@@ -145,8 +145,10 @@ impl NodeDbPgHandler {
             // ClusterArray plans are handled entirely on the Control Plane by
             // the ArrayCoordinator — they must never reach the SPSC bridge or
             // trigger/DML machinery. Intercepted AFTER the routing gate, so an
-            // in-transaction write is buffered (reshaped into per-shard
-            // `ArrayOp` plans) instead of applying here and surviving ROLLBACK.
+            // in-transaction write is staged per shard and buffered (reshaped
+            // into per-shard `ArrayOp` plans) instead of applying here and
+            // surviving ROLLBACK, and an in-transaction read carries the
+            // transaction id the gate stamped for read-your-own-writes.
             if matches!(
                 task.plan,
                 nodedb_physical::physical_plan::PhysicalPlan::ClusterArray(_)

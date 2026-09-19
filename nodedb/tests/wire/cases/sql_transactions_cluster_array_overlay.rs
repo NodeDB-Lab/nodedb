@@ -1,25 +1,22 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! In-transaction ARRAY reads (`ARRAY_SLICE`, `ARRAY_PROJECT`, `ARRAY_AGG`)
-//! observe the transaction's own uncommitted cell writes
-//! (read-your-own-writes), and `INSERT INTO ARRAY` / `DELETE FROM ARRAY`
-//! answer with a real affected count at statement time.
+//! In-transaction ARRAY reads (`ARRAY_SLICE`, `ARRAY_AGG`) observe the
+//! transaction's own uncommitted cell writes (read-your-own-writes), and
+//! `INSERT INTO ARRAY` / `DELETE FROM ARRAY` answer with a real affected
+//! count at statement time, on the CLUSTER plan path.
 //!
-//! Every case runs on `TestServer::start_standalone()`: with no cluster
-//! topology the planner emits the single-node `ArrayOp::{Put, Delete}` form,
-//! which `is_stageable_write` routes through `MetaOp::StageWrite` into the
-//! per-transaction `ArrayTxnOverlay` (`execute_stage_array`). The reads carry
-//! the session's active `TxnId`, so the Data Plane's Slice / Project /
-//! Aggregate handlers merge that overlay into the durable tile set before
-//! filtering. On the default Calvin-backed server the planner emits the
-//! `ClusterArrayOp` routing wrapper instead; the staging gate fans it out
-//! into one `ArrayOp` per owning vShard and stages each on its shard, and the
-//! cluster `Slice` / `Agg` carry the `TxnId` to every shard. That path is
-//! covered by `sql_transactions_cluster_array_overlay.rs`.
-//!
-//! COMMIT durability is unchanged: the buffered `ArrayOp` plan replays
-//! through the real handlers at COMMIT (`array_insert_commit_persists_cell`
-//! in `sql_transactions_buffered_atomicity_fix.rs`).
+//! Every case runs on the default `TestServer::start()`: `single_node_calvin`
+//! is on, so `plan_sql()` emits the `ClusterArrayOp::{Put, Delete, Slice,
+//! Agg}` routing wrappers. The staging gate fans a `Put` / `Delete` out into
+//! one `ArrayOp::{Put, Delete}` per owning vShard (`session::txn_expand`),
+//! buffers every per-shard task, and stages each into its shard's
+//! `ArrayTxnOverlay` on that shard's leader (`session::array_fanout_stage`).
+//! A `Slice` / `Agg` carries the session's `TxnId` to every shard
+//! (`ArrayShardSliceReq::txn_id`, `ArrayShardAggReq::txn_id`), so each
+//! shard folds its own staged cells into its rows or partial. COMMIT
+//! replays the buffered per-shard tasks; ROLLBACK drops every shard's
+//! overlay. The single-node form is covered by
+//! `sql_transactions_array_overlay.rs`.
 
 use crate::harness::TestServer;
 use tokio_postgres::SimpleQueryMessage;
@@ -101,17 +98,17 @@ async fn affected(server: &TestServer, sql: &str) -> u64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn staged_put_visible_to_same_txn_slice() {
-    let server = TestServer::start_standalone().await;
-    create_array(&server, "arr_ov_slice").await;
+async fn cluster_staged_put_visible_to_same_txn_slice() {
+    let server = TestServer::start().await;
+    create_array(&server, "carr_ov_slice").await;
 
     server.exec("BEGIN").await.unwrap();
     server
-        .exec("INSERT INTO ARRAY arr_ov_slice COORDS (1, 1) VALUES (7.0)")
+        .exec("INSERT INTO ARRAY carr_ov_slice COORDS (1, 1) VALUES (7.0)")
         .await
         .unwrap();
 
-    let rows = cell_rows(&server, "arr_ov_slice", 1, 1).await;
+    let rows = cell_rows(&server, "carr_ov_slice", 1, 1).await;
     assert_eq!(
         rows.len(),
         1,
@@ -122,31 +119,31 @@ async fn staged_put_visible_to_same_txn_slice() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn staged_put_rollback_discards_and_leaves_base_cell_intact() {
-    let server = TestServer::start_standalone().await;
-    create_array(&server, "arr_ov_rb").await;
+async fn cluster_staged_put_rollback_discards_and_leaves_base_cell_intact() {
+    let server = TestServer::start().await;
+    create_array(&server, "carr_ov_rb").await;
     server
-        .exec("INSERT INTO ARRAY arr_ov_rb COORDS (2, 2) VALUES (5.0)")
+        .exec("INSERT INTO ARRAY carr_ov_rb COORDS (2, 2) VALUES (5.0)")
         .await
         .unwrap();
 
     server.exec("BEGIN").await.unwrap();
     server
-        .exec("INSERT INTO ARRAY arr_ov_rb COORDS (3, 3) VALUES (9.0)")
+        .exec("INSERT INTO ARRAY carr_ov_rb COORDS (3, 3) VALUES (9.0)")
         .await
         .unwrap();
-    assert_eq!(cell_rows(&server, "arr_ov_rb", 3, 3).await.len(), 1);
+    assert_eq!(cell_rows(&server, "carr_ov_rb", 3, 3).await.len(), 1);
     // The base cell stays visible alongside the staged one.
-    assert_eq!(cell_rows(&server, "arr_ov_rb", 2, 2).await.len(), 1);
+    assert_eq!(cell_rows(&server, "carr_ov_rb", 2, 2).await.len(), 1);
 
     server.client.simple_query("ROLLBACK").await.unwrap();
 
-    let staged = cell_rows(&server, "arr_ov_rb", 3, 3).await;
+    let staged = cell_rows(&server, "carr_ov_rb", 3, 3).await;
     assert!(
         staged.is_empty(),
         "rolled-back staged cell must not persist, got {staged:?}"
     );
-    let base = cell_rows(&server, "arr_ov_rb", 2, 2).await;
+    let base = cell_rows(&server, "carr_ov_rb", 2, 2).await;
     assert_eq!(
         base.len(),
         1,
@@ -155,22 +152,22 @@ async fn staged_put_rollback_discards_and_leaves_base_cell_intact() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn staged_put_outside_slice_window_excluded() {
-    let server = TestServer::start_standalone().await;
-    create_array(&server, "arr_ov_window").await;
+async fn cluster_staged_put_outside_slice_window_excluded() {
+    let server = TestServer::start().await;
+    create_array(&server, "carr_ov_window").await;
 
     server.exec("BEGIN").await.unwrap();
     server
-        .exec("INSERT INTO ARRAY arr_ov_window COORDS (8, 8) VALUES (1.0)")
+        .exec("INSERT INTO ARRAY carr_ov_window COORDS (8, 8) VALUES (1.0)")
         .await
         .unwrap();
 
-    let outside = slice_rows(&server, "arr_ov_window", ((0, 4), (0, 4))).await;
+    let outside = slice_rows(&server, "carr_ov_window", ((0, 4), (0, 4))).await;
     assert!(
         outside.is_empty(),
         "a staged cell outside the slice window must not appear, got {outside:?}"
     );
-    let inside = slice_rows(&server, "arr_ov_window", ((5, 9), (5, 9))).await;
+    let inside = slice_rows(&server, "carr_ov_window", ((5, 9), (5, 9))).await;
     assert_eq!(
         inside.len(),
         1,
@@ -181,64 +178,64 @@ async fn staged_put_outside_slice_window_excluded() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn staged_put_on_one_array_not_visible_on_another() {
-    let server = TestServer::start_standalone().await;
-    create_array(&server, "arr_ov_a").await;
-    create_array(&server, "arr_ov_b").await;
+async fn cluster_staged_put_on_one_array_not_visible_on_another() {
+    let server = TestServer::start().await;
+    create_array(&server, "carr_ov_a").await;
+    create_array(&server, "carr_ov_b").await;
 
     server.exec("BEGIN").await.unwrap();
     server
-        .exec("INSERT INTO ARRAY arr_ov_a COORDS (1, 1) VALUES (1.0)")
+        .exec("INSERT INTO ARRAY carr_ov_a COORDS (1, 1) VALUES (1.0)")
         .await
         .unwrap();
 
-    let other = cell_rows(&server, "arr_ov_b", 1, 1).await;
+    let other = cell_rows(&server, "carr_ov_b", 1, 1).await;
     assert!(
         other.is_empty(),
         "a staged cell on one array must not leak into another, got {other:?}"
     );
-    assert_eq!(cell_rows(&server, "arr_ov_a", 1, 1).await.len(), 1);
+    assert_eq!(cell_rows(&server, "carr_ov_a", 1, 1).await.len(), 1);
 
     server.client.simple_query("ROLLBACK").await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn staged_delete_hides_base_cell_from_slice_and_agg() {
-    let server = TestServer::start_standalone().await;
-    create_array(&server, "arr_ov_del").await;
+async fn cluster_staged_delete_hides_base_cell_from_slice_and_agg() {
+    let server = TestServer::start().await;
+    create_array(&server, "carr_ov_del").await;
     server
-        .exec("INSERT INTO ARRAY arr_ov_del COORDS (1, 1) VALUES (10.0)")
+        .exec("INSERT INTO ARRAY carr_ov_del COORDS (1, 1) VALUES (10.0)")
         .await
         .unwrap();
     server
-        .exec("INSERT INTO ARRAY arr_ov_del COORDS (2, 2) VALUES (20.0)")
+        .exec("INSERT INTO ARRAY carr_ov_del COORDS (2, 2) VALUES (20.0)")
         .await
         .unwrap();
-    assert_eq!(agg(&server, "arr_ov_del", "count").await, 2.0);
+    assert_eq!(agg(&server, "carr_ov_del", "count").await, 2.0);
 
     server.exec("BEGIN").await.unwrap();
     server
-        .exec("DELETE FROM ARRAY arr_ov_del WHERE COORDS IN ((1, 1))")
+        .exec("DELETE FROM ARRAY carr_ov_del WHERE COORDS IN ((1, 1))")
         .await
         .unwrap();
 
-    let hidden = cell_rows(&server, "arr_ov_del", 1, 1).await;
+    let hidden = cell_rows(&server, "carr_ov_del", 1, 1).await;
     assert!(
         hidden.is_empty(),
         "a same-tx DELETE FROM ARRAY must hide the base cell from ARRAY_SLICE, got {hidden:?}"
     );
     assert_eq!(
-        cell_rows(&server, "arr_ov_del", 2, 2).await.len(),
+        cell_rows(&server, "carr_ov_del", 2, 2).await.len(),
         1,
         "the untouched sibling cell stays visible"
     );
     assert_eq!(
-        agg(&server, "arr_ov_del", "count").await,
+        agg(&server, "carr_ov_del", "count").await,
         1.0,
         "ARRAY_AGG count must exclude the staged-deleted cell"
     );
     assert_eq!(
-        agg(&server, "arr_ov_del", "sum").await,
+        agg(&server, "carr_ov_del", "sum").await,
         20.0,
         "ARRAY_AGG sum must exclude the staged-deleted cell"
     );
@@ -246,27 +243,29 @@ async fn staged_delete_hides_base_cell_from_slice_and_agg() {
     server.client.simple_query("ROLLBACK").await.unwrap();
 
     assert_eq!(
-        cell_rows(&server, "arr_ov_del", 1, 1).await.len(),
+        cell_rows(&server, "carr_ov_del", 1, 1).await.len(),
         1,
         "ROLLBACK must restore the base cell"
     );
-    assert_eq!(agg(&server, "arr_ov_del", "count").await, 2.0);
+    assert_eq!(agg(&server, "carr_ov_del", "count").await, 2.0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn in_txn_array_dml_answers_real_command_tags() {
-    let server = TestServer::start_standalone().await;
-    create_array(&server, "arr_ov_tags").await;
+async fn cluster_in_txn_array_dml_answers_real_command_tags() {
+    let server = TestServer::start().await;
+    create_array(&server, "carr_ov_tags").await;
     server
-        .exec("INSERT INTO ARRAY arr_ov_tags COORDS (9, 9) VALUES (1.0)")
+        .exec("INSERT INTO ARRAY carr_ov_tags COORDS (9, 9) VALUES (1.0)")
         .await
         .unwrap();
 
     server.exec("BEGIN").await.unwrap();
 
+    // Three cells in one statement: the per-shard counts sum to the tag
+    // whatever vShards the cells partition to.
     let inserted = affected(
         &server,
-        "INSERT INTO ARRAY arr_ov_tags \
+        "INSERT INTO ARRAY carr_ov_tags \
          COORDS (1, 1) VALUES (1.0), \
          COORDS (1, 2) VALUES (2.0), \
          COORDS (1, 3) VALUES (3.0)",
@@ -280,7 +279,7 @@ async fn in_txn_array_dml_answers_real_command_tags() {
     // A base cell (committed before BEGIN) counts as existing.
     let deleted_base = affected(
         &server,
-        "DELETE FROM ARRAY arr_ov_tags WHERE COORDS IN ((9, 9))",
+        "DELETE FROM ARRAY carr_ov_tags WHERE COORDS IN ((9, 9))",
     )
     .await;
     assert_eq!(
@@ -291,7 +290,7 @@ async fn in_txn_array_dml_answers_real_command_tags() {
     // A cell staged earlier in this transaction counts as existing.
     let deleted_staged = affected(
         &server,
-        "DELETE FROM ARRAY arr_ov_tags WHERE COORDS IN ((1, 2))",
+        "DELETE FROM ARRAY carr_ov_tags WHERE COORDS IN ((1, 2))",
     )
     .await;
     assert_eq!(
@@ -302,7 +301,7 @@ async fn in_txn_array_dml_answers_real_command_tags() {
     // An absent cell, and a cell already staged-deleted, count as nothing.
     let deleted_absent = affected(
         &server,
-        "DELETE FROM ARRAY arr_ov_tags WHERE COORDS IN ((7, 7))",
+        "DELETE FROM ARRAY carr_ov_tags WHERE COORDS IN ((7, 7))",
     )
     .await;
     assert_eq!(
@@ -311,7 +310,7 @@ async fn in_txn_array_dml_answers_real_command_tags() {
     );
     let deleted_twice = affected(
         &server,
-        "DELETE FROM ARRAY arr_ov_tags WHERE COORDS IN ((9, 9))",
+        "DELETE FROM ARRAY carr_ov_tags WHERE COORDS IN ((9, 9))",
     )
     .await;
     assert_eq!(
@@ -323,59 +322,52 @@ async fn in_txn_array_dml_answers_real_command_tags() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn staged_put_visible_to_same_txn_project_and_agg() {
-    let server = TestServer::start_standalone().await;
-    create_array(&server, "arr_ov_proj").await;
+async fn cluster_staged_put_visible_to_same_txn_agg() {
+    let server = TestServer::start().await;
+    create_array(&server, "carr_ov_agg").await;
     server
-        .exec("INSERT INTO ARRAY arr_ov_proj COORDS (1, 1) VALUES (10.0)")
+        .exec("INSERT INTO ARRAY carr_ov_agg COORDS (1, 1) VALUES (10.0)")
         .await
         .unwrap();
 
     server.exec("BEGIN").await.unwrap();
     server
-        .exec("INSERT INTO ARRAY arr_ov_proj COORDS (2, 2) VALUES (5.0)")
+        .exec("INSERT INTO ARRAY carr_ov_agg COORDS (2, 2) VALUES (5.0)")
         .await
         .unwrap();
 
-    let projected = server
-        .query_rows("SELECT * FROM ARRAY_PROJECT('arr_ov_proj', ['value'])")
-        .await
-        .unwrap();
+    // Each shard folds only its own staged cells into its partial, so the
+    // coordinator's merge counts the staged cell exactly once.
     assert_eq!(
-        projected.len(),
-        2,
-        "ARRAY_PROJECT must return the base cell and the staged cell, got {projected:?}"
-    );
-    assert_eq!(
-        agg(&server, "arr_ov_proj", "count").await,
+        agg(&server, "carr_ov_agg", "count").await,
         2.0,
         "ARRAY_AGG count must include the staged cell"
     );
     assert_eq!(
-        agg(&server, "arr_ov_proj", "sum").await,
+        agg(&server, "carr_ov_agg", "sum").await,
         15.0,
         "ARRAY_AGG sum must include the staged cell's value"
     );
 
     server.client.simple_query("ROLLBACK").await.unwrap();
 
-    assert_eq!(agg(&server, "arr_ov_proj", "count").await, 1.0);
+    assert_eq!(agg(&server, "carr_ov_agg", "count").await, 1.0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn staged_put_commit_persists_cell() {
-    let server = TestServer::start_standalone().await;
-    create_array(&server, "arr_ov_commit").await;
+async fn cluster_staged_put_commit_persists_cell() {
+    let server = TestServer::start().await;
+    create_array(&server, "carr_ov_commit").await;
 
     server.exec("BEGIN").await.unwrap();
     server
-        .exec("INSERT INTO ARRAY arr_ov_commit COORDS (4, 4) VALUES (4.0)")
+        .exec("INSERT INTO ARRAY carr_ov_commit COORDS (4, 4) VALUES (4.0)")
         .await
         .unwrap();
-    assert_eq!(cell_rows(&server, "arr_ov_commit", 4, 4).await.len(), 1);
+    assert_eq!(cell_rows(&server, "carr_ov_commit", 4, 4).await.len(), 1);
     server.client.simple_query("COMMIT").await.unwrap();
 
-    let rows = cell_rows(&server, "arr_ov_commit", 4, 4).await;
+    let rows = cell_rows(&server, "carr_ov_commit", 4, 4).await;
     assert_eq!(
         rows.len(),
         1,

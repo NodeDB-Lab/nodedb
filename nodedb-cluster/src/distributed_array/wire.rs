@@ -51,6 +51,14 @@ pub struct ArrayShardSliceReq {
     /// Bitemporal valid-time point forwarded from `ArrayOp::Slice::valid_at_ms`.
     /// `None` = no valid-time filter.
     pub valid_at_ms: Option<i64>,
+    /// The reading transaction's id, for read-your-own-writes against the
+    /// shard's per-transaction staging overlay. `None` = autocommit read.
+    ///
+    /// The id is minted on the coordinator and has meaning on a shard only
+    /// where that transaction staged cells. Staging resolves each shard's
+    /// own leader and stages there, and this read resolves the same leader,
+    /// so the overlay keyed by this id is on the node that serves the read.
+    pub txn_id: Option<u64>,
 }
 
 /// Gather response: shard returns matching rows as opaque msgpack row bytes.
@@ -89,6 +97,16 @@ pub struct ArrayShardAggReq {
     /// Bitemporal valid-time point forwarded from `ArrayOp::Aggregate::valid_at_ms`.
     /// `None` = no valid-time filter.
     pub valid_at_ms: Option<i64>,
+    /// The reading transaction's id, for read-your-own-writes against the
+    /// shard's per-transaction staging overlay. `None` = autocommit read.
+    ///
+    /// The id is minted on the coordinator and has meaning on a shard only
+    /// where that transaction staged cells. Staging resolves each shard's
+    /// own leader and stages there, and this read resolves the same leader,
+    /// so the overlay keyed by this id is on the node that serves the read.
+    /// Each shard folds only its own overlay cells into its partial, so the
+    /// coordinator's merge counts every staged cell exactly once.
+    pub txn_id: Option<u64>,
 }
 
 /// Gather response: shard returns partial aggregate(s) for merge.

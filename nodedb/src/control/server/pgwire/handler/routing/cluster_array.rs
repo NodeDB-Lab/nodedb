@@ -58,6 +58,10 @@ impl NodeDbPgHandler {
         use crate::control::cluster::ClusterArrayExecutor;
         use std::sync::Arc;
 
+        // Read before the task is consumed: an in-transaction `Slice`/`Agg`
+        // carries the session's transaction id, and each shard folds that
+        // transaction's staged cells into its result.
+        let txn_id = authorized.txn_id();
         let task = authorized.into_physical_task();
         let tenant_id = task.tenant_id;
         let database_id = task.database_id;
@@ -89,7 +93,7 @@ impl NodeDbPgHandler {
             self.state.node_id,
             Arc::clone(&self.state),
         );
-        let payload_bytes = executor.execute(&cluster_op).await.map_err(|e| {
+        let payload_bytes = executor.execute(&cluster_op, txn_id).await.map_err(|e| {
             let (severity, code, message) = error_to_sqlstate(&e);
             PgWireError::UserError(Box::new(ErrorInfo::new(
                 severity.to_owned(),

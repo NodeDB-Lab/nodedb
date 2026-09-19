@@ -61,6 +61,9 @@ pub trait ArrayLocalExecutor: Send + Sync + 'static {
     ///   set only tiles whose prefix falls in this range are returned, preventing
     ///   duplicate rows in single-node harnesses where all vShards share one
     ///   Data Plane. `None` = no Hilbert filter.
+    /// `txn_id` — the reading transaction's id; the executor stamps it on the
+    ///   Data Plane request so the shard folds that transaction's staged
+    ///   cells into the result. `None` = autocommit read.
     ///
     /// Returns the per-row bytes (one element per matching row, each the
     /// native-msgpack encoding of that row) plus the `truncated_before_horizon`
@@ -88,7 +91,9 @@ pub trait ArrayLocalExecutor: Send + Sync + 'static {
     /// The Data Plane computes the aggregate with `return_partial = true`, so it
     /// returns partial states (plus the `truncated_before_horizon` signal)
     /// rather than finalized scalars. The coordinator merges partials from all
-    /// shards before finalizing.
+    /// shards before finalizing. `req.txn_id` is stamped on the Data Plane
+    /// request so the partial folds in that transaction's staged cells on
+    /// this shard.
     async fn exec_agg(&self, local_vshard_id: u32, req: &ArrayShardAggReq) -> Result<ArrayAggExec>;
 
     /// Apply a cell-batch write to the local array engine.

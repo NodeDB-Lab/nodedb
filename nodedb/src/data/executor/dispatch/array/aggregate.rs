@@ -122,13 +122,15 @@ impl CoreLoop {
         // and current-state reads. The two differ only in how tiles are sourced;
         // the reduce/encode kernel below is identical for both.
         let temporal = system_as_of.is_some() || valid_at_ms.is_some();
-        // Read-your-own-writes applies ONLY to the finalizing single-node
-        // read. The distributed partial path (`return_partial`) merges once
-        // at the coordinator and must not see overlay cells here: the
-        // coordinator owns the transaction's staged state for that read.
-        // `AS OF SYSTEM TIME` is a snapshot of committed history and skips
-        // the overlay too.
-        let overlay_txn = if return_partial || system_as_of.is_some() {
+        // Read-your-own-writes folds the transaction's overlay into this
+        // shard's result, for the finalizing single-node read and for the
+        // distributed partial alike. Each shard's overlay holds only the
+        // cells partitioned to that shard, and `collect_agg_tiles` applies
+        // the shard's `hilbert_range` to overlay tiles as to base tiles, so
+        // folding them into the shard's partial counts every staged cell
+        // exactly once at the coordinator's merge. `AS OF SYSTEM TIME` is a
+        // snapshot of committed history and skips the overlay.
+        let overlay_txn = if system_as_of.is_some() {
             None
         } else {
             task.request.txn_id

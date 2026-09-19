@@ -28,9 +28,11 @@ use crate::control::server::shared::sql::staging_predicates::{
 };
 use crate::control::server::shared::write_admission::plan_requires_txn_buffering;
 use crate::control::state::SharedState;
-use nodedb_physical::physical_plan::{CrdtOp, MetaOp};
+use crate::types::{DatabaseId, TenantId, TxnId, VShardId};
+use nodedb_physical::physical_plan::{ClusterArrayOp, CrdtOp, MetaOp};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
+use super::array_fanout_stage::stage_cluster_array_write;
 use super::connection::SessionId;
 use super::leader_forward::{forward_to_leader, resolve_leader};
 use super::state::TransactionState;
@@ -139,7 +141,9 @@ pub enum StagingGateError {
 /// `MetaOp::StageWrite` task wrapping the original plan; it must dispatch
 /// that task and return the neutral `crate::Result<Response>` (i.e. the same
 /// result a protocol's own single-task dispatch method produces, before any
-/// protocol-specific error-to-wire mapping is applied).
+/// protocol-specific error-to-wire mapping is applied). It is `Fn` because a
+/// `ClusterArrayOp::{Put, Delete}` fans out into one staging dispatch per
+/// owning vShard.
 pub async fn route_in_tx_write<F, Fut>(
     state: &SharedState,
     sessions: &SessionStore,
@@ -148,7 +152,7 @@ pub async fn route_in_tx_write<F, Fut>(
     dispatch: F,
 ) -> Result<InTxnRoute, StagingGateError>
 where
-    F: FnOnce(PhysicalTask) -> Fut,
+    F: Fn(PhysicalTask) -> Fut,
     Fut: Future<Output = crate::Result<Response>>,
 {
     if sessions.transaction_state(session_id) != TransactionState::InBlock {
@@ -174,6 +178,20 @@ where
         return Ok(InTxnRoute::Read(Box::new(task)));
     }
 
+    // A distributed array write is a routing wrapper with no Data-Plane
+    // handler: it is staged per owning vShard (each shard's own overlay, on
+    // that shard's leader) and answers with the summed count, so the
+    // cluster path gives the same statement-time contract as the
+    // single-node `ArrayOp::{Put, Delete}` stage below.
+    if matches!(
+        &task.plan,
+        PhysicalPlan::ClusterArray(ClusterArrayOp::Put { .. } | ClusterArrayOp::Delete { .. })
+    ) {
+        return Ok(InTxnRoute::Staged(
+            stage_cluster_array_write(state, sessions, session_id, task, dispatch).await?,
+        ));
+    }
+
     // Point writes execute at STATEMENT time via the staging overlay (real
     // tag + statement-time constraint errors); the plan is still buffered so
     // COMMIT stays the sole durable apply. Other writes keep buffer + "OK",
@@ -189,6 +207,29 @@ where
     Ok(InTxnRoute::Staged(
         stage_write(state, sessions, session_id, task, dispatch).await?,
     ))
+}
+
+/// Wrap `plan` in a `MetaOp::StageWrite` task addressed to `vshard_id`,
+/// carrying the transaction id. Shared by every staging-overlay dispatch: a
+/// plain in-transaction write below, and `array_fanout_stage`'s per-shard
+/// fan-out of a `ClusterArrayOp::{Put, Delete}`.
+pub(super) fn wrap_stage_write(
+    tenant_id: TenantId,
+    vshard_id: VShardId,
+    database_id: DatabaseId,
+    txn_id: Option<TxnId>,
+    plan: PhysicalPlan,
+) -> PhysicalTask {
+    PhysicalTask {
+        tenant_id,
+        vshard_id,
+        database_id,
+        plan: PhysicalPlan::Meta(MetaOp::StageWrite {
+            plan: Box::new(plan),
+        }),
+        post_set_op: PostSetOp::None,
+        txn_id,
+    }
 }
 
 /// Stage a stageable write into the per-transaction overlay and classify its
@@ -209,16 +250,21 @@ where
     F: FnOnce(PhysicalTask) -> Fut,
     Fut: Future<Output = crate::Result<Response>>,
 {
-    let stage_task = PhysicalTask {
-        tenant_id: task.tenant_id,
-        vshard_id: task.vshard_id,
-        database_id: task.database_id,
-        plan: PhysicalPlan::Meta(MetaOp::StageWrite {
-            plan: Box::new(task.plan.clone()),
-        }),
-        post_set_op: PostSetOp::None,
-        txn_id: sessions.tx_id(session_id),
-    };
+    let stage_task = wrap_stage_write(
+        task.tenant_id,
+        task.vshard_id,
+        task.database_id,
+        sessions.tx_id(session_id),
+        task.plan.clone(),
+    );
+
+    // Resolved once and reused for both the admission check below and the
+    // metering charge after dispatch, instead of looking up the identity and
+    // rebuilding the scope twice for the same statement.
+    let identity = sessions.identity(session_id);
+    let scope = identity.as_ref().map(|identity| {
+        RequestAuthScope::for_database(identity, state.auth_stores(), task.database_id)
+    });
 
     // A spent hard quota refuses the staged write before it touches the
     // overlay. This mirrors the charge at the bottom of this function, which
@@ -226,13 +272,10 @@ where
     // like that charge, gating here covers every `Staged` route at once
     // rather than being duplicated in each caller's dispatch closure.
     if state.metering_config.enabled
-        && let Some(identity) = sessions.identity(session_id)
+        && let Some(scope) = &scope
     {
-        let scope = RequestAuthScope::builder(&identity, state.auth_stores())
-            .with_session_database(Some(task.database_id))
-            .build();
         let info = PlanMeteringInfo::extract(&task.plan);
-        admit_quota_for_dispatch(state, &scope, &info).map_err(StagingGateError::Dispatch)?;
+        admit_quota_for_dispatch(state, scope, &info).map_err(StagingGateError::Dispatch)?;
     }
 
     // Stage on the vShard's CURRENT leader. When this node leads the vShard (or
@@ -274,17 +317,13 @@ where
     // COMMIT, so it is metered there instead
     // (`session::commit::metering::meter_committed_buffered_writes`).
     //
-    // `sessions.identity` is `None` only for a session that reached this
-    // point (inside a transaction block, mid-write) with no identity ever
-    // recorded — not reachable in practice, since every path that can enter
-    // `InBlock` state authenticates first. Metering must never fail a
-    // request, so a missing identity just skips the (impossible) charge
-    // rather than panicking.
-    if let Some(identity) = sessions.identity(session_id) {
-        let scope = RequestAuthScope::builder(&identity, state.auth_stores())
-            .with_session_database(Some(task.database_id))
-            .build();
-        meter_staged_write(state, &scope, &task.plan, &resp);
+    // `identity` is `None` only for a session that reached this point (inside
+    // a transaction block, mid-write) with no identity ever recorded — not
+    // reachable in practice, since every path that can enter `InBlock` state
+    // authenticates first. Metering must never fail a request, so a missing
+    // identity just skips the (impossible) charge rather than panicking.
+    if let Some(scope) = &scope {
+        meter_staged_write(state, scope, &task.plan, &resp);
     }
 
     let kind = staged_tag_kind(&task.plan, resp.payload.as_ref());

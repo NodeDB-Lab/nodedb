@@ -328,6 +328,7 @@ mod tests {
             shard_hilbert_range: None,
             system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
+            txn_id: None,
         };
         zerompk::to_msgpack_vec(&req).unwrap()
     }
@@ -347,6 +348,7 @@ mod tests {
             shard_hilbert_range: None,
             system_as_of: None,
             valid_at_ms: None,
+            txn_id: None,
         };
         zerompk::to_msgpack_vec(&req).unwrap()
     }
@@ -588,6 +590,7 @@ mod tests {
             shard_hilbert_range: None,
             system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
+            txn_id: None,
         };
         let err = super::validate_slice_routing(&req, 5)
             .expect_err("disjoint Hilbert range should reject");
@@ -614,6 +617,7 @@ mod tests {
             shard_hilbert_range: None,
             system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
+            txn_id: None,
         };
         super::validate_slice_routing(&req, 1).expect("overlapping range should accept");
     }

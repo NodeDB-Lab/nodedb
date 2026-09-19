@@ -228,6 +228,7 @@ mod sql_transactions_array_overlay;
 mod sql_transactions_bitemporal_rollback;
 mod sql_transactions_buffered_atomicity_fix;
 mod sql_transactions_bulk_dml_overlay;
+mod sql_transactions_cluster_array_overlay;
 mod sql_transactions_columnar_engine_rollback;
 mod sql_transactions_columnar_overlay;
 mod sql_transactions_columnar_predicate_dml_overlay;

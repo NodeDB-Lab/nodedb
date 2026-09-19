@@ -21,6 +21,7 @@ use crate::control::cluster::array_cluster_helpers::{
 };
 use crate::control::state::SharedState;
 use crate::data::executor::response_codec;
+use crate::types::TxnId;
 use nodedb_physical::physical_plan::ClusterArrayOp;
 use zerompk;
 
@@ -49,6 +50,7 @@ struct SliceArgs<'a> {
     prefix_bits: u8,
     system_time: nodedb_types::SystemTimeScope,
     valid_at_ms: Option<i64>,
+    txn_id: Option<TxnId>,
 }
 
 struct AggArgs<'a> {
@@ -60,6 +62,7 @@ struct AggArgs<'a> {
     prefix_bits: u8,
     system_as_of: Option<i64>,
     valid_at_ms: Option<i64>,
+    txn_id: Option<TxnId>,
 }
 
 impl ClusterArrayExecutor {
@@ -92,7 +95,17 @@ impl ClusterArrayExecutor {
     /// Execute a `ClusterArrayOp` and return raw response bytes ready to be
     /// returned to the client. The response format mirrors local `ArrayOp`
     /// responses so downstream decode logic is unchanged.
-    pub(crate) async fn execute(&self, op: &ClusterArrayOp) -> crate::Result<Vec<u8>> {
+    ///
+    /// `txn_id` is the reading transaction's id. A `Slice`/`Agg` inside a
+    /// transaction block carries it to every shard so each shard folds its
+    /// own staged cells into the result. A `Put`/`Delete` never runs here
+    /// inside a transaction block: the staging gate fans it out per shard
+    /// (`session::array_fanout_stage`) before it reaches this executor.
+    pub(crate) async fn execute(
+        &self,
+        op: &ClusterArrayOp,
+        txn_id: Option<TxnId>,
+    ) -> crate::Result<Vec<u8>> {
         match op {
             ClusterArrayOp::Slice {
                 array_id,
@@ -113,6 +126,7 @@ impl ClusterArrayExecutor {
                     prefix_bits: *prefix_bits,
                     system_time: *system_time,
                     valid_at_ms: *valid_at_ms,
+                    txn_id,
                 })
                 .await
             }
@@ -136,6 +150,7 @@ impl ClusterArrayExecutor {
                     prefix_bits: *prefix_bits,
                     system_as_of: *system_as_of,
                     valid_at_ms: *valid_at_ms,
+                    txn_id,
                 })
                 .await
             }
@@ -174,6 +189,7 @@ impl ClusterArrayExecutor {
             prefix_bits,
             system_time,
             valid_at_ms,
+            txn_id,
         } = args;
         let coordinator = ArrayCoordinator::for_slice(
             self.source_node,
@@ -202,6 +218,7 @@ impl ClusterArrayExecutor {
             shard_hilbert_range: None,
             system_time,
             valid_at_ms,
+            txn_id: txn_id.map(TxnId::as_u64),
         };
         let result = coordinator
             .coord_slice(req, limit, system_time)
@@ -249,6 +266,7 @@ impl ClusterArrayExecutor {
             prefix_bits,
             system_as_of,
             valid_at_ms,
+            txn_id,
         } = args;
         let coordinator = ArrayCoordinator::for_slice(
             self.source_node,
@@ -271,6 +289,7 @@ impl ClusterArrayExecutor {
             shard_hilbert_range: None,
             system_as_of,
             valid_at_ms,
+            txn_id: txn_id.map(TxnId::as_u64),
         };
         let agg = coordinator.coord_agg(req).await.map_err(cluster_err)?;
 

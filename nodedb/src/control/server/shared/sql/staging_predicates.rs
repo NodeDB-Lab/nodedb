@@ -29,9 +29,10 @@ pub fn is_point_write(plan: &PhysicalPlan) -> bool {
 /// Allow-list of plans staged via `MetaOp::StageWrite`: [`is_point_write`] plus
 /// stageable KV/Columnar/Timeseries/Spatial/Graph/Array writes. `Incr`/`Cas`/
 /// `GetSet`/`BatchPut` also stage TTL into the overlay so a same-txn `GetTtl`
-/// sees it. The single-node `ArrayOp::{Put, Delete}` stages; the
-/// `ClusterArrayOp` routing wrapper does not (it is reshaped into per-vShard
-/// `ArrayOp` tasks and buffered).
+/// sees it. The single-node `ArrayOp::{Put, Delete}` stages here; the
+/// `ClusterArrayOp::{Put, Delete}` routing wrapper is not listed because
+/// `route_in_tx_write` fans it out per vShard first
+/// (`session::array_fanout_stage`), then stages each per-vShard `ArrayOp`.
 pub fn is_stageable_write(plan: &PhysicalPlan) -> bool {
     is_point_write(plan)
         || matches!(
@@ -190,6 +191,8 @@ pub fn staged_tag_kind(plan: &PhysicalPlan, payload: &[u8]) -> StagedTagKind {
         }
         PhysicalPlan::Array(ArrayOp::Put { .. }) => StagedTagKind::Insert,
         PhysicalPlan::Array(ArrayOp::Delete { .. }) => StagedTagKind::Delete,
+        // `ClusterArrayOp::{Put, Delete}` never reaches here: the fan-out stage
+        // (`session::array_fanout_stage`) picks the tag by outer variant.
         other => unreachable!(
             "staged_tag_kind called on a non-stageable-write plan; \
              is_stageable_write invariant broken: {other:?}"

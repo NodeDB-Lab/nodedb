@@ -428,6 +428,7 @@ mod tests {
             shard_hilbert_range: None,
             system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
+            txn_id: None,
         };
 
         // 3 shards × 2 rows each = 6 merged rows.
@@ -458,6 +459,7 @@ mod tests {
             shard_hilbert_range: None,
             system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
+            txn_id: None,
         };
 
         let result = coord
@@ -478,6 +480,7 @@ mod tests {
             shard_hilbert_range: None,
             system_as_of: None,
             valid_at_ms: None,
+            txn_id: None,
         }
     }
 
@@ -635,6 +638,7 @@ mod tests {
             shard_hilbert_range: None,
             system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
+            txn_id: None,
         };
 
         // coordinator_limit = 0 → no cutoff → 20 rows.

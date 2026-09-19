@@ -10,11 +10,12 @@
 //! persist them, and — the deliberate trade-off documented in
 //! `control/server/shared/write_admission/predicate/txn_buffering.rs` — a
 //! read later in the SAME transaction no longer observes a buffered write
-//! until COMMIT (read-your-own-writes is lost for the buffered ops). The
-//! single-node `ArrayOp::{Put, Delete}` is the exception: it stages into
+//! until COMMIT (read-your-own-writes is lost for the buffered ops). Array
+//! writes are the exception: `ArrayOp::{Put, Delete}` stages into
 //! `ArrayTxnOverlay` at statement time, so a same-transaction read sees it
 //! (`array_insert_in_txn_visible_to_same_txn_read` below, on a standalone
-//! server; the full contract lives in `sql_transactions_array_overlay.rs`).
+//! server; the full contract lives in `sql_transactions_array_overlay.rs`
+//! and, for the cluster wrapper, `sql_transactions_cluster_array_overlay.rs`).
 //!
 //! `CrdtOp` and `VectorOp` flipped variants have no direct SQL entry point on
 //! the existing pgwire surface, so the fix is pinned via the Array and
@@ -28,10 +29,12 @@
 //! `ClusterArrayOp::{Put, Delete}` instead (`array_convert/dml.rs`, gated on
 //! `ctx.cluster_enabled`). The wrapper has no Data-Plane handler, so the
 //! staging gate reshapes it into one `ArrayOp::{Put, Delete}` per owning
-//! vShard before buffering (`session::txn_expand`); COMMIT replays those. The
-//! atomicity cases below therefore exercise the wrapper end to end. The
-//! read-your-own-writes case uses `TestServer::start_standalone()`, where the
-//! planner emits the single-node `ArrayOp` form that stages.
+//! vShard (`session::txn_expand`), buffers every per-shard task, and stages
+//! each into its shard's overlay (`session::array_fanout_stage`); COMMIT
+//! replays the buffered tasks. The atomicity cases below therefore exercise
+//! the wrapper end to end. The read-your-own-writes case uses
+//! `TestServer::start_standalone()`, where the planner emits the single-node
+//! `ArrayOp` form.
 
 use crate::harness::TestServer;
 
