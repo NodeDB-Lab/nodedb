@@ -3,10 +3,12 @@
 //! Vector serializer for transaction resolve.
 //!
 //! Unlike the KV / document / graph serializers, the vector serializer is
-//! **plan-driven**, not overlay-driven: vector writes are never staged into a
-//! transaction overlay (there is no `stage_vector`). A vector post-image is
-//! also inexpressible — the HNSW graph mutation has no compact absolute form —
-//! so the redo record logs the INSERT itself and replay rebuilds the index
+//! **plan-driven**, not overlay-driven. A vector-primary direct write does
+//! stage a `StagedVectorRow` (`stage_write/stage_vector.rs`), but only so the
+//! transaction's own reads see it; the redo record still comes from the plan.
+//! A vector post-image is inexpressible — the HNSW graph mutation has no
+//! compact absolute form — so the redo record logs the INSERT itself and
+//! replay rebuilds the index
 //! (`replay_vector_wal`, dispatched from the redo reconstitute path). This
 //! module therefore reads the [`VectorOp`] plan node directly and emits the
 //! SAME engine-native WAL sub-record shape the autocommit vector path produces,

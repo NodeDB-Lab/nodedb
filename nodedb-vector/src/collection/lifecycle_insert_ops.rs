@@ -121,6 +121,43 @@ impl VectorCollection {
         false
     }
 
+    /// The live FP32 vector stored under global `id`, whichever segment
+    /// holds it. `None` for an unknown or soft-deleted id.
+    pub fn vector_for_id(&self, id: u32) -> Option<Vec<f32>> {
+        if id >= self.growing_base_id {
+            let local = id - self.growing_base_id;
+            if (local as usize) < self.growing.len() {
+                return self.growing.get_vector(local).map(<[f32]>::to_vec);
+            }
+        }
+        for seg in &self.sealed {
+            if id >= seg.base_id {
+                let local = id - seg.base_id;
+                if (local as usize) < seg.index.len() {
+                    if seg.index.is_deleted(local) {
+                        return None;
+                    }
+                    return sealed_vector(seg, local);
+                }
+            }
+        }
+        for seg in &self.building {
+            if id >= seg.base_id {
+                let local = id - seg.base_id;
+                if (local as usize) < seg.flat.len() {
+                    return seg.flat.get_vector(local).map(<[f32]>::to_vec);
+                }
+            }
+        }
+        None
+    }
+
+    /// The live FP32 vector bound to `surrogate`, if any.
+    pub fn vector_for_surrogate(&self, surrogate: Surrogate) -> Option<Vec<f32>> {
+        self.local_for_surrogate(surrogate)
+            .and_then(|id| self.vector_for_id(id))
+    }
+
     /// Soft-delete a vector by surrogate.
     pub fn delete_by_surrogate(&mut self, surrogate: Surrogate) -> bool {
         let Some(global_id) = self.surrogate_to_local.get(&surrogate).copied() else {
@@ -161,6 +198,25 @@ impl VectorCollection {
             }
         }
         false
+    }
+}
+
+/// The FP32 vector at `local` in a sealed segment: the mmap tier when the
+/// segment lives there, else the HNSW node (decoded from a narrow dtype or
+/// fetched from the segment backing when the node holds no local copy).
+fn sealed_vector(seg: &super::segment::SealedSegment, local: u32) -> Option<Vec<f32>> {
+    if let Some(mmap) = &seg.mmap_vectors {
+        return mmap.get_vector(local).map(<[f32]>::to_vec);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        seg.index
+            .get_vector_or_backing(local)
+            .map(std::borrow::Cow::into_owned)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        seg.index.get_vector(local).map(<[f32]>::to_vec)
     }
 }
 
@@ -208,5 +264,16 @@ mod tests {
         assert!(coll.delete_by_surrogate(s));
         assert!(!coll.delete_by_surrogate(s));
         assert_eq!(coll.live_count(), 0);
+    }
+
+    #[test]
+    fn vector_for_surrogate_reads_the_growing_segment_and_hides_deletes() {
+        let mut coll = collection();
+        let s = Surrogate::new(11);
+        coll.insert_with_surrogate(vec![0.5, 0.25], s);
+        assert_eq!(coll.vector_for_surrogate(s), Some(vec![0.5, 0.25]));
+        assert!(coll.delete_by_surrogate(s));
+        assert_eq!(coll.vector_for_surrogate(s), None);
+        assert_eq!(coll.vector_for_id(999), None);
     }
 }

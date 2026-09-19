@@ -5,8 +5,9 @@
 //! transaction's own uncommitted document writes (read-your-own-writes for
 //! Vector).
 //!
-//! A vector is a FIELD on a document, not a standalone stageable write: the
-//! HNSW/IVF index update is an inline side effect of the document write
+//! On a document collection a vector is a FIELD on the document, not a
+//! standalone stageable write: the HNSW/IVF index update is an inline side
+//! effect of the document write
 //! (`apply_point_put_vector_indexes`, called from
 //! `handlers/point/apply_put/core.rs::apply_point_put`), the same shape as
 //! FTS indexing (see `fts_merge.rs`). There is therefore no staged vector
@@ -20,6 +21,10 @@
 //! ascending sort + truncate (see `nodedb_vector::distance::distance`:
 //! `InnerProduct` is pre-negated so smaller-is-better holds for every
 //! metric).
+//!
+//! A vector-primary collection stages the vector itself with its sidecar
+//! (`StagedVectorRow`); [`CoreLoop::merge_vector_overlay_into_search`]
+//! routes such a collection to `vector_primary_merge.rs`.
 
 use std::collections::HashMap;
 
@@ -65,32 +70,37 @@ fn json_number_as_f32(v: &serde_json::Value) -> Option<f32> {
         .map(|f| f as f32)
 }
 
-/// Evaluate a single [`PayloadAtom`] directly against a staged document's
-/// decoded JSON fields, mirroring the semantics `PayloadIndexSet::pre_filter`
-/// applies to the durable bitmap indexes -- there is no existing evaluator
-/// that runs a `PayloadAtom` against a raw JSON object (the durable path
-/// only evaluates against bitmap indexes), so this is a small,
-/// self-contained evaluator built from `serde_json::Value` comparisons
-/// rather than a new bitmap index.
-fn payload_atom_matches(atom: &PayloadAtom, doc: &serde_json::Value) -> bool {
+/// Evaluate a single [`PayloadAtom`] against a staged row's decoded JSON
+/// fields, mirroring the semantics `PayloadIndexSet::pre_filter` applies to
+/// the durable bitmap indexes. `field` resolves an atom's field name to the
+/// row's value: a document body is read by the name as written, a
+/// vector-primary sidecar by its lower-cased name (the case the bitmap
+/// indexes were built from). No existing evaluator runs a `PayloadAtom`
+/// against a raw JSON object (the durable path only evaluates bitmap
+/// indexes), so this is a small evaluator built from `serde_json::Value`
+/// comparisons.
+pub(super) fn payload_atom_matches<'d>(
+    atom: &PayloadAtom,
+    field: &dyn Fn(&str) -> Option<&'d serde_json::Value>,
+) -> bool {
     match atom {
-        PayloadAtom::Eq(field, expected) => doc
-            .get(field)
-            .is_some_and(|actual| json_value_eq(actual, expected)),
-        PayloadAtom::In(field, values) => {
-            let Some(actual) = doc.get(field) else {
+        PayloadAtom::Eq(name, expected) => {
+            field(name).is_some_and(|actual| json_value_eq(actual, expected))
+        }
+        PayloadAtom::In(name, values) => {
+            let Some(actual) = field(name) else {
                 return false;
             };
             values.iter().any(|v| json_value_eq(actual, v))
         }
         PayloadAtom::Range {
-            field,
+            field: name,
             low,
             low_inclusive,
             high,
             high_inclusive,
         } => {
-            let Some(actual) = doc.get(field).and_then(serde_json::Value::as_f64) else {
+            let Some(actual) = field(name).and_then(serde_json::Value::as_f64) else {
                 return false;
             };
             let above_low = match low {
@@ -149,7 +159,10 @@ fn value_as_f64(v: &Value) -> Option<f64> {
 
 /// After a `Vec::remove(idx)` shifts every later element left by one, shift
 /// every recorded index greater than `idx` in `seen` to match.
-fn reindex_after_removal(seen: &mut HashMap<HybridFusionKey, usize>, removed_idx: usize) {
+pub(super) fn reindex_after_removal(
+    seen: &mut HashMap<HybridFusionKey, usize>,
+    removed_idx: usize,
+) {
     for idx in seen.values_mut() {
         if *idx > removed_idx {
             *idx -= 1;
@@ -197,6 +210,30 @@ impl CoreLoop {
         let coll_key = (database_id, tid, collection.to_string());
         let config_key = (database_id, tid, collection.to_string());
 
+        // A vector-primary row stages its vector and sidecar together, not a
+        // document body: its merge reads that staged shape instead.
+        if self
+            .doc_configs
+            .get(&config_key)
+            .is_some_and(|config| config.vector_primary.is_some())
+        {
+            return self.merge_vector_primary_overlay_into_search(
+                VectorMergeParams {
+                    txn_id,
+                    database_id,
+                    tid,
+                    collection,
+                    field_name,
+                    query_vector,
+                    metric,
+                    top_k,
+                    filter_bitmap,
+                    payload_filters,
+                },
+                hits,
+            );
+        }
+
         // Read-your-own-writes refreshes the lease (see the reaper).
         self.touch_overlay(txn_id);
         if let Some(overlay) = self.txn_overlays.get(&txn_id) {
@@ -230,7 +267,7 @@ impl CoreLoop {
                         let passes_payload = payload_filters.is_empty()
                             || payload_filters
                                 .iter()
-                                .all(|atom| payload_atom_matches(atom, &doc));
+                                .all(|atom| payload_atom_matches(atom, &|name| doc.get(name)));
                         if !passes_filter_bitmap || !passes_payload {
                             if let Some(idx) = seen.remove(&key) {
                                 hits.remove(idx);

@@ -28,7 +28,9 @@ use crate::data::executor::task::ExecutionTask;
 
 use super::rls_write_gate;
 use super::upsert::apply_on_conflict_updates;
-use super::vector_direct_row::{VectorDirectIndexSpec, VectorDirectRowWrite, encode_sidecar};
+use super::vector_direct_row::{
+    VectorDirectIndexSpec, VectorDirectRowWrite, VectorSidecarRow, encode_sidecar,
+};
 
 /// Decode MessagePack payload bytes into `HashMap<String, Value>` and
 /// lower-case all field names so bitmap inserts agree with SELECT
@@ -94,59 +96,72 @@ pub(in crate::data::executor) struct VectorPlannedUpsert {
     pub old_sidecar: Option<Vec<u8>>,
 }
 
+/// Merge the conflict patch into the row's current sidecar (`stored`, as
+/// the writer currently sees it: base storage for a live write, base ∪
+/// overlay for a staged one), with the proposed `fields` as `EXCLUDED`, and
+/// decide the write policy on the result. The merged image is what the
+/// policy decides, since it exists nowhere before this point. The one merge
+/// every upsert path runs, so a live and a staged `ON CONFLICT` agree.
+pub(in crate::data::executor) fn merge_vector_upsert_patch(
+    patch: &VectorUpsertPatch<'_>,
+    stored: Option<VectorSidecarRow>,
+    fields: HashMap<String, Value>,
+) -> Result<VectorPlannedUpsert, ErrorCode> {
+    let VectorUpsertPatch {
+        database_id: _,
+        tid,
+        collection,
+        field,
+        on_conflict_updates,
+        rls_write_check,
+    } = *patch;
+    let (stored, old_sidecar) = match stored {
+        Some(row) => (row.fields, Some(row.bytes)),
+        None => (HashMap::new(), None),
+    };
+    // Assignments see the stored row; `EXCLUDED.col` reads the proposed one.
+    let merged = match apply_on_conflict_updates(
+        Value::Object(stored),
+        &Value::Object(fields),
+        on_conflict_updates,
+    )? {
+        Value::Object(map) => map,
+        other => {
+            return Err(ErrorCode::Internal {
+                detail: format!(
+                    "ON CONFLICT merge on '{collection}' produced a non-object row: {other:?}"
+                ),
+            });
+        }
+    };
+    let image = Value::Object(merged.clone());
+    rls_write_gate::admit_document_value(rls_write_check, &image, tid, collection)?;
+    // The vector column never lives in the sidecar: the proposed row's
+    // vector replaces the stored node whatever the patch names, so an
+    // assignment to it is dropped from the payload.
+    let fields = merged
+        .into_iter()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case(field))
+        .map(|(k, v)| (k.to_ascii_lowercase(), v))
+        .collect();
+    Ok(VectorPlannedUpsert {
+        fields,
+        old_sidecar,
+    })
+}
+
 impl CoreLoop {
-    /// Merge the conflict patch into `surrogate`'s stored sidecar, with the
-    /// proposed `fields` as `EXCLUDED`, and decide the write policy on the
-    /// result. The merged image is what the policy decides, since it exists
-    /// nowhere before this point.
+    /// Merge the conflict patch into `surrogate`'s stored sidecar: read the
+    /// base row, then [`merge_vector_upsert_patch`].
     pub(in crate::data::executor) fn plan_vector_upsert_patch(
         &self,
         patch: &VectorUpsertPatch<'_>,
         surrogate: Surrogate,
         fields: HashMap<String, Value>,
     ) -> Result<VectorPlannedUpsert, ErrorCode> {
-        let VectorUpsertPatch {
-            database_id,
-            tid,
-            collection,
-            field,
-            on_conflict_updates,
-            rls_write_check,
-        } = *patch;
-        let (stored, old_sidecar) =
-            match self.vector_sidecar_row(database_id, tid, collection, surrogate)? {
-                Some(row) => (row.fields, Some(row.bytes)),
-                None => (HashMap::new(), None),
-            };
-        // Assignments see the stored row; `EXCLUDED.col` reads the proposed one.
-        let merged = match apply_on_conflict_updates(
-            Value::Object(stored),
-            &Value::Object(fields),
-            on_conflict_updates,
-        )? {
-            Value::Object(map) => map,
-            other => {
-                return Err(ErrorCode::Internal {
-                    detail: format!(
-                        "ON CONFLICT merge on '{collection}' produced a non-object row: {other:?}"
-                    ),
-                });
-            }
-        };
-        let image = Value::Object(merged.clone());
-        rls_write_gate::admit_document_value(rls_write_check, &image, tid, collection)?;
-        // The vector column never lives in the sidecar: the proposed row's
-        // vector replaces the stored node whatever the patch names, so an
-        // assignment to it is dropped from the payload.
-        let fields = merged
-            .into_iter()
-            .filter(|(k, _)| !k.eq_ignore_ascii_case(field))
-            .map(|(k, v)| (k.to_ascii_lowercase(), v))
-            .collect();
-        Ok(VectorPlannedUpsert {
-            fields,
-            old_sidecar,
-        })
+        let stored =
+            self.vector_sidecar_row(patch.database_id, patch.tid, patch.collection, surrogate)?;
+        merge_vector_upsert_patch(patch, stored, fields)
     }
 
     /// Handle `VectorOp::DirectInsert` / `DirectInsertIfAbsent` /

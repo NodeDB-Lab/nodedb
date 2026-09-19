@@ -24,7 +24,7 @@ use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_staged_write};
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
 use crate::control::server::shared::sql::staging_predicates::{
-    is_stageable_write, require_affected_count, staged_tag_kind,
+    is_stageable_write, require_affected_count, stageable_write_shape,
 };
 use crate::control::server::shared::write_admission::plan_requires_txn_buffering;
 use crate::control::state::SharedState;
@@ -250,6 +250,13 @@ where
     F: FnOnce(PhysicalTask) -> Fut,
     Fut: Future<Output = crate::Result<Response>>,
 {
+    let plan = &task.plan;
+    let Some(shape) = stageable_write_shape(plan) else {
+        return Err(StagingGateError::Dispatch(crate::Error::Internal {
+            detail: format!("stage_write requires a stageable write; got {plan:?}"),
+        }));
+    };
+
     let stage_task = wrap_stage_write(
         task.tenant_id,
         task.vshard_id,
@@ -326,7 +333,7 @@ where
         meter_staged_write(state, scope, &task.plan, &resp);
     }
 
-    let kind = staged_tag_kind(&task.plan, resp.payload.as_ref());
+    let kind = shape.tag_kind(resp.payload.as_ref());
 
     // Every count-bearing stage handler answers with a real count
     // (`stage_count_response`), so a missing one means a staging handler stopped

@@ -24,7 +24,7 @@ use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
     /// Execute a `MetaOp::StageWrite` for an in-transaction point write. Only
-    /// point-write `DocumentOp`s are valid here; anything else is internal.
+    /// stageable writes are valid here; anything else is internal.
     pub(in crate::data::executor) fn execute_stage_write(
         &mut self,
         task: &ExecutionTask,
@@ -183,7 +183,7 @@ impl CoreLoop {
                 // Autocommit-then-Raft, never staged in a transaction.
                 | GraphOp::ResolveEdgeDelete(_),
             ) => return self.stage_not_point_write(task),
-            PhysicalPlan::Vector(_) => return self.stage_not_point_write(task),
+            PhysicalPlan::Vector(op) => return self.execute_stage_vector(task, tid, txn_id, op),
             PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
                 collection,
                 payload,

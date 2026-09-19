@@ -73,6 +73,79 @@ pub(in crate::data::executor) struct IndexOverlayMergeParams<'a> {
     pub strict_schema: Option<&'a StrictSchema>,
 }
 
+/// Fold `overlay`'s staged rows for `coll_key` into `rows` (base scan
+/// `(StorageKey, body)` pairs). `matches` is the SAME predicate the base scan
+/// applied. `body_of` turns a staged put body into the row body `matches`
+/// and every downstream stage read: identity for a document collection,
+/// the normalized sidecar for a vector-primary one.
+///
+/// A staged tombstone hides its base row. A staged put replaces the base
+/// body and is re-checked against the predicate. A staged put for a
+/// surrogate absent from base is appended when it satisfies the predicate.
+/// Turns a staged put body into the row body downstream stages read.
+pub(super) type StagedBodyOf<'a, E> = dyn Fn(&StorageKey, &[u8]) -> Result<Vec<u8>, E> + 'a;
+
+pub(super) fn merge_staged_rows<E>(
+    overlay: &super::TxnOverlay,
+    coll_key: &(DatabaseId, TenantId, String),
+    rows: &mut Vec<(StorageKey, Vec<u8>)>,
+    matches: &dyn Fn(&StorageKey, &[u8]) -> bool,
+    body_of: &StagedBodyOf<'_, E>,
+) -> Result<(), E> {
+    // Surrogates already represented in the base result. Additions consult
+    // this to avoid re-adding a row that base already carries (or that the
+    // retain pass has just superseded in place).
+    let mut seen: HashSet<u32> = rows.iter().map(|(k, _)| k.surrogate().as_u32()).collect();
+
+    // `retain_mut` needs a `bool`, so a staged body that will not decode is
+    // captured here and surfaced once the pass finishes.
+    let body_err: std::cell::Cell<Option<E>> = std::cell::Cell::new(None);
+
+    // Base-minus-superseded: a single in-place pass. Drop tombstoned rows,
+    // replace put-superseded bodies and re-check the predicate, keep the
+    // rest untouched.
+    rows.retain_mut(|(row_key, body)| {
+        let surrogate = row_key.surrogate().as_u32();
+        match overlay.get(coll_key, surrogate) {
+            Some(Staged::Tombstone) => false,
+            Some(Staged::Put(staged_body)) => match body_of(row_key, staged_body) {
+                Ok(staged_body) => {
+                    *body = staged_body;
+                    matches(row_key, body)
+                }
+                Err(e) => {
+                    body_err.set(Some(e));
+                    false
+                }
+            },
+            None => true,
+        }
+    });
+    if let Some(e) = body_err.take() {
+        return Err(e);
+    }
+
+    // Overlay additions: staged puts for surrogates the base scan did not
+    // return. A tombstone for a surrogate absent from base hides nothing.
+    for (surrogate, staged) in overlay.iter_for_collection(coll_key) {
+        if seen.contains(&surrogate) {
+            continue;
+        }
+        match staged {
+            Staged::Put(body) => {
+                let key = StorageKey::for_surrogate(Surrogate::new(surrogate));
+                let body = body_of(&key, body)?;
+                if matches(&key, &body) {
+                    rows.push((key, body));
+                    seen.insert(surrogate);
+                }
+            }
+            Staged::Tombstone => {}
+        }
+    }
+    Ok(())
+}
+
 impl CoreLoop {
     /// Merge the overlay for `txn_id` into `rows` (base scan `(StorageKey,
     /// body)` pairs). `matches` is the SAME predicate the base scan applied,
@@ -91,44 +164,14 @@ impl CoreLoop {
         let Some(overlay) = self.txn_overlays.get(&txn_id) else {
             return;
         };
-
-        // Surrogates already represented in the base result. Additions consult
-        // this to avoid re-adding a row that base already carries (or that the
-        // retain pass has just superseded in place).
-        let mut seen: HashSet<u32> = rows.iter().map(|(k, _)| k.surrogate().as_u32()).collect();
-
-        // Base-minus-superseded: a single in-place pass. Drop tombstoned rows,
-        // replace put-superseded bodies and re-check the predicate, keep the
-        // rest untouched.
-        rows.retain_mut(|(row_key, body)| {
-            let surrogate = row_key.surrogate().as_u32();
-            match overlay.get(coll_key, surrogate) {
-                Some(Staged::Tombstone) => false,
-                Some(Staged::Put(staged_body)) => {
-                    *body = staged_body.clone();
-                    matches(row_key, body)
-                }
-                None => true,
-            }
-        });
-
-        // Overlay additions: staged puts for surrogates the base scan did not
-        // return. A tombstone for a surrogate absent from base hides nothing.
-        for (surrogate, staged) in overlay.iter_for_collection(coll_key) {
-            if seen.contains(&surrogate) {
-                continue;
-            }
-            match staged {
-                Staged::Put(body) => {
-                    let key = StorageKey::for_surrogate(Surrogate::new(surrogate));
-                    if matches(&key, body) {
-                        rows.push((key, body.clone()));
-                        seen.insert(surrogate);
-                    }
-                }
-                Staged::Tombstone => {}
-            }
-        }
+        // A document collection's staged body IS the stored row body.
+        let Ok(()) = merge_staged_rows::<std::convert::Infallible>(
+            overlay,
+            coll_key,
+            rows,
+            matches,
+            &|_, body| Ok(body.to_vec()),
+        );
     }
 
     /// Fold a transaction's staging overlay into a KV scan result's `(key,

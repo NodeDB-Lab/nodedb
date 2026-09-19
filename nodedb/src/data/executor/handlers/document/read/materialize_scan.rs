@@ -14,7 +14,9 @@ use redb::{ReadableDatabase, ReadableTable};
 
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::transaction::overlay::SidecarRowShape;
 use crate::data::executor::scan_normalize::sparse_row_to_doc;
+use crate::data::executor::sparse_body_format::SparseBodyFormat;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::sparse::btree::{DOCUMENTS, KeyedTable, invalid_storage_key_err};
 use crate::types::{DatabaseId, TenantId};
@@ -139,7 +141,25 @@ impl CoreLoop {
                 TenantId::new(tid),
                 collection.to_string(),
             );
-            self.merge_overlay_into_scan(txn_id, &coll_key, &mut entries, &|_, _| true);
+            // A vector-primary row stages its vector with its sidecar; its
+            // merge yields the stored sidecar, normalized below like base.
+            let vector_primary = matches!(
+                self.sparse_body_format(task.request.database_id, TenantId::new(tid), collection),
+                SparseBodyFormat::VectorSidecar
+            );
+            if vector_primary {
+                if let Err(e) = self.merge_vector_primary_overlay_into_scan(
+                    txn_id,
+                    &coll_key,
+                    SidecarRowShape::Stored,
+                    &mut entries,
+                    &|_, _| true,
+                ) {
+                    return self.response_error(task, e);
+                }
+            } else {
+                self.merge_overlay_into_scan(txn_id, &coll_key, &mut entries, &|_, _| true);
+            }
             // The whole set is returned in one response; the scan is complete.
             Vec::new()
         } else if entries.len() < count {

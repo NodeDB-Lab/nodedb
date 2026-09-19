@@ -10,8 +10,10 @@ mod lease;
 mod merge;
 mod spatial_merge;
 mod staged;
+mod staged_vector;
 mod timeseries_merge;
 mod vector_merge;
+mod vector_primary_merge;
 
 pub(in crate::data::executor) use array_merge::ArrayOverlayMergeParams;
 pub use array_staged::{ArrayTxnOverlay, StagedCellPut};
@@ -25,5 +27,7 @@ pub(in crate::data::executor) use spatial_merge::SpatialOverlayMergeParams;
 pub use staged::{
     BitemporalStamp, CollectionOverlay, MAX_TXN_OVERLAY_BYTES, Staged, StagedTtl, TxnOverlay,
 };
+pub use staged_vector::StagedVectorRow;
 pub(in crate::data::executor) use timeseries_merge::TimeseriesOverlayMergeParams;
 pub(in crate::data::executor) use vector_merge::VectorMergeParams;
+pub(in crate::data::executor) use vector_primary_merge::{SidecarRowShape, staged_vector_sidecar};

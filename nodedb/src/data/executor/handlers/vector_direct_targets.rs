@@ -18,6 +18,37 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::scan_normalize::sparse_row_to_doc;
 use crate::data::executor::sparse_body_format::SparseBodyFormatRef;
 
+/// Decode the serialized `ScanFilter`s of a predicate write. A malformed
+/// payload is an error, never an empty predicate: a silent decode failure
+/// would turn a `WHERE` into a whole-collection write.
+pub(in crate::data::executor) fn decode_vector_write_filters(
+    collection: &str,
+    filter_bytes: &[u8],
+) -> Result<Vec<ScanFilter>, ErrorCode> {
+    if filter_bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    zerompk::from_msgpack(filter_bytes).map_err(|e| ErrorCode::Internal {
+        detail: format!("vector-primary predicate write on '{collection}': filter decode: {e}"),
+    })
+}
+
+/// Whether one sidecar row satisfies `filters`, evaluated on the row decoded
+/// through the vector sidecar format, the same converter `SELECT` uses. A
+/// predicate that divides by zero fails the statement, the same as it fails
+/// the equivalent `SELECT`. Empty `filters` match every row.
+pub(in crate::data::executor) fn vector_sidecar_matches(
+    key: &StorageKey,
+    sidecar: &[u8],
+    filters: &[ScanFilter],
+) -> Result<bool, ErrorCode> {
+    if filters.is_empty() {
+        return Ok(true);
+    }
+    let (_id, mp) = sparse_row_to_doc(key, sidecar, SparseBodyFormatRef::VectorSidecar);
+    ScanFilter::all_match_binary(filters, &mp).map_err(|_| ErrorCode::DivisionByZero)
+}
+
 impl CoreLoop {
     /// The surrogates `targets` names, in a deterministic order.
     ///
@@ -42,15 +73,7 @@ impl CoreLoop {
                     .collect())
             }
             VectorWriteTargets::Predicate(filter_bytes) => {
-                let filters: Vec<ScanFilter> = if filter_bytes.is_empty() {
-                    Vec::new()
-                } else {
-                    zerompk::from_msgpack(filter_bytes).map_err(|e| ErrorCode::Internal {
-                        detail: format!(
-                            "vector-primary predicate write on '{collection}': filter decode: {e}"
-                        ),
-                    })?
-                };
+                let filters = decode_vector_write_filters(collection, filter_bytes)?;
                 self.scan_vector_sidecar_matches(database_id, tid, collection, &filters)
             }
         }
@@ -58,7 +81,7 @@ impl CoreLoop {
 
     /// Every sidecar row of `collection` that `filters` matches, as the
     /// surrogate its storage key carries.
-    fn scan_vector_sidecar_matches(
+    pub(in crate::data::executor) fn scan_vector_sidecar_matches(
         &self,
         database_id: u64,
         tid: u64,
@@ -97,19 +120,8 @@ impl CoreLoop {
                     rest,
                 ))
             })?;
-            if !filters.is_empty() {
-                let (_id, mp) = sparse_row_to_doc(
-                    &key,
-                    value_guard.value(),
-                    SparseBodyFormatRef::VectorSidecar,
-                );
-                // A predicate that divides by zero fails the statement, the
-                // same as it fails the equivalent `SELECT`.
-                match ScanFilter::all_match_binary(filters, &mp) {
-                    Ok(true) => {}
-                    Ok(false) => continue,
-                    Err(_) => return Err(ErrorCode::DivisionByZero),
-                }
+            if !vector_sidecar_matches(&key, value_guard.value(), filters)? {
+                continue;
             }
             out.push(key.surrogate());
         }

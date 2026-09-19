@@ -15,9 +15,10 @@
 //! (`handlers/transaction/overlay/vector_merge.rs`), mirroring the FTS
 //! overlay-merge pattern.
 //!
-//! Scope: single-vector search merge only. `MultiSearch`, vector-primary
-//! `DirectUpsert`, and `SetParams` staging are explicitly out of scope
-//! (follow-ups) and are not covered here.
+//! Scope: single-vector search merge on a document collection. A
+//! vector-primary collection's staged DML is covered by
+//! `sql_transactions_vector_primary_overlay.rs`; `MultiSearch` and
+//! `SetParams` staging are not covered here.
 
 use crate::harness::TestServer;
 

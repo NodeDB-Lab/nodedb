@@ -11,9 +11,10 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::document::sort;
+use crate::data::executor::handlers::transaction::overlay::SidecarRowShape;
 use crate::data::executor::response_codec::DocumentRow;
 use crate::data::executor::scan_normalize::sparse_row_to_doc;
-use crate::data::executor::sparse_body_format::SparseBodyFormatRef;
+use crate::data::executor::sparse_body_format::{SparseBodyFormat, SparseBodyFormatRef};
 use crate::data::executor::task::ExecutionTask;
 
 /// Parameters for [`CoreLoop::execute_document_scan`].
@@ -201,7 +202,30 @@ impl CoreLoop {
                             }
                         }
                     };
-                    self.merge_overlay_into_scan(txn_id, &coll_key, &mut filtered, &matches);
+                    // A vector-primary row stages its vector with its sidecar;
+                    // its merge renders the sidecar the way the fetch stage
+                    // rendered every base row.
+                    let vector_primary = matches!(
+                        self.sparse_body_format(
+                            task.request.database_id,
+                            crate::types::TenantId::new(tid),
+                            collection,
+                        ),
+                        SparseBodyFormat::VectorSidecar
+                    );
+                    if vector_primary {
+                        if let Err(e) = self.merge_vector_primary_overlay_into_scan(
+                            txn_id,
+                            &coll_key,
+                            SidecarRowShape::Normalized,
+                            &mut filtered,
+                            &matches,
+                        ) {
+                            return self.response_error(task, e);
+                        }
+                    } else {
+                        self.merge_overlay_into_scan(txn_id, &coll_key, &mut filtered, &matches);
+                    }
                     if predicate_err.take().is_some() {
                         return self.response_error(task, ErrorCode::DivisionByZero);
                     }

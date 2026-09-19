@@ -34,6 +34,8 @@ mod stage_rls;
 mod stage_spatial;
 mod stage_timeseries;
 mod stage_upsert;
+mod stage_vector;
+mod stage_vector_targets;
 
 pub(in crate::data::executor) use body::stored_row_identity;
 pub(in crate::data::executor) use context::StageCtx;

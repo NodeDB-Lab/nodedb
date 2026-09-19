@@ -65,6 +65,53 @@ pub(in crate::data::executor) struct VectorPlannedRow {
     pub old_sidecar: Vec<u8>,
 }
 
+/// Merge the patch into the row's current sidecar (`stored`, as the writer
+/// currently sees it: base storage for a live write, base ∪ overlay for a
+/// staged one) and decide the write policy on the result. The one merge
+/// every `UPDATE` path runs, so a live and a staged update agree.
+pub(in crate::data::executor) fn merge_vector_direct_update_row(
+    patch: &VectorPayloadPatch<'_>,
+    surrogate: Surrogate,
+    stored: VectorSidecarRow,
+) -> Result<VectorPlannedRow, ErrorCode> {
+    let VectorPayloadPatch {
+        database_id: _,
+        tid,
+        collection,
+        field,
+        payload_patch,
+        rls_write_check,
+    } = *patch;
+    let VectorSidecarRow {
+        fields,
+        bytes: old_sidecar,
+    } = stored;
+    let excluded = Value::Object(HashMap::new());
+    let merged = match apply_on_conflict_updates(Value::Object(fields), &excluded, payload_patch)? {
+        Value::Object(map) => map,
+        other => {
+            return Err(ErrorCode::Internal {
+                detail: format!("UPDATE on '{collection}' produced a non-object row: {other:?}"),
+            });
+        }
+    };
+    let image = Value::Object(merged.clone());
+    rls_write_gate::admit_document_value(rls_write_check, &image, tid, collection)?;
+    // The vector column never lives in the sidecar.
+    let fields: HashMap<String, Value> = merged
+        .into_iter()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case(field))
+        .map(|(k, v)| (k.to_ascii_lowercase(), v))
+        .collect();
+    let sidecar = encode_sidecar(&fields)?;
+    Ok(VectorPlannedRow {
+        surrogate,
+        fields,
+        sidecar,
+        old_sidecar,
+    })
+}
+
 impl CoreLoop {
     /// Handle `VectorOp::DirectUpdate`.
     pub(in crate::data::executor) fn execute_vector_direct_update(
@@ -173,55 +220,20 @@ impl CoreLoop {
         self.response_affected(task, written.len() as u64)
     }
 
-    /// Merge the patch into `surrogate`'s stored sidecar and decide the
-    /// write policy on the result. `None` when the sidecar is gone.
+    /// Merge the patch into `surrogate`'s stored sidecar: read the base row,
+    /// then [`merge_vector_direct_update_row`]. `None` when the sidecar is
+    /// gone.
     pub(in crate::data::executor) fn plan_vector_direct_update_row(
         &self,
         patch: &VectorPayloadPatch<'_>,
         surrogate: Surrogate,
     ) -> Result<Option<VectorPlannedRow>, ErrorCode> {
-        let VectorPayloadPatch {
-            database_id,
-            tid,
-            collection,
-            field,
-            payload_patch,
-            rls_write_check,
-        } = *patch;
-        let Some(VectorSidecarRow {
-            fields,
-            bytes: old_sidecar,
-        }) = self.vector_sidecar_row(database_id, tid, collection, surrogate)?
+        let Some(stored) =
+            self.vector_sidecar_row(patch.database_id, patch.tid, patch.collection, surrogate)?
         else {
             return Ok(None);
         };
-        let excluded = Value::Object(HashMap::new());
-        let merged =
-            match apply_on_conflict_updates(Value::Object(fields), &excluded, payload_patch)? {
-                Value::Object(map) => map,
-                other => {
-                    return Err(ErrorCode::Internal {
-                        detail: format!(
-                            "UPDATE on '{collection}' produced a non-object row: {other:?}"
-                        ),
-                    });
-                }
-            };
-        let image = Value::Object(merged.clone());
-        rls_write_gate::admit_document_value(rls_write_check, &image, tid, collection)?;
-        // The vector column never lives in the sidecar.
-        let fields: HashMap<String, Value> = merged
-            .into_iter()
-            .filter(|(k, _)| !k.eq_ignore_ascii_case(field))
-            .map(|(k, v)| (k.to_ascii_lowercase(), v))
-            .collect();
-        let sidecar = encode_sidecar(&fields)?;
-        Ok(Some(VectorPlannedRow {
-            surrogate,
-            fields,
-            sidecar,
-            old_sidecar,
-        }))
+        merge_vector_direct_update_row(patch, surrogate, stored).map(Some)
     }
 
     /// Rewrite one row. With `new_vector` the old row is removed and a fresh

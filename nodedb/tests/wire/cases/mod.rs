@@ -258,6 +258,7 @@ mod sql_transactions_timeseries_overlay;
 mod sql_transactions_unique_violation;
 mod sql_transactions_upsert_overlay;
 mod sql_transactions_vector_overlay;
+mod sql_transactions_vector_primary_overlay;
 mod sql_trigger_fuel;
 mod sql_typeguard_default_gate;
 mod sql_typeguard_defaults;

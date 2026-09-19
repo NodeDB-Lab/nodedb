@@ -95,8 +95,9 @@ impl CoreLoop {
                 // maintenance ops carry no persisted post-image.
                 PhysicalPlan::Query(_) | PhysicalPlan::Meta(_) => {}
 
-                // Plan-driven: these engines are not staged into an overlay, so
-                // each op serializes from the plan node, skips, or errors.
+                // Plan-driven: each op serializes from the plan node, skips, or
+                // errors. A vector-primary write's overlay entry serves the
+                // transaction's own reads only, never the redo record.
                 PhysicalPlan::Vector(op) => vector::serialize_vector_op(op, &mut ops)?,
                 PhysicalPlan::Array(op) => array::serialize_array_op(op, &mut ops)?,
                 PhysicalPlan::Columnar(op) => columnar::serialize_columnar_op(op, &mut ops)?,

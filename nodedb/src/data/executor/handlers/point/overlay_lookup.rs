@@ -11,8 +11,11 @@
 
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::transaction::overlay::{Staged, StagedTtl};
+use crate::data::executor::handlers::transaction::overlay::{
+    Staged, StagedTtl, staged_vector_sidecar,
+};
 use crate::data::executor::handlers::transaction::stage_write::kv_row_identity;
+use crate::data::executor::sparse_body_format::SparseBodyFormat;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::kv::current_ms;
 use nodedb_types::{RowIdentity, Surrogate};
@@ -58,10 +61,23 @@ impl CoreLoop {
         let staged = overlay
             .get_by_doc_id(&coll_key, document_id)
             .or_else(|| overlay.get(&coll_key, surrogate.0))?;
-        match staged {
-            Staged::Put(body) => Some(Ok(body.clone())),
-            Staged::Tombstone => Some(Err(self.response_with_payload(task, Vec::new()))),
+        let body = match staged {
+            Staged::Put(body) => body,
+            Staged::Tombstone => return Some(Err(self.response_with_payload(task, Vec::new()))),
+        };
+        // A vector-primary row stages its vector with its sidecar; the point
+        // read renders the sidecar, the bytes the sparse store holds at COMMIT.
+        let vector_primary = matches!(
+            self.sparse_body_format(task.request.database_id, coll_key.1, collection),
+            SparseBodyFormat::VectorSidecar
+        );
+        if !vector_primary {
+            return Some(Ok(body.clone()));
         }
+        Some(match staged_vector_sidecar(body) {
+            Ok(sidecar) => Ok(sidecar),
+            Err(e) => Err(self.response_error(task, e)),
+        })
     }
 
     /// Consult the active transaction's staging overlay for a raw KV key

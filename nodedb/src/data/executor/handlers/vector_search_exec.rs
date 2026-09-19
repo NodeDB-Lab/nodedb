@@ -175,10 +175,35 @@ impl CoreLoop {
             } else {
                 index_key
             };
+        // An index with no base rows still answers a transaction's own staged
+        // rows: the merge ranks them over an empty base result.
+        let staged_only = |core: &Self, txn_id| {
+            core.search_overlay_only(
+                task,
+                super::transaction::overlay::VectorMergeParams {
+                    txn_id,
+                    database_id: task.request.database_id,
+                    tid: crate::types::TenantId::new(tid),
+                    collection,
+                    field_name,
+                    query_vector,
+                    metric,
+                    top_k,
+                    filter_bitmap,
+                    payload_filters,
+                },
+            )
+        };
         let Some(collection_ref) = self.vector_collections.get(&effective_key) else {
+            if let Some(txn_id) = task.request.txn_id {
+                return staged_only(self, txn_id);
+            }
             return self.response_error(task, ErrorCode::NotFound);
         };
         if collection_ref.is_empty() {
+            if let Some(txn_id) = task.request.txn_id {
+                return staged_only(self, txn_id);
+            }
             return self.response_with_payload(task, b"[]".to_vec());
         }
 
@@ -372,6 +397,24 @@ impl CoreLoop {
             }
         } else {
             hits.truncate(truncate_to);
+        }
+        if let Some(ref m) = self.metrics {
+            m.record_vector_search(0);
+            m.record_query_by_engine("vector");
+        }
+        encode_hits_response(self, task, &hits)
+    }
+
+    /// Answer a search from the transaction's staged rows alone, for a
+    /// collection whose index holds no base row yet.
+    fn search_overlay_only(
+        &self,
+        task: &ExecutionTask,
+        params: super::transaction::overlay::VectorMergeParams<'_>,
+    ) -> Response {
+        let mut hits: Vec<super::super::response_codec::VectorSearchHit> = Vec::new();
+        if let Err(e) = self.merge_vector_overlay_into_search(params, &mut hits) {
+            return self.response_error(task, e);
         }
         if let Some(ref m) = self.metrics {
             m.record_vector_search(0);
