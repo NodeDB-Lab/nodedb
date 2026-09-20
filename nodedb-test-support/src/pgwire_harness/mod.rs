@@ -7,6 +7,7 @@
 
 mod multicore;
 mod query;
+pub mod raw_pgwire;
 mod restart;
 mod start;
 mod support;
