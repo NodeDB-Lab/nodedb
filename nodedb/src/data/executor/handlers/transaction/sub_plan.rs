@@ -89,7 +89,7 @@ impl CoreLoop {
             PhysicalPlan::Vector(op) => self.exec_tx_vector(dummy_task, tid, plan, op, undo_log),
             PhysicalPlan::Graph(op) => self.exec_tx_graph(dummy_task, tid, plan, op, undo_log),
             PhysicalPlan::Crdt(op) => self.exec_tx_crdt(dummy_task, tid, plan, op, crdt_deltas),
-            PhysicalPlan::Kv(kv_op) => self.execute_tx_kv(dummy_task, tid, kv_op, undo_log),
+            PhysicalPlan::Kv(kv_op) => self.execute_tx_kv(dummy_task, tid, plan, kv_op, undo_log),
             PhysicalPlan::Columnar(op) => {
                 self.exec_tx_columnar(dummy_task, tid, plan, op, undo_log)
             }

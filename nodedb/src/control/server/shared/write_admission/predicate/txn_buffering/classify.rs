@@ -238,7 +238,8 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
         PhysicalPlan::Kv(KvOp::ResolvedWrite { .. }) => false,
 
         // ---- Kv: predicate DML — encoded (buffered) ----
-        // Encoded; COMMIT-time resolve refuses them — autocommit is the supported path.
+        // Staged per matched row at statement time; COMMIT replays the live
+        // handler in statement order, like Document `BulkUpdate`/`BulkDelete`.
         PhysicalPlan::Kv(KvOp::PredicateUpdate { .. } | KvOp::PredicateDelete { .. }) => true,
 
         // ---- Columnar: encoded (buffered) ----

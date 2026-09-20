@@ -248,6 +248,7 @@ mod sql_transactions_insert_select_cross_engine;
 mod sql_transactions_insert_select_overlay;
 mod sql_transactions_kv_atomic_overlay;
 mod sql_transactions_kv_overlay;
+mod sql_transactions_kv_predicate_overlay;
 mod sql_transactions_kv_transfer_overlay;
 mod sql_transactions_pk_scan_consistency;
 mod sql_transactions_point_get_overlay;

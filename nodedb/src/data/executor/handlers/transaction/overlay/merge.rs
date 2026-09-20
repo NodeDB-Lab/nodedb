@@ -188,13 +188,15 @@ impl CoreLoop {
     /// instead, via [`TxnOverlay::iter_doc_entries_for_collection`] and
     /// [`unhex_key`](super::super::stage_write::unhex_key) to recover the
     /// raw key bytes for a staged addition. `matches` is the SAME predicate
-    /// the base KV scan applied, evaluated on the value bytes.
+    /// the base KV scan applied, evaluated on `(raw key, value bytes)`: the
+    /// row shape a predicate sees (`kv_row_to_doc`) folds the key in as its
+    /// `key` field, so a `WHERE key = ...` needs both.
     pub(in crate::data::executor) fn merge_kv_overlay_into_scan(
         &self,
         txn_id: TxnId,
         coll_key: &(DatabaseId, TenantId, String),
         rows: &mut Vec<(Vec<u8>, Vec<u8>)>,
-        matches: &dyn Fn(&[u8]) -> bool,
+        matches: &dyn Fn(&[u8], &[u8]) -> bool,
     ) {
         // Read-your-own-writes refreshes the lease (see the reaper).
         self.touch_overlay(txn_id);
@@ -230,7 +232,7 @@ impl CoreLoop {
                 Some(Staged::Tombstone) => false,
                 Some(Staged::Put(staged_value)) => {
                     *value = staged_value.clone();
-                    matches(value)
+                    matches(key, value)
                 }
                 None => base_visible,
             }
@@ -242,8 +244,8 @@ impl CoreLoop {
             }
             if let Staged::Put(value) = staged
                 && !staged_expired(doc_id)
-                && matches(value)
                 && let Some(key) = super::super::stage_write::unhex_key(doc_id.as_str())
+                && matches(&key, value)
             {
                 rows.push((key, value.clone()));
                 seen.insert(doc_id.clone());

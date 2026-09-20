@@ -11,9 +11,9 @@
 //! see `sql_transactions_scan_overlay.rs` for the analogous scan-path
 //! coverage on non-indexed predicates.
 //!
-//! Every write here is a point write (by primary key), so it lands in the
-//! per-transaction staging overlay; predicate DML is not staged yet and is
-//! out of scope.
+//! Every write here is a point write (by primary key). Predicate DML staging
+//! is covered by `sql_transactions_bulk_dml_overlay.rs` and
+//! `sql_transactions_kv_predicate_overlay.rs`.
 
 use crate::harness::TestServer;
 

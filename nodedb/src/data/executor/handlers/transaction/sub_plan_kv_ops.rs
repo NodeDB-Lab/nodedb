@@ -2,7 +2,7 @@
 
 //! KV operation dispatch for transaction batches.
 
-use crate::bridge::envelope::{ErrorCode, Response, Status};
+use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::KvOp;
@@ -17,6 +17,7 @@ impl CoreLoop {
         &mut self,
         task: &ExecutionTask,
         tid: u64,
+        plan: &PhysicalPlan,
         op: &KvOp,
         undo_log: &mut Vec<UndoEntry>,
     ) -> Result<Response, ErrorCode> {
@@ -154,15 +155,13 @@ impl CoreLoop {
                     .into(),
             }),
 
-            // A predicate write resolves its row set from committed state at
-            // apply time; the transaction redo record has no per-row shape
-            // for that. Autocommit is the supported path.
+            // ── Predicate DML — replayed live, in statement order ──
+            // Staged per matched row at statement time; the live handler
+            // re-evaluates the predicate against the batch-ordered base at
+            // COMMIT, the same passthrough Document `BulkUpdate`/`BulkDelete`
+            // take in `exec_tx_document`.
             KvOp::PredicateUpdate { .. } | KvOp::PredicateDelete { .. } => {
-                Err(ErrorCode::Internal {
-                    detail: "KV predicate UPDATE/DELETE is not permitted inside a \
-                             TransactionBatch; run it outside an explicit transaction"
-                        .into(),
-                })
+                self.exec_tx_passthrough(tid, plan, task.request.deadline)
             }
         }
     }

@@ -327,7 +327,11 @@ fn classify_kv_op(op: &KvOp, collections: &mut BTreeSet<String>) -> crate::Resul
         | KvOp::Cas { collection, .. }
         | KvOp::GetSet { collection, .. }
         | KvOp::FieldSet { collection, .. }
-        | KvOp::Transfer { collection, .. } => {
+        | KvOp::Transfer { collection, .. }
+        // Predicate DML stages each matched row's post-image or tombstone
+        // at statement time, so the overlay carries it like a keyed write.
+        | KvOp::PredicateUpdate { collection, .. }
+        | KvOp::PredicateDelete { collection, .. } => {
             collections.insert(collection.to_string());
             Ok(())
         }
@@ -364,15 +368,6 @@ fn classify_kv_op(op: &KvOp, collections: &mut BTreeSet<String>) -> crate::Resul
         KvOp::ResolvedWrite { .. } => Err(crate::Error::PlanError {
             detail: "kv resolved write is not supported in transaction resolve".to_string(),
         }),
-
-        // Predicate DML resolves its row set from committed state at apply time;
-        // per-row KV redo shapes can't express that. Autocommit is the supported path.
-        KvOp::PredicateUpdate { .. } | KvOp::PredicateDelete { .. } => {
-            Err(crate::Error::PlanError {
-                detail: "kv predicate UPDATE/DELETE is not supported in transaction resolve"
-                    .to_string(),
-            })
-        }
 
         // A standalone TTL delta has no value post-image, and KV redo carries
         // TTL only as part of a value put, so rejecting avoids a silent drop.

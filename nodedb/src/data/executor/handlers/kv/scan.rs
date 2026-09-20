@@ -100,7 +100,12 @@ impl CoreLoop {
                 crate::types::TenantId::new(tid),
                 collection.to_string(),
             );
-            self.merge_kv_overlay_into_scan(txn_id, &coll_key, &mut entries, &|_value: &[u8]| true);
+            self.merge_kv_overlay_into_scan(
+                txn_id,
+                &coll_key,
+                &mut entries,
+                &|_key: &[u8], _value: &[u8]| true,
+            );
         }
 
         // Bound an unbounded (no-LIMIT) scan by the memory budget. Sum the raw

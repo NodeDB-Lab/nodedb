@@ -43,7 +43,7 @@ pub enum StagedWriteShape {
 
 /// Classify a plan into the [`StagedWriteShape`] the in-transaction staging gate
 /// stages it as, or `None` if the plan is not stageable. `None` covers: Document
-/// scans/reads, KV reads/predicate ops/autocommit-only resolve ops, Columnar/
+/// scans/reads, KV reads/autocommit-only resolve ops, Columnar/
 /// Timeseries/Spatial/Graph/Array reads and maintenance ops, Vector search, every
 /// `CrdtOp` other than the row writes `DocUpsert`/`DocDelete`, and every
 /// non-write-engine `PhysicalPlan` variant (`Text`, `Query`, `Meta`,
@@ -163,7 +163,8 @@ pub fn stageable_write_shape(plan: &PhysicalPlan) -> Option<StagedWriteShape> {
 }
 
 /// Classify a `KvOp` into the [`StagedWriteShape`] it stages as, or `None` if it
-/// is a read, a predicate op, or autocommit-only. Exhaustive over every `KvOp`
+/// is a read or autocommit-only. Predicate `UPDATE`/`DELETE` stage like their
+/// Document `BulkUpdate`/`BulkDelete` siblings. Exhaustive over every `KvOp`
 /// variant.
 fn kv_write_shape(op: &KvOp) -> Option<StagedWriteShape> {
     match op {
@@ -175,6 +176,10 @@ fn kv_write_shape(op: &KvOp) -> Option<StagedWriteShape> {
         }
         KvOp::InsertOnConflictUpdate { .. } => Some(StagedWriteShape::ConflictUpsert),
         KvOp::Delete { .. } => Some(StagedWriteShape::Delete),
+        // Predicate DML: the row set resolves against BASE ∪ OVERLAY at
+        // statement time, the same shapes as Document `BulkUpdate`/`BulkDelete`.
+        KvOp::PredicateUpdate { .. } => Some(StagedWriteShape::Update),
+        KvOp::PredicateDelete { .. } => Some(StagedWriteShape::Delete),
         // These return a computed value, not a row count — forward the payload verbatim.
         KvOp::Incr { .. }
         | KvOp::IncrFloat { .. }
@@ -203,10 +208,7 @@ fn kv_write_shape(op: &KvOp) -> Option<StagedWriteShape> {
         | KvOp::MaterializeScan { .. }
         // Autocommit-only: transaction resolve rejects both.
         | KvOp::ResolveWrite(_)
-        | KvOp::ResolvedWrite { .. }
-        // Autocommit-only: a predicate resolves its row set at apply time.
-        | KvOp::PredicateUpdate { .. }
-        | KvOp::PredicateDelete { .. } => None,
+        | KvOp::ResolvedWrite { .. } => None,
     }
 }
 
@@ -773,6 +775,29 @@ mod tests {
                 .tag_kind(&payload),
             StagedTagKind::Update
         );
+    }
+
+    #[test]
+    fn kv_write_shape_predicate_update_and_delete_stage_as_update_and_delete() {
+        let update = KvOp::PredicateUpdate {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+            filters: Vec::new(),
+            updates: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            returning: None,
+            rls_filters: Vec::new(),
+        };
+        let delete = KvOp::PredicateDelete {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+            filters: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            returning: None,
+            rls_filters: Vec::new(),
+        };
+        assert_eq!(kv_write_shape(&update), Some(StagedWriteShape::Update));
+        assert_eq!(kv_write_shape(&delete), Some(StagedWriteShape::Delete));
+        assert!(is_stageable_write(&kv_plan(update)));
+        assert!(is_stageable_write(&kv_plan(delete)));
     }
 
     #[test]
