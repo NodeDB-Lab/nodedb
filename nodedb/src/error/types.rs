@@ -378,11 +378,8 @@ pub enum Error {
     #[error("dispatch error: {detail}")]
     Dispatch { detail: String },
 
-    /// Per-tenant dispatch capacity is saturated: the request was NOT enqueued
-    /// and nothing was applied. The identical request is expected to succeed
-    /// once in-flight work drains, so callers must retry with backoff — never
-    /// treat this as a terminal dispatch failure (issue 352: a terminal read
-    /// turns the startup rebuild into an error storm).
+    /// Per-tenant dispatch capacity is saturated: the request was not enqueued,
+    /// so callers retry with backoff instead of reporting a terminal failure.
     #[error("tenant {tenant_id}: dispatch capacity busy ({inflight}/{cap} in-flight); retry")]
     DispatchCapacityBusy {
         tenant_id: u64,
@@ -526,15 +523,12 @@ pub enum Error {
     )]
     SequencerUnavailable,
 
-    /// Active-session capacity reached.
     #[error("session cap ({cap}) exceeded — rejecting new login")]
     SessionCapExceeded { cap: usize },
 
-    /// Session closed because the per-database idle timeout elapsed.
     #[error("session closed: idle timeout exceeded")]
     SessionIdleTimeout,
 
-    /// Session closed because the OIDC token expired.
     #[error("session closed: OIDC token expired")]
     SessionTokenExpired,
 
@@ -542,29 +536,21 @@ pub enum Error {
     #[error("session terminated by administrator")]
     SessionKilledByAdmin,
 
-    /// Session closed because the associated user was dropped.
     #[error("session closed: user account was dropped")]
     SessionUserDropped,
 
-    /// OIDC bearer token rejected because the authenticated provider has no tenant binding.
     #[error("OIDC token rejected: authenticated provider has no tenant binding")]
     OidcProviderTenantUnbound,
 
-    /// OIDC provider tenant is absent or unreadable.
     #[error("OIDC token rejected: authenticated provider tenant is unavailable")]
     OidcProviderTenantUnavailable { tenant_id: u64 },
 
-    /// OIDC bearer token rejected: claim mapping produced no default database.
     #[error("OIDC token rejected: claim mapping produced no default database for subject '{sub}'")]
     OidcNoDefaultDatabase { sub: String },
 
-    /// Vector insert or index rejected: the vector dimension exceeds the
-    /// tenant's `max_vector_dim` quota.
     #[error("vector dimension {dim} exceeds tenant quota max_vector_dim={limit}")]
     TenantVectorDimExceeded { dim: u32, limit: u32 },
 
-    /// Graph traversal rejected: the requested depth exceeds the tenant's
-    /// `max_graph_depth` quota.
     #[error("graph traversal depth {depth} exceeds tenant quota max_graph_depth={limit}")]
     TenantGraphDepthExceeded { depth: u32, limit: u32 },
 
@@ -588,7 +574,6 @@ pub enum Error {
         cause: super::ollp::OllpExhaustedCause,
     },
 
-    /// Unpromoted mirrors are read-only.
     #[error("database '{database}' is a read-only mirror; promote it before writing")]
     MirrorReadOnly { database: String },
 
