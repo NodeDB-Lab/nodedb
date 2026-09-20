@@ -219,6 +219,7 @@ impl TestServer {
             pg_port: spawned.ports.pgwire,
             native_port: spawned.ports.native,
             http_port: spawned.ports.http,
+            resp_port: spawned.ports.resp,
             spawned: Some(spawned),
             conn_handle: Some(conn_handle),
             _dir: dir,

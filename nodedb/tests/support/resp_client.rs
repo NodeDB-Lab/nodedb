@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Minimal RESP (Redis protocol) client for crash tests.
+//! Minimal RESP (Redis protocol) client for out-of-process tests.
 //!
 //! Deliberately the same encode/parse approach as
 //! `tests/resp_row_level_security.rs`'s in-process RESP client: a raw
 //! `TcpStream`, array-of-bulk-strings command encoding, and a reply parser
 //! covering the five RESP2 type prefixes those tests already exercise. This
 //! copy talks to a real spawned `nodedb` binary's RESP port instead of an
-//! in-process listener, so a crash test can drive `AUTH` / `SELECT` / data
-//! commands the same way a real Redis client would before killing the
-//! server.
+//! in-process listener, so the crash and wire harnesses can drive `AUTH` /
+//! `SELECT` / data commands the same way a real Redis client would.
 
-#![allow(dead_code)] // Not every crash test exercises every reply variant.
+#![allow(dead_code)] // Not every test binary exercises every reply variant.
 
 use std::time::Duration;
 

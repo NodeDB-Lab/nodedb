@@ -14,9 +14,16 @@ mod crash_harness;
 use std::time::{Duration, Instant};
 
 use crash_harness::CrashHarness;
-use crash_harness::resp_client::{self, Reply};
+use crash_harness::support::resp_client::{self, Reply};
 
-const PASSWORD: &str = "crash-resp-kv-secret-1";
+/// A fresh, process-scoped RESP password: never a literal credential.
+fn resp_test_password() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock must be after the epoch")
+        .as_nanos();
+    format!("crash-resp-kv-{}-{nanos}", std::process::id())
+}
 
 /// A checkpoint landing between the write and the kill would flush KV state
 /// independent of the WAL, producing a false pass. An hour interval makes
@@ -43,14 +50,15 @@ async fn resp_kv_set_survives_kill_9() {
          WITH (engine='kv')",
     )
     .await;
-    h.exec("CREATE USER resp_kv_user PASSWORD 'crash-resp-kv-secret-1'")
+    let password = resp_test_password();
+    h.exec(&format!("CREATE USER resp_kv_user PASSWORD '{password}'"))
         .await;
     h.exec("GRANT ROLE readwrite TO resp_kv_user").await;
 
     let mut client = resp_client::session(
         resp_addr(h.resp_port),
         "resp_kv_user",
-        PASSWORD,
+        &password,
         "resp_kv_survive",
     )
     .await;
@@ -83,7 +91,7 @@ async fn resp_kv_set_survives_kill_9() {
     let mut post_crash_client = resp_client::session(
         resp_addr(h.resp_port),
         "resp_kv_user",
-        PASSWORD,
+        &password,
         "resp_kv_survive",
     )
     .await;

@@ -40,6 +40,8 @@ pub struct TestServer {
     pub native_port: u16,
     /// HTTP (REST) listener port — also where `/healthz` was polled.
     pub http_port: u16,
+    /// RESP (Redis protocol) listener port.
+    pub resp_port: u16,
     /// `None` once `graceful_shutdown` has consumed it.
     pub(super) spawned: Option<SpawnedServer>,
     pub(super) conn_handle: Option<tokio::task::JoinHandle<()>>,

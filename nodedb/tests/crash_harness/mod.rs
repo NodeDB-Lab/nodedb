@@ -20,13 +20,12 @@ pub mod diagnostics;
 // The ILP client helper lives in `nodedb-test-support` and is imported
 // directly by tests that need it, not re-exported here.
 mod pgwire;
-pub mod resp_client;
 
 // Only `crash_ilp_timeseries_write.rs` uses these directly.
 #[allow(unused_imports)]
 pub use pgwire::{RetryableSchemaChange, Session};
 #[path = "../support/mod.rs"]
-mod support;
+pub mod support;
 
 /// Re-exported so a crash test can state its own filesystem precondition
 /// without pulling the support module in a second time.

@@ -11,10 +11,15 @@ mod connect;
 mod lifecycle;
 mod process;
 mod query;
+mod resp_user;
 mod types;
 
 pub mod insert_returning_engines;
 pub mod raw_pgwire;
+
+#[path = "../../support/mod.rs"]
+mod support;
+pub use support::resp_client;
 
 // Mirrors the `TestServer` API surface `pgwire_harness` exposes, so porting a
 // test file is an import swap.
