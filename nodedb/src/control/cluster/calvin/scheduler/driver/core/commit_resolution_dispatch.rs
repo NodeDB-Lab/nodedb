@@ -37,6 +37,18 @@ impl Scheduler {
         };
         if let Err(error) = dispatch_result {
             self.shared.tracker.cancel(&request_id);
+            if self.note_dispatch_busy(&error, epoch) {
+                // Retryable capacity condition (issue 352): paced by the drain.
+                tracing::debug!(
+                    vshard_id = self.vshard_id,
+                    epoch,
+                    position,
+                    committed,
+                    %error,
+                    "calvin: commit resolution dispatch deferred (capacity busy)"
+                );
+                return false;
+            }
             tracing::error!(
                 vshard_id = self.vshard_id,
                 epoch,

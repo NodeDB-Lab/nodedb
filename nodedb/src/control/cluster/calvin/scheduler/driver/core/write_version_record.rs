@@ -106,6 +106,17 @@ impl Scheduler {
         };
         if let Err(e) = dispatch_result {
             self.shared.tracker.cancel(&request_id);
+            if self.note_dispatch_busy_shared(&e) {
+                // Retryable capacity condition (issue 352): counted + paced.
+                tracing::debug!(
+                    vshard_id = self.vshard_id,
+                    epoch,
+                    position,
+                    error = %e,
+                    "calvin: write-version record dispatch deferred (capacity busy)"
+                );
+                return;
+            }
             tracing::warn!(
                 vshard_id = self.vshard_id,
                 epoch,

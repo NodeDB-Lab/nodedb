@@ -157,6 +157,18 @@ impl Scheduler {
         };
         if let Err(e) = dispatch_result {
             self.shared.tracker.cancel(&request_id);
+            if self.note_dispatch_busy(&e, epoch) {
+                // Retryable capacity condition (issue 352): the catch-up drain
+                // re-drives after the armed backoff; no error log per attempt.
+                tracing::debug!(
+                    vshard_id = self.vshard_id,
+                    epoch,
+                    position,
+                    error = %e,
+                    "calvin: CalvinResolve dispatch deferred (capacity busy)"
+                );
+                return false;
+            }
             tracing::error!(
                 vshard_id = self.vshard_id,
                 epoch,
