@@ -120,6 +120,30 @@ pub struct ServerConfig {
     pub scheduler: SchedulerConfig,
 }
 
+/// Rejects startup bounds written where they used to live, naming the moved-to
+/// path. `deny_unknown_fields` catches the key anyway, but its message lists
+/// every valid field instead of the replacement.
+fn reject_moved_startup_bounds(content: &str) -> crate::Result<()> {
+    let Ok(doc) = toml::from_str::<toml::Table>(content) else {
+        // A malformed document fails in the real parse below; nothing to
+        // inspect here.
+        return Ok(());
+    };
+    let Some(server) = doc.get("server").and_then(|v| v.as_table()) else {
+        return Ok(());
+    };
+    for key in ["raft_ready_timeout_ms", "data_group_recovery_timeout_ms"] {
+        if server.contains_key(key) {
+            return Err(crate::Error::Config {
+                detail: format!(
+                    "`[server] {key}` moved to `[tuning.startup] {key}`; set the bound there"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 impl ServerConfig {
     /// Load configuration from a TOML file, falling back to defaults.
     pub fn from_file(path: &std::path::Path) -> crate::Result<Self> {
@@ -131,6 +155,7 @@ impl ServerConfig {
         // that field — this is textual substitution before parsing, not a
         // second, competing expansion.
         let content = super::env_expand::expand_env(path, &content)?;
+        reject_moved_startup_bounds(&content)?;
         let parsed: Self = toml::from_str(&content).map_err(|e| crate::Error::Config {
             detail: format!("invalid TOML config: {e}"),
         })?;
@@ -385,6 +410,49 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("server.data_plane_cores"), "{msg}");
         assert!(msg.contains("positive integer"), "{msg}");
+    }
+
+    /// The pre-tuning location of a startup bound is rejected with the new
+    /// path named, not serde's full valid-field list.
+    #[test]
+    fn from_file_rejects_a_startup_bound_at_its_old_server_path() {
+        let path = write_temp_config(
+            "nodedb-moved-startup-bound.toml",
+            "[server]\nraft_ready_timeout_ms = 300000\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(msg.contains("tuning.startup"), "{msg}");
+        assert!(msg.contains("raft_ready_timeout_ms"), "{msg}");
+    }
+
+    /// The moved key is rejected under either legacy name.
+    #[test]
+    fn from_file_rejects_the_legacy_data_group_recovery_bound() {
+        let path = write_temp_config(
+            "nodedb-moved-recovery-bound.toml",
+            "[server]\ndata_group_recovery_timeout_ms = 600000\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(msg.contains("tuning.startup"), "{msg}");
+        assert!(msg.contains("data_group_recovery_timeout_ms"), "{msg}");
+    }
+
+    /// Both boot bounds live under `[tuning.startup]`; the other bound keeps
+    /// its default when only one is set.
+    #[test]
+    fn from_file_reads_the_startup_bounds_from_tuning() {
+        let path = write_temp_config(
+            "nodedb-startup-tuning.toml",
+            "[tuning.startup]\ndata_group_recovery_timeout_ms = 1234000\n",
+        );
+        let cfg = ServerConfig::from_file(&path).expect("load config");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(cfg.tuning.startup.data_group_recovery_timeout_ms, 1_234_000);
+        assert_eq!(cfg.tuning.startup.raft_ready_timeout_ms, 300_000);
     }
 
     #[test]

@@ -260,6 +260,7 @@ async fn server_main() -> anyhow::Result<()> {
     };
 
     // Wait for raft readiness, run catalog sanity check, warm peer cache, fire gates.
+    // The two boot bounds come from [tuning.startup].
     nodedb::bootstrap::cluster_ready::await_cluster_ready(
         &shared,
         raft_ready_rx,
@@ -274,6 +275,8 @@ async fn server_main() -> anyhow::Result<()> {
             health_loop_gate,
             gateway_enable_gate,
         },
+        config.tuning.startup.raft_ready_timeout(),
+        config.tuning.startup.data_group_recovery_timeout(),
     )
     .await?;
 

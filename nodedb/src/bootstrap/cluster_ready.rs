@@ -28,11 +28,16 @@ pub struct ClusterReadyGates {
 ///
 /// In single-node mode `raft_ready_rx` is `None` and the raft-ready wait is
 /// skipped. Gate fires are always performed regardless of cluster mode.
+///
+/// `raft_ready_timeout` and `data_group_recovery_timeout` are the boot bounds
+/// from `[tuning.startup]`.
 pub async fn await_cluster_ready(
     shared: &Arc<SharedState>,
     raft_ready_rx: Option<tokio::sync::watch::Receiver<bool>>,
     data_plane_replay_done: Vec<tokio::sync::oneshot::Receiver<()>>,
     gates: ClusterReadyGates,
+    raft_ready_timeout: Duration,
+    data_group_recovery_timeout: Duration,
 ) -> anyhow::Result<()> {
     let ClusterReadyGates {
         raft_gate,
@@ -55,7 +60,7 @@ pub async fn await_cluster_ready(
             shared,
             &mut ready_rx,
             &raft_gate,
-            RAFT_READY_STALL_TIMEOUT,
+            raft_ready_timeout,
             RAFT_READY_POLL_INTERVAL,
         )
         .await?;
@@ -143,7 +148,12 @@ pub async fn await_cluster_ready(
     // elections, so without this wait the gateway can open while a data
     // group's engines are still empty and an acknowledged write reads back as
     // if it never happened. Fail closed, like the replay wait above.
-    if let Err(e) = crate::bootstrap::data_group_recovery::await_data_group_recovery(shared).await {
+    if let Err(e) = crate::bootstrap::data_group_recovery::await_data_group_recovery(
+        shared,
+        data_group_recovery_timeout,
+    )
+    .await
+    {
         data_groups_gate.fail(format!("data raft group recovery failed: {e}"));
         return Err(e);
     }
@@ -197,19 +207,6 @@ pub async fn await_cluster_ready(
     Ok(())
 }
 
-/// How long the metadata group may make NO replay progress before the boot
-/// fails. Reset on every applied-index advance, so a large replay never trips
-/// it — only a genuinely stuck group does.
-/// How long the metadata group may go without *any* applied entry before the
-/// readiness gate fails startup.
-///
-/// Raised from 30 s after the 2026-09-20 incident: with a large apply backlog
-/// (tens of thousands of entries from a burst of cross-shard writes) the group
-/// needs minutes, and aborting the start turned a slow boot into a restart
-/// loop. The gate still fails a group that never applies anything.
-/// Follow-up: make this configurable.
-const RAFT_READY_STALL_TIMEOUT: Duration = Duration::from_secs(300);
-
 /// How often the stall check samples the applied index while waiting.
 const RAFT_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -218,7 +215,8 @@ const RAFT_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Bounds the wait on lack of PROGRESS, not on total elapsed time. A node
 /// replaying a large log keeps advancing `applied_index` and must be allowed
 /// to finish; a group that is genuinely stuck advances nothing and fails
-/// after [`RAFT_READY_STALL_TIMEOUT`].
+/// after `stall_timeout` (`[tuning.startup] raft_ready_timeout_ms`, five
+/// minutes by default).
 async fn wait_for_raft_ready(
     shared: &Arc<SharedState>,
     ready_rx: &mut tokio::sync::watch::Receiver<bool>,

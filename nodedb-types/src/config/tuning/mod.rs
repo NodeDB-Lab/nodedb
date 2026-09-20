@@ -9,6 +9,7 @@ mod memory;
 mod network;
 mod scheduler;
 mod shutdown;
+mod startup;
 
 pub use bitemporal::BitemporalTuning;
 pub use config::TuningConfig;
@@ -23,3 +24,4 @@ pub use memory::MemoryTuning;
 pub use network::{BridgeTuning, ClusterTransportTuning, NetworkTuning, WalTuning};
 pub use scheduler::SchedulerTuning;
 pub use shutdown::ShutdownTuning;
+pub use startup::StartupTuning;

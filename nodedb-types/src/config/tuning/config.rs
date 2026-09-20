@@ -12,6 +12,7 @@ use super::memory::MemoryTuning;
 use super::network::{BridgeTuning, ClusterTransportTuning, NetworkTuning, WalTuning};
 use super::scheduler::SchedulerTuning;
 use super::shutdown::ShutdownTuning;
+use super::startup::StartupTuning;
 
 /// Top-level tuning configuration.
 ///
@@ -48,6 +49,8 @@ pub struct TuningConfig {
     #[serde(default)]
     pub shutdown: ShutdownTuning,
     #[serde(default)]
+    pub startup: StartupTuning,
+    #[serde(default)]
     pub bitemporal: BitemporalTuning,
     #[serde(default)]
     pub maintenance: MaintenanceTuning,
@@ -73,6 +76,8 @@ mod tests {
         let parsed: TuningConfig = toml::from_str(&toml_str).expect("deserialize");
 
         assert_eq!(parsed.data_plane.idle_poll_timeout_ms, 100);
+        assert_eq!(parsed.startup.raft_ready_timeout_ms, 300_000);
+        assert_eq!(parsed.startup.data_group_recovery_timeout_ms, 600_000);
         assert_eq!(parsed.query.sort_run_size, 100_000);
         assert_eq!(parsed.vector.flat_index_threshold, 10_000);
         assert_eq!(parsed.sparse.bm25_k1, 1.2);

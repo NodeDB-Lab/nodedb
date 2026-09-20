@@ -239,6 +239,13 @@ pgwire = true
 http = true
 resp = true
 ilp = false                       # Example: disable TLS for ILP ingest
+
+[tuning.startup]
+# Boot bounds for the readiness gates (defaults shown). Raise them when a
+# backlogged restart needs minutes of replay; a bound set under [server] is
+# rejected at load with the [tuning.startup] path named.
+raft_ready_timeout_ms = 300000    # metadata group may stall this long (5 min)
+data_group_recovery_timeout_ms = 600000  # data groups must replay within (10 min)
 ```
 
 Every listener binds during startup, before the server accepts any
