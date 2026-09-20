@@ -95,6 +95,12 @@ pub(super) fn encode_hits_response(
     }
 }
 
+/// The response for a search with no candidates: an empty msgpack hit array,
+/// the same shape a search with hits encodes.
+pub(super) fn empty_hits_response(core: &CoreLoop, task: &ExecutionTask) -> Response {
+    encode_hits_response(core, task, &Vec::new())
+}
+
 /// Parameters for vector search.
 pub(in crate::data::executor) struct VectorSearchParams<'a> {
     pub task: &'a ExecutionTask,

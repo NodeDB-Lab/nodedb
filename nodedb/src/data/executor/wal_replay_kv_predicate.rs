@@ -56,7 +56,7 @@ impl CoreLoop {
 
         let mut written = 0usize;
         for (key, body) in matched {
-            let computed = match merge_field_updates(Some(body.as_slice()), &updates) {
+            let computed = match merge_field_updates(&collection, Some(body.as_slice()), &updates) {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(

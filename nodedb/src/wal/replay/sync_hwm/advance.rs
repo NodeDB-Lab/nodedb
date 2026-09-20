@@ -91,6 +91,12 @@ pub fn replay_sync_hwm_records(
             | RecordType::VectorParams
             | RecordType::VectorIndexDrop
             | RecordType::VectorDirectUpsert
+            | RecordType::VectorDirectDelete
+            | RecordType::VectorDirectUpdate
+            | RecordType::VectorDirectTruncate
+            | RecordType::ColumnarTruncate
+            | RecordType::TimeseriesTruncate
+            | RecordType::VectorResolvedDirectWrite
             | RecordType::SparseVectorPut
             | RecordType::SparseVectorDelete
             | RecordType::MultiVectorPut

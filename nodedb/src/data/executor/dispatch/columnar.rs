@@ -71,6 +71,7 @@ impl CoreLoop {
                         rls_write_check,
                         returning: returning.as_ref(),
                         rls_filters,
+                        spatial_undo: None,
                     },
                 )
             }
@@ -172,6 +173,11 @@ impl CoreLoop {
                 *is_update,
                 rls_write_check,
             ),
+
+            ColumnarOp::Truncate {
+                collection,
+                restart_identity: _,
+            } => self.execute_columnar_truncate(task, collection.as_str(), None),
         }
     }
 }

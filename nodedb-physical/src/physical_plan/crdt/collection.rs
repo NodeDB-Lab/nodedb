@@ -179,6 +179,7 @@ mod tests {
                 fields_json: "{}".to_string(),
                 surrogate: Surrogate::ZERO,
                 partial: false,
+                verb: crate::physical_plan::CrdtWriteVerb::Insert,
                 returning: None,
                 rls_filters: Vec::new(),
             },

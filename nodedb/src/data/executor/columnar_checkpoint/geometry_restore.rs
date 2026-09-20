@@ -79,6 +79,15 @@ impl CoreLoop {
             return 0;
         }
 
+        // The R-tree is derived from the restored rows and nothing else. An
+        // entry a restored spatial checkpoint holds for a row this generation
+        // no longer has (deleted or truncated after that checkpoint) must not
+        // survive, so the collection's entries are dropped before the rebuild.
+        self.spatial_indexes
+            .retain(|(d, t, c, _), _| !(d == db_id && t == tenant_id && c == collection));
+        self.spatial_doc_map
+            .retain(|(d, t, c, _, _), _| !(d == db_id && t == tenant_id && c == collection));
+
         let mut rows: Vec<Vec<nodedb_types::value::Value>> = Vec::new();
         rows.extend(Self::restored_flushed_rows(
             engine, segments, &schema, collection,
@@ -131,7 +140,8 @@ impl CoreLoop {
         );
 
         let indexed = docs.len();
-        self.index_columnar_geometry_columns(&task, &schema, collection, &docs);
+        // Boot-time rebuild: nothing to roll back, so the delta is dropped.
+        let _ = self.index_columnar_geometry_columns(&task, &schema, collection, &docs);
         indexed
     }
 

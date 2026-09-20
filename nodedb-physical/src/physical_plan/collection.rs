@@ -29,6 +29,12 @@ impl PhysicalPlan {
             // A vector-primary row lives here only; `None` left it with no
             // collection to key a redaction policy on.
             | PhysicalPlan::Vector(VectorOp::DirectUpsert { collection, .. })
+            | PhysicalPlan::Vector(VectorOp::DirectInsert { collection, .. })
+            | PhysicalPlan::Vector(VectorOp::DirectInsertIfAbsent { collection, .. })
+            | PhysicalPlan::Vector(VectorOp::DirectDelete { collection, .. })
+            | PhysicalPlan::Vector(VectorOp::DirectTruncate { collection, .. })
+            | PhysicalPlan::Vector(VectorOp::DirectUpdate { collection, .. })
+            | PhysicalPlan::Vector(VectorOp::ResolvedDirectWrite { collection, .. })
             | PhysicalPlan::Vector(VectorOp::Delete { collection, .. })
             | PhysicalPlan::Document(DocumentOp::BatchInsert { collection, .. })
             | PhysicalPlan::Document(DocumentOp::PointPut { collection, .. })
@@ -72,8 +78,10 @@ impl PhysicalPlan {
             | PhysicalPlan::Columnar(ColumnarOp::Delete { collection, .. })
             | PhysicalPlan::Columnar(ColumnarOp::ResolvedUpdate { collection, .. })
             | PhysicalPlan::Columnar(ColumnarOp::ResolvedDelete { collection, .. })
+            | PhysicalPlan::Columnar(ColumnarOp::Truncate { collection, .. })
             | PhysicalPlan::Timeseries(TimeseriesOp::Scan { collection, .. })
             | PhysicalPlan::Timeseries(TimeseriesOp::Ingest { collection, .. })
+            | PhysicalPlan::Timeseries(TimeseriesOp::Truncate { collection, .. })
             | PhysicalPlan::Spatial(SpatialOp::Scan { collection, .. })
             | PhysicalPlan::Document(DocumentOp::Register { collection, .. })
             | PhysicalPlan::Document(DocumentOp::IndexLookup { collection, .. })
@@ -85,7 +93,8 @@ impl PhysicalPlan {
             // collection, which is what the propose step routes on.
             PhysicalPlan::Timeseries(TimeseriesOp::ResolveIngest(inner)) => match inner.as_ref() {
                 TimeseriesOp::Scan { collection, .. }
-                | TimeseriesOp::Ingest { collection, .. } => Some(collection.as_str()),
+                | TimeseriesOp::Ingest { collection, .. }
+                | TimeseriesOp::Truncate { collection, .. } => Some(collection.as_str()),
                 TimeseriesOp::ResolveIngest(_) => None,
             },
             // Same shape on the graph side, and `EdgeDelete` itself reports
@@ -109,6 +118,10 @@ impl PhysicalPlan {
             | PhysicalPlan::Graph(GraphOp::MatchVarLenResume { .. })
             | PhysicalPlan::Graph(GraphOp::BspSuperstep(_))
             | PhysicalPlan::Graph(GraphOp::WccSuperstep(_)) => None,
+            // Read-only resolve wrapper: it reports the wrapped write's collection.
+            PhysicalPlan::Vector(VectorOp::ResolveDirectWrite(inner)) => {
+                inner.direct_write_collection()
+            }
             // Exchange: recurse into the child plan to extract the collection.
             PhysicalPlan::Query(QueryOp::Exchange(op)) => op.child.collection(),
             // PostProcess: recurse into the materialized input plan.
@@ -133,9 +146,12 @@ impl PhysicalPlan {
             | PhysicalPlan::Spatial(_)
             | PhysicalPlan::Query(_)
             | PhysicalPlan::Meta(_)
-            | PhysicalPlan::Array(_)
-            | PhysicalPlan::ClusterArray(_)
             | PhysicalPlan::ClusterEvent(_) => None,
+            // An array is a collection for read-set tracking and the commit
+            // validator's own-write exclusion: a same-transaction slice after a
+            // staged put must key on the name the put's write floor records.
+            PhysicalPlan::Array(op) => Some(op.primary_array().name.as_str()),
+            PhysicalPlan::ClusterArray(op) => Some(op.array_id().name.as_str()),
         }
     }
 }

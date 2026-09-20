@@ -257,7 +257,7 @@ impl CoreLoop {
         };
 
         if coll.is_empty() {
-            return self.response_with_payload(task, b"[]".to_vec());
+            return super::vector_search::empty_hits_response(self, task);
         }
 
         // Over-fetch: we need enough candidates so that after grouping by doc_id,

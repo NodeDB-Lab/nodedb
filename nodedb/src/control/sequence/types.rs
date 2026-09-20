@@ -192,6 +192,24 @@ impl SequenceHandle {
         Ok(value)
     }
 
+    /// Restart the sequence so the next `nextval` returns `value` itself
+    /// (`ALTER SEQUENCE ... RESTART WITH`, `TRUNCATE ... RESTART IDENTITY`).
+    /// Unlike `setval`, the restart value counts as not yet called.
+    pub fn restart_at(&self, value: i64) -> Result<(), SequenceError> {
+        if value < self.def.min_value || value > self.def.max_value {
+            return Err(SequenceError::OutOfRange {
+                name: self.def.name.clone(),
+                value,
+                min: self.def.min_value,
+                max: self.def.max_value,
+            });
+        }
+        self.counter
+            .store(value - self.def.increment, Ordering::Relaxed);
+        self.called.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Check if the period has changed and reset the counter if needed.
     ///
     /// Must be called before `nextval()` when the sequence has a reset scope.
@@ -380,6 +398,19 @@ mod tests {
         assert_eq!(h.setval(50).unwrap(), 50);
         assert_eq!(h.currval().unwrap(), 50);
         assert_eq!(h.nextval().unwrap(), 51);
+    }
+
+    #[test]
+    fn restart_at_makes_the_restart_value_the_next_value() {
+        let h = make_handle(1, 1, 1, 100, false);
+        assert_eq!(h.nextval().unwrap(), 1);
+        assert_eq!(h.nextval().unwrap(), 2);
+        h.restart_at(1).unwrap();
+        assert!(!h.is_called());
+        assert_eq!(h.nextval().unwrap(), 1);
+        h.restart_at(40).unwrap();
+        assert_eq!(h.nextval().unwrap(), 40);
+        assert!(h.restart_at(101).is_err());
     }
 
     #[test]

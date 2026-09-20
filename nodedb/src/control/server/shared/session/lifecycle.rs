@@ -174,7 +174,7 @@ mod tests {
     }
 
     /// A `TxnDataPlane` that records every dispatched overlay meta-op (per vShard)
-    /// instead of touching a real core. `MarkSavepoint` replies with a 16-byte
+    /// instead of touching a real core. `MarkSavepoint` replies with a `SAVEPOINT_MARKER_BYTES`-byte
     /// composite marker whose value component is `vshard + 1`, so a later
     /// ROLLBACK TO can be asserted to thread each vShard's own saved marker.
     #[derive(Default)]
@@ -195,9 +195,13 @@ mod tests {
                     MetaOp::MarkSavepoint { .. } => {
                         let value = (vshard.as_u32() as u64) + 1;
                         let graph = 0u64;
-                        let mut bytes = Vec::with_capacity(16);
+                        let array = 0u64;
+                        let mut bytes = Vec::with_capacity(
+                            nodedb_physical::physical_plan::SAVEPOINT_MARKER_BYTES,
+                        );
                         bytes.extend_from_slice(&value.to_le_bytes());
                         bytes.extend_from_slice(&graph.to_le_bytes());
+                        bytes.extend_from_slice(&array.to_le_bytes());
                         Payload::from_vec(bytes)
                     }
                     _ => Payload::empty(),

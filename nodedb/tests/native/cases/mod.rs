@@ -5,6 +5,7 @@ mod native_clone_write_intercept;
 mod native_create_then_dml;
 mod native_direct_op_txn_overlay;
 mod native_dml_affected_counts;
+mod native_dml_outcome_conformance;
 mod native_error_code_classification;
 mod native_gateway_txn_overlay;
 mod native_primary_key_nullability;

@@ -39,6 +39,14 @@
 //! tuple element is `None` — matching the autocommit redo producer and the
 //! replay decoder, both of which treat it as `Option<SyncProvenance>`.
 //!
+//! ## Staged TRUNCATE
+//!
+//! A truncated collection with vector fields additionally emits one
+//! `RecordType::Delete` per base row the truncate removes
+//! ([`serialize_truncated_base_rows`]), the same per-row redo the autocommit
+//! truncate mints from its write-set. Base rows superseded by an overlay
+//! entry are covered by that entry instead.
+//!
 //! ## Determinism
 //!
 //! The overlay keys slots by surrogate in a `HashMap`, so entries are collected
@@ -47,12 +55,13 @@
 
 use std::collections::BTreeMap;
 
-use nodedb_types::RowIdentity;
 use nodedb_types::columnar::StrictSchema;
 use nodedb_types::sync::wire::SyncProvenance;
+use nodedb_types::{RowIdentity, StorageKey};
 use nodedb_wal::record::RecordType;
 
 use crate::data::executor::handlers::transaction::overlay::{Staged, TxnOverlay};
+use crate::data::executor::handlers::transaction::stage_write::stored_row_identity;
 use crate::data::executor::strict_format;
 use crate::types::{DatabaseId, TenantId};
 use crate::wal::RedoSubRecord;
@@ -134,20 +143,64 @@ pub(super) fn serialize_document_collection(
                     payload,
                 });
             }
-            Staged::Tombstone => {
-                let prov: Option<SyncProvenance> = None;
-                let payload =
-                    zerompk::to_msgpack_vec(&(collection, doc_id.as_str(), prov, surrogate))
-                        .map_err(|e| crate::Error::Serialization {
-                            format: "msgpack".into(),
-                            detail: format!("document resolve delete: {e}"),
-                        })?;
-                ops.push(RedoSubRecord {
-                    record_type: RecordType::Delete as u32,
-                    payload,
-                });
-            }
+            Staged::Tombstone => ops.push(delete_sub_record(collection, doc_id, surrogate)?),
         }
+    }
+    Ok(())
+}
+
+/// The `RecordType::Delete` redo sub-record for one row:
+/// `(collection, document_id, Option<SyncProvenance>, surrogate)`.
+fn delete_sub_record(
+    collection: &str,
+    doc_id: &RowIdentity,
+    surrogate: u32,
+) -> crate::Result<RedoSubRecord> {
+    let prov: Option<SyncProvenance> = None;
+    let payload = zerompk::to_msgpack_vec(&(collection, doc_id.as_str(), prov, surrogate))
+        .map_err(|e| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("document resolve delete: {e}"),
+        })?;
+    Ok(RedoSubRecord {
+        record_type: RecordType::Delete as u32,
+        payload,
+    })
+}
+
+/// The base rows a staged TRUNCATE removes at COMMIT, with what names each
+/// one in its redo entry.
+pub(super) struct TruncatedBaseRows<'a> {
+    pub collection: &'a str,
+    /// `(storage key, stored body)` of every base row with no overlay entry.
+    pub rows: &'a [(StorageKey, Vec<u8>)],
+    pub strict_schema: Option<&'a StrictSchema>,
+    /// The collection's declared `PRIMARY KEY` column, from the plan.
+    pub declared_primary_key: Option<&'a str>,
+}
+
+/// Append one `RecordType::Delete` redo sub-record per base row a staged
+/// TRUNCATE removes, in deterministic doc-id order. Mirrors the per-row
+/// `Delete` redo the autocommit truncate mints from `Response::write_set` on
+/// a collection with vector fields, so a WAL-only restart does not replay
+/// each row's original `Put` and resurrect its HNSW vector.
+pub(super) fn serialize_truncated_base_rows(
+    params: TruncatedBaseRows<'_>,
+    ops: &mut Vec<RedoSubRecord>,
+) -> crate::Result<()> {
+    let TruncatedBaseRows {
+        collection,
+        rows,
+        strict_schema,
+        declared_primary_key,
+    } = params;
+    let mut entries: BTreeMap<RowIdentity, u32> = BTreeMap::new();
+    for (key, body) in rows {
+        let identity = stored_row_identity(body, strict_schema, declared_primary_key, *key);
+        entries.insert(identity, key.surrogate().as_u32());
+    }
+    for (doc_id, surrogate) in &entries {
+        ops.push(delete_sub_record(collection, doc_id, *surrogate)?);
     }
     Ok(())
 }

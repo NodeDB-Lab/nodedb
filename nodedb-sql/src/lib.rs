@@ -161,7 +161,7 @@ fn plan_statements(
                 plans.append(&mut delete_plans);
             }
             StatementKind::Truncate(stmt) => {
-                let mut trunc_plans = planner::dml::plan_truncate_stmt(stmt)?;
+                let mut trunc_plans = planner::dml::plan_truncate_stmt(stmt, catalog)?;
                 plans.append(&mut trunc_plans);
             }
             StatementKind::Merge(stmt) => {

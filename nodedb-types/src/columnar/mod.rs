@@ -10,6 +10,7 @@ pub mod int_width;
 pub mod profile;
 pub mod resolved_dml_wal_record;
 pub mod schema;
+pub mod truncate_wal_record;
 pub mod wal_record;
 
 pub use column_def::{ColumnDef, ColumnModifier};
@@ -25,4 +26,5 @@ pub use schema::{
     BITEMPORAL_RESERVED_COLUMNS, BITEMPORAL_SYSTEM_FROM, BITEMPORAL_VALID_FROM,
     BITEMPORAL_VALID_UNTIL, ColumnarSchema, DroppedColumn, SchemaError, SchemaOps, StrictSchema,
 };
+pub use truncate_wal_record::ColumnarTruncateWalRecord;
 pub use wal_record::ColumnarWalRecord;

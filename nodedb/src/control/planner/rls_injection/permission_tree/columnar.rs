@@ -57,7 +57,9 @@ pub(super) fn apply_columnar(ctx: &PermCtx<'_>, op: &mut ColumnarOp) -> crate::R
         ColumnarOp::ResolvedUpdate { collection, .. } => {
             ctx.authorize(collection, PermTreeLevel::Write)
         }
-        ColumnarOp::ResolvedDelete { collection, .. } => {
+        // Delete level, blanket: a truncate removes rows it never
+        // enumerates, so there is no predicate to narrow.
+        ColumnarOp::ResolvedDelete { collection, .. } | ColumnarOp::Truncate { collection, .. } => {
             ctx.authorize(collection, PermTreeLevel::Delete)
         }
 
@@ -87,6 +89,12 @@ pub(super) fn apply_timeseries(ctx: &PermCtx<'_>, op: &mut TimeseriesOp) -> crat
         // Recurse: the resolve pass stands in for the ingest it wraps, so it
         // needs the same write level on the same collection.
         TimeseriesOp::ResolveIngest(inner) => apply_timeseries(ctx, inner),
+
+        // Delete level, blanket: a truncate removes rows it never
+        // enumerates, so there is no predicate to narrow.
+        TimeseriesOp::Truncate { collection, .. } => {
+            ctx.authorize(collection, PermTreeLevel::Delete)
+        }
     }
 }
 

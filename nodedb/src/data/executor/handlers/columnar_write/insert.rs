@@ -8,6 +8,7 @@ use nodedb_types::sync::wire::{AckStatus, SyncProvenance};
 
 use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::response_codec;
 use crate::data::executor::sync_gate::{SyncAdmit, ack_status_from_admit};
 use crate::data::executor::task::ExecutionTask;
@@ -34,6 +35,10 @@ pub(in crate::data::executor) struct ColumnarInsertParams<'a> {
     /// emits. A separate gate from `rls_write_check`: that one decides whether
     /// the write happens, this one decides what may be shown back.
     pub rls_filters: &'a [u8],
+    /// Inside a transaction batch: the undo log the R-tree maintenance this
+    /// insert performs is recorded on, so a rollback un-indexes the rows it
+    /// removes. `None` on the autocommit path.
+    pub spatial_undo: Option<&'a mut Vec<UndoEntry>>,
 }
 
 impl CoreLoop {
@@ -67,6 +72,7 @@ impl CoreLoop {
             rls_write_check,
             returning,
             rls_filters,
+            spatial_undo,
         } = params;
         // ── Sync idempotency gate (Data-Plane side) ──────────────────────────
         if let Some(prov) = provenance {
@@ -163,7 +169,11 @@ impl CoreLoop {
         }
 
         // Populate R-tree for geometry columns so spatial predicates work.
-        self.index_columnar_geometry_columns(task, &schema, collection, &ndb_rows);
+        let geometry_delta =
+            self.index_columnar_geometry_columns(task, &schema, collection, &ndb_rows);
+        if let Some(undo_log) = spatial_undo {
+            Self::push_geometry_index_undo(undo_log, geometry_delta);
+        }
 
         tracing::debug!(
             core = self.core_id,

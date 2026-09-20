@@ -114,6 +114,10 @@ impl CoreLoop {
         let Some(overlay) = self.txn_overlays.get(&txn_id) else {
             return Ok(());
         };
+        // A staged TRUNCATE hides every base row; staged puts re-enter below.
+        if overlay.is_truncated(coll_key) {
+            results.clear();
+        }
 
         for (_surrogate, staged) in overlay.iter_for_collection(coll_key) {
             if results.len() >= limit {

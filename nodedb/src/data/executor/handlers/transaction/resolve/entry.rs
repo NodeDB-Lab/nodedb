@@ -66,6 +66,9 @@ impl CoreLoop {
         // Plan-driven serializers emit into `ops` during this walk; overlay-driven
         // serializers only collect collections here, serialized in phase two below.
         let mut ops: Vec<RedoSubRecord> = Vec::new();
+        // The declared primary key of each truncated document collection,
+        // from the plan: names every removed base row in its redo entry.
+        let truncate_primary_keys = truncate_declared_primary_keys(plans);
 
         for plan in plans {
             match plan {
@@ -95,8 +98,9 @@ impl CoreLoop {
                 // maintenance ops carry no persisted post-image.
                 PhysicalPlan::Query(_) | PhysicalPlan::Meta(_) => {}
 
-                // Plan-driven: these engines are not staged into an overlay, so
-                // each op serializes from the plan node, skips, or errors.
+                // Plan-driven: each op serializes from the plan node, skips, or
+                // errors. A vector-primary write's overlay entry serves the
+                // transaction's own reads only, never the redo record.
                 PhysicalPlan::Vector(op) => vector::serialize_vector_op(op, &mut ops)?,
                 PhysicalPlan::Array(op) => array::serialize_array_op(op, &mut ops)?,
                 PhysicalPlan::Columnar(op) => columnar::serialize_columnar_op(op, &mut ops)?,
@@ -168,6 +172,9 @@ impl CoreLoop {
                     TenantId::new(tid),
                     collection.clone(),
                 );
+                if overlay.is_truncated(&coll_key) {
+                    kv::serialize_kv_truncate(collection, &mut ops)?;
+                }
                 kv::serialize_kv_collection(overlay, &coll_key, collection, &mut ops)?;
             }
             for collection in &doc_collections {
@@ -180,6 +187,21 @@ impl CoreLoop {
                 // once so the serializer can decode them back to MessagePack.
                 let strict_schema =
                     self.resolve_strict_schema(task.request.database_id.as_u64(), tid, collection);
+                if overlay.is_truncated(&coll_key) {
+                    let rows =
+                        self.truncated_base_rows(task, tid, collection, overlay, &coll_key)?;
+                    document::serialize_truncated_base_rows(
+                        document::TruncatedBaseRows {
+                            collection,
+                            rows: &rows,
+                            strict_schema: strict_schema.as_ref(),
+                            declared_primary_key: truncate_primary_keys
+                                .get(collection.as_str())
+                                .and_then(|pk| pk.as_deref()),
+                        },
+                        &mut ops,
+                    )?;
+                }
                 document::serialize_document_collection(
                     overlay,
                     &coll_key,
@@ -219,6 +241,72 @@ impl CoreLoop {
         }
         Ok(ops)
     }
+
+    /// The base rows a staged TRUNCATE of `collection` removes at COMMIT and
+    /// that need a per-row `Delete` redo: every base row with no overlay
+    /// entry, on a collection with vector fields. Empty for a collection
+    /// without vector fields, where the autocommit truncate mints no per-row
+    /// redo either (row durability is redb-synchronous). Read-only against
+    /// base.
+    fn truncated_base_rows(
+        &self,
+        task: &ExecutionTask,
+        tid: u64,
+        collection: &str,
+        overlay: &crate::data::executor::handlers::transaction::overlay::TxnOverlay,
+        coll_key: &(crate::types::DatabaseId, TenantId, String),
+    ) -> crate::Result<Vec<(nodedb_types::StorageKey, Vec<u8>)>> {
+        let database_id = task.request.database_id.as_u64();
+        if !self.collection_has_vectors(database_id, tid, collection) {
+            return Ok(Vec::new());
+        }
+        let bitemporal = self.is_bitemporal(database_id, tid, collection);
+        let mut rows = Vec::new();
+        for key in self.scan_matching_documents(database_id, tid, collection, &[])? {
+            if overlay.get(coll_key, key.surrogate().as_u32()).is_some() {
+                continue;
+            }
+            let body = if bitemporal {
+                self.sparse
+                    .versioned_get_current(database_id, tid, collection, &key)?
+            } else {
+                self.sparse.get(database_id, tid, collection, &key)?
+            };
+            if let Some(body) = body {
+                rows.push((key, body));
+            }
+        }
+        Ok(rows)
+    }
+}
+
+/// The declared primary key of every document collection a `Truncate` plan
+/// names, keyed by collection.
+fn truncate_declared_primary_keys(plans: &[PhysicalPlan]) -> BTreeMap<String, Option<String>> {
+    plans
+        .iter()
+        .filter_map(|plan| match plan {
+            PhysicalPlan::Document(DocumentOp::Truncate {
+                collection,
+                declared_primary_key,
+                ..
+            }) => Some((collection.to_string(), declared_primary_key.clone())),
+            PhysicalPlan::Document(_)
+            | PhysicalPlan::Kv(_)
+            | PhysicalPlan::Graph(_)
+            | PhysicalPlan::Crdt(_)
+            | PhysicalPlan::Text(_)
+            | PhysicalPlan::Query(_)
+            | PhysicalPlan::Meta(_)
+            | PhysicalPlan::Vector(_)
+            | PhysicalPlan::Array(_)
+            | PhysicalPlan::Columnar(_)
+            | PhysicalPlan::Timeseries(_)
+            | PhysicalPlan::Spatial(_)
+            | PhysicalPlan::ClusterArray(_)
+            | PhysicalPlan::ClusterEvent(_) => None,
+        })
+        .collect()
 }
 
 /// Classify a KV op for transaction resolve: collect the collection of a
@@ -239,7 +327,11 @@ fn classify_kv_op(op: &KvOp, collections: &mut BTreeSet<String>) -> crate::Resul
         | KvOp::Cas { collection, .. }
         | KvOp::GetSet { collection, .. }
         | KvOp::FieldSet { collection, .. }
-        | KvOp::Transfer { collection, .. } => {
+        | KvOp::Transfer { collection, .. }
+        // Predicate DML stages each matched row's post-image or tombstone
+        // at statement time, so the overlay carries it like a keyed write.
+        | KvOp::PredicateUpdate { collection, .. }
+        | KvOp::PredicateDelete { collection, .. } => {
             collections.insert(collection.to_string());
             Ok(())
         }
@@ -277,29 +369,26 @@ fn classify_kv_op(op: &KvOp, collections: &mut BTreeSet<String>) -> crate::Resul
             detail: "kv resolved write is not supported in transaction resolve".to_string(),
         }),
 
-        // Predicate DML resolves its row set from committed state at apply time;
-        // per-row KV redo shapes can't express that. Autocommit is the supported path.
-        KvOp::PredicateUpdate { .. } | KvOp::PredicateDelete { .. } => {
-            Err(crate::Error::PlanError {
-                detail: "kv predicate UPDATE/DELETE is not supported in transaction resolve"
-                    .to_string(),
-            })
-        }
-
         // A standalone TTL delta has no value post-image, and KV redo carries
         // TTL only as part of a value put, so rejecting avoids a silent drop.
         KvOp::Expire { .. } | KvOp::Persist { .. } => Err(crate::Error::PlanError {
             detail: "kv EXPIRE/PERSIST is not supported in transaction resolve".to_string(),
         }),
 
-        // Index / DDL / truncate: never stageable into the overlay, so no
-        // row-level redo shape carries them.
+        // Truncate: staged as an overlay marker; the serializer emits the
+        // `kv_truncate` redo ahead of the collection's row entries.
+        KvOp::Truncate { collection, .. } => {
+            collections.insert(collection.to_string());
+            Ok(())
+        }
+
+        // Index / DDL: never stageable into the overlay, so no row-level
+        // redo shape carries them.
         KvOp::RegisterIndex { .. }
         | KvOp::DropIndex { .. }
         | KvOp::RegisterSortedIndex { .. }
-        | KvOp::DropSortedIndex { .. }
-        | KvOp::Truncate { .. } => Err(crate::Error::PlanError {
-            detail: "kv index/DDL/truncate op is not supported in transaction resolve".to_string(),
+        | KvOp::DropSortedIndex { .. } => Err(crate::Error::PlanError {
+            detail: "kv index/DDL op is not supported in transaction resolve".to_string(),
         }),
     }
 }
@@ -360,14 +449,20 @@ fn classify_document_op(op: &DocumentOp, collections: &mut BTreeSet<String>) -> 
                 .to_string(),
         }),
 
-        // Index / DDL / truncate: never stageable into the overlay, so no
-        // row-level redo shape carries them.
+        // Truncate: staged as an overlay marker; the serializer emits a
+        // `Delete` per removed base row on a vector collection ahead of the
+        // collection's overlay entries.
+        DocumentOp::Truncate { collection, .. } => {
+            collections.insert(collection.to_string());
+            Ok(())
+        }
+
+        // Index / DDL: never stageable into the overlay, so no row-level
+        // redo shape carries them.
         DocumentOp::Register { .. }
         | DocumentOp::DropIndex { .. }
-        | DocumentOp::BackfillIndex { .. }
-        | DocumentOp::Truncate { .. } => Err(crate::Error::PlanError {
-            detail: "document index/DDL/truncate op is not supported in transaction resolve"
-                .to_string(),
+        | DocumentOp::BackfillIndex { .. } => Err(crate::Error::PlanError {
+            detail: "document index/DDL op is not supported in transaction resolve".to_string(),
         }),
     }
 }
@@ -1027,6 +1122,7 @@ mod tests {
                 clauses: Vec::new(),
                 returning: None,
                 resolved_inserts: None,
+                resolved_insert_identities: Vec::new(),
                 source_rows: None,
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
@@ -1069,6 +1165,7 @@ mod tests {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vp"),
                 field: "emb".to_string(),
                 surrogate: Surrogate::new(1),
+                pk_bytes: Vec::new(),
                 vector: vec![1.0, 2.0, 3.0],
                 payload: Vec::new(),
                 quantization: nodedb_types::VectorQuantization::None,
@@ -1076,6 +1173,8 @@ mod tests {
                 payload_indexes: Vec::new(),
                 returning: None,
                 rls_filters: Vec::new(),
+                on_conflict_updates: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
             }),
             PhysicalPlan::Vector(VectorOp::MultiVectorInsert {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "mc"),
@@ -1146,6 +1245,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vp"),
             field: "emb".to_string(),
             surrogate: Surrogate::new(42),
+            pk_bytes: Vec::new(),
             vector: vec![1.0, 2.0, 3.0],
             payload: Vec::new(),
             quantization: nodedb_types::VectorQuantization::None,
@@ -1153,6 +1253,8 @@ mod tests {
             payload_indexes: Vec::new(),
             returning: None,
             rls_filters: Vec::new(),
+            on_conflict_updates: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
         });
         let resp = src.execute_resolve_txn(&task, TID, TxnId::new(51), std::slice::from_ref(&plan));
         let redo = decode_redo(&resp);
@@ -2717,6 +2819,45 @@ mod tests {
         assert_eq!(rec.kind, "columnar_dml");
         assert!(!rec.is_update, "DELETE must carry is_update = false");
         assert!(rec.updates.is_empty(), "DELETE carries no assignments");
+    }
+
+    /// Columnar-family truncates resolve to the same dedicated record the
+    /// autocommit path appends, carrying the collection name only.
+    #[test]
+    fn columnar_family_truncate_emits_dedicated_truncate_sub_records() {
+        use nodedb_types::columnar::ColumnarTruncateWalRecord;
+
+        let (mut core, _dir) = make_core();
+        let task = make_task();
+
+        let columnar = PhysicalPlan::Columnar(ColumnarOp::Truncate {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cevents"),
+            restart_identity: true,
+        });
+        let resp = core.execute_resolve_txn(&task, TID, TxnId::new(46), &[columnar]);
+        assert_eq!(resp.status, Status::Ok);
+        let redo = decode_redo(&resp);
+        assert_eq!(redo.ops.len(), 1);
+        assert_eq!(redo.ops[0].record_type, RecordType::ColumnarTruncate as u32);
+        let rec: ColumnarTruncateWalRecord =
+            zerompk::from_msgpack(&redo.ops[0].payload).expect("decode columnar truncate");
+        assert_eq!(rec.collection, "cevents");
+
+        let timeseries = PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "tsevents"),
+            restart_identity: false,
+        });
+        let resp = core.execute_resolve_txn(&task, TID, TxnId::new(47), &[timeseries]);
+        assert_eq!(resp.status, Status::Ok);
+        let redo = decode_redo(&resp);
+        assert_eq!(redo.ops.len(), 1);
+        assert_eq!(
+            redo.ops[0].record_type,
+            RecordType::TimeseriesTruncate as u32
+        );
+        let rec: ColumnarTruncateWalRecord =
+            zerompk::from_msgpack(&redo.ops[0].payload).expect("decode timeseries truncate");
+        assert_eq!(rec.collection, "tsevents");
     }
 
     /// An array `Put` plan resolves to a version-tagged `ArrayPut` sub-record

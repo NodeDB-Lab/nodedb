@@ -72,6 +72,7 @@ pub(super) fn convert_body_to_single_plan(
         | SqlPlan::UpdateFrom { .. }
         | SqlPlan::Delete { .. }
         | SqlPlan::Truncate { .. }
+        | SqlPlan::VectorPrimaryTruncate { .. }
         | SqlPlan::Join { .. }
         | SqlPlan::Aggregate { .. }
         | SqlPlan::TimeseriesScan { .. }
@@ -102,6 +103,8 @@ pub(super) fn convert_body_to_single_plan(
         | SqlPlan::LateralTopK { .. }
         | SqlPlan::LateralLoop { .. }
         | SqlPlan::VectorPrimaryInsert { .. }
+        | SqlPlan::VectorPrimaryDelete { .. }
+        | SqlPlan::VectorPrimaryUpdate { .. }
         | SqlPlan::CreateIndex { .. }
         | SqlPlan::DropIndex { .. } => {
             let mut tasks = convert_one(input, tenant_id, ctx)?;

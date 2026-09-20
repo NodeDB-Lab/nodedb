@@ -14,8 +14,42 @@ use nodedb_physical::physical_plan::{ArrayOp, ClusterArrayOp, PhysicalPlan};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use crate::control::cluster::array_executor::flatten_blob_vec;
+use crate::control::server::shared::sql::staging_predicates::StagedTagKind;
 use crate::engine::array::wal::{ArrayDeleteCell, ArrayPutCell};
 use crate::types::VShardId;
+
+/// The per-vShard `ArrayOp::{Put, Delete}` tasks a `ClusterArrayOp::{Put,
+/// Delete}` fans out to, with the command tag the statement answers with.
+/// `None` for every other plan.
+///
+/// The statement-time fan-out stage ([`super::array_fanout_stage`]) stages
+/// and buffers exactly these tasks, so the overlay each shard holds and the
+/// plan COMMIT replays come from one partition.
+pub fn expand_cluster_array_write(
+    task: &PhysicalTask,
+) -> crate::Result<Option<(StagedTagKind, Vec<PhysicalTask>)>> {
+    if let PhysicalPlan::ClusterArray(ClusterArrayOp::Put {
+        array_id,
+        cells,
+        prefix_bits,
+        ..
+    }) = &task.plan
+    {
+        let tasks = expand_put(task, array_id, cells, *prefix_bits)?;
+        return Ok(Some((StagedTagKind::Insert, tasks)));
+    }
+    if let PhysicalPlan::ClusterArray(ClusterArrayOp::Delete {
+        array_id,
+        coords,
+        prefix_bits,
+        ..
+    }) = &task.plan
+    {
+        let tasks = expand_delete(task, array_id, coords, *prefix_bits)?;
+        return Ok(Some((StagedTagKind::Delete, tasks)));
+    }
+    Ok(None)
+}
 
 /// The tasks to buffer for `task`. A plan with no fan-out shape buffers as
 /// itself, so this is the identity for every engine but distributed Array.

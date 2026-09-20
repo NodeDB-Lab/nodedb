@@ -152,6 +152,7 @@ impl EngineWriteResolver for DocumentWriteResolver {
             ResolvedRows::Update(_)
             | ResolvedRows::Delete(_)
             | ResolvedRows::Kv { .. }
+            | ResolvedRows::Vector { .. }
             | ResolvedRows::Timeseries { .. }
             | ResolvedRows::GraphEdgeDeleteAdmitted => Err(crate::Error::Internal {
                 detail: format!(

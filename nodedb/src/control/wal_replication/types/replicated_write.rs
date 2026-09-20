@@ -9,7 +9,11 @@ use super::wire_shapes::{
     ColumnarResolvedRow, ConstraintChangeOp, DocumentResolvedMutationWire, KvResolvedMutationWire,
     ReplicatedBatchEdge, ReplicatedSumTarget,
 };
-use nodedb_physical::physical_plan::{ColumnarInsertIntent, UpdateValue};
+use nodedb_physical::physical_plan::document::MergeClauseOp;
+use nodedb_physical::physical_plan::{
+    ColumnarInsertIntent, CrdtWriteVerb, UpdateValue, VectorDirectWriteIntent,
+    VectorResolvedMutation, VectorWriteTargets,
+};
 use nodedb_types::{PayloadIndexKind, VectorQuantization, VectorStorageDtype};
 
 #[derive(
@@ -220,15 +224,24 @@ pub enum ReplicatedWrite {
         #[serde(default)]
         provenance: Option<Vec<u8>>,
     },
+    /// Vector-primary insert family: `DirectInsert`, `DirectInsertIfAbsent`,
+    /// and `DirectUpsert`, told apart by `intent`. Every replica applies the
+    /// same existence rule the leader did.
     DirectUpsert {
         collection: String,
         field: String,
         surrogate: u32,
+        /// UTF-8 of the declared primary key; followers bind `surrogate` to
+        /// it instead of re-allocating.
+        pk_bytes: Vec<u8>,
         vector: Vec<f32>,
         payload: Vec<u8>,
         quantization: VectorQuantization,
         storage_dtype: VectorStorageDtype,
         payload_indexes: Vec<(String, PayloadIndexKind)>,
+        intent: VectorDirectWriteIntent,
+        /// `ON CONFLICT DO UPDATE SET` patch; empty means whole-row replace.
+        on_conflict_updates: Vec<(String, UpdateValue)>,
         /// See `ReplicatedWrite::PointPut::returning`.
         #[serde(default)]
         returning: Option<Vec<u8>>,
@@ -646,6 +659,8 @@ pub enum ReplicatedWrite {
         surrogate: u32,
         fields_json: String,
         partial: bool,
+        /// The statement verb, so a decoded plan matches the proposed one.
+        verb: CrdtWriteVerb,
         /// See `ReplicatedWrite::PointPut::returning`.
         #[serde(default)]
         returning: Option<Vec<u8>>,
@@ -688,6 +703,10 @@ pub enum ReplicatedWrite {
     },
     KvTruncate {
         collection: String,
+        /// `TRUNCATE ... RESTART IDENTITY`; the applying node resets the
+        /// collection's sequences after the clear.
+        #[serde(default)]
+        restart_identity: bool,
     },
     ConstraintChange {
         collection: String,
@@ -785,6 +804,24 @@ pub enum ReplicatedWrite {
         rows: Vec<ColumnarResolvedRow>,
     },
 
+    /// Columnar or spatial `TRUNCATE`: every replica clears the collection's
+    /// mutation engine, flushed segments, and R-tree entries.
+    /// `restart_identity` is applied by the applying node's sequence store
+    /// after the clear.
+    ColumnarTruncate {
+        collection: String,
+        #[serde(default)]
+        restart_identity: bool,
+    },
+
+    /// Timeseries `TRUNCATE`: every replica clears the collection's memtable
+    /// and on-disk partitions. `restart_identity` as above.
+    TimeseriesTruncate {
+        collection: String,
+        #[serde(default)]
+        restart_identity: bool,
+    },
+
     /// Resolved form of a state-dependent KV write on a write-policy
     /// collection: mutations and reply, already decided, not an operation to
     /// re-derive. `mutations` may span two collections for `TransferItem`.
@@ -834,6 +871,121 @@ pub enum ReplicatedWrite {
         /// Statement reply decided at resolve time; every replica returns it
         /// unchanged.
         response_payload: Vec<u8>,
+    },
+
+    /// Vector-primary `DELETE` on a collection with NO write policy — the
+    /// targets travel and every replica resolves them against its own state.
+    VectorDirectDelete {
+        collection: String,
+        field: String,
+        targets: VectorWriteTargets,
+        /// See `ReplicatedWrite::PointPut::returning`.
+        #[serde(default)]
+        returning: Option<Vec<u8>>,
+        /// See `ReplicatedWrite::PointPut::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
+    },
+
+    /// Vector-primary `TRUNCATE`: every replica clears the collection's
+    /// primary index and sidecar rows. `restart_identity` is applied by the
+    /// applying node's sequence store after the clear.
+    VectorDirectTruncate {
+        collection: String,
+        field: String,
+        #[serde(default)]
+        restart_identity: bool,
+    },
+
+    /// Vector-primary `UPDATE` on a collection with NO write policy — see
+    /// [`ReplicatedWrite::VectorDirectDelete`].
+    VectorDirectUpdate {
+        collection: String,
+        field: String,
+        targets: VectorWriteTargets,
+        new_vector: Option<Vec<f32>>,
+        payload_patch: Vec<(String, UpdateValue)>,
+        quantization: VectorQuantization,
+        storage_dtype: VectorStorageDtype,
+        payload_indexes: Vec<(String, PayloadIndexKind)>,
+        /// See `ReplicatedWrite::PointPut::returning`.
+        #[serde(default)]
+        returning: Option<Vec<u8>>,
+        /// See `ReplicatedWrite::PointPut::rls_filters`.
+        #[serde(default)]
+        rls_filters: Vec<u8>,
+    },
+
+    /// Resolved form of a vector-primary `DELETE` / `UPDATE` /
+    /// conflict-patching `UPSERT` on a write-policy collection: row
+    /// mutations and reply, already decided against the live writing
+    /// identity, not a predicate a follower could re-judge. Surrogates are
+    /// the leader's; an `Upsert` mutation carries the key it binds to.
+    VectorResolvedDirectWrite {
+        collection: String,
+        field: String,
+        quantization: VectorQuantization,
+        storage_dtype: VectorStorageDtype,
+        payload_indexes: Vec<(String, PayloadIndexKind)>,
+        mutations: Vec<VectorResolvedMutation>,
+        /// Statement reply decided at resolve time; every replica returns it
+        /// unchanged.
+        response_payload: Vec<u8>,
+    },
+    /// A resolved autocommit `MERGE` apply pass (`DocumentOp::Merge` with
+    /// `resolved_inserts` and `source_rows` set). Carries every input the
+    /// Data Plane re-derives the classification from, so each replica applies
+    /// the same arms in Raft order: the source rows shipped at resolve time,
+    /// the pre-assigned NOT-MATCHED surrogates it verifies against
+    /// (`OllpRetryRequired` on drift, no write), and the resolved
+    /// materialized-sum targets. The write policy was decided on the proposing
+    /// node over the resolved arms; decode stamps `decided_earlier_in_request()`.
+    MergeApply {
+        target_collection: String,
+        source_collection: String,
+        source_alias: String,
+        target_join_col: String,
+        source_join_col: String,
+        clauses: Vec<MergeClauseOp>,
+        /// See `PointPut::returning`.
+        returning: Option<Vec<u8>>,
+        /// See `DocumentOp::Merge::resolved_inserts`.
+        resolved_inserts: Vec<(String, u32)>,
+        /// See `DocumentOp::Merge::resolved_insert_identities`.
+        resolved_insert_identities: Vec<(String, u32)>,
+        source_rows: Vec<(String, Vec<u8>)>,
+        /// See `PointPut::rls_filters`.
+        rls_filters: Vec<u8>,
+        /// See `PointPut::resolved_sum_targets`.
+        resolved_sum_targets: Vec<(String, u32)>,
+        /// See `PointPut::resolved_sum_target_bindings`.
+        resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
+        /// See `PointUpdate::declared_primary_key`.
+        declared_primary_key: Option<String>,
+    },
+    /// A resolved autocommit `UPDATE ... FROM` apply pass
+    /// (`DocumentOp::UpdateFromJoin` with `source_rows` set). Same contract as
+    /// `MergeApply`: the join map builds from the shipped rows on every
+    /// replica, the policy was decided on the proposing node.
+    UpdateFromJoinApply {
+        target_collection: String,
+        source_collection: String,
+        source_alias: String,
+        target_join_col: String,
+        source_join_col: String,
+        updates: Vec<(String, UpdateValue)>,
+        target_filters: Vec<u8>,
+        /// See `PointPut::returning`.
+        returning: Option<Vec<u8>>,
+        source_rows: Vec<(String, Vec<u8>)>,
+        /// See `PointPut::rls_filters`.
+        rls_filters: Vec<u8>,
+        /// See `PointPut::resolved_sum_targets`.
+        resolved_sum_targets: Vec<(String, u32)>,
+        /// See `PointPut::resolved_sum_target_bindings`.
+        resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
+        /// See `PointUpdate::declared_primary_key`.
+        declared_primary_key: Option<String>,
     },
 }
 

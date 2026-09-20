@@ -261,6 +261,31 @@ impl ContinuousAggregateManager {
 
     // -- Schema invalidation --
 
+    /// Reset every aggregate that depends on `source`, directly or through a
+    /// chain, to its freshly-registered state: no materialized buckets and a
+    /// default watermark. The definitions stay registered and active, so the
+    /// next flush of the source rebuilds them from the rows it carries. This
+    /// is what a `TRUNCATE` of the source owes its aggregates.
+    pub fn reset_for_source(&mut self, database_id: u64, source: &str) {
+        let mut pending: Vec<String> = self
+            .dependencies
+            .get(&(database_id, source.to_string()))
+            .cloned()
+            .unwrap_or_default();
+        while let Some(name) = pending.pop() {
+            let key = (database_id, name.clone());
+            if !self.definitions.contains_key(&key) {
+                continue;
+            }
+            self.materialized
+                .insert(key.clone(), MaterializedBuckets::default());
+            self.watermarks.insert(key, WatermarkState::default());
+            if let Some(downstream) = self.dependencies.get(&(database_id, name)) {
+                pending.extend(downstream.iter().cloned());
+            }
+        }
+    }
+
     /// Mark aggregates as stale after source schema change.
     pub fn invalidate_for_source(&mut self, database_id: u64, source: &str) {
         if let Some(agg_names) = self
@@ -421,6 +446,28 @@ mod tests {
         let wm = mgr.get_watermark(0, "metrics_1m").unwrap();
         assert!(wm.watermark_ts > 1_700_000_000_000);
         assert_eq!(wm.rows_aggregated, 6000);
+    }
+
+    /// A truncate of the source empties the aggregate and rewinds its
+    /// watermark, and leaves it active for the next flush.
+    #[test]
+    fn reset_for_source_empties_buckets_and_keeps_the_aggregate_live() {
+        let mut mgr = ContinuousAggregateManager::new();
+        mgr.register(make_agg_def("metrics_1m", "metrics", "1m"));
+        let drain = make_drain(1000, 1_700_000_000_000, 1000);
+        mgr.on_flush(0, "metrics", &drain, 1_700_000_001_000);
+        assert!(!mgr.get_materialized(0, "metrics_1m").unwrap().is_empty());
+
+        mgr.reset_for_source(0, "metrics");
+
+        assert!(mgr.get_materialized(0, "metrics_1m").unwrap().is_empty());
+        let wm = mgr.get_watermark(0, "metrics_1m").unwrap();
+        assert_eq!(wm.rows_aggregated, 0);
+        assert!(!mgr.get_definition(0, "metrics_1m").unwrap().stale);
+
+        let refreshed = mgr.on_flush(0, "metrics", &drain, 1_700_000_002_000);
+        assert_eq!(refreshed, vec!["metrics_1m"]);
+        assert!(!mgr.get_materialized(0, "metrics_1m").unwrap().is_empty());
     }
 
     #[test]

@@ -176,6 +176,7 @@ pub(super) async fn handle_flushdb(session: &RespSession, state: &SharedState) -
             nodedb_types::DatabaseId::DEFAULT,
             &session.collection,
         ),
+        restart_identity: false,
     });
 
     match dispatch_kv_write(state, session, plan).await {

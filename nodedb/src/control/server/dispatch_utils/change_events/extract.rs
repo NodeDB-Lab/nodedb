@@ -8,7 +8,7 @@ use crate::control::change_stream::ChangeOperation;
 use crate::types::TenantId;
 use nodedb_physical::physical_plan::{
     ArrayOp, ClusterArrayOp, ColumnarOp, CrdtOp, DocumentOp, DocumentResolvedMutation, KvOp,
-    KvResolvedMutation, MetaOp, TimeseriesOp, VectorOp,
+    KvResolvedMutation, MetaOp, TimeseriesOp, VectorOp, VectorResolvedMutation, VectorWriteTargets,
 };
 use nodedb_types::{RowIdentity, StorageKey};
 
@@ -19,6 +19,30 @@ pub(super) type WriteChangeMeta = (String, RowIdentity, ChangeOperation);
 /// collection, not one addressable row. A subscriber sees `"*"`.
 fn every_row() -> RowIdentity {
     RowIdentity::from_user_key("*")
+}
+
+/// One event per point-targeted vector-primary surrogate; a predicate write
+/// names every row, like `BulkUpdate` / `BulkDelete`.
+fn vector_target_events(
+    collection: &nodedb_types::QualifiedCollection,
+    targets: &VectorWriteTargets,
+    operation: ChangeOperation,
+) -> Vec<WriteChangeMeta> {
+    match targets {
+        VectorWriteTargets::Surrogates(surrogates) => surrogates
+            .iter()
+            .map(|s| {
+                (
+                    collection.to_string(),
+                    StorageKey::for_surrogate(*s).to_identity(),
+                    operation,
+                )
+            })
+            .collect(),
+        VectorWriteTargets::Predicate(_) => {
+            vec![(collection.to_string(), every_row(), operation)]
+        }
+    }
 }
 
 /// A KV row's identity is its key bytes, rendered as text for the subscriber.
@@ -141,13 +165,18 @@ pub(super) fn extract_write_metadata(
         // Remaining DocumentOp variants are reads or catalog/schema DDL — no row changed.
         PhysicalPlan::Document(_) => Vec::new(),
 
-        // Batch write; document_id="*" indicates a batch. High-cardinality metrics
-        // would flood the bus otherwise — subscribe via collection_filter.
+        // Batch write and truncate: document_id="*" names every row. Per-row
+        // events would flood the bus — subscribe via collection_filter.
         PhysicalPlan::Timeseries(TimeseriesOp::Ingest { collection, .. }) => {
             vec![(collection.to_string(), every_row(), ChangeOperation::Insert)]
         }
-        // TimeseriesOp::Scan is a read — no row changed.
-        PhysicalPlan::Timeseries(_) => Vec::new(),
+        PhysicalPlan::Timeseries(TimeseriesOp::Truncate { collection, .. }) => {
+            vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
+        }
+        // Scan and the resolve pass are reads — no row changed.
+        PhysicalPlan::Timeseries(TimeseriesOp::Scan { .. } | TimeseriesOp::ResolveIngest(_)) => {
+            Vec::new()
+        }
 
         // KV engine write operations.
         PhysicalPlan::Kv(KvOp::Put {
@@ -202,7 +231,7 @@ pub(super) fn extract_write_metadata(
         PhysicalPlan::Kv(KvOp::BatchPut { collection, .. }) => {
             vec![(collection.to_string(), every_row(), ChangeOperation::Insert)]
         }
-        PhysicalPlan::Kv(KvOp::Truncate { collection }) => {
+        PhysicalPlan::Kv(KvOp::Truncate { collection, .. }) => {
             vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
         }
         // Debits + credits two keys in the same collection; not individually addressable,
@@ -261,17 +290,14 @@ pub(super) fn extract_write_metadata(
         PhysicalPlan::Columnar(ColumnarOp::Insert { collection, .. }) => {
             vec![(collection.to_string(), every_row(), ChangeOperation::Insert)]
         }
-        PhysicalPlan::Columnar(ColumnarOp::Update { collection, .. }) => {
+        // The resolved-row-set forms are the same statements, same CDC event.
+        PhysicalPlan::Columnar(ColumnarOp::Update { collection, .. })
+        | PhysicalPlan::Columnar(ColumnarOp::ResolvedUpdate { collection, .. }) => {
             vec![(collection.to_string(), every_row(), ChangeOperation::Update)]
         }
-        PhysicalPlan::Columnar(ColumnarOp::Delete { collection, .. }) => {
-            vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
-        }
-        // Resolved-row-set form of the same UPDATE/DELETE — same CDC event as above.
-        PhysicalPlan::Columnar(ColumnarOp::ResolvedUpdate { collection, .. }) => {
-            vec![(collection.to_string(), every_row(), ChangeOperation::Update)]
-        }
-        PhysicalPlan::Columnar(ColumnarOp::ResolvedDelete { collection, .. }) => {
+        PhysicalPlan::Columnar(ColumnarOp::Delete { collection, .. })
+        | PhysicalPlan::Columnar(ColumnarOp::ResolvedDelete { collection, .. })
+        | PhysicalPlan::Columnar(ColumnarOp::Truncate { collection, .. }) => {
             vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
         }
         // Scan / MaterializeScan are reads — no row changed.
@@ -293,17 +319,69 @@ pub(super) fn extract_write_metadata(
         PhysicalPlan::Graph(_) => Vec::new(),
 
         // Vector is normally a Document secondary index — publishing here would duplicate.
-        // `DirectUpsert` is the exception: the sole write for a vector-primary collection.
-        // The row carries no user key, so its identity is the decimal surrogate.
-        PhysicalPlan::Vector(VectorOp::DirectUpsert {
-            collection,
-            surrogate,
-            ..
-        }) => vec![(
+        // The direct write family is the exception: the sole writes for a vector-primary
+        // collection. The row's identity is its PK-bound surrogate, rendered as the decimal
+        // surrogate, which is what a sidecar read reports as the row id.
+        PhysicalPlan::Vector(
+            VectorOp::DirectUpsert {
+                collection,
+                surrogate,
+                ..
+            }
+            | VectorOp::DirectInsert {
+                collection,
+                surrogate,
+                ..
+            }
+            | VectorOp::DirectInsertIfAbsent {
+                collection,
+                surrogate,
+                ..
+            },
+        ) => vec![(
             collection.to_string(),
             StorageKey::for_surrogate(*surrogate).to_identity(),
             ChangeOperation::Insert,
         )],
+        PhysicalPlan::Vector(VectorOp::DirectDelete {
+            collection,
+            targets,
+            ..
+        }) => vector_target_events(collection, targets, ChangeOperation::Delete),
+        PhysicalPlan::Vector(VectorOp::DirectTruncate { collection, .. }) => {
+            vec![(collection.to_string(), every_row(), ChangeOperation::Delete)]
+        }
+        PhysicalPlan::Vector(VectorOp::DirectUpdate {
+            collection,
+            targets,
+            ..
+        }) => vector_target_events(collection, targets, ChangeOperation::Update),
+        // Reports one event per mutation, naming every row touched — never collapses to "*".
+        // An upsert's pre-image is what the resolve found stored: absent = insert, present = update.
+        PhysicalPlan::Vector(VectorOp::ResolvedDirectWrite {
+            collection,
+            mutations,
+            ..
+        }) => mutations
+            .iter()
+            .map(|mutation| {
+                let operation = match mutation {
+                    VectorResolvedMutation::Delete { .. } => ChangeOperation::Delete,
+                    VectorResolvedMutation::Update { .. } => ChangeOperation::Update,
+                    VectorResolvedMutation::Upsert { old_payload, .. } => match old_payload {
+                        Some(_) => ChangeOperation::Update,
+                        None => ChangeOperation::Insert,
+                    },
+                };
+                (
+                    collection.to_string(),
+                    StorageKey::for_surrogate(mutation.surrogate()).to_identity(),
+                    operation,
+                )
+            })
+            .collect(),
+        // The resolve pass reads; the rows it decides are published by the
+        // resolved write that applies them.
         PhysicalPlan::Vector(_) => Vec::new(),
 
         // Spatial R-tree writes are index maintenance for a row already published
@@ -624,6 +702,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "embeddings"),
             field: "emb".into(),
             surrogate: Surrogate::new(42),
+            pk_bytes: Vec::new(),
             vector: vec![0.0, 1.0],
             payload: Vec::new(),
             quantization: VectorQuantization::default(),
@@ -631,6 +710,8 @@ mod tests {
             payload_indexes: Vec::new(),
             returning: None,
             rls_filters: Vec::new(),
+            on_conflict_updates: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
         });
         let meta = extract_write_metadata(&plan, TenantId::new(1));
         // The row id is the client identity of the row, the decimal

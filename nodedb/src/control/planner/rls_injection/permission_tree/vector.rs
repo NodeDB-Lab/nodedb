@@ -2,7 +2,7 @@
 
 //! Permission-tree resolution for vector-engine operations.
 
-use nodedb_physical::physical_plan::VectorOp;
+use nodedb_physical::physical_plan::{VectorOp, VectorResolvedMutation};
 
 use super::context::{PermCtx, PermTreeLevel};
 use super::plan::walk;
@@ -60,17 +60,43 @@ pub(super) fn apply_vector(ctx: &PermCtx<'_>, op: &mut VectorOp) -> crate::Resul
         | VectorOp::BatchInsert { collection, .. }
         | VectorOp::SparseInsert { collection, .. }
         | VectorOp::MultiVectorInsert { collection, .. }
-        | VectorOp::DirectUpsert { collection, .. } => {
+        | VectorOp::DirectUpsert { collection, .. }
+        | VectorOp::DirectInsert { collection, .. }
+        | VectorOp::DirectInsertIfAbsent { collection, .. }
+        | VectorOp::DirectUpdate { collection, .. } => {
             ctx.authorize(collection, PermTreeLevel::Write)
         }
 
         // Filter (delete level, blanket): index deletions remove the row's
         // entry from the index.
         VectorOp::Delete { collection, .. }
+        | VectorOp::DirectDelete { collection, .. }
+        | VectorOp::DirectTruncate { collection, .. }
         | VectorOp::DeleteBySurrogate { collection, .. }
         | VectorOp::SparseDelete { collection, .. }
         | VectorOp::MultiVectorDelete { collection, .. } => {
             ctx.authorize(collection, PermTreeLevel::Delete)
+        }
+
+        // Recurse: the wrapped op is the intercepted write verbatim.
+        VectorOp::ResolveDirectWrite(inner) => apply_vector(ctx, inner),
+
+        // Blanket per mutation: each names the row it writes directly, and a
+        // `Delete` mutation is a removal, so it takes the delete level.
+        VectorOp::ResolvedDirectWrite {
+            collection,
+            mutations,
+            ..
+        } => {
+            for mutation in mutations {
+                let level = match mutation {
+                    VectorResolvedMutation::Update { .. }
+                    | VectorResolvedMutation::Upsert { .. } => PermTreeLevel::Write,
+                    VectorResolvedMutation::Delete { .. } => PermTreeLevel::Delete,
+                };
+                ctx.authorize(collection, level)?;
+            }
+            Ok(())
         }
 
         // No-op: index configuration and index maintenance. They act on the

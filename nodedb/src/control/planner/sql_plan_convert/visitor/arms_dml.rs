@@ -155,24 +155,115 @@ macro_rules! impl_dml_arms_for_convert_visitor {
 
         fn vector_primary_insert(
             &mut self,
-            collection: &str,
-            field: &str,
-            quantization: &nodedb_types::VectorQuantization,
-            storage_dtype: &nodedb_types::VectorStorageDtype,
-            payload_indexes: &[(String, nodedb_types::PayloadIndexKind)],
-            rows: &[nodedb_sql::types::plan::VectorPrimaryRow],
+            args: nodedb_sql::VectorPrimaryInsertVisitArgs<'_>,
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
-            super::super::dml::convert_vector_primary_insert(
+            let nodedb_sql::VectorPrimaryInsertVisitArgs {
                 collection,
-                &super::super::dml::VectorPrimaryInsertCfg {
-                    field,
-                    quantization: *quantization,
-                    storage_dtype: *storage_dtype,
-                    payload_indexes,
-                },
+                field,
+                quantization,
+                storage_dtype,
+                payload_indexes,
                 rows,
+                intent,
+                on_conflict_updates,
+                primary_key,
+            } = args;
+            let primary_key = primary_key.ok_or_else(|| crate::Error::PlanError {
+                detail: format!(
+                    "vector-primary insert converter reached collection '{collection}' with no                      resolved primary key"
+                ),
+            })?;
+            super::super::dml::convert_vector_primary_insert(
+                super::super::dml::VectorPrimaryInsertArgs {
+                    collection,
+                    cfg: &super::super::dml::VectorPrimaryCfg {
+                        field,
+                        quantization,
+                        storage_dtype,
+                        payload_indexes,
+                    },
+                    rows,
+                    intent,
+                    on_conflict_updates,
+                    primary_key,
+                    tenant_id: self.tenant_id,
+                    ctx: self.ctx,
+                },
+            )
+        }
+
+        fn vector_primary_delete(
+            &mut self,
+            args: nodedb_sql::VectorPrimaryDeleteVisitArgs<'_>,
+        ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
+            let nodedb_sql::VectorPrimaryDeleteVisitArgs {
+                collection,
+                field,
+                filters,
+                target_keys,
+                // Point keys are already extracted against it by the planner.
+                primary_key: _,
+            } = args;
+            super::super::dml::convert_vector_primary_delete(
+                collection,
+                field,
+                filters,
+                target_keys,
                 self.tenant_id,
                 self.ctx,
+            )
+        }
+
+        fn vector_primary_truncate(
+            &mut self,
+            collection: &str,
+            field: &str,
+            restart_identity: bool,
+        ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
+            Ok(super::super::dml::convert_vector_primary_truncate(
+                collection,
+                field,
+                restart_identity,
+                self.tenant_id,
+                self.ctx,
+            ))
+        }
+
+        fn vector_primary_update(
+            &mut self,
+            args: nodedb_sql::VectorPrimaryUpdateVisitArgs<'_>,
+        ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
+            let nodedb_sql::VectorPrimaryUpdateVisitArgs {
+                collection,
+                field,
+                quantization,
+                storage_dtype,
+                payload_indexes,
+                new_vector,
+                assignments,
+                filters,
+                target_keys,
+                // Attached by `inject_returning_spec` after plan conversion.
+                returning: _,
+                // Point keys are already extracted against it by the planner.
+                primary_key: _,
+            } = args;
+            super::super::dml::convert_vector_primary_update(
+                super::super::dml::VectorPrimaryUpdateArgs {
+                    collection,
+                    cfg: &super::super::dml::VectorPrimaryCfg {
+                        field,
+                        quantization,
+                        storage_dtype,
+                        payload_indexes,
+                    },
+                    new_vector,
+                    assignments,
+                    filters,
+                    target_keys,
+                    tenant_id: self.tenant_id,
+                    ctx: self.ctx,
+                },
             )
         }
 

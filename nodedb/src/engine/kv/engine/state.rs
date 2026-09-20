@@ -39,6 +39,11 @@ pub struct KvEngine {
     memory_budget_bytes: usize,
     /// Sorted index manager: order-statistic trees for leaderboard-style queries.
     pub(in crate::engine::kv) sorted_indexes: crate::engine::kv::sorted_index::SortedIndexManager,
+    /// Per-table write epoch, bumped on every row mutation. Key: same
+    /// `table_key` hash as `tables`. Read by the Data Plane aggregate result
+    /// cache (`write_epoch`) to detect a KV write since a cached result was
+    /// computed — see `engine/write_epoch.rs` for the single bump chokepoint.
+    pub(in crate::engine::kv) write_epochs: HashMap<u64, u64>,
 }
 
 impl KvEngine {
@@ -64,6 +69,7 @@ impl KvEngine {
             inline_threshold,
             memory_budget_bytes: 0, // 0 = unlimited (set via set_memory_budget).
             sorted_indexes: crate::engine::kv::sorted_index::SortedIndexManager::new(),
+            write_epochs: HashMap::new(),
         }
     }
 

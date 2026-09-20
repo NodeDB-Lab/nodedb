@@ -10,29 +10,60 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use pgwire::api::results::{Response, Tag};
+use pgwire::api::results::Response;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::control::security::auth_context::AuthContext;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::response_shape::schema::OutputSchema;
+use crate::control::server::response_shape::types::{
+    DmlOutcome, StatementTag, payload_to_dml_outcome, staged_dml_outcome,
+};
 use crate::control::server::shared::session::SessionId;
 use crate::control::trigger::dml_hook::DmlWriteInfo;
 use crate::types::TenantId;
 use nodedb_physical::physical_task::PhysicalTask;
 
-use super::super::super::types::{error_to_sqlstate, shape_error_to_pg};
+use super::super::super::types::{
+    dml_fold_error_to_pg, error_to_pg, error_to_sqlstate, shape_error_to_pg,
+};
 use super::super::core::NodeDbPgHandler;
 use super::super::plan::PlanKind;
+
+/// What a write task handled short of normal dispatch contributes to the
+/// statement's one command tag.
+pub(super) enum HandledWrite {
+    /// A count-bearing outcome: folds into the statement tag.
+    Dml(DmlOutcome),
+    /// No count and no verb (a buffered write, a trigger that consumed an
+    /// opaque plan): the statement renders `OK` unless a DML outcome is
+    /// folded too.
+    Opaque,
+}
+
+impl HandledWrite {
+    /// Fold this contribution into the statement's tag.
+    pub(super) fn fold_into(self, statement_tag: &mut StatementTag) -> PgWireResult<()> {
+        match self {
+            HandledWrite::Dml(outcome) => statement_tag
+                .fold(outcome)
+                .map_err(|e| dml_fold_error_to_pg(&e)),
+            HandledWrite::Opaque => {
+                statement_tag.fold_opaque();
+                Ok(())
+            }
+        }
+    }
+}
 
 /// Outcome of routing a single task through the in-transaction staging gate.
 pub(super) enum TxnRouteOutcome {
     /// Not staged/buffered: caller proceeds to normal dispatch with the
     /// (possibly `txn_id`-stamped) task.
     Proceed(Box<PhysicalTask>),
-    /// Fully handled (buffered "OK", or a staged write's real command tag).
-    /// Caller pushes this response and continues the loop.
-    Handled(Response),
+    /// Fully handled (buffered, or a staged write with its real count).
+    /// Caller folds this into the statement tag and continues the loop.
+    Handled(HandledWrite),
 }
 
 impl NodeDbPgHandler {
@@ -106,13 +137,10 @@ impl NodeDbPgHandler {
 
         match routed {
             Ok(InTxnRoute::Read(routed_task)) => Ok(TxnRouteOutcome::Proceed(routed_task)),
-            Ok(InTxnRoute::Buffered) => Ok(TxnRouteOutcome::Handled(Response::Execution(
-                Tag::new("OK"),
+            Ok(InTxnRoute::Buffered) => Ok(TxnRouteOutcome::Handled(HandledWrite::Opaque)),
+            Ok(InTxnRoute::Staged(outcome)) => Ok(TxnRouteOutcome::Handled(HandledWrite::Dml(
+                staged_dml_outcome(outcome.kind, outcome.affected),
             ))),
-            Ok(InTxnRoute::Staged(outcome)) => {
-                let tag = super::super::plan::tag_from_staged(outcome.kind, outcome.affected);
-                Ok(TxnRouteOutcome::Handled(Response::Execution(tag)))
-            }
             Err(StagingGateError::Dispatch(e)) => {
                 let (severity, code, message) = error_to_sqlstate(&e);
                 Err(PgWireError::UserError(Box::new(ErrorInfo::new(
@@ -138,11 +166,19 @@ impl NodeDbPgHandler {
     }
 }
 
+/// What a pre-dispatch hook answered the task with.
+pub(super) enum PreDispatchHandled {
+    /// A clone write's `RETURNING` rows, encoded. Caller pushes the response.
+    Rows(Response),
+    /// A write's contribution to the statement tag. Caller folds it.
+    Write(HandledWrite),
+}
+
 /// Outcome of running the pre-dispatch hooks for a single task.
 pub(super) enum PreDispatchOutcome {
     /// The task was fully handled (trigger short-circuit, or clone write
-    /// interception). Caller pushes this response and continues the loop.
-    Handled(Response),
+    /// interception). Caller emits the answer and continues the loop.
+    Handled(PreDispatchHandled),
     /// No interception occurred (or a mutation was applied in place);
     /// caller proceeds to normal dispatch with the (possibly mutated) task
     /// and the trigger bookkeeping needed for the AFTER-trigger phase.
@@ -269,9 +305,30 @@ impl NodeDbPgHandler {
                 )))
             })? {
                 PreDispatchResult::Handled => {
-                    return Ok(PreDispatchOutcome::Handled(Response::Execution(Tag::new(
-                        "OK",
-                    ))));
+                    // The trigger consumed the row: the statement ran and
+                    // affected nothing. A count-bearing plan keeps its verb
+                    // with a zero count so the fold stays on one verb; an
+                    // opaque plan contributes no count.
+                    let handled = match plan_kind {
+                        PlanKind::DmlResult(verb) => {
+                            HandledWrite::Dml(DmlOutcome { verb, affected: 0 })
+                        }
+                        // The verb is resolved at apply time and no apply
+                        // happened. The statement is an `INSERT ... ON
+                        // CONFLICT DO UPDATE`, so it reports as `INSERT`.
+                        PlanKind::DmlResultByOp => HandledWrite::Dml(DmlOutcome {
+                            verb: "INSERT",
+                            affected: 0,
+                        }),
+                        PlanKind::Execution
+                        | PlanKind::ArraySlice
+                        | PlanKind::ReturningRows
+                        | PlanKind::SingleDocument
+                        | PlanKind::MultiRow => HandledWrite::Opaque,
+                    };
+                    return Ok(PreDispatchOutcome::Handled(PreDispatchHandled::Write(
+                        handled,
+                    )));
                 }
                 PreDispatchResult::Proceed {
                     mutated_fields: Some(fields),
@@ -287,19 +344,11 @@ impl NodeDbPgHandler {
         }
 
         // Extract truncate restart_identity info before task is moved.
-        let truncate_restart_collection =
-            if let nodedb_physical::physical_plan::PhysicalPlan::Document(
-                nodedb_physical::physical_plan::DocumentOp::Truncate {
-                    collection,
-                    restart_identity: true,
-                    ..
-                },
-            ) = &task.plan
-            {
-                Some(collection.to_string())
-            } else {
-                None
-            };
+        // Engine-neutral: `truncate_target` names every truncate-shaped op.
+        let truncate_restart_collection = match task.plan.truncate_target() {
+            Some((collection, true)) => Some(collection.to_string()),
+            Some((_, false)) | None => None,
+        };
 
         // --- Clone write-path interception ---
         // Protocol-neutral hook (`shared::clone_write`); native, RESP, and
@@ -348,18 +397,21 @@ impl NodeDbPgHandler {
                             if let Some(n) = notice {
                                 self.sessions.push_notice(session_id, n);
                             }
-                            return Ok(PreDispatchOutcome::Handled(response));
+                            return Ok(PreDispatchOutcome::Handled(PreDispatchHandled::Rows(
+                                response,
+                            )));
                         }
                         ShapeOutcome::Passthrough => {
-                            let shaped =
-                                crate::control::server::pgwire::handler::plan::payload_to_response(
-                                    resp.payload.as_ref(),
-                                    plan_kind,
-                                )?;
-                            if let Some(notice) = shaped.notice {
-                                self.sessions.push_notice(session_id, notice);
-                            }
-                            return Ok(PreDispatchOutcome::Handled(shaped.response));
+                            let handled =
+                                match payload_to_dml_outcome(resp.payload.as_ref(), plan_kind)
+                                    .map_err(|e| error_to_pg(&e))?
+                                {
+                                    Some(outcome) => HandledWrite::Dml(outcome),
+                                    None => HandledWrite::Opaque,
+                                };
+                            return Ok(PreDispatchOutcome::Handled(PreDispatchHandled::Write(
+                                handled,
+                            )));
                         }
                     }
                 }

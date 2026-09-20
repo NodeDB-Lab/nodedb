@@ -93,6 +93,7 @@ pub(in super::super) fn convert_merge(
             // in `ResolveWrite`. This neutral form never reaches the Data
             // Plane directly.
             resolved_inserts: None,
+            resolved_insert_identities: Vec::new(),
             // The source rows are shipped in by the Control-Plane orchestrator
             // (cross-core source-ship); the neutral plan carries none.
             source_rows: None,

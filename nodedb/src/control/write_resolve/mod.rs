@@ -15,6 +15,7 @@ mod resolver;
 mod run;
 mod select;
 mod timeseries;
+mod vector;
 
 pub use columnar::ColumnarWriteResolver;
 pub use document::DocumentWriteResolver;
@@ -25,3 +26,4 @@ pub use resolver::{EngineWriteResolver, WriteResolveContext};
 pub use run::{MAX_WRITE_RESOLVE_RETRIES, run_authorized_write_resolve, run_write_resolve};
 pub use select::resolver_for_plan;
 pub use timeseries::TimeseriesWriteResolver;
+pub use vector::VectorWriteResolver;

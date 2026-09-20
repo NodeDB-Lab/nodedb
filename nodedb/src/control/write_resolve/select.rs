@@ -10,6 +10,7 @@ use super::graph::resolver_for_graph_op;
 use super::kv::resolver_for_kv_op;
 use super::resolver::EngineWriteResolver;
 use super::timeseries::resolver_for_timeseries_op;
+use super::vector::resolver_for_vector_op;
 
 /// The resolver for `plan`, or `None` when it carries no live predicate to
 /// resolve before proposing. Exhaustive over `PhysicalPlan` — a new
@@ -21,8 +22,8 @@ pub fn resolver_for_plan(plan: &PhysicalPlan) -> Option<Box<dyn EngineWriteResol
         PhysicalPlan::Document(op) => resolver_for_document_op(op),
         PhysicalPlan::Timeseries(op) => resolver_for_timeseries_op(op),
         PhysicalPlan::Graph(op) => resolver_for_graph_op(op),
-        PhysicalPlan::Vector(_)
-        | PhysicalPlan::Text(_)
+        PhysicalPlan::Vector(op) => resolver_for_vector_op(op),
+        PhysicalPlan::Text(_)
         | PhysicalPlan::Spatial(_)
         | PhysicalPlan::Crdt(_)
         | PhysicalPlan::Query(_)

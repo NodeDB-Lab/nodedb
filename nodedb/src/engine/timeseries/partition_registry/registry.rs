@@ -180,6 +180,11 @@ impl PartitionRegistry {
         self.partitions.len()
     }
 
+    /// Rows across every registered partition.
+    pub fn total_row_count(&self) -> u64 {
+        self.partitions.values().map(|e| e.meta.row_count).sum()
+    }
+
     pub fn active_count(&self) -> usize {
         self.partitions
             .values()

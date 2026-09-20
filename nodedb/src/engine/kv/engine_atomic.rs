@@ -315,22 +315,9 @@ impl KvEngine {
             None
         };
 
-        // Write the value. Callers of `atomic_put` always invoke `ensure_table`
-        // for this `tkey` earlier in the same method, so the entry is
-        // guaranteed present here; `or_insert_with` keeps that invariant
-        // encoded in the type instead of unwrapping an `Option`.
-        let default_capacity = self.default_capacity;
-        let load_factor_threshold = self.load_factor_threshold;
-        let rehash_batch_size = self.rehash_batch_size;
-        let inline_threshold = self.inline_threshold;
-        let table = self.tables.entry(tkey).or_insert_with(|| {
-            KvHashTable::new(
-                default_capacity,
-                load_factor_threshold,
-                rehash_batch_size,
-                inline_threshold,
-            )
-        });
+        // Write the value, bumping this table's write epoch — the single
+        // chokepoint the aggregate result cache reads to detect this write.
+        let table = self.table_for_write_or_create(tkey, tenant_id, collection);
         table.put(key, value, expire_at, surrogate);
 
         // Schedule new expiry if needed.

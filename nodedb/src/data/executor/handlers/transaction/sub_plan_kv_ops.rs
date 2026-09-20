@@ -2,7 +2,7 @@
 
 //! KV operation dispatch for transaction batches.
 
-use crate::bridge::envelope::{ErrorCode, Response, Status};
+use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::KvOp;
@@ -17,6 +17,7 @@ impl CoreLoop {
         &mut self,
         task: &ExecutionTask,
         tid: u64,
+        plan: &PhysicalPlan,
         op: &KvOp,
         undo_log: &mut Vec<UndoEntry>,
     ) -> Result<Response, ErrorCode> {
@@ -47,12 +48,22 @@ impl CoreLoop {
             // `plan_requires_txn_buffering` classifies these unbuffered, so a
             // client statement never replays through this arm at commit; it
             // guards a hypothetical direct-dispatch route.
-            KvOp::RegisterIndex { .. } | KvOp::DropIndex { .. } | KvOp::Truncate { .. } => {
-                Err(ErrorCode::Internal {
-                    detail: "KV secondary-index / truncate DDL is not permitted inside a \
-                             TransactionBatch"
-                        .into(),
-                })
+            KvOp::RegisterIndex { .. } | KvOp::DropIndex { .. } => Err(ErrorCode::Internal {
+                detail: "KV secondary-index DDL is not permitted inside a TransactionBatch".into(),
+            }),
+
+            // ── Truncate — replayed live, in statement order ──
+            // Staged as an overlay marker at statement time; the live truncate
+            // wipes every row replayed before it in this batch. Like the
+            // Document truncate passthrough, it pushes no undo entry.
+            KvOp::Truncate { collection, .. } => {
+                let resp = self.execute_kv_truncate(task, did, tid, collection.as_str());
+                if resp.status == Status::Error {
+                    return Err(resp.error_code.map(|c| *c).unwrap_or(ErrorCode::Internal {
+                        detail: "kv truncate failed".into(),
+                    }));
+                }
+                Ok(resp)
             }
 
             // ── TTL ops — capture prior expiry, execute, push undo ───────────
@@ -144,15 +155,13 @@ impl CoreLoop {
                     .into(),
             }),
 
-            // A predicate write resolves its row set from committed state at
-            // apply time; the transaction redo record has no per-row shape
-            // for that. Autocommit is the supported path.
+            // ── Predicate DML — replayed live, in statement order ──
+            // Staged per matched row at statement time; the live handler
+            // re-evaluates the predicate against the batch-ordered base at
+            // COMMIT, the same passthrough Document `BulkUpdate`/`BulkDelete`
+            // take in `exec_tx_document`.
             KvOp::PredicateUpdate { .. } | KvOp::PredicateDelete { .. } => {
-                Err(ErrorCode::Internal {
-                    detail: "KV predicate UPDATE/DELETE is not permitted inside a \
-                             TransactionBatch; run it outside an explicit transaction"
-                        .into(),
-                })
+                self.exec_tx_passthrough(tid, plan, task.request.deadline)
             }
         }
     }

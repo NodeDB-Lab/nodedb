@@ -526,6 +526,7 @@ fn kv_truncate_clears_all() {
                 nodedb_types::DatabaseId::DEFAULT,
                 "ephemeral",
             ),
+            restart_identity: false,
         }),
     );
     let json: serde_json::Value = payload_value(&payload);

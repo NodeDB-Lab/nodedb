@@ -69,6 +69,10 @@ impl CoreLoop {
                         Staged::Tombstone => self.response_with_payload(task, Vec::new()),
                     };
                 }
+                // A staged TRUNCATE hides every base row with no staged put.
+                if overlay.is_truncated(&coll_key) {
+                    return self.response_with_payload(task, Vec::new());
+                }
             }
         }
 

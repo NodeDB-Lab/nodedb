@@ -147,6 +147,8 @@ impl CoreLoop {
             ts_last_value_caches: HashMap::new(),
             ts_series_catalogs: HashMap::new(),
             ts_registries: HashMap::new(),
+            ts_truncate_backlog: Vec::new(),
+            ts_truncate_floors: HashMap::new(),
             continuous_agg_mgr:
                 crate::engine::timeseries::continuous_agg::ContinuousAggregateManager::new(),
             checkpoint_coordinator: crate::storage::checkpoint::CheckpointCoordinator::new(
@@ -199,6 +201,7 @@ impl CoreLoop {
             ollp_is_group_leader: true,
             txn_overlays: HashMap::new(),
             graph_txn_overlays: HashMap::new(),
+            array_txn_overlays: HashMap::new(),
             txn_created_columnar_engines: HashMap::new(),
             write_index: super::write_index::WriteVersionIndex::new(),
             commit_pending: HashMap::new(),

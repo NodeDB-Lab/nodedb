@@ -7,6 +7,11 @@
 //! exact same code — mirrors the `engine_atomic_compute` / `stage_kv_atomic`
 //! split for `Incr`/`Cas`/etc.
 
+use std::collections::HashMap;
+
+use nodedb_query::msgpack_scan::{KvBodyShape, kv_body_to_row, row_to_kv_body};
+use nodedb_types::Value;
+
 /// Failure modes of [`compute_transfer`], translated to `ErrorCode` at each
 /// call site (the live handler and the staging handler render slightly
 /// different `ErrorCode` variants around the same detail message).
@@ -18,6 +23,7 @@ pub(in crate::data::executor) enum TransferError {
 
 /// The two updated document bodies and post-transfer balances for a
 /// `Transfer` op, computed from BASE ∪ OVERLAY current values.
+#[derive(Debug)]
 pub(in crate::data::executor) struct TransferComputation {
     pub new_source: Vec<u8>,
     pub new_dest: Vec<u8>,
@@ -28,14 +34,18 @@ pub(in crate::data::executor) struct TransferComputation {
 /// Compute the read-validate-write outcome of an atomic fungible transfer.
 ///
 /// `dest_bytes` is `None` when the destination key does not exist under
-/// BASE ∪ OVERLAY -- a fresh document is created holding just `field`.
+/// BASE ∪ OVERLAY -- a fresh document is created holding just `field`. A
+/// destination that exists but lacks `field` starts from 0. Either side
+/// holding a bare value (the single-`value` SQL form, RESP `SET`) or a
+/// non-numeric `field` is a type mismatch, never silently treated as 0.
 pub(in crate::data::executor) fn compute_transfer(
     source_bytes: &[u8],
     dest_bytes: Option<&[u8]>,
     field: &str,
     amount: f64,
 ) -> Result<TransferComputation, TransferError> {
-    let source_balance = extract_numeric_field(source_bytes, field).ok_or_else(|| {
+    let mut source = map_row(source_bytes, "source")?;
+    let source_balance = numeric_field(&source, field)?.ok_or_else(|| {
         TransferError::TypeMismatch(format!("field '{field}' is not numeric or missing"))
     })?;
 
@@ -46,56 +56,80 @@ pub(in crate::data::executor) fn compute_transfer(
         });
     }
 
-    let dest_balance = dest_bytes
-        .and_then(|b| extract_numeric_field(b, field))
-        .unwrap_or(0.0);
-
-    let new_source = update_numeric_field(source_bytes, field, source_balance - amount)
-        .map_err(TransferError::TypeMismatch)?;
-
-    let new_dest = match dest_bytes.filter(|b| !b.is_empty()) {
-        None => {
-            let doc = serde_json::json!({ field: dest_balance + amount });
-            nodedb_types::json_to_msgpack(&doc)
-                .map_err(|e| TransferError::TypeMismatch(format!("serialize destination: {e}")))?
-        }
-        Some(bytes) => update_numeric_field(bytes, field, dest_balance + amount)
-            .map_err(TransferError::TypeMismatch)?,
+    let mut dest = match dest_bytes.filter(|b| !b.is_empty()) {
+        None => HashMap::with_capacity(1),
+        Some(bytes) => map_row(bytes, "destination")?,
     };
+    let dest_balance = numeric_field(&dest, field)?.unwrap_or(0.0);
+
+    let source_balance_after = source_balance - amount;
+    let dest_balance_after = dest_balance + amount;
+    source.insert(field.to_string(), numeric_value(source_balance_after));
+    dest.insert(field.to_string(), numeric_value(dest_balance_after));
 
     Ok(TransferComputation {
-        new_source,
-        new_dest,
-        source_balance_after: source_balance - amount,
-        dest_balance_after: dest_balance + amount,
+        new_source: encode_map(source, "source")?,
+        new_dest: encode_map(dest, "destination")?,
+        source_balance_after,
+        dest_balance_after,
     })
 }
 
-/// Extract a numeric field from a MessagePack-encoded KV value.
-pub(in crate::data::executor) fn extract_numeric_field(value: &[u8], field: &str) -> Option<f64> {
-    let doc: serde_json::Value = nodedb_types::json_from_msgpack(value).ok()?;
-    let v = doc.get(field)?;
-    v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
+/// Decode a KV body as the typed-column map a transfer operates on.
+fn map_row(bytes: &[u8], side: &str) -> Result<HashMap<String, Value>, TransferError> {
+    let (row, shape) = kv_body_to_row(bytes)
+        .map_err(|e| TransferError::TypeMismatch(format!("{side} body: {e}")))?;
+    if shape == KvBodyShape::Raw {
+        return Err(TransferError::TypeMismatch(format!(
+            "{side} holds a bare value, not a hash"
+        )));
+    }
+    match row {
+        Value::Object(map) => Ok(map),
+        other => Err(TransferError::TypeMismatch(format!(
+            "{side} body is {}, not an object",
+            other.type_name()
+        ))),
+    }
 }
 
-/// Update a numeric field in a MessagePack-encoded KV value, preserving other
-/// fields.
-pub(in crate::data::executor) fn update_numeric_field(
-    value: &[u8],
-    field: &str,
-    new_value: f64,
-) -> Result<Vec<u8>, String> {
-    let mut doc: serde_json::Value =
-        nodedb_types::json_from_msgpack(value).map_err(|e| format!("deserialize value: {e}"))?;
-    if let Some(obj) = doc.as_object_mut() {
-        if new_value.fract() == 0.0 && new_value >= i64::MIN as f64 && new_value <= i64::MAX as f64
-        {
-            obj.insert(field.to_string(), serde_json::json!(new_value as i64));
-        } else {
-            obj.insert(field.to_string(), serde_json::json!(new_value));
-        }
+/// `field` as f64: `Ok(None)` when absent, a type mismatch when present but
+/// not numeric.
+fn numeric_field(map: &HashMap<String, Value>, field: &str) -> Result<Option<f64>, TransferError> {
+    match map.get(field) {
+        None => Ok(None),
+        Some(Value::Float(f)) => Ok(Some(*f)),
+        Some(Value::Integer(i)) => Ok(Some(*i as f64)),
+        Some(other) => Err(TransferError::TypeMismatch(format!(
+            "field '{field}' is {}, not numeric",
+            other.type_name()
+        ))),
     }
-    nodedb_types::json_to_msgpack(&doc).map_err(|e| format!("serialize value: {e}"))
+}
+
+/// A whole-number balance stays an integer on disk; anything else is a float.
+fn numeric_value(v: f64) -> Value {
+    if v.fract() == 0.0 && v >= i64::MIN as f64 && v <= i64::MAX as f64 {
+        Value::Integer(v as i64)
+    } else {
+        Value::Float(v)
+    }
+}
+
+fn encode_map(map: HashMap<String, Value>, side: &str) -> Result<Vec<u8>, TransferError> {
+    row_to_kv_body(&Value::Object(map), KvBodyShape::Map)
+        .map_err(|e| TransferError::TypeMismatch(format!("serialize {side}: {e}")))
+}
+
+/// Extract a numeric field from a MessagePack-encoded KV value.
+#[cfg(test)]
+pub(in crate::data::executor) fn extract_numeric_field(value: &[u8], field: &str) -> Option<f64> {
+    let (row, _) = kv_body_to_row(value).ok()?;
+    match row.get(field)? {
+        Value::Float(f) => Some(*f),
+        Value::Integer(i) => Some(*i as f64),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -134,6 +168,38 @@ mod tests {
             err,
             Err(TransferError::InsufficientBalance { .. })
         ));
+    }
+
+    #[test]
+    fn transfer_rejects_a_bare_value_destination() {
+        // A raw body (the single-`value` form, RESP `SET`) is not a hash:
+        // never treated as a zero balance and re-encoded as a map.
+        let source = doc("balance", 100.0);
+        let err = compute_transfer(&source, Some(b"5"), "balance", 30.0);
+        assert!(
+            matches!(err, Err(TransferError::TypeMismatch(_))),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn transfer_rejects_a_bare_value_source() {
+        let err = compute_transfer(b"100", None, "balance", 30.0);
+        assert!(
+            matches!(err, Err(TransferError::TypeMismatch(_))),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn transfer_rejects_non_numeric_destination_field() {
+        let source = doc("balance", 100.0);
+        let dest = nodedb_types::json_to_msgpack(&serde_json::json!({"balance": "abc"})).unwrap();
+        let err = compute_transfer(&source, Some(&dest), "balance", 30.0);
+        assert!(
+            matches!(err, Err(TransferError::TypeMismatch(_))),
+            "{err:?}"
+        );
     }
 
     #[test]

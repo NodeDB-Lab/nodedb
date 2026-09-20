@@ -13,6 +13,7 @@ mod purge;
 mod reads;
 mod scan_ops;
 mod state;
+mod write_epoch;
 
 pub use checkpoint_export::KvCollectionRef;
 pub use checkpoint_restore::{RestoreCompositeIndexParams, RestoreFieldIndexParams};

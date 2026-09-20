@@ -2,7 +2,7 @@
 
 //! Set operations and miscellaneous plan conversions (UNION, INTERSECT, EXCEPT, CTE, etc.).
 
-use nodedb_sql::types::{Projection, SortKey, SqlExpr, SqlPlan, SqlValue, WindowSpec};
+use nodedb_sql::types::{EngineType, Projection, SortKey, SqlExpr, SqlPlan, SqlValue, WindowSpec};
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::types::{TenantId, VShardId};
@@ -74,8 +74,15 @@ pub(super) fn convert_constant_result(
     }])
 }
 
+/// Lower `SqlPlan::Truncate` to the engine that stores the rows. The match
+/// is exhaustive over `EngineType`: a document-family collection clears its
+/// document store, a KV collection clears its hash index, a columnar or
+/// spatial collection clears its mutation engine (spatial shares the
+/// columnar DML ops, so it shares the truncate op too), and a timeseries
+/// collection clears its memtable and partitions.
 pub(super) fn convert_truncate(
     collection: &str,
+    engine: EngineType,
     restart_identity: bool,
     tenant_id: TenantId,
     ctx: &ConvertContext,
@@ -84,19 +91,46 @@ pub(super) fn convert_truncate(
     let qualified_collection = nodedb_types::QualifiedCollection::new(ctx.database_id, collection);
     let collection = coll_qualified.as_str();
     let vshard = VShardId::from_collection_in_database(ctx.database_id, collection);
+    let plan = match engine {
+        EngineType::DocumentSchemaless | EngineType::DocumentStrict => {
+            PhysicalPlan::Document(DocumentOp::Truncate {
+                collection: qualified_collection,
+                restart_identity,
+                // Filled in by the materialized-sum resolution pass, which recon-
+                // scans the rows this TRUNCATE will remove.
+                resolved_sum_targets: Vec::new(),
+                // Names the column each removed row's identity is read from.
+                declared_primary_key: super::dml::declared_primary_key_name(ctx, collection)?,
+            })
+        }
+        EngineType::KeyValue => PhysicalPlan::Kv(KvOp::Truncate {
+            collection: qualified_collection,
+            restart_identity,
+        }),
+        EngineType::Columnar | EngineType::Spatial => {
+            PhysicalPlan::Columnar(ColumnarOp::Truncate {
+                collection: qualified_collection,
+                restart_identity,
+            })
+        }
+        EngineType::Timeseries => PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+            collection: qualified_collection,
+            restart_identity,
+        }),
+        // `ArrayRules::plan_truncate` refuses before a plan is built.
+        EngineType::Array => {
+            return Err(crate::Error::Internal {
+                detail: format!(
+                    "TRUNCATE reached plan conversion for array collection '{collection}'"
+                ),
+            });
+        }
+    };
     Ok(vec![PhysicalTask {
         tenant_id,
         vshard_id: vshard,
         database_id: ctx.database_id,
-        plan: PhysicalPlan::Document(DocumentOp::Truncate {
-            collection: qualified_collection,
-            restart_identity,
-            // Filled in by the materialized-sum resolution pass, which recon-
-            // scans the rows this TRUNCATE will remove.
-            resolved_sum_targets: Vec::new(),
-            // Names the column each removed row's identity is read from.
-            declared_primary_key: super::dml::declared_primary_key_name(ctx, collection)?,
-        }),
+        plan,
         post_set_op: PostSetOp::None,
         txn_id: None,
     }])
@@ -436,7 +470,122 @@ fn lower_subquery_sort_keys(keys: &[SortKey], merged_doc_body: bool) -> Vec<Sort
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodedb_sql::types::EngineType;
+
+    fn bare_ctx() -> ConvertContext {
+        ConvertContext {
+            purpose: crate::control::planner::sql_plan_convert::PlanningPurpose::Execute,
+            retention_registry: None,
+            array_catalog: None,
+            credentials: None,
+            wal: None,
+            surrogate_assigner: None,
+            cluster_enabled: false,
+            bitemporal_retention_registry: None,
+            max_vector_dim: 0,
+            force_shuffle_join: false,
+            shuffle_num_parts: 0,
+            force_shuffle_agg: false,
+            shuffle_agg_num_parts: 0,
+            broadcast_threshold_bytes: 8 * 1024 * 1024,
+            shuffle_agg_threshold: 10_000,
+            database_id: crate::types::DatabaseId::DEFAULT,
+            tenant_id: crate::types::TenantId::new(0),
+        }
+    }
+
+    #[test]
+    fn convert_truncate_routes_kv_to_kv_op_with_restart_flag() {
+        let tasks = convert_truncate(
+            "kvc",
+            EngineType::KeyValue,
+            true,
+            TenantId::new(1),
+            &bare_ctx(),
+        )
+        .expect("kv truncate converts");
+        assert_eq!(tasks.len(), 1);
+        match &tasks[0].plan {
+            PhysicalPlan::Kv(KvOp::Truncate {
+                collection,
+                restart_identity,
+            }) => {
+                assert_eq!(collection.as_str(), "kvc");
+                assert!(*restart_identity);
+            }
+            other => panic!("expected KvOp::Truncate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn convert_truncate_routes_document_engines_to_document_op() {
+        for engine in [EngineType::DocumentSchemaless, EngineType::DocumentStrict] {
+            let tasks = convert_truncate("docs", engine, false, TenantId::new(1), &bare_ctx())
+                .expect("document truncate converts");
+            assert!(
+                matches!(
+                    &tasks[0].plan,
+                    PhysicalPlan::Document(DocumentOp::Truncate { .. })
+                ),
+                "{engine:?} must lower to DocumentOp::Truncate, got {:?}",
+                tasks[0].plan
+            );
+        }
+    }
+
+    #[test]
+    fn convert_truncate_routes_columnar_and_spatial_to_columnar_op() {
+        for engine in [EngineType::Columnar, EngineType::Spatial] {
+            let tasks = convert_truncate("c", engine, true, TenantId::new(1), &bare_ctx())
+                .expect("columnar-family truncate converts");
+            assert_eq!(tasks.len(), 1);
+            match &tasks[0].plan {
+                PhysicalPlan::Columnar(ColumnarOp::Truncate {
+                    collection,
+                    restart_identity,
+                }) => {
+                    assert_eq!(collection.as_str(), "c");
+                    assert!(*restart_identity, "{engine:?} must carry restart_identity");
+                }
+                other => panic!("{engine:?} must lower to ColumnarOp::Truncate, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn convert_truncate_routes_timeseries_to_timeseries_op() {
+        let tasks = convert_truncate(
+            "ts",
+            EngineType::Timeseries,
+            false,
+            TenantId::new(1),
+            &bare_ctx(),
+        )
+        .expect("timeseries truncate converts");
+        assert_eq!(tasks.len(), 1);
+        match &tasks[0].plan {
+            PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+                collection,
+                restart_identity,
+            }) => {
+                assert_eq!(collection.as_str(), "ts");
+                assert!(!*restart_identity);
+            }
+            other => panic!("expected TimeseriesOp::Truncate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn convert_truncate_on_array_is_an_internal_error() {
+        let err = convert_truncate(
+            "arr",
+            EngineType::Array,
+            false,
+            TenantId::new(1),
+            &bare_ctx(),
+        )
+        .expect_err("array never reaches conversion");
+        assert!(matches!(err, crate::Error::Internal { .. }), "got {err:?}");
+    }
 
     #[test]
     fn convert_insert_select_builds_document_op() {

@@ -11,7 +11,7 @@ use super::{
     entry_array, entry_columnar_family, entry_crdt, entry_document, entry_graph, entry_kv, vector,
 };
 use crate::bridge::envelope::PhysicalPlan;
-use crate::control::surrogate::SurrogateAssigner;
+use crate::control::surrogate::{SurrogateAssigner, bind_plan_identities};
 use crate::types::{DatabaseId, TenantId, VShardId};
 
 /// Decoded `(tenant, vshard, plan, resolved_now_ms)` for a committed entry.
@@ -20,8 +20,9 @@ use crate::types::{DatabaseId, TenantId, VShardId};
 pub type DecodedEntry = (TenantId, VShardId, PhysicalPlan, Option<u64>);
 
 /// Returns `None` if the data is not a valid ReplicatedEntry (e.g., ConfChange or no-op).
-/// `assigner`, when `Some`, installs the leader-assigned surrogate, never
-/// re-allocating — except a pre-migration CRDT entry, see `decode/crdt.rs`.
+/// `assigner`, when `Some`, installs every carried surrogate through
+/// `bind_plan_identities`, never re-allocating — except a pre-surrogate CRDT
+/// apply, which allocates loudly.
 pub fn from_replicated_entry(
     data: &[u8],
     assigner: Option<&SurrogateAssigner>,
@@ -41,11 +42,13 @@ pub fn from_replicated_entry(
     // `0` decodes to `DatabaseId::DEFAULT` (see `LegacyReplicatedEntry`).
     let database_id = DatabaseId::new(entry.database_id);
     let ctx = DecodeCtx {
-        assigner,
         database_id,
         tenant_id,
     };
-    let (plan, resolved_now_ms) = to_physical_plan(&entry.write, &ctx)?;
+    let (mut plan, resolved_now_ms) = to_physical_plan(&entry.write, &ctx)?;
+    if let Some(assigner) = assigner {
+        bind_plan_identities(assigner, database_id, tenant_id, &mut plan)?;
+    }
     Ok(Some((
         tenant_id,
         VShardId::new(entry.vshard_id),
@@ -72,8 +75,10 @@ fn to_physical_plan(
         | ReplicatedWrite::BulkDml { .. }
         | ReplicatedWrite::InsertSelect { .. }
         | ReplicatedWrite::ApplyBalanceDelta { .. }
-        | ReplicatedWrite::DocumentResolvedWrite { .. } => {
-            Ok((entry_document::decode_arm(ctx, write)?, None))
+        | ReplicatedWrite::DocumentResolvedWrite { .. }
+        | ReplicatedWrite::MergeApply { .. }
+        | ReplicatedWrite::UpdateFromJoinApply { .. } => {
+            Ok((entry_document::decode_arm(write)?, None))
         }
         // The full `Vector*` variant family dispatches to one helper — see
         // `vector::decode_arm`'s doc.
@@ -87,7 +92,13 @@ fn to_physical_plan(
         | ReplicatedWrite::MultiVectorInsert { .. }
         | ReplicatedWrite::MultiVectorDelete { .. }
         | ReplicatedWrite::DeleteBySurrogate { .. }
-        | ReplicatedWrite::DirectUpsert { .. } => Ok((vector::decode_arm(ctx, write)?, None)),
+        | ReplicatedWrite::DirectUpsert { .. }
+        | ReplicatedWrite::VectorDirectDelete { .. }
+        | ReplicatedWrite::VectorDirectTruncate { .. }
+        | ReplicatedWrite::VectorDirectUpdate { .. }
+        | ReplicatedWrite::VectorResolvedDirectWrite { .. } => {
+            Ok((vector::decode_arm(write)?, None))
+        }
         // CRDT family (`PhysicalPlan::Crdt`).
         ReplicatedWrite::CrdtApply { .. }
         | ReplicatedWrite::CrdtApplyFenced { .. }
@@ -98,18 +109,14 @@ fn to_physical_plan(
         | ReplicatedWrite::CrdtListMove { .. }
         | ReplicatedWrite::CrdtDocUpsert { .. }
         | ReplicatedWrite::CrdtDocDelete { .. }
-        | ReplicatedWrite::ConstraintChange { .. } => {
-            Ok((entry_crdt::decode_arm(ctx, write)?, None))
-        }
+        | ReplicatedWrite::ConstraintChange { .. } => Ok((entry_crdt::decode_arm(write)?, None)),
         // Graph family (`PhysicalPlan::Graph`).
         ReplicatedWrite::EdgePut { .. }
         | ReplicatedWrite::EdgeDelete { .. }
         | ReplicatedWrite::SetNodeLabels { .. }
         | ReplicatedWrite::RemoveNodeLabels { .. }
         | ReplicatedWrite::EdgePutBatch { .. }
-        | ReplicatedWrite::EdgeDeleteBatch { .. } => {
-            Ok((entry_graph::decode_arm(ctx, write)?, None))
-        }
+        | ReplicatedWrite::EdgeDeleteBatch { .. } => Ok((entry_graph::decode_arm(write)?, None)),
         // KV family — the only group carrying `resolved_now_ms`.
         ReplicatedWrite::KvTruncate { .. }
         | ReplicatedWrite::KvPut { .. }
@@ -133,7 +140,7 @@ fn to_physical_plan(
         | ReplicatedWrite::KvTransferItem { .. }
         | ReplicatedWrite::KvResolvedWrite { .. }
         | ReplicatedWrite::KvPredicateUpdate { .. }
-        | ReplicatedWrite::KvPredicateDelete { .. } => entry_kv::decode_arm(ctx, write),
+        | ReplicatedWrite::KvPredicateDelete { .. } => entry_kv::decode_arm(write),
         // Columnar-storage family + overlay sync engines.
         ReplicatedWrite::ColumnarIngest { .. }
         | ReplicatedWrite::TimeseriesIngest { .. }
@@ -142,7 +149,9 @@ fn to_physical_plan(
         | ReplicatedWrite::SpatialInsert { .. }
         | ReplicatedWrite::SpatialDelete { .. }
         | ReplicatedWrite::ColumnarBulkDml { .. }
-        | ReplicatedWrite::ColumnarBulkDmlResolved { .. } => {
+        | ReplicatedWrite::ColumnarBulkDmlResolved { .. }
+        | ReplicatedWrite::ColumnarTruncate { .. }
+        | ReplicatedWrite::TimeseriesTruncate { .. } => {
             Ok((entry_columnar_family::decode_arm(write)?, None))
         }
         // Raft-native array cell writes — the cluster SQL DML array path.

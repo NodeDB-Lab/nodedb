@@ -2,8 +2,20 @@
 
 //! Conversion utilities for CRDT value types.
 
+use crate::engine::document::crdt_store::loro_value_to_json;
+
+/// The stored body of a CRDT row whose Loro map holds `row`: the row's JSON
+/// encoded as MessagePack, before the put path canonicalizes it. The live
+/// materialization (`encode_crdt_row`) and the transaction staging path
+/// (`stage_crdt`) both build a row body here, so a staged row and its COMMIT
+/// replay agree byte for byte. `None` when the row cannot encode.
+pub(in crate::data::executor) fn crdt_row_body(row: &loro::LoroValue) -> Option<Vec<u8>> {
+    let json = loro_value_to_json(row);
+    nodedb_types::json_to_msgpack(&json).ok()
+}
+
 /// Convert a `serde_json::Value` to a `loro::LoroValue`.
-pub(super) fn json_to_loro_value(val: &serde_json::Value) -> loro::LoroValue {
+pub(in crate::data::executor) fn json_to_loro_value(val: &serde_json::Value) -> loro::LoroValue {
     match val {
         serde_json::Value::Null => loro::LoroValue::Null,
         serde_json::Value::Bool(b) => loro::LoroValue::Bool(*b),

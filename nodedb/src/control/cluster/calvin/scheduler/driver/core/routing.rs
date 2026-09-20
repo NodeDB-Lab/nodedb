@@ -210,13 +210,26 @@ fn vector_routing(op: &VectorOp, database_id: DatabaseId) -> PlanRouting {
         | VectorOp::SparseDelete { collection, .. }
         | VectorOp::MultiVectorInsert { collection, .. }
         | VectorOp::MultiVectorDelete { collection, .. }
-        | VectorOp::DirectUpsert { collection, .. } => {
+        | VectorOp::DirectUpsert { collection, .. }
+        | VectorOp::DirectInsert { collection, .. }
+        | VectorOp::DirectInsertIfAbsent { collection, .. }
+        | VectorOp::DirectDelete { collection, .. }
+        | VectorOp::DirectTruncate { collection, .. }
+        | VectorOp::DirectUpdate { collection, .. } => {
             PlanRouting::Vshards(vec![collection_vshard_in_database(
                 database_id,
                 collection.as_str(),
             )])
         }
-        VectorOp::Search { .. }
+        // Never scheduled: the write-resolve orchestrator proposes it through
+        // Raft directly, on the vshard of the collection it resolved.
+        VectorOp::ResolvedDirectWrite { .. } => PlanRouting::Unroutable(
+            "resolved governed vector write: proposed directly by the write-resolve orchestrator",
+        ),
+        // Read-only: it reports what the wrapped write would do and mutates
+        // nothing.
+        VectorOp::ResolveDirectWrite(_)
+        | VectorOp::Search { .. }
         | VectorOp::MultiSearch { .. }
         | VectorOp::SetParams { .. }
         | VectorOp::DropIndex { .. }
@@ -290,7 +303,7 @@ fn graph_routing(op: &GraphOp) -> PlanRouting {
 
 fn timeseries_routing(op: &TimeseriesOp, database_id: DatabaseId) -> PlanRouting {
     match op {
-        TimeseriesOp::Ingest { collection, .. } => {
+        TimeseriesOp::Ingest { collection, .. } | TimeseriesOp::Truncate { collection, .. } => {
             PlanRouting::Vshards(vec![collection_vshard_in_database(
                 database_id,
                 collection.as_str(),
@@ -308,7 +321,8 @@ fn columnar_routing(op: &ColumnarOp, database_id: DatabaseId) -> PlanRouting {
         | ColumnarOp::Update { collection, .. }
         | ColumnarOp::Delete { collection, .. }
         | ColumnarOp::ResolvedUpdate { collection, .. }
-        | ColumnarOp::ResolvedDelete { collection, .. } => {
+        | ColumnarOp::ResolvedDelete { collection, .. }
+        | ColumnarOp::Truncate { collection, .. } => {
             PlanRouting::Vshards(vec![collection_vshard_in_database(
                 database_id,
                 collection.as_str(),
@@ -605,6 +619,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vecs"),
             field: "emb".to_owned(),
             surrogate: Surrogate::new(3),
+            pk_bytes: Vec::new(),
             vector: vec![0.5, 0.6],
             payload: vec![1, 2, 3],
             quantization: VectorQuantization::None,
@@ -612,6 +627,8 @@ mod tests {
             payload_indexes: vec![("tenant_id".to_owned(), PayloadIndexKind::Equality)],
             returning: None,
             rls_filters: Vec::new(),
+            on_conflict_updates: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
         });
         assert_eq!(vshards_of(&direct_upsert), vec![want]);
 
@@ -672,6 +689,7 @@ mod tests {
             clauses: Vec::new(),
             returning: None,
             resolved_inserts: None,
+            resolved_insert_identities: Vec::new(),
             source_rows: None,
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),

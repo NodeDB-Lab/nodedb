@@ -134,14 +134,16 @@ impl QueryContext {
     }
 
     /// Create a query context from `SharedState` without lease
-    /// integration. Used by internal sub-planners (check
-    /// constraints, type guards, ANALYZE, procedural DML, event
-    /// trigger dispatch) that run inside a pgwire handler whose
-    /// outer query already acquired leases. Re-acquiring via a
-    /// sub-planner would be redundant — the lease store's fast
-    /// path would return instantly anyway, but going through the
-    /// sub-planner without a direct `Arc<SharedState>` reference
-    /// would require threading one through every call site.
+    /// integration. Used by internal sub-planners (neutral DDL
+    /// readback queries — check constraints, type guards, ANALYZE,
+    /// COPY TO, materialized view refresh — plus procedural DML,
+    /// event trigger dispatch, and graph scatter-gather hops) that
+    /// run inside a handler whose outer query already acquired
+    /// leases. Re-acquiring via a sub-planner would be redundant —
+    /// the lease store's fast path would return instantly anyway,
+    /// but going through the sub-planner without a direct
+    /// `Arc<SharedState>` reference would require threading one
+    /// through every call site.
     pub fn for_state(state: &crate::control::state::SharedState) -> Self {
         let mut ctx = Self::with_catalog(
             Arc::clone(&state.credentials),

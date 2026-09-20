@@ -3,7 +3,7 @@
 //! Dispatch for MetaOp variants (WAL, snapshots, retention, continuous aggregates).
 
 use crate::bridge::envelope::Response;
-use nodedb_physical::physical_plan::MetaOp;
+use nodedb_physical::physical_plan::{MetaOp, SAVEPOINT_MARKER_BYTES};
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::control::calvin::CalvinExecCtx;
@@ -304,7 +304,8 @@ impl CoreLoop {
             // or rollback). `HashMap::remove` on an absent key is a no-op, so
             // this is safe even when no overlay was ever populated. The GRAPH
             // overlay is a parallel, independent structure (see
-            // `GraphTxnOverlay`) and is dropped in lockstep.
+            // `GraphTxnOverlay`) and is dropped in lockstep, as is the ARRAY
+            // overlay (`ArrayTxnOverlay`).
             //
             // Columnar engines this transaction auto-created during staging
             // (`stage_columnar_insert` -> `ensure_columnar_engine_schema`) are
@@ -322,10 +323,11 @@ impl CoreLoop {
                 self.response_ok(task)
             }
 
-            // Return a composite savepoint marker spanning BOTH overlays: the
-            // value/TTL overlay's undo-journal length followed by the parallel
-            // GRAPH overlay's, each an 8-byte LE u64 (16 bytes total). An
-            // absent overlay (no staged write of that kind yet) reports 0.
+            // Return a composite savepoint marker spanning every overlay: the
+            // value/TTL overlay's undo-journal length, then the parallel GRAPH
+            // overlay's, then the ARRAY overlay's, each an 8-byte LE u64 (24
+            // bytes total). An absent overlay (no staged write of that kind
+            // yet) reports 0.
             MetaOp::MarkSavepoint { txn_id } => {
                 // A savepoint marks an active transaction — refresh its lease.
                 self.touch_overlay(*txn_id);
@@ -339,19 +341,26 @@ impl CoreLoop {
                     .get(txn_id)
                     .map(|overlay| overlay.journal_len())
                     .unwrap_or(0) as u64;
-                let mut payload = Vec::with_capacity(16);
+                let array_marker = self
+                    .array_txn_overlays
+                    .get(txn_id)
+                    .map(|overlay| overlay.journal_len())
+                    .unwrap_or(0) as u64;
+                let mut payload = Vec::with_capacity(SAVEPOINT_MARKER_BYTES);
                 payload.extend_from_slice(&value_marker.to_le_bytes());
                 payload.extend_from_slice(&graph_marker.to_le_bytes());
+                payload.extend_from_slice(&array_marker.to_le_bytes());
                 self.response_with_payload(task, payload)
             }
 
-            // Rewind BOTH the value/TTL overlay and the GRAPH overlay to their
-            // marked journal lengths. An absent overlay is a no-op (nothing of
-            // that kind was staged).
+            // Rewind the value/TTL overlay and the GRAPH and ARRAY overlays to
+            // their marked journal lengths. An absent overlay is a no-op
+            // (nothing of that kind was staged).
             MetaOp::RollbackToSavepoint {
                 txn_id,
                 value_marker,
                 graph_marker,
+                array_marker,
             } => {
                 // Rewinding a savepoint is transaction activity — refresh lease.
                 self.touch_overlay(*txn_id);
@@ -360,6 +369,9 @@ impl CoreLoop {
                 }
                 if let Some(overlay) = self.graph_txn_overlays.get_mut(txn_id) {
                     overlay.rollback_to(*graph_marker as usize);
+                }
+                if let Some(overlay) = self.array_txn_overlays.get_mut(txn_id) {
+                    overlay.rollback_to(*array_marker as usize);
                 }
                 self.response_ok(task)
             }

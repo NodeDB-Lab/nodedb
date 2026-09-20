@@ -198,8 +198,16 @@ pub struct CoreLoop {
     /// lookups for repeated dashboard/analytics queries.
     ///
     /// Key: `(TenantId, "{collection}\0{group_by_fields}\0{agg_ops}")`.
-    /// Value: cached result rows as JSON.
-    pub(in crate::data::executor) aggregate_cache: HashMap<(DatabaseId, TenantId, String), Vec<u8>>,
+    /// Value: cached result rows as JSON, stamped with the KV write epoch the
+    /// collection was at when computed — see
+    /// `handlers::aggregate::AggregateCacheEntry`. Document/columnar writes
+    /// still evict explicitly via `invalidate_aggregate_cache_for_collection`;
+    /// KV writes are caught by the epoch stamp instead, since a KV write has
+    /// no equivalent per-write invalidation call site.
+    pub(in crate::data::executor) aggregate_cache: HashMap<
+        (DatabaseId, TenantId, String),
+        super::super::handlers::aggregate::AggregateCacheEntry,
+    >,
 
     /// Last time periodic maintenance (compaction, edge sweep) was run.
     pub(in crate::data::executor) last_maintenance: Option<std::time::Instant>,
@@ -306,6 +314,17 @@ pub struct CoreLoop {
         (DatabaseId, TenantId, String),
         crate::engine::timeseries::partition_registry::PartitionRegistry,
     >,
+
+    /// Aside partition directories of committed timeseries truncates whose
+    /// removal failed at batch finalize; the maintenance tick retries them.
+    pub(in crate::data::executor) ts_truncate_backlog: Vec<std::path::PathBuf>,
+
+    /// WAL LSN of the last truncate applied to each timeseries collection.
+    /// An ingest carrying a `wal_lsn` at or below it was written before the
+    /// truncate (a WAL catch-up redelivery) and is refused, so a row the
+    /// truncate removed can never come back through the catch-up path.
+    /// Key: (DatabaseId, TenantId, collection).
+    pub(in crate::data::executor) ts_truncate_floors: HashMap<(DatabaseId, TenantId, String), u64>,
 
     /// Continuous aggregate manager for this core. Fires on memtable flush.
     pub(in crate::data::executor) continuous_agg_mgr:
@@ -486,6 +505,13 @@ pub struct CoreLoop {
     pub(in crate::data::executor) graph_txn_overlays: HashMap<
         crate::types::TxnId,
         crate::data::executor::handlers::transaction::overlay::GraphTxnOverlay,
+    >,
+    /// Parallel to `txn_overlays`, for ARRAY writes (cell identity is a
+    /// coordinate tuple, not a surrogate -- see `ArrayTxnOverlay`). Same
+    /// lifecycle.
+    pub(in crate::data::executor) array_txn_overlays: HashMap<
+        crate::types::TxnId,
+        crate::data::executor::handlers::transaction::overlay::ArrayTxnOverlay,
     >,
     /// Columnar engines THIS txn newly created while staging; `DropTxnOverlay`
     /// drops still-empty entries (rollback) and leaves filled ones (commit).

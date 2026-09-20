@@ -56,7 +56,9 @@ impl CoreLoop {
             tid,
             collection.as_str(),
         ) {
-            Ok(()) => self.response_ok(task),
+            // Same count semantics as `execute_edge_delete`: 1 when a live
+            // edge exists to remove, 0 when it is already absent.
+            Ok(()) => self.response_affected(task, u64::from(stored.is_some())),
             Err(error) => self.response_error(task, error),
         }
     }

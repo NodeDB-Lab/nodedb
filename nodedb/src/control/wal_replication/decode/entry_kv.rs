@@ -7,18 +7,17 @@
 
 use super::super::decode_sync_engines::decode_returning;
 use super::super::types::ReplicatedWrite;
-use super::ctx::DecodeCtx;
 use super::kv;
 use super::kv::ReturningFields;
 use crate::bridge::envelope::PhysicalPlan;
 
-pub(super) fn decode_arm(
-    ctx: &DecodeCtx,
-    write: &ReplicatedWrite,
-) -> crate::Result<(PhysicalPlan, Option<u64>)> {
+pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan, Option<u64>)> {
     let mut resolved_now_ms: Option<u64> = None;
     let plan = match write {
-        ReplicatedWrite::KvTruncate { collection } => kv::truncate(collection),
+        ReplicatedWrite::KvTruncate {
+            collection,
+            restart_identity,
+        } => kv::truncate(collection, *restart_identity),
         ReplicatedWrite::KvPut {
             collection,
             key,
@@ -31,7 +30,6 @@ pub(super) fn decode_arm(
         } => {
             resolved_now_ms = *rn;
             kv::put(
-                ctx,
                 collection,
                 key,
                 value,
@@ -68,7 +66,6 @@ pub(super) fn decode_arm(
         } => {
             resolved_now_ms = *rn;
             kv::insert(
-                ctx,
                 collection,
                 key,
                 value,
@@ -92,7 +89,6 @@ pub(super) fn decode_arm(
         } => {
             resolved_now_ms = *rn;
             kv::insert_if_absent(
-                ctx,
                 collection,
                 key,
                 value,
@@ -117,7 +113,6 @@ pub(super) fn decode_arm(
         } => {
             resolved_now_ms = *rn;
             kv::insert_on_conflict_update(
-                ctx,
                 collection,
                 kv::ConflictEntry {
                     key,
@@ -143,7 +138,6 @@ pub(super) fn decode_arm(
         } => {
             resolved_now_ms = *rn;
             kv::batch_put(
-                ctx,
                 collection,
                 entries,
                 *ttl_ms,
@@ -173,28 +167,28 @@ pub(super) fn decode_arm(
             resolved_now_ms: rn,
         } => {
             resolved_now_ms = *rn;
-            kv::incr(ctx, collection, key, *delta, *ttl_ms, *surrogate)?
+            kv::incr(collection, key, *delta, *ttl_ms, *surrogate)?
         }
         ReplicatedWrite::KvIncrFloat {
             collection,
             key,
             delta,
             surrogate,
-        } => kv::incr_float(ctx, collection, key, *delta, *surrogate)?,
+        } => kv::incr_float(collection, key, *delta, *surrogate)?,
         ReplicatedWrite::KvCas {
             collection,
             key,
             expected,
             new_value,
             surrogate,
-        } => kv::cas(ctx, collection, key, expected, new_value, *surrogate)?,
+        } => kv::cas(collection, key, expected, new_value, *surrogate)?,
         ReplicatedWrite::KvGetSet {
             collection,
             key,
             new_value,
             surrogate,
             rls_filters,
-        } => kv::get_set(ctx, collection, key, new_value, *surrogate, rls_filters)?,
+        } => kv::get_set(collection, key, new_value, *surrogate, rls_filters)?,
         ReplicatedWrite::KvRegisterSortedIndex {
             collection,
             index_name,
@@ -231,7 +225,6 @@ pub(super) fn decode_arm(
             returning,
             rls_filters,
         } => kv::field_set(
-            ctx,
             collection,
             key,
             updates,
@@ -250,22 +243,19 @@ pub(super) fn decode_arm(
             amount,
             debit_surrogate,
             credit_surrogate,
-        } => kv::transfer(
-            ctx,
-            kv::TransferFields {
-                collection,
-                source_key,
-                dest_key,
-                field,
-                amount: *amount,
-                debit_surrogate: *debit_surrogate,
-                credit_surrogate: *credit_surrogate,
-            },
-        )?,
+        } => kv::transfer(kv::TransferFields {
+            collection,
+            source_key,
+            dest_key,
+            field,
+            amount: *amount,
+            debit_surrogate: *debit_surrogate,
+            credit_surrogate: *credit_surrogate,
+        })?,
         ReplicatedWrite::KvResolvedWrite {
             mutations,
             response_payload,
-        } => kv::resolved_write(ctx, mutations, response_payload)?,
+        } => kv::resolved_write(mutations, response_payload)?,
         ReplicatedWrite::KvPredicateUpdate {
             collection,
             filters,
@@ -301,7 +291,6 @@ pub(super) fn decode_arm(
             dest_key,
             surrogate,
         } => kv::transfer_item(
-            ctx,
             source_collection,
             dest_collection,
             item_key,

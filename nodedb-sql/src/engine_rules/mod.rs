@@ -15,7 +15,7 @@ pub mod timeseries;
 pub(crate) use index_lookup::try_document_index_lookup;
 pub use params::{
     AggregateParams, DeleteParams, InsertParams, MergeParams, PointGetParams, ScanParams,
-    UpdateFromParams, UpdateParams, UpsertParams,
+    TruncateParams, UpdateFromParams, UpdateParams, UpsertParams,
 };
 pub use resolve::resolve_engine_rules;
 pub use rules::EngineRules;

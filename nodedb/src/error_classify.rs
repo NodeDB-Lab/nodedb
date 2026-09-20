@@ -214,6 +214,7 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::Bridge { detail } => NodeDbError::bridge(detail),
         Error::VersionCompat { detail } => NodeDbError::cluster(detail),
         Error::Internal { detail } => NodeDbError::internal(detail),
+        Error::Shaping(e) => (**e).clone(),
         Error::RemoteTyped { code, message } => NodeDbError::remote_typed(*code, message.clone()),
         Error::DescriptorVersionAnomaly { .. } => NodeDbError::internal(e.to_string()),
         Error::CatalogIntegrityViolation { .. } => NodeDbError::internal(e.to_string()),

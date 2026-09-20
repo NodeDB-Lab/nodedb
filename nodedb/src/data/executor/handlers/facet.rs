@@ -107,7 +107,16 @@ impl CoreLoop {
             && let Ok(bytes) =
                 nodedb_types::json_to_msgpack(&serde_json::Value::Object(facet_result.clone()))
         {
-            self.aggregate_cache.insert(cache_key, bytes);
+            let kv_epoch =
+                self.kv_engine
+                    .write_epoch(task.request.database_id.as_u64(), tid, collection);
+            self.aggregate_cache.insert(
+                cache_key,
+                super::aggregate::AggregateCacheEntry {
+                    kv_epoch,
+                    payload: bytes,
+                },
+            );
         }
 
         match super::super::response_codec::encode_json_as_msgpack(&serde_json::Value::Object(

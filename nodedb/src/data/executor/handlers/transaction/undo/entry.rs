@@ -29,6 +29,50 @@ pub(in crate::data::executor) struct TimeseriesIngestUndo {
     pub reservation_bytes_before: Option<usize>,
 }
 
+/// Complete in-memory pre-image of one columnar or spatial `TRUNCATE`
+/// applied inside a transaction batch. Every row-bearing structure the
+/// truncate emptied is moved here whole, so a rollback puts back exactly
+/// what existed: every bitemporal version, every tombstone, every flushed
+/// segment, and every R-tree entry.
+pub(in crate::data::executor) struct ColumnarTruncateUndo {
+    pub collection_key: (nodedb_types::DatabaseId, TenantId, String),
+    /// The mutation engine's rows, taken by `MutationEngine::truncate`.
+    pub rows: nodedb_columnar::TruncatedRows,
+    /// `columnar_flushed_segments[key]`, when the collection had one.
+    pub flushed_segments: Option<Vec<Vec<u8>>>,
+    /// `columnar_flushed_surrogates[key]`, in lockstep with the segments.
+    pub flushed_surrogates: Option<nodedb_columnar::mutation::snapshot::FlushedSurrogateTable>,
+    /// Every per-field R-tree the collection owned.
+    pub spatial_indexes: Vec<(SpatialIndexKey, crate::engine::spatial::RTree)>,
+    /// Every reverse-map record of those R-trees.
+    pub spatial_doc_map: Vec<SpatialDocMapEntry>,
+}
+
+/// One `spatial_doc_map` record: its `(database, tenant, collection, field,
+/// entry id)` key and the document id it maps to.
+pub(in crate::data::executor) type SpatialDocMapEntry = (
+    (nodedb_types::DatabaseId, TenantId, String, String, u64),
+    String,
+);
+
+/// Complete pre-image of one timeseries `TRUNCATE` applied inside a
+/// transaction batch: the in-memory state moved out whole, and the on-disk
+/// partition directory renamed aside rather than removed, so a rollback
+/// renames it back and a commit removes it (`finalize_timeseries_truncates`).
+pub(in crate::data::executor) struct TimeseriesTruncateUndo {
+    pub collection_key: (nodedb_types::DatabaseId, TenantId, String),
+    /// `(original, moved)` when the collection had a partition directory.
+    pub moved_dir: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    pub memtable: Option<crate::engine::timeseries::columnar_memtable::ColumnarMemtable>,
+    pub memtable_mem: Option<nodedb_mem::ReservationToken>,
+    pub registry: Option<crate::engine::timeseries::partition_registry::PartitionRegistry>,
+    pub max_ingested_lsn: Option<u64>,
+    pub last_value_cache: Option<LastValueCache>,
+    pub series_catalog: Option<nodedb_types::timeseries::SeriesCatalog>,
+    /// `ts_truncate_floors[key]` before this truncate raised it.
+    pub truncate_floor: Option<u64>,
+}
+
 /// Tracks a write operation for rollback purposes.
 pub(in crate::data::executor) enum UndoEntry {
     /// Undo a PointPut by deleting the document (or restoring the old value).
@@ -307,6 +351,11 @@ pub(in crate::data::executor) enum UndoEntry {
     /// schema/dictionaries and update the last-value cache before a later
     /// sub-plan fails.
     TimeseriesIngest(TimeseriesIngestUndo),
+    /// Undo a columnar or spatial `TRUNCATE` by reinstalling its pre-image.
+    ColumnarTruncate(ColumnarTruncateUndo),
+    /// Undo a timeseries `TRUNCATE` by reinstalling its pre-image and
+    /// renaming the partition directory back.
+    TimeseriesTruncate(Box<TimeseriesTruncateUndo>),
     /// Undo a column-stats observe by restoring the pre-image captured before
     /// the read-modify-write.
     ///

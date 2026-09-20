@@ -6,6 +6,8 @@ use nodedb_types::{QualifiedCollection, Surrogate};
 
 use crate::physical_plan::document::ReturningSpec;
 
+use super::write_verb::CrdtWriteVerb;
+
 /// CRDT engine physical operations.
 #[derive(
     Debug,
@@ -224,6 +226,8 @@ pub enum CrdtOp {
         fields_json: String,
         surrogate: Surrogate,
         partial: bool,
+        /// The SQL statement that produced this write; decides the command tag.
+        verb: CrdtWriteVerb,
         /// When `Some`, return the STORED post-image of the upserted row —
         /// projected per spec. Carried across replication so a replay
         /// re-executes this write for the originating request, not just for

@@ -8,11 +8,10 @@
 //! `entry_document::decode_arm` for the trailing-arm contract.
 
 use super::super::types::ReplicatedWrite;
-use super::ctx::DecodeCtx;
 use super::graph;
 use crate::bridge::envelope::PhysicalPlan;
 
-pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Result<PhysicalPlan> {
+pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan> {
     match write {
         ReplicatedWrite::EdgePut {
             collection,
@@ -22,18 +21,15 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             properties,
             src_surrogate,
             dst_surrogate,
-        } => graph::edge_put(
-            ctx,
-            graph::EdgePutFields {
-                collection,
-                src_id,
-                label,
-                dst_id,
-                properties,
-                src_surrogate: *src_surrogate,
-                dst_surrogate: *dst_surrogate,
-            },
-        ),
+        } => Ok(graph::edge_put(graph::EdgePutFields {
+            collection,
+            src_id,
+            label,
+            dst_id,
+            properties,
+            src_surrogate: *src_surrogate,
+            dst_surrogate: *dst_surrogate,
+        })),
         ReplicatedWrite::EdgeDelete {
             collection,
             src_id,
@@ -41,23 +37,22 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             dst_id,
             src_surrogate,
             dst_surrogate,
-        } => graph::edge_delete(
-            ctx,
+        } => Ok(graph::edge_delete(
             collection,
             src_id,
             label,
             dst_id,
             *src_surrogate,
             *dst_surrogate,
-        ),
+        )),
         ReplicatedWrite::SetNodeLabels { node_id, labels } => {
             Ok(graph::set_node_labels(node_id, labels))
         }
         ReplicatedWrite::RemoveNodeLabels { node_id, labels } => {
             Ok(graph::remove_node_labels(node_id, labels))
         }
-        ReplicatedWrite::EdgePutBatch { edges } => graph::edge_put_batch(ctx, edges),
-        ReplicatedWrite::EdgeDeleteBatch { edges } => graph::edge_delete_batch(ctx, edges),
+        ReplicatedWrite::EdgePutBatch { edges } => Ok(graph::edge_put_batch(edges)),
+        ReplicatedWrite::EdgeDeleteBatch { edges } => Ok(graph::edge_delete_batch(edges)),
         _ => Err(crate::Error::Internal {
             detail: "entry_graph::decode_arm called with a non-Graph ReplicatedWrite variant \
                 (dispatch bug in decode/entry.rs's grouped Graph match arm)"

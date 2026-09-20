@@ -257,4 +257,16 @@ pub enum ColumnarOp {
         count: usize,
         system_as_of_ms: Option<i64>,
     },
+
+    /// `TRUNCATE` of a columnar or spatial collection: every row, every
+    /// bitemporal version, every flushed segment, and every R-tree entry
+    /// the collection's geometry columns produced. Reports the number of
+    /// live rows that existed.
+    Truncate {
+        collection: QualifiedCollection,
+        /// `TRUNCATE ... RESTART IDENTITY`: the Control Plane resets the
+        /// collection's sequences after the Data Plane clears the rows.
+        #[serde(default)]
+        restart_identity: bool,
+    },
 }

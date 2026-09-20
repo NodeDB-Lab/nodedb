@@ -92,7 +92,7 @@ impl KvEngine {
                 None
             };
 
-            let Some(table) = self.tables.get_mut(&tkey) else {
+            let Some(table) = self.table_mut_for_write(tkey) else {
                 continue;
             };
             // A mismatched `expire_at_ms` means the TTL was replaced after this
@@ -146,7 +146,9 @@ impl KvEngine {
         let tkey = table_key(database_id, tenant_id, collection);
         let count = self.tables.get(&tkey).map(|t| t.len()).unwrap_or(0);
 
-        // Remove the hash table entirely.
+        // Remove the hash table entirely, bumping its write epoch so a
+        // cached aggregate result computed before the truncate is a miss.
+        self.bump_write_epoch(tkey);
         self.tables.remove(&tkey);
         // Remove all indexes.
         self.indexes.remove(&tkey);

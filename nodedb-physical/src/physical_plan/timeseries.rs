@@ -105,4 +105,15 @@ pub enum TimeseriesOp {
     /// into stamped ILP lines (memtable schema is Data-Plane-only, so
     /// normalization must happen here) and decides the policy without writing.
     ResolveIngest(Box<TimeseriesOp>),
+
+    /// `TRUNCATE` of a timeseries collection: the memtable, every on-disk
+    /// partition, the series catalog, and the last-value cache. Reports the
+    /// number of rows that existed across memtable and partitions.
+    Truncate {
+        collection: QualifiedCollection,
+        /// `TRUNCATE ... RESTART IDENTITY`: the Control Plane resets the
+        /// collection's sequences after the Data Plane clears the rows.
+        #[serde(default)]
+        restart_identity: bool,
+    },
 }

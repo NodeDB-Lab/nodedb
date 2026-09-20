@@ -66,6 +66,11 @@ pub struct QueryResult {
     pub rows: Vec<Vec<Value>>,
     /// Number of rows affected (for INSERT/UPDATE/DELETE).
     pub rows_affected: u64,
+    /// The statement's command verb (`INSERT`, `UPDATE`, `DELETE`, `UPSERT`,
+    /// `MERGE`, `TRUNCATE`, ...). `None` when the statement produced no DML
+    /// outcome.
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 impl QueryResult {
@@ -75,6 +80,7 @@ impl QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
             rows_affected: 0,
+            command: None,
         }
     }
 
@@ -167,6 +173,7 @@ mod tests {
             columns: vec!["name".into(), "age".into()],
             rows: vec![vec![Value::String("Alice".into()), Value::Integer(30)]],
             rows_affected: 0,
+            command: None,
         };
         let row = qr.row_as_map(0).unwrap();
         assert_eq!(row["name"].as_str(), Some("Alice"));

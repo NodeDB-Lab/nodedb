@@ -109,6 +109,14 @@ impl EngineRules for SpatialRules {
         }])
     }
 
+    fn plan_truncate(&self, p: TruncateParams) -> Result<Vec<SqlPlan>> {
+        Ok(vec![SqlPlan::Truncate {
+            collection: p.collection,
+            engine: EngineType::Spatial,
+            restart_identity: p.restart_identity,
+        }])
+    }
+
     fn plan_aggregate(&self, p: AggregateParams) -> Result<SqlPlan> {
         let base_scan = SqlPlan::Scan {
             collection: p.collection,

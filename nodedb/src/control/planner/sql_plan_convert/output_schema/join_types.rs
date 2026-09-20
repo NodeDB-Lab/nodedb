@@ -131,6 +131,7 @@ fn collect_sides(plan: &SqlPlan, out: &mut Vec<JoinSide>) {
         | SqlPlan::UpdateFrom { .. }
         | SqlPlan::Delete { .. }
         | SqlPlan::Truncate { .. }
+        | SqlPlan::VectorPrimaryTruncate { .. }
         | SqlPlan::Aggregate { .. }
         | SqlPlan::TimeseriesIngest { .. }
         | SqlPlan::Union { .. }
@@ -154,6 +155,8 @@ fn collect_sides(plan: &SqlPlan, out: &mut Vec<JoinSide>) {
         | SqlPlan::LateralTopK { .. }
         | SqlPlan::LateralLoop { .. }
         | SqlPlan::VectorPrimaryInsert { .. }
+        | SqlPlan::VectorPrimaryDelete { .. }
+        | SqlPlan::VectorPrimaryUpdate { .. }
         | SqlPlan::CreateIndex { .. }
         | SqlPlan::DropIndex { .. } => {}
     }

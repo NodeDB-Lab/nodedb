@@ -3,7 +3,7 @@
 //! SQL planning: converts SQL text into physical task lists, and selects the
 //! read consistency a planned task set requires.
 //!
-//! Calvin batch response shaping lives in `calvin_response.rs`.
+//! Calvin batch response shaping lives in `response_shape::calvin_fold`.
 
 use std::sync::Arc;
 

@@ -158,6 +158,19 @@ impl CoreLoop {
             }
         }
 
+        // Aside partition directories a committed timeseries truncate could
+        // not remove at finalize: retry on every maintenance call.
+        if !self.ts_truncate_backlog.is_empty() {
+            let pending = self.retry_ts_truncate_backlog();
+            if pending > 0 {
+                tracing::warn!(
+                    core = self.core_id,
+                    pending,
+                    "timeseries truncate backlog still pending after retry"
+                );
+            }
+        }
+
         // KV expiry wheel tick: process expired keys on every maintenance call.
         // Bounded by the per-tick reap budget internally — safe for the reactor.
         // Expired keys are emitted as structured log events for CDC visibility.

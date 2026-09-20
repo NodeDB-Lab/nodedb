@@ -10,7 +10,9 @@
 pub mod engine;
 pub mod flush;
 pub mod snapshot;
+pub mod truncate;
 pub mod write;
 
 pub use engine::{MutationEngine, MutationResult};
 pub use snapshot::{ColumnDataSnapshot, ColumnarEngineSnapshot};
+pub use truncate::TruncatedRows;

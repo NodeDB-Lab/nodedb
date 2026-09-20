@@ -37,13 +37,20 @@ pub use write_set_redo::{append_write_set_redo, mint_dispatch_local_redo, plan_p
 pub(crate) use graph_labels::encode_graph_node_label_payload;
 pub(crate) use timeseries::{
     encode_columnar_batch_payload, encode_columnar_dml_payload,
-    encode_columnar_resolved_dml_payload, encode_timeseries_batch_payload_with_format,
+    encode_columnar_resolved_dml_payload, encode_columnar_truncate_payload,
+    encode_timeseries_batch_payload_with_format,
 };
 pub(crate) use vector::{
-    VectorDirectUpsertPayload, encode_multi_vector_delete_payload, encode_multi_vector_put_payload,
+    VectorDirectDeleteRecord, VectorDirectTruncateRecord, VectorDirectUpdatePayload,
+    VectorDirectUpdateRecord, VectorDirectUpsertPayload, VectorDirectUpsertRecord,
+    VectorResolvedDirectWritePayload, VectorResolvedDirectWriteRecord,
+    encode_multi_vector_delete_payload, encode_multi_vector_put_payload,
     encode_sparse_vector_delete_payload, encode_sparse_vector_put_payload,
     encode_vector_batch_put_payload, encode_vector_delete_by_surrogate_payload,
-    encode_vector_delete_payload, encode_vector_direct_upsert_payload, encode_vector_put_payload,
+    encode_vector_delete_payload, encode_vector_direct_delete_payload,
+    encode_vector_direct_truncate_payload, encode_vector_direct_update_payload,
+    encode_vector_direct_upsert_payload, encode_vector_put_payload,
+    encode_vector_resolved_direct_write_payload,
 };
 
 pub(crate) use super::wal_dispatch_fts_spatial::{

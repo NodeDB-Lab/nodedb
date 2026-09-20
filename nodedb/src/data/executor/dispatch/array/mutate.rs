@@ -107,7 +107,23 @@ impl CoreLoop {
                 );
             }
         };
-        let n = cells.len();
+        // Report the number of cells that existed, not the number of
+        // coordinates named: a delete of an absent coordinate affects nothing.
+        let mut existed: usize = 0;
+        for cell in &cells {
+            match self.array_engine.contains_cell(array_id, &cell.coord) {
+                Ok(true) => existed += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("array delete lookup: {e}"),
+                        },
+                    );
+                }
+            }
+        }
         if let Err(e) = self.array_engine.delete_cells(array_id, cells, wal_lsn) {
             return self.response_error(
                 task,
@@ -130,7 +146,7 @@ impl CoreLoop {
         if let Some(prov) = provenance {
             self.sync_commit(prov);
         }
-        encode_count_response(self, task, "deleted", n)
+        encode_count_response(self, task, "deleted", existed)
     }
 
     pub(in crate::data::executor) fn handle_array_flush(

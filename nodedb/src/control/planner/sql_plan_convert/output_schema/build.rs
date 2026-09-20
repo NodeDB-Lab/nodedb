@@ -361,7 +361,9 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
         | SqlPlan::UpdateFrom { collection, .. }
         | SqlPlan::Delete { collection, .. }
         | SqlPlan::TimeseriesIngest { collection, .. }
-        | SqlPlan::VectorPrimaryInsert { collection, .. } => {
+        | SqlPlan::VectorPrimaryInsert { collection, .. }
+        | SqlPlan::VectorPrimaryDelete { collection, .. }
+        | SqlPlan::VectorPrimaryUpdate { collection, .. } => {
             build_returning_schema(returning, collection, catalog, database_id)
         }
         // Same rule, for the two writes that name their target `target`.
@@ -374,6 +376,7 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
         // so announcing columns for one would hold a count payload to a row
         // shape it does not have.
         SqlPlan::Truncate { .. }
+        | SqlPlan::VectorPrimaryTruncate { .. }
         | SqlPlan::CreateArray { .. }
         | SqlPlan::DropArray { .. }
         | SqlPlan::AlterArray { .. }

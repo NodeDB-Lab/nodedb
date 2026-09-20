@@ -10,10 +10,10 @@
 use super::super::decode_sync_engines::decode_returning;
 use super::super::types::ReplicatedWrite;
 use super::crdt;
-use super::ctx::DecodeCtx;
 use crate::bridge::envelope::PhysicalPlan;
+use nodedb_physical::physical_plan::CrdtOp;
 
-pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Result<PhysicalPlan> {
+pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan> {
     match write {
         ReplicatedWrite::CrdtApply {
             collection,
@@ -23,25 +23,22 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             provenance,
             constraint_version_required,
             surrogate,
-        } => crdt::apply(
-            ctx,
-            crdt::ApplyArgs {
-                collection,
-                document_id,
-                delta,
-                peer_id: *peer_id,
-                provenance_bytes: provenance,
-                constraint_version_required: *constraint_version_required,
-                expected_frontier_digest: None,
-                auth_user_id: 0,
-                auth_device_id: 0,
-                auth_seq_no: 0,
-                delta_signature: [0; 32],
-                signing_required: false,
-                authenticated: false,
-                carried_surrogate: *surrogate,
-            },
-        ),
+        } => crdt::apply(crdt::ApplyArgs {
+            collection,
+            document_id,
+            delta,
+            peer_id: *peer_id,
+            provenance_bytes: provenance,
+            constraint_version_required: *constraint_version_required,
+            expected_frontier_digest: None,
+            auth_user_id: 0,
+            auth_device_id: 0,
+            auth_seq_no: 0,
+            delta_signature: [0; 32],
+            signing_required: false,
+            authenticated: false,
+            carried_surrogate: *surrogate,
+        }),
         ReplicatedWrite::CrdtApplyFenced {
             collection,
             document_id,
@@ -51,25 +48,22 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             constraint_version_required,
             expected_frontier_digest,
             surrogate,
-        } => crdt::apply(
-            ctx,
-            crdt::ApplyArgs {
-                collection,
-                document_id,
-                delta,
-                peer_id: *peer_id,
-                provenance_bytes: provenance,
-                constraint_version_required: *constraint_version_required,
-                expected_frontier_digest: Some(*expected_frontier_digest),
-                auth_user_id: 0,
-                auth_device_id: 0,
-                auth_seq_no: 0,
-                delta_signature: [0; 32],
-                signing_required: false,
-                authenticated: false,
-                carried_surrogate: *surrogate,
-            },
-        ),
+        } => crdt::apply(crdt::ApplyArgs {
+            collection,
+            document_id,
+            delta,
+            peer_id: *peer_id,
+            provenance_bytes: provenance,
+            constraint_version_required: *constraint_version_required,
+            expected_frontier_digest: Some(*expected_frontier_digest),
+            auth_user_id: 0,
+            auth_device_id: 0,
+            auth_seq_no: 0,
+            delta_signature: [0; 32],
+            signing_required: false,
+            authenticated: false,
+            carried_surrogate: *surrogate,
+        }),
         ReplicatedWrite::CrdtApplyAuthenticated {
             collection,
             document_id,
@@ -84,25 +78,22 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             delta_signature,
             signing_required,
             surrogate,
-        } => crdt::apply(
-            ctx,
-            crdt::ApplyArgs {
-                collection,
-                document_id,
-                delta,
-                peer_id: *peer_id,
-                provenance_bytes: provenance,
-                constraint_version_required: *constraint_version_required,
-                expected_frontier_digest: *expected_frontier_digest,
-                auth_user_id: *auth_user_id,
-                auth_device_id: *auth_device_id,
-                auth_seq_no: *auth_seq_no,
-                delta_signature: *delta_signature,
-                signing_required: *signing_required,
-                authenticated: true,
-                carried_surrogate: *surrogate,
-            },
-        ),
+        } => crdt::apply(crdt::ApplyArgs {
+            collection,
+            document_id,
+            delta,
+            peer_id: *peer_id,
+            provenance_bytes: provenance,
+            constraint_version_required: *constraint_version_required,
+            expected_frontier_digest: *expected_frontier_digest,
+            auth_user_id: *auth_user_id,
+            auth_device_id: *auth_device_id,
+            auth_seq_no: *auth_seq_no,
+            delta_signature: *delta_signature,
+            signing_required: *signing_required,
+            authenticated: true,
+            carried_surrogate: *surrogate,
+        }),
         ReplicatedWrite::CrdtImportCollection {
             tenant_id,
             collection,
@@ -116,7 +107,6 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             fields_json,
             surrogate,
         } => crdt::list_insert(
-            ctx,
             collection,
             document_id,
             list_path,
@@ -130,7 +120,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             list_path,
             index,
             surrogate,
-        } => crdt::list_delete(ctx, collection, document_id, list_path, *index, *surrogate),
+        } => crdt::list_delete(collection, document_id, list_path, *index, *surrogate),
         ReplicatedWrite::CrdtListMove {
             collection,
             document_id,
@@ -139,7 +129,6 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             to_index,
             surrogate,
         } => crdt::list_move(
-            ctx,
             collection,
             document_id,
             list_path,
@@ -153,17 +142,24 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             surrogate,
             fields_json,
             partial,
+            verb,
             returning,
             rls_filters,
-        } => Ok(crdt::doc_upsert(
-            collection,
-            document_id,
-            *surrogate,
-            fields_json,
-            *partial,
-            decode_returning(returning)?,
-            rls_filters,
-        )),
+            // The row's own top-level `surrogate` is carried across the wire and
+            // rebuilt via `Surrogate::new` — the live dispatch handler uses it to
+            // gate and key the sparse-store materialization. `returning` rides on
+            // the record so a replay re-executes this write for the originating
+            // request, not only for the follower's own state.
+        } => Ok(PhysicalPlan::Crdt(CrdtOp::DocUpsert {
+            collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+            document_id: document_id.clone(),
+            fields_json: fields_json.clone(),
+            surrogate: nodedb_types::Surrogate::new(*surrogate),
+            partial: *partial,
+            verb: *verb,
+            returning: decode_returning(returning)?,
+            rls_filters: rls_filters.clone(),
+        })),
         ReplicatedWrite::CrdtDocDelete {
             collection,
             document_id,

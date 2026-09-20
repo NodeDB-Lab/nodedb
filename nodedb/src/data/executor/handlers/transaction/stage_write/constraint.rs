@@ -7,7 +7,8 @@
 //! the current transaction (OVERLAY). A prior in-transaction tombstone on a
 //! primary key makes it "absent" (so a re-insert after an in-transaction
 //! delete succeeds); a prior in-transaction put under a different surrogate
-//! sharing a unique value is a conflict.
+//! sharing a unique value is a conflict. A staged TRUNCATE hides every base
+//! row, so only the overlay is consulted afterwards.
 
 use super::context::StageCtx;
 use crate::data::executor::core_loop::CoreLoop;
@@ -20,13 +21,22 @@ use crate::engine::document::store::{CollectionConfig, StorageKey, extract_index
 pub(super) enum OverlayPk {
     /// A put is staged for this key: present regardless of base.
     Present,
-    /// A tombstone is staged for this key: absent regardless of base.
+    /// A tombstone is staged for this key, or the collection is truncated in
+    /// this transaction: absent regardless of base.
     Absent,
     /// Nothing staged for this key: fall back to base.
     Unstaged,
 }
 
 impl CoreLoop {
+    /// Whether `ctx.collection`'s base rows are visible inside `ctx.txn_id`.
+    /// `false` after a staged TRUNCATE of the collection.
+    pub(super) fn stage_base_visible(&self, ctx: &StageCtx<'_>) -> bool {
+        self.txn_overlays
+            .get(&ctx.txn_id)
+            .is_none_or(|overlay| overlay.base_visible(&ctx.coll_key))
+    }
+
     /// True when the primary key is present under BASE ∪ OVERLAY semantics.
     pub(super) fn stage_pk_present(
         &self,
@@ -81,17 +91,20 @@ impl CoreLoop {
         // BASE: another durable row already owning one of the unique values.
         // The row's own index entries are keyed by its storage key. The
         // self-match exclusion compares that key, not the plan's document id.
-        let storage_key = StorageKey::for_surrogate(ctx.surrogate);
-        check_unique_constraints(UniqueCheck {
-            sparse: &self.sparse,
-            database_id: ctx.database_id,
-            tid: ctx.tid,
-            collection,
-            doc: incoming_doc,
-            document_id: &storage_key,
-            paths: &config.index_paths,
-            bitemporal: config.bitemporal,
-        })?;
+        // Skipped after a staged TRUNCATE: no base row survives COMMIT.
+        if self.stage_base_visible(ctx) {
+            let storage_key = StorageKey::for_surrogate(ctx.surrogate);
+            check_unique_constraints(UniqueCheck {
+                sparse: &self.sparse,
+                database_id: ctx.database_id,
+                tid: ctx.tid,
+                collection,
+                doc: incoming_doc,
+                document_id: &storage_key,
+                paths: &config.index_paths,
+                bitemporal: config.bitemporal,
+            })?;
+        }
 
         // OVERLAY: a staged put under a different surrogate sharing a value.
         for path in &config.index_paths {

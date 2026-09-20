@@ -13,12 +13,16 @@ use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::manager::WalManager;
 
 use super::encode::{
-    VectorDirectUpsertPayload, encode_multi_vector_delete_payload, encode_multi_vector_put_payload,
+    VectorDirectUpdatePayload, VectorDirectUpsertPayload, VectorResolvedDirectWritePayload,
+    encode_multi_vector_delete_payload, encode_multi_vector_put_payload,
     encode_sparse_vector_delete_payload, encode_sparse_vector_put_payload,
     encode_vector_batch_put_payload, encode_vector_delete_by_surrogate_payload,
-    encode_vector_delete_payload, encode_vector_direct_upsert_payload,
-    encode_vector_index_drop_payload, encode_vector_put_payload,
+    encode_vector_delete_payload, encode_vector_direct_delete_payload,
+    encode_vector_direct_truncate_payload, encode_vector_direct_update_payload,
+    encode_vector_direct_upsert_payload, encode_vector_index_drop_payload,
+    encode_vector_put_payload, encode_vector_resolved_direct_write_payload,
 };
+use nodedb_physical::physical_plan::VectorDirectWriteIntent;
 
 /// Operation fields for a vector put WAL record.
 ///
@@ -185,18 +189,50 @@ pub(crate) fn wal_append_vector_op(
             let entry = encode_vector_index_drop_payload(collection.as_str(), field_name)?;
             Some(wal.append_vector_index_drop(tenant_id, vshard_id, database_id, &entry)?)
         }
+        // A projection is a client-session concern and must not enter the
+        // durable record: replay re-applies the write, it does not answer the
+        // statement that asked for rows. The write check was decided against
+        // a live identity; replay admits what the leader committed.
         VectorOp::DirectUpsert {
             collection,
             field,
             surrogate,
+            pk_bytes,
             vector,
             payload,
             quantization,
             storage_dtype,
             payload_indexes,
-            // A projection is a client-session concern and must not enter the
-            // durable record: replay re-applies the write, it does not answer
-            // the statement that asked for rows.
+            returning: _,
+            rls_filters: _,
+            on_conflict_updates,
+            rls_write_check: _,
+        } => {
+            let entry = encode_vector_direct_upsert_payload(VectorDirectUpsertPayload {
+                collection: collection.as_str(),
+                field,
+                surrogate: *surrogate,
+                pk_bytes,
+                vector,
+                payload,
+                quantization: *quantization,
+                storage_dtype: *storage_dtype,
+                payload_indexes,
+                intent: VectorDirectWriteIntent::Upsert,
+                on_conflict_updates,
+            })?;
+            Some(wal.append_vector_direct_upsert(tenant_id, vshard_id, database_id, &entry)?)
+        }
+        VectorOp::DirectInsert {
+            collection,
+            field,
+            surrogate,
+            pk_bytes,
+            vector,
+            payload,
+            quantization,
+            storage_dtype,
+            payload_indexes,
             returning: _,
             rls_filters: _,
         } => {
@@ -204,14 +240,123 @@ pub(crate) fn wal_append_vector_op(
                 collection: collection.as_str(),
                 field,
                 surrogate: *surrogate,
+                pk_bytes,
                 vector,
                 payload,
                 quantization: *quantization,
                 storage_dtype: *storage_dtype,
                 payload_indexes,
+                intent: VectorDirectWriteIntent::Insert,
+                on_conflict_updates: &[],
             })?;
             Some(wal.append_vector_direct_upsert(tenant_id, vshard_id, database_id, &entry)?)
         }
+        VectorOp::DirectInsertIfAbsent {
+            collection,
+            field,
+            surrogate,
+            pk_bytes,
+            vector,
+            payload,
+            quantization,
+            storage_dtype,
+            payload_indexes,
+            returning: _,
+            rls_filters: _,
+        } => {
+            let entry = encode_vector_direct_upsert_payload(VectorDirectUpsertPayload {
+                collection: collection.as_str(),
+                field,
+                surrogate: *surrogate,
+                pk_bytes,
+                vector,
+                payload,
+                quantization: *quantization,
+                storage_dtype: *storage_dtype,
+                payload_indexes,
+                intent: VectorDirectWriteIntent::InsertIfAbsent,
+                on_conflict_updates: &[],
+            })?;
+            Some(wal.append_vector_direct_upsert(tenant_id, vshard_id, database_id, &entry)?)
+        }
+        VectorOp::DirectDelete {
+            collection,
+            field,
+            targets,
+            returning: _,
+            rls_filters: _,
+            rls_write_check: _,
+        } => {
+            let entry = encode_vector_direct_delete_payload(collection.as_str(), field, targets)?;
+            Some(wal.append_vector_direct_delete(tenant_id, vshard_id, database_id, &entry)?)
+        }
+        // `restart_identity` is applied by the Control Plane after commit,
+        // against the sequence store; the Data-Plane record carries only what
+        // replay re-applies.
+        VectorOp::DirectTruncate {
+            collection,
+            field,
+            restart_identity: _,
+        } => {
+            let entry = encode_vector_direct_truncate_payload(collection.as_str(), field)?;
+            Some(wal.append_vector_direct_truncate(tenant_id, vshard_id, database_id, &entry)?)
+        }
+        VectorOp::DirectUpdate {
+            collection,
+            field,
+            targets,
+            new_vector,
+            payload_patch,
+            quantization,
+            storage_dtype,
+            payload_indexes,
+            returning: _,
+            rls_filters: _,
+            rls_write_check: _,
+        } => {
+            let entry = encode_vector_direct_update_payload(VectorDirectUpdatePayload {
+                collection: collection.as_str(),
+                field,
+                targets,
+                new_vector: new_vector.as_deref(),
+                payload_patch,
+                quantization: *quantization,
+                storage_dtype: *storage_dtype,
+                payload_indexes,
+            })?;
+            Some(wal.append_vector_direct_update(tenant_id, vshard_id, database_id, &entry)?)
+        }
+        // The reply and the verdict are per request; replay re-applies the
+        // rows, it answers nobody and re-decides nothing.
+        VectorOp::ResolvedDirectWrite {
+            collection,
+            field,
+            quantization,
+            storage_dtype,
+            payload_indexes,
+            mutations,
+            response_payload: _,
+            rls_write_check: _,
+        } => {
+            let entry =
+                encode_vector_resolved_direct_write_payload(VectorResolvedDirectWritePayload {
+                    collection: collection.as_str(),
+                    field,
+                    quantization: *quantization,
+                    storage_dtype: *storage_dtype,
+                    payload_indexes,
+                    mutations,
+                })?;
+            Some(wal.append_vector_resolved_direct_write(
+                tenant_id,
+                vshard_id,
+                database_id,
+                &entry,
+            )?)
+        }
+        // Read-only: it reports what the wrapped write would do and mutates
+        // nothing.
+        VectorOp::ResolveDirectWrite(_) => None,
         VectorOp::SparseInsert {
             collection,
             field_name,

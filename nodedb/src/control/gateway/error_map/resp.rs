@@ -25,6 +25,7 @@ impl GatewayErrorMap {
                 format!("ERR {detail}")
             }
             Error::RejectedConstraint { detail, .. } => format!("CONSTRAINT {detail}"),
+            Error::TypeMismatch { detail, .. } => format!("WRONGTYPE {detail}"),
             Error::RetryableSchemaChanged { descriptor } => {
                 format!("ERR schema changed ({descriptor}); please retry")
             }
@@ -77,6 +78,17 @@ mod tests {
     fn resp_internal() {
         let msg = GatewayErrorMap::to_resp(&internal());
         assert!(msg.starts_with("ERR"));
+    }
+
+    #[test]
+    fn resp_type_mismatch_is_wrongtype() {
+        let err = Error::TypeMismatch {
+            collection: "c".into(),
+            key: "k".into(),
+            detail: "key holds a bare value, not a hash".into(),
+        };
+        let msg = GatewayErrorMap::to_resp(&err);
+        assert!(msg.starts_with("WRONGTYPE "), "{msg}");
     }
 
     #[test]

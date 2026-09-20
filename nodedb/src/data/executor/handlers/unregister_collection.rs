@@ -333,6 +333,7 @@ impl CoreLoop {
             self.ts_max_ingested_lsn.remove(&key);
             self.ts_last_value_caches.remove(&key);
             self.ts_series_catalogs.remove(&key);
+            self.ts_truncate_floors.remove(&key);
             r
         };
 
@@ -526,14 +527,25 @@ mod tests {
 
         core.aggregate_cache.insert(
             (database, tenant, "products\0count(*)".to_string()),
-            vec![1],
+            crate::data::executor::handlers::aggregate::AggregateCacheEntry {
+                kv_epoch: 0,
+                payload: vec![1],
+            },
         );
         core.aggregate_cache.insert(
             (database, tenant, "products\0facet:brand".to_string()),
-            vec![2],
+            crate::data::executor::handlers::aggregate::AggregateCacheEntry {
+                kv_epoch: 0,
+                payload: vec![2],
+            },
         );
-        core.aggregate_cache
-            .insert((database, tenant, "other\0count(*)".to_string()), vec![3]);
+        core.aggregate_cache.insert(
+            (database, tenant, "other\0count(*)".to_string()),
+            crate::data::executor::handlers::aggregate::AggregateCacheEntry {
+                kv_epoch: 0,
+                payload: vec![3],
+            },
+        );
 
         core.clear_collection_all_engines(database, tenant, "products", false, true)
             .expect("full collection clear");

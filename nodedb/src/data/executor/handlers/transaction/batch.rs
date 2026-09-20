@@ -161,6 +161,7 @@ impl CoreLoop {
         // publish its write floor/timer/checkpoint/reservation state or start
         // best-effort post-commit maintenance.
         self.finalize_deferred_timeseries_ingests(task, &undo_log);
+        self.finalize_timeseries_truncates(&undo_log);
 
         debug!(
             core = self.core_id,

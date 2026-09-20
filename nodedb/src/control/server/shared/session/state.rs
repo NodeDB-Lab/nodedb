@@ -21,15 +21,27 @@ use crate::event::cdc::CdcOffset;
 use crate::types::{DatabaseId, Lsn, TenantId, TxnId, VShardId};
 use nodedb_physical::physical_task::PhysicalTask;
 
+/// Per-vShard Data-Plane staging-overlay undo-journal markers captured by
+/// `MetaOp::MarkSavepoint`: one journal length per overlay kind.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OverlayMarkers {
+    /// Value/TTL overlay (`TxnOverlay`) journal length.
+    pub value: usize,
+    /// GRAPH overlay (`GraphTxnOverlay`) journal length.
+    pub graph: usize,
+    /// ARRAY overlay (`ArrayTxnOverlay`) journal length.
+    pub array: usize,
+}
+
 /// One entry on the transaction's savepoint stack.
 ///
 /// A savepoint captures the write-buffer and deferred-offset lengths AND, for
 /// each vShard that had staged writes when the savepoint was established, that
-/// vShard's value/TTL and
-/// graph overlay undo-journal markers. On ROLLBACK TO, the buffer is truncated
-/// to `buffer_len` and every currently-staged vShard's overlays are rewound —
-/// to its saved marker if present, else to `(0, 0)` (a vShard first staged
-/// AFTER the savepoint must have ALL of its staged writes rewound).
+/// vShard's value/TTL, graph, and array overlay undo-journal markers. On
+/// ROLLBACK TO, the buffer is truncated to `buffer_len` and every
+/// currently-staged vShard's overlays are rewound — to its saved marker if
+/// present, else to all-zero markers (a vShard first staged AFTER the
+/// savepoint must have ALL of its staged writes rewound).
 pub struct SavepointEntry {
     /// User-visible savepoint name.
     pub name: String,
@@ -41,8 +53,8 @@ pub struct SavepointEntry {
     pub pending_inference_len: usize,
     /// Task-local DDL buffer length captured when the savepoint was established.
     pub ddl_buffer_len: usize,
-    /// Per-vShard `(value_marker, graph_marker)` overlay journal markers.
-    pub markers: BTreeMap<VShardId, (usize, usize)>,
+    /// Per-vShard overlay journal markers.
+    pub markers: BTreeMap<VShardId, OverlayMarkers>,
 }
 
 /// PostgreSQL transaction state for ReadyForQuery status byte.
@@ -176,8 +188,9 @@ pub struct ConnSession {
     /// read reserves, and reset at transaction boundaries.
     pub tx_reservation_owner: Option<nodedb_cluster::calvin::types::TxnIdWire>,
     /// Savepoint stack. On ROLLBACK TO, truncate tx_buffer to the saved length
-    /// AND rewind each staged vShard's two Data-Plane staging overlays (value/TTL
-    /// and GRAPH) to their saved journal markers. See [`SavepointEntry`].
+    /// AND rewind each staged vShard's three Data-Plane staging overlays
+    /// (value/TTL, GRAPH, and ARRAY) to their saved journal markers. See
+    /// [`SavepointEntry`].
     pub savepoints: Vec<SavepointEntry>,
     /// Pending consumer offset commits deferred until COMMIT. Flushed
     /// atomically on COMMIT and discarded on ROLLBACK.

@@ -9,8 +9,7 @@
 //!
 //! 1. Two `document_schemaless` collections, each created `WITH
 //!    (bitemporal=true)`, are placed on DIFFERENT vShards
-//!    (`distinct_vshard_bitemporal_collections`, same technique as
-//!    `calvin_multi_shard_redo_restart.rs`).
+//!    (`vshard_names::distinct_vshard_collections`).
 //! 2. `BEGIN; INSERT INTO <a>; INSERT INTO <b>; COMMIT` is sent as ONE
 //!    `simple_query` call, so both writes are buffered inside the block and,
 //!    on COMMIT, `classify_dispatch` sees writes on two vShards → MultiShard
@@ -29,9 +28,9 @@ use crate::common;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use nodedb::types::{DatabaseId, VShardId};
 use tokio_postgres::SimpleQueryMessage;
 
+use super::vshard_names::distinct_vshard_collections;
 use common::cluster_harness::{TestClusterNode, read_once_a_leader_exists, wait_for};
 
 /// Observed sequencer-group leader id from a node's local Raft status, or `0`
@@ -56,26 +55,6 @@ fn admitted_total(node: &TestClusterNode) -> u64 {
         .get()
         .map(|m| m.admitted_total.load(Ordering::Relaxed))
         .unwrap_or(0)
-}
-
-/// A `(coll_a, coll_b)` pair of bitemporal collection names whose vShard ids
-/// differ, so a transaction writing to both is genuinely multi-shard.
-/// Deterministic: `VShardId::from_collection_in_database` is a pure function
-/// of the database id + collection name bytes. Same technique as
-/// `calvin_multi_shard_redo_restart.rs::distinct_vshard_collections`.
-fn distinct_vshard_bitemporal_collections() -> (String, String) {
-    let a_name = "bt_a".to_string();
-    let va = VShardId::from_collection_in_database(DatabaseId::DEFAULT, &a_name).as_u32();
-    for i in 0u32..512 {
-        let b_name = format!("bt_b_{i}");
-        if VShardId::from_collection_in_database(DatabaseId::DEFAULT, &b_name).as_u32() != va {
-            return (a_name, b_name);
-        }
-    }
-    panic!(
-        "could not find a second bitemporal collection name on a distinct vShard \
-         from the first in 512 tries"
-    );
 }
 
 /// Current `value` for `id` in a bitemporal document collection, or `None` if
@@ -156,7 +135,7 @@ async fn calvin_multi_shard_bitemporal_commit_survives_wal_only_restart() {
     )
     .await;
 
-    let (coll_a, coll_b) = distinct_vshard_bitemporal_collections();
+    let (coll_a, coll_b) = distinct_vshard_collections("bt_a", "bt_b");
 
     node.client
         .simple_query(&format!(

@@ -7,14 +7,15 @@ use std::collections::BTreeMap;
 use crate::types::VShardId;
 
 use super::super::connection::SessionId;
-use super::super::state::SavepointEntry;
+use super::super::state::{OverlayMarkers, SavepointEntry};
 use super::super::store::SessionStore;
 
 /// What a ROLLBACK TO must rewind: per-vShard Data-Plane overlay journal
 /// markers, and the task-local DDL buffer length.
 pub struct SavepointRewind {
-    /// A vShard first staged AFTER the savepoint is absent; rewind it to `(0, 0)`.
-    pub markers: BTreeMap<VShardId, (usize, usize)>,
+    /// A vShard first staged AFTER the savepoint is absent; rewind it to
+    /// all-zero markers.
+    pub markers: BTreeMap<VShardId, OverlayMarkers>,
     pub ddl_buffer_len: usize,
 }
 
@@ -22,7 +23,7 @@ impl SessionStore {
     /// Create a savepoint at the current tx_buffer position.
     ///
     /// `markers` maps each vShard that had staged writes at savepoint time to its
-    /// Data-Plane value/TTL and GRAPH overlay undo-journal lengths (captured via
+    /// Data-Plane value/TTL, GRAPH, and ARRAY overlay undo-journal lengths (captured via
     /// `MetaOp::MarkSavepoint`), so a later ROLLBACK TO can rewind every staging
     /// overlay to exactly this point. `ddl_buffer_len` is the task-local DDL
     /// buffer's length at savepoint time — `SessionStore` cannot read the
@@ -32,7 +33,7 @@ impl SessionStore {
         &self,
         addr: impl Into<SessionId>,
         name: String,
-        markers: BTreeMap<VShardId, (usize, usize)>,
+        markers: BTreeMap<VShardId, OverlayMarkers>,
         ddl_buffer_len: usize,
     ) {
         self.write_session(addr, |session| {

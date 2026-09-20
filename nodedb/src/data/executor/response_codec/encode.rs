@@ -102,12 +102,36 @@ pub(in crate::data::executor) fn encode_value_vec(
 }
 
 /// Encode a simple `{"key": count}` response (for insert confirmations).
-pub(in crate::data::executor) fn encode_count(key: &str, count: usize) -> crate::Result<Vec<u8>> {
+///
+/// Crate-visible: the Control-Plane cluster array coordinator emits the same
+/// count map a local Data-Plane array write does, so one decoder serves both.
+pub(crate) fn encode_count(key: &str, count: usize) -> crate::Result<Vec<u8>> {
     let mut map = std::collections::BTreeMap::new();
     map.insert(key, count);
     zerompk::to_msgpack_vec(&map).map_err(|e| crate::Error::Codec {
         detail: format!("count response serialization: {e}"),
     })
+}
+
+/// Encode `{"affected": n}` — the count every DML handler reports through
+/// `CoreLoop::response_affected`. Exposed so a resolve pass can decide the
+/// same reply bytes without holding a `Response`.
+pub(crate) fn encode_affected(affected: u64) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(16);
+    nodedb_query::msgpack_scan::write_map_header(&mut payload, 1);
+    nodedb_query::msgpack_scan::write_kv_i64(&mut payload, "affected", affected as i64);
+    payload
+}
+
+/// Encode `{"affected": n, "op": op}` — the count of a write whose verb the
+/// handler decides at apply time (`"insert"` or `"update"`). The Control Plane
+/// reads `op` via `extract_kv_conflict_op` to render `INSERT 0 n` / `UPDATE n`.
+pub(crate) fn encode_affected_with_op(affected: u64, op: &str) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(32);
+    nodedb_query::msgpack_scan::write_map_header(&mut payload, 2);
+    nodedb_query::msgpack_scan::write_kv_i64(&mut payload, "affected", affected as i64);
+    nodedb_query::msgpack_scan::write_kv_str(&mut payload, "op", op);
+    payload
 }
 
 /// Deserialize a Data-Plane response payload into `T`.

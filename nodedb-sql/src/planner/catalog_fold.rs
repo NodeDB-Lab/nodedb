@@ -175,7 +175,9 @@ fn walk_plan(
 
         mut plan @ (SqlPlan::DocumentIndexLookup { .. }
         | SqlPlan::Update { .. }
-        | SqlPlan::Delete { .. }) => {
+        | SqlPlan::Delete { .. }
+        | SqlPlan::VectorPrimaryUpdate { .. }
+        | SqlPlan::VectorPrimaryDelete { .. }) => {
             match &mut plan {
                 SqlPlan::DocumentIndexLookup {
                     filters,
@@ -191,12 +193,17 @@ fn walk_plan(
                     fold_sort_keys(sort_keys, catalog, database_id, tenant_id);
                     fold_windows(window_functions, catalog, database_id, tenant_id);
                 }
-                SqlPlan::Delete { filters, .. } => {
+                SqlPlan::Delete { filters, .. } | SqlPlan::VectorPrimaryDelete { filters, .. } => {
                     for filter in filters {
                         fold_filter(filter, catalog, database_id, tenant_id);
                     }
                 }
                 SqlPlan::Update {
+                    assignments,
+                    filters,
+                    ..
+                }
+                | SqlPlan::VectorPrimaryUpdate {
                     assignments,
                     filters,
                     ..

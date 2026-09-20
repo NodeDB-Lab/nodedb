@@ -214,6 +214,7 @@ mod tests {
                 columns: vec!["x".into()],
                 rows: vec![vec![Value::Integer(42)]],
                 rows_affected: 0,
+                command: None,
             },
             100,
         );

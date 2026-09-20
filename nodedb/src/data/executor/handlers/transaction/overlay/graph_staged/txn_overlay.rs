@@ -22,9 +22,9 @@
 //! and node-label staging live in the sibling `edges` and `labels` modules;
 //! memory accounting lives in `memory`.
 
-use std::cell::Cell;
 use std::collections::HashMap;
 
+use super::super::lease::{LeaseStamp, SystemFromLatch};
 use super::types::{EdgeKey, GraphCollKey, GraphCollectionOverlay, NodeLabelDelta};
 
 /// One graph-overlay slot's state captured immediately before a staged edge
@@ -78,10 +78,10 @@ pub struct GraphTxnOverlay {
     /// read alongside it by the lease reaper (a refresh on EITHER overlay keeps
     /// the transaction alive). `Cell` for the same single-threaded `!Send`
     /// interior-mutability reason.
-    last_touch_ord: Cell<i64>,
+    last_touch: LeaseStamp,
     /// Frozen system-time ordinal used by both live transaction apply and WAL
     /// redo. Separate from lease liveness so refreshes cannot change history.
-    resolved_system_from_ord: Cell<i64>,
+    resolved_system_from: SystemFromLatch,
 }
 
 impl GraphTxnOverlay {
@@ -92,29 +92,22 @@ impl GraphTxnOverlay {
     /// Refresh the graph overlay's lease stamp to `ord`. See
     /// `super::super::staged::TxnOverlay::touch`.
     pub fn touch(&self, ord: i64) {
-        self.last_touch_ord.set(ord);
+        self.last_touch.touch(ord);
     }
 
     /// The graph overlay's last lease stamp (0 if never touched).
     pub fn last_touch(&self) -> i64 {
-        self.last_touch_ord.get()
+        self.last_touch.last_touch()
     }
 
     /// Freeze the graph transaction's system-time ordinal on first resolve.
     /// Retries return the same value byte-for-byte.
     pub fn freeze_system_from(&self, candidate: i64) -> i64 {
-        let frozen = self.resolved_system_from_ord.get();
-        if frozen != 0 {
-            frozen
-        } else {
-            self.resolved_system_from_ord.set(candidate);
-            candidate
-        }
+        self.resolved_system_from.freeze(candidate)
     }
 
     pub fn resolved_system_from(&self) -> Option<i64> {
-        let value = self.resolved_system_from_ord.get();
-        (value != 0).then_some(value)
+        self.resolved_system_from.resolved()
     }
 
     /// Record an edge identity's prior state across BOTH edge sets before a

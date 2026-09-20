@@ -7,10 +7,13 @@
 //! TOCTOU-safe round trip: (0) ship the source rows (scanned on its own
 //! core, since it may differ from the target's) into `source_rows`; (1)
 //! resolve — the Data Plane classifies the merge read-only and returns
-//! NOT-MATCHED rows; (2) assign a fresh registered surrogate per insert row;
-//! (3) apply — the Data Plane re-derives the classification, verifies the
-//! insert-key set still matches (`OllpRetryRequired` without writing on
-//! drift), and applies every arm in one transaction.
+//! NOT-MATCHED rows; (2) assign a fresh registered surrogate per insert row
+//! and decide the target's write policy over every resolved arm; (3) apply —
+//! the resolved plan lands on the target vShard's owner and every replica
+//! through `orchestrated_write`, where the Data Plane re-derives the
+//! classification, verifies the insert-key set still matches
+//! (`OllpRetryRequired` without writing on drift), and applies every arm in
+//! one transaction.
 //!
 //! Resolve and apply are separate snapshots; concurrent drift between them
 //! is caught by apply-time verification and retried (bounded; exhaustion
@@ -20,6 +23,9 @@ use nodedb_types::{DatabaseId, TenantId};
 
 use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
 use crate::control::maintenance::clone_materializer::{dispatch_local, read_all_source_rows};
+use crate::control::orchestrated_write::{
+    apply_orchestrated_write, decide_write_policy_over_images,
+};
 use crate::control::state::SharedState;
 use nodedb_physical::physical_plan::document::merge_types::MergeClauseOp;
 use nodedb_physical::physical_plan::{DocumentOp, ReturningSpec};
@@ -27,7 +33,7 @@ use nodedb_physical::physical_plan::{DocumentOp, ReturningSpec};
 use super::resolve_arms::decode_resolve;
 use crate::control::planner::materialized_sum::resolve_sum_targets_for_bodies;
 use crate::control::target_identity::{
-    assign_target_surrogate, bare_collection_name, resolve_target_pk,
+    assign_target_surrogate, bare_collection_name, derive_document_id, resolve_target_pk,
 };
 
 /// Upper bound on resolve→apply retries under concurrent source/target drift.
@@ -75,6 +81,7 @@ pub async fn run_authorized_merge(
         source_join_col,
         clauses,
         resolved_inserts: None,
+        resolved_insert_identities: _,
         source_rows: _,
         returning,
         rls_filters,
@@ -139,7 +146,12 @@ pub(crate) async fn run_merge(state: &SharedState, args: MergeArgs<'_>) -> crate
         .await?;
 
         // Phase 1: resolve the NOT-MATCHED insert rows (read-only snapshot).
-        let resolve_plan = merge_plan(&args, true, None, Some(source_rows.clone()), Vec::new());
+        let resolve_plan = merge_plan(
+            &args,
+            MergePass::Resolve,
+            Some(source_rows.clone()),
+            Vec::new(),
+        );
         let resolve_resp = dispatch_local(
             state,
             args.tenant_id,
@@ -191,10 +203,30 @@ pub(crate) async fn run_merge(state: &SharedState, args: MergeArgs<'_>) -> crate
             .await?,
         );
 
+        // Phase 2a: decide the target's write policy over every resolved arm,
+        // here where the writing identity is live: the post-image of an
+        // UPDATE or INSERT arm, the pre-image of a DELETE arm. The apply plan
+        // then carries a decided check every replica applies verbatim.
+        decide_write_policy_over_images(
+            args.rls_write_check,
+            arms.updates
+                .iter()
+                .map(|(_, _, body, _)| body.as_slice())
+                .chain(arms.deletes.iter().map(|(_, _, body)| body.as_slice()))
+                .chain(arms.inserts.iter().map(|(_, body)| body.as_slice())),
+            args.tenant_id,
+            args.target_collection,
+        )?;
+
         let insert_rows = arms.inserts;
 
-        // Phase 2: assign a fresh, registered surrogate per inserted row.
-        let mut resolved: Vec<(String, u32)> = Vec::with_capacity(insert_rows.len());
+        // Phase 2: assign a fresh, registered surrogate per inserted row, and
+        // record the document id it stores under so every applying node
+        // installs the same pk → surrogate binding.
+        let mut inserts = ResolvedInserts {
+            by_join_key: Vec::with_capacity(insert_rows.len()),
+            identities: Vec::with_capacity(insert_rows.len()),
+        };
         for (join_key, body) in &insert_rows {
             let surrogate = assign_target_surrogate(
                 state,
@@ -204,26 +236,29 @@ pub(crate) async fn run_merge(state: &SharedState, args: MergeArgs<'_>) -> crate
                 &target_pk,
                 body,
             )?;
-            resolved.push((join_key.clone(), surrogate.as_u32()));
+            let document_id = derive_document_id(&target_pk, body, surrogate);
+            inserts
+                .by_join_key
+                .push((join_key.clone(), surrogate.as_u32()));
+            inserts.identities.push((document_id, surrogate.as_u32()));
         }
 
-        // Phase 3: atomic apply with the pre-assigned surrogates + drift verify.
-        // The apply reuses THIS attempt's source snapshot so the DP re-derives
-        // the classification from the same source the resolve saw.
+        // Phase 3: atomic apply with the pre-assigned surrogates + drift verify,
+        // on the target's owner and every replica. The apply reuses THIS
+        // attempt's source snapshot so the DP re-derives the classification
+        // from the same source the resolve saw.
         let apply_plan = merge_plan(
             &args,
-            false,
-            Some(resolved),
+            MergePass::Apply(inserts),
             Some(source_rows),
             resolved_sum_targets,
         );
-        let apply_resp = dispatch_local(
+        let apply_resp = apply_orchestrated_write(
             state,
             args.tenant_id,
             args.database_id,
             args.target_collection,
             apply_plan,
-            None,
         )
         .await?;
 
@@ -240,20 +275,24 @@ pub(crate) async fn run_merge(state: &SharedState, args: MergeArgs<'_>) -> crate
             // the counter is monotonic and gap-tolerant).
             continue;
         }
-
-        // `dispatch_local` bypasses the funnel's post-apply redo minting, so
-        // a vector-indexed target's write-set arrives unconsumed. Mint it
-        // now — without it a WAL-only restart rebuilds the HNSW from
-        // pre-merge records. No-op on non-vector targets.
-        crate::control::server::wal_dispatch::mint_dispatch_local_redo(
-            &state.wal,
-            args.tenant_id,
-            args.database_id,
-            args.target_collection,
-            &apply_resp,
-        )?;
         return Ok(apply_resp);
     }
+}
+
+/// The NOT-MATCHED surrogates an apply pass carries: keyed by source join
+/// value for the Data Plane's drift check, and by target document id for the
+/// pk → surrogate binding every applying node installs.
+struct ResolvedInserts {
+    by_join_key: Vec<(String, u32)>,
+    identities: Vec<(String, u32)>,
+}
+
+/// Which orchestrator pass a `DocumentOp::Merge` plan is built for.
+enum MergePass {
+    /// Read-only classification: writes nothing, projects nothing.
+    Resolve,
+    /// The write, with its pre-assigned surrogates and a decided policy.
+    Apply(ResolvedInserts),
 }
 
 /// Build a `DocumentOp::Merge` physical plan for one orchestrator pass.
@@ -263,11 +302,24 @@ pub(crate) async fn run_merge(state: &SharedState, args: MergeArgs<'_>) -> crate
 /// rather than reading the source from the target core's local store.
 fn merge_plan(
     args: &MergeArgs<'_>,
-    resolve_only: bool,
-    resolved_inserts: Option<Vec<(String, u32)>>,
+    pass: MergePass,
     source_rows: Option<Vec<(String, Vec<u8>)>>,
     resolved_sum_targets: Vec<nodedb_physical::physical_plan::ResolvedSumTarget>,
 ) -> PhysicalPlan {
+    // Only APPLY can project rows; RESOLVE's payload is the fixed
+    // `(updates, deletes, inserts)` tuple `decode_resolve` expects. RESOLVE
+    // carries the live check unread; APPLY carries the decision the
+    // orchestrator made over the resolved arms, which is what replicates.
+    let (returning, resolved_inserts, resolved_insert_identities, rls_write_check) = match pass {
+        MergePass::Resolve => (None, None, Vec::new(), args.rls_write_check.clone()),
+        MergePass::Apply(inserts) => (
+            args.returning.cloned(),
+            Some(inserts.by_join_key),
+            inserts.identities,
+            nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
+        ),
+    };
+    let resolve_only = resolved_inserts.is_none();
     let merge = DocumentOp::Merge {
         target_collection: nodedb_types::QualifiedCollection::from_stored(
             args.target_collection.to_string(),
@@ -279,19 +331,12 @@ fn merge_plan(
         target_join_col: args.target_join_col.to_string(),
         source_join_col: args.source_join_col.to_string(),
         clauses: args.clauses.to_vec(),
-        // Only APPLY can project rows; RESOLVE's payload is the fixed
-        // `(updates, deletes, inserts)` tuple `decode_resolve` expects.
-        returning: if resolve_only {
-            None
-        } else {
-            args.returning.cloned()
-        },
+        returning,
         resolved_inserts,
+        resolved_insert_identities,
         source_rows,
         rls_filters: args.rls_filters.to_vec(),
-        // Carried on both passes (inert on RESOLVE) so a future writing
-        // resolve cannot silently lose the gate.
-        rls_write_check: args.rls_write_check.clone(),
+        rls_write_check,
         // Empty on RESOLVE (writes nothing); APPLY carries the resolution.
         resolved_sum_targets,
         declared_primary_key: args.declared_primary_key.map(str::to_string),

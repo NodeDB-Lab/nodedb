@@ -9,7 +9,6 @@
 //! physical plan via `ExecuteRequest` instead of a raw SQL string.
 
 mod calvin_dispatch;
-mod calvin_response;
 mod catalog;
 mod check_enforcement;
 mod cluster_array;
@@ -18,6 +17,7 @@ pub(in crate::control::server::pgwire::handler) mod execute;
 mod execute_dml_hooks;
 mod execute_entry;
 mod gateway_dispatch;
+mod gateway_fold;
 mod placement;
 mod planning;
 mod pre_dispatch;

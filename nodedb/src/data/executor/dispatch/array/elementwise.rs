@@ -17,6 +17,7 @@ use nodedb_types::{SurrogateBitmap, Value};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::transaction::overlay::ArrayOverlayMergeParams;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::ArrayBinaryOp;
 
@@ -72,7 +73,7 @@ impl CoreLoop {
             );
         }
 
-        let left_tiles = match self
+        let mut left_tiles = match self
             .array_engine
             .scan_tiles(left, &MbrQueryPredicate::default())
         {
@@ -86,7 +87,7 @@ impl CoreLoop {
                 );
             }
         };
-        let right_tiles = match self
+        let mut right_tiles = match self
             .array_engine
             .scan_tiles(right, &MbrQueryPredicate::default())
         {
@@ -100,6 +101,31 @@ impl CoreLoop {
                 );
             }
         };
+        // Read-your-own-writes: each operand merges its own staged cells
+        // BEFORE the union and the surrogate filter, so `cell_filter` still
+        // applies to both sides and outer-join fallthroughs from a staged
+        // cell are excluded exactly like those from a base cell.
+        for (array_id, tiles, side) in [
+            (left, &mut left_tiles, "left"),
+            (right, &mut right_tiles, "right"),
+        ] {
+            if let Err(e) = self.merge_array_overlay_payloads(
+                ArrayOverlayMergeParams {
+                    txn_id: task.request.txn_id,
+                    array_id,
+                    schema: &schema,
+                    valid_at_ms: None,
+                },
+                tiles,
+            ) {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("array elementwise overlay merge {side}: {e}"),
+                    },
+                );
+            }
+        }
 
         let left_union = match union_tiles(&schema, left_tiles) {
             Ok(t) => t,

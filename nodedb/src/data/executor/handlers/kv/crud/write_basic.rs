@@ -80,7 +80,7 @@ impl CoreLoop {
             // stored post-image, not an echo of the request.
             return self.kv_stored_returning_response(task, spec, rls_filters, &[(key, value)]);
         }
-        self.response_ok(task)
+        self.response_affected(task, 1)
     }
 
     /// SQL `INSERT` semantics: write only if key doesn't already exist.
@@ -167,7 +167,7 @@ impl CoreLoop {
         if let Some(spec) = returning {
             return self.kv_stored_returning_response(task, spec, rls_filters, &[(key, value)]);
         }
-        self.response_ok(task)
+        self.response_affected(task, 1)
     }
 
     /// SQL `INSERT ... ON CONFLICT DO NOTHING` semantics: write if absent,

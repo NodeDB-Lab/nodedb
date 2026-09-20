@@ -3,6 +3,7 @@ pub mod authorization;
 pub mod check_constraint;
 pub mod clone_read;
 pub mod clone_write;
+pub(crate) mod cluster_array_dispatch;
 pub mod ddl;
 pub mod metering;
 pub mod panic_isolation;

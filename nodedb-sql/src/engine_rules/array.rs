@@ -61,6 +61,14 @@ impl EngineRules for ArrayRules {
         ))
     }
 
+    fn plan_truncate(&self, _p: TruncateParams) -> Result<Vec<SqlPlan>> {
+        Err(unsupported(
+            "TRUNCATE",
+            "use DROP ARRAY <name> to remove the array, or \
+             DELETE FROM ARRAY <name> WHERE COORDS IN (...) to remove cells",
+        ))
+    }
+
     fn plan_aggregate(&self, _p: AggregateParams) -> Result<SqlPlan> {
         Err(unsupported(
             "GROUP BY",

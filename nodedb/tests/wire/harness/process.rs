@@ -186,7 +186,13 @@ fn try_spawn(
         // trust mode ignores it. Same value on every spawn (including a
         // restart against the same data directory).
         .env("NODEDB_SUPERUSER_PASSWORD", "nodedb")
-        .env("RUST_LOG", "info")
+        // `NODEDB_TEST_RUST_LOG` overrides the spawned server's `RUST_LOG`,
+        // defaulting to `info`. Set it (e.g. `debug`) to see finer server
+        // logs when a test needs them dumped via `NODEDB_TEST_DUMP_SERVER_LOG`.
+        .env(
+            "RUST_LOG",
+            std::env::var("NODEDB_TEST_RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+        )
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::from(log_err))
         .spawn()
@@ -252,6 +258,18 @@ impl Drop for SpawnedServer {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+        // The data directory is removed right after this drop, so a failing
+        // test's server log survives only when it is copied out here.
+        // `NODEDB_TEST_DUMP_SERVER_LOG` (any value) turns this dump on;
+        // `read_log` never panics — a missing/unreadable log file renders as
+        // an inline placeholder string instead.
+        if std::env::var_os("NODEDB_TEST_DUMP_SERVER_LOG").is_some() {
+            eprintln!(
+                "--- server log {} ---\n{}",
+                self.log_path.display(),
+                self.read_log()
+            );
         }
     }
 }

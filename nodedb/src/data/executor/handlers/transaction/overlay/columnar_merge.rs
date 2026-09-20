@@ -124,12 +124,13 @@ impl CoreLoop {
         // checked once the retain pass finishes, aborting the merge before
         // the overlay-addition pass below runs.
         let mut first_err: Option<crate::Error> = None;
+        let base_visible = overlay.base_visible(coll_key);
         matched.retain_mut(|(surrogate, row, obj)| {
             if first_err.is_some() {
                 return true;
             }
             let Some(s) = surrogate else {
-                return true;
+                return base_visible;
             };
             match overlay.get(coll_key, s.0) {
                 Some(Staged::Tombstone) => false,
@@ -163,7 +164,7 @@ impl CoreLoop {
                     // row: drop it rather than surface stale base data.
                     None => false,
                 },
-                None => true,
+                None => base_visible,
             }
         });
         if let Some(e) = first_err {

@@ -243,7 +243,7 @@ async fn getset_in_tx_returns_staged_old_value() {
 // through the same `route_in_tx_write`/`stage_write` staging gate the
 // SQL-planned dispatch loops use (`dispatch_single_task` in
 // `direct_ops.rs`), so `KvOp::BatchPut`'s `is_stageable_write` /
-// `staged_tag_kind` classification and its Data Plane staging handler
+// `stageable_write_shape` classification and its Data Plane staging handler
 // (`stage_kv_atomic::stage_kv_batch_put`) are exercised end-to-end. See
 // `nodedb/tests/native_direct_op_txn_overlay.rs` for the native-protocol
 // coverage (staged BatchPut visible read-your-own-writes, discarded on

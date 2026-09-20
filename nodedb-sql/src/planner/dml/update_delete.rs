@@ -9,10 +9,13 @@ use super::super::ast_helpers::{
     flatten_and_expr, qualified_ident_pair, strip_and_convert_filters,
 };
 use super::super::dml_helpers::{
+    VectorPrimaryUpdateParams, build_vector_primary_delete_plan,
+    build_vector_primary_truncate_plan, build_vector_primary_update_plan,
     check_declared_float_ranges_in_assignments, check_declared_int_ranges_in_assignments,
-    extract_point_keys, extract_table_name_from_table_with_joins,
+    extract_point_keys, extract_table_name_from_table_with_joins, is_vector_primary,
+    refuse_vector_primary_shape,
 };
-use crate::engine_rules::{self, DeleteParams, UpdateFromParams, UpdateParams};
+use crate::engine_rules::{self, DeleteParams, TruncateParams, UpdateFromParams, UpdateParams};
 use crate::error::{Result, SqlError};
 use crate::parser::normalize::{
     SCHEMA_QUALIFIED_MSG, normalize_ident, normalize_object_name_checked,
@@ -76,6 +79,22 @@ pub fn plan_update(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Ve
     };
 
     let target_keys = extract_point_keys(update.selection.as_ref(), &info);
+
+    // Vector-primary collection: the row lives in the HNSW index and its
+    // payload sidecar, never in the document store the engine rules target.
+    if is_vector_primary(&info)
+        && let Some(ref vpc) = info.vector_primary
+    {
+        return build_vector_primary_update_plan(VectorPrimaryUpdateParams {
+            collection: &table_name,
+            info: &info,
+            vpc,
+            assignments: assigns,
+            filters,
+            target_keys,
+            returning: update.returning.is_some(),
+        });
+    }
 
     let rules = engine_rules::resolve_engine_rules(info.engine);
     rules.plan_update(UpdateParams {
@@ -169,6 +188,7 @@ fn plan_update_from(
         .ok_or_else(|| SqlError::UnknownTable {
             name: source_name.clone(),
         })?;
+    refuse_vector_primary_shape(&target_info, "UPDATE ... FROM")?;
 
     // The SET target belongs to the update target; its right-hand side can
     // read either relation.
@@ -411,6 +431,19 @@ pub fn plan_delete(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Ve
 
     let target_keys = extract_point_keys(delete.selection.as_ref(), &info);
 
+    // Vector-primary collection: see `plan_update`.
+    if is_vector_primary(&info)
+        && let Some(ref vpc) = info.vector_primary
+    {
+        return Ok(build_vector_primary_delete_plan(
+            &table_name,
+            &info,
+            vpc,
+            filters,
+            target_keys,
+        ));
+    }
+
     let rules = engine_rules::resolve_engine_rules(info.engine);
     rules.plan_delete(DeleteParams {
         collection: table_name,
@@ -420,7 +453,11 @@ pub fn plan_delete(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Ve
 }
 
 /// Plan a TRUNCATE statement.
-pub fn plan_truncate_stmt(stmt: &ast::Statement) -> Result<Vec<SqlPlan>> {
+///
+/// Each named collection resolves through the catalog: a vector-primary
+/// collection lowers to `SqlPlan::VectorPrimaryTruncate`, every other
+/// engine routes through its `EngineRules::plan_truncate`.
+pub fn plan_truncate_stmt(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
     let ast::Statement::Truncate(truncate) = stmt else {
         return Err(SqlError::Parse {
             detail: "expected TRUNCATE statement".into(),
@@ -430,14 +467,43 @@ pub fn plan_truncate_stmt(stmt: &ast::Statement) -> Result<Vec<SqlPlan>> {
         truncate.identity,
         Some(sqlparser::ast::TruncateIdentityOption::Restart)
     );
-    truncate
-        .table_names
-        .iter()
-        .map(|t| {
-            Ok(SqlPlan::Truncate {
-                collection: normalize_object_name_checked(&t.name)?,
+    let mut plans = Vec::with_capacity(truncate.table_names.len());
+    for target in &truncate.table_names {
+        let table_name = normalize_object_name_checked(&target.name)?;
+        // An array lives in its own catalog namespace, so its refusal comes
+        // from `ArrayRules` before the collection lookup can miss it.
+        if catalog.array_exists(&table_name) {
+            plans.append(
+                &mut engine_rules::resolve_engine_rules(EngineType::Array).plan_truncate(
+                    TruncateParams {
+                        collection: table_name,
+                        restart_identity,
+                    },
+                )?,
+            );
+            continue;
+        }
+        let info = catalog
+            .get_collection(DatabaseId::DEFAULT, &table_name)?
+            .ok_or_else(|| SqlError::UnknownTable {
+                name: table_name.clone(),
+            })?;
+        // Vector-primary collection: see `plan_update`.
+        if is_vector_primary(&info)
+            && let Some(ref vpc) = info.vector_primary
+        {
+            plans.push(build_vector_primary_truncate_plan(
+                &table_name,
+                vpc,
                 restart_identity,
-            })
-        })
-        .collect()
+            ));
+            continue;
+        }
+        let rules = engine_rules::resolve_engine_rules(info.engine);
+        plans.append(&mut rules.plan_truncate(TruncateParams {
+            collection: table_name,
+            restart_identity,
+        })?);
+    }
+    Ok(plans)
 }

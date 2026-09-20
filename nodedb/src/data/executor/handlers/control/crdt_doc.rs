@@ -146,7 +146,7 @@ impl CoreLoop {
                     }
                 }
             } else {
-                self.response_ok(task)
+                self.response_affected(task, 1)
             }
         } else if let Some(spec) = returning {
             match returning_rows::build_rows_payload(spec, rls_filters, &[]) {
@@ -161,7 +161,7 @@ impl CoreLoop {
                 }
             }
         } else {
-            self.response_ok(task)
+            self.response_affected(task, 1)
         };
         self.checkpoint_coordinator.mark_dirty("crdt", 1);
         response

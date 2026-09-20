@@ -121,6 +121,7 @@ pub(super) async fn run_task_loop(
                 clauses: _,
                 returning: _,
                 resolved_inserts: None,
+                resolved_insert_identities: _,
                 source_rows: _,
                 rls_filters: _,
                 rls_write_check: _,

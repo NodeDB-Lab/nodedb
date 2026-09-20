@@ -18,7 +18,7 @@ pub use expr_scan::{
     referenced_columns,
 };
 pub use merge_types::{MergeClauseKind, MergePlanAction, MergePlanClause};
-pub use row_types::{KvInsertIntent, VectorPrimaryRow, WriteRoute};
+pub use row_types::{KvInsertIntent, VectorPrimaryInsertIntent, VectorPrimaryRow, WriteRoute};
 pub use variants::{DistanceMetric, SqlPlan};
 pub use vector_opts::{ArrayPrefilter, VectorAnnOptions, VectorQuantization};
 pub use volatility_scan::expr_is_volatile;

@@ -69,9 +69,9 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | DocumentOp::UpdateFromJoin { .. },
         ) => true,
 
-        // `Truncate` stays write-but-unbuffered: unverified whether the passthrough
-        // executes it correctly at COMMIT replay, so ROLLBACK still doesn't undo it.
-        PhysicalPlan::Document(DocumentOp::Truncate { .. }) => false,
+        // `Truncate` is staged as an overlay marker and replays through the
+        // live truncate at COMMIT, so ROLLBACK undoes it.
+        PhysicalPlan::Document(DocumentOp::Truncate { .. }) => true,
 
         // ---- Vector: encoded (buffered) ----
         PhysicalPlan::Vector(
@@ -92,7 +92,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | VectorOp::MultiVectorScoreSearch { .. },
         ) => false,
 
-        // `to_replicated_entry` encodes all six (`encode/vector.rs`) — a plain
+        // `to_replicated_entry` encodes all ten (`encode/vector.rs`) — a plain
         // oracle-matching write, not a divergence. See `vector_variants_match_oracle`.
         PhysicalPlan::Vector(
             VectorOp::DeleteBySurrogate { .. }
@@ -100,13 +100,25 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | VectorOp::SparseDelete { .. }
             | VectorOp::MultiVectorInsert { .. }
             | VectorOp::MultiVectorDelete { .. }
-            | VectorOp::DirectUpsert { .. },
+            | VectorOp::DirectUpsert { .. }
+            | VectorOp::DirectInsert { .. }
+            | VectorOp::DirectInsertIfAbsent { .. }
+            | VectorOp::DirectDelete { .. }
+            | VectorOp::DirectTruncate { .. }
+            | VectorOp::DirectUpdate { .. },
         ) => true,
 
         // DDL/Alter, not encoded.
         PhysicalPlan::Vector(
             VectorOp::Seal { .. } | VectorOp::CompactIndex { .. } | VectorOp::Rebuild { .. },
         ) => false,
+
+        // Read-only classification pass issued by the write-resolve orchestrator.
+        PhysicalPlan::Vector(VectorOp::ResolveDirectWrite(_)) => false,
+
+        // ---- Vector: resolved write — encoded, but autocommit-only ----
+        // Built by write-resolve on the autocommit path, proposed straight through Raft.
+        PhysicalPlan::Vector(VectorOp::ResolvedDirectWrite { .. }) => false,
 
         // ---- Crdt: encoded (buffered) ----
         // Raw delta applies need preview admission before proposal; `route_in_tx_write` rejects them.
@@ -213,18 +225,21 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | KvOp::ResolveWrite(_),
         ) => false,
 
-        // ---- Kv: index / DDL / truncate — encoded, but autocommit-only ----
+        // ---- Kv: truncate — encoded (buffered) ----
+        // Staged as an overlay marker; replays through the live truncate at COMMIT.
+        PhysicalPlan::Kv(KvOp::Truncate { .. }) => true,
+
+        // ---- Kv: index DDL — encoded, but autocommit-only ----
         // Inverse divergence: encoded, but transaction resolve rejects them.
-        PhysicalPlan::Kv(
-            KvOp::Truncate { .. } | KvOp::RegisterIndex { .. } | KvOp::DropIndex { .. },
-        ) => false,
+        PhysicalPlan::Kv(KvOp::RegisterIndex { .. } | KvOp::DropIndex { .. }) => false,
 
         // ---- Kv: resolved write — encoded, but autocommit-only ----
         // Same inverse divergence: encoded, but transaction resolve rejects it.
         PhysicalPlan::Kv(KvOp::ResolvedWrite { .. }) => false,
 
         // ---- Kv: predicate DML — encoded (buffered) ----
-        // Encoded; COMMIT-time resolve refuses them — autocommit is the supported path.
+        // Staged per matched row at statement time; COMMIT replays the live
+        // handler in statement order, like Document `BulkUpdate`/`BulkDelete`.
         PhysicalPlan::Kv(KvOp::PredicateUpdate { .. } | KvOp::PredicateDelete { .. }) => true,
 
         // ---- Columnar: encoded (buffered) ----
@@ -233,7 +248,8 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | ColumnarOp::Delete { .. }
             | ColumnarOp::Update { .. }
             | ColumnarOp::ResolvedUpdate { .. }
-            | ColumnarOp::ResolvedDelete { .. },
+            | ColumnarOp::ResolvedDelete { .. }
+            | ColumnarOp::Truncate { .. },
         ) => true,
         // ---- Columnar: reads, not encoded ----
         // `ResolveDml` mirrors the oracle: `to_replicated_entry` returns `None` for it.
@@ -244,7 +260,9 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
         ) => false,
 
         // ---- Timeseries ----
-        PhysicalPlan::Timeseries(TimeseriesOp::Ingest { .. }) => true,
+        PhysicalPlan::Timeseries(TimeseriesOp::Ingest { .. } | TimeseriesOp::Truncate { .. }) => {
+            true
+        }
         // Resolve pass is read-only; `to_replicated_entry` reports `None`.
         PhysicalPlan::Timeseries(TimeseriesOp::Scan { .. } | TimeseriesOp::ResolveIngest(_)) => {
             false
@@ -350,7 +368,9 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | ArrayOp::PurgeArrayDrop { .. },
         ) => false,
         // Buffered and encoded — matches oracle. `to_replicated_entry` emits
-        // `ArrayCellPut`/`ArrayCellDelete`, at the cost of RYOW loss + the no-undo gap.
+        // `ArrayCellPut`/`ArrayCellDelete`. Also stageable (`is_stageable_write`),
+        // so the statement answers with a real count and same-transaction reads
+        // see the cell through `ArrayTxnOverlay`.
         PhysicalPlan::Array(ArrayOp::Put { .. } | ArrayOp::Delete { .. }) => true,
 
         // ---- ClusterArray: coordinator-only, never touched by `to_replicated_entry`.
@@ -841,6 +861,7 @@ mod tests {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 field: String::new(),
                 surrogate: Surrogate::ZERO,
+                pk_bytes: Vec::new(),
                 vector: Vec::new(),
                 payload: Vec::new(),
                 quantization: Default::default(),
@@ -848,6 +869,55 @@ mod tests {
                 payload_indexes: Vec::new(),
                 returning: None,
                 rls_filters: Vec::new(),
+                on_conflict_updates: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
+            }),
+            PhysicalPlan::Vector(VectorOp::DirectInsert {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                field: String::new(),
+                surrogate: Surrogate::ZERO,
+                pk_bytes: Vec::new(),
+                vector: Vec::new(),
+                payload: Vec::new(),
+                quantization: Default::default(),
+                storage_dtype: Default::default(),
+                payload_indexes: Vec::new(),
+                returning: None,
+                rls_filters: Vec::new(),
+            }),
+            PhysicalPlan::Vector(VectorOp::DirectInsertIfAbsent {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                field: String::new(),
+                surrogate: Surrogate::ZERO,
+                pk_bytes: Vec::new(),
+                vector: Vec::new(),
+                payload: Vec::new(),
+                quantization: Default::default(),
+                storage_dtype: Default::default(),
+                payload_indexes: Vec::new(),
+                returning: None,
+                rls_filters: Vec::new(),
+            }),
+            PhysicalPlan::Vector(VectorOp::DirectDelete {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                field: String::new(),
+                targets: nodedb_physical::physical_plan::VectorWriteTargets::Surrogates(Vec::new()),
+                returning: None,
+                rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            }),
+            PhysicalPlan::Vector(VectorOp::DirectUpdate {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                field: String::new(),
+                targets: nodedb_physical::physical_plan::VectorWriteTargets::Predicate(Vec::new()),
+                new_vector: None,
+                payload_patch: Vec::new(),
+                quantization: Default::default(),
+                storage_dtype: Default::default(),
+                payload_indexes: Vec::new(),
+                returning: None,
+                rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
         ];
         for p in &plans {
@@ -948,6 +1018,7 @@ mod tests {
                 fields_json: "{}".into(),
                 surrogate: Surrogate::ZERO,
                 partial: false,
+                verb: nodedb_physical::physical_plan::CrdtWriteVerb::Insert,
                 returning: None,
                 rls_filters: Vec::new(),
             }),
@@ -1850,6 +1921,7 @@ mod tests {
                 txn_id: TxnId::new(1),
                 value_marker: 0,
                 graph_marker: 0,
+                array_marker: 0,
             }),
             PhysicalPlan::Meta(MetaOp::RecordCalvinWriteVersions {
                 tenant_id: tenant(),
@@ -1991,6 +2063,7 @@ mod tests {
                 clauses: Vec::new(),
                 returning: None,
                 resolved_inserts: None,
+                resolved_insert_identities: Vec::new(),
                 source_rows: None,
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
@@ -2041,12 +2114,12 @@ mod tests {
         }
     }
 
-    /// Pin the inverse divergence: truncate and KV index/DDL ops are autocommit-only
-    /// (resolve rejects them, so buffering is never needed), while `to_replicated_entry`
-    /// encodes them all.
+    /// Truncate is buffered in a transaction (overlay marker, COMMIT replay)
+    /// and matches the oracle; KV index DDL stays autocommit-only (resolve
+    /// rejects it) while `to_replicated_entry` encodes it.
     #[test]
-    fn truncate_and_index_variants_are_encoded_but_not_buffered() {
-        let plans = vec![
+    fn truncate_is_buffered_and_index_variants_are_not() {
+        let truncates = vec![
             PhysicalPlan::Document(DocumentOp::Truncate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 restart_identity: false,
@@ -2055,7 +2128,30 @@ mod tests {
             }),
             PhysicalPlan::Kv(KvOp::Truncate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                restart_identity: false,
             }),
+            PhysicalPlan::Vector(VectorOp::DirectTruncate {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                field: "vec".into(),
+                restart_identity: false,
+            }),
+            PhysicalPlan::Columnar(ColumnarOp::Truncate {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                restart_identity: false,
+            }),
+            PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                restart_identity: false,
+            }),
+        ];
+        for p in &truncates {
+            assert!(
+                plan_requires_txn_buffering(p),
+                "expected {p:?} to require txn buffering"
+            );
+            assert_matches_oracle(p);
+        }
+        let plans = vec![
             PhysicalPlan::Kv(KvOp::RegisterIndex {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 field: "f".into(),

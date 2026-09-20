@@ -135,9 +135,11 @@ mod tests {
         );
     }
 
-    // ---- Pinned replication gaps: writes with no `ReplicatedWrite` shape yet,
-    // so `to_replicated_entry` returns `None` on purpose. Each assertion is a
-    // tripwire — wiring one of these must fail loudly and update this list.
+    // ---- Pinned non-replicated shapes: `to_replicated_entry` returns `None`
+    // on purpose. An unresolved MERGE / `UPDATE ... FROM` is intercepted by
+    // its orchestrator, which proposes the resolved shape instead;
+    // `Crdt::RestoreToVersion` has no `ReplicatedWrite` shape yet. Each
+    // assertion is a tripwire — wiring one must fail loudly and update this list.
 
     #[test]
     fn known_write_gaps_are_not_replicated() {
@@ -146,7 +148,7 @@ mod tests {
 
         let gaps: Vec<(&str, PhysicalPlan)> = vec![
             (
-                "Document::Merge",
+                "Document::Merge (unresolved)",
                 PhysicalPlan::Document(DocumentOp::Merge {
                     target_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
                     source_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "staging"),
@@ -156,6 +158,7 @@ mod tests {
                     clauses: Vec::new(),
                     returning: None,
                     resolved_inserts: None,
+                    resolved_insert_identities: Vec::new(),
                     source_rows: None,
                     rls_filters: Vec::new(),
                     rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
@@ -164,7 +167,7 @@ mod tests {
                 }),
             ),
             (
-                "Document::UpdateFromJoin",
+                "Document::UpdateFromJoin (unresolved)",
                 PhysicalPlan::Document(DocumentOp::UpdateFromJoin {
                     target_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
                     source_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "staging"),
@@ -197,8 +200,7 @@ mod tests {
                 to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, plan)
                     .expect("encode must not error")
                     .is_none(),
-                "{name} is a known replication gap; wiring is a tracked follow-up — \
-                 this test fails loudly if someone wires it so they update the tracking"
+                "{name} never replicates in this shape; wiring it must update this list"
             );
         }
     }

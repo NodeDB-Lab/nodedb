@@ -48,7 +48,9 @@ pub(super) fn resolver_for_columnar_op(op: &ColumnarOp) -> Option<Box<dyn Engine
         | ColumnarOp::ResolvedUpdate { .. }
         | ColumnarOp::ResolvedDelete { .. }
         | ColumnarOp::ResolveDml { .. }
-        | ColumnarOp::MaterializeScan { .. } => return None,
+        | ColumnarOp::MaterializeScan { .. }
+        // Refused at injection under a write policy; carries no predicate.
+        | ColumnarOp::Truncate { .. } => return None,
     };
     if !rls_write_check.has_predicate() {
         return None;
@@ -137,6 +139,7 @@ impl EngineWriteResolver for ColumnarWriteResolver {
             },
             ResolvedRows::Kv { .. }
             | ResolvedRows::Document { .. }
+            | ResolvedRows::Vector { .. }
             | ResolvedRows::Timeseries { .. }
             | ResolvedRows::GraphEdgeDeleteAdmitted => {
                 return Err(crate::Error::Internal {

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Statement-time staging for KV point puts: `Put`, `Insert`,
-//! `InsertIfAbsent`. Sibling files stage the rest of the fourteen
-//! stageable `KvOp`s. A KV row's overlay identity is
+//! `InsertIfAbsent`. Sibling files stage the rest of the stageable
+//! `KvOp`s. A KV row's overlay identity is
 //! [`kv_row_identity`] of its raw key, applied symmetrically here and in
 //! the read-merge paths.
 
@@ -10,12 +10,13 @@ use nodedb_physical::physical_plan::KvOp;
 use nodedb_types::{RowIdentity, Surrogate};
 
 use super::context::StageCtx;
+use super::stage_kv_predicate::{StageKvPredicateDeleteParams, StageKvPredicateUpdateParams};
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::kv::current_ms;
-use crate::types::TxnId;
+use crate::types::{DatabaseId, TenantId, TxnId};
 
 /// Lowercase-hex encode a raw KV key. [`unhex_key`] is the inverse.
 fn hex_key(key: &[u8]) -> String {
@@ -109,6 +110,39 @@ impl CoreLoop {
                 returning: _,
                 rls_filters: _,
             } => self.stage_kv_delete(task, tid, txn_id, collection.as_str(), keys, rls_write_check),
+            // Predicate DML staged like Document `BulkUpdate`/`BulkDelete`:
+            // the row set resolves against BASE ∪ OVERLAY. Same `RETURNING`
+            // treatment as `Delete`.
+            KvOp::PredicateUpdate {
+                collection,
+                filters,
+                updates,
+                rls_write_check,
+                returning: _,
+                rls_filters: _,
+            } => self.stage_kv_predicate_update(StageKvPredicateUpdateParams {
+                task,
+                tid,
+                txn_id,
+                collection: collection.as_str(),
+                filter_bytes: filters,
+                updates,
+                rls_write_check,
+            }),
+            KvOp::PredicateDelete {
+                collection,
+                filters,
+                rls_write_check,
+                returning: _,
+                rls_filters: _,
+            } => self.stage_kv_predicate_delete(StageKvPredicateDeleteParams {
+                task,
+                tid,
+                txn_id,
+                collection: collection.as_str(),
+                filter_bytes: filters,
+                rls_write_check,
+            }),
             KvOp::BatchPut { .. }
             | KvOp::Incr { .. }
             | KvOp::IncrFloat { .. }
@@ -147,6 +181,9 @@ impl CoreLoop {
                     rls_write_check,
                 },
             ),
+            KvOp::Truncate { collection, .. } => {
+                self.stage_collection_truncate(task, tid, txn_id, collection.as_str())
+            }
             KvOp::Get { .. }
             | KvOp::Scan { .. }
             | KvOp::BatchGet { .. }
@@ -154,7 +191,6 @@ impl CoreLoop {
             | KvOp::DropIndex { .. }
             | KvOp::FieldGet { .. }
             | KvOp::GetTtl { .. }
-            | KvOp::Truncate { .. }
             | KvOp::RegisterSortedIndex { .. }
             | KvOp::DropSortedIndex { .. }
             | KvOp::SortedIndexRank { .. }
@@ -166,11 +202,7 @@ impl CoreLoop {
             // Resolve-before-propose is autocommit-only: it decides against
             // committed state and proposes directly, never through staging.
             | KvOp::ResolveWrite(_)
-            | KvOp::ResolvedWrite { .. }
-            // Predicate DML resolves its row set from committed state at
-            // apply time, so there is no point write to stage.
-            | KvOp::PredicateUpdate { .. }
-            | KvOp::PredicateDelete { .. } => self.stage_not_point_write(task),
+            | KvOp::ResolvedWrite { .. } => self.stage_not_point_write(task),
         }
     }
 
@@ -273,6 +305,43 @@ impl CoreLoop {
         }
     }
 
+    /// The surrogate a staged write on `key` lands on, or `None` when the
+    /// row is absent under BASE ∪ OVERLAY. A row this transaction staged a
+    /// put for resolves through the overlay's own doc-id binding; a staged
+    /// tombstone or a staged TRUNCATE hides it; otherwise the base engine's
+    /// key -> surrogate map decides. Shared by the keyed and predicate
+    /// deletes and the predicate update so every KV tombstone or post-image
+    /// binds to the row the COMMIT replay will touch.
+    pub(super) fn resolve_kv_stage_surrogate(
+        &self,
+        txn_id: TxnId,
+        coll_key: &(DatabaseId, TenantId, String),
+        key: &[u8],
+    ) -> Option<Surrogate> {
+        let doc_id = kv_row_identity(key);
+        let overlay = self.txn_overlays.get(&txn_id);
+        match overlay.and_then(|o| o.get_by_doc_id(coll_key, &doc_id)) {
+            Some(Staged::Put(_)) => Some(
+                overlay
+                    .and_then(|o| o.surrogate_for_doc_id(coll_key, &doc_id))
+                    .map(Surrogate::new)
+                    .unwrap_or(Surrogate::ZERO),
+            ),
+            Some(Staged::Tombstone) => None,
+            None if !overlay.is_none_or(|o| o.base_visible(coll_key)) => None,
+            None => self
+                .kv_engine
+                .get_with_surrogate(
+                    coll_key.0.as_u64(),
+                    coll_key.1.as_u64(),
+                    coll_key.2.as_str(),
+                    key,
+                    current_ms(),
+                )
+                .map(|(_, s)| s),
+        }
+    }
+
     /// Resolve the current value for `key` under base ∪ overlay, preferring
     /// a staged put/tombstone over the base KV engine. `pub(super)` so
     /// `stage_kv_atomic.rs` reuses this instead of re-deriving it.
@@ -284,6 +353,7 @@ impl CoreLoop {
         {
             Some(Staged::Put(body)) => Some(body.clone()),
             Some(Staged::Tombstone) => None,
+            None if !self.stage_base_visible(ctx) => None,
             None => {
                 let now_ms = current_ms();
                 self.kv_engine

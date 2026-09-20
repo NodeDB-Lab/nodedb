@@ -73,6 +73,82 @@ pub(in crate::data::executor) struct IndexOverlayMergeParams<'a> {
     pub strict_schema: Option<&'a StrictSchema>,
 }
 
+/// Fold `overlay`'s staged rows for `coll_key` into `rows` (base scan
+/// `(StorageKey, body)` pairs). `matches` is the SAME predicate the base scan
+/// applied. `body_of` turns a staged put body into the row body `matches`
+/// and every downstream stage read: identity for a document collection,
+/// the normalized sidecar for a vector-primary one.
+///
+/// A staged tombstone hides its base row. A staged put replaces the base
+/// body and is re-checked against the predicate. A staged put for a
+/// surrogate absent from base is appended when it satisfies the predicate.
+/// A base row with no overlay entry is dropped when the collection is
+/// truncated in this transaction.
+/// Turns a staged put body into the row body downstream stages read.
+pub(super) type StagedBodyOf<'a, E> = dyn Fn(&StorageKey, &[u8]) -> Result<Vec<u8>, E> + 'a;
+
+pub(super) fn merge_staged_rows<E>(
+    overlay: &super::TxnOverlay,
+    coll_key: &(DatabaseId, TenantId, String),
+    rows: &mut Vec<(StorageKey, Vec<u8>)>,
+    matches: &dyn Fn(&StorageKey, &[u8]) -> bool,
+    body_of: &StagedBodyOf<'_, E>,
+) -> Result<(), E> {
+    // Surrogates already represented in the base result. Additions consult
+    // this to avoid re-adding a row that base already carries (or that the
+    // retain pass has just superseded in place).
+    let mut seen: HashSet<u32> = rows.iter().map(|(k, _)| k.surrogate().as_u32()).collect();
+    let base_visible = overlay.base_visible(coll_key);
+
+    // `retain_mut` needs a `bool`, so a staged body that will not decode is
+    // captured here and surfaced once the pass finishes.
+    let body_err: std::cell::Cell<Option<E>> = std::cell::Cell::new(None);
+
+    // Base-minus-superseded: a single in-place pass. Drop tombstoned rows,
+    // replace put-superseded bodies and re-check the predicate, keep the
+    // rest untouched.
+    rows.retain_mut(|(row_key, body)| {
+        let surrogate = row_key.surrogate().as_u32();
+        match overlay.get(coll_key, surrogate) {
+            Some(Staged::Tombstone) => false,
+            Some(Staged::Put(staged_body)) => match body_of(row_key, staged_body) {
+                Ok(staged_body) => {
+                    *body = staged_body;
+                    matches(row_key, body)
+                }
+                Err(e) => {
+                    body_err.set(Some(e));
+                    false
+                }
+            },
+            None => base_visible,
+        }
+    });
+    if let Some(e) = body_err.take() {
+        return Err(e);
+    }
+
+    // Overlay additions: staged puts for surrogates the base scan did not
+    // return. A tombstone for a surrogate absent from base hides nothing.
+    for (surrogate, staged) in overlay.iter_for_collection(coll_key) {
+        if seen.contains(&surrogate) {
+            continue;
+        }
+        match staged {
+            Staged::Put(body) => {
+                let key = StorageKey::for_surrogate(Surrogate::new(surrogate));
+                let body = body_of(&key, body)?;
+                if matches(&key, &body) {
+                    rows.push((key, body));
+                    seen.insert(surrogate);
+                }
+            }
+            Staged::Tombstone => {}
+        }
+    }
+    Ok(())
+}
+
 impl CoreLoop {
     /// Merge the overlay for `txn_id` into `rows` (base scan `(StorageKey,
     /// body)` pairs). `matches` is the SAME predicate the base scan applied,
@@ -91,44 +167,14 @@ impl CoreLoop {
         let Some(overlay) = self.txn_overlays.get(&txn_id) else {
             return;
         };
-
-        // Surrogates already represented in the base result. Additions consult
-        // this to avoid re-adding a row that base already carries (or that the
-        // retain pass has just superseded in place).
-        let mut seen: HashSet<u32> = rows.iter().map(|(k, _)| k.surrogate().as_u32()).collect();
-
-        // Base-minus-superseded: a single in-place pass. Drop tombstoned rows,
-        // replace put-superseded bodies and re-check the predicate, keep the
-        // rest untouched.
-        rows.retain_mut(|(row_key, body)| {
-            let surrogate = row_key.surrogate().as_u32();
-            match overlay.get(coll_key, surrogate) {
-                Some(Staged::Tombstone) => false,
-                Some(Staged::Put(staged_body)) => {
-                    *body = staged_body.clone();
-                    matches(row_key, body)
-                }
-                None => true,
-            }
-        });
-
-        // Overlay additions: staged puts for surrogates the base scan did not
-        // return. A tombstone for a surrogate absent from base hides nothing.
-        for (surrogate, staged) in overlay.iter_for_collection(coll_key) {
-            if seen.contains(&surrogate) {
-                continue;
-            }
-            match staged {
-                Staged::Put(body) => {
-                    let key = StorageKey::for_surrogate(Surrogate::new(surrogate));
-                    if matches(&key, body) {
-                        rows.push((key, body.clone()));
-                        seen.insert(surrogate);
-                    }
-                }
-                Staged::Tombstone => {}
-            }
-        }
+        // A document collection's staged body IS the stored row body.
+        let Ok(()) = merge_staged_rows::<std::convert::Infallible>(
+            overlay,
+            coll_key,
+            rows,
+            matches,
+            &|_, body| Ok(body.to_vec()),
+        );
     }
 
     /// Fold a transaction's staging overlay into a KV scan result's `(key,
@@ -142,13 +188,15 @@ impl CoreLoop {
     /// instead, via [`TxnOverlay::iter_doc_entries_for_collection`] and
     /// [`unhex_key`](super::super::stage_write::unhex_key) to recover the
     /// raw key bytes for a staged addition. `matches` is the SAME predicate
-    /// the base KV scan applied, evaluated on the value bytes.
+    /// the base KV scan applied, evaluated on `(raw key, value bytes)`: the
+    /// row shape a predicate sees (`kv_row_to_doc`) folds the key in as its
+    /// `key` field, so a `WHERE key = ...` needs both.
     pub(in crate::data::executor) fn merge_kv_overlay_into_scan(
         &self,
         txn_id: TxnId,
         coll_key: &(DatabaseId, TenantId, String),
         rows: &mut Vec<(Vec<u8>, Vec<u8>)>,
-        matches: &dyn Fn(&[u8]) -> bool,
+        matches: &dyn Fn(&[u8], &[u8]) -> bool,
     ) {
         // Read-your-own-writes refreshes the lease (see the reaper).
         self.touch_overlay(txn_id);
@@ -168,6 +216,7 @@ impl CoreLoop {
                 Some(StagedTtl::ExpireAt(t)) if t <= now_ms
             )
         };
+        let base_visible = overlay.base_visible(coll_key);
 
         rows.retain_mut(|(key, value)| {
             let doc_id = super::super::stage_write::kv_row_identity(key);
@@ -183,9 +232,9 @@ impl CoreLoop {
                 Some(Staged::Tombstone) => false,
                 Some(Staged::Put(staged_value)) => {
                     *value = staged_value.clone();
-                    matches(value)
+                    matches(key, value)
                 }
-                None => true,
+                None => base_visible,
             }
         });
 
@@ -195,8 +244,8 @@ impl CoreLoop {
             }
             if let Staged::Put(value) = staged
                 && !staged_expired(doc_id)
-                && matches(value)
                 && let Some(key) = super::super::stage_write::unhex_key(doc_id.as_str())
+                && matches(&key, value)
             {
                 rows.push((key, value.clone()));
                 seen.insert(doc_id.clone());
@@ -321,18 +370,19 @@ impl CoreLoop {
         // Base doc IDs' surrogates, so additions don't re-append a row the
         // base index lookup already returned.
         let mut seen: HashSet<u32> = doc_ids.iter().map(|id| id.surrogate().as_u32()).collect();
+        let base_visible = overlay.base_visible(coll_key);
 
         // Base-minus-superseded: resolve each base storage key to its
         // surrogate and consult the overlay. A tombstone drops it; a staged
         // put re-checks whether the new body still equals the lookup value
         // (an update may have moved the row off the indexed value); no
-        // overlay entry keeps it as-is.
+        // overlay entry keeps it as-is unless the collection is truncated.
         doc_ids.retain(|doc_id| {
             let surrogate = doc_id.surrogate().as_u32();
             match overlay.get(coll_key, surrogate) {
                 Some(Staged::Tombstone) => false,
                 Some(Staged::Put(body)) => value_matches(body) && residual_matches(doc_id, body),
-                None => true,
+                None => base_visible,
             }
         });
 
@@ -373,9 +423,10 @@ impl CoreLoop {
     /// `doc_id` is the storage key the index lookup returned, so the overlay
     /// is consulted by surrogate (`get`), matching the identity the merge
     /// used — `get_by_doc_id` is keyed by the PK and would not match.
-    /// Returns `None` for a staged tombstone. Falls back to the lazy `base`
-    /// closure (skipped whenever the overlay already has the answer) when the
-    /// surrogate has no staged mutation.
+    /// Returns `None` for a staged tombstone, and for a base row of a
+    /// collection truncated in this transaction. Falls back to the lazy
+    /// `base` closure (skipped whenever the overlay already has the answer)
+    /// when the surrogate has no staged mutation.
     pub(in crate::data::executor) fn overlay_or_base_body(
         &self,
         txn_id: Option<TxnId>,
@@ -391,6 +442,7 @@ impl CoreLoop {
                 match overlay.get(coll_key, surrogate) {
                     Some(Staged::Put(body)) => return Ok(Some(body.clone())),
                     Some(Staged::Tombstone) => return Ok(None),
+                    None if overlay.is_truncated(coll_key) => return Ok(None),
                     None => {}
                 }
             }

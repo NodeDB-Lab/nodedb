@@ -12,12 +12,18 @@ use nodedb_types::protocol::NativeResponse;
 use nodedb_types::value::Value;
 
 use crate::bridge::envelope::Status;
+use crate::control::planner::calvin::write_class::{
+    plan_counts_toward_statement_tag, plans_have_user_write,
+};
 use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::response_shape::compose::{ShapeOutcome, shape_response_materialized};
 use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::request::MaterializedShapeRequest;
 use crate::control::server::response_shape::schema::OutputSchema;
-use crate::control::server::response_shape::types::{PlanKind, describe_plan};
+use crate::control::server::response_shape::types::{
+    DmlOutcome, FoldedTag, PlanKind, StatementTag, describe_plan, payload_to_dml_outcome,
+    staged_dml_outcome,
+};
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
 use crate::control::server::shared::session::expander_stage::{
@@ -32,8 +38,9 @@ use nodedb_physical::physical_task::PhysicalTask;
 use super::sql_dispatch_task::dispatch_task;
 use super::streaming::SqlOutcome;
 use super::{
-    DispatchCtx, error_code_to_native, error_response_to_native, error_to_native,
-    error_to_native_with_sqlstate, shape_error_to_native, to_native_columns_rows,
+    DispatchCtx, apply_dml_outcome, dml_fold_error_to_native, error_code_to_native,
+    error_response_to_native, error_to_native, error_to_native_with_sqlstate,
+    shape_error_to_native, to_native_columns_rows,
 };
 use crate::control::server::native::sqlstate_code::sqlstate_error;
 
@@ -43,6 +50,17 @@ fn resp(r: NativeResponse) -> SqlOutcome {
     SqlOutcome::Response(Box::new(r))
 }
 
+/// Fold one task's count-bearing outcome into the statement's tag, rendering
+/// a verb mismatch as the native error frame.
+fn fold_dml(
+    tag: &mut StatementTag,
+    seq: u64,
+    outcome: DmlOutcome,
+) -> Result<(), Box<NativeResponse>> {
+    tag.fold(outcome)
+        .map_err(|e| Box::new(dml_fold_error_to_native(seq, &e)))
+}
+
 /// Run the per-task dispatch loop for a planned, non-streamed task set,
 /// materializing all rows/columns/affected-count into a single
 /// [`SqlOutcome::Response`].
@@ -50,6 +68,13 @@ fn resp(r: NativeResponse) -> SqlOutcome {
 /// Called from `execute_planned` after the streaming fast path has been
 /// ruled out (or declined). Buffers writes when in an explicit transaction
 /// block, exactly like the pgwire dispatch loop.
+///
+/// The statement's `rows_affected` and `command` come from one
+/// [`StatementTag`] folded over every task, the same fold pgwire renders as
+/// its command tag: a count-bearing task contributes its reported count and
+/// verb, an opaque task (buffered write, index or graph maintenance,
+/// computed-value payload) contributes nothing. Neither field is ever
+/// synthesised from the task count.
 pub(super) async fn run_dispatch_loop(
     ctx: &DispatchCtx<'_>,
     seq: u64,
@@ -62,12 +87,15 @@ pub(super) async fn run_dispatch_loop(
     let mut all_rows: Vec<Vec<Value>> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut last_lsn = 0u64;
-    let mut total_affected = 0u64;
+    let mut statement_tag = StatementTag::default();
     // Checked once rather than per task — metering is disabled by default, so
     // this keeps the per-task extraction below (which clones the collection
     // name) a true no-op on the hot path for every deployment that hasn't
     // turned it on.
     let metering_enabled = ctx.state.metering_config.enabled;
+    // A derived implicit-edge write beside the user's own never answers the
+    // statement, exactly as Calvin's deposit rule has it.
+    let has_user_write = plans_have_user_write(tasks.iter().map(|t| &t.plan));
     // Session-scoped sequence access for the statement's Control-Plane
     // computed columns: the registry plus this connection's `currval` map.
     let session_sequences = ctx.sessions.sequence_values(ctx.peer_addr);
@@ -186,7 +214,8 @@ pub(super) async fn run_dispatch_loop(
                             in_transaction_returning_unsupported(),
                     ));
                 }
-                total_affected += 1;
+                // Applied at COMMIT: no count and no verb yet.
+                statement_tag.fold_opaque();
                 continue;
             }
             Ok(InTxnRoute::Staged(outcome)) => {
@@ -197,8 +226,20 @@ pub(super) async fn run_dispatch_loop(
                             in_transaction_returning_unsupported(),
                     ));
                 }
-                if matches!(outcome.kind, StagedTagKind::RawPayload) && !outcome.payload.is_empty()
-                {
+                // The staging gate decided the verb and counted the rows it
+                // applied to the overlay; only a computed-value payload
+                // (`RawPayload`) is shaped instead of folded.
+                if !matches!(outcome.kind, StagedTagKind::RawPayload) {
+                    if let Err(e) = fold_dml(
+                        &mut statement_tag,
+                        seq,
+                        staged_dml_outcome(outcome.kind, outcome.affected),
+                    ) {
+                        return SqlOutcome::Response(e);
+                    }
+                } else if outcome.payload.is_empty() {
+                    statement_tag.fold_opaque();
+                } else {
                     let plan_kind = describe_plan(&plan_for_staged_response);
                     let redaction = QueryRedaction::for_plan(
                         ctx.tenant_id(),
@@ -226,13 +267,10 @@ pub(super) async fn run_dispatch_loop(
                             }
                             all_rows.extend(rows);
                         }
-                        Ok(ShapeOutcome::Passthrough) => {
-                            total_affected += 1;
-                        }
+                        // The value rides in the payload, never as a count.
+                        Ok(ShapeOutcome::Passthrough) => statement_tag.fold_opaque(),
                         Err(e) => return resp(shape_error_to_native(seq, &e)),
                     }
-                } else {
-                    total_affected += outcome.affected as u64;
                 }
                 continue;
             }
@@ -242,8 +280,53 @@ pub(super) async fn run_dispatch_loop(
             }
         };
 
+        // `ClusterArray` plans are handled entirely on the Control Plane by
+        // the `ArrayCoordinator` — they must never reach the SPSC bridge or
+        // the trigger/DML machinery. A write reshapes into per-shard
+        // `ArrayOp` tasks inside the staging gate above and never reaches
+        // here as `ClusterArray`; only reads (`Slice`/`Agg`) and autocommit
+        // `Put`/`Delete` arrive as this plan by the time `routed` resolves to
+        // `Read`. Intercepted here, before `dispatch_task` would otherwise
+        // route it through the gateway toward the Data Plane. Metering is
+        // not applied here, matching pgwire's `ClusterArray` short-circuit,
+        // which also does not meter this path.
+        if matches!(
+            task.plan,
+            crate::bridge::envelope::PhysicalPlan::ClusterArray(_)
+        ) {
+            let authorized = match super::sql_gateway::authorize_native_task(ctx, &task) {
+                Ok(a) => a,
+                Err(e) => return resp(error_to_native(seq, &e)),
+            };
+            match super::cluster_array::dispatch_cluster_array_task(ctx, authorized, output_schema)
+                .await
+            {
+                Ok(super::cluster_array::ClusterArrayOutcome::Rows {
+                    columns,
+                    rows,
+                    notice,
+                }) => {
+                    if let Some(n) = notice {
+                        warnings.push(n);
+                    }
+                    if !columns.is_empty() && all_columns.is_none() {
+                        all_columns = Some(columns);
+                    }
+                    all_rows.extend(rows);
+                }
+                Ok(super::cluster_array::ClusterArrayOutcome::Affected(outcome)) => {
+                    if let Err(e) = fold_dml(&mut statement_tag, seq, outcome) {
+                        return SqlOutcome::Response(e);
+                    }
+                }
+                Err(e) => return resp(error_to_native(seq, &e)),
+            }
+            continue;
+        }
+
         let plan_for_response = task.plan.clone();
         let task_vshard = task.vshard_id;
+        let task_database_id = task.database_id;
         let (task_resp, shard_watermarks, dist_reads) = match dispatch_task(ctx, task).await {
             Ok(r) => r,
             Err(e) => return resp(error_to_native(seq, &e)),
@@ -289,31 +372,34 @@ pub(super) async fn run_dispatch_loop(
             return resp(error_response_to_native(seq, &task_resp));
         }
 
+        // --- TRUNCATE RESTART IDENTITY ---
+        // Autocommit only: a buffered truncate restarts its sequences at
+        // COMMIT. Same rule as the pgwire dispatch loop.
+        if let Some((collection, true)) = plan_for_response.truncate_target() {
+            ctx.state
+                .sequence_registry
+                .restart_sequences_for_collection(
+                    task_database_id.as_u64(),
+                    ctx.tenant_id().as_u64(),
+                    collection.as_str(),
+                );
+        }
+
         last_lsn = task_resp.watermark_lsn.as_u64();
 
         // This task's own row count, for metering below — distinct from
-        // `total_affected`/`all_rows`, which accumulate across every task in
+        // `statement_tag`/`all_rows`, which accumulate across every task in
         // the loop.
         let mut task_rows: Option<u64> = None;
         let plan_kind = describe_plan(&plan_for_response);
-        if let crate::control::server::response_shape::types::PlanKind::DmlResult(_) = plan_kind {
-            // A count-bearing write must report the rows it actually touched.
-            // Adding 1 per dispatched task instead, as the empty-payload
-            // branch below does, would report a row for a delete that removed
-            // nothing and for an `ON CONFLICT DO NOTHING` insert that skipped.
-            match crate::control::server::shared::sql::staging_predicates::require_affected_count(
-                &task_resp.payload,
-            ) {
-                Ok(n) => {
-                    total_affected += n;
-                    task_rows = Some(n);
-                }
-                Err(e) => return resp(error_to_native(seq, &e)),
-            }
-        } else if task_resp.payload.is_empty() {
-            // Not a count-bearing plan (graph / vector / index write): one unit
-            // of work per dispatched task, as before.
-            total_affected += 1;
+        let counts_toward_tag =
+            plan_counts_toward_statement_tag(&plan_for_response, has_user_write);
+        let count_bearing = matches!(plan_kind, PlanKind::DmlResult(_) | PlanKind::DmlResultByOp);
+        if task_resp.payload.is_empty() && !count_bearing {
+            // Not a count-bearing plan (graph / vector / index write): no
+            // count and no verb to report. A count-bearing plan with no
+            // payload falls through so the count reader refuses it.
+            statement_tag.fold_opaque();
         } else {
             let redaction =
                 QueryRedaction::for_plan(ctx.tenant_id(), ctx.auth_context(), &plan_for_response);
@@ -339,8 +425,25 @@ pub(super) async fn run_dispatch_loop(
                     task_rows = Some(rows.len() as u64);
                     all_rows.extend(rows);
                 }
+                // A count-bearing write reports the rows it touched and its
+                // verb; an opaque execution reports neither. Counting one per
+                // dispatched task instead would report a row for a delete
+                // that removed nothing and for an `ON CONFLICT DO NOTHING`
+                // insert that skipped.
+                Ok(ShapeOutcome::Passthrough) if !counts_toward_tag => {
+                    statement_tag.fold_opaque();
+                }
                 Ok(ShapeOutcome::Passthrough) => {
-                    total_affected += 1;
+                    match payload_to_dml_outcome(&task_resp.payload, plan_kind) {
+                        Ok(Some(outcome)) => {
+                            task_rows = Some(outcome.affected);
+                            if let Err(e) = fold_dml(&mut statement_tag, seq, outcome) {
+                                return SqlOutcome::Response(e);
+                            }
+                        }
+                        Ok(None) => statement_tag.fold_opaque(),
+                        Err(e) => return resp(error_to_native(seq, &e)),
+                    }
                 }
                 Err(e) => return resp(shape_error_to_native(seq, &e)),
             }
@@ -355,23 +458,16 @@ pub(super) async fn run_dispatch_loop(
         }
     }
 
-    if all_rows.is_empty() {
-        let mut r = NativeResponse::ok(seq);
-        r.rows_affected = Some(total_affected);
-        r.watermark_lsn = last_lsn;
-        r.warnings = warnings;
-        resp(r)
-    } else {
-        resp(NativeResponse {
-            seq,
-            status: nodedb_types::protocol::ResponseStatus::Ok,
-            columns: all_columns,
-            rows: Some(all_rows),
-            rows_affected: Some(total_affected),
-            watermark_lsn: last_lsn,
-            error: None,
-            auth: None,
-            warnings,
-        })
+    let mut r = NativeResponse::ok(seq);
+    r.watermark_lsn = last_lsn;
+    r.warnings = warnings;
+    if !all_rows.is_empty() {
+        r.columns = all_columns;
+        r.rows = Some(all_rows);
     }
+    match statement_tag.finish() {
+        Some(FoldedTag::Dml(outcome)) => apply_dml_outcome(&mut r, outcome),
+        Some(FoldedTag::Opaque) | None => {}
+    }
+    resp(r)
 }

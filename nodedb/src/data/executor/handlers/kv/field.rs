@@ -2,6 +2,7 @@
 
 //! KV field-level operation handlers: FieldGet, FieldSet.
 
+use nodedb_query::msgpack_scan::{KvBodyShape, kv_body_shape};
 use tracing::debug;
 
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -80,6 +81,17 @@ impl CoreLoop {
             }
         }
 
+        // A raw body (the single-`value` SQL form, RESP `SET`) is not a
+        // hash: the verdict Redis gives `HGET` on a string key.
+        if kv_body_shape(&value) == KvBodyShape::Raw {
+            return self.response_error(
+                task,
+                ErrorCode::TypeMismatch {
+                    collection: collection.to_string(),
+                    detail: "key holds a bare value, not a hash".into(),
+                },
+            );
+        }
         // Decode as standard msgpack map.
         let doc = match nodedb_types::json_from_msgpack(&value) {
             Ok(serde_json::Value::Object(map)) => map,
@@ -160,8 +172,11 @@ impl CoreLoop {
         // Merge field updates via the pure computation shared with the
         // in-transaction staging handler (`stage_kv_transfer.rs`), so a
         // staged value and its COMMIT-time durable replay never diverge.
-        let computed = match super::field_compute::merge_field_updates(current.as_deref(), updates)
-        {
+        let computed = match super::field_compute::merge_field_updates(
+            collection,
+            current.as_deref(),
+            updates,
+        ) {
             Ok(c) => c,
             Err(e) => return self.response_error(task, e),
         };

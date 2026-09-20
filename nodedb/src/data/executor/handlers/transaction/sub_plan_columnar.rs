@@ -5,7 +5,7 @@
 //! Split out of `sub_plan.rs` to keep that file under the size limit; this
 //! is still the columnar arm of the same per-sub-plan dispatcher.
 
-use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response};
+use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::ColumnarOp;
@@ -13,9 +13,9 @@ use nodedb_physical::physical_plan::ColumnarOp;
 use super::undo::UndoEntry;
 
 impl CoreLoop {
-    /// Columnar engine: insert / predicate update / predicate delete are
-    /// undo-tracked; everything else passes through the standard dispatch
-    /// path.
+    /// Columnar engine: insert, predicate update / delete, their resolved
+    /// forms, and truncate are undo-tracked; everything else passes through
+    /// the standard dispatch path.
     ///
     /// Predicate update/delete are staged at statement time; this is the
     /// durable COMMIT replay. Undo is captured here so a sibling sub-plan
@@ -116,6 +116,23 @@ impl CoreLoop {
                 rls_write_check,
                 undo_log,
             ),
+
+            // Staged as an overlay marker at statement time; the live truncate
+            // wipes every row replayed before it in this batch and records
+            // its whole pre-image for atomic rollback.
+            ColumnarOp::Truncate {
+                collection,
+                restart_identity: _,
+            } => {
+                let resp =
+                    self.execute_columnar_truncate(dummy_task, collection.as_str(), Some(undo_log));
+                if resp.status == Status::Error {
+                    return Err(resp.error_code.map(|c| *c).unwrap_or(ErrorCode::Internal {
+                        detail: "columnar truncate failed".into(),
+                    }));
+                }
+                Ok(resp)
+            }
 
             ColumnarOp::Scan { .. }
             | ColumnarOp::MaterializeScan { .. }

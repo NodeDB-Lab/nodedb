@@ -237,6 +237,7 @@ impl CoreLoop {
                 // waiting on a projection, and no identity to gate reads for.
                 returning: None,
                 rls_filters: &[],
+                spatial_undo: None,
             },
         );
         if response.status != crate::bridge::envelope::Status::Ok {
@@ -256,16 +257,20 @@ impl CoreLoop {
     /// Replay WAL timeseries records to rebuild in-memory memtable state after crash.
     ///
     /// Called once during startup, after `open()` but before the event loop.
-    /// Processes `TimeseriesBatch` records, ignoring records for other vShards.
-    /// Uses LSN-based skip: only replays records with LSN > last flushed LSN.
+    /// Processes `TimeseriesBatch` records and the columnar-family truncate
+    /// records, ignoring records for other vShards. Uses LSN-based skip: only
+    /// replays records with LSN > last flushed LSN, and never a record a
+    /// later truncate of its collection already removed.
     pub fn replay_timeseries_wal(
         &mut self,
         records: &[nodedb_wal::WalRecord],
         num_cores: usize,
         tombstones: &nodedb_wal::TombstoneSet,
     ) {
+        use crate::data::executor::wal_replay_columnar_truncate::TruncateFloors;
         use nodedb_wal::record::RecordType;
 
+        let truncate_floors = TruncateFloors::collect(records, num_cores, self.core_id);
         let mut replayed = 0usize;
         let mut skipped = 0usize;
 
@@ -274,7 +279,11 @@ impl CoreLoop {
             let record_type = RecordType::from_raw(logical_type);
 
             let is_ts_batch = record_type == Some(RecordType::TimeseriesBatch);
-            if !is_ts_batch {
+            let is_truncate = matches!(
+                record_type,
+                Some(RecordType::ColumnarTruncate) | Some(RecordType::TimeseriesTruncate)
+            );
+            if !is_ts_batch && !is_truncate {
                 continue;
             }
 
@@ -290,6 +299,15 @@ impl CoreLoop {
                 continue;
             }
 
+            if is_truncate {
+                if self.replay_truncate_record(record, tombstones) {
+                    replayed += 1;
+                } else {
+                    skipped += 1;
+                }
+                continue;
+            }
+
             // Predicate DML (`columnar_dml`) rides the same `TimeseriesBatch`
             // record type but a disjoint map shape from both `ColumnarWalRecord`
             // and the legacy tuples (see `ColumnarDmlWalRecord`'s doc comment),
@@ -302,6 +320,7 @@ impl CoreLoop {
                 DatabaseId::new(record.header.database_id),
                 record.header.lsn,
                 tombstones,
+                &truncate_floors,
             ) {
                 replayed += applied;
                 continue;
@@ -316,6 +335,7 @@ impl CoreLoop {
                 DatabaseId::new(record.header.database_id),
                 record.header.lsn,
                 tombstones,
+                &truncate_floors,
             ) {
                 replayed += applied;
                 continue;
@@ -358,6 +378,11 @@ impl CoreLoop {
             // Skip records for collections that were hard-deleted after
             // this write. Otherwise the purged memtable would resurrect.
             if tombstones.is_tombstoned(db_id.as_u64(), tenant_id, collection, record_lsn) {
+                skipped += 1;
+                continue;
+            }
+            // A later truncate of this collection removed this row.
+            if truncate_floors.covers(&key, record_lsn) {
                 skipped += 1;
                 continue;
             }

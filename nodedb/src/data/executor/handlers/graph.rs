@@ -17,7 +17,7 @@ use crate::types::TenantId;
 
 #[path = "graph_edge_resolve.rs"]
 pub(in crate::data::executor) mod graph_edge_resolve;
-#[path = "graph_edge_write.rs"]
+#[path = "graph_edge_write/mod.rs"]
 pub(in crate::data::executor) mod graph_edge_write;
 #[path = "graph_traversal.rs"]
 pub(in crate::data::executor) mod graph_traversal;

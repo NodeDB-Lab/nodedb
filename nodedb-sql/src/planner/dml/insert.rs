@@ -5,8 +5,8 @@
 use sqlparser::ast;
 
 use super::super::dml_helpers::{
-    KvInsertParams, bind_insert_select_columns, build_kv_insert_plan,
-    build_vector_primary_insert_plan, resolve_insert_columns,
+    KvInsertParams, VectorPrimaryInsertParams, bind_insert_select_columns, build_kv_insert_plan,
+    build_vector_primary_insert_plan, is_vector_primary, resolve_insert_columns,
 };
 use super::target::{
     OnConflict, classify_on_conflict, column_schema, insert_columns, resolve_target, target_scope,
@@ -88,17 +88,25 @@ pub fn plan_insert(
     // then every cell coerced and range-checked against its declared type.
     let typed = typed_rows(&info, &columns, rows_ast, catalog)?;
 
-    // Vector-primary collection: bypass document encoding.
-    if info.primary == nodedb_types::PrimaryEngine::Vector
+    // Vector-primary collection: bypass document encoding. The row's
+    // existence intent travels with the plan, as it does for KV.
+    if is_vector_primary(&info)
         && let Some(ref vpc) = info.vector_primary
     {
-        return build_vector_primary_insert_plan(
-            &table_name,
+        let intent = if if_absent {
+            VectorPrimaryInsertIntent::InsertIfAbsent
+        } else {
+            VectorPrimaryInsertIntent::Insert
+        };
+        return build_vector_primary_insert_plan(VectorPrimaryInsertParams {
+            collection: &table_name,
             vpc,
-            &columns,
-            typed.rows,
-            typed.volatile_defaults,
-        );
+            rows: typed.rows,
+            volatile_defaults: typed.volatile_defaults,
+            intent,
+            on_conflict_updates: Vec::new(),
+            primary_key: info.primary_key.clone(),
+        });
     }
 
     // All other engines: delegate to engine rules.

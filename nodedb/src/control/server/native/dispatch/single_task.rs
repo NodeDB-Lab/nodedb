@@ -7,16 +7,20 @@
 use nodedb_types::protocol::NativeResponse;
 
 use crate::bridge::envelope::{Payload, Response, Status};
+use crate::control::server::response_shape::types::staged_dml_outcome;
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
 use crate::control::server::shared::session::staging_gate::{
-    InTxnRoute, StagingGateError, route_in_tx_write,
+    InTxnRoute, StagedTagKind, StagingGateError, route_in_tx_write,
 };
 use crate::types::{Lsn, RequestId};
 
 use super::raw_dispatch::dispatch_authorized_single_task;
 use super::response::data_plane_response_to_native;
-use super::{DispatchCtx, error_code_to_native, error_to_native, error_to_native_with_sqlstate};
+use super::{
+    DispatchCtx, apply_dml_outcome, error_code_to_native, error_to_native,
+    error_to_native_with_sqlstate,
+};
 
 /// Dispatch one plan via the gateway (when wired) or the local SPSC path,
 /// converting the Data-Plane response into a `NativeResponse`.
@@ -49,8 +53,8 @@ pub(super) async fn dispatch_single_task(
     let task = authorized.into_staging_task();
 
     // Cloned before `route_in_tx_write` consumes `task`, so a staged write
-    // whose outcome carries a real affected-count/computed-value payload
-    // (e.g. `KvBatchPut`'s `{"inserted": n}`) can be shaped into the
+    // whose outcome carries a computed-value payload (KV `Incr` / `Cas` /
+    // `GetSet`, see `StagedTagKind::RawPayload`) can be shaped into the
     // response the same way the non-staged branch below shapes it.
     let plan_for_staged_response = task.plan.clone();
 
@@ -97,12 +101,17 @@ pub(super) async fn dispatch_single_task(
     .await
     {
         Ok(InTxnRoute::Read(routed_task)) => *routed_task,
-        Ok(InTxnRoute::Buffered) => {
-            let mut r = NativeResponse::ok(seq);
-            r.rows_affected = Some(1);
-            return r;
-        }
+        // A buffered write applies at COMMIT: no count and no verb yet.
+        Ok(InTxnRoute::Buffered) => return NativeResponse::ok(seq),
         Ok(InTxnRoute::Staged(outcome)) => {
+            // The staging gate decided the verb and counted the rows it
+            // applied to the overlay; only a computed-value payload is
+            // forwarded as-is.
+            if !matches!(outcome.kind, StagedTagKind::RawPayload) {
+                let mut r = NativeResponse::ok(seq);
+                apply_dml_outcome(&mut r, staged_dml_outcome(outcome.kind, outcome.affected));
+                return r;
+            }
             let synthetic = Response {
                 request_id: RequestId::new(0),
                 status: Status::Ok,
@@ -122,6 +131,49 @@ pub(super) async fn dispatch_single_task(
             return error_code_to_native(seq, code.as_ref());
         }
     };
+
+    // `ClusterArray` plans are handled entirely on the Control Plane by the
+    // `ArrayCoordinator` — they must never reach the SPSC bridge or the
+    // trigger/DML machinery. A write reshapes into per-shard `ArrayOp` tasks
+    // inside `route_in_tx_write` above and never reaches here as
+    // `ClusterArray`; only reads (`Slice`/`Agg`) and autocommit `Put`/`Delete`
+    // arrive as this plan by the time the route resolves to `Read`.
+    // Intercepted here, before `dispatch_authorized_single_task` would
+    // otherwise route it toward the Data Plane. No SQL output schema exists
+    // on this direct-op path, so no projection narrows the shaped rows.
+    // Metering is not applied here, matching pgwire's `ClusterArray`
+    // short-circuit, which also does not meter this path.
+    if matches!(
+        task.plan,
+        crate::bridge::envelope::PhysicalPlan::ClusterArray(_)
+    ) {
+        let authorized = match super::sql_gateway::authorize_native_task(ctx, &task) {
+            Ok(a) => a,
+            Err(e) => return error_to_native(seq, &e),
+        };
+        return match super::cluster_array::dispatch_cluster_array_task(ctx, authorized, None).await
+        {
+            Ok(super::cluster_array::ClusterArrayOutcome::Rows {
+                columns,
+                rows,
+                notice,
+            }) => {
+                let mut r = NativeResponse::ok(seq);
+                if !columns.is_empty() {
+                    r.columns = Some(columns);
+                }
+                r.rows = Some(rows);
+                r.warnings = notice.into_iter().collect();
+                r
+            }
+            Ok(super::cluster_array::ClusterArrayOutcome::Affected(outcome)) => {
+                let mut r = NativeResponse::ok(seq);
+                apply_dml_outcome(&mut r, outcome);
+                r
+            }
+            Err(e) => error_to_native(seq, &e),
+        };
+    }
 
     let plan_for_response = task.plan.clone();
     let task_vshard = task.vshard_id;

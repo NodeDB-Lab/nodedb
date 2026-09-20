@@ -216,6 +216,10 @@ fn record_to_events(record: &WalRecord, sequence: &mut u64) -> Vec<WriteEvent> {
         | RecordType::VectorParams
         | RecordType::VectorIndexDrop
         | RecordType::VectorDirectUpsert
+        | RecordType::VectorDirectDelete
+        | RecordType::VectorDirectUpdate
+        | RecordType::VectorDirectTruncate
+        | RecordType::VectorResolvedDirectWrite
         | RecordType::MultiVectorPut
         | RecordType::MultiVectorDelete
         | RecordType::CrdtDelta
@@ -245,6 +249,11 @@ fn record_to_events(record: &WalRecord, sequence: &mut u64) -> Vec<WriteEvent> {
         // opt-in per collection), never the Data-Plane WriteEvent stream — so
         // there is no forward WriteEvent to reconstruct.
         | RecordType::TimeseriesBatch
+        // Columnar-family truncate: whole-collection clear with no per-row
+        // identity; its forward CDC rides the Control-Plane change stream
+        // (`extract_write_metadata`, keyed `(collection, "*", Delete)`).
+        | RecordType::ColumnarTruncate
+        | RecordType::TimeseriesTruncate
         // Array: `ArrayPut` / `ArrayDelete` cells decode per-cell, but the forward
         // path emits no Data-Plane WriteEvent — array CDC rides the Control-Plane
         // change stream (`extract_write_metadata`, keyed `(array_name, "*", op)`).

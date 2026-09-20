@@ -7,6 +7,7 @@ use pgwire::error::{ErrorInfo, PgWireError};
 
 use crate::OllpExhaustedCause;
 use crate::bridge::envelope::{ErrorCode, Status};
+use crate::control::server::response_shape::types::DmlFoldError;
 
 /// Create a pgwire ErrorResponse with a SQLSTATE code.
 pub fn sqlstate_error(code: &str, message: &str) -> PgWireError {
@@ -14,6 +15,24 @@ pub fn sqlstate_error(code: &str, message: &str) -> PgWireError {
         "ERROR".to_owned(),
         code.to_owned(),
         message.to_owned(),
+    )))
+}
+
+/// Map a statement-tag fold refusal to the pgwire error the client reads.
+/// Two tasks of one statement disagreeing on their verb is a planner bug,
+/// so it surfaces as an internal error.
+pub fn dml_fold_error_to_pg(e: &DmlFoldError) -> PgWireError {
+    sqlstate_error("XX000", &e.to_string())
+}
+
+/// Map a NodeDB `Error` to the pgwire error the client reads, through the
+/// one SQLSTATE table [`error_to_sqlstate`] owns.
+pub fn error_to_pg(err: &crate::Error) -> PgWireError {
+    let (severity, code, message) = error_to_sqlstate(err);
+    PgWireError::UserError(Box::new(ErrorInfo::new(
+        severity.to_owned(),
+        code.to_owned(),
+        message,
     )))
 }
 
@@ -194,6 +213,11 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::DataPlane(code) => {
             crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate(code)
         }
+        crate::Error::Shaping(e) => (
+            "ERROR",
+            numeric_code_to_sqlstate(e.code()),
+            e.message().to_string(),
+        ),
         _ => ("ERROR", sqlstate::INTERNAL_ERROR, err.to_string()),
     }
 }

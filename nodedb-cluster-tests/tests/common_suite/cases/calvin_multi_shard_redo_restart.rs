@@ -6,8 +6,8 @@
 //! `vector_index_txn_restart.rs` for the single-shard analogue).
 //!
 //! 1. Two collections — a KV collection and a vector-indexed document
-//!    collection — are created on DIFFERENT vShards (`distinct_vshard_
-//!    collections`, same technique as `calvin_cluster_pgwire_e2e.rs`).
+//!    collection — are created on DIFFERENT vShards
+//!    (`vshard_names::distinct_vshard_collections`).
 //! 2. `BEGIN; INSERT INTO <kv>; INSERT INTO <vecdocs>; COMMIT` is sent as ONE
 //!    `simple_query` call. tokio-postgres ships this as a single wire
 //!    message; the server buffers the two INSERTs during the transaction and,
@@ -25,9 +25,9 @@ use crate::common;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use nodedb::types::{DatabaseId, VShardId};
 use tokio_postgres::SimpleQueryMessage;
 
+use super::vshard_names::distinct_vshard_collections;
 use common::cluster_harness::{TestClusterNode, read_once_a_leader_exists, wait_for};
 
 /// Observed sequencer-group leader id from a node's local Raft status, or `0`
@@ -52,26 +52,6 @@ fn admitted_total(node: &TestClusterNode) -> u64 {
         .get()
         .map(|m| m.admitted_total.load(Ordering::Relaxed))
         .unwrap_or(0)
-}
-
-/// A `(kv_name, vec_name)` pair of collection names whose vShard ids differ,
-/// so a transaction writing to both is genuinely multi-shard. Deterministic:
-/// `VShardId::from_collection_in_database` is a pure function of the database
-/// id + collection name bytes. Same technique as
-/// `calvin_cluster_pgwire_e2e.rs::two_distinct_vshard_collections`.
-fn distinct_vshard_collections() -> (String, String) {
-    let kv_name = "cmr_kv".to_string();
-    let vkv = VShardId::from_collection_in_database(DatabaseId::DEFAULT, &kv_name).as_u32();
-    for i in 0u32..512 {
-        let vec_name = format!("cmr_vecdocs_{i}");
-        if VShardId::from_collection_in_database(DatabaseId::DEFAULT, &vec_name).as_u32() != vkv {
-            return (kv_name, vec_name);
-        }
-    }
-    panic!(
-        "could not find a vector-doc collection name on a distinct vShard from \
-         the KV collection in 512 tries"
-    );
 }
 
 /// Single-row `col` value for `id` in a KV/document collection, or `None` if
@@ -140,7 +120,7 @@ async fn calvin_multi_shard_write_in_explicit_block_commits_and_survives_restart
     )
     .await;
 
-    let (kv, vecdocs) = distinct_vshard_collections();
+    let (kv, vecdocs) = distinct_vshard_collections("cmr_kv", "cmr_vecdocs");
 
     node.client
         .simple_query(&format!(

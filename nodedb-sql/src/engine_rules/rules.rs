@@ -7,7 +7,7 @@ use crate::types::SqlPlan;
 
 use super::params::{
     AggregateParams, DeleteParams, InsertParams, MergeParams, PointGetParams, ScanParams,
-    UpdateFromParams, UpdateParams, UpsertParams,
+    TruncateParams, UpdateFromParams, UpdateParams, UpsertParams,
 };
 
 /// Engine-specific planning rules.
@@ -37,6 +37,9 @@ pub trait EngineRules {
     fn plan_update_from(&self, params: UpdateFromParams) -> Result<Vec<SqlPlan>>;
     /// Plan a DELETE (point or bulk).
     fn plan_delete(&self, params: DeleteParams) -> Result<Vec<SqlPlan>>;
+    /// Plan a TRUNCATE. Returns `Err(SqlError::Unsupported)` for engines
+    /// that carry no whole-collection clear on the SQL surface (array).
+    fn plan_truncate(&self, params: TruncateParams) -> Result<Vec<SqlPlan>>;
     /// Plan a GROUP BY / aggregate query.
     fn plan_aggregate(&self, params: AggregateParams) -> Result<SqlPlan>;
     /// Plan a MERGE statement.

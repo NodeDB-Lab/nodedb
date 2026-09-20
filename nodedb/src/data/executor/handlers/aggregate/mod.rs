@@ -15,6 +15,7 @@
 //! renaming and ORDER BY sorting), `state_emit` (the distributed-shuffle
 //! partial-state producer), and `shuffle_merge` (the partial-state consumer).
 
+mod cache_entry;
 mod cache_key;
 pub(in crate::data::executor) mod exec;
 mod invalidate;
@@ -22,3 +23,5 @@ mod rows;
 pub(in crate::data::executor) mod shuffle_merge;
 pub(in crate::data::executor) mod state_emit;
 mod streaming;
+
+pub(in crate::data::executor) use cache_entry::AggregateCacheEntry;

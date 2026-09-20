@@ -132,6 +132,7 @@ pub async fn execute_sql(
                 clauses: _,
                 returning: _,
                 resolved_inserts: None,
+                resolved_insert_identities: _,
                 source_rows: _,
                 rls_filters: _,
                 rls_write_check: _,
@@ -281,6 +282,8 @@ pub async fn execute_sql(
             }
         };
 
+        // WebSocket RPC has no session transaction (no BEGIN / COMMIT), so
+        // every task is autocommit and forwards with no transaction id.
         let payloads: crate::Result<Vec<Vec<u8>>> = match shared.gateway.get() {
             Some(gw) => {
                 let gw_ctx = QueryContext {

@@ -146,9 +146,14 @@ impl CoreLoop {
     }
 }
 
+/// A vector-primary row a write path hands back to a `RETURNING`
+/// projection: its sparse-store key paired with the sidecar bytes stored
+/// (or removed) under it.
+pub(in crate::data::executor) type VectorStoredRow<'a> = (&'a nodedb_types::StorageKey, &'a [u8]);
+
 impl CoreLoop {
-    /// Build a vector-primary upsert's `RETURNING` response from the sidecar
-    /// it stored, via [`sparse_row_to_doc`] against
+    /// Build a vector-primary write's `RETURNING` response from the sidecars
+    /// it stored or removed, via [`sparse_row_to_doc`] against
     /// [`SparseBodyFormatRef::VectorSidecar`] — the same converter `SELECT`
     /// uses. The sidecar is `zerompk` TAGGED bytes an ordinary document
     /// decode misreads (`"alice"` comes back as `[4,"alice"]`), so the
@@ -158,26 +163,36 @@ impl CoreLoop {
         task: &ExecutionTask,
         spec: &ReturningSpec,
         rls_filters: &[u8],
-        row_key: &nodedb_types::StorageKey,
-        sidecar: &[u8],
+        rows: &[VectorStoredRow<'_>],
     ) -> Response {
-        let (_id, mp) = sparse_row_to_doc(row_key, sidecar, SparseBodyFormatRef::VectorSidecar);
-        // An empty row set here would report "the write affected nothing" for a
-        // write that did land, so an unreadable sidecar fails the statement.
-        let docs: Vec<Value> = match doc_format::decode_document_value(&mp) {
-            Ok(doc) => vec![doc],
-            Err(e) => return self.response_error(task, e),
-        };
-        match build_rows_payload(spec, rls_filters, &docs) {
+        match vector_stored_rows_payload(spec, rls_filters, rows) {
             Ok(payload) => self.response_with_payload(task, payload),
-            Err(e) => self.response_error(
-                task,
-                ErrorCode::Internal {
-                    detail: format!("RETURNING encode: {e}"),
-                },
-            ),
+            Err(e) => self.response_error(task, e),
         }
     }
+}
+
+/// The `RowsPayload` blob a vector-primary write's `RETURNING` clause
+/// projects. Split from [`CoreLoop::vector_stored_returning_response`] so the
+/// resolve-before-propose path decides the same payload without holding a
+/// `Response`.
+pub(in crate::data::executor) fn vector_stored_rows_payload(
+    spec: &ReturningSpec,
+    rls_filters: &[u8],
+    rows: &[VectorStoredRow<'_>],
+) -> crate::Result<Vec<u8>> {
+    // An unreadable sidecar fails the statement: an empty row set here
+    // would report "the write affected nothing" for a write that did land.
+    let docs: Vec<Value> = rows
+        .iter()
+        .map(|(row_key, sidecar)| {
+            let (_id, mp) = sparse_row_to_doc(row_key, sidecar, SparseBodyFormatRef::VectorSidecar);
+            doc_format::decode_document_value(&mp)
+        })
+        .collect::<crate::Result<Vec<_>>>()?;
+    build_rows_payload(spec, rls_filters, &docs).map_err(|e| crate::Error::Internal {
+        detail: format!("RETURNING encode: {e}"),
+    })
 }
 
 /// Project the STORED post-images of freshly written rows into a

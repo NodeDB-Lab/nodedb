@@ -28,6 +28,37 @@ impl From<nodedb_query::EvalError> for Error {
     }
 }
 
+/// A non-scalar offered where a raw KV body is required is a request
+/// shape error, not an internal fault.
+impl From<nodedb_types::NotScalar> for Error {
+    fn from(e: nodedb_types::NotScalar) -> Self {
+        Self::BadRequest {
+            detail: e.to_string(),
+        }
+    }
+}
+
+/// A KV read-modify-write that cannot re-encode into the stored shape.
+/// Shape mismatches name the offending keys or kind for the caller; a body
+/// that fails to decode or encode is a serialization fault.
+impl From<nodedb_query::msgpack_scan::KvBodyError> for Error {
+    fn from(e: nodedb_query::msgpack_scan::KvBodyError) -> Self {
+        use nodedb_query::msgpack_scan::KvBodyError as Ke;
+        match e {
+            Ke::RowNotObject { .. }
+            | Ke::RawMissingValue
+            | Ke::RawExtraKeys { .. }
+            | Ke::RawNotScalar(_) => Self::BadRequest {
+                detail: e.to_string(),
+            },
+            Ke::Decode(_) | Ke::Encode(_) => Self::Serialization {
+                format: "msgpack".into(),
+                detail: e.to_string(),
+            },
+        }
+    }
+}
+
 impl From<crate::engine::timeseries::ilp::IlpError> for Error {
     fn from(e: crate::engine::timeseries::ilp::IlpError) -> Self {
         Self::BadRequest {

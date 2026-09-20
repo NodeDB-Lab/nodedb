@@ -6,7 +6,7 @@
 //! and record undo entries) live in `sub_plan_write.rs`; this file only
 //! routes each `PhysicalPlan` variant to its engine-specific handler.
 
-use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response};
+use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, TenantId, TraceId};
@@ -89,7 +89,7 @@ impl CoreLoop {
             PhysicalPlan::Vector(op) => self.exec_tx_vector(dummy_task, tid, plan, op, undo_log),
             PhysicalPlan::Graph(op) => self.exec_tx_graph(dummy_task, tid, plan, op, undo_log),
             PhysicalPlan::Crdt(op) => self.exec_tx_crdt(dummy_task, tid, plan, op, crdt_deltas),
-            PhysicalPlan::Kv(kv_op) => self.execute_tx_kv(dummy_task, tid, kv_op, undo_log),
+            PhysicalPlan::Kv(kv_op) => self.execute_tx_kv(dummy_task, tid, plan, kv_op, undo_log),
             PhysicalPlan::Columnar(op) => {
                 self.exec_tx_columnar(dummy_task, tid, plan, op, undo_log)
             }
@@ -454,7 +454,29 @@ impl CoreLoop {
                 undo_log,
             ),
 
-            _ => self.exec_tx_passthrough(tid, plan, dummy_task.request.deadline),
+            // Staged as an overlay marker at statement time; the live truncate
+            // records its whole pre-image (memory state plus the partition
+            // directory renamed aside) for atomic rollback.
+            TimeseriesOp::Truncate {
+                collection,
+                restart_identity: _,
+            } => {
+                let resp = self.execute_timeseries_truncate(
+                    dummy_task,
+                    collection.as_str(),
+                    Some(undo_log),
+                );
+                if resp.status == Status::Error {
+                    return Err(resp.error_code.map(|c| *c).unwrap_or(ErrorCode::Internal {
+                        detail: "timeseries truncate failed".into(),
+                    }));
+                }
+                Ok(resp)
+            }
+
+            TimeseriesOp::Scan { .. } | TimeseriesOp::ResolveIngest(_) => {
+                self.exec_tx_passthrough(tid, plan, dummy_task.request.deadline)
+            }
         }
     }
 }

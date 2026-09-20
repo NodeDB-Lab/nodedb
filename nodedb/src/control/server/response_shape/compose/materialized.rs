@@ -37,9 +37,9 @@ use super::kernel::{empty_shaped, shape_decoded_rows, single_result_row};
 ///
 /// Row-producing plan kinds (`SingleDocument`, `MultiRow`, `ReturningRows`,
 /// `ArraySlice`) yield `Rows`. Tag/execution kinds (`Execution`,
-/// `DmlResult`) yield `Passthrough` — a `ShapedRows` cannot represent a bare
-/// `CommandComplete` tag or affected-row count, so callers keep their
-/// existing tag / `rows_affected` handling for those.
+/// `DmlResult`, `DmlResultByOp`) yield `Passthrough` — a `ShapedRows` cannot
+/// represent a bare `CommandComplete` tag or affected-row count, so callers
+/// keep their existing tag / `rows_affected` handling for those.
 pub enum ShapeOutcome {
     Rows(ShapedRows),
     Passthrough,
@@ -65,7 +65,9 @@ pub fn shape_response_materialized(
     } = request;
 
     match plan_kind {
-        PlanKind::Execution | PlanKind::DmlResult(_) => return Ok(ShapeOutcome::Passthrough),
+        PlanKind::Execution | PlanKind::DmlResult(_) | PlanKind::DmlResultByOp => {
+            return Ok(ShapeOutcome::Passthrough);
+        }
         PlanKind::ArraySlice
         | PlanKind::ReturningRows
         | PlanKind::SingleDocument
@@ -90,7 +92,9 @@ pub fn shape_response_materialized(
         // Handled by the early return above; kept exhaustive (no catch-all,
         // no panic) so a future PlanKind desync degrades to passthrough
         // rather than crashing the connection.
-        PlanKind::Execution | PlanKind::DmlResult(_) => return Ok(ShapeOutcome::Passthrough),
+        PlanKind::Execution | PlanKind::DmlResult(_) | PlanKind::DmlResultByOp => {
+            return Ok(ShapeOutcome::Passthrough);
+        }
     };
     Ok(ShapeOutcome::Rows(shaped))
 }
@@ -115,7 +119,9 @@ pub fn shape_payload_no_plan(
     sequences: Option<&dyn SequenceAccess>,
 ) -> Result<ShapeOutcome, NodeDbError> {
     Ok(match plan_kind {
-        PlanKind::Execution | PlanKind::DmlResult(_) => ShapeOutcome::Passthrough,
+        PlanKind::Execution | PlanKind::DmlResult(_) | PlanKind::DmlResultByOp => {
+            ShapeOutcome::Passthrough
+        }
         PlanKind::ArraySlice => ShapeOutcome::Rows(shape_array_slice(payload, redaction)?),
         PlanKind::ReturningRows => ShapeOutcome::Rows(shape_returning_rows(
             payload, projection, redaction, sequences,

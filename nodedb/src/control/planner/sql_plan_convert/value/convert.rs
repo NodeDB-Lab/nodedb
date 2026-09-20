@@ -68,13 +68,25 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-pub(crate) fn sql_value_to_bytes(v: &SqlValue) -> Vec<u8> {
+/// Raw bytes for a KV key or a single-`value` column body.
+///
+/// A scalar encodes through `nodedb_types::scalar_to_raw_bytes`, the same
+/// rule a KV read-modify-write uses to re-encode a raw body. An array is
+/// PostgreSQL array text.
+pub(crate) fn sql_value_to_bytes(v: &SqlValue) -> crate::Result<Vec<u8>> {
     match v {
-        SqlValue::String(s) => s.as_bytes().to_vec(),
-        SqlValue::Bytes(b) => b.clone(),
-        SqlValue::Int(i) => i.to_string().as_bytes().to_vec(),
-        SqlValue::Decimal(d) => d.to_string().as_bytes().to_vec(),
-        _ => sql_value_to_string(v).into_bytes(),
+        SqlValue::Array(_) => Ok(sql_value_to_string(v).into_bytes()),
+        SqlValue::Int(_)
+        | SqlValue::Float(_)
+        | SqlValue::Decimal(_)
+        | SqlValue::String(_)
+        | SqlValue::Bool(_)
+        | SqlValue::Null
+        | SqlValue::Bytes(_)
+        | SqlValue::Timestamp(_)
+        | SqlValue::Timestamptz(_) => Ok(nodedb_types::scalar_to_raw_bytes(
+            &sql_value_to_nodedb_value(v),
+        )?),
     }
 }
 
@@ -107,6 +119,20 @@ mod tests {
             ])),
             "{public,\"two words\",\"NULL\",NULL}"
         );
+    }
+
+    #[test]
+    fn raw_bytes_follow_the_shared_scalar_rule() {
+        let cases = [
+            (SqlValue::String("v1".into()), b"v1".to_vec()),
+            (SqlValue::Int(7), b"7".to_vec()),
+            (SqlValue::Bool(false), b"false".to_vec()),
+            (SqlValue::Bytes(vec![0xff]), vec![0xff]),
+            (SqlValue::Null, Vec::new()),
+        ];
+        for (sql, expected) in cases {
+            assert_eq!(sql_value_to_bytes(&sql).unwrap(), expected, "{sql:?}");
+        }
     }
 
     #[test]

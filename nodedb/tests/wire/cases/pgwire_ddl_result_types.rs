@@ -19,8 +19,7 @@
 //! field builders declare today.
 
 use crate::harness::TestServer;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use crate::harness::raw_pgwire::RawPgConn;
 
 /// PostgreSQL built-in type OIDs (stable, wire-level constants).
 const OID_TEXT: u32 = 25;
@@ -34,27 +33,6 @@ const OID_INT2: u32 = 21;
 struct RawResult {
     columns: Vec<(String, u32)>,
     rows: Vec<Vec<Option<String>>>,
-}
-
-/// Read exactly one backend message: a 1-byte type tag followed by an
-/// i32 length (which counts itself but not the tag). Returns
-/// `(tag, body)` where `body` excludes the 4-byte length prefix.
-async fn read_message(stream: &mut TcpStream) -> (u8, Vec<u8>) {
-    let mut tag = [0u8; 1];
-    stream.read_exact(&mut tag).await.expect("read message tag");
-    let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
-        .await
-        .expect("read message length");
-    let len = i32::from_be_bytes(len_buf) as usize;
-    let body_len = len - 4;
-    let mut body = vec![0u8; body_len];
-    stream
-        .read_exact(&mut body)
-        .await
-        .expect("read message body");
-    (tag[0], body)
 }
 
 /// Read a NUL-terminated string starting at `*pos` in `body`, advancing
@@ -84,45 +62,13 @@ fn read_i32(body: &[u8], pos: &mut usize) -> i32 {
 /// Open a fresh raw connection, complete a trust-mode startup, run one
 /// simple query, and decode its `RowDescription` + `DataRow`s.
 async fn raw_simple_query(port: u16, sql: &str) -> RawResult {
-    let mut stream = TcpStream::connect(("127.0.0.1", port))
-        .await
-        .expect("connect to pgwire port");
-
-    // ── StartupMessage: protocol 3.0, user=nodedb, database=default ──
-    let mut params = Vec::new();
-    params.extend_from_slice(b"user\0nodedb\0database\0default\0\0");
-    let total = 4 + 4 + params.len();
-    let mut startup = Vec::new();
-    startup.extend_from_slice(&(total as i32).to_be_bytes());
-    startup.extend_from_slice(&196_608i32.to_be_bytes()); // 0x0003_0000
-    startup.extend_from_slice(&params);
-    stream.write_all(&startup).await.expect("send startup");
-
-    // Drain startup replies (Auth, ParameterStatus*, BackendKeyData) until
-    // the first ReadyForQuery ('Z'). Trust mode sends AuthenticationOk.
-    loop {
-        let (tag, body) = read_message(&mut stream).await;
-        match tag {
-            b'Z' => break,
-            b'E' => panic!("startup error: {}", String::from_utf8_lossy(&body)),
-            _ => {}
-        }
-    }
-
-    // ── Simple Query ('Q') ──
-    let mut qbody = sql.as_bytes().to_vec();
-    qbody.push(0);
-    let mut qmsg = vec![b'Q'];
-    qmsg.extend_from_slice(&((4 + qbody.len()) as i32).to_be_bytes());
-    qmsg.extend_from_slice(&qbody);
-    stream.write_all(&qmsg).await.expect("send query");
+    let mut conn = RawPgConn::connect(port, "nodedb", "default").await;
+    let messages = conn.simple_query(sql).await;
 
     let mut columns: Vec<(String, u32)> = Vec::new();
     let mut rows: Vec<Vec<Option<String>>> = Vec::new();
 
-    // Read until ReadyForQuery ('Z') terminates the simple-query cycle.
-    loop {
-        let (tag, body) = read_message(&mut stream).await;
+    for (tag, body) in messages {
         match tag {
             b'T' => {
                 // RowDescription: i16 field count, then per field:
@@ -160,8 +106,6 @@ async fn raw_simple_query(port: u16, sql: &str) -> RawResult {
                 }
                 rows.push(row);
             }
-            b'E' => panic!("query error: {}", String::from_utf8_lossy(&body)),
-            b'Z' => break,
             _ => {}
         }
     }

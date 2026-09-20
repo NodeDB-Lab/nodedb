@@ -13,7 +13,9 @@
 //! silently diverged: one of them appended raw bytes verbatim into a msgpack
 //! map, and every scan path served `value: 118` for a stored `"v1"`.
 
-use crate::msgpack_scan::{inject_str_field, map_header, write_map_header, write_str};
+use crate::msgpack_scan::{
+    KvBodyShape, inject_str_field, kv_body_shape, write_map_header, write_str,
+};
 
 /// Shape a KV entry into the canonical `{key, value…}` msgpack row.
 ///
@@ -36,8 +38,12 @@ use crate::msgpack_scan::{inject_str_field, map_header, write_map_header, write_
 /// lossy view is taken: a SQL `SELECT` over binary values is already degraded
 /// by the pgwire text protocol, and this keeps the output well-formed msgpack
 /// rather than merely different-but-still-broken.
+///
+/// A read-modify-write decodes and re-encodes the body through
+/// [`super::kv_body_to_row`] / [`super::row_to_kv_body`], which keep the
+/// stored shape.
 pub fn kv_row_msgpack(key: &str, value: &[u8]) -> Vec<u8> {
-    if map_header(value, 0).is_some() {
+    if kv_body_shape(value) == KvBodyShape::Map {
         return inject_str_field(value, "key", key);
     }
     let mut buf = Vec::with_capacity(value.len() + key.len() + 16);

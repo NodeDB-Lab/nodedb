@@ -16,6 +16,9 @@ impl KvEngine {
     ) -> usize {
         let tkey = crate::engine::kv::engine_helpers::table_key(database_id, tenant_id, collection);
         let mut removed = 0;
+        // Bump before removal so a cached aggregate result computed before the
+        // purge is a miss, whether or not the table actually existed.
+        self.bump_write_epoch(tkey);
         if self.tables.remove(&tkey).is_some() {
             removed += 1;
         }
@@ -58,6 +61,7 @@ impl KvEngine {
 
         let removed = keys_to_remove.len();
         for key in &keys_to_remove {
+            self.bump_write_epoch(*key);
             self.tables.remove(key);
             self.indexes.remove(key);
             self.hash_to_tenant.remove(key);

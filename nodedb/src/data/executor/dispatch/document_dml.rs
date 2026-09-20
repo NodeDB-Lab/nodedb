@@ -86,6 +86,9 @@ impl CoreLoop {
             clauses,
             returning,
             resolved_inserts,
+            // Bound on the Control Plane before dispatch; the handler keys
+            // inserts by `resolved_inserts` alone.
+            resolved_insert_identities: _,
             source_rows,
             rls_filters,
             rls_write_check,

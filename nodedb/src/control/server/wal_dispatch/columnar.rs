@@ -124,6 +124,17 @@ pub(super) fn wal_append_columnar_op(
             )?;
             Some(wal.append_timeseries_batch(tenant_id, vshard_id, database_id, &wal_payload)?)
         }
+        // `restart_identity` is applied by the Control Plane after dispatch,
+        // against the sequence store; the Data-Plane record carries only what
+        // replay re-applies.
+        ColumnarOp::Truncate {
+            collection,
+            restart_identity: _,
+        } => {
+            let wal_payload =
+                super::timeseries::encode_columnar_truncate_payload(collection.as_str())?;
+            Some(wal.append_columnar_truncate(tenant_id, vshard_id, database_id, &wal_payload)?)
+        }
         // NotAWrite — reads / query ops / DDL that produces no engine mutation
         // here. `ResolveDml` mutates nothing; it only reports the row set a
         // predicate DML would touch, so it appends no durable record.
@@ -181,6 +192,30 @@ mod tests {
         assert!(has_record_of_type(
             &wal,
             nodedb_wal::record::RecordType::TimeseriesBatch
+        ));
+    }
+
+    #[test]
+    fn truncate_appends_columnar_truncate_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = open_wal(dir.path());
+        let plan = PhysicalPlan::Columnar(ColumnarOp::Truncate {
+            collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
+            restart_identity: true,
+        });
+
+        let outcome = super::super::wal_append_if_write(
+            &wal,
+            TenantId::new(1),
+            VShardId::new(0),
+            DatabaseId::DEFAULT,
+            &plan,
+        )
+        .expect("append");
+        assert!(outcome.lsn.is_some(), "Truncate must produce a durable LSN");
+        assert!(has_record_of_type(
+            &wal,
+            nodedb_wal::record::RecordType::ColumnarTruncate
         ));
     }
 

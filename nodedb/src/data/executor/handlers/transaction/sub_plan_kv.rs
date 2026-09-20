@@ -105,6 +105,9 @@ impl CoreLoop {
                 // never carries a projection or the read gate that bounds one.
                 returning: None,
                 rls_filters: &[],
+                // R-tree entries are in-memory, so a rollback must un-index
+                // the rows it removes.
+                spatial_undo: Some(&mut *undo_log),
             },
         );
         if resp.status == Status::Error {

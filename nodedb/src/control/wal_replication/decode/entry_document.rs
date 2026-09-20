@@ -7,9 +7,9 @@
 
 use super::super::decode_sync_engines::decode_returning;
 use super::super::types::{BalanceDeltaFields, ReplicatedSumTarget, ReplicatedWrite};
-use super::ctx::DecodeCtx;
 use super::document;
 use super::document::{PointInsertOptions, ReturningFields, UpsertExtras, WireSumResolution};
+use super::document_join;
 use crate::bridge::envelope::PhysicalPlan;
 
 /// Pair a record's two materialized-sum resolution slots so the decoder, not
@@ -21,7 +21,7 @@ fn sums<'a>(
     WireSumResolution { bindings, legacy }
 }
 
-pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Result<PhysicalPlan> {
+pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan> {
     match write {
         ReplicatedWrite::PointPut {
             collection,
@@ -32,8 +32,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             resolved_sum_target_bindings,
             returning,
             rls_filters,
-        } => document::point_put(
-            ctx,
+        } => Ok(document::point_put(
             collection,
             document_id,
             value,
@@ -43,7 +42,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
                 returning: decode_returning(returning)?,
                 rls_filters,
             },
-        ),
+        )),
         ReplicatedWrite::PointInsert {
             collection,
             document_id,
@@ -55,8 +54,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             resolved_sum_target_bindings,
             returning,
             rls_filters,
-        } => document::point_insert(
-            ctx,
+        } => Ok(document::point_insert(
             collection,
             document_id,
             value,
@@ -72,7 +70,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
                     rls_filters,
                 },
             },
-        ),
+        )),
         ReplicatedWrite::PointDelete {
             collection,
             document_id,
@@ -81,8 +79,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             resolved_sum_target_bindings,
             returning,
             rls_filters,
-        } => document::point_delete(
-            ctx,
+        } => Ok(document::point_delete(
             collection,
             document_id,
             *surrogate,
@@ -91,7 +88,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
                 returning: decode_returning(returning)?,
                 rls_filters,
             },
-        ),
+        )),
         ReplicatedWrite::PointUpdate {
             collection,
             document_id,
@@ -102,8 +99,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             returning,
             rls_filters,
             declared_primary_key,
-        } => document::point_update(
-            ctx,
+        } => Ok(document::point_update(
             collection,
             document_id,
             updates,
@@ -116,7 +112,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
                 },
                 declared_primary_key: declared_primary_key.clone(),
             },
-        ),
+        )),
         ReplicatedWrite::DocUpsert {
             collection,
             document_id,
@@ -127,8 +123,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             resolved_sum_target_bindings,
             returning,
             rls_filters,
-        } => document::doc_upsert(
-            ctx,
+        } => Ok(document::doc_upsert(
             collection,
             document_id,
             value,
@@ -141,7 +136,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
                     rls_filters,
                 },
             },
-        ),
+        )),
         ReplicatedWrite::DocBatchInsert {
             collection,
             documents,
@@ -152,7 +147,6 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             returning,
             rls_filters,
         } => document::batch_insert(
-            ctx,
             collection,
             documents,
             surrogates,
@@ -232,7 +226,75 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
         ReplicatedWrite::DocumentResolvedWrite {
             mutations,
             response_payload,
-        } => document::resolved_write(ctx, mutations, response_payload),
+        } => Ok(document::resolved_write(mutations, response_payload)),
+        ReplicatedWrite::MergeApply {
+            target_collection,
+            source_collection,
+            source_alias,
+            target_join_col,
+            source_join_col,
+            clauses,
+            returning,
+            resolved_inserts,
+            resolved_insert_identities,
+            source_rows,
+            rls_filters,
+            resolved_sum_targets,
+            resolved_sum_target_bindings,
+            declared_primary_key,
+        } => Ok(document_join::merge_apply(
+            document_join::JoinFields {
+                target_collection,
+                source_collection,
+                source_alias,
+                target_join_col,
+                source_join_col,
+                source_rows,
+                resolved_sum_targets: &sums(resolved_sum_target_bindings, resolved_sum_targets),
+                declared_primary_key: declared_primary_key.clone(),
+            },
+            document_join::MergeFields {
+                clauses,
+                resolved_inserts,
+                resolved_insert_identities,
+            },
+            ReturningFields {
+                returning: decode_returning(returning)?,
+                rls_filters,
+            },
+        )),
+        ReplicatedWrite::UpdateFromJoinApply {
+            target_collection,
+            source_collection,
+            source_alias,
+            target_join_col,
+            source_join_col,
+            updates,
+            target_filters,
+            returning,
+            source_rows,
+            rls_filters,
+            resolved_sum_targets,
+            resolved_sum_target_bindings,
+            declared_primary_key,
+        } => Ok(document_join::update_from_join_apply(
+            document_join::JoinFields {
+                target_collection,
+                source_collection,
+                source_alias,
+                target_join_col,
+                source_join_col,
+                source_rows,
+                resolved_sum_targets: &sums(resolved_sum_target_bindings, resolved_sum_targets),
+                declared_primary_key: declared_primary_key.clone(),
+            },
+            updates,
+            target_filters,
+            ReturningFields {
+                returning: decode_returning(returning)?,
+                rls_filters,
+            },
+        )),
         _ => Err(crate::Error::Internal {
             detail: "entry_document::decode_arm called with a non-Document ReplicatedWrite \
                 variant (dispatch bug in decode/entry.rs's grouped Document match arm)"

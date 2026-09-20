@@ -96,10 +96,7 @@ ALLOWED_REFERENCES = {
     ),
     ("control/server/pgwire/handler/dispatch.rs", "into_physical_task"),
     ("control/server/pgwire/handler/submit.rs", "into_physical_task"),
-    (
-        "control/server/pgwire/handler/routing/cluster_array.rs",
-        "into_physical_task",
-    ),
+    ("control/server/shared/cluster_array_dispatch.rs", "into_physical_task"),
     ("control/array_sync/inbound.rs", "into_scope"),
     ("control/array_sync/inbound_propose.rs", "into_scope"),
     ("control/array_sync/snapshot_assembly.rs", "into_scope"),

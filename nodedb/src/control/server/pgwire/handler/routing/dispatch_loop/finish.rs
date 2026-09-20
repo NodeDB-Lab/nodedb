@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! The statement's tail after every task ran: the folded `RETURNING` rows as
-//! one result set, then the set-operation merge of the deferred payloads.
+//! one result set, then the set-operation merge of the deferred payloads,
+//! then the statement's one command tag.
 
 use std::sync::Arc;
 
@@ -13,10 +14,11 @@ use nodedb_physical::physical_task::PostSetOp;
 use crate::control::sequence::{SequenceAccess, SessionSequenceAccess, SessionSequenceValues};
 use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::schema::OutputSchema;
-use crate::control::server::response_shape::types::ShapedRows;
+use crate::control::server::response_shape::types::{ShapedRows, StatementTag};
 use crate::control::server::shared::session::SessionId;
 use crate::types::{DatabaseId, TenantId};
 
+use super::super::super::super::command_tag::push_folded_tag;
 use super::super::super::core::NodeDbPgHandler;
 use super::super::super::shape_encode;
 use super::super::set_ops;
@@ -25,6 +27,8 @@ use super::super::set_ops;
 pub(super) struct StatementTail<'a> {
     /// The statement's `RETURNING` rows, folded across every task.
     pub(super) returning_rows: Option<ShapedRows>,
+    /// The statement's command tag, folded across every write task.
+    pub(super) statement_tag: StatementTag,
     /// Per-branch payloads deferred for a set-operation merge.
     pub(super) dedup_payloads: Vec<Vec<u8>>,
     pub(super) dedup_set_op: PostSetOp,
@@ -52,6 +56,7 @@ impl NodeDbPgHandler {
     ) -> PgWireResult<()> {
         let StatementTail {
             returning_rows,
+            statement_tag,
             dedup_payloads,
             dedup_set_op,
             projection,
@@ -97,6 +102,11 @@ impl NodeDbPgHandler {
             }
             responses.push(response);
         }
+
+        // The statement's one command tag, after its rows. A statement never
+        // carries both RETURNING rows and a count-bearing tag: `RETURNING`
+        // classifies as `ReturningRows`, which folds rows and no count.
+        push_folded_tag(responses, statement_tag.finish());
 
         Ok(())
     }

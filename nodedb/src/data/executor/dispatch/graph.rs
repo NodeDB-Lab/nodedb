@@ -286,18 +286,24 @@ impl CoreLoop {
                 // CDC: a node-label set surfaces as an Insert on the nameable
                 // node-label stream, carrying the added labels as `new_value`.
                 self.emit_graph_label_event(task, node_id, labels, crate::event::WriteOp::Insert);
-                self.response_ok(task)
+                // `add_node_label` interns the node if it was new, so a
+                // successful set always touches exactly one node.
+                self.response_affected(task, 1)
             }
 
             GraphOp::RemoveNodeLabels { node_id, labels } => {
                 let partition = self.csr_partition_mut(database_id, tid);
+                // Checked before the removal loop: the node identity is the
+                // same across every label in `labels`, and `remove_node_label`
+                // itself reports nothing back about whether the node existed.
+                let existed = partition.contains_node(node_id);
                 for label in labels {
                     partition.remove_node_label(node_id, label);
                 }
                 // CDC: a node-label removal surfaces as a Delete on the nameable
                 // node-label stream, carrying the removed labels as `old_value`.
                 self.emit_graph_label_event(task, node_id, labels, crate::event::WriteOp::Delete);
-                self.response_ok(task)
+                self.response_affected(task, u64::from(existed))
             }
 
             GraphOp::TemporalNeighbors {
@@ -444,6 +450,14 @@ mod tests {
         let task = make_task_with_lsn(op.clone(), 88);
         let resp = h.core.dispatch_graph(&task, &op);
         assert_eq!(resp.status, Status::Ok);
+        assert_eq!(
+            crate::control::server::shared::sql::staging_predicates::require_affected_count(
+                resp.payload.as_bytes()
+            )
+            .expect("SetNodeLabels must report an affected count"),
+            1,
+            "a set always interns/touches exactly one node"
+        );
 
         let event = consumers[0]
             .try_recv()
@@ -472,6 +486,14 @@ mod tests {
         let task = make_task_with_lsn(op.clone(), 89);
         let resp = h.core.dispatch_graph(&task, &op);
         assert_eq!(resp.status, Status::Ok);
+        assert_eq!(
+            crate::control::server::shared::sql::staging_predicates::require_affected_count(
+                resp.payload.as_bytes()
+            )
+            .expect("RemoveNodeLabels must report an affected count"),
+            0,
+            "'alice' was never labeled, so there is no node to remove from"
+        );
 
         let event = consumers[0]
             .try_recv()

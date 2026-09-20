@@ -7,7 +7,6 @@ use nodedb_types::Surrogate;
 use super::engine::KvEngine;
 use super::engine_helpers::{expiry_key, extract_all_field_values_from_msgpack, table_key};
 use super::entry::NO_EXPIRY;
-use super::hash_table::KvHashTable;
 
 /// Parameters for [`KvEngine::put`].
 #[derive(Debug, Clone, Copy)]
@@ -96,24 +95,9 @@ impl KvEngine {
             self.expiry.cancel(&composite, old_ms);
         }
 
-        // Insert/update. Use get_mut (no clone) for existing tables,
-        // entry (clones tkey) only for first-time table creation.
-        let table = if let Some(t) = self.tables.get_mut(&tkey) {
-            t
-        } else {
-            self.hash_to_tenant.entry(tkey).or_insert(tenant_id);
-            self.hash_to_collection
-                .entry(tkey)
-                .or_insert_with(|| collection.to_string());
-            self.tables.entry(tkey).or_insert_with(|| {
-                KvHashTable::new(
-                    self.default_capacity,
-                    self.load_factor_threshold,
-                    self.rehash_batch_size,
-                    self.inline_threshold,
-                )
-            })
-        };
+        // Fetch-or-create the table, bumping its write epoch — the single
+        // chokepoint the aggregate result cache reads to detect this write.
+        let table = self.table_for_write_or_create(tkey, tenant_id, collection);
         let old = table.put(key, value, expire_at, surrogate);
 
         // Schedule new expiry.
@@ -168,6 +152,10 @@ impl KvEngine {
         now_ms: u64,
     ) -> usize {
         let tkey = table_key(database_id, tenant_id, collection);
+        // Bump first (only touches `write_epochs`) so the subsequent `tables`
+        // borrow stays disjoint from the `indexes` / `expiry` / `sorted_indexes`
+        // accesses interleaved with it below.
+        self.bump_write_epoch(tkey);
         let table = match self.tables.get_mut(&tkey) {
             Some(t) => t,
             None => return 0,
@@ -268,6 +256,7 @@ impl KvEngine {
         expire_at: u64,
     ) -> bool {
         let tkey = table_key(database_id, tenant_id, collection);
+        self.bump_write_epoch(tkey);
         let table = match self.tables.get_mut(&tkey) {
             Some(t) => t,
             None => return false,
@@ -299,6 +288,7 @@ impl KvEngine {
         key: &[u8],
     ) -> bool {
         let tkey = table_key(database_id, tenant_id, collection);
+        self.bump_write_epoch(tkey);
         let table = match self.tables.get_mut(&tkey) {
             Some(t) => t,
             None => return false,

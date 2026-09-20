@@ -51,6 +51,24 @@ impl TestClusterNode {
             .map(|(_, current, _)| current)
     }
 
+    /// The value the next `nextval` call on this sequence returns:
+    /// `current_value + increment`. Holds whether or not the sequence has
+    /// been called yet — a restart stores `value - increment` with
+    /// `called = false` precisely so this formula gives `value` right
+    /// after `RESTART WITH value`, matching Postgres semantics.
+    pub fn sequence_next_value(&self, tenant_id: u64, name: &str) -> Option<i64> {
+        let db = nodedb_types::DatabaseId::DEFAULT.as_u64();
+        let current = self
+            .shared
+            .sequence_registry
+            .list(db, tenant_id)
+            .into_iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, current, _)| current)?;
+        let def = self.shared.sequence_registry.get_def(db, tenant_id, name)?;
+        Some(current + def.increment)
+    }
+
     /// Check whether a trigger with the given name exists in this
     /// node's in-memory trigger registry.
     pub fn has_trigger(&self, tenant_id: u64, name: &str) -> bool {

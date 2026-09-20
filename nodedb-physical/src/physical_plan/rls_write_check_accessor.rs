@@ -15,6 +15,7 @@ use super::document::DocumentOp;
 use super::graph::GraphOp;
 use super::kv::KvOp;
 use super::timeseries::TimeseriesOp;
+use super::vector::VectorOp;
 
 impl PhysicalPlan {
     /// The single RLS write check this plan carries, or `None` if it carries
@@ -108,6 +109,18 @@ impl PhysicalPlan {
             })
             | PhysicalPlan::Kv(KvOp::ResolvedWrite {
                 rls_write_check, ..
+            })
+            | PhysicalPlan::Vector(VectorOp::DirectUpsert {
+                rls_write_check, ..
+            })
+            | PhysicalPlan::Vector(VectorOp::DirectDelete {
+                rls_write_check, ..
+            })
+            | PhysicalPlan::Vector(VectorOp::DirectUpdate {
+                rls_write_check, ..
+            })
+            | PhysicalPlan::Vector(VectorOp::ResolvedDirectWrite {
+                rls_write_check, ..
             }) => Some(rls_write_check),
 
             // Carries two checks, not one — see `rls_write_checks`.
@@ -118,6 +131,9 @@ impl PhysicalPlan {
 
             // Same shape on the document side.
             PhysicalPlan::Document(DocumentOp::ResolveWrite(_)) => None,
+
+            // And on the vector-primary side.
+            PhysicalPlan::Vector(VectorOp::ResolveDirectWrite(_)) => None,
 
             // Not write-class: no `rls_write_check` field at all.
             PhysicalPlan::Vector(_)

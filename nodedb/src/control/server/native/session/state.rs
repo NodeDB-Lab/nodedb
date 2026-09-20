@@ -97,7 +97,9 @@ impl NativeSession {
         global_permit: OwnedSemaphorePermit,
         resources: NativeConnectionResources,
     ) -> Self {
-        let query_ctx = QueryContext::for_state(&state);
+        // A top-level connection plans with descriptor leases, the array
+        // catalog and the WAL handle, same as a pgwire connection.
+        let query_ctx = QueryContext::for_state_with_lease(&state);
         let NativeConnectionResources { sessions, cleanup } = resources;
         let transport = stream.transport_security();
         Self {

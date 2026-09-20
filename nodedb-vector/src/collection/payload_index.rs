@@ -148,6 +148,13 @@ impl PayloadIndexBitmaps {
         }
     }
 
+    fn clear(&mut self) {
+        match self {
+            Self::Equality(m) => m.clear(),
+            Self::Range(m) => m.clear(),
+        }
+    }
+
     fn iter(&self) -> Box<dyn Iterator<Item = (&PayloadKey, &RoaringBitmap)> + '_> {
         match self {
             Self::Equality(m) => Box::new(m.iter()),
@@ -285,6 +292,14 @@ impl PayloadIndexSet {
             if let Some(value) = fields.get(field) {
                 idx.delete(node_id, value);
             }
+        }
+    }
+
+    /// Drop every node from every index. The registered fields and their
+    /// kinds stay, so the next `insert_row` indexes the same columns.
+    pub fn clear_rows(&mut self) {
+        for idx in self.indexes.values_mut() {
+            idx.bitmaps.clear();
         }
     }
 

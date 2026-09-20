@@ -421,6 +421,15 @@ pub enum Error {
     #[error("internal error: {detail}")]
     Internal { detail: String },
 
+    /// A response-shaping failure from the protocol-neutral shaping layer
+    /// (`response_shape::compose`). Carries its own numeric code and message
+    /// so every protocol classifies it exactly like the direct-`NodeDbError`
+    /// call sites do, instead of collapsing it into a generic internal error.
+    /// Boxed: `NodeDbError` carries a message, details and a cause chain,
+    /// and inlining it would grow every `Result<_, Error>` on the hot path.
+    #[error(transparent)]
+    Shaping(Box<nodedb_types::NodeDbError>),
+
     /// Remote typed error preserves its transmitted classification.
     #[error("remote error [{code}]: {message}")]
     RemoteTyped {
@@ -586,6 +595,12 @@ pub enum Error {
 
 /// Result alias for NodeDB operations.
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<nodedb_types::NodeDbError> for Error {
+    fn from(error: nodedb_types::NodeDbError) -> Self {
+        Error::Shaping(Box::new(error))
+    }
+}
 
 #[cfg(test)]
 mod tests {

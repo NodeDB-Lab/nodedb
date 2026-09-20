@@ -32,9 +32,10 @@
 //! so they do not diverge from the oracle and are covered by
 //! `array_and_cluster_array_variants_match_oracle` below.
 //! `VectorOp::{DeleteBySurrogate, SparseInsert, SparseDelete,
-//! MultiVectorInsert, MultiVectorDelete, DirectUpsert}` are likewise NOT in
-//! this exception list: `to_replicated_entry` has encoder arms for
-//! all six (see `control/wal_replication/encode/vector.rs::encode`), so they
+//! MultiVectorInsert, MultiVectorDelete, DirectUpsert, DirectInsert,
+//! DirectInsertIfAbsent, DirectDelete, DirectTruncate, DirectUpdate}` are
+//! likewise NOT in this exception list: `to_replicated_entry` has encoder
+//! arms for all eleven (see `control/wal_replication/encode/vector.rs::encode`), so they
 //! do not diverge from the oracle and are covered by
 //! `vector_variants_match_oracle` below.
 //! `CrdtOp::{ListInsert, ListDelete, ListMove}` are likewise NOT in this
@@ -57,7 +58,10 @@
 //! 1. RYOW LOSS: a `Buffered` plan does not stage into the per-transaction
 //!    overlay, so a read later in the SAME transaction does not observe the
 //!    write until COMMIT. This matches how bulk Document DML already behaved
-//!    in a transaction before it was staged.
+//!    in a transaction before it was staged. The single-node
+//!    `ArrayOp::{Put, Delete}` is exempt: `is_stageable_write` routes it
+//!    through `MetaOp::StageWrite` into `ArrayTxnOverlay`, so same-transaction
+//!    array reads see it. The `ClusterArrayOp` wrapper is still `Buffered`.
 //! 2. NO-UNDO GAP (pre-existing, not fixed here): every flipped variant
 //!    reaches `exec_tx_passthrough`
 //!    (`data/executor/handlers/transaction/sub_plan_write.rs`) at COMMIT,
@@ -75,20 +79,25 @@
 //! survived ROLLBACK.
 //!
 //! A second, inverse divergence exists in the opposite direction:
-//! `DocumentOp::Truncate` and `KvOp::{Truncate, RegisterIndex, DropIndex}`
-//! classify `false` here (not buffered) even though `to_replicated_entry` has
-//! an encoder arm for each and returns `Some`. This is not a bug in either
-//! function: every one of them is autocommit-only — `resolve/entry.rs`
-//! (`data/executor/handlers/transaction/resolve/entry.rs:329-334` for the Kv
-//! index/DDL/truncate arm, `:394-400` for the Document arm) rejects them with
-//! `PlanError` when they appear inside an explicit transaction, so they are
-//! never routed through `plan_requires_txn_buffering` for staging in practice.
-//! They only ever reach `to_replicated_entry` via the autocommit path, where
-//! they replicate normally. Pinned by
-//! `truncate_and_index_variants_are_encoded_but_not_buffered` below via
-//! `assert_encoded_but_not_buffered` — the inverse of
+//! `KvOp::{RegisterIndex, DropIndex}` classify `false` here (not buffered)
+//! even though `to_replicated_entry` has an encoder arm for each and returns
+//! `Some`. This is not a bug in either function: both are autocommit-only —
+//! `resolve/entry.rs` (`data/executor/handlers/transaction/resolve/entry.rs`,
+//! Kv index arm) rejects them with `PlanError` when they appear inside an
+//! explicit transaction, so they are never routed through
+//! `plan_requires_txn_buffering` for staging in practice. They only ever
+//! reach `to_replicated_entry` via the autocommit path, where they replicate
+//! normally. Pinned by `truncate_is_buffered_and_index_variants_are_not`
+//! below via `assert_encoded_but_not_buffered` — the inverse of
 //! `assert_buffered_but_unencoded` — and correspondingly excluded from
 //! `kv_variants_match_oracle`.
+//!
+//! `DocumentOp::Truncate`, `KvOp::Truncate`, `VectorOp::DirectTruncate`,
+//! `ColumnarOp::Truncate`, and `TimeseriesOp::Truncate` classify `true`: in a
+//! transaction they stage as a `TxnOverlay` truncate marker that hides every
+//! base row without a newer overlay entry, and COMMIT replays the live
+//! truncate in statement order. ROLLBACK and ROLLBACK TO SAVEPOINT drop the
+//! marker.
 
 #![deny(clippy::wildcard_enum_match_arm)]
 

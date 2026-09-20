@@ -92,6 +92,26 @@ pub fn is_derived_side_effect(plan: &PhysicalPlan) -> bool {
     }
 }
 
+/// Whether a statement's plans carry the user's own write, as opposed to
+/// only derived side effects. Decided over the FULL plan set: one slice or
+/// one task alone cannot tell a lone derived participant from a
+/// derived-only statement (the standalone `GRAPH INSERT EDGE` DSL).
+pub fn plans_have_user_write<'a>(plans: impl IntoIterator<Item = &'a PhysicalPlan>) -> bool {
+    plans
+        .into_iter()
+        .any(|plan| is_write_plan(plan) && !is_derived_side_effect(plan))
+}
+
+/// Whether `plan`'s applied count answers the client's statement.
+///
+/// The one rule every response fold shares with Calvin's deposit: when the
+/// statement carries the user's own write, a derived participant's count
+/// describes a row the statement never named and folds as opaque. When it
+/// carries none, every write is the user's and counts.
+pub fn plan_counts_toward_statement_tag(plan: &PhysicalPlan, has_user_write: bool) -> bool {
+    !(has_user_write && is_derived_side_effect(plan))
+}
+
 fn kv_is_write(op: &KvOp) -> bool {
     match op {
         KvOp::Put { .. }
@@ -154,8 +174,17 @@ fn vector_is_write(op: &VectorOp) -> bool {
         | VectorOp::SparseDelete { .. }
         | VectorOp::MultiVectorInsert { .. }
         | VectorOp::MultiVectorDelete { .. }
-        | VectorOp::DirectUpsert { .. } => true,
-        VectorOp::Search { .. }
+        | VectorOp::DirectUpsert { .. }
+        | VectorOp::DirectInsert { .. }
+        | VectorOp::DirectInsertIfAbsent { .. }
+        | VectorOp::DirectDelete { .. }
+        | VectorOp::DirectTruncate { .. }
+        | VectorOp::DirectUpdate { .. }
+        // Mutates the rows its mutation list names, like any other write.
+        | VectorOp::ResolvedDirectWrite { .. } => true,
+        // Read-only: reports what the wrapped write would apply, mutates nothing.
+        VectorOp::ResolveDirectWrite(_)
+        | VectorOp::Search { .. }
         | VectorOp::MultiSearch { .. }
         | VectorOp::QueryStats { .. }
         | VectorOp::SparseSearch { .. }
@@ -202,7 +231,7 @@ fn graph_is_write(op: &GraphOp) -> bool {
 
 fn timeseries_is_write(op: &TimeseriesOp) -> bool {
     match op {
-        TimeseriesOp::Ingest { .. } => true,
+        TimeseriesOp::Ingest { .. } | TimeseriesOp::Truncate { .. } => true,
         // The resolve pass writes nothing; the ingest it reports is proposed
         // separately by the write-resolve orchestrator.
         TimeseriesOp::ResolveIngest(_) | TimeseriesOp::Scan { .. } => false,
@@ -215,7 +244,8 @@ fn columnar_is_write(op: &ColumnarOp) -> bool {
         | ColumnarOp::Update { .. }
         | ColumnarOp::Delete { .. }
         | ColumnarOp::ResolvedUpdate { .. }
-        | ColumnarOp::ResolvedDelete { .. } => true,
+        | ColumnarOp::ResolvedDelete { .. }
+        | ColumnarOp::Truncate { .. } => true,
         // Read-only: decides the write policy but mutates nothing, so no
         // vshard lock to take.
         ColumnarOp::Scan { .. }
@@ -401,6 +431,7 @@ mod tests {
     fn is_write_plan_true_for_kv_truncate() {
         let plan = PhysicalPlan::Kv(KvOp::Truncate {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
+            restart_identity: false,
         });
         assert!(is_write_plan(&plan), "KvOp::Truncate must be a write");
     }
@@ -528,6 +559,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vecs"),
             field: "emb".to_owned(),
             surrogate: Surrogate::new(3),
+            pk_bytes: Vec::new(),
             vector: vec![0.5, 0.6],
             payload: vec![1, 2, 3],
             quantization: VectorQuantization::None,
@@ -535,6 +567,8 @@ mod tests {
             payload_indexes: vec![("tenant_id".to_owned(), PayloadIndexKind::Equality)],
             returning: None,
             rls_filters: Vec::new(),
+            on_conflict_updates: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
         });
         assert!(
             is_write_plan(&plan),

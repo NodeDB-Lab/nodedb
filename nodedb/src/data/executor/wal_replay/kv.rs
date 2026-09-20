@@ -145,7 +145,7 @@ impl CoreLoop {
                 }
 
                 // kv_insert_on_conflict_update (delta): re-runs the same
-                // `apply_on_conflict_updates` RMW merge against current state.
+                // `merge_kv_conflict_body` RMW merge against current state.
                 if let Some(applied) = self.try_replay_kv_insert_on_conflict_update(
                     &record.payload,
                     tenant_id,

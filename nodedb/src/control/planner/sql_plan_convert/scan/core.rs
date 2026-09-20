@@ -257,7 +257,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_point_get(
     let physical = match engine {
         EngineType::KeyValue => PhysicalPlan::Kv(KvOp::Get {
             collection: qualified_collection.clone(),
-            key: sql_value_to_bytes(key_value),
+            key: sql_value_to_bytes(key_value)?,
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
         }),

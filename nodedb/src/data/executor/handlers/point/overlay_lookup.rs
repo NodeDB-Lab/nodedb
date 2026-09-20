@@ -11,8 +11,11 @@
 
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::transaction::overlay::{Staged, StagedTtl};
+use crate::data::executor::handlers::transaction::overlay::{
+    Staged, StagedTtl, staged_vector_sidecar,
+};
 use crate::data::executor::handlers::transaction::stage_write::kv_row_identity;
+use crate::data::executor::sparse_body_format::SparseBodyFormat;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::kv::current_ms;
 use nodedb_types::{RowIdentity, Surrogate};
@@ -30,10 +33,11 @@ impl CoreLoop {
     /// caller runs the SAME RLS filtering and strict-decode framing it would
     /// run on a base-storage hit.
     ///
-    /// Returns `Some(Err(response))` when the overlay holds a tombstone —
-    /// the row is staged-deleted, so the caller should return the given
-    /// not-found response immediately (mirrors the base path's empty-result
-    /// response for a missing row).
+    /// Returns `Some(Err(response))` when the overlay holds a tombstone, or
+    /// the collection is truncated in this transaction and the row has no
+    /// staged put — the row is staged-deleted, so the caller should return
+    /// the given not-found response immediately (mirrors the base path's
+    /// empty-result response for a missing row).
     pub(in crate::data::executor) fn overlay_point_lookup(
         &self,
         task: &ExecutionTask,
@@ -57,11 +61,30 @@ impl CoreLoop {
         // fall back to the surrogate for rows that already exist in base.
         let staged = overlay
             .get_by_doc_id(&coll_key, document_id)
-            .or_else(|| overlay.get(&coll_key, surrogate.0))?;
-        match staged {
-            Staged::Put(body) => Some(Ok(body.clone())),
-            Staged::Tombstone => Some(Err(self.response_with_payload(task, Vec::new()))),
+            .or_else(|| overlay.get(&coll_key, surrogate.0));
+        let body = match staged {
+            Some(Staged::Put(body)) => body,
+            Some(Staged::Tombstone) => {
+                return Some(Err(self.response_with_payload(task, Vec::new())));
+            }
+            None if overlay.is_truncated(&coll_key) => {
+                return Some(Err(self.response_with_payload(task, Vec::new())));
+            }
+            None => return None,
+        };
+        // A vector-primary row stages its vector with its sidecar; the point
+        // read renders the sidecar, the bytes the sparse store holds at COMMIT.
+        let vector_primary = matches!(
+            self.sparse_body_format(task.request.database_id, coll_key.1, collection),
+            SparseBodyFormat::VectorSidecar
+        );
+        if !vector_primary {
+            return Some(Ok(body.clone()));
         }
+        Some(match staged_vector_sidecar(body) {
+            Ok(sidecar) => Ok(sidecar),
+            Err(e) => Err(self.response_error(task, e)),
+        })
     }
 
     /// Consult the active transaction's staging overlay for a raw KV key
@@ -71,8 +94,9 @@ impl CoreLoop {
     /// Unlike [`overlay_point_lookup`], which is tailored to a single
     /// point-get's not-found response shape, this returns a plain nested
     /// `Option`: the outer `None` means "no overlay entry -- fall through to
-    /// base storage"; `Some(None)` means "staged-deleted -- treat as
-    /// absent"; `Some(Some(body))` is a staged put.
+    /// base storage"; `Some(None)` means "staged-deleted, or hidden by a
+    /// staged TRUNCATE of the collection -- treat as absent";
+    /// `Some(Some(body))` is a staged put.
     pub(in crate::data::executor) fn kv_overlay_body(
         &self,
         task: &ExecutionTask,
@@ -102,10 +126,11 @@ impl CoreLoop {
             return Some(None);
         }
 
-        let staged = overlay.get_by_doc_id(&coll_key, &doc_id)?;
-        Some(match staged {
-            Staged::Put(body) => Some(body.clone()),
-            Staged::Tombstone => None,
-        })
+        match overlay.get_by_doc_id(&coll_key, &doc_id) {
+            Some(Staged::Put(body)) => Some(Some(body.clone())),
+            Some(Staged::Tombstone) => Some(None),
+            None if overlay.is_truncated(&coll_key) => Some(None),
+            None => None,
+        }
     }
 }

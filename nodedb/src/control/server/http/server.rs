@@ -251,9 +251,10 @@ pub async fn run(
     );
     let mut shutdown_rx = bus.handle().flat_watch().raw_receiver();
 
-    let query_ctx = Arc::new(crate::control::planner::context::QueryContext::for_state(
-        &shared,
-    ));
+    // A top-level listener plans with descriptor leases, the array catalog
+    // and the WAL handle, same as a pgwire connection.
+    let query_ctx =
+        Arc::new(crate::control::planner::context::QueryContext::for_state_with_lease(&shared));
     let state = AppState {
         shared,
         auth_mode,

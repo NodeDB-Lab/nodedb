@@ -263,7 +263,7 @@ impl CoreLoop {
             KvOp::GetTtl { collection, key } => {
                 self.execute_kv_get_ttl(task, did, tid, collection.as_str(), key)
             }
-            KvOp::Truncate { collection } => {
+            KvOp::Truncate { collection, .. } => {
                 self.execute_kv_truncate(task, did, tid, collection.as_str())
             }
             KvOp::Incr {

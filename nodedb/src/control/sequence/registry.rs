@@ -299,7 +299,7 @@ impl SequenceRegistry {
             name: name.to_string(),
         })?;
 
-        handle.setval(restart_value)?;
+        handle.restart_at(restart_value)?;
         Ok(())
     }
 
@@ -394,7 +394,7 @@ impl SequenceRegistry {
         for (key, handle) in map.iter() {
             if key.starts_with(&prefix) && handle.def.name.ends_with(suffix) {
                 let start = handle.def.start_value;
-                if let Err(e) = handle.setval(start) {
+                if let Err(e) = handle.restart_at(start) {
                     tracing::warn!(
                         sequence = %handle.def.name,
                         error = %e,

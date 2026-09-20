@@ -12,5 +12,9 @@ pub(super) mod kv;
 pub(super) mod rollback;
 pub(super) mod spatial;
 pub(super) mod stats;
+pub(super) mod timeseries;
+pub(super) mod truncate_columnar;
 
-pub(in crate::data::executor) use entry::{TimeseriesIngestUndo, UndoEntry};
+pub(in crate::data::executor) use entry::{
+    ColumnarTruncateUndo, TimeseriesIngestUndo, TimeseriesTruncateUndo, UndoEntry,
+};

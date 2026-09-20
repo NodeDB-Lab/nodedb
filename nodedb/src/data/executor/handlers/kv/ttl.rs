@@ -162,6 +162,10 @@ impl CoreLoop {
                 if matches!(staged_value, Some(Staged::Tombstone)) {
                     return self.kv_get_ttl_response(task, -2);
                 }
+                // A staged TRUNCATE hides every base row with no staged put.
+                if staged_value.is_none() && overlay.is_truncated(&coll_key) {
+                    return self.kv_get_ttl_response(task, -2);
+                }
                 let staged_ttl = overlay.get_ttl_by_doc_id(&coll_key, &doc_id);
                 match staged_ttl {
                     Some(StagedTtl::ExpireAt(expire_at_ms)) => {

@@ -115,6 +115,22 @@ impl TestServer {
         Self::connect_and_build(spawned, dir, AuthMode::Trust).await
     }
 
+    /// Spawn a single-core NodeDB server with `single_node_calvin = false`:
+    /// no cluster topology, so the planner emits the single-node plan forms
+    /// (`ArrayOp::{Put, Delete, Slice, ...}`) rather than the `ClusterArrayOp`
+    /// routing wrappers. Single-vShard transactions commit through the
+    /// single-shard path; cross-shard interactive transactions are rejected.
+    pub async fn start_standalone() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::standalone(),
+            1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
     /// Open a server backed by an existing data directory, reopened in place
     /// so a previous server's data is visible after boot. `dir` is not
     /// consumed — ownership stays with the caller.
@@ -203,6 +219,7 @@ impl TestServer {
             pg_port: spawned.ports.pgwire,
             native_port: spawned.ports.native,
             http_port: spawned.ports.http,
+            resp_port: spawned.ports.resp,
             spawned: Some(spawned),
             conn_handle: Some(conn_handle),
             _dir: dir,

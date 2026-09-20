@@ -19,7 +19,9 @@ use nodedb_types::SurrogateBitmap;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::transaction::overlay::ArrayOverlayMergeParams;
 use crate::data::executor::task::ExecutionTask;
+use crate::types::TxnId;
 use nodedb_physical::physical_plan::ArrayReducer;
 
 use super::aggregate_helpers::{
@@ -41,6 +43,18 @@ pub(in crate::data::executor) struct AggParams<'a> {
     pub system_as_of: Option<i64>,
     /// Bitemporal valid-time point. `None` = no valid-time filter.
     pub valid_at_ms: Option<i64>,
+}
+
+/// Bundled inputs for [`CoreLoop::collect_agg_tiles`].
+struct AggTileScan<'a> {
+    array_id: &'a ArrayId,
+    schema: &'a ArraySchema,
+    hilbert_range: Option<(u64, u64)>,
+    system_as_of: Option<i64>,
+    valid_at_ms: Option<i64>,
+    /// The transaction whose staged cells merge into the scan, or `None`
+    /// for an autocommit read, a distributed partial, or a temporal read.
+    overlay_txn: Option<TxnId>,
 }
 
 /// Bundled inputs for [`CoreLoop::reduce_and_encode_agg`] — keeps the kernel
@@ -108,13 +122,32 @@ impl CoreLoop {
         // and current-state reads. The two differ only in how tiles are sourced;
         // the reduce/encode kernel below is identical for both.
         let temporal = system_as_of.is_some() || valid_at_ms.is_some();
-        let (all_tiles, truncated_before_horizon) =
-            match self.collect_agg_tiles(array_id, hilbert_range, system_as_of, valid_at_ms) {
-                Ok(v) => v,
-                Err(detail) => {
-                    return self.response_error(task, ErrorCode::Internal { detail });
-                }
-            };
+        // Read-your-own-writes folds the transaction's overlay into this
+        // shard's result, for the finalizing single-node read and for the
+        // distributed partial alike. Each shard's overlay holds only the
+        // cells partitioned to that shard, and `collect_agg_tiles` applies
+        // the shard's `hilbert_range` to overlay tiles as to base tiles, so
+        // folding them into the shard's partial counts every staged cell
+        // exactly once at the coordinator's merge. `AS OF SYSTEM TIME` is a
+        // snapshot of committed history and skips the overlay.
+        let overlay_txn = if system_as_of.is_some() {
+            None
+        } else {
+            task.request.txn_id
+        };
+        let (all_tiles, truncated_before_horizon) = match self.collect_agg_tiles(AggTileScan {
+            array_id,
+            schema: &schema,
+            hilbert_range,
+            system_as_of,
+            valid_at_ms,
+            overlay_txn,
+        }) {
+            Ok(v) => v,
+            Err(detail) => {
+                return self.response_error(task, ErrorCode::Internal { detail });
+            }
+        };
 
         self.reduce_and_encode_agg(AggEmit {
             task,
@@ -143,22 +176,36 @@ impl CoreLoop {
     ///
     /// Returns an error *detail* string (wrapped into `ErrorCode::Internal` by
     /// the caller) rather than a `Response`, so it can borrow `&self` cleanly.
-    fn collect_agg_tiles(
-        &self,
-        array_id: &ArrayId,
-        hilbert_range: Option<(u64, u64)>,
-        system_as_of: Option<i64>,
-        valid_at_ms: Option<i64>,
-    ) -> Result<(Vec<TilePayload>, bool), String> {
+    fn collect_agg_tiles(&self, scan: AggTileScan<'_>) -> Result<(Vec<TilePayload>, bool), String> {
+        let AggTileScan {
+            array_id,
+            schema,
+            hilbert_range,
+            system_as_of,
+            valid_at_ms,
+            overlay_txn,
+        } = scan;
         let cutoff = system_as_of.unwrap_or(i64::MAX);
         let store = self
             .array_engine
             .store(array_id)
             .map_err(|e| format!("array '{}' not open: {e}", array_id.name))?;
-        let (resolved_tiles, truncated_before_horizon) =
-            store
-                .scan_tiles_at(cutoff, valid_at_ms)
-                .map_err(|e| format!("array aggregate scan: {e}"))?;
+        let (mut resolved_tiles, truncated_before_horizon) = store
+            .scan_tiles_at(cutoff, valid_at_ms)
+            .map_err(|e| format!("array aggregate scan: {e}"))?;
+        // Staged cells join the SAME tile set the base cells reduce through,
+        // ahead of the shard-range filter, so they fold into the same partial
+        // accumulator under the same surrogate filter.
+        self.merge_array_overlay_tiles(
+            ArrayOverlayMergeParams {
+                txn_id: overlay_txn,
+                array_id,
+                schema,
+                valid_at_ms,
+            },
+            &mut resolved_tiles,
+        )
+        .map_err(|e| format!("array aggregate overlay merge: {e}"))?;
         let tiles = resolved_tiles
             .into_iter()
             .filter(|(hp, _)| hilbert_prefix_in_range(*hp, hilbert_range))

@@ -11,7 +11,7 @@ use nodedb_cluster::error::{ClusterError, Result};
 use crate::bridge::envelope::{Priority, Request};
 use crate::control::state::SharedState;
 use crate::event::types::EventSource;
-use crate::types::{ReadConsistency, RequestId, TraceId, VShardId};
+use crate::types::{ReadConsistency, RequestId, TraceId, TxnId, VShardId};
 use nodedb_physical::physical_plan::PhysicalPlan;
 
 /// Timeout for a single shard-side array operation dispatched through the
@@ -36,14 +36,20 @@ impl DataPlaneArrayExecutor {
 
     /// Dispatch a `PhysicalPlan` through the local SPSC bridge and await the
     /// single (non-streaming) response.
+    ///
+    /// `txn_id` is the reading transaction's id for read-your-own-writes
+    /// against this shard's staging overlay. `None` for an autocommit read
+    /// and for every write: a cluster array write is never inside a
+    /// transaction block, where it is staged per shard instead.
     pub(super) async fn dispatch_and_await(
         &self,
         array_id: &ArrayId,
         local_vshard_id: VShardId,
         plan: PhysicalPlan,
+        txn_id: Option<TxnId>,
     ) -> Result<crate::bridge::envelope::Response> {
         let request_id = self.state.next_request_id();
-        let request = local_request(request_id, array_id, local_vshard_id, plan);
+        let request = local_request(request_id, array_id, local_vshard_id, plan, txn_id);
 
         let mut rx = self.state.tracker.register(request_id);
 
@@ -81,6 +87,7 @@ fn local_request(
     array_id: &ArrayId,
     local_vshard_id: VShardId,
     plan: PhysicalPlan,
+    txn_id: Option<TxnId>,
 ) -> Request {
     Request {
         request_id,
@@ -97,7 +104,7 @@ fn local_request(
         user_roles: Vec::new(),
         user_id: None,
         statement_digest: None,
-        txn_id: None,
+        txn_id,
         wal_lsn: None,
         resolved_now_ms: None,
         admission: crate::bridge::envelope::Admission::Exempt(
@@ -139,7 +146,7 @@ mod tests {
         assert_eq!(entry.tenant_id, tenant_id.as_u64());
         assert_eq!(entry.database_id, database_id.as_u64());
 
-        let request = local_request(RequestId::new(7), &array_id, vshard_id, plan);
+        let request = local_request(RequestId::new(7), &array_id, vshard_id, plan, None);
         assert_eq!(request.tenant_id, tenant_id);
         assert_eq!(request.database_id, database_id);
         assert_eq!(request.vshard_id, vshard_id);
@@ -160,8 +167,8 @@ mod tests {
             provenance: None,
         });
 
-        let read_request = local_request(RequestId::new(8), &array_id, vshard_id, read);
-        let write_request = local_request(RequestId::new(9), &array_id, vshard_id, write);
+        let read_request = local_request(RequestId::new(8), &array_id, vshard_id, read, None);
+        let write_request = local_request(RequestId::new(9), &array_id, vshard_id, write, None);
 
         assert_eq!(read_request.vshard_id, vshard_id);
         assert_eq!(write_request.vshard_id, vshard_id);

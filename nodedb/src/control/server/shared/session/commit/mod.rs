@@ -4,6 +4,7 @@
 
 pub mod conflict;
 pub mod metering;
+pub mod restart_identity;
 pub mod run;
 pub mod single_shard;
 

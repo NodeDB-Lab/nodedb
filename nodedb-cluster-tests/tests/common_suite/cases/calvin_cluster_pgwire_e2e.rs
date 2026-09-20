@@ -30,10 +30,10 @@ use crate::common;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use nodedb::types::{DatabaseId, VShardId};
 use nodedb_cluster::calvin::SEQUENCER_GROUP_ID;
 use tokio_postgres::SimpleQueryMessage;
 
+use super::vshard_names::distinct_vshard_collections;
 use common::cluster_harness::{TestClusterNode, wait_for};
 
 /// Observed sequencer-group leader id from a node's local Raft status, or `0`
@@ -59,23 +59,6 @@ async fn value_of(client: &tokio_postgres::Client, coll: &str, id: &str) -> Opti
         SimpleQueryMessage::Row(r) => r.get("v").map(str::to_owned),
         _ => None,
     })
-}
-
-/// Find two collection names whose vShard ids differ.
-fn two_distinct_vshard_collections() -> (String, String) {
-    let mut first: Option<(String, u32)> = None;
-    for i in 0u32..512 {
-        let name = format!("calvin_e2e_{i}");
-        let vshard = VShardId::from_collection_in_database(DatabaseId::DEFAULT, &name).as_u32();
-        if let Some((ref fname, fv)) = first {
-            if fv != vshard {
-                return (fname.clone(), name);
-            }
-        } else {
-            first = Some((name, vshard));
-        }
-    }
-    panic!("could not find two distinct-vshard collections in 512 tries");
 }
 
 /// Calvin multi-shard batch via pgwire `simple_query` COMMITS when sent as an
@@ -124,7 +107,7 @@ async fn calvin_multishard_write_in_explicit_block_commits() {
     )
     .await;
 
-    let (col_a, col_b) = two_distinct_vshard_collections();
+    let (col_a, col_b) = distinct_vshard_collections("calvin_e2e_0", "calvin_e2e");
 
     // Create both collections on this (single) node.
     node.client

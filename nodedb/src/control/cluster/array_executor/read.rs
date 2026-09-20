@@ -11,7 +11,7 @@ use nodedb_cluster::error::{ClusterError, Result};
 use nodedb_query::msgpack_scan;
 use nodedb_types::Surrogate;
 
-use crate::types::VShardId;
+use crate::types::{TxnId, VShardId};
 use nodedb_types::SurrogateBitmap;
 
 use super::executor::DataPlaneArrayExecutor;
@@ -53,7 +53,12 @@ impl DataPlaneArrayExecutor {
         });
 
         let resp = self
-            .dispatch_and_await(&array_id, VShardId::new(local_vshard_id), plan)
+            .dispatch_and_await(
+                &array_id,
+                VShardId::new(local_vshard_id),
+                plan,
+                req.txn_id.map(TxnId::new),
+            )
             .await?;
 
         if resp.status == crate::bridge::envelope::Status::Error {
@@ -123,7 +128,12 @@ impl DataPlaneArrayExecutor {
         });
 
         let resp = self
-            .dispatch_and_await(&array_id, VShardId::new(local_vshard_id), plan)
+            .dispatch_and_await(
+                &array_id,
+                VShardId::new(local_vshard_id),
+                plan,
+                req.txn_id.map(TxnId::new),
+            )
             .await?;
 
         if resp.status == crate::bridge::envelope::Status::Error {
@@ -175,7 +185,7 @@ impl DataPlaneArrayExecutor {
         });
 
         let resp = self
-            .dispatch_and_await(&array_id, VShardId::new(local_vshard_id), plan)
+            .dispatch_and_await(&array_id, VShardId::new(local_vshard_id), plan, None)
             .await?;
 
         if resp.status == crate::bridge::envelope::Status::Error {

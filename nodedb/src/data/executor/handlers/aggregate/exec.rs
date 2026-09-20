@@ -6,6 +6,7 @@
 
 use tracing::debug;
 
+use super::cache_entry::AggregateCacheEntry;
 use super::cache_key::{AggregateCacheKeyInputs, aggregate_cache_key, legacy_aggregate_pairs};
 use super::rows::{apply_user_aliases_to_rows, sort_aggregated_rows};
 use crate::bridge::envelope::{ErrorCode, Response, Status};
@@ -149,9 +150,22 @@ impl CoreLoop {
                 limit,
                 sort_keys,
             });
-            if let Some(cached) = self.aggregate_cache.get(&cache_key) {
-                debug!(core = self.core_id, %collection, "aggregate cache hit");
-                return self.response_with_payload(task, cached.clone());
+            let current_kv_epoch =
+                self.kv_engine
+                    .write_epoch(task.request.database_id.as_u64(), tid, collection);
+            match self.aggregate_cache.get(&cache_key) {
+                Some(entry) if entry.kv_epoch == current_kv_epoch => {
+                    debug!(core = self.core_id, %collection, "aggregate cache hit");
+                    return self.response_with_payload(task, entry.payload.clone());
+                }
+                Some(_) => {
+                    // Stale: a KV write since this was computed bumped the
+                    // collection's write epoch. Drop it so the recompute
+                    // below can re-insert at the current epoch without
+                    // being blocked by the 256 cap.
+                    self.aggregate_cache.remove(&cache_key);
+                }
+                None => {}
             }
         }
 
@@ -325,7 +339,18 @@ impl CoreLoop {
                                 sort_keys,
                             });
                             if self.aggregate_cache.len() < 256 {
-                                self.aggregate_cache.insert(cache_key, payload.clone());
+                                let kv_epoch = self.kv_engine.write_epoch(
+                                    task.request.database_id.as_u64(),
+                                    tid,
+                                    collection,
+                                );
+                                self.aggregate_cache.insert(
+                                    cache_key,
+                                    AggregateCacheEntry {
+                                        kv_epoch,
+                                        payload: payload.clone(),
+                                    },
+                                );
                             }
                         }
                         self.response_with_payload(task, payload)
@@ -389,5 +414,161 @@ impl CoreLoop {
             sub_aggregates,
             sort_keys,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use nodedb_bridge::buffer::RingBuffer;
+    use nodedb_physical::physical_plan::VectorOp;
+    use nodedb_types::Surrogate;
+
+    use super::*;
+    use crate::bridge::envelope::{Admission, ExemptReason, PhysicalPlan, Priority, Request};
+    use crate::data::executor::core_loop::CoreLoop;
+    use crate::engine::kv::KvPutParams;
+    use crate::types::{DatabaseId, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
+
+    fn open_core() -> (CoreLoop, tempfile::TempDir) {
+        use crate::bridge::dispatch::{BridgeRequest, BridgeResponse};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
+        let (resp_tx, _resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
+        let core = CoreLoop::open(
+            0,
+            req_rx,
+            resp_tx,
+            dir.path(),
+            std::sync::Arc::new(nodedb_types::OrdinalClock::new()),
+            crate::data::executor::core_loop::test_governor(),
+        )
+        .expect("open core");
+        (core, dir)
+    }
+
+    /// Plan content is irrelevant to `execute_aggregate` — only
+    /// `task.request.database_id` is read from it, and `tid`/`collection`
+    /// are passed separately via `AggregateExecInputs`.
+    fn make_task() -> ExecutionTask {
+        ExecutionTask::new(Request {
+            request_id: RequestId::new(1),
+            tenant_id: TenantId::new(1),
+            database_id: DatabaseId::DEFAULT,
+            vshard_id: VShardId::new(0),
+            plan: PhysicalPlan::Vector(VectorOp::Search {
+                collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "kvcoll"),
+                query_vector: Vec::new(),
+                top_k: 0,
+                ef_search: 0,
+                metric: nodedb_types::vector_distance::DistanceMetric::L2,
+                filter_bitmap: None,
+                field_name: String::new(),
+                rls_filters: Vec::new(),
+                inline_prefilter_plan: None,
+                ann_options: Default::default(),
+                skip_payload_fetch: false,
+                payload_filters: Vec::new(),
+            }),
+            deadline: Instant::now() + Duration::from_secs(5),
+            priority: Priority::Normal,
+            trace_id: TraceId::ZERO,
+            consistency: ReadConsistency::Strong,
+            idempotency_key: None,
+            event_source: crate::event::EventSource::User,
+            user_roles: Vec::new(),
+            user_id: None,
+            statement_digest: None,
+            txn_id: None,
+            wal_lsn: None,
+            resolved_now_ms: None,
+            admission: Admission::Exempt(ExemptReason::Read),
+        })
+    }
+
+    fn count_star() -> AggregateSpec {
+        AggregateSpec {
+            function: "count".to_string(),
+            alias: "count".to_string(),
+            user_alias: None,
+            field: "*".to_string(),
+            expr: None,
+        }
+    }
+
+    fn count_star_inputs<'a>(
+        task: &'a ExecutionTask,
+        aggregates: &'a [AggregateSpec],
+    ) -> AggregateExecInputs<'a> {
+        AggregateExecInputs {
+            task,
+            tid: 1,
+            collection: "kvcoll",
+            input: None,
+            group_by: &[],
+            aggregates,
+            filters: &[],
+            having: &[],
+            limit: usize::MAX,
+            sub_group_by: &[],
+            sub_aggregates: &[],
+            grouping_sets: &[],
+            sort_keys: &[],
+        }
+    }
+
+    fn put_kv_row(core: &mut CoreLoop, key: &[u8]) {
+        core.kv_engine.put(KvPutParams {
+            database_id: 0,
+            tenant_id: 1,
+            collection: "kvcoll",
+            key,
+            value: b"v",
+            ttl_ms: 0,
+            now_ms: 1_000,
+            surrogate: Surrogate::ZERO,
+        });
+    }
+
+    /// An aggregate cache entry stamped with an older KV write epoch is a
+    /// miss once the collection's write epoch has moved on — this is the fix
+    /// for `SELECT COUNT(*)` over a `WITH (engine='kv')` collection serving a
+    /// stale count after a KV write the cache had no explicit invalidation
+    /// hook for.
+    #[test]
+    fn stale_kv_epoch_cache_entry_is_a_miss() {
+        let (mut core, _dir) = open_core();
+        let task = make_task();
+        put_kv_row(&mut core, b"k1");
+
+        let aggregates = vec![count_star()];
+
+        let first = core.execute_aggregate(count_star_inputs(&task, &aggregates));
+        assert_eq!(first.status, Status::Ok);
+        assert_eq!(core.aggregate_cache.len(), 1);
+        let cache_key = core.aggregate_cache.keys().next().unwrap().clone();
+        let epoch_at_insert = core.aggregate_cache.get(&cache_key).unwrap().kv_epoch;
+        assert_eq!(epoch_at_insert, core.kv_engine.write_epoch(0, 1, "kvcoll"));
+
+        // A further KV write bumps the table's write epoch without going
+        // through `invalidate_aggregate_cache_for_collection` — the epoch
+        // stamp is the only thing that can catch this.
+        put_kv_row(&mut core, b"k2");
+        assert!(core.kv_engine.write_epoch(0, 1, "kvcoll") > epoch_at_insert);
+
+        let second = core.execute_aggregate(count_star_inputs(&task, &aggregates));
+        assert_eq!(second.status, Status::Ok);
+        let refreshed_epoch = core.aggregate_cache.get(&cache_key).unwrap().kv_epoch;
+        assert_eq!(
+            refreshed_epoch,
+            core.kv_engine.write_epoch(0, 1, "kvcoll"),
+            "the stale entry must be evicted and recomputed at the current epoch"
+        );
+        assert_ne!(
+            refreshed_epoch, epoch_at_insert,
+            "serving the stale entry unchanged would reproduce the bug"
+        );
     }
 }

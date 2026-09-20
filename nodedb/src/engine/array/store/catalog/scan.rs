@@ -181,6 +181,20 @@ impl ArrayStore {
         Ok(out)
     }
 
+    /// Point lookup: whether `coord` holds a live cell in the current state.
+    ///
+    /// Tile-pruned: the coordinate's Hilbert prefix selects exactly the
+    /// memtable tile versions and segment footer entries that can hold it
+    /// (`iter_tile_versions` binary-searches the footer by prefix), and only
+    /// those tiles are decoded. The newest version wins, so a coordinate
+    /// whose latest version is a tombstone or erasure reports `false`.
+    pub fn contains_cell(&self, coord: &[CoordValue]) -> nodedb_array::ArrayResult<bool> {
+        Ok(matches!(
+            self.ceiling_for_coord(coord, i64::MAX, None)?,
+            CeilingResult::Live(_)
+        ))
+    }
+
     /// Resolve the ceiling for a specific cell coordinate.
     ///
     /// Returns the raw `CeilingResult` so callers can distinguish between
@@ -305,6 +319,95 @@ mod tests {
                 "expected a typed segment-open error, got {err:?}"
             ),
         }
+    }
+
+    /// `contains_cell` reports the newest version only: a live put is found,
+    /// a later tombstone hides it, a re-put after the tombstone restores it,
+    /// and a coordinate never written stays absent. Covers the memtable and
+    /// the flushed-segment source.
+    #[test]
+    fn contains_cell_reports_newest_version_across_memtable_and_segments() {
+        use crate::engine::array::engine::{ArrayEngine, ArrayEngineConfig};
+        use crate::engine::array::test_support::{aid, put_one, schema as engine_schema};
+        use crate::engine::array::wal::ArrayDeleteCell;
+        use nodedb_array::types::coord::value::CoordValue;
+
+        let dir = TempDir::new().unwrap();
+        let mut e = ArrayEngine::new(ArrayEngineConfig::new(dir.path().to_path_buf())).unwrap();
+        e.open_array(aid(), engine_schema(), 0xC0DE).unwrap();
+        let coord = |x: i64, y: i64| vec![CoordValue::Int64(x), CoordValue::Int64(y)];
+
+        // Never written.
+        assert!(
+            !e.store(&aid())
+                .unwrap()
+                .contains_cell(&coord(1, 1))
+                .unwrap()
+        );
+
+        // Live in the memtable.
+        put_one(&mut e, 1, 1, 7, 1);
+        assert!(
+            e.store(&aid())
+                .unwrap()
+                .contains_cell(&coord(1, 1))
+                .unwrap()
+        );
+        // A different coordinate in the same tile is still absent.
+        assert!(
+            !e.store(&aid())
+                .unwrap()
+                .contains_cell(&coord(1, 2))
+                .unwrap()
+        );
+
+        // Flushed to a segment: still found.
+        e.flush(&aid(), 2).unwrap();
+        assert!(
+            e.store(&aid())
+                .unwrap()
+                .contains_cell(&coord(1, 1))
+                .unwrap()
+        );
+
+        // Tombstone at a later system time hides it.
+        e.delete_cells(
+            &aid(),
+            vec![ArrayDeleteCell {
+                coord: coord(1, 1),
+                system_from_ms: 10,
+                erasure: false,
+            }],
+            3,
+        )
+        .unwrap();
+        assert!(
+            !e.store(&aid())
+                .unwrap()
+                .contains_cell(&coord(1, 1))
+                .unwrap()
+        );
+
+        // Re-put at a later system time restores it.
+        e.put_cells(
+            &aid(),
+            vec![crate::engine::array::wal::ArrayPutCell {
+                coord: coord(1, 1),
+                attrs: vec![nodedb_array::types::cell_value::value::CellValue::Int64(8)],
+                surrogate: nodedb_types::Surrogate::ZERO,
+                system_from_ms: 20,
+                valid_from_ms: 0,
+                valid_until_ms: i64::MAX,
+            }],
+            4,
+        )
+        .unwrap();
+        assert!(
+            e.store(&aid())
+                .unwrap()
+                .contains_cell(&coord(1, 1))
+                .unwrap()
+        );
     }
 
     #[test]

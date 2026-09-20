@@ -13,7 +13,7 @@ use crate::bridge::envelope::PhysicalPlan;
 use crate::control::cluster::calvin::scheduler::driver::core::routing::{PlanRouting, plan_vshard};
 use crate::control::cluster::calvin::scheduler::lock_manager::LockKey;
 use crate::types::VShardId;
-use nodedb_physical::physical_plan::{DocumentOp, GraphOp, KvOp, VectorOp};
+use nodedb_physical::physical_plan::{DocumentOp, GraphOp, KvOp, VectorOp, VectorWriteTargets};
 
 /// The vShard and exact lock-key set a POINT write must hold on the fast path.
 /// Returns `None` (routes to Calvin) for any plan that isn't a single-home,
@@ -183,10 +183,43 @@ fn vector_point_key(op: &VectorOp) -> Option<LockKey> {
             collection,
             surrogate,
             ..
+        }
+        | VectorOp::DirectInsert {
+            collection,
+            surrogate,
+            ..
+        }
+        | VectorOp::DirectInsertIfAbsent {
+            collection,
+            surrogate,
+            ..
+        }
+        | VectorOp::DirectUpsert {
+            collection,
+            surrogate,
+            ..
         } => Some(LockKey::Surrogate {
             collection: Arc::from(collection.as_str()),
             surrogate: surrogate.as_u32(),
         }),
+        // A single point target keys like a point write; a wider target set
+        // has no one stable identity.
+        VectorOp::DirectDelete {
+            collection,
+            targets: VectorWriteTargets::Surrogates(surrogates),
+            ..
+        }
+        | VectorOp::DirectUpdate {
+            collection,
+            targets: VectorWriteTargets::Surrogates(surrogates),
+            ..
+        } if surrogates.len() == 1 => Some(LockKey::Surrogate {
+            collection: Arc::from(collection.as_str()),
+            surrogate: surrogates[0].as_u32(),
+        }),
+        VectorOp::DirectDelete { .. } | VectorOp::DirectUpdate { .. } => None,
+        // Every row of the collection: no single stable identity.
+        VectorOp::DirectTruncate { .. } => None,
         VectorOp::BatchInsert { .. }
         | VectorOp::Delete { .. }
         | VectorOp::SparseInsert { .. }

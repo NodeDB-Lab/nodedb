@@ -77,7 +77,7 @@ pub(super) fn apply_kv(ctx: &PermCtx<'_>, op: &mut KvOp) -> crate::Result<()> {
         // does not enumerate — by key, by predicate, or wholesale.
         KvOp::Delete { collection, .. }
         | KvOp::PredicateDelete { collection, .. }
-        | KvOp::Truncate { collection } => ctx.authorize(collection, PermTreeLevel::Delete),
+        | KvOp::Truncate { collection, .. } => ctx.authorize(collection, PermTreeLevel::Delete),
 
         // Blanket both levels: delete on source, write on destination.
         KvOp::TransferItem {

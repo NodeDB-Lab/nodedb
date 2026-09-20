@@ -17,6 +17,10 @@
 //!   (or no TTL delta) emits `None`.
 //! * A staged tombstone ([`Staged::Tombstone`]) → `RecordType::Delete`,
 //!   `("kv_delete", collection, [key])`.
+//! * A staged TRUNCATE → `RecordType::Delete`, `encode_kv_truncate`'s
+//!   `("kv_truncate", collection)`, emitted before the collection's row
+//!   entries so replay wipes base first and then reinstalls the rows staged
+//!   after the truncate ([`serialize_kv_truncate`]).
 //!
 //! ## `ttl_ms` in the redo payload
 //!
@@ -37,7 +41,7 @@ use std::collections::BTreeMap;
 use nodedb_types::RowIdentity;
 use nodedb_wal::record::RecordType;
 
-use crate::control::server::wal_dispatch_kv::encode::encode_kv_put;
+use crate::control::server::wal_dispatch_kv::encode::{encode_kv_put, encode_kv_truncate};
 use crate::data::executor::handlers::transaction::overlay::{Staged, StagedTtl, TxnOverlay};
 use crate::data::executor::handlers::transaction::stage_write::unhex_key;
 use crate::types::{DatabaseId, TenantId};
@@ -47,6 +51,21 @@ use crate::wal::RedoSubRecord;
 /// expiry instant (when present) is authoritative on replay and the overlay
 /// never retains the original relative TTL, so this slot is always `0`.
 const RESOLVE_TTL_MS: u64 = 0;
+
+/// Append the `kv_truncate` redo sub-record for a collection a staged
+/// TRUNCATE wipes at COMMIT — the same record the autocommit KV truncate
+/// appends.
+pub(super) fn serialize_kv_truncate(
+    collection: &str,
+    ops: &mut Vec<RedoSubRecord>,
+) -> crate::Result<()> {
+    let payload = encode_kv_truncate(collection)?;
+    ops.push(RedoSubRecord {
+        record_type: RecordType::Delete as u32,
+        payload,
+    });
+    Ok(())
+}
 
 /// Append the redo sub-records for every KV post-image staged in `overlay`
 /// for `coll_key` to `ops`, in deterministic doc-id order.

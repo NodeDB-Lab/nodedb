@@ -9,7 +9,10 @@
 use crate::temporal::TemporalScope;
 use crate::types::SqlPlan;
 use crate::types::filter::Filter;
-use crate::types::plan::{ArrayPrefilter, MergePlanClause, VectorAnnOptions, WriteRoute};
+use crate::types::plan::{
+    ArrayPrefilter, MergePlanClause, VectorAnnOptions, VectorPrimaryInsertIntent, VectorPrimaryRow,
+    WriteRoute,
+};
 use crate::types::query::{
     AggregateExpr, EngineType, JoinType, Projection, SortKey, SpatialPredicate, WindowSpec,
 };
@@ -262,4 +265,41 @@ pub struct LateralLoopVisitArgs<'a> {
     pub projection: &'a [Projection],
     pub outer_row_cap: usize,
     pub left_join: bool,
+}
+
+/// Parameters for [`super::trait_def::PlanVisitor::vector_primary_insert`].
+pub struct VectorPrimaryInsertVisitArgs<'a> {
+    pub collection: &'a str,
+    pub field: &'a str,
+    pub quantization: nodedb_types::VectorQuantization,
+    pub storage_dtype: nodedb_types::VectorStorageDtype,
+    pub payload_indexes: &'a [(String, nodedb_types::PayloadIndexKind)],
+    pub rows: &'a [VectorPrimaryRow],
+    pub intent: VectorPrimaryInsertIntent,
+    pub on_conflict_updates: &'a [(String, SqlExpr)],
+    pub primary_key: Option<&'a str>,
+}
+
+/// Parameters for [`super::trait_def::PlanVisitor::vector_primary_delete`].
+pub struct VectorPrimaryDeleteVisitArgs<'a> {
+    pub collection: &'a str,
+    pub field: &'a str,
+    pub filters: &'a [Filter],
+    pub target_keys: &'a [SqlValue],
+    pub primary_key: Option<&'a str>,
+}
+
+/// Parameters for [`super::trait_def::PlanVisitor::vector_primary_update`].
+pub struct VectorPrimaryUpdateVisitArgs<'a> {
+    pub collection: &'a str,
+    pub field: &'a str,
+    pub quantization: nodedb_types::VectorQuantization,
+    pub storage_dtype: nodedb_types::VectorStorageDtype,
+    pub payload_indexes: &'a [(String, nodedb_types::PayloadIndexKind)],
+    pub new_vector: Option<&'a [f32]>,
+    pub assignments: &'a [(String, SqlExpr)],
+    pub filters: &'a [Filter],
+    pub target_keys: &'a [SqlValue],
+    pub returning: bool,
+    pub primary_key: Option<&'a str>,
 }

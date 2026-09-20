@@ -8,12 +8,15 @@
 
 pub mod flush;
 pub mod geometry_index;
+pub mod geometry_remove;
 pub mod insert;
 pub mod read_prior;
 pub mod row_ingest;
 pub mod schema;
 pub mod spatial;
 
+pub(in crate::data::executor) use geometry_index::GeometryIndexDelta;
+pub(in crate::data::executor) use geometry_remove::{RemovedSpatialEntry, schema_has_geometry};
 pub(in crate::data::executor) use insert::ColumnarInsertParams;
 pub(in crate::data::executor) use schema::{ndb_field_to_value, row_values_to_object};
 // `ensure_columnar_engine_schema` is an inherent `CoreLoop` method (defined

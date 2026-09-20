@@ -45,13 +45,18 @@ pub(super) fn validate_catalog_exprs(
             assignments,
             filters,
             ..
+        }
+        | SqlPlan::VectorPrimaryUpdate {
+            assignments,
+            filters,
+            ..
         } => {
             for (_, expr) in assignments {
                 validate_expr(expr, catalog, database_id, tenant_id)?;
             }
             validate_filters(filters, catalog, database_id, tenant_id)?;
         }
-        SqlPlan::Delete { filters, .. } => {
+        SqlPlan::Delete { filters, .. } | SqlPlan::VectorPrimaryDelete { filters, .. } => {
             validate_filters(filters, catalog, database_id, tenant_id)?
         }
         SqlPlan::UpdateFrom {

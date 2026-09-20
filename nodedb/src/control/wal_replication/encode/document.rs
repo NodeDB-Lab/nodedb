@@ -28,7 +28,7 @@ pub(super) struct WireReturning<'a> {
 /// Flatten a plan's resolution into the authoritative wire shape (`Surrogate`
 /// travels as bare `u32`, like every other identity on this wire). An entry
 /// with no target collection is dropped rather than guessed at.
-fn wire_target_bindings(resolved: &[ResolvedSumTarget]) -> Vec<ReplicatedSumTarget> {
+pub(super) fn wire_target_bindings(resolved: &[ResolvedSumTarget]) -> Vec<ReplicatedSumTarget> {
     resolved
         .iter()
         .filter_map(|entry| {
@@ -47,7 +47,7 @@ fn wire_target_bindings(resolved: &[ResolvedSumTarget]) -> Vec<ReplicatedSumTarg
 /// The superseded `(join_value, surrogate)` shape, kept populated so an older
 /// peer binary still reads it correctly. Derived from the authoritative slot,
 /// never carried separately, so the two can't disagree. First binding wins per join value.
-fn wire_targets(resolved: &[ResolvedSumTarget]) -> Vec<(String, u32)> {
+pub(super) fn wire_targets(resolved: &[ResolvedSumTarget]) -> Vec<(String, u32)> {
     let mut legacy: Vec<(String, u32)> = Vec::with_capacity(resolved.len());
     for entry in resolved {
         if legacy.iter().any(|(value, _)| *value == entry.join_value) {

@@ -51,6 +51,14 @@ pub struct ArrayShardSliceReq {
     /// Bitemporal valid-time point forwarded from `ArrayOp::Slice::valid_at_ms`.
     /// `None` = no valid-time filter.
     pub valid_at_ms: Option<i64>,
+    /// The reading transaction's id, for read-your-own-writes against the
+    /// shard's per-transaction staging overlay. `None` = autocommit read.
+    ///
+    /// The id is minted on the coordinator and has meaning on a shard only
+    /// where that transaction staged cells. Staging resolves each shard's
+    /// own leader and stages there, and this read resolves the same leader,
+    /// so the overlay keyed by this id is on the node that serves the read.
+    pub txn_id: Option<u64>,
 }
 
 /// Gather response: shard returns matching rows as opaque msgpack row bytes.
@@ -89,6 +97,16 @@ pub struct ArrayShardAggReq {
     /// Bitemporal valid-time point forwarded from `ArrayOp::Aggregate::valid_at_ms`.
     /// `None` = no valid-time filter.
     pub valid_at_ms: Option<i64>,
+    /// The reading transaction's id, for read-your-own-writes against the
+    /// shard's per-transaction staging overlay. `None` = autocommit read.
+    ///
+    /// The id is minted on the coordinator and has meaning on a shard only
+    /// where that transaction staged cells. Staging resolves each shard's
+    /// own leader and stages there, and this read resolves the same leader,
+    /// so the overlay keyed by this id is on the node that serves the read.
+    /// Each shard folds only its own overlay cells into its partial, so the
+    /// coordinator's merge counts every staged cell exactly once.
+    pub txn_id: Option<u64>,
 }
 
 /// Gather response: shard returns partial aggregate(s) for merge.
@@ -125,6 +143,11 @@ pub struct ArrayShardPutReq {
 pub struct ArrayShardPutResp {
     pub shard_id: u32,
     pub applied_lsn: u64,
+    /// Cells this shard actually wrote, read from the Data Plane handler's
+    /// `{"inserted": n}` count. The coordinator sums this across shards for
+    /// the client-facing `INSERT n` count — never `cells.len()`, which counts
+    /// coordinates named, not cells written.
+    pub affected: u64,
 }
 
 /// Scatter request: coordinator asks a shard to delete cells by exact coords.
@@ -148,6 +171,12 @@ pub struct ArrayShardDeleteReq {
 pub struct ArrayShardDeleteResp {
     pub shard_id: u32,
     pub applied_lsn: u64,
+    /// Cells this shard actually removed, read from the Data Plane handler's
+    /// `{"deleted": n}` count (the number of coords that existed, not the
+    /// number named). A delete of an absent coordinate contributes 0. The
+    /// coordinator sums this across shards for the client-facing `DELETE n`
+    /// count — never `coords.len()`.
+    pub affected: u64,
 }
 
 /// Scatter request: coordinator asks a shard to run a surrogate bitmap scan.

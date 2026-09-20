@@ -10,6 +10,8 @@
 use super::super::types::{BalanceDeltaFields, ReplicatedWrite};
 use super::document;
 use super::document::{SumFields, WireReturning};
+use super::document_join;
+use super::document_join::{JoinFields, MergeFields};
 use super::entry::encode_returning;
 use nodedb_physical::physical_plan::DocumentOp;
 
@@ -215,9 +217,92 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             rls_filters,
         ),
 
-        // Known gap: cross-collection writes whose source/target co-location is
-        // not enforced (`Unroutable` in `plan_vshard`); no ReplicatedWrite shape yet.
-        DocumentOp::Merge { .. } | DocumentOp::UpdateFromJoin { .. } => return None,
+        // The resolved apply pass of an autocommit MERGE: the orchestrator
+        // shipped the source rows, pre-assigned the NOT-MATCHED surrogates
+        // and decided the write policy over the resolved arms, so every
+        // replica re-derives the same classification in Raft order.
+        DocumentOp::Merge {
+            target_collection,
+            source_collection,
+            source_alias,
+            target_join_col,
+            source_join_col,
+            clauses,
+            returning,
+            resolved_inserts: Some(resolved_inserts),
+            resolved_insert_identities,
+            source_rows: Some(source_rows),
+            rls_filters,
+            rls_write_check: _,
+            resolved_sum_targets,
+            declared_primary_key,
+        } => document_join::merge_apply(
+            JoinFields {
+                target_collection: target_collection.as_str(),
+                source_collection: source_collection.as_str(),
+                source_alias,
+                target_join_col,
+                source_join_col,
+                source_rows,
+                resolved_sum_targets,
+                declared_primary_key: declared_primary_key.as_deref(),
+            },
+            MergeFields {
+                clauses,
+                resolved_inserts,
+                resolved_insert_identities,
+            },
+            WireReturning {
+                returning: encode_returning(returning),
+                rls_filters,
+            },
+        ),
+        // The resolved apply pass of an autocommit `UPDATE ... FROM`: the join
+        // map builds from the shipped rows on every replica.
+        DocumentOp::UpdateFromJoin {
+            target_collection,
+            source_collection,
+            source_alias,
+            target_join_col,
+            source_join_col,
+            updates,
+            target_filters,
+            returning,
+            source_rows: Some(source_rows),
+            rls_filters,
+            rls_write_check: _,
+            resolved_sum_targets,
+            declared_primary_key,
+        } => document_join::update_from_join_apply(
+            JoinFields {
+                target_collection: target_collection.as_str(),
+                source_collection: source_collection.as_str(),
+                source_alias,
+                target_join_col,
+                source_join_col,
+                source_rows,
+                resolved_sum_targets,
+                declared_primary_key: declared_primary_key.as_deref(),
+            },
+            updates,
+            target_filters,
+            WireReturning {
+                returning: encode_returning(returning),
+                rls_filters,
+            },
+        ),
+        // The unresolved shape every Control-Plane entry point intercepts:
+        // its orchestrator resolves it, then proposes the resolved shape above.
+        DocumentOp::Merge {
+            resolved_inserts: None,
+            ..
+        }
+        | DocumentOp::Merge {
+            source_rows: None, ..
+        }
+        | DocumentOp::UpdateFromJoin {
+            source_rows: None, ..
+        } => return None,
         DocumentOp::Truncate {
             collection,
             restart_identity,

@@ -16,7 +16,8 @@ use nodedb_wal::record::RecordType;
 
 use crate::control::server::wal_dispatch::{
     encode_columnar_batch_payload, encode_columnar_dml_payload,
-    encode_columnar_resolved_dml_payload, encode_timeseries_batch_payload_with_format,
+    encode_columnar_resolved_dml_payload, encode_columnar_truncate_payload,
+    encode_timeseries_batch_payload_with_format,
 };
 use crate::wal::RedoSubRecord;
 
@@ -122,6 +123,20 @@ pub(super) fn serialize_columnar_op(
             });
             Ok(())
         }
+        // Same record the autocommit path appends (`RecordType::ColumnarTruncate`),
+        // replayed via `replay_columnar_truncate`. `restart_identity` is a
+        // Control-Plane sequence concern and never enters the redo record.
+        ColumnarOp::Truncate {
+            collection,
+            restart_identity: _,
+        } => {
+            let sub_payload = encode_columnar_truncate_payload(collection.as_str())?;
+            ops.push(RedoSubRecord {
+                record_type: RecordType::ColumnarTruncate as u32,
+                payload: sub_payload,
+            });
+            Ok(())
+        }
     }
 }
 
@@ -153,6 +168,21 @@ pub(super) fn serialize_timeseries_op(
             )?;
             ops.push(RedoSubRecord {
                 record_type: RecordType::TimeseriesBatch as u32,
+                payload: sub_payload,
+            });
+            Ok(())
+        }
+
+        // Same record the autocommit path appends
+        // (`RecordType::TimeseriesTruncate`), replayed via
+        // `replay_timeseries_truncate`.
+        TimeseriesOp::Truncate {
+            collection,
+            restart_identity: _,
+        } => {
+            let sub_payload = encode_columnar_truncate_payload(collection.as_str())?;
+            ops.push(RedoSubRecord {
+                record_type: RecordType::TimeseriesTruncate as u32,
                 payload: sub_payload,
             });
             Ok(())
