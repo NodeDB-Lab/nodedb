@@ -273,28 +273,16 @@ impl Scheduler {
         };
 
         if let Err(e) = dispatch_result {
-            if matches!(e, crate::Error::DispatchCapacityBusy { .. }) {
-                // Retryable capacity condition (issue 352): nothing was
-                // enqueued. Demote the log, count it, and pace the re-drive via
-                // the scheduler's drain gate instead of spinning on ERROR.
+            if self.note_dispatch_busy(&e, epoch) {
+                // Retryable capacity condition: nothing was enqueued. Demote
+                // the log and pace the re-drive via the scheduler's drain gate
+                // instead of spinning on ERROR.
                 debug!(
                     vshard_id = self.vshard_id,
                     epoch,
                     position,
                     error = %e,
                     "calvin scheduler: dispatch deferred (capacity busy)"
-                );
-                self.metrics.record_dispatch_busy();
-                let attempts = self.dispatch_busy_attempts.saturating_add(1);
-                self.dispatch_busy_attempts = attempts;
-                self.dispatch_busy_until = Some(
-                    // no-determinism: the backoff deadline is scheduler observability, not Calvin WAL data
-                    Instant::now()
-                        + super::scheduler::Scheduler::busy_backoff(
-                            attempts,
-                            self.vshard_id,
-                            epoch,
-                        ),
                 );
                 self.on_txn_complete(txn_id);
                 return;

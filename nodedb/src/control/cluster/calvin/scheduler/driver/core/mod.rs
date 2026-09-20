@@ -10,6 +10,7 @@
 //! Sub-modules (one concern per file):
 //!
 //! - [`scheduler`] — `Scheduler` struct, ctor, run loop.
+//! - [`busy`] — capacity-busy accounting and the bounded re-drive backoff.
 //! - [`completion_route`] — routes each executor response (disconnect, OLLP
 //!   mismatch, staged commit-resolution state, or direct apply) to its handler.
 //! - [`process`] — new-txn processing, dependent-read barrier setup,
@@ -45,6 +46,7 @@
 //!
 //! Never used for WAL-influencing values.
 
+pub mod busy;
 pub mod catch_up;
 pub mod commit_redo;
 pub mod commit_resolution_dispatch;

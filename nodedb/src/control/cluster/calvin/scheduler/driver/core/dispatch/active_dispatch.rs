@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use tracing::error;
+use tracing::{debug, error};
 
 use nodedb_cluster::calvin::types::SequencedTxn;
 use nodedb_physical::physical_plan::PhysicalPlan;
@@ -121,6 +121,17 @@ impl Scheduler {
         };
 
         if let Err(e) = dispatch_result {
+            if self.note_dispatch_busy(&e, epoch) {
+                debug!(
+                    vshard_id = self.vshard_id,
+                    epoch,
+                    position,
+                    error = %e,
+                    "calvin scheduler: active dispatch deferred (capacity busy)"
+                );
+                self.on_txn_complete(txn_id);
+                return;
+            }
             error!(
                 vshard_id = self.vshard_id,
                 epoch,
