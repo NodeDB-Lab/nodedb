@@ -13,13 +13,15 @@ use crate::control::server::response_shape::compose::{self, ShapeOutcome};
 use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::request::MaterializedShapeRequest;
 use crate::control::server::response_shape::schema::OutputSchema;
-use crate::control::server::response_shape::types::{ShapedRows, StatementTag};
+use crate::control::server::response_shape::types::{
+    ShapedRows, StatementTag, payload_to_dml_outcome,
+};
 use crate::control::server::shared::session::SessionId;
 use crate::types::{DatabaseId, TenantId};
 
-use super::super::super::super::types::{dml_fold_error_to_pg, shape_error_to_pg};
+use super::super::super::super::types::{dml_fold_error_to_pg, error_to_pg, shape_error_to_pg};
 use super::super::super::core::NodeDbPgHandler;
-use super::super::super::plan::{PlanKind, payload_to_dml_outcome};
+use super::super::super::plan::PlanKind;
 use super::super::super::shape_encode;
 
 /// Everything needed to shape one task's response.
@@ -106,7 +108,9 @@ impl NodeDbPgHandler {
                 Ok(Some(task_rows))
             }
             ShapeOutcome::Passthrough => {
-                match payload_to_dml_outcome(&response.payload, plan_kind)? {
+                match payload_to_dml_outcome(&response.payload, plan_kind)
+                    .map_err(|e| error_to_pg(&e))?
+                {
                     Some(outcome) => statement_tag
                         .fold(outcome)
                         .map_err(|e| dml_fold_error_to_pg(&e))?,

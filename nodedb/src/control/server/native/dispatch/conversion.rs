@@ -7,7 +7,9 @@ use nodedb_types::protocol::NativeResponse;
 
 use crate::bridge::envelope::Response;
 use crate::control::server::native::sqlstate_code::sqlstate_error;
-use crate::control::server::response_shape::types::ShapedRows;
+use crate::control::server::response_shape::types::{
+    DmlFoldError, DmlOutcome, PlanKind, ShapedRows, describe_plan, payload_to_dml_outcome,
+};
 use crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate;
 use crate::control::server::shared::ddl::{DdlError, DdlResult};
 
@@ -104,6 +106,13 @@ pub(crate) fn shape_error_to_native(seq: u64, e: &nodedb_types::NodeDbError) -> 
     NativeResponse::error_with_code(seq, "XX000", e.message().to_string(), e.code().0)
 }
 
+/// Render a statement-tag fold refusal as a native error frame. Two tasks of
+/// one statement disagreeing on their verb is a planner bug, so it is an
+/// internal error, the same class pgwire's `dml_fold_error_to_pg` renders.
+pub(crate) fn dml_fold_error_to_native(seq: u64, e: &DmlFoldError) -> NativeResponse {
+    sqlstate_error(seq, "XX000", e.to_string())
+}
+
 /// Render an error [`Response`] from the Data Plane as a native error frame.
 ///
 /// The Data Plane already classified the failure into a deterministic
@@ -192,6 +201,7 @@ pub(crate) fn ddl_result_to_native(
                     columns: Some(columns),
                     rows: Some(rows),
                     rows_affected: None,
+                    command: None,
                     watermark_lsn: 0,
                     error: None,
                     auth: None,
@@ -231,17 +241,14 @@ pub(crate) fn calvin_native_response(
     };
     use crate::control::server::response_shape::redaction::QueryRedaction;
     use crate::control::server::response_shape::request::MaterializedShapeRequest;
-    use crate::control::server::response_shape::types::{PlanKind, describe_plan};
 
     let returning_plan = plans
         .iter()
         .find(|p| matches!(describe_plan(p), PlanKind::ReturningRows));
-    let dml_plan = plans.iter().find(|p| {
-        matches!(
-            describe_plan(p),
-            PlanKind::DmlResult(_) | PlanKind::DmlResultByOp
-        )
-    });
+    let dml_kind = plans
+        .iter()
+        .map(describe_plan)
+        .find(|kind| matches!(kind, PlanKind::DmlResult(_) | PlanKind::DmlResultByOp));
 
     let redaction = returning_plan.map(|plan| QueryRedaction::for_plan(tenant_id, auth, plan));
     if let (Some(resp), Some(plan)) = (apply_result.as_ref(), returning_plan)
@@ -276,11 +283,11 @@ pub(crate) fn calvin_native_response(
         r.watermark_lsn = resp.watermark_lsn.as_u64();
     }
     // A batch with no count-bearing plan (vector / DDL work) has no row count
-    // to report, and says so by leaving `rows_affected` unset rather than
-    // inventing one from the task count. Graph edge/label writes classify as
-    // count-bearing (`PlanKind::DmlResult`), same as any other DML.
-    if dml_plan.is_some() {
-        let count = apply_result.as_ref().map_or_else(
+    // or verb to report, and says so by leaving both unset rather than
+    // inventing a count from the task count. Graph edge/label writes classify
+    // as count-bearing (`PlanKind::DmlResult`), same as any other DML.
+    if let Some(kind) = dml_kind {
+        let outcome = apply_result.as_ref().map_or_else(
             || {
                 Err(crate::Error::Internal {
                     detail: "native Calvin write completed with no applied response to read its \
@@ -288,18 +295,37 @@ pub(crate) fn calvin_native_response(
                         .to_owned(),
                 })
             },
-            |resp| {
-                crate::control::server::shared::sql::staging_predicates::require_affected_count(
-                    resp.payload.as_bytes(),
-                )
-            },
+            |resp| calvin_dml_outcome(resp.payload.as_bytes(), kind),
         );
-        match count {
-            Ok(n) => r.rows_affected = Some(n),
+        match outcome {
+            Ok(outcome) => apply_dml_outcome(&mut r, outcome),
             Err(e) => return error_to_native(seq, &e),
         }
     }
     r
+}
+
+/// The count-bearing outcome a Calvin batch's DML plan reports, read from
+/// the applied response: the plan's verb for `DmlResult`, the handler's
+/// resolved verb for `DmlResultByOp`.
+///
+/// The caller only ever passes a `kind` already filtered to `DmlResult` /
+/// `DmlResultByOp`, so `payload_to_dml_outcome`'s `Ok(None)` (its `Execution`
+/// arm) never actually happens here; it is refused rather than unwrapped so a
+/// future caller that widens the filter fails loudly instead of losing a
+/// count.
+fn calvin_dml_outcome(payload: &[u8], kind: PlanKind) -> crate::Result<DmlOutcome> {
+    payload_to_dml_outcome(payload, kind)?.ok_or_else(|| crate::Error::Internal {
+        detail: format!("Calvin batch DML plan classified as non-DML kind {kind:?}"),
+    })
+}
+
+/// Write a statement's count-bearing outcome onto a native response: the
+/// verb always, the count only when the verb carries one (`TRUNCATE` does
+/// not, matching the bare tag pgwire answers with).
+pub(crate) fn apply_dml_outcome(r: &mut NativeResponse, outcome: DmlOutcome) {
+    r.rows_affected = outcome.carries_count().then_some(outcome.affected);
+    r.command = Some(outcome.verb.to_owned());
 }
 
 /// Convert protocol-neutral `ShapedRows` (produced by

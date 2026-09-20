@@ -6,13 +6,14 @@
 //! task right after their own in-transaction routing gate and delegate to the
 //! shared, protocol-neutral core
 //! (`shared::cluster_array_dispatch::execute_cluster_array`), then convert
-//! the outcome into native wire columns/rows or an affected count. Metering
+//! the outcome into native wire columns/rows or a count-bearing outcome. Metering
 //! is not applied on this path, matching pgwire's `ClusterArray`
 //! short-circuit, which also does not meter it.
 
 use nodedb_types::Value;
 
 use crate::control::server::response_shape::schema::OutputSchema;
+use crate::control::server::response_shape::types::DmlOutcome;
 use crate::control::server::shared::authorization::AuthorizedTask;
 use crate::control::server::shared::cluster_array_dispatch::{
     ClusterArrayShaped, execute_cluster_array,
@@ -29,8 +30,9 @@ pub(crate) enum ClusterArrayOutcome {
         rows: Vec<Vec<Value>>,
         notice: Option<String>,
     },
-    /// A write's affected row count (`Put` / `Delete`).
-    Affected(u64),
+    /// A write's count-bearing outcome (`Put` / `Delete`): the caller folds
+    /// it into the statement's tag.
+    Affected(DmlOutcome),
 }
 
 /// Execute a single `ClusterArrayOp` via the shared core and convert its
@@ -50,8 +52,6 @@ pub(crate) async fn dispatch_cluster_array_task(
                 notice,
             })
         }
-        ClusterArrayShaped::Affected(outcome) => {
-            Ok(ClusterArrayOutcome::Affected(outcome.affected))
-        }
+        ClusterArrayShaped::Affected(outcome) => Ok(ClusterArrayOutcome::Affected(outcome)),
     }
 }

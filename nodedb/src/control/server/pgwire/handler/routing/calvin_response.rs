@@ -13,6 +13,8 @@ use crate::control::server::response_shape::types::{DmlOutcome, ShapedRows};
 use crate::types::TenantId;
 use nodedb_physical::physical_task::PhysicalTask;
 
+use super::super::super::types::error_to_pg;
+
 /// Shared inputs for shaping one task of a completed Calvin batch.
 pub(super) struct CalvinResponseCtx<'a> {
     /// The statement's announced output columns, when it announced any. A
@@ -53,15 +55,16 @@ pub(super) fn calvin_execution_response(
     apply_resp: Option<&crate::bridge::envelope::Response>,
     ctx: CalvinResponseCtx<'_>,
 ) -> pgwire::error::PgWireResult<CalvinTaskOutcome> {
-    use super::super::plan::{
-        calvin_tag_for_plan, dml_outcome_by_op, dml_outcome_from_payload, is_calvin_foldable,
-    };
+    use super::super::plan::{calvin_tag_for_plan, is_calvin_foldable};
     use crate::control::server::response_shape::compose::{
         ShapeOutcome, shape_response_materialized,
     };
     use crate::control::server::response_shape::redaction::QueryRedaction;
     use crate::control::server::response_shape::request::MaterializedShapeRequest;
     use crate::control::server::response_shape::types::{PlanKind, describe_plan};
+    use crate::control::server::response_shape::types::{
+        dml_outcome_by_op, dml_outcome_from_payload,
+    };
 
     let CalvinResponseCtx {
         projection,
@@ -117,17 +120,17 @@ pub(super) fn calvin_execution_response(
     match plan_kind {
         PlanKind::DmlResult(verb) => {
             let resp = applied(verb)?;
-            Ok(CalvinTaskOutcome::Dml(dml_outcome_from_payload(
-                resp.payload.as_bytes(),
-                verb,
-            )?))
+            Ok(CalvinTaskOutcome::Dml(
+                dml_outcome_from_payload(resp.payload.as_bytes(), verb)
+                    .map_err(|e| error_to_pg(&e))?,
+            ))
         }
         // The verb is in the payload; the error text only names the kind.
         PlanKind::DmlResultByOp => {
             let resp = applied("insert-or-update")?;
-            Ok(CalvinTaskOutcome::Dml(dml_outcome_by_op(
-                resp.payload.as_bytes(),
-            )?))
+            Ok(CalvinTaskOutcome::Dml(
+                dml_outcome_by_op(resp.payload.as_bytes()).map_err(|e| error_to_pg(&e))?,
+            ))
         }
         PlanKind::Execution
         | PlanKind::ArraySlice

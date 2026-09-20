@@ -367,6 +367,7 @@ pub(crate) async fn handle_direct_op(
                 DispatchClass::MultiShard { .. }
             );
         if route_to_calvin {
+            let plans: Vec<PhysicalPlan> = tasks.iter().map(|task| task.plan.clone()).collect();
             match dispatch_authorized_tasks_to_calvin(
                 ctx.state,
                 authorized_tasks,
@@ -378,13 +379,18 @@ pub(crate) async fn handle_direct_op(
             )
             .await
             {
-                // No RETURNING possible here, so the Response carries no rows —
-                // report one row-affected per task.
-                Ok(_apply) => {
-                    let mut r = NativeResponse::ok(seq);
-                    r.rows_affected = Some(tasks.len() as u64);
-                    r
-                }
+                // The count and verb come from the applied response the
+                // batch's count-bearing plan reported, never from the task
+                // count: an implicit-edge cleanup task is not a row.
+                Ok(apply) => super::conversion::calvin_native_response(
+                    seq,
+                    apply,
+                    &plans,
+                    ctx.state,
+                    ctx.database_id(),
+                    tenant_id,
+                    ctx.auth_context(),
+                ),
                 Err(e) => error_to_native(seq, &e),
             }
         } else {

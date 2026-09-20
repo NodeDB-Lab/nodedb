@@ -28,11 +28,13 @@ const INSERT_TAG_OID: u32 = 0;
 /// it affected. `command` must already be the exact tag text (e.g.
 /// `"INSERT"`, `"UPDATE"`, or a NodeDB-specific name like `"UPSERT"`).
 pub(in crate::control::server::pgwire) fn dml_tag(command: &str, rows: usize) -> Tag {
+    // A count-less verb (SQL `TRUNCATE`) renders bare, per the one rule
+    // `DmlOutcome::verb_carries_count` owns for every protocol.
+    if !DmlOutcome::verb_carries_count(command) {
+        return Tag::new(command);
+    }
     match command {
         "INSERT" => Tag::new(command).with_oid(INSERT_TAG_OID).with_rows(rows),
-        // Real SQL TRUNCATE: Postgres's tag (`TRUNCATE TABLE`) never carries
-        // a count — drop it here too rather than inventing one.
-        "TRUNCATE" => Tag::new(command),
         _ => Tag::new(command).with_rows(rows),
     }
 }

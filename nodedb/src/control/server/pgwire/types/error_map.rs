@@ -25,6 +25,17 @@ pub fn dml_fold_error_to_pg(e: &DmlFoldError) -> PgWireError {
     sqlstate_error("XX000", &e.to_string())
 }
 
+/// Map a NodeDB `Error` to the pgwire error the client reads, through the
+/// one SQLSTATE table [`error_to_sqlstate`] owns.
+pub fn error_to_pg(err: &crate::Error) -> PgWireError {
+    let (severity, code, message) = error_to_sqlstate(err);
+    PgWireError::UserError(Box::new(ErrorInfo::new(
+        severity.to_owned(),
+        code.to_owned(),
+        message,
+    )))
+}
+
 /// Map an error raised while shaping a response to the pgwire error the
 /// client reads, with the SQLSTATE its numeric code maps to. A per-row
 /// sequence accessor refusal (`42704`, `55000`) or a division by zero

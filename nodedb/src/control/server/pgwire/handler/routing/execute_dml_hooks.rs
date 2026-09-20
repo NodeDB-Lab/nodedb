@@ -16,15 +16,19 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use crate::control::security::auth_context::AuthContext;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::response_shape::schema::OutputSchema;
-use crate::control::server::response_shape::types::{DmlOutcome, StatementTag};
+use crate::control::server::response_shape::types::{
+    DmlOutcome, StatementTag, payload_to_dml_outcome, staged_dml_outcome,
+};
 use crate::control::server::shared::session::SessionId;
 use crate::control::trigger::dml_hook::DmlWriteInfo;
 use crate::types::TenantId;
 use nodedb_physical::physical_task::PhysicalTask;
 
-use super::super::super::types::{dml_fold_error_to_pg, error_to_sqlstate, shape_error_to_pg};
+use super::super::super::types::{
+    dml_fold_error_to_pg, error_to_pg, error_to_sqlstate, shape_error_to_pg,
+};
 use super::super::core::NodeDbPgHandler;
-use super::super::plan::{PlanKind, payload_to_dml_outcome, staged_dml_outcome};
+use super::super::plan::PlanKind;
 
 /// What a write task handled short of normal dispatch contributes to the
 /// statement's one command tag.
@@ -399,7 +403,9 @@ impl NodeDbPgHandler {
                         }
                         ShapeOutcome::Passthrough => {
                             let handled =
-                                match payload_to_dml_outcome(resp.payload.as_ref(), plan_kind)? {
+                                match payload_to_dml_outcome(resp.payload.as_ref(), plan_kind)
+                                    .map_err(|e| error_to_pg(&e))?
+                                {
                                     Some(outcome) => HandledWrite::Dml(outcome),
                                     None => HandledWrite::Opaque,
                                 };

@@ -54,6 +54,7 @@ pub(super) fn response_to_query_result(resp: NativeResponse) -> NodeDbResult<Que
         columns: resp.columns.unwrap_or_default(),
         rows: resp.rows.unwrap_or_default(),
         rows_affected: resp.rows_affected.unwrap_or(0),
+        command: resp.command,
     })
 }
 
@@ -69,6 +70,7 @@ mod tests {
                 columns: vec!["x".into()],
                 rows: vec![vec![nodedb_types::Value::Integer(42)]],
                 rows_affected: 0,
+                command: None,
             },
             0,
         );

@@ -73,6 +73,12 @@ pub struct NativeResponse {
     /// Number of rows affected (for writes).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rows_affected: Option<u64>,
+    /// The statement's command verb (`INSERT`, `UPDATE`, `DELETE`, `UPSERT`,
+    /// `MERGE`, `TRUNCATE`, ...). `None` when the statement produced no DML
+    /// outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[msgpack(default)]
+    pub command: Option<String>,
     /// WAL LSN watermark at time of computation.
     pub watermark_lsn: u64,
     /// Error details (if status == Error).
@@ -136,6 +142,7 @@ impl NativeResponse {
             columns: None,
             rows: None,
             rows_affected: None,
+            command: None,
             watermark_lsn: 0,
             error: None,
             auth: None,
@@ -151,6 +158,7 @@ impl NativeResponse {
             columns: Some(qr.columns),
             rows: Some(qr.rows),
             rows_affected: Some(qr.rows_affected),
+            command: qr.command,
             watermark_lsn: lsn,
             error: None,
             auth: None,
@@ -182,6 +190,7 @@ impl NativeResponse {
             columns: None,
             rows: None,
             rows_affected: None,
+            command: None,
             watermark_lsn: 0,
             error: Some(ErrorPayload {
                 code: code.into(),
@@ -201,6 +210,7 @@ impl NativeResponse {
             columns: None,
             rows: None,
             rows_affected: None,
+            command: None,
             watermark_lsn: 0,
             error: None,
             auth: Some(AuthResponse {
@@ -219,6 +229,7 @@ impl NativeResponse {
             columns: Some(vec!["status".into()]),
             rows: Some(vec![vec![Value::String(message.into())]]),
             rows_affected: Some(1),
+            command: None,
             watermark_lsn: 0,
             error: None,
             auth: None,
@@ -259,6 +270,7 @@ mod tests {
                 Value::String("Alice".into()),
             ]],
             rows_affected: 0,
+            command: None,
         };
         let r = NativeResponse::from_query_result(5, qr, 100);
         assert_eq!(r.seq, 5);
@@ -298,6 +310,7 @@ mod tests {
                 columns: vec!["x".into()],
                 rows: vec![vec![Value::Integer(42)]],
                 rows_affected: 0,
+                command: None,
             },
             99,
         );

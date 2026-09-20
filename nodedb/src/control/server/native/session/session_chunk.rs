@@ -36,6 +36,7 @@ pub(super) fn chunk_large_response(
         columns: response.columns.clone(),
         rows: Some(rows[..total_rows.min(100)].to_vec()),
         rows_affected: None,
+        command: None,
         watermark_lsn: response.watermark_lsn,
         error: None,
         auth: None,
@@ -71,6 +72,11 @@ pub(super) fn chunk_large_response(
             rows: Some(chunk.to_vec()),
             rows_affected: if is_last {
                 response.rows_affected
+            } else {
+                None
+            },
+            command: if is_last {
+                response.command.clone()
             } else {
                 None
             },
@@ -114,6 +120,7 @@ mod tests {
             columns: Some(columns),
             rows: Some(rows),
             rows_affected: None,
+            command: None,
             watermark_lsn: 42,
             error: None,
             auth: None,
@@ -146,6 +153,7 @@ mod tests {
             columns: None,
             rows: None,
             rows_affected: Some(5),
+            command: None,
             watermark_lsn: 42,
             error: None,
             auth: None,
@@ -181,6 +189,7 @@ mod tests {
             columns: Some(columns.clone()),
             rows: Some(rows),
             rows_affected: None,
+            command: None,
             watermark_lsn: 99,
             error: None,
             auth: None,

@@ -189,6 +189,7 @@ pub async fn send_request(
                         Some(aggregate.rows_affected.unwrap_or(0) + rows_affected);
                 }
                 aggregate.watermark_lsn = aggregate.watermark_lsn.max(response.watermark_lsn);
+                aggregate.command = response.command;
                 aggregate.status = response.status;
                 aggregate.error = response.error;
                 aggregate.auth = response.auth;
