@@ -661,7 +661,7 @@ mod tests {
         let _ = dispatcher.db_pressure_on_core(0, 2);
     }
 
-    // --- Dead-core request loss (GitHub #265) ---
+    // --- Dead-core request loss ---
     //
     // When a Data Plane core's consumer/producer is dropped (the core thread
     // died), `Dispatcher` must synthesize an error `Response` for every
