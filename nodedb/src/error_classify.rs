@@ -177,8 +177,11 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::InvalidLimitValue { clause, value } => {
             NodeDbError::invalid_limit_value(*clause, value.clone())
         }
+        // Retryable, like a write conflict: the descriptor-lease paths already
+        // retry this variant, so it must not reach a client as a plan/syntax
+        // error, which reads as "fix your SQL".
         Error::RetryableSchemaChanged { descriptor } => {
-            NodeDbError::plan_error(format!("retryable schema change on {descriptor}"))
+            NodeDbError::write_conflict("catalog", descriptor.clone())
         }
         Error::RetryableLeaderChange {
             group_id,
