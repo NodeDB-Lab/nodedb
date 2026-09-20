@@ -8,10 +8,9 @@
 //! is present in this core's KV engine at this point in LSN-ordered replay
 //! and re-runs the exact same pure merge (`merge_field_updates`) the live
 //! autocommit handler in `handlers/kv/field.rs` uses, so a staged value and
-//! its durable replay never diverge. `merge_field_updates` builds a
-//! `serde_json::Map`, which this workspace keeps `BTreeMap`-backed (the
-//! `preserve_order` feature is not enabled), so re-encoding is deterministic
-//! and byte-identical to the live write given the same inputs.
+//! its durable replay never diverge. `merge_field_updates` encodes the
+//! merged map in key order, so re-encoding is deterministic and
+//! byte-identical to the live write given the same inputs.
 
 use tracing::warn;
 
@@ -59,7 +58,7 @@ impl CoreLoop {
         if if_present && current.is_none() {
             return Some(0);
         }
-        let computed = match merge_field_updates(current.as_deref(), &updates) {
+        let computed = match merge_field_updates(&collection, current.as_deref(), &updates) {
             Ok(c) => c,
             Err(e) => {
                 warn!(
@@ -212,6 +211,7 @@ mod tests {
         let seed = nodedb_types::json_to_msgpack(&serde_json::json!({ "hp": 10 }))
             .expect("encode seed doc");
         let expected = super::merge_field_updates(
+            "players",
             Some(&seed),
             &[("mana".to_string(), json_field_bytes(serde_json::json!(5)))],
         )
@@ -245,6 +245,7 @@ mod tests {
         h.core.replay_kv_wal(&records, 1, &TombstoneSet::new());
 
         let expected = super::merge_field_updates(
+            "players",
             None,
             &[("hp".to_string(), json_field_bytes(serde_json::json!(100)))],
         )
@@ -259,14 +260,14 @@ mod tests {
     }
 
     #[test]
-    fn kv_field_set_onto_non_object_value_replays_as_silently_treated_empty() {
-        // Seed a value that is not a JSON object; live behavior silently
-        // treats this as an empty object rather than erroring, and replay
-        // must pin that exact behavior, not "improve" on it.
+    fn kv_field_set_onto_bare_value_body_is_refused_and_replay_skips_it() {
+        // A body that is not a msgpack map is a bare value (the single-`value`
+        // SQL form, RESP `SET`). A field set against it is a type mismatch
+        // live, so replay skips the record and the seed survives untouched.
         let put_scalar = PhysicalPlan::Kv(KvOp::Put {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "players"),
             key: b"p2".to_vec(),
-            value: json_field_bytes(serde_json::json!(42)),
+            value: b"42".to_vec(),
             ttl_ms: 0,
             surrogate: Surrogate::new(1),
             returning: None,
@@ -288,19 +289,22 @@ mod tests {
         let mut h = make_core();
         h.core.replay_kv_wal(&records, 1, &TombstoneSet::new());
 
-        let scalar_seed = json_field_bytes(serde_json::json!(42));
-        let expected = super::merge_field_updates(
-            Some(&scalar_seed),
+        let live = super::merge_field_updates(
+            "players",
+            Some(b"42"),
             &[("hp".to_string(), json_field_bytes(serde_json::json!(1)))],
-        )
-        .expect("live merge treats non-object current value as empty")
-        .new_value;
-
+        );
+        assert!(
+            matches!(
+                live,
+                Err(crate::bridge::envelope::ErrorCode::TypeMismatch { .. })
+            ),
+            "a field set over a bare-value body must be a type mismatch live"
+        );
         assert_eq!(
             get_value(&h.core, "players", b"p2"),
-            Some(expected),
-            "field_set over a non-object current value must replay to the same \
-             silently-treated-as-empty result live produces"
+            Some(b"42".to_vec()),
+            "replay must skip the refused field set and leave the bare value in place"
         );
     }
 

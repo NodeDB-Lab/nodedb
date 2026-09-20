@@ -119,7 +119,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
                     }
                 })
                 .collect();
-            let key_bytes = sql_value_to_bytes(key);
+            let key_bytes = sql_value_to_bytes(key)?;
             // Content-addressed identity: keeps the surrogate the original insert assigned.
             // `Surrogate::ZERO` only when no assigner is wired (test / embedded-without-catalog).
             let surrogate = ctx.surrogate_for_pk(collection, &key_bytes)?;

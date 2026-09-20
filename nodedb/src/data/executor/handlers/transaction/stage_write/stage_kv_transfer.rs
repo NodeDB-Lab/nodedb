@@ -168,7 +168,7 @@ impl CoreLoop {
                 Err(e) => self.response_error(ctx.task, e),
             };
         }
-        let computed = match merge_field_updates(current.as_deref(), updates) {
+        let computed = match merge_field_updates(ctx.collection, current.as_deref(), updates) {
             Ok(c) => c,
             Err(e) => return self.response_error(ctx.task, e),
         };

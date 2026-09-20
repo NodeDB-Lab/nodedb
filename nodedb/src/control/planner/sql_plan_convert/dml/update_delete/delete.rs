@@ -54,7 +54,10 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
                 txn_id: None,
             }]);
         }
-        let keys: Vec<Vec<u8>> = target_keys.iter().map(sql_value_to_bytes).collect();
+        let keys: Vec<Vec<u8>> = target_keys
+            .iter()
+            .map(sql_value_to_bytes)
+            .collect::<crate::Result<_>>()?;
         return Ok(vec![PhysicalTask {
             tenant_id,
             vshard_id: vshard,

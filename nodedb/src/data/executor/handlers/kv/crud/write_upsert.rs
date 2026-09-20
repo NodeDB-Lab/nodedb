@@ -12,9 +12,9 @@ use crate::data::executor::task::ExecutionTask;
 impl CoreLoop {
     /// SQL `INSERT ... ON CONFLICT (key) DO UPDATE SET ...` semantics.
     /// Read-modify-write: if the key is absent, plain put; if present,
-    /// decode the stored value, apply the updates (with `EXCLUDED`
-    /// resolving to the would-be-inserted row), and write the merged
-    /// result back.
+    /// merge through `merge_kv_conflict_body` (with `EXCLUDED` resolving
+    /// to the would-be-inserted row) and write the result back in the
+    /// stored body's shape.
     pub(in crate::data::executor) fn execute_kv_insert_on_conflict_update(
         &mut self,
         task: &ExecutionTask,
@@ -51,51 +51,13 @@ impl CoreLoop {
         let stored_bytes: Vec<u8> = match &existing_bytes {
             None => value.to_vec(),
             Some(existing_raw) => {
-                let existing_val = match nodedb_types::value_from_msgpack(existing_raw) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        return self.response_error(
-                            task,
-                            ErrorCode::Internal {
-                                detail: "failed to decode existing KV value for ON CONFLICT \
-                                         DO UPDATE"
-                                    .into(),
-                            },
-                        );
-                    }
-                };
-                let excluded_val = match nodedb_types::value_from_msgpack(value) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        return self.response_error(
-                            task,
-                            ErrorCode::Internal {
-                                detail: "failed to decode incoming KV value for ON CONFLICT \
-                                         DO UPDATE"
-                                    .into(),
-                            },
-                        );
-                    }
-                };
-                let merged =
-                    match crate::data::executor::handlers::upsert::apply_on_conflict_updates(
-                        existing_val,
-                        &excluded_val,
-                        updates,
-                    ) {
-                        Ok(v) => v,
-                        Err(e) => return self.response_error(task, e),
-                    };
-                match nodedb_types::value_to_msgpack(&merged) {
+                match super::super::conflict_merge::merge_kv_conflict_body(
+                    existing_raw,
+                    value,
+                    updates,
+                ) {
                     Ok(b) => b,
-                    Err(_) => {
-                        return self.response_error(
-                            task,
-                            ErrorCode::Internal {
-                                detail: "failed to encode merged KV value".into(),
-                            },
-                        );
-                    }
+                    Err(e) => return self.response_error(task, e),
                 }
             }
         };

@@ -8,17 +8,18 @@
 //!
 //! Unlike the plain `Put` / `Insert` / `InsertIfAbsent` staging in
 //! `stage_kv.rs`, this op has to resolve the current row (via
-//! `resolve_kv_current`, BASE ∪ OVERLAY), decode both sides, merge them
-//! through the same `apply_on_conflict_updates` the base (non-staged)
-//! handler uses, and re-encode -- all before the RLS write check and the
-//! actual staged put, since the write policy has to decide the row image
-//! staging produced, not one COMMIT re-derives later.
+//! `resolve_kv_current`, BASE ∪ OVERLAY) and merge it through the same
+//! `merge_kv_conflict_body` the base (non-staged) handler uses -- all
+//! before the RLS write check and the actual staged put, since the write
+//! policy has to decide the row image staging produced, not one COMMIT
+//! re-derives later.
 
 use nodedb_physical::physical_plan::UpdateValue;
 
 use super::context::StageCtx;
-use crate::bridge::envelope::{ErrorCode, Response};
+use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::kv::conflict_merge::merge_kv_conflict_body;
 
 impl CoreLoop {
     // ── InsertOnConflictUpdate: resolve current, merge, tag by outcome ──────
@@ -35,56 +36,10 @@ impl CoreLoop {
         let existing = self.resolve_kv_current(ctx, key);
         let (stored_bytes, op) = match &existing {
             None => (value.to_vec(), "insert"),
-            Some(existing_raw) => {
-                let existing_val = match nodedb_types::value_from_msgpack(existing_raw) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        return self.response_error(
-                            ctx.task,
-                            ErrorCode::Internal {
-                                detail: "failed to decode existing KV value for staged \
-                                         ON CONFLICT DO UPDATE"
-                                    .into(),
-                            },
-                        );
-                    }
-                };
-                let excluded_val = match nodedb_types::value_from_msgpack(value) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        return self.response_error(
-                            ctx.task,
-                            ErrorCode::Internal {
-                                detail: "failed to decode incoming KV value for staged \
-                                         ON CONFLICT DO UPDATE"
-                                    .into(),
-                            },
-                        );
-                    }
-                };
-                let merged =
-                    match crate::data::executor::handlers::upsert::apply_on_conflict_updates(
-                        existing_val,
-                        &excluded_val,
-                        updates,
-                    ) {
-                        Ok(v) => v,
-                        Err(e) => return self.response_error(ctx.task, e),
-                    };
-                match nodedb_types::value_to_msgpack(&merged) {
-                    Ok(b) => (b, "update"),
-                    Err(_) => {
-                        return self.response_error(
-                            ctx.task,
-                            ErrorCode::Internal {
-                                detail: "failed to encode merged KV value for staged \
-                                         ON CONFLICT DO UPDATE"
-                                    .into(),
-                            },
-                        );
-                    }
-                }
-            }
+            Some(existing_raw) => match merge_kv_conflict_body(existing_raw, value, updates) {
+                Ok(b) => (b, "update"),
+                Err(e) => return self.response_error(ctx.task, e),
+            },
         };
 
         // Staging is where an in-transaction statement's row image is produced,

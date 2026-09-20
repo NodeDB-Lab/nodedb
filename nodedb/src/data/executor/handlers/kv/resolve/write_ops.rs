@@ -14,6 +14,7 @@ use super::context::{
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::kv::atomic::KvAtomicCtx;
+use crate::data::executor::handlers::kv::conflict_merge::merge_kv_conflict_body;
 use crate::data::executor::handlers::kv::crud::{KvDeleteParams, KvInsertOnConflictUpdateParams};
 use crate::data::executor::handlers::kv::field::KvFieldSetArgs;
 use crate::data::executor::handlers::kv::rls::admit_kv_row;
@@ -57,29 +58,7 @@ impl CoreLoop {
 
         let stored_bytes: Vec<u8> = match &existing_bytes {
             None => value.to_vec(),
-            Some(existing_raw) => {
-                let existing_val =
-                    nodedb_types::value_from_msgpack(existing_raw).map_err(|_| {
-                        ErrorCode::Internal {
-                            detail: "failed to decode existing KV value for ON CONFLICT \
-                                     DO UPDATE"
-                                .into(),
-                        }
-                    })?;
-                let excluded_val =
-                    nodedb_types::value_from_msgpack(value).map_err(|_| ErrorCode::Internal {
-                        detail: "failed to decode incoming KV value for ON CONFLICT DO UPDATE"
-                            .into(),
-                    })?;
-                let merged = crate::data::executor::handlers::upsert::apply_on_conflict_updates(
-                    existing_val,
-                    &excluded_val,
-                    updates,
-                )?;
-                nodedb_types::value_to_msgpack(&merged).map_err(|_| ErrorCode::Internal {
-                    detail: "failed to encode merged KV value".into(),
-                })?
-            }
+            Some(existing_raw) => merge_kv_conflict_body(existing_raw, value, updates)?,
         };
 
         admit_kv_row(rls_write_check, &stored_bytes, key, tid, collection)?;
@@ -259,6 +238,7 @@ impl CoreLoop {
         }
 
         let computed = crate::data::executor::handlers::kv::field_compute::merge_field_updates(
+            collection,
             current.as_deref(),
             updates,
         )?;

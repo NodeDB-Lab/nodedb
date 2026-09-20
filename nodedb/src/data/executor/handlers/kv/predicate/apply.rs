@@ -63,7 +63,7 @@ impl CoreLoop {
 
         let mut writes: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::with_capacity(matched.len());
         for (key, body) in matched {
-            let computed = match merge_field_updates(Some(body.as_slice()), updates) {
+            let computed = match merge_field_updates(collection, Some(body.as_slice()), updates) {
                 Ok(c) => c,
                 Err(e) => return self.response_error(task, e),
             };

@@ -30,6 +30,7 @@ pub(super) fn remote_code_to_resp_prefix(code: nodedb_types::error::ErrorCode) -
         Ec::COLLECTION_NOT_FOUND => "NOTFOUND",
         Ec::AUTHORIZATION_DENIED => "NOPERM",
         Ec::CONSTRAINT_VIOLATION => "CONSTRAINT",
+        Ec::TYPE_MISMATCH => "WRONGTYPE",
         _ => "ERR",
     }
 }
@@ -71,6 +72,10 @@ mod tests {
         assert_eq!(
             remote_code_to_resp_prefix(ErrorCode::CONSTRAINT_VIOLATION),
             "CONSTRAINT"
+        );
+        assert_eq!(
+            remote_code_to_resp_prefix(ErrorCode::TYPE_MISMATCH),
+            "WRONGTYPE"
         );
     }
 

@@ -13,6 +13,7 @@ pub mod field;
 pub mod filter;
 pub mod group_key;
 pub mod index;
+pub mod kv_body;
 pub mod kv_row;
 pub mod reader;
 pub mod sidecar;
@@ -23,6 +24,7 @@ pub use compare::{compare_field_bytes, hash_field_bytes};
 pub use field::{extract_field, extract_path};
 pub use group_key::build_group_key;
 pub use index::FieldIndex;
+pub use kv_body::{KvBodyError, KvBodyShape, kv_body_shape, kv_body_to_row, row_to_kv_body};
 pub use kv_row::kv_row_msgpack;
 pub use reader::{
     array_header, map_header, read_bin_advance, read_bool, read_f64, read_i64, read_null, read_str,

@@ -188,6 +188,7 @@ mod sql_index_lifecycle;
 mod sql_index_lifecycle_restart;
 mod sql_insert_conflict_columnar;
 mod sql_insert_conflict_kv;
+mod sql_insert_conflict_kv_bare_value;
 mod sql_insert_conflict_schemaless;
 mod sql_insert_conflict_strict;
 mod sql_insert_value_expressions;

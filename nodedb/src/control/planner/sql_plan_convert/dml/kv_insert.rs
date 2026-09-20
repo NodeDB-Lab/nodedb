@@ -47,9 +47,9 @@ pub(in super::super) fn convert_kv_insert(
                 detail: "primary key cannot be NULL or omitted".to_string(),
             });
         }
-        let key = sql_value_to_bytes(key_val);
+        let key = sql_value_to_bytes(key_val)?;
         let value = if value_cols.len() == 1 && value_cols[0].0 == "value" {
-            sql_value_to_bytes(&value_cols[0].1)
+            sql_value_to_bytes(&value_cols[0].1)?
         } else {
             let mut buf = Vec::with_capacity(value_cols.len() * 32);
             write_msgpack_map_header(&mut buf, value_cols.len());

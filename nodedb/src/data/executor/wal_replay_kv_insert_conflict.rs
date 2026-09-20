@@ -8,7 +8,7 @@
 //! post-merge document — because the Control Plane cannot know the merged
 //! row before dispatch. Replay re-reads whatever value is present in this
 //! core's KV engine at this point in LSN-ordered replay and re-runs the
-//! exact same RMW merge (`apply_on_conflict_updates`) the live handler in
+//! exact same RMW merge (`merge_kv_conflict_body`) the live handler in
 //! `handlers/kv/crud/write_upsert.rs` uses, so a staged value and its
 //! durable replay never diverge. A key absent at replay time installs
 //! `value` verbatim, matching the live handler's insert branch.
@@ -29,7 +29,7 @@
 use tracing::warn;
 
 use super::core_loop::CoreLoop;
-use super::handlers::upsert::apply_on_conflict_updates;
+use super::handlers::kv::conflict_merge::merge_kv_conflict_body;
 use crate::data::executor::core_loop::write_index::KeyRepr;
 use nodedb_physical::physical_plan::UpdateValue;
 
@@ -177,13 +177,10 @@ impl CoreLoop {
     }
 
     /// Shared RMW + write-back for both shapes: absent key installs `value`
-    /// verbatim (the live handler's insert branch); present key decodes the
-    /// existing + incoming (`EXCLUDED`) rows and re-runs
-    /// `apply_on_conflict_updates`, the exact merge the live handler uses.
-    /// Any decode/encode failure is logged and the record is skipped rather
-    /// than fabricating a value — a mismatch here means the previously
-    /// durable bytes are no longer decodable, not a computation the live
-    /// path would have failed identically.
+    /// verbatim (the live handler's insert branch); present key re-runs
+    /// `merge_kv_conflict_body`, the exact merge the live handler uses. A
+    /// merge failure is logged and the record is skipped rather than
+    /// fabricating a value.
     fn apply_replayed_insert_on_conflict_update(
         &mut self,
         f: ReplayedInsertOnConflictUpdate<'_>,
@@ -206,71 +203,25 @@ impl CoreLoop {
 
         let stored_bytes: Vec<u8> = match &existing_bytes {
             None => value.to_vec(),
-            Some(existing_raw) => {
-                let existing_val = match nodedb_types::value_from_msgpack(existing_raw) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(
-                            core = self.core_id,
-                            collection = %collection,
-                            key = %String::from_utf8_lossy(key),
-                            ?e,
-                            "WAL kv_insert_on_conflict_update replay: failed to decode existing \
-                             value, skipping record"
-                        );
-                        return 0;
-                    }
-                };
-                let excluded_val = match nodedb_types::value_from_msgpack(value) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(
-                            core = self.core_id,
-                            collection = %collection,
-                            key = %String::from_utf8_lossy(key),
-                            ?e,
-                            "WAL kv_insert_on_conflict_update replay: failed to decode incoming \
-                             value, skipping record"
-                        );
-                        return 0;
-                    }
-                };
-                let merged = match apply_on_conflict_updates(existing_val, &excluded_val, updates) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        // A division/modulo-by-zero can only be reached by
-                        // replaying a WAL record logged before this fix
-                        // shipped (a fresh write would now fail at statement
-                        // time, before ever reaching the WAL) — warn and
-                        // skip, matching every other decode-failure branch
-                        // in this replay path, rather than crashing startup
-                        // on a historical record.
-                        warn!(
-                            core = self.core_id,
-                            collection = %collection,
-                            key = %String::from_utf8_lossy(key),
-                            ?e,
-                            "WAL kv_insert_on_conflict_update replay: ON CONFLICT expression \
-                             failed to evaluate, skipping record"
-                        );
-                        return 0;
-                    }
-                };
-                match nodedb_types::value_to_msgpack(&merged) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        warn!(
-                            core = self.core_id,
-                            collection = %collection,
-                            key = %String::from_utf8_lossy(key),
-                            ?e,
-                            "WAL kv_insert_on_conflict_update replay: failed to encode merged \
-                             value, skipping record"
-                        );
-                        return 0;
-                    }
+            Some(existing_raw) => match merge_kv_conflict_body(existing_raw, value, updates) {
+                Ok(b) => b,
+                Err(e) => {
+                    // A division/modulo-by-zero here can only come from a
+                    // record logged by a build that did not fail the
+                    // statement at execution time; a shape or decode error
+                    // means the durable bytes no longer hold what the record
+                    // expects. Either way the record is skipped, never
+                    // fabricated, and startup continues.
+                    warn!(
+                        core = self.core_id,
+                        collection = %collection,
+                        key = %String::from_utf8_lossy(key),
+                        ?e,
+                        "WAL kv_insert_on_conflict_update replay: merge failed, skipping record"
+                    );
+                    return 0;
                 }
-            }
+            },
         };
 
         match expire_at_ms {
@@ -445,8 +396,12 @@ mod tests {
         // decoded logical value, not raw bytes.
         let existing_val = nodedb_types::value_from_msgpack(&seed).expect("decode seed");
         let excluded_val = nodedb_types::value_from_msgpack(&excluded).expect("decode excluded");
-        let expected =
-            super::apply_on_conflict_updates(existing_val, &excluded_val, &updates).unwrap();
+        let expected = crate::data::executor::handlers::upsert::apply_on_conflict_updates(
+            existing_val,
+            &excluded_val,
+            &updates,
+        )
+        .unwrap();
 
         let stored = get_value(&h.core, "players", b"p1").expect("value present after replay");
         let stored_val = nodedb_types::value_from_msgpack(&stored).expect("decode stored value");
@@ -553,8 +508,12 @@ mod tests {
         // raw bytes (per-instance key ordering differs between live and replay).
         let existing_val = nodedb_types::value_from_msgpack(&seed).expect("decode seed");
         let excluded_val = nodedb_types::value_from_msgpack(&excluded).expect("decode excluded");
-        let expected =
-            super::apply_on_conflict_updates(existing_val, &excluded_val, &updates).unwrap();
+        let expected = crate::data::executor::handlers::upsert::apply_on_conflict_updates(
+            existing_val,
+            &excluded_val,
+            &updates,
+        )
+        .unwrap();
         // Read at now_ms=0: this record installs an absolute expiry of 6_000,
         // which is already in the past on the wall clock `get_value` uses, so
         // read before expiry to assert the merged value landed.
@@ -575,6 +534,56 @@ mod tests {
             "replay must install the recorded absolute expiry verbatim (expire_at_ms - \
              now_ms(0) == 6000), not recompute now_ms + ttl_ms at replay time"
         );
+    }
+
+    /// Replay a raw-body seed `Put` followed by an `ON CONFLICT DO UPDATE SET
+    /// value = EXCLUDED.value` and return the stored bytes.
+    fn replay_raw_overwrite(seed: &[u8], incoming: &[u8]) -> Vec<u8> {
+        let put = PhysicalPlan::Kv(KvOp::Put {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "raw"),
+            key: b"k".to_vec(),
+            value: seed.to_vec(),
+            ttl_ms: 0,
+            surrogate: Surrogate::new(1),
+            returning: None,
+            rls_filters: Vec::new(),
+        });
+        let upsert = PhysicalPlan::Kv(KvOp::InsertOnConflictUpdate {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "raw"),
+            key: b"k".to_vec(),
+            value: incoming.to_vec(),
+            ttl_ms: 0,
+            updates: vec![(
+                "value".to_string(),
+                UpdateValue::Expr(nodedb_query::SqlExpr::ExcludedColumn("value".to_string())),
+            )],
+            surrogate: Surrogate::new(1),
+            rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            returning: None,
+            rls_filters: Vec::new(),
+        });
+        let records = append_via_autocommit(&[put, upsert]);
+        let mut h = make_core();
+        h.core.replay_kv_wal(&records, 1, &TombstoneSet::new());
+        get_value(&h.core, "raw", b"k").expect("value present after replay")
+    }
+
+    #[test]
+    fn raw_body_on_conflict_update_replays_as_raw_bytes() {
+        // The stored body is raw scalar bytes, not msgpack. Replay must
+        // merge it as `{"value": "first"}` and write the raw result back,
+        // never a msgpack map and never a decode-failure skip.
+        assert_eq!(
+            replay_raw_overwrite(b"first", b"second-longer-value"),
+            b"second-longer-value".to_vec()
+        );
+    }
+
+    #[test]
+    fn raw_single_byte_body_on_conflict_update_keeps_its_shape() {
+        // 0x31 is a valid msgpack fixint; the body must still be read as
+        // the string "1" and written back as one raw byte.
+        assert_eq!(replay_raw_overwrite(b"1", b"2"), b"2".to_vec());
     }
 
     #[test]
