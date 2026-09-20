@@ -85,15 +85,17 @@ async fn sequence_create_visible_on_every_node() {
         .await
         .expect("alter sequence restart");
 
+    // A restart marks the sequence not yet called, so its stored counter
+    // sits one increment below 500; the next `nextval` still returns 500.
     wait_for(
-        "all 3 nodes see sequence counter == 500",
+        "all 3 nodes: next order_id nextval == 500",
         Duration::from_secs(10),
         Duration::from_millis(50),
         || {
             cluster
                 .nodes
                 .iter()
-                .all(|n| n.sequence_current_value(1, "order_id") == Some(500))
+                .all(|n| n.sequence_next_value(1, "order_id") == Some(500))
         },
     )
     .await;

@@ -25,29 +25,12 @@
 
 use std::time::Duration;
 
-use nodedb::types::{DatabaseId, VShardId};
 use nodedb_cluster::calvin::SEQUENCER_GROUP_ID;
 
 use crate::common;
 
+use super::vshard_names::distinct_vshard_collections;
 use crate::common::cluster_harness::{TestCluster, wait_for};
-
-/// Find two collection names whose vShard ids differ.
-fn two_distinct_vshard_collections() -> (String, String) {
-    let mut first: Option<(String, u32)> = None;
-    for i in 0u32..512 {
-        let name = format!("calvin_routed_{i}");
-        let vshard = VShardId::from_collection_in_database(DatabaseId::DEFAULT, &name).as_u32();
-        if let Some((ref fname, fv)) = first {
-            if fv != vshard {
-                return (fname.clone(), name);
-            }
-        } else {
-            first = Some((name, vshard));
-        }
-    }
-    panic!("could not find two distinct-vshard collections in 512 tries");
-}
 
 /// Observed sequencer-group leader id from a node's local Raft status, or `0` if
 /// no leader is known yet.
@@ -73,7 +56,7 @@ fn sequencer_leader(node: &common::cluster_harness::TestClusterNode) -> u64 {
 async fn cross_shard_write_from_non_sequencer_leader_completes() {
     let cluster = TestCluster::spawn_three().await.expect("3-node cluster");
 
-    let (col_a, col_b) = two_distinct_vshard_collections();
+    let (col_a, col_b) = distinct_vshard_collections("calvin_routed_0", "calvin_routed");
 
     cluster
         .exec_ddl_on_any_leader(&format!(
