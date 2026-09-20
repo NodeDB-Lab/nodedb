@@ -29,6 +29,9 @@ pub(super) struct ShapeTaskParams<'a> {
     pub(super) response: &'a crate::bridge::envelope::Response,
     pub(super) plan: &'a PhysicalPlan,
     pub(super) plan_kind: PlanKind,
+    /// Whether this task's count answers the statement. False for a derived
+    /// implicit-edge write beside the user's own, which folds as opaque.
+    pub(super) counts_toward_tag: bool,
     pub(super) projection: Option<&'a OutputSchema>,
     pub(super) result_formats: &'a [FieldFormat],
     pub(super) session_id: SessionId,
@@ -60,6 +63,7 @@ impl NodeDbPgHandler {
             response,
             plan,
             plan_kind,
+            counts_toward_tag,
             projection,
             result_formats,
             session_id,
@@ -108,6 +112,10 @@ impl NodeDbPgHandler {
                 Ok(Some(task_rows))
             }
             ShapeOutcome::Passthrough => {
+                if !counts_toward_tag {
+                    statement_tag.fold_opaque();
+                    return Ok(None);
+                }
                 match payload_to_dml_outcome(&response.payload, plan_kind)
                     .map_err(|e| error_to_pg(&e))?
                 {

@@ -92,6 +92,26 @@ pub fn is_derived_side_effect(plan: &PhysicalPlan) -> bool {
     }
 }
 
+/// Whether a statement's plans carry the user's own write, as opposed to
+/// only derived side effects. Decided over the FULL plan set: one slice or
+/// one task alone cannot tell a lone derived participant from a
+/// derived-only statement (the standalone `GRAPH INSERT EDGE` DSL).
+pub fn plans_have_user_write<'a>(plans: impl IntoIterator<Item = &'a PhysicalPlan>) -> bool {
+    plans
+        .into_iter()
+        .any(|plan| is_write_plan(plan) && !is_derived_side_effect(plan))
+}
+
+/// Whether `plan`'s applied count answers the client's statement.
+///
+/// The one rule every response fold shares with Calvin's deposit: when the
+/// statement carries the user's own write, a derived participant's count
+/// describes a row the statement never named and folds as opaque. When it
+/// carries none, every write is the user's and counts.
+pub fn plan_counts_toward_statement_tag(plan: &PhysicalPlan, has_user_write: bool) -> bool {
+    !(has_user_write && is_derived_side_effect(plan))
+}
+
 fn kv_is_write(op: &KvOp) -> bool {
     match op {
         KvOp::Put { .. }

@@ -13,7 +13,7 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::control::planner::calvin::{DispatchClass, classify_dispatch};
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::shared::session::SessionId;
+use crate::control::server::shared::session::{SessionId, TransactionState};
 use crate::control::server::shared::write_admission::all_writes_bufferable;
 use crate::types::TenantId;
 
@@ -179,24 +179,27 @@ impl NodeDbPgHandler {
             return Ok(responses);
         }
 
-        if let Some(responses) = self
-            .maybe_dispatch_tasks_via_gateway(
-                &tasks,
-                identity,
-                tenant_id,
-                session_id,
-                ResultShaping {
-                    projection: effective_schema,
-                    formats: shaping.formats,
-                },
-                &auth_ctx,
-            )
-            .await?
+        // Read once, ahead of the gateway gate: an in-block write must never
+        // forward here, or it applies durably outside the transaction.
+        let tx_state = self.sessions.transaction_state(session_id);
+        if tx_state != crate::control::server::shared::session::TransactionState::InBlock
+            && let Some(responses) = self
+                .maybe_dispatch_tasks_via_gateway(
+                    &tasks,
+                    identity,
+                    tenant_id,
+                    session_id,
+                    ResultShaping {
+                        projection: effective_schema,
+                        formats: shaping.formats,
+                    },
+                    &auth_ctx,
+                )
+                .await?
         {
             return Ok(responses);
         }
 
-        let tx_state = self.sessions.transaction_state(session_id);
         // Autocommit statement routing: the only reads to widen with are the
         // ones the materialized-sum settlement stamped on the source rows its
         // shipped balances were folded from.
@@ -216,7 +219,7 @@ impl NodeDbPgHandler {
                 // block, fall through to the per-task staging gate when the gate
                 // can buffer every write — COMMIT then flushes the whole buffer
                 // through Calvin. Anything else is refused, never applied.
-                if tx_state == crate::control::server::shared::session::TransactionState::InBlock {
+                if tx_state == TransactionState::InBlock {
                     if !all_writes_bufferable(&tasks) {
                         let (severity, code, message) =
                             error_to_sqlstate(&crate::Error::CrossShardInExplicitTransaction);

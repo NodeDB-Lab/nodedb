@@ -9,7 +9,7 @@ use nodedb_physical::physical_task::PhysicalTask;
 
 use crate::control::planner::calvin::plan_needs_implicit_edge_recon;
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::shared::session::SessionId;
+use crate::control::server::shared::session::{SessionId, TransactionState};
 use crate::types::TenantId;
 
 use super::placement::TaskPlacement;
@@ -98,7 +98,7 @@ impl NodeDbPgHandler {
             formats: result_formats,
         } = shaping;
         let tx_state = self.sessions.transaction_state(session_id);
-        if tx_state == crate::control::server::shared::session::TransactionState::InBlock
+        if tx_state == TransactionState::InBlock
             || self.state.calvin_completion_registry.get().is_none()
         {
             return Ok(None);
@@ -138,6 +138,14 @@ impl NodeDbPgHandler {
     ///
     /// Unresolved multi-step DML stays local so its orchestrator can resolve
     /// final plans before authorization.
+    ///
+    /// The caller skips this for an in-block statement. A write forwarded
+    /// here applies durably at once, outside the transaction; the dispatch
+    /// loop's staging gate stages it on the owner under this transaction
+    /// instead, through `leader_forward`. A read forwarded here loses the
+    /// transaction id its gather resolves with and records no read for
+    /// commit-time validation; the loop's gather reaches the owner carrying
+    /// the transaction id, so the owner resolves this transaction's overlay.
     pub(super) async fn maybe_dispatch_tasks_via_gateway(
         &self,
         tasks: &[PhysicalTask],
@@ -179,6 +187,7 @@ impl NodeDbPgHandler {
                 identity,
                 tenant_id,
                 database_id,
+                session_id,
                 projection,
                 result_formats,
                 auth,

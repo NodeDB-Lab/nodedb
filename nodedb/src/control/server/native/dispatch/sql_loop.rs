@@ -12,6 +12,9 @@ use nodedb_types::protocol::NativeResponse;
 use nodedb_types::value::Value;
 
 use crate::bridge::envelope::Status;
+use crate::control::planner::calvin::write_class::{
+    plan_counts_toward_statement_tag, plans_have_user_write,
+};
 use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::response_shape::compose::{ShapeOutcome, shape_response_materialized};
 use crate::control::server::response_shape::redaction::QueryRedaction;
@@ -90,6 +93,9 @@ pub(super) async fn run_dispatch_loop(
     // name) a true no-op on the hot path for every deployment that hasn't
     // turned it on.
     let metering_enabled = ctx.state.metering_config.enabled;
+    // A derived implicit-edge write beside the user's own never answers the
+    // statement, exactly as Calvin's deposit rule has it.
+    let has_user_write = plans_have_user_write(tasks.iter().map(|t| &t.plan));
     // Session-scoped sequence access for the statement's Control-Plane
     // computed columns: the registry plus this connection's `currval` map.
     let session_sequences = ctx.sessions.sequence_values(ctx.peer_addr);
@@ -386,6 +392,8 @@ pub(super) async fn run_dispatch_loop(
         // the loop.
         let mut task_rows: Option<u64> = None;
         let plan_kind = describe_plan(&plan_for_response);
+        let counts_toward_tag =
+            plan_counts_toward_statement_tag(&plan_for_response, has_user_write);
         let count_bearing = matches!(plan_kind, PlanKind::DmlResult(_) | PlanKind::DmlResultByOp);
         if task_resp.payload.is_empty() && !count_bearing {
             // Not a count-bearing plan (graph / vector / index write): no
@@ -422,6 +430,9 @@ pub(super) async fn run_dispatch_loop(
                 // dispatched task instead would report a row for a delete
                 // that removed nothing and for an `ON CONFLICT DO NOTHING`
                 // insert that skipped.
+                Ok(ShapeOutcome::Passthrough) if !counts_toward_tag => {
+                    statement_tag.fold_opaque();
+                }
                 Ok(ShapeOutcome::Passthrough) => {
                     match payload_to_dml_outcome(&task_resp.payload, plan_kind) {
                         Ok(Some(outcome)) => {

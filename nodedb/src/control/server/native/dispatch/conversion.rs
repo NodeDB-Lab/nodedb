@@ -8,7 +8,7 @@ use nodedb_types::protocol::NativeResponse;
 use crate::bridge::envelope::Response;
 use crate::control::server::native::sqlstate_code::sqlstate_error;
 use crate::control::server::response_shape::types::{
-    DmlFoldError, DmlOutcome, PlanKind, ShapedRows, describe_plan, payload_to_dml_outcome,
+    DmlFoldError, DmlOutcome, FoldedTag, ShapedRows,
 };
 use crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate;
 use crate::control::server::shared::ddl::{DdlError, DdlResult};
@@ -182,17 +182,21 @@ pub(crate) fn ddl_result_to_native(
             Some(DdlResult::Status {
                 command,
                 rows_affected,
-            }) => {
-                let mut r = NativeResponse::status_row(seq, command);
-                // `status_row` defaults to the `Some(1)` "one command ran"
-                // sentinel for count-less DDL. A count-bearing status (the
-                // graph edge/label DSL statements) overrides it with the
-                // real affected count instead.
-                if let Some(n) = rows_affected {
-                    r.rows_affected = Some(n);
+            }) => match rows_affected {
+                // A count-bearing status is a DML answer (the `{ ... }`
+                // document INSERT / UPSERT, the graph edge and label DSL):
+                // its verb and count, rendered by the same rule the dispatch
+                // loop's folded tag renders with. pgwire renders it as the
+                // `<verb> <n>` command tag.
+                Some(affected) => {
+                    let mut r = NativeResponse::ok(seq);
+                    apply_dml_status(&mut r, &command, affected);
+                    r
                 }
-                r
-            }
+                // A count-less DDL keeps the status row, whose `Some(1)`
+                // `rows_affected` sentinel means "one command ran".
+                None => NativeResponse::status_row(seq, command),
+            },
             Some(DdlResult::Rows(shaped)) => {
                 let (columns, rows) = to_native_columns_rows(&shaped);
                 NativeResponse {
@@ -213,14 +217,15 @@ pub(crate) fn ddl_result_to_native(
     }
 }
 
-/// Build the native response for a completed Calvin transaction, surfacing
-/// RETURNING rows when the write carried them.
+/// Build the native response for a completed Calvin transaction: its
+/// RETURNING rows, when a task carried them, and the statement's one folded
+/// tag as `(rows_affected, command)`.
 ///
-/// `apply_result` is the applied Data-Plane response drained from the sidecar and
-/// `plans` is the completed batch's plans, in dispatch order. A RETURNING plan
-/// shapes the payload into native columns/rows; otherwise the batch's
-/// count-bearing plan (if any) reports `rows_affected` READ FROM the applied
-/// response.
+/// `apply_result` is the applied Data-Plane response drained from the sidecar
+/// and `plans` is the completed batch's plans, in dispatch order. The fold is
+/// the protocol-neutral `response_shape::calvin_fold` pgwire renders too, so
+/// a three-row implicit-edge insert answers `(3, INSERT)` here and
+/// `INSERT 0 3` there.
 ///
 /// There is deliberately no per-statement fallback count. The number of
 /// dispatched tasks is not the number of affected rows — a single-row delete
@@ -236,96 +241,61 @@ pub(crate) fn calvin_native_response(
     tenant_id: nodedb_types::TenantId,
     auth: &crate::control::security::auth_context::AuthContext,
 ) -> NativeResponse {
-    use crate::control::server::response_shape::compose::{
-        ShapeOutcome, shape_response_materialized,
+    use crate::control::server::response_shape::calvin_fold::{
+        CalvinFoldCtx, CalvinFoldError, fold_calvin_batch,
     };
-    use crate::control::server::response_shape::redaction::QueryRedaction;
-    use crate::control::server::response_shape::request::MaterializedShapeRequest;
 
-    let returning_plan = plans
-        .iter()
-        .find(|p| matches!(describe_plan(p), PlanKind::ReturningRows));
-    let dml_kind = plans
-        .iter()
-        .map(describe_plan)
-        .find(|kind| matches!(kind, PlanKind::DmlResult(_) | PlanKind::DmlResultByOp));
+    let plan_refs: Vec<&crate::bridge::envelope::PhysicalPlan> = plans.iter().collect();
+    let fold = match fold_calvin_batch(
+        &plan_refs,
+        apply_result.as_ref(),
+        &CalvinFoldCtx {
+            // The native protocol announces no output columns ahead of the rows.
+            projection: None,
+            state,
+            tenant_id,
+            database_id,
+            auth,
+        },
+    ) {
+        Ok(fold) => fold,
+        Err(CalvinFoldError::Verb(e)) => return dml_fold_error_to_native(seq, &e),
+        Err(CalvinFoldError::Shape(e)) => return error_to_native(seq, &e),
+    };
 
-    let redaction = returning_plan.map(|plan| QueryRedaction::for_plan(tenant_id, auth, plan));
-    if let (Some(resp), Some(plan)) = (apply_result.as_ref(), returning_plan)
-        && matches!(describe_plan(plan), PlanKind::ReturningRows)
-        && let Ok(ShapeOutcome::Rows(shaped)) =
-            shape_response_materialized(MaterializedShapeRequest {
-                payload: resp.payload.as_bytes(),
-                plan,
-                plan_kind: PlanKind::ReturningRows,
-                projection: None,
-                state,
-                database_id,
-                tenant_id,
-                redaction: redaction.as_ref().map(|r| r.ctx(&state.redaction)),
-                // No projection, so no Control-Plane computed column to resolve.
-                sequences: None,
-            })
-    {
-        let (cols, rows) = to_native_columns_rows(&shaped);
-        let mut r = NativeResponse::ok(seq);
-        r.watermark_lsn = resp.watermark_lsn.as_u64();
-        if !cols.is_empty() {
-            r.columns = Some(cols);
-        }
-        r.rows = Some(rows);
-        return r;
-    }
-
-    // Plain write: surface the affected count the mutation itself reported.
     let mut r = NativeResponse::ok(seq);
     if let Some(resp) = &apply_result {
         r.watermark_lsn = resp.watermark_lsn.as_u64();
     }
+    if let Some(shaped) = fold.rows {
+        let (cols, rows) = to_native_columns_rows(&shaped);
+        if !cols.is_empty() {
+            r.columns = Some(cols);
+        }
+        r.rows = Some(rows);
+    }
     // A batch with no count-bearing plan (vector / DDL work) has no row count
     // or verb to report, and says so by leaving both unset rather than
-    // inventing a count from the task count. Graph edge/label writes classify
-    // as count-bearing (`PlanKind::DmlResult`), same as any other DML.
-    if let Some(kind) = dml_kind {
-        let outcome = apply_result.as_ref().map_or_else(
-            || {
-                Err(crate::Error::Internal {
-                    detail: "native Calvin write completed with no applied response to read its \
-                             affected-row count from"
-                        .to_owned(),
-                })
-            },
-            |resp| calvin_dml_outcome(resp.payload.as_bytes(), kind),
-        );
-        match outcome {
-            Ok(outcome) => apply_dml_outcome(&mut r, outcome),
-            Err(e) => return error_to_native(seq, &e),
-        }
+    // inventing a count from the task count.
+    match fold.tag {
+        Some(FoldedTag::Dml(outcome)) => apply_dml_outcome(&mut r, outcome),
+        Some(FoldedTag::Opaque) | None => {}
     }
     r
-}
-
-/// The count-bearing outcome a Calvin batch's DML plan reports, read from
-/// the applied response: the plan's verb for `DmlResult`, the handler's
-/// resolved verb for `DmlResultByOp`.
-///
-/// The caller only ever passes a `kind` already filtered to `DmlResult` /
-/// `DmlResultByOp`, so `payload_to_dml_outcome`'s `Ok(None)` (its `Execution`
-/// arm) never actually happens here; it is refused rather than unwrapped so a
-/// future caller that widens the filter fails loudly instead of losing a
-/// count.
-fn calvin_dml_outcome(payload: &[u8], kind: PlanKind) -> crate::Result<DmlOutcome> {
-    payload_to_dml_outcome(payload, kind)?.ok_or_else(|| crate::Error::Internal {
-        detail: format!("Calvin batch DML plan classified as non-DML kind {kind:?}"),
-    })
 }
 
 /// Write a statement's count-bearing outcome onto a native response: the
 /// verb always, the count only when the verb carries one (`TRUNCATE` does
 /// not, matching the bare tag pgwire answers with).
 pub(crate) fn apply_dml_outcome(r: &mut NativeResponse, outcome: DmlOutcome) {
-    r.rows_affected = outcome.carries_count().then_some(outcome.affected);
-    r.command = Some(outcome.verb.to_owned());
+    apply_dml_status(r, outcome.verb, outcome.affected);
+}
+
+/// The one rendering rule behind [`apply_dml_outcome`], for a verb that is
+/// not a `'static` tag name (a DDL-router `DdlResult::Status` command).
+fn apply_dml_status(r: &mut NativeResponse, verb: &str, affected: u64) {
+    r.rows_affected = DmlOutcome::verb_carries_count(verb).then_some(affected);
+    r.command = Some(verb.to_owned());
 }
 
 /// Convert protocol-neutral `ShapedRows` (produced by
@@ -485,6 +455,55 @@ mod tests {
         assert_eq!(
             client_err.code(),
             nodedb_types::error::ErrorCode::COLLECTION_NOT_FOUND
+        );
+    }
+
+    /// A count-bearing DDL-router status (the `{ ... }` document INSERT) is
+    /// a DML answer: `(rows_affected, command)` exactly as the dispatch
+    /// loop's folded tag reports, never a status row with no verb.
+    #[test]
+    fn count_bearing_ddl_status_reports_verb_and_count() {
+        let response = ddl_result_to_native(
+            1,
+            Ok(vec![DdlResult::Status {
+                command: "INSERT".to_owned(),
+                rows_affected: Some(1),
+            }]),
+        );
+        assert_eq!(response.rows_affected, Some(1));
+        assert_eq!(response.command.as_deref(), Some("INSERT"));
+        assert!(response.rows.is_none());
+        assert!(response.columns.is_none());
+    }
+
+    /// `TRUNCATE` carries no count on any protocol: the verb alone.
+    #[test]
+    fn count_less_verb_status_reports_verb_only() {
+        let response = ddl_result_to_native(
+            1,
+            Ok(vec![DdlResult::Status {
+                command: "TRUNCATE".to_owned(),
+                rows_affected: Some(9),
+            }]),
+        );
+        assert_eq!(response.rows_affected, None);
+        assert_eq!(response.command.as_deref(), Some("TRUNCATE"));
+    }
+
+    /// A count-less DDL keeps the status row.
+    #[test]
+    fn count_less_ddl_status_keeps_the_status_row() {
+        let response = ddl_result_to_native(
+            1,
+            Ok(vec![DdlResult::Status {
+                command: "CREATE COLLECTION".to_owned(),
+                rows_affected: None,
+            }]),
+        );
+        assert_eq!(response.command, None);
+        assert_eq!(
+            response.rows,
+            Some(vec![vec![Value::String("CREATE COLLECTION".to_owned())]])
         );
     }
 

@@ -14,6 +14,9 @@ use std::sync::Arc;
 use pgwire::api::results::Response;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
+use crate::control::planner::calvin::write_class::{
+    plan_counts_toward_statement_tag, plans_have_user_write,
+};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::server::response_shape::redaction::QueryRedaction;
@@ -92,6 +95,9 @@ impl NodeDbPgHandler {
         // the collection name) a true no-op on the hot path for every
         // deployment that hasn't turned it on.
         let metering_enabled = self.state.metering_config.enabled;
+        // A derived implicit-edge write beside the user's own never answers
+        // the statement, exactly as Calvin's deposit rule has it.
+        let has_user_write = plans_have_user_write(tasks.iter().map(|t| &t.plan));
 
         for mut task in tasks {
             if task.tenant_id != tenant_id {
@@ -184,6 +190,7 @@ impl NodeDbPgHandler {
             }
 
             let plan_kind = describe_plan(&task.plan);
+            let counts_toward_tag = plan_counts_toward_statement_tag(&task.plan, has_user_write);
             let resp_post_set_op = task.post_set_op;
             let task_database_id = task.database_id;
             let task_vshard = task.vshard_id;
@@ -426,6 +433,7 @@ impl NodeDbPgHandler {
                         response: &resp,
                         plan: &plan_for_response,
                         plan_kind,
+                        counts_toward_tag,
                         projection,
                         result_formats,
                         session_id,

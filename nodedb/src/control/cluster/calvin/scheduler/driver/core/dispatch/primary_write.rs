@@ -49,10 +49,7 @@ pub(super) fn participant_change_sets(
 /// the FULL plan set before it is sliced per vShard, because a slice alone
 /// cannot tell a lone derived participant from a derived-only statement.
 pub(super) fn txn_has_non_derived_write(plans: &[PhysicalPlan]) -> bool {
-    plans.iter().any(|plan| {
-        crate::control::planner::calvin::is_write_plan(plan)
-            && !crate::control::planner::calvin::write_class::is_derived_side_effect(plan)
-    })
+    crate::control::planner::calvin::write_class::plans_have_user_write(plans)
 }
 
 /// Whether this vShard's slice carries the USER'S own write, as opposed to a

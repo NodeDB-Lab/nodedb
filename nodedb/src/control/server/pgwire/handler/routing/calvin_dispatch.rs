@@ -15,27 +15,26 @@ use crate::control::planner::calvin::{
 };
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
-use crate::control::server::response_shape::types::{ShapedRows, StatementTag};
+use crate::control::server::response_shape::calvin_fold::{
+    CalvinFoldCtx, CalvinFoldError, fold_calvin_batch,
+};
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::session::{SessionId, TransactionState};
 use crate::types::{DatabaseId, TenantId};
 use nodedb_physical::physical_task::PhysicalTask;
 
 use super::super::super::command_tag::push_folded_tag;
-use super::super::super::types::{dml_fold_error_to_pg, error_to_sqlstate};
+use super::super::super::types::{dml_fold_error_to_pg, error_to_pg, error_to_sqlstate};
 use super::super::core::NodeDbPgHandler;
-use super::calvin_response::{CalvinResponseCtx, CalvinTaskOutcome, calvin_execution_response};
 
-/// Meter one Calvin task's shaped response, once its response has already
-/// been synthesised successfully by `calvin_execution_response` — Calvin
-/// applies the whole batch atomically, so by the time responses are being
-/// shaped every task in `tasks` has already committed.
+/// Meter one Calvin task once the batch has committed — Calvin applies the
+/// whole batch atomically, so by the time responses are being shaped every
+/// task in `tasks` has already committed.
 ///
-/// `rows: None` — `calvin_execution_response` yields either a tag
-/// contribution or the task's `ShapedRows`, which the caller folds into the
-/// statement's single result set; counting rows here would mean reaching into
-/// that fold before it is complete. `meter_dispatch` charges one unit for
-/// `None`, correct for the write that just committed.
+/// `rows: None` — a task yields either a tag contribution or its rows, which
+/// the fold takes once for the statement's single result set; counting rows
+/// here would mean reaching into that fold. `meter_dispatch` charges one unit
+/// for `None`, correct for the write that just committed.
 fn meter_calvin_task(
     state: &crate::control::state::SharedState,
     identity: &AuthenticatedIdentity,
@@ -245,15 +244,10 @@ impl NodeDbPgHandler {
         )
     }
 
-    /// Shape a completed Calvin batch into the statement's responses.
-    ///
-    /// A statement is ONE result set and ONE command tag. Calvin deposits ONE
-    /// applied response for the whole transaction (a second RETURNING-bearing
-    /// participant is recorded as a conflict and fails the statement
-    /// upstream), and every task is shaped from that same payload — so the
-    /// rows are taken once rather than accumulated, which would repeat the
-    /// identical payload per task. Every non-RETURNING task folds into the
-    /// statement tag, emitted once after the rows.
+    /// Shape a completed Calvin batch into the statement's responses: its
+    /// RETURNING rows, when a task carried them, then its one command tag.
+    /// The fold itself is protocol-neutral (`response_shape::calvin_fold`), so
+    /// native answers the same rows and count for the same batch.
     fn shape_calvin_batch(
         &self,
         tasks: &[PhysicalTask],
@@ -268,37 +262,33 @@ impl NodeDbPgHandler {
             tenant_id,
             database_id,
         } = shaping;
-        let mut returning_rows: Option<ShapedRows> = None;
-        let mut statement_tag = StatementTag::default();
+        let plans: Vec<&crate::bridge::envelope::PhysicalPlan> =
+            tasks.iter().map(|task| &task.plan).collect();
+        let fold = fold_calvin_batch(
+            &plans,
+            apply_resp,
+            &CalvinFoldCtx {
+                projection,
+                state: &self.state,
+                tenant_id,
+                database_id,
+                auth,
+            },
+        )
+        .map_err(|e| match e {
+            CalvinFoldError::Verb(e) => dml_fold_error_to_pg(&e),
+            CalvinFoldError::Shape(e) => error_to_pg(&e),
+        })?;
         for task in tasks {
-            match calvin_execution_response(
-                task,
-                apply_resp,
-                CalvinResponseCtx {
-                    projection,
-                    state: &self.state,
-                    tenant_id,
-                    database_id,
-                    auth,
-                },
-            )? {
-                CalvinTaskOutcome::Rows(shaped) => {
-                    returning_rows.get_or_insert(shaped);
-                }
-                CalvinTaskOutcome::Dml(outcome) => statement_tag
-                    .fold(outcome)
-                    .map_err(|e| dml_fold_error_to_pg(&e))?,
-                CalvinTaskOutcome::Opaque => statement_tag.fold_opaque(),
-            }
             meter_calvin_task(&self.state, identity, database_id, task);
         }
         let mut responses: Vec<Response> = Vec::with_capacity(2);
-        if let Some(shaped) = returning_rows {
+        if let Some(shaped) = fold.rows {
             let (response, _notice) =
                 super::super::shape_encode::shaped_query_response(shaped, result_formats);
             responses.push(response);
         }
-        push_folded_tag(&mut responses, statement_tag.finish());
+        push_folded_tag(&mut responses, fold.tag);
         Ok(responses)
     }
 }
