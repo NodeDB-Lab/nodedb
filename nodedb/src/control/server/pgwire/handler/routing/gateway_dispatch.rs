@@ -39,17 +39,16 @@ fn meter_gateway_task(
     state: &crate::control::state::SharedState,
     identity: &AuthenticatedIdentity,
     database_id: nodedb_types::id::DatabaseId,
-    plan: &crate::bridge::envelope::PhysicalPlan,
+    info: &PlanMeteringInfo,
     rows: Option<u64>,
 ) {
     if !state.metering_config.enabled {
         return;
     }
-    let info = PlanMeteringInfo::extract(plan);
     let scope = RequestAuthScope::builder(identity, state.auth_stores())
         .with_session_database(Some(database_id))
         .build();
-    meter_dispatch(state, &scope, &info, rows);
+    meter_dispatch(state, &scope, info, rows);
 }
 
 /// Everything a gateway dispatch needs besides the tasks themselves.
@@ -129,7 +128,7 @@ impl NodeDbPgHandler {
         for task in tasks {
             let plan_kind = describe_plan(&task.plan);
             let counts_toward_tag = plan_counts_toward_statement_tag(&task.plan, has_user_write);
-            let plan_for_metering = task.plan.clone();
+            let metering_info = PlanMeteringInfo::extract(&task.plan);
             let emitter = crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(
                 &self.state.audit,
             ));
@@ -172,7 +171,7 @@ impl NodeDbPgHandler {
                             &self.state,
                             identity,
                             database_id,
-                            &plan_for_metering,
+                            &metering_info,
                             rows,
                         );
                         continue;
@@ -221,7 +220,7 @@ impl NodeDbPgHandler {
                 &self.state,
                 identity,
                 database_id,
-                &plan_for_metering,
+                &metering_info,
                 task_rows,
             );
         }

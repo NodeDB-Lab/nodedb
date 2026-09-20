@@ -149,9 +149,9 @@ impl Scheduler {
                 has_primary_write,
                 has_returning,
                 change_sets,
-                // The dependent-read active path now STAGES (leader-verify OLLP
-                // + buffer, no base apply); its response drives the same
-                // resolve → redo → flush as the static path, restoring
+                // The dependent-read active path STAGES (leader-verify OLLP +
+                // buffer, no base apply); its response drives the same
+                // resolve → redo → flush as the static path, for
                 // WAL-only-restart durability. `resolve_staged_commit` reads the
                 // `read_set_valid: None` the active handler returns as "commit".
                 commit_state: Some(super::super::super::types::CommitState::Staged),

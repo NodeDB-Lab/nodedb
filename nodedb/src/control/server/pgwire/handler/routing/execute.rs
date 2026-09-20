@@ -182,7 +182,7 @@ impl NodeDbPgHandler {
         // Read once, ahead of the gateway gate: an in-block write must never
         // forward here, or it applies durably outside the transaction.
         let tx_state = self.sessions.transaction_state(session_id);
-        if tx_state != crate::control::server::shared::session::TransactionState::InBlock
+        if tx_state != TransactionState::InBlock
             && let Some(responses) = self
                 .maybe_dispatch_tasks_via_gateway(
                     &tasks,

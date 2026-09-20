@@ -153,7 +153,7 @@ pub(crate) fn error_code_to_native(
 /// Encode a protocol-neutral DDL dispatch result into a single
 /// `NativeResponse`.
 ///
-/// Reduction mirrors the previous pgwire→native bridge: on error, an error
+/// Reduction mirrors the pgwire→native bridge: on error, an error
 /// frame carrying the neutral SQLSTATE + message; otherwise the first
 /// row-returning / status / empty result determines the response (a status tag
 /// becomes a single-column status row, a row result becomes a columns+rows
@@ -176,8 +176,8 @@ pub(crate) fn ddl_result_to_native(
             message,
         }) => NativeResponse::error_with_code(seq, sqlstate, message, code.0),
         // Unknown pgwire response variants are dropped during translation, so
-        // the first element is the first meaningful result — mirroring the
-        // previous bridge, which returned on the first known variant.
+        // the first element is the first meaningful result — the bridge
+        // returns on the first known variant.
         Ok(results) => match results.into_iter().next() {
             Some(DdlResult::Status {
                 command,
