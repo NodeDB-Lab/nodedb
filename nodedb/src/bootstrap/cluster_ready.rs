@@ -200,7 +200,15 @@ pub async fn await_cluster_ready(
 /// How long the metadata group may make NO replay progress before the boot
 /// fails. Reset on every applied-index advance, so a large replay never trips
 /// it — only a genuinely stuck group does.
-const RAFT_READY_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the metadata group may go without *any* applied entry before the
+/// readiness gate fails startup.
+///
+/// Raised from 30 s after the 2026-09-20 incident: with a large apply backlog
+/// (tens of thousands of entries from a burst of cross-shard writes) the group
+/// needs minutes, and aborting the start turned a slow boot into a restart
+/// loop. The gate still fails a group that never applies anything.
+/// Follow-up: make this configurable.
+const RAFT_READY_STALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How often the stall check samples the applied index while waiting.
 const RAFT_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
