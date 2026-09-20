@@ -153,22 +153,25 @@ impl Scheduler {
             }
         };
         let has_non_derived_write = txn_has_non_derived_write(&plans);
-        let local = match self.local_calvin_plans(plans, txn.tx_class.database_id, epoch, position)
-        {
-            Ok(p) => p,
-            Err(e) => {
-                error!(
-                    vshard_id = self.vshard_id,
-                    epoch,
-                    position,
-                    error = %e,
-                    "calvin scheduler: static txn routing failed; releasing locks"
-                );
-                self.propose_routing_failure(epoch, position, txn_id, &e);
-                self.on_txn_complete(txn_id);
-                return;
-            }
-        };
+        let mut local =
+            match self.local_calvin_plans(plans, txn.tx_class.database_id, epoch, position) {
+                Ok(p) => p,
+                Err(e) => {
+                    error!(
+                        vshard_id = self.vshard_id,
+                        epoch,
+                        position,
+                        error = %e,
+                        "calvin scheduler: static txn routing failed; releasing locks"
+                    );
+                    self.propose_routing_failure(epoch, position, txn_id, &e);
+                    self.on_txn_complete(txn_id);
+                    return;
+                }
+            };
+        if !self.bind_local_identities(&mut local, txn.tx_class.database_id, tenant_id, txn_id) {
+            return;
+        }
 
         // A participant with no local WRITE slice is either a READ-ONLY
         // participant — writes home elsewhere, but a read homes HERE, so it must

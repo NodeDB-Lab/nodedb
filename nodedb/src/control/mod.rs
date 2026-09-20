@@ -32,6 +32,7 @@ pub mod metadata_proposer;
 pub mod metrics;
 pub mod mirror;
 pub mod notify_bus;
+pub(crate) mod orchestrated_write;
 pub mod otel;
 pub mod pending_ddl;
 pub mod planner;

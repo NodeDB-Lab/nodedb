@@ -156,6 +156,7 @@ async fn resolve_merge_arms(
             clauses: clauses.clone(),
             returning: None,
             resolved_inserts: None,
+            resolved_insert_identities: Vec::new(),
             source_rows: Some(source_rows),
             // Read-only classification pass: writes nothing, so no gate applies.
             rls_filters: Vec::new(),

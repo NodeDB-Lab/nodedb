@@ -1122,6 +1122,7 @@ mod tests {
                 clauses: Vec::new(),
                 returning: None,
                 resolved_inserts: None,
+                resolved_insert_identities: Vec::new(),
                 source_rows: None,
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,

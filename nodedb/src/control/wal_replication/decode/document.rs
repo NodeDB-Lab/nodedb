@@ -5,8 +5,10 @@
 //! Materialized-sum resolution is read off the record, never re-derived: the
 //! pk → surrogate binding needs an async round-trip to another node's leader,
 //! and asking twice could get different answers.
+//!
+//! Every surrogate is rebuilt verbatim from the record; `entry.rs` binds the
+//! whole plan afterwards.
 
-use super::ctx::{DecodeCtx, bind_or_lookup};
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::wal_replication::types::{BalanceDeltaFields, ReplicatedSumTarget};
 use nodedb_physical::physical_plan::{DocumentOp, ResolvedSumTarget, ReturningSpec, UpdateValue};
@@ -30,7 +32,7 @@ pub(super) struct WireSumResolution<'a> {
 
 /// Lift the wire resolution back into plan shape. `bindings` wins whenever
 /// non-empty; `legacy` entries name no target, so lift untargeted.
-fn plan_targets(wire: &WireSumResolution<'_>) -> Vec<ResolvedSumTarget> {
+pub(super) fn plan_targets(wire: &WireSumResolution<'_>) -> Vec<ResolvedSumTarget> {
     if !wire.bindings.is_empty() {
         return wire
             .bindings
@@ -53,38 +55,26 @@ fn plan_targets(wire: &WireSumResolution<'_>) -> Vec<ResolvedSumTarget> {
 }
 
 pub(super) fn point_put(
-    ctx: &DecodeCtx,
     collection: &str,
     document_id: &str,
     value: &[u8],
     surrogate: u32,
     resolved_sum_targets: &WireSumResolution<'_>,
     returning: ReturningFields<'_>,
-) -> crate::Result<PhysicalPlan> {
+) -> PhysicalPlan {
     let pk_bytes = document_id.as_bytes().to_vec();
-    let carried = nodedb_types::Surrogate::new(surrogate);
-    let surrogate = match ctx.assigner {
-        Some(a) => a.bind(
-            ctx.database_id,
-            ctx.tenant_id,
-            collection,
-            &pk_bytes,
-            carried,
-        )?,
-        None => carried,
-    };
-    Ok(PhysicalPlan::Document(DocumentOp::PointPut {
+    PhysicalPlan::Document(DocumentOp::PointPut {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         document_id: document_id.to_owned(),
         value: value.to_vec(),
-        surrogate,
+        surrogate: nodedb_types::Surrogate::new(surrogate),
         pk_bytes,
         // Carried on the record — a replay re-executes for the originating request.
         returning: returning.returning,
         rls_filters: returning.rls_filters.to_vec(),
         // Read off the record — see this module's doc.
         resolved_sum_targets: plan_targets(resolved_sum_targets),
-    }))
+    })
 }
 
 /// The materialized-sum decisions the proposer made, carried on the record.
@@ -108,61 +98,45 @@ pub(super) struct PointInsertOptions<'a> {
 }
 
 pub(super) fn point_insert(
-    ctx: &DecodeCtx,
     collection: &str,
     document_id: &str,
     value: &[u8],
     if_absent: bool,
     surrogate: u32,
     options: PointInsertOptions<'_>,
-) -> crate::Result<PhysicalPlan> {
+) -> PhysicalPlan {
     let PointInsertOptions { sums, returning } = options;
     let SumDecisions {
         resolved: resolved_sum_targets,
         deferred: deferred_sum_targets,
     } = sums;
-    let pk_bytes = document_id.as_bytes();
-    let carried = nodedb_types::Surrogate::new(surrogate);
-    let surrogate = match ctx.assigner {
-        Some(a) => a.bind(
-            ctx.database_id,
-            ctx.tenant_id,
-            collection,
-            pk_bytes,
-            carried,
-        )?,
-        None => carried,
-    };
-    Ok(PhysicalPlan::Document(DocumentOp::PointInsert {
+    PhysicalPlan::Document(DocumentOp::PointInsert {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         document_id: document_id.to_owned(),
         value: value.to_vec(),
         if_absent,
-        surrogate,
+        surrogate: nodedb_types::Surrogate::new(surrogate),
         // Carried on the record — see `point_put`.
         returning: returning.returning,
         rls_filters: returning.rls_filters.to_vec(),
         // Read off the record — see this module's doc.
         resolved_sum_targets: plan_targets(&resolved_sum_targets),
         deferred_sum_targets: deferred_sum_targets.to_vec(),
-    }))
+    })
 }
 
 pub(super) fn point_delete(
-    ctx: &DecodeCtx,
     collection: &str,
     document_id: &str,
     surrogate: u32,
     resolved_sum_targets: &WireSumResolution<'_>,
     returning: ReturningFields<'_>,
-) -> crate::Result<PhysicalPlan> {
+) -> PhysicalPlan {
     let pk_bytes = document_id.as_bytes().to_vec();
-    let carried = nodedb_types::Surrogate::new(surrogate);
-    let surrogate = bind_or_lookup(ctx, collection, &pk_bytes, carried)?;
-    Ok(PhysicalPlan::Document(DocumentOp::PointDelete {
+    PhysicalPlan::Document(DocumentOp::PointDelete {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         document_id: document_id.to_owned(),
-        surrogate,
+        surrogate: nodedb_types::Surrogate::new(surrogate),
         pk_bytes,
         // Carried on the record — see `point_put`.
         returning: returning.returning,
@@ -172,7 +146,7 @@ pub(super) fn point_delete(
         rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
         // Read off the record — see this module's doc.
         resolved_sum_targets: plan_targets(resolved_sum_targets),
-    }))
+    })
 }
 
 /// `point_update`'s materialized-sum resolution, its RETURNING pair, and the
@@ -185,25 +159,22 @@ pub(super) struct PointUpdateExtras<'a> {
 }
 
 pub(super) fn point_update(
-    ctx: &DecodeCtx,
     collection: &str,
     document_id: &str,
     updates: &[(String, UpdateValue)],
     surrogate: u32,
     extras: PointUpdateExtras<'_>,
-) -> crate::Result<PhysicalPlan> {
+) -> PhysicalPlan {
     let PointUpdateExtras {
         resolved_sum_targets,
         returning,
         declared_primary_key,
     } = extras;
     let pk_bytes = document_id.as_bytes().to_vec();
-    let carried = nodedb_types::Surrogate::new(surrogate);
-    let surrogate = bind_or_lookup(ctx, collection, &pk_bytes, carried)?;
-    Ok(PhysicalPlan::Document(DocumentOp::PointUpdate {
+    PhysicalPlan::Document(DocumentOp::PointUpdate {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         document_id: document_id.to_owned(),
-        surrogate,
+        surrogate: nodedb_types::Surrogate::new(surrogate),
         pk_bytes,
         updates: updates.to_vec(),
         // Carried on the record — see `point_put`.
@@ -216,7 +187,7 @@ pub(super) fn point_update(
         // Read off the record so this apply enforces NOT NULL on the
         // computed post-image, the same as the proposer's own apply.
         declared_primary_key,
-    }))
+    })
 }
 
 /// `doc_upsert`'s materialized-sum resolution plus its RETURNING pair,
@@ -228,27 +199,23 @@ pub(super) struct UpsertExtras<'a> {
 }
 
 pub(super) fn doc_upsert(
-    ctx: &DecodeCtx,
     collection: &str,
     document_id: &str,
     value: &[u8],
     on_conflict_updates: &[(String, UpdateValue)],
     surrogate: u32,
     extras: UpsertExtras<'_>,
-) -> crate::Result<PhysicalPlan> {
+) -> PhysicalPlan {
     let UpsertExtras {
         resolved_sum_targets,
         returning,
     } = extras;
-    let pk_bytes = document_id.as_bytes().to_vec();
-    let carried = nodedb_types::Surrogate::new(surrogate);
-    let surrogate = bind_or_lookup(ctx, collection, &pk_bytes, carried)?;
-    Ok(PhysicalPlan::Document(DocumentOp::Upsert {
+    PhysicalPlan::Document(DocumentOp::Upsert {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         document_id: document_id.to_owned(),
         value: value.to_vec(),
         on_conflict_updates: on_conflict_updates.to_vec(),
-        surrogate,
+        surrogate: nodedb_types::Surrogate::new(surrogate),
         // No predicate on replay — see `point_delete`.
         rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
         // Carried on the record — see `point_put`.
@@ -256,14 +223,12 @@ pub(super) fn doc_upsert(
         rls_filters: returning.rls_filters.to_vec(),
         // Read off the record — see this module's doc.
         resolved_sum_targets: plan_targets(resolved_sum_targets),
-    }))
+    })
 }
 
-/// Reconstruct a `BatchInsert` plan, binding each row's carried surrogate to
-/// its `document_id` on this replica (mirrors `kv::batch_put`). Idempotent
-/// under exactly-once, LSN-ordered Raft apply.
+/// Reconstruct a `BatchInsert` plan with each row's carried surrogate
+/// (mirrors `kv::batch_put`).
 pub(super) fn batch_insert(
-    ctx: &DecodeCtx,
     collection: &str,
     documents: &[(String, Vec<u8>)],
     surrogates: &[u32],
@@ -284,27 +249,13 @@ pub(super) fn batch_insert(
             ),
         });
     }
-    let resolved = documents
-        .iter()
-        .zip(surrogates.iter())
-        .map(|((document_id, _value), carried)| {
-            let carried = nodedb_types::Surrogate::new(*carried);
-            match ctx.assigner {
-                Some(a) => a.bind(
-                    ctx.database_id,
-                    ctx.tenant_id,
-                    collection,
-                    document_id.as_bytes(),
-                    carried,
-                ),
-                None => Ok(carried),
-            }
-        })
-        .collect::<crate::Result<Vec<_>>>()?;
     Ok(PhysicalPlan::Document(DocumentOp::BatchInsert {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         documents: documents.to_vec(),
-        surrogates: resolved,
+        surrogates: surrogates
+            .iter()
+            .map(|&raw| nodedb_types::Surrogate::new(raw))
+            .collect(),
         // Carried on the record — see `point_put`.
         returning: returning.returning,
         rls_filters: returning.rls_filters.to_vec(),
@@ -415,78 +366,62 @@ pub(super) fn apply_balance_delta(fields: BalanceDeltaFields<'_>) -> PhysicalPla
 }
 
 /// Reconstruct a resolved document write plan (`DocumentOp::ResolvedWrite`).
-/// Every mutation's surrogate binds via the assigner against its own
-/// `(collection, primary key)`; everything else travels on the record.
+/// Every mutation travels on the record, surrogate included.
 pub(super) fn resolved_write(
-    ctx: &DecodeCtx,
     mutations: &[super::super::types::DocumentResolvedMutationWire],
     response_payload: &[u8],
-) -> crate::Result<PhysicalPlan> {
+) -> PhysicalPlan {
     use super::super::types::DocumentResolvedMutationWire as W;
     use nodedb_physical::physical_plan::DocumentResolvedMutation as M;
 
     let decoded = mutations
         .iter()
-        .map(|m| -> crate::Result<M> {
-            Ok(match m {
-                W::Put {
-                    collection,
-                    document_id,
-                    surrogate,
-                    value,
-                    precondition,
-                    resolved_sum_targets,
-                } => {
-                    let pk_bytes = document_id.as_bytes().to_vec();
-                    let carried = nodedb_types::Surrogate::new(*surrogate);
-                    M::Put {
-                        surrogate: bind_or_lookup(ctx, collection, &pk_bytes, carried)?,
-                        collection: nodedb_types::QualifiedCollection::from_stored(
-                            collection.clone(),
-                        ),
-                        document_id: document_id.clone(),
-                        pk_bytes,
-                        value: value.clone(),
-                        precondition: precondition.clone(),
-                        resolved_sum_targets: plan_targets(&WireSumResolution {
-                            bindings: resolved_sum_targets,
-                            legacy: &[],
-                        }),
-                    }
-                }
-                W::Delete {
-                    collection,
-                    document_id,
-                    surrogate,
-                    precondition,
-                    resolved_sum_targets,
-                } => {
-                    let pk_bytes = document_id.as_bytes().to_vec();
-                    let carried = nodedb_types::Surrogate::new(*surrogate);
-                    M::Delete {
-                        surrogate: bind_or_lookup(ctx, collection, &pk_bytes, carried)?,
-                        collection: nodedb_types::QualifiedCollection::from_stored(
-                            collection.clone(),
-                        ),
-                        document_id: document_id.clone(),
-                        pk_bytes,
-                        precondition: precondition.clone(),
-                        resolved_sum_targets: plan_targets(&WireSumResolution {
-                            bindings: resolved_sum_targets,
-                            legacy: &[],
-                        }),
-                    }
-                }
-            })
+        .map(|m| match m {
+            W::Put {
+                collection,
+                document_id,
+                surrogate,
+                value,
+                precondition,
+                resolved_sum_targets,
+            } => M::Put {
+                surrogate: nodedb_types::Surrogate::new(*surrogate),
+                collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                document_id: document_id.clone(),
+                pk_bytes: document_id.as_bytes().to_vec(),
+                value: value.clone(),
+                precondition: precondition.clone(),
+                resolved_sum_targets: plan_targets(&WireSumResolution {
+                    bindings: resolved_sum_targets,
+                    legacy: &[],
+                }),
+            },
+            W::Delete {
+                collection,
+                document_id,
+                surrogate,
+                precondition,
+                resolved_sum_targets,
+            } => M::Delete {
+                surrogate: nodedb_types::Surrogate::new(*surrogate),
+                collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                document_id: document_id.clone(),
+                pk_bytes: document_id.as_bytes().to_vec(),
+                precondition: precondition.clone(),
+                resolved_sum_targets: plan_targets(&WireSumResolution {
+                    bindings: resolved_sum_targets,
+                    legacy: &[],
+                }),
+            },
         })
-        .collect::<crate::Result<Vec<M>>>()?;
+        .collect();
 
-    Ok(PhysicalPlan::Document(DocumentOp::ResolvedWrite {
+    PhysicalPlan::Document(DocumentOp::ResolvedWrite {
         mutations: decoded,
         response_payload: response_payload.to_vec(),
         // Decided before this entry was proposed; the record proves it.
         rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
-    }))
+    })
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@
 //! delegates to [`super::columnar`].
 //!
 //! Delegated from `decode/entry.rs`'s single grouped match arm. None of these
-//! arms bind surrogates, so this group takes no [`DecodeCtx`]. `write` is
+//! arms scope by tenancy, so this group takes no [`DecodeCtx`]. `write` is
 //! guaranteed by the caller to already be one of these variants — see
 //! `entry_document::decode_arm` for the trailing-arm contract.
 //!

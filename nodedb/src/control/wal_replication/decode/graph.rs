@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Decode `ReplicatedWrite` variants that produce `PhysicalPlan::Graph`.
+//!
+//! Every endpoint surrogate is rebuilt verbatim from the record; `entry.rs`
+//! binds the whole plan afterwards.
 
-use super::ctx::DecodeCtx;
 use crate::bridge::envelope::PhysicalPlan;
 use nodedb_physical::physical_plan::{BatchEdge, GraphOp};
 use nodedb_types::RlsWriteCheck;
@@ -19,83 +21,38 @@ pub(super) struct EdgePutFields<'a> {
     pub(super) dst_surrogate: u32,
 }
 
-pub(super) fn edge_put(ctx: &DecodeCtx, f: EdgePutFields) -> crate::Result<PhysicalPlan> {
-    let carried_src = nodedb_types::Surrogate::new(f.src_surrogate);
-    let src_surrogate = match ctx.assigner {
-        Some(a) => a.bind(
-            ctx.database_id,
-            ctx.tenant_id,
-            f.collection,
-            f.src_id.as_bytes(),
-            carried_src,
-        )?,
-        None => carried_src,
-    };
-    let carried_dst = nodedb_types::Surrogate::new(f.dst_surrogate);
-    let dst_surrogate = match ctx.assigner {
-        Some(a) => a.bind(
-            ctx.database_id,
-            ctx.tenant_id,
-            f.collection,
-            f.dst_id.as_bytes(),
-            carried_dst,
-        )?,
-        None => carried_dst,
-    };
-    Ok(PhysicalPlan::Graph(GraphOp::EdgePut {
+pub(super) fn edge_put(f: EdgePutFields) -> PhysicalPlan {
+    PhysicalPlan::Graph(GraphOp::EdgePut {
         collection: nodedb_types::QualifiedCollection::from_stored(f.collection.to_owned()),
         src_id: f.src_id.to_owned(),
         label: f.label.to_owned(),
         dst_id: f.dst_id.to_owned(),
         properties: f.properties.to_vec(),
-        src_surrogate,
-        dst_surrogate,
-    }))
+        src_surrogate: nodedb_types::Surrogate::new(f.src_surrogate),
+        dst_surrogate: nodedb_types::Surrogate::new(f.dst_surrogate),
+    })
 }
 
 pub(super) fn edge_delete(
-    ctx: &DecodeCtx,
     collection: &str,
     src_id: &str,
     label: &str,
     dst_id: &str,
     src_surrogate: u32,
     dst_surrogate: u32,
-) -> crate::Result<PhysicalPlan> {
-    let carried_src = nodedb_types::Surrogate::new(src_surrogate);
-    let src_surrogate = match ctx.assigner {
-        Some(a) => a.bind(
-            ctx.database_id,
-            ctx.tenant_id,
-            collection,
-            src_id.as_bytes(),
-            carried_src,
-        )?,
-        None => carried_src,
-    };
-    let carried_dst = nodedb_types::Surrogate::new(dst_surrogate);
-    let dst_surrogate = match ctx.assigner {
-        Some(a) => a.bind(
-            ctx.database_id,
-            ctx.tenant_id,
-            collection,
-            dst_id.as_bytes(),
-            carried_dst,
-        )?,
-        None => carried_dst,
-    };
-    Ok(PhysicalPlan::Graph(GraphOp::EdgeDelete {
+) -> PhysicalPlan {
+    PhysicalPlan::Graph(GraphOp::EdgeDelete {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         src_id: src_id.to_owned(),
         label: label.to_owned(),
         dst_id: dst_id.to_owned(),
-        src_surrogate,
-        dst_surrogate,
+        src_surrogate: nodedb_types::Surrogate::new(src_surrogate),
+        dst_surrogate: nodedb_types::Surrogate::new(dst_surrogate),
         // No predicate here: this node is a follower applying an
         // already-committed write. The writing identity is not available on
         // this node. The leader enforces RLS before proposing the write.
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
-    }))
+    })
 }
 
 pub(super) fn set_node_labels(node_id: &str, labels: &[String]) -> PhysicalPlan {
@@ -112,65 +69,35 @@ pub(super) fn remove_node_labels(node_id: &str, labels: &[String]) -> PhysicalPl
     })
 }
 
-/// Bind the endpoint surrogates for every edge in a `ReplicatedBatchEdge` slice,
-/// producing a `Vec<BatchEdge>` with leader-assigned surrogates installed in the
-/// local catalog. Shared by the `EdgePutBatch` and `EdgeDeleteBatch` decode arms.
-fn bind_batch_edges(
-    ctx: &DecodeCtx,
-    edges: &[super::super::types::ReplicatedBatchEdge],
-) -> crate::Result<Vec<BatchEdge>> {
-    let mut bound = Vec::with_capacity(edges.len());
-    for e in edges {
-        let carried_src = nodedb_types::Surrogate::new(e.src_surrogate);
-        let src_surrogate = match ctx.assigner {
-            Some(a) => a.bind(
-                ctx.database_id,
-                ctx.tenant_id,
-                &e.collection,
-                e.src_id.as_bytes(),
-                carried_src,
-            )?,
-            None => carried_src,
-        };
-        let carried_dst = nodedb_types::Surrogate::new(e.dst_surrogate);
-        let dst_surrogate = match ctx.assigner {
-            Some(a) => a.bind(
-                ctx.database_id,
-                ctx.tenant_id,
-                &e.collection,
-                e.dst_id.as_bytes(),
-                carried_dst,
-            )?,
-            None => carried_dst,
-        };
-        bound.push(BatchEdge {
+/// Rebuild every edge of a `ReplicatedBatchEdge` slice as a `BatchEdge`,
+/// endpoint surrogates verbatim. Shared by the `EdgePutBatch` and
+/// `EdgeDeleteBatch` decode arms.
+fn batch_edges(edges: &[super::super::types::ReplicatedBatchEdge]) -> Vec<BatchEdge> {
+    edges
+        .iter()
+        .map(|e| BatchEdge {
             collection: nodedb_types::QualifiedCollection::from_stored(e.collection.clone()),
             src_id: e.src_id.clone(),
             label: e.label.clone(),
             dst_id: e.dst_id.clone(),
-            src_surrogate,
-            dst_surrogate,
-        });
-    }
-    Ok(bound)
+            src_surrogate: nodedb_types::Surrogate::new(e.src_surrogate),
+            dst_surrogate: nodedb_types::Surrogate::new(e.dst_surrogate),
+        })
+        .collect()
 }
 
-pub(super) fn edge_put_batch(
-    ctx: &DecodeCtx,
-    edges: &[super::super::types::ReplicatedBatchEdge],
-) -> crate::Result<PhysicalPlan> {
-    Ok(PhysicalPlan::Graph(GraphOp::EdgePutBatch {
-        edges: bind_batch_edges(ctx, edges)?,
-    }))
+pub(super) fn edge_put_batch(edges: &[super::super::types::ReplicatedBatchEdge]) -> PhysicalPlan {
+    PhysicalPlan::Graph(GraphOp::EdgePutBatch {
+        edges: batch_edges(edges),
+    })
 }
 
 pub(super) fn edge_delete_batch(
-    ctx: &DecodeCtx,
     edges: &[super::super::types::ReplicatedBatchEdge],
-) -> crate::Result<PhysicalPlan> {
-    Ok(PhysicalPlan::Graph(GraphOp::EdgeDeleteBatch {
-        edges: bind_batch_edges(ctx, edges)?,
-    }))
+) -> PhysicalPlan {
+    PhysicalPlan::Graph(GraphOp::EdgeDeleteBatch {
+        edges: batch_edges(edges),
+    })
 }
 
 #[cfg(test)]

@@ -5,11 +5,18 @@
 //! A remote source silently updates nothing unless shipped into `source_rows`
 //! on the target's core. Never inserts. In-transaction resolves at statement
 //! time instead — see `expand_staged_update_from_join`.
+//!
+//! The resolved apply plan lands on the target vShard's owner and every
+//! replica through `orchestrated_write`; a target write policy is decided
+//! here over the matched post-images, so the plan replicates decided.
 
 use nodedb_types::{DatabaseId, TenantId};
 
 use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
 use crate::control::maintenance::clone_materializer::{dispatch_local, read_all_source_rows};
+use crate::control::orchestrated_write::{
+    apply_orchestrated_write, decide_write_policy_over_images,
+};
 use crate::control::planner::materialized_sum::{
     resolve_sum_targets_for_bodies, source_drives_bindings,
 };
@@ -98,9 +105,10 @@ pub(crate) async fn run_update_from_join(
     state: &SharedState,
     args: UpdateFromJoinArgs<'_>,
 ) -> crate::Result<Response> {
-    // Checked once: a target driving no materialized-sum binding AND
-    // declaring no period lock skips the RESOLVE round trip and retry loop
-    // entirely.
+    // Checked once: a target driving no materialized-sum binding, declaring
+    // no period lock AND carrying no write policy skips the RESOLVE round
+    // trip and retry loop entirely. A write policy needs the matched
+    // post-images, which only RESOLVE produces.
     let drives_bindings = source_drives_bindings(
         state,
         args.target_collection,
@@ -114,7 +122,7 @@ pub(crate) async fn run_update_from_join(
         args.tenant_id,
         args.database_id,
     )?;
-    let needs_resolve = drives_bindings || has_period_lock;
+    let needs_resolve = drives_bindings || has_period_lock || args.rls_write_check.has_predicate();
 
     let mut attempt: u32 = 0;
     loop {
@@ -130,7 +138,7 @@ pub(crate) async fn run_update_from_join(
         .await?;
 
         let resolved_sum_targets = if needs_resolve {
-            match resolve_matched_sum_targets(state, &args, source_rows.clone()).await? {
+            match resolve_matched_rows(state, &args, source_rows.clone()).await? {
                 Some(resolved) => resolved,
                 // RESOLVE pass failed on the Data Plane; its response is the answer.
                 None => {
@@ -140,6 +148,14 @@ pub(crate) async fn run_update_from_join(
                 }
             }
         } else {
+            // No policy to decide: the gate admits every row, or refuses an
+            // un-injected plan before it proposes.
+            decide_write_policy_over_images(
+                args.rls_write_check,
+                std::iter::empty(),
+                args.tenant_id,
+                args.target_collection,
+            )?;
             Vec::new()
         };
 
@@ -158,20 +174,21 @@ pub(crate) async fn run_update_from_join(
             returning: args.returning.cloned(),
             source_rows: Some(source_rows),
             rls_filters: args.rls_filters.to_vec(),
-            rls_write_check: args.rls_write_check.clone(),
+            // Decided above over the matched post-images; what replicates.
+            rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
             resolved_sum_targets,
             declared_primary_key: args.declared_primary_key.map(str::to_string),
         });
 
         // Join-map now built from the shipped rows, so this lands correctly
-        // regardless of where the source vShard lives.
-        let resp = dispatch_local(
+        // regardless of where the source vShard lives — on the target's
+        // owner and every replica.
+        let resp = apply_orchestrated_write(
             state,
             args.tenant_id,
             args.database_id,
             args.target_collection,
             plan,
-            None,
         )
         .await?;
 
@@ -188,25 +205,16 @@ pub(crate) async fn run_update_from_join(
             continue;
         }
 
-        // `dispatch_local` bypasses redo minting; without it, WAL-only restart
-        // resurrects stale embeddings. No-op on non-vector targets.
-        crate::control::server::wal_dispatch::mint_dispatch_local_redo(
-            &state.wal,
-            args.tenant_id,
-            args.database_id,
-            args.target_collection,
-            &resp,
-        )?;
-
         return Ok(resp);
     }
 }
 
-/// Resolve the materialized-sum AND period-lock targets this statement's
-/// matched rows need. Resolves both images of every matched row (a
-/// join-column rewrite debits one target and credits another; a period-lock
-/// check may read either image). `None` means RESOLVE failed.
-async fn resolve_matched_sum_targets(
+/// Resolve the matched rows and everything the apply needs from them: the
+/// target's write policy decided over every post-image, and the
+/// materialized-sum AND period-lock targets (both images of every matched
+/// row — a join-column rewrite debits one target and credits another; a
+/// period-lock check may read either image). `None` means RESOLVE failed.
+async fn resolve_matched_rows(
     state: &SharedState,
     args: &UpdateFromJoinArgs<'_>,
     source_rows: Vec<(String, Vec<u8>)>,
@@ -249,6 +257,12 @@ async fn resolve_matched_sum_targets(
     }
 
     let arms = decode_resolved_update_rows(&resp.payload)?;
+    decide_write_policy_over_images(
+        args.rls_write_check,
+        arms.iter().map(|(_, _, body, _)| body.as_slice()),
+        args.tenant_id,
+        args.target_collection,
+    )?;
     let bodies: Vec<&[u8]> = arms
         .iter()
         .flat_map(|(_, _, body, old_body)| [body.as_slice(), old_body.as_slice()])

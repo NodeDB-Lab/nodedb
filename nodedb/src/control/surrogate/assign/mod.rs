@@ -3,7 +3,9 @@
 //! CP-side surrogate assigner: resolves `(collection, pk_bytes)` to a
 //! stable `Surrogate` and owns the cross-node HiLo reservation path.
 
+pub mod bind_plan;
 pub(super) mod cluster_reserve;
 pub mod core;
 
+pub use bind_plan::{IdentityBinder, bind_plan_identities};
 pub use core::{SurrogateAssigner, SurrogateRegistryHandle};

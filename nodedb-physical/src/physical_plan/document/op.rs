@@ -506,6 +506,13 @@ pub enum DocumentOp {
         /// intercepts — never reaches the Data Plane.
         #[serde(default)]
         resolved_inserts: Option<Vec<(String, u32)>>,
+        /// The same NOT-MATCHED surrogates keyed by the target document id
+        /// each row stores under, index-aligned with `resolved_inserts`, so
+        /// every applying node installs the `(collection, pk) → surrogate`
+        /// binding a later point read by primary key resolves through. Empty
+        /// when `resolved_inserts` is `None`. The handler never reads it.
+        #[serde(default)]
+        resolved_insert_identities: Vec<(String, u32)>,
         /// See `UpdateFromJoin::source_rows`.
         #[serde(default)]
         source_rows: Option<Vec<(String, Vec<u8>)>>,

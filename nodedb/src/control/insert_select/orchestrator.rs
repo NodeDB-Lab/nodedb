@@ -19,7 +19,8 @@ use nodedb_types::{DatabaseId, Lsn, Surrogate, TenantId};
 
 use crate::bridge::envelope::{Payload, PhysicalPlan, Response, Status};
 use crate::control::insert_select::copy_rows::{assign_page_rows, resolve_copy_spec};
-use crate::control::maintenance::clone_materializer::{dispatch_local, scan_source_page};
+use crate::control::maintenance::clone_materializer::scan_source_page;
+use crate::control::orchestrated_write::apply_orchestrated_write;
 use crate::control::state::SharedState;
 use nodedb_physical::physical_plan::DocumentOp;
 
@@ -131,9 +132,9 @@ pub(crate) async fn run_insert_select(
                 documents.push((document_id, value));
                 surrogates.push(surrogate);
             }
-            // Resolve this page's sum targets: `dispatch_local` bypasses the
-            // statement-level resolution pass, so without this the fold has
-            // no target to credit. Resolved per page since each is its own
+            // Resolve this page's sum targets: the orchestrated apply bypasses
+            // the statement-level resolution pass, so without this the fold
+            // has no target to credit. Resolved per page since each is its own
             // atomic write.
             let page_bodies: Vec<&[u8]> =
                 documents.iter().map(|(_, body)| body.as_slice()).collect();
@@ -175,18 +176,18 @@ pub(crate) async fn run_insert_select(
                 returning: None,
                 rls_filters: Vec::new(),
                 resolved_sum_targets,
-                // Every page dispatches locally to the target's own core, so a
-                // binding whose target is co-resident folds here; nothing is
-                // deferred to a sibling task.
+                // Every page applies on the target's own vShard, so a binding
+                // whose target is co-resident folds here; nothing is deferred
+                // to a sibling task.
                 deferred_sum_targets: Vec::new(),
             });
-            let resp = dispatch_local(
+            // Each page lands on the target's owner and every replica.
+            let resp = apply_orchestrated_write(
                 state,
                 tenant_id,
                 database_id,
                 req.target_collection,
                 plan,
-                None,
             )
             .await?;
             if resp.status != Status::Ok {
@@ -194,17 +195,6 @@ pub(crate) async fn run_insert_select(
                 // rows did not land. Surface the DP error verbatim.
                 return Ok(resp);
             }
-            // `dispatch_local` bypasses the funnel's post-apply redo minting,
-            // so a vector-indexed target's write-set arrives unconsumed. Mint
-            // it now — without it, a WAL-only restart rebuilds the HNSW from
-            // nothing for these rows: the vectors are lost, not just stale.
-            crate::control::server::wal_dispatch::mint_dispatch_local_redo(
-                &state.wal,
-                tenant_id,
-                database_id,
-                req.target_collection,
-                &resp,
-            )?;
             total_inserted += decode_inserted(&resp.payload).unwrap_or(page_len);
             if resp.watermark_lsn > max_lsn {
                 max_lsn = resp.watermark_lsn;

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Decode `ReplicatedWrite` variants that produce `PhysicalPlan::Kv`.
+//!
+//! Every surrogate is rebuilt verbatim from the record; `entry.rs` binds the
+//! whole plan afterwards.
 
-use super::ctx::{DecodeCtx, bind_or_lookup};
 use crate::bridge::envelope::PhysicalPlan;
 use nodedb_physical::physical_plan::{KvOp, ReturningSpec};
 use nodedb_types::RlsWriteCheck;
@@ -16,7 +18,6 @@ pub(super) struct ReturningFields<'a> {
 }
 
 pub(super) fn put(
-    ctx: &DecodeCtx,
     collection: &str,
     key: &[u8],
     value: &[u8],
@@ -24,11 +25,7 @@ pub(super) fn put(
     surrogate: u32,
     returning: ReturningFields<'_>,
 ) -> crate::Result<PhysicalPlan> {
-    let carried = nodedb_types::Surrogate::new(surrogate);
-    let surrogate = match ctx.assigner {
-        Some(a) => a.bind(ctx.database_id, ctx.tenant_id, collection, key, carried)?,
-        None => carried,
-    };
+    let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Put {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         key: key.to_vec(),
@@ -93,7 +90,6 @@ pub(super) fn predicate_delete(
 }
 
 pub(super) fn insert(
-    ctx: &DecodeCtx,
     collection: &str,
     key: &[u8],
     value: &[u8],
@@ -101,11 +97,7 @@ pub(super) fn insert(
     surrogate: u32,
     returning: ReturningFields<'_>,
 ) -> crate::Result<PhysicalPlan> {
-    let carried = nodedb_types::Surrogate::new(surrogate);
-    let surrogate = match ctx.assigner {
-        Some(a) => a.bind(ctx.database_id, ctx.tenant_id, collection, key, carried)?,
-        None => carried,
-    };
+    let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Insert {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         key: key.to_vec(),
@@ -119,7 +111,6 @@ pub(super) fn insert(
 }
 
 pub(super) fn insert_if_absent(
-    ctx: &DecodeCtx,
     collection: &str,
     key: &[u8],
     value: &[u8],
@@ -127,11 +118,7 @@ pub(super) fn insert_if_absent(
     surrogate: u32,
     returning: ReturningFields<'_>,
 ) -> crate::Result<PhysicalPlan> {
-    let carried = nodedb_types::Surrogate::new(surrogate);
-    let surrogate = match ctx.assigner {
-        Some(a) => a.bind(ctx.database_id, ctx.tenant_id, collection, key, carried)?,
-        None => carried,
-    };
+    let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::InsertIfAbsent {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         key: key.to_vec(),
@@ -154,7 +141,6 @@ pub(super) struct ConflictEntry<'a> {
 }
 
 pub(super) fn insert_on_conflict_update(
-    ctx: &DecodeCtx,
     collection: &str,
     entry: ConflictEntry<'_>,
     returning: ReturningFields<'_>,
@@ -166,11 +152,7 @@ pub(super) fn insert_on_conflict_update(
         updates,
         surrogate,
     } = entry;
-    let carried = nodedb_types::Surrogate::new(surrogate);
-    let surrogate = match ctx.assigner {
-        Some(a) => a.bind(ctx.database_id, ctx.tenant_id, collection, key, carried)?,
-        None => carried,
-    };
+    let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::InsertOnConflictUpdate {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         key: key.to_vec(),
@@ -187,29 +169,20 @@ pub(super) fn insert_on_conflict_update(
 }
 
 pub(super) fn batch_put(
-    ctx: &DecodeCtx,
     collection: &str,
     entries: &[(Vec<u8>, Vec<u8>)],
     ttl_ms: u64,
     surrogates: &[u32],
     returning: ReturningFields<'_>,
 ) -> crate::Result<PhysicalPlan> {
-    let resolved = entries
-        .iter()
-        .zip(surrogates.iter())
-        .map(|((key, _value), carried)| {
-            let carried = nodedb_types::Surrogate::new(*carried);
-            match ctx.assigner {
-                Some(a) => a.bind(ctx.database_id, ctx.tenant_id, collection, key, carried),
-                None => Ok(carried),
-            }
-        })
-        .collect::<crate::Result<Vec<_>>>()?;
     Ok(PhysicalPlan::Kv(KvOp::BatchPut {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         entries: entries.to_vec(),
         ttl_ms,
-        surrogates: resolved,
+        surrogates: surrogates
+            .iter()
+            .map(|&raw| nodedb_types::Surrogate::new(raw))
+            .collect(),
         // Carried on the record — see `put`.
         returning: returning.returning,
         rls_filters: returning.rls_filters.to_vec(),
@@ -234,15 +207,13 @@ pub(super) fn persist(collection: &str, key: &[u8]) -> PhysicalPlan {
 }
 
 pub(super) fn incr(
-    ctx: &DecodeCtx,
     collection: &str,
     key: &[u8],
     delta: i64,
     ttl_ms: u64,
     surrogate: u32,
 ) -> crate::Result<PhysicalPlan> {
-    let carried = nodedb_types::Surrogate::new(surrogate);
-    let surrogate = bind_or_lookup(ctx, collection, key, carried)?;
+    let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Incr {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         key: key.to_vec(),
@@ -254,14 +225,12 @@ pub(super) fn incr(
 }
 
 pub(super) fn incr_float(
-    ctx: &DecodeCtx,
     collection: &str,
     key: &[u8],
     delta: f64,
     surrogate: u32,
 ) -> crate::Result<PhysicalPlan> {
-    let carried = nodedb_types::Surrogate::new(surrogate);
-    let surrogate = bind_or_lookup(ctx, collection, key, carried)?;
+    let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::IncrFloat {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         key: key.to_vec(),
@@ -272,15 +241,13 @@ pub(super) fn incr_float(
 }
 
 pub(super) fn cas(
-    ctx: &DecodeCtx,
     collection: &str,
     key: &[u8],
     expected: &[u8],
     new_value: &[u8],
     surrogate: u32,
 ) -> crate::Result<PhysicalPlan> {
-    let carried = nodedb_types::Surrogate::new(surrogate);
-    let surrogate = bind_or_lookup(ctx, collection, key, carried)?;
+    let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Cas {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         key: key.to_vec(),
@@ -292,15 +259,13 @@ pub(super) fn cas(
 }
 
 pub(super) fn get_set(
-    ctx: &DecodeCtx,
     collection: &str,
     key: &[u8],
     new_value: &[u8],
     surrogate: u32,
     rls_filters: &[u8],
 ) -> crate::Result<PhysicalPlan> {
-    let carried = nodedb_types::Surrogate::new(surrogate);
-    let surrogate = bind_or_lookup(ctx, collection, key, carried)?;
+    let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::GetSet {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         key: key.to_vec(),
@@ -372,7 +337,6 @@ pub(super) fn drop_index(collection: &str, field: &str) -> PhysicalPlan {
 }
 
 pub(super) fn field_set(
-    ctx: &DecodeCtx,
     collection: &str,
     key: &[u8],
     updates: &[(String, Vec<u8>)],
@@ -380,8 +344,7 @@ pub(super) fn field_set(
     if_present: bool,
     returning: ReturningFields<'_>,
 ) -> crate::Result<PhysicalPlan> {
-    let carried = nodedb_types::Surrogate::new(surrogate);
-    let surrogate = bind_or_lookup(ctx, collection, key, carried)?;
+    let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::FieldSet {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         key: key.to_vec(),
@@ -406,11 +369,9 @@ pub(super) struct TransferFields<'a> {
     pub(super) credit_surrogate: u32,
 }
 
-pub(super) fn transfer(ctx: &DecodeCtx, f: TransferFields) -> crate::Result<PhysicalPlan> {
-    let carried_debit = nodedb_types::Surrogate::new(f.debit_surrogate);
-    let debit_surrogate = bind_or_lookup(ctx, f.collection, f.source_key, carried_debit)?;
-    let carried_credit = nodedb_types::Surrogate::new(f.credit_surrogate);
-    let credit_surrogate = bind_or_lookup(ctx, f.collection, f.dest_key, carried_credit)?;
+pub(super) fn transfer(f: TransferFields) -> crate::Result<PhysicalPlan> {
+    let debit_surrogate = nodedb_types::Surrogate::new(f.debit_surrogate);
+    let credit_surrogate = nodedb_types::Surrogate::new(f.credit_surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Transfer {
         collection: nodedb_types::QualifiedCollection::from_stored(f.collection.to_owned()),
         source_key: f.source_key.to_vec(),
@@ -435,7 +396,6 @@ pub(super) fn truncate(collection: &str, restart_identity: bool) -> PhysicalPlan
 /// Reconstruct a resolved KV write plan (`KvOp::ResolvedWrite`). Every `Put`
 /// mutation's surrogate binds against its own `(collection, key)`.
 pub(super) fn resolved_write(
-    ctx: &DecodeCtx,
     mutations: &[super::super::types::KvResolvedMutationWire],
     response_payload: &[u8],
 ) -> crate::Result<PhysicalPlan> {
@@ -454,20 +414,15 @@ pub(super) fn resolved_write(
                     expire_at_ms,
                     surrogate,
                     precondition,
-                } => {
-                    let carried = nodedb_types::Surrogate::new(*surrogate);
-                    M::Put {
-                        collection: nodedb_types::QualifiedCollection::from_stored(
-                            collection.clone(),
-                        ),
-                        key: key.clone(),
-                        value: value.clone(),
-                        ttl_ms: *ttl_ms,
-                        expire_at_ms: *expire_at_ms,
-                        surrogate: bind_or_lookup(ctx, collection, key, carried)?,
-                        precondition: precondition.clone(),
-                    }
-                }
+                } => M::Put {
+                    collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                    key: key.clone(),
+                    value: value.clone(),
+                    ttl_ms: *ttl_ms,
+                    expire_at_ms: *expire_at_ms,
+                    surrogate: nodedb_types::Surrogate::new(*surrogate),
+                    precondition: precondition.clone(),
+                },
                 W::Delete {
                     collection,
                     key,
@@ -513,15 +468,13 @@ pub(super) fn resolved_write(
 }
 
 pub(super) fn transfer_item(
-    ctx: &DecodeCtx,
     source_collection: &str,
     dest_collection: &str,
     item_key: &[u8],
     dest_key: &[u8],
     surrogate: u32,
 ) -> crate::Result<PhysicalPlan> {
-    let carried = nodedb_types::Surrogate::new(surrogate);
-    let surrogate = bind_or_lookup(ctx, dest_collection, dest_key, carried)?;
+    let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::TransferItem {
         source_collection: nodedb_types::QualifiedCollection::from_stored(
             source_collection.to_owned(),

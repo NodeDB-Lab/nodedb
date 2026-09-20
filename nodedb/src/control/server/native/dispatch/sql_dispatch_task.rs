@@ -48,6 +48,7 @@ pub(super) async fn dispatch_task(
             clauses: _,
             returning: _,
             resolved_inserts: None,
+            resolved_insert_identities: _,
             source_rows: _,
             rls_filters: _,
             rls_write_check: _,

@@ -7,8 +7,8 @@
 //! per-op helper); the sibling modules hold the per-op decoders they call
 //! into:
 //! - [`entry`]: thin top-level dispatcher (`from_replicated_entry`).
-//! - [`ctx`]: shared `DecodeCtx` + surrogate-binding helpers.
-//! - [`entry_document`] / [`document`]: `PhysicalPlan::Document`.
+//! - [`ctx`]: shared `DecodeCtx` (tenancy scope).
+//! - [`entry_document`] / [`document`] / [`document_join`]: `PhysicalPlan::Document`.
 //! - [`entry_array`]: Raft-native array cell writes → `PhysicalPlan::Array`.
 //! - [`entry_kv`] / [`kv`]: `PhysicalPlan::Kv`.
 //! - [`entry_graph`] / [`graph`]: `PhysicalPlan::Graph`.
@@ -22,6 +22,7 @@ mod columnar;
 mod crdt;
 mod ctx;
 mod document;
+mod document_join;
 mod entry;
 mod entry_array;
 mod entry_columnar_family;

@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Decode `ReplicatedWrite` variants that produce `PhysicalPlan::Vector`.
+//!
+//! Every surrogate is rebuilt verbatim from the record; `entry.rs` binds the
+//! whole plan afterwards (a headless row self-keys there).
 
 use super::super::decode_sync_engines;
 use super::super::types::ReplicatedWrite;
-use super::ctx::DecodeCtx;
 use crate::bridge::envelope::PhysicalPlan;
 use nodedb_physical::physical_plan::VectorOp;
 use nodedb_types::Surrogate;
@@ -24,7 +26,7 @@ use nodedb_types::Surrogate;
 /// the full enum, mirroring how `decode/entry.rs` itself handles `ArrayOp` /
 /// `ArraySchema` reaching `to_physical_plan` (an internal dispatch-contract
 /// violation, not a reachable production state).
-pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Result<PhysicalPlan> {
+pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan> {
     match write {
         ReplicatedWrite::VectorInsert {
             collection,
@@ -34,24 +36,21 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             surrogate,
             pk_bytes,
             provenance,
-        } => insert(
-            ctx,
-            InsertFields {
-                collection,
-                vector,
-                dim: *dim,
-                field_name,
-                surrogate: *surrogate,
-                pk_bytes,
-                provenance,
-            },
-        ),
+        } => insert(InsertFields {
+            collection,
+            vector,
+            dim: *dim,
+            field_name,
+            surrogate: *surrogate,
+            pk_bytes,
+            provenance,
+        }),
         ReplicatedWrite::VectorBatchInsert {
             collection,
             vectors,
             dim,
             surrogates,
-        } => batch_insert(ctx, collection, vectors, *dim, surrogates),
+        } => batch_insert(collection, vectors, *dim, surrogates),
         ReplicatedWrite::VectorDelete {
             collection,
             vector_id,
@@ -101,15 +100,14 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             vectors,
             count,
             dim,
-        } => multi_vector_insert(
-            ctx,
+        } => Ok(multi_vector_insert(
             collection,
             field_name,
             *document_surrogate,
             vectors,
             *count,
             *dim,
-        ),
+        )),
         ReplicatedWrite::MultiVectorDelete {
             collection,
             field_name,
@@ -139,24 +137,21 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             on_conflict_updates,
             returning,
             rls_filters,
-        } => super::vector_direct::direct_upsert(
-            ctx,
-            super::vector_direct::DirectUpsertFields {
-                collection,
-                field,
-                surrogate: *surrogate,
-                pk_bytes,
-                vector,
-                payload,
-                quantization: *quantization,
-                storage_dtype: *storage_dtype,
-                payload_indexes,
-                intent: *intent,
-                on_conflict_updates,
-                returning: decode_sync_engines::decode_returning(returning)?,
-                rls_filters,
-            },
-        ),
+        } => super::vector_direct::direct_upsert(super::vector_direct::DirectUpsertFields {
+            collection,
+            field,
+            surrogate: *surrogate,
+            pk_bytes,
+            vector,
+            payload,
+            quantization: *quantization,
+            storage_dtype: *storage_dtype,
+            payload_indexes,
+            intent: *intent,
+            on_conflict_updates,
+            returning: decode_sync_engines::decode_returning(returning)?,
+            rls_filters,
+        }),
         ReplicatedWrite::VectorDirectDelete {
             collection,
             field,
@@ -212,8 +207,7 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
             payload_indexes,
             mutations,
             response_payload,
-        } => super::vector_direct::resolved_direct_write(
-            ctx,
+        } => Ok(super::vector_direct::resolved_direct_write(
             super::vector_direct::ResolvedDirectWriteFields {
                 collection,
                 field,
@@ -223,34 +217,12 @@ pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Res
                 mutations,
                 response_payload,
             },
-        ),
+        )),
         _ => Err(crate::Error::Internal {
             detail: "vector::decode_arm called with a non-Vector ReplicatedWrite variant \
                 (dispatch bug in decode/entry.rs's grouped Vector match arm)"
                 .into(),
         }),
-    }
-}
-
-/// Bind a leader-assigned surrogate by its own self-key (big-endian bytes of
-/// the surrogate itself). Shared by every decode arm here that has no PK
-/// sidecar to bind against (headless vector inserts, multi-vector inserts,
-/// direct upserts, batch inserts) — each installs the exact carried identity
-/// on every replica instead of re-allocating.
-pub(super) fn bind_self_keyed(
-    ctx: &DecodeCtx,
-    collection: &str,
-    carried: Surrogate,
-) -> crate::Result<Surrogate> {
-    match ctx.assigner {
-        Some(a) => a.bind(
-            ctx.database_id,
-            ctx.tenant_id,
-            collection,
-            &carried.as_u32().to_be_bytes(),
-            carried,
-        ),
-        None => Ok(carried),
     }
 }
 
@@ -266,32 +238,20 @@ pub(super) struct InsertFields<'a> {
     pub(super) provenance: &'a Option<Vec<u8>>,
 }
 
-pub(super) fn insert(ctx: &DecodeCtx, f: InsertFields) -> crate::Result<PhysicalPlan> {
-    // Bind the leader-assigned surrogate verbatim — never re-allocate.
-    // With a PK we bind by it; headless inserts self-key by the
-    // surrogate's own big-endian bytes (mirrors `assign_anonymous`).
-    let carried = Surrogate::new(f.surrogate);
-    let surrogate = match ctx.assigner {
-        Some(a) => match f.pk_bytes {
-            Some(pk) => a.bind(ctx.database_id, ctx.tenant_id, f.collection, pk, carried)?,
-            None => bind_self_keyed(ctx, f.collection, carried)?,
-        },
-        None => carried,
-    };
+pub(super) fn insert(f: InsertFields) -> crate::Result<PhysicalPlan> {
     let provenance = decode_sync_engines::decode_provenance(f.provenance)?;
     Ok(PhysicalPlan::Vector(VectorOp::Insert {
         collection: nodedb_types::QualifiedCollection::from_stored(f.collection.to_owned()),
         vector: f.vector.to_vec(),
         dim: f.dim,
         field_name: f.field_name.to_owned(),
-        surrogate,
+        surrogate: Surrogate::new(f.surrogate),
         pk_bytes: f.pk_bytes.clone(),
         provenance,
     }))
 }
 
 pub(super) fn batch_insert(
-    ctx: &DecodeCtx,
     collection: &str,
     vectors: &[Vec<f32>],
     dim: usize,
@@ -311,14 +271,7 @@ pub(super) fn batch_insert(
             ),
         });
     }
-    // Bind each element by its self-key and use the *authoritative*
-    // returned surrogate in the plan. Each is unique by construction
-    // so first-wins returns the carried value, but consuming the
-    // return keeps this consistent with the single-row arms.
-    let surrogates: Vec<Surrogate> = surrogates
-        .iter()
-        .map(|&raw| bind_self_keyed(ctx, collection, Surrogate::new(raw)))
-        .collect::<crate::Result<Vec<_>>>()?;
+    let surrogates: Vec<Surrogate> = surrogates.iter().map(|&raw| Surrogate::new(raw)).collect();
     Ok(PhysicalPlan::Vector(VectorOp::BatchInsert {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         vectors: vectors.to_vec(),
@@ -394,27 +347,21 @@ pub(super) fn sparse_delete(collection: &str, field_name: &str, doc_id: &str) ->
 }
 
 pub(super) fn multi_vector_insert(
-    ctx: &DecodeCtx,
     collection: &str,
     field_name: &str,
     document_surrogate: u32,
     vectors: &[f32],
     count: usize,
     dim: usize,
-) -> crate::Result<PhysicalPlan> {
-    // Self-keyed bind (mirrors `batch_insert`'s headless path): all `count`
-    // vectors share this one carried surrogate, so binding by the
-    // surrogate's own bytes is enough to install the same identity on every
-    // replica without a separate PK.
-    let surrogate = bind_self_keyed(ctx, collection, Surrogate::new(document_surrogate))?;
-    Ok(PhysicalPlan::Vector(VectorOp::MultiVectorInsert {
+) -> PhysicalPlan {
+    PhysicalPlan::Vector(VectorOp::MultiVectorInsert {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         field_name: field_name.to_owned(),
-        document_surrogate: surrogate,
+        document_surrogate: Surrogate::new(document_surrogate),
         vectors: vectors.to_vec(),
         count,
         dim,
-    }))
+    })
 }
 
 pub(super) fn multi_vector_delete(
@@ -425,8 +372,7 @@ pub(super) fn multi_vector_delete(
     PhysicalPlan::Vector(VectorOp::MultiVectorDelete {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         field_name: field_name.to_owned(),
-        // Deletes an already-bound identity; no re-binding needed (mirrors
-        // `VectorDelete`, which carries no ctx interaction).
+        // Deletes an already-bound identity; nothing to bind.
         document_surrogate: Surrogate::new(document_surrogate),
     })
 }

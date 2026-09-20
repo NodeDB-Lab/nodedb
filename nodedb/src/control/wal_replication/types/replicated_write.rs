@@ -9,6 +9,7 @@ use super::wire_shapes::{
     ColumnarResolvedRow, ConstraintChangeOp, DocumentResolvedMutationWire, KvResolvedMutationWire,
     ReplicatedBatchEdge, ReplicatedSumTarget,
 };
+use nodedb_physical::physical_plan::document::MergeClauseOp;
 use nodedb_physical::physical_plan::{
     ColumnarInsertIntent, CrdtWriteVerb, UpdateValue, VectorDirectWriteIntent,
     VectorResolvedMutation, VectorWriteTargets,
@@ -930,6 +931,61 @@ pub enum ReplicatedWrite {
         /// Statement reply decided at resolve time; every replica returns it
         /// unchanged.
         response_payload: Vec<u8>,
+    },
+    /// A resolved autocommit `MERGE` apply pass (`DocumentOp::Merge` with
+    /// `resolved_inserts` and `source_rows` set). Carries every input the
+    /// Data Plane re-derives the classification from, so each replica applies
+    /// the same arms in Raft order: the source rows shipped at resolve time,
+    /// the pre-assigned NOT-MATCHED surrogates it verifies against
+    /// (`OllpRetryRequired` on drift, no write), and the resolved
+    /// materialized-sum targets. The write policy was decided on the proposing
+    /// node over the resolved arms; decode stamps `decided_earlier_in_request()`.
+    MergeApply {
+        target_collection: String,
+        source_collection: String,
+        source_alias: String,
+        target_join_col: String,
+        source_join_col: String,
+        clauses: Vec<MergeClauseOp>,
+        /// See `PointPut::returning`.
+        returning: Option<Vec<u8>>,
+        /// See `DocumentOp::Merge::resolved_inserts`.
+        resolved_inserts: Vec<(String, u32)>,
+        /// See `DocumentOp::Merge::resolved_insert_identities`.
+        resolved_insert_identities: Vec<(String, u32)>,
+        source_rows: Vec<(String, Vec<u8>)>,
+        /// See `PointPut::rls_filters`.
+        rls_filters: Vec<u8>,
+        /// See `PointPut::resolved_sum_targets`.
+        resolved_sum_targets: Vec<(String, u32)>,
+        /// See `PointPut::resolved_sum_target_bindings`.
+        resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
+        /// See `PointUpdate::declared_primary_key`.
+        declared_primary_key: Option<String>,
+    },
+    /// A resolved autocommit `UPDATE ... FROM` apply pass
+    /// (`DocumentOp::UpdateFromJoin` with `source_rows` set). Same contract as
+    /// `MergeApply`: the join map builds from the shipped rows on every
+    /// replica, the policy was decided on the proposing node.
+    UpdateFromJoinApply {
+        target_collection: String,
+        source_collection: String,
+        source_alias: String,
+        target_join_col: String,
+        source_join_col: String,
+        updates: Vec<(String, UpdateValue)>,
+        target_filters: Vec<u8>,
+        /// See `PointPut::returning`.
+        returning: Option<Vec<u8>>,
+        source_rows: Vec<(String, Vec<u8>)>,
+        /// See `PointPut::rls_filters`.
+        rls_filters: Vec<u8>,
+        /// See `PointPut::resolved_sum_targets`.
+        resolved_sum_targets: Vec<(String, u32)>,
+        /// See `PointPut::resolved_sum_target_bindings`.
+        resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
+        /// See `PointUpdate::declared_primary_key`.
+        declared_primary_key: Option<String>,
     },
 }
 

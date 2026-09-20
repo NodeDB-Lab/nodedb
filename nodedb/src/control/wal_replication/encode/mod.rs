@@ -9,6 +9,7 @@
 mod columnar;
 mod crdt;
 mod document;
+mod document_join;
 mod entry;
 mod entry_array;
 mod entry_columnar_family;

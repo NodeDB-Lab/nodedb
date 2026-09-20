@@ -3,12 +3,12 @@
 //! Decode the vector-primary direct-write wire variants back into
 //! `PhysicalPlan::Vector`.
 //!
-//! The insert family binds the leader-assigned surrogate to the row's
-//! primary key. `DELETE` / `UPDATE` carry their targets verbatim: a
-//! point-targeted write names the leader's surrogates, which every replica
-//! bound when the rows were inserted; a predicate-targeted write re-resolves
-//! the predicate against the replica's own sidecar rows, exactly as
-//! `KvPredicateDelete` does.
+//! Every surrogate is rebuilt verbatim from the record; `entry.rs` binds the
+//! insert family to its primary key afterwards. `DELETE` / `UPDATE` carry
+//! their targets verbatim: a point-targeted write names the leader's
+//! surrogates, which every replica bound when the rows were inserted; a
+//! predicate-targeted write re-resolves the predicate against the replica's
+//! own sidecar rows, exactly as `KvPredicateDelete` does.
 
 use nodedb_physical::physical_plan::{
     ReturningSpec, UpdateValue, VectorDirectWriteIntent, VectorOp, VectorResolvedMutation,
@@ -16,8 +16,6 @@ use nodedb_physical::physical_plan::{
 };
 use nodedb_types::Surrogate;
 
-use super::ctx::DecodeCtx;
-use super::vector::bind_self_keyed;
 use crate::bridge::envelope::PhysicalPlan;
 
 /// `ReplicatedWrite::VectorDirectDelete` → `VectorOp::DirectDelete`.
@@ -104,22 +102,8 @@ pub(super) struct DirectUpsertFields<'a> {
     pub(super) rls_filters: &'a [u8],
 }
 
-pub(super) fn direct_upsert(ctx: &DecodeCtx, f: DirectUpsertFields) -> crate::Result<PhysicalPlan> {
-    // Bind the leader-assigned surrogate to the row's primary key, so a
-    // later point read or delete on this replica resolves the same identity.
-    // A record with no key (a headless row) self-keys like a headless insert.
-    let carried = Surrogate::new(f.surrogate);
-    let surrogate = match ctx.assigner {
-        Some(a) if !f.pk_bytes.is_empty() => a.bind(
-            ctx.database_id,
-            ctx.tenant_id,
-            f.collection,
-            f.pk_bytes,
-            carried,
-        )?,
-        Some(_) => bind_self_keyed(ctx, f.collection, carried)?,
-        None => carried,
-    };
+pub(super) fn direct_upsert(f: DirectUpsertFields) -> crate::Result<PhysicalPlan> {
+    let surrogate = Surrogate::new(f.surrogate);
     let collection = nodedb_types::QualifiedCollection::from_stored(f.collection.to_owned());
     // Carried on the record — a replay re-executes this write for the
     // originating request, not just for the follower's own state.
@@ -186,58 +170,20 @@ pub(super) struct ResolvedDirectWriteFields<'a> {
 
 /// `ReplicatedWrite::VectorResolvedDirectWrite` → `VectorOp::ResolvedDirectWrite`.
 ///
-/// A `Delete` / `Update` names a surrogate every replica bound when the row
-/// was inserted. An `Upsert` binds the leader-assigned surrogate to the
-/// row's primary key here, exactly as [`direct_upsert`] does, so a later
-/// point read or delete on this replica resolves the same identity.
-pub(super) fn resolved_direct_write(
-    ctx: &DecodeCtx,
-    f: ResolvedDirectWriteFields<'_>,
-) -> crate::Result<PhysicalPlan> {
-    let mut mutations = Vec::with_capacity(f.mutations.len());
-    for mutation in f.mutations {
-        mutations.push(match mutation {
-            VectorResolvedMutation::Upsert {
-                surrogate,
-                pk_bytes,
-                vector,
-                payload,
-                old_payload,
-            } => {
-                let surrogate = match ctx.assigner {
-                    Some(a) if !pk_bytes.is_empty() => a.bind(
-                        ctx.database_id,
-                        ctx.tenant_id,
-                        f.collection,
-                        pk_bytes,
-                        *surrogate,
-                    )?,
-                    Some(_) => bind_self_keyed(ctx, f.collection, *surrogate)?,
-                    None => *surrogate,
-                };
-                VectorResolvedMutation::Upsert {
-                    surrogate,
-                    pk_bytes: pk_bytes.clone(),
-                    vector: vector.clone(),
-                    payload: payload.clone(),
-                    old_payload: old_payload.clone(),
-                }
-            }
-            VectorResolvedMutation::Delete { .. } | VectorResolvedMutation::Update { .. } => {
-                mutation.clone()
-            }
-        });
-    }
-    Ok(PhysicalPlan::Vector(VectorOp::ResolvedDirectWrite {
+/// Every mutation travels verbatim: a `Delete` / `Update` names a surrogate
+/// bound when the row was inserted, an `Upsert` carries the leader-assigned
+/// surrogate `entry.rs` binds to the row's primary key.
+pub(super) fn resolved_direct_write(f: ResolvedDirectWriteFields<'_>) -> PhysicalPlan {
+    PhysicalPlan::Vector(VectorOp::ResolvedDirectWrite {
         collection: nodedb_types::QualifiedCollection::from_stored(f.collection.to_owned()),
         field: f.field.to_owned(),
         quantization: f.quantization,
         storage_dtype: f.storage_dtype,
         payload_indexes: f.payload_indexes.to_vec(),
-        mutations,
+        mutations: f.mutations.to_vec(),
         response_payload: f.response_payload.to_vec(),
         // The leader decided the policy with a live identity before it
         // proposed; a replica applies what was committed.
         rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
-    }))
+    })
 }

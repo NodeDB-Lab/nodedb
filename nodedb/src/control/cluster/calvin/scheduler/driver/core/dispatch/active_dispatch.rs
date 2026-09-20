@@ -50,47 +50,50 @@ impl Scheduler {
             }
         };
         let has_non_derived_write = txn_has_non_derived_write(&plans);
-        let plans = match self.local_calvin_plans(plans, txn.tx_class.database_id, epoch, position)
-        {
-            Ok(p) if !p.is_empty() => p,
-            Ok(_) => {
-                // A dependent-read active txn dispatched here always carries a
-                // local write slice (the OLLP orchestrator only routes the write
-                // participant through this path). An empty local slice is a
-                // routing bug, not a read-only participant — surface it as a
-                // terminal routing failure rather than dispatching an
-                // active task with nothing to apply.
-                let e = crate::Error::Internal {
-                    detail: format!(
-                        "calvin active txn {epoch}/{position} homes no local write plans \
+        let mut plans =
+            match self.local_calvin_plans(plans, txn.tx_class.database_id, epoch, position) {
+                Ok(p) if !p.is_empty() => p,
+                Ok(_) => {
+                    // A dependent-read active txn dispatched here always carries a
+                    // local write slice (the OLLP orchestrator only routes the write
+                    // participant through this path). An empty local slice is a
+                    // routing bug, not a read-only participant — surface it as a
+                    // terminal routing failure rather than dispatching an
+                    // active task with nothing to apply.
+                    let e = crate::Error::Internal {
+                        detail: format!(
+                            "calvin active txn {epoch}/{position} homes no local write plans \
                          for vshard {}",
-                        self.vshard_id
-                    ),
-                };
-                error!(
-                    vshard_id = self.vshard_id,
-                    epoch,
-                    position,
-                    error = %e,
-                    "calvin scheduler: active txn homes no local writes; releasing locks"
-                );
-                self.propose_routing_failure(epoch, position, txn_id, &e);
-                self.on_txn_complete(txn_id);
-                return;
-            }
-            Err(e) => {
-                error!(
-                    vshard_id = self.vshard_id,
-                    epoch,
-                    position,
-                    error = %e,
-                    "calvin scheduler: active txn routing failed; releasing locks"
-                );
-                self.propose_routing_failure(epoch, position, txn_id, &e);
-                self.on_txn_complete(txn_id);
-                return;
-            }
-        };
+                            self.vshard_id
+                        ),
+                    };
+                    error!(
+                        vshard_id = self.vshard_id,
+                        epoch,
+                        position,
+                        error = %e,
+                        "calvin scheduler: active txn homes no local writes; releasing locks"
+                    );
+                    self.propose_routing_failure(epoch, position, txn_id, &e);
+                    self.on_txn_complete(txn_id);
+                    return;
+                }
+                Err(e) => {
+                    error!(
+                        vshard_id = self.vshard_id,
+                        epoch,
+                        position,
+                        error = %e,
+                        "calvin scheduler: active txn routing failed; releasing locks"
+                    );
+                    self.propose_routing_failure(epoch, position, txn_id, &e);
+                    self.on_txn_complete(txn_id);
+                    return;
+                }
+            };
+        if !self.bind_local_identities(&mut plans, txn.tx_class.database_id, tenant_id, txn_id) {
+            return;
+        }
         let has_primary_write = plans_have_primary_write(&plans, has_non_derived_write);
         let has_returning = plans_have_returning(&plans);
         let change_sets = participant_change_sets(&plans, tenant_id, self.vshard_id);
