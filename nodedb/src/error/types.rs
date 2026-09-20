@@ -378,6 +378,18 @@ pub enum Error {
     #[error("dispatch error: {detail}")]
     Dispatch { detail: String },
 
+    /// Per-tenant dispatch capacity is saturated: the request was NOT enqueued
+    /// and nothing was applied. The identical request is expected to succeed
+    /// once in-flight work drains, so callers must retry with backoff — never
+    /// treat this as a terminal dispatch failure (issue 352: a terminal read
+    /// turns the startup rebuild into an error storm).
+    #[error("tenant {tenant_id}: dispatch capacity busy ({inflight}/{cap} in-flight); retry")]
+    DispatchCapacityBusy {
+        tenant_id: u64,
+        inflight: u32,
+        cap: u32,
+    },
+
     #[error("storage error ({engine}): {detail}")]
     Storage { engine: String, detail: String },
 

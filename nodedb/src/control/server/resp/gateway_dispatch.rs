@@ -373,7 +373,9 @@ fn gateway_payloads_to_response(payloads: Vec<Vec<u8>>) -> Response {
 /// which Redis clients handle with automatic retry (same as Redis Cluster BUSY).
 fn map_busy_error(e: crate::Error) -> crate::Error {
     match &e {
-        crate::Error::Bridge { .. } | crate::Error::Dispatch { .. } => crate::Error::Bridge {
+        crate::Error::Bridge { .. }
+        | crate::Error::Dispatch { .. }
+        | crate::Error::DispatchCapacityBusy { .. } => crate::Error::Bridge {
             detail: "BUSY NodeDB is processing requests, retry later".into(),
         },
         _ => e,
