@@ -201,7 +201,14 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::DataPlane(code) => {
             crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate(code)
         }
-        _ => ("ERROR", sqlstate::INTERNAL_ERROR, err.to_string()),
+        // A variant with no arm of its own carries its class on the error:
+        // `classify` borrows it (the crate's one Error-to-NodeDbError map),
+        // then this table answers instead of a blanket `XX000`.
+        _ => (
+            "ERROR",
+            numeric_code_to_sqlstate(crate::error_classify::classify(err).code()),
+            err.to_string(),
+        ),
     }
 }
 
@@ -465,5 +472,106 @@ mod tests {
         let message = super::super::shaping_error_message(error.code(), error.message());
 
         assert!(message.contains("timestamp"));
+    }
+
+    /// A variant with no arm of its own still carries a class: the fallback
+    /// borrows it through `classify` and this table answers it.
+    #[test]
+    fn arm_less_variants_keep_their_class_through_the_fallback() {
+        use crate::Error;
+
+        let cases = vec![
+            (
+                Error::AppendOnlyViolation {
+                    collection: "c".into(),
+                    detail: "d".into(),
+                },
+                sqlstate::APPEND_ONLY_VIOLATION,
+            ),
+            (
+                Error::BalanceViolation {
+                    collection: "c".into(),
+                    detail: "d".into(),
+                },
+                sqlstate::BALANCE_VIOLATION,
+            ),
+            (
+                Error::InsufficientBalance {
+                    collection: "c".into(),
+                    key: "k".into(),
+                    detail: "d".into(),
+                },
+                sqlstate::CHECK_VIOLATION,
+            ),
+            (
+                Error::PeriodLocked {
+                    collection: "c".into(),
+                    detail: "d".into(),
+                },
+                sqlstate::PERIOD_LOCKED,
+            ),
+            (
+                Error::RetentionViolation {
+                    collection: "c".into(),
+                    detail: "d".into(),
+                },
+                sqlstate::RETENTION_VIOLATION,
+            ),
+            (
+                Error::LegalHoldActive {
+                    collection: "c".into(),
+                    detail: "d".into(),
+                },
+                sqlstate::LEGAL_HOLD_ACTIVE,
+            ),
+            (
+                Error::StateTransitionViolation {
+                    collection: "c".into(),
+                    detail: "d".into(),
+                },
+                sqlstate::STATE_TRANSITION_VIOLATION,
+            ),
+            (
+                Error::TransitionCheckViolation {
+                    collection: "c".into(),
+                    detail: "d".into(),
+                },
+                sqlstate::TRANSITION_CHECK_VIOLATION,
+            ),
+            (
+                Error::TypeGuardViolation {
+                    collection: "c".into(),
+                    detail: "d".into(),
+                },
+                sqlstate::TYPE_GUARD_VIOLATION,
+            ),
+            (
+                Error::TypeMismatch {
+                    collection: "c".into(),
+                    key: "k".into(),
+                    detail: "d".into(),
+                },
+                sqlstate::DATATYPE_MISMATCH,
+            ),
+            (
+                Error::MirrorReadOnly {
+                    database: "db".into(),
+                },
+                sqlstate::READ_ONLY_SQL_TRANSACTION,
+            ),
+            (
+                // Retryable in the lease paths, so the fallback must not read
+                // as a plan/syntax error now that it answers through `classify`.
+                Error::RetryableSchemaChanged {
+                    descriptor: "users".into(),
+                },
+                sqlstate::SERIALIZATION_FAILURE,
+            ),
+        ];
+
+        for (err, expected) in cases {
+            let (_severity, state, _message) = error_to_sqlstate(&err);
+            assert_eq!(state, expected, "{err:?}");
+        }
     }
 }
