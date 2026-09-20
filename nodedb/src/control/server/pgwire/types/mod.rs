@@ -11,7 +11,6 @@ pub mod internal_message;
 pub mod parse;
 pub mod privilege;
 
-pub(crate) use error_map::numeric_code_to_sqlstate;
 pub use error_map::{
     dml_fold_error_to_pg, error_to_pg, error_to_sqlstate, notice_warning,
     response_status_to_sqlstate, shape_error_to_pg, sqlstate_error,
