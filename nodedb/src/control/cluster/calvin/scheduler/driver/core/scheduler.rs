@@ -4,9 +4,10 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{debug, info};
 
 use nodedb_cluster::MultiRaft;
 use nodedb_cluster::calvin::types::SchedulerInput;
@@ -95,6 +96,12 @@ pub struct Scheduler {
     /// Rebuild target epoch (highest applied epoch from the initial recovery
     /// scan).
     pub(in crate::control::cluster::calvin::scheduler::driver::core) rebuild_target_epoch: u64,
+    /// Pacing gate for the catch-up drain while dispatch capacity is saturated
+    /// (issue 352): the stall tick defers its re-drive until this instant.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) dispatch_busy_until:
+        Option<Instant>,
+    /// Consecutive capacity-busy dispatch outcomes; drives the bounded backoff.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) dispatch_busy_attempts: u32,
     /// Highest replicated epoch observed across all scheduler inputs so far.
     /// Advances monotonically as `process_scheduler_input` sees new inputs; the
     /// lease-based reservation reap uses it (minus `LEASE_EPOCHS`) as the
@@ -218,6 +225,8 @@ impl Scheduler {
             read_result_rx,
             applied: AppliedGate::new(fully_applied_epoch, applied_tail),
             rebuild_target_epoch,
+            dispatch_busy_until: None,
+            dispatch_busy_attempts: 0,
             max_input_epoch: 0,
             config,
             metrics,
@@ -257,6 +266,22 @@ impl Scheduler {
             return false;
         }
         fully_applied >= self.rebuild_target_epoch
+    }
+
+    /// Bounded, deterministic backoff for a capacity-busy dispatch (issue 352).
+    ///
+    /// 5 ms doubling on consecutive busy outcomes, capped at 250 ms, plus a
+    /// small deterministic jitter derived from the vShard and epoch so peers do
+    /// not re-drive in lockstep. No RNG: the value is reproducible in tests.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn busy_backoff(
+        attempts: u32,
+        vshard_id: u32,
+        epoch: u64,
+    ) -> Duration {
+        let base = 5u64.saturating_mul(1u64 << attempts.min(6));
+        let capped = base.min(250);
+        let jitter = (u64::from(vshard_id).wrapping_add(epoch)) % 7;
+        Duration::from_millis(capped + jitter)
     }
 
     /// Publish an advanced fully-applied watermark to the metrics gauge and the
@@ -371,11 +396,24 @@ impl Scheduler {
                 }
 
                 _ = stall_tick.tick() => {
-                    // Replay any sequencer-fan-out inputs dropped on this replica
-                    // (channel Full/Closed) so a missed `SchedulerInput` never
-                    // permanently diverges this vShard's lock table from its peers.
-                    // O(1) common case (no pending catch-up). See `drain_catch_up`.
-                    self.drain_catch_up();
+                    // Issue 352: while dispatch capacity is saturated, defer the
+                    // catch-up drain's re-drive instead of spinning on a full
+                    // per-tenant queue. The next tick after the backoff retries.
+                    let now = Instant::now();
+                    if self.dispatch_busy_until.map(|t| now < t).unwrap_or(false) {
+                        debug!(
+                            vshard_id = self.vshard_id,
+                            "calvin scheduler: drain deferred (capacity busy)"
+                        );
+                    } else {
+                        self.dispatch_busy_until = None;
+                        // Replay any sequencer-fan-out inputs dropped on this
+                        // replica (channel Full/Closed) so a missed
+                        // `SchedulerInput` never permanently diverges this
+                        // vShard's lock table from its peers. O(1) common case
+                        // (no pending catch-up). See `drain_catch_up`.
+                        self.drain_catch_up();
+                    }
                     // The top-of-loop check_awaiting_verdict_stalls /
                     // check_dependent_barrier_timeouts do the stall work on every
                     // wake; this arm guarantees the loop wakes to run them (and the
@@ -564,5 +602,19 @@ mod tests {
             scheduler.is_caught_up(),
             "no rebuild target (greenfield node) must report caught-up"
         );
+    }
+
+    #[test]
+    fn busy_backoff_is_bounded_and_jittered() {
+        assert_eq!(Scheduler::busy_backoff(0, 0, 0), Duration::from_millis(5));
+        assert_eq!(Scheduler::busy_backoff(3, 0, 0), Duration::from_millis(40));
+        assert!(Scheduler::busy_backoff(30, 0, 0) <= Duration::from_millis(257));
+        // jitter varies with vshard + epoch and stays inside the 0..=6 ms band
+        assert_ne!(
+            Scheduler::busy_backoff(2, 1, 0),
+            Scheduler::busy_backoff(2, 1, 1)
+        );
+        assert!(Scheduler::busy_backoff(2, 0, 0) >= Duration::from_millis(20));
+        assert!(Scheduler::busy_backoff(2, 0, 6) <= Duration::from_millis(26));
     }
 }

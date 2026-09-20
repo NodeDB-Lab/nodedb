@@ -198,6 +198,11 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
 
         Error::Wal(wal_err) => NodeDbError::wal(wal_err),
         Error::Dispatch { detail } => NodeDbError::dispatch(detail),
+        // Retryable capacity condition (issue 352): classified like a dispatch
+        // failure, and the pgwire gateway maps it to BUSY so clients retry.
+        Error::DispatchCapacityBusy { tenant_id, .. } => {
+            NodeDbError::dispatch(format!("tenant {tenant_id}: dispatch capacity busy; retry"))
+        }
         Error::Storage { detail, .. } => NodeDbError::storage(detail),
         Error::ColdStorage { detail } => NodeDbError::cold_storage(detail),
         Error::Serialization { format, detail } => {

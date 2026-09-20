@@ -171,11 +171,13 @@ impl Dispatcher {
         if self.max_per_tenant_inflight > 0 {
             let inflight = self.tenant_inflight.get(&tenant_id).copied().unwrap_or(0);
             if inflight >= self.max_per_tenant_inflight {
-                return Err(crate::Error::Dispatch {
-                    detail: format!(
-                        "tenant {tenant_id}: queue full ({inflight}/{} in-flight)",
-                        self.max_per_tenant_inflight
-                    ),
+                // Retryable by type (issue 352): the request was not enqueued
+                // and nothing was applied. The Calvin scheduler backs off and
+                // re-drives instead of logging an error per attempt.
+                return Err(crate::Error::DispatchCapacityBusy {
+                    tenant_id,
+                    inflight,
+                    cap: self.max_per_tenant_inflight,
                 });
             }
         }
@@ -557,6 +559,28 @@ mod tests {
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].status, Status::Ok);
         assert_eq!(&*responses[0].payload, b"result");
+    }
+
+    /// A full per-tenant queue must surface as a *retryable capacity*
+    /// condition, never as a generic `Error::Dispatch` that callers treat as a
+    /// terminal failure. Issue 352: the Calvin scheduler completes the
+    /// transaction as failed and logs ERROR on `Error::Dispatch`, which turns
+    /// the startup rebuild into an error storm.
+    #[test]
+    fn full_queue_is_a_retryable_capacity_condition() {
+        let (mut dispatcher, _data_sides) = Dispatcher::new(1, 4);
+        for i in 0..4u64 {
+            dispatcher
+                .dispatch(make_request_for_db(0, i + 1, i + 1))
+                .unwrap();
+        }
+        let err = dispatcher
+            .dispatch(make_request_for_db(0, 99, 99))
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::Error::DispatchCapacityBusy { .. }),
+            "a full queue must be a retryable capacity signal (issue 352); got {err:?}"
+        );
     }
 
     #[test]

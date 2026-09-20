@@ -17,6 +17,8 @@ pub const EXECUTOR_TXN_DURATION_BUCKETS: &[u64] = &[1, 5, 10, 50, 100, 500, 1000
 pub struct SchedulerMetrics {
     /// Total transactions dispatched to the Data Plane executor.
     pub dispatch_count: AtomicU64,
+    /// Total dispatches deferred because a per-tenant queue was full (issue 352).
+    pub dispatch_busy_count: AtomicU64,
     /// Total transactions that were blocked on lock acquisition.
     pub blocked_count: AtomicU64,
     /// Total lock-wait duration in milliseconds (sum across all txns).
@@ -87,6 +89,11 @@ impl SchedulerMetrics {
     /// Record that a transaction was dispatched.
     pub fn record_dispatch(&self) {
         self.dispatch_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record that a dispatch was deferred: the per-tenant queue was full.
+    pub fn record_dispatch_busy(&self) {
+        self.dispatch_busy_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record that a transaction was blocked on lock acquisition.
@@ -298,6 +305,7 @@ impl Default for SchedulerMetrics {
     fn default() -> Self {
         Self {
             dispatch_count: AtomicU64::new(0),
+            dispatch_busy_count: AtomicU64::new(0),
             blocked_count: AtomicU64::new(0),
             lock_wait_ms_total: AtomicU64::new(0),
             completed_count: AtomicU64::new(0),
