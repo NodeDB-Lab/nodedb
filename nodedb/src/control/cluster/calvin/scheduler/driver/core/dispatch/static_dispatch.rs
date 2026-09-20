@@ -288,6 +288,7 @@ impl Scheduler {
                 let attempts = self.dispatch_busy_attempts.saturating_add(1);
                 self.dispatch_busy_attempts = attempts;
                 self.dispatch_busy_until = Some(
+                    // no-determinism: the backoff deadline is scheduler observability, not Calvin WAL data
                     Instant::now()
                         + super::scheduler::Scheduler::busy_backoff(
                             attempts,

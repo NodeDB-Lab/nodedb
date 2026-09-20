@@ -283,6 +283,7 @@ impl Scheduler {
         let attempts = self.dispatch_busy_attempts.saturating_add(1);
         self.dispatch_busy_attempts = attempts;
         self.dispatch_busy_until =
+            // no-determinism: the backoff deadline is scheduler observability, not Calvin WAL data
             Some(Instant::now() + Self::busy_backoff(attempts, self.vshard_id, epoch));
         true
     }
@@ -431,6 +432,7 @@ impl Scheduler {
                     // Issue 352: while dispatch capacity is saturated, defer the
                     // catch-up drain's re-drive instead of spinning on a full
                     // per-tenant queue. The next tick after the backoff retries.
+                    // no-determinism: the drain gate reads the wall clock; not Calvin WAL data
                     let now = Instant::now();
                     if self.dispatch_busy_until.map(|t| now < t).unwrap_or(false) {
                         debug!(
