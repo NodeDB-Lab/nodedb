@@ -34,7 +34,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Upper bound on the whole wait. Generous relative to a randomized election
 /// timeout plus replay of a retained log, but finite: a group that cannot elect
 /// or cannot apply is a failure, not a reason to hang forever.
-pub const DATA_GROUP_RECOVERY_TIMEOUT: Duration = Duration::from_secs(60);
+pub const DATA_GROUP_RECOVERY_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// True when `group_id` names a data group whose log carries user writes that
 /// must be replayed into the Data Plane before queries are served.
