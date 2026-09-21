@@ -346,8 +346,8 @@ pub enum Error {
     #[error("invalid {clause} value: {value}")]
     InvalidLimitValue { clause: &'static str, value: String },
 
-    /// Descriptor lease conflict; pgwire retries within `PLAN_RETRY_BUDGET`.
-    #[error("retryable schema change on {descriptor}")]
+    /// Retried within `PLAN_RETRY_BUDGET`; every path renders this wording from `Display`.
+    #[error("schema changed during execution ({descriptor}); please retry")]
     RetryableSchemaChanged { descriptor: String },
 
     /// Leader-change overwrite; callers must re-propose to avoid false success.

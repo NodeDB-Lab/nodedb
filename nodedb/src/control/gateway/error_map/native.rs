@@ -26,10 +26,7 @@ impl GatewayErrorMap {
                 (CODE_NOT_LEADER, format!("not leader; hint: {leader_addr}"))
             }
             Error::DeadlineExceeded { .. } => (CODE_DEADLINE, err.to_string()),
-            Error::RetryableSchemaChanged { descriptor } => (
-                CODE_SCHEMA_CHANGED,
-                format!("schema changed ({descriptor})"),
-            ),
+            Error::RetryableSchemaChanged { .. } => (CODE_SCHEMA_CHANGED, err.to_string()),
             Error::CollectionNotFound { collection, .. } => (
                 CODE_NOT_FOUND,
                 format!("collection \"{collection}\" not found"),

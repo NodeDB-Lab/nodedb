@@ -23,10 +23,7 @@ impl GatewayErrorMap {
                 format!("cluster in leader election; leader hint: {leader_addr}"),
             ),
             Error::DeadlineExceeded { .. } => (504, err.to_string()),
-            Error::RetryableSchemaChanged { descriptor } => (
-                503,
-                format!("schema changed during execution ({descriptor}); please retry"),
-            ),
+            Error::RetryableSchemaChanged { .. } => (503, err.to_string()),
             Error::CollectionNotFound { collection, .. } => {
                 (404, format!("collection \"{collection}\" does not exist"))
             }

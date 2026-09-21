@@ -8,11 +8,8 @@ use crate::Error;
 impl GatewayErrorMap {
     /// Map a gateway error into `(sqlstate, message)` for pgwire.
     ///
-    /// One table answers for the direct and the routed path. This mapper's 14
-    /// arms restated the direct table, but its own catch-all sent the 26
-    /// variants the direct table classifies and it did not list to `XX000`.
-    /// A client must not see a different class because a statement crossed the
-    /// gateway.
+    /// One table answers for the direct and the routed path, so a client sees
+    /// the same class and message for a given error either way.
     pub fn to_pgwire(err: &Error) -> (&'static str, String) {
         let (_severity, state, message) =
             crate::control::server::pgwire::types::error_to_sqlstate(err);
@@ -40,8 +37,8 @@ mod tests {
         assert_eq!(code, sqlstate::QUERY_CANCELED);
     }
 
-    /// The gateway previously stated this arm itself; both paths now answer
-    /// `INTERNAL_ERROR` from the shared table, with the variant's own message.
+    /// Both paths answer `INTERNAL_ERROR` from the shared table, with the
+    /// variant's own message naming the descriptor.
     #[test]
     fn pgwire_schema_changed() {
         let (code, msg) = GatewayErrorMap::to_pgwire(&schema_changed());
@@ -74,9 +71,8 @@ mod tests {
         assert_eq!(code, sqlstate::INTERNAL_ERROR);
     }
 
-    /// A routed fault keeps the class the direct path gives it. The gateway's
-    /// own arms restated the direct table, but the 26 variants the direct table
-    /// classifies and the gateway did not list reached the client as XX000.
+    /// For every classified variant, the routed class equals the direct class,
+    /// and the direct class is not `XX000`.
     #[test]
     fn gateway_and_direct_mapper_agree_on_classified_errors() {
         use crate::types::{DatabaseId, TenantId};

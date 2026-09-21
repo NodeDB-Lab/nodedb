@@ -115,16 +115,16 @@ async fn drain_forces_plan_retry_surfacing_typed_error() {
     })
     .await;
 
-    // A SELECT should fail fast: the pgwire retry helper makes
-    // 3 attempts, each hits the drain check, each surfaces
-    // `RetryableSchemaChanged`. After the retry budget the
-    // error maps to a plan error visible to the client.
+    // A SELECT must fail fast: the pgwire retry helper makes 3 attempts,
+    // each hits the drain check and surfaces `RetryableSchemaChanged`; after
+    // the retry budget the client reads that variant's Display text.
     let result = leader.exec("SELECT * FROM retry_me").await;
     assert!(result.is_err(), "SELECT must fail while drain is active");
     let err = result.unwrap_err();
     assert!(
-        err.to_lowercase().contains("retryable schema change")
-            || err.to_lowercase().contains("plan error"),
+        err.to_lowercase()
+            .contains("schema changed during execution")
+            || err.to_lowercase().contains("please retry"),
         "unexpected error variant: {err}"
     );
 
