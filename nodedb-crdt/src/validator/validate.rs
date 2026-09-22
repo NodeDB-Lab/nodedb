@@ -133,8 +133,7 @@ impl Validator {
         // Check auth expiry: agents that accumulated deltas offline must
         // re-authenticate before syncing.
         if auth.auth_expires_at > 0 {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let now_ms = nodedb_types::clock::since_epoch()
                 .unwrap_or_default()
                 .as_millis() as u64;
             if now_ms > auth.auth_expires_at {
@@ -147,8 +146,7 @@ impl Validator {
 
         self.verify_delta_auth(&change.collection, &auth, &delta_bytes)?;
 
-        let hlc_timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let hlc_timestamp = nodedb_types::clock::since_epoch()
             .unwrap_or_default()
             .as_millis() as u64;
 

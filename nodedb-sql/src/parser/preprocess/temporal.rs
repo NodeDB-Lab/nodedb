@@ -251,8 +251,7 @@ fn parse_temporal_expr(token: &str) -> Result<i64, TemporalParseError> {
 
     // NOW() — case-insensitive
     if t.to_uppercase() == "NOW()" {
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let ms = nodedb_types::clock::since_epoch()
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
         return Ok(ms);
@@ -579,17 +578,11 @@ mod tests {
 
     #[test]
     fn as_of_system_time_now() {
-        let before = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let before = nodedb_types::clock::since_epoch().unwrap().as_millis() as i64;
         let ex = extract("SELECT * FROM array_slice('g', '{}') AS OF SYSTEM TIME NOW()")
             .unwrap()
             .unwrap();
-        let after = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let after = nodedb_types::clock::since_epoch().unwrap().as_millis() as i64;
         let ts = ex
             .temporal
             .system_time
