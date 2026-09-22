@@ -41,3 +41,5 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 toml = { workspace = true }
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+js-sys = "0.3"

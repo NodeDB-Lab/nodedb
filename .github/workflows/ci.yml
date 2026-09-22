@@ -10,6 +10,12 @@
 #   - Actions → CI → Run workflow, against any branch.
 #
 # While the label is on, every subsequent push to the PR re-runs the suite.
+#
+# A nightly schedule probes the same suites against `main` itself. Nothing
+# else reports a red `main`: the label gate keeps upstream churn out of PR
+# runs, so without this the first run to notice a broken main is the next PR
+# a maintainer labels. GitHub sends failure notifications for a scheduled run
+# to whoever last edited the cron line.
 
 name: CI
 
@@ -18,6 +24,8 @@ on:
     branches: [main]
     types: [labeled, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *" # 04:00 UTC daily; staggered from NodeDB-Lite's 03:00
 
 concurrency:
   group: ci-${{ github.ref }}
