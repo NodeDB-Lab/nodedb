@@ -242,8 +242,11 @@ Uses:
 - `Strong` — returns `STALE_READ_NOT_LEADER` with source endpoint hint
 - `Eventual` — served immediately
 
+The level is a session setting, not a query clause:
+
 ```sql
-SELECT * FROM orders CONSISTENCY='bounded_staleness';  -- served from mirror
+SET default_read_consistency = 'bounded_staleness:5s';  -- served from the mirror
+SELECT * FROM orders;
 ```
 
 ### Bootstrap and Lag
