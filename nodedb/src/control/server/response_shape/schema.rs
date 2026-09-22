@@ -3,10 +3,10 @@
 //! Planner-authoritative output schema types, plus the type mapping from the
 //! planner's `SqlDataType` to the response shaper's wire-facing `DdlColType`.
 //!
-//! Nothing in this module is consumed by existing call sites yet; it is a
-//! purely additive foundation for later threading the planner's resolved
-//! output schema into response shaping (replacing the SQL-string re-parse
-//! path).
+//! The planner derives the schema from the compiled plan and the catalog, and
+//! the session caches it with the physical tasks (`session/plan_cache.rs`).
+//! Shaping receives it as `MaterializedShapeRequest::projection`, which drives
+//! projection and the Control-Plane computed columns.
 
 /// One output column of a resolved query, as known by the planner.
 ///

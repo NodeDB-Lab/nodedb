@@ -132,13 +132,13 @@ async fn crdt_merge_in_non_default_database_is_rls_enforced() {
         "a write policy on a non-default-database CRDT collection must reject \
          a CRDT MERGE its predicate forbids",
     );
-    // `CRDT MERGE`'s handler wraps every admission failure — RLS denial
-    // included — under this one SQLSTATE (`crdt_merge.rs`'s `dispatch_...
-    // .map_err(|e| ddl_err("XX000", ...))`); the substantive assertion is
-    // that an error surfaces here at all, since pre-fix the merge applied
-    // silently and no error, of any code, reached the client.
+    // `CRDT MERGE`'s handler classifies every admission failure — an RLS
+    // denial reaches the client as `42501`. Pre-fix the merge applied
+    // silently and no error, of any code, reached the client, so the
+    // substantive assertion stays "an error surfaces at all"; the code is
+    // pinned because a denial is the one case a client can act on.
     assert_eq!(
-        sqlstate, "XX000",
+        sqlstate, "42501",
         "expected the CRDT admission failure's SQLSTATE, got: {sqlstate}"
     );
     assert_eq!(
@@ -199,7 +199,7 @@ async fn crdt_merge_in_default_database_is_still_rls_enforced() {
          MERGE its predicate forbids",
     );
     assert_eq!(
-        sqlstate, "XX000",
+        sqlstate, "42501",
         "expected the CRDT admission failure's SQLSTATE, got: {sqlstate}"
     );
     assert_eq!(
