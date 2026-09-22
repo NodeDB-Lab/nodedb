@@ -28,3 +28,28 @@ pub fn since_epoch() -> Option<Duration> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::since_epoch;
+
+    /// The helper exists so callers never reach `SystemTime::now()` on a
+    /// target that has no clock. It must answer on every target it builds for.
+    #[test]
+    fn since_epoch_is_available() {
+        let elapsed = since_epoch().expect("clock reads after the Unix epoch");
+        assert!(
+            elapsed.as_secs() > 1_600_000_000,
+            "clock reads a date after 2020: {elapsed:?}"
+        );
+    }
+
+    /// Callers assume the clock does not go backwards between two reads
+    /// (HLC monotonicity, retry stamps, auth expiry).
+    #[test]
+    fn since_epoch_does_not_go_backwards() {
+        let first = since_epoch().expect("clock");
+        let second = since_epoch().expect("clock");
+        assert!(second >= first, "{second:?} is before {first:?}");
+    }
+}
