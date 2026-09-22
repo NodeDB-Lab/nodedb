@@ -32,8 +32,10 @@ pub type DurMs = u64;
 /// easier to detect than `i64::MAX`. Logs the condition once per process via
 /// `tracing::error!` to alert operators.
 ///
-/// # TODO(post-launch): funnel direct `SystemTime::now()` callers through this
-/// helper so all inline clock-read sites also get the once-per-process log.
+/// Inline clock reads go through `crate::clock::since_epoch()`, which owns the
+/// target split. This helper keeps its own contract — substitute `0` and log
+/// once per process — for callers that want a value rather than a `Result`;
+/// callers that must surface a pre-epoch clock keep their own error mapping.
 pub fn current_wall_ms() -> WallMs {
     crate::clock::since_epoch()
         .map(|d| d.as_millis().min(i64::MAX as u128) as i64)

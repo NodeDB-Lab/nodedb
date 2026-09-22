@@ -451,10 +451,9 @@ fn clone_chain_depth(state: &SharedState, start_db_id: DatabaseId) -> crate::Res
 /// Returns `Err` if the system clock is set before the Unix epoch — caller
 /// must surface the failure rather than silently substituting a sentinel.
 fn current_wall_ms() -> crate::Result<i64> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    nodedb_types::clock::since_epoch()
         .map(|d| d.as_millis() as i64)
-        .map_err(|e| crate::Error::Internal {
-            detail: format!("clone_database: system clock predates Unix epoch: {e}"),
+        .ok_or_else(|| crate::Error::Internal {
+            detail: "clone_database: system clock predates Unix epoch".to_owned(),
         })
 }
