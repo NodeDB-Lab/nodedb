@@ -1043,7 +1043,7 @@ AS OF VALID TIME 1700000000000;
 
 Time values are milliseconds since Unix epoch. For current time, use `extract(epoch from now()) * 1000` or `(SELECT extract(epoch from now() at time zone 'utc') * 1000)`.
 
-See [Bitemporal Queries](../bitemporal.md) for detailed use cases.
+See [Bitemporal Queries](bitemporal.md) for detailed use cases.
 
 ## Transactions
 
@@ -1299,7 +1299,7 @@ SHOW USERS;
 - [Getting Started](getting-started.md) — First queries walkthrough
 - [Architecture](architecture.md) — How the three-plane execution model works
 - Engine guides: [Vectors](vectors.md) | [Graph](graph.md) | [Documents](documents.md) | [KV](kv.md) | [Timeseries](timeseries.md) | [Spatial](spatial.md) | [Full-Text](full-text-search.md) | [Array](array.md)
-- [Bitemporal Queries](../bitemporal.md) — System time and valid time semantics
-- [WASM](../wasm.md) — Browser and Node.js deployment
+- [Bitemporal Queries](bitemporal.md) — System time and valid time semantics
+- [WASM](wasm.md) — Browser and Node.js deployment
 
 [Back to docs](README.md)

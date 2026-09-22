@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Prometheus-compatible PromQL HTTP API at `/obsv/api/v1/*`.
+//! Prometheus-compatible PromQL HTTP API at `/v1/obsv/api/v1/*`.
 //!
-//! Grafana data source URL: `http://nodedb:6480/obsv/api`
+//! Grafana data source URL: `http://nodedb:6480/v1/obsv/api`
 
 pub mod buildinfo;
 pub mod handlers;
