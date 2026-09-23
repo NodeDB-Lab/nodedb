@@ -11,6 +11,14 @@ use std::collections::HashMap;
 use nodedb_types::SparseVector;
 use serde::{Deserialize, Serialize};
 
+/// One document of a [`SparseInvertedIndex`]: its internal id and its
+/// `(dimension, weight)` entries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SparseDocImage {
+    internal_id: u32,
+    entries: Vec<(u32, f32)>,
+}
+
 /// Inverted index for sparse vectors.
 ///
 /// For each dimension that appears in any document's sparse vector, stores
@@ -108,6 +116,59 @@ impl SparseInvertedIndex {
                 }
             }
         }
+    }
+
+    /// The internal id and entries of `doc_id`, or `None` when absent.
+    pub fn doc_image(&self, doc_id: &str) -> Option<SparseDocImage> {
+        let internal_id = *self.doc_id_forward.get(doc_id)?;
+        let entries = self
+            .doc_dims
+            .get(&internal_id)
+            .map(|dims| {
+                dims.iter()
+                    .filter_map(|dim| {
+                        let list = self.postings.get(dim)?;
+                        let weight = list.iter().find(|(id, _)| *id == internal_id)?.1;
+                        Some((*dim, weight))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(SparseDocImage {
+            internal_id,
+            entries,
+        })
+    }
+
+    /// The internal id the next insert takes.
+    pub fn next_internal_id(&self) -> u32 {
+        self.next_id
+    }
+
+    /// Put `doc_id` back to `prior` (absent when `None`) and the internal id
+    /// counter back to `next_id`. A rollback uses it to withdraw a write, so
+    /// the next insert takes the id it would have taken without it.
+    pub fn roll_back_doc(&mut self, doc_id: &str, prior: Option<&SparseDocImage>, next_id: u32) {
+        if let Some(current) = self.doc_id_forward.remove(doc_id) {
+            self.remove_internal(current);
+            self.doc_id_reverse.remove(&current);
+            self.doc_count -= 1;
+        }
+        if let Some(prior) = prior {
+            let id = prior.internal_id;
+            let mut dims = Vec::with_capacity(prior.entries.len());
+            for &(dim, weight) in &prior.entries {
+                let list = self.postings.entry(dim).or_default();
+                let at = list.partition_point(|(existing, _)| *existing < id);
+                list.insert(at, (id, weight));
+                dims.push(dim);
+            }
+            self.doc_dims.insert(id, dims);
+            self.doc_id_forward.insert(doc_id.to_string(), id);
+            self.doc_id_reverse.insert(id, doc_id.to_string());
+            self.doc_count += 1;
+        }
+        self.next_id = self.next_id.min(next_id);
     }
 
     /// Get the posting list for a dimension.
@@ -293,5 +354,37 @@ mod tests {
 
         let postings = idx.get_postings(5).unwrap();
         assert_eq!(postings.len(), 3);
+    }
+
+    #[test]
+    fn a_rolled_back_upsert_restores_the_prior_entries_and_id_counter() {
+        let mut idx = SparseInvertedIndex::new();
+        idx.insert("doc1", &make_sv(&[(10, 0.5), (20, 0.8)]));
+        idx.insert("doc2", &make_sv(&[(10, 0.1)]));
+        let prior = idx.doc_image("doc1");
+        let next_id = idx.next_internal_id();
+
+        idx.insert("doc1", &make_sv(&[(30, 0.9)]));
+        idx.roll_back_doc("doc1", prior.as_ref(), next_id);
+
+        assert_eq!(idx.doc_image("doc1"), prior);
+        assert_eq!(idx.next_internal_id(), next_id);
+        assert!(idx.get_postings(30).is_none());
+        assert_eq!(
+            idx.get_postings(10).map(<[(u32, f32)]>::to_vec),
+            Some(vec![(0, 0.5), (1, 0.1)]),
+            "the restored posting keeps its id order"
+        );
+    }
+
+    #[test]
+    fn a_rolled_back_insert_of_a_new_document_removes_it() {
+        let mut idx = SparseInvertedIndex::new();
+        let next_id = idx.next_internal_id();
+        idx.insert("doc1", &make_sv(&[(10, 0.5)]));
+        idx.roll_back_doc("doc1", None, next_id);
+        assert!(idx.doc_image("doc1").is_none());
+        assert_eq!(idx.doc_count(), 0);
+        assert!(idx.get_postings(10).is_none());
     }
 }

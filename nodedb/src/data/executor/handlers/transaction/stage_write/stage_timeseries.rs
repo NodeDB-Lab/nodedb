@@ -5,10 +5,11 @@
 //! A timeseries INSERT issued inside a `BEGIN..COMMIT` block is staged here,
 //! one overlay `Put` per row, so a later same-transaction RAW timeseries
 //! SELECT observes the newly inserted rows (read-your-own-writes) before
-//! COMMIT. COMMIT durable replay is unchanged: the buffered
-//! `TimeseriesOp::Ingest` plan is still replayed through
-//! `execute_timeseries_ingest` inside the COMMIT `TransactionBatch`, which
-//! remains the sole durable apply.
+//! COMMIT. COMMIT resolves the buffered `TimeseriesOp::Ingest` plan into a
+//! redo sub-record, which is the sole durable apply. The staged batch records
+//! the instant it read as its default row timestamp, and resolve stamps the
+//! batch's untimed rows with that instant, so every replica stores the rows
+//! the statement decided.
 //!
 //! No memtable mutation at statement time: staging writes ONLY into the
 //! per-transaction overlay (`txn_overlays`), never into `columnar_memtables`.
@@ -144,6 +145,11 @@ impl CoreLoop {
             );
         }
 
+        // The default timestamp of every untimed row in this batch. The write
+        // policy decides against it here, and COMMIT resolve stamps the rows
+        // with it, so the stored image is the one decided.
+        let now_ms = self.ingest_now_ms();
+
         // Decide the whole batch before the first staged put, so a refusal
         // leaves the overlay untouched and reports no affected count.
         //
@@ -166,7 +172,7 @@ impl CoreLoop {
                 crate::types::TenantId::new(tid),
                 collection,
             ),
-            self.ingest_now_ms(),
+            now_ms,
             tid,
             collection,
         ) {
@@ -216,6 +222,7 @@ impl CoreLoop {
             }
             staged += 1;
         }
+        self.note_staged_ingest_now(task, tid, txn_id, collection, surrogates, now_ms);
 
         self.stage_count_response(task, staged)
     }
@@ -307,6 +314,7 @@ impl CoreLoop {
                 },
             );
         }
+        let now_ms = self.ingest_now_ms();
         // The write policy decides the parsed lines, through the very same
         // helper the Data-Plane ingest gate uses, so the statement-time
         // decision and the COMMIT-time one are made on a byte-identical image.
@@ -320,7 +328,7 @@ impl CoreLoop {
                 crate::types::TenantId::new(tid),
                 collection,
             ),
-            self.ingest_now_ms(),
+            now_ms,
             tid,
             collection,
         ) {
@@ -436,6 +444,7 @@ impl CoreLoop {
                 return self.response_error(task, error);
             }
         }
+        self.note_staged_ingest_now(task, tid, txn_id, collection, surrogates, now_ms);
         self.stage_count_response(task, lines.len())
     }
 

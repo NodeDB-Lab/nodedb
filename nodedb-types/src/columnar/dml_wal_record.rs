@@ -109,6 +109,7 @@ mod tests {
             payload: vec![1, 2, 3],
             provenance: None,
             surrogates: Vec::new(),
+            conflict_policy: Vec::new(),
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode");
         let as_dml_record: Result<ColumnarDmlWalRecord, _> = zerompk::from_msgpack(&bytes);

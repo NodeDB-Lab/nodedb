@@ -218,7 +218,10 @@ impl CoreLoop {
             return self.ivf_insert(task, tid, &key, vector, dim, surrogate);
         }
 
-        // Default: HNSW (with or without PQ).
+        // Default: HNSW (with or without PQ). A committed-redo install seals
+        // once the whole record landed, so a rollback finds its inserts in
+        // the growing segment.
+        let defer_seal = self.recording_redo_undo();
         match self.get_or_create_vector_index(database_id, tid, collection, dim, field_name) {
             Ok(collection_ref) => {
                 collection_ref.insert_with_surrogate(vector.to_vec(), surrogate);
@@ -231,7 +234,8 @@ impl CoreLoop {
                     collection_ref.note_checkpoint_lsn(lsn.as_u64());
                 }
                 let seal_key = CoreLoop::vector_build_key(&index_key);
-                if collection_ref.needs_seal()
+                if !defer_seal
+                    && collection_ref.needs_seal()
                     && let Some(req) = collection_ref.seal(&seal_key)
                     && let Some(tx) = &self.build_tx
                     && let Err(e) = tx.send(req)

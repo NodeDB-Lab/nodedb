@@ -43,6 +43,9 @@ pub(super) struct ArrayWriteSubmit {
     /// the entry carries none. Passed through as the redo record's
     /// `now_override` so this replica records the value its peers recorded.
     pub resolved_now_ms: Option<u64>,
+    /// The idempotency key of the committed entry, carried by the redo
+    /// record's header.
+    pub apply_key: u64,
     /// Contextual label for the error surfaced to the propose waiter.
     pub op_label: &'static str,
 }
@@ -70,6 +73,7 @@ pub(super) async fn submit_array_write(
         plan,
         event_source,
         resolved_now_ms,
+        apply_key,
         op_label,
     } = params;
 
@@ -92,6 +96,7 @@ pub(super) async fn submit_array_write(
             // durability path than this record's replay.
             durability: WalDurability::AppendHere {
                 now_override: resolved_now_ms,
+                apply_key,
             },
             // Raft committed this entry at a fixed log index and every replica
             // applies it in that order; re-entering the write-admission gate

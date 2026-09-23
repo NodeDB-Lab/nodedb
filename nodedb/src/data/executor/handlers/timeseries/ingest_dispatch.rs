@@ -16,6 +16,12 @@ use crate::data::executor::task::ExecutionTask;
 pub(in crate::data::executor) enum TimeseriesApplyMode {
     Immediate,
     CommitDeferred,
+    /// The install pass of a committed redo record. The memtable flushes the
+    /// rows it already holds when it has no room, then the ingest records
+    /// the pre-image its undo restores. No flush, budget recharge or timer
+    /// update runs after the rows land: the apply settles those once the
+    /// whole record installed (`settle_redo_timeseries`).
+    RedoInstall,
 }
 
 /// Parameters for a timeseries ingest operation on the Data Plane.
@@ -148,13 +154,19 @@ impl CoreLoop {
         };
         // A record written before a later truncate describes rows the
         // truncate removed: the same "nothing to write" answer as a record
-        // already on disk.
+        // already on disk. Strictly before: a record at the truncate's own LSN
+        // is a sibling sub-record of the same transaction redo group, applied
+        // in the order the transaction wrote it.
         let already_flushed = already_flushed
             || wal_lsn.is_some_and(|lsn| {
                 self.ts_truncate_floors
                     .get(&key)
-                    .is_some_and(|floor| lsn <= *floor)
+                    .is_some_and(|floor| lsn < *floor)
             });
+        // Both tests are restart-replay watermarks. A committed-redo apply
+        // installs its record once, whatever a live flush or truncate stamped
+        // since the record's LSN was minted.
+        let already_flushed = self.replay_watermark_skips(already_flushed);
 
         if already_flushed {
             if let Some(prov) = provenance
@@ -204,7 +216,12 @@ impl CoreLoop {
             };
         }
 
-        let now_ms = self.ingest_now_ms();
+        // The instant the write funnel resolved and the WAL record carries,
+        // so live apply and replay stamp untimed rows alike.
+        let now_ms = task
+            .resolved_now_ms()
+            .and_then(|ms| i64::try_from(ms).ok())
+            .unwrap_or_else(|| self.ingest_now_ms());
 
         let ingest_response = match format {
             "ilp" => self.execute_ilp_ingest(TimeseriesIngestParams {
@@ -267,13 +284,13 @@ impl CoreLoop {
 
         if let Some(prov) = provenance
             && ingest_response.status == Status::Ok
-            && mode == TimeseriesApplyMode::Immediate
+            && mode != TimeseriesApplyMode::CommitDeferred
         {
             self.sync_commit(prov);
             let applied_seq = self.sync_hwm_value(prov.producer_id, prov.stream_id);
             return self.sync_ack_response(task, AckStatus::Applied, applied_seq);
         }
-        if ingest_response.status == Status::Ok && mode == TimeseriesApplyMode::Immediate {
+        if ingest_response.status == Status::Ok && mode != TimeseriesApplyMode::CommitDeferred {
             self.note_collection_write_lsn(task, collection);
         }
         ingest_response

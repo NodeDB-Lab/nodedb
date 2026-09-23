@@ -40,8 +40,8 @@ pub use crdt::{CrdtOp, CrdtWriteVerb};
 pub use document::{
     BalancedDef, DocumentOp, DocumentResolveOutcome, DocumentResolvedMutation, EnforcementOptions,
     GeneratedColumnSpec, MaterializedSumBinding, OllpPredictedEdge, PeriodLockConfig,
-    RegisteredIndex, RegisteredIndexState, ResolvedSumTarget, ReturningColumns, ReturningItem,
-    ReturningSpec, StorageMode, SumTargetKey, TimeseriesSchema, UpdateValue,
+    RedoSumTargets, RegisteredIndex, RegisteredIndexState, ResolvedSumTarget, ReturningColumns,
+    ReturningItem, ReturningSpec, StorageMode, SumTargetKey, TimeseriesSchema, UpdateValue,
     resolved_sum_surrogate,
 };
 pub use exchange::{ExchangeMode, ExchangeOp};

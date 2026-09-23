@@ -27,8 +27,8 @@ pub(super) fn wal_append_columnar_op(
             collection,
             payload,
             format: _,
-            intent: _,
-            on_conflict_updates: _,
+            intent,
+            on_conflict_updates,
             surrogates,
             schema_bytes: _,
             provenance,
@@ -44,16 +44,23 @@ pub(super) fn wal_append_columnar_op(
             rls_filters: _,
         } => {
             // Encode a map-shaped `ColumnarWalRecord` carrying the per-row
-            // cross-engine surrogates so replay restores the exact same
-            // identity after a restart. `surrogates` is index-aligned with the
+            // cross-engine surrogates and the insert's conflict policy, so
+            // replay restores the exact same identity and decides each
+            // existing key the way the live insert did. `surrogates` is index-aligned with the
             // rows in `payload`. The map shape is distinct from the legacy
             // 4-tuple array, so old on-disk records still decode via the
             // replay fallback path.
             let wal_payload = super::timeseries::encode_columnar_batch_payload(
-                collection.as_str(),
-                payload,
-                provenance.as_ref(),
-                surrogates,
+                super::timeseries::ColumnarBatchRecord {
+                    collection: collection.as_str(),
+                    payload,
+                    provenance: provenance.as_ref(),
+                    surrogates,
+                    conflict_policy: &crate::wal::ColumnarConflictPolicy {
+                        intent: *intent,
+                        on_conflict_updates: on_conflict_updates.clone(),
+                    },
+                },
             )?;
             Some(wal.append_timeseries_batch(tenant_id, vshard_id, database_id, &wal_payload)?)
         }

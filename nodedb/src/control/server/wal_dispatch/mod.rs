@@ -34,11 +34,13 @@ pub use write_set_redo::{append_write_set_redo, mint_dispatch_local_redo, plan_p
 
 // Payload encoders shared by the autocommit WAL path and transaction resolve, so
 // each engine's record shape lives in exactly one place.
+pub(crate) use crdt::encode_crdt_op_record;
 pub(crate) use graph_labels::encode_graph_node_label_payload;
+pub(crate) use text::encode_text_op_record;
+#[cfg(test)]
+pub(crate) use timeseries::{TimeseriesIngestRecord, encode_timeseries_ingest_payload};
 pub(crate) use timeseries::{
-    encode_columnar_batch_payload, encode_columnar_dml_payload,
-    encode_columnar_resolved_dml_payload, encode_columnar_truncate_payload,
-    encode_timeseries_batch_payload_with_format,
+    encode_columnar_truncate_payload, encode_timeseries_batch_payload_with_format,
 };
 pub(crate) use vector::{
     VectorDirectDeleteRecord, VectorDirectTruncateRecord, VectorDirectUpdatePayload,

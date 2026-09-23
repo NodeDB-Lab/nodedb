@@ -5,9 +5,8 @@
 //! A columnar batch INSERT issued inside a `BEGIN..COMMIT` block is staged
 //! here, one overlay `Put` per row, so a later same-transaction columnar
 //! SELECT observes the newly inserted rows (read-your-own-writes) before
-//! COMMIT. COMMIT durable replay is unchanged: the buffered `ColumnarOp::Insert`
-//! plan is still replayed through `execute_columnar_insert` inside the
-//! COMMIT `TransactionBatch`, which remains the sole durable apply.
+//! COMMIT. COMMIT resolves the staged rows into the transaction's redo record
+//! (`resolve::columnar_image`), and every replica installs exactly those rows.
 //!
 //! Row identity: the overlay's identity side-map holds the row's primary-key
 //! value when the schema declares one, else the decimal surrogate
@@ -16,19 +15,19 @@
 //!
 //! Row body encoding: each row's schema-ordered `Vec<Value>` is wrapped as a
 //! `Value::Array` and encoded via `nodedb_types::value_to_msgpack` — decoded
-//! the same way by `merge_overlay_into_columnar_scan`. This is a
-//! staging-only representation; it plays no part in the durable segment
-//! format written at COMMIT by `execute_columnar_insert`.
+//! the same way by `merge_overlay_into_columnar_scan` and by COMMIT resolve.
+//!
+//! Conflict intent: a row whose primary key this transaction already sees is
+//! skipped under `ON CONFLICT DO NOTHING` and refuses the statement under a
+//! declared natural primary key, the decisions the autocommit insert makes.
 //!
 //! ON CONFLICT DO UPDATE: the staged body is the MERGED row, not the submitted
 //! one. The overlay exists to show what this transaction has written, and after
-//! a conflict merge that is the stored row with the assignments applied —
-//! exactly what `execute_columnar_insert` persists at COMMIT. Staging the
-//! submitted body instead made the overlay and the eventual durable state
-//! disagree, so a same-transaction `SELECT` showed a row the COMMIT would never
-//! produce. The merge is resolved against this transaction's own overlay first
-//! and the engine second, so an earlier statement's staged row is the one it
-//! merges against.
+//! a conflict merge that is the stored row with the assignments applied. The
+//! redo carries that merged row, so COMMIT persists exactly what a
+//! same-transaction `SELECT` showed. The merge is resolved against this
+//! transaction's own overlay first and the engine second, so an earlier
+//! statement's staged row is the one it merges against.
 //!
 //! Row-level security: the write policy decides the batch here, at the
 //! statement, not only at COMMIT — otherwise a refused row would be reported as
@@ -39,10 +38,12 @@
 //!
 //! Field coercion mirrors `execute_columnar_insert` exactly (same
 //! `ndb_field_to_value` / bitemporal column population) via the shared
-//! `columnar_write::schema` helpers, so a staged row's values match what the
-//! durable COMMIT replay will eventually store.
+//! `columnar_write::schema` helpers, so a staged row holds the values an
+//! autocommit insert of the same row stores.
 
-use nodedb_physical::physical_plan::UpdateValue;
+use std::collections::HashSet;
+
+use nodedb_physical::physical_plan::{ColumnarInsertIntent, UpdateValue};
 use nodedb_types::Surrogate;
 use nodedb_types::columnar::schema::{TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
 use nodedb_types::value::Value;
@@ -52,6 +53,7 @@ use super::stage_columnar_dml::columnar_row_identity;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::columnar_write::ndb_field_to_value;
+use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{TenantId, TxnId};
 
@@ -65,6 +67,9 @@ pub(in crate::data::executor) struct StageColumnarInsertParams<'a> {
     pub payload: &'a [u8],
     pub surrogates: &'a [Surrogate],
     pub schema_bytes: &'a [u8],
+    /// What a row whose primary key already exists does: replace it, merge
+    /// into it, stay out (`ON CONFLICT DO NOTHING`), or refuse the statement.
+    pub intent: ColumnarInsertIntent,
     /// `ON CONFLICT (pk) DO UPDATE SET` assignments carried by the plan.
     /// Needed here only to resolve the row image the write policy decides —
     /// the merged row, not the submitted one. The staged body itself is
@@ -95,6 +100,7 @@ impl CoreLoop {
             payload,
             surrogates,
             schema_bytes,
+            intent,
             on_conflict_updates,
             rls_write_check,
         } = params;
@@ -179,6 +185,9 @@ impl CoreLoop {
         // overlay. Splitting it the other way would make a refusal partially
         // durable in the overlay, which is the worse of the two.
         let mut resolved: Vec<(Surrogate, Vec<Value>)> = Vec::with_capacity(ndb_rows.len());
+        // Rows earlier in this statement, by surrogate. A primary key maps to
+        // one surrogate, so a repeated key within the statement is caught here.
+        let mut written: HashSet<Surrogate> = HashSet::with_capacity(ndb_rows.len());
 
         for (row_idx, row) in ndb_rows.iter().enumerate() {
             let obj = match row {
@@ -225,6 +234,42 @@ impl CoreLoop {
                     );
                 }
             };
+
+            // A key that already exists keeps its row under `DO NOTHING` and
+            // refuses the statement under a declared natural primary key,
+            // exactly as the autocommit insert decides.
+            if matches!(
+                intent,
+                ColumnarInsertIntent::InsertIfAbsent | ColumnarInsertIntent::InsertUnique
+            ) {
+                let exists = written.contains(&surrogate)
+                    || match self.staged_columnar_row_exists(
+                        txn_id,
+                        &engine_key,
+                        surrogate,
+                        &values,
+                    ) {
+                        Ok(exists) => exists,
+                        Err(error) => return self.response_error(task, error),
+                    };
+                if exists {
+                    if intent == ColumnarInsertIntent::InsertIfAbsent {
+                        continue;
+                    }
+                    return self.response_error(
+                        task,
+                        crate::Error::RejectedConstraint {
+                            collection: collection.to_string(),
+                            constraint: "unique".to_string(),
+                            detail: format!(
+                                "duplicate primary key violates primary-key uniqueness on \
+                                 '{collection}'"
+                            ),
+                        },
+                    );
+                }
+            }
+            written.insert(surrogate);
 
             // The row that will exist afterwards: the incoming row for a plain
             // insert, the merged row for the ON CONFLICT branch. This is the
@@ -280,5 +325,34 @@ impl CoreLoop {
         }
 
         self.stage_count_response(task, staged)
+    }
+
+    /// Whether the row keyed like `values` exists as this transaction sees
+    /// it: its staged put or tombstone first, then the engine, unless the
+    /// transaction truncated the collection.
+    fn staged_columnar_row_exists(
+        &self,
+        txn_id: TxnId,
+        engine_key: &(nodedb_types::DatabaseId, TenantId, String),
+        surrogate: Surrogate,
+        values: &[Value],
+    ) -> Result<bool, ErrorCode> {
+        if let Some(overlay) = self.txn_overlays.get(&txn_id) {
+            match overlay.get(engine_key, surrogate.as_u32()) {
+                Some(Staged::Put(_)) => return Ok(true),
+                Some(Staged::Tombstone) => return Ok(false),
+                None if overlay.is_truncated(engine_key) => return Ok(false),
+                None => {}
+            }
+        }
+        let Some(engine) = self.columnar_engines.get(engine_key) else {
+            return Ok(false);
+        };
+        let pk_bytes = engine
+            .encode_pk_from_row(values)
+            .map_err(|e| ErrorCode::Internal {
+                detail: format!("columnar insert: pk encode failed: {e}"),
+            })?;
+        Ok(engine.pk_index().contains(&pk_bytes))
     }
 }

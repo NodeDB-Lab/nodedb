@@ -210,6 +210,8 @@ impl CoreLoop {
             active_bitemporal_stamps: HashMap::new(),
             active_graph_system_from: None,
             balanced_txn_entries: None,
+            redo_apply:
+                crate::data::executor::handlers::transaction::redo_apply::RedoApplyState::new(),
         })
     }
 }

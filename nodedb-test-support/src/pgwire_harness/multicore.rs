@@ -61,6 +61,7 @@ impl TestServer {
             let core_handle =
                 crate::core_loop_runner::spawn_core_loop(crate::core_loop_runner::CoreLoopSpawn {
                     idx,
+                    num_cores,
                     data_side,
                     core_dir: dir.path().to_path_buf(),
                     core_array_catalog: shared.array_catalog.clone(),

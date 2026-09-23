@@ -5,6 +5,7 @@ use super::aliases::{
     default_columnar_ingest_format, default_columnar_insert_intent, default_ivf_cells,
     default_ivf_nprobe, default_pq_m,
 };
+use super::transaction_redo_wire::{ReplicatedEventSource, ReplicatedIdentity};
 use super::wire_shapes::{
     ColumnarResolvedRow, ConstraintChangeOp, DocumentResolvedMutationWire, KvResolvedMutationWire,
     ReplicatedBatchEdge, ReplicatedSumTarget,
@@ -299,6 +300,10 @@ pub enum ReplicatedWrite {
         format: String,
         /// Leader-assigned global surrogates, parallel to the rows in `payload`.
         surrogates: Vec<u32>,
+        /// The timestamp, in epoch milliseconds, of every row that carries
+        /// none. The proposer reads its clock once, and every replica stores
+        /// the same instant.
+        default_timestamp_ms: i64,
         /// Sync provenance encoded as zerompk bytes.
         #[serde(default)]
         provenance: Option<Vec<u8>>,
@@ -986,6 +991,25 @@ pub enum ReplicatedWrite {
         resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
         /// See `PointUpdate::declared_primary_key`.
         declared_primary_key: Option<String>,
+    },
+    /// One committed transaction's resolved post-images for one vShard.
+    ///
+    /// Every replica, the proposer included, appends `redo` to its own WAL
+    /// and applies it through the WAL replay arms, in Raft log order. The
+    /// record is resolved once, on the proposer; no replica re-derives it.
+    /// `redo.calvin_stamp` names the Calvin `(epoch, position)` the record
+    /// applies, when a Calvin flush produced it.
+    TransactionRedo {
+        redo: crate::wal::RedoRecord,
+        /// Every collection the transaction wrote, for the collection-floor
+        /// write versions.
+        collections: Vec<String>,
+        /// Materialized-sum resolution the document writes fold into their
+        /// targets, keyed by source collection.
+        sum_targets: Vec<nodedb_physical::physical_plan::RedoSumTargets>,
+        /// Identities every replica binds before the apply.
+        identities: Vec<ReplicatedIdentity>,
+        event_source: ReplicatedEventSource,
     },
 }
 

@@ -13,7 +13,7 @@
 //! `MetaOp::ResolveTxn` already does for session transactions
 //! (`resolve/entry.rs`).
 
-use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan, TimeseriesOp};
+use nodedb_physical::physical_plan::{ColumnarOp, DocumentOp, GraphOp, PhysicalPlan, TimeseriesOp};
 use nodedb_types::RowIdentity;
 
 use crate::bridge::envelope::{ErrorCode, Response, Status};
@@ -45,9 +45,11 @@ impl CoreLoop {
     /// than a live predicate rescan — see that module's docs for the
     /// determinism rationale. `TimeseriesOp::Ingest` is staged through the
     /// same canonical row decoder as session writes; its per-row tokens are
-    /// overlay-local and never become base-storage identities. Columnar and
-    /// spatial predicate writes remain unstaged because they have no
-    /// deterministic post-image overlay representation.
+    /// overlay-local and never become base-storage identities. Every columnar
+    /// write is staged through the session handlers, so COMMIT resolve reads
+    /// its post-images from the overlay. Staging runs under the epoch's time
+    /// anchor, so every replica stages the same images. Spatial writes carry
+    /// their absolute post-image on the plan node and stay unstaged.
     pub(in crate::data::executor) fn stage_calvin_overlay(
         &mut self,
         task: &ExecutionTask,
@@ -218,6 +220,22 @@ impl CoreLoop {
                 });
                 Self::stage_result(&response)
             }
+            // Every columnar write stages its post-image the way a session
+            // write does, so the transaction's redo carries the rows the
+            // flush installs: an ON CONFLICT merge and a predicate DML's
+            // matched rows are resolved once, here, against the state this
+            // position observes.
+            PhysicalPlan::Columnar(
+                op @ (ColumnarOp::Insert { .. }
+                | ColumnarOp::Update { .. }
+                | ColumnarOp::Delete { .. }
+                | ColumnarOp::ResolvedUpdate { .. }
+                | ColumnarOp::ResolvedDelete { .. }
+                | ColumnarOp::Truncate { .. }),
+            ) => {
+                let resp = self.execute_stage_columnar(task, tid, txn_id, op);
+                Self::stage_result(&resp)
+            }
             PhysicalPlan::Graph(
                 op @ (GraphOp::EdgePut { .. }
                 | GraphOp::EdgeDelete { .. }
@@ -259,11 +277,8 @@ impl CoreLoop {
     /// itself failing) is a silent no-op — the same shape as the
     /// `commit_pending` removal it accompanies.
     ///
-    /// Mirrors `MetaOp::DropTxnOverlay`'s gauge accounting exactly: every map
-    /// was populated (if at all) via the `txn_overlay_mut` /
-    /// `graph_txn_overlay_mut` / `array_txn_overlay_mut` choke points, which bump `active_txn_overlays`
-    /// on first creation, so removal here must decrement by the same count
-    /// or the gauge drifts upward forever on every Calvin-staged transaction.
+    /// Runs the same teardown as `MetaOp::DropTxnOverlay`
+    /// (`drop_overlay_entry`), so the `active_txn_overlays` gauge stays exact.
     pub(in crate::data::executor) fn drop_calvin_synthetic_overlay(
         &mut self,
         epoch: u64,
@@ -271,15 +286,9 @@ impl CoreLoop {
         vshard: u32,
     ) {
         if let Ok(synthetic_txn_id) = calvin_synthetic_txn_id(epoch, position, vshard) {
-            let removed = u64::from(self.txn_overlays.remove(&synthetic_txn_id).is_some())
-                + u64::from(self.graph_txn_overlays.remove(&synthetic_txn_id).is_some())
-                + u64::from(self.array_txn_overlays.remove(&synthetic_txn_id).is_some());
-            if removed > 0
-                && let Some(m) = &self.metrics
-            {
-                m.active_txn_overlays
-                    .fetch_sub(removed, std::sync::atomic::Ordering::Relaxed);
-            }
+            // The shared teardown also drops a columnar engine staging
+            // auto-created that the flush left empty.
+            self.drop_overlay_entry(synthetic_txn_id);
         }
     }
 }

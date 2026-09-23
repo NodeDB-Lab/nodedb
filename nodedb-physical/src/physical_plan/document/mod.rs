@@ -19,7 +19,7 @@ pub use merge_types::{MergeActionOp, MergeClauseKind as MergeClauseKindOp, Merge
 pub use ollp_edge::OllpPredictedEdge;
 pub use op::DocumentOp;
 pub use resolved_mutation::{DocumentResolveOutcome, DocumentResolvedMutation};
-pub use sum_target::{ResolvedSumTarget, SumTargetKey, resolved_sum_surrogate};
+pub use sum_target::{RedoSumTargets, ResolvedSumTarget, SumTargetKey, resolved_sum_surrogate};
 pub use timeseries_schema::TimeseriesSchema;
 pub use types::{
     BalancedDef, EnforcementOptions, GeneratedColumnSpec, MaterializedSumBinding, PeriodLockConfig,

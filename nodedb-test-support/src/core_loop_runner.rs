@@ -61,6 +61,10 @@ pub struct WalReplay {
 pub struct CoreLoopSpawn {
     /// Core index within the data plane (0-based).
     pub idx: usize,
+    /// Total number of Data-Plane cores in this node. The committed-redo apply
+    /// routes each record to `vshard_id % num_cores`, the same rule the
+    /// dispatcher routes requests by.
+    pub num_cores: usize,
     /// SPSC bridge endpoints for this core.
     pub data_side: CoreChannelDataSide,
     /// Storage directory shared with the rest of the harness.
@@ -109,6 +113,7 @@ pub struct CoreLoopSpawn {
 pub fn spawn_core_loop(spawn: CoreLoopSpawn) -> tokio::task::JoinHandle<()> {
     let CoreLoopSpawn {
         idx,
+        num_cores,
         data_side,
         core_dir,
         core_array_catalog,
@@ -138,6 +143,7 @@ pub fn spawn_core_loop(spawn: CoreLoopSpawn) -> tokio::task::JoinHandle<()> {
                 )
                 .expect("CoreLoop::open_with_array_catalog");
                 core.set_event_producer(event_producer);
+                core.set_num_cores(num_cores);
                 core.set_query_tuning(query_tuning);
                 core.set_graph_tuning(graph_tuning);
                 if let Some(m) = core_metrics {
@@ -150,10 +156,10 @@ pub fn spawn_core_loop(spawn: CoreLoopSpawn) -> tokio::task::JoinHandle<()> {
                 if let Some(WalReplay {
                     records,
                     tombstones,
-                    num_cores,
+                    num_cores: replay_num_cores,
                 }) = replay
                 {
-                    core.replay_all_wal(&records, num_cores, &tombstones);
+                    core.replay_all_wal(&records, replay_num_cores, &tombstones);
                 }
                 while matches!(
                     stop_rx.try_recv(),

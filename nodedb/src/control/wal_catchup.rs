@@ -161,37 +161,33 @@ async fn run_catchup_cycle(shared: &SharedState) -> CatchupResult {
             continue;
         }
 
-        // Deserialize WAL payload. Try the new 4-element shape (with kind
-        // discriminator, collection, payload, and trailing provenance) first,
-        // then fall back to the legacy 2-element (collection, payload) shape
-        // written by pre-3a records. Provenance is decoded and discarded here.
-        let (collection, payload) = if let Ok((disc, coll, p, _provenance)) =
-            zerompk::from_msgpack::<(
-                String,
-                String,
-                Vec<u8>,
-                Option<nodedb_types::sync::wire::SyncProvenance>,
-            )>(&record.payload)
-        {
-            let _ = disc;
-            (coll, p)
-        } else if let Ok((coll, p)) = zerompk::from_msgpack::<(String, Vec<u8>)>(&record.payload) {
-            (coll, p)
-        } else {
+        // A columnar record shares this record type and is not a timeseries
+        // ingest; catch-up re-dispatches timeseries ingests only.
+        let Ok(decoded) = crate::wal::decode_batch_record(&record.payload) else {
             max_lsn = max_lsn.max(record.header.lsn);
             continue;
         };
+        if decoded
+            .kind
+            .as_deref()
+            .is_some_and(|kind| kind != "timeseries")
+        {
+            max_lsn = max_lsn.max(record.header.lsn);
+            continue;
+        }
 
         let tenant_id = TenantId::new(record.header.tenant_id);
+        let database_id = DatabaseId::new(record.header.database_id);
         let vshard_id = VShardId::new(record.header.vshard_id);
+        let format = decoded.format.unwrap_or_else(|| "ilp".to_string());
 
         let plan = PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-            collection: nodedb_types::QualifiedCollection::from_stored(collection),
-            payload,
-            format: "ilp".to_string(),
+            collection: nodedb_types::QualifiedCollection::from_stored(decoded.collection),
+            payload: decoded.payload,
+            format,
             wal_lsn: Some(record.header.lsn),
             // Re-derived on the engine side during apply (record carries
-            // raw ILP — row identities are reconstructed from the wire).
+            // raw rows — row identities are reconstructed from the wire).
             surrogates: Vec::new(),
             provenance: None,
             // No predicate here: catch-up replays an already-committed WAL
@@ -202,13 +198,22 @@ async fn run_catchup_cycle(shared: &SharedState) -> CatchupResult {
         });
 
         // Dispatch to Data Plane — do NOT re-append to WAL (already there).
-        match crate::control::server::dispatch_utils::dispatch_to_data_plane(
+        // Untimed rows take the instant the record carries.
+        match crate::control::server::dispatch_utils::dispatch_trusted_internal_write_to_data_plane(
             shared,
-            tenant_id,
-            DatabaseId::DEFAULT,
-            vshard_id,
-            plan,
-            TraceId::ZERO,
+            crate::control::server::dispatch_utils::WriteDispatch {
+                tenant_id,
+                database_id,
+                vshard_id,
+                plan,
+                trace_id: TraceId::ZERO,
+                event_source: crate::event::EventSource::User,
+                txn_id: None,
+                wal_lsn: None,
+                resolved_now_ms: decoded
+                    .default_timestamp_ms
+                    .and_then(|ms| u64::try_from(ms).ok()),
+            },
         )
         .await
         {

@@ -69,6 +69,7 @@ mod node_labels_replicate_to_followers;
 mod pgwire_gateway_migration;
 mod planner_local_only;
 mod prepared_cache_invalidation;
+mod proposal_committed_twice_applies_once;
 mod resp_gateway_migration;
 mod retention_policy_cross_node;
 mod scope_quota_cross_node;

@@ -125,6 +125,25 @@ pub(in crate::data::executor) struct CheckpointFloors {
     /// the watermark — is what the core may report.
     pub(in crate::data::executor) vector_durable_lsn: Lsn,
 
+    /// LSN of the newest KV checkpoint generation on disk, restored at boot
+    /// from the manifest. Restart replay skips a KV record at or below it, so
+    /// a committed record applied at or below it must be published again
+    /// (`redo_apply::cover`). Never a truncation floor.
+    pub(in crate::data::executor) kv_published_lsn: Lsn,
+
+    /// LSN of the newest columnar checkpoint generation on disk, whichever
+    /// flush published it, restored at boot from the manifest. Same rule as
+    /// `kv_published_lsn`.
+    pub(in crate::data::executor) columnar_published_lsn: Lsn,
+
+    /// LSN of the newest vector checkpoint generation on disk, whichever
+    /// flush published it, restored at boot from the manifest. Restart
+    /// replay skips a vector record at or below the LSN its collection was
+    /// published with, so a committed record applied at or below this one
+    /// must be published again (`redo_apply::cover`). Never a truncation
+    /// floor: that is `vector_durable_lsn`.
+    pub(in crate::data::executor) vector_published_lsn: Lsn,
+
     /// Highest LSN the CRDT engines are known to be durable through OUTSIDE the
     /// WAL (i.e. in `{data_dir}/crdt-ckpt/`), advanced only by a fully
     /// successful `checkpoint_crdt_engines`.

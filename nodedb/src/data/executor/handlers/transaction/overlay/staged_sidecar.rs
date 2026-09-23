@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Per-row sidecars of the staging overlay: the KV TTL delta and the
-//! bitemporal stamp. Both live beside [`Staged`](super::Staged) rather than
-//! inside it because only one engine reads each.
+//! Per-row sidecars of the staging overlay: the KV TTL delta, the
+//! bitemporal stamp, the displaced columnar base key and a timeseries
+//! batch's default timestamp. Each lives beside
+//! [`Staged`](super::Staged) rather than inside it because only one engine
+//! reads it.
 
 use nodedb_types::RowIdentity;
 
@@ -116,6 +118,71 @@ impl TxnOverlay {
             .get(coll_key)?
             .bitemporal_by_surrogate
             .get(&surrogate)
+            .copied()
+    }
+
+    /// Record the primary key of the base row `surrogate` names, the first
+    /// time a statement stages that base row. A base row's key does not change
+    /// inside the transaction, so a later record for the same surrogate is
+    /// dropped and no undo journalling is needed: after a savepoint rollback
+    /// the recorded key still names the same base row.
+    pub fn note_base_pk(
+        &mut self,
+        coll_key: &(DatabaseId, TenantId, String),
+        surrogate: u32,
+        pk_msgpack: Vec<u8>,
+    ) {
+        self.collections
+            .entry(coll_key.clone())
+            .or_default()
+            .base_pk_by_surrogate
+            .entry(surrogate)
+            .or_insert(pk_msgpack);
+    }
+
+    /// The primary key (MessagePack) of the base row a staged columnar write
+    /// displaced for `surrogate`. `None` when the transaction staged no base
+    /// row under that surrogate.
+    pub fn base_pk(
+        &self,
+        coll_key: &(DatabaseId, TenantId, String),
+        surrogate: u32,
+    ) -> Option<&[u8]> {
+        self.collections
+            .get(coll_key)?
+            .base_pk_by_surrogate
+            .get(&surrogate)
+            .map(Vec::as_slice)
+    }
+
+    /// Record the instant a staged timeseries ingest read as its default row
+    /// timestamp, under the batch's first surrogate. Surrogates are fresh per
+    /// staged row, so no later statement records the same key and no undo
+    /// journalling is needed.
+    pub fn note_ingest_now(
+        &mut self,
+        coll_key: &(DatabaseId, TenantId, String),
+        first_surrogate: u32,
+        now_ms: i64,
+    ) {
+        self.collections
+            .entry(coll_key.clone())
+            .or_default()
+            .ingest_now_by_surrogate
+            .insert(first_surrogate, now_ms);
+    }
+
+    /// The default row timestamp the staged ingest whose first row is
+    /// `first_surrogate` read at its statement.
+    pub fn ingest_now(
+        &self,
+        coll_key: &(DatabaseId, TenantId, String),
+        first_surrogate: u32,
+    ) -> Option<i64> {
+        self.collections
+            .get(coll_key)?
+            .ingest_now_by_surrogate
+            .get(&first_surrogate)
             .copied()
     }
 

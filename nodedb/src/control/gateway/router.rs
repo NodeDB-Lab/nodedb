@@ -63,24 +63,12 @@ pub fn route_plan(
     strategy_fn: impl Fn(&str) -> PartitionStrategy,
     extractor: &dyn KeyExtractor,
 ) -> Result<Vec<TaskRoute>> {
-    // Commit-time meta-ops (ResolveTxn / TransactionBatch) carry no collection
-    // name, so their vShard cannot be derived here — the primary_vshard
-    // fallback would silently send them to vShard 0 and durably apply the
-    // commit batch on the wrong core. They are dispatched with the
-    // task's pre-classified `vshard_id` (see `dispatch_single_shard`), never
-    // through the gateway.
-    {
-        use nodedb_physical::physical_plan::MetaOp;
-        if matches!(
-            &plan,
-            PhysicalPlan::Meta(MetaOp::ResolveTxn { .. } | MetaOp::TransactionBatch { .. })
-        ) {
-            return Err(crate::Error::Internal {
-                detail: "commit meta-op cannot be routed by the gateway; \
-                         dispatch it with the task's explicit vshard_id"
-                    .to_owned(),
-            });
-        }
+    if is_task_vshard_scoped(&plan) {
+        return Err(crate::Error::Internal {
+            detail: "transaction meta-op cannot be routed by the gateway; \
+                     dispatch it with the task's explicit vshard_id"
+                .to_owned(),
+        });
     }
 
     // In single-node mode every plan runs locally.
@@ -283,6 +271,30 @@ fn route_broadcast(
     routes
 }
 
+/// Whether `plan` is a transaction meta-op that runs on the core of the
+/// task's own `vshard_id`.
+///
+/// These ops name no collection, so the router cannot derive their vShard. The
+/// `primary_vshard` fallback would send them to vShard 0: a staged write would
+/// land in an overlay the commit never reads, and a commit would apply on the
+/// wrong core. Callers dispatch them with the task's `vshard_id`, never
+/// through the gateway.
+pub fn is_task_vshard_scoped(plan: &PhysicalPlan) -> bool {
+    use nodedb_physical::physical_plan::MetaOp;
+    matches!(
+        plan,
+        PhysicalPlan::Meta(
+            MetaOp::StageWrite { .. }
+                | MetaOp::MarkSavepoint { .. }
+                | MetaOp::RollbackToSavepoint { .. }
+                | MetaOp::DropTxnOverlay { .. }
+                | MetaOp::ResolveTxn { .. }
+                | MetaOp::TransactionBatch { .. }
+                | MetaOp::ApplyTransactionRedo { .. }
+        )
+    )
+}
+
 /// Determine the primary vShard for a plan by hashing the first collection name.
 ///
 /// Falls back to vShard 0 for plans that have no named collection (Meta ops).
@@ -464,15 +476,31 @@ mod tests {
         unreachable!()
     }
 
-    /// Commit-time meta-ops carry no collection name, so the router cannot
-    /// derive their vShard — silently falling back to vShard 0 durably applies
-    /// the commit batch on the wrong core. They must be rejected here;
-    /// callers dispatch them with the task's pre-classified `vshard_id`.
+    /// Transaction meta-ops carry no collection name, so the router cannot
+    /// derive their vShard. The vShard 0 fallback stages a write in an overlay
+    /// the commit never reads, or applies a commit on the wrong core.
     #[test]
-    fn commit_meta_ops_are_rejected() {
+    fn transaction_meta_ops_are_rejected() {
         use nodedb_physical::physical_plan::MetaOp;
 
+        let txn_id = nodedb_types::id::TxnId::new(7);
         for plan in [
+            PhysicalPlan::Meta(MetaOp::StageWrite {
+                plan: Box::new(PhysicalPlan::Kv(KvOp::Get {
+                    collection: QualifiedCollection::new(DatabaseId::DEFAULT, "users"),
+                    key: vec![],
+                    rls_filters: vec![],
+                    surrogate_ceiling: None,
+                })),
+            }),
+            PhysicalPlan::Meta(MetaOp::MarkSavepoint { txn_id }),
+            PhysicalPlan::Meta(MetaOp::RollbackToSavepoint {
+                txn_id,
+                value_marker: 0,
+                graph_marker: 0,
+                array_marker: 0,
+            }),
+            PhysicalPlan::Meta(MetaOp::DropTxnOverlay { txn_id }),
             PhysicalPlan::Meta(MetaOp::TransactionBatch {
                 plans: vec![],
                 txn_id: None,
@@ -480,6 +508,11 @@ mod tests {
             PhysicalPlan::Meta(MetaOp::ResolveTxn {
                 txn_id: nodedb_types::id::TxnId::new(7),
                 plans: vec![],
+            }),
+            PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
+                redo: vec![],
+                collections: vec![],
+                sum_targets: vec![],
             }),
         ] {
             for table in [None, Some(single_node_table())] {
@@ -491,9 +524,10 @@ mod tests {
                     |_| PartitionStrategy::CollectionHomed,
                     &crate::control::gateway::UnwiredKeyExtractor,
                 );
+                assert!(is_task_vshard_scoped(&plan), "{plan:?}");
                 assert!(
                     result.is_err(),
-                    "commit meta-op must not be routable via the gateway: {plan:?}"
+                    "transaction meta-op must not be routable via the gateway: {plan:?}"
                 );
             }
         }

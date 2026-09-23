@@ -210,7 +210,10 @@ fn single_node_submit(
         event_source: crate::event::EventSource::User,
         txn_id: None,
         user_id: None,
-        durability: WalDurability::AppendHere { now_override: None },
+        durability: WalDurability::AppendHere {
+            now_override: None,
+            apply_key: 0,
+        },
         ordering: WriteOrdering::Gate,
         change_feed: ChangeFeedOwner::Funnel,
     }

@@ -63,6 +63,25 @@ pub(crate) async fn submit_write(
     // `Some(collection)` for such a write, else `None`.
     let post_apply = wal_dispatch::plan_post_apply_redo(&plan);
     let appends_here = matches!(&durability, WalDurability::AppendHere { .. });
+    let apply_key = match &durability {
+        WalDurability::AppendHere { apply_key, .. } => *apply_key,
+        WalDurability::CallerSupplied { .. } => 0,
+    };
+    // A transaction redo's refusal is final: every replica reaches it at the
+    // same log position against the same state. Its abort marker carries the
+    // entry's key, so the proposal ledger counts the refusal as the entry's
+    // outcome after a restart. Any other refused write keeps its entry
+    // replayable, so its abort marker carries no key.
+    let final_refusal_key = if matches!(
+        plan,
+        nodedb_physical::physical_plan::PhysicalPlan::Meta(
+            nodedb_physical::physical_plan::MetaOp::ApplyTransactionRedo { .. }
+        )
+    ) {
+        apply_key
+    } else {
+        0
+    };
 
     // Durable-at-ack obligation, also computed before `plan` moves. `Some` only
     // for a write whose redo record THIS funnel is required to mint; a caller
@@ -148,6 +167,8 @@ pub(crate) async fn submit_write(
             vshard_id,
             wal_lsn,
             appends_here,
+            final_refusal_key,
+            apply_key,
             post_apply,
             funnel_redo_engine,
             change_set,

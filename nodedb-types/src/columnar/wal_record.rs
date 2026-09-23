@@ -60,6 +60,13 @@ pub struct ColumnarWalRecord {
     #[serde(default)]
     #[msgpack(default)]
     pub surrogates: Vec<Surrogate>,
+    /// What a row whose primary key already exists does, encoded by the
+    /// writer that knows the insert's conflict intent and `ON CONFLICT`
+    /// assignments. Empty for a plain insert, which replaces the row. Replay
+    /// decides each row the way the live insert did.
+    #[serde(default)]
+    #[msgpack(default)]
+    pub conflict_policy: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -80,6 +87,7 @@ mod tests {
             payload: vec![1, 2, 3, 4],
             provenance: Some(prov.clone()),
             surrogates: vec![Surrogate::new(10), Surrogate::new(11), Surrogate::new(12)],
+            conflict_policy: Vec::new(),
         };
 
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode ColumnarWalRecord");
@@ -104,6 +112,7 @@ mod tests {
             payload: vec![9],
             provenance: None,
             surrogates: Vec::new(),
+            conflict_policy: Vec::new(),
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode");
         let decoded: ColumnarWalRecord = zerompk::from_msgpack(&bytes).expect("decode");

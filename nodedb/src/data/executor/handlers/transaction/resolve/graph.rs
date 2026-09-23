@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nodedb_physical::physical_plan::GraphOp;
+use nodedb_physical::physical_plan::{GraphOp, PhysicalPlan};
 use nodedb_wal::record::RecordType;
 
 use crate::control::server::wal_dispatch::encode_graph_node_label_payload;
@@ -232,6 +232,15 @@ pub(super) fn classify_graph_op(
         // per-collection post-image — nothing to collect here.
         GraphOp::SetNodeLabels { .. } | GraphOp::RemoveNodeLabels { .. } => Ok(()),
     }
+}
+
+/// Whether `plan` writes node labels, which stage into the graph overlay
+/// under its fixed label key.
+pub(super) fn is_label_write(plan: &PhysicalPlan) -> bool {
+    matches!(
+        plan,
+        PhysicalPlan::Graph(GraphOp::SetNodeLabels { .. } | GraphOp::RemoveNodeLabels { .. })
+    )
 }
 
 #[cfg(test)]

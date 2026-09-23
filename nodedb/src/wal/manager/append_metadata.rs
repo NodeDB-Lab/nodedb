@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! WAL appends for node-global metadata: temporal-purge audit, surrogate
-//! allocation/binding, Calvin epoch tracking, and sync watermarks.
+//! allocation/binding, Calvin epoch tracking, applied Raft proposals, and
+//! sync watermarks.
 
 use nodedb_wal::record::RecordType;
 
@@ -108,6 +109,31 @@ impl WalManager {
             DatabaseId::DEFAULT,
             &payload,
         )
+    }
+
+    /// Append a payload-free `ProposalApplied` marker for the replicated
+    /// proposal whose apply is in scope (see [`WalManager::with_apply_key`]).
+    /// An apply that writes no record of its own appends it in place of its
+    /// forward record, so the proposal's key still reaches the WAL.
+    ///
+    /// Returns `None` and appends nothing outside a proposal's apply.
+    pub fn append_proposal_applied(
+        &self,
+        tenant_id: TenantId,
+        vshard_id: VShardId,
+        database_id: DatabaseId,
+    ) -> crate::Result<Option<Lsn>> {
+        if super::append::current_apply_key() == 0 {
+            return Ok(None);
+        }
+        self.append_record(
+            RecordType::ProposalApplied,
+            tenant_id,
+            vshard_id,
+            database_id,
+            &[],
+        )
+        .map(Some)
     }
 
     /// Append a `SyncSeqAdvance` watermark record. Emitted by the Data Plane sync

@@ -39,7 +39,10 @@ impl CoreLoop {
     /// no-op (`add_index` reports the field as already indexed and skips the
     /// backfill), and replaying a drop whose registration the export therefore
     /// never saw is a no-op too.
-    pub(in crate::data::executor) fn checkpoint_kv_engines(&self) -> crate::Result<Lsn> {
+    ///
+    /// Every published generation raises `kv_published_lsn`, the LSN restart
+    /// restores KV from (see `redo_apply::cover`).
+    pub(in crate::data::executor) fn checkpoint_kv_engines(&mut self) -> crate::Result<Lsn> {
         let durable_through = self.watermark;
 
         let ckpt_dir = kv_ckpt_dir(&self.data_dir, self.core_id);
@@ -63,6 +66,7 @@ impl CoreLoop {
 
         let written = self.write_kv_generation(&gen_dir)?;
         self.publish_kv_generation(&ckpt_dir, generation, durable_through)?;
+        self.floors.kv_published_lsn = self.floors.kv_published_lsn.max(durable_through);
 
         // The previous generation is now unreachable. Removing it reclaims disk
         // but is NOT required for correctness — the manifest alone decides what

@@ -29,6 +29,10 @@
 
 use tracing::warn;
 
+use crate::data::executor::handlers::transaction::undo::document_outcome::{
+    DocumentRow, push_put_undo,
+};
+
 use nodedb_types::{RowIdentity, Surrogate};
 
 use crate::data::executor::core_loop::CoreLoop;
@@ -102,7 +106,8 @@ impl CoreLoop {
         surrogate: Surrogate,
         value: &[u8],
     ) {
-        self.materialize_document_write(
+        // A materialization miss is logged and never wedges the sync stream.
+        if let Err(error) = self.materialize_document_write(
             task,
             CrdtMaterializeWrite {
                 tid,
@@ -112,7 +117,15 @@ impl CoreLoop {
                 value,
                 index_text: false,
             },
-        );
+        ) {
+            warn!(
+                core = self.core_id,
+                %collection,
+                surrogate = surrogate.as_u32(),
+                %error,
+                "crdt sync materialize into sparse document store failed"
+            );
+        }
     }
 
     /// Shared body of the sparse-store materialization. `index_text` gates
@@ -125,7 +138,7 @@ impl CoreLoop {
         &mut self,
         task: &ExecutionTask,
         write: CrdtMaterializeWrite<'_>,
-    ) {
+    ) -> crate::Result<()> {
         let CrdtMaterializeWrite {
             tid,
             collection,
@@ -137,15 +150,8 @@ impl CoreLoop {
         let database_id = task.request.database_id.as_u64();
         let storage_key = StorageKey::for_surrogate(surrogate);
 
-        let txn = match self.sparse.begin_write() {
-            Ok(t) => t,
-            Err(e) => {
-                warn!(core = self.core_id, %collection, error = %e, "crdt sync materialize: begin_write failed");
-                return;
-            }
-        };
-
-        let prior = match self.apply_point_put(
+        let txn = self.sparse.begin_write()?;
+        let outcome = self.apply_point_put(
             &txn,
             PointPutParams {
                 database_id,
@@ -160,24 +166,11 @@ impl CoreLoop {
                 wal_lsn: task.wal_lsn(),
                 resolved_targets: &[],
             },
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(
-                    core = self.core_id,
-                    %collection,
-                    document_id = %storage_key,
-                    error = %e,
-                    "crdt sync materialize into sparse document store failed"
-                );
-                return;
-            }
-        };
-
-        if let Err(e) = txn.commit() {
-            warn!(core = self.core_id, %collection, error = %e, "crdt sync materialize: commit failed");
-            return;
-        }
+        )?;
+        txn.commit().map_err(|e| crate::Error::Storage {
+            engine: "sparse".into(),
+            detail: format!("crdt materialize commit: {e}"),
+        })?;
 
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
@@ -190,7 +183,24 @@ impl CoreLoop {
             collection,
             RowIdentity::from_user_key(document_id),
             value,
-            prior.prior_value.as_deref(),
+            outcome.prior_value.as_deref(),
         );
+        if self.recording_redo_undo() {
+            let mut undo = Vec::new();
+            push_put_undo(
+                &mut undo,
+                DocumentRow {
+                    database_id,
+                    tid,
+                    collection,
+                    storage_key,
+                    identity: RowIdentity::from_user_key(document_id),
+                },
+                outcome,
+                None,
+            );
+            self.record_redo_undo(undo);
+        }
+        Ok(())
     }
 }

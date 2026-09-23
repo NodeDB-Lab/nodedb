@@ -34,7 +34,7 @@ pub const MAX_WAL_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
 ///   | vshard_id(4) | payload_len(4) | database_id(8) | reserved(8) | crc32c(4)
 ///
 /// `database_id` occupies bytes 34–41 (previously part of the 16-byte reserved
-/// field). `reserved` occupies bytes 42–49. Bytes 34–41 were zero-filled in
+/// field). `apply_key` occupies bytes 42–49. Bytes 34–41 were zero-filled in
 /// prior records, so `database_id == 0` maps to `DatabaseId(0)` (the default
 /// database), preserving backward compatibility without a format-version bump.
 pub const HEADER_SIZE: usize = 54;
@@ -64,9 +64,12 @@ pub struct RecordHeader {
     ///
     /// Occupies bytes 34–41 of the on-disk header (previously part of reserved).
     pub database_id: u64,
-    /// Reserved for future use; must be zero on write; ignored on read
-    /// (but covered by CRC32C). Occupies bytes 42–49.
-    pub reserved: [u8; 8],
+    /// The idempotency key of the replicated proposal whose apply appended
+    /// this record, `0` for a record no proposal apply appended. The record
+    /// and the key are durable together, so a node recovers which proposals
+    /// it applied from the records themselves. Covered by CRC32C. Occupies
+    /// bytes 42–49.
+    pub apply_key: u64,
     pub crc32c: u32,
 }
 
@@ -81,14 +84,12 @@ impl RecordHeader {
         buf[26..30].copy_from_slice(&self.vshard_id.to_le_bytes());
         buf[30..34].copy_from_slice(&self.payload_len.to_le_bytes());
         buf[34..42].copy_from_slice(&self.database_id.to_le_bytes());
-        buf[42..50].copy_from_slice(&self.reserved);
+        buf[42..50].copy_from_slice(&self.apply_key.to_le_bytes());
         buf[50..54].copy_from_slice(&self.crc32c.to_le_bytes());
         buf
     }
 
     pub fn from_bytes(buf: &[u8; HEADER_SIZE]) -> Self {
-        let mut reserved = [0u8; 8];
-        reserved.copy_from_slice(&buf[42..50]);
         Self {
             magic: u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]),
             format_version: u16::from_le_bytes([buf[4], buf[5]]),
@@ -104,15 +105,17 @@ impl RecordHeader {
             database_id: u64::from_le_bytes([
                 buf[34], buf[35], buf[36], buf[37], buf[38], buf[39], buf[40], buf[41],
             ]),
-            reserved,
+            apply_key: u64::from_le_bytes([
+                buf[42], buf[43], buf[44], buf[45], buf[46], buf[47], buf[48], buf[49],
+            ]),
             crc32c: u32::from_le_bytes([buf[50], buf[51], buf[52], buf[53]]),
         }
     }
 
     /// CRC32C over header (excluding the crc32c field) + payload.
     ///
-    /// The 16 reserved bytes are included in the CRC so they cannot be
-    /// silently modified without detection.
+    /// The apply key is included in the CRC so it cannot be silently
+    /// modified without detection.
     pub fn compute_checksum(&self, payload: &[u8]) -> u32 {
         let header_bytes = self.to_bytes();
         let mut digest = crc32c::crc32c(&header_bytes[..HEADER_SIZE - 4]);
@@ -168,7 +171,7 @@ mod tests {
             vshard_id,
             payload_len: 100,
             database_id: 0,
-            reserved: [0u8; 8],
+            apply_key: 0,
             crc32c: 0xDEAD_BEEF,
         }
     }
@@ -184,7 +187,7 @@ mod tests {
     fn header_golden_54_bytes_exact_offsets() {
         // magic at 0..4, format_version at 4..6, record_type at 6..10,
         // lsn at 10..18, tenant_id at 18..26, vshard_id at 26..30,
-        // payload_len at 30..34, database_id at 34..42, reserved at 42..50,
+        // payload_len at 30..34, database_id at 34..42, apply_key at 42..50,
         // crc32c at 50..54.
         let header = RecordHeader {
             magic: WAL_MAGIC,
@@ -195,7 +198,7 @@ mod tests {
             vshard_id: 0xCAFE_BABE,
             payload_len: 256,
             database_id: 0xABCD_0000_1234_5678,
-            reserved: [0u8; 8],
+            apply_key: 0,
             crc32c: 0x1234_5678,
         };
         let b = header.to_bytes();
@@ -216,7 +219,7 @@ mod tests {
         assert_eq!(&b[30..34], &256u32.to_le_bytes());
         // database_id
         assert_eq!(&b[34..42], &0xABCD_0000_1234_5678u64.to_le_bytes());
-        // reserved — all zero
+        // apply_key — zero
         assert_eq!(&b[42..50], &[0u8; 8]);
         // crc32c
         assert_eq!(&b[50..54], &0x1234_5678u32.to_le_bytes());
@@ -234,7 +237,7 @@ mod tests {
             vshard_id: 0,
             payload_len: 0,
             database_id: 7,
-            reserved: [0u8; 8],
+            apply_key: 0,
             crc32c: 0,
         };
         let bytes = header.to_bytes();
@@ -268,7 +271,7 @@ mod tests {
             vshard_id: 0,
             payload_len: 0,
             database_id: 0,
-            reserved: [0u8; 8],
+            apply_key: 0,
             crc32c: 0,
         };
         let bytes = header.to_bytes();

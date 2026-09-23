@@ -17,7 +17,7 @@ use crate::types::TxnId;
 
 impl CoreLoop {
     /// Stage a `ColumnarOp` write into `txn_id`'s overlay.
-    pub(super) fn execute_stage_columnar(
+    pub(in crate::data::executor) fn execute_stage_columnar(
         &mut self,
         task: &ExecutionTask,
         tid: u64,
@@ -30,6 +30,7 @@ impl CoreLoop {
                 payload,
                 surrogates,
                 schema_bytes,
+                intent,
                 on_conflict_updates,
                 rls_write_check,
                 ..
@@ -41,6 +42,7 @@ impl CoreLoop {
                 payload,
                 surrogates,
                 schema_bytes,
+                intent: *intent,
                 on_conflict_updates,
                 rls_write_check,
             }),

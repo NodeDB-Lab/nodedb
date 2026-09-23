@@ -115,7 +115,9 @@ pub fn replay_surrogate_records(
             // WriteAborted only names a refused write's LSN; the record it
             // names is already gone from this stream (the replay source drops
             // it), and the marker itself binds no surrogate.
-            | RecordType::WriteAborted => {}
+            | RecordType::WriteAborted
+            // ProposalApplied only names an applied Raft proposal.
+            | RecordType::ProposalApplied => {}
         }
     }
     Ok(stats)

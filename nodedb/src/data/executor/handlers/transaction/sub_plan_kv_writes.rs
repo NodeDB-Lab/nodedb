@@ -36,7 +36,7 @@ impl CoreLoop {
                 let now_ms = current_ms();
                 let prior = self
                     .kv_engine
-                    .get(did, tid, collection.as_str(), key, now_ms);
+                    .entry_image(did, tid, collection.as_str(), key, now_ms);
                 let resp = self.execute_kv_put(
                     task,
                     crate::data::executor::handlers::kv::crud::KvWriteParams {
@@ -59,7 +59,7 @@ impl CoreLoop {
                 undo_log.push(UndoEntry::KvPut {
                     collection: collection.to_string(),
                     key: key.clone(),
-                    prior_value: prior,
+                    prior,
                 });
                 Ok(resp)
             }
@@ -95,7 +95,7 @@ impl CoreLoop {
                 undo_log.push(UndoEntry::KvPut {
                     collection: collection.to_string(),
                     key: key.clone(),
-                    prior_value: None,
+                    prior: None,
                 });
                 Ok(resp)
             }
@@ -137,7 +137,7 @@ impl CoreLoop {
                     undo_log.push(UndoEntry::KvPut {
                         collection: collection.to_string(),
                         key: key.clone(),
-                        prior_value: None,
+                        prior: None,
                     });
                 }
                 Ok(resp)
@@ -149,7 +149,7 @@ impl CoreLoop {
                 let now_ms = current_ms();
                 let prior = self
                     .kv_engine
-                    .get(did, tid, collection.as_str(), key, now_ms);
+                    .entry_image(did, tid, collection.as_str(), key, now_ms);
                 let resp = self.execute_kv(task, did, tid, op);
                 if resp.status == Status::Error {
                     return Err(resp.error_code.map(|c| *c).unwrap_or(ErrorCode::Internal {
@@ -159,7 +159,7 @@ impl CoreLoop {
                 undo_log.push(UndoEntry::KvPut {
                     collection: collection.to_string(),
                     key: key.clone(),
-                    prior_value: prior,
+                    prior,
                 });
                 Ok(resp)
             }
@@ -172,13 +172,13 @@ impl CoreLoop {
             } => {
                 let now_ms = current_ms();
                 // Capture prior values for all keys that exist before deleting.
-                let priors: Vec<(Vec<u8>, Vec<u8>)> = keys
+                let priors: Vec<(Vec<u8>, crate::engine::kv::KvEntryImage)> = keys
                     .iter()
                     .filter_map(|k| {
-                        let v = self
-                            .kv_engine
-                            .get(did, tid, collection.as_str(), k, now_ms)?;
-                        Some((k.clone(), v))
+                        let image =
+                            self.kv_engine
+                                .entry_image(did, tid, collection.as_str(), k, now_ms)?;
+                        Some((k.clone(), image))
                     })
                     .collect();
                 // In-transaction writes never carry `RETURNING`: the Control
@@ -200,11 +200,11 @@ impl CoreLoop {
                         detail: "kv delete failed".into(),
                     }));
                 }
-                for (key, prior_value) in priors {
+                for (key, prior) in priors {
                     undo_log.push(UndoEntry::KvDelete {
                         collection: collection.to_string(),
                         key,
-                        prior_value,
+                        prior,
                     });
                 }
                 Ok(resp)
@@ -218,13 +218,20 @@ impl CoreLoop {
                 ..
             } => {
                 let now_ms = current_ms();
-                let prior_entries: Vec<(Vec<u8>, Option<Vec<u8>>)> = entries
-                    .iter()
-                    .map(|(k, _v)| {
-                        let prior = self.kv_engine.get(did, tid, collection.as_str(), k, now_ms);
-                        (k.clone(), prior)
-                    })
-                    .collect();
+                let prior_entries: Vec<(Vec<u8>, Option<crate::engine::kv::KvEntryImage>)> =
+                    entries
+                        .iter()
+                        .map(|(k, _v)| {
+                            let prior = self.kv_engine.entry_image(
+                                did,
+                                tid,
+                                collection.as_str(),
+                                k,
+                                now_ms,
+                            );
+                            (k.clone(), prior)
+                        })
+                        .collect();
                 let resp = self.execute_kv_batch_put(
                     task,
                     crate::data::executor::handlers::kv::batch::KvBatchPutArgs {
@@ -262,7 +269,7 @@ impl CoreLoop {
                 let now_ms = current_ms();
                 let prior = self
                     .kv_engine
-                    .get(did, tid, collection.as_str(), key, now_ms);
+                    .entry_image(did, tid, collection.as_str(), key, now_ms);
                 let resp = self.execute_kv_field_set(
                     crate::data::executor::handlers::kv::atomic::KvAtomicCtx {
                         task,
@@ -288,7 +295,7 @@ impl CoreLoop {
                 undo_log.push(UndoEntry::KvPut {
                     collection: collection.to_string(),
                     key: key.clone(),
-                    prior_value: prior,
+                    prior,
                 });
                 Ok(resp)
             }
@@ -307,10 +314,10 @@ impl CoreLoop {
                 let now_ms = current_ms();
                 let source_prior =
                     self.kv_engine
-                        .get(did, tid, collection.as_str(), source_key, now_ms);
+                        .entry_image(did, tid, collection.as_str(), source_key, now_ms);
                 let dest_prior =
                     self.kv_engine
-                        .get(did, tid, collection.as_str(), dest_key, now_ms);
+                        .entry_image(did, tid, collection.as_str(), dest_key, now_ms);
                 let resp = self.execute_kv(task, did, tid, op);
                 if resp.status == Status::Error {
                     return Err(resp.error_code.map(|c| *c).unwrap_or(ErrorCode::Internal {
@@ -343,12 +350,20 @@ impl CoreLoop {
                 dest_rls_write_check,
             } => {
                 let now_ms = current_ms();
-                let source_prior =
-                    self.kv_engine
-                        .get(did, tid, source_collection.as_str(), item_key, now_ms);
-                let dest_prior =
-                    self.kv_engine
-                        .get(did, tid, dest_collection.as_str(), dest_key, now_ms);
+                let source_prior = self.kv_engine.entry_image(
+                    did,
+                    tid,
+                    source_collection.as_str(),
+                    item_key,
+                    now_ms,
+                );
+                let dest_prior = self.kv_engine.entry_image(
+                    did,
+                    tid,
+                    dest_collection.as_str(),
+                    dest_key,
+                    now_ms,
+                );
                 let resp = self.execute_kv_transfer_item(
                     task,
                     crate::data::executor::handlers::kv::transfer::TransferItemParams {

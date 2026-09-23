@@ -17,4 +17,5 @@ mod write_epoch;
 
 pub use checkpoint_export::KvCollectionRef;
 pub use checkpoint_restore::{RestoreCompositeIndexParams, RestoreFieldIndexParams};
+pub use reads::{KvEntryImage, KvKeyRef};
 pub use state::{KvEngine, ScanResult};

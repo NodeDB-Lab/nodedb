@@ -140,7 +140,7 @@ impl InvertedIndex {
     /// Core indexing logic: writes postings, doc length, and stats within
     /// a transaction. Bypasses the LSM memtable so Origin transactions can
     /// stay atomic with the document write.
-    fn write_index_data(
+    pub(super) fn write_index_data(
         &self,
         txn: &WriteTransaction,
         scope: IndexDocScope<'_>,

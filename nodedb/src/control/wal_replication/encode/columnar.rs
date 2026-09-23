@@ -39,23 +39,28 @@ pub(super) fn columnar_ingest(fields: ColumnarIngestFields<'_>) -> ReplicatedWri
     }
 }
 
-pub(super) fn timeseries_ingest(
-    collection: &str,
-    payload: &[u8],
-    format: &str,
-    surrogates: &[Surrogate],
-    provenance: Option<Vec<u8>>,
-    returning: Option<Vec<u8>>,
-    rls_filters: &[u8],
-) -> ReplicatedWrite {
+/// Fields of a `TimeseriesOp::Ingest` that cross the wire.
+pub(super) struct TimeseriesIngestFields<'a> {
+    pub collection: &'a str,
+    pub payload: &'a [u8],
+    pub format: &'a str,
+    pub surrogates: &'a [Surrogate],
+    pub default_timestamp_ms: i64,
+    pub provenance: Option<Vec<u8>>,
+    pub returning: Option<Vec<u8>>,
+    pub rls_filters: &'a [u8],
+}
+
+pub(super) fn timeseries_ingest(fields: TimeseriesIngestFields<'_>) -> ReplicatedWrite {
     ReplicatedWrite::TimeseriesIngest {
-        collection: collection.to_owned(),
-        payload: payload.to_vec(),
-        format: format.to_owned(),
-        surrogates: surrogates.iter().map(|s| s.as_u32()).collect(),
-        provenance,
-        returning,
-        rls_filters: rls_filters.to_vec(),
+        collection: fields.collection.to_owned(),
+        payload: fields.payload.to_vec(),
+        format: fields.format.to_owned(),
+        surrogates: fields.surrogates.iter().map(|s| s.as_u32()).collect(),
+        default_timestamp_ms: fields.default_timestamp_ms,
+        provenance: fields.provenance,
+        returning: fields.returning,
+        rls_filters: fields.rls_filters.to_vec(),
     }
 }
 

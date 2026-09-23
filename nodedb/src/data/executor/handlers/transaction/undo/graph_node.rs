@@ -38,6 +38,31 @@ impl CoreLoop {
             _ => unreachable!("apply_undo_mark_node called with non-mark-node entry"),
         }
     }
+
+    /// Put every label a node-label op touched back to its prior state.
+    pub(super) fn apply_undo_node_labels(
+        &mut self,
+        entry_index: usize,
+        database_id: u64,
+        tid: u64,
+        node_id: &str,
+        prior: Vec<(String, bool)>,
+    ) -> Result<(), (usize, String)> {
+        let partition = self.csr_partition_mut(database_id, tid);
+        for (label, carried) in prior {
+            if carried {
+                partition.add_node_label(node_id, &label).map_err(|e| {
+                    (
+                        entry_index,
+                        format!("restoring label '{label}' on node '{node_id}': {e}"),
+                    )
+                })?;
+            } else {
+                partition.remove_node_label(node_id, &label);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

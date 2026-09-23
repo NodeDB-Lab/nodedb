@@ -22,7 +22,12 @@ use crate::types::{DatabaseId, TenantId};
 use super::array_dispatch::{apply_array_op_entry, apply_array_schema_entry};
 use super::bookkeeping::record_durable_apply;
 use super::calvin_read_result::{CalvinReadResultFields, forward_calvin_read_result};
+use super::proposal_gate::{EntryOutcome, ProposalGate};
+use super::transaction_redo::apply_transaction_redo_entry;
 use super::write_dispatch::apply_generic_entry;
+use crate::control::distributed_applier::proposal_ledger::{
+    PROPOSAL_LEDGER_CAPACITY, ProposalLedger,
+};
 
 /// Run the background loop that applies committed Raft entries to the local Data Plane.
 ///
@@ -36,6 +41,26 @@ pub async fn run_apply_loop(
         std::sync::Mutex<std::collections::BTreeMap<u32, mpsc::Sender<ReadResultEvent>>>,
     >,
 ) {
+    // Proposals this node already applied, recovered from its WAL before any
+    // entry is delivered: every record an entry's apply appended carries the
+    // entry's idempotency key in its header.
+    let records = match state.wal.replay() {
+        Ok(records) => records,
+        Err(error) => {
+            // Without the keys an entry re-delivered above the durable floor,
+            // or a second committed copy of a proposal, would apply a second
+            // time. Refuse to apply anything rather than risk it: the loop
+            // stops, and every propose waiter surfaces the stall.
+            tracing::error!(
+                %error,
+                "data-group apply loop cannot read its WAL to recover applied proposals; \
+                 refusing to apply committed entries"
+            );
+            return;
+        }
+    };
+    let mut ledger = ProposalLedger::from_records(&records, PROPOSAL_LEDGER_CAPACITY);
+    drop(records);
     while let Some(batch) = apply_rx.recv().await {
         // The floor is saved ONCE per batch, after the loop — never per entry.
         // `save_applied_index` lands a redb transaction, and redb commits at
@@ -52,6 +77,10 @@ pub async fn run_apply_loop(
         // its outcome — `record` for the ones whose success means a durable
         // redo record, `skip` for the ones that apply no durable state at all.
         let mut prefix = AppliedPrefix::new();
+        let mut gate = ProposalGate {
+            ledger: &mut ledger,
+            group_id: batch.group_id,
+        };
         for entry in &batch.entries {
             // Decode once; reused for both the idempotency key and the
             // Array/Calvin fast-path match below. Returns 0 for
@@ -73,6 +102,14 @@ pub async fn run_apply_loop(
                 .as_ref()
                 .map(|e| DatabaseId::new(e.database_id))
                 .unwrap_or(DatabaseId::DEFAULT);
+
+            // A second committed copy of a proposal this node already applied
+            // (a re-proposal after a leader change whose first copy also
+            // committed) resolves its waiter with the first copy's result and
+            // applies nothing.
+            if gate.skip_duplicate(&tracker, &mut prefix, entry.index, applied_key) {
+                continue;
+            }
 
             // ── Array CRDT variants — handled on the Control Plane, bypass Data Plane ──
             if let Some(replicated) = replicated_opt {
@@ -108,7 +145,11 @@ pub async fn run_apply_loop(
                         // submits through `submit_write`, so its redo is fsynced
                         // before it reports success. A failure breaks the
                         // prefix: the entry must stay replayable.
-                        prefix.record(entry.index, applied_ok);
+                        let outcome = EntryOutcome::Applied {
+                            durable: applied_ok,
+                            result: None,
+                        };
+                        gate.settle(&mut prefix, entry.index, applied_key, outcome);
                         continue;
                     }
                     ReplicatedWrite::ArraySchema {
@@ -143,7 +184,20 @@ pub async fn run_apply_loop(
                         // Data-Plane memtables and exists on disk only as the
                         // redo record the funnel appends, which is why they must
                         // route through `submit_write`.
-                        prefix.record(entry.index, applied_ok);
+                        let outcome = EntryOutcome::Applied {
+                            durable: applied_ok,
+                            result: None,
+                        };
+                        gate.settle(&mut prefix, entry.index, applied_key, outcome);
+                        continue;
+                    }
+                    ReplicatedWrite::TransactionRedo { .. } => {
+                        let outcome =
+                            apply_transaction_redo_entry(&state, &tracker, pos, &replicated).await;
+                        // Advance the durable prefix when the entry's outcome is
+                        // durable: its keyed redo record fsynced, or a final
+                        // refusal cancelled in the WAL.
+                        gate.settle(&mut prefix, entry.index, applied_key, outcome);
                         continue;
                     }
                     ReplicatedWrite::CalvinReadResult {
@@ -182,16 +236,16 @@ pub async fn run_apply_loop(
                 }
             }
 
-            apply_generic_entry(
+            let outcome = apply_generic_entry(
                 &state,
                 &tracker,
-                &mut prefix,
                 batch.group_id,
                 entry,
                 applied_key,
                 database_id,
             )
             .await;
+            gate.settle(&mut prefix, entry.index, applied_key, outcome);
         }
 
         // One save + one compaction check per batch, against the contiguous

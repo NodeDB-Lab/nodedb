@@ -22,22 +22,22 @@ use nodedb_physical::physical_plan::ResolvedSumTarget;
 use super::types::map_enforcement_error;
 
 /// The write being admitted, and the pre-image it is judged against.
-pub(in crate::data::executor::handlers::point) struct PutEnforcement<'a> {
-    pub(in crate::data::executor::handlers::point) config_key: &'a (DatabaseId, TenantId, String),
-    pub(in crate::data::executor::handlers::point) database_id: u64,
-    pub(in crate::data::executor::handlers::point) tid: u64,
-    pub(in crate::data::executor::handlers::point) collection: &'a str,
+pub(in crate::data::executor) struct PutEnforcement<'a> {
+    pub(in crate::data::executor) config_key: &'a (DatabaseId, TenantId, String),
+    pub(in crate::data::executor) database_id: u64,
+    pub(in crate::data::executor) tid: u64,
+    pub(in crate::data::executor) collection: &'a str,
     /// The incoming body in MessagePack form for both storage modes (a strict
     /// collection encodes its Binary Tuple separately).
-    pub(in crate::data::executor::handlers::point) value: &'a [u8],
+    pub(in crate::data::executor) value: &'a [u8],
     /// The row as currently stored, when one exists.
-    pub(in crate::data::executor::handlers::point) old_value: &'a Option<Vec<u8>>,
-    pub(in crate::data::executor::handlers::point) user_roles: &'a [String],
+    pub(in crate::data::executor) old_value: &'a Option<Vec<u8>>,
+    pub(in crate::data::executor) user_roles: &'a [String],
     /// `(target collection, join-key value)` → target row surrogate, resolved
     /// on the Control Plane at plan time. A period-lock check reads its
     /// reference row's surrogate off this slice, keyed by
     /// `(config.ref_table, period value)`.
-    pub(in crate::data::executor::handlers::point) resolved_targets: &'a [ResolvedSumTarget],
+    pub(in crate::data::executor) resolved_targets: &'a [ResolvedSumTarget],
 }
 
 impl CoreLoop {
@@ -51,7 +51,7 @@ impl CoreLoop {
     /// CRDT-sync materialization (which passes `enforce == false`): those
     /// deltas already passed admission on their origin replica at Raft commit
     /// time.
-    pub(in crate::data::executor::handlers::point) fn check_stateless_put_enforcement(
+    pub(in crate::data::executor) fn check_stateless_put_enforcement(
         &self,
         enforce: bool,
         p: PutEnforcement<'_>,

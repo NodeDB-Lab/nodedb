@@ -27,6 +27,8 @@
 //!      for shutdown.
 //!    - `add_vshard_sender(vshard_id, sender)` — wire a per-vshard channel
 //!      into the state machine so tests can assert fan-out.
+//!    - `try_recv_txn(rx)` — read the next sequenced txn a fan-out channel
+//!      holds.
 
 #![allow(dead_code)] // Not every test file uses every helper.
 
@@ -130,24 +132,15 @@ impl CalvinTestNode {
 
     /// Register a per-vshard output sender so the state machine can
     /// fan out sequenced transactions to the receiving test code.
-    pub fn add_vshard_sender(&self, vshard_id: u32, sender: mpsc::Sender<SequencedTxn>) {
-        // The state machine now fans out `SchedulerInput`; these tests assert on
-        // the sequenced-txn stream, so adapt: forward only `Txn` payloads to the
-        // caller's `SequencedTxn` channel (reservation inputs don't occur here).
-        let (adapt_tx, mut adapt_rx) = mpsc::channel::<SchedulerInput>(512);
-        tokio::spawn(async move {
-            while let Some(input) = adapt_rx.recv().await {
-                if let SchedulerInput::Txn(txn) = input
-                    && sender.send(txn).await.is_err()
-                {
-                    break;
-                }
-            }
-        });
+    ///
+    /// The state machine sends into `sender` itself, inside `apply`, before
+    /// it advances `last_applied_epoch`. A test that waits for the epoch can
+    /// then read the fan-out with `try_recv_txn` and no further wait.
+    pub fn add_vshard_sender(&self, vshard_id: u32, sender: mpsc::Sender<SchedulerInput>) {
         self.state_machine
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .set_vshard_sender(vshard_id, adapt_tx);
+            .set_vshard_sender(vshard_id, sender);
     }
 
     /// Start the sequencer service epoch-ticker task on this node.
@@ -416,4 +409,15 @@ pub async fn wait_for_sequencer_leader(
         }
         tokio::time::sleep(step).await;
     }
+}
+
+/// The next sequenced txn `rx` holds, skipping any other scheduler input.
+/// `None` when the channel holds no txn.
+pub fn try_recv_txn(rx: &mut mpsc::Receiver<SchedulerInput>) -> Option<SequencedTxn> {
+    while let Ok(input) = rx.try_recv() {
+        if let SchedulerInput::Txn(txn) = input {
+            return Some(txn);
+        }
+    }
+    None
 }

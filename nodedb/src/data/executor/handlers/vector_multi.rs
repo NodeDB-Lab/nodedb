@@ -112,6 +112,8 @@ impl CoreLoop {
             .get(&index_key)
             .cloned()
             .unwrap_or_default();
+        // A committed-redo install seals once the whole record landed.
+        let defer_seal = self.recording_redo_undo();
         let coll = self
             .vector_collections
             .entry(index_key.clone())
@@ -143,7 +145,8 @@ impl CoreLoop {
 
         // Auto-seal if needed.
         let seal_key = CoreLoop::vector_build_key(&index_key);
-        if coll.needs_seal()
+        if !defer_seal
+            && coll.needs_seal()
             && let Some(req) = coll.seal(&seal_key)
             && let Some(tx) = &self.build_tx
             && let Err(e) = tx.send(req)

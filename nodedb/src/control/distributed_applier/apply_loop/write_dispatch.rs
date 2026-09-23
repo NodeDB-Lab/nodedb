@@ -15,7 +15,6 @@ use crate::bridge::envelope::{PhysicalPlan, Status};
 use crate::control::array_sync::raft_apply::{
     AppliedPosition, ArrayCellTarget, apply_array_cell_write,
 };
-use crate::control::distributed_applier::applied_index::AppliedPrefix;
 use crate::control::distributed_applier::propose_tracker::{AppliedWrite, ProposeTracker};
 use crate::control::server::dispatch_utils::{
     ChangeFeedOwner, SubmitWrite, WalDurability, WriteOrdering, submit_write,
@@ -25,19 +24,20 @@ use crate::control::wal_replication::from_replicated_entry;
 use crate::types::{DatabaseId, TraceId};
 
 use super::helpers::{committed_response_result, deterministic_crdt_fence_noop};
+use super::proposal_gate::{EntryOutcome, ledger_outcome};
 
 /// Decode `entry` and apply it: Raft-native array cell writes route through
 /// the array-open bootstrap and the write funnel; everything else dispatches
-/// through the write funnel directly. Records the outcome into `prefix`.
+/// through the write funnel directly. Returns the outcome the caller records
+/// into its applied prefix.
 pub(super) async fn apply_generic_entry(
     state: &Arc<SharedState>,
     tracker: &Arc<ProposeTracker>,
-    prefix: &mut AppliedPrefix,
     group_id: u64,
     entry: &LogEntry,
     applied_key: u64,
     database_id: DatabaseId,
-) {
+) -> EntryOutcome {
     let decoded = from_replicated_entry(&entry.data, Some(state.surrogate_assigner.as_ref()));
     let (tenant_id, vshard_id, plan, resolved_now_ms) = match decoded {
         Ok(Some(t)) => t,
@@ -60,8 +60,7 @@ pub(super) async fn apply_generic_entry(
             // it buys nothing and costs a double-apply of every later
             // write in the batch. It applied no state, so it must not
             // advance the floor either.
-            prefix.skip();
-            return;
+            return EntryOutcome::Skipped;
         }
         Err(e) => {
             tracing::warn!(
@@ -83,8 +82,10 @@ pub(super) async fn apply_generic_entry(
             // state rather than on its own bytes, so a re-delivery can
             // legitimately succeed. Holding the floor below it is what
             // keeps it replayable.
-            prefix.record(entry.index, false);
-            return;
+            return EntryOutcome::Applied {
+                durable: false,
+                result: None,
+            };
         }
     };
 
@@ -117,8 +118,10 @@ pub(super) async fn apply_generic_entry(
             plan,
         )
         .await;
-        prefix.record(entry.index, applied_ok);
-        return;
+        return EntryOutcome::Applied {
+            durable: applied_ok,
+            result: None,
+        };
     }
 
     let submitted = submit_write(
@@ -149,6 +152,7 @@ pub(super) async fn apply_generic_entry(
             // install the byte-identical value every other replica does.
             durability: WalDurability::AppendHere {
                 now_override: resolved_now_ms,
+                apply_key: applied_key,
             },
             // Raft committed this entry at a fixed log index; every
             // replica applies it in that order. Re-entering the
@@ -192,6 +196,7 @@ pub(super) async fn apply_generic_entry(
     };
 
     let applied_ok = result.is_ok() || deterministic_crdt_fence_noop(&result);
+    let applied = ledger_outcome(&result);
     tracker.complete(group_id, entry.index, applied_key, result);
 
     // Extend the batch's durable prefix. On success `submit_write`'s
@@ -202,5 +207,8 @@ pub(super) async fn apply_generic_entry(
     // neither a safe compaction boundary nor a safe restart floor;
     // breaking the prefix is what keeps a genuinely failed apply
     // replayable rather than silently skipped.
-    prefix.record(entry.index, applied_ok);
+    EntryOutcome::Applied {
+        durable: applied_ok,
+        result: Some(applied),
+    }
 }

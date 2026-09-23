@@ -23,7 +23,7 @@ use crate::types::Lsn;
 /// tracker resolves on the very node that applied locally — so the version this
 /// carries is that node's own, which is exactly what shard-local OCC validates
 /// against.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AppliedWrite {
     /// The Data Plane's response payload, verbatim.
     pub payload: Vec<u8>,

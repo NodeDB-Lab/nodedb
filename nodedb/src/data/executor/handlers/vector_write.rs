@@ -28,6 +28,8 @@ impl CoreLoop {
         debug!(core = self.core_id, %collection, dim, count = vectors.len(), "vector batch insert");
         let database_id = task.request.database_id.as_u64();
         let index_key = CoreLoop::vector_index_key(database_id, tid, collection, "");
+        // A committed-redo install seals once the whole record landed.
+        let defer_seal = self.recording_redo_undo();
         match self.get_or_create_vector_index(database_id, tid, collection, dim, "") {
             Ok(collection_ref) => {
                 for (i, vector) in vectors.iter().enumerate() {
@@ -53,7 +55,8 @@ impl CoreLoop {
                     collection_ref.note_checkpoint_lsn(lsn.as_u64());
                 }
                 let seal_key = CoreLoop::vector_build_key(&index_key);
-                if collection_ref.needs_seal()
+                if !defer_seal
+                    && collection_ref.needs_seal()
                     && let Some(req) = collection_ref.seal(&seal_key)
                     && let Some(tx) = &self.build_tx
                     && let Err(e) = tx.send(req)

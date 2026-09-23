@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::server::shared::write_admission::plan_is_write;
-use nodedb_physical::physical_plan::GraphOp;
+use nodedb_physical::physical_plan::{GraphOp, MetaOp};
 
 /// Count of writes acknowledged with no durable redo record despite belonging
 /// to an engine whose every write-class op mints one on this path.
@@ -56,9 +56,10 @@ pub fn writes_acked_without_durability() -> u64 {
 /// * `Crdt` — constraint installs are Raft-log-replay durable and
 ///   `RestoreToVersion` only computes a forward delta that a follow-up
 ///   `Apply` logs;
-/// * `Meta` — COMMIT's single transaction redo, the procedural batch flush and
-///   the Calvin ops each own durability on their own path and arrive with the
-///   LSN they minted (or none, by design);
+/// * `Meta` — the procedural batch flush and the Calvin ops each own
+///   durability on their own path and arrive with the LSN they minted (or
+///   none, by design). `ApplyTransactionRedo` is the one `Meta` write this
+///   funnel appends a record for, and it is held to the barrier;
 /// * `ClusterArray` — a coordinator-side routing wrapper: each owning shard's
 ///   apply mints the redo for the cells it actually holds;
 /// * an empty `EdgePutBatch` / `EdgeDeleteBatch`, which has no edge to make
@@ -86,6 +87,8 @@ pub(super) fn funnel_minted_redo_engine(plan: &PhysicalPlan) -> Option<&'static 
         PhysicalPlan::Graph(GraphOp::EdgePutBatch { edges }) if edges.is_empty() => None,
         PhysicalPlan::Graph(GraphOp::EdgeDeleteBatch { edges }) if edges.is_empty() => None,
         PhysicalPlan::Graph(_) => Some("graph"),
+        // The committed-redo apply appends its `TransactionRedo` record here.
+        PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo { .. }) => Some("transaction"),
         PhysicalPlan::Document(_)
         | PhysicalPlan::Crdt(_)
         | PhysicalPlan::Meta(_)
@@ -136,6 +139,18 @@ mod tests {
     #[test]
     fn kv_write_requires_a_funnel_minted_redo() {
         assert_eq!(funnel_minted_redo_engine(&kv_put()), Some("kv"));
+    }
+
+    /// A committed transaction's redo apply mints its record in the funnel,
+    /// so an acknowledgement without it must trip the barrier.
+    #[test]
+    fn committed_redo_apply_requires_a_funnel_minted_redo() {
+        let plan = PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
+            redo: vec![1],
+            collections: vec!["c".into()],
+            sum_targets: Vec::new(),
+        });
+        assert_eq!(funnel_minted_redo_engine(&plan), Some("transaction"));
     }
 
     /// A read carries no durability obligation at all.

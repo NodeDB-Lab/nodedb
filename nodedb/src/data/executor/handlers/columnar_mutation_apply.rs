@@ -41,6 +41,25 @@ pub(in crate::data::executor) struct ColumnarDeleteOutcome {
     pub restored: Vec<(Vec<u8>, RowLocation)>,
 }
 
+/// The surrogate the segment sidecar records for the flushed row at `loc`.
+/// Segment ids are 1-based: segment `n` is sidecar index `n - 1`.
+pub(in crate::data::executor) fn flushed_row_surrogate(
+    sidecars: &std::collections::HashMap<
+        ColumnarEngineKey,
+        nodedb_columnar::mutation::snapshot::FlushedSurrogateTable,
+    >,
+    key: &ColumnarEngineKey,
+    loc: RowLocation,
+) -> Option<nodedb_types::Surrogate> {
+    let segment_index = usize::try_from(loc.segment_id.checked_sub(1)?).ok()?;
+    sidecars
+        .get(key)?
+        .get(segment_index)?
+        .get(loc.row_index as usize)
+        .copied()
+        .flatten()
+}
+
 impl CoreLoop {
     /// Apply `(old_pk, post_image)` rows through `MutationEngine::update`
     /// (delete-old-PK + insert-new-row). For a collection with geometry
@@ -100,7 +119,16 @@ impl CoreLoop {
             } else {
                 None
             };
-            match engine.update(old_pk, new_row) {
+            // A flushed row's surrogate lives in its segment's sidecar, which
+            // the engine does not hold; the replacement row keeps it.
+            let flushed_surrogate = engine
+                .pk_index()
+                .get(&old_pk_bytes)
+                .filter(|loc| loc.segment_id != engine.memtable_segment_id())
+                .and_then(|loc| {
+                    flushed_row_surrogate(&self.columnar_flushed_surrogates, key, *loc)
+                });
+            match engine.update(old_pk, new_row, flushed_surrogate) {
                 Ok(_) => {}
                 Err(e) => {
                     warn!(core = self.core_id, %collection, error = %e, "columnar update row failed");
@@ -219,4 +247,70 @@ fn push_removed_spatial_undo(undo_log: &mut Vec<UndoEntry>, removed: Vec<Removed
             inserted: Vec::new(),
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
+    use nodedb_types::columnar::{ColumnDef, ColumnType};
+    use nodedb_types::{DatabaseId, Surrogate};
+
+    fn schema() -> ColumnarSchema {
+        ColumnarSchema {
+            columns: vec![
+                ColumnDef::required("id", ColumnType::Int64).with_primary_key(),
+                ColumnDef::required("v", ColumnType::Int64),
+            ],
+            version: 1,
+        }
+    }
+
+    #[test]
+    fn an_update_of_a_flushed_row_keeps_the_surrogate_its_segment_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let key: ColumnarEngineKey = (
+            DatabaseId::DEFAULT,
+            crate::types::TenantId::new(1),
+            "m".to_string(),
+        );
+        let mut engine = nodedb_columnar::MutationEngine::new("m".to_string(), schema());
+        engine
+            .insert_with_surrogate(&[Value::Integer(1), Value::Integer(10)], Surrogate::new(42))
+            .expect("insert");
+        let segment_id = engine.next_segment_id();
+        let sidecar = engine.memtable_surrogates().to_vec();
+        let _drained = engine.memtable_mut().drain_optimized();
+        engine.on_memtable_flushed(segment_id).expect("flush");
+        core.columnar_engines.insert(key.clone(), engine);
+        core.columnar_flushed_surrogates
+            .insert(key.clone(), vec![sidecar]);
+
+        let outcome = core.apply_columnar_update_rows(
+            &make_default_task(),
+            &key,
+            &schema(),
+            &[(
+                Value::Integer(1),
+                vec![Value::Integer(1), Value::Integer(99)],
+            )],
+            None,
+        );
+
+        assert_eq!(outcome.affected, 1);
+        let live: Vec<(Option<Surrogate>, Vec<Value>)> = core
+            .columnar_engines
+            .get(&key)
+            .expect("engine")
+            .scan_memtable_rows_with_surrogates()
+            .collect();
+        assert_eq!(
+            live,
+            vec![(
+                Some(Surrogate::new(42)),
+                vec![Value::Integer(1), Value::Integer(99)]
+            )]
+        );
+    }
 }

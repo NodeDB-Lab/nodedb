@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::control::gateway::GatewayErrorMap;
 use crate::control::gateway::core::QueryContext as GatewayQueryContext;
+use crate::control::gateway::router::is_task_vshard_scoped;
 use crate::control::server::shared::clone_write::CloneCheckedOutcome;
 use crate::types::{Lsn, RequestId, TraceId};
 use nodedb_physical::physical_task::PhysicalTask;
@@ -77,7 +78,14 @@ pub(super) async fn dispatch_task_via_gateway(
     let database_id = checked.database_id();
     let txn_id = checked.txn_id();
 
-    match ctx.state.gateway.get() {
+    // A staged write and the other transaction meta-ops run on the core of
+    // the task's own vShard. The gateway would route them to vShard 0.
+    let gateway = ctx
+        .state
+        .gateway
+        .get()
+        .filter(|_| !is_task_vshard_scoped(checked.plan()));
+    match gateway {
         Some(gw) => {
             let gw_ctx = GatewayQueryContext {
                 tenant_id,

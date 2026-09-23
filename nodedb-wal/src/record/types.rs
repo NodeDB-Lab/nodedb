@@ -345,6 +345,20 @@ pub enum RecordType {
     /// exists to prevent, so an older binary pointed at a WAL containing one
     /// must fail to start loudly rather than readmit refused data.
     WriteAborted = 61 | 0x8000,
+
+    /// Marks one replicated Raft proposal as applied on this node when its
+    /// apply writes no record of its own (a `wal=false` timeseries ingest).
+    /// Payload: empty. The proposal's idempotency key is the header's
+    /// `apply_key`, as on every record a proposal's apply appends.
+    ///
+    /// A proposal re-proposed after a leader change can commit at two log
+    /// indexes. The data-group apply loop recovers every keyed record at boot
+    /// and skips the second copy, so a write applies once per proposal. Never
+    /// replayed into any engine.
+    ///
+    /// Required: skipping this record re-applies a duplicate proposal, which
+    /// double-counts every non-idempotent effect (a timeseries append).
+    ProposalApplied = 62 | 0x8000,
 }
 
 impl RecordType {
@@ -399,6 +413,7 @@ impl RecordType {
             x if x == 59 | 0x8000 => Some(Self::GraphNodeLabelSet),
             x if x == 60 | 0x8000 => Some(Self::GraphNodeLabelRemove),
             x if x == 61 | 0x8000 => Some(Self::WriteAborted),
+            x if x == 62 | 0x8000 => Some(Self::ProposalApplied),
             _ => None,
         }
     }
@@ -483,6 +498,7 @@ mod tests {
             RecordType::GraphNodeLabelSet,
             RecordType::GraphNodeLabelRemove,
             RecordType::WriteAborted,
+            RecordType::ProposalApplied,
         ] {
             assert_eq!(RecordType::from_raw(ty as u32), Some(ty));
         }

@@ -235,6 +235,7 @@ mod sql_transactions_columnar_engine_rollback;
 mod sql_transactions_columnar_overlay;
 mod sql_transactions_columnar_predicate_dml_overlay;
 mod sql_transactions_columnar_row_level_security;
+mod sql_transactions_commit_point_visibility;
 mod sql_transactions_crdt_overlay;
 mod sql_transactions_crdt_overlay_lifecycle;
 mod sql_transactions_cross_shard_read_reject;

@@ -298,6 +298,22 @@ impl CoreLoop {
                 self.execute_calvin_resolve(task, *epoch, *position)
             }
 
+            // Install a committed transaction's redo record through the WAL
+            // replay arms, on every replica, in Raft log order.
+            MetaOp::ApplyTransactionRedo {
+                redo,
+                collections,
+                sum_targets,
+            } => self.execute_apply_transaction_redo(
+                task,
+                tid,
+                crate::data::executor::handlers::transaction::redo_apply::CommittedRedo {
+                    redo,
+                    collections,
+                    sum_targets,
+                },
+            ),
+
             MetaOp::StageWrite { plan } => self.execute_stage_write(task, tid, plan),
 
             // Release the staging overlay once a transaction resolves (commit
@@ -495,6 +511,7 @@ mod txn_created_columnar_engine_tests {
             payload: &pl,
             surrogates: &surrogates,
             schema_bytes: &sb,
+            intent: nodedb_physical::physical_plan::ColumnarInsertIntent::Insert,
             on_conflict_updates: &[],
             rls_write_check: &no_policy,
         });
@@ -624,6 +641,7 @@ mod txn_created_columnar_engine_tests {
             payload: &pl,
             surrogates: &surrogates,
             schema_bytes: &sb,
+            intent: nodedb_physical::physical_plan::ColumnarInsertIntent::Insert,
             on_conflict_updates: &[],
             rls_write_check: &no_policy,
         });

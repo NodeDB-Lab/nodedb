@@ -12,8 +12,6 @@
 //! diverge. See `wal::CrdtListOpWalRecord`'s doc comment for the full
 //! rationale and why this is deliberately NOT `RecordType::CrdtDelta`.
 
-use tracing::warn;
-
 use crate::bridge::envelope::{PhysicalPlan, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
@@ -22,24 +20,14 @@ use nodedb_physical::physical_plan::CrdtOp;
 use nodedb_types::{RowIdentity, Surrogate};
 
 /// Narrow a WAL-logged `u64` list position to the `usize` the live
-/// `execute_crdt_list_*` handlers take. Returns `None` (with the record
-/// skipped by the caller) on a platform where `usize` is narrower than
-/// `u64` and the logged position doesn't fit — never truncates via `as`,
-/// which would silently replay at the wrong position.
-fn wal_list_index(core_id: usize, lsn: u64, field: &str, value: u64) -> Option<usize> {
-    match usize::try_from(value) {
-        Ok(v) => Some(v),
-        Err(_) => {
-            warn!(
-                core = core_id,
-                lsn,
-                field,
-                value,
-                "CrdtListOp WAL record position does not fit usize; skipping record"
-            );
-            None
-        }
-    }
+/// `execute_crdt_list_*` handlers take. The error names the field on a
+/// platform where `usize` is narrower than `u64` and the logged position
+/// does not fit. It never truncates via `as`, which would silently replay at
+/// the wrong position.
+fn wal_list_index(field: &str, value: u64) -> crate::Result<usize> {
+    usize::try_from(value).map_err(|_| crate::Error::Internal {
+        detail: format!("CrdtListOp position {field} = {value} does not fit usize"),
+    })
 }
 
 impl CoreLoop {
@@ -76,10 +64,11 @@ impl CoreLoop {
         }
 
         let Ok(payload) = zerompk::from_msgpack::<CrdtListOpWalRecord>(&record.payload) else {
-            warn!(
-                core = self.core_id,
-                lsn = record.header.lsn,
-                "malformed CrdtListOp WAL record; skipping"
+            self.replay_record_rejected(
+                "crdt",
+                record.header.lsn,
+                None,
+                "malformed CrdtListOp WAL record",
             );
             return Some(0);
         };
@@ -98,7 +87,6 @@ impl CoreLoop {
         let tid = TenantId::new(tenant_id);
         let database_id = DatabaseId::new(record.header.database_id);
         let vshard = VShardId::new(record.header.vshard_id);
-        let core_id = self.core_id;
 
         // The task carries the real intent even though today's handlers read
         // only the explicit args passed alongside it, not the plan itself —
@@ -127,8 +115,17 @@ impl CoreLoop {
                 index,
                 fields_json,
             } => {
-                let Some(index) = wal_list_index(core_id, record_lsn, "index", index) else {
-                    return Some(0);
+                let index = match wal_list_index("index", index) {
+                    Ok(index) => index,
+                    Err(e) => {
+                        self.replay_record_rejected(
+                            "crdt",
+                            record_lsn,
+                            Some(Box::new(crate::bridge::envelope::ErrorCode::from(e))),
+                            "CrdtListOp position out of range",
+                        );
+                        return Some(0);
+                    }
                 };
                 let document_id = RowIdentity::from_user_key(document_id);
                 let plan = PhysicalPlan::Crdt(CrdtOp::ListInsert {
@@ -157,8 +154,17 @@ impl CoreLoop {
                 list_path,
                 index,
             } => {
-                let Some(index) = wal_list_index(core_id, record_lsn, "index", index) else {
-                    return Some(0);
+                let index = match wal_list_index("index", index) {
+                    Ok(index) => index,
+                    Err(e) => {
+                        self.replay_record_rejected(
+                            "crdt",
+                            record_lsn,
+                            Some(Box::new(crate::bridge::envelope::ErrorCode::from(e))),
+                            "CrdtListOp position out of range",
+                        );
+                        return Some(0);
+                    }
                 };
                 let document_id = RowIdentity::from_user_key(document_id);
                 let plan = PhysicalPlan::Crdt(CrdtOp::ListDelete {
@@ -186,14 +192,19 @@ impl CoreLoop {
                 from_index,
                 to_index,
             } => {
-                let Some(from_index) =
-                    wal_list_index(core_id, record_lsn, "from_index", from_index)
-                else {
-                    return Some(0);
-                };
-                let Some(to_index) = wal_list_index(core_id, record_lsn, "to_index", to_index)
-                else {
-                    return Some(0);
+                let (from_index, to_index) = match wal_list_index("from_index", from_index)
+                    .and_then(|from| wal_list_index("to_index", to_index).map(|to| (from, to)))
+                {
+                    Ok(indexes) => indexes,
+                    Err(e) => {
+                        self.replay_record_rejected(
+                            "crdt",
+                            record_lsn,
+                            Some(Box::new(crate::bridge::envelope::ErrorCode::from(e))),
+                            "CrdtListOp position out of range",
+                        );
+                        return Some(0);
+                    }
                 };
                 let document_id = RowIdentity::from_user_key(document_id);
                 let plan = PhysicalPlan::Crdt(CrdtOp::ListMove {
@@ -219,14 +230,13 @@ impl CoreLoop {
         };
 
         if response.status != Status::Ok {
-            warn!(
-                core = self.core_id,
-                collection = %collection,
-                document_id = %document_id,
-                list_path = %list_path,
-                lsn = record_lsn,
-                error = ?response.error_code,
-                "CRDT list-op WAL replay failed; skipping record"
+            self.replay_record_rejected(
+                "crdt",
+                record_lsn,
+                response.error_code,
+                &format!(
+                    "CRDT list op on '{collection}' / '{document_id}' at '{list_path}' failed"
+                ),
             );
             return Some(0);
         }

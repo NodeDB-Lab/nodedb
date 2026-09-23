@@ -43,7 +43,7 @@ impl CoreLoop {
                 let now_ms = current_ms();
                 let prior = self
                     .kv_engine
-                    .get(did, tid, collection.as_str(), key, now_ms);
+                    .entry_image(did, tid, collection.as_str(), key, now_ms);
                 let resp = self.execute_kv_incr(
                     crate::data::executor::handlers::kv::atomic::KvAtomicCtx {
                         task,
@@ -65,7 +65,7 @@ impl CoreLoop {
                 undo_log.push(UndoEntry::KvPut {
                     collection: collection.to_string(),
                     key: key.clone(),
-                    prior_value: prior,
+                    prior,
                 });
                 Ok(resp)
             }
@@ -80,7 +80,7 @@ impl CoreLoop {
                 let now_ms = current_ms();
                 let prior = self
                     .kv_engine
-                    .get(did, tid, collection.as_str(), key, now_ms);
+                    .entry_image(did, tid, collection.as_str(), key, now_ms);
                 let resp = self.execute_kv_incr_float(
                     crate::data::executor::handlers::kv::atomic::KvAtomicCtx {
                         task,
@@ -101,7 +101,7 @@ impl CoreLoop {
                 undo_log.push(UndoEntry::KvPut {
                     collection: collection.to_string(),
                     key: key.clone(),
-                    prior_value: prior,
+                    prior,
                 });
                 Ok(resp)
             }
@@ -117,7 +117,7 @@ impl CoreLoop {
                 let now_ms = current_ms();
                 let prior = self
                     .kv_engine
-                    .get(did, tid, collection.as_str(), key, now_ms);
+                    .entry_image(did, tid, collection.as_str(), key, now_ms);
                 let resp = self.execute_kv_cas(
                     crate::data::executor::handlers::kv::atomic::KvAtomicCtx {
                         task,
@@ -140,7 +140,7 @@ impl CoreLoop {
                 undo_log.push(UndoEntry::KvPut {
                     collection: collection.to_string(),
                     key: key.clone(),
-                    prior_value: prior,
+                    prior,
                 });
                 Ok(resp)
             }
@@ -156,7 +156,7 @@ impl CoreLoop {
                 let now_ms = current_ms();
                 let prior = self
                     .kv_engine
-                    .get(did, tid, collection.as_str(), key, now_ms);
+                    .entry_image(did, tid, collection.as_str(), key, now_ms);
                 let resp = self.execute_kv_getset(
                     crate::data::executor::handlers::kv::atomic::KvAtomicCtx {
                         task,
@@ -178,7 +178,7 @@ impl CoreLoop {
                 undo_log.push(UndoEntry::KvPut {
                     collection: collection.to_string(),
                     key: key.clone(),
-                    prior_value: prior,
+                    prior,
                 });
                 Ok(resp)
             }

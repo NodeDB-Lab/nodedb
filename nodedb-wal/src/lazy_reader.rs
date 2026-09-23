@@ -460,7 +460,7 @@ mod tests {
             vshard_id: 0,
             payload_len: (MAX_WAL_PAYLOAD_SIZE + 1) as u32,
             database_id: 0,
-            reserved: [0; 8],
+            apply_key: 0,
             crc32c: 0,
         };
         std::fs::write(&path, header.to_bytes()).unwrap();

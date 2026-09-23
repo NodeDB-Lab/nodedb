@@ -25,7 +25,10 @@
 //!   The autocommit delete shape `(collection, document_id, prov)` omits the
 //!   surrogate; replay needs it (the redb storage key is
 //!   `StorageKey::for_surrogate(surrogate)`, and the delete cascade keys on
-//!   it), so the redo shape appends it as a fourth element.
+//!   it), so the redo shape appends it as a fourth element. A
+//!   `bitemporal=true` collection's delete appends its resolve-time
+//!   `sys_from_ms` as a fifth element, and the decoded stamp forces the
+//!   versioned tombstone at that exact version key.
 //!
 //! ## Idempotency
 //!
@@ -65,6 +68,14 @@
 //!
 //! Both paths run exactly once over their own node's state; they differ only in
 //! whether that state already contains the effect.
+//!
+//! ### Committed-redo apply
+//!
+//! A replica applying a committed `TransactionRedo` Raft entry drives this arm
+//! with a redo-apply scope open. The source rows it writes then fold into
+//! their targets and link their hash chain, exactly as replication does (see
+//! `handlers::transaction::redo_apply`). With no scope open this arm is plain
+//! restart replay.
 
 use nodedb_types::Surrogate;
 use nodedb_types::sync::wire::SyncProvenance;
@@ -75,6 +86,7 @@ use super::core_loop::CoreLoop;
 use super::handlers::point::apply_delete::PointDeleteParams;
 use super::handlers::point::apply_put::PointPutParams;
 use super::handlers::transaction::overlay::BitemporalStamp;
+use super::handlers::transaction::redo_apply::CommittedDocWrite;
 use crate::data::executor::core_loop::write_index::KeyRepr;
 use crate::engine::document::store::StorageKey;
 
@@ -134,12 +146,14 @@ impl CoreLoop {
                 );
                 type PlainPut = (String, String, Vec<u8>, Option<SyncProvenance>, u32);
                 // Replay keys the row by its surrogate; the record's text
-                // `document_id` is the client key and stays unread.
+                // `document_id` is the client key, read only by a committed
+                // redo apply for the row's event identity.
                 let decoded = zerompk::from_msgpack::<BitemporalPut>(&record.payload)
                     .map(
-                        |(collection, _document_id, value, _prov, surrogate, sys, vf, vu)| {
+                        |(collection, document_id, value, _prov, surrogate, sys, vf, vu)| {
                             (
                                 collection,
+                                document_id,
                                 value,
                                 surrogate,
                                 Some(BitemporalStamp {
@@ -152,15 +166,18 @@ impl CoreLoop {
                     )
                     .or_else(|_| {
                         zerompk::from_msgpack::<PlainPut>(&record.payload).map(
-                            |(collection, _document_id, value, _prov, surrogate)| {
-                                (collection, value, surrogate, None)
+                            |(collection, document_id, value, _prov, surrogate)| {
+                                (collection, document_id, value, surrogate, None)
                             },
                         )
                     });
-                let Ok((collection, value, surrogate_u32, stamp)) = decoded else {
+                let Ok((collection, document_id, value, surrogate_u32, stamp)) = decoded else {
                     continue;
                 };
                 if tombstones.is_tombstoned(database_id, tenant_id, &collection, record_lsn) {
+                    continue;
+                }
+                if self.claim_for_validation() {
                     continue;
                 }
                 // Carry the stamp into apply scratch (forcing the versioned
@@ -170,14 +187,28 @@ impl CoreLoop {
                     self.observe_bitemporal_stamp(s.sys_from_ms);
                     self.active_bitemporal_stamps.insert(surrogate_u32, s);
                 }
-                let applied = self.apply_document_put(
-                    database_id,
-                    tenant_id,
-                    &collection,
-                    surrogate_u32,
-                    &value,
-                    record_lsn,
-                );
+                let applied = if self.redo_apply.scope.is_some() {
+                    self.apply_committed_document_put(
+                        CommittedDocWrite {
+                            database_id,
+                            tenant_id,
+                            collection: &collection,
+                            document_id: &document_id,
+                            surrogate: surrogate_u32,
+                            record_lsn,
+                        },
+                        &value,
+                    )
+                } else {
+                    self.apply_document_put(
+                        database_id,
+                        tenant_id,
+                        &collection,
+                        surrogate_u32,
+                        &value,
+                        record_lsn,
+                    )
+                };
                 if stamp.is_some() {
                     self.active_bitemporal_stamps.remove(&surrogate_u32);
                 }
@@ -193,18 +224,61 @@ impl CoreLoop {
                 }
             } else {
                 // Replay keys the row by its surrogate; the record's text
-                // `document_id` is the client key and stays unread.
-                let Ok((collection, _document_id, _prov, surrogate_u32)) =
-                    zerompk::from_msgpack::<(String, String, Option<SyncProvenance>, u32)>(
-                        &record.payload,
-                    )
-                else {
+                // `document_id` is the client key, read only by a committed
+                // redo apply for the row's event identity.
+                // A `bitemporal=true` collection's delete carries its
+                // resolve-time system time as a fifth element; the plain form
+                // has four. The stamp forces the versioned tombstone at that
+                // exact version key.
+                type BitemporalDelete = (String, String, Option<SyncProvenance>, u32, i64);
+                type PlainDelete = (String, String, Option<SyncProvenance>, u32);
+                let decoded = zerompk::from_msgpack::<BitemporalDelete>(&record.payload)
+                    .map(|(collection, document_id, _prov, surrogate, sys)| {
+                        (collection, document_id, surrogate, Some(sys))
+                    })
+                    .or_else(|_| {
+                        zerompk::from_msgpack::<PlainDelete>(&record.payload).map(
+                            |(collection, document_id, _prov, surrogate)| {
+                                (collection, document_id, surrogate, None)
+                            },
+                        )
+                    });
+                let Ok((collection, document_id, surrogate_u32, sys_from_ms)) = decoded else {
                     continue;
                 };
                 if tombstones.is_tombstoned(database_id, tenant_id, &collection, record_lsn) {
                     continue;
                 }
-                if self.apply_document_delete(database_id, tenant_id, &collection, surrogate_u32) {
+                if self.claim_for_validation() {
+                    continue;
+                }
+                if let Some(sys) = sys_from_ms {
+                    self.observe_bitemporal_stamp(sys);
+                    self.active_bitemporal_stamps.insert(
+                        surrogate_u32,
+                        BitemporalStamp {
+                            sys_from_ms: sys,
+                            valid_from_ms: i64::MIN,
+                            valid_until_ms: i64::MAX,
+                        },
+                    );
+                }
+                let removed = if self.redo_apply.scope.is_some() {
+                    self.apply_committed_document_delete(CommittedDocWrite {
+                        database_id,
+                        tenant_id,
+                        collection: &collection,
+                        document_id: &document_id,
+                        surrogate: surrogate_u32,
+                        record_lsn,
+                    })
+                } else {
+                    self.apply_document_delete(database_id, tenant_id, &collection, surrogate_u32)
+                };
+                if sys_from_ms.is_some() {
+                    self.active_bitemporal_stamps.remove(&surrogate_u32);
+                }
+                if removed {
                     deletes += 1;
                     self.note_replay_write_lsn(
                         database_id,
@@ -848,5 +922,87 @@ mod tests {
             Some(b"v".as_slice()),
             "kv sub-record must be replayed"
         );
+    }
+
+    fn bitemporal_put_sub(collection: &str, surrogate: u32, sys_from_ms: i64) -> RedoSubRecord {
+        let prov: Option<SyncProvenance> = None;
+        let payload = zerompk::to_msgpack_vec(&(
+            collection,
+            "userpk",
+            doc_value("alice"),
+            prov,
+            surrogate,
+            sys_from_ms,
+            i64::MIN,
+            i64::MAX,
+        ))
+        .expect("encode bitemporal put sub-record");
+        RedoSubRecord {
+            record_type: RecordType::Put as u32,
+            payload,
+        }
+    }
+
+    fn bitemporal_delete_sub(collection: &str, surrogate: u32, sys_from_ms: i64) -> RedoSubRecord {
+        let prov: Option<SyncProvenance> = None;
+        let payload =
+            zerompk::to_msgpack_vec(&(collection, "userpk", prov, surrogate, sys_from_ms))
+                .expect("encode bitemporal delete sub-record");
+        RedoSubRecord {
+            record_type: RecordType::Delete as u32,
+            payload,
+        }
+    }
+
+    /// A bitemporal redo delete carries its resolve-time system time, so two
+    /// independent applies of the same record (two replicas, or a replica and
+    /// a restart) write the tombstone at the same version key.
+    #[test]
+    fn a_bitemporal_redo_delete_tombstones_at_its_carried_system_time_on_every_apply() {
+        const PUT_MS: i64 = 1_000;
+        const DELETE_MS: i64 = 2_000;
+        let surrogate = 42u32;
+        let record = redo_record(
+            7,
+            0,
+            vec![
+                bitemporal_put_sub("hist", surrogate, PUT_MS),
+                bitemporal_delete_sub("hist", surrogate, DELETE_MS),
+            ],
+        );
+        let row_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
+
+        for _replica in 0..2 {
+            let mut h = make_core();
+            h.core
+                .replay_transaction_redo_wal(
+                    std::slice::from_ref(&record),
+                    1,
+                    &nodedb_wal::TombstoneSet::new(),
+                )
+                .expect("redo replay must succeed");
+            let before = h
+                .core
+                .sparse
+                .versioned_get_as_of(0, 7, "hist", &row_key, Some(DELETE_MS - 1), None)
+                .expect("read before the tombstone");
+            assert!(
+                before.is_some(),
+                "the row is live before the carried tombstone"
+            );
+            let at = h
+                .core
+                .sparse
+                .versioned_get_as_of(0, 7, "hist", &row_key, Some(DELETE_MS), None)
+                .expect("read at the tombstone");
+            assert!(
+                at.is_none(),
+                "the tombstone sits at the carried system time, not a locally minted one"
+            );
+            assert!(
+                h.core.active_bitemporal_stamps.is_empty(),
+                "the carried stamp is scoped to its own apply"
+            );
+        }
     }
 }

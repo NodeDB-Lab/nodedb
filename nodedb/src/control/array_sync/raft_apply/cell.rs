@@ -117,6 +117,7 @@ pub(crate) async fn apply_array_cell_write(
             // exactly as the generic committed-write branch does.
             event_source: crate::event::EventSource::User,
             resolved_now_ms,
+            apply_key: applied_key,
             op_label: "array cell write",
         },
     )

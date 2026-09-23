@@ -16,7 +16,7 @@
 //! must be re-applied into the memtable.
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::replay_abort::abort_replay;
+use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use std::sync::Arc;
 
 /// Outcome of preparing an array's store for replay.
@@ -63,11 +63,43 @@ impl CoreLoop {
         Ok(ArrayOpen::Ready)
     }
 
+    /// In the install pass of a committed-redo apply, record the memtable
+    /// tiles a cell write touches and the sync high-water mark it advances.
+    /// Returns `false` when the tiles cannot be read; the error is kept on
+    /// the apply.
+    fn record_array_tiles_undo<'a>(
+        &mut self,
+        array_id: &nodedb_array::types::ArrayId,
+        cells: impl IntoIterator<Item = (&'a [nodedb_array::types::coord::value::CoordValue], i64)>,
+        provenance: Option<&nodedb_types::sync::wire::SyncProvenance>,
+    ) -> bool {
+        let captured = self
+            .array_engine
+            .snapshot_tiles(array_id, cells)
+            .map_err(|e| crate::Error::Internal {
+                detail: format!(
+                    "reading the memtable tiles of array '{}': {e}",
+                    array_id.name
+                ),
+            })
+            .map(|snapshot| {
+                std::iter::once(UndoEntry::ArrayTiles {
+                    array_id: array_id.clone(),
+                    snapshot,
+                })
+                .chain(self.capture_sync_hwm_undo(provenance))
+            });
+        self.record_redo_capture(captured)
+    }
+
     /// The LSN this array's flushed segments are already durable through.
     ///
     /// `0` when the store is not open, which gates nothing — the safe
     /// direction, matching every other engine's unset replay floor.
-    fn array_durable_lsn(&self, array_id: &nodedb_array::types::ArrayId) -> u64 {
+    pub(in crate::data::executor) fn array_durable_lsn(
+        &self,
+        array_id: &nodedb_array::types::ArrayId,
+    ) -> u64 {
         self.array_engine
             .store(array_id)
             .map_or(0, |store| store.manifest().durable_lsn)
@@ -111,13 +143,16 @@ impl CoreLoop {
             if is_put {
                 let payload = match decode_put_with_version(&record.payload) {
                     Ok(p) => p,
-                    Err(e) => abort_replay(
-                        "array",
-                        "decode_put",
-                        self.core_id,
-                        record_lsn,
-                        &format!("ArrayPut payload could not be decoded: {e}"),
-                    ),
+                    Err(e) => {
+                        self.replay_record_unapplied(
+                            "array",
+                            "decode_put",
+                            record_lsn,
+                            &format!("ArrayPut payload could not be decoded: {e}"),
+                        );
+                        skipped += 1;
+                        continue;
+                    }
                 };
                 if tombstones.is_tombstoned(
                     record.header.database_id,
@@ -131,43 +166,78 @@ impl CoreLoop {
                 match self.ensure_array_open_for_replay(&payload.array_id) {
                     Ok(ArrayOpen::Ready) => {}
                     Ok(ArrayOpen::NoCatalogEntry) => {
-                        tracing::warn!(
-                            core = self.core_id,
-                            array = %payload.array_id.name,
-                            lsn = record_lsn,
-                            "WAL array replay: no catalog entry for this array; \
-                             skipping its retained cells"
+                        self.replay_record_rejected(
+                            "array",
+                            record_lsn,
+                            None,
+                            &format!(
+                                "array '{}' has no catalog entry; its retained cells are skipped",
+                                payload.array_id.name
+                            ),
                         );
                         skipped += 1;
                         continue;
                     }
-                    Err(e) => abort_replay(
-                        "array",
-                        "open",
-                        self.core_id,
-                        record_lsn,
-                        &format!("array '{}' could not be opened: {e}", payload.array_id.name),
-                    ),
+                    Err(e) => {
+                        self.replay_record_unapplied(
+                            "array",
+                            "open",
+                            record_lsn,
+                            &format!("array '{}' could not be opened: {e}", payload.array_id.name),
+                        );
+                        skipped += 1;
+                        continue;
+                    }
                 }
-                if record_lsn <= self.array_durable_lsn(&payload.array_id) {
+                if self
+                    .replay_watermark_skips(record_lsn <= self.array_durable_lsn(&payload.array_id))
+                {
+                    skipped += 1;
+                    continue;
+                }
+                if self.claim_for_validation() {
+                    continue;
+                }
+                let installing = self.recording_redo_undo();
+                if installing
+                    && !self.record_array_tiles_undo(
+                        &payload.array_id,
+                        payload
+                            .cells
+                            .iter()
+                            .map(|c| (c.coord.as_slice(), c.system_from_ms)),
+                        payload.provenance.as_ref(),
+                    )
+                {
                     skipped += 1;
                     continue;
                 }
                 let cell_count = payload.cells.len();
                 let prov = payload.provenance.clone();
-                if let Err(e) =
+                // An install flushes once the whole record landed, so a
+                // rollback finds its cells in the memtable.
+                let stamped = if installing {
+                    self.array_engine.put_cells_unflushed(
+                        &payload.array_id,
+                        payload.cells,
+                        record_lsn,
+                    )
+                } else {
                     self.array_engine
                         .put_cells(&payload.array_id, payload.cells, record_lsn)
-                {
-                    abort_replay(
+                };
+                if let Err(e) = stamped {
+                    self.replay_record_unapplied(
                         "array",
                         "put_cells",
-                        self.core_id,
                         record_lsn,
                         &format!("committed cells could not be re-applied: {e}"),
                     );
+                    skipped += 1;
+                    continue;
                 }
                 puts += cell_count;
+                self.note_redo_array_written(&payload.array_id);
                 // Rebuild the per-core HWM frontier from the WAL record's
                 // provenance. No fence check here — replay records are already
                 // durable and ordered; just advance the frontier.
@@ -179,13 +249,16 @@ impl CoreLoop {
 
             let payload = match decode_delete_with_version(&record.payload) {
                 Ok(p) => p,
-                Err(e) => abort_replay(
-                    "array",
-                    "decode_delete",
-                    self.core_id,
-                    record_lsn,
-                    &format!("ArrayDelete payload could not be decoded: {e}"),
-                ),
+                Err(e) => {
+                    self.replay_record_unapplied(
+                        "array",
+                        "decode_delete",
+                        record_lsn,
+                        &format!("ArrayDelete payload could not be decoded: {e}"),
+                    );
+                    skipped += 1;
+                    continue;
+                }
             };
             if tombstones.is_tombstoned(
                 record.header.database_id,
@@ -199,43 +272,75 @@ impl CoreLoop {
             match self.ensure_array_open_for_replay(&payload.array_id) {
                 Ok(ArrayOpen::Ready) => {}
                 Ok(ArrayOpen::NoCatalogEntry) => {
-                    tracing::warn!(
-                        core = self.core_id,
-                        array = %payload.array_id.name,
-                        lsn = record_lsn,
-                        "WAL array replay: no catalog entry for this array; \
-                         skipping its retained tombstones"
+                    self.replay_record_rejected(
+                        "array",
+                        record_lsn,
+                        None,
+                        &format!(
+                            "array '{}' has no catalog entry; its retained tombstones are skipped",
+                            payload.array_id.name
+                        ),
                     );
                     skipped += 1;
                     continue;
                 }
-                Err(e) => abort_replay(
-                    "array",
-                    "open",
-                    self.core_id,
-                    record_lsn,
-                    &format!("array '{}' could not be opened: {e}", payload.array_id.name),
-                ),
+                Err(e) => {
+                    self.replay_record_unapplied(
+                        "array",
+                        "open",
+                        record_lsn,
+                        &format!("array '{}' could not be opened: {e}", payload.array_id.name),
+                    );
+                    skipped += 1;
+                    continue;
+                }
             }
-            if record_lsn <= self.array_durable_lsn(&payload.array_id) {
+            if self.replay_watermark_skips(record_lsn <= self.array_durable_lsn(&payload.array_id))
+            {
+                skipped += 1;
+                continue;
+            }
+            if self.claim_for_validation() {
+                continue;
+            }
+            let installing = self.recording_redo_undo();
+            if installing
+                && !self.record_array_tiles_undo(
+                    &payload.array_id,
+                    payload
+                        .cells
+                        .iter()
+                        .map(|c| (c.coord.as_slice(), c.system_from_ms)),
+                    payload.provenance.as_ref(),
+                )
+            {
                 skipped += 1;
                 continue;
             }
             let cell_count = payload.cells.len();
             let prov = payload.provenance.clone();
-            if let Err(e) =
+            let stamped = if installing {
+                self.array_engine.delete_cells_unflushed(
+                    &payload.array_id,
+                    payload.cells,
+                    record_lsn,
+                )
+            } else {
                 self.array_engine
                     .delete_cells(&payload.array_id, payload.cells, record_lsn)
-            {
-                abort_replay(
+            };
+            if let Err(e) = stamped {
+                self.replay_record_unapplied(
                     "array",
                     "delete_cells",
-                    self.core_id,
                     record_lsn,
                     &format!("committed tombstones could not be re-applied: {e}"),
                 );
+                skipped += 1;
+                continue;
             }
             deletes += cell_count;
+            self.note_redo_array_written(&payload.array_id);
             if let Some(p) = &prov {
                 self.sync_commit(p);
             }

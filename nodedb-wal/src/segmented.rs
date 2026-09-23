@@ -23,7 +23,7 @@ use tracing::info;
 
 use crate::crypto::KeyRing;
 use crate::error::{Result, WalError};
-use crate::record::WalRecord;
+use crate::record::{RecordTarget, WalRecord};
 use crate::segment::{
     DEFAULT_SEGMENT_TARGET_SIZE, SegmentContinuity, SegmentMeta, TruncateResult,
     check_retained_floor, discover_segments, segment_path, truncate_segments,
@@ -191,13 +191,32 @@ impl SegmentedWal {
         database_id: u64,
         payload: &[u8],
     ) -> Result<u64> {
+        self.append_keyed(
+            RecordTarget {
+                record_type,
+                tenant_id,
+                vshard_id,
+                database_id,
+            },
+            payload,
+            0,
+        )
+    }
+
+    /// [`Self::append`] for a record appended by the apply of the replicated
+    /// proposal `apply_key` (see [`crate::WalRecord::new_keyed`]).
+    pub fn append_keyed(
+        &mut self,
+        target: RecordTarget,
+        payload: &[u8],
+        apply_key: u64,
+    ) -> Result<u64> {
         // Check if we need to roll to a new segment.
         if self.writer.file_offset() >= self.segment_target_size {
             self.roll_segment()?;
         }
 
-        self.writer
-            .append(record_type, tenant_id, vshard_id, database_id, payload)
+        self.writer.append_keyed(target, payload, apply_key)
     }
 
     /// Flush all buffered records and fsync the active segment.

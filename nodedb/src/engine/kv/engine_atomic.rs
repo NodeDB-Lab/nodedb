@@ -14,11 +14,28 @@ use super::hash_table::KvHashTable;
 
 /// Result of a compare-and-swap operation.
 pub struct CasResult {
-    /// Whether the swap succeeded (current == expected).
-    pub success: bool,
+    /// The bytes the swap stored. `None` when the compare failed and nothing
+    /// was written.
+    pub written: Option<Vec<u8>>,
     /// The value that was present at the time of the CAS.
     /// `None` if the key did not exist.
     pub current_value: Option<Vec<u8>>,
+}
+
+impl CasResult {
+    /// Whether the swap succeeded (current == expected).
+    pub fn success(&self) -> bool {
+        self.written.is_some()
+    }
+}
+
+/// Result of a get-and-set operation.
+pub struct GetSetResult {
+    /// The value that was present before the write. `None` if the key did
+    /// not exist.
+    pub old: Option<Vec<u8>>,
+    /// The bytes the write stored.
+    pub written: Vec<u8>,
 }
 
 /// Errors specific to atomic KV operations.
@@ -30,20 +47,20 @@ pub enum AtomicError {
     Overflow,
     /// The computed new value failed to re-encode as MessagePack.
     Encode { detail: String },
-    /// The [`IncrAdmission`] gate refused the computed post-image, so nothing
+    /// The [`AtomicAdmission`] gate refused the computed post-image, so nothing
     /// was written. Boxed to keep the error small on the success path.
     Rejected(Box<crate::Error>),
 }
 
-/// A gate consulted with the computed post-image before an increment commits.
+/// A gate consulted with the computed post-image before an atomic commits.
 ///
-/// INCR computes the value it stores from the stored one, so the row a
-/// row-level-security write policy has to decide does not exist until the
-/// arithmetic has run — and the arithmetic runs here, inside the engine, in the
-/// same pass that persists the result. Passing the decision in is what keeps
-/// that arithmetic in one place: pre-computing the increment at the call site
-/// just to check it would leave two copies of it to drift apart.
-pub type IncrAdmission<'a> = &'a dyn Fn(&[u8]) -> crate::Result<()>;
+/// Every atomic computes the value it stores from the stored one: INCR runs
+/// arithmetic, and CAS and GETSET swap one column of a typed row. The row a
+/// row-level-security write policy has to decide does not exist until that
+/// computation has run, and it runs here, inside the engine, in the same pass
+/// that persists the result. Passing the decision in keeps the computation in
+/// one place.
+pub type AtomicAdmission<'a> = &'a dyn Fn(&[u8]) -> crate::Result<()>;
 
 /// An admission that accepts every image.
 ///
@@ -88,7 +105,7 @@ impl KvEngine {
         ctx: AtomicKeyCtx<'_>,
         delta: i64,
         ttl_ms: u64,
-        admit: IncrAdmission<'_>,
+        admit: AtomicAdmission<'_>,
     ) -> Result<i64, AtomicError> {
         self.incr_resolved(ctx, delta, ttl_ms, None, admit)
     }
@@ -111,7 +128,7 @@ impl KvEngine {
         delta: i64,
         ttl_ms: u64,
         expire_at_ms: u64,
-        admit: IncrAdmission<'_>,
+        admit: AtomicAdmission<'_>,
     ) -> Result<i64, AtomicError> {
         self.incr_resolved(ctx, delta, ttl_ms, Some(expire_at_ms), admit)
     }
@@ -125,7 +142,7 @@ impl KvEngine {
         delta: i64,
         ttl_ms: u64,
         expire_override: Option<u64>,
-        admit: IncrAdmission<'_>,
+        admit: AtomicAdmission<'_>,
     ) -> Result<i64, AtomicError> {
         let tkey = table_key(ctx.database_id, ctx.tenant_id, ctx.collection);
         let table = self.ensure_table(tkey, ctx.tenant_id, ctx.collection);
@@ -159,7 +176,7 @@ impl KvEngine {
         &mut self,
         ctx: AtomicKeyCtx<'_>,
         delta: f64,
-        admit: IncrAdmission<'_>,
+        admit: AtomicAdmission<'_>,
     ) -> Result<f64, AtomicError> {
         let tkey = table_key(ctx.database_id, ctx.tenant_id, ctx.collection);
         let table = self.ensure_table(tkey, ctx.tenant_id, ctx.collection);
@@ -179,41 +196,61 @@ impl KvEngine {
     /// If current value equals `expected`, sets to `new_value` and returns success.
     /// If current value differs, returns the actual current value.
     /// If key doesn't exist and `expected` is empty, creates the key (create-if-not-exists).
-    pub fn cas(&mut self, ctx: AtomicKeyCtx<'_>, expected: &[u8], new_value: &[u8]) -> CasResult {
+    /// If `admit` refuses the bytes the swap would store: returns `Rejected`
+    /// and writes nothing.
+    pub fn cas(
+        &mut self,
+        ctx: AtomicKeyCtx<'_>,
+        expected: &[u8],
+        new_value: &[u8],
+        admit: AtomicAdmission<'_>,
+    ) -> Result<CasResult, AtomicError> {
         let tkey = table_key(ctx.database_id, ctx.tenant_id, ctx.collection);
         let table = self.ensure_table(tkey, ctx.tenant_id, ctx.collection);
 
         let current = table.get(ctx.key, ctx.now_ms).map(|v| v.to_vec());
 
-        let (matches, write_bytes) = compute::cas(current.as_deref(), expected, new_value);
-
-        if matches {
-            self.atomic_put(ctx, tkey, &write_bytes, 0, current.is_none(), None);
-            CasResult {
-                success: true,
+        let (matches, write_bytes) = compute::cas(current.as_deref(), expected, new_value)?;
+        if !matches {
+            return Ok(CasResult {
+                written: None,
                 current_value: current,
-            }
-        } else {
-            CasResult {
-                success: false,
-                current_value: current,
-            }
+            });
         }
+        // Decided before the value is installed — see `incr_resolved`.
+        admit(&write_bytes).map_err(|error| AtomicError::Rejected(Box::new(error)))?;
+        self.atomic_put(ctx, tkey, &write_bytes, 0, current.is_none(), None);
+        Ok(CasResult {
+            written: Some(write_bytes),
+            current_value: current,
+        })
     }
 
     /// Atomic get-and-set: sets new value, returns old value.
     ///
-    /// If key didn't exist, returns `None`.
+    /// If key didn't exist, `old` is `None`.
     /// Preserves existing TTL.
-    pub fn getset(&mut self, ctx: AtomicKeyCtx<'_>, new_value: &[u8]) -> Option<Vec<u8>> {
+    /// If `admit` refuses the bytes the write would store: returns `Rejected`
+    /// and writes nothing.
+    pub fn getset(
+        &mut self,
+        ctx: AtomicKeyCtx<'_>,
+        new_value: &[u8],
+        admit: AtomicAdmission<'_>,
+    ) -> Result<GetSetResult, AtomicError> {
         let tkey = table_key(ctx.database_id, ctx.tenant_id, ctx.collection);
         let table = self.ensure_table(tkey, ctx.tenant_id, ctx.collection);
         let old = table.get(ctx.key, ctx.now_ms).map(|v| v.to_vec());
-        let write_bytes = compute::getset(old.as_deref(), new_value);
+        let write_bytes = compute::getset(old.as_deref(), new_value)?;
+        // Decided before the value is installed — see `incr_resolved`.
+        admit(&write_bytes).map_err(|error| AtomicError::Rejected(Box::new(error)))?;
 
         // GetSet preserves existing TTL (ttl_ms = 0).
         self.atomic_put(ctx, tkey, &write_bytes, 0, old.is_none(), None);
-        old
+        Ok(GetSetResult {
+            old,
+            written: write_bytes,
+        })
     }
 
     /// Ensure a hash table exists for (tenant, collection), creating if needed.
@@ -585,8 +622,10 @@ mod tests {
     #[test]
     fn cas_create_if_not_exists() {
         let mut engine = make_engine();
-        let result = engine.cas(ctx("state", b"player1"), b"", b"idle");
-        assert!(result.success);
+        let result = engine
+            .cas(ctx("state", b"player1"), b"", b"idle", &admit_any)
+            .expect("cas");
+        assert!(result.success());
         assert!(result.current_value.is_none());
         // Verify key was created.
         let val = engine.get(0, 1, "state", b"player1", 1000);
@@ -606,8 +645,10 @@ mod tests {
             now_ms: 1000,
             surrogate: Surrogate::ZERO,
         });
-        let result = engine.cas(ctx("state", b"p1"), b"idle", b"in_match");
-        assert!(result.success);
+        let result = engine
+            .cas(ctx("state", b"p1"), b"idle", b"in_match", &admit_any)
+            .expect("cas");
+        assert!(result.success());
         assert_eq!(result.current_value.as_deref(), Some(b"idle".as_slice()));
         let val = engine.get(0, 1, "state", b"p1", 1000);
         assert_eq!(val.as_deref(), Some(b"in_match".as_slice()));
@@ -626,8 +667,10 @@ mod tests {
             now_ms: 1000,
             surrogate: Surrogate::ZERO,
         });
-        let result = engine.cas(ctx("state", b"p1"), b"idle", b"in_match");
-        assert!(!result.success);
+        let result = engine
+            .cas(ctx("state", b"p1"), b"idle", b"in_match", &admit_any)
+            .expect("cas");
+        assert!(!result.success());
         assert_eq!(
             result.current_value.as_deref(),
             Some(b"fighting".as_slice())
@@ -640,7 +683,10 @@ mod tests {
     #[test]
     fn getset_new_key() {
         let mut engine = make_engine();
-        let old = engine.getset(ctx("session", b"tok"), b"new-token");
+        let old = engine
+            .getset(ctx("session", b"tok"), b"new-token", &admit_any)
+            .expect("getset")
+            .old;
         assert!(old.is_none());
         let val = engine.get(0, 1, "session", b"tok", 1000);
         assert_eq!(val.as_deref(), Some(b"new-token".as_slice()));
@@ -659,7 +705,10 @@ mod tests {
             now_ms: 1000,
             surrogate: Surrogate::ZERO,
         });
-        let old = engine.getset(ctx("session", b"tok"), b"new-token");
+        let old = engine
+            .getset(ctx("session", b"tok"), b"new-token", &admit_any)
+            .expect("getset")
+            .old;
         assert_eq!(old.as_deref(), Some(b"old-token".as_slice()));
         let val = engine.get(0, 1, "session", b"tok", 1000);
         assert_eq!(val.as_deref(), Some(b"new-token".as_slice()));

@@ -4,256 +4,17 @@
 //!
 //! On startup, replays `TimeseriesBatch` records into the per-core
 //! columnar memtable. Only replays records with LSN > `last_flushed_wal_lsn`
-//! per partition (not max_ts — safe with out-of-order data).
+//! per partition (not max_ts — safe with out-of-order data). A
+//! committed-redo apply runs the same arm without that skip
+//! (`replay_policy`).
 
-use crate::bridge::envelope::{PhysicalPlan, Priority, Request};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::timeseries::TimeseriesIngestExec;
-use crate::data::executor::task::{ExecutionTask, TaskState};
-use crate::engine::timeseries::columnar_memtable::{
-    ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema,
-};
 use crate::types::DatabaseId;
-use crate::types::ReadConsistency;
-use nodedb_physical::physical_plan::{ColumnarInsertIntent, ColumnarOp, TimeseriesOp};
-use nodedb_types::timeseries::MetricSample;
 
-use super::timeseries_wal_decode::{ColumnarReplayArgs, TimeseriesReplayArgs, decode_batch_record};
+use super::timeseries_wal_decode::{ColumnarReplayArgs, TimeseriesReplayArgs};
+use crate::wal::{DecodedBatchRecord, decode_batch_record};
+
 impl CoreLoop {
-    /// Build a synthetic replay `ExecutionTask` embedding `plan`.
-    ///
-    /// Shared with `wal_replay_columnar_dml` — every replay handler that
-    /// re-invokes a live execute_* method needs the same minimal task shape.
-    pub(in crate::data::executor) fn replay_task(
-        tenant_id: crate::types::TenantId,
-        database_id: DatabaseId,
-        vshard_id: crate::types::VShardId,
-        plan: PhysicalPlan,
-        wal_lsn: Option<crate::types::Lsn>,
-    ) -> ExecutionTask {
-        ExecutionTask {
-            request: Request {
-                request_id: crate::types::RequestId::new(0),
-                tenant_id,
-                database_id,
-                vshard_id,
-                plan,
-                deadline: std::time::Instant::now()
-                    + crate::data::executor::deadline::REPLAY_DEADLINE,
-                priority: Priority::Normal,
-                trace_id: crate::types::TraceId::ZERO,
-                consistency: ReadConsistency::Strong,
-                idempotency_key: None,
-                event_source: crate::event::EventSource::User,
-                user_roles: Vec::new(),
-                user_id: None,
-                statement_digest: None,
-                txn_id: None,
-                wal_lsn,
-                resolved_now_ms: None,
-                admission: crate::bridge::envelope::Admission::Exempt(
-                    crate::bridge::envelope::ExemptReason::AlreadyOrdered,
-                ),
-            },
-            state: TaskState::Running,
-            wal_lsn,
-            resolved_now_ms: None,
-        }
-    }
-
-    /// Ensure a timeseries memtable exists for the given collection, creating if needed.
-    ///
-    /// Uses the same operator tuning the live ingest path does. A memtable keeps
-    /// the limits it was built with for its whole life, so seeding replay with
-    /// hardcoded defaults would leave a restarted node running budgets the
-    /// operator did not configure until every collection happened to flush.
-    fn ensure_columnar_memtable(
-        &mut self,
-        key: (DatabaseId, crate::types::TenantId, String),
-        schema: ColumnarSchema,
-    ) {
-        let config = ColumnarMemtableConfig::from_tuning(&self.ts_tuning);
-        self.columnar_memtables
-            .entry(key)
-            .or_insert_with(|| ColumnarMemtable::new(schema, config));
-    }
-
-    fn replay_timeseries_payload(
-        &mut self,
-        tid: crate::types::TenantId,
-        db_id: DatabaseId,
-        args: TimeseriesReplayArgs<'_>,
-    ) -> usize {
-        let TimeseriesReplayArgs {
-            collection,
-            payload,
-            record_lsn,
-            provenance,
-            format,
-        } = args;
-        if let Ok(batch) =
-            zerompk::from_msgpack::<nodedb_types::timeseries::TimeseriesWalBatch>(payload)
-        {
-            let key = (db_id, tid, collection.to_string());
-            self.ensure_columnar_memtable(key.clone(), ColumnarSchema::metric_default());
-
-            let Some(mt) = self.columnar_memtables.get_mut(&key) else {
-                return 0;
-            };
-            for (series_id, timestamp_ms, value) in &batch.samples {
-                mt.ingest_metric(
-                    *series_id,
-                    MetricSample {
-                        timestamp_ms: *timestamp_ms,
-                        value: *value,
-                    },
-                );
-            }
-            let sample_count = batch.samples.len();
-            // Re-charge the engine memory budget to the memtable's resident
-            // footprint after replaying these samples. The reservation is
-            // held until the memtable is drained on flush, so a replay-driven
-            // flush balances its release instead of over-releasing.
-            self.recharge_ts_memtable_budget(tid, db_id, collection);
-            return sample_count;
-        }
-
-        let format = format.unwrap_or_else(|| {
-            if std::str::from_utf8(payload).is_ok() {
-                "ilp"
-            } else {
-                "msgpack"
-            }
-        });
-        let task = Self::replay_task(
-            tid,
-            db_id,
-            crate::types::VShardId::from_collection_in_database(db_id, collection),
-            PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
-                payload: payload.to_vec(),
-                format: format.to_string(),
-                wal_lsn: Some(record_lsn),
-                surrogates: Vec::new(),
-                provenance: provenance.clone(),
-                rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
-                returning: None,
-                rls_filters: Vec::new(),
-            }),
-            Some(crate::types::Lsn::new(record_lsn)),
-        );
-        let response = self.execute_timeseries_ingest(TimeseriesIngestExec {
-            task: &task,
-            tid,
-            collection,
-            payload,
-            format,
-            wal_lsn: Some(record_lsn),
-            provenance: provenance.as_ref(),
-            mode: crate::data::executor::handlers::timeseries::TimeseriesApplyMode::Immediate,
-            // Replay re-applies a record the policy already decided when it was
-            // written, and the identity that wrote it is not present at boot to
-            // resolve `$auth.*` against. A refused write never reaches replay:
-            // its record is cancelled before the refusal is acknowledged.
-            rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
-            // Replay rebuilds stored state at boot; there is no client waiting
-            // on a row set, and no identity whose reads would need gating. The
-            // projection belongs to the originating request, which was answered
-            // before the process restarted.
-            returning: None,
-            rls_filters: &[],
-        });
-        if response.status != crate::bridge::envelope::Status::Ok {
-            tracing::warn!(
-                "timeseries WAL replay failed for collection={collection} lsn={record_lsn}: {:?}",
-                response.error_code
-            );
-            return 0;
-        }
-        if format == "ilp-msgpack" {
-            return zerompk::from_msgpack::<Vec<String>>(payload).map_or(0, |rows| rows.len());
-        }
-        match nodedb_types::value_from_msgpack(payload) {
-            Ok(nodedb_types::Value::Array(rows)) => rows.len(),
-            Ok(nodedb_types::Value::Object(_)) => 1,
-            _ => 0,
-        }
-    }
-
-    fn replay_columnar_payload(
-        &mut self,
-        tid: crate::types::TenantId,
-        db_id: DatabaseId,
-        args: ColumnarReplayArgs<'_>,
-    ) -> usize {
-        let ColumnarReplayArgs {
-            collection,
-            payload,
-            record_lsn,
-            provenance,
-            surrogates,
-        } = args;
-        // `execute_columnar_insert` reads only `task.request.{database_id,
-        // tenant_id, request_id}` — it never inspects the embedded plan.
-        // Embed empty vecs for the plan-level surrogates/provenance to avoid
-        // cloning the owned values we need to pass as explicit args below.
-        let task = Self::replay_task(
-            tid,
-            db_id,
-            crate::types::VShardId::from_collection_in_database(db_id, collection),
-            PhysicalPlan::Columnar(ColumnarOp::Insert {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
-                payload: payload.to_vec(),
-                format: "msgpack".into(),
-                intent: ColumnarInsertIntent::Insert,
-                on_conflict_updates: Vec::new(),
-                surrogates: Vec::new(),
-                schema_bytes: Vec::new(),
-                provenance: None,
-                wal_lsn: Some(record_lsn),
-                rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
-                returning: None,
-                rls_filters: Vec::new(),
-            }),
-            Some(crate::types::Lsn::new(record_lsn)),
-        );
-        // Restore the persisted per-row surrogates so `execute_columnar_insert`
-        // rebinds the exact same cross-engine identity via
-        // `insert_with_surrogate`. An empty slice (legacy records / sync path)
-        // falls back to fresh allocation as before.
-        let response = self.execute_columnar_insert(
-            &task,
-            crate::data::executor::handlers::columnar_write::ColumnarInsertParams {
-                collection,
-                payload,
-                format: "msgpack",
-                intent: ColumnarInsertIntent::Insert,
-                on_conflict_updates: &[],
-                surrogates: &surrogates,
-                schema_bytes: &[],
-                provenance: provenance.as_ref(),
-                rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
-                // WAL replay reconstructs stored state; there is no client
-                // waiting on a projection, and no identity to gate reads for.
-                returning: None,
-                rls_filters: &[],
-                spatial_undo: None,
-            },
-        );
-        if response.status != crate::bridge::envelope::Status::Ok {
-            tracing::warn!(
-                "columnar WAL replay failed for collection={collection} lsn={record_lsn}: {:?}",
-                response.error_code
-            );
-            return 0;
-        }
-        match nodedb_types::value_from_msgpack(payload) {
-            Ok(nodedb_types::Value::Array(rows)) => rows.len(),
-            Ok(nodedb_types::Value::Object(_)) => 1,
-            _ => 0,
-        }
-    }
-
     /// Replay WAL timeseries records to rebuild in-memory memtable state after crash.
     ///
     /// Called once during startup, after `open()` but before the event loop.
@@ -308,13 +69,10 @@ impl CoreLoop {
                 continue;
             }
 
-            // Predicate DML (`columnar_dml`) rides the same `TimeseriesBatch`
-            // record type but a disjoint map shape from both `ColumnarWalRecord`
-            // and the legacy tuples (see `ColumnarDmlWalRecord`'s doc comment),
-            // so it must be tried BEFORE `decode_batch_record` below — that
-            // decoder's tuple fallbacks would otherwise mis-classify it as a
-            // malformed row-payload record and drop it.
-            if let Some(applied) = self.try_replay_columnar_predicate_dml(
+            // A transaction's columnar row images (`columnar_image`) are a
+            // disjoint map shape too, tried first for the same reason as the
+            // DML shapes below.
+            if let Some(applied) = self.try_replay_columnar_image(
                 &record.payload,
                 record.header.tenant_id,
                 DatabaseId::new(record.header.database_id),
@@ -325,18 +83,44 @@ impl CoreLoop {
                 replayed += applied;
                 continue;
             }
+            // A committed redo record carries columnar rows only as images,
+            // and timeseries rows only as an ingest. Every other shape is
+            // left unclaimed, so the validate pass refuses the record.
+            let redo_apply = self.applying_committed_redo();
+
+            // Predicate DML (`columnar_dml`) rides the same `TimeseriesBatch`
+            // record type but a disjoint map shape from both `ColumnarWalRecord`
+            // and the legacy tuples (see `ColumnarDmlWalRecord`'s doc comment),
+            // so it must be tried BEFORE `decode_batch_record` below — that
+            // decoder's tuple fallbacks would otherwise mis-classify it as a
+            // malformed row-payload record and drop it.
+            if !redo_apply
+                && let Some(applied) = self.try_replay_columnar_predicate_dml(
+                    &record.payload,
+                    record.header.tenant_id,
+                    DatabaseId::new(record.header.database_id),
+                    record.header.lsn,
+                    tombstones,
+                    &truncate_floors,
+                )
+            {
+                replayed += applied;
+                continue;
+            }
 
             // Resolved-row-set DML (`columnar_resolved_dml`) is likewise a
             // disjoint map shape and must be tried before the generic decode
             // below for the same reason as the predicate-DML check above.
-            if let Some(applied) = self.try_replay_columnar_resolved_predicate_dml(
-                &record.payload,
-                record.header.tenant_id,
-                DatabaseId::new(record.header.database_id),
-                record.header.lsn,
-                tombstones,
-                &truncate_floors,
-            ) {
+            if !redo_apply
+                && let Some(applied) = self.try_replay_columnar_resolved_predicate_dml(
+                    &record.payload,
+                    record.header.tenant_id,
+                    DatabaseId::new(record.header.database_id),
+                    record.header.lsn,
+                    tombstones,
+                    &truncate_floors,
+                )
+            {
                 replayed += applied;
                 continue;
             }
@@ -348,23 +132,26 @@ impl CoreLoop {
             // surrogates. Records iterate in LSN order (guaranteed by the WAL
             // segment layout), so provenance-aware replay processes seq in
             // order.
-            let Ok((
+            let Ok(DecodedBatchRecord {
                 kind,
-                raw_collection,
+                collection: raw_collection,
                 payload,
-                record_provenance,
-                record_format,
-                record_surrogates,
-            )) = decode_batch_record(&record.payload)
+                provenance: record_provenance,
+                format: record_format,
+                surrogates: record_surrogates,
+                conflict_policy,
+                default_timestamp_ms,
+            }) = decode_batch_record(&record.payload)
             else {
-                crate::data::executor::replay_abort::abort_replay(
+                self.replay_record_unapplied(
                     "timeseries",
                     "decode_batch",
-                    self.core_id,
                     record.header.lsn,
                     "TimeseriesBatch payload matched none of the columnar / timeseries \
                      record shapes",
                 );
+                skipped += 1;
+                continue;
             };
 
             let tenant_id = record.header.tenant_id;
@@ -387,7 +174,8 @@ impl CoreLoop {
                 continue;
             }
 
-            // Check if this record was already flushed (LSN-based skip).
+            // Check if this record was already flushed (LSN-based skip). A
+            // restart watermark only: see `replay_policy`.
             if let Some(registry) = self.ts_registries.get(&key) {
                 // Find the max flushed LSN across all partitions.
                 let max_flushed_lsn = registry
@@ -395,10 +183,18 @@ impl CoreLoop {
                     .map(|(_, e)| e.meta.last_flushed_wal_lsn)
                     .max()
                     .unwrap_or(0);
-                if record_lsn <= max_flushed_lsn {
+                if self.replay_watermark_skips(record_lsn <= max_flushed_lsn) {
                     skipped += 1;
                     continue;
                 }
+            }
+
+            if redo_apply && kind.as_deref() == Some("columnar") {
+                skipped += 1;
+                continue;
+            }
+            if self.claim_for_validation() {
+                continue;
             }
 
             let accepted = match kind.as_deref() {
@@ -409,7 +205,11 @@ impl CoreLoop {
                 // does not cover and whose replay it must therefore not gate.
                 // Gating one engine's records on another engine's durability
                 // would drop the writes outright.
-                Some("columnar") if self.floors.replay_floors.columnar.covers(record_lsn) => {
+                Some("columnar")
+                    if self.replay_watermark_skips(
+                        self.floors.replay_floors.columnar.covers(record_lsn),
+                    ) =>
+                {
                     // Already folded into the restored generation. Replaying it
                     // would re-insert every row: an upsert masks the duplicate
                     // on a plain collection, but a `bitemporal=true` collection
@@ -427,6 +227,7 @@ impl CoreLoop {
                         record_lsn,
                         provenance: record_provenance,
                         surrogates: record_surrogates,
+                        conflict_policy,
                     },
                 ),
                 Some("timeseries") | None => self.replay_timeseries_payload(
@@ -438,14 +239,15 @@ impl CoreLoop {
                         record_lsn,
                         provenance: record_provenance,
                         format: record_format.as_deref(),
+                        default_timestamp_ms,
                     },
                 ),
                 Some(other) => {
-                    tracing::warn!(
-                        core = self.core_id,
-                        lsn = record_lsn,
-                        kind = other,
-                        "skipping unknown TimeseriesBatch WAL kind"
+                    self.replay_record_rejected(
+                        "timeseries",
+                        record_lsn,
+                        None,
+                        &format!("unknown TimeseriesBatch WAL kind '{other}'"),
                     );
                     0
                 }
@@ -488,10 +290,10 @@ impl CoreLoop {
 
 #[cfg(test)]
 mod tests {
-    use super::super::timeseries_wal_decode::decode_batch_record;
     use crate::data::executor::core_loop::CoreLoop;
     use crate::data::executor::core_loop::write_index::CollKey;
     use crate::types::{DatabaseId, Lsn, TenantId};
+    use crate::wal::{DecodedBatchRecord, decode_batch_record};
     use nodedb_types::Surrogate;
     use nodedb_types::columnar::ColumnarWalRecord;
     use nodedb_types::sync::wire::SyncProvenance;
@@ -636,6 +438,7 @@ mod tests {
             payload: row_payload("name", "alice"),
             provenance: None,
             surrogates: Vec::new(),
+            conflict_policy: Vec::new(),
         };
         let payload = zerompk::to_msgpack_vec(&rec).expect("encode columnar wal record");
         WalRecord::new(WalRecordArgs {
@@ -649,6 +452,92 @@ mod tests {
             preamble_bytes: None,
         })
         .expect("wal record")
+    }
+
+    /// A replayed `ON CONFLICT DO NOTHING` insert keeps the row its key
+    /// already holds, as the live insert did.
+    #[test]
+    fn a_replayed_do_nothing_insert_keeps_the_existing_row() {
+        use nodedb_types::Value;
+        use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
+
+        let mut h = make_core();
+        let schema = ColumnarSchema {
+            columns: vec![
+                ColumnDef::required("id", ColumnType::Int64).with_primary_key(),
+                ColumnDef::required("v", ColumnType::Int64),
+            ],
+            version: 1,
+        };
+        let mut engine = nodedb_columnar::MutationEngine::new("m".to_string(), schema);
+        engine
+            .insert(&[Value::Integer(1), Value::Integer(10)])
+            .expect("seed row");
+        h.core.columnar_engines.insert(
+            (DatabaseId::new(0), TenantId::new(7), "m".to_string()),
+            engine,
+        );
+
+        let mut row = std::collections::HashMap::new();
+        row.insert("id".to_string(), Value::Integer(1));
+        row.insert("v".to_string(), Value::Integer(20));
+        let policy = crate::wal::ColumnarConflictPolicy {
+            intent: nodedb_physical::physical_plan::ColumnarInsertIntent::InsertIfAbsent,
+            on_conflict_updates: Vec::new(),
+        };
+        let rec = ColumnarWalRecord {
+            kind: "columnar".to_string(),
+            collection: "m".to_string(),
+            payload: nodedb_types::value_to_msgpack(&Value::Array(vec![Value::Object(row)]))
+                .expect("encode row"),
+            provenance: None,
+            surrogates: Vec::new(),
+            conflict_policy: policy.encode().expect("encode policy"),
+        };
+        let record = WalRecord::new(WalRecordArgs {
+            record_type: RecordType::TimeseriesBatch as u32,
+            lsn: 40,
+            tenant_id: 7,
+            vshard_id: 0,
+            database_id: 0,
+            payload: zerompk::to_msgpack_vec(&rec).expect("encode record"),
+            encryption_key: None,
+            preamble_bytes: None,
+        })
+        .expect("wal record");
+
+        h.core.replay_timeseries_wal(
+            std::slice::from_ref(&record),
+            1,
+            &nodedb_wal::TombstoneSet::new(),
+        );
+
+        let rows: Vec<Vec<Value>> = h
+            .core
+            .columnar_engines
+            .get(&(DatabaseId::new(0), TenantId::new(7), "m".to_string()))
+            .expect("engine")
+            .scan_memtable_rows()
+            .collect();
+        assert_eq!(rows, vec![vec![Value::Integer(1), Value::Integer(10)]]);
+    }
+
+    #[test]
+    fn a_conflict_policy_round_trips_and_a_plain_insert_encodes_empty() {
+        let plain = crate::wal::ColumnarConflictPolicy::replace();
+        assert!(plain.encode().expect("encode").is_empty());
+        let upsert = crate::wal::ColumnarConflictPolicy {
+            intent: nodedb_physical::physical_plan::ColumnarInsertIntent::Put,
+            on_conflict_updates: vec![(
+                "v".to_string(),
+                nodedb_physical::physical_plan::UpdateValue::Literal(vec![0x05]),
+            )],
+        };
+        let bytes = upsert.encode().expect("encode");
+        assert_eq!(
+            crate::wal::ColumnarConflictPolicy::decode(&bytes).expect("decode"),
+            upsert
+        );
     }
 
     /// WAL replay threads the record LSN into `replay_task` so
@@ -864,11 +753,19 @@ mod tests {
             payload: vec![7, 8, 9],
             provenance: Some(prov.clone()),
             surrogates: vec![Surrogate::new(100), Surrogate::new(101)],
+            conflict_policy: Vec::new(),
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode map record");
 
-        let (kind, collection, payload, provenance, format, surrogates) =
-            decode_batch_record(&bytes).expect("decode map record");
+        let DecodedBatchRecord {
+            kind,
+            collection,
+            payload,
+            provenance,
+            format,
+            surrogates,
+            ..
+        } = decode_batch_record(&bytes).expect("decode map record");
         assert_eq!(kind.as_deref(), Some("columnar"));
         assert_eq!(collection, "events");
         assert_eq!(payload, vec![7, 8, 9]);
@@ -890,8 +787,15 @@ mod tests {
         ))
         .expect("encode legacy columnar tuple");
 
-        let (kind, collection, payload, provenance, format, surrogates) =
-            decode_batch_record(&bytes).expect("decode legacy tuple");
+        let DecodedBatchRecord {
+            kind,
+            collection,
+            payload,
+            provenance,
+            format,
+            surrogates,
+            ..
+        } = decode_batch_record(&bytes).expect("decode legacy tuple");
         assert_eq!(kind.as_deref(), Some("columnar"));
         assert_eq!(collection, "events");
         assert_eq!(payload, vec![1, 2, 3]);
@@ -914,8 +818,14 @@ mod tests {
         ))
         .expect("encode timeseries tuple");
 
-        let (kind, collection, payload, _provenance, format, surrogates) =
-            decode_batch_record(&bytes).expect("decode timeseries tuple");
+        let DecodedBatchRecord {
+            kind,
+            collection,
+            payload,
+            format,
+            surrogates,
+            ..
+        } = decode_batch_record(&bytes).expect("decode timeseries tuple");
         assert_eq!(kind.as_deref(), Some("timeseries"));
         assert_eq!(collection, "metrics");
         assert_eq!(payload, vec![4, 5, 6]);
@@ -927,8 +837,14 @@ mod tests {
     fn legacy_untagged_two_tuple_decodes() {
         let bytes = zerompk::to_msgpack_vec(&("metrics".to_string(), vec![1u8, 2]))
             .expect("encode 2-tuple");
-        let (kind, collection, payload, _, format, surrogates) =
-            decode_batch_record(&bytes).expect("decode 2-tuple");
+        let DecodedBatchRecord {
+            kind,
+            collection,
+            payload,
+            format,
+            surrogates,
+            ..
+        } = decode_batch_record(&bytes).expect("decode 2-tuple");
         assert_eq!(kind, None);
         assert_eq!(collection, "metrics");
         assert_eq!(payload, vec![1, 2]);
@@ -948,11 +864,43 @@ mod tests {
             "ilp-msgpack".to_string(),
         ))
         .expect("encode format-preserving tuple");
-        let (kind, collection, _payload, _provenance, format, surrogates) =
-            decode_batch_record(&bytes).expect("decode format-preserving tuple");
+        let DecodedBatchRecord {
+            kind,
+            collection,
+            format,
+            surrogates,
+            default_timestamp_ms,
+            ..
+        } = decode_batch_record(&bytes).expect("decode format-preserving tuple");
         assert_eq!(kind.as_deref(), Some("timeseries"));
         assert_eq!(collection, "cpu");
         assert_eq!(format.as_deref(), Some("ilp-msgpack"));
         assert!(surrogates.is_empty());
+        assert_eq!(default_timestamp_ms, None);
+    }
+
+    #[test]
+    fn an_autocommit_ingest_record_carries_its_default_timestamp() {
+        let bytes = crate::control::server::wal_dispatch::encode_timeseries_ingest_payload(
+            crate::control::server::wal_dispatch::TimeseriesIngestRecord {
+                collection: "cpu",
+                payload: b"cpu value=1",
+                provenance: None,
+                format: "ilp",
+                default_timestamp_ms: 1_700_000_000_123,
+            },
+        )
+        .expect("encode ingest record");
+        let DecodedBatchRecord {
+            kind,
+            collection,
+            format,
+            default_timestamp_ms,
+            ..
+        } = decode_batch_record(&bytes).expect("decode ingest record");
+        assert_eq!(kind.as_deref(), Some("timeseries"));
+        assert_eq!(collection, "cpu");
+        assert_eq!(format.as_deref(), Some("ilp"));
+        assert_eq!(default_timestamp_ms, Some(1_700_000_000_123));
     }
 }

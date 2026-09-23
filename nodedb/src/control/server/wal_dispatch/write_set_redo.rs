@@ -10,7 +10,7 @@
 use crate::bridge::envelope::{PhysicalPlan, Response, Status, WriteSetEntry};
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::manager::WalManager;
-use nodedb_physical::physical_plan::DocumentOp;
+use nodedb_physical::physical_plan::{DocumentOp, MetaOp};
 
 use super::document::{encode_document_delete_record, encode_document_put_record};
 
@@ -46,6 +46,12 @@ pub fn plan_post_apply_redo(plan: &PhysicalPlan) -> Option<String> {
         // Journals nothing on the pre-dispatch path; without this redo, a WAL-only
         // restart replays source rows and leaves the total as it stood before.
         Some(collection.to_string())
+    } else if let PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo { collections, .. }) = plan {
+        // A committed transaction's materialized-sum folds write target rows no
+        // redo sub-record names. Each write-set entry names its own target
+        // collection, so the transaction's first collection is only the
+        // fallback an entry without one would use.
+        collections.first().cloned()
     } else {
         None
     }

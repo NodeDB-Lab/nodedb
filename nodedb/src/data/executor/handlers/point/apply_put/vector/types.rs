@@ -22,6 +22,7 @@ pub(in crate::data::executor) struct VectorIndexPutParams<'a> {
 /// (`collection`, `field`, `doc_id`). Replaces a raw `(index_key, vector_id)`
 /// tuple so undo can restore/remove the reverse-lookup map symmetrically with
 /// the R-tree's `SpatialInsert`/`SpatialDelete` undo pattern.
+#[derive(Clone)]
 pub(in crate::data::executor) struct VectorIndexDelta {
     pub index_key: (nodedb_types::DatabaseId, crate::types::TenantId, String),
     pub vector_id: u32,

@@ -75,18 +75,23 @@ pub(super) fn authorize_and_append(
     )?;
 
     let (wal_lsn, resolved_now_ms) = match durability {
-        WalDurability::AppendHere { now_override } => {
+        WalDurability::AppendHere {
+            now_override,
+            apply_key,
+        } => {
             let outcome = rollback_on_err(
                 shared,
                 &ddl_transition,
-                wal_dispatch::wal_append(WalAppendRequest {
-                    wal: &shared.wal,
-                    tenant_id,
-                    vshard_id,
-                    database_id,
-                    plan: &plan,
-                    credentials: None,
-                    now_override,
+                shared.wal.with_apply_key(apply_key, || {
+                    wal_dispatch::wal_append(WalAppendRequest {
+                        wal: &shared.wal,
+                        tenant_id,
+                        vshard_id,
+                        database_id,
+                        plan: &plan,
+                        credentials: None,
+                        now_override,
+                    })
                 }),
             )?;
             (outcome.lsn, outcome.resolved_now_ms)

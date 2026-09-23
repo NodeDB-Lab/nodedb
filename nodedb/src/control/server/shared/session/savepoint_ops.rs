@@ -311,6 +311,10 @@ mod tests {
                 })
             })
         }
+
+        fn event_source(&self) -> crate::event::EventSource {
+            crate::event::EventSource::User
+        }
     }
 
     /// A benign staged write task homed on `vshard`. The plan content is irrelevant

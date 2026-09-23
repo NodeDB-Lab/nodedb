@@ -29,6 +29,7 @@ use nodedb_wal::record::RecordType;
 use crate::bridge::envelope::{PhysicalPlan, Status};
 use crate::control::server::wal_dispatch::VectorDirectUpsertRecord;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::wal_replay_vector_redo::RedoVectorWrite;
 use crate::types::DatabaseId;
 
 impl CoreLoop {
@@ -189,6 +190,12 @@ impl CoreLoop {
             on_conflict_updates,
         )) = zerompk::from_msgpack::<VectorDirectUpsertRecord>(payload)
         else {
+            self.replay_record_unapplied(
+                "vector",
+                "direct_upsert_decode",
+                record_lsn,
+                "VectorDirectUpsert payload does not decode",
+            );
             return false;
         };
         if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
@@ -197,12 +204,29 @@ impl CoreLoop {
         let index_key = CoreLoop::vector_index_key(database_id, tenant_id, &collection, &field);
         // Watermark gate: a restored checkpoint already holds every write at or
         // below its watermark; re-applying would append a duplicate HNSW node.
-        if let Some(existing) = self.vector_collections.get(&index_key)
-            && record_lsn <= existing.checkpoint_wal_lsn()
-        {
+        if self.replay_watermark_skips(
+            self.vector_collections
+                .get(&index_key)
+                .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
+        ) {
             return false;
         }
         let surrogate = nodedb_types::Surrogate::new(surrogate_u32);
+        if !self.redo_vector_prelude(
+            RedoVectorWrite {
+                index_key: &index_key,
+                tid: tenant_id,
+                collection: &collection,
+                dim: vector.len(),
+                surrogates: &[surrogate],
+                ids: &[],
+                sidecars: true,
+            },
+            None,
+            record_lsn,
+        ) {
+            return false;
+        }
         let vshard = crate::types::VShardId::from_collection_in_database(
             DatabaseId::new(database_id),
             &collection,
@@ -250,11 +274,11 @@ impl CoreLoop {
             },
         );
         if response.status != Status::Ok {
-            tracing::warn!(
-                core = self.core_id,
-                %collection,
-                lsn = record_lsn,
-                "WAL replay: direct-upsert handler returned error; skipping"
+            self.replay_record_rejected(
+                "vector",
+                record_lsn,
+                response.error_code,
+                &format!("vector direct upsert into '{collection}' failed"),
             );
             return false;
         }
@@ -280,6 +304,12 @@ impl CoreLoop {
         let Ok((collection, field_name, doc_surrogate_u32, vectors_flat, count, dim)) =
             zerompk::from_msgpack::<(String, String, u32, Vec<f32>, usize, usize)>(payload)
         else {
+            self.replay_record_unapplied(
+                "vector",
+                "multi_vector_put_decode",
+                record_lsn,
+                "MultiVectorPut payload does not decode",
+            );
             return false;
         };
         if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
@@ -287,12 +317,29 @@ impl CoreLoop {
         }
         let index_key =
             CoreLoop::vector_index_key(database_id, tenant_id, &collection, &field_name);
-        if let Some(existing) = self.vector_collections.get(&index_key)
-            && record_lsn <= existing.checkpoint_wal_lsn()
-        {
+        if self.replay_watermark_skips(
+            self.vector_collections
+                .get(&index_key)
+                .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
+        ) {
             return false;
         }
         let document_surrogate = nodedb_types::Surrogate::new(doc_surrogate_u32);
+        if !self.redo_vector_prelude(
+            RedoVectorWrite {
+                index_key: &index_key,
+                tid: tenant_id,
+                collection: &collection,
+                dim,
+                surrogates: &[document_surrogate],
+                ids: &[],
+                sidecars: false,
+            },
+            None,
+            record_lsn,
+        ) {
+            return false;
+        }
         let vshard = crate::types::VShardId::from_collection_in_database(
             DatabaseId::new(database_id),
             &collection,
@@ -323,11 +370,11 @@ impl CoreLoop {
             },
         );
         if response.status != Status::Ok {
-            tracing::warn!(
-                core = self.core_id,
-                %collection,
-                lsn = record_lsn,
-                "WAL replay: multi-vector insert handler returned error; skipping"
+            self.replay_record_rejected(
+                "vector",
+                record_lsn,
+                response.error_code,
+                &format!("multi-vector insert into '{collection}' failed"),
             );
             return false;
         }
@@ -352,6 +399,12 @@ impl CoreLoop {
         let Ok((collection, field_name, doc_surrogate_u32)) =
             zerompk::from_msgpack::<(String, String, u32)>(payload)
         else {
+            self.replay_record_unapplied(
+                "vector",
+                "multi_vector_delete_decode",
+                record_lsn,
+                "MultiVectorDelete payload does not decode",
+            );
             return false;
         };
         if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
@@ -359,12 +412,29 @@ impl CoreLoop {
         }
         let index_key =
             CoreLoop::vector_index_key(database_id, tenant_id, &collection, &field_name);
-        if let Some(existing) = self.vector_collections.get(&index_key)
-            && record_lsn <= existing.checkpoint_wal_lsn()
-        {
+        if self.replay_watermark_skips(
+            self.vector_collections
+                .get(&index_key)
+                .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
+        ) {
             return false;
         }
         let document_surrogate = nodedb_types::Surrogate::new(doc_surrogate_u32);
+        if !self.redo_vector_prelude(
+            RedoVectorWrite {
+                index_key: &index_key,
+                tid: tenant_id,
+                collection: &collection,
+                dim: 0,
+                surrogates: &[document_surrogate],
+                ids: &[],
+                sidecars: false,
+            },
+            None,
+            record_lsn,
+        ) {
+            return false;
+        }
         let vshard = crate::types::VShardId::from_collection_in_database(
             DatabaseId::new(database_id),
             &collection,
@@ -392,90 +462,6 @@ impl CoreLoop {
         if let Some(coll) = self.vector_collections.get_mut(&index_key) {
             coll.note_checkpoint_lsn(record_lsn);
         }
-        true
-    }
-
-    /// Replay one `SparseVectorPut` record. Idempotent upsert-by-`doc_id`, so
-    /// no watermark gate is required.
-    fn replay_sparse_put(
-        &mut self,
-        payload: &[u8],
-        tenant_id: u64,
-        database_id: u64,
-        record_lsn: u64,
-        tombstones: &nodedb_wal::TombstoneSet,
-    ) -> bool {
-        let tombstones = tombstones.for_database(database_id);
-        let Ok((collection, field_name, doc_id, entries)) =
-            zerompk::from_msgpack::<(String, String, String, Vec<(u32, f32)>)>(payload)
-        else {
-            return false;
-        };
-        if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
-            return false;
-        }
-        let vshard = crate::types::VShardId::from_collection_in_database(
-            DatabaseId::new(database_id),
-            &collection,
-        );
-        let task = Self::replay_vector_task(
-            nodedb_types::TenantId::new(tenant_id),
-            DatabaseId::new(database_id),
-            vshard,
-            PhysicalPlan::Vector(VectorOp::SparseInsert {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
-                field_name: field_name.clone(),
-                doc_id: doc_id.clone(),
-                entries: entries.clone(),
-            }),
-        );
-        let response = self.execute_sparse_insert(
-            &task,
-            tenant_id,
-            &collection,
-            &field_name,
-            &doc_id,
-            &entries,
-        );
-        response.status == Status::Ok
-    }
-
-    /// Replay one `SparseVectorDelete` record. Idempotent (an absent document
-    /// is a no-op), so no watermark gate is required.
-    fn replay_sparse_delete(
-        &mut self,
-        payload: &[u8],
-        tenant_id: u64,
-        database_id: u64,
-        record_lsn: u64,
-        tombstones: &nodedb_wal::TombstoneSet,
-    ) -> bool {
-        let tombstones = tombstones.for_database(database_id);
-        let Ok((collection, field_name, doc_id)) =
-            zerompk::from_msgpack::<(String, String, String)>(payload)
-        else {
-            return false;
-        };
-        if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
-            return false;
-        }
-        let vshard = crate::types::VShardId::from_collection_in_database(
-            DatabaseId::new(database_id),
-            &collection,
-        );
-        let task = Self::replay_vector_task(
-            nodedb_types::TenantId::new(tenant_id),
-            DatabaseId::new(database_id),
-            vshard,
-            PhysicalPlan::Vector(VectorOp::SparseDelete {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
-                field_name: field_name.clone(),
-                doc_id: doc_id.clone(),
-            }),
-        );
-        // An absent document yields NotFound; that is an expected idempotent
-        // no-op on replay, not a failure.
-        let _ = self.execute_sparse_delete(&task, tenant_id, &collection, &field_name, &doc_id);
         true
     }
 }

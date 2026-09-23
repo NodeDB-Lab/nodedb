@@ -67,6 +67,7 @@ pub mod timeseries;
 mod timeseries_gap_fill;
 pub mod timeseries_wal;
 pub(super) mod timeseries_wal_decode;
+mod timeseries_wal_payload;
 pub mod transaction;
 pub mod truncate;
 pub mod truncate_response;

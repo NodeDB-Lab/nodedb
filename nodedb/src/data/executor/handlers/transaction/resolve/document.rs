@@ -16,7 +16,11 @@
 //! * A staged tombstone ([`Staged::Tombstone`]) → `RecordType::Delete`,
 //!   `(collection, document_id, Option<SyncProvenance>, surrogate)`. The redo
 //!   delete shape carries the surrogate (unlike the autocommit delete shape)
-//!   because replay keys redb by `StorageKey::for_surrogate(surrogate)`.
+//!   because replay keys redb by `StorageKey::for_surrogate(surrogate)`. For a
+//!   `bitemporal=true` collection it becomes a 5-tuple that appends the
+//!   resolve-time system time, so every apply of the record writes its
+//!   tombstone at the same version key. The replay decoder distinguishes the
+//!   two forms by arity.
 //!
 //! ## Stored form vs replay input
 //!
@@ -41,11 +45,10 @@
 //!
 //! ## Staged TRUNCATE
 //!
-//! A truncated collection with vector fields additionally emits one
-//! `RecordType::Delete` per base row the truncate removes
-//! ([`serialize_truncated_base_rows`]), the same per-row redo the autocommit
-//! truncate mints from its write-set. Base rows superseded by an overlay
-//! entry are covered by that entry instead.
+//! A truncated collection additionally emits one `RecordType::Delete` per base
+//! row the truncate removes ([`serialize_truncated_base_rows`]): the redo
+//! record is all a replica installs, so every removed row travels in it. Base
+//! rows superseded by an overlay entry are covered by that entry instead.
 //!
 //! ## Determinism
 //!
@@ -143,25 +146,38 @@ pub(super) fn serialize_document_collection(
                     payload,
                 });
             }
-            Staged::Tombstone => ops.push(delete_sub_record(collection, doc_id, surrogate)?),
+            Staged::Tombstone => ops.push(delete_sub_record(
+                collection,
+                doc_id,
+                surrogate,
+                overlay
+                    .get_bitemporal(coll_key, surrogate)
+                    .map(|stamp| stamp.sys_from_ms),
+            )?),
         }
     }
     Ok(())
 }
 
 /// The `RecordType::Delete` redo sub-record for one row:
-/// `(collection, document_id, Option<SyncProvenance>, surrogate)`.
+/// `(collection, document_id, Option<SyncProvenance>, surrogate)`, with the
+/// tombstone's system time appended when `sys_from_ms` is `Some` (a
+/// `bitemporal=true` collection).
 fn delete_sub_record(
     collection: &str,
     doc_id: &RowIdentity,
     surrogate: u32,
+    sys_from_ms: Option<i64>,
 ) -> crate::Result<RedoSubRecord> {
     let prov: Option<SyncProvenance> = None;
-    let payload = zerompk::to_msgpack_vec(&(collection, doc_id.as_str(), prov, surrogate))
-        .map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("document resolve delete: {e}"),
-        })?;
+    let payload = match sys_from_ms {
+        Some(sys) => zerompk::to_msgpack_vec(&(collection, doc_id.as_str(), prov, surrogate, sys)),
+        None => zerompk::to_msgpack_vec(&(collection, doc_id.as_str(), prov, surrogate)),
+    }
+    .map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("document resolve delete: {e}"),
+    })?;
     Ok(RedoSubRecord {
         record_type: RecordType::Delete as u32,
         payload,
@@ -177,13 +193,15 @@ pub(super) struct TruncatedBaseRows<'a> {
     pub strict_schema: Option<&'a StrictSchema>,
     /// The collection's declared `PRIMARY KEY` column, from the plan.
     pub declared_primary_key: Option<&'a str>,
+    /// The truncate's system time on a `bitemporal=true` collection. Every
+    /// removed row's tombstone carries it.
+    pub sys_from_ms: Option<i64>,
 }
 
 /// Append one `RecordType::Delete` redo sub-record per base row a staged
-/// TRUNCATE removes, in deterministic doc-id order. Mirrors the per-row
-/// `Delete` redo the autocommit truncate mints from `Response::write_set` on
-/// a collection with vector fields, so a WAL-only restart does not replay
-/// each row's original `Put` and resurrect its HNSW vector.
+/// TRUNCATE removes, in deterministic doc-id order. Every replica removes the
+/// same rows from the record, and a WAL-only restart does not replay a
+/// removed row's original `Put` and resurrect it or its HNSW vector.
 pub(super) fn serialize_truncated_base_rows(
     params: TruncatedBaseRows<'_>,
     ops: &mut Vec<RedoSubRecord>,
@@ -193,6 +211,7 @@ pub(super) fn serialize_truncated_base_rows(
         rows,
         strict_schema,
         declared_primary_key,
+        sys_from_ms,
     } = params;
     let mut entries: BTreeMap<RowIdentity, u32> = BTreeMap::new();
     for (key, body) in rows {
@@ -200,7 +219,12 @@ pub(super) fn serialize_truncated_base_rows(
         entries.insert(identity, key.surrogate().as_u32());
     }
     for (doc_id, surrogate) in &entries {
-        ops.push(delete_sub_record(collection, doc_id, *surrogate)?);
+        ops.push(delete_sub_record(
+            collection,
+            doc_id,
+            *surrogate,
+            sys_from_ms,
+        )?);
     }
     Ok(())
 }
@@ -324,6 +348,35 @@ mod tests {
         assert_eq!(doc_id, "gone");
         assert!(prov.is_none());
         assert_eq!(surrogate, 11, "delete tuple must carry the surrogate");
+    }
+
+    #[test]
+    fn a_bitemporal_tombstone_carries_its_resolve_time_system_time() {
+        use crate::data::executor::handlers::transaction::overlay::BitemporalStamp;
+
+        let mut overlay = TxnOverlay::new();
+        overlay.insert_tombstone(coll_key("hist"), 11, &id("gone"));
+        overlay.set_bitemporal(
+            &coll_key("hist"),
+            11,
+            BitemporalStamp {
+                sys_from_ms: 4_242,
+                valid_from_ms: i64::MIN,
+                valid_until_ms: i64::MAX,
+            },
+        );
+
+        let mut ops = Vec::new();
+        serialize_document_collection(&overlay, &coll_key("hist"), "hist", None, &mut ops)
+            .expect("serialize delete");
+        let (_c, doc_id, _prov, surrogate, sys) =
+            zerompk::from_msgpack::<(String, String, Option<SyncProvenance>, u32, i64)>(
+                &ops[0].payload,
+            )
+            .expect("decode bitemporal delete tuple");
+        assert_eq!(doc_id, "gone");
+        assert_eq!(surrogate, 11);
+        assert_eq!(sys, 4_242, "the redo delete carries the resolve-time stamp");
     }
 
     #[test]

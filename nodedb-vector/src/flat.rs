@@ -286,6 +286,21 @@ impl FlatIndex {
         self.deleted.len()
     }
 
+    /// Drop every vector at position `len` or later, as if it was never
+    /// inserted. A rollback uses it to withdraw the newest inserts.
+    pub fn truncate(&mut self, len: usize) {
+        if len >= self.deleted.len() {
+            return;
+        }
+        let dropped_live = self.deleted[len..]
+            .iter()
+            .filter(|deleted| !**deleted)
+            .count();
+        self.live_count -= dropped_live;
+        self.deleted.truncate(len);
+        self.data.truncate(len * self.dim);
+    }
+
     pub fn live_count(&self) -> usize {
         self.live_count
     }

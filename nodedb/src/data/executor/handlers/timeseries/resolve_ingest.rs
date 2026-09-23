@@ -15,6 +15,17 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 
+/// One ingest payload to normalize and stamp.
+pub(in crate::data::executor) struct StampedIngest<'a> {
+    pub database_id: crate::types::DatabaseId,
+    pub tid: crate::types::TenantId,
+    pub collection: &'a str,
+    pub payload: &'a [u8],
+    pub format: &'a str,
+    /// The default timestamp of a row that carries none.
+    pub now_ms: i64,
+}
+
 /// The measurement an ingest writes to, taken from its routing collection.
 fn measurement_of(collection: &str) -> &str {
     collection
@@ -51,36 +62,18 @@ impl CoreLoop {
         let time_key = self
             .declared_ts_time_key(task.request.database_id, tid, collection.as_str())
             .map(str::to_string);
-        let batch = match Self::normalized_ilp_batch(
-            collection.as_str(),
+        let now_ms = self.ingest_now_ms();
+        let lines = match self.stamped_ingest_lines(StampedIngest {
+            database_id: task.request.database_id,
+            tid,
+            collection: collection.as_str(),
             payload,
             format,
-            time_key.as_deref(),
-        ) {
-            Ok(batch) => batch,
+            now_ms,
+        }) {
+            Ok(lines) => lines,
             Err(error) => return self.response_error(task, error),
         };
-
-        let now_ms = self.ingest_now_ms();
-        let lines = match normalize::stamp_timestamps(&batch, now_ms) {
-            Ok(lines) => lines,
-            Err(error) => {
-                return self.response_error(
-                    task,
-                    ErrorCode::RejectedPrevalidation {
-                        reason: format!("timeseries resolve: unparsable line protocol: {error}"),
-                    },
-                );
-            }
-        };
-        if lines.is_empty() {
-            return self.response_error(
-                task,
-                ErrorCode::RejectedPrevalidation {
-                    reason: format!("timeseries resolve: '{collection}' payload holds no rows"),
-                },
-            );
-        }
 
         // Decide the policy against the stamped lines — the exact images the
         // proposed ingest will store on every replica.
@@ -116,6 +109,37 @@ impl CoreLoop {
                 },
             ),
         }
+    }
+
+    /// The canonical lines `payload` stores, with every row that carries no
+    /// timestamp stamped `now_ms`. A transaction's resolve and the governed
+    /// ingest's resolve pass both stamp here, once, before the write is
+    /// proposed, so every replica stores identical rows.
+    pub(in crate::data::executor) fn stamped_ingest_lines(
+        &self,
+        ingest: StampedIngest<'_>,
+    ) -> Result<Vec<String>, ErrorCode> {
+        let StampedIngest {
+            database_id,
+            tid,
+            collection,
+            payload,
+            format,
+            now_ms,
+        } = ingest;
+        let time_key = self.declared_ts_time_key(database_id, tid, collection);
+        let batch = Self::normalized_ilp_batch(collection, payload, format, time_key)?;
+        let lines = normalize::stamp_timestamps(&batch, now_ms).map_err(|error| {
+            ErrorCode::RejectedPrevalidation {
+                reason: format!("timeseries resolve: unparsable line protocol: {error}"),
+            }
+        })?;
+        if lines.is_empty() {
+            return Err(ErrorCode::RejectedPrevalidation {
+                reason: format!("timeseries resolve: '{collection}' payload holds no rows"),
+            });
+        }
+        Ok(lines)
     }
 
     /// Rewrite `payload` into line protocol, mirroring the ingest handler's

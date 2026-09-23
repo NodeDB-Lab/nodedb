@@ -9,6 +9,9 @@ use crate::data::executor::enforcement::funnel::WriteEnforcementOutcome;
 use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, WriteImages};
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
+use crate::data::executor::handlers::transaction::undo::document_outcome::{
+    DocumentRow, push_put_undo, push_target_undo,
+};
 use crate::data::executor::task::ExecutionTask;
 
 /// Parameters for [`CoreLoop::tx_point_put`].
@@ -285,77 +288,22 @@ impl CoreLoop {
         })?;
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
-        // Reverse every derived materialized-sum target write with the SAME set
-        // of undo entries the source row uses: the target write is a full
-        // document write, so it has index, vector, spatial and stats
-        // side-effects of its own to reverse.
-        for target in target_writes {
-            undo_log.push(UndoEntry::PutDocument {
-                collection: target.collection,
-                document_id: nodedb_types::StorageKey::for_surrogate(target.surrogate),
-                identity: target.identity,
-                old_value: target.outcome.prior_value,
-                bitemporal_sys_from_ms: target.outcome.bitemporal_sys_from_ms,
-                bitemporal_index_tuples: target.outcome.bitemporal_index_tuples,
-                secondary_index_added: target.outcome.secondary_index_added,
-                secondary_index_removed: target.outcome.secondary_index_removed,
-                chain_hash_prior: None,
-            });
-            for delta in target.outcome.vector_inserts {
-                undo_log.push(UndoEntry::InsertVector {
-                    index_key: delta.index_key,
-                    vector_id: delta.vector_id,
-                    collection: delta.collection,
-                    field: delta.field,
-                    doc_id: Some(delta.doc_id),
-                });
-            }
-            for (key, entry_id) in target.outcome.spatial_inserts {
-                undo_log.push(UndoEntry::SpatialInsert { key, entry_id });
-            }
-            for (key, prior) in target.outcome.stats_prior {
-                undo_log.push(UndoEntry::StatsRestore { key, prior });
-            }
-        }
-
-        undo_log.push(UndoEntry::PutDocument {
-            collection: collection.to_string(),
-            document_id: storage_key,
-            // The plan's `document_id` is the row's client identity.
-            identity: nodedb_types::RowIdentity::from_user_key(document_id),
-            old_value: outcome.prior_value,
-            bitemporal_sys_from_ms: outcome.bitemporal_sys_from_ms,
-            bitemporal_index_tuples: outcome.bitemporal_index_tuples,
-            // Plain secondary-index entries this put added/removed; reversed on
-            // rollback so the index returns to its pre-tx state.
-            secondary_index_added: outcome.secondary_index_added,
-            secondary_index_removed: outcome.secondary_index_removed,
-            chain_hash_prior: chain.prior(),
-        });
-
-        // Reverse any HNSW vector inserts on rollback (one `InsertVector` undo
-        // per vector this put added to a per-field index).
-        for delta in outcome.vector_inserts {
-            undo_log.push(UndoEntry::InsertVector {
-                index_key: delta.index_key,
-                vector_id: delta.vector_id,
-                collection: delta.collection,
-                field: delta.field,
-                doc_id: Some(delta.doc_id),
-            });
-        }
-
-        // Reverse any spatial R-tree inserts on rollback (one `SpatialInsert`
-        // undo per per-field R-tree entry this put added).
-        for (key, entry_id) in outcome.spatial_inserts {
-            undo_log.push(UndoEntry::SpatialInsert { key, entry_id });
-        }
-
-        // Reverse the column-stats read-modify-write on rollback by restoring
-        // each captured pre-image.
-        for (key, prior) in outcome.stats_prior {
-            undo_log.push(UndoEntry::StatsRestore { key, prior });
-        }
+        // A target write is a full document write with side effects of its
+        // own, reversed with the same entries the source row uses.
+        push_target_undo(undo_log, &target_writes);
+        push_put_undo(
+            undo_log,
+            DocumentRow {
+                database_id,
+                tid,
+                collection,
+                storage_key,
+                // The plan's `document_id` is the row's client identity.
+                identity: nodedb_types::RowIdentity::from_user_key(document_id),
+            },
+            outcome,
+            chain.prior(),
+        );
 
         // One row was written, and the count is REPORTED — `PointPut` and
         // `PointInsert` both render an `INSERT <n>` command tag, so their

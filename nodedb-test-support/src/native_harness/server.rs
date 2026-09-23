@@ -98,6 +98,7 @@ impl NativeTestServer {
             )
             .expect("open core");
             core.set_event_producer(event_producer);
+            core.set_num_cores(1);
             if let Some(m) = core_metrics {
                 core.set_metrics(m);
             }

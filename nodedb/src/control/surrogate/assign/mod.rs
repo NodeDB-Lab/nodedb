@@ -7,5 +7,8 @@ pub mod bind_plan;
 pub(super) mod cluster_reserve;
 pub mod core;
 
-pub use bind_plan::{IdentityBinder, bind_plan_identities};
+pub use bind_plan::{
+    CarriedIdentity, IdentityBinder, bind_carried_identities, bind_plan_identities,
+    collect_plan_identities,
+};
 pub use core::{SurrogateAssigner, SurrogateRegistryHandle};

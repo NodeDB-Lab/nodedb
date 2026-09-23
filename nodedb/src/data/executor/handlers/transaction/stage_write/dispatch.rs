@@ -32,6 +32,10 @@ impl CoreLoop {
                 },
             );
         };
+        // Every core that stages a write for this transaction holds its
+        // overlay, even when the write stages no row. COMMIT's resolve refuses
+        // a transaction with staged writes whose overlay is missing.
+        self.txn_overlay_mut(txn_id);
 
         let doc_op = match plan {
             PhysicalPlan::Document(op) => op,

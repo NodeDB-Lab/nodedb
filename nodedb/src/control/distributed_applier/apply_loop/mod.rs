@@ -17,6 +17,10 @@
 //! - [`calvin_read_result`]: forwards a committed `CalvinReadResult` entry to
 //!   the local Calvin scheduler.
 //! - [`write_dispatch`]: the generic decode + Data-Plane `submit_write` path.
+//! - [`transaction_redo`]: a committed transaction's redo, stamped with its
+//!   Raft entry and applied through the WAL replay arms.
+//! - [`proposal_gate`]: skips a second committed copy of an applied proposal
+//!   and records each applied proposal in the ledger and the WAL.
 //! - [`bookkeeping`]: applied-floor persistence + Raft log compaction trigger.
 //! - [`helpers`]: shared response/result classification helpers.
 
@@ -25,6 +29,8 @@ mod bookkeeping;
 mod calvin_read_result;
 mod driver;
 mod helpers;
+mod proposal_gate;
+mod transaction_redo;
 mod write_dispatch;
 
 pub use driver::run_apply_loop;

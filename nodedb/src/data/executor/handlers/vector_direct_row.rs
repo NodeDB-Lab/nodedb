@@ -290,7 +290,10 @@ impl CoreLoop {
         surrogates: &[Surrogate],
     ) {
         let seal_key = CoreLoop::vector_build_key(index_key);
-        if let Some(coll) = self.vector_collections.get_mut(index_key)
+        // A committed-redo install seals once the whole record landed, so a
+        // rollback finds its inserts in the growing segment.
+        if !self.recording_redo_undo()
+            && let Some(coll) = self.vector_collections.get_mut(index_key)
             && coll.needs_seal()
             && let Some(req) = coll.seal(&seal_key)
             && let Some(tx) = &self.build_tx

@@ -10,6 +10,7 @@ pub mod lifecycle_insert_ops;
 pub mod lifecycle_reindex;
 pub mod payload_index;
 pub mod quantize;
+pub mod rollback;
 pub mod search;
 pub mod segment;
 pub mod stats;
@@ -17,6 +18,7 @@ pub mod tier;
 
 pub use lifecycle::VectorCollection;
 pub use payload_index::{FilterPredicate, PayloadIndex, PayloadIndexKind, PayloadIndexSet};
+pub use rollback::VectorWriteMark;
 pub use segment::{
     BuildComplete, BuildRequest, BuildingSegment, DEFAULT_SEAL_THRESHOLD, SealedSegment,
 };

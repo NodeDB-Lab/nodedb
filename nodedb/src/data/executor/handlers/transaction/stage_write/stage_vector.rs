@@ -12,8 +12,9 @@
 //! same-transaction point read or scan renders the sidecar. Each op decides
 //! its outcome against BASE ∪ OVERLAY with the live handler's own rules:
 //! a duplicate key refuses, `ON CONFLICT DO NOTHING` skips, a conflict
-//! patch merges through the live handler's merge. COMMIT replays the
-//! buffered plan through the live handler, which stays the durable apply.
+//! patch merges through the live handler's merge. COMMIT resolves the staged
+//! row into the transaction's redo record (`resolve::vector_primary`), and
+//! every replica installs exactly that row.
 
 use std::collections::HashMap;
 

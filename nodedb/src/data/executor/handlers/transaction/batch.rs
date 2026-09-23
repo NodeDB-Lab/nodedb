@@ -61,9 +61,10 @@ impl CoreLoop {
         // recorded into per-core apply scratch, so `apply_point_put` installs
         // each bitemporal document put on the versioned store at the SAME stamp
         // the redo carries. Calvin threads its stamps in before the call
-        // (`txn_id = None` here); the session single-shard commit passes its
-        // `txn_id`. The scratch is consulted ONLY by the forward apply below, so
-        // it is cleared the moment `run_sub_plans` returns (any path).
+        // (`txn_id = None` here); a caller applying a session transaction's
+        // plans passes its `txn_id`. The scratch is consulted ONLY by the
+        // forward apply below, so it is cleared the moment `run_sub_plans`
+        // returns (any path).
         if let Some(txn_id) = txn_id {
             self.load_bitemporal_stamps_for_txn(txn_id);
             self.active_graph_system_from = self

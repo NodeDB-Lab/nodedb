@@ -168,7 +168,8 @@ pub(crate) async fn execute_plan_all_local_cores(
             | MetaOp::RollbackToSavepoint { .. }
             | MetaOp::RecordCalvinWriteVersions { .. }
             | MetaOp::CalvinFlush { .. }
-            | MetaOp::CalvinDrop { .. } => {
+            | MetaOp::CalvinDrop { .. }
+            | MetaOp::ApplyTransactionRedo { .. } => {
                 generic_gather(state, tenant_id, database_id, plan, trace_id, txn_id).await
             }
         },

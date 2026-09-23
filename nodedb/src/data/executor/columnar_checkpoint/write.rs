@@ -47,7 +47,10 @@ impl CoreLoop {
     /// fall above the stamp and replay. That is safe and stays safe: it matched
     /// nothing against the state that the export captured, so re-executing the
     /// same predicate against that same restored state matches nothing again.
-    pub(in crate::data::executor) fn checkpoint_columnar_engines(&self) -> crate::Result<Lsn> {
+    ///
+    /// Every published generation raises `columnar_published_lsn`, the LSN
+    /// restart restores columnar from (see `redo_apply::cover`).
+    pub(in crate::data::executor) fn checkpoint_columnar_engines(&mut self) -> crate::Result<Lsn> {
         let durable_through = self.watermark;
 
         let ckpt_dir = columnar_ckpt_dir(&self.data_dir, self.core_id);
@@ -71,6 +74,8 @@ impl CoreLoop {
 
         let written = self.write_columnar_generation(&gen_dir)?;
         self.publish_columnar_generation(&ckpt_dir, generation, durable_through)?;
+        self.floors.columnar_published_lsn =
+            self.floors.columnar_published_lsn.max(durable_through);
 
         // The previous generation is now unreachable. Removing it reclaims disk
         // but is NOT required for correctness — the manifest alone decides what

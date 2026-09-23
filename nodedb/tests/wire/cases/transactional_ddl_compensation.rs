@@ -23,15 +23,15 @@ async fn collection_names(server: &TestServer) -> Vec<String> {
         .collect()
 }
 
-/// Forces `commit::single_shard_batch_dispatch` (see
-/// `control::server::shared::session::commit::single_shard::dispatch_batch`)
-/// to fail before it ever calls the real Data-Plane dispatch, so no WAL or
-/// disk state changes from the injected failure itself.
+/// Forces `commit::single_shard_redo_commit` (see
+/// `control::server::shared::session::commit::single_shard::commit_redo`)
+/// to fail before the redo record is committed, so no WAL or disk state
+/// changes from the injected failure itself.
 #[cfg(feature = "failpoints")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dispatch_failure_after_create_compensates_the_finalized_collection() {
     let server = TestServer::start_with_failpoints(
-        "commit::single_shard_batch_dispatch=fail(injected dispatch failure)",
+        "commit::single_shard_redo_commit=fail(injected dispatch failure)",
     )
     .await;
 

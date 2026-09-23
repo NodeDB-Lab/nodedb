@@ -37,7 +37,7 @@ use std::time::Duration;
 
 use nodedb_cluster::calvin::{
     sequencer::{SequencerConfig, new_inbox},
-    types::{EngineKeySet, ReadWriteSet, SequencedTxn, SortedVec, TxClass, VersionedReadSet},
+    types::{EngineKeySet, ReadWriteSet, SchedulerInput, SortedVec, TxClass, VersionedReadSet},
 };
 use nodedb_types::{
     TenantId,
@@ -45,7 +45,7 @@ use nodedb_types::{
 };
 use tokio::sync::mpsc;
 
-use super::cluster_common::{spawn_with_sequencer, wait_for_sequencer_leader};
+use super::cluster_common::{spawn_with_sequencer, try_recv_txn, wait_for_sequencer_leader};
 
 /// Find two collection names that hash to distinct vshards.
 ///
@@ -104,14 +104,17 @@ fn make_ollp_tx_class(
     .expect("valid multi-vshard OLLP TxClass")
 }
 
-/// Assert: one specific vshard channel received at least one SequencedTxn.
+/// Assert: one specific vshard channel received at least one sequenced txn.
+///
+/// The state machine sends into the channel inside `apply`, before it
+/// advances the epoch the caller waited for, so the txn is already there.
 fn assert_fan_out_received(
-    rx: &mut mpsc::Receiver<SequencedTxn>,
+    rx: &mut mpsc::Receiver<SchedulerInput>,
     vshard_id: u32,
     replica_idx: usize,
 ) {
     assert!(
-        rx.try_recv().is_ok(),
+        try_recv_txn(rx).is_some(),
         "replica {replica_idx}: vshard {vshard_id} fan-out channel received no txn"
     );
 }
@@ -139,8 +142,8 @@ async fn ollp_bulk_update_txclass_admitted_and_fanned_out() {
     let vs_ollp = VShardId::from_collection_in_database(DatabaseId::DEFAULT, &col_ollp).as_u32();
 
     // Wire per-vshard fan-out receivers on every replica.
-    let mut rxs_static: Vec<mpsc::Receiver<SequencedTxn>> = Vec::new();
-    let mut rxs_ollp: Vec<mpsc::Receiver<SequencedTxn>> = Vec::new();
+    let mut rxs_static: Vec<mpsc::Receiver<SchedulerInput>> = Vec::new();
+    let mut rxs_ollp: Vec<mpsc::Receiver<SchedulerInput>> = Vec::new();
     for node in &nodes {
         let (tx_s, rx_s) = mpsc::channel(64);
         let (tx_o, rx_o) = mpsc::channel(64);
@@ -191,8 +194,8 @@ async fn ollp_bulk_update_txclass_admitted_and_fanned_out() {
 
     // Simulate an OLLP retry: concurrent insert added surrogate 4 to col_ollp.
     // Re-wire fresh fan-out receivers and re-submit with the corrected set.
-    let mut retry_rxs_static: Vec<mpsc::Receiver<SequencedTxn>> = Vec::new();
-    let mut retry_rxs_ollp: Vec<mpsc::Receiver<SequencedTxn>> = Vec::new();
+    let mut retry_rxs_static: Vec<mpsc::Receiver<SchedulerInput>> = Vec::new();
+    let mut retry_rxs_ollp: Vec<mpsc::Receiver<SchedulerInput>> = Vec::new();
     for node in &nodes {
         let (tx_s, rx_s) = mpsc::channel(64);
         let (tx_o, rx_o) = mpsc::channel(64);

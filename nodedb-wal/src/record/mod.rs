@@ -23,4 +23,4 @@ pub use padding::{MIN_PADDING_RECORD_SIZE, padding_record, padding_span};
 pub use surrogate::{SURROGATE_PAYLOAD_SIZE, SurrogateAllocPayload, SurrogateBindPayload};
 pub use sync_seq::{SYNC_SEQ_ADVANCE_PAYLOAD_SIZE, SyncSeqAdvancePayload};
 pub use types::RecordType;
-pub use wal_record::{WalRecord, WalRecordArgs};
+pub use wal_record::{RecordTarget, WalRecord, WalRecordArgs};

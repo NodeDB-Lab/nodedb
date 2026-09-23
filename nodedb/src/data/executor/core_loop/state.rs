@@ -523,12 +523,13 @@ pub struct CoreLoop {
     pub(in crate::data::executor) write_index: super::write_index::WriteVersionIndex,
 
     /// Scratch map (surrogate → resolve-time bitemporal stamp) consulted ONLY
-    /// by `apply_point_put`. Populated right before a bitemporal document apply
-    /// scope — from a committing transaction's overlay sidecar (commit-time
-    /// install) or a decoded 8-tuple redo sub-record (WAL replay) — and cleared
-    /// right after. When a surrogate has an entry, the put is forced onto the
-    /// versioned store at the carried stamp rather than deriving a fresh one,
-    /// so the base install and the redo agree on the version key even when
+    /// by `apply_point_put` and `apply_point_delete`. Populated right before a
+    /// bitemporal document apply scope — from a committing transaction's
+    /// overlay sidecar (commit-time install) or a decoded stamped redo put or
+    /// delete sub-record (WAL replay, committed-redo apply) — and cleared right
+    /// after. When a surrogate has an entry, the put or tombstone is forced
+    /// onto the versioned store at the carried system time rather than a fresh
+    /// one, so every apply of the record agrees on the version key even when
     /// `doc_configs` is empty (the real replay-time boot state).
     pub(in crate::data::executor) active_bitemporal_stamps:
         HashMap<u32, crate::data::executor::handlers::transaction::overlay::BitemporalStamp>,
@@ -577,4 +578,8 @@ pub struct CoreLoop {
     /// flush's undo log, awaiting the post-apply `RecordCalvinWriteVersions` op.
     pub(in crate::data::executor) calvin_flush_index_tuples:
         crate::data::executor::handlers::transaction::index_write_values::StagedCalvinIndexTuples,
+
+    /// Core count and per-record scratch of the committed-redo apply.
+    pub(in crate::data::executor) redo_apply:
+        crate::data::executor::handlers::transaction::redo_apply::RedoApplyState,
 }

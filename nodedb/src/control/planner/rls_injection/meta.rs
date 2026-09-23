@@ -101,7 +101,8 @@ pub(super) fn inject_meta(ctx: &RlsCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         | MetaOp::RollbackToSavepoint { .. }
         | MetaOp::CalvinFlush { .. }
         | MetaOp::CalvinDrop { .. }
-        | MetaOp::CalvinResolve { .. } => Ok(()),
+        | MetaOp::CalvinResolve { .. }
+        | MetaOp::ApplyTransactionRedo { .. } => Ok(()),
     }
 }
 

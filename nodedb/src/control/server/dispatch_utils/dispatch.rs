@@ -57,7 +57,10 @@ pub async fn dispatch_authorized_autocommit_write(
             trace_id,
             event_source: crate::event::EventSource::User,
             txn_id: task.txn_id,
-            durability: WalDurability::AppendHere { now_override: None },
+            durability: WalDurability::AppendHere {
+                now_override: None,
+                apply_key: 0,
+            },
         },
     )
     .await
@@ -87,7 +90,10 @@ pub(crate) async fn dispatch_authorized_autocommit_write_with_source(
             trace_id,
             event_source,
             txn_id: task.txn_id,
-            durability: WalDurability::AppendHere { now_override: None },
+            durability: WalDurability::AppendHere {
+                now_override: None,
+                apply_key: 0,
+            },
         },
     )
     .await
@@ -236,7 +242,10 @@ pub(crate) async fn dispatch_autocommit_write(
             txn_id,
             // The funnel appends the WAL record under the admission guard just
             // before enqueue and stamps the minted LSN onto the `Request`.
-            durability: WalDurability::AppendHere { now_override: None },
+            durability: WalDurability::AppendHere {
+                now_override: None,
+                apply_key: 0,
+            },
         },
     )
     .await

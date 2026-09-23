@@ -153,15 +153,18 @@ pub(super) fn timeseries_write(op: &TimeseriesOp) -> Option<ReplicatedWrite> {
             rls_write_check: _,
             returning,
             rls_filters,
-        } => columnar::timeseries_ingest(
-            collection.as_str(),
+        } => columnar::timeseries_ingest(columnar::TimeseriesIngestFields {
+            collection: collection.as_str(),
             payload,
             format,
             surrogates,
-            encode_provenance(provenance),
-            encode_returning(returning),
+            // Read once, here on the proposer: every replica stamps an
+            // untimed row with this instant instead of its own clock.
+            default_timestamp_ms: crate::engine::kv::current_ms() as i64,
+            provenance: encode_provenance(provenance),
+            returning: encode_returning(returning),
             rls_filters,
-        ),
+        }),
 
         TimeseriesOp::Truncate {
             collection,

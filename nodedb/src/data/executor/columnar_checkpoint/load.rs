@@ -112,6 +112,7 @@ impl CoreLoop {
             .columnar
             .set(Lsn::new(manifest.durable_through_lsn));
         self.floors.columnar_durable_lsn = Lsn::new(manifest.durable_through_lsn);
+        self.floors.columnar_published_lsn = Lsn::new(manifest.durable_through_lsn);
 
         info!(
             core = self.core_id,

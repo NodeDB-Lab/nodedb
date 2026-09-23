@@ -36,6 +36,12 @@ pub(super) struct ResponsePhaseInput {
     pub vshard_id: VShardId,
     pub wal_lsn: Option<Lsn>,
     pub appends_here: bool,
+    /// The idempotency key every record this write appends carries (see
+    /// `WalDurability::AppendHere`).
+    pub apply_key: u64,
+    /// The key a final refusal's abort marker carries, `0` when this write's
+    /// refusals are not final (see `AbortTarget::final_refusal_key`).
+    pub final_refusal_key: u64,
     pub post_apply: Option<String>,
     pub funnel_redo_engine: Option<&'static str>,
     pub change_set: Option<WriteChangeSet>,
@@ -68,6 +74,8 @@ pub(super) async fn collect_classify_and_finish(
         vshard_id,
         wal_lsn,
         appends_here,
+        apply_key,
+        final_refusal_key,
         post_apply,
         funnel_redo_engine,
         change_set,
@@ -152,6 +160,7 @@ pub(super) async fn collect_classify_and_finish(
                 vshard_id,
                 wal_lsn,
                 appends_here,
+                final_refusal_key,
             },
             &response,
         )
@@ -170,14 +179,16 @@ pub(super) async fn collect_classify_and_finish(
         rollback_on_err(
             shared,
             &ddl_transition,
-            wal_dispatch::append_write_set_redo(
-                &shared.wal,
-                tenant_id,
-                vshard_id,
-                database_id,
-                collection,
-                &response.write_set,
-            ),
+            shared.wal.with_apply_key(apply_key, || {
+                wal_dispatch::append_write_set_redo(
+                    &shared.wal,
+                    tenant_id,
+                    vshard_id,
+                    database_id,
+                    collection,
+                    &response.write_set,
+                )
+            }),
         )?
     } else {
         None

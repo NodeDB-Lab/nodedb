@@ -29,10 +29,10 @@
 //! runs at COMMIT replay — both refuse a shipped-but-vanished row rather than
 //! silently dropping it from the affected count.
 //!
-//! COMMIT durable replay is unchanged: the buffered `ColumnarOp::ResolvedUpdate`
-//! / `ColumnarOp::ResolvedDelete` plan is still replayed through
-//! `execute_columnar_resolved_update` / `execute_columnar_resolved_delete`
-//! inside the COMMIT `TransactionBatch`, which remains the sole durable apply.
+//! COMMIT resolves the staged post-images and tombstones into the
+//! transaction's redo record (`resolve::columnar_image`), with each shipped
+//! primary key recorded as the base row it replaces
+//! (`stage_columnar_base_key`).
 
 use std::collections::HashMap;
 
@@ -170,6 +170,11 @@ impl CoreLoop {
         }
 
         let affected = resolved.len();
+        for ((surrogate, _, _), (pk, _)) in resolved.iter().zip(rows) {
+            if let Err(e) = self.stage_note_columnar_base_pk(txn_id, &coll_key, *surrogate, pk) {
+                return self.response_error(task, e);
+            }
+        }
         for (surrogate, identity, new_row) in resolved {
             let body = match nodedb_types::value_to_msgpack(&Value::Array(new_row.clone())) {
                 Ok(b) => b,
@@ -263,6 +268,11 @@ impl CoreLoop {
         }
 
         let affected = surrogates.len();
+        for ((surrogate, _), pk) in surrogates.iter().zip(pks) {
+            if let Err(e) = self.stage_note_columnar_base_pk(txn_id, &coll_key, *surrogate, pk) {
+                return self.response_error(task, e);
+            }
+        }
         for (surrogate, identity) in surrogates {
             self.txn_overlay_mut(txn_id)
                 .insert_tombstone(coll_key.clone(), surrogate, &identity);

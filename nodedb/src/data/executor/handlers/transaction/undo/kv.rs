@@ -13,6 +13,20 @@ use crate::engine::kv::current_ms;
 
 use super::UndoEntry;
 
+fn kv_key<'a>(
+    did: u64,
+    tid: u64,
+    collection: &'a str,
+    key: &'a [u8],
+) -> crate::engine::kv::KvKeyRef<'a> {
+    crate::engine::kv::KvKeyRef {
+        database_id: did,
+        tenant_id: tid,
+        collection,
+        key,
+    }
+}
+
 impl CoreLoop {
     pub(super) fn apply_undo_kv(
         &mut self,
@@ -25,47 +39,25 @@ impl CoreLoop {
             UndoEntry::KvPut {
                 collection,
                 key,
-                prior_value,
+                prior,
             } => {
-                let now_ms = current_ms();
-                if let Some(old) = prior_value {
-                    self.kv_engine.put(crate::engine::kv::KvPutParams {
-                        database_id: did,
-                        tenant_id: tid,
-                        collection: &collection,
-                        key: &key,
-                        value: &old,
-                        ttl_ms: 0,
-                        now_ms,
-                        surrogate: nodedb_types::Surrogate::ZERO,
-                    });
-                } else {
-                    self.kv_engine.delete(
-                        did,
-                        tid,
-                        &collection,
-                        std::slice::from_ref(&key),
-                        now_ms,
-                    );
-                }
+                self.kv_engine.reinstate_entry(
+                    kv_key(did, tid, &collection, &key),
+                    prior.as_ref(),
+                    current_ms(),
+                );
                 Ok(())
             }
             UndoEntry::KvDelete {
                 collection,
                 key,
-                prior_value,
+                prior,
             } => {
-                let now_ms = current_ms();
-                self.kv_engine.put(crate::engine::kv::KvPutParams {
-                    database_id: did,
-                    tenant_id: tid,
-                    collection: &collection,
-                    key: &key,
-                    value: &prior_value,
-                    ttl_ms: 0,
-                    now_ms,
-                    surrogate: nodedb_types::Surrogate::ZERO,
-                });
+                self.kv_engine.restore_entry_image(
+                    kv_key(did, tid, &collection, &key),
+                    &prior,
+                    current_ms(),
+                );
                 Ok(())
             }
             UndoEntry::KvBatchPut {
@@ -73,21 +65,12 @@ impl CoreLoop {
                 entries,
             } => {
                 let now_ms = current_ms();
-                for (key, prior_value) in entries {
-                    if let Some(old) = prior_value {
-                        self.kv_engine.put(crate::engine::kv::KvPutParams {
-                            database_id: did,
-                            tenant_id: tid,
-                            collection: &collection,
-                            key: &key,
-                            value: &old,
-                            ttl_ms: 0,
-                            now_ms,
-                            surrogate: nodedb_types::Surrogate::ZERO,
-                        });
-                    } else {
-                        self.kv_engine.delete(did, tid, &collection, &[key], now_ms);
-                    }
+                for (key, prior) in entries {
+                    self.kv_engine.reinstate_entry(
+                        kv_key(did, tid, &collection, &key),
+                        prior.as_ref(),
+                        now_ms,
+                    );
                 }
                 Ok(())
             }
@@ -99,31 +82,16 @@ impl CoreLoop {
                 dest_prior,
             } => {
                 let now_ms = current_ms();
-                self.kv_engine.put(crate::engine::kv::KvPutParams {
-                    database_id: did,
-                    tenant_id: tid,
-                    collection: &collection,
-                    key: &source_key,
-                    value: &source_prior,
-                    ttl_ms: 0,
+                self.kv_engine.restore_entry_image(
+                    kv_key(did, tid, &collection, &source_key),
+                    &source_prior,
                     now_ms,
-                    surrogate: nodedb_types::Surrogate::ZERO,
-                });
-                if let Some(old) = dest_prior {
-                    self.kv_engine.put(crate::engine::kv::KvPutParams {
-                        database_id: did,
-                        tenant_id: tid,
-                        collection: &collection,
-                        key: &dest_key,
-                        value: &old,
-                        ttl_ms: 0,
-                        now_ms,
-                        surrogate: nodedb_types::Surrogate::ZERO,
-                    });
-                } else {
-                    self.kv_engine
-                        .delete(did, tid, &collection, &[dest_key], now_ms);
-                }
+                );
+                self.kv_engine.reinstate_entry(
+                    kv_key(did, tid, &collection, &dest_key),
+                    dest_prior.as_ref(),
+                    now_ms,
+                );
                 Ok(())
             }
             UndoEntry::KvTransferItem {
@@ -134,39 +102,39 @@ impl CoreLoop {
                 source_prior,
                 dest_prior,
             } => {
-                let now_ms = current_ms();
                 // Cross-collection move: the forward op deleted `item_key` from
-                // `source_collection` and wrote to `dest_key` in `dest_collection`
-                // (e.g. inventory → archive). Reverse both halves: re-insert the
-                // source row, then undo the destination write below. `source_prior`
-                // is always Some because the forward op required the source to
-                // exist; `dest_prior` is None when the dest key was a new insert
-                // and Some(old) when it overwrote an existing row.
-                self.kv_engine.put(crate::engine::kv::KvPutParams {
-                    database_id: did,
-                    tenant_id: tid,
-                    collection: &source_collection,
-                    key: &item_key,
-                    value: &source_prior,
-                    ttl_ms: 0,
+                // `source_collection` and wrote `dest_key` in `dest_collection`.
+                // Both halves are reinstated: the source row always existed,
+                // the destination key may have been absent.
+                let now_ms = current_ms();
+                self.kv_engine.restore_entry_image(
+                    kv_key(did, tid, &source_collection, &item_key),
+                    &source_prior,
                     now_ms,
-                    surrogate: nodedb_types::Surrogate::ZERO,
-                });
-                // Undo the dest write.
-                if let Some(old) = dest_prior {
-                    self.kv_engine.put(crate::engine::kv::KvPutParams {
-                        database_id: did,
-                        tenant_id: tid,
-                        collection: &dest_collection,
-                        key: &dest_key,
-                        value: &old,
-                        ttl_ms: 0,
+                );
+                self.kv_engine.reinstate_entry(
+                    kv_key(did, tid, &dest_collection, &dest_key),
+                    dest_prior.as_ref(),
+                    now_ms,
+                );
+                Ok(())
+            }
+            UndoEntry::KvTruncate { collection, rows } => {
+                // Every write after the truncate was reversed first, so the
+                // collection holds what the truncate left. Empty it and
+                // reinstall every row it held.
+                let now_ms = current_ms();
+                self.kv_engine.truncate(did, tid, &collection);
+                for row in rows {
+                    self.kv_engine.restore_entry_image(
+                        kv_key(did, tid, &collection, &row.key),
+                        &crate::engine::kv::KvEntryImage {
+                            value: row.value,
+                            expire_at_ms: row.expire_at_ms,
+                            surrogate: row.surrogate,
+                        },
                         now_ms,
-                        surrogate: nodedb_types::Surrogate::ZERO,
-                    });
-                } else {
-                    self.kv_engine
-                        .delete(did, tid, &dest_collection, &[dest_key], now_ms);
+                    );
                 }
                 Ok(())
             }
@@ -644,6 +612,102 @@ mod tests {
             ranked_keys,
             vec![b"p2".to_vec(), b"p3".to_vec(), b"p1".to_vec()],
             "restored index must rank identically to the original"
+        );
+    }
+
+    fn seed_with_expiry_and_surrogate(core: &mut CoreLoop) -> crate::engine::kv::KvEntryImage {
+        let now_ms = current_ms();
+        core.kv_engine.put_with_absolute_expiry(
+            crate::engine::kv::KvPutParams {
+                database_id: DB,
+                tenant_id: TID,
+                collection: "cache",
+                key: b"k",
+                value: b"old",
+                ttl_ms: 0,
+                now_ms,
+                surrogate: nodedb_types::Surrogate::new(9),
+            },
+            now_ms + 3_600_000,
+        );
+        core.kv_engine
+            .entry_image(DB, TID, "cache", b"k", now_ms)
+            .expect("seeded key")
+    }
+
+    #[test]
+    fn a_rolled_back_overwrite_restores_the_value_expiry_and_surrogate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let before = seed_with_expiry_and_surrogate(&mut core);
+        put_kv(&mut core, "cache", b"k", b"new", 0);
+
+        core.rollback_undo_log(
+            DB,
+            TID,
+            vec![UndoEntry::KvPut {
+                collection: "cache".into(),
+                key: b"k".to_vec(),
+                prior: Some(before.clone()),
+            }],
+        )
+        .expect("rollback");
+
+        assert_eq!(
+            core.kv_engine
+                .entry_image(DB, TID, "cache", b"k", current_ms()),
+            Some(before)
+        );
+    }
+
+    #[test]
+    fn a_rolled_back_delete_restores_the_expiry_and_surrogate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let before = seed_with_expiry_and_surrogate(&mut core);
+        core.kv_engine
+            .delete(DB, TID, "cache", &[b"k".to_vec()], current_ms());
+
+        core.rollback_undo_log(
+            DB,
+            TID,
+            vec![UndoEntry::KvDelete {
+                collection: "cache".into(),
+                key: b"k".to_vec(),
+                prior: before.clone(),
+            }],
+        )
+        .expect("rollback");
+
+        assert_eq!(
+            core.kv_engine
+                .entry_image(DB, TID, "cache", b"k", current_ms()),
+            Some(before)
+        );
+    }
+
+    #[test]
+    fn a_rolled_back_truncate_reinstalls_every_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let before = seed_with_expiry_and_surrogate(&mut core);
+        let rows = core.kv_engine.export_collection(DB, TID, "cache");
+        core.kv_engine.truncate(DB, TID, "cache");
+
+        core.rollback_undo_log(
+            DB,
+            TID,
+            vec![UndoEntry::KvTruncate {
+                collection: "cache".into(),
+                rows,
+            }],
+        )
+        .expect("rollback");
+
+        assert_eq!(
+            core.kv_engine
+                .entry_image(DB, TID, "cache", b"k", current_ms()),
+            Some(before)
         );
     }
 }

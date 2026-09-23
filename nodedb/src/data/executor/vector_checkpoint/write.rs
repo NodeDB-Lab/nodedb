@@ -40,7 +40,13 @@ impl CoreLoop {
     /// runs on the core's own thread between tasks, and a vector write raises
     /// the watermark only after the collection has already been mutated, so
     /// every write with `lsn <= watermark` is in the bytes written below.
-    pub(crate) fn checkpoint_vector_indexes(&self) -> crate::Result<CheckpointOutcome> {
+    ///
+    /// Every published generation raises `vector_published_lsn`, whichever
+    /// caller published it: restart restores from the newest generation, so
+    /// a committed record applied at or below it must reach a newer one
+    /// (`redo_apply::cover`). `vector_durable_lsn` stays the caller's to
+    /// raise.
+    pub(crate) fn checkpoint_vector_indexes(&mut self) -> crate::Result<CheckpointOutcome> {
         let durable_lsn = self.watermark;
 
         let ckpt_dir = vector_ckpt_dir(&self.data_dir, self.core_id);
@@ -64,6 +70,7 @@ impl CoreLoop {
 
         let files_written = self.write_vector_generation(&gen_dir)?;
         publish_vector_generation(&ckpt_dir, generation, durable_lsn)?;
+        self.floors.vector_published_lsn = self.floors.vector_published_lsn.max(durable_lsn);
 
         // The previous generation is now unreachable. Removing it reclaims disk
         // but is NOT required for correctness — the manifest alone decides what

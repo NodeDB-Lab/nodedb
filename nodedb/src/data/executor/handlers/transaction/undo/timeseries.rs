@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Undo of a timeseries `TRUNCATE` inside a transaction batch: reinstall the
-//! in-memory state `execute_timeseries_truncate` moved out and rename the
-//! partition directory back to its live name.
+//! Timeseries undo: the pre-image capture of an ingest, and the undo of a
+//! `TRUNCATE` inside a transaction batch, which reinstalls the in-memory
+//! state `execute_timeseries_truncate` moved out and renames the partition
+//! directory back to its live name.
 //!
 //! The rename is the only durable step. A rename that fails is fatal to the
 //! rollback (`Err` → `RollbackFailed`): the memory state would say the rows
@@ -10,10 +11,35 @@
 //! would answer from half a collection.
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::types::{DatabaseId, TenantId};
 
-use super::TimeseriesTruncateUndo;
+use super::{TimeseriesIngestUndo, TimeseriesTruncateUndo};
 
 impl CoreLoop {
+    /// The complete in-memory pre-image of a timeseries collection before an
+    /// ingest mutates it: the memtable, its config and resident footprint,
+    /// the last-value cache, the ingest watermark, the ingest timer, and the
+    /// memtable's reservation.
+    pub(in crate::data::executor) fn capture_timeseries_ingest_undo(
+        &self,
+        collection_key: &(DatabaseId, TenantId, String),
+    ) -> TimeseriesIngestUndo {
+        let memtable = self.columnar_memtables.get(collection_key);
+        TimeseriesIngestUndo {
+            collection_key: collection_key.clone(),
+            memtable_before: memtable.map(|memtable| memtable.export_snapshot()),
+            memtable_config_before: memtable.map(|memtable| memtable.config()),
+            memtable_memory_bytes_before: memtable.map(|memtable| memtable.memory_bytes()),
+            last_value_cache_before: self.ts_last_value_caches.get(collection_key).cloned(),
+            max_ingested_lsn_before: self.ts_max_ingested_lsn.get(collection_key).copied(),
+            last_ts_ingest_before: self.last_ts_ingest,
+            reservation_bytes_before: self
+                .columnar_memtable_mem
+                .get(collection_key)
+                .map(nodedb_mem::ReservationToken::size),
+        }
+    }
+
     pub(super) fn apply_undo_timeseries_truncate(
         &mut self,
         entry_index: usize,

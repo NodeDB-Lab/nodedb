@@ -17,11 +17,11 @@ use crate::types::TenantId;
 use nodedb_physical::physical_plan::ColumnarInsertIntent;
 use nodedb_physical::physical_plan::document::UpdateValue;
 
-use super::undo::{TimeseriesIngestUndo, UndoEntry};
+use super::undo::UndoEntry;
 
 /// Captured undo state for a pending columnar insert: the list of new PK bytes
 /// to insert, paired with the prior `RowLocation` of any displaced memtable rows.
-type ColumnarUndoState = (Vec<Vec<u8>>, Vec<(Vec<u8>, RowLocation)>);
+pub(in crate::data::executor) type ColumnarUndoState = (Vec<Vec<u8>>, Vec<(Vec<u8>, RowLocation)>);
 
 /// Parameters for [`CoreLoop::execute_tx_columnar_insert`].
 pub(super) struct TxColumnarInsertParams<'a> {
@@ -133,39 +133,53 @@ impl CoreLoop {
         payload: &[u8],
         intent: ColumnarInsertIntent,
     ) -> ColumnarUndoState {
-        let mut inserted_pks: Vec<Vec<u8>> = Vec::new();
-        let mut displaced: Vec<(Vec<u8>, RowLocation)> = Vec::new();
-
         let Some(engine) = self.columnar_engines.get(collection_key) else {
             // Engine doesn't exist yet; execute_columnar_insert will create it.
             // row_count_before will be 0, so truncate_to(0) handles rollback.
-            return (inserted_pks, displaced);
+            return (Vec::new(), Vec::new());
         };
-
         let ndb_rows: Vec<nodedb_types::Value> = match nodedb_types::value_from_msgpack(payload) {
             Ok(nodedb_types::Value::Array(arr)) => arr,
             Ok(v @ nodedb_types::Value::Object(_)) => vec![v],
-            _ => return (inserted_pks, displaced),
+            _ => return (Vec::new(), Vec::new()),
         };
+        let schema = engine.schema();
+        let rows: Vec<Vec<nodedb_types::Value>> = ndb_rows
+            .iter()
+            .filter_map(|row| match row {
+                nodedb_types::Value::Object(obj) => Some(
+                    schema
+                        .columns
+                        .iter()
+                        .map(|col| {
+                            obj.get(&col.name)
+                                .cloned()
+                                .unwrap_or(nodedb_types::Value::Null)
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        self.columnar_insert_undo_state(collection_key, &rows, intent)
+    }
 
-        let schema = engine.schema().clone();
-        for row in &ndb_rows {
-            let obj = match row {
-                nodedb_types::Value::Object(m) => m,
-                _ => continue,
-            };
-
-            let values: Vec<nodedb_types::Value> = schema
-                .columns
-                .iter()
-                .map(|col| {
-                    obj.get(&col.name)
-                        .cloned()
-                        .unwrap_or(nodedb_types::Value::Null)
-                })
-                .collect();
-
-            let Ok(pk_bytes) = engine.encode_pk_from_row(&values) else {
+    /// The PK bytes a columnar insert of `rows` (schema-ordered values) will
+    /// bind, and the memtable rows it will displace, captured before the
+    /// insert runs.
+    pub(in crate::data::executor) fn columnar_insert_undo_state(
+        &self,
+        collection_key: &(nodedb_types::DatabaseId, TenantId, String),
+        rows: &[Vec<nodedb_types::Value>],
+        intent: ColumnarInsertIntent,
+    ) -> ColumnarUndoState {
+        let mut inserted_pks: Vec<Vec<u8>> = Vec::new();
+        let mut displaced: Vec<(Vec<u8>, RowLocation)> = Vec::new();
+        let Some(engine) = self.columnar_engines.get(collection_key) else {
+            return (inserted_pks, displaced);
+        };
+        for values in rows {
+            let Ok(pk_bytes) = engine.encode_pk_from_row(values) else {
                 continue;
             };
 
@@ -219,28 +233,7 @@ impl CoreLoop {
         } = params;
         let collection_key = (task.request.database_id, tid, collection.to_string());
 
-        let undo = TimeseriesIngestUndo {
-            collection_key: collection_key.clone(),
-            memtable_before: self
-                .columnar_memtables
-                .get(&collection_key)
-                .map(|memtable| memtable.export_snapshot()),
-            memtable_config_before: self
-                .columnar_memtables
-                .get(&collection_key)
-                .map(|memtable| memtable.config()),
-            memtable_memory_bytes_before: self
-                .columnar_memtables
-                .get(&collection_key)
-                .map(|memtable| memtable.memory_bytes()),
-            last_value_cache_before: self.ts_last_value_caches.get(&collection_key).cloned(),
-            max_ingested_lsn_before: self.ts_max_ingested_lsn.get(&collection_key).copied(),
-            last_ts_ingest_before: self.last_ts_ingest,
-            reservation_bytes_before: self
-                .columnar_memtable_mem
-                .get(&collection_key)
-                .map(nodedb_mem::ReservationToken::size),
-        };
+        let undo = self.capture_timeseries_ingest_undo(&collection_key);
 
         // Push before mutation. A panic in ingest is caught by the batch
         // driver, which can then restore this exact pre-image.

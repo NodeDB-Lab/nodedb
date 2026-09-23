@@ -10,6 +10,7 @@
 
 mod array;
 mod binder;
+mod carried;
 mod crdt;
 mod document;
 mod graph;
@@ -17,3 +18,4 @@ mod kv;
 mod vector;
 
 pub use binder::{IdentityBinder, bind_plan_identities};
+pub use carried::{CarriedIdentity, bind_carried_identities, collect_plan_identities};

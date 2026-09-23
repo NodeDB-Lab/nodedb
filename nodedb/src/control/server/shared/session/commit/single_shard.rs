@@ -1,23 +1,31 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Single-shard COMMIT: one `TransactionRedo` WAL record, then one atomic
-//! `TransactionBatch` dispatch stamped with that record's LSN.
+//! Single-shard COMMIT: resolve the transaction's staged post-images into one
+//! redo record, then commit that record through the vShard's apply log.
+//!
+//! The vShard has one apply log. With Raft it is the data-group log: the
+//! record is proposed there and every replica, this node included, appends
+//! it to its own WAL and installs it when the entry commits. With no Raft the
+//! record goes through the same apply on this node alone. COMMIT returns only
+//! once the record is durable and installed here.
 
 use nodedb_physical::physical_plan::MetaOp;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
-use crate::bridge::envelope::{PhysicalPlan, Response, Status};
+use crate::bridge::envelope::{PhysicalPlan, Status};
 use crate::control::gateway::RouteDecision;
 use crate::control::state::SharedState;
+use crate::control::wal_replication::encode::transaction_redo_entry;
+use crate::control::wal_replication::propose_replicated_entry;
+use crate::control::wal_replication::transaction_redo::{
+    RedoTarget, TransactionRedoPayload, apply_transaction_redo,
+};
 
 use super::super::outcome::{AbortReason, TxnDataPlane};
 
 /// Single-shard commit: resolve the transaction's staged post-images into one
-/// replayable `TransactionRedo` WAL record, then dispatch the buffered plans as
-/// one atomic `TransactionBatch` stamped with that record's LSN. The redo
-/// record restores restart durability for in-transaction writes into in-memory
-/// secondary indexes (vector HNSW, FTS) that the base storage engine cannot
-/// rebuild on its own. Returns `Some(reason)` on failure.
+/// `RedoRecord`, then commit it through the vShard's apply log. Returns
+/// `Some(reason)` on failure.
 pub(super) async fn dispatch_single_shard(
     state: &SharedState,
     dp: &impl TxnDataPlane,
@@ -74,16 +82,13 @@ pub(super) async fn dispatch_single_shard(
         }
     };
 
-    // Re-verify local vShard ownership immediately before the durable WAL
-    // append. `run_commit` resolved this vShard as `Local`, but a leadership
-    // handoff can land during the `ResolveTxn` await above. Without this
-    // re-check the transaction redo would be appended to a WAL this node no
-    // longer owns, and the batch dispatch below (which re-resolves leadership)
-    // would then reject the now-non-local commit — leaving an orphaned durable
-    // redo record behind while the client is told the commit aborted. Aborting
-    // here, BEFORE any durable write, keeps the failure side-effect-free and
-    // retryable: the client's retry re-enters `run_commit`, sees the vShard is
-    // non-local, and routes the commit through Calvin's replicated barrier.
+    // Re-verify local vShard leadership before anything durable happens.
+    // `run_commit` resolved this vShard as `Local` and validated the read set
+    // against this node's write versions, but a leadership handoff can land
+    // during the `ResolveTxn` await above. The new leader may already have
+    // applied writes this node's validation never saw, so the commit aborts
+    // side-effect-free and retryable: the retry sees the vShard is non-local
+    // and routes through Calvin's replicated barrier.
     if !matches!(
         crate::control::server::graph_dispatch::cluster_resolve::resolve_for_vshard(
             state,
@@ -94,75 +99,91 @@ pub(super) async fn dispatch_single_shard(
         return Some(AbortReason::Serialization);
     }
 
-    // 2. Write-ahead the transaction as ONE replayable `TransactionRedo` record
-    //    (each sub-op keeps its real engine `record_type`). `None` when the txn
-    //    has no durable writes (all reads / CRDT / text). Its LSN stamps the
-    //    batch install so the Data Plane records the committed write version for
-    //    every key in the batch.
-    let wal_lsn = if redo.ops.is_empty() {
-        None
-    } else {
-        match state
-            .wal
-            .append_transaction_redo(tenant_id, vshard_id, database_id, &redo)
-        {
-            Ok(lsn) => Some(lsn),
-            Err(e) => {
-                return Some(AbortReason::Dispatch(crate::Error::Internal {
-                    detail: format!("single-shard commit: transaction redo WAL append failed: {e}"),
-                }));
+    // A transaction with no durable write (all reads) installs nothing.
+    if redo.ops.is_empty() {
+        return None;
+    }
+
+    // 2. Commit the record through the vShard's apply log. The payload carries
+    //    the resolve-time bitemporal stamps inside the redo sub-records, so
+    //    every replica installs each row on the same version key.
+    let payload = match TransactionRedoPayload::from_commit(
+        state,
+        database_id,
+        tenant_id,
+        redo,
+        &plans,
+        dp.event_source(),
+    ) {
+        Ok(payload) => payload,
+        Err(e) => return Some(AbortReason::Dispatch(e)),
+    };
+    commit_redo(
+        state,
+        RedoTarget {
+            tenant_id,
+            database_id,
+            vshard_id,
+        },
+        &payload,
+    )
+    .await
+}
+
+/// Commit `payload` through the vShard's apply log and wait until it is
+/// durable and installed on this node.
+///
+/// A fail point ahead of the real commit lets a test force this exact
+/// synchronous-failure branch (`Option<AbortReason>` back to `run_commit`,
+/// which compensates a finalized DDL) without touching disk.
+async fn commit_redo(
+    state: &SharedState,
+    target: RedoTarget,
+    payload: &TransactionRedoPayload,
+) -> Option<AbortReason> {
+    if let Err(e) = inject_commit_failure() {
+        return Some(AbortReason::Dispatch(e));
+    }
+    match state.async_raft_proposer() {
+        // The proposer forwards to the group leader and returns once the entry
+        // is committed and applied on this node by the apply loop.
+        Some(proposer) => {
+            let entry = transaction_redo_entry(
+                target.tenant_id,
+                target.database_id,
+                target.vshard_id,
+                payload,
+            );
+            match propose_replicated_entry(state, proposer, entry).await {
+                Ok(_) => None,
+                Err(crate::Error::DataPlane(code)) => {
+                    Some(AbortReason::BatchRejected { code: Some(code) })
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "transaction redo commit failed");
+                    Some(AbortReason::Dispatch(e))
+                }
             }
         }
-    };
-    let batch_task = PhysicalTask {
-        tenant_id,
-        vshard_id,
-        database_id,
-        plan: PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            plans,
-            // Reuse the resolve-time bitemporal stamps recorded in this
-            // transaction's staging overlay so a `bitemporal=true` document put
-            // installs on the same version key the redo (WAL-appended just
-            // above) carries — otherwise a normal restart writes a second
-            // version of the row.
-            txn_id: Some(txn_id),
-        }),
-        post_set_op: PostSetOp::None,
-        txn_id: None,
-    };
-    classify_batch_dispatch(dispatch_batch(dp, batch_task, wal_lsn).await)
+        // No Raft: this node is the only replica, and its apply is the log.
+        None => match apply_transaction_redo(state, target, payload, 0).await {
+            Ok(outcome) if outcome.response.status == Status::Ok => None,
+            Ok(outcome) => Some(AbortReason::BatchRejected {
+                code: outcome.response.error_code.as_deref().cloned(),
+            }),
+            Err(e) => {
+                tracing::warn!(error = %e, "transaction redo commit failed");
+                Some(AbortReason::Dispatch(e))
+            }
+        },
+    }
 }
 
-/// The transaction batch's Data-Plane dispatch, with a fail point ahead of
-/// the real call so a test can force this exact synchronous-failure branch
-/// (`Option<AbortReason>` back to `run_commit`, which compensates a
-/// finalized DDL) without a real Data-Plane rejection or touching disk.
-/// Compiles to a bare `dp.dispatch_no_wal` call outside the `failpoints`
-/// feature.
-async fn dispatch_batch(
-    dp: &impl TxnDataPlane,
-    batch_task: PhysicalTask,
-    wal_lsn: Option<crate::types::Lsn>,
-) -> crate::Result<Response> {
-    crate::fail_point_err!("commit::single_shard_batch_dispatch", |detail| {
+/// The `commit::single_shard_redo_commit` fail point. Compiles to `Ok(())`
+/// outside the `failpoints` feature.
+fn inject_commit_failure() -> crate::Result<()> {
+    crate::fail_point_err!("commit::single_shard_redo_commit", |detail| {
         crate::Error::Internal { detail }
     });
-    dp.dispatch_no_wal(batch_task, wal_lsn).await
-}
-
-/// Convert a transaction-batch dispatch result into a commit abort reason, if
-/// any. `dispatch_no_wal` returns `Ok(Response { status: Error, .. })` for a
-/// failed batch rather than a Rust `Err` — the status must be checked
-/// explicitly or a failed sub-plan reports as COMMIT success.
-fn classify_batch_dispatch(result: crate::Result<Response>) -> Option<AbortReason> {
-    match result {
-        Err(e) => {
-            tracing::warn!(error = %e, "transaction batch dispatch failed");
-            Some(AbortReason::Dispatch(e))
-        }
-        Ok(resp) if resp.status != Status::Ok => Some(AbortReason::BatchRejected {
-            code: resp.error_code.as_deref().cloned(),
-        }),
-        Ok(_) => None,
-    }
+    Ok(())
 }

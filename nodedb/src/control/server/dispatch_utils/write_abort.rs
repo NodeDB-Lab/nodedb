@@ -40,6 +40,11 @@ pub(crate) struct AbortTarget {
     /// Whether the write funnel appended the forward record. A caller that
     /// recorded durability elsewhere owns the undo semantics of its own record.
     pub appends_here: bool,
+    /// The idempotency key of the replicated proposal whose refusal is final,
+    /// `0` otherwise. A final refusal is the proposal's outcome: its abort
+    /// marker carries the key, and the proposal ledger rebuilt at boot counts
+    /// the proposal as applied. The cancelled forward record never counts.
+    pub final_refusal_key: u64,
 }
 
 /// Cancel a forward write record the Data Plane refused.
@@ -89,12 +94,19 @@ pub(crate) async fn abort_refused_write(
         return Ok(());
     }
 
-    let abort_lsn = shared.wal.append_write_aborted(
-        target.tenant_id,
-        target.vshard_id,
-        target.database_id,
-        wal_lsn,
-    )?;
+    let marker_key = if refusal_is_final(code) {
+        target.final_refusal_key
+    } else {
+        0
+    };
+    let abort_lsn = shared.wal.with_apply_key(marker_key, || {
+        shared.wal.append_write_aborted(
+            target.tenant_id,
+            target.vshard_id,
+            target.database_id,
+            wal_lsn,
+        )
+    })?;
     shared.wal.wait_durable(abort_lsn).await?;
     tracing::debug!(
         aborted_lsn = wal_lsn.as_u64(),
@@ -102,6 +114,29 @@ pub(crate) async fn abort_refused_write(
         "refused write cancelled in the WAL"
     );
     Ok(())
+}
+
+/// Whether a replicated proposal refused with `code` is refused for good: a
+/// redelivery of the same entry against the same state refuses it again.
+///
+/// A verdict that depends on this node's momentary load or on a transient
+/// precondition is not final: another replica can apply the same entry, and
+/// a redelivery here can too. That covers admission and capacity verdicts,
+/// concurrency retries, the staging byte budget, and `RetryableRefusal`,
+/// which a committed-redo apply answers with after it rolled a failed
+/// install back.
+pub(crate) fn refusal_is_final(code: &ErrorCode) -> bool {
+    write_definitely_not_applied(code)
+        && !matches!(
+            code,
+            ErrorCode::RetryableRefusal { .. }
+                | ErrorCode::RateExceeded { .. }
+                | ErrorCode::CollectionDraining { .. }
+                | ErrorCode::DispatchCapacity { .. }
+                | ErrorCode::ConflictRetry
+                | ErrorCode::OllpRetryRequired
+                | ErrorCode::TxnOverlayMemoryExceeded { .. }
+        )
 }
 
 /// Whether `code` proves the write was refused without applying anything.
@@ -230,5 +265,21 @@ mod tests {
             detail: "io_uring".into(),
         }));
         assert!(!write_definitely_not_applied(&ErrorCode::DuplicateWrite));
+    }
+
+    #[test]
+    fn a_constraint_verdict_is_final_and_a_retryable_one_is_not() {
+        assert!(refusal_is_final(&ErrorCode::RejectedPrevalidation {
+            reason: "sub-record does not decode".into(),
+        }));
+        assert!(!refusal_is_final(&ErrorCode::RetryableRefusal {
+            reason: "install rolled back".into(),
+        }));
+        assert!(!refusal_is_final(&ErrorCode::DispatchCapacity {
+            reason: "core 0 queue is full".into(),
+        }));
+        assert!(!refusal_is_final(&ErrorCode::Internal {
+            detail: "io_uring".into(),
+        }));
     }
 }

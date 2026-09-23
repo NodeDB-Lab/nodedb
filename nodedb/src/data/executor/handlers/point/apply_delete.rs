@@ -146,7 +146,17 @@ impl CoreLoop {
         let _ = user_roles;
 
         let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
-        let bitemporal = self.is_bitemporal(database_id, tid, collection);
+        // A stamp in `active_bitemporal_stamps` (a committed redo delete)
+        // forces the versioned branch at the EXACT resolve-time system time,
+        // so every replica and every restart tombstones the same version key.
+        // Absent an override, derive bitemporality from config and mint the
+        // system time here.
+        let carried_sys_from = self
+            .active_bitemporal_stamps
+            .get(&surrogate.as_u32())
+            .map(|stamp| stamp.sys_from_ms);
+        let bitemporal =
+            carried_sys_from.is_some() || self.is_bitemporal(database_id, tid, collection);
         let config_key = (
             crate::types::DatabaseId::new(database_id),
             crate::types::TenantId::new(tid),
@@ -177,7 +187,7 @@ impl CoreLoop {
                         resolved_targets,
                     )?;
                 }
-                let sys_from = self.bitemporal_now_ms();
+                let sys_from = carried_sys_from.unwrap_or_else(|| self.bitemporal_now_ms());
                 bitemporal_sys_from_ms = Some(sys_from);
                 self.sparse.versioned_tombstone_in_txn(
                     txn,
@@ -438,7 +448,7 @@ impl CoreLoop {
 /// (`apply_point_delete`) and transactional (`tx_point_delete`) paths.
 /// These checks have no persistent side effect, so a violation here
 /// simply aborts before the write.
-fn run_delete_enforcement(
+pub(in crate::data::executor) fn run_delete_enforcement(
     sparse: &crate::engine::sparse::btree::SparseEngine,
     database_id: u64,
     tid: u64,

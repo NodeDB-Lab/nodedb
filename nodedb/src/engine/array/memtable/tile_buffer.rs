@@ -263,6 +263,23 @@ impl Memtable {
         Ok(tile)
     }
 
+    /// The buffer of `tile`, if the memtable holds one.
+    pub fn tile(&self, tile: &TileId) -> Option<&TileBuffer> {
+        self.tiles.get(tile)
+    }
+
+    /// Put `tile` back to `buffer`, or drop it when `buffer` is `None`.
+    pub fn restore_tile(&mut self, tile: TileId, buffer: Option<TileBuffer>) {
+        match buffer {
+            Some(buffer) => {
+                self.tiles.insert(tile, buffer);
+            }
+            None => {
+                self.tiles.remove(&tile);
+            }
+        }
+    }
+
     pub fn stats(&self) -> MemtableStats {
         let mut s = MemtableStats::default();
         for b in self.tiles.values() {

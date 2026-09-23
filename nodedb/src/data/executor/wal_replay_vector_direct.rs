@@ -15,6 +15,7 @@ use crate::control::server::wal_dispatch::{
     VectorDirectDeleteRecord, VectorDirectTruncateRecord, VectorDirectUpdateRecord,
 };
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::wal_replay_vector_redo::RedoVectorTargets;
 use crate::types::DatabaseId;
 
 impl CoreLoop {
@@ -33,15 +34,35 @@ impl CoreLoop {
         let Ok((collection, field, targets)) =
             zerompk::from_msgpack::<VectorDirectDeleteRecord>(payload)
         else {
+            self.replay_record_unapplied(
+                "vector",
+                "direct_delete_decode",
+                record_lsn,
+                "VectorDirectDelete payload does not decode",
+            );
             return false;
         };
         if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
             return false;
         }
         let index_key = CoreLoop::vector_index_key(database_id, tenant_id, &collection, &field);
-        if let Some(existing) = self.vector_collections.get(&index_key)
-            && record_lsn <= existing.checkpoint_wal_lsn()
-        {
+        if self.replay_watermark_skips(
+            self.vector_collections
+                .get(&index_key)
+                .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
+        ) {
+            return false;
+        }
+        if !self.redo_vector_targets_prelude(
+            RedoVectorTargets {
+                index_key: &index_key,
+                tid: tenant_id,
+                collection: &collection,
+                dim: 0,
+                targets: &targets,
+            },
+            record_lsn,
+        ) {
             return false;
         }
         let vshard = crate::types::VShardId::from_collection_in_database(
@@ -74,11 +95,11 @@ impl CoreLoop {
             },
         );
         if response.status != Status::Ok {
-            tracing::warn!(
-                core = self.core_id,
-                %collection,
-                lsn = record_lsn,
-                "WAL replay: direct-delete handler returned error; skipping"
+            self.replay_record_rejected(
+                "vector",
+                record_lsn,
+                response.error_code,
+                &format!("vector direct delete on '{collection}' failed"),
             );
             return false;
         }
@@ -102,16 +123,34 @@ impl CoreLoop {
         let tombstones = tombstones.for_database(database_id);
         let Ok((collection, field)) = zerompk::from_msgpack::<VectorDirectTruncateRecord>(payload)
         else {
+            self.replay_record_unapplied(
+                "vector",
+                "direct_truncate_decode",
+                record_lsn,
+                "VectorDirectTruncate payload does not decode",
+            );
             return false;
         };
         if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
             return false;
         }
         let index_key = CoreLoop::vector_index_key(database_id, tenant_id, &collection, &field);
-        if let Some(existing) = self.vector_collections.get(&index_key)
-            && record_lsn <= existing.checkpoint_wal_lsn()
-        {
+        if self.replay_watermark_skips(
+            self.vector_collections
+                .get(&index_key)
+                .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
+        ) {
             return false;
+        }
+        if self.claim_for_validation() {
+            return false;
+        }
+        if self.recording_redo_undo() {
+            let captured =
+                self.detach_vector_collection_for_truncate(&index_key, tenant_id, &collection);
+            if !self.record_redo_capture(captured.map(std::iter::once)) {
+                return false;
+            }
         }
         let vshard = crate::types::VShardId::from_collection_in_database(
             DatabaseId::new(database_id),
@@ -129,11 +168,11 @@ impl CoreLoop {
         );
         let response = self.execute_vector_direct_truncate(&task, tenant_id, &collection, &field);
         if response.status != Status::Ok {
-            tracing::warn!(
-                core = self.core_id,
-                %collection,
-                lsn = record_lsn,
-                "WAL replay: direct-truncate handler returned error; skipping"
+            self.replay_record_rejected(
+                "vector",
+                record_lsn,
+                response.error_code,
+                &format!("vector direct truncate on '{collection}' failed"),
             );
             return false;
         }
@@ -165,15 +204,35 @@ impl CoreLoop {
             payload_indexes,
         )) = zerompk::from_msgpack::<VectorDirectUpdateRecord>(payload)
         else {
+            self.replay_record_unapplied(
+                "vector",
+                "direct_update_decode",
+                record_lsn,
+                "VectorDirectUpdate payload does not decode",
+            );
             return false;
         };
         if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
             return false;
         }
         let index_key = CoreLoop::vector_index_key(database_id, tenant_id, &collection, &field);
-        if let Some(existing) = self.vector_collections.get(&index_key)
-            && record_lsn <= existing.checkpoint_wal_lsn()
-        {
+        if self.replay_watermark_skips(
+            self.vector_collections
+                .get(&index_key)
+                .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
+        ) {
+            return false;
+        }
+        if !self.redo_vector_targets_prelude(
+            RedoVectorTargets {
+                index_key: &index_key,
+                tid: tenant_id,
+                collection: &collection,
+                dim: new_vector.as_ref().map_or(0, Vec::len),
+                targets: &targets,
+            },
+            record_lsn,
+        ) {
             return false;
         }
         let vshard = crate::types::VShardId::from_collection_in_database(
@@ -216,11 +275,11 @@ impl CoreLoop {
             },
         );
         if response.status != Status::Ok {
-            tracing::warn!(
-                core = self.core_id,
-                %collection,
-                lsn = record_lsn,
-                "WAL replay: direct-update handler returned error; skipping"
+            self.replay_record_rejected(
+                "vector",
+                record_lsn,
+                response.error_code,
+                &format!("vector direct update on '{collection}' failed"),
             );
             return false;
         }

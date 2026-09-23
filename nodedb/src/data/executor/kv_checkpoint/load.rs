@@ -73,6 +73,7 @@ impl CoreLoop {
             .replay_floors
             .kv
             .set(Lsn::new(manifest.durable_through_lsn));
+        self.floors.kv_published_lsn = Lsn::new(manifest.durable_through_lsn);
 
         info!(
             core = self.core_id,

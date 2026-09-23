@@ -54,6 +54,15 @@ pub struct CollectionOverlay {
     /// by the commit-time base install so redo and install share one stamp.
     /// See [`BitemporalStamp`]. Never consulted by non-bitemporal collections.
     pub(super) bitemporal_by_surrogate: HashMap<u32, BitemporalStamp>,
+    /// Primary key (MessagePack) of the base row a staged columnar write
+    /// displaced, per surrogate. Recorded when a statement first stages a
+    /// base row, read by COMMIT resolve so the redo names the row it removes.
+    /// Never consulted by non-columnar collections.
+    pub(super) base_pk_by_surrogate: HashMap<u32, Vec<u8>>,
+    /// The instant a staged timeseries ingest read as its default row
+    /// timestamp, keyed by the batch's first surrogate. COMMIT resolve stamps
+    /// the batch's untimed rows with it. Never consulted by other engines.
+    pub(super) ingest_now_by_surrogate: HashMap<u32, i64>,
 }
 
 impl CollectionOverlay {
@@ -63,6 +72,8 @@ impl CollectionOverlay {
             && self.doc_id_to_surrogate.is_empty()
             && self.ttl_by_surrogate.is_empty()
             && self.bitemporal_by_surrogate.is_empty()
+            && self.base_pk_by_surrogate.is_empty()
+            && self.ingest_now_by_surrogate.is_empty()
     }
 }
 

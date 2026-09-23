@@ -81,4 +81,8 @@ pub trait TxnDataPlane {
         task: PhysicalTask,
         wal_lsn: Option<crate::types::Lsn>,
     ) -> Pin<Box<dyn Future<Output = crate::Result<Response>> + Send + 'a>>;
+
+    /// The source the transaction's committed writes carry into the Event
+    /// Plane, on every replica that applies them.
+    fn event_source(&self) -> crate::event::EventSource;
 }

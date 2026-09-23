@@ -84,11 +84,18 @@ impl CoreLoop {
             | UndoEntry::KvBatchPut { .. }
             | UndoEntry::KvTransfer { .. }
             | UndoEntry::KvTransferItem { .. }
+            | UndoEntry::KvTruncate { .. }
             | UndoEntry::KvTtl { .. }
             | UndoEntry::SortedIndexDdl { .. } => self.apply_undo_kv(did, tid, entry_index, entry),
             UndoEntry::ColumnarInsert { .. }
             | UndoEntry::ColumnarUpdate { .. }
             | UndoEntry::ColumnarDelete { .. } => self.apply_undo_columnar(entry_index, entry),
+            UndoEntry::ColumnarEngineCreated { collection_key } => {
+                self.columnar_engines.remove(&collection_key);
+                self.columnar_flushed_segments.remove(&collection_key);
+                self.columnar_flushed_surrogates.remove(&collection_key);
+                Ok(())
+            }
             UndoEntry::TimeseriesIngest(_) => self.apply_undo_timeseries(entry_index, entry),
             UndoEntry::ColumnarTruncate(undo) => {
                 self.apply_undo_columnar_truncate(entry_index, undo)
@@ -98,6 +105,55 @@ impl CoreLoop {
             }
             UndoEntry::StatsRestore { .. } => self.apply_undo_stats(entry_index, entry),
             UndoEntry::MarkNodeDeleted { .. } => self.apply_undo_mark_node(entry_index, entry),
+            UndoEntry::SpatialRow(undo) => self.apply_undo_spatial_row(entry_index, *undo),
+            UndoEntry::VectorWrite(undo) => self.apply_undo_vector_write(entry_index, *undo),
+            UndoEntry::CrdtCollection(undo) => self.apply_undo_crdt_collection(entry_index, *undo),
+            UndoEntry::ArrayTiles { array_id, snapshot } => self
+                .array_engine
+                .restore_tiles(&array_id, snapshot)
+                .map_err(|e| {
+                    (
+                        entry_index,
+                        format!(
+                            "restoring the memtable tiles of array '{}': {e}",
+                            array_id.name
+                        ),
+                    )
+                }),
+            UndoEntry::SparseDoc {
+                key,
+                doc_id,
+                prior,
+                next_id,
+            } => {
+                match next_id {
+                    Some(next_id) => {
+                        if let Some(index) = self.sparse_vector_indexes.get_mut(&key) {
+                            index.roll_back_doc(&doc_id, prior.as_ref(), next_id);
+                        }
+                    }
+                    None => {
+                        self.sparse_vector_indexes.remove(&key);
+                    }
+                }
+                Ok(())
+            }
+            UndoEntry::VectorTruncate(undo) => self.apply_undo_vector_truncate(entry_index, *undo),
+            UndoEntry::FtsDocument(undo) => self.apply_undo_fts_doc(entry_index, *undo),
+            UndoEntry::SyncHwm {
+                producer_id,
+                stream_id,
+                prior,
+            } => {
+                self.apply_undo_sync_hwm(producer_id, stream_id, prior);
+                Ok(())
+            }
+            UndoEntry::NodeLabels {
+                database_id,
+                tid: label_tid,
+                node_id,
+                prior,
+            } => self.apply_undo_node_labels(entry_index, database_id, label_tid, &node_id, prior),
         }
     }
 }

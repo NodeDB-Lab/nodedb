@@ -5,17 +5,37 @@
 #![deny(clippy::wildcard_enum_match_arm)]
 
 use nodedb_physical::physical_plan::CrdtOp;
+use nodedb_wal::record::RecordType;
 
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::manager::WalManager;
+
+/// Which CRDT WAL record class a `CrdtOp` write journals as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CrdtRecordKind {
+    /// A Loro delta or snapshot import.
+    Delta,
+    /// A block-list mutation intent.
+    ListOp,
+    /// A document-row mutation intent.
+    DocOp,
+}
+
+impl CrdtRecordKind {
+    /// The WAL record type this class is journalled under.
+    pub(crate) fn record_type(self) -> RecordType {
+        match self {
+            Self::Delta => RecordType::CrdtDelta,
+            Self::ListOp => RecordType::CrdtListOp,
+            Self::DocOp => RecordType::CrdtDocOp,
+        }
+    }
+}
 
 /// Append the WAL record for a single `CrdtOp`, returning the allocated LSN for
 /// the delta / snapshot-import / block-list write variants (`Some`) or `None`
 /// for every read / constraint / policy variant that carries no durable
 /// per-write effect on THIS path.
-///
-/// The match over [`CrdtOp`] is **exhaustive** (`wildcard_enum_match_arm` is
-/// denied), so a future write variant cannot silently become non-durable.
 pub(super) fn wal_append_crdt_op(
     wal: &WalManager,
     tenant_id: TenantId,
@@ -23,6 +43,35 @@ pub(super) fn wal_append_crdt_op(
     database_id: DatabaseId,
     op: &CrdtOp,
 ) -> crate::Result<Option<Lsn>> {
+    let Some((kind, payload)) = encode_crdt_op_record(op)? else {
+        return Ok(None);
+    };
+    let lsn = match kind {
+        CrdtRecordKind::Delta => {
+            wal.append_crdt_delta(tenant_id, vshard_id, database_id, &payload)?
+        }
+        CrdtRecordKind::ListOp => {
+            wal.append_crdt_list_op(tenant_id, vshard_id, database_id, &payload)?
+        }
+        CrdtRecordKind::DocOp => {
+            wal.append_crdt_doc_op(tenant_id, vshard_id, database_id, &payload)?
+        }
+    };
+    Ok(Some(lsn))
+}
+
+/// Encode the WAL record a single `CrdtOp` write journals as: its record class
+/// and payload. `None` for every read / constraint / policy variant that
+/// carries no durable per-write effect on this path.
+///
+/// The match over [`CrdtOp`] is **exhaustive** (`wildcard_enum_match_arm` is
+/// denied), so a future write variant cannot silently become non-durable.
+/// Shared by the autocommit WAL append and the transaction resolver, so a
+/// CRDT write inside a transaction journals the exact record its autocommit
+/// form does.
+pub(crate) fn encode_crdt_op_record(
+    op: &CrdtOp,
+) -> crate::Result<Option<(CrdtRecordKind, Vec<u8>)>> {
     let appended = match op {
         CrdtOp::Apply {
             collection,
@@ -47,7 +96,7 @@ pub(super) fn wal_append_crdt_op(
                 format: "msgpack".into(),
                 detail: format!("wal crdt delta: {e}"),
             })?;
-            Some(wal.append_crdt_delta(tenant_id, vshard_id, database_id, &crdt_payload)?)
+            Some((CrdtRecordKind::Delta, crdt_payload))
         }
         CrdtOp::ApplyAuthenticated {
             collection,
@@ -82,7 +131,7 @@ pub(super) fn wal_append_crdt_op(
                 format: "msgpack".into(),
                 detail: format!("wal authenticated crdt delta: {e}"),
             })?;
-            Some(wal.append_crdt_delta(tenant_id, vshard_id, database_id, &crdt_payload)?)
+            Some((CrdtRecordKind::Delta, crdt_payload))
         }
         CrdtOp::ImportSnapshot {
             collection, bytes, ..
@@ -103,7 +152,7 @@ pub(super) fn wal_append_crdt_op(
                 format: "msgpack".into(),
                 detail: format!("wal crdt snapshot import: {e}"),
             })?;
-            Some(wal.append_crdt_delta(tenant_id, vshard_id, database_id, &crdt_payload)?)
+            Some((CrdtRecordKind::Delta, crdt_payload))
         }
         CrdtOp::ListInsert {
             collection,
@@ -125,7 +174,7 @@ pub(super) fn wal_append_crdt_op(
                 fields_json: fields_json.clone(),
             };
             let bytes = encode_crdt_list_op_payload(payload)?;
-            Some(wal.append_crdt_list_op(tenant_id, vshard_id, database_id, &bytes)?)
+            Some((CrdtRecordKind::ListOp, bytes))
         }
         CrdtOp::ListDelete {
             collection,
@@ -141,7 +190,7 @@ pub(super) fn wal_append_crdt_op(
                 index: *index as u64,
             };
             let bytes = encode_crdt_list_op_payload(payload)?;
-            Some(wal.append_crdt_list_op(tenant_id, vshard_id, database_id, &bytes)?)
+            Some((CrdtRecordKind::ListOp, bytes))
         }
         CrdtOp::ListMove {
             collection,
@@ -159,7 +208,7 @@ pub(super) fn wal_append_crdt_op(
                 to_index: *to_index as u64,
             };
             let bytes = encode_crdt_list_op_payload(payload)?;
-            Some(wal.append_crdt_list_op(tenant_id, vshard_id, database_id, &bytes)?)
+            Some((CrdtRecordKind::ListOp, bytes))
         }
         CrdtOp::DocUpsert {
             collection,
@@ -183,7 +232,7 @@ pub(super) fn wal_append_crdt_op(
                 partial: *partial,
             };
             let bytes = encode_crdt_doc_op_payload(payload)?;
-            Some(wal.append_crdt_doc_op(tenant_id, vshard_id, database_id, &bytes)?)
+            Some((CrdtRecordKind::DocOp, bytes))
         }
         CrdtOp::DocDelete {
             collection,
@@ -198,7 +247,7 @@ pub(super) fn wal_append_crdt_op(
                 surrogate: surrogate.as_u32(),
             };
             let bytes = encode_crdt_doc_op_payload(payload)?;
-            Some(wal.append_crdt_doc_op(tenant_id, vshard_id, database_id, &bytes)?)
+            Some((CrdtRecordKind::DocOp, bytes))
         }
         // NotAWrite — reads / query ops / DDL that produces no engine mutation here
         CrdtOp::Read { .. }

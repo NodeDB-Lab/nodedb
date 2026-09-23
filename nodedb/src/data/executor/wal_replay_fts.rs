@@ -42,7 +42,6 @@
 
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::replay_abort::abort_replay;
 use crate::data::executor::task::{ExecutionTask, TaskState};
 use crate::types::{DatabaseId, ReadConsistency};
 use nodedb_physical::physical_plan::TextOp;
@@ -136,13 +135,16 @@ impl CoreLoop {
             if is_fts_index {
                 let payload = match FtsIndexPayload::from_bytes(&record.payload) {
                     Ok(p) => p,
-                    Err(e) => abort_replay(
-                        "fts",
-                        "decode_index",
-                        self.core_id,
-                        record_lsn,
-                        &format!("FtsIndexPayload could not be decoded: {e}"),
-                    ),
+                    Err(e) => {
+                        self.replay_record_unapplied(
+                            "fts",
+                            "decode_index",
+                            record_lsn,
+                            &format!("FtsIndexPayload could not be decoded: {e}"),
+                        );
+                        skipped += 1;
+                        continue;
+                    }
                 };
 
                 if tombstones.is_tombstoned(
@@ -158,19 +160,38 @@ impl CoreLoop {
                 // Re-derive surrogate from the hex doc_id stored in the WAL.
                 let surrogate = match u32::from_str_radix(&payload.doc_id, 16) {
                     Ok(raw) => Surrogate::new(raw),
-                    Err(e) => abort_replay(
-                        "fts",
-                        "doc_id",
-                        self.core_id,
-                        record_lsn,
-                        &format!(
-                            "doc_id '{}' is not the hex surrogate the index path writes: {e}",
-                            payload.doc_id
-                        ),
-                    ),
+                    Err(e) => {
+                        self.replay_record_unapplied(
+                            "fts",
+                            "doc_id",
+                            record_lsn,
+                            &format!(
+                                "doc_id '{}' is not the hex surrogate the index path writes: {e}",
+                                payload.doc_id
+                            ),
+                        );
+                        skipped += 1;
+                        continue;
+                    }
                 };
 
                 let prov = payload.provenance.clone();
+                if self.claim_for_validation() {
+                    continue;
+                }
+                if self.recording_redo_undo() {
+                    let captured = self.capture_fts_doc_undo(
+                        database_id,
+                        tenant_id,
+                        &payload.collection,
+                        surrogate,
+                        Some(&prov),
+                    );
+                    if !self.record_redo_capture(captured) {
+                        skipped += 1;
+                        continue;
+                    }
+                }
 
                 let vshard = crate::types::VShardId::from_collection_in_database(
                     database_id,
@@ -200,29 +221,33 @@ impl CoreLoop {
                 );
 
                 if response.status != crate::bridge::envelope::Status::Ok {
-                    abort_replay(
+                    self.replay_record_unapplied(
                         "fts",
                         "index_handler",
-                        self.core_id,
                         record_lsn,
                         &format!(
-                            "the FtsIndexDoc handler rejected a committed write into '{}'",
-                            payload.collection
+                            "the FtsIndexDoc handler rejected a committed write into '{}': {:?}",
+                            payload.collection, response.error_code
                         ),
                     );
+                    skipped += 1;
+                    continue;
                 }
                 indexed += 1;
             } else {
                 // FtsDelete
                 let payload = match FtsDeletePayload::from_bytes(&record.payload) {
                     Ok(p) => p,
-                    Err(e) => abort_replay(
-                        "fts",
-                        "decode_delete",
-                        self.core_id,
-                        record_lsn,
-                        &format!("FtsDeletePayload could not be decoded: {e}"),
-                    ),
+                    Err(e) => {
+                        self.replay_record_unapplied(
+                            "fts",
+                            "decode_delete",
+                            record_lsn,
+                            &format!("FtsDeletePayload could not be decoded: {e}"),
+                        );
+                        skipped += 1;
+                        continue;
+                    }
                 };
 
                 if tombstones.is_tombstoned(
@@ -237,19 +262,38 @@ impl CoreLoop {
 
                 let surrogate = match u32::from_str_radix(&payload.doc_id, 16) {
                     Ok(raw) => Surrogate::new(raw),
-                    Err(e) => abort_replay(
-                        "fts",
-                        "doc_id",
-                        self.core_id,
-                        record_lsn,
-                        &format!(
-                            "doc_id '{}' is not the hex surrogate the index path writes: {e}",
-                            payload.doc_id
-                        ),
-                    ),
+                    Err(e) => {
+                        self.replay_record_unapplied(
+                            "fts",
+                            "doc_id",
+                            record_lsn,
+                            &format!(
+                                "doc_id '{}' is not the hex surrogate the index path writes: {e}",
+                                payload.doc_id
+                            ),
+                        );
+                        skipped += 1;
+                        continue;
+                    }
                 };
 
                 let prov = payload.provenance.clone();
+                if self.claim_for_validation() {
+                    continue;
+                }
+                if self.recording_redo_undo() {
+                    let captured = self.capture_fts_doc_undo(
+                        database_id,
+                        tenant_id,
+                        &payload.collection,
+                        surrogate,
+                        Some(&prov),
+                    );
+                    if !self.record_redo_capture(captured) {
+                        skipped += 1;
+                        continue;
+                    }
+                }
 
                 let vshard = crate::types::VShardId::from_collection_in_database(
                     database_id,
@@ -277,16 +321,17 @@ impl CoreLoop {
                 );
 
                 if response.status != crate::bridge::envelope::Status::Ok {
-                    abort_replay(
+                    self.replay_record_unapplied(
                         "fts",
                         "delete_handler",
-                        self.core_id,
                         record_lsn,
                         &format!(
-                            "the FtsDeleteDoc handler rejected a committed delete in '{}'",
-                            payload.collection
+                            "the FtsDeleteDoc handler rejected a committed delete in '{}': {:?}",
+                            payload.collection, response.error_code
                         ),
                     );
+                    skipped += 1;
+                    continue;
                 }
                 deleted += 1;
             }

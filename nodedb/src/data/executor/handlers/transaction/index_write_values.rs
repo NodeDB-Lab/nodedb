@@ -68,12 +68,23 @@ fn entry_index_tuples(entry: &UndoEntry) -> Option<(String, Vec<(String, String)
         | UndoEntry::KvBatchPut { .. }
         | UndoEntry::KvTransfer { .. }
         | UndoEntry::KvTransferItem { .. }
+        | UndoEntry::KvTruncate { .. }
         | UndoEntry::KvTtl { .. }
         | UndoEntry::SortedIndexDdl { .. }
         | UndoEntry::MarkNodeDeleted { .. }
+        | UndoEntry::NodeLabels { .. }
+        | UndoEntry::SpatialRow(_)
+        | UndoEntry::VectorWrite(_)
+        | UndoEntry::CrdtCollection(_)
+        | UndoEntry::ArrayTiles { .. }
+        | UndoEntry::SparseDoc { .. }
+        | UndoEntry::VectorTruncate(_)
+        | UndoEntry::FtsDocument(_)
+        | UndoEntry::SyncHwm { .. }
         | UndoEntry::ColumnarInsert { .. }
         | UndoEntry::ColumnarUpdate { .. }
         | UndoEntry::ColumnarDelete { .. }
+        | UndoEntry::ColumnarEngineCreated { .. }
         | UndoEntry::TimeseriesIngest(_)
         | UndoEntry::ColumnarTruncate(_)
         | UndoEntry::TimeseriesTruncate(_)

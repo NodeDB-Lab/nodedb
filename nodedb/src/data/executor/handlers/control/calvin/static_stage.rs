@@ -79,7 +79,10 @@ impl CoreLoop {
         };
 
         // Stage every plan before publishing `PendingCommit`. Panic isolation
-        // cleans both staging representations after any failure.
+        // cleans both staging representations after any failure. Staging reads
+        // the epoch's time anchor, so every replica stages the same images.
+        let prev_epoch_ms = self.epoch_system_ms;
+        self.epoch_system_ms = Some(epoch_system_ms);
         let stage_result = catch_unwind(AssertUnwindSafe(|| {
             for plan in plans {
                 self.stage_calvin_overlay(task, synthetic_txn_id, *tenant_id, plan)?;
@@ -88,6 +91,7 @@ impl CoreLoop {
             }
             Ok::<(), ErrorCode>(())
         }));
+        self.epoch_system_ms = prev_epoch_ms;
         match stage_result {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {

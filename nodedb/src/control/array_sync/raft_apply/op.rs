@@ -201,6 +201,7 @@ pub(crate) async fn apply_array_op(
             // A sync op carries no proposer-resolved instant; only TTL-bearing
             // KV writes resolve one, and no array op is such a write.
             resolved_now_ms: None,
+            apply_key: applied_key,
             op_label: "array op",
         },
     )

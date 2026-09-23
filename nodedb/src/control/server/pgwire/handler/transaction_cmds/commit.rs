@@ -42,6 +42,10 @@ impl TxnDataPlane for PgwireTxnDp<'_> {
     ) -> Pin<Box<dyn Future<Output = crate::Result<DpResponse>> + Send + 'a>> {
         Box::pin(self.handler.dispatch_task_no_wal(task, None, wal_lsn))
     }
+
+    fn event_source(&self) -> crate::event::EventSource {
+        crate::event::EventSource::User
+    }
 }
 
 impl NodeDbPgHandler {

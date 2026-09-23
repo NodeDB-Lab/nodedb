@@ -35,13 +35,13 @@
 //! COMMIT would report `{"affected": N}` for a statement the transaction can
 //! never keep, and expose the refused image to its own reads meanwhile.
 //!
-//! COMMIT durable replay is unchanged: the buffered `ColumnarOp::Delete` /
-//! `ColumnarOp::Update` plan is still replayed through
-//! `execute_columnar_delete` / `execute_columnar_update` inside the COMMIT
-//! `TransactionBatch`, which remains the sole durable apply. The staged set is
-//! resolved from the live memtable (plus overlay) exactly as those durable
-//! handlers resolve their matching set, so the in-transaction view matches the
-//! post-commit view.
+//! COMMIT resolves the staged post-images and tombstones into the
+//! transaction's redo record (`resolve::columnar_image`). The first statement
+//! that stages a base row records that row's primary key
+//! (`stage_columnar_base_key`), so the redo names the base row a key-changing
+//! UPDATE or a DELETE removes. The staged set is resolved from the live
+//! memtable (plus overlay), the scope the autocommit handlers
+//! (`execute_columnar_delete` / `execute_columnar_update`) match against.
 
 use nodedb_types::columnar::ColumnarSchema;
 use nodedb_types::value::Value;
@@ -157,6 +157,11 @@ impl CoreLoop {
 
         let affected = affected_rows.len();
         for (surrogate, row) in affected_rows {
+            if let Err(e) =
+                self.stage_note_columnar_base_row(txn_id, &coll_key, &schema, surrogate, &row)
+            {
+                return self.response_error(task, e);
+            }
             let identity = columnar_row_identity(&schema, &row, surrogate);
             self.txn_overlay_mut(txn_id)
                 .insert_tombstone(coll_key.clone(), surrogate, &identity);
@@ -211,13 +216,15 @@ impl CoreLoop {
         // transaction's own reads.
         let affected = affected_rows.len();
         let mut new_rows: Vec<(u32, Vec<Value>)> = Vec::with_capacity(affected);
+        let mut base_rows: Vec<(u32, Vec<Value>)> = Vec::with_capacity(affected);
         for (surrogate, row) in affected_rows {
-            match apply_columnar_updates(&schema, row, updates) {
+            match apply_columnar_updates(&schema, row.clone(), updates) {
                 Ok(r) => new_rows.push((surrogate, r)),
                 Err(detail) => {
                     return self.response_error(task, ErrorCode::Internal { detail });
                 }
             }
+            base_rows.push((surrogate, row));
         }
         if let Err(response) = self.stage_admit_columnar_rows(
             task,
@@ -230,6 +237,15 @@ impl CoreLoop {
             return response;
         }
 
+        // The key the pre-image carried names the base row a key-changing
+        // update removes; recorded before the put below stages the surrogate.
+        for (surrogate, row) in &base_rows {
+            if let Err(e) =
+                self.stage_note_columnar_base_row(txn_id, &coll_key, &schema, *surrogate, row)
+            {
+                return self.response_error(task, e);
+            }
+        }
         for (surrogate, new_row) in new_rows {
             let identity = columnar_row_identity(&schema, &new_row, surrogate);
             let body = match nodedb_types::value_to_msgpack(&Value::Array(new_row)) {

@@ -66,6 +66,10 @@ impl TxnDataPlane for NativeTxnDp<'_> {
             .await
         })
     }
+
+    fn event_source(&self) -> crate::event::EventSource {
+        crate::event::EventSource::User
+    }
 }
 
 pub(crate) fn handle_begin(ctx: &DispatchCtx<'_>, seq: u64) -> NativeResponse {

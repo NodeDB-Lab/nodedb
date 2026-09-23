@@ -573,4 +573,22 @@ pub enum MetaOp {
     /// base engine is touched during resolve. Wire-additive: appended last
     /// so older log entries decode unchanged.
     CalvinResolve { epoch: u64, position: u32 },
+
+    /// Apply one committed transaction's resolved redo record on the core that
+    /// owns its vShard.
+    ///
+    /// Every replica runs this from the vShard's data-group Raft log, in log
+    /// order, and installs the same post-images. The write funnel appends
+    /// `redo` to this node's WAL as one `TransactionRedo` record before the
+    /// dispatch, so restart replay reproduces the apply.
+    ///
+    /// `redo` is the zerompk-encoded redo record. `collections` names every
+    /// collection the transaction wrote; each gets a collection-floor write
+    /// version at the record's LSN. `sum_targets` is the materialized-sum
+    /// resolution the transaction's document writes fold into their targets.
+    ApplyTransactionRedo {
+        redo: Vec<u8>,
+        collections: Vec<String>,
+        sum_targets: Vec<super::RedoSumTargets>,
+    },
 }

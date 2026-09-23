@@ -50,6 +50,8 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             payload,
             format,
             surrogates,
+            // Carried as the entry's `resolved_now_ms` (see `decode::entry`).
+            default_timestamp_ms: _,
             provenance,
             returning,
             rls_filters,
@@ -117,5 +119,52 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
                 columnar-family match arm)"
                 .into(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::control::wal_replication::decode;
+    use crate::types::{DatabaseId, TenantId, VShardId};
+    use nodedb_physical::physical_plan::{PhysicalPlan, TimeseriesOp};
+    use nodedb_types::QualifiedCollection;
+
+    #[test]
+    fn a_replicated_timeseries_ingest_carries_the_proposers_instant() {
+        let plan = PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
+            payload: b"metrics value=1".to_vec(),
+            format: "ilp".to_string(),
+            wal_lsn: None,
+            surrogates: Vec::new(),
+            provenance: None,
+            rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
+            returning: None,
+            rls_filters: Vec::new(),
+        });
+        let before = crate::engine::kv::current_ms();
+        let write = crate::control::wal_replication::ReplicableWrite::decide_for_replication(&plan)
+            .expect("decide");
+        let entry = crate::control::wal_replication::encode::to_replicated_entry(
+            TenantId::new(1),
+            DatabaseId::DEFAULT,
+            VShardId::new(0),
+            &write,
+        )
+        .expect("encode")
+        .expect("a timeseries ingest replicates");
+        let after = crate::engine::kv::current_ms();
+
+        let bytes = entry.to_bytes();
+        let (_, _, _, resolved_now_ms) = decode::from_replicated_entry(&bytes, None)
+            .expect("decode")
+            .expect("an entry");
+        let instant = resolved_now_ms.expect("the ingest carries an instant");
+        assert!((before..=after).contains(&instant));
+        // Every replica decodes the same bytes, so every replica stamps alike.
+        let (_, _, _, again) = decode::from_replicated_entry(&bytes, None)
+            .expect("decode")
+            .expect("an entry");
+        assert_eq!(again, Some(instant));
     }
 }

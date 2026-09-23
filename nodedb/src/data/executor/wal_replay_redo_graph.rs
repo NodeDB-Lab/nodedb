@@ -100,6 +100,9 @@ impl CoreLoop {
                 ) {
                     continue;
                 }
+                if self.claim_for_validation() {
+                    continue;
+                }
                 let task = Self::replay_graph_task(
                     tenant_id,
                     database_id,
@@ -118,7 +121,9 @@ impl CoreLoop {
                     }),
                 );
                 self.active_graph_system_from = system_from;
-                let response = self.execute_edge_put(
+                let mut undo = Vec::new();
+                let recording = self.recording_redo_undo();
+                let response = self.execute_edge_put_with_undo(
                     &task,
                     EdgePutParams {
                         tid: tenant_id,
@@ -130,16 +135,18 @@ impl CoreLoop {
                         src_surrogate: nodedb_types::Surrogate::new(src_sur),
                         dst_surrogate: nodedb_types::Surrogate::new(dst_sur),
                     },
+                    recording.then_some(&mut undo),
                 );
                 self.active_graph_system_from = None;
+                self.record_redo_undo(undo);
                 if response.status == crate::bridge::envelope::Status::Ok {
                     puts += 1;
                 } else {
-                    tracing::warn!(
-                        core = self.core_id,
-                        %collection,
-                        lsn = record_lsn,
-                        "WAL graph redo: edge put handler returned error; skipping"
+                    self.replay_record_rejected(
+                        "graph",
+                        record_lsn,
+                        response.error_code,
+                        &format!("graph edge put into '{collection}' failed"),
                     );
                 }
             } else {
@@ -164,6 +171,9 @@ impl CoreLoop {
                 ) {
                     continue;
                 }
+                if self.claim_for_validation() {
+                    continue;
+                }
                 let task = Self::replay_graph_task(
                     tenant_id,
                     database_id,
@@ -185,7 +195,9 @@ impl CoreLoop {
                     }),
                 );
                 self.active_graph_system_from = system_from;
-                let response = self.execute_edge_delete(
+                let mut undo = Vec::new();
+                let recording = self.recording_redo_undo();
+                let response = self.execute_edge_delete_with_undo(
                     &task,
                     crate::data::executor::handlers::graph::EdgeDeleteParams {
                         tid: tenant_id,
@@ -198,16 +210,18 @@ impl CoreLoop {
                         // identity is not present at boot.
                         rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                     },
+                    recording.then_some(&mut undo),
                 );
                 self.active_graph_system_from = None;
+                self.record_redo_undo(undo);
                 if response.status == crate::bridge::envelope::Status::Ok {
                     deletes += 1;
                 } else {
-                    tracing::warn!(
-                        core = self.core_id,
-                        %collection,
-                        lsn = record_lsn,
-                        "WAL graph redo: edge delete handler returned error; skipping"
+                    self.replay_record_rejected(
+                        "graph",
+                        record_lsn,
+                        response.error_code,
+                        &format!("graph edge delete in '{collection}' failed"),
                     );
                 }
             }

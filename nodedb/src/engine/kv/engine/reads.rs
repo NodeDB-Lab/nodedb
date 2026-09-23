@@ -3,8 +3,30 @@
 use nodedb_types::Surrogate;
 
 use super::KvEngine;
+use crate::engine::kv::KvPutParams;
 use crate::engine::kv::engine_helpers::table_key;
-use crate::engine::kv::hash_table::EntryMeta;
+use crate::engine::kv::entry::NO_EXPIRY;
+use crate::engine::kv::hash_table::{EntryMeta, KvExportEntry};
+
+/// One key of one KV collection.
+#[derive(Debug, Clone, Copy)]
+pub struct KvKeyRef<'a> {
+    pub database_id: u64,
+    pub tenant_id: u64,
+    pub collection: &'a str,
+    pub key: &'a [u8],
+}
+
+/// A key's complete stored state: its value, its absolute expiry, and the
+/// surrogate bound to it. A rollback reinstalls it exactly, so the key keeps
+/// its TTL instant and its identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KvEntryImage {
+    pub value: Vec<u8>,
+    /// Absolute expiry instant in ms since epoch, [`NO_EXPIRY`] for none.
+    pub expire_at_ms: u64,
+    pub surrogate: Surrogate,
+}
 
 impl KvEngine {
     /// Look up the user primary key bytes for a given surrogate within
@@ -103,6 +125,84 @@ impl KvEngine {
     ) -> Option<EntryMeta> {
         let tkey = table_key(database_id, tenant_id, collection);
         self.tables.get(&tkey)?.get_entry_meta(key)
+    }
+
+    /// The complete stored state of `key`, or `None` when it is absent or
+    /// expired.
+    pub fn entry_image(
+        &self,
+        database_id: u64,
+        tenant_id: u64,
+        collection: &str,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<KvEntryImage> {
+        let tkey = table_key(database_id, tenant_id, collection);
+        let table = self.tables.get(&tkey)?;
+        let (value, surrogate) = table.get_with_surrogate(key, now_ms)?;
+        let expire_at_ms = table
+            .get_entry_meta(key)
+            .map_or(NO_EXPIRY, |meta| meta.expire_at_ms);
+        Some(KvEntryImage {
+            value: value.to_vec(),
+            expire_at_ms,
+            surrogate,
+        })
+    }
+
+    /// Reinstall `image` under `key`: the value, the absolute expiry instant
+    /// and the surrogate it held, with every index maintained.
+    pub fn restore_entry_image(&mut self, target: KvKeyRef<'_>, image: &KvEntryImage, now_ms: u64) {
+        self.put_with_absolute_expiry(
+            KvPutParams {
+                database_id: target.database_id,
+                tenant_id: target.tenant_id,
+                collection: target.collection,
+                key: target.key,
+                value: &image.value,
+                ttl_ms: 0,
+                now_ms,
+                surrogate: image.surrogate,
+            },
+            image.expire_at_ms,
+        );
+    }
+
+    /// Put `key` back to `image`, or remove it when `image` is `None`: the
+    /// key was absent before.
+    pub fn reinstate_entry(
+        &mut self,
+        target: KvKeyRef<'_>,
+        image: Option<&KvEntryImage>,
+        now_ms: u64,
+    ) {
+        match image {
+            Some(image) => self.restore_entry_image(target, image, now_ms),
+            None => {
+                let key = [target.key.to_vec()];
+                self.delete(
+                    target.database_id,
+                    target.tenant_id,
+                    target.collection,
+                    &key,
+                    now_ms,
+                );
+            }
+        }
+    }
+
+    /// Every live row of a collection with its complete stored state.
+    pub fn export_collection(
+        &self,
+        database_id: u64,
+        tenant_id: u64,
+        collection: &str,
+    ) -> Vec<KvExportEntry> {
+        let tkey = table_key(database_id, tenant_id, collection);
+        self.tables
+            .get(&tkey)
+            .map(|table| table.export_entries_with_surrogates())
+            .unwrap_or_default()
     }
 
     /// BATCH GET: fetch multiple keys. Returns values in order (None for missing).

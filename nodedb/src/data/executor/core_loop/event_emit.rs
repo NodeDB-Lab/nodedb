@@ -274,18 +274,17 @@ impl CoreLoop {
         new_value: Option<&[u8]>,
         old_value: Option<&[u8]>,
     ) {
-        let producer = match self.event_producer.as_mut() {
-            Some(p) => p,
-            None => return, // Event Plane not configured.
-        };
-
-        self.event_sequence += 1;
+        if self.event_producer.is_none() {
+            return; // Event Plane not configured.
+        }
 
         let (system_time_ms, valid_time_ms) =
             crate::event::bitemporal_extract::extract_stamps(new_value.or(old_value));
 
         let event = crate::event::WriteEvent {
-            sequence: self.event_sequence,
+            // Assigned when the event is sent, so a held event never leaves
+            // a gap in the sequence.
+            sequence: 0,
             collection: Arc::from(collection),
             op,
             row_id,
@@ -302,6 +301,28 @@ impl CoreLoop {
             statement_digest: task.request.statement_digest.clone(),
         };
 
+        // The install pass of a committed-redo apply holds its events until
+        // the whole record landed. A rolled-back install sends none.
+        if let Some(scope) = self.redo_apply.scope.as_mut()
+            && scope.pass
+                == crate::data::executor::handlers::transaction::redo_apply::RedoApplyPass::Install
+        {
+            scope.pending_events.push(event);
+            return;
+        }
+        self.send_write_event(event);
+    }
+
+    /// Number `event` with the next sequence and hand it to the Event Plane.
+    pub(in crate::data::executor) fn send_write_event(
+        &mut self,
+        mut event: crate::event::WriteEvent,
+    ) {
+        let Some(producer) = self.event_producer.as_mut() else {
+            return;
+        };
+        self.event_sequence += 1;
+        event.sequence = self.event_sequence;
         producer.emit(event);
     }
 

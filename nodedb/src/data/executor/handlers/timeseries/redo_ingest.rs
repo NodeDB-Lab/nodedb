@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: BUSL-1.1
+
+//! The admission test every ILP ingest runs before its rows land, and the
+//! preparation a committed-redo install adds to it.
+//!
+//! An install flushes the rows the memtable already holds when it has no
+//! room for the new ones, and only then records its pre-image. The undo
+//! therefore restores a memtable that holds nothing the flush moved to disk.
+
+use crate::bridge::envelope::ErrorCode;
+use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::transaction::undo::UndoEntry;
+use crate::engine::timeseries::ilp;
+use crate::types::{DatabaseId, TenantId};
+
+use super::admission;
+
+impl CoreLoop {
+    /// Whether the memtable of `key` must flush before `lines` land in it: it
+    /// is at its soft or hard limit, the engine budget is under pressure, or
+    /// its tag dictionaries have no room for the lines' tags.
+    pub(super) fn ts_ingest_needs_flush(
+        &self,
+        key: &(DatabaseId, TenantId, String),
+        lines: &[ilp::IlpLine<'_>],
+    ) -> bool {
+        let governor_pressure = self
+            .governor
+            .try_reserve(key.0, key.1, nodedb_mem::EngineId::Timeseries, 0)
+            .is_err();
+        let soft_limit = self.ts_tuning.memtable_budget_bytes;
+        let hard_limit = self.ts_tuning.memtable_hard_limit_bytes;
+        let max_tag_cardinality = self.ts_tuning.max_tag_cardinality;
+        self.columnar_memtables.get(key).is_some_and(|mt| {
+            let resident = mt.memory_bytes();
+            resident >= soft_limit
+                || resident >= hard_limit
+                || governor_pressure
+                || !admission::has_tag_headroom(mt, lines, max_tag_cardinality)
+        })
+    }
+
+    /// Prepare the install of `lines` into `collection`: flush the memtable
+    /// when it has no room, then record the pre-image the undo restores.
+    pub(super) fn prepare_redo_ts_ingest(
+        &mut self,
+        database_id: DatabaseId,
+        tid: TenantId,
+        collection: &str,
+        lines: &[ilp::IlpLine<'_>],
+        now_ms: i64,
+    ) -> Result<(), ErrorCode> {
+        let key = (database_id, tid, collection.to_string());
+        if self.ts_ingest_needs_flush(&key, lines) {
+            self.flush_ts_collection(tid, database_id, collection, now_ms)
+                .map_err(|e| ErrorCode::Internal {
+                    detail: format!("pre-install ts flush of '{collection}' failed: {e}"),
+                })?;
+        }
+        let undo = self.capture_timeseries_ingest_undo(&key);
+        self.record_redo_undo([UndoEntry::TimeseriesIngest(undo)]);
+        Ok(())
+    }
+}

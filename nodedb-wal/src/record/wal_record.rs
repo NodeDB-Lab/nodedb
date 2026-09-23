@@ -15,6 +15,16 @@ pub struct WalRecord {
     pub payload: Vec<u8>,
 }
 
+/// The header fields of a record its caller decides: its type and scope.
+/// The writer assigns the LSN.
+#[derive(Debug, Clone, Copy)]
+pub struct RecordTarget {
+    pub record_type: u32,
+    pub tenant_id: u64,
+    pub vshard_id: u32,
+    pub database_id: u64,
+}
+
 /// Parameters for [`WalRecord::new`].
 pub struct WalRecordArgs<'a> {
     pub record_type: u32,
@@ -43,6 +53,13 @@ impl WalRecord {
     /// zero-filled). Pre-existing records with zeros decode to `DatabaseId(0)`
     /// (the default database), preserving backward compatibility.
     pub fn new(args: WalRecordArgs<'_>) -> Result<Self> {
+        Self::new_keyed(args, 0)
+    }
+
+    /// [`Self::new`] for a record appended by the apply of the replicated
+    /// proposal `apply_key`. The key rides the header, inside the CRC and the
+    /// encryption AAD, so the record and the key are durable together.
+    pub fn new_keyed(args: WalRecordArgs<'_>, apply_key: u64) -> Result<Self> {
         let WalRecordArgs {
             record_type,
             lsn,
@@ -70,7 +87,7 @@ impl WalRecord {
                 vshard_id,
                 payload_len: 0,
                 database_id,
-                reserved: [0u8; 8],
+                apply_key,
                 crc32c: 0,
             };
             let header_bytes = temp_header.to_bytes();
@@ -98,7 +115,7 @@ impl WalRecord {
             vshard_id,
             payload_len: final_payload.len() as u32,
             database_id,
-            reserved: [0u8; 8],
+            apply_key,
             crc32c: 0,
         };
 
@@ -108,6 +125,12 @@ impl WalRecord {
             header,
             payload: final_payload,
         })
+    }
+
+    /// The idempotency key of the proposal whose apply appended this record,
+    /// `0` when no proposal apply appended it.
+    pub fn apply_key(&self) -> u64 {
+        self.header.apply_key
     }
 
     /// Decrypt the payload if the record is encrypted.

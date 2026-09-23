@@ -12,8 +12,6 @@
 //! `wal::CrdtDocOpWalRecord`'s doc comment for the full rationale and why this
 //! is deliberately NOT `RecordType::CrdtDelta`.
 
-use tracing::warn;
-
 use crate::bridge::envelope::{PhysicalPlan, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
@@ -54,10 +52,11 @@ impl CoreLoop {
         }
 
         let Ok(payload) = zerompk::from_msgpack::<CrdtDocOpWalRecord>(&record.payload) else {
-            warn!(
-                core = self.core_id,
-                lsn = record.header.lsn,
-                "malformed CrdtDocOp WAL record; skipping"
+            self.replay_record_rejected(
+                "crdt",
+                record.header.lsn,
+                None,
+                "malformed CrdtDocOp WAL record",
             );
             return Some(0);
         };
@@ -157,13 +156,11 @@ impl CoreLoop {
         };
 
         if response.status != Status::Ok {
-            warn!(
-                core = self.core_id,
-                collection = %collection,
-                document_id = %document_id,
-                lsn = record_lsn,
-                error = ?response.error_code,
-                "CRDT doc-op WAL replay failed; skipping record"
+            self.replay_record_rejected(
+                "crdt",
+                record_lsn,
+                response.error_code,
+                &format!("CRDT doc op on '{collection}' / '{document_id}' failed"),
             );
             return Some(0);
         }

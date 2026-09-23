@@ -442,6 +442,7 @@ mod tests {
                     Value::String("Alice Updated".into()),
                     Value::Float(0.75),
                 ],
+                None,
             )
             .expect("update");
 
@@ -614,6 +615,63 @@ mod tests {
             .insert(&[Value::Integer(1), Value::String("x".into()), Value::Null])
             .expect("insert");
         assert_eq!(engine.memtable_surrogates(), &[None]);
+    }
+
+    #[test]
+    fn an_update_keeps_the_old_rows_surrogate() {
+        let mut engine = MutationEngine::new("col".into(), test_schema());
+        engine
+            .insert_with_surrogate(
+                &[Value::Integer(1), Value::String("x".into()), Value::Null],
+                Surrogate(42),
+            )
+            .expect("insert");
+        engine
+            .update(
+                &Value::Integer(1),
+                &[Value::Integer(2), Value::String("y".into()), Value::Null],
+                Some(Surrogate(7)),
+            )
+            .expect("update");
+        let live: Vec<Option<Surrogate>> = engine
+            .scan_memtable_rows_with_surrogates()
+            .map(|(surrogate, _)| surrogate)
+            .collect();
+        assert_eq!(
+            live,
+            vec![Some(Surrogate(42))],
+            "the replacement row carries the identity the memtable row had"
+        );
+    }
+
+    #[test]
+    fn an_update_of_a_flushed_row_carries_the_segment_surrogate() {
+        let mut engine = MutationEngine::new("col".into(), test_schema());
+        engine
+            .insert_with_surrogate(
+                &[Value::Integer(1), Value::String("x".into()), Value::Null],
+                Surrogate(42),
+            )
+            .expect("insert");
+        let segment_id = engine.next_segment_id();
+        let _drained = engine.memtable_mut().drain_optimized();
+        engine.on_memtable_flushed(segment_id).expect("flush");
+        engine
+            .update(
+                &Value::Integer(1),
+                &[Value::Integer(1), Value::String("y".into()), Value::Null],
+                Some(Surrogate(42)),
+            )
+            .expect("update");
+        let live: Vec<Option<Surrogate>> = engine
+            .scan_memtable_rows_with_surrogates()
+            .map(|(surrogate, _)| surrogate)
+            .collect();
+        assert_eq!(
+            live,
+            vec![Some(Surrogate(42))],
+            "the replacement row carries the identity the flushed row had"
+        );
     }
 
     #[test]

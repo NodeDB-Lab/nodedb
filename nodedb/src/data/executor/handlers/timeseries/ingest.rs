@@ -184,6 +184,18 @@ impl CoreLoop {
             return self.response_error(task, error);
         }
 
+        if mode == TimeseriesApplyMode::RedoInstall
+            && let Err(error) = self.prepare_redo_ts_ingest(
+                task.request.database_id,
+                tid,
+                collection,
+                &lines,
+                now_ms,
+            )
+        {
+            return self.response_error(task, error);
+        }
+
         let bitemporal =
             self.is_bitemporal(task.request.database_id.as_u64(), tid.as_u64(), collection);
         let is_new_memtable = !self.columnar_memtables.contains_key(&key);
@@ -216,32 +228,28 @@ impl CoreLoop {
 
         // The WAL has already committed this record, so the admission gate
         // resolves every possible mid-record stop before the first row lands.
-        let governor_pressure = self
-            .governor
-            .try_reserve(
-                task.request.database_id,
-                tid,
-                nodedb_mem::EngineId::Timeseries,
-                0,
-            )
-            .is_err();
         let soft_limit = self.ts_tuning.memtable_budget_bytes;
-        let hard_limit = self.ts_tuning.memtable_hard_limit_bytes;
-        let max_tag_cardinality = self.ts_tuning.max_tag_cardinality;
-        let needs_flush = self.columnar_memtables.get(&key).is_some_and(|mt| {
-            let resident = mt.memory_bytes();
-            resident >= soft_limit
-                || resident >= hard_limit
-                || governor_pressure
-                || !admission::has_tag_headroom(mt, &lines, max_tag_cardinality)
-        });
-        if needs_flush {
+        if self.ts_ingest_needs_flush(&key, &lines) {
             if mode == TimeseriesApplyMode::CommitDeferred {
                 return self.response_error(
                     task,
                     ErrorCode::RejectedPrevalidation {
                         reason: "transactional timeseries ingest requires a flush before mutation"
                             .into(),
+                    },
+                );
+            }
+            // A redo install flushed before it took its pre-image. A flush
+            // now would drain rows that pre-image holds, so the install
+            // fails and rolls back instead.
+            if mode == TimeseriesApplyMode::RedoInstall {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!(
+                            "'{collection}' still needs a flush after the flush that preceded \
+                             its committed-redo install"
+                        ),
                     },
                 );
             }

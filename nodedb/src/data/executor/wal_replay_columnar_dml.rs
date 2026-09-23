@@ -43,8 +43,6 @@
 //! used by the separate `ts_registries` / bucketed-partition machinery, which
 //! this op pair never targets.
 
-use tracing::warn;
-
 use super::core_loop::CoreLoop;
 use crate::bridge::envelope::{PhysicalPlan, Status};
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
@@ -99,7 +97,7 @@ impl CoreLoop {
         // trying to detect the duplicate afterwards. Returns `Some(0)` and not
         // `None`: the record decoded as this shape, so the caller must not fall
         // through to its row-payload decoders and mis-classify it.
-        if self.floors.replay_floors.columnar.covers(record_lsn) {
+        if self.replay_watermark_skips(self.floors.replay_floors.columnar.covers(record_lsn)) {
             return Some(0);
         }
 
@@ -172,13 +170,14 @@ impl CoreLoop {
         };
 
         if response.status != Status::Ok {
-            warn!(
-                core = self.core_id,
-                collection = %record.collection,
-                lsn = record_lsn,
-                is_update = record.is_update,
-                error = ?response.error_code,
-                "columnar predicate DML WAL replay failed; skipping record"
+            self.replay_record_rejected(
+                "columnar",
+                record_lsn,
+                response.error_code,
+                &format!(
+                    "columnar predicate DML replay on '{}' failed (update: {})",
+                    record.collection, record.is_update
+                ),
             );
             return Some(0);
         }
@@ -252,7 +251,7 @@ impl CoreLoop {
             return Some(0);
         }
 
-        if self.floors.replay_floors.columnar.covers(record_lsn) {
+        if self.replay_watermark_skips(self.floors.replay_floors.columnar.covers(record_lsn)) {
             return Some(0);
         }
 
@@ -266,12 +265,14 @@ impl CoreLoop {
                 let pk = match nodedb_types::value_from_msgpack(&wal_row.pk_msgpack) {
                     Ok(v) => v,
                     Err(e) => {
-                        warn!(
-                            core = self.core_id,
-                            collection = %record.collection,
-                            lsn = record_lsn,
-                            error = %e,
-                            "columnar resolved-row-set DML WAL replay: malformed PK; skipping record"
+                        self.replay_record_rejected(
+                            "columnar",
+                            record_lsn,
+                            None,
+                            &format!(
+                                "columnar resolved-row-set DML on '{}': malformed PK: {e}",
+                                record.collection
+                            ),
                         );
                         return Some(0);
                     }
@@ -279,12 +280,14 @@ impl CoreLoop {
                 let new_row = match nodedb_types::value_from_msgpack(&wal_row.new_row_msgpack) {
                     Ok(Value::Array(arr)) => arr,
                     Ok(_) | Err(_) => {
-                        warn!(
-                            core = self.core_id,
-                            collection = %record.collection,
-                            lsn = record_lsn,
-                            "columnar resolved-row-set DML WAL replay: malformed post-image row; \
-                             skipping record"
+                        self.replay_record_rejected(
+                            "columnar",
+                            record_lsn,
+                            None,
+                            &format!(
+                                "columnar resolved-row-set DML on '{}': malformed post-image row",
+                                record.collection
+                            ),
                         );
                         return Some(0);
                     }
@@ -318,12 +321,14 @@ impl CoreLoop {
                 let pk = match nodedb_types::value_from_msgpack(&wal_row.pk_msgpack) {
                     Ok(v) => v,
                     Err(e) => {
-                        warn!(
-                            core = self.core_id,
-                            collection = %record.collection,
-                            lsn = record_lsn,
-                            error = %e,
-                            "columnar resolved-row-set DML WAL replay: malformed PK; skipping record"
+                        self.replay_record_rejected(
+                            "columnar",
+                            record_lsn,
+                            None,
+                            &format!(
+                                "columnar resolved-row-set DML on '{}': malformed PK: {e}",
+                                record.collection
+                            ),
                         );
                         return Some(0);
                     }
@@ -354,13 +359,14 @@ impl CoreLoop {
         };
 
         if response.status != Status::Ok {
-            warn!(
-                core = self.core_id,
-                collection = %record.collection,
-                lsn = record_lsn,
-                is_update = record.is_update,
-                error = ?response.error_code,
-                "columnar resolved-row-set DML WAL replay failed; skipping record"
+            self.replay_record_rejected(
+                "columnar",
+                record_lsn,
+                response.error_code,
+                &format!(
+                    "columnar resolved-row-set DML replay on '{}' failed (update: {})",
+                    record.collection, record.is_update
+                ),
             );
             return Some(0);
         }

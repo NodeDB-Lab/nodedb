@@ -68,6 +68,7 @@ impl CoreLoop {
         // clamps truncation to, so claiming it over a half-restored generation
         // would authorise deleting the records that would have completed it.
         self.floors.vector_durable_lsn = Lsn::new(manifest.durable_through_lsn);
+        self.floors.vector_published_lsn = Lsn::new(manifest.durable_through_lsn);
 
         info!(
             core = self.core_id,

@@ -15,8 +15,10 @@ use crate::control::surrogate::{SurrogateAssigner, bind_plan_identities};
 use crate::types::{DatabaseId, TenantId, VShardId};
 
 /// Decoded `(tenant, vshard, plan, resolved_now_ms)` for a committed entry.
-/// `resolved_now_ms` is `None` except for a TTL-bearing KV write, where it's
-/// stamped onto the request so every replica installs the same `expire_at_ms`.
+/// `resolved_now_ms` is the instant the proposer read for the write, stamped
+/// onto the request so every replica installs the same value: a TTL-bearing
+/// KV write's `expire_at_ms`, and a timeseries ingest's untimed rows. `None`
+/// for every other write.
 pub type DecodedEntry = (TenantId, VShardId, PhysicalPlan, Option<u64>);
 
 /// Returns `None` if the data is not a valid ReplicatedEntry (e.g., ConfChange or no-op).
@@ -58,7 +60,7 @@ pub fn from_replicated_entry(
 }
 
 /// Convert a ReplicatedWrite back into a PhysicalPlan, alongside `resolved_now_ms`
-/// (see [`DecodedEntry`]) — `None` except for the KV group's TTL-bearing arms.
+/// (see [`DecodedEntry`]).
 fn to_physical_plan(
     write: &ReplicatedWrite,
     ctx: &DecodeCtx,
@@ -117,7 +119,7 @@ fn to_physical_plan(
         | ReplicatedWrite::RemoveNodeLabels { .. }
         | ReplicatedWrite::EdgePutBatch { .. }
         | ReplicatedWrite::EdgeDeleteBatch { .. } => Ok((entry_graph::decode_arm(write)?, None)),
-        // KV family — the only group carrying `resolved_now_ms`.
+        // KV family: a TTL-bearing write carries `resolved_now_ms`.
         ReplicatedWrite::KvTruncate { .. }
         | ReplicatedWrite::KvPut { .. }
         | ReplicatedWrite::KvDelete { .. }
@@ -141,9 +143,17 @@ fn to_physical_plan(
         | ReplicatedWrite::KvResolvedWrite { .. }
         | ReplicatedWrite::KvPredicateUpdate { .. }
         | ReplicatedWrite::KvPredicateDelete { .. } => entry_kv::decode_arm(write),
+        // A timeseries ingest carries the proposer's instant for its untimed
+        // rows, installed on every replica as `resolved_now_ms`.
+        ReplicatedWrite::TimeseriesIngest {
+            default_timestamp_ms,
+            ..
+        } => Ok((
+            entry_columnar_family::decode_arm(write)?,
+            u64::try_from(*default_timestamp_ms).ok(),
+        )),
         // Columnar-storage family + overlay sync engines.
         ReplicatedWrite::ColumnarIngest { .. }
-        | ReplicatedWrite::TimeseriesIngest { .. }
         | ReplicatedWrite::FtsIndex { .. }
         | ReplicatedWrite::FtsDelete { .. }
         | ReplicatedWrite::SpatialInsert { .. }
@@ -168,6 +178,12 @@ fn to_physical_plan(
         }),
         ReplicatedWrite::CalvinReadResult { .. } => Err(crate::Error::Internal {
             detail: "CalvinReadResult reached to_physical_plan (should have been intercepted)"
+                .into(),
+        }),
+        // The apply loop applies these through `transaction_redo`, which stamps
+        // the redo with the entry's Raft coordinates.
+        ReplicatedWrite::TransactionRedo { .. } => Err(crate::Error::Internal {
+            detail: "TransactionRedo reached to_physical_plan (should have been intercepted)"
                 .into(),
         }),
     }

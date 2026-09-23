@@ -9,6 +9,7 @@ pub mod crdt_payload;
 pub mod manager;
 pub mod redo;
 pub mod replay;
+pub mod timeseries_batch_payload;
 
 pub use audit_segment::AuditWalSegment;
 pub(crate) use crdt_doc_payload::CrdtDocOpWalRecord;
@@ -20,3 +21,6 @@ pub use replay::SyncHwmReplayMaps;
 pub use replay::SyncHwmReplayStats;
 pub use replay::replay_surrogate_records;
 pub use replay::replay_sync_hwm_records;
+pub(crate) use timeseries_batch_payload::{
+    ColumnarConflictPolicy, DecodedBatchRecord, decode_batch_record,
+};

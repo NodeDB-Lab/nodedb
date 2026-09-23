@@ -72,6 +72,14 @@ impl CoreLoop {
         self.segment_compaction_config = config;
     }
 
+    /// Set the number of Data Plane cores on this node. The committed-redo
+    /// apply routes its records through the replay arms, which pick a record's
+    /// core as `vshard_id % num_cores`. Called after open, before the event
+    /// loop starts.
+    pub fn set_num_cores(&mut self, num_cores: usize) {
+        self.redo_apply.num_cores = num_cores;
+    }
+
     /// Set query execution tuning parameters (called after open, before event loop).
     ///
     /// Also resizes the doc cache if `doc_cache_entries` differs from the current size.

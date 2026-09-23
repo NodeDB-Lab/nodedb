@@ -11,50 +11,99 @@ use crate::control::security::credential::CredentialStore;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::manager::WalManager;
 
-/// Append the WAL record for a `TimeseriesOp`: LSN for ingest, `None` for
-/// `Scan` or a `wal=false` collection. `credentials` is threaded through
-/// solely for the per-collection bypass check.
+/// Inputs of [`wal_append_timeseries_op`].
+pub(super) struct TimeseriesAppend<'a> {
+    pub wal: &'a WalManager,
+    pub tenant_id: TenantId,
+    pub vshard_id: VShardId,
+    pub database_id: DatabaseId,
+    pub op: &'a TimeseriesOp,
+    /// Threaded through solely for the per-collection `wal=false` bypass.
+    pub credentials: Option<&'a CredentialStore>,
+    /// The instant decided elsewhere for the ingest's untimed rows (see
+    /// `WalAppendRequest::now_override`).
+    pub now_override: Option<u64>,
+}
+
+/// What [`wal_append_timeseries_op`] appended and resolved.
+pub(super) struct TimeseriesAppendOutcome {
+    /// LSN for an ingest or truncate, `None` for a scan. A `wal=false` ingest
+    /// carries its `ProposalApplied` marker's LSN inside a replicated
+    /// proposal's apply, and `None` outside one.
+    pub lsn: Option<Lsn>,
+    /// The instant an ingest's untimed rows take. `Some` for every ingest,
+    /// WAL-bypassed or not, so the live apply stores the same rows restart
+    /// replay does.
+    pub resolved_now_ms: Option<u64>,
+}
+
+/// Append the WAL record for a `TimeseriesOp`.
+///
+/// An ingest resolves its default row timestamp here, once: `now_override`
+/// when the instant was decided elsewhere, else this node's clock. The record
+/// carries it, and the live apply receives it as `resolved_now_ms`.
 pub(super) fn wal_append_timeseries_op(
-    wal: &WalManager,
-    tenant_id: TenantId,
-    vshard_id: VShardId,
-    database_id: DatabaseId,
-    op: &TimeseriesOp,
-    credentials: Option<&CredentialStore>,
-) -> crate::Result<Option<Lsn>> {
-    let appended = match op {
+    append: TimeseriesAppend<'_>,
+) -> crate::Result<TimeseriesAppendOutcome> {
+    let TimeseriesAppend {
+        wal,
+        tenant_id,
+        vshard_id,
+        database_id,
+        op,
+        credentials,
+        now_override,
+    } = append;
+    let outcome = match op {
         TimeseriesOp::Ingest {
             collection,
             payload,
-            format: _,
+            format,
             provenance,
             ..
         } => {
+            let now_ms = now_override.unwrap_or_else(crate::engine::kv::current_ms);
             // WAL bypass: skip WAL if collection has wal=false in timeseries_config.
-            if let Some(creds) = credentials
-                && let Ok(Some(coll)) = creds.catalog().get_collection(
-                    database_id,
-                    tenant_id.as_u64(),
-                    collection.as_str(),
+            let bypassed = credentials.is_some_and(|creds| {
+                matches!(
+                    creds.catalog().get_collection(
+                        database_id,
+                        tenant_id.as_u64(),
+                        collection.as_str(),
+                    ),
+                    Ok(Some(coll)) if coll
+                        .get_timeseries_config()
+                        .is_some_and(|config| {
+                            config.get("wal").and_then(|v| v.as_str()) == Some("false")
+                        })
                 )
-                && let Some(config) = coll.get_timeseries_config()
-                && config.get("wal").and_then(|v| v.as_str()) == Some("false")
-            {
-                // WAL bypassed — acceptable data loss of last flush interval on crash.
-                None
+            });
+            let lsn = if bypassed {
+                // WAL bypassed: the rows since the last flush are lost on a
+                // crash. A replicated proposal's apply still records its key,
+                // in a payload-free marker that stands in for the forward
+                // record, so a second committed copy of the proposal is
+                // skipped after a restart. Outside a proposal's apply nothing
+                // is appended.
+                wal.append_proposal_applied(tenant_id, vshard_id, database_id)?
             } else {
-                // Provenance appended last; older 3-element decoders ignore it via arity fallback.
-                let wal_payload = encode_timeseries_batch_payload(
-                    collection.as_str(),
+                let wal_payload = encode_timeseries_ingest_payload(TimeseriesIngestRecord {
+                    collection: collection.as_str(),
                     payload,
-                    provenance.as_ref(),
-                )?;
+                    provenance: provenance.as_ref(),
+                    format,
+                    default_timestamp_ms: i64::try_from(now_ms).unwrap_or(i64::MAX),
+                })?;
                 Some(wal.append_timeseries_batch(
                     tenant_id,
                     vshard_id,
                     database_id,
                     &wal_payload,
                 )?)
+            };
+            TimeseriesAppendOutcome {
+                lsn,
+                resolved_now_ms: Some(now_ms),
             }
         }
         // `restart_identity` is applied by the Control Plane after dispatch,
@@ -65,12 +114,23 @@ pub(super) fn wal_append_timeseries_op(
             restart_identity: _,
         } => {
             let wal_payload = encode_columnar_truncate_payload(collection.as_str())?;
-            Some(wal.append_timeseries_truncate(tenant_id, vshard_id, database_id, &wal_payload)?)
+            TimeseriesAppendOutcome {
+                lsn: Some(wal.append_timeseries_truncate(
+                    tenant_id,
+                    vshard_id,
+                    database_id,
+                    &wal_payload,
+                )?),
+                resolved_now_ms: None,
+            }
         }
         // Reads / read-only resolve pass — no engine mutation here.
-        TimeseriesOp::Scan { .. } | TimeseriesOp::ResolveIngest(_) => None,
+        TimeseriesOp::Scan { .. } | TimeseriesOp::ResolveIngest(_) => TimeseriesAppendOutcome {
+            lsn: None,
+            resolved_now_ms: None,
+        },
     };
-    Ok(appended)
+    Ok(outcome)
 }
 
 /// Encode the payload of a `ColumnarTruncate` / `TimeseriesTruncate` WAL
@@ -85,19 +145,43 @@ pub(crate) fn encode_columnar_truncate_payload(collection: &str) -> crate::Resul
     })
 }
 
-/// Encode the payload of a `TimeseriesBatch` WAL record for a timeseries ingest.
-/// Produces the legacy 4-element tuple `("timeseries", collection, payload,
-/// provenance)`. New transaction redo must use [`encode_timeseries_batch_payload_with_format`].
-pub(crate) fn encode_timeseries_batch_payload(
-    collection: &str,
-    payload: &[u8],
-    provenance: Option<&nodedb_types::sync::wire::SyncProvenance>,
+/// One timeseries ingest's `TimeseriesBatch` WAL record.
+pub(crate) struct TimeseriesIngestRecord<'a> {
+    pub collection: &'a str,
+    pub payload: &'a [u8],
+    pub provenance: Option<&'a nodedb_types::sync::wire::SyncProvenance>,
+    /// The payload's ingest format: payload bytes alone cannot distinguish ILP
+    /// from row MessagePack.
+    pub format: &'a str,
+    /// The timestamp, in epoch milliseconds, of every row that carries none.
+    pub default_timestamp_ms: i64,
+}
+
+/// Encode an autocommit timeseries ingest's `TimeseriesBatch` WAL record: the
+/// six-element tuple `("timeseries", collection, payload, provenance, format,
+/// default_timestamp_ms)`. Replay stamps untimed rows with the carried
+/// instant, so they store the rows the live apply stored.
+pub(crate) fn encode_timeseries_ingest_payload(
+    record: TimeseriesIngestRecord<'_>,
 ) -> crate::Result<Vec<u8>> {
-    zerompk::to_msgpack_vec(&("timeseries", collection, payload, provenance)).map_err(|e| {
-        crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("wal timeseries batch: {e}"),
-        }
+    let TimeseriesIngestRecord {
+        collection,
+        payload,
+        provenance,
+        format,
+        default_timestamp_ms,
+    } = record;
+    zerompk::to_msgpack_vec(&(
+        "timeseries",
+        collection,
+        payload,
+        provenance,
+        format,
+        default_timestamp_ms,
+    ))
+    .map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("wal timeseries ingest: {e}"),
     })
 }
 
@@ -117,21 +201,39 @@ pub(crate) fn encode_timeseries_batch_payload_with_format(
     })
 }
 
+/// One columnar insert's `TimeseriesBatch` WAL record.
+pub(crate) struct ColumnarBatchRecord<'a> {
+    pub collection: &'a str,
+    pub payload: &'a [u8],
+    pub provenance: Option<&'a nodedb_types::sync::wire::SyncProvenance>,
+    /// Per-row surrogates, index-aligned with the rows in `payload`.
+    pub surrogates: &'a [nodedb_types::Surrogate],
+    /// What a row whose primary key already exists does.
+    pub conflict_policy: &'a crate::wal::ColumnarConflictPolicy,
+}
+
 /// Encode the payload of a `TimeseriesBatch` WAL record for a columnar batch.
 /// Produces the map-shaped `ColumnarWalRecord` (`kind = "columnar"`), distinct
-/// from the timeseries tuple so `decode_batch_record` routes correctly.
+/// from the timeseries tuple so `decode_batch_record` routes correctly. The
+/// record carries the insert's conflict policy, so replay skips, merges or
+/// replaces each row exactly as the live insert did.
 pub(crate) fn encode_columnar_batch_payload(
-    collection: &str,
-    payload: &[u8],
-    provenance: Option<&nodedb_types::sync::wire::SyncProvenance>,
-    surrogates: &[nodedb_types::Surrogate],
+    record: ColumnarBatchRecord<'_>,
 ) -> crate::Result<Vec<u8>> {
+    let ColumnarBatchRecord {
+        collection,
+        payload,
+        provenance,
+        surrogates,
+        conflict_policy,
+    } = record;
     let record = nodedb_types::columnar::ColumnarWalRecord {
         kind: "columnar".to_string(),
         collection: collection.to_string(),
         payload: payload.to_vec(),
         provenance: provenance.cloned(),
         surrogates: surrogates.to_vec(),
+        conflict_policy: conflict_policy.encode()?,
     };
     zerompk::to_msgpack_vec(&record).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
@@ -176,7 +278,13 @@ pub(crate) fn wal_append_timeseries(
         return Ok(None);
     }
 
-    let wal_payload = encode_timeseries_batch_payload(collection, payload, provenance)?;
+    let wal_payload = encode_timeseries_ingest_payload(TimeseriesIngestRecord {
+        collection,
+        payload,
+        provenance,
+        format: "ilp",
+        default_timestamp_ms: i64::try_from(crate::engine::kv::current_ms()).unwrap_or(i64::MAX),
+    })?;
     let lsn = wal.append_timeseries_batch(tenant_id, vshard_id, database_id, &wal_payload)?;
     Ok(Some(lsn))
 }
@@ -277,7 +385,14 @@ pub fn wal_append_columnar(
         provenance,
         surrogates,
     } = args;
-    let wal_payload = encode_columnar_batch_payload(collection, payload, provenance, surrogates)?;
+    // The sync path applies a plain insert: an existing row is replaced.
+    let wal_payload = encode_columnar_batch_payload(ColumnarBatchRecord {
+        collection,
+        payload,
+        provenance,
+        surrogates,
+        conflict_policy: &crate::wal::ColumnarConflictPolicy::replace(),
+    })?;
     let lsn = wal.append_timeseries_batch(tenant_id, vshard_id, database_id, &wal_payload)?;
     Ok(Some(lsn))
 }
@@ -328,6 +443,49 @@ mod tests {
             &wal,
             nodedb_wal::record::RecordType::TimeseriesBatch
         ));
+    }
+
+    #[test]
+    fn an_ingest_record_carries_the_instant_its_untimed_rows_take() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = open_wal(dir.path());
+        let plan = PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
+            collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
+            payload: b"metrics value=1".to_vec(),
+            format: "ilp".to_string(),
+            wal_lsn: None,
+            surrogates: vec![],
+            provenance: None,
+            rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            returning: None,
+            rls_filters: vec![],
+        });
+
+        let outcome = super::super::wal_append(super::super::WalAppendRequest {
+            wal: &wal,
+            tenant_id: TenantId::new(1),
+            vshard_id: VShardId::new(0),
+            database_id: DatabaseId::DEFAULT,
+            plan: &plan,
+            credentials: None,
+            now_override: Some(1_700_000_000_123),
+        })
+        .expect("append");
+
+        assert_eq!(outcome.resolved_now_ms, Some(1_700_000_000_123));
+        wal.sync().expect("sync wal");
+        let record = wal
+            .replay()
+            .expect("read wal")
+            .into_iter()
+            .find(|r| {
+                nodedb_wal::record::RecordType::from_raw(r.logical_record_type())
+                    == Some(nodedb_wal::record::RecordType::TimeseriesBatch)
+            })
+            .expect("ingest record");
+        let decoded = crate::wal::decode_batch_record(&record.payload).expect("decode");
+        assert_eq!(decoded.default_timestamp_ms, Some(1_700_000_000_123));
+        assert_eq!(decoded.format.as_deref(), Some("ilp"));
     }
 
     #[test]

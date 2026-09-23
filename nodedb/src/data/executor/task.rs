@@ -26,15 +26,13 @@ pub struct ExecutionTask {
     pub wal_lsn: Option<Lsn>,
 
     /// Wall-clock instant (ms since epoch) the Control Plane resolved at
-    /// WAL-append time for a TTL-bearing KV write, carried alongside the
-    /// request so live apply installs the SAME instant the durable WAL record
-    /// carries rather than re-reading the clock. Re-reading it at apply time
-    /// would let the live value disagree with the durable one by the dispatch
-    /// latency — harmless day to day, but a crash between the two would have
-    /// replay recompute `now_ms` at restart time instead of installing the
-    /// original instant, pushing the TTL's expiry forward by the
-    /// crash-to-restart delay. `None` for non-TTL writes, reads, and writes
-    /// whose resolved instant is not (yet) threaded.
+    /// WAL-append time, carried alongside the request so live apply installs
+    /// the SAME instant the durable WAL record carries rather than re-reading
+    /// the clock. A TTL-bearing KV write resolves its expiry against it, and a
+    /// timeseries ingest stamps its untimed rows with it. Re-reading the clock
+    /// at apply time would let the live value disagree with the durable one,
+    /// and replay would recompute it at restart time. `None` for other
+    /// writes and reads.
     /// Copied from [`Request::resolved_now_ms`](crate::bridge::envelope::Request)
     /// in [`ExecutionTask::new`], same as `wal_lsn`.
     pub resolved_now_ms: Option<u64>,
@@ -89,8 +87,8 @@ impl ExecutionTask {
         self.wal_lsn
     }
 
-    /// Wall-clock instant the Control Plane resolved for a TTL-bearing KV
-    /// write, if any. See the field doc on [`ExecutionTask::resolved_now_ms`].
+    /// Wall-clock instant the Control Plane resolved for this write, if any.
+    /// See the field doc on [`ExecutionTask::resolved_now_ms`].
     pub fn resolved_now_ms(&self) -> Option<u64> {
         self.resolved_now_ms
     }

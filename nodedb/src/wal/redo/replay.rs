@@ -40,8 +40,15 @@
 //! mutually-exclusive tuple shapes — see the `replay_document_redo` and
 //! `replay_graph_redo` arms in `crate::data::executor`).
 //!
-//! `calvin_stamp` is ignored here: it is read only by the Calvin recovery scan,
-//! never gates engine replay.
+//! `calvin_stamp` is ignored here: the Calvin recovery scan reads it, and it
+//! does not gate engine replay.
+//!
+//! The committed-redo apply (`handlers::transaction::redo_apply`) drives this
+//! same entry point with a one-record slice for every committed transaction,
+//! so the live install and restart replay run the same arms. The arms settle
+//! watermark skips and per-record errors by pass (`data::executor`'s
+//! `replay_policy`): restart replay keeps its gates, the live install skips
+//! none and fails on any error.
 
 use std::borrow::Cow;
 
@@ -133,16 +140,13 @@ impl CoreLoop {
     /// `MultiVectorPut` / `MultiVectorDelete` sub-records the vector resolver
     /// emits — rebuilds any index from them.
     ///
-    /// Three arms take the STANDALONE slice rather than the merged one, at the
+    /// Two arms take the STANDALONE slice rather than the merged one, at the
     /// exact positions they have always occupied so their ordering against the
     /// merged arms is unchanged:
     ///
     /// * `replay_document_vector_wal` — redo document puts rebuild their
     ///   secondary vector index inline inside `replay_document_redo`, so
     ///   feeding it the merged stream would index them a second time.
-    /// * `replay_crdt_wal_ordered` — CRDT deltas ride their own `CrdtDelta`
-    ///   records, never redo sub-records, and that arm is already globally
-    ///   LSN-ordered on its own.
     /// * `replay_graph_node_label_wal` — its redo counterpart is
     ///   `replay_graph_node_labels_redo` below; handing both the merged stream
     ///   would apply every label delta twice.
@@ -171,8 +175,9 @@ impl CoreLoop {
         self.replay_timeseries_wal(&ordered, num_cores, tombstones);
         self.replay_array_wal(&ordered, num_cores, tombstones);
         // CRDT deltas and document/list intents share Loro state, so replay
-        // their standalone WAL records together in global LSN order.
-        self.replay_crdt_wal_ordered(records, num_cores, tombstones);
+        // them together in global LSN order: the standalone records and the
+        // intents a committed transaction journalled as redo sub-records.
+        self.replay_crdt_wal_ordered(&ordered, num_cores, tombstones);
         self.replay_fts_wal(&ordered, num_cores, tombstones);
         self.replay_spatial_wal(&ordered, num_cores, tombstones);
         // Graph node labels have no redb-backed durability (unlike edges,

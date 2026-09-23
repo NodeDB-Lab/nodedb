@@ -2,10 +2,13 @@
 
 //! The per-identity resolution rule and the top-level plan walk.
 
+use std::cell::RefCell;
+
 use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_types::Surrogate;
 
 use super::super::SurrogateAssigner;
+use super::carried::CarriedIdentity;
 use crate::types::{DatabaseId, TenantId};
 
 /// Binds carried identities against one node's catalog under one tenancy scope.
@@ -13,6 +16,8 @@ pub struct IdentityBinder<'a> {
     assigner: &'a SurrogateAssigner,
     database_id: DatabaseId,
     tenant_id: TenantId,
+    /// `Some` when the walk also lists every identity it binds.
+    recorded: Option<RefCell<Vec<CarriedIdentity>>>,
 }
 
 impl<'a> IdentityBinder<'a> {
@@ -25,6 +30,35 @@ impl<'a> IdentityBinder<'a> {
             assigner,
             database_id,
             tenant_id,
+            recorded: None,
+        }
+    }
+
+    /// A binder that also lists every identity it binds, with the
+    /// authoritative surrogate.
+    pub(super) fn recording(
+        assigner: &'a SurrogateAssigner,
+        database_id: DatabaseId,
+        tenant_id: TenantId,
+    ) -> Self {
+        Self {
+            recorded: Some(RefCell::new(Vec::new())),
+            ..Self::new(assigner, database_id, tenant_id)
+        }
+    }
+
+    /// The identities a recording binder bound, in walk order.
+    pub(super) fn into_recorded(self) -> Vec<CarriedIdentity> {
+        self.recorded.map(RefCell::into_inner).unwrap_or_default()
+    }
+
+    fn record(&self, collection: &str, pk_bytes: &[u8], surrogate: Surrogate) {
+        if let Some(recorded) = &self.recorded {
+            recorded.borrow_mut().push(CarriedIdentity {
+                collection: collection.to_string(),
+                pk_bytes: pk_bytes.to_vec(),
+                surrogate,
+            });
         }
     }
 
@@ -42,13 +76,15 @@ impl<'a> IdentityBinder<'a> {
         carried: Surrogate,
     ) -> crate::Result<Surrogate> {
         if carried != Surrogate::ZERO {
-            return self.assigner.bind(
+            let bound = self.assigner.bind(
                 self.database_id,
                 self.tenant_id,
                 collection,
                 pk_bytes,
                 carried,
-            );
+            )?;
+            self.record(collection, pk_bytes, bound);
+            return Ok(bound);
         }
         Ok(self
             .assigner
@@ -112,6 +148,7 @@ impl<'a> IdentityBinder<'a> {
             collection,
             document_id.as_bytes(),
         )?;
+        self.record(collection, document_id.as_bytes(), *slot);
         Ok(())
     }
 }
@@ -125,14 +162,18 @@ pub fn bind_plan_identities(
     tenant_id: TenantId,
     plan: &mut PhysicalPlan,
 ) -> crate::Result<()> {
-    let binder = IdentityBinder::new(assigner, database_id, tenant_id);
+    bind_with(&IdentityBinder::new(assigner, database_id, tenant_id), plan)
+}
+
+/// Bind every identity `plan` carries through `binder`.
+pub(super) fn bind_with(binder: &IdentityBinder<'_>, plan: &mut PhysicalPlan) -> crate::Result<()> {
     match plan {
-        PhysicalPlan::Document(op) => super::document::bind(&binder, op),
-        PhysicalPlan::Kv(op) => super::kv::bind(&binder, op),
-        PhysicalPlan::Graph(op) => super::graph::bind(&binder, op),
-        PhysicalPlan::Vector(op) => super::vector::bind(&binder, op),
-        PhysicalPlan::Crdt(op) => super::crdt::bind(&binder, op),
-        PhysicalPlan::Array(op) => super::array::bind(&binder, op),
+        PhysicalPlan::Document(op) => super::document::bind(binder, op),
+        PhysicalPlan::Kv(op) => super::kv::bind(binder, op),
+        PhysicalPlan::Graph(op) => super::graph::bind(binder, op),
+        PhysicalPlan::Vector(op) => super::vector::bind(binder, op),
+        PhysicalPlan::Crdt(op) => super::crdt::bind(binder, op),
+        PhysicalPlan::Array(op) => super::array::bind(binder, op),
         // Columnar-family rows are keyed by the surrogate alone; text, spatial,
         // timeseries, query, meta and cluster plans carry no pk binding.
         PhysicalPlan::Text(_)

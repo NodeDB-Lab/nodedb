@@ -9,7 +9,7 @@ use crate::align::AlignedBuf;
 use crate::double_write::{DoubleWriteBuffer, DwbProtection};
 use crate::error::{Result, WalError};
 use crate::preamble::SegmentPreamble;
-use crate::record::{HEADER_SIZE, MIN_PADDING_RECORD_SIZE, WalRecord, WalRecordArgs};
+use crate::record::{HEADER_SIZE, MIN_PADDING_RECORD_SIZE, RecordTarget, WalRecord, WalRecordArgs};
 
 use super::config::{WalWriterConfig, open_dwb_for, resume_offset};
 use super::durability::{DurabilityState, fsync_and_track};
@@ -254,6 +254,32 @@ impl WalWriter {
         database_id: u64,
         payload: &[u8],
     ) -> Result<u64> {
+        self.append_keyed(
+            RecordTarget {
+                record_type,
+                tenant_id,
+                vshard_id,
+                database_id,
+            },
+            payload,
+            0,
+        )
+    }
+
+    /// [`Self::append`] for a record appended by the apply of the replicated
+    /// proposal `apply_key` (see [`WalRecord::new_keyed`]).
+    pub fn append_keyed(
+        &mut self,
+        target: RecordTarget,
+        payload: &[u8],
+        apply_key: u64,
+    ) -> Result<u64> {
+        let RecordTarget {
+            record_type,
+            tenant_id,
+            vshard_id,
+            database_id,
+        } = target;
         if self.sealed {
             return Err(WalError::Sealed);
         }
@@ -261,16 +287,19 @@ impl WalWriter {
 
         let lsn = self.next_lsn.load(Ordering::Relaxed);
         let preamble_bytes = self.segment_preamble.as_ref().map(|p| p.to_bytes());
-        let record = WalRecord::new(WalRecordArgs {
-            record_type,
-            lsn,
-            tenant_id,
-            vshard_id,
-            database_id,
-            payload: payload.to_vec(),
-            encryption_key: self.encryption_ring.as_ref().map(|r| r.current()),
-            preamble_bytes: preamble_bytes.as_ref(),
-        })?;
+        let record = WalRecord::new_keyed(
+            WalRecordArgs {
+                record_type,
+                lsn,
+                tenant_id,
+                vshard_id,
+                database_id,
+                payload: payload.to_vec(),
+                encryption_key: self.encryption_ring.as_ref().map(|r| r.current()),
+                preamble_bytes: preamble_bytes.as_ref(),
+            },
+            apply_key,
+        )?;
 
         let header_bytes = record.header.to_bytes();
         let total_size = HEADER_SIZE + record.payload.len();

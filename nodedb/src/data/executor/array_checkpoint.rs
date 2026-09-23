@@ -449,4 +449,73 @@ mod tests {
             "the flushed segment and the live memtable must read as one array"
         );
     }
+
+    /// A committed record applied at an LSN the array's durable watermark
+    /// already covers is flushed into a segment: restart replay skips it, so
+    /// the segment is its only copy.
+    #[test]
+    fn a_committed_record_applied_below_the_durable_lsn_is_flushed() {
+        use crate::data::executor::handlers::transaction::redo_apply::CommittedRedo;
+        use crate::engine::array::wal::{ArrayPutPayload, encode_put_with_version};
+        use crate::wal::{RedoRecord, RedoSubRecord};
+        use nodedb_wal::record::RecordType;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = aid();
+
+        let mut before = Core::open_at(dir.path());
+        before.open_array(&id);
+        before.put(&id, 1, 2, 30, 100);
+        before.core.advance_watermark(Lsn::new(100));
+        before
+            .core
+            .checkpoint_array_engines()
+            .expect("flush at lsn 100");
+
+        let payload = encode_put_with_version(&ArrayPutPayload {
+            array_id: id.clone(),
+            cells: vec![ArrayPutCell {
+                coord: vec![CoordValue::Int64(9), CoordValue::Int64(9)],
+                attrs: vec![CellValue::Int64(40)],
+                surrogate: nodedb_types::Surrogate::ZERO,
+                system_from_ms: 1,
+                valid_from_ms: 0,
+                valid_until_ms: i64::MAX,
+            }],
+            provenance: None,
+        })
+        .expect("encode put");
+        let redo = RedoRecord {
+            version: 1,
+            ops: vec![RedoSubRecord {
+                record_type: RecordType::ArrayPut as u32,
+                payload,
+            }],
+            calvin_stamp: None,
+        }
+        .to_bytes()
+        .expect("encode redo");
+        let mut task = crate::data::executor::core_loop::tests::make_default_task();
+        task.wal_lsn = Some(Lsn::new(50));
+        let response = before.core.execute_apply_transaction_redo(
+            &task,
+            TID,
+            CommittedRedo {
+                redo: &redo,
+                collections: &[],
+                sum_targets: &[],
+            },
+        );
+        assert_eq!(response.status, Status::Ok, "apply: {response:?}");
+        drop(before);
+
+        let mut after = Core::open_at(dir.path());
+        after.open_array(&id);
+        assert_eq!(
+            after.slice_all(&id),
+            vec![(1, 2, 30), (9, 9, 40)],
+            "the cell committed at lsn 50 survives a restart that replays nothing \
+             at or below lsn 100"
+        );
+    }
 }

@@ -105,8 +105,18 @@ impl CoreLoop {
             },
             &expected,
             &new_value,
+            // Replay re-applies a write the policy already admitted when it
+            // was first accepted.
+            &crate::engine::kv::admit_any,
         );
-        if result.success {
+        let swapped = match result {
+            Ok(result) => result.success(),
+            Err(error) => {
+                self.replay_swap_error("cas", &collection, &key, record_lsn, error);
+                false
+            }
+        };
+        if swapped {
             self.note_replay_write_lsn(
                 database_id,
                 tenant_id,
@@ -115,7 +125,7 @@ impl CoreLoop {
                 record_lsn,
             );
         }
-        Some(usize::from(result.success))
+        Some(usize::from(swapped))
     }
 
     /// Decode + tombstone-gate + replay one `kv_incr_float` WAL record.
@@ -242,7 +252,7 @@ impl CoreLoop {
         if self.skip_kv_replay_record(tombstones, tenant_id, &collection, record_lsn) {
             return Some(0);
         }
-        self.kv_engine.getset(
+        let result = self.kv_engine.getset(
             AtomicKeyCtx {
                 database_id,
                 tenant_id,
@@ -252,7 +262,14 @@ impl CoreLoop {
                 surrogate: nodedb_types::Surrogate::new(surrogate),
             },
             &new_value,
+            // Replay re-applies a write the policy already admitted when it
+            // was first accepted.
+            &crate::engine::kv::admit_any,
         );
+        if let Err(error) = result {
+            self.replay_swap_error("getset", &collection, &key, record_lsn, error);
+            return Some(0);
+        }
         self.note_replay_write_lsn(
             database_id,
             tenant_id,
@@ -261,6 +278,42 @@ impl CoreLoop {
             record_lsn,
         );
         Some(1)
+    }
+
+    /// Handle a `cas` or `getset` record whose replay computed no value.
+    ///
+    /// The live apply of the same record against the same pre-state failed
+    /// the same way and wrote nothing, so replay skips it. A refusal by the
+    /// write gate cannot happen here: replay hands the engine `admit_any`.
+    /// Reaching it means a redo path re-decides writes that were already
+    /// admitted, so replay stops and files a forensic report.
+    fn replay_swap_error(
+        &self,
+        op: &'static str,
+        collection: &str,
+        key: &[u8],
+        record_lsn: u64,
+        error: AtomicError,
+    ) {
+        let detail = match error {
+            AtomicError::TypeMismatch { detail } | AtomicError::Encode { detail } => detail,
+            AtomicError::Overflow => "overflow".to_string(),
+            AtomicError::Rejected(error) => abort_replay(
+                "kv",
+                "swap_admission",
+                self.core_id,
+                record_lsn,
+                &format!("the RLS write gate refused a committed {op} on '{collection}': {error}"),
+            ),
+        };
+        warn!(
+            core = self.core_id,
+            collection = %collection,
+            key = %String::from_utf8_lossy(key),
+            op,
+            %detail,
+            "WAL kv swap replay: no value computed, skipping record"
+        );
     }
 }
 

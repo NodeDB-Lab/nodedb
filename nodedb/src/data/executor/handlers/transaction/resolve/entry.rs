@@ -2,30 +2,47 @@
 
 //! `MetaOp::ResolveTxn`: turns a committing transaction's staged post-images
 //! into one replayable [`RedoRecord`], without mutating base. Overlay-driven
-//! serializers (KV, Document, Graph) read post-images from the staging
-//! overlay; plan-driven serializers (Vector, Array, Columnar, Timeseries,
-//! Spatial) are unstaged and serialize from the plan node instead.
+//! serializers (KV, Document, Graph, Columnar, vector-primary) read the
+//! post-image the transaction was shown from the staging overlay, so replay
+//! installs it verbatim. Plan-driven serializers (HNSW Vector, Array,
+//! Timeseries, Spatial, CRDT, Text) carry absolute or append-only writes and
+//! serialize from the plan node instead.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nodedb_physical::physical_plan::{DocumentOp, KvOp, PhysicalPlan};
+use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
 use nodedb_types::RowIdentity;
 
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::transaction::overlay::{BitemporalStamp, Staged};
+use crate::data::executor::handlers::transaction::overlay::BitemporalStamp;
 use crate::data::executor::handlers::transaction::stage_write::GRAPH_LABEL_COLL_KEY;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{TenantId, TxnId};
 use crate::wal::{RedoRecord, RedoSubRecord};
 
+use super::classify::{classify_document_op, classify_kv_op};
+use super::columnar_image::{ColumnarCollectionImages, ColumnarCollections};
 use super::graph::EdgeIdentityKey;
-use super::{array, columnar, document, graph, kv, spatial, vector};
+use super::vector_direct::DirectWrites;
+use super::vector_primary::VectorPrimaryCollections;
+use super::{array, columnar_image, crdt, document, graph, kv, spatial, text, vector};
+
+/// Which writes of a transaction its statements staged into the overlay.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::data::executor) enum StagedWrites {
+    /// A session transaction: every write is staged at its statement.
+    Session,
+    /// A Calvin transaction: document, KV, graph, timeseries and columnar
+    /// writes are staged; vector-primary direct writes are not, so they
+    /// resolve from their plan nodes.
+    Calvin,
+}
 
 impl CoreLoop {
-    /// Resolve a committing transaction's staged writes into a [`RedoRecord`]
-    /// and return its encoded bytes in the response payload. Reads the overlay
-    /// by `&` and never mutates any base engine.
+    /// Resolve a committing session transaction's staged writes into a
+    /// [`RedoRecord`] and return its encoded bytes in the response payload.
+    /// Reads the overlay by `&` and never mutates any base engine.
     pub(in crate::data::executor) fn execute_resolve_txn(
         &mut self,
         task: &ExecutionTask,
@@ -33,7 +50,19 @@ impl CoreLoop {
         txn_id: TxnId,
         plans: &[PhysicalPlan],
     ) -> Response {
-        let ops = match self.resolve_txn_ops(task, tid, txn_id, plans) {
+        self.execute_resolve_staged(task, tid, txn_id, plans, StagedWrites::Session)
+    }
+
+    /// Resolve a transaction whose staging follows `staged`.
+    pub(in crate::data::executor) fn execute_resolve_staged(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        txn_id: TxnId,
+        plans: &[PhysicalPlan],
+        staged: StagedWrites,
+    ) -> Response {
+        let ops = match self.resolve_txn_ops(task, tid, txn_id, plans, staged) {
             Ok(ops) => ops,
             Err(e) => return self.response_error(task, e),
         };
@@ -57,11 +86,18 @@ impl CoreLoop {
         tid: u64,
         txn_id: TxnId,
         plans: &[PhysicalPlan],
+        staged: StagedWrites,
     ) -> crate::Result<Vec<RedoSubRecord>> {
         let mut kv_collections: BTreeSet<String> = BTreeSet::new();
         let mut doc_collections: BTreeSet<String> = BTreeSet::new();
         let mut graph_collections: BTreeSet<String> = BTreeSet::new();
         let mut edge_surrogates: BTreeMap<EdgeIdentityKey, (u32, u32)> = BTreeMap::new();
+        let mut columnar_collections: ColumnarCollections = BTreeMap::new();
+        let mut vector_primary_collections: VectorPrimaryCollections = BTreeMap::new();
+        let mut direct_writes = match staged {
+            StagedWrites::Session => DirectWrites::Staged(&mut vector_primary_collections),
+            StagedWrites::Calvin => DirectWrites::Plan,
+        };
 
         // Plan-driven serializers emit into `ops` during this walk; overlay-driven
         // serializers only collect collections here, serialized in phase two below.
@@ -86,25 +122,34 @@ impl CoreLoop {
                     graph::classify_graph_op(op, &mut graph_collections, &mut edge_surrogates)?
                 }
 
-                // CRDT deltas ride their own `CrdtDelta` WAL record, never redo
-                // sub-records (see `replay_transaction_redo_wal`).
-                PhysicalPlan::Crdt(_) => {}
+                // Plan-driven: a CRDT write resolves to the intent record its
+                // autocommit form journals.
+                PhysicalPlan::Crdt(op) => crdt::serialize_crdt_op(op, &mut ops)?,
 
-                // FTS postings are re-derived from the owning document at
-                // install time, so a text op contributes no redo sub-record.
-                PhysicalPlan::Text(_) => {}
+                // Plan-driven: an FTS write resolves to the posting record its
+                // autocommit form journals.
+                PhysicalPlan::Text(op) => text::serialize_text_op(op, &mut ops)?,
 
                 // Read-only families: scans, joins, aggregates, exchange, and
                 // maintenance ops carry no persisted post-image.
                 PhysicalPlan::Query(_) | PhysicalPlan::Meta(_) => {}
 
                 // Plan-driven: each op serializes from the plan node, skips, or
-                // errors. A vector-primary write's overlay entry serves the
-                // transaction's own reads only, never the redo record.
-                PhysicalPlan::Vector(op) => vector::serialize_vector_op(op, &mut ops)?,
+                // errors. A vector-primary direct write only registers its
+                // collection; its staged row is serialized from the overlay.
+                PhysicalPlan::Vector(op) => {
+                    vector::serialize_vector_op(op, &mut ops, &mut direct_writes)?
+                }
                 PhysicalPlan::Array(op) => array::serialize_array_op(op, &mut ops)?,
-                PhysicalPlan::Columnar(op) => columnar::serialize_columnar_op(op, &mut ops)?,
-                PhysicalPlan::Timeseries(op) => columnar::serialize_timeseries_op(op, &mut ops)?,
+                PhysicalPlan::Timeseries(op) => {
+                    self.serialize_timeseries_op(task, tid, txn_id, op, &mut ops)?
+                }
+
+                // Columnar: every write is staged per surrogate, so the image
+                // the transaction was shown is serialized from the overlay.
+                PhysicalPlan::Columnar(op) => {
+                    columnar_image::classify_columnar_op(op, &mut columnar_collections)?
+                }
 
                 // Spatial `Insert`/`Delete` plan nodes carry the complete absolute
                 // post-image, so they serialize from the plan node, not an overlay.
@@ -120,9 +165,21 @@ impl CoreLoop {
             }
         }
 
-        // Pin the resolve-time bitemporal stamp once, in the overlay sidecar, so
-        // redo and install read the same version key. Deterministic (collection,
-        // doc-id) order keeps replicas resolving the same txn in sync.
+        if staged == StagedWrites::Session {
+            let reads_overlay = !kv_collections.is_empty()
+                || !doc_collections.is_empty()
+                || !graph_collections.is_empty()
+                || !columnar_collections.is_empty()
+                || !vector_primary_collections.is_empty()
+                || plans.iter().any(graph::is_label_write);
+            self.require_staging_overlay(txn_id, reads_overlay)?;
+        }
+
+        // Pin the resolve-time bitemporal stamp once, in the overlay sidecar, for
+        // every staged put AND tombstone, so the redo carries it and every apply
+        // (install, replica, restart) writes the same version key. Deterministic
+        // (collection, doc-id) order keeps replicas resolving the same txn in
+        // sync.
         for collection in &doc_collections {
             if !self.is_bitemporal(task.request.database_id.as_u64(), tid, collection) {
                 continue;
@@ -132,20 +189,19 @@ impl CoreLoop {
                 TenantId::new(tid),
                 collection.clone(),
             );
-            let mut puts: Vec<(&RowIdentity, u32)> = match self.txn_overlays.get(&txn_id) {
+            let mut writes: Vec<(&RowIdentity, u32)> = match self.txn_overlays.get(&txn_id) {
                 Some(overlay) => overlay
                     .iter_doc_entries_for_collection(&coll_key)
-                    .filter_map(|(doc_id, staged)| match staged {
-                        Staged::Put(_) => overlay
+                    .filter_map(|(doc_id, _staged)| {
+                        overlay
                             .surrogate_for_doc_id(&coll_key, doc_id)
-                            .map(|surrogate| (doc_id, surrogate)),
-                        Staged::Tombstone => None,
+                            .map(|surrogate| (doc_id, surrogate))
                     })
                     .collect(),
                 None => Vec::new(),
             };
-            puts.sort();
-            let stamps: Vec<(u32, BitemporalStamp)> = puts
+            writes.sort();
+            let stamps: Vec<(u32, BitemporalStamp)> = writes
                 .into_iter()
                 .map(|(_doc_id, surrogate)| {
                     (
@@ -198,6 +254,9 @@ impl CoreLoop {
                             declared_primary_key: truncate_primary_keys
                                 .get(collection.as_str())
                                 .and_then(|pk| pk.as_deref()),
+                            sys_from_ms: self
+                                .is_bitemporal(task.request.database_id.as_u64(), tid, collection)
+                                .then(|| self.bitemporal_now_ms()),
                         },
                         &mut ops,
                     )?;
@@ -211,6 +270,14 @@ impl CoreLoop {
                 )?;
             }
         }
+        self.serialize_staged_image_collections(
+            task,
+            tid,
+            txn_id,
+            &columnar_collections,
+            &vector_primary_collections,
+            &mut ops,
+        )?;
         if let Some(graph_overlay) = self.graph_txn_overlays.get(&txn_id) {
             // Freeze temporal identity independently from the overlay's lease
             // refresh stamp. Resolve retries reuse the exact same ordinal.
@@ -242,12 +309,71 @@ impl CoreLoop {
         Ok(ops)
     }
 
-    /// The base rows a staged TRUNCATE of `collection` removes at COMMIT and
-    /// that need a per-row `Delete` redo: every base row with no overlay
-    /// entry, on a collection with vector fields. Empty for a collection
-    /// without vector fields, where the autocommit truncate mints no per-row
-    /// redo either (row durability is redb-synchronous). Read-only against
-    /// base.
+    /// Refuse a session resolve whose writes live in a staging overlay this
+    /// core does not hold.
+    ///
+    /// Every core that stages a write opens the transaction's overlay, so a
+    /// missing overlay means the writes were staged on another core or the
+    /// overlay was reaped. Resolving would then commit none of them.
+    fn require_staging_overlay(&self, txn_id: TxnId, reads_overlay: bool) -> crate::Result<()> {
+        if !reads_overlay
+            || self.txn_overlays.contains_key(&txn_id)
+            || self.graph_txn_overlays.contains_key(&txn_id)
+        {
+            return Ok(());
+        }
+        Err(crate::Error::Internal {
+            detail: format!(
+                "{txn_id} has staged writes but core {} holds no staging overlay for it; \
+                 the commit is refused",
+                self.core_id
+            ),
+        })
+    }
+
+    /// Serialize the columnar and vector-primary collections the
+    /// transaction wrote from its overlay, in collection order.
+    fn serialize_staged_image_collections(
+        &self,
+        task: &ExecutionTask,
+        tid: u64,
+        txn_id: TxnId,
+        columnar: &ColumnarCollections,
+        vector_primary: &VectorPrimaryCollections,
+        ops: &mut Vec<RedoSubRecord>,
+    ) -> crate::Result<()> {
+        let Some(overlay) = self.txn_overlays.get(&txn_id) else {
+            return Ok(());
+        };
+        let coll_key = |collection: &str| {
+            (
+                task.request.database_id,
+                TenantId::new(tid),
+                collection.to_string(),
+            )
+        };
+        for (collection, schema_bytes) in columnar {
+            let key = coll_key(collection);
+            columnar_image::serialize_columnar_collection(
+                ColumnarCollectionImages {
+                    overlay,
+                    coll_key: &key,
+                    schema: self.columnar_engines.get(&key).map(|e| e.schema()),
+                    schema_bytes,
+                },
+                ops,
+            )?;
+        }
+        for (collection, writes) in vector_primary {
+            self.serialize_vector_primary_collection(overlay, &coll_key(collection), writes, ops)?;
+        }
+        Ok(())
+    }
+
+    /// The base rows a staged TRUNCATE of `collection` removes at COMMIT:
+    /// every base row with no overlay entry. The redo record is the only
+    /// thing a replica installs, so each removed row travels as its own
+    /// `Delete`. Read-only against base.
     fn truncated_base_rows(
         &self,
         task: &ExecutionTask,
@@ -257,9 +383,6 @@ impl CoreLoop {
         coll_key: &(crate::types::DatabaseId, TenantId, String),
     ) -> crate::Result<Vec<(nodedb_types::StorageKey, Vec<u8>)>> {
         let database_id = task.request.database_id.as_u64();
-        if !self.collection_has_vectors(database_id, tid, collection) {
-            return Ok(Vec::new());
-        }
         let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let mut rows = Vec::new();
         for key in self.scan_matching_documents(database_id, tid, collection, &[])? {
@@ -307,164 +430,6 @@ fn truncate_declared_primary_keys(plans: &[PhysicalPlan]) -> BTreeMap<String, Op
             | PhysicalPlan::ClusterEvent(_) => None,
         })
         .collect()
-}
-
-/// Classify a KV op for transaction resolve: collect the collection of a
-/// row-level write into `collections`, skip read-only ops, and reject the ops
-/// that have no row-level redo representation.
-fn classify_kv_op(op: &KvOp, collections: &mut BTreeSet<String>) -> crate::Result<()> {
-    match op {
-        // Row-level writes: the resolved post-image (value or tombstone) is in
-        // the overlay, keyed by collection.
-        KvOp::Put { collection, .. }
-        | KvOp::Insert { collection, .. }
-        | KvOp::InsertIfAbsent { collection, .. }
-        | KvOp::InsertOnConflictUpdate { collection, .. }
-        | KvOp::Delete { collection, .. }
-        | KvOp::BatchPut { collection, .. }
-        | KvOp::Incr { collection, .. }
-        | KvOp::IncrFloat { collection, .. }
-        | KvOp::Cas { collection, .. }
-        | KvOp::GetSet { collection, .. }
-        | KvOp::FieldSet { collection, .. }
-        | KvOp::Transfer { collection, .. }
-        // Predicate DML stages each matched row's post-image or tombstone
-        // at statement time, so the overlay carries it like a keyed write.
-        | KvOp::PredicateUpdate { collection, .. }
-        | KvOp::PredicateDelete { collection, .. } => {
-            collections.insert(collection.to_string());
-            Ok(())
-        }
-        // `TransferItem` moves a row across collections: the source holds a
-        // staged tombstone and the destination a staged value.
-        KvOp::TransferItem {
-            source_collection,
-            dest_collection,
-            ..
-        } => {
-            collections.insert(source_collection.to_string());
-            collections.insert(dest_collection.to_string());
-            Ok(())
-        }
-
-        // Read-only: nothing staged, nothing to persist.
-        KvOp::Get { .. }
-        | KvOp::BatchGet { .. }
-        | KvOp::Scan { .. }
-        | KvOp::FieldGet { .. }
-        | KvOp::GetTtl { .. }
-        | KvOp::MaterializeScan { .. }
-        | KvOp::SortedIndexRank { .. }
-        | KvOp::SortedIndexTopK { .. }
-        | KvOp::SortedIndexRange { .. }
-        | KvOp::SortedIndexCount { .. }
-        | KvOp::SortedIndexScore { .. }
-        // Read-only: reports what a governed write would apply, stages
-        // nothing.
-        | KvOp::ResolveWrite(_) => Ok(()),
-
-        // Resolve-before-propose is an autocommit path: never staged into an
-        // overlay, so no row-level redo shape carries it.
-        KvOp::ResolvedWrite { .. } => Err(crate::Error::PlanError {
-            detail: "kv resolved write is not supported in transaction resolve".to_string(),
-        }),
-
-        // A standalone TTL delta has no value post-image, and KV redo carries
-        // TTL only as part of a value put, so rejecting avoids a silent drop.
-        KvOp::Expire { .. } | KvOp::Persist { .. } => Err(crate::Error::PlanError {
-            detail: "kv EXPIRE/PERSIST is not supported in transaction resolve".to_string(),
-        }),
-
-        // Truncate: staged as an overlay marker; the serializer emits the
-        // `kv_truncate` redo ahead of the collection's row entries.
-        KvOp::Truncate { collection, .. } => {
-            collections.insert(collection.to_string());
-            Ok(())
-        }
-
-        // Index / DDL: never stageable into the overlay, so no row-level
-        // redo shape carries them.
-        KvOp::RegisterIndex { .. }
-        | KvOp::DropIndex { .. }
-        | KvOp::RegisterSortedIndex { .. }
-        | KvOp::DropSortedIndex { .. } => Err(crate::Error::PlanError {
-            detail: "kv index/DDL op is not supported in transaction resolve".to_string(),
-        }),
-    }
-}
-
-/// Classify a Document op for transaction resolve: collect the collection of a
-/// staged point/bulk write into `collections`, skip read-only ops, and reject
-/// the writes that leave no overlay post-image.
-fn classify_document_op(op: &DocumentOp, collections: &mut BTreeSet<String>) -> crate::Result<()> {
-    match op {
-        // Staged writes: the resolved post-image is in the overlay, keyed by the
-        // user primary key. RETURNING doesn't affect staging, so these serialize
-        // from the overlay like any other point/bulk write.
-        DocumentOp::PointPut { collection, .. }
-        | DocumentOp::PointInsert { collection, .. }
-        | DocumentOp::Upsert { collection, .. }
-        | DocumentOp::PointDelete { collection, .. }
-        | DocumentOp::PointUpdate { collection, .. }
-        | DocumentOp::BulkUpdate { collection, .. }
-        | DocumentOp::BulkDelete { collection, .. }
-        // A balance write stages like any other point write: one target row,
-        // one absolute post-image, keyed by the row's own surrogate.
-        | DocumentOp::ApplyBalanceDelta { collection, .. } => {
-            collections.insert(collection.to_string());
-            Ok(())
-        }
-        // `INSERT ... SELECT` stages the copied rows into the target collection.
-        DocumentOp::InsertSelect {
-            target_collection, ..
-        } => {
-            collections.insert(target_collection.to_string());
-            Ok(())
-        }
-
-        // Read-only families: scans, lookups, point-gets, and estimates carry
-        // no persisted post-image.
-        DocumentOp::ResolveWrite(_)
-        | DocumentOp::PointGet { .. }
-        | DocumentOp::Scan { .. }
-        | DocumentOp::RangeScan { .. }
-        | DocumentOp::IndexLookup { .. }
-        | DocumentOp::IndexedFetch { .. }
-        | DocumentOp::EstimateCount { .. }
-        | DocumentOp::MaterializeScan { .. } => Ok(()),
-
-        // Resolve-before-propose is an autocommit path: never staged into an
-        // overlay, so no row-level redo shape carries it.
-        DocumentOp::ResolvedWrite { .. } => Err(crate::Error::PlanError {
-            detail: "document resolved write is not supported in transaction resolve".to_string(),
-        }),
-
-        // Join/merge have no per-surrogate post-image; `BatchInsert` rides the
-        // buffered-plan path. None is staged, so rejecting avoids a lossy redo.
-        DocumentOp::UpdateFromJoin { .. }
-        | DocumentOp::Merge { .. }
-        | DocumentOp::BatchInsert { .. } => Err(crate::Error::PlanError {
-            detail: "document join/merge/batch DML has no staged post-image and is not \
-                     supported in transaction resolve"
-                .to_string(),
-        }),
-
-        // Truncate: staged as an overlay marker; the serializer emits a
-        // `Delete` per removed base row on a vector collection ahead of the
-        // collection's overlay entries.
-        DocumentOp::Truncate { collection, .. } => {
-            collections.insert(collection.to_string());
-            Ok(())
-        }
-
-        // Index / DDL: never stageable into the overlay, so no row-level
-        // redo shape carries them.
-        DocumentOp::Register { .. }
-        | DocumentOp::DropIndex { .. }
-        | DocumentOp::BackfillIndex { .. } => Err(crate::Error::PlanError {
-            detail: "document index/DDL op is not supported in transaction resolve".to_string(),
-        }),
-    }
 }
 
 #[cfg(test)]
@@ -1202,6 +1167,11 @@ mod tests {
             }),
         ];
 
+        // A vector-primary direct write resolves from the row its statement
+        // staged.
+        let staged = core.execute_stage_write(&make_stage_task(txn), TID, &plans[0]);
+        assert_eq!(staged.status, Status::Ok, "stage: {staged:?}");
+
         for plan in plans {
             let resp = core.execute_resolve_txn(&task, TID, txn, std::slice::from_ref(&plan));
             assert_eq!(
@@ -1256,6 +1226,8 @@ mod tests {
             on_conflict_updates: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
         });
+        let staged = src.execute_stage_write(&make_stage_task(TxnId::new(51)), TID, &plan);
+        assert_eq!(staged.status, Status::Ok, "stage: {staged:?}");
         let resp = src.execute_resolve_txn(&task, TID, TxnId::new(51), std::slice::from_ref(&plan));
         let redo = decode_redo(&resp);
         let record = wrap_redo(&redo);
@@ -1276,6 +1248,131 @@ mod tests {
             coll.local_for_surrogate(Surrogate::new(42)).is_some(),
             "the cross-engine surrogate must be rebound on redo replay"
         );
+    }
+
+    fn vp_fields(note: &str, v: i64) -> Vec<u8> {
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("note".to_string(), nodedb_types::Value::String(note.into()));
+        fields.insert("v".to_string(), nodedb_types::Value::Integer(v));
+        zerompk::to_msgpack_vec(&fields).expect("encode payload fields")
+    }
+
+    fn vp_upsert_plan(
+        surrogate: u32,
+        payload: Vec<u8>,
+        on_conflict_updates: Vec<(String, UpdateValue)>,
+    ) -> PhysicalPlan {
+        PhysicalPlan::Vector(VectorOp::DirectUpsert {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vp"),
+            field: "emb".to_string(),
+            surrogate: Surrogate::new(surrogate),
+            pk_bytes: Vec::new(),
+            vector: vec![1.0, 0.0, 0.0],
+            payload,
+            quantization: nodedb_types::VectorQuantization::None,
+            storage_dtype: nodedb_types::VectorStorageDtype::F32,
+            payload_indexes: Vec::new(),
+            returning: None,
+            rls_filters: Vec::new(),
+            on_conflict_updates,
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+        })
+    }
+
+    /// Commit a vector-primary base row on `core` through the live handler.
+    fn vp_live_upsert(core: &mut CoreLoop, surrogate: u32, payload: &[u8]) {
+        let task = make_task();
+        let resp = core.execute_vector_direct_upsert(
+            crate::data::executor::handlers::vector_upsert::VectorDirectUpsertParams {
+                task: &task,
+                tid: TID,
+                collection: "vp",
+                field: "emb",
+                surrogate: Surrogate::new(surrogate),
+                vector: &[1.0, 0.0, 0.0],
+                payload,
+                quantization: nodedb_types::VectorQuantization::None,
+                storage_dtype: nodedb_types::VectorStorageDtype::F32,
+                payload_indexes: &[],
+                intent: nodedb_physical::physical_plan::VectorDirectWriteIntent::Upsert,
+                on_conflict_updates: &[],
+                rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: &[],
+            },
+        );
+        assert_eq!(resp.status, Status::Ok, "seed vector-primary row: {resp:?}");
+    }
+
+    /// A vector-primary `ON CONFLICT DO UPDATE` stages the merged sidecar; the
+    /// redo carries exactly that sidecar, and a replica holding the same base
+    /// row installs it verbatim instead of re-running the merge.
+    #[test]
+    fn vector_primary_on_conflict_redo_installs_the_merged_sidecar_the_transaction_saw() {
+        let (mut src, _src_dir) = make_core();
+        let (mut dst, _dst_dir) = make_core();
+        vp_live_upsert(&mut src, 31, &vp_fields("orig", 1));
+        vp_live_upsert(&mut dst, 31, &vp_fields("orig", 1));
+
+        let txn = TxnId::new(53);
+        let upsert = vp_upsert_plan(
+            31,
+            vp_fields("new", 7),
+            vec![(
+                "v".to_string(),
+                UpdateValue::Literal(
+                    nodedb_types::value_to_msgpack(&nodedb_types::Value::Integer(7))
+                        .expect("encode literal"),
+                ),
+            )],
+        );
+        let staged = src.execute_stage_write(&make_stage_task(txn), TID, &upsert);
+        assert_eq!(staged.status, Status::Ok, "stage: {staged:?}");
+        let staged_sidecar = match src
+            .txn_overlays
+            .get(&txn)
+            .and_then(|overlay| overlay.get(&coll_key("vp"), 31))
+        {
+            Some(Staged::Put(body)) => {
+                crate::data::executor::handlers::transaction::overlay::StagedVectorRow::from_bytes(
+                    body,
+                )
+                .expect("decode staged row")
+                .sidecar
+            }
+            other => panic!("the upsert must stage a row, got {other:?}"),
+        };
+
+        let redo = decode_redo(&src.execute_resolve_txn(&make_task(), TID, txn, &[upsert]));
+        assert_eq!(redo.ops.len(), 1);
+        assert_eq!(
+            redo.ops[0].record_type,
+            RecordType::VectorResolvedDirectWrite as u32
+        );
+
+        dst.replay_transaction_redo_wal(
+            std::slice::from_ref(&wrap_redo(&redo)),
+            1,
+            &nodedb_wal::TombstoneSet::new(),
+        )
+        .expect("redo replay must succeed");
+        let installed = dst
+            .vector_sidecar_bytes(DatabaseId::DEFAULT.as_u64(), TID, "vp", Surrogate::new(31))
+            .expect("read sidecar")
+            .expect("the row exists on the replica");
+        assert_eq!(
+            installed, staged_sidecar,
+            "the replica holds the sidecar the transaction was shown"
+        );
+        let fields =
+            crate::data::executor::handlers::vector_upsert::decode_payload_lowercased(&installed)
+                .expect("decode sidecar");
+        assert_eq!(
+            fields.get("note"),
+            Some(&nodedb_types::Value::String("orig".into())),
+            "the column the SET list left alone keeps its stored value"
+        );
+        assert_eq!(fields.get("v"), Some(&nodedb_types::Value::Integer(7)));
     }
 
     /// Resolve a `MultiVectorInsert` and replay it through the redo path.
@@ -2581,70 +2678,248 @@ mod tests {
         );
     }
 
-    /// A columnar `Insert` plan resolves to a `TimeseriesBatch` sub-record whose
-    /// payload is a map-shaped `ColumnarWalRecord` (`kind: "columnar"`) and
-    /// replays into the columnar engine's memtable.
-    #[test]
-    fn columnar_insert_resolves_to_columnar_batch_and_replays() {
-        let (mut src, _src_dir) = make_core();
-        let task = make_task();
-        let txn = TxnId::new(42);
+    fn columnar_schema() -> nodedb_types::columnar::ColumnarSchema {
+        nodedb_types::columnar::ColumnarSchema::new(vec![
+            ColumnDef::required("id", ColumnType::String).with_primary_key(),
+            ColumnDef::nullable("v", ColumnType::Int64),
+            ColumnDef::nullable("note", ColumnType::String),
+        ])
+        .expect("valid columnar schema")
+    }
 
+    fn columnar_row(id: &str, v: i64, note: &str) -> nodedb_types::Value {
         let mut row = std::collections::HashMap::new();
-        row.insert("a".to_string(), nodedb_types::Value::Integer(1));
-        row.insert("b".to_string(), nodedb_types::Value::Integer(2));
-        let payload = nodedb_types::value_to_msgpack(&nodedb_types::Value::Array(vec![
-            nodedb_types::Value::Object(row),
-        ]))
-        .expect("encode columnar payload");
+        row.insert("id".to_string(), nodedb_types::Value::String(id.into()));
+        row.insert("v".to_string(), nodedb_types::Value::Integer(v));
+        row.insert("note".to_string(), nodedb_types::Value::String(note.into()));
+        nodedb_types::Value::Object(row)
+    }
 
-        let plan = PhysicalPlan::Columnar(ColumnarOp::Insert {
-            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cevents"),
-            payload,
+    /// A columnar INSERT of one row at `surrogate`. `on_conflict` non-empty
+    /// makes it the `ON CONFLICT (pk) DO UPDATE` shape.
+    fn columnar_insert_plan(
+        collection: &str,
+        row: nodedb_types::Value,
+        surrogate: u32,
+        on_conflict: Vec<(String, UpdateValue)>,
+    ) -> PhysicalPlan {
+        let intent = if on_conflict.is_empty() {
+            ColumnarInsertIntent::Insert
+        } else {
+            ColumnarInsertIntent::Put
+        };
+        PhysicalPlan::Columnar(ColumnarOp::Insert {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, collection),
+            payload: nodedb_types::value_to_msgpack(&nodedb_types::Value::Array(vec![row]))
+                .expect("encode columnar payload"),
             format: "msgpack".to_string(),
-            intent: ColumnarInsertIntent::Insert,
-            on_conflict_updates: Vec::new(),
-            surrogates: Vec::new(),
-            schema_bytes: Vec::new(),
+            intent,
+            on_conflict_updates: on_conflict,
+            surrogates: vec![Surrogate::new(surrogate)],
+            schema_bytes: zerompk::to_msgpack_vec(&columnar_schema()).expect("encode schema"),
             provenance: None,
             wal_lsn: None,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
-        });
-        let resp = src.execute_resolve_txn(&task, TID, txn, &[plan]);
-        let redo = decode_redo(&resp);
-        assert_eq!(redo.ops.len(), 1, "one columnar insert -> one sub-record");
-        assert_eq!(redo.ops[0].record_type, RecordType::TimeseriesBatch as u32);
+        })
+    }
 
-        // The payload decodes as a `ColumnarWalRecord` with kind "columnar".
-        let rec = zerompk::from_msgpack::<nodedb_types::columnar::ColumnarWalRecord>(
-            &redo.ops[0].payload,
-        )
-        .expect("decode columnar wal record");
-        assert_eq!(rec.kind, "columnar");
+    /// Commit `plan` on `core` the way an autocommit write does.
+    fn columnar_base_insert(core: &mut CoreLoop, plan: &PhysicalPlan) {
+        let (collection, payload, surrogates, schema_bytes) = match plan {
+            PhysicalPlan::Columnar(ColumnarOp::Insert {
+                collection,
+                payload,
+                surrogates,
+                schema_bytes,
+                ..
+            }) => (collection, payload, surrogates, schema_bytes),
+            other => panic!("expected a columnar insert, got {other:?}"),
+        };
+        let resp = core.execute_columnar_insert(
+            &make_task(),
+            crate::data::executor::handlers::columnar_write::ColumnarInsertParams {
+                collection: collection.as_str(),
+                payload,
+                format: "msgpack",
+                intent: ColumnarInsertIntent::Insert,
+                on_conflict_updates: &[],
+                surrogates,
+                schema_bytes,
+                provenance: None,
+                rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: &[],
+                spatial_undo: None,
+            },
+        );
+        assert_eq!(resp.status, Status::Ok, "seed base row: {resp:?}");
+    }
+
+    /// Every live `(surrogate, row)` of `collection` on `core`, by surrogate.
+    fn columnar_rows(core: &CoreLoop, collection: &str) -> Vec<(u32, Vec<nodedb_types::Value>)> {
+        let key = (
+            DatabaseId::DEFAULT,
+            TenantId::new(TID),
+            collection.to_string(),
+        );
+        let mut rows: Vec<(u32, Vec<nodedb_types::Value>)> = core
+            .columnar_engines
+            .get(&key)
+            .map(|engine| {
+                engine
+                    .scan_memtable_rows_with_surrogates()
+                    .filter_map(|(s, row)| s.map(|s| (s.as_u32(), row)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        rows.sort_by_key(|(s, _)| *s);
+        rows
+    }
+
+    /// A staged columnar INSERT resolves to one `columnar_image` record whose
+    /// row replays into a fresh engine under its surrogate.
+    #[test]
+    fn columnar_insert_resolves_to_its_staged_image_and_replays() {
+        let (mut src, _src_dir) = make_core();
+        let txn = TxnId::new(42);
+        let plan = columnar_insert_plan("cevents", columnar_row("a", 1, "x"), 7, Vec::new());
+        let staged = src.execute_stage_write(&make_stage_task(txn), TID, &plan);
+        assert_eq!(staged.status, Status::Ok, "stage: {staged:?}");
+
+        let redo = decode_redo(&src.execute_resolve_txn(&make_task(), TID, txn, &[plan]));
+        assert_eq!(redo.ops.len(), 1, "one staged columnar row -> one record");
+        assert_eq!(redo.ops[0].record_type, RecordType::TimeseriesBatch as u32);
+        let rec: nodedb_types::columnar::ColumnarImageWalRecord =
+            zerompk::from_msgpack(&redo.ops[0].payload).expect("decode image record");
+        assert_eq!(rec.kind, nodedb_types::columnar::COLUMNAR_IMAGE_KIND);
         assert_eq!(rec.collection, "cevents");
 
-        let record = wrap_redo(&redo);
         let (mut dst, _dst_dir) = make_core();
         dst.replay_transaction_redo_wal(
-            std::slice::from_ref(&record),
+            std::slice::from_ref(&wrap_redo(&redo)),
             1,
             &nodedb_wal::TombstoneSet::new(),
         )
         .expect("redo replay must succeed");
+        let rows = columnar_rows(&dst, "cevents");
+        assert_eq!(rows.len(), 1, "the staged row replays: {rows:?}");
+        assert_eq!(rows[0].0, 7, "under its own surrogate");
+    }
 
-        let key = (
-            DatabaseId::DEFAULT,
-            TenantId::new(TID),
-            "cevents".to_string(),
+    /// An `ON CONFLICT DO UPDATE` stages the merged row; the redo carries
+    /// that merged row, and a replica holding the same base row installs
+    /// exactly it. Replaying the submitted row instead would lose the
+    /// columns the SET list left untouched.
+    #[test]
+    fn columnar_on_conflict_redo_installs_the_merged_row_the_transaction_saw() {
+        let base = columnar_insert_plan("upserts", columnar_row("a", 1, "orig"), 9, Vec::new());
+        let (mut src, _src_dir) = make_core();
+        let (mut dst, _dst_dir) = make_core();
+        columnar_base_insert(&mut src, &base);
+        columnar_base_insert(&mut dst, &base);
+
+        let txn = TxnId::new(48);
+        let upsert = columnar_insert_plan(
+            "upserts",
+            columnar_row("a", 7, "new"),
+            9,
+            vec![(
+                "v".to_string(),
+                UpdateValue::Literal(
+                    nodedb_types::value_to_msgpack(&nodedb_types::Value::Integer(7))
+                        .expect("encode literal"),
+                ),
+            )],
         );
+        let staged = src.execute_stage_write(&make_stage_task(txn), TID, &upsert);
+        assert_eq!(staged.status, Status::Ok, "stage: {staged:?}");
+        let redo = decode_redo(&src.execute_resolve_txn(&make_task(), TID, txn, &[upsert]));
+
+        dst.replay_transaction_redo_wal(
+            std::slice::from_ref(&wrap_redo(&redo)),
+            1,
+            &nodedb_wal::TombstoneSet::new(),
+        )
+        .expect("redo replay must succeed");
+        let rows = columnar_rows(&dst, "upserts");
+        assert_eq!(rows.len(), 1, "the upsert replaces the row: {rows:?}");
         assert_eq!(
-            dst.columnar_engines
-                .get(&key)
-                .map(|e| e.memtable().row_count()),
-            Some(1),
-            "columnar row must replay into the memtable"
+            rows[0].1,
+            vec![
+                nodedb_types::Value::String("a".into()),
+                nodedb_types::Value::Integer(7),
+                nodedb_types::Value::String("orig".into()),
+            ],
+            "the replica holds the merged row: v from the SET list, note untouched"
+        );
+    }
+
+    /// A key-changing UPDATE and a DELETE of base rows resolve to images
+    /// that name the base row they remove, so no row survives under the old
+    /// key on a replica.
+    #[test]
+    fn columnar_update_and_delete_redo_remove_the_base_rows_they_replace() {
+        let seed_a = columnar_insert_plan("moves", columnar_row("a", 1, "x"), 3, Vec::new());
+        let seed_b = columnar_insert_plan("moves", columnar_row("b", 2, "y"), 4, Vec::new());
+        let (mut src, _src_dir) = make_core();
+        let (mut dst, _dst_dir) = make_core();
+        for core in [&mut src, &mut dst] {
+            columnar_base_insert(core, &seed_a);
+            columnar_base_insert(core, &seed_b);
+        }
+
+        let txn = TxnId::new(49);
+        let pk_filter = |id: &str| {
+            zerompk::to_msgpack_vec(&vec![nodedb_query::scan_filter::ScanFilter {
+                field: "id".to_string(),
+                op: nodedb_query::scan_filter::FilterOp::Eq,
+                value: nodedb_types::Value::String(id.into()),
+                clauses: Vec::new(),
+                expr: None,
+            }])
+            .expect("encode filter")
+        };
+        let update = PhysicalPlan::Columnar(ColumnarOp::Update {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "moves"),
+            filters: pk_filter("a"),
+            updates: vec![(
+                "id".to_string(),
+                nodedb_types::value_to_msgpack(&nodedb_types::Value::String("z".into()))
+                    .expect("encode assignment"),
+            )],
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+        });
+        let delete = PhysicalPlan::Columnar(ColumnarOp::Delete {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "moves"),
+            filters: pk_filter("b"),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+        });
+        for plan in [&update, &delete] {
+            let staged = src.execute_stage_write(&make_stage_task(txn), TID, plan);
+            assert_eq!(staged.status, Status::Ok, "stage: {staged:?}");
+        }
+        let redo = decode_redo(&src.execute_resolve_txn(&make_task(), TID, txn, &[update, delete]));
+
+        dst.replay_transaction_redo_wal(
+            std::slice::from_ref(&wrap_redo(&redo)),
+            1,
+            &nodedb_wal::TombstoneSet::new(),
+        )
+        .expect("redo replay must succeed");
+        let rows = columnar_rows(&dst, "moves");
+        assert_eq!(
+            rows,
+            vec![(
+                3,
+                vec![
+                    nodedb_types::Value::String("z".into()),
+                    nodedb_types::Value::Integer(1),
+                    nodedb_types::Value::String("x".into()),
+                ]
+            )],
+            "the renamed row lives under its new key only, and the deleted row is gone"
         );
     }
 
@@ -2656,19 +2931,11 @@ mod tests {
         let task = make_task();
         let txn = TxnId::new(43);
 
-        // A `TimeseriesWalBatch` is what `replay_timeseries_payload` decodes to
-        // ingest samples directly into the memtable.
-        let batch = nodedb_types::timeseries::TimeseriesWalBatch {
-            collection: "metrics".to_string(),
-            samples: vec![(11u64, 1_700_000_000_000i64, 42.0f64)],
-            provenance: None,
-        };
-        let payload = zerompk::to_msgpack_vec(&batch).expect("encode ts batch");
-
+        // A line-protocol ingest: the format a timeseries INSERT stages.
         let plan = PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
-            payload,
-            format: "samples".to_string(),
+            payload: b"metrics value=42 1700000000000000000".to_vec(),
+            format: "ilp".to_string(),
             wal_lsn: None,
             surrogates: Vec::new(),
             provenance: None,
@@ -2683,14 +2950,13 @@ mod tests {
 
         // The payload is the format-preserving 5-element tuple tagged
         // "timeseries" (a msgpack array), distinct from the columnar map form.
-        let (kind, collection, _payload, _prov, format) =
+        let (kind, collection, _payload, _prov, _format) =
             zerompk::from_msgpack::<(String, String, Vec<u8>, Option<SyncProvenance>, String)>(
                 &redo.ops[0].payload,
             )
             .expect("decode timeseries 5-tuple");
         assert_eq!(kind, "timeseries");
         assert_eq!(collection, "metrics");
-        assert_eq!(format, "samples");
 
         let record = wrap_redo(&redo);
         let (mut dst, _dst_dir) = make_core();
@@ -2778,49 +3044,6 @@ mod tests {
         assert_eq!(dictionary.1.get_id("west,1"), Some(0));
     }
 
-    /// `Columnar::Update`/`Delete` are predicate DML: resolve emits the same
-    /// `columnar_dml` sub-record the autocommit path appends.
-    #[test]
-    fn columnar_update_and_delete_emit_columnar_dml_sub_record() {
-        use nodedb_types::columnar::ColumnarDmlWalRecord;
-
-        let (mut core, _dir) = make_core();
-        let task = make_task();
-
-        let update = PhysicalPlan::Columnar(ColumnarOp::Update {
-            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cevents"),
-            filters: Vec::new(),
-            updates: vec![("a".to_string(), vec![1, 2, 3])],
-            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-        });
-        let resp = core.execute_resolve_txn(&task, TID, TxnId::new(44), &[update]);
-        assert_eq!(resp.status, Status::Ok);
-        let redo = decode_redo(&resp);
-        assert_eq!(redo.ops.len(), 1);
-        assert_eq!(redo.ops[0].record_type, RecordType::TimeseriesBatch as u32);
-        let rec: ColumnarDmlWalRecord =
-            zerompk::from_msgpack(&redo.ops[0].payload).expect("decode columnar_dml");
-        assert_eq!(rec.kind, "columnar_dml");
-        assert_eq!(rec.collection, "cevents");
-        assert!(rec.is_update, "UPDATE must carry is_update = true");
-        assert_eq!(rec.updates, vec![("a".to_string(), vec![1, 2, 3])]);
-
-        let delete = PhysicalPlan::Columnar(ColumnarOp::Delete {
-            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cevents"),
-            filters: Vec::new(),
-            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-        });
-        let resp = core.execute_resolve_txn(&task, TID, TxnId::new(45), &[delete]);
-        assert_eq!(resp.status, Status::Ok);
-        let redo = decode_redo(&resp);
-        assert_eq!(redo.ops.len(), 1);
-        let rec: ColumnarDmlWalRecord =
-            zerompk::from_msgpack(&redo.ops[0].payload).expect("decode columnar_dml");
-        assert_eq!(rec.kind, "columnar_dml");
-        assert!(!rec.is_update, "DELETE must carry is_update = false");
-        assert!(rec.updates.is_empty(), "DELETE carries no assignments");
-    }
-
     /// Columnar-family truncates resolve to the same dedicated record the
     /// autocommit path appends, carrying the collection name only.
     #[test]
@@ -2834,6 +3057,10 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cevents"),
             restart_identity: true,
         });
+        // A columnar truncate resolves from the overlay marker its statement
+        // staged.
+        let staged = core.execute_stage_write(&make_stage_task(TxnId::new(46)), TID, &columnar);
+        assert_eq!(staged.status, Status::Ok, "stage: {staged:?}");
         let resp = core.execute_resolve_txn(&task, TID, TxnId::new(46), &[columnar]);
         assert_eq!(resp.status, Status::Ok);
         let redo = decode_redo(&resp);
@@ -2968,12 +3195,10 @@ mod tests {
             b"V".to_vec(),
         );
 
-        let mut row = std::collections::HashMap::new();
-        row.insert("a".to_string(), nodedb_types::Value::Integer(7));
-        let col_payload = nodedb_types::value_to_msgpack(&nodedb_types::Value::Array(vec![
-            nodedb_types::Value::Object(row),
-        ]))
-        .expect("encode columnar payload");
+        // Stage the columnar row into the overlay (overlay-driven serializer).
+        let columnar = columnar_insert_plan("cevents", columnar_row("a", 7, "x"), 22, Vec::new());
+        let staged = src.execute_stage_write(&make_stage_task(txn), TID, &columnar);
+        assert_eq!(staged.status, Status::Ok, "stage: {staged:?}");
 
         let plans = [
             kv_write_plan("kvc"),
@@ -2986,20 +3211,7 @@ mod tests {
                 pk_bytes: None,
                 provenance: None,
             }),
-            PhysicalPlan::Columnar(ColumnarOp::Insert {
-                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cevents"),
-                payload: col_payload,
-                format: "msgpack".to_string(),
-                intent: ColumnarInsertIntent::Insert,
-                on_conflict_updates: Vec::new(),
-                surrogates: Vec::new(),
-                schema_bytes: Vec::new(),
-                provenance: None,
-                wal_lsn: None,
-                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-                returning: None,
-                rls_filters: Vec::new(),
-            }),
+            columnar,
         ];
 
         let resp = src.execute_resolve_txn(&task, TID, txn, &plans);
@@ -3394,5 +3606,170 @@ mod tests {
             "a spatial insert with no provenance must raise a typed error, not silently drop"
         );
         assert!(resp.error_code.is_some());
+    }
+
+    #[test]
+    fn a_session_resolve_of_staged_writes_on_a_core_without_their_overlay_is_refused() {
+        let (mut core, _dir) = make_core();
+        let task = make_task();
+
+        let resp = core.execute_resolve_txn(&task, TID, TxnId::new(61), &[doc_put_plan("docs")]);
+
+        assert_eq!(
+            resp.status,
+            Status::Error,
+            "a resolve must not commit nothing for writes staged elsewhere: {resp:?}"
+        );
+    }
+
+    #[test]
+    fn a_staged_write_that_stages_no_row_still_opens_the_overlay_its_resolve_reads() {
+        let (mut core, _dir) = make_core();
+        let txn = TxnId::new(62);
+        let delete_absent = PhysicalPlan::Document(DocumentOp::PointDelete {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
+            document_id: "absent".to_string(),
+            surrogate: Surrogate::new(9_001),
+            pk_bytes: Vec::new(),
+            returning: None,
+            rls_filters: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            resolved_sum_targets: Vec::new(),
+        });
+
+        let staged = core.execute_stage_write(&make_stage_task(txn), TID, &delete_absent);
+        assert_eq!(staged.status, Status::Ok, "stage: {staged:?}");
+        assert!(core.txn_overlays.contains_key(&txn));
+
+        let resp = core.execute_resolve_txn(&make_task(), TID, txn, &[delete_absent]);
+        assert_eq!(resp.status, Status::Ok, "resolve: {resp:?}");
+    }
+
+    #[test]
+    fn an_untimed_timeseries_row_resolves_with_the_instant_its_statement_read() {
+        let (mut core, _dir) = make_core();
+        let txn = TxnId::new(63);
+        let mut row = std::collections::HashMap::new();
+        row.insert("value".to_string(), nodedb_types::Value::Float(1.5));
+        let payload = nodedb_types::value_to_msgpack(&nodedb_types::Value::Array(vec![
+            nodedb_types::Value::Object(row),
+        ]))
+        .expect("encode rows");
+        let ingest = PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
+            payload,
+            format: "msgpack".to_string(),
+            wal_lsn: None,
+            surrogates: vec![Surrogate::new(801)],
+            provenance: None,
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            returning: None,
+            rls_filters: Vec::new(),
+        });
+
+        core.epoch_system_ms = Some(1_700_000_000_000);
+        let staged = core.execute_stage_write(&make_stage_task(txn), TID, &ingest);
+        assert_eq!(staged.status, Status::Ok, "stage: {staged:?}");
+
+        // Resolve reads a later clock; the row keeps the statement's instant.
+        core.epoch_system_ms = Some(1_700_000_999_000);
+        let redo = decode_redo(&core.execute_resolve_txn(&make_task(), TID, txn, &[ingest]));
+        assert_eq!(redo.ops.len(), 1);
+        let (_kind, _collection, lines, _prov, format) =
+            zerompk::from_msgpack::<(String, String, Vec<u8>, Option<SyncProvenance>, String)>(
+                &redo.ops[0].payload,
+            )
+            .expect("decode timeseries redo");
+        assert_eq!(format, "ilp-msgpack");
+        let lines: Vec<String> = zerompk::from_msgpack(&lines).expect("decode lines");
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].ends_with(" 1700000000000000000"),
+            "the row carries the statement's instant: {}",
+            lines[0]
+        );
+    }
+
+    fn seeded_columnar_core() -> (CoreLoop, tempfile::TempDir) {
+        let (mut core, dir) = make_core();
+        let schema = nodedb_types::columnar::ColumnarSchema {
+            columns: vec![
+                ColumnDef::required("id", ColumnType::Int64).with_primary_key(),
+                ColumnDef::required("v", ColumnType::Int64),
+            ],
+            version: 1,
+        };
+        let mut engine = nodedb_columnar::MutationEngine::new("m".to_string(), schema);
+        engine
+            .insert_with_surrogate(
+                &[
+                    nodedb_types::Value::Integer(1),
+                    nodedb_types::Value::Integer(10),
+                ],
+                Surrogate::new(5),
+            )
+            .expect("seed base row");
+        core.columnar_engines.insert(coll_key("m"), engine);
+        (core, dir)
+    }
+
+    fn columnar_insert(intent: ColumnarInsertIntent) -> PhysicalPlan {
+        let mut row = std::collections::HashMap::new();
+        row.insert("id".to_string(), nodedb_types::Value::Integer(1));
+        row.insert("v".to_string(), nodedb_types::Value::Integer(20));
+        PhysicalPlan::Columnar(ColumnarOp::Insert {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "m"),
+            payload: nodedb_types::value_to_msgpack(&nodedb_types::Value::Array(vec![
+                nodedb_types::Value::Object(row),
+            ]))
+            .expect("encode row"),
+            format: "msgpack".to_string(),
+            intent,
+            on_conflict_updates: Vec::new(),
+            surrogates: vec![Surrogate::new(5)],
+            schema_bytes: Vec::new(),
+            provenance: None,
+            wal_lsn: None,
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            returning: None,
+            rls_filters: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn a_staged_do_nothing_insert_of_an_existing_key_leaves_the_row_alone() {
+        let (mut core, _dir) = seeded_columnar_core();
+        let txn = TxnId::new(64);
+        let insert = columnar_insert(ColumnarInsertIntent::InsertIfAbsent);
+
+        let staged = core.execute_stage_write(&make_stage_task(txn), TID, &insert);
+        assert_eq!(staged.status, Status::Ok, "stage: {staged:?}");
+        let overlay = core.txn_overlays.get(&txn).expect("overlay");
+        assert!(
+            overlay.get(&coll_key("m"), 5).is_none(),
+            "DO NOTHING stages no row over an existing key"
+        );
+
+        let redo = decode_redo(&core.execute_resolve_txn(&make_task(), TID, txn, &[insert]));
+        assert!(
+            redo.ops.is_empty(),
+            "the redo writes nothing: {:?}",
+            redo.ops
+        );
+    }
+
+    #[test]
+    fn a_staged_unique_insert_of_an_existing_key_is_refused() {
+        let (mut core, _dir) = seeded_columnar_core();
+        let txn = TxnId::new(65);
+        let insert = columnar_insert(ColumnarInsertIntent::InsertUnique);
+
+        let staged = core.execute_stage_write(&make_stage_task(txn), TID, &insert);
+
+        assert_eq!(staged.status, Status::Error);
+        assert!(matches!(
+            staged.error_code.as_deref(),
+            Some(crate::bridge::envelope::ErrorCode::RejectedConstraint { .. })
+        ));
     }
 }

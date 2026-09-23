@@ -123,6 +123,28 @@ impl IvfPqIndex {
         id
     }
 
+    /// Whether the index holds a trained codebook.
+    pub fn is_trained(&self) -> bool {
+        self.pq.is_some()
+    }
+
+    /// Drop every vector added with id `count` or later. When `trained` is
+    /// `false` the training goes too, as the index held before its first
+    /// add. A rollback uses it to withdraw the newest adds.
+    pub fn roll_back_to(&mut self, count: u32, trained: bool) {
+        if !trained {
+            self.centroids.clear();
+            self.pq = None;
+            self.cells.clear();
+            self.count = 0;
+            return;
+        }
+        for cell in &mut self.cells {
+            cell.retain(|(id, _)| *id < count);
+        }
+        self.count = self.count.min(count);
+    }
+
     /// Batch add vectors.
     pub fn add_batch(&mut self, vectors: &[&[f32]]) {
         for v in vectors {

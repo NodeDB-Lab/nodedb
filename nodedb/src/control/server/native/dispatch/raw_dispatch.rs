@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::control::gateway::GatewayErrorMap;
 use crate::control::gateway::core::QueryContext as GatewayQueryContext;
+use crate::control::gateway::router::is_task_vshard_scoped;
 use crate::control::server::shared::clone_write::CloneCheckedOutcome;
 use crate::types::{Lsn, RequestId, TenantId, TraceId, TxnId, VShardId};
 
@@ -57,7 +58,14 @@ pub(super) async fn dispatch_authorized_single_task(
         CloneCheckedOutcome::Handled(resp) => return Ok(resp),
         CloneCheckedOutcome::Proceed(checked) => checked,
     };
-    match ctx.state.gateway.get() {
+    // A staged write and the other transaction meta-ops run on the core of
+    // the task's own vShard. The gateway would route them to vShard 0.
+    let gateway = ctx
+        .state
+        .gateway
+        .get()
+        .filter(|_| !is_task_vshard_scoped(checked.plan()));
+    match gateway {
         Some(gateway) => {
             let query = GatewayQueryContext {
                 tenant_id,

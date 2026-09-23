@@ -8,6 +8,9 @@ use crate::data::executor::enforcement::funnel::WriteEnforcementOutcome;
 use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, WriteImages};
 use crate::data::executor::handlers::point::apply_delete::PointDeleteParams;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
+use crate::data::executor::handlers::transaction::undo::document_outcome::{
+    DocumentRow, push_delete_undo, push_target_undo,
+};
 use crate::data::executor::task::ExecutionTask;
 
 /// Parameters for [`CoreLoop::tx_point_delete`].
@@ -123,112 +126,23 @@ impl CoreLoop {
         })?;
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
-        // Reverse every derived materialized-sum target write with the SAME set
-        // of undo entries a source row uses: the target write is a full document
-        // write, so it has index, vector, spatial and stats side-effects of its
-        // own to reverse.
-        for target in target_writes {
-            undo_log.push(UndoEntry::PutDocument {
-                collection: target.collection,
-                document_id: nodedb_types::StorageKey::for_surrogate(target.surrogate),
-                identity: target.identity,
-                old_value: target.outcome.prior_value,
-                bitemporal_sys_from_ms: target.outcome.bitemporal_sys_from_ms,
-                bitemporal_index_tuples: target.outcome.bitemporal_index_tuples,
-                secondary_index_added: target.outcome.secondary_index_added,
-                secondary_index_removed: target.outcome.secondary_index_removed,
-                chain_hash_prior: None,
-            });
-            for delta in target.outcome.vector_inserts {
-                undo_log.push(UndoEntry::InsertVector {
-                    index_key: delta.index_key,
-                    vector_id: delta.vector_id,
-                    collection: delta.collection,
-                    field: delta.field,
-                    doc_id: Some(delta.doc_id),
-                });
-            }
-            for (key, entry_id) in target.outcome.spatial_inserts {
-                undo_log.push(UndoEntry::SpatialInsert { key, entry_id });
-            }
-            for (key, prior) in target.outcome.stats_prior {
-                undo_log.push(UndoEntry::StatsRestore { key, prior });
-            }
-        }
-
-        // Only push an undo entry when a row was actually removed — a delete
-        // against a non-existent key has nothing to reverse.
-        if let Some(old) = outcome.prior_value {
-            undo_log.push(UndoEntry::DeleteDocument {
-                collection: collection.to_string(),
-                document_id: nodedb_types::StorageKey::for_surrogate(surrogate),
-                // The plan's `document_id` is the row's client identity.
-                identity: nodedb_types::RowIdentity::from_user_key(document_id),
-                old_value: old,
-                bitemporal_sys_from_ms: outcome.bitemporal_sys_from_ms,
-                bitemporal_index_tuples: outcome.bitemporal_index_tuples,
-                // NON-empty on non-bitemporal deletes: the cascade removed these
-                // plain secondary-index entries, so a rolled-back DELETE restores
-                // them (closes the pre-existing tx-DELETE rollback hole).
-                secondary_index_tuples: outcome.secondary_index_tuples,
-                chain_hash_prior: None,
-            });
-        }
-
-        // The delete-cleanup soft-deleted this document's vectors unconditionally
-        // (fixing the orphan leak even in autocommit). In the transactional path
-        // a rollback must restore them, so push one `DeleteVector` undo per
-        // soft-deleted vector — `apply_undo_vector` `undelete`s each on rollback.
-        for delta in outcome.vector_deletes {
-            undo_log.push(UndoEntry::DeleteVector {
-                index_key: delta.index_key,
-                vector_id: delta.vector_id,
-                collection: delta.collection,
-                field: delta.field,
-                doc_id: Some(delta.doc_id),
-            });
-        }
-
-        // Reverse any spatial R-tree removals on rollback (one `SpatialDelete`
-        // undo per per-field R-tree entry the delete removed, re-inserting it
-        // with its captured bbox).
-        for (key, entry_id, bbox, document_id) in outcome.spatial_deletes {
-            undo_log.push(UndoEntry::SpatialDelete {
-                key,
-                entry_id,
-                bbox,
-                document_id,
-            });
-        }
-
-        // Reverse the `mark_node_deleted` bookkeeping on rollback: un-mark the
-        // node in the in-memory `deleted_nodes` tracker. `Some` only when this
-        // delete NEWLY marked the node (a pre-existing tombstone from a prior
-        // committed op is never resurrected — see `apply_point_delete`).
-        if let Some(node_id) = outcome.mark_node_deleted {
-            undo_log.push(UndoEntry::MarkNodeDeleted {
+        // A target write is a full document write with side effects of its
+        // own. The delete's own entries reverse the row, its index entries,
+        // vectors, R-tree entries, the node tombstone, and every edge the
+        // cascade removed.
+        push_target_undo(undo_log, &target_writes);
+        push_delete_undo(
+            undo_log,
+            DocumentRow {
                 database_id,
                 tid,
-                node_id,
-            });
-        }
-
-        // The graph-edge cascade unconditionally removed every edge incident on
-        // this document from BOTH the CSR partition and the persistent edge
-        // store. In the transactional path a rollback must restore them, so push
-        // one `DeleteEdge` undo per cascaded edge — `apply_undo_edge` re-inserts
-        // each into both stores with its captured old properties. NON-empty
-        // whenever the deleted document had edges: this closes the pre-existing
-        // hole where a rolled-back tx DELETE permanently lost cascaded edges.
-        for (collection, src_id, label, dst_id, old_properties) in outcome.edge_deletes {
-            undo_log.push(UndoEntry::DeleteEdge {
                 collection,
-                src_id,
-                label,
-                dst_id,
-                old_properties,
-            });
-        }
+                storage_key: nodedb_types::StorageKey::for_surrogate(surrogate),
+                // The plan's `document_id` is the row's client identity.
+                identity: nodedb_types::RowIdentity::from_user_key(document_id),
+            },
+            outcome,
+        );
 
         // `PointDelete` renders a `DELETE <n>` command tag, so its response
         // carries the count — 0 when the key was absent — exactly as the

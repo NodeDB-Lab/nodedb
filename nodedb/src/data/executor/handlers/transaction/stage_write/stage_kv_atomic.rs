@@ -41,12 +41,12 @@ use nodedb_types::Surrogate;
 
 use super::context::StageCtx;
 use super::stage_kv::kv_row_identity;
-use crate::bridge::envelope::{ErrorCode, Response};
+use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::StagedTtl;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::kv::{AtomicError, atomic_compute, current_ms};
+use crate::engine::kv::{atomic_compute, current_ms};
 use crate::types::TxnId;
 
 /// FNV-1a 32-bit hash, used only to derive a stable, collection-local overlay
@@ -201,7 +201,7 @@ impl CoreLoop {
                 }
                 self.kv_atomic_json_response(ctx.task, &serde_json::json!({ "value": new_i64 }))
             }
-            Err(e) => self.kv_atomic_error(ctx.task, ctx.collection, e),
+            Err(e) => self.response_atomic_error(ctx.task, ctx.collection, e),
         }
     }
 
@@ -223,7 +223,7 @@ impl CoreLoop {
                 }
                 self.kv_atomic_json_response(ctx.task, &serde_json::json!({ "value": new_f64 }))
             }
-            Err(e) => self.kv_atomic_error(ctx.task, ctx.collection, e),
+            Err(e) => self.response_atomic_error(ctx.task, ctx.collection, e),
         }
     }
 
@@ -260,7 +260,11 @@ impl CoreLoop {
         rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
         let current = self.resolve_kv_current(ctx, key);
-        let (matches, write_bytes) = atomic_compute::cas(current.as_deref(), expected, new_value);
+        let (matches, write_bytes) =
+            match atomic_compute::cas(current.as_deref(), expected, new_value) {
+                Ok(outcome) => outcome,
+                Err(e) => return self.response_atomic_error(ctx.task, ctx.collection, e),
+            };
 
         if matches {
             if let Err(e) = self.stage_admit_kv_image(ctx, &write_bytes, rls_write_check) {
@@ -294,7 +298,10 @@ impl CoreLoop {
         rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
         let current = self.resolve_kv_current(ctx, key);
-        let write_bytes = atomic_compute::getset(current.as_deref(), new_value);
+        let write_bytes = match atomic_compute::getset(current.as_deref(), new_value) {
+            Ok(bytes) => bytes,
+            Err(e) => return self.response_atomic_error(ctx.task, ctx.collection, e),
+        };
         if let Err(e) = self.stage_admit_kv_image(ctx, &write_bytes, rls_write_check) {
             return self.response_error(ctx.task, e);
         }
@@ -368,32 +375,6 @@ impl CoreLoop {
         match response_codec::encode_json_as_msgpack(value) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(task, e),
-        }
-    }
-
-    fn kv_atomic_error(&self, task: &ExecutionTask, collection: &str, e: AtomicError) -> Response {
-        match e {
-            AtomicError::TypeMismatch { detail } => self.response_error(
-                task,
-                ErrorCode::TypeMismatch {
-                    collection: collection.to_string(),
-                    detail,
-                },
-            ),
-            AtomicError::Overflow => self.response_error(
-                task,
-                ErrorCode::OverflowError {
-                    collection: collection.to_string(),
-                },
-            ),
-            AtomicError::Encode { detail } => {
-                self.response_error(task, ErrorCode::Internal { detail })
-            }
-            // Staging computes its image through `atomic_compute` and decides
-            // the policy itself, so the engine's own admission gate never
-            // reaches this path — the arm exists so a new engine-side refusal
-            // cannot be silently dropped here.
-            AtomicError::Rejected(error) => self.response_error(task, *error),
         }
     }
 }

@@ -17,6 +17,7 @@
 //!   `Timeseries` / `Text` / `Spatial`.
 //! - [`vector`]: `PhysicalPlan::Vector` (grouped `decode_arm`).
 //! - [`vector_direct`]: the vector-primary `DELETE` / `UPDATE` decoders.
+//! - [`transaction_redo`]: a committed transaction's redo entry.
 
 mod columnar;
 mod crdt;
@@ -32,7 +33,9 @@ mod entry_graph;
 mod entry_kv;
 mod graph;
 mod kv;
+mod transaction_redo;
 mod vector;
 mod vector_direct;
 
 pub use entry::from_replicated_entry;
+pub use transaction_redo::transaction_redo_payload;

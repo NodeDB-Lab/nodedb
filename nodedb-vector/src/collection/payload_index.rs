@@ -295,6 +295,22 @@ impl PayloadIndexSet {
         }
     }
 
+    /// A set with the same registered fields and kinds and no rows.
+    pub fn definitions_only(&self) -> Self {
+        Self {
+            indexes: self
+                .indexes
+                .iter()
+                .map(|(field, index)| {
+                    (
+                        field.clone(),
+                        PayloadIndex::new(index.field.clone(), index.kind),
+                    )
+                })
+                .collect(),
+        }
+    }
+
     /// Drop every node from every index. The registered fields and their
     /// kinds stay, so the next `insert_row` indexes the same columns.
     pub fn clear_rows(&mut self) {

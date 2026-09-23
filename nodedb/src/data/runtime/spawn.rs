@@ -92,6 +92,9 @@ pub fn spawn_core(
             // (Duration is Copy).
             let checkpoint_interval = compaction_config.checkpoint_interval;
 
+            // 2b. The committed-redo apply routes records by `vshard % num_cores`.
+            core.set_num_cores(num_cores);
+
             // 2c. Apply compaction config.
             core.set_compaction_config(
                 compaction_config.interval,

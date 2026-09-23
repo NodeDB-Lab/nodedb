@@ -350,7 +350,8 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::CalvinFlush { .. }
             | MetaOp::CalvinDrop { .. }
             | MetaOp::CalvinResolve { .. }
-            | MetaOp::ResolveTxn { .. },
+            | MetaOp::ResolveTxn { .. }
+            | MetaOp::ApplyTransactionRedo { .. },
         ) => false,
 
         // ---- Array reads / DDL / Flush: `to_replicated_entry` returns `None` — matches oracle.

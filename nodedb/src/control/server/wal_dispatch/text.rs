@@ -3,11 +3,10 @@
 //! WAL append dispatch for `PhysicalPlan::Text(TextOp)`.
 
 use nodedb_physical::physical_plan::TextOp;
+use nodedb_wal::record::RecordType;
 
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::manager::WalManager;
-
-use super::super::wal_dispatch_fts_spatial;
 
 /// Append the WAL record for a single `TextOp`, returning the allocated LSN
 /// for the FTS write variants (`Some`) or `None` for every read/search
@@ -29,7 +28,24 @@ pub(crate) fn wal_append_text_op(
     database_id: DatabaseId,
     op: &TextOp,
 ) -> crate::Result<Option<Lsn>> {
-    let appended = match op {
+    let Some((record_type, payload)) = encode_text_op_record(op)? else {
+        return Ok(None);
+    };
+    let lsn = if record_type == RecordType::FtsIndex {
+        wal.append_fts_index(tenant_id, vshard_id, database_id, &payload)?
+    } else {
+        wal.append_fts_delete(tenant_id, vshard_id, database_id, &payload)?
+    };
+    Ok(Some(lsn))
+}
+
+/// Encode the WAL record a single `TextOp` write journals as: its record type
+/// (`FtsIndex` or `FtsDelete`) and payload. `None` for every read / search /
+/// analyzer-config variant. Shared by the autocommit WAL append and the
+/// transaction resolver, so an FTS write inside a transaction journals the
+/// exact record its autocommit form does.
+pub(crate) fn encode_text_op_record(op: &TextOp) -> crate::Result<Option<(RecordType, Vec<u8>)>> {
+    let encoded = match op {
         TextOp::FtsIndexDoc {
             collection,
             surrogate,
@@ -41,13 +57,10 @@ pub(crate) fn wal_append_text_op(
             let prov = provenance.clone().unwrap_or_default();
             let payload =
                 nodedb_wal::record::FtsIndexPayload::new(prov, collection.as_str(), &doc_id, text);
-            Some(wal_dispatch_fts_spatial::wal_append_fts_index(
-                wal,
-                tenant_id,
-                vshard_id,
-                database_id,
-                &payload,
-            )?)
+            Some((
+                RecordType::FtsIndex,
+                payload.to_bytes().map_err(crate::Error::Wal)?,
+            ))
         }
         TextOp::FtsDeleteDoc {
             collection,
@@ -59,13 +72,10 @@ pub(crate) fn wal_append_text_op(
             let prov = provenance.clone().unwrap_or_default();
             let payload =
                 nodedb_wal::record::FtsDeletePayload::new(prov, collection.as_str(), &doc_id);
-            Some(wal_dispatch_fts_spatial::wal_append_fts_delete(
-                wal,
-                tenant_id,
-                vshard_id,
-                database_id,
-                &payload,
-            )?)
+            Some((
+                RecordType::FtsDelete,
+                payload.to_bytes().map_err(crate::Error::Wal)?,
+            ))
         }
         // Reads / scans / analyzer config: no durable effect.
         TextOp::Search { .. }
@@ -75,5 +85,5 @@ pub(crate) fn wal_append_text_op(
         | TextOp::HybridSearchTriple { .. }
         | TextOp::SetTextConfig { .. } => None,
     };
-    Ok(appended)
+    Ok(encoded)
 }

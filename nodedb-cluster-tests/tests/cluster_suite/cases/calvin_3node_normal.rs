@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use nodedb_cluster::calvin::{
     sequencer::{SequencerConfig, new_inbox},
-    types::{EngineKeySet, ReadWriteSet, SequencedTxn, SortedVec, TxClass, VersionedReadSet},
+    types::{EngineKeySet, ReadWriteSet, SchedulerInput, SortedVec, TxClass, VersionedReadSet},
 };
 use nodedb_types::{
     TenantId,
@@ -27,7 +27,7 @@ use nodedb_types::{
 };
 use tokio::sync::mpsc;
 
-use super::cluster_common::{spawn_with_sequencer, wait_for_sequencer_leader};
+use super::cluster_common::{spawn_with_sequencer, try_recv_txn, wait_for_sequencer_leader};
 
 /// Find two collection names that hash to distinct vshards.
 fn two_distinct_collections() -> (String, String) {
@@ -95,8 +95,8 @@ async fn sequencer_normal_path_commit_on_all_replicas() {
     let va = VShardId::from_collection_in_database(DatabaseId::DEFAULT, &tx_a).as_u32();
     let vb = VShardId::from_collection_in_database(DatabaseId::DEFAULT, &col_b_name).as_u32();
 
-    let mut vshard_rxs_a: Vec<mpsc::Receiver<SequencedTxn>> = Vec::new();
-    let mut vshard_rxs_b: Vec<mpsc::Receiver<SequencedTxn>> = Vec::new();
+    let mut vshard_rxs_a: Vec<mpsc::Receiver<SchedulerInput>> = Vec::new();
+    let mut vshard_rxs_b: Vec<mpsc::Receiver<SchedulerInput>> = Vec::new();
     for node in &nodes {
         let (tx_a_ch, rx_a) = mpsc::channel(64);
         let (tx_b_ch, rx_b) = mpsc::channel(64);
@@ -149,8 +149,8 @@ async fn sequencer_normal_path_commit_on_all_replicas() {
         .zip(vshard_rxs_b.iter_mut())
         .enumerate()
     {
-        let got_a = rx_a.try_recv().is_ok();
-        let got_b = rx_b.try_recv().is_ok();
+        let got_a = try_recv_txn(rx_a).is_some();
+        let got_b = try_recv_txn(rx_b).is_some();
         assert!(
             got_a || got_b,
             "node {}: neither vshard receiver got the txn fan-out",

@@ -70,12 +70,18 @@ impl TruncateFloors {
 
     /// Whether a record at `lsn` for `key` precedes a truncate of that
     /// collection and is therefore already removed.
+    ///
+    /// Strictly below: a record at the truncate's own LSN is a sibling
+    /// sub-record of the same transaction redo group. Replay applies a group's
+    /// sub-records in the order the transaction wrote them, so a row staged
+    /// before the truncate is removed by the truncate's own replay, and a row
+    /// staged after it must apply.
     pub(in crate::data::executor) fn covers(
         &self,
         key: &(DatabaseId, TenantId, String),
         lsn: u64,
     ) -> bool {
-        self.floors.get(key).is_some_and(|floor| lsn <= *floor)
+        self.floors.get(key).is_some_and(|floor| lsn < *floor)
     }
 
     /// Same as [`Self::covers`], keyed by the collection's parts. The key
@@ -138,8 +144,17 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> bool {
-        let Ok(record) = zerompk::from_msgpack::<ColumnarTruncateWalRecord>(payload) else {
-            return false;
+        let record = match zerompk::from_msgpack::<ColumnarTruncateWalRecord>(payload) {
+            Ok(record) => record,
+            Err(e) => {
+                self.replay_record_unapplied(
+                    "columnar",
+                    "truncate_decode",
+                    record_lsn,
+                    &format!("truncate record does not decode: {e}"),
+                );
+                return false;
+            }
         };
         if tombstones.is_tombstoned(
             database_id.as_u64(),
@@ -149,7 +164,10 @@ impl CoreLoop {
         ) {
             return false;
         }
-        if self.floors.replay_floors.columnar.covers(record_lsn) {
+        if self.replay_watermark_skips(self.floors.replay_floors.columnar.covers(record_lsn)) {
+            return false;
+        }
+        if self.claim_for_validation() {
             return false;
         }
         let task = Self::replay_task(
@@ -164,14 +182,23 @@ impl CoreLoop {
             }),
             Some(Lsn::new(record_lsn)),
         );
-        let response = self.execute_columnar_truncate(&task, &record.collection, None);
+        let mut undo = Vec::new();
+        let recording = self.recording_redo_undo();
+        let response = self.execute_columnar_truncate(
+            &task,
+            &record.collection,
+            recording.then_some(&mut undo),
+        );
+        self.record_redo_undo(undo);
         if response.status != Status::Ok {
-            tracing::warn!(
-                core = self.core_id,
-                collection = %record.collection,
-                lsn = record_lsn,
-                error = ?response.error_code,
-                "WAL replay: columnar truncate handler returned error; skipping"
+            self.replay_record_rejected(
+                "columnar",
+                record_lsn,
+                response.error_code,
+                &format!(
+                    "columnar truncate handler rejected truncate of '{}'",
+                    record.collection
+                ),
             );
             return false;
         }
@@ -190,8 +217,17 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> bool {
-        let Ok(record) = zerompk::from_msgpack::<ColumnarTruncateWalRecord>(payload) else {
-            return false;
+        let record = match zerompk::from_msgpack::<ColumnarTruncateWalRecord>(payload) {
+            Ok(record) => record,
+            Err(e) => {
+                self.replay_record_unapplied(
+                    "timeseries",
+                    "truncate_decode",
+                    record_lsn,
+                    &format!("truncate record does not decode: {e}"),
+                );
+                return false;
+            }
         };
         if tombstones.is_tombstoned(
             database_id.as_u64(),
@@ -208,7 +244,10 @@ impl CoreLoop {
                 .iter()
                 .any(|(_, e)| e.meta.last_flushed_wal_lsn >= record_lsn)
         });
-        if flushed_after_truncate {
+        if self.replay_watermark_skips(flushed_after_truncate) {
+            return false;
+        }
+        if self.claim_for_validation() {
             return false;
         }
         let task = Self::replay_task(
@@ -223,14 +262,25 @@ impl CoreLoop {
             }),
             Some(Lsn::new(record_lsn)),
         );
-        let response = self.execute_timeseries_truncate(&task, &record.collection, None);
+        // The install keeps the partition directory aside until the whole
+        // record landed, so a rollback can rename it back.
+        let mut undo = Vec::new();
+        let recording = self.recording_redo_undo();
+        let response = self.execute_timeseries_truncate(
+            &task,
+            &record.collection,
+            recording.then_some(&mut undo),
+        );
+        self.record_redo_undo(undo);
         if response.status != Status::Ok {
-            tracing::warn!(
-                core = self.core_id,
-                collection = %record.collection,
-                lsn = record_lsn,
-                error = ?response.error_code,
-                "WAL replay: timeseries truncate handler returned error; skipping"
+            self.replay_record_rejected(
+                "timeseries",
+                record_lsn,
+                response.error_code,
+                &format!(
+                    "timeseries truncate handler rejected truncate of '{}'",
+                    record.collection
+                ),
             );
             return false;
         }
@@ -262,6 +312,18 @@ mod tests {
     }
 
     #[test]
+    fn a_row_at_the_truncates_own_lsn_is_not_covered() {
+        let records = vec![truncate_record(RecordType::ColumnarTruncate, 9, 0, "c")];
+        let floors = TruncateFloors::collect(&records, 1, 0);
+        let c = (DatabaseId::DEFAULT, TenantId::new(1), "c".to_string());
+        assert!(floors.covers(&c, 8));
+        assert!(
+            !floors.covers(&c, 9),
+            "a sibling sub-record of the truncate's redo group applies in group order"
+        );
+    }
+
+    #[test]
     fn floors_keep_the_highest_truncate_lsn_per_collection_on_this_core() {
         let records = vec![
             truncate_record(RecordType::ColumnarTruncate, 5, 0, "c"),
@@ -273,9 +335,9 @@ mod tests {
         let floors = TruncateFloors::collect(&records, 2, 0);
         let c = (DatabaseId::DEFAULT, TenantId::new(1), "c".to_string());
         let ts = (DatabaseId::DEFAULT, TenantId::new(1), "ts".to_string());
-        assert!(floors.covers(&c, 9));
+        assert!(floors.covers(&c, 8));
         assert!(!floors.covers(&c, 10));
-        assert!(floors.covers(&ts, 7));
+        assert!(floors.covers(&ts, 6));
         assert!(
             !floors.covers(&ts, 8),
             "the other core's truncate is not ours"

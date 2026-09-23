@@ -127,7 +127,9 @@ pub fn replay_sync_hwm_records(
             | RecordType::GraphNodeLabelSet
             | RecordType::GraphNodeLabelRemove
             // WriteAborted carries only a refused write's LSN, no sync HWM.
-            | RecordType::WriteAborted => {}
+            | RecordType::WriteAborted
+            // ProposalApplied carries only an applied Raft proposal's identity.
+            | RecordType::ProposalApplied => {}
         }
     }
 

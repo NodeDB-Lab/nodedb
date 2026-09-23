@@ -412,7 +412,8 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | MetaOp::CalvinFlush { .. }
             | MetaOp::CalvinDrop { .. }
             | MetaOp::ResolveTxn { .. }
-            | MetaOp::CalvinResolve { .. },
+            | MetaOp::CalvinResolve { .. }
+            | MetaOp::ApplyTransactionRedo { .. },
         )
         | PhysicalPlan::Array(
             ArrayOp::OpenArray { .. }

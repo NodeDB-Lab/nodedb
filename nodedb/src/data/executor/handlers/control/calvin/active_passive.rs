@@ -168,10 +168,16 @@ impl CoreLoop {
             Ok(id) => id,
             Err(e) => return self.response_error(task, e),
         };
-        for plan in plans {
-            if let Err(e) = self.stage_calvin_overlay(task, synthetic_txn_id, *tenant_id, plan) {
-                return self.response_error(task, e);
-            }
+        // Staging reads the epoch's time anchor, so every replica stages the
+        // same images.
+        let prev_epoch_ms = self.epoch_system_ms;
+        self.epoch_system_ms = Some(epoch_system_ms);
+        let staged = plans.iter().try_for_each(|plan| {
+            self.stage_calvin_overlay(task, synthetic_txn_id, *tenant_id, plan)
+        });
+        self.epoch_system_ms = prev_epoch_ms;
+        if let Err(e) = staged {
+            return self.response_error(task, e);
         }
 
         Response {

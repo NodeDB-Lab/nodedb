@@ -16,6 +16,7 @@
 mod compaction;
 mod core;
 mod corpus_stats;
+mod doc_image;
 mod doc_terms;
 mod errors;
 mod indexing;
@@ -24,6 +25,7 @@ mod search;
 mod synonyms;
 
 pub use core::InvertedIndex;
+pub use doc_image::FtsDocImage;
 pub use indexing::IndexDocScope;
 pub use nodedb_fts::FtsSearchParams;
 pub use nodedb_fts::posting::{MatchOffset, Posting, QueryMode, TextSearchResult};

@@ -20,7 +20,15 @@ pub(crate) enum WalDurability {
     /// is what makes WAL-LSN order equal dispatcher-enqueue order per key; the
     /// strict-FIFO per-database WFQ then makes apply order follow enqueue
     /// order, so restart replay (in LSN order) cannot diverge from live state.
-    AppendHere { now_override: Option<u64> },
+    ///
+    /// `apply_key` is the idempotency key of the replicated proposal this
+    /// write applies, `0` for a write no proposal carries. Every record the
+    /// funnel appends for the write carries it in its header, so the record
+    /// names the proposal it applied in the same durable write.
+    AppendHere {
+        now_override: Option<u64>,
+        apply_key: u64,
+    },
     /// The caller already recorded this write's durability elsewhere — COMMIT's
     /// single `Transaction` record, the procedural batch flush, a trigger /
     /// sync path that owns its own funnel — and supplies the LSN it minted.

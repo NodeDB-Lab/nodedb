@@ -35,6 +35,19 @@ impl WalManager {
         self.append_record(RecordType::TransactionRedo, tid, vs, db, &payload)
     }
 
+    /// Append a `TransactionRedo` record whose payload is an already-encoded
+    /// redo record. Used by the committed-redo apply path, which carries the
+    /// record encoded on the plan it dispatches.
+    pub fn append_transaction_redo_bytes(
+        &self,
+        tid: TenantId,
+        vs: VShardId,
+        db: DatabaseId,
+        payload: &[u8],
+    ) -> crate::Result<Lsn> {
+        self.append_record(RecordType::TransactionRedo, tid, vs, db, payload)
+    }
+
     pub fn append_crdt_delta(
         &self,
         tid: TenantId,

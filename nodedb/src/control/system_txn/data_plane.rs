@@ -55,4 +55,8 @@ impl TxnDataPlane for SystemTxnDataPlane<'_> {
             .await
         })
     }
+
+    fn event_source(&self) -> crate::event::EventSource {
+        self.event_source
+    }
 }

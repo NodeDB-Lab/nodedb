@@ -5,11 +5,11 @@
 //! read path — PK point lookups and filtered aggregates, not just full scans —
 //! on the writing connection and on fresh connections.
 //!
-//! Pre-fix, `NativeTxnDp::dispatch_no_wal` routed the commit's `MetaOp`
-//! tasks through the gateway without `task.vshard_id`; the gateway's
-//! `primary_vshard` fallback sent them to vShard 0, so the commit batch was
-//! durably applied on the wrong core. The bug needs (a) the gateway wired,
-//! as production boot does, and (b) more than one Data Plane core, so that
+//! The statement's `StageWrite` and the commit's `MetaOp` tasks name no
+//! collection. Routed through the gateway, its `primary_vshard` fallback
+//! sends them to vShard 0: the write stages in core 0's overlay, and the
+//! owning core resolves and installs nothing. The case needs the gateway
+//! wired, as production boot does, and more than one Data Plane core, so
 //! vShard 0 and the collection's owning vShard live on different cores.
 
 use std::time::Duration;

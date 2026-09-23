@@ -10,7 +10,7 @@ use nodedb_physical::physical_plan::KvResolveOutcome;
 use super::context::{ResolveResult, ResolvedPut, expiry_from_ttl, one, put_mutation};
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::kv::atomic::KvAtomicCtx;
+use crate::data::executor::handlers::kv::atomic::{KvAtomicCtx, atomic_error_code};
 use crate::data::executor::handlers::kv::rls::admit_kv_row;
 use crate::data::executor::response_codec;
 use crate::engine::kv::current_ms;
@@ -20,24 +20,6 @@ use crate::engine::kv::engine_atomic_compute as compute;
 /// atomic's reply, exactly as the live handlers do.
 fn base64_body(body: Option<&[u8]>) -> Option<String> {
     body.map(|v| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, v))
-}
-
-/// Translate an `AtomicError` into the `ErrorCode` the live handler returns
-/// for it.
-fn atomic_error_code(error: crate::engine::kv::AtomicError, collection: &str) -> ErrorCode {
-    match error {
-        crate::engine::kv::AtomicError::TypeMismatch { detail } => ErrorCode::TypeMismatch {
-            collection: collection.to_string(),
-            detail,
-        },
-        crate::engine::kv::AtomicError::Overflow => ErrorCode::OverflowError {
-            collection: collection.to_string(),
-        },
-        crate::engine::kv::AtomicError::Encode { detail } => ErrorCode::Internal { detail },
-        // The gate is consulted out here, not inside the engine, so the
-        // engine's own rejection path is unreachable from a compute call.
-        crate::engine::kv::AtomicError::Rejected(error) => (*error).into(),
-    }
 }
 
 impl CoreLoop {
@@ -146,13 +128,15 @@ impl CoreLoop {
         if self.kv_engine.is_over_budget() {
             return Err(ErrorCode::ResourcesExhausted);
         }
-        // Decided before the swap, same as `execute_kv_cas`: `new_value` is
-        // caller-supplied, so the post-swap row is known up front.
-        admit_kv_row(rls_write_check, new_value, key, tid, collection)?;
-
         let now_ms = self.kv_atomic_now_ms();
         let current = self.kv_resolve_read(did, tid, collection, key, now_ms);
-        let (matches, write_bytes) = compute::cas(current.as_deref(), expected, new_value);
+        let (matches, write_bytes) = compute::cas(current.as_deref(), expected, new_value)
+            .map_err(|e| atomic_error_code(e, collection))?;
+        // Decided on the image the swap stores, same as `execute_kv_cas`: a
+        // swap into a typed row stores the row, not `new_value` itself.
+        if matches {
+            admit_kv_row(rls_write_check, &write_bytes, key, tid, collection)?;
+        }
 
         let response_payload = response_codec::encode_json_as_msgpack(&serde_json::json!({
             "success": matches,
@@ -199,11 +183,12 @@ impl CoreLoop {
         if self.kv_engine.is_over_budget() {
             return Err(ErrorCode::ResourcesExhausted);
         }
-        admit_kv_row(rls_write_check, new_value, key, tid, collection)?;
-
         let now_ms = self.kv_atomic_now_ms();
         let old = self.kv_resolve_read(did, tid, collection, key, now_ms);
-        let write_bytes = compute::getset(old.as_deref(), new_value);
+        let write_bytes = compute::getset(old.as_deref(), new_value)
+            .map_err(|e| atomic_error_code(e, collection))?;
+        // Decided on the image the write stores, same as `execute_kv_getset`.
+        admit_kv_row(rls_write_check, &write_bytes, key, tid, collection)?;
 
         let disclosable_old = match &old {
             Some(bytes) => match self.row_passes_rls(bytes, rls_filters) {

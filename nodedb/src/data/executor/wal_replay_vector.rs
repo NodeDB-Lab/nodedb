@@ -2,55 +2,13 @@
 
 //! WAL replay for vector engine startup recovery.
 
-use crate::bridge::envelope::{PhysicalPlan, Priority, Request};
-use crate::data::executor::replay_abort::abort_replay;
-use crate::data::executor::task::{ExecutionTask, TaskState};
-use crate::types::{DatabaseId, ReadConsistency};
+use crate::bridge::envelope::PhysicalPlan;
+use crate::types::DatabaseId;
 
 use super::core_loop::CoreLoop;
+use super::wal_replay_vector_redo::RedoVectorWrite;
 
 impl CoreLoop {
-    /// Build a synthetic `ExecutionTask` for WAL replay.
-    ///
-    /// Mirrors the equivalent helper in `timeseries_wal.rs`. The task carries
-    /// no meaningful request semantics — it is only needed so that the handler
-    /// methods can return a typed `Response`.
-    pub(in crate::data::executor) fn replay_vector_task(
-        tenant_id: crate::types::TenantId,
-        database_id: DatabaseId,
-        vshard_id: crate::types::VShardId,
-        plan: PhysicalPlan,
-    ) -> ExecutionTask {
-        ExecutionTask {
-            request: Request {
-                request_id: crate::types::RequestId::new(0),
-                tenant_id,
-                database_id,
-                vshard_id,
-                plan,
-                deadline: std::time::Instant::now()
-                    + crate::data::executor::deadline::REPLAY_DEADLINE,
-                priority: Priority::Normal,
-                trace_id: crate::types::TraceId::ZERO,
-                consistency: ReadConsistency::Strong,
-                idempotency_key: None,
-                event_source: crate::event::EventSource::User,
-                user_roles: Vec::new(),
-                user_id: None,
-                statement_digest: None,
-                txn_id: None,
-                wal_lsn: None,
-                resolved_now_ms: None,
-                admission: crate::bridge::envelope::Admission::Exempt(
-                    crate::bridge::envelope::ExemptReason::AlreadyOrdered,
-                ),
-            },
-            state: TaskState::Running,
-            wal_lsn: None,
-            resolved_now_ms: None,
-        }
-    }
-
     /// Replay WAL vector records to rebuild in-memory HNSW indexes after crash.
     ///
     /// Called once during startup, after `open()` but before the event loop.
@@ -100,6 +58,12 @@ impl CoreLoop {
             let database_id = record.header.database_id;
             let record_lsn = record.header.lsn;
             let tombstones = tombstones.for_database(database_id);
+
+            // A committed redo record carries no index DDL; left unclaimed,
+            // the validate pass refuses a record that does.
+            if (is_index_drop || is_vector_params) && self.applying_committed_redo() {
+                continue;
+            }
 
             if is_index_drop {
                 // Applied in LSN order, so it wipes the params / puts that
@@ -158,10 +122,9 @@ impl CoreLoop {
                         // payload, so a disagreement is not a schema change the
                         // record predates — it is a record whose two halves
                         // cannot both be what the writer wrote.
-                        abort_replay(
+                        self.replay_record_unapplied(
                             "vector",
                             "dim",
-                            self.core_id,
                             record_lsn,
                             &format!(
                                 "record for '{collection}' declares dim {dim} but carries {} \
@@ -169,6 +132,8 @@ impl CoreLoop {
                                 vector.len()
                             ),
                         );
+                        skipped += 1;
+                        continue;
                     }
                     // Checkpoint watermark gate: a restored checkpoint already
                     // contains every write at or below its `checkpoint_wal_lsn`.
@@ -182,13 +147,31 @@ impl CoreLoop {
                         &collection,
                         &field_name,
                     );
-                    if let Some(existing) = self.vector_collections.get(&insert_index_key)
-                        && record_lsn <= existing.checkpoint_wal_lsn()
-                    {
+                    if self.replay_watermark_skips(
+                        self.vector_collections
+                            .get(&insert_index_key)
+                            .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
+                    ) {
                         skipped += 1;
                         continue;
                     }
                     let surrogate = nodedb_types::Surrogate::new(surrogate_u32);
+                    if !self.redo_vector_prelude(
+                        RedoVectorWrite {
+                            index_key: &insert_index_key,
+                            tid: tenant_id,
+                            collection: &collection,
+                            dim,
+                            surrogates: &[surrogate],
+                            ids: &[],
+                            sidecars: false,
+                        },
+                        provenance.as_ref(),
+                        record_lsn,
+                    ) {
+                        skipped += 1;
+                        continue;
+                    }
                     // Local replay rebinds by the carried surrogate; the
                     // compat doc-id slot (always `None` on this write path)
                     // maps straight through to `pk_bytes` for fidelity.
@@ -226,16 +209,18 @@ impl CoreLoop {
                         },
                     );
                     if response.status != crate::bridge::envelope::Status::Ok {
-                        abort_replay(
+                        self.replay_record_unapplied(
                             "vector",
                             "insert_handler",
-                            self.core_id,
                             record_lsn,
                             &format!(
                                 "the vector insert handler rejected a committed write into \
-                                 '{collection}'"
+                                 '{collection}': {:?}",
+                                response.error_code
                             ),
                         );
+                        skipped += 1;
+                        continue;
                     }
                     // Advance the (possibly freshly created) collection's
                     // watermark so the next checkpoint records this replayed
@@ -249,6 +234,11 @@ impl CoreLoop {
                         &record.payload,
                     )
                 {
+                    // A committed redo record never carries this shape; left
+                    // unclaimed, the validate pass refuses the record.
+                    if self.applying_committed_redo() {
+                        continue;
+                    }
                     if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
                         skipped += 1;
                         continue;
@@ -258,10 +248,9 @@ impl CoreLoop {
                         // payload, so a disagreement is not a schema change the
                         // record predates — it is a record whose two halves
                         // cannot both be what the writer wrote.
-                        abort_replay(
+                        self.replay_record_unapplied(
                             "vector",
                             "dim",
-                            self.core_id,
                             record_lsn,
                             &format!(
                                 "record for '{collection}' declares dim {dim} but carries {} \
@@ -269,6 +258,8 @@ impl CoreLoop {
                                 vector.len()
                             ),
                         );
+                        skipped += 1;
+                        continue;
                     }
                     let index_key = CoreLoop::vector_index_key(
                         database_id,
@@ -277,9 +268,11 @@ impl CoreLoop {
                         &field_name,
                     );
                     // Checkpoint watermark gate (see the surrogate arm above).
-                    if let Some(existing) = self.vector_collections.get(&index_key)
-                        && record_lsn <= existing.checkpoint_wal_lsn()
-                    {
+                    if self.replay_watermark_skips(
+                        self.vector_collections
+                            .get(&index_key)
+                            .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
+                    ) {
                         skipped += 1;
                         continue;
                     }
@@ -307,12 +300,15 @@ impl CoreLoop {
                     // than malformed, so this stays a skip: aborting here would
                     // wedge the boot on a retained pre-rebuild tail.
                     if index.dim() != dim {
-                        tracing::warn!(
-                            core = self.core_id,
-                            %collection,
-                            index_dim = index.dim(),
-                            record_dim = dim,
-                            "skipping WAL vector record: index dimension mismatch"
+                        let index_dim = index.dim();
+                        self.replay_record_rejected(
+                            "vector",
+                            record_lsn,
+                            None,
+                            &format!(
+                                "vector record for '{collection}' has dim {dim}, the index has \
+                                 dim {index_dim}"
+                            ),
                         );
                         continue;
                     }
@@ -327,6 +323,11 @@ impl CoreLoop {
                 } else if let Ok((collection, vector, dim)) =
                     zerompk::from_msgpack::<(String, Vec<f32>, usize)>(&record.payload)
                 {
+                    // A committed redo record never carries this shape; left
+                    // unclaimed, the validate pass refuses the record.
+                    if self.applying_committed_redo() {
+                        continue;
+                    }
                     if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
                         skipped += 1;
                         continue;
@@ -336,10 +337,9 @@ impl CoreLoop {
                         // payload, so a disagreement is not a schema change the
                         // record predates — it is a record whose two halves
                         // cannot both be what the writer wrote.
-                        abort_replay(
+                        self.replay_record_unapplied(
                             "vector",
                             "dim",
-                            self.core_id,
                             record_lsn,
                             &format!(
                                 "record for '{collection}' declares dim {dim} but carries {} \
@@ -347,13 +347,17 @@ impl CoreLoop {
                                 vector.len()
                             ),
                         );
+                        skipped += 1;
+                        continue;
                     }
                     let index_key =
                         CoreLoop::vector_index_key(database_id, tenant_id, &collection, "");
                     // Checkpoint watermark gate (see the surrogate arm above).
-                    if let Some(existing) = self.vector_collections.get(&index_key)
-                        && record_lsn <= existing.checkpoint_wal_lsn()
-                    {
+                    if self.replay_watermark_skips(
+                        self.vector_collections
+                            .get(&index_key)
+                            .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
+                    ) {
                         skipped += 1;
                         continue;
                     }
@@ -381,12 +385,15 @@ impl CoreLoop {
                     // than malformed, so this stays a skip: aborting here would
                     // wedge the boot on a retained pre-rebuild tail.
                     if index.dim() != dim {
-                        tracing::warn!(
-                            core = self.core_id,
-                            %collection,
-                            index_dim = index.dim(),
-                            record_dim = dim,
-                            "skipping WAL vector record: index dimension mismatch"
+                        let index_dim = index.dim();
+                        self.replay_record_rejected(
+                            "vector",
+                            record_lsn,
+                            None,
+                            &format!(
+                                "vector record for '{collection}' has dim {dim}, the index has \
+                                 dim {index_dim}"
+                            ),
                         );
                         continue;
                     }
@@ -403,9 +410,27 @@ impl CoreLoop {
                     let index_key =
                         CoreLoop::vector_index_key(database_id, tenant_id, &collection, "");
                     // Checkpoint watermark gate (see the surrogate arm above).
-                    if let Some(existing) = self.vector_collections.get(&index_key)
-                        && record_lsn <= existing.checkpoint_wal_lsn()
-                    {
+                    if self.replay_watermark_skips(
+                        self.vector_collections
+                            .get(&index_key)
+                            .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
+                    ) {
+                        skipped += 1;
+                        continue;
+                    }
+                    if !self.redo_vector_prelude(
+                        RedoVectorWrite {
+                            index_key: &index_key,
+                            tid: tenant_id,
+                            collection: &collection,
+                            dim,
+                            surrogates: &[],
+                            ids: &[],
+                            sidecars: false,
+                        },
+                        None,
+                        record_lsn,
+                    ) {
                         skipped += 1;
                         continue;
                     }
@@ -432,89 +457,16 @@ impl CoreLoop {
                     inserted += 1;
                 }
             } else if is_vector_delete {
-                // Decode order (longest shape first for backward compatibility):
-                //
-                //   4-element: (collection, surrogate_u32, field_name, Option<SyncProvenance>)
-                //     → sync-path delete-by-surrogate; routes through the handler so the
-                //       idempotency gate fires on replay.
-                //
-                //   3-element: (collection, vector_id, Option<SyncProvenance>)
-                //     → local delete-by-node-id with provenance (discarded here).
-                //
-                //   2-element: (collection, vector_id)
-                //     → legacy shape; direct node-id deletion.
-                if let Ok((collection, surrogate_u32, field_name, provenance)) =
-                    zerompk::from_msgpack::<(
-                        String,
-                        u32,
-                        String,
-                        Option<nodedb_types::sync::wire::SyncProvenance>,
-                    )>(&record.payload)
-                {
-                    if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
-                        skipped += 1;
-                        continue;
-                    }
-                    let surrogate = nodedb_types::Surrogate::new(surrogate_u32);
-                    let vshard = crate::types::VShardId::from_collection_in_database(
-                        DatabaseId::new(database_id),
-                        &collection,
-                    );
-                    let task = Self::replay_vector_task(
-                        nodedb_types::TenantId::new(tenant_id),
-                        DatabaseId::new(database_id),
-                        vshard,
-                        PhysicalPlan::Vector(
-                            nodedb_physical::physical_plan::VectorOp::DeleteBySurrogate {
-                                collection: nodedb_types::QualifiedCollection::from_stored(
-                                    collection.clone(),
-                                ),
-                                surrogate,
-                                field_name: field_name.clone(),
-                                provenance: provenance.clone(),
-                            },
-                        ),
-                    );
-                    let response = self.execute_vector_delete_by_surrogate(
-                        &task,
-                        tenant_id,
-                        &collection,
-                        surrogate,
-                        &field_name,
-                        provenance.as_ref(),
-                    );
-                    if response.status != crate::bridge::envelope::Status::Ok {
-                        tracing::warn!(
-                            core = self.core_id,
-                            %collection,
-                            lsn = record_lsn,
-                            "WAL vector replay: delete-by-surrogate handler returned error; skipping"
-                        );
-                        skipped += 1;
-                        continue;
-                    }
+                if self.replay_vector_delete_record(
+                    &record.payload,
+                    tenant_id,
+                    database_id,
+                    record_lsn,
+                    &tombstones,
+                ) {
                     deleted += 1;
                 } else {
-                    // Legacy: 3-element (with discarded provenance) or 2-element.
-                    let delete_decoded = zerompk::from_msgpack::<(
-                        String,
-                        u32,
-                        Option<nodedb_types::sync::wire::SyncProvenance>,
-                    )>(&record.payload)
-                    .map(|(c, id, _prov)| (c, id))
-                    .or_else(|_| zerompk::from_msgpack::<(String, u32)>(&record.payload));
-                    if let Ok((collection, vector_id)) = delete_decoded {
-                        if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
-                            skipped += 1;
-                            continue;
-                        }
-                        let index_key =
-                            CoreLoop::vector_index_key(database_id, tenant_id, &collection, "");
-                        if let Some(index) = self.vector_collections.get_mut(&index_key) {
-                            index.delete(vector_id);
-                            deleted += 1;
-                        }
-                    }
+                    skipped += 1;
                 }
             }
         }

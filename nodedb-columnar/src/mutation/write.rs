@@ -203,16 +203,36 @@ impl MutationEngine {
     ///
     /// NOTE: The caller must provide the full old row values for the re-insert.
     /// This method takes the complete new row (already merged with old values).
+    ///
+    /// The new row keeps the cross-engine surrogate the old row carried. A
+    /// memtable row's surrogate is in this engine's side table. A flushed
+    /// row's surrogate is in its segment's sidecar, outside this engine, so
+    /// the caller passes it as `flushed_surrogate`. It is read only when the
+    /// old row is flushed.
     pub fn update(
         &mut self,
         old_pk: &Value,
         new_values: &[Value],
+        flushed_surrogate: Option<Surrogate>,
     ) -> Result<MutationResult, ColumnarError> {
+        let surrogate = match self.pk_index.get(&encode_pk(old_pk)) {
+            Some(loc) if loc.segment_id == self.memtable_segment_id => self
+                .memtable_surrogates
+                .get(loc.row_index as usize)
+                .copied()
+                .flatten(),
+            Some(_) => flushed_surrogate,
+            None => None,
+        };
+
         // Delete the old row.
         let delete_result = self.delete(old_pk)?;
 
-        // Insert the new row.
-        let insert_result = self.insert(new_values)?;
+        // Insert the new row under the old row's surrogate.
+        let insert_result = match surrogate {
+            Some(surrogate) => self.insert_with_surrogate(new_values, surrogate)?,
+            None => self.insert(new_values)?,
+        };
 
         // Combine WAL records.
         let mut wal_records = delete_result.wal_records;

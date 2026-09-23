@@ -16,6 +16,9 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::point::apply_delete::PointDeleteParams;
 use crate::data::executor::handlers::returning_doc;
 use crate::data::executor::handlers::returning_rows;
+use crate::data::executor::handlers::transaction::undo::document_outcome::{
+    DocumentRow, push_delete_undo,
+};
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::{RowIdentity, StorageKey};
 use nodedb_physical::physical_plan::ReturningSpec;
@@ -111,7 +114,9 @@ impl CoreLoop {
         };
 
         let response = if let Some(bytes) = materialized {
-            self.materialize_document_write(
+            // The Loro row and its sparse projection answer the same reads, so
+            // a projection that did not land fails the write.
+            if let Err(error) = self.materialize_document_write(
                 task,
                 super::crdt_materialize::CrdtMaterializeWrite {
                     tid: tenant_id.as_u64(),
@@ -121,7 +126,9 @@ impl CoreLoop {
                     value: &bytes,
                     index_text: true,
                 },
-            );
+            ) {
+                return self.response_error(task, error);
+            }
             if let Some(spec) = returning {
                 // No strict schema: a CRDT row's stored body is whatever
                 // `encode_crdt_row` materialized from Loro, which is always
@@ -256,11 +263,27 @@ impl CoreLoop {
             );
         }
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
+        let prior_value = outcome.prior_value.clone();
+        if self.recording_redo_undo() {
+            let mut undo = Vec::new();
+            push_delete_undo(
+                &mut undo,
+                DocumentRow {
+                    database_id: task.request.database_id.as_u64(),
+                    tid,
+                    collection,
+                    storage_key,
+                    identity: RowIdentity::from_user_key(document_id),
+                },
+                outcome,
+            );
+            self.record_redo_undo(undo);
+        }
 
         // Emit the delete to the Event Plane only when a row was actually
         // removed, threading the pre-delete bytes through as `old_value` so
         // CDC/change-stream consumers observe the prior state.
-        if let Some(prior_bytes) = outcome.prior_value.as_deref() {
+        if let Some(prior_bytes) = prior_value.as_deref() {
             let old_converted = self.resolve_event_payload(
                 task.request.database_id.as_u64(),
                 tid,
@@ -275,12 +298,12 @@ impl CoreLoop {
             );
         }
 
-        // Project the pre-deletion row for RETURNING. `outcome.prior_value` is
+        // Project the pre-deletion row for RETURNING. `prior_value` is
         // only borrowed by the CDC emit above (via `.as_deref()`), so it is
         // still available here; the user-visible `document_id` is injected as
         // `id` exactly like PointDelete.
         let response = if let Some(spec) = returning {
-            if let Some(prior_bytes) = outcome.prior_value.as_deref() {
+            if let Some(prior_bytes) = prior_value.as_deref() {
                 // No strict schema — see the upsert path: a CRDT row is
                 // materialized as MessagePack in either storage mode.
                 let doc = match returning_doc::from_stored(
@@ -318,7 +341,7 @@ impl CoreLoop {
         } else {
             // No RETURNING: report what the delete actually removed. A tombstone
             // written over an already-absent document removes nothing.
-            self.response_affected(task, u64::from(outcome.prior_value.is_some()))
+            self.response_affected(task, u64::from(prior_value.is_some()))
         };
         self.checkpoint_coordinator.mark_dirty("crdt", 1);
         response

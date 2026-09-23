@@ -43,7 +43,6 @@
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::spatial_sync::SpatialInsertExec;
-use crate::data::executor::replay_abort::abort_replay;
 use crate::data::executor::task::{ExecutionTask, TaskState};
 use crate::types::{DatabaseId, ReadConsistency};
 use nodedb_physical::physical_plan::SpatialOp;
@@ -51,6 +50,27 @@ use nodedb_types::Surrogate;
 use nodedb_wal::record::RecordType;
 
 impl CoreLoop {
+    /// In the install pass of a committed-redo apply, record the undo of one
+    /// spatial write before it runs: the row's pre-image and the sync
+    /// high-water mark. Returns `false` when the pre-image cannot be read;
+    /// the error is kept on the apply and the write is skipped.
+    fn record_spatial_row_undo(
+        &mut self,
+        database_id: DatabaseId,
+        tenant_id: u64,
+        (collection, field): (&str, &str),
+        surrogate: Surrogate,
+        provenance: &nodedb_types::sync::wire::SyncProvenance,
+    ) -> bool {
+        if !self.recording_redo_undo() {
+            return true;
+        }
+        let captured = self
+            .capture_spatial_row_undo(database_id, tenant_id, collection, field, surrogate)
+            .map(|row| std::iter::once(row).chain(self.capture_sync_hwm_undo(Some(provenance))));
+        self.record_redo_capture(captured)
+    }
+
     /// Build a synthetic `ExecutionTask` for Spatial WAL replay.
     fn replay_spatial_task(
         tenant_id: crate::types::TenantId,
@@ -133,13 +153,16 @@ impl CoreLoop {
             if is_spatial_put {
                 let payload = match SpatialPutPayload::from_bytes(&record.payload) {
                     Ok(p) => p,
-                    Err(e) => abort_replay(
-                        "spatial",
-                        "decode_put",
-                        self.core_id,
-                        record_lsn,
-                        &format!("SpatialPutPayload could not be decoded: {e}"),
-                    ),
+                    Err(e) => {
+                        self.replay_record_unapplied(
+                            "spatial",
+                            "decode_put",
+                            record_lsn,
+                            &format!("SpatialPutPayload could not be decoded: {e}"),
+                        );
+                        skipped += 1;
+                        continue;
+                    }
                 };
 
                 if tombstones.is_tombstoned(
@@ -154,35 +177,54 @@ impl CoreLoop {
 
                 let surrogate = match u32::from_str_radix(&payload.doc_id, 16) {
                     Ok(raw) => Surrogate::new(raw),
-                    Err(e) => abort_replay(
-                        "spatial",
-                        "doc_id",
-                        self.core_id,
-                        record_lsn,
-                        &format!(
-                            "doc_id '{}' is not the hex surrogate the insert path writes: {e}",
-                            payload.doc_id
-                        ),
-                    ),
+                    Err(e) => {
+                        self.replay_record_unapplied(
+                            "spatial",
+                            "doc_id",
+                            record_lsn,
+                            &format!(
+                                "doc_id '{}' is not the hex surrogate the insert path writes: {e}",
+                                payload.doc_id
+                            ),
+                        );
+                        skipped += 1;
+                        continue;
+                    }
                 };
 
                 // Decode geometry from msgpack bytes stored in the WAL payload.
                 let geometry: nodedb_types::geometry::Geometry =
                     match zerompk::from_msgpack(&payload.geometry_bytes) {
                         Ok(g) => g,
-                        Err(e) => abort_replay(
-                            "spatial",
-                            "geometry",
-                            self.core_id,
-                            record_lsn,
-                            &format!(
-                                "the geometry committed into '{}' could not be decoded: {e}",
-                                payload.collection
-                            ),
-                        ),
+                        Err(e) => {
+                            self.replay_record_unapplied(
+                                "spatial",
+                                "geometry",
+                                record_lsn,
+                                &format!(
+                                    "the geometry committed into '{}' could not be decoded: {e}",
+                                    payload.collection
+                                ),
+                            );
+                            skipped += 1;
+                            continue;
+                        }
                     };
 
                 let prov = payload.provenance.clone();
+                if self.claim_for_validation() {
+                    continue;
+                }
+                if !self.record_spatial_row_undo(
+                    database_id,
+                    tenant_id,
+                    (&payload.collection, &payload.field),
+                    surrogate,
+                    &prov,
+                ) {
+                    skipped += 1;
+                    continue;
+                }
 
                 let vshard = crate::types::VShardId::from_collection_in_database(
                     database_id,
@@ -214,29 +256,33 @@ impl CoreLoop {
                 });
 
                 if response.status != crate::bridge::envelope::Status::Ok {
-                    abort_replay(
+                    self.replay_record_unapplied(
                         "spatial",
                         "insert_handler",
-                        self.core_id,
                         record_lsn,
                         &format!(
-                            "the SpatialInsert handler rejected a committed write into '{}'",
-                            payload.collection
+                            "the SpatialInsert handler rejected a committed write into '{}': {:?}",
+                            payload.collection, response.error_code
                         ),
                     );
+                    skipped += 1;
+                    continue;
                 }
                 inserted += 1;
             } else {
                 // SpatialDelete
                 let payload = match SpatialDeletePayload::from_bytes(&record.payload) {
                     Ok(p) => p,
-                    Err(e) => abort_replay(
-                        "spatial",
-                        "decode_delete",
-                        self.core_id,
-                        record_lsn,
-                        &format!("SpatialDeletePayload could not be decoded: {e}"),
-                    ),
+                    Err(e) => {
+                        self.replay_record_unapplied(
+                            "spatial",
+                            "decode_delete",
+                            record_lsn,
+                            &format!("SpatialDeletePayload could not be decoded: {e}"),
+                        );
+                        skipped += 1;
+                        continue;
+                    }
                 };
 
                 if tombstones.is_tombstoned(
@@ -251,19 +297,35 @@ impl CoreLoop {
 
                 let surrogate = match u32::from_str_radix(&payload.doc_id, 16) {
                     Ok(raw) => Surrogate::new(raw),
-                    Err(e) => abort_replay(
-                        "spatial",
-                        "doc_id",
-                        self.core_id,
-                        record_lsn,
-                        &format!(
-                            "doc_id '{}' is not the hex surrogate the insert path writes: {e}",
-                            payload.doc_id
-                        ),
-                    ),
+                    Err(e) => {
+                        self.replay_record_unapplied(
+                            "spatial",
+                            "doc_id",
+                            record_lsn,
+                            &format!(
+                                "doc_id '{}' is not the hex surrogate the insert path writes: {e}",
+                                payload.doc_id
+                            ),
+                        );
+                        skipped += 1;
+                        continue;
+                    }
                 };
 
                 let prov = payload.provenance.clone();
+                if self.claim_for_validation() {
+                    continue;
+                }
+                if !self.record_spatial_row_undo(
+                    database_id,
+                    tenant_id,
+                    (&payload.collection, &payload.field),
+                    surrogate,
+                    &prov,
+                ) {
+                    skipped += 1;
+                    continue;
+                }
 
                 let vshard = crate::types::VShardId::from_collection_in_database(
                     database_id,
@@ -293,16 +355,17 @@ impl CoreLoop {
                 );
 
                 if response.status != crate::bridge::envelope::Status::Ok {
-                    abort_replay(
+                    self.replay_record_unapplied(
                         "spatial",
                         "delete_handler",
-                        self.core_id,
                         record_lsn,
                         &format!(
-                            "the SpatialDelete handler rejected a committed delete in '{}'",
-                            payload.collection
+                            "the SpatialDelete handler rejected a committed delete in '{}': {:?}",
+                            payload.collection, response.error_code
                         ),
                     );
+                    skipped += 1;
+                    continue;
                 }
                 deleted += 1;
             }

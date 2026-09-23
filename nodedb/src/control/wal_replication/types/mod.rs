@@ -16,15 +16,18 @@
 //! - [`wire_shapes`]: small wire-format types embedded inside [`ReplicatedWrite`].
 //! - [`replicated_write`]: the [`ReplicatedWrite`] enum itself.
 //! - [`replicated_entry`]: [`ReplicatedEntry`] (routing envelope) + (de)serialization.
+//! - [`transaction_redo_wire`]: wire types of the committed-transaction redo entry.
 
 mod aliases;
 mod replicated_entry;
 mod replicated_write;
+mod transaction_redo_wire;
 mod wire_shapes;
 
 pub use aliases::{AsyncRaftProposer, RaftAppliedIndexSink, RaftCompactor, RaftProposer};
 pub use replicated_entry::ReplicatedEntry;
 pub use replicated_write::ReplicatedWrite;
+pub use transaction_redo_wire::{ReplicatedEventSource, ReplicatedIdentity};
 pub use wire_shapes::{
     BalanceDeltaFields, ColumnarResolvedRow, ConstraintChangeOp, DocumentResolvedMutationWire,
     KvResolvedMutationWire, ReplicatedBatchEdge, ReplicatedSumTarget,

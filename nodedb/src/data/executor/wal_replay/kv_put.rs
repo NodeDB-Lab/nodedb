@@ -31,7 +31,7 @@
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::write_index::KeyRepr;
-use crate::data::executor::replay_abort::abort_replay;
+use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use nodedb_types::Surrogate;
 
 /// Inputs shared by both arms, bundled so each stays under the
@@ -67,6 +67,19 @@ impl CoreLoop {
 
         if self.skip_kv_replay_record(tombstones, tenant_id, &collection, record_lsn) {
             return Some(0);
+        }
+        if self.claim_for_validation() {
+            return Some(0);
+        }
+        if self.recording_redo_undo() {
+            let prior =
+                self.kv_engine
+                    .entry_image(database_id, tenant_id, &collection, &key, now_ms);
+            self.record_redo_undo([UndoEntry::KvPut {
+                collection: collection.clone(),
+                key: key.clone(),
+                prior,
+            }]);
         }
 
         let params = crate::engine::kv::KvPutParams {
@@ -118,10 +131,9 @@ impl CoreLoop {
         // lengths disagree cannot be applied without guessing which row owns
         // which identity, so it aborts rather than binding the wrong one.
         if surrogates.len() != entries.len() {
-            abort_replay(
+            self.replay_record_unapplied(
                 "kv",
                 "batch_put_surrogates",
-                self.core_id,
                 record_lsn,
                 &format!(
                     "kv_batch_put into '{collection}' carries {} entries but {} surrogates",
@@ -129,6 +141,7 @@ impl CoreLoop {
                     surrogates.len()
                 ),
             );
+            return Some(0);
         }
 
         let params = crate::engine::kv::KvBatchPutParams {

@@ -7,6 +7,6 @@ pub mod rebalancer;
 pub mod test_node;
 
 pub use calvin_test_node::{
-    CalvinApplier, CalvinTestNode, spawn_with_sequencer, wait_for_sequencer_leader,
+    CalvinApplier, CalvinTestNode, spawn_with_sequencer, try_recv_txn, wait_for_sequencer_leader,
 };
 pub use test_node::{NoopApplier, TestNode, test_transport, wait_for};

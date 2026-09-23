@@ -1,11 +1,52 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+use std::cell::Cell;
+
+use nodedb_wal::RecordTarget;
 use nodedb_wal::record::RecordType;
 
 use super::core::WalManager;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 
+thread_local! {
+    /// The proposal whose apply the current thread is appending records for,
+    /// `0` outside one. Set only by [`WalManager::with_apply_key`].
+    static APPLY_KEY: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Restores the thread's prior apply key when a keyed append scope ends,
+/// panics included.
+struct ApplyKeyScope {
+    prior: u64,
+}
+
+impl Drop for ApplyKeyScope {
+    fn drop(&mut self) {
+        APPLY_KEY.with(|key| key.set(self.prior));
+    }
+}
+
+/// The apply key of the proposal the current thread is appending for, `0`
+/// outside one.
+pub(super) fn current_apply_key() -> u64 {
+    APPLY_KEY.with(Cell::get)
+}
+
 impl WalManager {
+    /// Run `append` with every record this thread appends inside it carrying
+    /// `apply_key` in its header: the idempotency key of the replicated
+    /// proposal being applied. The record and the key become durable in one
+    /// write, so the apply loop recovers which proposals applied from the
+    /// records themselves.
+    ///
+    /// `append` must not await: the key is scoped to the calling thread, and
+    /// a WAL append is synchronous.
+    pub fn with_apply_key<R>(&self, apply_key: u64, append: impl FnOnce() -> R) -> R {
+        let prior = APPLY_KEY.with(|key| key.replace(apply_key));
+        let _scope = ApplyKeyScope { prior };
+        append()
+    }
+
     /// Internal: append a record of the given type to the WAL.
     pub(super) fn append_record(
         &self,
@@ -15,14 +56,18 @@ impl WalManager {
         database_id: DatabaseId,
         payload: &[u8],
     ) -> crate::Result<Lsn> {
+        let apply_key = current_apply_key();
         let mut wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
         let lsn = wal
-            .append(
-                record_type as u32,
-                tenant_id.as_u64(),
-                vshard_id.as_u32(),
-                database_id.as_u64(),
+            .append_keyed(
+                RecordTarget {
+                    record_type: record_type as u32,
+                    tenant_id: tenant_id.as_u64(),
+                    vshard_id: vshard_id.as_u32(),
+                    database_id: database_id.as_u64(),
+                },
                 payload,
+                apply_key,
             )
             .map_err(crate::Error::Wal)?;
         Ok(Lsn::new(lsn))

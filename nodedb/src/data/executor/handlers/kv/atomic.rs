@@ -26,6 +26,26 @@ pub(in crate::data::executor) struct KvAtomicCtx<'a> {
     pub(in crate::data::executor) rls_write_check: &'a nodedb_types::RlsWriteCheck,
 }
 
+/// The `ErrorCode` an atomic that computed or stored no value answers with.
+pub(in crate::data::executor) fn atomic_error_code(
+    error: AtomicError,
+    collection: &str,
+) -> ErrorCode {
+    match error {
+        AtomicError::TypeMismatch { detail } => ErrorCode::TypeMismatch {
+            collection: collection.to_string(),
+            detail,
+        },
+        AtomicError::Overflow => ErrorCode::OverflowError {
+            collection: collection.to_string(),
+        },
+        AtomicError::Encode { detail } => ErrorCode::Internal { detail },
+        // Nothing was written: the engine consults the gate before it
+        // installs the computed value.
+        AtomicError::Rejected(error) => (*error).into(),
+    }
+}
+
 impl CoreLoop {
     pub(in crate::data::executor) fn execute_kv_incr(
         &mut self,
@@ -98,25 +118,7 @@ impl CoreLoop {
                     ),
                 }
             }
-            Err(AtomicError::TypeMismatch { detail }) => self.response_error(
-                task,
-                ErrorCode::TypeMismatch {
-                    collection: collection.to_string(),
-                    detail,
-                },
-            ),
-            Err(AtomicError::Overflow) => self.response_error(
-                task,
-                ErrorCode::OverflowError {
-                    collection: collection.to_string(),
-                },
-            ),
-            Err(AtomicError::Encode { detail }) => {
-                self.response_error(task, ErrorCode::Internal { detail })
-            }
-            // Nothing was written: the engine consults the gate before it
-            // installs the computed value.
-            Err(AtomicError::Rejected(error)) => self.response_error(task, *error),
+            Err(error) => self.response_atomic_error(task, collection, error),
         }
     }
 
@@ -186,25 +188,7 @@ impl CoreLoop {
                     ),
                 }
             }
-            Err(AtomicError::TypeMismatch { detail }) => self.response_error(
-                task,
-                ErrorCode::TypeMismatch {
-                    collection: collection.to_string(),
-                    detail,
-                },
-            ),
-            Err(AtomicError::Overflow) => self.response_error(
-                task,
-                ErrorCode::OverflowError {
-                    collection: collection.to_string(),
-                },
-            ),
-            Err(AtomicError::Encode { detail }) => {
-                self.response_error(task, ErrorCode::Internal { detail })
-            }
-            // Nothing was written: the engine consults the gate before it
-            // installs the computed value.
-            Err(AtomicError::Rejected(error)) => self.response_error(task, *error),
+            Err(error) => self.response_atomic_error(task, collection, error),
         }
     }
 
@@ -229,18 +213,16 @@ impl CoreLoop {
             return self.response_error(task, ErrorCode::ResourcesExhausted);
         }
 
-        // `new_value` is caller-supplied, so the row that would exist after a
-        // successful swap is known before the engine is entered — decided here
-        // rather than after the fact.
-        if let Err(e) = super::rls::admit_kv_row(rls_write_check, new_value, key, tid, collection) {
-            return self.response_error(task, e);
-        }
-
         let now_ms: u64 = self
             .epoch_system_ms
             .map(|ms| ms as u64)
             .unwrap_or_else(current_ms);
-        let result = self.kv_engine.cas(
+        // A swap into a typed row stores the row with one column replaced, not
+        // `new_value` itself, so the policy decides the image the engine
+        // computes — see `Incr`.
+        let admit =
+            |image: &[u8]| super::rls::admit_kv_row(rls_write_check, image, key, tid, collection);
+        let result = match self.kv_engine.cas(
             crate::engine::kv::AtomicKeyCtx {
                 database_id: did,
                 tenant_id: tid,
@@ -251,9 +233,13 @@ impl CoreLoop {
             },
             expected,
             new_value,
-        );
+            &admit,
+        ) {
+            Ok(result) => result,
+            Err(error) => return self.response_atomic_error(task, collection, error),
+        };
 
-        if result.success {
+        if let Some(written) = &result.written {
             if let Some(ref m) = self.metrics {
                 m.record_kv_put();
             }
@@ -263,7 +249,7 @@ impl CoreLoop {
                 collection,
                 crate::event::WriteOp::Update,
                 crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
-                Some(new_value),
+                Some(written.as_slice()),
                 None,
             );
             self.note_kv_write_lsn(task, did, tid, collection, key);
@@ -274,7 +260,7 @@ impl CoreLoop {
             .as_ref()
             .map(|v| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, v));
         match response_codec::encode_json_as_msgpack(&serde_json::json!({
-            "success": result.success,
+            "success": result.success(),
             "current_value": current_b64,
         })) {
             Ok(payload) => self.response_with_payload(task, payload),
@@ -290,7 +276,7 @@ impl CoreLoop {
     /// `rls_filters` decides the OLD value handed back: `GETSET` is a read as
     /// much as a write, so a row the read policy hides must come back absent
     /// rather than being disclosed by the write that replaced it. The write
-    /// half is a separate decision on `new_value`.
+    /// half is a separate decision on the image the write stores.
     pub(in crate::data::executor) fn execute_kv_getset(
         &mut self,
         ctx: KvAtomicCtx<'_>,
@@ -312,17 +298,15 @@ impl CoreLoop {
             return self.response_error(task, ErrorCode::ResourcesExhausted);
         }
 
-        // The stored row is replaced wholesale, so the post-image is known
-        // before the engine call.
-        if let Err(e) = super::rls::admit_kv_row(rls_write_check, new_value, key, tid, collection) {
-            return self.response_error(task, e);
-        }
-
         let now_ms: u64 = self
             .epoch_system_ms
             .map(|ms| ms as u64)
             .unwrap_or_else(current_ms);
-        let old = self.kv_engine.getset(
+        // A write into a typed row stores the row with one column replaced, so
+        // the policy decides the image the engine computes — see `Incr`.
+        let admit =
+            |image: &[u8]| super::rls::admit_kv_row(rls_write_check, image, key, tid, collection);
+        let crate::engine::kv::GetSetResult { old, written } = match self.kv_engine.getset(
             crate::engine::kv::AtomicKeyCtx {
                 database_id: did,
                 tenant_id: tid,
@@ -332,7 +316,11 @@ impl CoreLoop {
                 surrogate,
             },
             new_value,
-        );
+            &admit,
+        ) {
+            Ok(result) => result,
+            Err(error) => return self.response_atomic_error(task, collection, error),
+        };
 
         if let Some(ref m) = self.metrics {
             m.record_kv_put();
@@ -343,7 +331,7 @@ impl CoreLoop {
             collection,
             crate::event::WriteOp::Update,
             crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
-            Some(new_value),
+            Some(written.as_slice()),
             old.as_deref(),
         );
         self.note_kv_write_lsn(task, did, tid, collection, key);
@@ -380,5 +368,15 @@ impl CoreLoop {
                 },
             ),
         }
+    }
+
+    /// The error response for an atomic that computed or stored no value.
+    pub(in crate::data::executor) fn response_atomic_error(
+        &self,
+        task: &ExecutionTask,
+        collection: &str,
+        error: AtomicError,
+    ) -> Response {
+        self.response_error(task, atomic_error_code(error, collection))
     }
 }

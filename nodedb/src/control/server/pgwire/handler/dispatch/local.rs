@@ -26,7 +26,10 @@ impl NodeDbPgHandler {
         self.submit_authorized_to_data_plane(
             checked,
             user_id,
-            WalDurability::AppendHere { now_override: None },
+            WalDurability::AppendHere {
+                now_override: None,
+                apply_key: 0,
+            },
         )
         .await
     }
