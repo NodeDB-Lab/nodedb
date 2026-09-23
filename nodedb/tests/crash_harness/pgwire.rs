@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use super::CrashHarness;
 
 /// Bounded retry budget for the `Error::RetryableSchemaChanged` condition
-/// (rendered over pgwire as `XX000: retryable schema change on <descriptor>`).
+/// (rendered over pgwire as `XX000: schema changed during execution
+/// (<descriptor>); please retry`).
 ///
 /// The server already retries this condition server-side for ~750ms
 /// (`retry_on_schema_change`, `control/server/shared/retry.rs`, 5 attempts,
@@ -30,15 +31,10 @@ const SCHEMA_CHANGE_RETRY_ATTEMPTS: usize = 5;
 const SCHEMA_CHANGE_RETRY_BACKOFF: Duration = Duration::from_millis(150);
 
 /// Substring of `Error::RetryableSchemaChanged`'s Display text
-/// (`#[error("retryable schema change on {descriptor}")]` in
-/// `nodedb/src/error.rs`). No distinct SQLSTATE is assigned to this
-/// condition — `error_to_sqlstate` in `control/server/pgwire/types/error_map.rs`
-/// has no arm for it, so it falls through to the generic
-/// `sqlstate::INTERNAL_ERROR` (`XX000`) bucket shared by every other
-/// unmapped error. Matching on that code alone would blanket-retry
-/// unrelated internal errors, so the message text — which is the error
-/// type's own stable Display string, not free-form prose — is the only
-/// durable signal available.
+/// (`#[error("schema changed during execution ({descriptor}); please retry")]`
+/// in `nodedb/src/error/types.rs`). The message is the durable signal: a code
+/// alone would blanket-retry unrelated internal errors, because the class this
+/// condition carries depends on the mapper in front of it.
 /// The server was still reporting `RetryableSchemaChanged` when the
 /// client-side retry budget ran out.
 ///
@@ -51,7 +47,7 @@ pub struct RetryableSchemaChange;
 
 fn is_retryable_schema_change(e: &tokio_postgres::Error) -> bool {
     e.as_db_error()
-        .is_some_and(|db| db.message().contains("retryable schema change"))
+        .is_some_and(|db| db.message().contains("schema changed during execution"))
 }
 
 /// Substring of the `calvin-submit` internal error text

@@ -2,56 +2,18 @@
 
 //! pgwire error shape: `(SQLSTATE, message)`.
 
-use nodedb_types::error::sqlstate;
-
 use super::gateway_map::GatewayErrorMap;
 use crate::Error;
 
 impl GatewayErrorMap {
     /// Map a gateway error into `(sqlstate, message)` for pgwire.
     ///
-    /// Returns a `'static` SQLSTATE string and an owned message string.
-    /// The SQLSTATE codes match those in `pgwire::types::error_to_sqlstate`
-    /// so migrated call-sites are wire-compatible with the old forwarding path.
+    /// One table answers for the direct and the routed path, so a client sees
+    /// the same class and message for a given error either way.
     pub fn to_pgwire(err: &Error) -> (&'static str, String) {
-        match err {
-            Error::NotLeader { leader_addr, .. } => (
-                sqlstate::DATABASE_DROPPED,
-                format!("cluster in leader election; leader hint: {leader_addr}"),
-            ),
-            Error::DeadlineExceeded { .. } => (sqlstate::QUERY_CANCELED, err.to_string()),
-            Error::RetryableSchemaChanged { descriptor } => (
-                sqlstate::INTERNAL_ERROR,
-                format!("schema changed during execution ({descriptor}); please retry"),
-            ),
-            Error::CollectionNotFound { collection, .. } => (
-                sqlstate::UNDEFINED_TABLE,
-                format!("collection \"{collection}\" does not exist"),
-            ),
-            Error::RejectedAuthz { .. } => (sqlstate::INSUFFICIENT_PRIVILEGE, err.to_string()),
-            Error::BadRequest { detail } => (sqlstate::SYNTAX_ERROR, detail.clone()),
-            Error::PlanError { detail } => (sqlstate::SYNTAX_ERROR, detail.clone()),
-            Error::Serialization { .. } | Error::Codec { .. } => {
-                (sqlstate::INTERNAL_ERROR, err.to_string())
-            }
-            Error::Internal { .. } => (sqlstate::INTERNAL_ERROR, err.to_string()),
-            Error::NoLeader { .. } => (sqlstate::LOCK_NOT_AVAILABLE, err.to_string()),
-            Error::CrossCollectionNotColocated { .. } => {
-                (sqlstate::FEATURE_NOT_SUPPORTED, err.to_string())
-            }
-            Error::RemoteTyped { code, message } => (
-                crate::control::server::pgwire::types::error_map::numeric_code_to_sqlstate(*code),
-                message.clone(),
-            ),
-            // A shard verdict that rode back as a typed code keeps the exact
-            // SQLSTATE and message the direct dispatch path would have given.
-            Error::DataPlane(code) => {
-                let (_severity, state, message) =
-                    crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate(code);
-                (state, message)
-            }
-            _ => (sqlstate::INTERNAL_ERROR, err.to_string()),
-        }
+        let (_severity, state, message) =
+            crate::control::server::pgwire::types::error_to_sqlstate(err);
+        (state, message)
     }
 }
 
@@ -61,6 +23,7 @@ mod tests {
         authz, deadline, internal, not_found, not_leader, schema_changed, serialization,
     };
     use super::*;
+    use nodedb_types::error::sqlstate;
 
     #[test]
     fn pgwire_not_leader() {
@@ -74,6 +37,8 @@ mod tests {
         assert_eq!(code, sqlstate::QUERY_CANCELED);
     }
 
+    /// Both paths answer `INTERNAL_ERROR` from the shared table, with the
+    /// variant's own message naming the descriptor.
     #[test]
     fn pgwire_schema_changed() {
         let (code, msg) = GatewayErrorMap::to_pgwire(&schema_changed());
@@ -104,5 +69,108 @@ mod tests {
     fn pgwire_serialization() {
         let (code, _) = GatewayErrorMap::to_pgwire(&serialization());
         assert_eq!(code, sqlstate::INTERNAL_ERROR);
+    }
+
+    /// For every classified variant, the routed class equals the direct class,
+    /// and the direct class is not `XX000`.
+    #[test]
+    fn gateway_and_direct_mapper_agree_on_classified_errors() {
+        use crate::types::{DatabaseId, TenantId};
+
+        let samples = vec![
+            Error::RejectedConstraint {
+                collection: "orders".into(),
+                constraint: "unique".into(),
+                detail: "duplicate key".into(),
+            },
+            Error::TxnOverlayMemoryExceeded { limit: 1 << 20 },
+            Error::UndefinedFunction {
+                name: "no_such_fn".into(),
+            },
+            Error::UndefinedObject {
+                kind: "sequence",
+                name: "s".into(),
+            },
+            Error::ObjectNotInPrerequisiteState {
+                object: "s".into(),
+                detail: "currval before nextval".into(),
+            },
+            Error::UndefinedColumn {
+                column: "nope".into(),
+            },
+            Error::AmbiguousColumn {
+                column: "id".into(),
+            },
+            Error::UnknownStrictField {
+                collection: "c".into(),
+                column: "x".into(),
+            },
+            Error::DivisionByZero,
+            Error::InvalidLimitValue {
+                clause: "LIMIT",
+                value: "-1".into(),
+            },
+            Error::DocumentNotFound {
+                collection: "c".into(),
+                document_id: "d".into(),
+            },
+            Error::ConflictRetry {
+                collection: "c".into(),
+                document_id: "d".into(),
+            },
+            Error::CalvinSerializationConflict,
+            Error::CalvinParticipantError,
+            Error::SourceFrozen {
+                database_id: DatabaseId::new(7),
+            },
+            Error::CloneWriteRequiresMaterialize {
+                collection: "c".into(),
+                engine: "kv".into(),
+                database: "db".into(),
+                reason: "shadowed",
+            },
+            Error::RateExceeded {
+                gate: "write".into(),
+                detail: "over budget".into(),
+                retry_after_ms: 50,
+            },
+            Error::MemoryExhausted {
+                engine: "kv".into(),
+            },
+            Error::FanOutExceeded {
+                shards_touched: 9,
+                limit: 8,
+            },
+            Error::MaterializedSumTargetNotFound {
+                target_collection: "t".into(),
+                join_column: "k".into(),
+                join_value: "1".into(),
+            },
+            Error::CollectionDeactivated {
+                tenant_id: TenantId::new(0),
+                collection: "c".into(),
+                retention_expires_at_ns: 1,
+            },
+            Error::FeatureNotSupported {
+                detail: "sparse".into(),
+            },
+            Error::BackupTenantMismatch {
+                expected: 1,
+                actual: 2,
+            },
+            Error::BackupKeyMismatch,
+        ];
+
+        for err in samples {
+            let (_sev, direct, _msg) =
+                crate::control::server::pgwire::types::error_to_sqlstate(&err);
+            let (gateway, _) = GatewayErrorMap::to_pgwire(&err);
+            assert_ne!(
+                direct,
+                sqlstate::INTERNAL_ERROR,
+                "sample has no class of its own: {err:?}"
+            );
+            assert_eq!(gateway, direct, "routed class differs for {err:?}");
+        }
     }
 }

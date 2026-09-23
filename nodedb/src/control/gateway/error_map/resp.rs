@@ -26,9 +26,7 @@ impl GatewayErrorMap {
             }
             Error::RejectedConstraint { detail, .. } => format!("CONSTRAINT {detail}"),
             Error::TypeMismatch { detail, .. } => format!("WRONGTYPE {detail}"),
-            Error::RetryableSchemaChanged { descriptor } => {
-                format!("ERR schema changed ({descriptor}); please retry")
-            }
+            Error::RetryableSchemaChanged { .. } => format!("ERR {err}"),
             Error::RemoteTyped { code, message } => {
                 format!("{} {message}", remote_code_to_resp_prefix(*code))
             }

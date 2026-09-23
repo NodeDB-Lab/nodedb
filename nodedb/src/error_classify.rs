@@ -177,9 +177,7 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::InvalidLimitValue { clause, value } => {
             NodeDbError::invalid_limit_value(*clause, value.clone())
         }
-        Error::RetryableSchemaChanged { descriptor } => {
-            NodeDbError::plan_error(format!("retryable schema change on {descriptor}"))
-        }
+        Error::RetryableSchemaChanged { .. } => NodeDbError::plan_error(e.to_string()),
         Error::RetryableLeaderChange {
             group_id,
             log_index,
