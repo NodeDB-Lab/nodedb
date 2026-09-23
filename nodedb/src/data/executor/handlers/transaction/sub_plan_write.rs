@@ -333,16 +333,18 @@ impl CoreLoop {
     ///
     /// None of these variants mutate engine state, so no undo entry is needed.
     ///
-    /// `deadline` is the enclosing statement's, copied from the parent task. A
-    /// sub-plan is part of the statement that spawned it, so it inherits that
-    /// statement's remaining budget; minting a fresh one here would let a
-    /// transaction outlive the `statement_timeout` its client set by one
-    /// sub-plan's worth of work per sub-plan.
+    /// The sub-plan task copies `parent`'s `deadline` and `admission`, so its
+    /// [`execution_deadline`](crate::bridge::envelope::Request::execution_deadline)
+    /// equals the parent's. A sub-plan is part of the statement that spawned
+    /// it, so it runs on that statement's remaining budget. A fresh budget per
+    /// sub-plan lets a transaction outlive its client's `statement_timeout`.
+    /// An already-ordered parent has no execution deadline, and neither does
+    /// its sub-plan.
     pub(super) fn exec_tx_passthrough(
         &mut self,
         tid: u64,
         plan: &PhysicalPlan,
-        deadline: std::time::Instant,
+        parent: &crate::bridge::envelope::Request,
     ) -> Result<Response, ErrorCode> {
         let resp = self.execute(&ExecutionTask::new(crate::bridge::envelope::Request {
             request_id: crate::types::RequestId::new(0),
@@ -351,7 +353,7 @@ impl CoreLoop {
             vshard_id: crate::types::VShardId::new(0),
             plan: plan.clone(),
             // no-determinism: sub-plan deadline is ephemeral, not written to WAL
-            deadline,
+            deadline: parent.deadline,
             priority: crate::bridge::envelope::Priority::Normal,
             trace_id: TraceId::ZERO,
             consistency: crate::types::ReadConsistency::Strong,
@@ -363,9 +365,7 @@ impl CoreLoop {
             txn_id: None,
             wal_lsn: None,
             resolved_now_ms: None,
-            admission: crate::bridge::envelope::Admission::Exempt(
-                crate::bridge::envelope::ExemptReason::AlreadyOrdered,
-            ),
+            admission: parent.admission,
         }));
         if resp.status == Status::Error {
             return Err(resp.error_code.map(|c| *c).unwrap_or(ErrorCode::Internal {

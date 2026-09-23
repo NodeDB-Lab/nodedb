@@ -161,7 +161,7 @@ impl CoreLoop {
             // COMMIT, the same passthrough Document `BulkUpdate`/`BulkDelete`
             // take in `exec_tx_document`.
             KvOp::PredicateUpdate { .. } | KvOp::PredicateDelete { .. } => {
-                self.exec_tx_passthrough(tid, plan, task.request.deadline)
+                self.exec_tx_passthrough(tid, plan, &task.request)
             }
         }
     }

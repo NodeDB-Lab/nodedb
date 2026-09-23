@@ -711,3 +711,70 @@ fn absent_document_read_without_matching_insert_still_commits() {
          collection"
     );
 }
+
+/// Push one prebuilt request through the ring and return its response.
+fn send_request(
+    core: &mut CoreLoop,
+    tx: &mut Producer<BridgeRequest>,
+    rx: &mut Consumer<BridgeResponse>,
+    request: Request,
+) -> Response {
+    tx.try_push(BridgeRequest { inner: request }).unwrap();
+    core.tick();
+    rx.try_pop().unwrap().inner
+}
+
+/// Calvin sub-operations are already ordered: every replica must run them.
+/// A stage and a flush whose envelope deadline has already passed still
+/// execute, and the write becomes visible. They never answer
+/// `DeadlineExceeded`.
+#[test]
+fn already_ordered_stage_and_flush_run_past_their_deadline() {
+    let (mut core, mut tx, mut rx, _dir) = make_core();
+    let already_ordered = |plan: PhysicalPlan| Request {
+        deadline: Instant::now() - Duration::from_secs(1),
+        admission: nodedb::bridge::envelope::Admission::Exempt(
+            nodedb::bridge::envelope::ExemptReason::AlreadyOrdered,
+        ),
+        ..make_request(plan, 0, None)
+    };
+
+    let staged = send_request(
+        &mut core,
+        &mut tx,
+        &mut rx,
+        already_ordered(stage_static(
+            9,
+            0,
+            vec![kv_put("latecoll", b"lk", b"lv")],
+            Vec::new(),
+        )),
+    );
+    assert_eq!(staged.status, Status::Ok, "late stage must run: {staged:?}");
+    assert_eq!(staged.read_set_valid, Some(true));
+
+    let flush = send_request(
+        &mut core,
+        &mut tx,
+        &mut rx,
+        already_ordered(PhysicalPlan::Meta(MetaOp::CalvinFlush {
+            epoch: 9,
+            position: 0,
+        })),
+    );
+    assert_eq!(flush.status, Status::Ok, "late flush must run: {flush:?}");
+
+    let after = send(
+        &mut core,
+        &mut tx,
+        &mut rx,
+        kv_get("latecoll", b"lk"),
+        0,
+        None,
+    );
+    assert_eq!(after.status, Status::Ok, "read after flush: {after:?}");
+    assert!(
+        !after.payload.is_empty(),
+        "the late flush must make the staged write visible"
+    );
+}

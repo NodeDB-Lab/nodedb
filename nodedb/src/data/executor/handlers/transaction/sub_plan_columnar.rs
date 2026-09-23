@@ -137,7 +137,7 @@ impl CoreLoop {
             ColumnarOp::Scan { .. }
             | ColumnarOp::MaterializeScan { .. }
             | ColumnarOp::ResolveDml { .. } => {
-                self.exec_tx_passthrough(tid, plan, dummy_task.request.deadline)
+                self.exec_tx_passthrough(tid, plan, &dummy_task.request)
             }
         }
     }

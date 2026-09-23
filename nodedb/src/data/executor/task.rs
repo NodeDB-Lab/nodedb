@@ -103,8 +103,12 @@ impl ExecutionTask {
         &self.request.plan
     }
 
+    /// Whether the task's execution deadline has passed. Already-ordered work
+    /// has no execution deadline and never expires.
     pub fn is_expired(&self) -> bool {
-        std::time::Instant::now() > self.request.deadline
+        self.request
+            .execution_deadline()
+            .is_some_and(|deadline| std::time::Instant::now() > deadline)
     }
 }
 
@@ -151,6 +155,32 @@ mod tests {
         let lsn = Lsn::new(4242);
         let task = ExecutionTask::new(request_with_wal_lsn(Some(lsn)));
         assert_eq!(task.wal_lsn(), Some(lsn));
+    }
+
+    fn past_deadline_task(admission: crate::bridge::envelope::Admission) -> ExecutionTask {
+        ExecutionTask::new(Request {
+            deadline: Instant::now() - Duration::from_secs(1),
+            admission,
+            ..request_with_wal_lsn(None)
+        })
+    }
+
+    #[test]
+    fn already_ordered_task_past_its_deadline_is_not_expired() {
+        let task = past_deadline_task(crate::bridge::envelope::Admission::Exempt(
+            crate::bridge::envelope::ExemptReason::AlreadyOrdered,
+        ));
+        assert!(!task.is_expired());
+    }
+
+    #[test]
+    fn admitted_or_read_task_past_its_deadline_is_expired() {
+        let admitted = past_deadline_task(crate::bridge::envelope::Admission::Admitted);
+        assert!(admitted.is_expired());
+        let read = past_deadline_task(crate::bridge::envelope::Admission::Exempt(
+            crate::bridge::envelope::ExemptReason::Read,
+        ));
+        assert!(read.is_expired());
     }
 
     #[test]

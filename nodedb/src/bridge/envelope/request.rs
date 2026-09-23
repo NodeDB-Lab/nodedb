@@ -34,7 +34,9 @@ pub struct Request {
     /// Opaque plan digest identifying the physical operation to execute.
     pub plan: PhysicalPlan,
 
-    /// Absolute deadline. Data Plane MUST stop at next safe point after expiry.
+    /// Absolute deadline. The Data Plane reads it only through
+    /// [`Request::execution_deadline`], and stops at the next safe point after
+    /// that deadline passes. Already-ordered work has no execution deadline.
     pub deadline: Instant,
 
     /// Request priority for scheduling on the Data Plane.
@@ -117,6 +119,25 @@ pub struct Request {
     /// (`crate::bridge::dispatch`) asserts no write-class plan reaches a core
     /// with the decision unmade.
     pub admission: Admission,
+}
+
+impl Request {
+    /// The deadline the Data Plane enforces while it runs this request.
+    ///
+    /// Returns `None` for [`ExemptReason::AlreadyOrdered`] work: Calvin
+    /// applies, replicated applies, replay, clone, and checkpoint. Their order
+    /// is already fixed and other replicas apply the same work. Such work has
+    /// no refusal outcome, so every replica must run it to completion. A
+    /// replica that drops it on a deadline diverges from the others.
+    ///
+    /// Returns `Some(self.deadline)` for every other request. Every Data-Plane
+    /// deadline check reads this method, never the raw field.
+    pub fn execution_deadline(&self) -> Option<Instant> {
+        match self.admission {
+            Admission::Exempt(ExemptReason::AlreadyOrdered) => None,
+            Admission::Admitted | Admission::Exempt(ExemptReason::Read) => Some(self.deadline),
+        }
+    }
 }
 
 /// Write-admission marker carried by every [`Request`].
@@ -212,6 +233,26 @@ mod tests {
         assert_eq!(req.request_id, RequestId::new(1));
         assert_eq!(req.tenant_id, TenantId::new(1));
         assert_ne!(req.trace_id, TraceId::ZERO);
+    }
+
+    #[test]
+    fn already_ordered_request_has_no_execution_deadline() {
+        let req = Request {
+            admission: Admission::Exempt(ExemptReason::AlreadyOrdered),
+            ..sample_request()
+        };
+        assert_eq!(req.execution_deadline(), None);
+    }
+
+    #[test]
+    fn admitted_and_read_requests_keep_their_deadline() {
+        for admission in [Admission::Admitted, Admission::Exempt(ExemptReason::Read)] {
+            let req = Request {
+                admission,
+                ..sample_request()
+            };
+            assert_eq!(req.execution_deadline(), Some(req.deadline));
+        }
     }
 
     #[test]

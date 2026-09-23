@@ -6,7 +6,7 @@
 //! and record undo entries) live in `sub_plan_write.rs`; this file only
 //! routes each `PhysicalPlan` variant to its engine-specific handler.
 
-use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
+use crate::bridge::envelope::{Admission, ErrorCode, PhysicalPlan, Request, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, TenantId, TraceId};
@@ -62,14 +62,9 @@ impl CoreLoop {
             return self.exec_tx_timeseries(parent, tid, plan, op, undo_log);
         }
 
-        let task = Self::build_dummy_task_at(
-            tid,
-            parent.request.database_id,
-            parent.request.vshard_id,
-            // The sub-plan is part of the parent statement, so it runs on what
-            // is left of the parent's budget rather than a fresh one.
-            parent.request.deadline,
-        );
+        // The sub-plan is part of the parent statement, so it runs on what is
+        // left of the parent's budget rather than a fresh one.
+        let task = Self::build_dummy_task_at(tid, &parent.request);
         self.execute_tx_sub_plan_with_task(&task, tid, plan, undo_log, crdt_deltas, user_roles)
     }
 
@@ -103,7 +98,7 @@ impl CoreLoop {
             | PhysicalPlan::Array(_)
             | PhysicalPlan::ClusterArray(_)
             | PhysicalPlan::ClusterEvent(_) => {
-                self.exec_tx_passthrough(tid, plan, dummy_task.request.deadline)
+                self.exec_tx_passthrough(tid, plan, &dummy_task.request)
             }
         }
     }
@@ -115,24 +110,40 @@ impl CoreLoop {
     /// only carries request metadata for response building.
     #[cfg(test)]
     pub(super) fn build_dummy_task(tid: u64) -> ExecutionTask {
-        Self::build_dummy_task_at(
+        Self::build_dummy_task_with(
             tid,
             DatabaseId::DEFAULT,
             crate::types::VShardId::new(0),
             // no-determinism: test-only dummy deadline, never written to Calvin state
             std::time::Instant::now() + std::time::Duration::from_secs(60),
+            Admission::Exempt(crate::bridge::envelope::ExemptReason::Read),
         )
     }
 
-    /// `deadline` is the enclosing statement's, copied from the parent task, so
-    /// every sub-plan this task carries stops when the statement does.
-    fn build_dummy_task_at(
+    /// Copies `parent`'s database, vShard, `deadline`, and `admission`. The
+    /// dummy task's
+    /// [`execution_deadline`](crate::bridge::envelope::Request::execution_deadline)
+    /// then equals the parent's. Every sub-plan this task carries stops when
+    /// the statement does. An already-ordered parent, such as a Calvin apply,
+    /// has no execution deadline, and its sub-plans run to completion.
+    fn build_dummy_task_at(tid: u64, parent: &Request) -> ExecutionTask {
+        Self::build_dummy_task_with(
+            tid,
+            parent.database_id,
+            parent.vshard_id,
+            parent.deadline,
+            parent.admission,
+        )
+    }
+
+    fn build_dummy_task_with(
         tid: u64,
         database_id: DatabaseId,
         vshard_id: crate::types::VShardId,
         deadline: std::time::Instant,
+        admission: Admission,
     ) -> ExecutionTask {
-        ExecutionTask::new(crate::bridge::envelope::Request {
+        ExecutionTask::new(Request {
             request_id: crate::types::RequestId::new(0),
             tenant_id: TenantId::new(tid),
             database_id,
@@ -153,9 +164,7 @@ impl CoreLoop {
             txn_id: None,
             wal_lsn: None,
             resolved_now_ms: None,
-            admission: crate::bridge::envelope::Admission::Exempt(
-                crate::bridge::envelope::ExemptReason::Read,
-            ),
+            admission,
         })
     }
 
@@ -246,7 +255,7 @@ impl CoreLoop {
                 undo_log,
             ),
 
-            _ => self.exec_tx_passthrough(tid, plan, dummy_task.request.deadline),
+            _ => self.exec_tx_passthrough(tid, plan, &dummy_task.request),
         }
     }
 
@@ -293,7 +302,7 @@ impl CoreLoop {
                 undo_log,
             )),
 
-            _ => self.exec_tx_passthrough(tid, plan, dummy_task.request.deadline),
+            _ => self.exec_tx_passthrough(tid, plan, &dummy_task.request),
         }
     }
 
@@ -394,7 +403,7 @@ impl CoreLoop {
                 Ok(response)
             }
 
-            _ => self.exec_tx_passthrough(tid, plan, dummy_task.request.deadline),
+            _ => self.exec_tx_passthrough(tid, plan, &dummy_task.request),
         }
     }
 
@@ -416,7 +425,7 @@ impl CoreLoop {
                     detail: "CRDT Apply is not supported inside transaction batches".into(),
                 })
             }
-            _ => self.exec_tx_passthrough(tid, plan, dummy_task.request.deadline),
+            _ => self.exec_tx_passthrough(tid, plan, &dummy_task.request),
         }
     }
 
@@ -475,7 +484,7 @@ impl CoreLoop {
             }
 
             TimeseriesOp::Scan { .. } | TimeseriesOp::ResolveIngest(_) => {
-                self.exec_tx_passthrough(tid, plan, dummy_task.request.deadline)
+                self.exec_tx_passthrough(tid, plan, &dummy_task.request)
             }
         }
     }
