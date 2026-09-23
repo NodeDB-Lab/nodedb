@@ -20,6 +20,7 @@ use super::super::config::SchedulerConfig;
 use super::super::types::{BlockedTxn, PendingTxn};
 use super::catch_up::CatchUpDrain;
 use super::deferred::DeferredQueue;
+use super::halt::HaltLatch;
 use super::intake::IntakeGate;
 use crate::bridge::envelope::Response;
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
@@ -157,6 +158,8 @@ pub struct Scheduler {
     pub(in crate::control::cluster::calvin::scheduler::driver::core) capacity_freed: Arc<Notify>,
     /// Last observed intake gate state. See [`super::intake`].
     pub(in crate::control::cluster::calvin::scheduler::driver::core) intake: IntakeGate,
+    /// First halt cause, once set. See [`super::halt`].
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) halt: HaltLatch,
 }
 
 /// Parameters for [`Scheduler::new`].
@@ -249,6 +252,7 @@ impl Scheduler {
             deferred: DeferredQueue::new(),
             capacity_freed,
             intake: IntakeGate::default(),
+            halt: HaltLatch::default(),
         }
     }
 
@@ -350,7 +354,7 @@ impl Scheduler {
             let capacity_notified = capacity_freed.notified();
             tokio::pin!(capacity_notified);
             capacity_notified.as_mut().enable();
-            if self.has_deferred_dispatch() {
+            if self.resends_deferred() {
                 self.redispatch_deferred();
             }
 
@@ -402,7 +406,7 @@ impl Scheduler {
                     }
                 }
 
-                _ = &mut capacity_notified, if self.has_deferred_dispatch() => {
+                _ = &mut capacity_notified, if self.resends_deferred() => {
                     // Capacity freed: the next loop pass re-sends deferred
                     // requests in FIFO order.
                 }

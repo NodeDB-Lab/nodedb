@@ -109,6 +109,24 @@ pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
         return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body));
     }
 
+    // A halted Calvin scheduler holds one vShard's sequenced txns unapplied.
+    // The node serves everything else, so it reports degraded, like a halted
+    // sequencer.
+    if let Some(halt) = state.shared.sequencer_halt.apply_halt().report() {
+        let body = json!({
+            "status": "degraded",
+            "reason": "calvin_apply_halted",
+            "node_id": state.shared.node_id,
+            "vshard_id": halt.vshard_id,
+            "epoch": halt.epoch,
+            "position": halt.position,
+            "halt_reason": halt.reason,
+            "step": halt.step,
+            "error": halt.error,
+        });
+        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body));
+    }
+
     // A core that stops completing event-loop iterations panics nothing, so
     // the per-core panic watchdog stays quiet and every other check above
     // still passes. Fail readiness and name the cores: work routed to a
@@ -251,4 +269,82 @@ pub async fn drain(
             "node_id": state.shared.node_id,
         })),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::bridge::dispatch::Dispatcher;
+    use crate::config::auth::AuthMode;
+    use crate::control::cluster::CalvinApplyHalt;
+    use crate::control::state::SharedState;
+    use crate::wal::WalManager;
+
+    fn app_state(dir: &tempfile::TempDir) -> AppState {
+        let wal = Arc::new(
+            WalManager::open_for_testing(&dir.path().join("health.wal")).expect("open WAL"),
+        );
+        let (dispatcher, _data_sides) = Dispatcher::new(1, 64);
+        let shared = SharedState::new(dispatcher, wal).expect("shared state");
+        AppState {
+            shutdown_bus: crate::control::shutdown::ShutdownBus::new(Arc::clone(&shared.shutdown))
+                .0,
+            query_ctx: Arc::new(crate::control::planner::context::QueryContext::for_state(
+                &shared,
+            )),
+            shared,
+            auth_mode: AuthMode::Trust,
+        }
+    }
+
+    async fn healthz_body(state: AppState) -> (StatusCode, serde_json::Value) {
+        let response = healthz(State(state)).await.into_response();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read healthz body");
+        let body = sonic_rs::from_slice::<serde_json::Value>(&bytes).expect("healthz body is JSON");
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn healthz_reports_a_halted_calvin_scheduler_as_degraded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = app_state(&dir);
+        state
+            .shared
+            .sequencer_halt
+            .apply_halt()
+            .record(CalvinApplyHalt {
+                vshard_id: 12,
+                epoch: 40,
+                position: 3,
+                reason: "flush_failed",
+                step: "flush",
+                error: "CalvinFlush returned Error".to_string(),
+            });
+
+        let (status, body) = healthz_body(state).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["status"], "degraded");
+        assert_eq!(body["reason"], "calvin_apply_halted");
+        assert_eq!(body["vshard_id"], 12);
+        assert_eq!(body["epoch"], 40);
+        assert_eq!(body["position"], 3);
+        assert_eq!(body["halt_reason"], "flush_failed");
+        assert_eq!(body["step"], "flush");
+    }
+
+    #[tokio::test]
+    async fn healthz_without_a_calvin_halt_names_no_calvin_halt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = app_state(&dir);
+
+        let (_status, body) = healthz_body(state).await;
+
+        assert_ne!(body["reason"], "calvin_apply_halted");
+    }
 }

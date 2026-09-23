@@ -22,7 +22,9 @@ pub(in crate::diag) use catalog::{
 };
 pub(in crate::diag) use crdt::HistoryCompactionNotApplied;
 pub use data_plane::LostResponseWrite;
-pub(in crate::diag) use data_plane::{CalvinCompletionTimeout, DataPlaneResponseLost};
+pub(in crate::diag) use data_plane::{
+    CalvinApplyHalted, CalvinCompletionTimeout, DataPlaneResponseLost,
+};
 pub(in crate::diag) use ingest::IlpAcceptedLinesDropped;
 pub use ingest::IlpFlushOutcome;
 pub use quota::{DATABASE_SCOPE, TENANT_SCOPE};

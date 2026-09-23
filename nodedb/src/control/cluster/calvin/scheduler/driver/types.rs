@@ -64,6 +64,12 @@ pub(super) struct PendingTxn {
     /// `Instant::now()` is used for this deadline (observability / liveness
     /// only; never influences WAL bytes).
     pub verdict_deadline: Option<Instant>,
+    /// Error text of a stage response that was not `Ok` on this replica.
+    ///
+    /// `Some` when this replica never staged the txn. An abort verdict drops it
+    /// as usual. A COMMIT verdict halts the scheduler, because the txn cannot
+    /// apply here while its peers apply it.
+    pub stage_error: Option<String>,
 }
 
 /// Commit-resolution state of a staged static Calvin transaction.

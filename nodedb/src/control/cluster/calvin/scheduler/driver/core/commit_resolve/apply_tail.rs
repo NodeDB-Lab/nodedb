@@ -7,6 +7,9 @@
 use nodedb_cluster::calvin::SequencerEntry;
 
 use crate::bridge::envelope::{Response, Status};
+use crate::control::cluster::calvin::scheduler::driver::core::halt::{
+    HaltReason, HaltStep, error_response_text,
+};
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::control::cluster::calvin::scheduler::metrics::infra_abort_reason;
@@ -19,7 +22,12 @@ impl Scheduler {
     /// successful drop only the `CompletionAck` is proposed — the coordinator's
     /// completion waiter still fires and the epoch advances, but nothing was
     /// written so there is no result to deposit, no apply LSN, and no versions
-    /// to record. A non-`Ok` resolve response is treated as an executor error.
+    /// to record.
+    ///
+    /// A non-`Ok` flush halts the scheduler. The flush handler removes the
+    /// staged buffer before it applies, so a second flush applies nothing, and
+    /// a skipped flush tears the committed txn on this replica. A non-`Ok` drop
+    /// completes the txn: under an abort verdict no replica writes anything.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn finish_resolved_commit(
         &mut self,
         txn_id: TxnId,
@@ -27,50 +35,48 @@ impl Scheduler {
         committed: bool,
         redo_lsn: Option<crate::types::Lsn>,
     ) {
-        let completed = if response.status == Status::Ok {
+        if response.status != Status::Ok {
             if committed {
-                self.commit_apply_tail(txn_id, response, redo_lsn)
-            } else {
-                self.propose_sequencer_entry(
-                    SequencerEntry::CompletionAck {
-                        epoch: txn_id.epoch,
-                        position: txn_id.position,
-                        vshard_id: self.vshard_id,
-                    },
+                self.halt_apply(
                     txn_id,
-                    "completion ack (dropped)",
+                    HaltReason::FlushFailed,
+                    HaltStep::Flush,
+                    error_response_text("CalvinFlush", &response),
                 );
-                true
+                return;
             }
-        } else {
             tracing::error!(
                 vshard_id = self.vshard_id,
                 epoch = txn_id.epoch,
                 position = txn_id.position,
-                committed,
-                "calvin: flush/drop response was not Ok while applying an already-committed \
-                 verdict; forcing infra-abort completion so locks release and the epoch advances"
+                "calvin: drop response was not Ok under an abort verdict; completing the \
+                 aborted txn, since no replica writes it"
             );
-            false
-        };
-
-        if completed {
-            self.metrics.record_completed();
-            self.on_txn_complete(txn_id);
-        } else {
-            // The cross-shard verdict is already globally durable, and a commit's
-            // resolved redo was WAL-appended before this flush — so recovery
-            // re-applies the write. A local flush/apply or WAL-marker failure is
-            // therefore an infrastructure event, NOT an outcome change. It must
-            // never leave the txn parked: holding its locks forever wedges every
-            // txn queued behind those keys and freezes this vShard's epoch
-            // watermark (which anchors cross-shard BEGIN snapshots), and nothing
-            // re-drives a non-`AwaitingVerdict` pending entry. Surface the infra
-            // abort and force completion — the same forward-progress contract the
-            // resolve/drop dispatch-failure path in `resume_on_verdict` follows.
             self.metrics.record_executor_error();
             self.metrics
                 .record_infra_abort(infra_abort_reason::IO_ERROR);
+            self.metrics.record_completed();
+            self.on_txn_complete(txn_id);
+            return;
+        }
+
+        let completed = if committed {
+            self.commit_apply_tail(txn_id, response, redo_lsn)
+        } else {
+            self.propose_sequencer_entry(
+                SequencerEntry::CompletionAck {
+                    epoch: txn_id.epoch,
+                    position: txn_id.position,
+                    vshard_id: self.vshard_id,
+                },
+                txn_id,
+                "completion ack (dropped)",
+            );
+            true
+        };
+        // `false` means the commit tail halted the scheduler: the txn stays
+        // pending and unapplied.
+        if completed {
             self.metrics.record_completed();
             self.on_txn_complete(txn_id);
         }
@@ -81,6 +87,10 @@ impl Scheduler {
     ///
     /// Shared by the flush-completion path and the direct-apply (dependent /
     /// active) apply path.
+    ///
+    /// Returns `false` once a failed `CalvinApplied` WAL append halted the
+    /// scheduler: the position must not be marked applied without its marker,
+    /// so the caller leaves the txn pending.
     ///
     /// `redo_lsn` is `Some(lsn)` when a `TransactionRedo` record was already
     /// WAL-appended for this commit's non-empty write set (`finish_redo_resolve`)
@@ -202,12 +212,11 @@ impl Scheduler {
                     Some(applied_lsn)
                 }
                 Err(e) => {
-                    tracing::error!(
-                        vshard_id = self.vshard_id,
-                        epoch = txn_id.epoch,
-                        position = txn_id.position,
-                        error = %e,
-                        "calvin: failed to write CalvinApplied WAL record"
+                    self.halt_apply(
+                        txn_id,
+                        HaltReason::WalAppendFailed,
+                        HaltStep::AppliedMarker,
+                        format!("CalvinApplied WAL append failed: {e}"),
                     );
                     None
                 }
@@ -216,7 +225,8 @@ impl Scheduler {
         let Some(lsn) = applied_lsn else {
             // The apply cannot be acknowledged without a durable participant
             // LSN: CDC and write-version consumers would otherwise observe a
-            // successful commit with no authoritative ordering point.
+            // successful commit with no authoritative ordering point. The
+            // scheduler halted above.
             return false;
         };
         // Control change-stream events are distinct from Data-Plane
@@ -247,5 +257,65 @@ impl Scheduler {
             "completion ack",
         );
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::envelope::ErrorCode;
+    use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
+        error_response, scheduler_with_pending,
+    };
+    use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
+
+    fn internal_error() -> Response {
+        error_response(ErrorCode::Internal {
+            detail: "core failed".to_string(),
+        })
+    }
+
+    /// A flush that returns an error under a COMMIT verdict holds the txn
+    /// unapplied and halts: a second flush would apply nothing.
+    #[tokio::test]
+    async fn flush_error_response_holds_committed_txn_unapplied() {
+        let txn_id = TxnId::new(9, 2);
+        let (mut scheduler, _dir) = scheduler_with_pending(
+            txn_id,
+            CommitState::AwaitingResolve {
+                committed: true,
+                redo_lsn: None,
+            },
+        );
+
+        scheduler.finish_resolved_commit(txn_id, internal_error(), true, None);
+
+        assert!(!scheduler.applied.is_applied(9, 2));
+        assert!(scheduler.pending.contains_key(&txn_id));
+        assert_eq!(
+            scheduler.apply_halt().map(|h| h.reason),
+            Some(HaltReason::FlushFailed)
+        );
+        assert!(scheduler.shared.sequencer_halt.apply_halt().is_halted());
+    }
+
+    /// A drop that returns an error under an abort verdict still completes
+    /// the txn: no replica writes an aborted txn.
+    #[tokio::test]
+    async fn drop_error_response_under_abort_completes_txn() {
+        let txn_id = TxnId::new(9, 2);
+        let (mut scheduler, _dir) = scheduler_with_pending(
+            txn_id,
+            CommitState::AwaitingResolve {
+                committed: false,
+                redo_lsn: None,
+            },
+        );
+
+        scheduler.finish_resolved_commit(txn_id, internal_error(), false, None);
+
+        assert!(scheduler.applied.is_applied(9, 2));
+        assert!(!scheduler.pending.contains_key(&txn_id));
+        assert!(!scheduler.is_apply_halted());
     }
 }

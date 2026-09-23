@@ -13,6 +13,7 @@
 use nodedb_cluster::calvin::SequencerEntry;
 
 use super::super::types::CommitState;
+use super::halt::{HaltReason, HaltStep};
 use super::scheduler::Scheduler;
 use crate::bridge::envelope::Response;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
@@ -31,20 +32,20 @@ impl Scheduler {
         let response = match resp_opt {
             Some(r) => r,
             None => {
-                // Bridge task observed a closed channel before any response.
-                tracing::warn!(
-                    vshard_id = self.vshard_id,
-                    request_id = request_id.as_u64(),
-                    epoch = txn_id.epoch,
-                    position = txn_id.position,
-                    "calvin: executor response channel disconnected"
-                );
+                // The bridge task saw the channel close before any response,
+                // so the request's outcome on this replica is unknown. Hold
+                // the txn unapplied and halt.
                 self.metrics.record_executor_error();
-                self.metrics.record_infra_abort(
-                    crate::control::cluster::calvin::scheduler::metrics::infra_abort_reason::IO_ERROR,
+                let state = self.pending.get(&txn_id).and_then(|p| p.commit_state);
+                self.halt_apply(
+                    txn_id,
+                    HaltReason::ResponseDisconnected,
+                    HaltStep::awaited_by(state),
+                    format!(
+                        "executor response channel for request {} closed before a response",
+                        request_id.as_u64()
+                    ),
                 );
-                self.metrics.record_completed();
-                self.on_txn_complete(txn_id);
                 return;
             }
         };
@@ -157,20 +158,11 @@ impl Scheduler {
             None => {}
         }
 
-        let completed = if response.status == crate::bridge::envelope::Status::Ok {
-            // Observe whether the applying participant reported its slice of the
-            // transaction's reads as no longer current against the local write
-            // versions. Direct-apply (dependent/active) observation only: the
-            // staged path folds this into its commit vote instead. `None` means
-            // no read-set was checked.
-            if response.read_set_valid == Some(false) {
-                self.shared
-                    .calvin_counters
-                    .read_set_validation_failures
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            self.commit_apply_tail(txn_id, response, None)
-        } else {
+        if response.status != crate::bridge::envelope::Status::Ok {
+            // A failed direct apply must not leave the txn parked with its locks
+            // held: that wedges every txn queued behind those keys and freezes
+            // this vShard's epoch watermark, and no sweep re-drives the entry.
+            // Surface the infra abort and force completion.
             tracing::error!(
                 vshard_id = self.vshard_id,
                 epoch = txn_id.epoch,
@@ -178,25 +170,102 @@ impl Scheduler {
                 "calvin: executor response was not Ok; forcing infra-abort completion so locks \
                  release and the epoch advances"
             );
-            false
-        };
-
-        if completed {
-            self.metrics.record_completed();
-            self.on_txn_complete(txn_id);
-        } else {
-            // A failed direct apply must not leave the txn parked with its locks
-            // held: that wedges every txn queued behind those keys and freezes
-            // this vShard's epoch watermark, and no sweep re-drives the entry.
-            // Surface the infra abort and force completion — the same
-            // forward-progress contract the disconnected-channel path above
-            // follows.
             self.metrics.record_executor_error();
             self.metrics.record_infra_abort(
                 crate::control::cluster::calvin::scheduler::metrics::infra_abort_reason::IO_ERROR,
             );
             self.metrics.record_completed();
             self.on_txn_complete(txn_id);
+            return;
         }
+
+        // Observe whether the applying participant reported its slice of the
+        // transaction's reads as no longer current against the local write
+        // versions. Direct-apply (dependent/active) observation only: the
+        // staged path folds this into its commit vote instead. `None` means
+        // no read-set was checked.
+        if response.read_set_valid == Some(false) {
+            self.shared
+                .calvin_counters
+                .read_set_validation_failures
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        // `false` means the commit tail halted the scheduler: the txn stays
+        // pending and unapplied.
+        if self.commit_apply_tail(txn_id, response, None) {
+            self.metrics.record_completed();
+            self.on_txn_complete(txn_id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+    use crate::control::cluster::calvin::scheduler::driver::core::halt::HaltReason;
+    use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
+        make_sequenced_txn, scheduler_with_pending, staged_pending,
+    };
+    use crate::control::cluster::calvin::scheduler::metrics::apply_halt_reason;
+
+    /// A response channel that closes before a response leaves the txn's
+    /// outcome unknown: the txn stays pending and unapplied, the scheduler
+    /// halts, and the node marker names the txn.
+    #[tokio::test]
+    async fn disconnected_response_holds_txn_unapplied_and_sets_node_marker() {
+        let txn_id = TxnId::new(5, 1);
+        let (mut scheduler, _dir) = scheduler_with_pending(
+            txn_id,
+            CommitState::AwaitingResolve {
+                committed: true,
+                redo_lsn: None,
+            },
+        );
+
+        scheduler.handle_completion(txn_id, RequestId::new(9), None);
+
+        assert!(
+            !scheduler.applied.is_applied(5, 1),
+            "an unknown outcome must not mark the position applied"
+        );
+        assert!(scheduler.pending.contains_key(&txn_id));
+        assert_eq!(
+            scheduler.apply_halt().map(|h| h.reason),
+            Some(HaltReason::ResponseDisconnected)
+        );
+        let marker = scheduler.shared.sequencer_halt.apply_halt().report();
+        assert_eq!(
+            marker.map(|h| (h.vshard_id, h.epoch, h.position, h.step)),
+            Some((7, 5, 1, "flush"))
+        );
+        assert_eq!(scheduler.metrics.apply_halted.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            scheduler.metrics.apply_halt_reason.load(Ordering::Relaxed),
+            apply_halt_reason::RESPONSE_DISCONNECTED as u64
+        );
+    }
+
+    /// A second disconnect keeps the first cause and holds its txn too.
+    #[tokio::test]
+    async fn second_halt_keeps_the_first_cause() {
+        let first = TxnId::new(5, 1);
+        let second = TxnId::new(6, 0);
+        let (mut scheduler, _dir) = scheduler_with_pending(first, CommitState::Staged);
+        let mut pending = staged_pending(make_sequenced_txn(6, 0), second);
+        pending.commit_state = Some(CommitState::AwaitingRedoResolve);
+        scheduler.pending.insert(second, pending);
+
+        scheduler.handle_completion(first, RequestId::new(9), None);
+        scheduler.handle_completion(second, RequestId::new(10), None);
+
+        assert!(!scheduler.applied.is_applied(6, 0));
+        assert!(scheduler.pending.contains_key(&second));
+        let marker = scheduler.shared.sequencer_halt.apply_halt().report();
+        assert_eq!(
+            marker.map(|h| (h.epoch, h.position, h.step)),
+            Some((5, 1, "stage"))
+        );
     }
 }

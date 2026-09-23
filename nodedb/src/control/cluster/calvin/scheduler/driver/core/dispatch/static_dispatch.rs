@@ -170,13 +170,7 @@ impl Scheduler {
                     return;
                 }
             };
-        if !self.bind_local_identities(
-            &mut local,
-            txn.tx_class.database_id,
-            tenant_id,
-            txn_id,
-            lock_owner,
-        ) {
+        if !self.bind_local_identities(&mut local, txn.tx_class.database_id, tenant_id, txn_id) {
             return;
         }
 
@@ -291,6 +285,7 @@ impl Scheduler {
                 commit_state: Some(super::super::super::types::CommitState::Staged),
                 // Set only once the txn parks in `AwaitingVerdict`.
                 verdict_deadline: None,
+                stage_error: None,
             },
         );
 

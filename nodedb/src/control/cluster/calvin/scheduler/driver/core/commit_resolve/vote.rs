@@ -8,6 +8,7 @@ use std::time::Instant;
 use nodedb_cluster::calvin::SequencerEntry;
 
 use crate::bridge::envelope::Response;
+use crate::control::cluster::calvin::scheduler::driver::core::halt::error_response_text;
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::driver::core::staged_vote::{
     StagedVote, staged_commit_vote,
@@ -86,9 +87,16 @@ impl Scheduler {
         // deadline. Do NOT dispatch resolve/drop here — the GLOBAL verdict, not
         // this local vote, decides. If the txn already vanished (torn down
         // elsewhere), there is nothing to park.
+        //
+        // A stage error parks too. A deterministic error fails on every
+        // replica, the leader votes abort, and every replica drops. A local
+        // error on a follower leaves the leader's commit vote standing:
+        // `resume_on_verdict` halts on that COMMIT verdict.
         match self.pending.get_mut(&txn_id) {
             Some(pending) => {
                 pending.commit_state = Some(CommitState::AwaitingVerdict);
+                pending.stage_error = (vote == StagedVote::ParticipantError)
+                    .then(|| error_response_text("stage", staged_response));
                 // no-determinism: local stall-warning deadline only; the global replicated verdict, not this wall-clock, decides commit/abort.
                 pending.verdict_deadline = Some(Instant::now() + self.config.verdict_stall_warn());
             }

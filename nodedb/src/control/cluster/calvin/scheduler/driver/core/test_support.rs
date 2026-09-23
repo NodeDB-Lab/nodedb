@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::bridge::dispatch::{BridgeResponse, CoreChannelDataSide, Dispatcher};
 use crate::bridge::envelope::{
-    Admission, ExemptReason, Payload, Priority, Request, Response, Status,
+    Admission, ErrorCode, ExemptReason, Payload, Priority, Request, Response, Status,
 };
 use crate::control::cluster::calvin::scheduler::driver::barrier::ReadResultEvent;
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::{
@@ -424,6 +424,7 @@ pub(super) fn staged_pending(txn: SequencedTxn, txn_id: TxnId) -> PendingTxn {
         change_sets: Vec::new(),
         commit_state: Some(CommitState::Staged),
         verdict_deadline: None,
+        stage_error: None,
     }
 }
 
@@ -441,4 +442,33 @@ pub(super) fn staged_response(status: Status, read_set_valid: Option<bool>) -> R
         read_version_lsn: Lsn::ZERO,
         write_set: Vec::new(),
     }
+}
+
+/// An executor `Response` with `Status::Error` carrying `code`.
+pub(super) fn error_response(code: ErrorCode) -> Response {
+    let mut response = staged_response(Status::Error, None);
+    response.error_code = Some(Box::new(code));
+    response
+}
+
+/// Close the dispatcher's Data Plane enqueue gate, as a node shutdown does.
+/// Every later dispatch is refused terminally.
+pub(super) fn begin_data_plane_drain(shared: &SharedState) {
+    shared
+        .dispatcher
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .begin_data_plane_drain();
+}
+
+/// A scheduler on vShard 7 with `txn_id` pending in `state`.
+pub(super) fn scheduler_with_pending(
+    txn_id: TxnId,
+    state: CommitState,
+) -> (Scheduler, tempfile::TempDir) {
+    let (mut scheduler, dir) = build_test_scheduler(7);
+    let mut pending = staged_pending(make_sequenced_txn(txn_id.epoch, txn_id.position), txn_id);
+    pending.commit_state = Some(state);
+    scheduler.pending.insert(txn_id, pending);
+    (scheduler, dir)
 }

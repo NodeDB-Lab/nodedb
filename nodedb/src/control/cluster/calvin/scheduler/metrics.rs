@@ -70,7 +70,12 @@ pub struct SchedulerMetrics {
     pub intake_backlog: AtomicU64,
     /// Intake gate closures by reason. Indexes are the constants in
     /// [`intake_closure_reason`].
-    pub intake_gate_closed_counts: [AtomicU64; 2],
+    pub intake_gate_closed_counts: [AtomicU64; 3],
+    /// Apply halt state: 1 once the scheduler halted, 0 while it applies.
+    pub apply_halted: AtomicU64,
+    /// Reason of the halt. An index into [`apply_halt_reason`], read only
+    /// while `apply_halted` is 1.
+    pub apply_halt_reason: AtomicU64,
 }
 
 /// Reason codes for `nodedb_calvin_infra_abort_total`.
@@ -96,8 +101,32 @@ pub mod infra_abort_reason {
 pub mod intake_closure_reason {
     pub const DEFERRED_DISPATCH: usize = 0;
     pub const BACKLOG_FULL: usize = 1;
+    pub const APPLY_HALTED: usize = 2;
 
-    pub const LABELS: &[&str] = &["deferred_dispatch", "backlog_full"];
+    pub const LABELS: &[&str] = &["deferred_dispatch", "backlog_full", "apply_halted"];
+}
+
+/// Reason codes for `nodedb_calvin_apply_halted`.
+pub mod apply_halt_reason {
+    pub const DRAINING: usize = 0;
+    pub const DISPATCH_REFUSED: usize = 1;
+    pub const RESPONSE_DISCONNECTED: usize = 2;
+    pub const RESOLVE_FAILED: usize = 3;
+    pub const FLUSH_FAILED: usize = 4;
+    pub const LOCAL_STAGE_FAILED: usize = 5;
+    pub const IDENTITY_BIND_FAILED: usize = 6;
+    pub const WAL_APPEND_FAILED: usize = 7;
+
+    pub const LABELS: &[&str] = &[
+        "draining",
+        "dispatch_refused",
+        "response_disconnected",
+        "resolve_failed",
+        "flush_failed",
+        "local_stage_failed",
+        "identity_bind_failed",
+        "wal_append_failed",
+    ];
 }
 
 impl SchedulerMetrics {
@@ -180,6 +209,15 @@ impl SchedulerMetrics {
     pub fn set_intake_gate_closed(&self, closed: bool) {
         self.intake_gate_closed
             .store(u64::from(closed), Ordering::Relaxed);
+    }
+
+    /// Set the apply halt gauge for `reason`.
+    ///
+    /// `reason` must be one of the constants in [`apply_halt_reason`].
+    pub fn set_apply_halted(&self, reason: usize) {
+        self.apply_halt_reason
+            .store(reason as u64, Ordering::Relaxed);
+        self.apply_halted.store(1, Ordering::Relaxed);
     }
 
     /// Set the in-flight backlog gauge.
@@ -404,6 +442,22 @@ impl SchedulerMetrics {
             );
         }
 
+        let _ = writeln!(
+            out,
+            "# HELP nodedb_calvin_apply_halted \
+             1 once the scheduler halted on an apply error it cannot mark applied, by reason."
+        );
+        let _ = writeln!(out, "# TYPE nodedb_calvin_apply_halted gauge");
+        let halted = self.apply_halted.load(Ordering::Relaxed) == 1;
+        let halt_reason = self.apply_halt_reason.load(Ordering::Relaxed);
+        for (i, &reason_label) in apply_halt_reason::LABELS.iter().enumerate() {
+            let value = u64::from(halted && halt_reason == i as u64);
+            let _ = writeln!(
+                out,
+                "nodedb_calvin_apply_halted{{{label},reason=\"{reason_label}\"}} {value}"
+            );
+        }
+
         out
     }
 }
@@ -428,6 +482,8 @@ impl Default for SchedulerMetrics {
             intake_gate_closed: AtomicU64::new(0),
             intake_backlog: AtomicU64::new(0),
             intake_gate_closed_counts: std::array::from_fn(|_| AtomicU64::new(0)),
+            apply_halted: AtomicU64::new(0),
+            apply_halt_reason: AtomicU64::new(0),
         }
     }
 }

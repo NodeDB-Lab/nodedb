@@ -13,10 +13,10 @@
 
 use super::super::types::CommitState;
 use super::deferred::{DispatchOutcome, DispatchStep};
+use super::halt::{HaltReason, HaltStep, error_response_text};
 use super::scheduler::Scheduler;
 use crate::bridge::envelope::{Response, Status};
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
-use crate::control::cluster::calvin::scheduler::metrics::infra_abort_reason;
 use crate::types::VShardId;
 use crate::wal::{CalvinStamp, RedoRecord};
 use nodedb_physical::physical_plan::PhysicalPlan;
@@ -27,35 +27,34 @@ impl Scheduler {
     /// `RedoRecord`, WAL-append it (unless its op set is empty), then dispatch
     /// the flush stamped with that record's LSN.
     ///
-    /// A non-`Ok` response, a decode failure, or a WAL-append failure is a
-    /// loud infra abort — never a silent fall-through to a non-durable flush.
+    /// The verdict is already COMMIT, so a skipped resolve would tear the
+    /// committed txn on this replica. A non-`Ok` response, a decode failure,
+    /// or a WAL-append failure halts the scheduler: the txn keeps its
+    /// `pending` entry and locks, and its position stays unapplied.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn finish_redo_resolve(
         &mut self,
         txn_id: TxnId,
         response: Response,
     ) {
         if response.status != Status::Ok {
-            tracing::warn!(
-                vshard_id = self.vshard_id,
-                epoch = txn_id.epoch,
-                position = txn_id.position,
-                "calvin: CalvinResolve response was not Ok; locks NOT released (shard degraded)"
+            self.halt_apply(
+                txn_id,
+                HaltReason::ResolveFailed,
+                HaltStep::Resolve,
+                error_response_text("CalvinResolve", &response),
             );
-            self.complete_infra_abort(txn_id);
             return;
         }
 
         let mut redo = match RedoRecord::from_bytes(response.payload.as_bytes()) {
             Ok(r) => r,
             Err(e) => {
-                tracing::error!(
-                    vshard_id = self.vshard_id,
-                    epoch = txn_id.epoch,
-                    position = txn_id.position,
-                    error = %e,
-                    "calvin: CalvinResolve redo record decode failed"
+                self.halt_apply(
+                    txn_id,
+                    HaltReason::ResolveFailed,
+                    HaltStep::Resolve,
+                    format!("CalvinResolve redo record decode failed: {e}"),
                 );
-                self.complete_infra_abort(txn_id);
                 return;
             }
         };
@@ -86,14 +85,12 @@ impl Scheduler {
             ) {
                 Ok(lsn) => Some(lsn),
                 Err(e) => {
-                    tracing::error!(
-                        vshard_id = self.vshard_id,
-                        epoch = txn_id.epoch,
-                        position = txn_id.position,
-                        error = %e,
-                        "calvin: TransactionRedo WAL append failed"
+                    self.halt_apply(
+                        txn_id,
+                        HaltReason::WalAppendFailed,
+                        HaltStep::RedoAppend,
+                        format!("TransactionRedo WAL append failed: {e}"),
                     );
-                    self.complete_infra_abort(txn_id);
                     return;
                 }
             }
@@ -114,21 +111,6 @@ impl Scheduler {
                 redo_lsn,
             });
         }
-    }
-
-    /// Complete `txn_id` as an infra error: releases its locks so the epoch
-    /// advances rather than stalling. Shared by every `finish_redo_resolve`
-    /// failure branch and every terminal resolve, flush, or drop dispatch
-    /// refusal.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn complete_infra_abort(
-        &mut self,
-        txn_id: TxnId,
-    ) {
-        self.metrics.record_executor_error();
-        self.metrics
-            .record_infra_abort(infra_abort_reason::IO_ERROR);
-        self.metrics.record_completed();
-        self.on_txn_complete(txn_id);
     }
 
     /// Dispatch `MetaOp::CalvinResolve` to this vShard's core, registering a
@@ -175,5 +157,63 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) fn missing_pend
             "calvin txn {}/{} has no pending entry to dispatch from",
             txn_id.epoch, txn_id.position
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::envelope::{ErrorCode, Payload};
+    use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
+        error_response, scheduler_with_pending, staged_response,
+    };
+
+    /// A resolve that returns an error under a COMMIT verdict holds the txn
+    /// unapplied and halts: skipping it would tear the committed txn.
+    #[tokio::test]
+    async fn resolve_error_response_holds_committed_txn_unapplied() {
+        let txn_id = TxnId::new(8, 0);
+        let (mut scheduler, _dir) =
+            scheduler_with_pending(txn_id, CommitState::AwaitingRedoResolve);
+
+        scheduler.finish_redo_resolve(
+            txn_id,
+            error_response(ErrorCode::Internal {
+                detail: "resolve failed".to_string(),
+            }),
+        );
+
+        assert!(!scheduler.applied.is_applied(8, 0));
+        assert!(scheduler.pending.contains_key(&txn_id));
+        assert_eq!(
+            scheduler.apply_halt().map(|h| h.reason),
+            Some(HaltReason::ResolveFailed)
+        );
+        assert!(scheduler.shared.sequencer_halt.apply_halt().is_halted());
+    }
+
+    /// A resolve whose redo record does not decode holds the txn unapplied
+    /// and halts.
+    #[tokio::test]
+    async fn undecodable_resolve_payload_holds_committed_txn_unapplied() {
+        let txn_id = TxnId::new(8, 0);
+        let (mut scheduler, _dir) =
+            scheduler_with_pending(txn_id, CommitState::AwaitingRedoResolve);
+        let mut response = staged_response(Status::Ok, None);
+        response.payload = Payload::from_vec(vec![0xff, 0x00, 0x13]);
+
+        scheduler.finish_redo_resolve(txn_id, response);
+
+        assert!(!scheduler.applied.is_applied(8, 0));
+        assert!(scheduler.pending.contains_key(&txn_id));
+        assert_eq!(
+            scheduler.apply_halt().map(|h| h.reason),
+            Some(HaltReason::ResolveFailed)
+        );
+        assert_eq!(
+            scheduler.pending.get(&txn_id).and_then(|p| p.commit_state),
+            Some(CommitState::AwaitingRedoResolve),
+            "no flush is dispatched"
+        );
     }
 }

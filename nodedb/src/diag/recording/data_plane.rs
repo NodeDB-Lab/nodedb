@@ -60,3 +60,31 @@ pub fn calvin_completion_timeout(
     .with_backtrace()
     .emit();
 }
+
+/// Report a Calvin scheduler that held a sequenced txn unapplied and halted
+/// its vShard. Called once per scheduler, from its halt latch on the first
+/// cause.
+pub fn calvin_apply_halted(
+    vshard_id: u32,
+    epoch: u64,
+    position: u32,
+    reason: &str,
+    step: &str,
+    error: &str,
+) {
+    let ctx = context::CalvinApplyHalted {
+        vshard_id,
+        epoch,
+        position,
+        reason,
+        step,
+        error,
+    };
+    let _ = Capture::new(
+        EventKind::InvariantViolation,
+        "Calvin scheduler halted: a sequenced txn could not be applied on this replica",
+    )
+    .domain(&ctx)
+    .with_backtrace()
+    .emit();
+}

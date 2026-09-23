@@ -131,10 +131,10 @@ pub struct SharedState {
     /// cannot clear. The readiness probe reads it so a wedged node stops
     /// reporting itself healthy while every query dies on a lease timeout.
     pub metadata_apply_wedge: Arc<crate::control::cluster::metadata_applier::MetadataApplyWedge>,
-    /// Set once when the Calvin sequencer state machine halts on an epoch
-    /// regression. Every non-Calvin path keeps serving, so the node stays up —
-    /// the health surfaces read this to make the lost capability visible rather
-    /// than letting it look like an ordinary node.
+    /// Set once when the Calvin sequencer halts on an epoch regression, and
+    /// (`apply_halt()`) once when a Calvin scheduler halts a vShard. The node
+    /// keeps serving every other path; the health surfaces read both markers
+    /// so the lost capability never looks like an ordinary node.
     pub sequencer_halt: Arc<crate::control::cluster::SequencerHaltMarker>,
     /// Which Data Plane cores have stopped completing event-loop iterations,
     /// as of the last sampling window. Replaced every window rather than

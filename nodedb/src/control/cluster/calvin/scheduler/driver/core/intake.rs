@@ -3,8 +3,9 @@
 //! Intake gate for the Calvin scheduler.
 //!
 //! The scheduler takes new sequenced input only while it can make progress.
-//! The gate closes while a capacity-refused dispatch waits for re-send, or
-//! while the in-flight backlog sits at [`SchedulerConfig::max_inflight_backlog`].
+//! The gate closes for good once the scheduler halts (see [`super::halt`]).
+//! It closes while a capacity-refused dispatch waits for re-send, or while
+//! the in-flight backlog sits at [`SchedulerConfig::max_inflight_backlog`].
 //! A closed gate disables the run loop's receiver arm and skips the catch-up
 //! drain. Completions, verdicts, read results, promotions, and capacity
 //! wakeups stay active, because they drain the backlog.
@@ -26,6 +27,8 @@ use crate::control::cluster::calvin::scheduler::metrics::intake_closure_reason;
 /// Why the intake gate is closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::control::cluster::calvin::scheduler::driver::core) enum IntakeClosure {
+    /// The scheduler halted on a txn it cannot mark applied.
+    ApplyHalted,
     /// A capacity-refused dispatch waits in the deferred FIFO.
     DeferredDispatch,
     /// The in-flight backlog is at its bound, and some of it progresses
@@ -37,6 +40,7 @@ impl IntakeClosure {
     /// The `nodedb_calvin_intake_gate_closed_total` reason index.
     fn metric_reason(self) -> usize {
         match self {
+            Self::ApplyHalted => intake_closure_reason::APPLY_HALTED,
             Self::DeferredDispatch => intake_closure_reason::DEFERRED_DISPATCH,
             Self::BacklogFull => intake_closure_reason::BACKLOG_FULL,
         }
@@ -66,6 +70,9 @@ impl Scheduler {
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn intake_closure(
         &self,
     ) -> Option<IntakeClosure> {
+        if self.is_apply_halted() {
+            return Some(IntakeClosure::ApplyHalted);
+        }
         if self.has_deferred_dispatch() {
             return Some(IntakeClosure::DeferredDispatch);
         }
@@ -137,6 +144,7 @@ mod tests {
     };
     use crate::control::cluster::calvin::scheduler::driver::types::BlockedTxn;
     use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
+    use crate::types::RequestId;
 
     /// How long a held input must stay unread. Several liveness ticks of the
     /// spawned loop fit in it.
@@ -278,6 +286,43 @@ mod tests {
         assert_eq!(metrics.intake_backlog.load(Ordering::Relaxed), 1);
         assert_eq!(
             metrics.intake_gate_closed_counts[intake_closure_reason::BACKLOG_FULL]
+                .load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    /// A halted scheduler closes intake with `ApplyHalted`, and the run loop
+    /// leaves new input unread.
+    #[tokio::test]
+    async fn halted_scheduler_closes_intake_and_reads_no_input() {
+        let registry = CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, _data_side) =
+            build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        let held = TxnId::new(3, 0);
+        scheduler
+            .pending
+            .insert(held, staged_pending(make_validate_only_txn(3, 0), held));
+        scheduler.handle_completion(held, RequestId::new(9), None);
+        assert_eq!(scheduler.intake_closure(), Some(IntakeClosure::ApplyHalted));
+        let metrics = Arc::clone(&scheduler.metrics);
+
+        let running = spawn_scheduler_loop(scheduler);
+        running
+            .input_tx()
+            .send(SchedulerInput::Txn(make_validate_only_txn(4, 0)))
+            .await
+            .expect("the loop's input channel is open");
+
+        let read_while_halted = inputs_consumed_within(running.input_tx(), HOLD_WAIT).await;
+        running.stop().await;
+
+        assert!(
+            !read_while_halted,
+            "the loop must not read input once the scheduler halted"
+        );
+        assert_eq!(metrics.intake_gate_closed.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            metrics.intake_gate_closed_counts[intake_closure_reason::APPLY_HALTED]
                 .load(Ordering::Relaxed),
             1
         );

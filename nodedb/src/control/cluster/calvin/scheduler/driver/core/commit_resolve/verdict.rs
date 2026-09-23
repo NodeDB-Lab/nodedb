@@ -11,6 +11,7 @@ use nodedb_cluster::calvin::VerdictSignal;
 use crate::control::cluster::calvin::scheduler::driver::core::deferred::{
     DispatchOutcome, DispatchStep,
 };
+use crate::control::cluster::calvin::scheduler::driver::core::halt::{HaltReason, HaltStep};
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
@@ -33,6 +34,10 @@ impl Scheduler {
     /// txn is still `Some(AwaitingVerdict)` — if it already transitioned out
     /// (resolve/drop dispatched, or completed), this is a no-op. This guarantees
     /// the flush/drop is dispatched exactly once.
+    ///
+    /// A COMMIT verdict for a txn this replica failed to stage halts the
+    /// scheduler: the txn stays parked with its locks, its stall deadline
+    /// cleared, and its position unapplied.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn resume_on_verdict(
         &mut self,
         txn_id: TxnId,
@@ -44,6 +49,20 @@ impl Scheduler {
             self.pending.get(&txn_id).and_then(|p| p.commit_state),
             Some(CommitState::AwaitingVerdict)
         ) {
+            return;
+        }
+
+        if committed
+            && let Some(pending) = self.pending.get_mut(&txn_id)
+            && let Some(stage_error) = pending.stage_error.clone()
+        {
+            pending.verdict_deadline = None;
+            self.halt_apply(
+                txn_id,
+                HaltReason::LocalStageFailed,
+                HaltStep::Stage,
+                format!("COMMIT verdict for a txn this replica did not stage: {stage_error}"),
+            );
             return;
         }
 
@@ -60,9 +79,12 @@ impl Scheduler {
             )
         };
         if let DispatchOutcome::Failed(error) = outcome {
-            // Terminal resolve/drop refusal: complete the txn as an infra error
-            // so its locks release and the epoch advances rather than stalling.
-            // The staged buffer is reclaimed by a later drop or on core teardown.
+            // Terminal resolve/drop refusal: the scheduler halts and holds
+            // the txn parked with its locks and staged buffer. The cleared
+            // deadline keeps the stall sweep from re-sending it.
+            if let Some(pending) = self.pending.get_mut(&txn_id) {
+                pending.verdict_deadline = None;
+            }
             self.fail_dispatch_step(txn_id, step, error);
             return;
         }
@@ -173,10 +195,13 @@ mod tests {
 
     use super::*;
     use crate::bridge::dispatch::CoreChannelDataSide;
+    use crate::bridge::envelope::ErrorCode;
     use crate::bridge::envelope::{Payload, Status};
+    use crate::control::cluster::calvin::scheduler::driver::core::halt::HaltReason;
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
-        await_data_plane_request, build_test_scheduler_with_data_side, fill_tenant_inflight,
-        make_sequenced_txn, release_filler, spawn_scheduler_loop, staged_pending, staged_response,
+        await_data_plane_request, build_test_scheduler_with_data_side, error_response,
+        fill_tenant_inflight, make_sequenced_txn, release_filler, spawn_scheduler_loop,
+        staged_pending, staged_response,
     };
     use crate::control::state::SharedState;
     use crate::types::RequestId;
@@ -452,5 +477,78 @@ mod tests {
             ));
             assert!(data_side.request_rx.try_pop().is_err());
         }
+    }
+
+    /// A follower scheduler whose stage failed, parked on the verdict barrier.
+    fn follower_with_failed_stage(
+        txn_id: TxnId,
+    ) -> (Scheduler, tempfile::TempDir, CoreChannelDataSide) {
+        let registry = CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, dir, data_side) = build_test_scheduler_with_data_side(7, registry);
+        assert!(
+            !scheduler.is_group_leader(),
+            "the fixture hosts no data group"
+        );
+        scheduler.pending.insert(
+            txn_id,
+            staged_pending(make_sequenced_txn(txn_id.epoch, txn_id.position), txn_id),
+        );
+        scheduler.resolve_staged_commit(
+            txn_id,
+            &error_response(ErrorCode::Internal {
+                detail: "stage failed".to_string(),
+            }),
+        );
+        (scheduler, dir, data_side)
+    }
+
+    /// A COMMIT verdict for a txn this follower failed to stage halts the
+    /// scheduler: the leader staged and voted commit, so this replica cannot
+    /// apply it. No resolve is dispatched, and the stall sweep stops.
+    #[tokio::test]
+    async fn commit_verdict_after_local_stage_error_halts_unapplied() {
+        let txn_id = TxnId::new(14, 2);
+        let (mut scheduler, _dir, mut data_side) = follower_with_failed_stage(txn_id);
+
+        scheduler.resume_on_verdict(txn_id, true);
+
+        assert!(!scheduler.applied.is_applied(14, 2));
+        let pending = scheduler
+            .pending
+            .get(&txn_id)
+            .expect("the txn stays pending");
+        assert_eq!(pending.commit_state, Some(CommitState::AwaitingVerdict));
+        assert_eq!(pending.verdict_deadline, None);
+        assert_eq!(
+            scheduler.apply_halt().map(|h| h.reason),
+            Some(HaltReason::LocalStageFailed)
+        );
+        assert!(
+            data_side.request_rx.try_pop().is_err(),
+            "no resolve reaches the Data Plane"
+        );
+    }
+
+    /// An abort verdict for a txn this replica failed to stage drops it as
+    /// usual: every replica reaches the same abort.
+    #[tokio::test]
+    async fn abort_verdict_after_local_stage_error_drops_without_halting() {
+        let txn_id = TxnId::new(14, 2);
+        let (mut scheduler, _dir, mut data_side) = follower_with_failed_stage(txn_id);
+
+        scheduler.resume_on_verdict(txn_id, false);
+
+        assert!(!scheduler.is_apply_halted());
+        let request = data_side
+            .request_rx
+            .try_pop()
+            .expect("the abort dispatches a drop");
+        assert!(matches!(
+            request.inner.plan,
+            PhysicalPlan::Meta(MetaOp::CalvinDrop {
+                epoch: 14,
+                position: 2
+            })
+        ));
     }
 }

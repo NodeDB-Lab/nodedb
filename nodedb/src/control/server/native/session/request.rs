@@ -52,12 +52,14 @@ impl NativeSession {
             // status surfaces must agree that this node cannot serve.
             // A halted sequencer is the same shape of after-boot degradation as
             // a wedged applier: the node still serves, but a whole class of
-            // writes no longer completes. Both surfaces must say so.
+            // writes no longer completes. Both surfaces must say so. A halted
+            // Calvin scheduler is the same shape, scoped to one vShard.
             // A stalled Data Plane core is a third after-boot degradation with
             // the same consequence: the gate reads Ok while work sent to that
             // core never completes. One atomic load, so it stays on this path.
             let native_status = if self.state.metadata_apply_wedge.is_wedged()
                 || self.state.sequencer_halt.is_halted()
+                || self.state.sequencer_halt.apply_halt().is_halted()
                 || self.state.core_stall.is_stalled()
             {
                 crate::control::startup::health::NativeStatus::Failed
