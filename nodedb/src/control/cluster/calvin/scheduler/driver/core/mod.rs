@@ -58,6 +58,8 @@ pub mod request;
 pub mod routing;
 pub mod scheduler;
 pub mod staged_vote;
+#[cfg(test)]
+mod test_support;
 pub mod write_version_record;
 
 pub use propose::{CalvinReadResultProposal, propose_calvin_read_result};

@@ -437,70 +437,9 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::BTreeSet;
 
-    use nodedb_cluster::RoutingTable;
-
-    use crate::bridge::dispatch::Dispatcher;
-
-    /// Build a minimally-wired `Scheduler` for driver-level unit tests. The Data
-    /// Plane is NOT started — tests exercise Control-Plane routing, guards, and
-    /// request dispatch only, so no core loop is needed. The returned `TempDir`
-    /// must be kept alive for the scheduler's lifetime (backs the WAL and
-    /// Raft storage).
-    fn build_test_scheduler(vshard_id: u32) -> (Scheduler, tempfile::TempDir) {
-        let registry = CalvinCompletionRegistry::new_detached();
-        let dir = tempfile::tempdir().unwrap();
-        let wal = Arc::new(
-            crate::wal::WalManager::open_for_testing(&dir.path().join("test.wal")).unwrap(),
-        );
-        let (dispatcher, mut data_sides) = Dispatcher::new(1, 64);
-        let _data_side = data_sides
-            .pop()
-            .expect("one configured core has one data side");
-        let shared = SharedState::new(dispatcher, wal).unwrap();
-
-        let rt = RoutingTable::uniform(1, &[1], 1);
-        let multi_raft = Arc::new(Mutex::new(MultiRaft::new(1, rt, dir.path().to_path_buf())));
-
-        let sequencer_state_machine = Arc::new(Mutex::new(SequencerStateMachine::new(
-            HashMap::new(),
-            Arc::clone(&registry),
-        )));
-
-        let (_tx, receiver) = mpsc::channel(16);
-        let (_rr_tx, read_result_rx) = mpsc::channel(16);
-        let (_prom_tx, promotion_rx) = mpsc::unbounded_channel();
-        let (verdict_tx, verdict_rx) = mpsc::channel(16);
-        registry.register_verdict_signal_sender(vshard_id, verdict_tx);
-
-        let lock_manager = Arc::new(Mutex::new(LockManager::new()));
-
-        let scheduler = Scheduler::new(SchedulerParams {
-            vshard_id,
-            receiver,
-            shared,
-            multi_raft,
-            sequencer_state_machine,
-            // A freshly-built scheduler has applied nothing, so its watermark is the
-            // not-yet-applied sentinel (matching `read_applied_recovery` for a clean
-            // node). Hardcoding `0` here would instead claim epoch 0 is fully applied,
-            // making the exactly-once gate (`AppliedGate::is_applied`) short-circuit
-            // every epoch-0 replay before it reaches the lock table — silently
-            // defeating the end-to-end drain tests below.
-            fully_applied_epoch: NOT_YET_APPLIED_EPOCH,
-            applied_tail: BTreeSet::new(),
-            rebuild_target_epoch: 0,
-            config: SchedulerConfig::default(),
-            metrics: SchedulerMetrics::new(),
-            read_result_rx,
-            lock_manager,
-            promotion_rx,
-            registry,
-            verdict_rx,
-        });
-        (scheduler, dir)
-    }
+    use crate::control::cluster::calvin::scheduler::driver::core::test_support::build_test_scheduler;
 
     /// A freshly-recovered scheduler (`fully_applied_epoch` still the
     /// `NOT_YET_APPLIED_EPOCH` sentinel) with a REAL, non-zero rebuild target must
