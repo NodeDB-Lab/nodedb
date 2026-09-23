@@ -4,7 +4,9 @@
 
 NodeDB-Lite compiles to WebAssembly and exposes the same `NodeDb` trait you use in native Lite. To talk to an Origin cluster from the browser, use Lite-WASM locally and replicate via CRDT sync over WebSocket — never run Origin in the browser.
 
-**Status: Experimental.** Lite-WASM support is feature-complete for all eight engines. Testing and CI integration are ongoing; treat the build as preview-quality. Report issues via GitHub.
+**Status: Experimental.** All eight engines are implemented for the WASM build, but treat it
+as preview-quality: CI integration is ongoing, and the array engine's first write fails until the
+commit-clock fix lands in the storage layer. Report issues via GitHub.
 
 ## Building for WASM
 
@@ -191,7 +193,7 @@ See [NodeDB-Lite](https://github.com/NodeDB-Lab/nodedb-lite) for full CRDT sync 
 ## Limitations and Known Issues
 
 - **Lite only — no Origin in WASM.** The distributed Origin server is not a WASM target. Browser/Node clients run Lite-WASM locally and sync to a separately-deployed Origin cluster over WebSocket
-- **No file persistence** — WASM runs in-memory only. For persistence, use `localStorage` or IndexedDB via a wrapper
+- **Persistence needs the OPFS worker** — `openPersistent*` keeps data in the Origin Private File System through `run_opfs_worker`. The default constructors (`open`, `openInMemory`) are in-memory only
 - **Single-threaded** — no thread-per-core, no parallel execution; everything runs on the JS/WASM main thread
 - **No io_uring, no native sockets** — storage and network I/O go through JS host APIs (`fetch`, IndexedDB, WebSocket); there is no NVMe path
 - **No cluster role** — Lite-WASM is a client/edge node only. It cannot act as a Raft member or vShard host

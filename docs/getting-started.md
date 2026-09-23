@@ -107,7 +107,7 @@ tar -xzf nodedb.tar.gz
 # Optional: install system-wide
 sudo mv nodedb /usr/local/bin/
 
-# Run with all defaults (data goes to ~/.nodedb/data)
+# Run with all defaults (Linux data dir: ~/.local/share/nodedb)
 nodedb
 ```
 
@@ -257,7 +257,7 @@ port named — the server never comes up missing a protocol.
 | `ports.sync`       | `NODEDB_PORT_SYNC`        | `9090`                                                |
 | `ports.resp`       | `NODEDB_PORT_RESP`        | disabled                                              |
 | `ports.ilp`        | `NODEDB_PORT_ILP`         | disabled                                              |
-| `data_dir`         | `NODEDB_DATA_DIR`         | `~/.nodedb/data` (binary), `/var/lib/nodedb` (Docker) |
+| `data_dir`         | `NODEDB_DATA_DIR`         | `$XDG_DATA_HOME/nodedb` or `~/.local/share/nodedb` (Linux), `~/Library/Application Support/nodedb` (macOS), `%LOCALAPPDATA%\nodedb\data` (Windows); `/var/lib/nodedb` (Docker) |
 | `memory_limit`     | `NODEDB_MEMORY_LIMIT`     | `1 GiB`                                               |
 | `data_plane_cores` | `NODEDB_DATA_PLANE_CORES` | CPUs - 1                                              |
 | `max_connections`  | `NODEDB_MAX_CONNECTIONS`  | `4096`                                                |

@@ -106,24 +106,25 @@ NodeDB-Lite compiles to WebAssembly. Run semantic search in the browser with no 
 
 ```javascript
 // Load NodeDB-Lite WASM module
-import { NodeDB } from "nodedb-lite-wasm";
+import init, { NodeDbLiteWasm } from "nodedb-lite-wasm";
 
-const db = await NodeDB.open("my-search-app");
+await init();
+
+const db = await NodeDbLiteWasm.openInMemory();
 
 // Create collection and index
-await db.exec(`CREATE COLLECTION docs TYPE document`);
-await db.exec(
+await db.executeSql(`CREATE COLLECTION docs TYPE document`);
+await db.executeSql(
   `CREATE VECTOR INDEX idx_docs_embedding ON docs METRIC cosine DIM 384`,
 );
 
-// Load a static snapshot (pre-built dataset)
-await db.loadSnapshot("/data/docs-snapshot.ndb");
+// Index a vector
+await db.vectorInsert("docs", "doc-1", embedding);
 
 // Search in the browser — no backend needed
-const results = await db.query(
-  `SEARCH docs USING VECTOR(embedding, ARRAY[${queryVector.join(",")}], 10)`,
-);
+const results = await db.vectorSearch("docs", queryVector, 10);
 ```
+
 
 **Use cases:**
 
@@ -131,8 +132,6 @@ const results = await db.query(
 - Demo applications (show vector search without a server)
 - Privacy-sensitive search (data never leaves the browser)
 - Offline-capable progressive web apps
-
-**Static snapshots:** Pre-build a dataset on your server, export as a snapshot file, host on a CDN. The WASM module loads the snapshot at startup — no live database connection needed.
 
 ## Privacy Model
 

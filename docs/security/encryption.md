@@ -161,7 +161,7 @@ or be stored in shared object storage without additional encryption.
 
 ## Encryption in Transit
 
-See [protocols.md — TLS](protocols.md#tls) for wire encryption
+See [protocols.md — TLS](../protocols.md#tls) for wire encryption
 configuration. All five listeners support TLS. Plaintext is the default
 and is appropriate only for local development.
 
