@@ -244,7 +244,7 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
 
         let req =
             crate::rpc_codec::RaftRpc::DataProposeRequest(crate::rpc_codec::DataProposeRequest {
-                vshard_id,
+                target: crate::rpc_codec::ProposeTarget::VShard(vshard_id),
                 bytes: data,
             });
         let resp = self.transport.send_rpc(leader_id, req).await?;

@@ -6,7 +6,8 @@ pub mod sequencer;
 pub mod types;
 
 pub use completion::{
-    AttemptOutcome, CalvinCompletionRegistry, ParticipantVote, TxnId, VerdictOutcome,
+    AttemptOutcome, CalvinCompletionRegistry, ParticipantProgress, ParticipantVote, TxnId,
+    VerdictOutcome,
 };
 pub use completion_verdict::VerdictSignal;
 pub use sequencer::{

@@ -4,12 +4,11 @@
 //! applied result, marking the apply durable, recording write versions, and
 //! proposing the `CompletionAck`.
 
-use nodedb_cluster::calvin::SequencerEntry;
-
 use crate::bridge::envelope::{Response, Status};
 use crate::control::cluster::calvin::scheduler::driver::core::halt::{
     HaltReason, HaltStep, error_response_text,
 };
+use crate::control::cluster::calvin::scheduler::driver::core::owed::SchedulerProposal;
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::control::cluster::calvin::scheduler::metrics::infra_abort_reason;
@@ -63,15 +62,7 @@ impl Scheduler {
         let completed = if committed {
             self.commit_apply_tail(txn_id, response, redo_lsn)
         } else {
-            self.propose_sequencer_entry(
-                SequencerEntry::CompletionAck {
-                    epoch: txn_id.epoch,
-                    position: txn_id.position,
-                    vshard_id: self.vshard_id,
-                },
-                txn_id,
-                "completion ack (dropped)",
-            );
+            self.propose_sequencer_entry(txn_id, SchedulerProposal::CompletionAck);
             true
         };
         // `false` means the commit tail halted the scheduler: the txn stays
@@ -247,15 +238,7 @@ impl Scheduler {
                 );
             }
         }
-        self.propose_sequencer_entry(
-            SequencerEntry::CompletionAck {
-                epoch: txn_id.epoch,
-                position: txn_id.position,
-                vshard_id: self.vshard_id,
-            },
-            txn_id,
-            "completion ack",
-        );
+        self.propose_sequencer_entry(txn_id, SchedulerProposal::CompletionAck);
         true
     }
 }

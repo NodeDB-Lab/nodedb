@@ -10,10 +10,9 @@
 //! [`CommitState::AwaitingVerdict`] has no outstanding bridge, so a completion
 //! for it is a no-op that keeps it parked.
 
-use nodedb_cluster::calvin::SequencerEntry;
-
 use super::super::types::CommitState;
 use super::halt::{HaltReason, HaltStep};
+use super::owed::SchedulerProposal;
 use super::scheduler::Scheduler;
 use crate::bridge::envelope::Response;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
@@ -102,14 +101,7 @@ impl Scheduler {
             // OllpMismatch calls note_ollp_mismatch, waking the coordinator's
             // retry-loop waiter wherever it is — mirrors how CompletionAck is
             // delivered to remote coordinators.
-            self.propose_sequencer_entry(
-                SequencerEntry::OllpMismatch {
-                    epoch: txn_id.epoch,
-                    position: txn_id.position,
-                },
-                txn_id,
-                "OLLP mismatch signal",
-            );
+            self.propose_sequencer_entry(txn_id, SchedulerProposal::OllpMismatch);
             return;
         }
 

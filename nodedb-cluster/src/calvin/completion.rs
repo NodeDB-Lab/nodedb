@@ -73,6 +73,24 @@ impl VerdictOutcome {
     }
 }
 
+/// What this node's registry has applied for one participant vShard of a txn.
+///
+/// A scheduler reads it to learn whether a sequencer entry it proposed has
+/// been applied here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParticipantProgress {
+    /// A `Vote` or `AbortVote` from this vShard is in the tally.
+    pub voted: bool,
+    /// A `CompletionAck` from this vShard is recorded.
+    pub acked: bool,
+    /// The txn's global verdict is stored.
+    pub has_verdict: bool,
+    /// An `OllpMismatch` for the txn is recorded.
+    pub mismatched: bool,
+    /// A `TxnRoutingFailed` for the txn is recorded and not yet delivered.
+    pub routing_failed: bool,
+}
+
 pub(crate) struct PendingCompletion {
     /// `pub(crate)`: also read/written by the vote/verdict-tally methods in
     /// `completion_verdict.rs` (a sibling module in the same crate).
@@ -382,6 +400,25 @@ impl CalvinCompletionRegistry {
                 );
             }
         }
+    }
+
+    /// What this registry holds for participant `vshard` of `txn`.
+    ///
+    /// `None` means no entry exists for `txn`. That is either a txn this node
+    /// never seeded, or one whose outcome already fired and evicted its entry.
+    pub fn participant_progress(&self, txn: TxnId, vshard: u32) -> Option<ParticipantProgress> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .completions
+            .get(&txn)
+            .map(|entry| ParticipantProgress {
+                voted: entry.votes.contains_key(&vshard),
+                acked: entry.acked_vshards.contains(&vshard),
+                has_verdict: entry.verdict.is_some(),
+                mismatched: entry.mismatched,
+                routing_failed: entry.routing_failed.is_some(),
+            })
     }
 
     /// Test-only: returns the number of pending completion entries.
@@ -710,5 +747,46 @@ mod tests {
             0,
             "entry must be evicted once mismatch is signalled"
         );
+    }
+
+    #[tokio::test]
+    async fn participant_progress_is_none_before_any_entry_exists() {
+        let reg = CalvinCompletionRegistry::new_detached();
+        assert_eq!(reg.participant_progress(TxnId::new(40, 0), 1), None);
+    }
+
+    #[tokio::test]
+    async fn participant_progress_reports_each_applied_signal_for_its_vshard() {
+        let reg = CalvinCompletionRegistry::new_detached();
+        let txn = TxnId::new(40, 1);
+        reg.seed_expected(txn, 2);
+        let empty = reg.participant_progress(txn, 1).expect("seeded entry");
+        assert!(!empty.voted && !empty.acked && !empty.has_verdict);
+        assert!(!empty.mismatched && !empty.routing_failed);
+
+        reg.note_vote(txn, 1, ParticipantVote::Commit);
+        reg.note_completion_ack(txn, 1);
+        let own = reg.participant_progress(txn, 1).expect("entry");
+        assert!(own.voted && own.acked);
+        let peer = reg.participant_progress(txn, 2).expect("entry");
+        assert!(
+            !peer.voted && !peer.acked,
+            "another vShard's signals do not count"
+        );
+
+        reg.note_verdict(txn, VerdictOutcome::Commit);
+        reg.note_ollp_mismatch(txn);
+        reg.note_routing_failed(txn, "unroutable".to_string());
+        let txn_wide = reg.participant_progress(txn, 2).expect("entry");
+        assert!(txn_wide.has_verdict && txn_wide.mismatched && txn_wide.routing_failed);
+    }
+
+    #[tokio::test]
+    async fn participant_progress_is_none_once_the_outcome_fired() {
+        let reg = CalvinCompletionRegistry::new_detached();
+        let txn = TxnId::new(40, 2);
+        let _rx = reg.register_completion(txn, 1);
+        reg.note_completion_ack(txn, 1);
+        assert_eq!(reg.participant_progress(txn, 1), None);
     }
 }

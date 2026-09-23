@@ -23,16 +23,21 @@ pub mod deferred;
 pub mod dispatch;
 pub mod halt;
 pub mod intake;
+pub mod owed;
 pub mod process;
 pub mod propose;
 pub mod read_result;
 pub mod request;
 pub mod routing;
 pub mod scheduler;
+pub mod sequencer_proposer;
 pub mod staged_vote;
+#[cfg(test)]
+mod test_proposer;
 #[cfg(test)]
 mod test_support;
 pub mod write_version_record;
 
 pub use propose::{CalvinReadResultProposal, propose_calvin_read_result};
 pub use scheduler::{Scheduler, SchedulerParams};
+pub use sequencer_proposer::{RaftSequencerProposer, SequencerProposer};

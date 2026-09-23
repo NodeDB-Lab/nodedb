@@ -2,23 +2,31 @@
 
 //! DataProposeRequest / DataProposeResponse wire types and codecs.
 //!
-//! Used to forward data-group (non-metadata) Raft proposals from a follower
-//! node to the group leader. The leader applies the proposal locally and
-//! returns `(group_id, log_index)` so the forwarder can register a
-//! `ProposeTracker` waiter and await commit.
+//! Used to forward a non-metadata Raft proposal from a node that does not
+//! lead the target group to the group leader. The target is a vShard's data
+//! group or the Calvin sequencer group. The leader applies the proposal
+//! locally and returns `(group_id, log_index)`.
 
 use super::discriminants::*;
 use super::header::write_frame;
 use super::raft_rpc::RaftRpc;
 use crate::error::{ClusterError, Result};
 
-/// Forward an opaque data-group proposal payload to the data-group leader.
-///
-/// `vshard_id` identifies the vShard (and thus the Raft group) the entry
-/// belongs to. `bytes` is the serialized `ReplicatedEntry`.
+/// The Raft group a forwarded proposal is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub enum ProposeTarget {
+    /// The data group that owns this vShard. The bytes are a serialized
+    /// `ReplicatedEntry`.
+    VShard(u32),
+    /// The Calvin sequencer group. The bytes are a msgpack-encoded
+    /// `SequencerEntry`.
+    Sequencer,
+}
+
+/// Forward an opaque proposal payload to the leader of its target group.
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct DataProposeRequest {
-    pub vshard_id: u32,
+    pub target: ProposeTarget,
     pub bytes: Vec<u8>,
 }
 
@@ -94,4 +102,37 @@ pub(super) fn decode_data_propose_resp(payload: &[u8]) -> Result<RaftRpc> {
         DataProposeResponse,
         "DataProposeResponse"
     )?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cluster_epoch::ClusterEpochState;
+    use crate::rpc_codec::{decode, encode};
+
+    fn roundtrip(target: ProposeTarget) -> DataProposeRequest {
+        let rpc = RaftRpc::DataProposeRequest(DataProposeRequest {
+            target,
+            bytes: vec![1, 2, 3],
+        });
+        let epoch = ClusterEpochState::default();
+        let encoded = encode(&rpc, &epoch).expect("encode");
+        match decode(&encoded, &epoch).expect("decode") {
+            RaftRpc::DataProposeRequest(req) => req,
+            other => panic!("decoded the wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sequencer_target_survives_the_wire() {
+        let req = roundtrip(ProposeTarget::Sequencer);
+        assert_eq!(req.target, ProposeTarget::Sequencer);
+        assert_eq!(req.bytes, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn vshard_target_survives_the_wire() {
+        let req = roundtrip(ProposeTarget::VShard(42));
+        assert_eq!(req.target, ProposeTarget::VShard(42));
+    }
 }

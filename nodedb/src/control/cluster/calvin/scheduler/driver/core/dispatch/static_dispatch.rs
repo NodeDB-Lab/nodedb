@@ -12,6 +12,7 @@ use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_physical::physical_plan::meta::MetaOp;
 
 use super::super::deferred::{DispatchOutcome, DispatchStep};
+use super::super::owed::SchedulerProposal;
 use super::super::routing::PlanRouting;
 use super::super::scheduler::Scheduler;
 use super::primary_write::{
@@ -51,21 +52,12 @@ impl Scheduler {
     /// full deadline and report a generic timeout. Mirrors the OllpMismatch
     /// broadcast in `handle_executor_response`. Shared by `dispatch_txn` and
     /// `dispatch_active_txn`.
-    pub(super) fn propose_routing_failure(
-        &self,
-        epoch: u64,
-        position: u32,
-        txn_id: TxnId,
-        err: &crate::Error,
-    ) {
+    pub(super) fn propose_routing_failure(&mut self, txn_id: TxnId, err: &crate::Error) {
         self.propose_sequencer_entry(
-            nodedb_cluster::calvin::SequencerEntry::TxnRoutingFailed {
-                epoch,
-                position,
+            txn_id,
+            SchedulerProposal::RoutingFailed {
                 detail: err.to_string(),
             },
-            txn_id,
-            "txn routing-failure signal",
         );
     }
 
@@ -165,7 +157,7 @@ impl Scheduler {
                         error = %e,
                         "calvin scheduler: static txn routing failed; releasing locks"
                     );
-                    self.propose_routing_failure(epoch, position, txn_id, &e);
+                    self.propose_routing_failure(txn_id, &e);
                     self.on_unpending_txn_complete(txn_id, lock_owner);
                     return;
                 }
@@ -200,7 +192,7 @@ impl Scheduler {
                 error = %e,
                 "calvin scheduler: static txn homes no local work; releasing locks"
             );
-            self.propose_routing_failure(epoch, position, txn_id, &e);
+            self.propose_routing_failure(txn_id, &e);
             self.on_unpending_txn_complete(txn_id, lock_owner);
             return;
         }

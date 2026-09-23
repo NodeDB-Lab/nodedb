@@ -10,10 +10,7 @@ use tracing::info;
 
 use nodedb_cluster::MultiRaft;
 use nodedb_cluster::calvin::types::SchedulerInput;
-use nodedb_cluster::calvin::{
-    CalvinCompletionRegistry, SEQUENCER_GROUP_ID, SequencerEntry, SequencerStateMachine,
-    VerdictSignal,
-};
+use nodedb_cluster::calvin::{CalvinCompletionRegistry, SequencerStateMachine, VerdictSignal};
 
 use super::super::barrier::{PendingDependentBarrier, ReadResultEvent};
 use super::super::config::SchedulerConfig;
@@ -22,6 +19,8 @@ use super::catch_up::CatchUpDrain;
 use super::deferred::DeferredQueue;
 use super::halt::HaltLatch;
 use super::intake::IntakeGate;
+use super::owed::OwedEntries;
+use super::sequencer_proposer::SequencerProposer;
 use crate::bridge::envelope::Response;
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
 use crate::control::cluster::calvin::scheduler::metrics::SchedulerMetrics;
@@ -53,10 +52,17 @@ pub struct Scheduler {
     /// Shared control-plane state used for dispatch, response tracking, WAL,
     /// and request-id allocation.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) shared: Arc<SharedState>,
-    /// Handle to MultiRaft so completion acknowledgements can be proposed to
-    /// the sequencer group.
+    /// Handle to MultiRaft for the data-group leader check and the catch-up
+    /// read of the sequencer log.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) multi_raft:
         Arc<Mutex<MultiRaft>>,
+    /// Hands sequencer entries to the sequencer group, locally on its leader
+    /// and by forward from any other node.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) sequencer_proposer:
+        Arc<dyn SequencerProposer>,
+    /// Sequencer entries proposed and not yet seen applied. See
+    /// [`super::owed`].
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) owed: OwedEntries,
     /// Shared handle to the sequencer state machine. The state machine records,
     /// per vShard, the earliest Raft index whose fan-out `try_send` was DROPPED
     /// (channel Full/Closed) so a dropped `SchedulerInput` never permanently
@@ -168,6 +174,9 @@ pub struct SchedulerParams {
     pub receiver: mpsc::Receiver<SchedulerInput>,
     pub shared: Arc<SharedState>,
     pub multi_raft: Arc<Mutex<MultiRaft>>,
+    /// The node's sequencer proposer. Production passes one
+    /// `RaftSequencerProposer` shared by every scheduler on the node.
+    pub sequencer_proposer: Arc<dyn SequencerProposer>,
     /// Shared sequencer state machine, source of the per-vShard catch-up index
     /// the drain replays from. Same `Arc` the Raft apply loop drives.
     pub sequencer_state_machine: Arc<Mutex<SequencerStateMachine>>,
@@ -204,6 +213,7 @@ impl Scheduler {
             receiver,
             shared,
             multi_raft,
+            sequencer_proposer,
             sequencer_state_machine,
             fully_applied_epoch,
             applied_tail,
@@ -233,6 +243,8 @@ impl Scheduler {
             receiver,
             shared,
             multi_raft,
+            sequencer_proposer,
+            owed: OwedEntries::new(),
             sequencer_state_machine,
             lock_manager,
             pending: BTreeMap::new(),
@@ -432,51 +444,13 @@ impl Scheduler {
                     // A closed intake gate skips the drain until it opens.
                     catch_up_resume =
                         !intake_open || self.drain_catch_up() == CatchUpDrain::Remaining;
+                    // Propose again every owed sequencer entry not yet applied.
+                    self.retry_owed_sequencer_entries();
                     // The top-of-loop check_awaiting_verdict_stalls /
                     // check_dependent_barrier_timeouts and the deferred re-send
                     // pass run on every wake; this arm guarantees the loop wakes
                     // to run them (and the drain) when no other event arrives.
                 }
-            }
-        }
-    }
-
-    /// Encode `entry` as MessagePack and propose it to the sequencer Raft group.
-    ///
-    /// Logs a warning on encode failure or propose failure; never panics.
-    /// `op_name` is a short human-readable label used in warning messages
-    /// (e.g. `"completion ack"`, `"OLLP mismatch signal"`).
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn propose_sequencer_entry(
-        &self,
-        entry: SequencerEntry,
-        txn_id: TxnId,
-        op_name: &str,
-    ) {
-        match zerompk::to_msgpack_vec(&entry) {
-            Ok(bytes) => {
-                if let Err(e) = self
-                    .multi_raft
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .propose_to_group(SEQUENCER_GROUP_ID, bytes)
-                {
-                    tracing::warn!(
-                        vshard_id = self.vshard_id,
-                        epoch = txn_id.epoch,
-                        position = txn_id.position,
-                        error = %e,
-                        "calvin: failed to propose {op_name}",
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    vshard_id = self.vshard_id,
-                    epoch = txn_id.epoch,
-                    position = txn_id.position,
-                    error = %e,
-                    "calvin: failed to encode {op_name}",
-                );
             }
         }
     }

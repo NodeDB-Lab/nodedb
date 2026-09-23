@@ -5,10 +5,9 @@
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use nodedb_cluster::calvin::SequencerEntry;
-
 use crate::bridge::envelope::Response;
 use crate::control::cluster::calvin::scheduler::driver::core::halt::error_response_text;
+use crate::control::cluster::calvin::scheduler::driver::core::owed::SchedulerProposal;
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::driver::core::staged_vote::{
     StagedVote, staged_commit_vote,
@@ -53,23 +52,16 @@ impl Scheduler {
         // leader ran read-set validation, so only a leader's vote is
         // authoritative. The sequencer aggregates every participant's vote into
         // the single global verdict this txn parks on below. An abort travels as
-        // `AbortVote` so its cause survives to the coordinator.
+        // `AbortVote` so its cause survives to the coordinator. The vote stays
+        // owed until the tally holds it, so a refused or dropped proposal is
+        // proposed again rather than lost.
         if self.is_group_leader() {
-            let entry = match vote.abort_reason() {
-                Some(reason) => SequencerEntry::AbortVote {
-                    epoch: txn_id.epoch,
-                    position: txn_id.position,
-                    vshard: self.vshard_id,
-                    reason,
+            self.propose_sequencer_entry(
+                txn_id,
+                SchedulerProposal::Vote {
+                    abort: vote.abort_reason(),
                 },
-                None => SequencerEntry::Vote {
-                    epoch: txn_id.epoch,
-                    position: txn_id.position,
-                    vshard: self.vshard_id,
-                    commit: true,
-                },
-            };
-            self.propose_sequencer_entry(entry, txn_id, "commit vote");
+            );
         }
 
         if vote == StagedVote::SerializationConflict {

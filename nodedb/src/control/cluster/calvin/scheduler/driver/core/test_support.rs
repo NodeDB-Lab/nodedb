@@ -26,6 +26,7 @@ use crate::control::cluster::calvin::scheduler::driver::barrier::ReadResultEvent
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::{
     Scheduler, SchedulerParams,
 };
+use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::CapturingProposer;
 use crate::control::cluster::calvin::scheduler::driver::types::{CommitState, PendingTxn};
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
 use crate::control::cluster::calvin::scheduler::metrics::SchedulerMetrics;
@@ -71,6 +72,7 @@ pub(super) fn build_test_scheduler(vshard_id: u32) -> (Scheduler, tempfile::Temp
         receiver,
         shared,
         multi_raft,
+        sequencer_proposer: CapturingProposer::accepting(),
         sequencer_state_machine,
         // A freshly-built scheduler has applied nothing, so its watermark is the
         // not-yet-applied sentinel (matching `read_applied_recovery` for a clean
@@ -129,6 +131,7 @@ pub(super) fn build_test_scheduler_with_data_side(
         receiver,
         shared,
         multi_raft,
+        sequencer_proposer: CapturingProposer::accepting(),
         sequencer_state_machine,
         fully_applied_epoch: NOT_YET_APPLIED_EPOCH,
         applied_tail: BTreeSet::new(),

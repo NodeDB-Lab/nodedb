@@ -38,7 +38,7 @@ pub use cluster_mgmt::{
     PongResponse, TopologyAck, TopologyUpdate,
 };
 pub use data_plane_error::DataPlaneErrorCode;
-pub use data_propose::{DataProposeRequest, DataProposeResponse};
+pub use data_propose::{DataProposeRequest, DataProposeResponse, ProposeTarget};
 pub use execute::{
     DescriptorVersionEntry, ExecuteRequest, ExecuteResponse, ExecuteStreamChunk, ExecuteStreamEnd,
     PLAN_DECODE_FAILED, TypedClusterError,

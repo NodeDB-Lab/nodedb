@@ -75,7 +75,7 @@ impl Scheduler {
                         error = %e,
                         "calvin scheduler: active txn homes no local writes; releasing locks"
                     );
-                    self.propose_routing_failure(epoch, position, txn_id, &e);
+                    self.propose_routing_failure(txn_id, &e);
                     self.on_unpending_txn_complete(txn_id, lock_owner);
                     return;
                 }
@@ -87,7 +87,7 @@ impl Scheduler {
                         error = %e,
                         "calvin scheduler: active txn routing failed; releasing locks"
                     );
-                    self.propose_routing_failure(epoch, position, txn_id, &e);
+                    self.propose_routing_failure(txn_id, &e);
                     self.on_unpending_txn_complete(txn_id, lock_owner);
                     return;
                 }

@@ -11,7 +11,8 @@ use nodedb_cluster::wire::VShardEnvelope;
 use crate::control::cluster::calvin::scheduler::metrics::SchedulerMetrics;
 use crate::control::cluster::calvin::scheduler::read_applied_recovery;
 use crate::control::cluster::calvin::{
-    ReadResultEvent, Scheduler, SchedulerConfig, SchedulerParams,
+    RaftSequencerProposer, ReadResultEvent, Scheduler, SchedulerConfig, SchedulerParams,
+    SequencerProposer,
 };
 use crate::control::cluster::handle::ClusterHandle;
 use crate::control::state::SharedState;
@@ -114,6 +115,8 @@ struct ReconcileSchedulersParams<'a> {
     routing: &'a Arc<RwLock<nodedb_cluster::RoutingTable>>,
     shared: &'a Arc<SharedState>,
     raft_loop_handle: &'a Arc<Mutex<nodedb_cluster::multi_raft::MultiRaft>>,
+    /// One proposer per node, so its forward limit bounds the whole node.
+    sequencer_proposer: &'a Arc<dyn SequencerProposer>,
     sequencer_state_machine: &'a Arc<Mutex<SequencerStateMachine>>,
     calvin_read_result_senders: &'a ReadResultSenders,
     calvin_completion_registry: &'a Arc<CalvinCompletionRegistry>,
@@ -138,6 +141,7 @@ fn reconcile_vshard_schedulers(params: ReconcileSchedulersParams<'_>) -> crate::
         routing,
         shared,
         raft_loop_handle,
+        sequencer_proposer,
         sequencer_state_machine,
         calvin_read_result_senders,
         calvin_completion_registry,
@@ -237,6 +241,7 @@ fn reconcile_vshard_schedulers(params: ReconcileSchedulersParams<'_>) -> crate::
             receiver: sequenced_rx,
             shared: Arc::clone(shared),
             multi_raft: raft_loop_handle.clone(),
+            sequencer_proposer: Arc::clone(sequencer_proposer),
             sequencer_state_machine: Arc::clone(sequencer_state_machine),
             fully_applied_epoch: recovery.fully_applied_epoch,
             applied_tail: recovery.applied_tail,
@@ -321,6 +326,11 @@ pub(super) fn spawn_vshard_schedulers(
 
     let node_id = handle.node_id;
     let routing = Arc::clone(&handle.routing);
+    let sequencer_proposer: Arc<dyn SequencerProposer> = Arc::new(RaftSequencerProposer::new(
+        node_id,
+        Arc::clone(&raft_loop_handle),
+        Arc::clone(shared),
+    ));
 
     // Initial reconcile: schedulers for vShards this node already knows it hosts.
     reconcile_vshard_schedulers(ReconcileSchedulersParams {
@@ -328,6 +338,7 @@ pub(super) fn spawn_vshard_schedulers(
         routing: &routing,
         shared,
         raft_loop_handle: &raft_loop_handle,
+        sequencer_proposer: &sequencer_proposer,
         sequencer_state_machine,
         calvin_read_result_senders,
         calvin_completion_registry,
@@ -362,6 +373,7 @@ pub(super) fn spawn_vshard_schedulers(
                             routing: &routing,
                             shared: &shared_task,
                             raft_loop_handle: &raft_loop_handle,
+                            sequencer_proposer: &sequencer_proposer,
                             sequencer_state_machine: &sm_task,
                             calvin_read_result_senders: &rr_task,
                             calvin_completion_registry: &registry_task,
