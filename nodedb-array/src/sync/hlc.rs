@@ -13,7 +13,6 @@
 //! spec's u48 intent while keeping byte alignment simple.
 
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -165,11 +164,10 @@ impl HlcGenerator {
 
     /// Return the current wall-clock milliseconds since Unix epoch.
     fn now_ms() -> ArrayResult<u64> {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+        nodedb_types::clock::since_epoch()
             .map(|d| d.as_millis() as u64)
-            .map_err(|e| ArrayError::InvalidHlc {
-                detail: format!("system clock before Unix epoch: {e}"),
+            .ok_or_else(|| ArrayError::InvalidHlc {
+                detail: "system clock before Unix epoch".to_owned(),
             })
     }
 

@@ -10,6 +10,7 @@
 //! crate.
 
 pub mod audit_dml;
+pub mod clock;
 pub mod config;
 pub mod quota;
 

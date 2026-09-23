@@ -12,7 +12,6 @@
 
 use std::cmp::Ordering;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -189,10 +188,9 @@ impl HlcClock {
 }
 
 fn wall_now_ns() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    crate::clock::since_epoch()
         .map(|d| d.as_nanos() as u64)
-        .unwrap_or_else(|_| {
+        .unwrap_or_else(|| {
             use std::sync::atomic::{AtomicBool, Ordering};
             static LOGGED: AtomicBool = AtomicBool::new(false);
             if !LOGGED.swap(true, Ordering::Relaxed) {

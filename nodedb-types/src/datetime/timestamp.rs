@@ -74,20 +74,18 @@ impl NdbDateTime {
     /// `i64::MAX` (year ~292,277 CE) rather than wrapping — clocks that far
     /// in the future simply report the maximum representable timestamp.
     pub fn now() -> Self {
-        let dur = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_else(|_| {
-                use std::sync::atomic::{AtomicBool, Ordering};
-                static LOGGED: AtomicBool = AtomicBool::new(false);
-                if !LOGGED.swap(true, Ordering::Relaxed) {
-                    tracing::error!(
-                        module = module_path!(),
-                        "system clock is before UNIX_EPOCH; using 0 (epoch) \
+        let dur = crate::clock::since_epoch().unwrap_or_else(|| {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                tracing::error!(
+                    module = module_path!(),
+                    "system clock is before UNIX_EPOCH; using 0 (epoch) \
                          — check NTP/RTC configuration"
-                    );
-                }
-                std::time::Duration::ZERO
-            });
+                );
+            }
+            std::time::Duration::ZERO
+        });
         Self {
             micros: i64::try_from(dur.as_micros()).unwrap_or(i64::MAX),
         }

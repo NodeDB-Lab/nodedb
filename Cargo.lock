@@ -4683,6 +4683,7 @@ dependencies = [
  "bytemuck",
  "crc32c",
  "getrandom 0.4.3",
+ "js-sys",
  "nanoid",
  "nodedb-codec",
  "rand 0.10.2",

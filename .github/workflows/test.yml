@@ -93,6 +93,37 @@ jobs:
       - name: Dependency audit
         run: cargo deny check
 
+  # Compile the shared crates for a wasm target. The server, cluster and raft
+  # crates are not wasm targets; these are the crates NodeDB-Lite compiles into
+  # its browser/wasm build, so a wasm-incompatible dependency or a target-specific
+  # cfg mistake fails here instead of in the Lite repo.
+  #
+  # `wasm32-wasip1` on purpose: `wasm32-unknown-unknown` needs a getrandom
+  # backend the workspace does not select, so the check would fail on the
+  # random source rather than on the code under change.
+  wasm:
+    name: WASM compile (wasip1)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust + wasm target
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: wasm-wasip1
+
+      - name: cargo check (shared crates)
+        run: |
+          cargo check --profile ci --target wasm32-wasip1 \
+            -p nodedb-types -p nodedb-codec -p nodedb-physical -p nodedb-mem \
+            -p nodedb-crdt -p nodedb-columnar -p nodedb-fts -p nodedb-graph \
+            -p nodedb-spatial -p nodedb-strict -p nodedb-sql -p nodedb-query \
+            -p nodedb-array -p nodedb-vector -p nodedb-client -p nodedb-wal
+
   # Single test job: runs the fast suite first, then the 3-node cluster
   # suite (`nodedb-cluster-tests`) on the same runner. Combining them
   # avoids a second cold compile of the whole workspace; the cluster

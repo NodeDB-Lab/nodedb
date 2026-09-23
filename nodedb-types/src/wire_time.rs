@@ -13,8 +13,6 @@
 //! Using these aliases in field declarations makes the intended semantics
 //! self-documenting and ensures a single canonical width per concept.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 /// A wall-clock instant expressed as signed milliseconds since the Unix epoch
 /// (UTC). Negative values represent dates before 1970-01-01.
 ///
@@ -34,13 +32,14 @@ pub type DurMs = u64;
 /// easier to detect than `i64::MAX`. Logs the condition once per process via
 /// `tracing::error!` to alert operators.
 ///
-/// # TODO(post-launch): funnel direct `SystemTime::now()` callers through this
-/// helper so all inline clock-read sites also get the once-per-process log.
+/// Inline clock reads go through `crate::clock::since_epoch()`, which owns the
+/// target split. This helper keeps its own contract — substitute `0` and log
+/// once per process — for callers that want a value rather than a `Result`;
+/// callers that must surface a pre-epoch clock keep their own error mapping.
 pub fn current_wall_ms() -> WallMs {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    crate::clock::since_epoch()
         .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or_else(|_| {
+        .unwrap_or_else(|| {
             use std::sync::atomic::{AtomicBool, Ordering};
             static LOGGED: AtomicBool = AtomicBool::new(false);
             if !LOGGED.swap(true, Ordering::Relaxed) {

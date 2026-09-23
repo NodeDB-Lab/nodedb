@@ -47,6 +47,9 @@ fn builder_loop(core_id: usize, rx: mpsc::Receiver<BuildRequest>, tx: mpsc::Send
             "building HNSW index"
         );
 
+        // The build log carries its duration; wasm32-unknown-unknown has no
+        // clock, so the timer is skipped there and the log reports 0.
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let start = std::time::Instant::now();
         let mut index = HnswIndex::with_seed(
             req.dim,
@@ -60,13 +63,16 @@ fn builder_loop(core_id: usize, rx: mpsc::Receiver<BuildRequest>, tx: mpsc::Send
                 .unwrap_or_else(|e| tracing::error!(error = %e, "HNSW insert failed"));
         }
 
-        let elapsed = start.elapsed();
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        let elapsed_ms = 0u64;
         info!(
             core_id,
             key = %req.key,
             segment_id = req.segment_id,
             vectors = index.len(),
-            elapsed_ms = elapsed.as_millis() as u64,
+            elapsed_ms,
             "HNSW index built"
         );
 

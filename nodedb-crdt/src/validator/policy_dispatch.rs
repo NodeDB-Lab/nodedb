@@ -121,8 +121,7 @@ impl Validator {
                         max_retries,
                         ttl_secs,
                     } => {
-                        let now_ms = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
+                        let now_ms = nodedb_types::clock::since_epoch()
                             .unwrap_or_default()
                             .as_millis() as u64;
 
@@ -286,10 +285,7 @@ mod tests {
             fields: vec![("email".into(), LoroValue::String("a@b.com".into()))],
         };
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let now = nodedb_types::clock::since_epoch().unwrap().as_millis() as u64;
 
         let resolution = validator
             .validate_with_policy(
@@ -342,10 +338,7 @@ mod tests {
             ],
         };
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let now = nodedb_types::clock::since_epoch().unwrap().as_millis() as u64;
 
         let resolution = validator
             .validate_with_policy(
@@ -387,10 +380,7 @@ mod tests {
             fields: vec![("author_id".into(), LoroValue::String("u1".into()))],
         };
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let now = nodedb_types::clock::since_epoch().unwrap().as_millis() as u64;
 
         let resolution = validator
             .validate_with_policy(
@@ -435,10 +425,7 @@ mod tests {
             fields: vec![("email".into(), LoroValue::String("a@b.com".into()))],
         };
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let now = nodedb_types::clock::since_epoch().unwrap().as_millis() as u64;
 
         let resolution = validator
             .validate_with_policy(

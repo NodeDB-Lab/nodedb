@@ -23,7 +23,6 @@
 //! exposed here so that wiring has a single canonical API to call.
 
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Nanoseconds in one millisecond.
 pub const NANOS_PER_MS: i64 = 1_000_000;
@@ -87,8 +86,7 @@ pub fn ordinal_to_ms(ordinal: i64) -> i64 {
 }
 
 fn wall_now_ns() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    crate::clock::since_epoch()
         .map(|d| {
             let ns = d.as_nanos();
             if ns > i64::MAX as u128 {
@@ -97,7 +95,7 @@ fn wall_now_ns() -> i64 {
                 ns as i64
             }
         })
-        .unwrap_or_else(|_| {
+        .unwrap_or_else(|| {
             use std::sync::atomic::{AtomicBool, Ordering};
             static LOGGED: AtomicBool = AtomicBool::new(false);
             if !LOGGED.swap(true, Ordering::Relaxed) {

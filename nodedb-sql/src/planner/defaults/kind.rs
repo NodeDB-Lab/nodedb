@@ -64,9 +64,7 @@ pub(super) fn cuid2_with_length(len: usize) -> crate::Result<String> {
 
 /// Render the current wall-clock instant the way `DEFAULT NOW()` stores it.
 fn now_rfc3339() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+    let now = nodedb_types::clock::since_epoch().unwrap_or_default();
     chrono::DateTime::from_timestamp_millis(now.as_millis() as i64)
         .map(|dt| dt.to_rfc3339())
         .unwrap_or_else(|| now.as_millis().to_string())
