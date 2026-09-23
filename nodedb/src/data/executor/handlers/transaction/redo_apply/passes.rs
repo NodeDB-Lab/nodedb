@@ -17,7 +17,6 @@ use nodedb_wal::WalRecord;
 
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::types::VShardId;
 
 use super::state::{RedoApplyPass, RedoApplyScope};
 
@@ -28,7 +27,7 @@ pub(super) enum PassRefusal {
     /// The install pass failed. Every write was rolled back.
     RolledBack(ErrorCode),
     /// The install pass failed and its rollback failed too. The core's state
-    /// is unknown.
+    /// is unknown, and the `RollbackFailed` code fail-stops the core.
     RollbackFailed(ErrorCode),
 }
 
@@ -54,7 +53,6 @@ pub(super) struct RedoTarget<'a> {
     pub sub_records: usize,
     pub database_id: u64,
     pub tid: u64,
-    pub vshard_id: VShardId,
 }
 
 impl CoreLoop {
@@ -99,7 +97,7 @@ impl CoreLoop {
             return Ok(scope);
         };
         let undo = std::mem::take(&mut scope.undo);
-        match self.rollback_undo_log_at(target.database_id, target.tid, target.vshard_id, undo) {
+        match self.rollback_undo_log(target.database_id, target.tid, undo) {
             Ok(()) => Err(PassRefusal::RolledBack(cause)),
             Err((entry_index, detail)) => {
                 Err(PassRefusal::RollbackFailed(ErrorCode::RollbackFailed {
@@ -133,8 +131,11 @@ impl CoreLoop {
             .map_err(ErrorCode::from);
         match self.redo_apply.scope.take() {
             Some(scope) => Ok((applied, scope)),
-            None => Err(PassRefusal::RollbackFailed(ErrorCode::Internal {
-                detail: "committed transaction redo lost its apply scope".into(),
+            // The scope held the undo log. Without it nothing can be rolled
+            // back, so the core's state is unknown.
+            None => Err(PassRefusal::RollbackFailed(ErrorCode::RollbackFailed {
+                entry_index: 0,
+                detail: "committed transaction redo lost its apply scope and its undo log".into(),
             })),
         }
     }

@@ -8,6 +8,7 @@ pub(in crate::data::executor) mod crdt_collection;
 pub(super) mod document;
 pub(super) mod document_fts;
 pub(in crate::data::executor::handlers) mod document_outcome;
+pub(in crate::data::executor) mod edge_write;
 pub(super) mod entry;
 pub(in crate::data::executor) mod fts_doc;
 pub(super) mod graph_node;

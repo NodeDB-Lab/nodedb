@@ -57,10 +57,17 @@ impl NativeSession {
             // A stalled Data Plane core is a third after-boot degradation with
             // the same consequence: the gate reads Ok while work sent to that
             // core never completes. One atomic load, so it stays on this path.
+            // A fail-stopped core refuses its work outright, with the same
+            // consequence.
             let native_status = if self.state.metadata_apply_wedge.is_wedged()
                 || self.state.sequencer_halt.is_halted()
                 || self.state.sequencer_halt.apply_halt().is_halted()
                 || self.state.core_stall.is_stalled()
+                || self
+                    .state
+                    .system_metrics
+                    .as_ref()
+                    .is_some_and(|metrics| metrics.core_fail_stops.is_stopped())
             {
                 crate::control::startup::health::NativeStatus::Failed
             } else {

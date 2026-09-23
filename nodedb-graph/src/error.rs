@@ -55,4 +55,10 @@ pub enum GraphError {
     /// Callers should apply backpressure and retry after memory is released.
     #[error("graph memory budget rejected: {0}")]
     MemoryBudget(#[from] MemError),
+
+    /// A rollback asked to withdraw an interned node or node label that is
+    /// not the newest one, or that something still refers to. Withdrawing it
+    /// would renumber or orphan live state.
+    #[error("cannot withdraw {kind} '{name}': it is not the newest {kind} or it is still in use")]
+    WithdrawRefused { kind: &'static str, name: String },
 }

@@ -413,13 +413,14 @@ mod tests {
             &put_seed,
         )
         .expect("wal append seed put");
-        wal.append_put(
-            TenantId::new(TID),
-            VShardId::new(0),
-            DatabaseId::DEFAULT,
-            &entry,
-        )
-        .expect("append raw kv_incr record");
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .append_put(
+                TenantId::new(TID),
+                VShardId::new(0),
+                DatabaseId::DEFAULT,
+                &entry,
+            )
+            .expect("append raw kv_incr record");
         wal.sync().expect("wal sync");
         let records = wal.replay().expect("wal replay read");
 

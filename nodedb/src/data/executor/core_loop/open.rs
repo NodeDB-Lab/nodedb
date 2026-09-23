@@ -212,6 +212,7 @@ impl CoreLoop {
             balanced_txn_entries: None,
             redo_apply:
                 crate::data::executor::handlers::transaction::redo_apply::RedoApplyState::new(),
+            fail_stop: super::fail_stop::CoreFailStop::default(),
         })
     }
 }

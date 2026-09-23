@@ -290,6 +290,52 @@ mod tests {
         );
     }
 
+    /// A record applied below a published checkpoint that cannot be published
+    /// again leaves the checkpoint's claim false for it. The work cannot be
+    /// rolled back, so the core fail-stops and the record's events stay unsent.
+    #[test]
+    fn a_failed_republish_fail_stops_the_core() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let (mut producers, mut consumers) =
+            crate::event::bus::create_event_bus_with_capacity(1, 64);
+        core.set_event_producer(producers.pop().expect("producer"));
+        core.floors.kv_published_lsn = Lsn::new(100);
+        // A file where the checkpoint directory belongs makes the publish fail.
+        let ckpt_dir = core
+            .data_dir
+            .join("kv-ckpt")
+            .join(format!("core-{}", core.core_id));
+        std::fs::create_dir_all(ckpt_dir.parent().expect("parent")).expect("kv-ckpt dir");
+        std::fs::write(&ckpt_dir, b"not a directory").expect("block the checkpoint dir");
+
+        let mut task = make_default_task();
+        task.wal_lsn = Some(Lsn::new(50));
+        let redo = RedoRecord {
+            version: 1,
+            ops: vec![kv_put("cache", b"b", b"2", 2)],
+            calvin_stamp: None,
+        }
+        .to_bytes()
+        .expect("encode redo");
+        let response = core.execute_apply_transaction_redo(
+            &task,
+            TID,
+            CommittedRedo {
+                redo: &redo,
+                collections: &["cache".to_string()],
+                sum_targets: &[],
+            },
+        );
+
+        assert_eq!(response.status, Status::Error);
+        assert!(core.fail_stop.is_stopped(), "the core fail-stops");
+        assert!(
+            consumers[0].try_recv().is_none(),
+            "no event leaves for a record whose post-install work failed"
+        );
+    }
+
     #[test]
     fn a_columnar_record_applied_below_a_published_checkpoint_is_published_again() {
         use nodedb_types::Value;

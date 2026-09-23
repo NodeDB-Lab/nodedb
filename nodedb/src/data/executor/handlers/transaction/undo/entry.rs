@@ -24,6 +24,9 @@ pub(in crate::data::executor) struct TimeseriesIngestUndo {
     /// accounting after rollback.
     pub memtable_memory_bytes_before: Option<usize>,
     pub last_value_cache_before: Option<LastValueCache>,
+    /// The collection's series catalog. Ingest registers each new series in
+    /// it.
+    pub series_catalog_before: Option<nodedb_types::timeseries::SeriesCatalog>,
     pub max_ingested_lsn_before: Option<u64>,
     pub last_ts_ingest_before: Option<std::time::Instant>,
     pub reservation_bytes_before: Option<usize>,
@@ -186,23 +189,9 @@ pub(in crate::data::executor) enum UndoEntry {
         bbox: nodedb_types::BoundingBox,
         document_id: String,
     },
-    /// Undo an EdgePut by deleting the edge (or restoring old properties).
-    PutEdge {
-        collection: String,
-        src_id: String,
-        label: String,
-        dst_id: String,
-        /// `None` if edge didn't exist before (inserted); `Some(bytes)` if overwritten.
-        old_properties: Option<Vec<u8>>,
-    },
-    /// Undo an EdgeDelete by re-inserting the edge with its old properties.
-    DeleteEdge {
-        collection: String,
-        src_id: String,
-        label: String,
-        dst_id: String,
-        old_properties: Vec<u8>,
-    },
+    /// Undo a graph edge write: remove the version it added and put the CSR
+    /// back.
+    EdgeWrite(Box<super::edge_write::EdgeWriteUndo>),
     /// Undo a KV write (Put / Insert / InsertIfAbsent / InsertOnConflictUpdate /
     /// FieldSet / Incr / IncrFloat / Cas / GetSet) by reinstating the key's
     /// prior state.
@@ -343,12 +332,17 @@ pub(in crate::data::executor) enum UndoEntry {
         prior: Option<u64>,
     },
     /// Undo a node-label set or removal: each label the op touched goes back
-    /// to whether the node carried it before (`true` = it did).
+    /// to whether the node carried it before (`true` = it did). The label
+    /// names and the node the op interned are withdrawn.
     NodeLabels {
         database_id: u64,
         tid: u64,
         node_id: String,
         prior: Vec<(String, bool)>,
+        /// Label names the op interned, in interning order.
+        interned_labels: Vec<String>,
+        /// Whether the op created the node in the CSR.
+        created_node: bool,
     },
     /// Undo a columnar insert by rolling back in-memory state.
     ///

@@ -9,6 +9,9 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
 
+use crate::data::executor::handlers::transaction::undo::UndoEntry;
+use crate::data::executor::handlers::transaction::undo::edge_write::EdgeTarget;
+
 use super::shared::{EdgePutParams, owns_logical_edge_stats};
 
 impl CoreLoop {
@@ -22,22 +25,20 @@ impl CoreLoop {
 
     /// Edge upsert with optional transactional compensation.
     ///
-    /// When `undo` is `Some`, the `UndoEntry::PutEdge` is recorded at the one
-    /// correct point: *after* the edge-store version is durably written and
-    /// *before* the fallible CSR mutation. Recording it earlier (before the
-    /// dangling-endpoint validation or the edge-store write) would leave a
-    /// compensation entry for an operation that never touched storage — on
-    /// rollback that entry would soft-delete or re-insert a version that never
-    /// existed, corrupting bitemporal edge history.
+    /// When `undo` is `Some`, the `UndoEntry::EdgeWrite` is recorded after
+    /// the edge-store version is written and before the fallible CSR
+    /// mutation. It names the version the put added, so a rollback removes
+    /// exactly that version. An entry recorded before the store write would
+    /// name a version that does not exist.
     ///
-    /// A put unconditionally writes a new edge-store version and CSR entry —
-    /// there is no "already identical" no-op path — so a successful put
-    /// always reports exactly one edge affected.
+    /// A put writes a new edge-store version and makes the CSR edge live with
+    /// the weight in `properties`, so a successful put always reports exactly
+    /// one edge affected.
     pub(in crate::data::executor) fn execute_edge_put_with_undo(
         &mut self,
         task: &ExecutionTask,
         params: EdgePutParams<'_>,
-        undo: Option<&mut Vec<crate::data::executor::handlers::transaction::undo::UndoEntry>>,
+        undo: Option<&mut Vec<UndoEntry>>,
     ) -> Response {
         let EdgePutParams {
             tid,
@@ -69,23 +70,6 @@ impl CoreLoop {
             );
         }
 
-        // Capture the pre-image only when a compensation record is requested.
-        let old_properties = if undo.is_some() {
-            self.edge_store
-                .get_edge(
-                    database_id,
-                    TenantId::new(tid),
-                    collection,
-                    src_id,
-                    label,
-                    dst_id,
-                )
-                .ok()
-                .flatten()
-        } else {
-            None
-        };
-
         let ord = self
             .active_graph_system_from
             .unwrap_or_else(|| self.hlc.next_ordinal());
@@ -97,8 +81,18 @@ impl CoreLoop {
             Some(ms) => ms,
             None => nodedb_types::ordinal_to_ms(ord),
         };
+        let target = EdgeTarget {
+            database_id,
+            tid,
+            collection,
+            src_id,
+            label,
+            dst_id,
+        };
+        // The CSR state the undo puts back, read only when an undo is kept.
+        let csr_prior = undo.is_some().then(|| self.capture_edge_csr(&target));
         use crate::engine::graph::edge_store::EdgeRef;
-        match self.edge_store.put_edge_versioned_with_stats(
+        match self.edge_store.put_edge_version_recorded(
             EdgeRef::new(
                 task.request.database_id,
                 TenantId::new(tid),
@@ -114,30 +108,18 @@ impl CoreLoop {
             i64::MAX,
             owns_logical_edge_stats(task, src_id),
         ) {
-            Ok(()) => {
+            Ok(version) => {
                 // Edge-store version is now durable; the compensation entry is
                 // valid from here on even if the CSR mutation below fails.
-                if let Some(undo) = undo {
-                    undo.push(
-                        crate::data::executor::handlers::transaction::undo::UndoEntry::PutEdge {
-                            collection: collection.to_string(),
-                            src_id: src_id.to_string(),
-                            label: label.to_string(),
-                            dst_id: dst_id.to_string(),
-                            old_properties,
-                        },
-                    );
+                if let (Some(undo), Some(csr)) = (undo, csr_prior) {
+                    undo.push(UndoEntry::EdgeWrite(Box::new(target.undo(version, csr))));
                 }
                 let weight = crate::engine::graph::csr::extract_weight_from_properties(properties);
                 let partition = self.csr_partition_mut(database_id, tid);
-                let csr_result = if weight != 1.0 {
-                    partition
-                        .add_edge_weighted_in_collection(src_id, label, dst_id, collection, weight)
-                } else {
-                    partition.add_edge_in_collection(src_id, label, dst_id, collection)
-                };
+                let csr_result =
+                    partition.put_edge_in_collection(src_id, label, dst_id, collection, weight);
                 match csr_result {
-                    Ok(()) => {
+                    Ok(_) => {
                         // Populate the per-node surrogates so future bitmap-gated
                         // traversals can check membership without a separate lookup.
                         partition.set_node_surrogate(src_id, src_surrogate);

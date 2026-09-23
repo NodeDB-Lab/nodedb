@@ -61,8 +61,7 @@ fn entry_index_tuples(entry: &UndoEntry) -> Option<(String, Vec<(String, String)
         | UndoEntry::DeleteVector { .. }
         | UndoEntry::SpatialInsert { .. }
         | UndoEntry::SpatialDelete { .. }
-        | UndoEntry::PutEdge { .. }
-        | UndoEntry::DeleteEdge { .. }
+        | UndoEntry::EdgeWrite(_)
         | UndoEntry::KvPut { .. }
         | UndoEntry::KvDelete { .. }
         | UndoEntry::KvBatchPut { .. }

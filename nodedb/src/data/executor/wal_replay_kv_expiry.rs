@@ -246,13 +246,14 @@ mod tests {
             &put_seed,
         )
         .expect("wal append seed put");
-        wal.append_put(
-            TenantId::new(TID),
-            VShardId::new(0),
-            DatabaseId::DEFAULT,
-            &entry,
-        )
-        .expect("append raw kv_expire record");
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .append_put(
+                TenantId::new(TID),
+                VShardId::new(0),
+                DatabaseId::DEFAULT,
+                &entry,
+            )
+            .expect("append raw kv_expire record");
         wal.sync().expect("wal sync");
         let records = wal.replay().expect("wal replay read");
 
@@ -380,13 +381,14 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("wal tempdir");
         let wal = WalManager::open_for_testing(&dir.path().join("wal")).expect("open wal");
-        wal.append_put(
-            TenantId::new(TID),
-            VShardId::new(0),
-            DatabaseId::DEFAULT,
-            &entry,
-        )
-        .expect("append raw kv_expire record");
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .append_put(
+                TenantId::new(TID),
+                VShardId::new(0),
+                DatabaseId::DEFAULT,
+                &entry,
+            )
+            .expect("append raw kv_expire record");
         wal.sync().expect("wal sync");
         let records = wal.replay().expect("wal replay read");
 

@@ -371,6 +371,59 @@ mod tests {
         );
     }
 
+    fn small_params() -> IvfPqParams {
+        IvfPqParams {
+            n_cells: 4,
+            pq_m: 4,
+            pq_k: 8,
+            nprobe: 4,
+            metric: DistanceMetric::L2,
+        }
+    }
+
+    #[test]
+    fn rolling_back_withdraws_every_vector_added_after_the_mark() {
+        let vecs = make_vectors(64, 8);
+        let refs: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
+        let mut idx = IvfPqIndex::new(8, small_params());
+        idx.train(&refs, test_memory());
+        idx.add_batch(&refs[..40]);
+        let mark = idx.len() as u32;
+        let before: Vec<u32> = idx.search(&vecs[5], 40).iter().map(|r| r.id).collect();
+
+        idx.add_batch(&refs[40..]);
+        idx.roll_back_to(mark, true);
+
+        assert_eq!(idx.len(), 40);
+        assert!(idx.is_trained(), "the training the index held stays");
+        let after = idx.search(&vecs[5], 64);
+        assert!(
+            after.iter().all(|r| r.id < mark),
+            "no vector added after the mark is found"
+        );
+        let after_ids: Vec<u32> = after.iter().map(|r| r.id).collect();
+        assert_eq!(after_ids, before, "the search reads as before the adds");
+
+        // The next add takes the first id past the mark again.
+        assert_eq!(idx.add(&vecs[63]), mark);
+    }
+
+    #[test]
+    fn rolling_back_to_an_untrained_mark_drops_the_training() {
+        let vecs = make_vectors(16, 8);
+        let refs: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
+        let mut idx = IvfPqIndex::new(8, small_params());
+        idx.train(&refs, test_memory());
+        idx.add_batch(&refs);
+
+        idx.roll_back_to(0, false);
+
+        assert!(idx.is_empty());
+        assert!(!idx.is_trained());
+        assert_eq!(idx.n_cells(), 0);
+        assert!(idx.search(&vecs[0], 5).is_empty());
+    }
+
     #[test]
     fn empty_index() {
         let idx = IvfPqIndex::new(8, IvfPqParams::default());

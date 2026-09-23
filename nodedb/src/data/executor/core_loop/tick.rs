@@ -91,6 +91,8 @@ impl CoreLoop {
             task.state = TaskState::Running;
             let resp = self.execute(&task);
             task.state = TaskState::Completed;
+            // A failed rollback leaves this core's state unknown.
+            self.fail_stop_on_rollback_failure(&resp);
             resp
         };
 
@@ -137,6 +139,12 @@ impl CoreLoop {
         self.drain_requests();
         let mut processed = 0;
         while !self.task_queue.is_empty() {
+            // A fail-stopped core serves nothing, including the rest of the
+            // queue behind the request that stopped it.
+            if self.fail_stop.is_stopped() {
+                processed += self.refuse_queued_while_stopped();
+                break;
+            }
             let batched = self.poll_write_batch();
             if batched > 0 {
                 processed += batched;
@@ -250,6 +258,44 @@ mod tests {
             resp.inner.error_code.as_deref(),
             Some(&ErrorCode::DeadlineExceeded)
         );
+    }
+
+    #[test]
+    fn a_fail_stopped_core_refuses_every_queued_request() {
+        let (mut core, mut req_tx, mut resp_rx, _dir) = make_core();
+        core.fail_stop_core(
+            crate::data::executor::core_loop::fail_stop::FailStopCause::RollbackFailed,
+            "undo entry 0: restore failed",
+        );
+        for _ in 0..2 {
+            req_tx
+                .try_push(BridgeRequest {
+                    inner: make_request(PhysicalPlan::Document(DocumentOp::PointGet {
+                        collection: QualifiedCollection::new(DatabaseId::DEFAULT, "x"),
+                        document_id: "y".into(),
+                        surrogate: nodedb_types::Surrogate::ZERO,
+                        pk_bytes: Vec::new(),
+                        rls_filters: Vec::new(),
+                        system_time: nodedb_types::SystemTimeScope::Current,
+                        valid_at_ms: None,
+                    })),
+                })
+                .expect("queue request");
+        }
+
+        assert_eq!(core.tick(), 2);
+        for _ in 0..2 {
+            let resp = resp_rx.try_pop().expect("refusal");
+            assert_eq!(resp.inner.status, Status::Error);
+            assert!(
+                matches!(
+                    resp.inner.error_code.as_deref(),
+                    Some(ErrorCode::RetryableRefusal { .. })
+                ),
+                "{:?}",
+                resp.inner.error_code
+            );
+        }
     }
 
     #[test]

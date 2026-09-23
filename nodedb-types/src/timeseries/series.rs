@@ -52,7 +52,7 @@ impl SeriesKey {
 /// On insert, if the SeriesId already maps to a *different* SeriesKey, the
 /// catalog rehashes with an incrementing attempt counter until it finds a free
 /// slot. This is one lookup per new series (not per row).
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeriesCatalog {
     /// SeriesId → (SeriesKey, rehash attempt that produced this ID).
     entries: HashMap<SeriesId, (SeriesKey, u64)>,

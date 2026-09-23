@@ -26,7 +26,8 @@
 //!    the open [`RedoApplyScope`];
 //! 3. a collection-floor write version for every collection written, and the
 //!    index-value versions of every document row;
-//! 4. the record's events (see `events`);
+//! 4. the record's events, sent once the post-install work succeeded (see
+//!    `events`);
 //! 5. the fold target rows in `Response::write_set`, so the funnel journals
 //!    them.
 
@@ -36,6 +37,7 @@ use nodedb_wal::record::{RecordType, WalRecordArgs};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::fail_stop::FailStopCause;
 use crate::data::executor::enforcement::write_hook::target_write_set;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
@@ -111,7 +113,6 @@ impl CoreLoop {
             sub_records: redo.ops.len(),
             database_id,
             tid,
-            vshard_id: task.request.vshard_id,
         };
         if let Err(refusal) = self.validate_redo_pass(&target, committed.sum_targets) {
             return self.response_error(task, refusal.into_code());
@@ -120,16 +121,27 @@ impl CoreLoop {
             Ok(scope) => scope,
             Err(refusal) => return self.response_error(task, refusal.into_code()),
         };
-        if let Err(error) = self.settle_redo_install(task, &mut scope) {
+        // Settle, then publish again every artifact whose watermark covers
+        // the record, so restart replay does not skip it. Neither step can be
+        // rolled back once it started, so a failure leaves live state restart
+        // replay does not rebuild: the core fail-stops. The funnel keeps the
+        // record for restart replay.
+        let settled = self.settle_redo_install(task, &mut scope).and_then(|()| {
+            self.cover_applied_record(lsn, &WrittenEngines::of(&redo), &scope.arrays_written)
+        });
+        if let Err(error) = settled {
+            self.fail_stop_core(
+                FailStopCause::PostInstallFailed,
+                &format!(
+                    "committed redo record at lsn {} installed, then failed: {error:?}",
+                    lsn.as_u64()
+                ),
+            );
             return self.response_error(task, error);
         }
-
-        // A record applied below a published engine watermark is published
-        // again, so restart replay does not skip it.
-        if let Err(error) =
-            self.cover_applied_record(lsn, &WrittenEngines::of(&redo), &scope.arrays_written)
-        {
-            return self.response_error(task, error);
+        // Events leave only once the record is settled and covered.
+        for event in std::mem::take(&mut scope.pending_events) {
+            self.send_write_event(event);
         }
 
         let tenant = TenantId::new(tid);
@@ -548,6 +560,115 @@ mod tests {
         );
         let key = CoreLoop::vector_index_key(0, TID, "docs", "");
         assert!(!core.vector_collections.contains_key(&key));
+    }
+
+    /// The edge an install wrote leaves no version behind at any system time,
+    /// and the nodes it created leave the CSR: the core reads as restart
+    /// replay of the cancelled record would.
+    #[test]
+    fn an_install_failure_leaves_no_trace_of_the_edge_it_wrote() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        let edge_put = RedoSubRecord {
+            record_type: RecordType::Put as u32,
+            payload: zerompk::to_msgpack_vec(&crate::wal::EdgePutRedo {
+                collection: "knows".into(),
+                src_id: "alice".into(),
+                label: "KNOWS".into(),
+                dst_id: "bob".into(),
+                properties: Vec::new(),
+                src_surrogate: 31,
+                dst_surrogate: 32,
+                system_from: Some(500),
+            })
+            .expect("encode edge put"),
+        };
+        let redo = redo_bytes(vec![edge_put, mismatched_ingest()]);
+
+        let response = core.execute_apply_transaction_redo(
+            &task_at(Some(95)),
+            TID,
+            CommittedRedo {
+                redo: &redo,
+                collections: &[],
+                sum_targets: &[],
+            },
+        );
+
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(ErrorCode::RetryableRefusal { .. })
+            ),
+            "{:?}",
+            response.error_code
+        );
+        let edge = crate::engine::graph::edge_store::EdgeRef::new(
+            crate::types::DatabaseId::DEFAULT,
+            TenantId::new(TID),
+            "knows",
+            "alice",
+            "KNOWS",
+            "bob",
+        );
+        for as_of in [500, 501, i64::MAX] {
+            assert_eq!(
+                core.edge_store
+                    .ceiling_resolve_edge(edge, as_of, None)
+                    .expect("resolve edge"),
+                None,
+                "no version of the rolled-back edge is visible at system time {as_of}"
+            );
+        }
+        assert!(
+            core.edge_store
+                .scan_all_node_surrogates()
+                .expect("scan bindings")
+                .is_empty()
+        );
+        assert!(
+            core.csr_partition(0, TID)
+                .is_none_or(|p| !p.contains_node("alice") && !p.contains_node("bob")),
+            "the nodes the edge created are gone from the CSR"
+        );
+    }
+
+    /// A label write on a node the CSR did not hold creates the node and
+    /// interns the label. A rolled-back install withdraws both.
+    #[test]
+    fn an_install_failure_withdraws_the_node_a_label_write_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        let label_set = RedoSubRecord {
+            record_type: RecordType::GraphNodeLabelSet as u32,
+            payload: zerompk::to_msgpack_vec(&("carol".to_string(), vec!["Person".to_string()]))
+                .expect("encode label set"),
+        };
+        let redo = redo_bytes(vec![label_set, mismatched_ingest()]);
+
+        let response = core.execute_apply_transaction_redo(
+            &task_at(Some(96)),
+            TID,
+            CommittedRedo {
+                redo: &redo,
+                collections: &[],
+                sum_targets: &[],
+            },
+        );
+
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(ErrorCode::RetryableRefusal { .. })
+            ),
+            "{:?}",
+            response.error_code
+        );
+        assert!(
+            core.csr_partition(0, TID)
+                .is_none_or(|p| !p.contains_node("carol") && !p.has_node_label_name("Person")),
+            "the node and the label name the write created are gone"
+        );
     }
 
     /// A non-document sub-record that cannot be applied fails the online

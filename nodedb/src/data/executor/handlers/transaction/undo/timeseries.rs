@@ -31,6 +31,7 @@ impl CoreLoop {
             memtable_config_before: memtable.map(|memtable| memtable.config()),
             memtable_memory_bytes_before: memtable.map(|memtable| memtable.memory_bytes()),
             last_value_cache_before: self.ts_last_value_caches.get(collection_key).cloned(),
+            series_catalog_before: self.ts_series_catalogs.get(collection_key).cloned(),
             max_ingested_lsn_before: self.ts_max_ingested_lsn.get(collection_key).copied(),
             last_ts_ingest_before: self.last_ts_ingest,
             reservation_bytes_before: self

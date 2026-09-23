@@ -6,7 +6,6 @@
 //! All methods return `Err((entry_index, detail))` on fatal failure so the
 //! caller can escalate to a typed `RollbackFailed` response.
 
-use nodedb_types::Surrogate;
 use tracing::error;
 
 use crate::data::executor::core_loop::CoreLoop;
@@ -110,189 +109,6 @@ impl CoreLoop {
         }
     }
 
-    // ── Graph ────────────────────────────────────────────────────────────────
-
-    #[cfg(test)]
-    pub(super) fn apply_undo_edge(
-        &mut self,
-        did: u64,
-        tid: u64,
-        entry_index: usize,
-        entry: UndoEntry,
-    ) -> Result<(), (usize, String)> {
-        self.apply_undo_edge_with_stats(did, tid, entry_index, entry, true)
-    }
-
-    pub(super) fn apply_undo_edge_with_stats(
-        &mut self,
-        did: u64,
-        tid: u64,
-        entry_index: usize,
-        entry: UndoEntry,
-        account_stats: bool,
-    ) -> Result<(), (usize, String)> {
-        use crate::engine::graph::edge_store::EdgeRef;
-        let database = nodedb_types::DatabaseId::new(did);
-        match entry {
-            UndoEntry::PutEdge {
-                collection,
-                src_id,
-                label,
-                dst_id,
-                old_properties,
-            } => {
-                let tenant = nodedb_types::TenantId::new(tid);
-                let ord = self.hlc.next_ordinal();
-                let edge_ref =
-                    EdgeRef::new(database, tenant, &collection, &src_id, &label, &dst_id);
-                if let Some(old_props) = old_properties {
-                    let valid_from_ms = nodedb_types::ordinal_to_ms(ord);
-                    self.edge_store
-                        .put_edge_versioned_with_stats(
-                            edge_ref,
-                            &old_props,
-                            ord,
-                            valid_from_ms,
-                            i64::MAX,
-                            account_stats,
-                        )
-                        .map_err(|e| {
-                            let detail = format!(
-                                "edge restore {collection} {src_id}-[{label}]->{dst_id}: {e}"
-                            );
-                            error!(
-                                core = self.core_id, entry_index,
-                                error = %detail,
-                                "transaction undo: edge restore failed; shard state unknown"
-                            );
-                            (entry_index, detail)
-                        })?;
-                    let weight =
-                        crate::engine::graph::csr::extract_weight_from_properties(&old_props);
-                    let partition = self.csr_partition_mut(did, tid);
-                    partition.remove_edge_in_collection(&src_id, &label, &dst_id, &collection);
-                    let csr_res = if weight != 1.0 {
-                        partition.add_edge_weighted_in_collection(
-                            &src_id,
-                            &label,
-                            &dst_id,
-                            &collection,
-                            weight,
-                        )
-                    } else {
-                        partition.add_edge_in_collection(&src_id, &label, &dst_id, &collection)
-                    };
-                    csr_res.map_err(|e| {
-                        let detail =
-                            format!("CSR restore {collection} {src_id}-[{label}]->{dst_id}: {e}");
-                        error!(
-                            core = self.core_id, entry_index,
-                            error = %detail,
-                            "transaction undo: CSR restore failed after edge_store restore; \
-                             shard state unknown"
-                        );
-                        (entry_index, detail)
-                    })?;
-                } else {
-                    self.edge_store
-                        .soft_delete_edge_with_stats(edge_ref, ord, account_stats)
-                        .map_err(|e| {
-                            let detail = format!(
-                                "edge tombstone {collection} {src_id}-[{label}]->{dst_id}: {e}"
-                            );
-                            error!(
-                                core = self.core_id, entry_index,
-                                error = %detail,
-                                "transaction undo: edge tombstone failed; shard state unknown"
-                            );
-                            (entry_index, detail)
-                        })?;
-                    self.csr_partition_mut(did, tid).remove_edge_in_collection(
-                        &src_id,
-                        &label,
-                        &dst_id,
-                        &collection,
-                    );
-                }
-                Ok(())
-            }
-            UndoEntry::DeleteEdge {
-                collection,
-                src_id,
-                label,
-                dst_id,
-                old_properties,
-            } => {
-                let tenant = nodedb_types::TenantId::new(tid);
-                let ord = self.hlc.next_ordinal();
-                let valid_from_ms = nodedb_types::ordinal_to_ms(ord);
-                // The cascade that produced this entry dropped the endpoints'
-                // durable identity bindings. The in-memory CSR still holds
-                // them, so restoring the edge restores the binding with it —
-                // otherwise a rolled-back delete would leave the graph intact
-                // but invisible to every cross-engine read after a restart.
-                let (src_surrogate, dst_surrogate) = self
-                    .csr_partition(did, tid)
-                    .map(|p| {
-                        (
-                            p.node_surrogate(&src_id).unwrap_or(Surrogate::ZERO),
-                            p.node_surrogate(&dst_id).unwrap_or(Surrogate::ZERO),
-                        )
-                    })
-                    .unwrap_or((Surrogate::ZERO, Surrogate::ZERO));
-                self.edge_store
-                    .put_edge_versioned_with_stats(
-                        EdgeRef::new(database, tenant, &collection, &src_id, &label, &dst_id)
-                            .with_surrogates(src_surrogate, dst_surrogate),
-                        &old_properties,
-                        ord,
-                        valid_from_ms,
-                        i64::MAX,
-                        account_stats,
-                    )
-                    .map_err(|e| {
-                        let detail = format!(
-                            "edge re-insert {collection} {src_id}-[{label}]->{dst_id}: {e}"
-                        );
-                        error!(
-                            core = self.core_id, entry_index,
-                            error = %detail,
-                            "transaction undo: edge re-insert failed; shard state unknown"
-                        );
-                        (entry_index, detail)
-                    })?;
-                let weight =
-                    crate::engine::graph::csr::extract_weight_from_properties(&old_properties);
-                let partition = self.csr_partition_mut(did, tid);
-                let csr_res = if weight != 1.0 {
-                    partition.add_edge_weighted_in_collection(
-                        &src_id,
-                        &label,
-                        &dst_id,
-                        &collection,
-                        weight,
-                    )
-                } else {
-                    partition.add_edge_in_collection(&src_id, &label, &dst_id, &collection)
-                };
-                csr_res.map_err(|e| {
-                    let detail = format!("CSR re-insert {src_id}-[{label}]->{dst_id}: {e}");
-                    error!(
-                        core = self.core_id, entry_index,
-                        error = %detail,
-                        "transaction undo: CSR re-insert failed after edge_store restore; \
-                         shard state unknown"
-                    );
-                    (entry_index, detail)
-                })
-            }
-            _ => Err((
-                entry_index,
-                "apply_undo_edge called with non-edge entry".to_string(),
-            )),
-        }
-    }
-
     // ── Columnar ─────────────────────────────────────────────────────────────
 
     pub(super) fn apply_undo_columnar(
@@ -385,6 +201,7 @@ impl CoreLoop {
             memtable_config_before,
             memtable_memory_bytes_before,
             last_value_cache_before,
+            series_catalog_before,
             max_ingested_lsn_before,
             last_ts_ingest_before,
             reservation_bytes_before,
@@ -445,6 +262,15 @@ impl CoreLoop {
             }
             None => {
                 self.ts_last_value_caches.remove(&collection_key);
+            }
+        }
+        match series_catalog_before {
+            Some(catalog) => {
+                self.ts_series_catalogs
+                    .insert(collection_key.clone(), catalog);
+            }
+            None => {
+                self.ts_series_catalogs.remove(&collection_key);
             }
         }
         match max_ingested_lsn_before {
@@ -525,6 +351,12 @@ mod tests {
         cache.update(1, 10, 1.0);
         core.ts_last_value_caches.insert(key.clone(), cache.clone());
         core.ts_max_ingested_lsn.insert(key.clone(), 7);
+        let mut catalog = nodedb_types::timeseries::SeriesCatalog::new();
+        catalog.resolve(&nodedb_types::timeseries::SeriesKey::new(
+            "cpu",
+            vec![("host".into(), "old-host".into())],
+        ));
+        core.ts_series_catalogs.insert(key.clone(), catalog.clone());
         let prior_timer = std::time::Instant::now();
         core.last_ts_ingest = Some(prior_timer);
 
@@ -534,6 +366,7 @@ mod tests {
             memtable_config_before: Some(config),
             memtable_memory_bytes_before: Some(memory_bytes),
             last_value_cache_before: Some(cache),
+            series_catalog_before: Some(catalog.clone()),
             max_ingested_lsn_before: Some(7),
             last_ts_ingest_before: Some(prior_timer),
             reservation_bytes_before: None,
@@ -556,10 +389,22 @@ mod tests {
             .expect("cache")
             .update(1, 20, 2.0);
         core.ts_max_ingested_lsn.insert(key.clone(), 99);
+        core.ts_series_catalogs
+            .get_mut(&key)
+            .expect("catalog")
+            .resolve(&nodedb_types::timeseries::SeriesKey::new(
+                "cpu",
+                vec![("host".into(), "new-host".into())],
+            ));
         core.last_ts_ingest = Some(std::time::Instant::now());
 
         core.apply_undo_timeseries(0, UndoEntry::TimeseriesIngest(token))
             .expect("undo");
+        assert_eq!(
+            core.ts_series_catalogs.get(&key),
+            Some(&catalog),
+            "the series the ingest registered are forgotten"
+        );
         let restored = core
             .columnar_memtables
             .get(&key)
@@ -597,12 +442,15 @@ mod tests {
             memtable_config_before: None,
             memtable_memory_bytes_before: None,
             last_value_cache_before: None,
+            series_catalog_before: None,
             max_ingested_lsn_before: None,
             last_ts_ingest_before: None,
             reservation_bytes_before: None,
         };
         core.columnar_memtables
             .insert(key.clone(), timeseries_memtable());
+        core.ts_series_catalogs
+            .insert(key.clone(), nodedb_types::timeseries::SeriesCatalog::new());
         core.ts_last_value_caches
             .insert(key.clone(), LastValueCache::new());
         core.ts_max_ingested_lsn.insert(key.clone(), 1);
@@ -613,6 +461,10 @@ mod tests {
         assert!(!core.columnar_memtables.contains_key(&key));
         assert!(!core.ts_last_value_caches.contains_key(&key));
         assert!(!core.ts_max_ingested_lsn.contains_key(&key));
+        assert!(
+            !core.ts_series_catalogs.contains_key(&key),
+            "the catalog the ingest created is gone"
+        );
         assert!(core.last_ts_ingest.is_none());
     }
 
@@ -667,6 +519,14 @@ mod tests {
                 "metrics".to_string(),
             )),
             "the last-value cache must follow the same initial pre-image"
+        );
+        assert!(
+            !core.ts_series_catalogs.contains_key(&(
+                crate::types::DatabaseId::DEFAULT,
+                TenantId::new(TID),
+                "metrics".to_string(),
+            )),
+            "the series catalog the first ingest created is rolled back"
         );
     }
 
@@ -1002,169 +862,6 @@ mod tests {
             core.vector_doc_map.get(&vector_doc_key()).copied(),
             Some(vector_id),
             "vector_doc_map entry must be restored so a later delete can find the vector again"
-        );
-    }
-
-    // ── Graph edge-cascade undo ──────────────────────────────────────────────
-
-    /// A rolled-back transactional document DELETE must restore every edge the
-    /// unconditional graph-edge cascade removed — into BOTH the persistent edge
-    /// store (`get_edge`) AND the in-memory CSR partition (`neighbors`), with the
-    /// original edge properties intact. This exercises the full capture→restore
-    /// path: `delete_edges_for_node` returns the removed edges, and
-    /// `apply_undo_edge` re-inserts each via a `DeleteEdge` undo entry.
-    #[test]
-    fn edge_cascade_delete_rollback_restores_csr_and_edge_store() {
-        use crate::engine::graph::csr::Direction;
-        use crate::engine::graph::edge_store::EdgeRef;
-
-        let dir = tempfile::tempdir().unwrap();
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let tenant = TenantId::new(TID);
-
-        // Seed alice-[KNOWS]->bob in BOTH stores, as a forward EdgePut would.
-        let seed_ord = core.hlc.next_ordinal();
-        core.edge_store
-            .put_edge_versioned(
-                EdgeRef::new(
-                    nodedb_types::DatabaseId::new(DB),
-                    tenant,
-                    "c",
-                    "alice",
-                    "KNOWS",
-                    "bob",
-                ),
-                b"p1",
-                seed_ord,
-                nodedb_types::ordinal_to_ms(seed_ord),
-                i64::MAX,
-            )
-            .unwrap();
-        core.csr_partition_mut(DB, TID)
-            .add_edge("alice", "KNOWS", "bob")
-            .unwrap();
-
-        // Sanity: edge present in both stores.
-        assert_eq!(
-            core.edge_store
-                .get_edge(DB, tenant, "c", "alice", "KNOWS", "bob")
-                .unwrap(),
-            Some(b"p1".to_vec())
-        );
-        assert_eq!(
-            core.csr_partition_mut(DB, TID)
-                .neighbors("alice", None, Direction::Out),
-            vec![("KNOWS".to_string(), "bob".to_string())]
-        );
-
-        // Forward document-delete cascade (Cascade 3): remove from CSR + edge store,
-        // capturing the removed edges for rollback.
-        core.csr_partition_mut(DB, TID).remove_node_edges("alice");
-        let cascade_ord = core.hlc.next_ordinal();
-        let removed = core
-            .edge_store
-            .delete_edges_for_node(DB, tenant, "alice", cascade_ord)
-            .unwrap();
-        assert_eq!(removed.len(), 1);
-        assert_eq!(
-            removed[0],
-            (
-                "c".to_string(),
-                "alice".to_string(),
-                "KNOWS".to_string(),
-                "bob".to_string(),
-                b"p1".to_vec()
-            )
-        );
-
-        // Both stores now show the edge gone.
-        assert!(
-            core.edge_store
-                .get_edge(DB, tenant, "c", "alice", "KNOWS", "bob")
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            core.csr_partition_mut(DB, TID)
-                .neighbors("alice", None, Direction::Out)
-                .is_empty()
-        );
-
-        // Rollback: push one DeleteEdge undo per captured edge and apply it.
-        for (idx, (collection, src_id, label, dst_id, old_properties)) in
-            removed.into_iter().enumerate()
-        {
-            let undo = UndoEntry::DeleteEdge {
-                collection,
-                src_id,
-                label,
-                dst_id,
-                old_properties,
-            };
-            core.apply_undo_edge(DB, TID, idx, undo).unwrap();
-        }
-
-        // Both stores fully restored, properties intact.
-        assert_eq!(
-            core.edge_store
-                .get_edge(DB, tenant, "c", "alice", "KNOWS", "bob")
-                .unwrap(),
-            Some(b"p1".to_vec()),
-            "edge store must be restored with original properties"
-        );
-        assert_eq!(
-            core.csr_partition_mut(DB, TID)
-                .neighbors("alice", None, Direction::Out),
-            vec![("KNOWS".to_string(), "bob".to_string())],
-            "CSR adjacency must be restored"
-        );
-    }
-
-    #[test]
-    fn graph_edge_update_undo_restores_csr_weight() {
-        use crate::engine::graph::edge_store::EdgeRef;
-
-        let dir = tempfile::tempdir().unwrap();
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let tenant = TenantId::new(TID);
-        let old_properties = nodedb_types::json_to_msgpack(&serde_json::json!({ "weight": 2.5 }))
-            .expect("encode old edge properties");
-        let new_properties = nodedb_types::json_to_msgpack(&serde_json::json!({ "weight": 9.0 }))
-            .expect("encode new edge properties");
-        let edge = EdgeRef::new(
-            crate::types::DatabaseId::new(DB),
-            tenant,
-            "c",
-            "alice",
-            "KNOWS",
-            "bob",
-        );
-        core.edge_store
-            .put_edge_versioned(edge, &new_properties, 10, 10, i64::MAX)
-            .expect("seed updated edge");
-        core.csr_partition_mut(DB, TID)
-            .add_edge_weighted_in_collection("alice", "KNOWS", "bob", "c", 9.0)
-            .expect("seed updated CSR edge");
-
-        core.apply_undo_edge(
-            DB,
-            TID,
-            0,
-            UndoEntry::PutEdge {
-                collection: "c".into(),
-                src_id: "alice".into(),
-                label: "KNOWS".into(),
-                dst_id: "bob".into(),
-                old_properties: Some(old_properties),
-            },
-        )
-        .expect("undo edge update");
-
-        assert_eq!(
-            core.csr_partition_mut(DB, TID)
-                .edge_weight("alice", "KNOWS", "bob"),
-            Some(2.5),
-            "rollback must restore the committed CSR traversal weight"
         );
     }
 }

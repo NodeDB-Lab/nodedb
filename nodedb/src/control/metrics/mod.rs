@@ -12,5 +12,5 @@ pub use database::{DatabaseCounters, DatabaseMetricsRegistry, DatabaseQuotaMetri
 pub use histogram::AtomicHistogram;
 pub use per_vshard::{PerVShardMetrics, PerVShardMetricsRegistry, VShardStatsSnapshot};
 pub use purge::PurgeMetrics;
-pub use system::{CoreHeartbeats, SystemMetrics};
+pub use system::{CoreFailStopReport, CoreFailStops, CoreHeartbeats, SystemMetrics};
 pub use tenant::TenantQuotaMetrics;

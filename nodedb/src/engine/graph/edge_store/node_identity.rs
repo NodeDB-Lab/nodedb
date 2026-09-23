@@ -86,6 +86,33 @@ impl EdgeStore {
         write_txn.commit().map_err(|e| redb_err("commit", e))?;
         Ok(())
     }
+
+    /// Bind `node` to the surrogate `raw`, replacing any binding it had.
+    ///
+    /// A rolled-back node delete uses it to put back the binding the delete
+    /// dropped.
+    pub fn bind_node_surrogate(
+        &self,
+        db: DatabaseId,
+        tid: TenantId,
+        node: &str,
+        raw: u32,
+    ) -> crate::Result<()> {
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| redb_err("begin_write", e))?;
+        {
+            let mut table = write_txn
+                .open_table(NODE_SURROGATES)
+                .map_err(|e| redb_err("open node_surrogates", e))?;
+            table
+                .insert((db.as_u64(), tid.as_u64(), node), raw)
+                .map_err(|e| redb_err("insert node surrogate", e))?;
+        }
+        write_txn.commit().map_err(|e| redb_err("commit", e))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

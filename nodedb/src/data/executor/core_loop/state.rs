@@ -433,10 +433,8 @@ pub struct CoreLoop {
     /// `wait_until_drained` on the same registry, so the unlink pass
     /// only runs once every in-flight scan has released.
     ///
-    /// `None` in test / no-cluster bringup paths: callers then skip
-    /// the gate and scan unconditionally (matching pre-quiesce
-    /// behavior). In the server bootstrap path `main.rs` wires the
-    /// shared registry via `set_quiesce` after `SharedState::open`.
+    /// `None` in test / no-cluster bringup: scans skip the gate. Boot wires
+    /// the shared registry via `set_quiesce` after `SharedState::open`.
     pub(in crate::data::executor) quiesce:
         Option<std::sync::Arc<crate::bridge::quiesce::CollectionQuiesce>>,
 
@@ -582,4 +580,6 @@ pub struct CoreLoop {
     /// Core count and per-record scratch of the committed-redo apply.
     pub(in crate::data::executor) redo_apply:
         crate::data::executor::handlers::transaction::redo_apply::RedoApplyState,
+    /// Set once this core's state is unknown. It then refuses every request.
+    pub(in crate::data::executor) fail_stop: super::fail_stop::CoreFailStop,
 }

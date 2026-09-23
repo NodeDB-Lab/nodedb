@@ -24,8 +24,8 @@ pub use catalog::{
 };
 pub use crdt::history_compaction_not_applied;
 pub use data_plane::{
-    calvin_apply_halted, calvin_completion_timeout, data_plane_response_lost,
-    data_plane_responses_lost,
+    calvin_apply_halted, calvin_completion_timeout, data_plane_core_fail_stopped,
+    data_plane_response_lost, data_plane_responses_lost,
 };
 pub use ingest::{ilp_invalid_utf8_drop, ilp_line_read_drop};
 pub use quota::{

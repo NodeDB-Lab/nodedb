@@ -127,6 +127,23 @@ pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
         return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body));
     }
 
+    // A fail-stopped core refuses every request routed to it: its state is
+    // unknown until restart. The other cores serve, so the node is degraded.
+    if let Some(stops) = state
+        .shared
+        .system_metrics
+        .as_ref()
+        .map(|metrics| &metrics.core_fail_stops)
+        && let Some(report) = stops.report()
+    {
+        let (status, mut body) = crate::control::metrics::system::core_fail_stop::to_http_response(
+            report,
+            stops.stopped_cores(),
+        );
+        body["node_id"] = json!(state.shared.node_id);
+        return (status, axum::Json(body));
+    }
+
     // A core that stops completing event-loop iterations panics nothing, so
     // the per-core panic watchdog stays quiet and every other check above
     // still passes. Fail readiness and name the cores: work routed to a

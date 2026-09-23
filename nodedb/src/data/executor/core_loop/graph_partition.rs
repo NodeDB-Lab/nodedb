@@ -39,6 +39,33 @@ impl CoreLoop {
         self.csr.get_or_create(db, tenant, memory)
     }
 
+    /// Remove every edge of `node`: tombstone them in the edge store, then
+    /// drop them from the CSR. The store cascade is one transaction, so on
+    /// its error neither store changed and the two still agree.
+    ///
+    /// Returns the tombstoned edges, for a caller that keeps an undo log.
+    pub(in crate::data::executor) fn cascade_node_edges(
+        &mut self,
+        database_id: u64,
+        tid: u64,
+        node: &str,
+    ) -> crate::Result<Vec<crate::engine::graph::edge_store::EdgeRestore>> {
+        let has_edges = self.csr_partition(database_id, tid).is_some_and(|p| {
+            p.node_id_raw(node)
+                .is_some_and(|id| p.out_degree_raw(id) + p.in_degree_raw(id) > 0)
+        });
+        if !has_edges {
+            return Ok(Vec::new());
+        }
+        let ord = self.hlc.next_ordinal();
+        let removed =
+            self.edge_store
+                .delete_edges_for_node(database_id, TenantId::new(tid), node, ord)?;
+        self.csr_partition_mut(database_id, tid)
+            .remove_node_edges(node);
+        Ok(removed)
+    }
+
     /// Mark `node_id` as deleted within the caller's `(database, tenant)`.
     /// Used by PointDelete cascade so subsequent `EdgePut` to the same node
     /// is rejected as dangling.

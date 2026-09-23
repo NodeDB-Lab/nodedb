@@ -8,10 +8,12 @@
 //! - `mutation`  — `add_edge`, `remove_edge`, `remove_node_edges`
 //! - `lookup`    — neighbor queries, accessors, degree, iterators
 //! - `scoped`    — collection-scoped read paths (MATCH / RAG)
+//! - `restore`   — exact edge writes and the reversals a rollback uses
 
 pub mod interning;
 pub mod lookup;
 pub mod mutation;
+pub mod restore;
 pub mod scoped;
 pub mod types;
 

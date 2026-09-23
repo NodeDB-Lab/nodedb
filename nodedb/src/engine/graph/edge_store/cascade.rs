@@ -5,29 +5,41 @@
 use redb::{ReadableDatabase, ReadableTable};
 use std::collections::HashMap;
 
-use super::store::{BaseKey, EDGES, EdgeStore, redb_err};
-use super::temporal::{EdgeRef, is_sentinel, parse_versioned_edge_key};
+use super::store::{BaseKey, EDGES, EdgeStore, NODE_SURROGATES, redb_err};
+use super::temporal::write::write_sentinel_in;
+use super::temporal::{
+    EdgeRef, EdgeValuePayload, EdgeVersionWrite, TOMBSTONE_SENTINEL, is_sentinel,
+    parse_versioned_edge_key,
+};
 use nodedb_types::{DatabaseId, TenantId};
 
-/// A single cascaded edge removal captured for transactional rollback:
-/// `(collection, src, label, dst, old_properties)`. `old_properties` is the
-/// edge's current-state value read BEFORE the soft-delete, so an
-/// `UndoEntry::DeleteEdge` can re-insert the exact edge into both the CSR
-/// partition and the persistent edge store on rollback.
-pub type EdgeRestore = (String, String, String, String, Vec<u8>);
+/// A single cascaded edge removal captured for transactional rollback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeRestore {
+    pub collection: String,
+    pub src: String,
+    pub label: String,
+    pub dst: String,
+    /// The edge's properties before the tombstone. The CSR restore reads its
+    /// weight from them.
+    pub old_properties: Vec<u8>,
+    /// The tombstone version the cascade added. A rollback removes it.
+    pub tombstone: EdgeVersionWrite,
+}
 
 impl EdgeStore {
     /// Soft-delete every edge incident on `node` (as either src or dst) in
-    /// the caller's tenant, across all collections. Emits a tombstone
-    /// version at `system_from` for each distinct base edge that has a
-    /// live (non-sentinel) latest version.
+    /// the caller's tenant, across all collections, and drop the node's
+    /// identity binding. Emits a tombstone version at `system_from` for each
+    /// distinct base edge that has a live (non-sentinel) latest version.
     ///
-    /// Returns the set of edges actually soft-deleted, each paired with its
-    /// pre-delete `old_properties`, so a transactional caller can push one
-    /// `UndoEntry::DeleteEdge` per edge and fully reverse the cascade on
-    /// rollback. The returned edges are exactly the live bases that existed
-    /// before this call (already-tombstoned bases are skipped and not
-    /// returned — they were not removed by this op).
+    /// One transaction holds every tombstone and the binding removal, so the
+    /// cascade lands whole or not at all.
+    ///
+    /// Returns the edges actually soft-deleted, each with its pre-delete
+    /// properties and its tombstone, so a transactional caller can push one
+    /// `UndoEntry::EdgeWrite` per edge and fully reverse the cascade on
+    /// rollback. Already-tombstoned bases are skipped and not returned.
     pub fn delete_edges_for_node(
         &self,
         db: u64,
@@ -35,45 +47,58 @@ impl EdgeStore {
         node: &str,
         system_from: i64,
     ) -> crate::Result<Vec<EdgeRestore>> {
-        // Snapshot all live bases touching `node`. Done in a read txn first
-        // so the write txn can call soft_delete_edge without nested locks.
+        // Snapshot all live bases touching `node` in a read txn first.
         let bases = self.live_bases_touching_node(db, tid, node)?;
+        let database = DatabaseId::new(db);
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| redb_err("begin_write", e))?;
         let mut removed = Vec::with_capacity(bases.len());
-        for (collection, src, label, dst) in &bases {
-            // Capture the current-state properties BEFORE the soft-delete so a
-            // rolled-back transactional delete can restore the exact edge value.
-            let old_properties = self
-                .get_edge(db, tid, collection, src, label, dst)?
-                .unwrap_or_default();
-            self.soft_delete_edge(
-                EdgeRef::new(DatabaseId::new(db), tid, collection, src, label, dst),
+        for ((collection, src, label, dst), old_properties) in bases {
+            let tombstone = write_sentinel_in(
+                &write_txn,
+                EdgeRef::new(database, tid, &collection, &src, &label, &dst),
                 system_from,
+                TOMBSTONE_SENTINEL,
+                true,
             )?;
-            removed.push((
-                collection.clone(),
-                src.clone(),
-                label.clone(),
-                dst.clone(),
+            removed.push(EdgeRestore {
+                collection,
+                src,
+                label,
+                dst,
                 old_properties,
-            ));
+                tombstone,
+            });
         }
         // The node itself is going away, so its identity binding goes with it.
         // Only this node's: the neighbours survive and keep theirs. A rolled-back
         // delete restores the binding along with the edges (see the transaction
         // undo path), so this is not a one-way loss.
-        self.delete_node_surrogate(DatabaseId::new(db), tid, node)?;
+        {
+            let mut surrogates = write_txn
+                .open_table(NODE_SURROGATES)
+                .map_err(|e| redb_err("open node_surrogates", e))?;
+            surrogates
+                .remove((db, tid.as_u64(), node))
+                .map_err(|e| redb_err("remove node surrogate", e))?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| redb_err("commit node edge cascade", e))?;
         Ok(removed)
     }
 
-    /// Enumerate `(collection, src, label, dst)` tuples for every base edge
-    /// in this `(database, tenant)` whose latest version touches `node` as src
-    /// or dst and is not a sentinel.
+    /// Every base edge in this `(database, tenant)` whose latest version
+    /// touches `node` as src or dst and is live, with that version's
+    /// properties.
     fn live_bases_touching_node(
         &self,
         db: u64,
         tid: TenantId,
         node: &str,
-    ) -> crate::Result<Vec<BaseKey>> {
+    ) -> crate::Result<Vec<(BaseKey, Vec<u8>)>> {
         let t = tid.as_u64();
         let read_txn = self
             .db
@@ -83,7 +108,8 @@ impl EdgeStore {
             .open_table(EDGES)
             .map_err(|e| redb_err("open edges", e))?;
 
-        let mut latest: HashMap<BaseKey, (i64, bool)> = HashMap::new();
+        // Latest version per base: its system time and its raw value.
+        let mut latest: HashMap<BaseKey, (i64, Vec<u8>)> = HashMap::new();
         // DB-scoped range: a node-delete in database A must NOT cascade into
         // the same tenant's edges in database B.
         let range = table
@@ -104,21 +130,27 @@ impl EdgeStore {
                 label.to_string(),
                 dst.to_string(),
             );
-            let is_sent = is_sentinel(v.value());
-            latest
-                .entry(base)
-                .and_modify(|(cur, cur_sent)| {
-                    if sys > *cur {
-                        *cur = sys;
-                        *cur_sent = is_sent;
-                    }
-                })
-                .or_insert((sys, is_sent));
+            let value = v.value();
+            match latest.get_mut(&base) {
+                Some((cur, bytes)) if sys > *cur => {
+                    *cur = sys;
+                    *bytes = value.to_vec();
+                }
+                Some(_) => {}
+                None => {
+                    latest.insert(base, (sys, value.to_vec()));
+                }
+            }
         }
-        Ok(latest
-            .into_iter()
-            .filter_map(|(base, (_sys, is_sent))| if is_sent { None } else { Some(base) })
-            .collect())
+        let mut live = Vec::with_capacity(latest.len());
+        for (base, (_sys, bytes)) in latest {
+            if is_sentinel(&bytes) {
+                continue;
+            }
+            let properties = EdgeValuePayload::decode(&bytes)?.properties;
+            live.push((base, properties));
+        }
+        Ok(live)
     }
 }
 
@@ -170,12 +202,12 @@ mod tests {
         assert!(
             removed
                 .iter()
-                .any(|(_, s, _, d, p)| s == "alice" && d == "bob" && p == b"1")
+                .any(|r| r.src == "alice" && r.dst == "bob" && r.old_properties == b"1")
         );
         assert!(
             removed
                 .iter()
-                .any(|(_, s, _, d, p)| s == "dave" && d == "alice" && p == b"3")
+                .any(|r| r.src == "dave" && r.dst == "alice" && r.old_properties == b"3")
         );
 
         assert!(

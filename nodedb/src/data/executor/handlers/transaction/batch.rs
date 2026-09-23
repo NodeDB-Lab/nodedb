@@ -281,12 +281,7 @@ impl CoreLoop {
                     // unwinding past a half-restored transaction.
                     let undo_len = undo_log.len();
                     let rollback_error_code = match catch_unwind(AssertUnwindSafe(|| {
-                        self.rollback_undo_log_at(
-                            task.request.database_id.as_u64(),
-                            tid,
-                            task.request.vshard_id,
-                            undo_log,
-                        )
+                        self.rollback_undo_log(task.request.database_id.as_u64(), tid, undo_log)
                     })) {
                         Ok(Ok(())) => error_code,
                         Ok(Err((entry_index, detail))) => {

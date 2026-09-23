@@ -412,7 +412,8 @@ mod tests {
             None,
         );
         let seed_bytes = seed_payload.encode().expect("encode seed");
-        wal.append_crdt_delta(tid, vs, db, &seed_bytes)
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .append_crdt_delta(tid, vs, db, &seed_bytes)
             .expect("append seed");
 
         // blocks: [] -> [blk-0] -> [blk-0, blk-1] -> [blk-1, blk-0] -> [blk-0]
@@ -489,7 +490,8 @@ mod tests {
             None,
         );
         let seed_bytes = seed_payload.encode().expect("encode seed");
-        wal.append_crdt_delta(tid, vs, db, &seed_bytes)
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .append_crdt_delta(tid, vs, db, &seed_bytes)
             .expect("append seed");
 
         // blocks: [] -> [blk-0, blk-1, blk-2, blk-3] -> move(3, 1)

@@ -25,6 +25,7 @@ pub mod payload;
 pub mod purge;
 pub mod query;
 pub mod read;
+pub mod revert;
 pub mod write;
 
 pub use keys::{
@@ -33,3 +34,4 @@ pub use keys::{
 };
 pub use payload::EdgeValuePayload;
 pub use query::NeighborsAsOfParams;
+pub use revert::{EdgeCountChange, EdgeVersionWrite};

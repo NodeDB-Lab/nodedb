@@ -15,7 +15,7 @@ pub use node_identity::NodeSurrogateRecord;
 pub use stats::CollectionStats;
 pub use store::{Direction, Edge, EdgeRecord, EdgeStore};
 pub use temporal::{
-    EdgeRef, EdgeValuePayload, GDPR_ERASURE_SENTINEL, NeighborsAsOfParams, SYSTEM_TIME_WIDTH,
-    TOMBSTONE_SENTINEL, edge_version_prefix, is_gdpr_erasure, is_sentinel, is_tombstone,
-    parse_versioned_edge_key, versioned_edge_key,
+    EdgeCountChange, EdgeRef, EdgeValuePayload, EdgeVersionWrite, GDPR_ERASURE_SENTINEL,
+    NeighborsAsOfParams, SYSTEM_TIME_WIDTH, TOMBSTONE_SENTINEL, edge_version_prefix,
+    is_gdpr_erasure, is_sentinel, is_tombstone, parse_versioned_edge_key, versioned_edge_key,
 };

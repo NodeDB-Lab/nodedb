@@ -229,18 +229,9 @@ impl CoreLoop {
                         collection: None,
                     });
                 }
-                let edges = self
-                    .csr_partition_mut(database_id, tid)
-                    .remove_node_edges(&doc_id);
-                let cascade_ord = self.hlc.next_ordinal();
-                if edges > 0
-                    && let Err(e) = self.edge_store.delete_edges_for_node(
-                        database_id,
-                        nodedb_types::TenantId::new(tid),
-                        &doc_id,
-                        cascade_ord,
-                    )
-                {
+                // On an error neither edge store changed: the edges stay in
+                // both, and the dangling-edge sweep retries them.
+                if let Err(e) = self.cascade_node_edges(database_id, tid, &doc_id) {
                     warn!(core = self.core_id, %doc_id, error = %e, "truncate: edge cascade failed");
                 }
                 self.doc_cache.invalidate(

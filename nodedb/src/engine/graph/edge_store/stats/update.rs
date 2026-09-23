@@ -47,11 +47,23 @@ pub struct EdgeStatsKey<'a> {
 /// `node[dst].refcount` (bumping `summary.distinct_node_count` per new node).
 ///
 /// If a prior live version exists this is an update — counters are unchanged.
+///
+/// Returns whether the counters changed.
 pub fn increment_for_insert(
     write_txn: &WriteTransaction,
     key: EdgeStatsKey<'_>,
     current_system_from: i64,
-) -> crate::Result<()> {
+) -> crate::Result<bool> {
+    if prior_live_exists(write_txn, key, current_system_from)? {
+        return Ok(false);
+    }
+    increment_counts(write_txn, key)?;
+    Ok(true)
+}
+
+/// Count one more live edge for `key`: the summary, its label and both
+/// endpoints.
+pub fn increment_counts(write_txn: &WriteTransaction, key: EdgeStatsKey<'_>) -> crate::Result<()> {
     let EdgeStatsKey {
         db,
         tid,
@@ -60,10 +72,6 @@ pub fn increment_for_insert(
         src,
         dst,
     } = key;
-    if prior_live_exists(write_txn, key, current_system_from)? {
-        return Ok(());
-    }
-
     let mut stats = write_txn
         .open_table(GRAPH_STATS)
         .map_err(|e| redb_err("open graph_stats (increment)", e))?;
@@ -120,11 +128,23 @@ pub fn increment_for_insert(
 /// decrementing `summary.distinct_node_count` when refcount reaches zero).
 ///
 /// If there was no prior live version, this is a no-op for the counters.
+///
+/// Returns whether the counters changed.
 pub fn decrement_for_delete(
     write_txn: &WriteTransaction,
     key: EdgeStatsKey<'_>,
     sentinel_system_from: i64,
-) -> crate::Result<()> {
+) -> crate::Result<bool> {
+    if !prior_live_exists(write_txn, key, sentinel_system_from)? {
+        return Ok(false);
+    }
+    decrement_counts(write_txn, key)?;
+    Ok(true)
+}
+
+/// Count one live edge fewer for `key`. The exact inverse of
+/// [`increment_counts`].
+pub fn decrement_counts(write_txn: &WriteTransaction, key: EdgeStatsKey<'_>) -> crate::Result<()> {
     let EdgeStatsKey {
         db,
         tid,
@@ -133,10 +153,6 @@ pub fn decrement_for_delete(
         src,
         dst,
     } = key;
-    if !prior_live_exists(write_txn, key, sentinel_system_from)? {
-        return Ok(());
-    }
-
     let mut stats = write_txn
         .open_table(GRAPH_STATS)
         .map_err(|e| redb_err("open graph_stats (decrement)", e))?;

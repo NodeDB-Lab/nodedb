@@ -88,3 +88,20 @@ pub fn calvin_apply_halted(
     .with_backtrace()
     .emit();
 }
+
+/// Report a Data-Plane core that fail-stopped because its state is unknown.
+/// Called once per core, from its fail-stop latch on the first cause.
+pub fn data_plane_core_fail_stopped(core_id: usize, cause: &str, detail: &str) {
+    let ctx = context::CoreFailStopped {
+        core_id,
+        cause,
+        detail,
+    };
+    let _ = Capture::new(
+        EventKind::InvariantViolation,
+        "Data-Plane core fail-stopped: its state is unknown until restart",
+    )
+    .domain(&ctx)
+    .with_backtrace()
+    .emit();
+}

@@ -23,7 +23,7 @@ pub(in crate::diag) use catalog::{
 pub(in crate::diag) use crdt::HistoryCompactionNotApplied;
 pub use data_plane::LostResponseWrite;
 pub(in crate::diag) use data_plane::{
-    CalvinApplyHalted, CalvinCompletionTimeout, DataPlaneResponseLost,
+    CalvinApplyHalted, CalvinCompletionTimeout, CoreFailStopped, DataPlaneResponseLost,
 };
 pub(in crate::diag) use ingest::IlpAcceptedLinesDropped;
 pub use ingest::IlpFlushOutcome;

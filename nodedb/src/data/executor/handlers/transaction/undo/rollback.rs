@@ -3,6 +3,7 @@
 //! Rollback driver for the undo log.
 
 use super::UndoEntry;
+use super::graph_node::NodeLabelsUndo;
 use crate::data::executor::core_loop::CoreLoop;
 
 impl CoreLoop {
@@ -13,32 +14,13 @@ impl CoreLoop {
     /// Returns `Err((entry_index, detail))` on the first undo failure —
     /// the entry index is the original forward-order position of the failed
     /// entry (before reversal). On failure the caller **must** return a
-    /// `RollbackFailed` error to the client; the shard state is unknown
-    /// and requires a restart to restore consistency via WAL replay.
+    /// `RollbackFailed` error. The core's state is then unknown: the core
+    /// fail-stops when that response leaves it, and a restart rebuilds the
+    /// state through WAL replay.
     pub(in crate::data::executor::handlers) fn rollback_undo_log(
         &mut self,
         did: u64,
         tid: u64,
-        undo_log: Vec<UndoEntry>,
-    ) -> Result<(), (usize, String)> {
-        self.rollback_undo_log_inner(did, tid, None, undo_log)
-    }
-
-    pub(in crate::data::executor::handlers) fn rollback_undo_log_at(
-        &mut self,
-        did: u64,
-        tid: u64,
-        vshard_id: crate::types::VShardId,
-        undo_log: Vec<UndoEntry>,
-    ) -> Result<(), (usize, String)> {
-        self.rollback_undo_log_inner(did, tid, Some(vshard_id), undo_log)
-    }
-
-    fn rollback_undo_log_inner(
-        &mut self,
-        did: u64,
-        tid: u64,
-        vshard_id: Option<crate::types::VShardId>,
         undo_log: Vec<UndoEntry>,
     ) -> Result<(), (usize, String)> {
         let total = undo_log.len();
@@ -47,7 +29,7 @@ impl CoreLoop {
             // diagnostics (makes it easier to correlate with the sub-plan that
             // produced this undo entry).
             let original_idx = total.saturating_sub(1 + rev_idx);
-            self.apply_undo_entry(did, tid, vshard_id, original_idx, entry)?;
+            self.apply_undo_entry(did, tid, original_idx, entry)?;
         }
         Ok(())
     }
@@ -59,7 +41,6 @@ impl CoreLoop {
         &mut self,
         did: u64,
         tid: u64,
-        vshard_id: Option<crate::types::VShardId>,
         entry_index: usize,
         entry: UndoEntry,
     ) -> Result<(), (usize, String)> {
@@ -73,12 +54,7 @@ impl CoreLoop {
             UndoEntry::SpatialInsert { .. } | UndoEntry::SpatialDelete { .. } => {
                 self.apply_undo_spatial(entry_index, entry)
             }
-            UndoEntry::PutEdge { ref src_id, .. } | UndoEntry::DeleteEdge { ref src_id, .. } => {
-                let account_stats = vshard_id.is_none_or(|vshard_id| {
-                    vshard_id == crate::types::VShardId::from_key(src_id.as_bytes())
-                });
-                self.apply_undo_edge_with_stats(did, tid, entry_index, entry, account_stats)
-            }
+            UndoEntry::EdgeWrite(undo) => self.apply_undo_edge_write(entry_index, *undo),
             UndoEntry::KvPut { .. }
             | UndoEntry::KvDelete { .. }
             | UndoEntry::KvBatchPut { .. }
@@ -153,7 +129,19 @@ impl CoreLoop {
                 tid: label_tid,
                 node_id,
                 prior,
-            } => self.apply_undo_node_labels(entry_index, database_id, label_tid, &node_id, prior),
+                interned_labels,
+                created_node,
+            } => self.apply_undo_node_labels(
+                entry_index,
+                NodeLabelsUndo {
+                    database_id,
+                    tid: label_tid,
+                    node_id,
+                    prior,
+                    interned_labels,
+                    created_node,
+                },
+            ),
         }
     }
 }

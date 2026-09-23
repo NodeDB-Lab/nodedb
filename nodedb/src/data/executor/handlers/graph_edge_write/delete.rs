@@ -9,6 +9,9 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
 
+use crate::data::executor::handlers::transaction::undo::UndoEntry;
+use crate::data::executor::handlers::transaction::undo::edge_write::EdgeTarget;
+
 use super::shared::{EdgeDeleteParams, owns_logical_edge_stats};
 
 impl CoreLoop {
@@ -22,10 +25,9 @@ impl CoreLoop {
 
     /// Edge delete with optional transactional compensation.
     ///
-    /// The `UndoEntry::DeleteEdge` is recorded only when a live pre-image
-    /// existed *and* the tombstone was durably written — never speculatively
-    /// before the write. A phantom entry would otherwise re-insert an edge that
-    /// was never deleted when the surrounding transaction rolls back.
+    /// The `UndoEntry::EdgeWrite` is recorded once the tombstone is written,
+    /// never before: it names the tombstone version, and a rollback removes
+    /// exactly that version.
     ///
     /// The RLS write policy is decided against that same pre-image and BEFORE
     /// the tombstone: the row a policy governs is the edge that exists now, and
@@ -39,7 +41,7 @@ impl CoreLoop {
         &mut self,
         task: &ExecutionTask,
         params: EdgeDeleteParams<'_>,
-        undo: Option<&mut Vec<crate::data::executor::handlers::transaction::undo::UndoEntry>>,
+        undo: Option<&mut Vec<UndoEntry>>,
     ) -> Response {
         let EdgeDeleteParams {
             tid,
@@ -52,9 +54,9 @@ impl CoreLoop {
         debug!(core = self.core_id, tid, %collection, %src_id, %label, %dst_id, "edge delete");
         let database_id = task.request.database_id.as_u64();
 
-        // The pre-image is always read now: the RLS write gate needs it for
-        // any non-admit-all policy, the undo log needs it for compensation,
-        // and the response needs it to report a truthful affected count.
+        // The pre-image is always read: the RLS write gate needs it for any
+        // non-admit-all policy, and the response needs it to report a
+        // truthful affected count.
         let old_properties = self
             .edge_store
             .get_edge(
@@ -81,8 +83,18 @@ impl CoreLoop {
         let ord = self
             .active_graph_system_from
             .unwrap_or_else(|| self.hlc.next_ordinal());
+        let target = EdgeTarget {
+            database_id,
+            tid,
+            collection,
+            src_id,
+            label,
+            dst_id,
+        };
+        // The CSR state the undo puts back, read only when an undo is kept.
+        let csr_prior = undo.is_some().then(|| self.capture_edge_csr(&target));
         use crate::engine::graph::edge_store::EdgeRef;
-        match self.edge_store.soft_delete_edge_with_stats(
+        match self.edge_store.soft_delete_edge_recorded(
             EdgeRef::new(
                 task.request.database_id,
                 TenantId::new(tid),
@@ -94,18 +106,11 @@ impl CoreLoop {
             ord,
             owns_logical_edge_stats(task, src_id),
         ) {
-            Ok(_) => {
-                // Tombstone is durable; record the compensation for a rollback.
-                if let (Some(undo), Some(props)) = (undo, old_properties) {
-                    undo.push(
-                        crate::data::executor::handlers::transaction::undo::UndoEntry::DeleteEdge {
-                            collection: collection.to_string(),
-                            src_id: src_id.to_string(),
-                            label: label.to_string(),
-                            dst_id: dst_id.to_string(),
-                            old_properties: props,
-                        },
-                    );
+            Ok(tombstone) => {
+                // The tombstone is written whether or not the edge was live,
+                // so the undo that removes it is recorded either way.
+                if let (Some(undo), Some(csr)) = (undo, csr_prior) {
+                    undo.push(UndoEntry::EdgeWrite(Box::new(target.undo(tombstone, csr))));
                 }
                 let partition = self.csr_partition_mut(database_id, tid);
                 partition.remove_edge_in_collection(src_id, label, dst_id, collection);

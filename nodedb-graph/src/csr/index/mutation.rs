@@ -87,8 +87,10 @@ impl CsrIndex {
         {
             return Ok(());
         }
-        // Check for duplicates in dense CSR (collection-aware).
+        // A dense copy is the edge itself: a deleted one comes back.
         if self.dense_has_edge(src_id, label_id, dst_id, collection_id) {
+            self.deleted_edges
+                .remove(&(src_id, label_id, dst_id, collection_id));
             return Ok(());
         }
 
@@ -107,8 +109,8 @@ impl CsrIndex {
             self.buffer_in_weights[dst_id as usize].push(weight);
         }
 
-        // If this exact `(src, label, dst, collection)` copy was previously
-        // deleted, un-delete it.
+        // A node-edge removal marks buffered edges deleted too. With no dense
+        // copy that mark names this edge only, so it goes.
         self.deleted_edges
             .remove(&(src_id, label_id, dst_id, collection_id));
         Ok(())

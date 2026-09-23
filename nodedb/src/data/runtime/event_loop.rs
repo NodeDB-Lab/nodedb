@@ -148,7 +148,11 @@ pub(super) fn run_event_loop(
         // coordinated checkpoint clamps to. This one is an
         // opportunistic head start, so its only obligations are to make
         // the bytes durable and to say so when it cannot.
-        if last_checkpoint.elapsed() >= checkpoint_interval {
+        // A fail-stopped core publishes nothing: restart rebuilds its state
+        // from the WAL, and a checkpoint of the unknown state would stand in
+        // for that rebuild.
+        let stopped = core.is_fail_stopped();
+        if !stopped && last_checkpoint.elapsed() >= checkpoint_interval {
             if let Err(e) = core.checkpoint_vector_indexes() {
                 warn!(
                     core = core_id,
@@ -161,7 +165,9 @@ pub(super) fn run_event_loop(
         }
 
         // Periodic compaction + maintenance (tombstone cleanup, CSR compact, edge sweep).
-        core.maybe_run_maintenance();
+        if !stopped {
+            core.maybe_run_maintenance();
+        }
 
         // Heartbeat: if no user writes for ~1 second (±100ms jitter),
         // emit a heartbeat to advance the Event Plane's partition

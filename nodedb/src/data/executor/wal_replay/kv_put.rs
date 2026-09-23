@@ -398,13 +398,14 @@ mod tests {
             let dir = tempfile::tempdir().expect("wal tempdir");
             let wal = WalManager::open_for_testing(&dir.path().join("wal")).expect("open wal");
             for payload in payloads {
-                wal.append_put(
-                    TenantId::new(TID),
-                    VShardId::new(0),
-                    DatabaseId::DEFAULT,
-                    payload,
-                )
-                .expect("append");
+                wal.appender(crate::wal::manager::NO_APPLY_KEY)
+                    .append_put(
+                        TenantId::new(TID),
+                        VShardId::new(0),
+                        DatabaseId::DEFAULT,
+                        payload,
+                    )
+                    .expect("append");
             }
             wal.sync().expect("sync");
             let records = wal.replay().expect("replay read");

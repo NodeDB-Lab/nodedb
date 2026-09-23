@@ -40,7 +40,6 @@ use nodedb_wal::WalRecord;
 use nodedb_wal::record::RecordType;
 
 use super::core_loop::CoreLoop;
-use super::handlers::transaction::undo::UndoEntry;
 use crate::types::DatabaseId;
 
 impl CoreLoop {
@@ -80,13 +79,9 @@ impl CoreLoop {
             return Some(0);
         }
         if self.recording_redo_undo() {
-            let prior = self.node_label_prior(database_id.as_u64(), tenant_id, &node_id, &labels);
-            self.record_redo_undo([UndoEntry::NodeLabels {
-                database_id: database_id.as_u64(),
-                tid: tenant_id,
-                node_id: node_id.clone(),
-                prior,
-            }]);
+            let undo =
+                self.capture_node_labels_undo(database_id.as_u64(), tenant_id, &node_id, &labels);
+            self.record_redo_undo([undo]);
         }
 
         if is_set {
@@ -119,28 +114,6 @@ impl CoreLoop {
             }
         }
         Some(1)
-    }
-
-    /// Whether `node_id` carries each of `labels` now.
-    fn node_label_prior(
-        &self,
-        database_id: u64,
-        tenant_id: u64,
-        node_id: &str,
-        labels: &[String],
-    ) -> Vec<(String, bool)> {
-        let partition = self.csr_partition(database_id, tenant_id);
-        let local = partition.and_then(|p| p.node_id_raw(node_id));
-        labels
-            .iter()
-            .map(|label| {
-                let carried = match (partition, local) {
-                    (Some(p), Some(id)) => p.node_has_label(id, label),
-                    _ => false,
-                };
-                (label.clone(), carried)
-            })
-            .collect()
     }
 
     /// Replay every `GraphNodeLabelSet` / `GraphNodeLabelRemove` record in

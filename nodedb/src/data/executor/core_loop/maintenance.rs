@@ -245,26 +245,18 @@ impl CoreLoop {
             .collect();
         let swept_nodes = work.len();
         for (db, tid, node) in &work {
-            let edges = match self.csr.partition_mut(*db, *tid) {
-                Some(partition) => partition.remove_node_edges(node),
-                None => 0,
-            };
-            if edges > 0 {
-                let ord = self.hlc.next_ordinal();
-                if let Err(e) = self
-                    .edge_store
-                    .delete_edges_for_node(db.as_u64(), *tid, node, ord)
-                {
-                    tracing::warn!(
-                        core = self.core_id,
-                        db = db.as_u64(),
-                        tid = tid.as_u64(),
-                        node = %node,
-                        error = %e,
-                        "sweep: failed to delete edges from store"
-                    );
-                }
-                removed += edges;
+            // On an error neither store changed, so the edges stay in both
+            // and the next sweep retries them.
+            match self.cascade_node_edges(db.as_u64(), tid.as_u64(), node) {
+                Ok(edges) => removed += edges.len(),
+                Err(e) => tracing::warn!(
+                    core = self.core_id,
+                    db = db.as_u64(),
+                    tid = tid.as_u64(),
+                    node = %node,
+                    error = %e,
+                    "sweep: failed to delete edges from store"
+                ),
             }
         }
         if removed > 0 {

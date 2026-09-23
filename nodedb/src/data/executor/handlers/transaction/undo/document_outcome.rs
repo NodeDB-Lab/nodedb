@@ -19,6 +19,7 @@ use crate::data::executor::handlers::point::apply_delete::PointDeleteOutcome;
 use crate::data::executor::handlers::point::apply_put::PointPutOutcome;
 
 use super::UndoEntry;
+use super::edge_write::{EdgeCsrPrior, EdgeWriteUndo};
 
 /// The document row one write touched.
 pub(in crate::data::executor::handlers) struct DocumentRow<'a> {
@@ -133,14 +134,25 @@ pub(in crate::data::executor::handlers) fn push_delete_undo(
             node_id,
         });
     }
-    for (collection, src_id, label, dst_id, old_properties) in outcome.edge_deletes {
-        undo_log.push(UndoEntry::DeleteEdge {
-            collection,
-            src_id,
-            label,
-            dst_id,
-            old_properties,
-        });
+    // The cascade dropped the deleted node's identity binding with its
+    // edges, so the undo binds the endpoints again.
+    for cascaded in outcome.edge_deletes {
+        let weight =
+            crate::engine::graph::csr::extract_weight_from_properties(&cascaded.old_properties);
+        undo_log.push(UndoEntry::EdgeWrite(Box::new(EdgeWriteUndo {
+            database_id: row.database_id,
+            tid: row.tid,
+            collection: cascaded.collection,
+            src_id: cascaded.src,
+            label: cascaded.label,
+            dst_id: cascaded.dst,
+            version: cascaded.tombstone,
+            csr: EdgeCsrPrior {
+                weight: Some(weight),
+                ..EdgeCsrPrior::default()
+            },
+            rebind_endpoints: true,
+        })));
     }
 }
 

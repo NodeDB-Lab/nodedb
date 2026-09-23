@@ -79,12 +79,7 @@ impl CoreLoop {
     ) -> Response {
         let undo_len = undo_log.len();
         let rollback = catch_unwind(AssertUnwindSafe(|| {
-            self.rollback_undo_log_at(
-                task.request.database_id.as_u64(),
-                tid,
-                task.request.vshard_id,
-                undo_log,
-            )
+            self.rollback_undo_log(task.request.database_id.as_u64(), tid, undo_log)
         }));
         let failure = match rollback {
             Ok(Ok(())) => None,

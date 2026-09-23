@@ -146,3 +146,39 @@ impl DomainContext for CalvinApplyHalted<'_> {
         })
     }
 }
+
+/// A Data-Plane core fail-stopped because its state is unknown: a rollback
+/// failed part way, or the work owed after a committed record's install
+/// failed.
+pub(in crate::diag) struct CoreFailStopped<'a> {
+    pub core_id: usize,
+    /// Cause label (`rollback_failed`, `post_install_failed`).
+    pub cause: &'a str,
+    pub detail: &'a str,
+}
+
+impl DomainContext for CoreFailStopped<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.data_plane_core_fail_stopped"
+    }
+
+    fn grouping_key(&self) -> String {
+        // The cause names the bug; the core is the occurrence.
+        format!("cause={}", self.cause)
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "core_id": self.core_id,
+            "cause": self.cause,
+            "detail": self.detail,
+            "why_fatal": "the core's live state no longer matches what restart replay \
+                          rebuilds from the WAL and its published artifacts. Serving it \
+                          would answer reads and take writes against state no replica \
+                          and no restart reproduces, so the core refuses every request",
+            "operator_action": "fix the named cause (the failing undo entry, or the disk \
+                                 behind the flush or artifact that failed), then restart \
+                                 the node. Restart replay rebuilds the core from the WAL",
+        })
+    }
+}

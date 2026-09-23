@@ -18,6 +18,7 @@ impl SystemMetrics {
         self.purge.write_prometheus(&mut out);
         self.io_metrics.write_prometheus(&mut out);
         self.spsc_throttle.write_prometheus(&mut out);
+        self.core_fail_stops.write_prometheus(&mut out);
         out
     }
 

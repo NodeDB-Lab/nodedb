@@ -4,12 +4,13 @@
 //!
 //! A write the undo cannot reverse waits here: a memtable flush drains rows
 //! the undo would restore in memory, a vector seal moves inserted nodes out of
-//! the growing segment, a truncate that removes files cannot be renamed back,
-//! and an event the Event Plane consumed cannot be withdrawn. Once the install
-//! succeeded, this runs them in one step.
+//! the growing segment, and a truncate that removes files cannot be renamed
+//! back. Once the install succeeded, this runs them in one step. The record's
+//! events wait until this step and the cover step both succeeded.
 //!
-//! A failure here comes after every sub-record landed, so it is not rolled
-//! back. It fails the response as an ambiguous error, and the funnel keeps
+//! A failure here comes after every sub-record landed. The undo cannot
+//! reverse a partial flush, and a flush failure is an I/O failure no validate
+//! pass can predict. So the apply fail-stops the core, and the funnel keeps
 //! the record for restart replay.
 
 use crate::bridge::envelope::ErrorCode;
@@ -53,9 +54,6 @@ impl CoreLoop {
         task: &ExecutionTask,
         scope: &mut RedoApplyScope,
     ) -> Result<(), ErrorCode> {
-        for event in std::mem::take(&mut scope.pending_events) {
-            self.send_write_event(event);
-        }
         self.finalize_timeseries_truncates(&scope.undo);
         self.finalize_vector_truncates(&mut scope.undo);
         self.seal_full_vector_collections();

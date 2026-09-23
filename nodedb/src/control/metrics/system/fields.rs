@@ -8,6 +8,7 @@ use std::sync::{Arc, RwLock};
 
 use super::super::histogram::{AtomicHistogram, WAL_FSYNC_BUCKETS_US};
 use super::super::purge::PurgeMetrics;
+use super::core_fail_stop::CoreFailStops;
 use super::heartbeat::CoreHeartbeats;
 use crate::data::executor::core_loop::pressure::ThrottleMetrics;
 use crate::data::io::IoMetrics;
@@ -219,6 +220,9 @@ pub struct SystemMetrics {
     /// that stops advancing is the only evidence a core has stopped
     /// completing iterations.
     pub core_heartbeats: CoreHeartbeats,
+    /// Cores that fail-stopped because their state is unknown. A core records
+    /// itself here once, as it stops.
+    pub core_fail_stops: CoreFailStops,
 }
 
 impl SystemMetrics {
