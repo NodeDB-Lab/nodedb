@@ -11,7 +11,8 @@ mod test_requests;
 
 pub use core_channel::{CoreChannel, CoreChannelDataSide};
 pub use dispatcher::{
-    BridgeRequest, BridgeResponse, DatabasePriorityResolver, DefaultPriorityResolver, Dispatcher,
+    BridgeRequest, BridgeResponse, DATA_PLANE_QUEUE_CAPACITY, DatabasePriorityResolver,
+    DefaultPriorityResolver, Dispatcher,
 };
 pub use drain::CorePending;
 pub use refusal::DispatchRefusal;

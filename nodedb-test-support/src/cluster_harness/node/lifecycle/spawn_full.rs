@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nodedb::bridge::dispatch::Dispatcher;
+use nodedb::bridge::dispatch::{DATA_PLANE_QUEUE_CAPACITY, Dispatcher};
 use nodedb::config::auth::AuthMode;
 use nodedb::config::server::ClusterSettings;
 use nodedb::control::server::pgwire::listener::PgListener;
@@ -101,7 +101,7 @@ impl TestClusterNode {
         )?);
         let wal_records: Arc<[nodedb_wal::WalRecord]> = Arc::from(wal.replay()?.into_boxed_slice());
         let replay_tombstones = nodedb_wal::extract_tombstones(&wal_records).unwrap();
-        let (dispatcher, data_sides) = Dispatcher::new(num_cores, 1024);
+        let (dispatcher, data_sides) = Dispatcher::new(num_cores, DATA_PLANE_QUEUE_CAPACITY);
         let (event_producers, event_consumers) = create_event_bus(num_cores);
 
         // Credential store backed by the system catalog — required for

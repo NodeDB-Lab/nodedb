@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use nodedb::ServerConfig;
 use nodedb::bootstrap;
-use nodedb::bridge::dispatch::Dispatcher;
+use nodedb::bridge::dispatch::{DATA_PLANE_QUEUE_CAPACITY, Dispatcher};
 
 /// Everything downstream boot phases need from Data Plane bootstrap,
 /// bundled so the call site doesn't juggle 15 separate `let`s.
@@ -55,7 +55,7 @@ pub(crate) async fn bootstrap_data_plane(
 
     // Create SPSC bridge: Dispatcher (Control Plane) + CoreChannelDataSide (Data Plane).
     let num_cores = config.server.data_plane_cores;
-    let (mut dispatcher, data_sides) = Dispatcher::new(num_cores, 1024);
+    let (mut dispatcher, data_sides) = Dispatcher::new(num_cores, DATA_PLANE_QUEUE_CAPACITY);
 
     // Create Event Bus: per-core ring buffers (Data Plane → Event Plane).
     let (event_producers, event_consumers) = nodedb::event::bus::create_event_bus(num_cores);

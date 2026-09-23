@@ -21,6 +21,12 @@ use crate::data::eventfd::EventFdNotifier;
 
 use super::core_channel::{CoreChannel, CoreChannelDataSide};
 
+/// Per-core request queue capacity of the server's bridge dispatcher.
+///
+/// Each core's weighted-fair queue and SPSC rings hold at most this many
+/// requests. Every request for one vShard routes to the same core.
+pub const DATA_PLANE_QUEUE_CAPACITY: usize = 1024;
+
 /// Serialized form of a request that goes through the SPSC ring buffer.
 ///
 /// The bridge crate is generic over `T` — we serialize our typed `Request`
