@@ -203,6 +203,36 @@ impl NodeDbError {
         }
     }
 
+    /// A KV counter atomic (`INCR`, `INCRBYFLOAT`) refused on `collection`.
+    ///
+    /// `fault` is the client text, e.g. `value is not an integer or out of
+    /// range`. The message is `"{fault} on {collection}"`, the text the SQL
+    /// surfaces send. `out_of_range` picks the class: `OVERFLOW` for a result
+    /// out of range, `TYPE_MISMATCH` for a stored value that does not parse.
+    pub fn kv_counter_fault(
+        collection: impl Into<String>,
+        fault: impl fmt::Display,
+        out_of_range: bool,
+    ) -> Self {
+        let collection = collection.into();
+        let message = format!("{fault} on {collection}");
+        if out_of_range {
+            Self {
+                code: ErrorCode::OVERFLOW,
+                message,
+                details: ErrorDetails::Overflow { collection },
+                cause: None,
+            }
+        } else {
+            Self {
+                code: ErrorCode::TYPE_MISMATCH,
+                message,
+                details: ErrorDetails::TypeMismatch { collection },
+                cause: None,
+            }
+        }
+    }
+
     pub fn insufficient_balance(collection: impl Into<String>, detail: impl fmt::Display) -> Self {
         let collection = collection.into();
         Self {

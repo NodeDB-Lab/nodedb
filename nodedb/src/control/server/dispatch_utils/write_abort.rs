@@ -161,7 +161,7 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         | ErrorCode::TransitionCheckViolation { .. }
         | ErrorCode::TypeGuardViolation { .. }
         | ErrorCode::TypeMismatch { .. }
-        | ErrorCode::OverflowError { .. }
+        | ErrorCode::CounterFault { .. }
         | ErrorCode::InsufficientBalance { .. }
         // Admission verdicts: the request never reached the mutation at all.
         | ErrorCode::RateExceeded { .. }

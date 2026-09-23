@@ -1319,13 +1319,15 @@ mod tests {
                 ttl_ms: 0,
                 surrogate: Surrogate::ZERO,
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
             }),
             PhysicalPlan::Kv(KvOp::IncrFloat {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 key: Vec::new(),
-                delta: 0.0,
+                delta: "0".into(),
                 surrogate: Surrogate::ZERO,
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
             }),
             PhysicalPlan::Kv(KvOp::Cas {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),

@@ -155,10 +155,21 @@ SELECT KV_GETSET('session_token', 'player-123', 'new-token-xyz');
 
 **RESP (Redis) equivalents:** `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT`, `GETSET` — all work over the RESP protocol.
 
+**Value shapes:**
+
+- Raw value (a single `value` column, or RESP `SET`): the value is a byte string. `INCR`/`INCRBY`/`DECR`/`DECRBY` read it as decimal integer text and store the result as decimal text. `INCRBYFLOAT` and `KV_INCR_FLOAT` read decimal text (plain or exponent form, such as `5.0e3`), add exactly, and store the trimmed decimal text: `"0.1"` plus `0.2` stores `"0.3"`, `"3.0"` plus `0` stores `"3"`. Exact addition covers 28 significant digits below 7.9e28. A value outside that range adds in 64-bit float. `SET k 5` then `INCR k` leaves `"6"`.
+- Absent key: the counter starts at 0 and is stored as decimal text.
+- Typed row (several columns): the first numeric column in key order moves. Every other column stays.
+
 **Error handling:**
 
-- `TYPE_MISMATCH` (SQLSTATE 42846) — INCR on a non-numeric value
-- `OVERFLOW` (SQLSTATE 22003) — i64 overflow on INCR
+| Condition | RESP reply | SQLSTATE |
+|---|---|---|
+| Raw value is not a decimal integer in the i64 range | `ERR value is not an integer or out of range` | `22P02` |
+| Raw value is not a decimal float | `ERR value is not a valid float` | `22P02` |
+| Integer result leaves the i64 range | `ERR increment or decrement would overflow` | `22003` |
+| Float result is NaN or infinite | `ERR increment would produce NaN or Infinity` | `22003` |
+| Typed row has no numeric column | `WRONGTYPE ...` | `42846` |
 
 ## Sorted Indexes (Leaderboards)
 

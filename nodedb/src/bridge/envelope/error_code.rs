@@ -79,8 +79,12 @@ pub enum ErrorCode {
     TypeGuardViolation { collection: String, detail: String },
     /// Value type does not match expected type for operation (e.g. INCR on a string).
     TypeMismatch { collection: String, detail: String },
-    /// Arithmetic overflow (e.g. i64::MAX + 1 on INCR).
-    OverflowError { collection: String },
+    /// A KV counter atomic read a stored value it cannot parse as a
+    /// number, or computed a result out of range.
+    CounterFault {
+        collection: String,
+        fault: super::CounterFault,
+    },
     /// Insufficient balance for transfer (source lacks required amount).
     InsufficientBalance { collection: String, detail: String },
     /// Rate limit exceeded for a rate gate / cooldown.
@@ -210,7 +214,6 @@ impl From<crate::Error> for ErrorCode {
             crate::Error::TypeMismatch {
                 collection, detail, ..
             } => Self::TypeMismatch { collection, detail },
-            crate::Error::OverflowError { collection, .. } => Self::OverflowError { collection },
             crate::Error::InsufficientBalance {
                 collection, detail, ..
             } => Self::InsufficientBalance { collection, detail },

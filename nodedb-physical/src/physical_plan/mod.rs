@@ -48,7 +48,7 @@ pub use exchange::{ExchangeMode, ExchangeOp};
 pub use graph::{
     BatchEdge, BspSuperstepPlan, BspSuperstepResult, GraphOp, WccSuperstepPlan, WccSuperstepResult,
 };
-pub use kv::{KvOp, KvResolveOutcome, KvResolvedMutation};
+pub use kv::{KvCounterShape, KvOp, KvResolveOutcome, KvResolvedMutation};
 pub use meta::{MetaOp, SAVEPOINT_MARKER_BYTES};
 pub use plan::PhysicalPlan;
 pub use query::{AggregateSpec, GroupKeySpec, JoinProjection, QueryOp};

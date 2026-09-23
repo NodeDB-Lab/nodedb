@@ -139,10 +139,10 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             sqlstate::CANNOT_COERCE,
             format!("type mismatch on {collection}: {detail}"),
         ),
-        ErrorCode::OverflowError { collection } => (
+        ErrorCode::CounterFault { collection, fault } => (
             "ERROR",
-            sqlstate::NUMERIC_VALUE_OUT_OF_RANGE,
-            format!("arithmetic overflow on {collection}"),
+            fault.sqlstate(),
+            format!("{} on {collection}", fault.message()),
         ),
         ErrorCode::InsufficientBalance { collection, detail } => (
             "ERROR",

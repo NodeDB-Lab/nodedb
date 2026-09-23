@@ -4,7 +4,7 @@
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::state::SharedState;
-use nodedb_physical::physical_plan::KvOp;
+use nodedb_physical::physical_plan::{KvCounterShape, KvOp};
 use nodedb_types::{DatabaseId, QualifiedCollection};
 
 use super::super::codec::RespValue;
@@ -105,9 +105,12 @@ async fn dispatch_incr(
         surrogate,
         // Filled by the RLS injection pass `dispatch_kv_write` runs.
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+        // RESP treats every value as a byte string, as `SET` and `GET` do, so
+        // an absent key starts as decimal text in any collection.
+        shape: KvCounterShape::Raw,
     });
 
-    match dispatch_kv_write(state, session, plan).await {
+    match dispatch_counter(state, session, plan).await {
         Ok(resp) => match payload_field_i64(&resp.payload, "value") {
             Some(new_val) => RespValue::integer(new_val),
             // The counter did change; a response we cannot read means we do
@@ -130,13 +133,11 @@ pub(in crate::control::server::resp) async fn handle_incrbyfloat(
     }
 
     let key = cmd.args[0].clone();
-    let delta_str = match cmd.arg_str(1) {
-        Some(s) => s,
-        None => return RespValue::err("ERR value is not a valid float"),
-    };
-    let delta: f64 = match delta_str.parse() {
-        Ok(v) => v,
-        Err(_) => return RespValue::err("ERR value is not a valid float"),
+    // The delta stays the client's decimal text, so the engine adds every
+    // digit the client sent.
+    let delta = match cmd.arg_str(1) {
+        Some(s) if crate::engine::kv::float_text::is_decimal_number(s) => s.to_string(),
+        _ => return RespValue::err("ERR value is not a valid float"),
     };
 
     if let Some(refusal) = refuse_if_counter_is_redacted(state, session) {
@@ -154,16 +155,40 @@ pub(in crate::control::server::resp) async fn handle_incrbyfloat(
         surrogate,
         // Filled by the RLS injection pass `dispatch_kv_write` runs.
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+        // See `dispatch_incr`.
+        shape: KvCounterShape::Raw,
     });
 
-    match dispatch_kv_write(state, session, plan).await {
+    match dispatch_counter(state, session, plan).await {
+        // The reply is a bulk string. A raw body answers with the exact text
+        // it stored, the bytes `GET` returns. A typed row answers with the
+        // column's new number.
         Ok(resp) => {
-            // Return the new value as a bulk string (Redis convention).
-            match payload_json(&resp.payload).get("value") {
-                Some(v) => RespValue::bulk(v.to_string().into_bytes()),
+            let reply = payload_json(&resp.payload);
+            let text = match reply.get("text").and_then(serde_json::Value::as_str) {
+                Some(text) => Some(text.to_string()),
+                None => reply
+                    .get("value")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|v| v.to_string()),
+            };
+            match text {
+                Some(text) => RespValue::bulk(text.into_bytes()),
                 None => RespValue::err("ERR counter response could not be decoded"),
             }
         }
         Err(e) => RespValue::from_error(&e),
     }
+}
+
+/// Dispatch a counter write and turn a Data-Plane error status into a typed
+/// error, so a counter fault reaches the client as its own message.
+async fn dispatch_counter(
+    state: &SharedState,
+    session: &RespSession,
+    plan: PhysicalPlan,
+) -> crate::Result<crate::bridge::envelope::Response> {
+    let resp = dispatch_kv_write(state, session, plan).await?;
+    crate::control::server::dispatch_utils::reject_data_plane_error(&resp)?;
+    Ok(resp)
 }

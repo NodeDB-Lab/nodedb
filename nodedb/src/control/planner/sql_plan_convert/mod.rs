@@ -12,6 +12,7 @@ pub mod expr;
 pub mod filter;
 pub mod filter_scan_side;
 pub mod group_key_name;
+pub mod kv_counter_shape;
 pub mod lateral;
 pub mod output_schema;
 pub mod output_schema_types;

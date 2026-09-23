@@ -12,6 +12,7 @@ pub(crate) mod document;
 pub(crate) mod graph;
 mod helpers;
 pub(crate) mod kv;
+pub(crate) mod kv_counter;
 pub(crate) mod query;
 pub(crate) mod spatial;
 pub(crate) mod text;

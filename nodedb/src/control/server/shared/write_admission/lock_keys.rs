@@ -272,6 +272,7 @@ mod tests {
                 ttl_ms: 0,
                 surrogate: Surrogate::new(1),
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
             }),
             LockKey::Kv {
                 collection: Arc::from("counters"),
@@ -286,9 +287,10 @@ mod tests {
             kv_key(KvOp::IncrFloat {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
                 key: b"k1".to_vec(),
-                delta: 1.5,
+                delta: "1.5".into(),
                 surrogate: Surrogate::new(1),
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
             }),
             LockKey::Kv {
                 collection: Arc::from("counters"),

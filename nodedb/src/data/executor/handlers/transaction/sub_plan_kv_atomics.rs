@@ -39,6 +39,7 @@ impl CoreLoop {
                 ttl_ms,
                 surrogate,
                 rls_write_check,
+                shape,
             } => {
                 let now_ms = current_ms();
                 let prior = self
@@ -56,6 +57,7 @@ impl CoreLoop {
                     },
                     *delta,
                     *ttl_ms,
+                    shape,
                 );
                 if resp.status == Status::Error {
                     return Err(resp.error_code.map(|c| *c).unwrap_or(ErrorCode::Internal {
@@ -76,6 +78,7 @@ impl CoreLoop {
                 delta,
                 surrogate,
                 rls_write_check,
+                shape,
             } => {
                 let now_ms = current_ms();
                 let prior = self
@@ -91,7 +94,8 @@ impl CoreLoop {
                         surrogate: *surrogate,
                         rls_write_check,
                     },
-                    *delta,
+                    delta,
+                    shape,
                 );
                 if resp.status == Status::Error {
                     return Err(resp.error_code.map(|c| *c).unwrap_or(ErrorCode::Internal {

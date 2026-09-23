@@ -36,13 +36,14 @@
 //! realistic transaction, and never persisted (COMMIT replay uses the real
 //! `KvEngine` atomic path, which ignores the overlay's surrogate entirely).
 
-use nodedb_physical::physical_plan::KvOp;
+use nodedb_physical::physical_plan::{KvCounterShape, KvOp};
 use nodedb_types::Surrogate;
 
 use super::context::StageCtx;
 use super::stage_kv::kv_row_identity;
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::kv::atomic::incr_float_reply;
 use crate::data::executor::handlers::transaction::overlay::StagedTtl;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
@@ -85,10 +86,11 @@ impl CoreLoop {
                 // overlay keys its own slots (see module doc) and ignores it.
                 surrogate: _,
                 rls_write_check,
+                shape,
             } => {
                 let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key);
                 self.stage_kv_ttl_side_effect(&ctx, *ttl_ms);
-                self.stage_kv_incr(&ctx, key, *delta, rls_write_check)
+                self.stage_kv_incr(&ctx, key, *delta, shape, rls_write_check)
             }
             KvOp::IncrFloat {
                 collection,
@@ -96,9 +98,10 @@ impl CoreLoop {
                 delta,
                 surrogate: _,
                 rls_write_check,
+                shape,
             } => {
                 let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection.as_str(), key);
-                self.stage_kv_incr_float(&ctx, key, *delta, rls_write_check)
+                self.stage_kv_incr_float(&ctx, key, delta, shape, rls_write_check)
             }
             KvOp::Cas {
                 collection,
@@ -188,10 +191,11 @@ impl CoreLoop {
         ctx: &StageCtx<'_>,
         key: &[u8],
         delta: i64,
+        shape: &KvCounterShape,
         rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
         let current = self.resolve_kv_current(ctx, key);
-        match atomic_compute::incr(current.as_deref(), delta) {
+        match atomic_compute::incr(current.as_deref(), delta, shape) {
             Ok((new_i64, new_bytes)) => {
                 if let Err(e) = self.stage_admit_kv_image(ctx, &new_bytes, rls_write_check) {
                     return self.response_error(ctx.task, e);
@@ -209,19 +213,21 @@ impl CoreLoop {
         &mut self,
         ctx: &StageCtx<'_>,
         key: &[u8],
-        delta: f64,
+        delta: &str,
+        shape: &KvCounterShape,
         rls_write_check: &nodedb_types::RlsWriteCheck,
     ) -> Response {
         let current = self.resolve_kv_current(ctx, key);
-        match atomic_compute::incr_float(current.as_deref(), delta) {
+        match atomic_compute::incr_float(current.as_deref(), delta, shape) {
             Ok((new_f64, new_bytes)) => {
                 if let Err(e) = self.stage_admit_kv_image(ctx, &new_bytes, rls_write_check) {
                     return self.response_error(ctx.task, e);
                 }
+                let reply = incr_float_reply(new_f64, &new_bytes);
                 if let Err(e) = self.stage_put_capped(ctx, new_bytes) {
                     return self.response_error(ctx.task, e);
                 }
-                self.kv_atomic_json_response(ctx.task, &serde_json::json!({ "value": new_f64 }))
+                self.kv_atomic_json_response(ctx.task, &reply)
             }
             Err(e) => self.response_atomic_error(ctx.task, ctx.collection, e),
         }

@@ -165,16 +165,18 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
             ttl_ms,
             surrogate,
             resolved_now_ms: rn,
+            shape,
         } => {
             resolved_now_ms = *rn;
-            kv::incr(collection, key, *delta, *ttl_ms, *surrogate)?
+            kv::incr(collection, key, *delta, *ttl_ms, *surrogate, shape)?
         }
         ReplicatedWrite::KvIncrFloat {
             collection,
             key,
             delta,
             surrogate,
-        } => kv::incr_float(collection, key, *delta, *surrogate)?,
+            shape,
+        } => kv::incr_float(collection, key, delta, *surrogate, shape)?,
         ReplicatedWrite::KvCas {
             collection,
             key,
@@ -472,6 +474,7 @@ mod tests {
                 ttl_ms: 60_000,
                 surrogate: 1,
                 resolved_now_ms: Some(1_000),
+                shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
             },
         );
         let bytes = entry_with_ttl.to_bytes();
@@ -496,6 +499,7 @@ mod tests {
                 ttl_ms: 0,
                 surrogate: 1,
                 resolved_now_ms: None,
+                shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
             },
         );
         let bytes_no_ttl = entry_no_ttl.to_bytes();

@@ -49,6 +49,28 @@ impl NodeDbError {
             cause: None,
         }
     }
+
+    /// Rebuild a typed error from a wire frame that also carries the
+    /// structured details the server held.
+    ///
+    /// The carried details are used when they belong to `code`, so a client
+    /// reads the collection, gate, or document the server named. Details of
+    /// another category, or none, fall back to [`NodeDbError::from_wire`].
+    pub fn from_wire_with_details(
+        code: ErrorCode,
+        message: impl Into<String>,
+        details: Option<ErrorDetails>,
+    ) -> Self {
+        match details {
+            Some(details) if details.code() == code => Self {
+                code,
+                message: message.into(),
+                details,
+                cause: None,
+            },
+            _ => Self::from_wire(code, message),
+        }
+    }
 }
 
 /// Map a numeric code onto the details variant that carries its category,
@@ -112,6 +134,40 @@ mod tests {
             );
             assert_eq!(e.code(), code);
         }
+    }
+
+    #[test]
+    fn carried_details_keep_the_collection() {
+        let e = NodeDbError::from_wire_with_details(
+            ErrorCode::OVERFLOW,
+            "increment or decrement would overflow on counters",
+            Some(ErrorDetails::Overflow {
+                collection: "counters".into(),
+            }),
+        );
+        assert_eq!(
+            e.details(),
+            &ErrorDetails::Overflow {
+                collection: "counters".into()
+            }
+        );
+    }
+
+    #[test]
+    fn details_of_another_category_fall_back_to_the_code() {
+        let e = NodeDbError::from_wire_with_details(
+            ErrorCode::OVERFLOW,
+            "overflow",
+            Some(ErrorDetails::TypeMismatch {
+                collection: "counters".into(),
+            }),
+        );
+        assert_eq!(
+            e.details(),
+            &ErrorDetails::Overflow {
+                collection: String::new()
+            }
+        );
     }
 
     #[test]

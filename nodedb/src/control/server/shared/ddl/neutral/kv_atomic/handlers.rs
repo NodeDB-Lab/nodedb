@@ -11,7 +11,8 @@ use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, VShardId};
-use nodedb_physical::physical_plan::{KvOp, PhysicalPlan};
+use nodedb_physical::physical_plan::{KvCounterShape, KvOp, PhysicalPlan};
+use nodedb_sql::planner::dml_helpers::KvCounterKind;
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::dispatch::{
@@ -61,6 +62,7 @@ pub async fn kv_incr(
             key.as_bytes(),
         )
         .map_err(|e| ddl_err("XX000", e.to_string()))?;
+    let shape = counter_shape(state, identity, &collection, &key, KvCounterKind::Integer)?;
     let plan = PhysicalPlan::Kv(KvOp::Incr {
         collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, &collection),
         key: key.as_bytes().to_vec(),
@@ -70,6 +72,7 @@ pub async fn kv_incr(
         // Filled by `dispatch_and_respond`, which runs the same RLS injection
         // pass the planner-driven path runs.
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+        shape,
     });
 
     dispatch_and_respond(
@@ -104,12 +107,18 @@ pub async fn kv_incr_float(
 
     let collection = unquote(&args[0]).to_lowercase();
     let key = unquote(&args[1]);
-    let delta: f64 = args[2].trim().parse().map_err(|_| {
-        ddl_err(
+    // The delta stays the client's decimal text, so the engine adds every
+    // digit the client wrote.
+    let delta = unquote(&args[2]).trim().to_string();
+    if !crate::engine::kv::float_text::is_decimal_number(&delta) {
+        return Err(ddl_err(
             "42601",
-            format!("KV_INCR_FLOAT: delta must be a float, got '{}'", args[2]),
-        )
-    })?;
+            format!(
+                "KV_INCR_FLOAT: delta must be a decimal number, got '{}'",
+                args[2]
+            ),
+        ));
+    }
 
     let vshard = VShardId::from_collection_in_database(DatabaseId::DEFAULT, &collection);
     let surrogate = state
@@ -121,6 +130,7 @@ pub async fn kv_incr_float(
             key.as_bytes(),
         )
         .map_err(|e| ddl_err("XX000", e.to_string()))?;
+    let shape = counter_shape(state, identity, &collection, &key, KvCounterKind::Float)?;
     let plan = PhysicalPlan::Kv(KvOp::IncrFloat {
         collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, &collection),
         key: key.as_bytes().to_vec(),
@@ -128,6 +138,7 @@ pub async fn kv_incr_float(
         surrogate,
         // Filled by `dispatch_and_respond` — see `kv_incr`.
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+        shape,
     });
 
     dispatch_and_respond(
@@ -140,6 +151,43 @@ pub async fn kv_incr_float(
         txn_ctx,
     )
     .await
+}
+
+/// The row an absent `key` in `collection` becomes, planned from the catalog.
+///
+/// The caller's grants are checked first, the same pair `dispatch_and_respond`
+/// checks: planning the row reads the catalog and can evaluate a DEFAULT, so
+/// a caller refused the collection must be refused before either happens.
+fn counter_shape(
+    state: &SharedState,
+    identity: &AuthenticatedIdentity,
+    collection: &str,
+    key: &str,
+    kind: KvCounterKind,
+) -> Result<KvCounterShape, DdlError> {
+    let gate = super::super::read_gate::CollectionReadGate::for_request(
+        state,
+        identity,
+        DatabaseId::DEFAULT,
+    );
+    gate.authorize(collection)?;
+    gate.authorize_permission(
+        collection,
+        crate::control::security::identity::Permission::Write,
+    )?;
+    crate::control::planner::sql_plan_convert::kv_counter_shape::kv_counter_shape(
+        state,
+        identity.tenant_id,
+        DatabaseId::DEFAULT,
+        collection,
+        key,
+        kind,
+    )
+    .map_err(|error| {
+        let (_, sqlstate, message) =
+            crate::control::server::pgwire::types::error_to_sqlstate(&error);
+        DdlError::new(sqlstate, message)
+    })
 }
 
 /// Handle `SELECT KV_CAS(collection, key, expected, new_value)`

@@ -37,9 +37,10 @@ pub(crate) async fn handle_direct_op(
     let vshard_id = ctx.vshard_for_key(vshard_key);
     let tenant_id = ctx.tenant_id();
 
-    // CRDT Apply allocates a surrogate while planning; authorize the exact
-    // collection first.
-    if matches!(op, OpCode::CrdtApply) {
+    // CRDT Apply allocates a surrogate while planning, and a KV counter plans
+    // its fresh row from the catalog, which can evaluate a DEFAULT. Authorize
+    // the exact collection first.
+    if matches!(op, OpCode::CrdtApply | OpCode::KvIncr | OpCode::KvIncrFloat) {
         let audit = crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(
             &ctx.state.audit,
         ));

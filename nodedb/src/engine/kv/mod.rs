@@ -13,6 +13,7 @@ mod engine_stats;
 mod engine_write;
 pub mod entry;
 pub mod expiry_wheel;
+pub mod float_text;
 mod hash_helpers;
 pub mod hash_table;
 pub mod index;
@@ -26,7 +27,8 @@ pub use engine::{
     KvEngine, KvEntryImage, KvKeyRef, RestoreCompositeIndexParams, RestoreFieldIndexParams,
 };
 pub use engine_atomic::{
-    AtomicAdmission, AtomicError, AtomicKeyCtx, CasResult, GetSetResult, admit_any,
+    AtomicAdmission, AtomicError, AtomicKeyCtx, CasResult, GetSetResult, IncrStep, Incremented,
+    admit_any,
 };
 pub use engine_atomic_compute as atomic_compute;
 pub use engine_index::RegisterIndexParams;

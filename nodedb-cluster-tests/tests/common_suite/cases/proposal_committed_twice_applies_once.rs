@@ -108,6 +108,9 @@ async fn a_proposal_committed_twice_moves_the_counter_once() {
                     ttl_ms: 0,
                     surrogate,
                     rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                    // The key is seeded before this proposal, so the shape an
+                    // absent key takes never applies.
+                    shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
                 });
                 let write =
                     ReplicableWrite::decide_for_replication(&plan).expect("KV_INCR replicates");

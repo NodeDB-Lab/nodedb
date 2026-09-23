@@ -4,7 +4,7 @@
 
 use super::super::types::ReplicatedWrite;
 use super::entry::encode_returning;
-use nodedb_physical::physical_plan::{ReturningSpec, UpdateValue};
+use nodedb_physical::physical_plan::{KvCounterShape, ReturningSpec, UpdateValue};
 use nodedb_types::Surrogate;
 
 /// Resolve the wall-clock instant for a TTL-bearing write once, at proposal
@@ -193,6 +193,7 @@ pub(super) fn incr(
     delta: i64,
     ttl_ms: u64,
     surrogate: u32,
+    shape: &KvCounterShape,
 ) -> ReplicatedWrite {
     ReplicatedWrite::KvIncr {
         collection: collection.to_owned(),
@@ -201,20 +202,23 @@ pub(super) fn incr(
         ttl_ms,
         surrogate,
         resolved_now_ms: resolve_now_ms(ttl_ms),
+        shape: shape.clone(),
     }
 }
 
 pub(super) fn incr_float(
     collection: &str,
     key: &[u8],
-    delta: f64,
+    delta: &str,
     surrogate: u32,
+    shape: &KvCounterShape,
 ) -> ReplicatedWrite {
     ReplicatedWrite::KvIncrFloat {
         collection: collection.to_owned(),
         key: key.to_vec(),
-        delta,
+        delta: delta.to_owned(),
         surrogate,
+        shape: shape.clone(),
     }
 }
 

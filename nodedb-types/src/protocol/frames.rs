@@ -125,6 +125,11 @@ pub struct ErrorPayload {
     #[serde(default, skip_serializing_if = "is_zero")]
     #[msgpack(default)]
     pub ndb_code: u16,
+    /// The structured details the server held: the collection, gate, or
+    /// document the error names. `None` when the server had none to send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[msgpack(default)]
+    pub details: Option<crate::error::ErrorDetails>,
 }
 
 /// `skip_serializing_if` predicate for [`ErrorPayload::ndb_code`]: zero is the
@@ -196,10 +201,20 @@ impl NativeResponse {
                 code: code.into(),
                 message: message.into(),
                 ndb_code,
+                details: None,
             }),
             auth: None,
             warnings: Vec::new(),
         }
+    }
+
+    /// Attach the structured error details to an error response. A response
+    /// with no error payload is returned unchanged.
+    pub fn with_error_details(mut self, details: crate::error::ErrorDetails) -> Self {
+        if let Some(payload) = self.error.as_mut() {
+            payload.details = Some(details);
+        }
+        self
     }
 
     /// Create an auth success response.
@@ -329,6 +344,19 @@ mod tests {
         let payload = decoded.error.expect("error payload survives the wire");
         assert_eq!(payload.code, "23505");
         assert_eq!(payload.ndb_code, 1000);
+    }
+
+    #[test]
+    fn error_payload_round_trips_the_details() {
+        let details = crate::error::ErrorDetails::Overflow {
+            collection: "counters".into(),
+        };
+        let frame = NativeResponse::error_with_code(7, "22003", "overflow on counters", 1021)
+            .with_error_details(details.clone());
+        let bytes = zerompk::to_msgpack_vec(&frame).expect("encode");
+        let decoded: NativeResponse = zerompk::from_msgpack(&bytes).expect("decode");
+        let payload = decoded.error.expect("error payload survives the wire");
+        assert_eq!(payload.details, Some(details));
     }
 
     #[test]

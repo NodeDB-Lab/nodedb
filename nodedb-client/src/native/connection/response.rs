@@ -40,9 +40,10 @@ fn error_frame_to_typed(
     if payload.ndb_code == 0 {
         return NodeDbError::internal(payload.message.clone());
     }
-    NodeDbError::from_wire(
+    NodeDbError::from_wire_with_details(
         nodedb_types::error::ErrorCode(payload.ndb_code),
         payload.message.clone(),
+        payload.details.clone(),
     )
 }
 

@@ -167,11 +167,15 @@ pub(crate) async fn dispatch_and_respond(
 /// bug in whatever produced it; it is surfaced as an internal error rather than
 /// silently downgraded to success.
 fn data_plane_error(code: Option<crate::bridge::envelope::ErrorCode>) -> DdlError {
-    let (_, sqlstate, message) = match code {
-        Some(code) => crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate(&code),
-        None => ("ERROR", "XX000", "unknown data plane error".to_owned()),
+    let Some(code) = code else {
+        return ddl_err("XX000", "unknown data plane error");
     };
-    ddl_err(sqlstate, message)
+    let (_, sqlstate, message) =
+        crate::control::server::shared::ddl::sqlstate::error_code_to_sqlstate(&code);
+    // The public error carries the code a client classifies by and the
+    // details naming the collection, which the SQLSTATE alone cannot give.
+    let public = nodedb_types::NodeDbError::from(crate::Error::DataPlane(code));
+    DdlError::from_public(sqlstate, message, &public)
 }
 
 /// Build a single-text-column row set carrying `text` under `col`.

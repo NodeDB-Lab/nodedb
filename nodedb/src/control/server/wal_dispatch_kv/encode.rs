@@ -2,6 +2,7 @@
 
 //! Pure payload encoders for KV WAL records.
 
+use nodedb_physical::physical_plan::KvCounterShape;
 use nodedb_physical::physical_plan::UpdateValue;
 
 /// Serialize `value` to a MessagePack WAL payload, wrapping any encode error
@@ -147,16 +148,19 @@ pub(crate) fn encode_kv_cas(
 }
 
 /// Encode a `kv_incr_float` WAL payload: `("kv_incr_float", collection, key,
-/// delta, surrogate)`. Delta record: replay re-runs `incr_float` on the present value.
+/// delta, surrogate, shape)`. `delta` is the client's decimal text. Delta
+/// record: replay re-runs `incr_float` on the present value, and an absent key
+/// takes `shape`.
 pub(crate) fn encode_kv_incr_float(
     collection: &str,
     key: &[u8],
-    delta: f64,
+    delta: &str,
     surrogate: u32,
+    shape: &KvCounterShape,
 ) -> crate::Result<Vec<u8>> {
     encode(
         "incr_float",
-        &("kv_incr_float", collection, key, delta, surrogate),
+        &("kv_incr_float", collection, key, delta, surrogate, shape),
     )
 }
 
@@ -274,35 +278,46 @@ pub(crate) fn encode_kv_drop_index(collection: &str, field: &str) -> crate::Resu
     encode("drop index", &("kv_drop_index", collection, field))
 }
 
-/// Encode a `kv_incr` WAL payload. `expire_at_ms = None` produces the six-element
-/// shape (`ttl_ms == 0` means "preserve existing TTL"); `Some(instant)` appends
-/// a 7th element so replay installs the exact resolved expiry.
-pub(crate) fn encode_kv_incr(
-    collection: &str,
-    key: &[u8],
-    delta: i64,
-    ttl_ms: u64,
-    surrogate: u32,
-    expire_at_ms: Option<u64>,
-) -> crate::Result<Vec<u8>> {
-    match expire_at_ms {
-        None => encode(
-            "incr",
-            &("kv_incr", collection, key, delta, ttl_ms, surrogate),
+/// Fields of a `kv_incr` WAL payload.
+pub(crate) struct KvIncrRecord<'a> {
+    pub collection: &'a str,
+    pub key: &'a [u8],
+    pub delta: i64,
+    /// `0` preserves the existing TTL.
+    pub ttl_ms: u64,
+    pub surrogate: u32,
+    /// The row an absent key becomes.
+    pub shape: &'a KvCounterShape,
+    /// The absolute expiry the live write resolved. `Some` only when
+    /// `ttl_ms > 0`, so replay installs the exact instant.
+    pub expire_at_ms: Option<u64>,
+}
+
+/// Encode a `kv_incr` WAL payload: `("kv_incr", collection, key, delta,
+/// ttl_ms, surrogate, shape, expire_at_ms)`.
+pub(crate) fn encode_kv_incr(record: KvIncrRecord<'_>) -> crate::Result<Vec<u8>> {
+    let KvIncrRecord {
+        collection,
+        key,
+        delta,
+        ttl_ms,
+        surrogate,
+        shape,
+        expire_at_ms,
+    } = record;
+    encode(
+        "incr",
+        &(
+            "kv_incr",
+            collection,
+            key,
+            delta,
+            ttl_ms,
+            surrogate,
+            shape,
+            expire_at_ms,
         ),
-        Some(expire_at_ms) => encode(
-            "incr",
-            &(
-                "kv_incr",
-                collection,
-                key,
-                delta,
-                ttl_ms,
-                surrogate,
-                expire_at_ms,
-            ),
-        ),
-    }
+    )
 }
 
 /// Fields of a `kv_register_sorted_index` WAL payload, bundled so
@@ -381,10 +396,10 @@ pub(crate) fn encode_kv_truncate(collection: &str) -> crate::Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use nodedb_physical::physical_plan::UpdateValue;
+    use nodedb_physical::physical_plan::{KvCounterShape, UpdateValue};
 
     use super::{
-        KvTransferFields, encode_kv_batch_put, encode_kv_cas, encode_kv_expire,
+        KvIncrRecord, KvTransferFields, encode_kv_batch_put, encode_kv_cas, encode_kv_expire,
         encode_kv_field_set, encode_kv_getset, encode_kv_incr, encode_kv_incr_float,
         encode_kv_insert_on_conflict_update, encode_kv_put, encode_kv_register_index,
         encode_kv_transfer, encode_kv_transfer_item,
@@ -570,16 +585,19 @@ mod tests {
     }
 
     #[test]
-    fn kv_incr_float_encodes_delta_with_surrogate() {
-        let entry = encode_kv_incr_float("scores", b"dmg", 3.125, 5).unwrap();
+    fn kv_incr_float_encodes_decimal_delta_with_surrogate_and_shape() {
+        let entry =
+            encode_kv_incr_float("scores", b"dmg", "3.125", 5, &KvCounterShape::Raw).unwrap();
 
-        let (disc, collection, key, delta, surrogate) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, f64, u32)>(&entry).unwrap();
+        let (disc, collection, key, delta, surrogate, shape) =
+            zerompk::from_msgpack::<(&str, String, Vec<u8>, String, u32, KvCounterShape)>(&entry)
+                .unwrap();
         assert_eq!(disc, "kv_incr_float");
         assert_eq!(collection, "scores");
         assert_eq!(key, b"dmg");
-        assert_eq!(delta, 3.125);
+        assert_eq!(delta, "3.125");
         assert_eq!(surrogate, 5);
+        assert_eq!(shape, KvCounterShape::Raw);
     }
 
     #[test]
@@ -725,53 +743,67 @@ mod tests {
         assert_eq!(expire_at_ms, 1_234);
     }
 
+    /// The decoded `kv_incr` tuple.
+    type IncrTuple = (
+        String,
+        String,
+        Vec<u8>,
+        i64,
+        u64,
+        u32,
+        KvCounterShape,
+        Option<u64>,
+    );
+
     #[test]
-    fn kv_incr_without_expire_at_matches_historical_shape() {
-        let entry = encode_kv_incr("counters", b"hits", 3, 0, 7, None).unwrap();
+    fn kv_incr_carries_shape_and_no_expiry_when_ttl_is_preserved() {
+        let shape = KvCounterShape::Typed {
+            column: Some("n".into()),
+            template: vec![0x80],
+        };
+        let entry = encode_kv_incr(KvIncrRecord {
+            collection: "counters",
+            key: b"hits",
+            delta: 3,
+            ttl_ms: 0,
+            surrogate: 7,
+            shape: &shape,
+            expire_at_ms: None,
+        })
+        .unwrap();
 
-        // Byte-identical to the historical six-element tuple encoding.
-        let expected =
-            zerompk::to_msgpack_vec(&("kv_incr", "counters", b"hits", 3i64, 0u64, 7u32)).unwrap();
-        assert_eq!(entry, expected);
-
-        let (disc, collection, key, delta, ttl_ms, surrogate) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, i64, u64, u32)>(&entry).unwrap();
+        let (disc, collection, key, delta, ttl_ms, surrogate, decoded_shape, expire_at_ms) =
+            zerompk::from_msgpack::<IncrTuple>(&entry).unwrap();
         assert_eq!(disc, "kv_incr");
         assert_eq!(collection, "counters");
         assert_eq!(key, b"hits");
         assert_eq!(delta, 3);
         assert_eq!(ttl_ms, 0);
         assert_eq!(surrogate, 7);
+        assert_eq!(decoded_shape, shape);
+        assert_eq!(expire_at_ms, None);
     }
 
     #[test]
     fn kv_incr_with_expire_at_carries_absolute_instant() {
-        let entry = encode_kv_incr(
-            "counters",
-            b"daily",
-            1,
-            86_400_000,
-            9,
-            Some(1_700_000_000_000),
-        )
+        let entry = encode_kv_incr(KvIncrRecord {
+            collection: "counters",
+            key: b"daily",
+            delta: 1,
+            ttl_ms: 86_400_000,
+            surrogate: 9,
+            shape: &KvCounterShape::Raw,
+            expire_at_ms: Some(1_700_000_000_000),
+        })
         .unwrap();
 
-        let (disc, collection, key, delta, ttl_ms, surrogate, expire_at_ms) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, i64, u64, u32, u64)>(&entry).unwrap();
+        let (disc, _, _, delta, ttl_ms, surrogate, _, expire_at_ms) =
+            zerompk::from_msgpack::<IncrTuple>(&entry).unwrap();
         assert_eq!(disc, "kv_incr");
-        assert_eq!(collection, "counters");
-        assert_eq!(key, b"daily");
         assert_eq!(delta, 1);
         assert_eq!(ttl_ms, 86_400_000);
         assert_eq!(surrogate, 9);
-        assert_eq!(expire_at_ms, 1_700_000_000_000);
-
-        // The historical six-element decode rejects the extended payload
-        // (strict array-length check), so the two shapes never alias.
-        assert!(
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, i64, u64, u32)>(&entry).is_err(),
-            "extended payload must not decode as the six-element tuple"
-        );
+        assert_eq!(expire_at_ms, Some(1_700_000_000_000));
     }
 
     #[test]

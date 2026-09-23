@@ -111,6 +111,9 @@ pub async fn rate_check(
         // dispatch bypasses the injection pass by design rather than pending
         // a decision that will never come.
         rls_write_check: nodedb_types::RlsWriteCheck::system_internal_collection(),
+        // The rate-gate collection declares no columns: a counter is decimal
+        // text, which `rate_remaining` reads back.
+        shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
     });
 
     match crate::control::server::dispatch_utils::dispatch_to_data_plane(
@@ -201,8 +204,17 @@ pub async fn rate_remaining(
     .await
     {
         Ok(resp) if resp.status == Status::Ok && !resp.payload.is_empty() => {
-            // Counter is stored as MessagePack i64.
-            zerompk::from_msgpack::<i64>(&resp.payload).unwrap_or(0)
+            // `KV_INCR` stores the counter as a raw body: its decimal text.
+            std::str::from_utf8(&resp.payload)
+                .ok()
+                .and_then(|text| text.parse::<i64>().ok())
+                .ok_or(ddl_err(
+                    "XX000",
+                    format!(
+                        "RATE_REMAINING: counter '{rate_key}' does not hold decimal text; \
+                         reset the gate with RATE_RESET"
+                    ),
+                ))?
         }
         _ => 0, // Key doesn't exist yet — no usage.
     };

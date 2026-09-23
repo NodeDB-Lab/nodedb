@@ -31,6 +31,13 @@ impl GatewayErrorMap {
             Error::RemoteTyped { code, message } => {
                 format!("{} {message}", remote_code_to_resp_prefix(*code))
             }
+            // A counter fault answers with the exact reply Redis gives for
+            // the same condition.
+            Error::DataPlane(crate::bridge::envelope::ErrorCode::CounterFault {
+                fault, ..
+            }) => {
+                format!("ERR {}", fault.message())
+            }
             Error::DataPlane(_) => {
                 let public = crate::error_classify::classify(err);
                 format!(
@@ -88,6 +95,33 @@ mod tests {
         };
         let msg = GatewayErrorMap::to_resp(&err);
         assert!(msg.starts_with("WRONGTYPE "), "{msg}");
+    }
+
+    #[test]
+    fn resp_counter_faults_use_the_redis_error_text() {
+        use crate::bridge::envelope::{CounterFault, ErrorCode};
+        let cases = [
+            (
+                CounterFault::NotAnInteger,
+                "ERR value is not an integer or out of range",
+            ),
+            (CounterFault::NotAFloat, "ERR value is not a valid float"),
+            (
+                CounterFault::IntegerOverflow,
+                "ERR increment or decrement would overflow",
+            ),
+            (
+                CounterFault::NonFinite,
+                "ERR increment would produce NaN or Infinity",
+            ),
+        ];
+        for (fault, expected) in cases {
+            let err = Error::DataPlane(ErrorCode::CounterFault {
+                collection: "counters".into(),
+                fault,
+            });
+            assert_eq!(GatewayErrorMap::to_resp(&err), expected);
+        }
     }
 
     #[test]

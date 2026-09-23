@@ -8,7 +8,9 @@ use nodedb_types::protocol::{OpCode, TextFields};
 use crate::bridge::envelope::PhysicalPlan;
 
 use super::super::DispatchCtx;
-use super::{columnar, crdt, document, graph, kv, query, spatial, text, timeseries, vector};
+use super::{
+    columnar, crdt, document, graph, kv, kv_counter, query, spatial, text, timeseries, vector,
+};
 
 /// Build a PhysicalPlan from an opcode and request fields.
 pub(crate) fn build_plan(
@@ -84,8 +86,8 @@ pub(crate) fn build_plan(
         OpCode::KvDropIndex => kv::build_drop_index(ctx, fields, collection),
         OpCode::KvTruncate => kv::build_truncate(ctx, collection),
         // KV atomic operations.
-        OpCode::KvIncr => kv::build_incr(ctx, collection, fields),
-        OpCode::KvIncrFloat => kv::build_incr_float(ctx, collection, fields),
+        OpCode::KvIncr => kv_counter::build_incr(ctx, collection, fields),
+        OpCode::KvIncrFloat => kv_counter::build_incr_float(ctx, collection, fields),
         OpCode::KvCas => kv::build_cas(ctx, collection, fields),
         OpCode::KvGetSet => kv::build_getset(ctx, collection, fields),
         // KV sorted index operations.

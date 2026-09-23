@@ -10,37 +10,47 @@
 //! diverging, so no success-gate is applied here (same rationale as
 //! `kv_incr_float` in `wal_replay_kv_atomic.rs`).
 //!
-//! `kv_incr` optionally carries a Control-Plane-resolved absolute
-//! `expire_at_ms` as a trailing seventh element, present only when the live
-//! write's `ttl_ms > 0` (see `encode_kv_incr`'s doc comment — `ttl_ms == 0`
-//! means "preserve whatever TTL the key already had", which has no instant
-//! to carry). Both shapes are genuinely produced in production, so both must
-//! be decoded; the seven-element shape is tried first because zerompk's
-//! strict array-length check means it can never match the six-element
-//! tuple, but skipping it would silently drop the recorded absolute instant.
-//! When present, replay installs it verbatim via
-//! `KvEngine::incr_with_absolute_expiry` instead of recomputing
+//! The record is `("kv_incr", collection, key, delta, ttl_ms, surrogate,
+//! shape, expire_at_ms)`. `shape` is the row an absent key becomes, so replay
+//! creates the same row the live write did. `expire_at_ms` is `Some` only
+//! when the live write's `ttl_ms > 0`: replay installs that instant verbatim
+//! via `KvEngine::incr_with_absolute_expiry` instead of recomputing
 //! `now_ms + ttl_ms`, which would drift the expiry forward by the
-//! crash-to-restart delay.
+//! crash-to-restart delay. `ttl_ms == 0` preserves the key's existing TTL.
 //!
 //! Unlike the `Put` family, `kv_incr` carries its own surrogate in the
 //! record rather than relying on the separately-durable surrogate catalog,
 //! so replay reconstructs it from the payload's `u32` instead of using
 //! `Surrogate::ZERO`.
 
+use nodedb_physical::physical_plan::KvCounterShape;
 use tracing::warn;
 
 use super::core_loop::CoreLoop;
 use crate::data::executor::core_loop::write_index::KeyRepr;
 use crate::data::executor::replay_abort::abort_replay;
-use crate::engine::kv::{AtomicError, AtomicKeyCtx};
+use crate::engine::kv::{AtomicError, AtomicKeyCtx, IncrStep, Incremented};
+
+/// The decoded `kv_incr` record.
+type KvIncrRecord<'a> = (
+    &'a str,
+    String,
+    Vec<u8>,
+    i64,
+    u64,
+    u32,
+    KvCounterShape,
+    Option<u64>,
+);
 
 impl CoreLoop {
-    /// Try both `kv_incr` WAL payload shapes in turn, seven-element
-    /// (absolute expiry) before six-element (preserve). Returns `None` when
-    /// neither decodes (caller tries the next candidate arm in
-    /// `wal_replay/kv.rs`), otherwise `Some(puts)` from whichever shape
-    /// decoded.
+    /// Decode + tombstone-gate + replay one `kv_incr` WAL record.
+    ///
+    /// Returns `None` when `payload` is not a `kv_incr` record (caller tries
+    /// the next candidate arm in `wal_replay/kv.rs`), otherwise `Some(puts)`:
+    /// `1` if the increment applied, `0` if tombstoned or the live write
+    /// computed no value (a type mismatch or overflow replays to the same
+    /// no-op).
     pub(super) fn try_replay_kv_incr(
         &mut self,
         payload: &[u8],
@@ -50,45 +60,8 @@ impl CoreLoop {
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> Option<usize> {
-        if let Some(applied) = self.try_replay_kv_incr_with_expiry(
-            payload,
-            tenant_id,
-            database_id,
-            now_ms,
-            record_lsn,
-            tombstones,
-        ) {
-            return Some(applied);
-        }
-        self.try_replay_kv_incr_preserve(
-            payload,
-            tenant_id,
-            database_id,
-            now_ms,
-            record_lsn,
-            tombstones,
-        )
-    }
-
-    /// Seven-element shape: `("kv_incr", collection, key, delta, ttl_ms,
-    /// surrogate, expire_at_ms)` — recorded only when the live write's
-    /// `ttl_ms > 0`.
-    ///
-    /// Returns `None` when `payload` does not match this shape, otherwise
-    /// `Some(puts)` — `1` if the increment applied, `0` if tombstoned or the
-    /// current value was not numeric (a type-mismatch or overflow replays to
-    /// the same no-op the live dispatch produced).
-    fn try_replay_kv_incr_with_expiry(
-        &mut self,
-        payload: &[u8],
-        tenant_id: u64,
-        database_id: u64,
-        now_ms: u64,
-        record_lsn: u64,
-        tombstones: &nodedb_wal::TombstoneSet,
-    ) -> Option<usize> {
-        let (disc, collection, key, delta, ttl_ms, surrogate, expire_at_ms) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, i64, u64, u32, u64)>(payload).ok()?;
+        let (disc, collection, key, delta, ttl_ms, surrogate, shape, expire_at_ms) =
+            zerompk::from_msgpack::<KvIncrRecord<'_>>(payload).ok()?;
         if disc != "kv_incr" {
             return None;
         }
@@ -96,23 +69,31 @@ impl CoreLoop {
         if self.skip_kv_replay_record(tombstones, tenant_id, &collection, record_lsn) {
             return Some(0);
         }
-        let result = self.kv_engine.incr_with_absolute_expiry(
-            AtomicKeyCtx {
-                database_id,
-                tenant_id,
-                collection: &collection,
-                key: &key,
-                now_ms,
-                surrogate: nodedb_types::Surrogate::new(surrogate),
-            },
-            delta,
-            ttl_ms,
-            expire_at_ms,
-            // Replay re-applies a write the policy already admitted when it was
-            // first accepted; re-deciding it here would make recovery depend on
-            // the policies of whoever happens to be connected.
-            &crate::engine::kv::admit_any,
-        );
+        let ctx = AtomicKeyCtx {
+            database_id,
+            tenant_id,
+            collection: &collection,
+            key: &key,
+            now_ms,
+            surrogate: nodedb_types::Surrogate::new(surrogate),
+        };
+        // Replay re-applies a write the policy already admitted when it was
+        // first accepted. Re-deciding it here would make recovery depend on
+        // the policies of whoever happens to be connected.
+        let admit = &crate::engine::kv::admit_any;
+        let result = match expire_at_ms {
+            Some(expire_at_ms) => self.kv_engine.incr_with_absolute_expiry(
+                ctx,
+                IncrStep {
+                    delta,
+                    ttl_ms,
+                    shape: &shape,
+                },
+                expire_at_ms,
+                admit,
+            ),
+            None => self.kv_engine.incr(ctx, delta, ttl_ms, &shape, admit),
+        };
         let applied = self.log_kv_incr_result(&collection, &key, delta, record_lsn, result);
         if applied > 0 {
             self.note_replay_write_lsn(
@@ -126,60 +107,8 @@ impl CoreLoop {
         Some(applied)
     }
 
-    /// Six-element shape: `("kv_incr", collection, key, delta, ttl_ms,
-    /// surrogate)` — recorded when the live write's `ttl_ms == 0` (preserve
-    /// whatever TTL the key already had; no absolute instant to carry).
-    ///
-    /// Returns `None` when `payload` does not match this shape, otherwise
-    /// `Some(puts)` — `1` if the increment applied, `0` if tombstoned or the
-    /// current value was not numeric.
-    fn try_replay_kv_incr_preserve(
-        &mut self,
-        payload: &[u8],
-        tenant_id: u64,
-        database_id: u64,
-        now_ms: u64,
-        record_lsn: u64,
-        tombstones: &nodedb_wal::TombstoneSet,
-    ) -> Option<usize> {
-        let (disc, collection, key, delta, ttl_ms, surrogate) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, i64, u64, u32)>(payload).ok()?;
-        if disc != "kv_incr" {
-            return None;
-        }
-        let tombstones = &tombstones.for_database(database_id);
-        if self.skip_kv_replay_record(tombstones, tenant_id, &collection, record_lsn) {
-            return Some(0);
-        }
-        let result = self.kv_engine.incr(
-            AtomicKeyCtx {
-                database_id,
-                tenant_id,
-                collection: &collection,
-                key: &key,
-                now_ms,
-                surrogate: nodedb_types::Surrogate::new(surrogate),
-            },
-            delta,
-            ttl_ms,
-            // Already-admitted redo — see `incr_with_absolute_expiry` above.
-            &crate::engine::kv::admit_any,
-        );
-        let applied = self.log_kv_incr_result(&collection, &key, delta, record_lsn, result);
-        if applied > 0 {
-            self.note_replay_write_lsn(
-                database_id,
-                tenant_id,
-                &collection,
-                Some(KeyRepr::KvKey(Box::from(key.as_slice()))),
-                record_lsn,
-            );
-        }
-        Some(applied)
-    }
-
-    /// Shared result handling for both `kv_incr` shapes: `Ok` counts as one
-    /// applied put; `TypeMismatch` / `Overflow` / `Encode` are
+    /// Shared result handling for a `kv_incr` replay: `Ok` counts as one
+    /// applied put; `TypeMismatch` / `Counter` / `Encode` are
     /// correctly-converging no-ops (the live dispatch would have failed
     /// identically), logged and skipped rather than treated as errors.
     ///
@@ -192,7 +121,7 @@ impl CoreLoop {
         key: &[u8],
         delta: i64,
         record_lsn: u64,
-        result: Result<i64, AtomicError>,
+        result: Result<Incremented<i64>, AtomicError>,
     ) -> usize {
         match result {
             Ok(_) => 1,
@@ -207,13 +136,14 @@ impl CoreLoop {
                 );
                 0
             }
-            Err(AtomicError::Overflow) => {
+            Err(AtomicError::Counter(fault)) => {
                 warn!(
                     core = self.core_id,
                     collection = %collection,
                     key = %String::from_utf8_lossy(key),
                     delta,
-                    "WAL kv_incr replay: overflow, skipping record"
+                    fault = fault.message(),
+                    "WAL kv_incr replay: no value computed, skipping record"
                 );
                 0
             }
@@ -258,10 +188,10 @@ mod tests {
 
     use crate::bridge::envelope::PhysicalPlan;
     use crate::control::server::wal_dispatch::wal_append_if_write;
-    use crate::control::server::wal_dispatch_kv::encode::encode_kv_incr;
+    use crate::control::server::wal_dispatch_kv::encode::{KvIncrRecord, encode_kv_incr};
     use crate::types::{DatabaseId, TenantId, VShardId};
     use crate::wal::manager::WalManager;
-    use nodedb_physical::physical_plan::KvOp;
+    use nodedb_physical::physical_plan::{KvCounterShape, KvOp};
     use nodedb_types::{QualifiedCollection, RlsWriteCheck, Surrogate};
     use nodedb_wal::TombstoneSet;
 
@@ -327,7 +257,10 @@ mod tests {
             .kv_engine
             .get(DatabaseId::DEFAULT.as_u64(), TID, collection, key, now_ms)
             .expect("value present");
-        zerompk::from_msgpack::<i64>(&bytes).expect("decode i64")
+        std::str::from_utf8(&bytes)
+            .expect("a raw counter is UTF-8 text")
+            .parse::<i64>()
+            .expect("a raw counter is decimal text")
     }
 
     fn ttl_ms(core: &CoreLoop, collection: &str, key: &[u8]) -> Option<i64> {
@@ -340,7 +273,7 @@ mod tests {
         let put_p = PhysicalPlan::Kv(KvOp::Put {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"hits".to_vec(),
-            value: zerompk::to_msgpack_vec(&5i64).expect("encode"),
+            value: b"5".to_vec(),
             ttl_ms: 0,
             surrogate: Surrogate::new(1),
             returning: None,
@@ -353,6 +286,7 @@ mod tests {
             ttl_ms: 0,
             surrogate: Surrogate::new(1),
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            shape: KvCounterShape::Raw,
         });
 
         let records = append_via_autocommit(&[put_p, incr]);
@@ -372,7 +306,7 @@ mod tests {
         let put_p = PhysicalPlan::Kv(KvOp::Put {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"hits".to_vec(),
-            value: zerompk::to_msgpack_vec(&5i64).expect("encode"),
+            value: b"5".to_vec(),
             ttl_ms: 0,
             surrogate: Surrogate::new(1),
             returning: None,
@@ -385,6 +319,7 @@ mod tests {
             ttl_ms: 0,
             surrogate: Surrogate::new(1),
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            shape: KvCounterShape::Raw,
         });
         let incr2 = PhysicalPlan::Kv(KvOp::Incr {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
@@ -393,6 +328,7 @@ mod tests {
             ttl_ms: 0,
             surrogate: Surrogate::new(1),
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            shape: KvCounterShape::Raw,
         });
 
         let records = append_via_autocommit(&[put_p, incr1, incr2]);
@@ -412,7 +348,7 @@ mod tests {
         let put_p = PhysicalPlan::Kv(KvOp::Put {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"temp".to_vec(),
-            value: zerompk::to_msgpack_vec(&5i64).expect("encode"),
+            value: b"5".to_vec(),
             ttl_ms: 60_000,
             surrogate: Surrogate::new(1),
             returning: None,
@@ -425,6 +361,7 @@ mod tests {
             ttl_ms: 0,
             surrogate: Surrogate::new(1),
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            shape: KvCounterShape::Raw,
         });
 
         let records = append_via_autocommit(&[put_p, incr]);
@@ -449,14 +386,22 @@ mod tests {
         let put_seed = PhysicalPlan::Kv(KvOp::Put {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"daily".to_vec(),
-            value: zerompk::to_msgpack_vec(&0i64).expect("encode"),
+            value: b"0".to_vec(),
             ttl_ms: 0,
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
         });
-        let entry = encode_kv_incr("counters", b"daily", 1, 5_000, 1, Some(6_000))
-            .expect("encode kv_incr with absolute expiry");
+        let entry = encode_kv_incr(KvIncrRecord {
+            collection: "counters",
+            key: b"daily",
+            delta: 1,
+            ttl_ms: 5_000,
+            surrogate: 1,
+            shape: &KvCounterShape::Raw,
+            expire_at_ms: Some(6_000),
+        })
+        .expect("encode kv_incr with absolute expiry");
 
         let dir = tempfile::tempdir().expect("wal tempdir");
         let wal = WalManager::open_for_testing(&dir.path().join("wal")).expect("open wal");
@@ -494,7 +439,7 @@ mod tests {
         let put_str = PhysicalPlan::Kv(KvOp::Put {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
             key: b"str".to_vec(),
-            value: zerompk::to_msgpack_vec(&"hello").expect("encode"),
+            value: b"hello".to_vec(),
             ttl_ms: 0,
             surrogate: Surrogate::new(1),
             returning: None,
@@ -507,6 +452,7 @@ mod tests {
             ttl_ms: 0,
             surrogate: Surrogate::new(1),
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            shape: KvCounterShape::Raw,
         });
 
         let records = append_via_autocommit(&[put_str, incr]);
@@ -520,15 +466,66 @@ mod tests {
             .kv_engine
             .get(DatabaseId::DEFAULT.as_u64(), TID, "counters", b"str", bytes)
             .expect("str survives replay");
-        let decoded: String = zerompk::from_msgpack(&value).expect("decode string");
         assert_eq!(
-            decoded, "hello",
+            value,
+            b"hello".to_vec(),
             "incr over a non-numeric value must replay to a no-op, value unchanged"
         );
     }
 
     #[test]
-    fn production_wal_append_emits_seven_element_shape_for_ttl_bearing_incr() {
+    fn kv_incr_on_an_absent_key_replays_the_typed_row_it_created() {
+        let mut template_row = std::collections::HashMap::new();
+        template_row.insert(
+            "status".to_string(),
+            nodedb_types::Value::String("new".into()),
+        );
+        let template = nodedb_types::value_to_msgpack(&nodedb_types::Value::Object(template_row))
+            .expect("encode template");
+        let incr = PhysicalPlan::Kv(KvOp::Incr {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
+            key: b"fresh".to_vec(),
+            delta: 5,
+            ttl_ms: 0,
+            surrogate: Surrogate::new(1),
+            rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            shape: KvCounterShape::Typed {
+                column: Some("n".into()),
+                template,
+            },
+        });
+
+        let records = append_via_autocommit(&[incr]);
+
+        let mut h = make_core();
+        h.core.replay_kv_wal(&records, 1, &TombstoneSet::new());
+
+        let now_ms = crate::engine::kv::current_ms();
+        let bytes = h
+            .core
+            .kv_engine
+            .get(
+                DatabaseId::DEFAULT.as_u64(),
+                TID,
+                "counters",
+                b"fresh",
+                now_ms,
+            )
+            .expect("the fresh row survives replay");
+        let nodedb_types::Value::Object(row) =
+            nodedb_types::value_from_msgpack(&bytes).expect("decode row")
+        else {
+            panic!("replay must recreate a typed row");
+        };
+        assert_eq!(row.get("n"), Some(&nodedb_types::Value::Integer(5)));
+        assert_eq!(
+            row.get("status"),
+            Some(&nodedb_types::Value::String("new".into()))
+        );
+    }
+
+    #[test]
+    fn production_wal_append_records_the_resolved_expiry_for_ttl_bearing_incr() {
         let observed_now_ms = crate::engine::kv::current_ms();
 
         let dir = tempfile::tempdir().expect("wal tempdir");
@@ -541,6 +538,7 @@ mod tests {
             ttl_ms: 86_400_000,
             surrogate: Surrogate::new(7),
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            shape: KvCounterShape::Raw,
         });
         let outcome = wal_append_if_write(
             &wal,
@@ -563,14 +561,14 @@ mod tests {
             .find(|r| r.header.tenant_id == TID)
             .expect("incr record present");
 
-        let (disc, _collection, _key, _delta, ttl_ms_field, _surrogate, expire_at_ms) =
-            zerompk::from_msgpack::<(&str, String, Vec<u8>, i64, u64, u32, u64)>(&record.payload)
-                .expect("seven-element kv_incr shape");
+        let (disc, _collection, _key, _delta, ttl_ms_field, _surrogate, _shape, expire_at_ms) =
+            zerompk::from_msgpack::<super::KvIncrRecord<'_>>(&record.payload)
+                .expect("kv_incr record");
         assert_eq!(disc, "kv_incr");
         assert_eq!(ttl_ms_field, 86_400_000);
         assert_eq!(
             expire_at_ms,
-            resolved + 86_400_000,
+            Some(resolved + 86_400_000),
             "the emitted record must carry the same instant wal_append_if_write resolved"
         );
     }

@@ -4,6 +4,7 @@
 
 use nodedb_types::{QualifiedCollection, RlsWriteCheck, Surrogate};
 
+use super::counter_shape::KvCounterShape;
 use super::resolved_mutation::KvResolvedMutation;
 use crate::physical_plan::document::ReturningSpec;
 
@@ -305,8 +306,10 @@ pub enum KvOp {
         restart_identity: bool,
     },
 
-    /// Atomic increment: init 0 if absent, `TypeMismatch` if not i64,
-    /// `OverflowError` on wrap. `ttl_ms > 0` sets/resets TTL; `0` preserves it.
+    /// Atomic increment: init 0 if absent. A raw body is decimal text in and
+    /// out, and a body that is not a decimal i64 is a counter fault. A typed
+    /// row moves its first integer column. Overflow is a counter fault, never
+    /// a wrap. `ttl_ms > 0` sets/resets TTL; `0` preserves it.
     Incr {
         collection: QualifiedCollection,
         key: Vec<u8>,
@@ -318,21 +321,28 @@ pub enum KvOp {
         /// Write policy evaluated against the computed post-increment image
         /// inside the engine, not guessed by the handler.
         rls_write_check: RlsWriteCheck,
+        /// The row an absent key becomes.
+        shape: KvCounterShape,
     },
 
     /// Atomic float increment on a numeric value. Returns new value.
     ///
-    /// Same semantics as `Incr` but for f64 values.
-    /// If value is not f64, returns `TypeMismatch`.
+    /// A raw body is decimal text in and out, added exactly. A typed row's
+    /// column adds in `f64`. A NaN or infinite result is a counter fault.
     IncrFloat {
         collection: QualifiedCollection,
         key: Vec<u8>,
-        delta: f64,
+        /// The increment as the client's decimal text, checked at the
+        /// protocol boundary. It is parsed once, where it is added, so no
+        /// digit is lost to an `f64` on the way.
+        delta: String,
         /// Stable cross-engine identity. `Surrogate::ZERO` only in tests.
         surrogate: Surrogate,
         /// Compiled row-level-security WRITE predicate — see `Incr`, whose
         /// engine-internal compute-and-persist this mirrors.
         rls_write_check: RlsWriteCheck,
+        /// The row an absent key becomes.
+        shape: KvCounterShape,
     },
 
     /// Compare-and-swap: set value to `new_value` only if current equals `expected`.

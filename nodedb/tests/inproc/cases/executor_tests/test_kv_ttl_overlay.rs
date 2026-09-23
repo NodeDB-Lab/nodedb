@@ -374,6 +374,7 @@ fn staged_incr_with_ttl_is_observed_by_in_tx_get_ttl() {
             ttl_ms: 30_000,
             surrogate: nodedb_types::Surrogate::ZERO,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
         })),
     });
     let resp = send_txn(&mut core, &mut tx, &mut rx, txn_id, stage_incr);

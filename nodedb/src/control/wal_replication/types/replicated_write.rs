@@ -12,7 +12,7 @@ use super::wire_shapes::{
 };
 use nodedb_physical::physical_plan::document::MergeClauseOp;
 use nodedb_physical::physical_plan::{
-    ColumnarInsertIntent, CrdtWriteVerb, UpdateValue, VectorDirectWriteIntent,
+    ColumnarInsertIntent, CrdtWriteVerb, KvCounterShape, UpdateValue, VectorDirectWriteIntent,
     VectorResolvedMutation, VectorWriteTargets,
 };
 use nodedb_types::{PayloadIndexKind, VectorQuantization, VectorStorageDtype};
@@ -493,12 +493,17 @@ pub enum ReplicatedWrite {
         surrogate: u32,
         /// See `KvPut::resolved_now_ms`.
         resolved_now_ms: Option<u64>,
+        /// The row an absent key becomes.
+        shape: KvCounterShape,
     },
     KvIncrFloat {
         collection: String,
         key: Vec<u8>,
-        delta: f64,
+        /// The client's decimal text.
+        delta: String,
         surrogate: u32,
+        /// The row an absent key becomes.
+        shape: KvCounterShape,
     },
     KvCas {
         collection: String,

@@ -7,9 +7,9 @@ use crate::wal::manager::WalManager;
 use nodedb_physical::physical_plan::KvOp;
 
 use super::encode::{
-    KvRegisterSortedIndexFields, KvTransferFields, encode_kv_batch_put, encode_kv_cas,
-    encode_kv_delete, encode_kv_drop_index, encode_kv_drop_sorted_index, encode_kv_expire,
-    encode_kv_field_set, encode_kv_getset, encode_kv_incr, encode_kv_incr_float,
+    KvIncrRecord, KvRegisterSortedIndexFields, KvTransferFields, encode_kv_batch_put,
+    encode_kv_cas, encode_kv_delete, encode_kv_drop_index, encode_kv_drop_sorted_index,
+    encode_kv_expire, encode_kv_field_set, encode_kv_getset, encode_kv_incr, encode_kv_incr_float,
     encode_kv_insert_on_conflict_update, encode_kv_persist, encode_kv_predicate_delete,
     encode_kv_predicate_update, encode_kv_put, encode_kv_register_index,
     encode_kv_register_sorted_index, encode_kv_transfer, encode_kv_transfer_item,
@@ -192,18 +192,20 @@ pub fn wal_append_kv_op(
             delta,
             ttl_ms,
             surrogate,
+            shape,
             ..
         } => {
             let (now_ms, expire_at_ms) = resolve_expiry(*ttl_ms, now_override);
             resolved_now_ms = now_ms;
-            let entry = encode_kv_incr(
-                collection.as_str(),
+            let entry = encode_kv_incr(KvIncrRecord {
+                collection: collection.as_str(),
                 key,
-                *delta,
-                *ttl_ms,
-                surrogate.as_u32(),
+                delta: *delta,
+                ttl_ms: *ttl_ms,
+                surrogate: surrogate.as_u32(),
+                shape,
                 expire_at_ms,
-            )?;
+            })?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
         KvOp::IncrFloat {
@@ -211,9 +213,11 @@ pub fn wal_append_kv_op(
             key,
             delta,
             surrogate,
+            shape,
             ..
         } => {
-            let entry = encode_kv_incr_float(collection.as_str(), key, *delta, surrogate.as_u32())?;
+            let entry =
+                encode_kv_incr_float(collection.as_str(), key, delta, surrogate.as_u32(), shape)?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
         KvOp::Cas {

@@ -43,6 +43,7 @@ pub fn ddl_results_to_pgwire(
             sqlstate,
             code,
             message,
+            ..
         }) => {
             let mut info = ErrorInfo::new("ERROR".to_owned(), sqlstate, message);
             info.routine = Some(code.to_string());

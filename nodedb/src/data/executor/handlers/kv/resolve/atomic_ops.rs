@@ -5,12 +5,14 @@
 //! `KvEngine::{incr, incr_float, cas, getset}` call — recomputing here would
 //! let resolve and apply disagree.
 
-use nodedb_physical::physical_plan::KvResolveOutcome;
+use nodedb_physical::physical_plan::{KvCounterShape, KvResolveOutcome};
 
 use super::context::{ResolveResult, ResolvedPut, expiry_from_ttl, one, put_mutation};
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::kv::atomic::{KvAtomicCtx, atomic_error_code};
+use crate::data::executor::handlers::kv::atomic::{
+    KvAtomicCtx, atomic_error_code, incr_float_reply,
+};
 use crate::data::executor::handlers::kv::rls::admit_kv_row;
 use crate::data::executor::response_codec;
 use crate::engine::kv::current_ms;
@@ -30,6 +32,7 @@ impl CoreLoop {
         ctx: KvAtomicCtx<'_>,
         delta: i64,
         ttl_ms: u64,
+        shape: &KvCounterShape,
     ) -> ResolveResult {
         let KvAtomicCtx {
             task,
@@ -45,7 +48,7 @@ impl CoreLoop {
         }
         let now_ms = self.kv_ttl_now_ms(task);
         let current = self.kv_resolve_read(did, tid, collection, key, now_ms);
-        let (new_value, new_bytes) = compute::incr(current.as_deref(), delta)
+        let (new_value, new_bytes) = compute::incr(current.as_deref(), delta, shape)
             .map_err(|e| atomic_error_code(e, collection))?;
         admit_kv_row(rls_write_check, &new_bytes, key, tid, collection)?;
 
@@ -72,7 +75,12 @@ impl CoreLoop {
 
     /// Resolve `INCR_FLOAT`. Always preserves the key's existing TTL, the
     /// same `ttl_ms = 0` call `KvEngine::incr_float` makes.
-    pub(super) fn resolve_kv_incr_float(&self, ctx: KvAtomicCtx<'_>, delta: f64) -> ResolveResult {
+    pub(super) fn resolve_kv_incr_float(
+        &self,
+        ctx: KvAtomicCtx<'_>,
+        delta: &str,
+        shape: &KvCounterShape,
+    ) -> ResolveResult {
         let KvAtomicCtx {
             did,
             tid,
@@ -87,12 +95,12 @@ impl CoreLoop {
         }
         let now_ms = self.kv_atomic_now_ms();
         let current = self.kv_resolve_read(did, tid, collection, key, now_ms);
-        let (new_value, new_bytes) = compute::incr_float(current.as_deref(), delta)
+        let (new_value, new_bytes) = compute::incr_float(current.as_deref(), delta, shape)
             .map_err(|e| atomic_error_code(e, collection))?;
         admit_kv_row(rls_write_check, &new_bytes, key, tid, collection)?;
 
         let response_payload =
-            response_codec::encode_json_as_msgpack(&serde_json::json!({ "value": new_value }))?;
+            response_codec::encode_json_as_msgpack(&incr_float_reply(new_value, &new_bytes))?;
         Ok(one(
             put_mutation(ResolvedPut {
                 collection,
@@ -312,8 +320,9 @@ mod tests {
             .get(did(), TID, collection, key, crate::engine::kv::current_ms())
     }
 
+    /// A raw counter body: the decimal text of `v`.
     fn i64_bytes(v: i64) -> Vec<u8> {
-        zerompk::to_msgpack_vec(&v).expect("encode i64")
+        v.to_string().into_bytes()
     }
 
     /// Run the resolve handler and decode its outcome.
@@ -353,6 +362,7 @@ mod tests {
             ttl_ms: 0,
             surrogate: Surrogate::new(1),
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
         }
     }
 

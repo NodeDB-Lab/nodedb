@@ -148,6 +148,7 @@ pub(crate) fn error_code_to_native(
     let (_, sqlstate, message) = error_code_to_sqlstate(code);
     let public = nodedb_types::NodeDbError::from(crate::Error::DataPlane(code.clone()));
     NativeResponse::error_with_code(seq, sqlstate, message, public.code().0)
+        .with_error_details(public.details().clone())
 }
 
 /// Encode a protocol-neutral DDL dispatch result into a single
@@ -174,7 +175,14 @@ pub(crate) fn ddl_result_to_native(
             sqlstate,
             code,
             message,
-        }) => NativeResponse::error_with_code(seq, sqlstate, message, code.0),
+            details,
+        }) => {
+            let frame = NativeResponse::error_with_code(seq, sqlstate, message, code.0);
+            match details {
+                Some(details) => frame.with_error_details(*details),
+                None => frame,
+            }
+        }
         // Unknown pgwire response variants are dropped during translation, so
         // the first element is the first meaningful result — the bridge
         // returns on the first known variant.

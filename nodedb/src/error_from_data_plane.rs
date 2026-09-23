@@ -11,7 +11,7 @@
 
 use nodedb_types::error::{ErrorCode as PublicCode, NodeDbError};
 
-use crate::bridge::envelope::ErrorCode;
+use crate::bridge::envelope::{CounterFault, ErrorCode};
 
 /// Convert a deterministic Data-Plane code into the public error a client
 /// can classify.
@@ -107,9 +107,16 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
         ErrorCode::TypeMismatch { collection, detail } => {
             NodeDbError::type_mismatch(collection, detail)
         }
-        ErrorCode::OverflowError { collection } => {
-            NodeDbError::overflow(collection, "arithmetic overflow")
-        }
+        // The same text the SQL surfaces send, with the collection in the
+        // details. RESP renders the bare Redis text from the code itself.
+        ErrorCode::CounterFault { collection, fault } => NodeDbError::kv_counter_fault(
+            collection,
+            fault.message(),
+            matches!(
+                fault,
+                CounterFault::IntegerOverflow | CounterFault::NonFinite
+            ),
+        ),
         ErrorCode::InsufficientBalance { collection, detail } => {
             NodeDbError::insufficient_balance(collection, detail)
         }
@@ -187,6 +194,41 @@ mod tests {
                 retry_after_ms: 500,
             })
             .is_rate_exceeded()
+        );
+    }
+
+    #[test]
+    fn counter_fault_carries_the_collection() {
+        let e = data_plane_code_to_public(ErrorCode::CounterFault {
+            collection: "counters".into(),
+            fault: CounterFault::NotAnInteger,
+        });
+        assert_eq!(e.code(), PublicCode::TYPE_MISMATCH);
+        assert_eq!(
+            e.message(),
+            "value is not an integer or out of range on counters"
+        );
+        assert_eq!(
+            e.details(),
+            &nodedb_types::error::ErrorDetails::TypeMismatch {
+                collection: "counters".into()
+            }
+        );
+
+        let e = data_plane_code_to_public(ErrorCode::CounterFault {
+            collection: "counters".into(),
+            fault: CounterFault::IntegerOverflow,
+        });
+        assert_eq!(e.code(), PublicCode::OVERFLOW);
+        assert_eq!(
+            e.message(),
+            "increment or decrement would overflow on counters"
+        );
+        assert_eq!(
+            e.details(),
+            &nodedb_types::error::ErrorDetails::Overflow {
+                collection: "counters".into()
+            }
         );
     }
 

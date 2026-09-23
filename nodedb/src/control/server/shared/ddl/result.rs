@@ -6,7 +6,7 @@
 //! http, pgwire, RESP) can encode from them without depending on the pgwire
 //! `Response` representation.
 
-use nodedb_types::error::{ErrorCode, sqlstate};
+use nodedb_types::error::{ErrorCode, ErrorDetails, sqlstate};
 
 use crate::control::server::response_shape::types::ShapedRows;
 
@@ -42,6 +42,9 @@ pub struct DdlError {
     pub sqlstate: String,
     pub code: ErrorCode,
     pub message: String,
+    /// The structured details of a typed verdict: the collection, gate, or
+    /// document it names. `None` for an error built from a SQLSTATE alone.
+    pub details: Option<Box<ErrorDetails>>,
 }
 
 impl DdlError {
@@ -55,6 +58,22 @@ impl DdlError {
             sqlstate,
             code,
             message: message.into(),
+            details: None,
+        }
+    }
+
+    /// Build a `DdlError` from a classified public error: its code and its
+    /// details travel with the SQLSTATE and message the SQL surfaces render.
+    pub fn from_public(
+        sqlstate: impl Into<String>,
+        message: impl Into<String>,
+        public: &nodedb_types::NodeDbError,
+    ) -> Self {
+        DdlError {
+            sqlstate: sqlstate.into(),
+            code: public.code(),
+            message: message.into(),
+            details: Some(Box::new(public.details().clone())),
         }
     }
 
@@ -65,6 +84,7 @@ impl DdlError {
             sqlstate: sqlstate.to_string(),
             code,
             message: message.into(),
+            details: None,
         }
     }
 

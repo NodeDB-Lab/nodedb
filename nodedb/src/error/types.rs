@@ -148,9 +148,6 @@ pub enum Error {
         detail: String,
     },
 
-    #[error("arithmetic overflow on {collection} key {key}")]
-    OverflowError { collection: String, key: String },
-
     #[error("insufficient balance on {collection} key {key}: {detail}")]
     InsufficientBalance {
         collection: String,

@@ -414,6 +414,7 @@ mod lockstep_tests {
             ttl_ms: 0,
             surrogate: Surrogate::new(3),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
         }));
     }
 

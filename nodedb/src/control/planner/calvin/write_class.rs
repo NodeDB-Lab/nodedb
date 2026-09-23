@@ -481,6 +481,7 @@ mod tests {
             ttl_ms: 0,
             surrogate: Surrogate::new(1),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
         });
         assert!(is_write_plan(&plan), "KvOp::Incr must be a write");
     }
@@ -490,9 +491,10 @@ mod tests {
         let plan = PhysicalPlan::Kv(KvOp::IncrFloat {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
             key: b"k".to_vec(),
-            delta: 1.5,
+            delta: "1.5".into(),
             surrogate: Surrogate::new(1),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
         });
         assert!(is_write_plan(&plan), "KvOp::IncrFloat must be a write");
     }

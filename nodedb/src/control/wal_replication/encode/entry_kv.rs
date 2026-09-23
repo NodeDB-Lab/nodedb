@@ -152,12 +152,14 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             ttl_ms,
             surrogate,
             rls_write_check: _,
+            shape,
         } => kv::incr(
             collection.as_str(),
             key,
             *delta,
             *ttl_ms,
             surrogate.as_u32(),
+            shape,
         ),
         // A follower has no writing identity; decode stamps `already_decided_elsewhere()`.
         KvOp::IncrFloat {
@@ -166,7 +168,8 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
             delta,
             surrogate,
             rls_write_check: _,
-        } => kv::incr_float(collection.as_str(), key, *delta, surrogate.as_u32()),
+            shape,
+        } => kv::incr_float(collection.as_str(), key, delta, surrogate.as_u32(), shape),
         // A follower has no writing identity; decode stamps `already_decided_elsewhere()`.
         KvOp::Cas {
             collection,

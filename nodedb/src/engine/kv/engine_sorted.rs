@@ -348,9 +348,14 @@ mod tests {
             // `ttl_ms == 0` preserves whatever TTL the key already has, so the
             // increment under test is the only thing this write changes.
             0,
+            &nodedb_physical::physical_plan::KvCounterShape::Raw,
             &admit_any,
         );
-        assert_eq!(updated.ok(), Some(99), "p1's score must become 10 + 89");
+        assert_eq!(
+            updated.ok().map(|result| result.value),
+            Some(99),
+            "p1's score must become 10 + 89"
+        );
 
         assert_eq!(
             ranked_keys(e.sorted_index_top_k(0, 1, "lb", 10, n)),

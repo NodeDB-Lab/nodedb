@@ -9,19 +9,12 @@
 //! within the same transaction, and are discarded on `ROLLBACK`. COMMIT's
 //! durable replay is unchanged.
 //!
-//! RYOW / persistence is asserted via a follow-up `SELECT KV_INCR(k, 0)` (a
-//! true no-op add) rather than `SELECT n FROM c WHERE key = ...`, because the
-//! ordinary SQL projection read is unreliable for a row any atomic op has
-//! ever touched: the base `KvEngine`'s `atomic_put` (`engine/kv/
-//! engine_atomic.rs`) unconditionally writes with `Surrogate::ZERO`,
-//! discarding a real surrogate a prior `INSERT`/`UPSERT` assigned that row
-//! for SQL/surrogate-indexed access. This reproduces identically in
-//! autocommit (no transaction involved) -- confirmed by direct probe -- so
-//! it is a pre-existing base-engine gap, not something introduced by the
-//! staging work this suite covers, and is out of scope to fix here.
-//! `SELECT KV_INCR(k, 0)` sidesteps it: it reads the same way every `KV_*`
-//! call does (`resolve_kv_current` / the base engine's own `table.get(key)`
-//! by raw key bytes), which is unaffected by the surrogate reset.
+//! Read-your-own-writes and persistence are asserted two ways: a follow-up
+//! `SELECT KV_INCR(k, 0)` (a no-op add that reads through the atomic path),
+//! and a plain `SELECT n FROM c WHERE key = ...`. A KV point `SELECT` reads
+//! the row by its raw key, consulting the transaction's staging overlay
+//! first, and an atomic write stores the plan's surrogate, so both reads see
+//! the value the atomic computed.
 
 use crate::harness::TestServer;
 
@@ -35,6 +28,14 @@ async fn setup(server: &TestServer) {
 /// Parse the JSON payload `SELECT KV_*(...)` returns as its single text column.
 fn json_of(rows: &[String]) -> serde_json::Value {
     serde_json::from_str(&rows[0]).expect("KV_* result must be JSON")
+}
+
+/// The `n` column of `key`, read by a plain point `SELECT`.
+async fn n_of(server: &TestServer, key: &str) -> Vec<String> {
+    server
+        .query_text(&format!("SELECT n FROM c WHERE key = '{key}'"))
+        .await
+        .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -81,6 +82,12 @@ async fn incr_in_tx_returns_computed_value_and_chains() {
         "second in-tx INCR must chain off the first staged value"
     );
 
+    assert_eq!(
+        n_of(&server, "ctr").await,
+        vec!["10".to_string()],
+        "an in-tx SELECT must observe the chained staged INCR"
+    );
+
     server.exec("COMMIT").await.unwrap();
 
     let committed = server
@@ -91,6 +98,32 @@ async fn incr_in_tx_returns_computed_value_and_chains() {
         json_of(&committed)["value"],
         10,
         "COMMIT must persist the chained INCR"
+    );
+    assert_eq!(
+        n_of(&server, "ctr").await,
+        vec!["10".to_string()],
+        "a SELECT after COMMIT must read the committed INCR"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn autocommit_incr_is_read_back_by_a_point_select() {
+    let server = TestServer::start().await;
+    setup(&server).await;
+
+    server
+        .exec("INSERT INTO c (key, n) VALUES ('ctr', 5)")
+        .await
+        .unwrap();
+    let rows = server
+        .query_text("SELECT KV_INCR('c', 'ctr', 3)")
+        .await
+        .unwrap();
+    assert_eq!(json_of(&rows)["value"], 8);
+    assert_eq!(
+        n_of(&server, "ctr").await,
+        vec!["8".to_string()],
+        "a point SELECT must read the value an autocommit INCR stored"
     );
 }
 
@@ -120,6 +153,11 @@ async fn incr_in_tx_rollback_reverts_to_base_value() {
         json_of(&after)["value"],
         5,
         "ROLLBACK must discard the staged INCR"
+    );
+    assert_eq!(
+        n_of(&server, "ctr").await,
+        vec!["5".to_string()],
+        "a SELECT after ROLLBACK must read the base value"
     );
 }
 

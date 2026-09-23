@@ -518,6 +518,7 @@ mod tests {
             ttl_ms: 0,
             surrogate: nodedb_types::Surrogate::ZERO,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
         });
         assert!(inject(&mut plan, &store).is_ok());
         assert!(write_check(&plan).has_predicate());

@@ -122,6 +122,17 @@ impl OriginCatalog {
         }
     }
 
+    /// Bind the node-wide sequence counters, so a column DEFAULT that calls
+    /// `nextval` can allocate. For a planner built with [`OriginCatalog::new`]
+    /// that plans rows outside a pgwire session.
+    pub fn with_sequence_registry(
+        mut self,
+        registry: Arc<crate::control::sequence::SequenceRegistry>,
+    ) -> Self {
+        self.sequence_registry = Some(registry);
+        self
+    }
+
     /// Bind the calling session's `currval` map to this adapter.
     pub fn with_session_sequences(
         mut self,

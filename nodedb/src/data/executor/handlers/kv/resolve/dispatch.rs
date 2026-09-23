@@ -135,6 +135,7 @@ impl CoreLoop {
                 ttl_ms,
                 surrogate,
                 rls_write_check,
+                shape,
             } => self.resolve_kv_incr(
                 KvAtomicCtx {
                     task,
@@ -147,6 +148,7 @@ impl CoreLoop {
                 },
                 *delta,
                 *ttl_ms,
+                shape,
             ),
             KvOp::IncrFloat {
                 collection,
@@ -154,6 +156,7 @@ impl CoreLoop {
                 delta,
                 surrogate,
                 rls_write_check,
+                shape,
             } => self.resolve_kv_incr_float(
                 KvAtomicCtx {
                     task,
@@ -164,7 +167,8 @@ impl CoreLoop {
                     surrogate: *surrogate,
                     rls_write_check,
                 },
-                *delta,
+                delta,
+                shape,
             ),
             KvOp::Cas {
                 collection,
@@ -424,8 +428,9 @@ mod tests {
             .get(did(), TID, collection, key, crate::engine::kv::current_ms())
     }
 
+    /// A raw counter body: the decimal text of `v`.
     fn i64_bytes(v: i64) -> Vec<u8> {
-        zerompk::to_msgpack_vec(&v).expect("encode i64")
+        v.to_string().into_bytes()
     }
 
     /// Run the resolve handler and decode its outcome.
@@ -449,6 +454,7 @@ mod tests {
             ttl_ms: 0,
             surrogate: Surrogate::new(1),
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
         }
     }
 

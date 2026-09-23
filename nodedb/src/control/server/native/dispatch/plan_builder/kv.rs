@@ -262,7 +262,7 @@ pub(crate) fn build_truncate(
 /// Resolve the stable cross-engine surrogate for a KV atomic op, content-
 /// addressed on `(collection, key)` — the same binding a normal insert of that
 /// key allocated, so an atomic op on an existing key keeps its identity.
-fn assign_kv_surrogate(
+pub(super) fn assign_kv_surrogate(
     ctx: &DispatchCtx<'_>,
     collection: &str,
     key: &[u8],
@@ -270,54 +270,6 @@ fn assign_kv_surrogate(
     ctx.state
         .surrogate_assigner
         .assign(ctx.database_id(), ctx.tenant_id(), collection, key)
-}
-
-pub(crate) fn build_incr(
-    ctx: &DispatchCtx<'_>,
-    collection: &str,
-    fields: &TextFields,
-) -> crate::Result<PhysicalPlan> {
-    let key = fields
-        .key
-        .as_deref()
-        .ok_or_else(|| crate::Error::BadRequest {
-            detail: "missing 'key'".to_string(),
-        })?;
-    let delta = fields.incr_delta.unwrap_or(1);
-    let ttl_ms = fields.ttl_ms.unwrap_or(0);
-    let surrogate = assign_kv_surrogate(ctx, collection, key.as_bytes())?;
-
-    Ok(PhysicalPlan::Kv(KvOp::Incr {
-        collection: QualifiedCollection::new(ctx.database_id(), collection),
-        key: key.as_bytes().to_vec(),
-        delta,
-        ttl_ms,
-        surrogate,
-        rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
-    }))
-}
-
-pub(crate) fn build_incr_float(
-    ctx: &DispatchCtx<'_>,
-    collection: &str,
-    fields: &TextFields,
-) -> crate::Result<PhysicalPlan> {
-    let key = fields
-        .key
-        .as_deref()
-        .ok_or_else(|| crate::Error::BadRequest {
-            detail: "missing 'key'".to_string(),
-        })?;
-    let delta = fields.incr_float_delta.unwrap_or(1.0);
-    let surrogate = assign_kv_surrogate(ctx, collection, key.as_bytes())?;
-
-    Ok(PhysicalPlan::Kv(KvOp::IncrFloat {
-        collection: QualifiedCollection::new(ctx.database_id(), collection),
-        key: key.as_bytes().to_vec(),
-        delta,
-        surrogate,
-        rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
-    }))
 }
 
 pub(crate) fn build_cas(

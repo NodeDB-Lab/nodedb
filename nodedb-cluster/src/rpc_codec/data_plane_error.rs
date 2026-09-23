@@ -72,8 +72,9 @@ pub enum DataPlaneErrorCode {
         collection: String,
         detail: String,
     },
-    OverflowError {
+    CounterFault {
         collection: String,
+        fault: DataPlaneCounterFault,
     },
     InsufficientBalance {
         collection: String,
@@ -126,4 +127,13 @@ pub enum DataPlaneErrorCode {
     DispatchCapacity {
         reason: String,
     },
+}
+
+/// Wire mirror of `nodedb::bridge::envelope::CounterFault`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub enum DataPlaneCounterFault {
+    NotAnInteger,
+    NotAFloat,
+    IntegerOverflow,
+    NonFinite,
 }

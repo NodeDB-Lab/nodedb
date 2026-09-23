@@ -441,13 +441,15 @@ mod tests {
             ttl_ms: 0,
             surrogate: nodedb_types::Surrogate::ZERO,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
         })));
         assert!(is_stageable_write(&kv_plan(KvOp::IncrFloat {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
             key: b"k".to_vec(),
-            delta: 1.0,
+            delta: "1".into(),
             surrogate: nodedb_types::Surrogate::ZERO,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
         })));
         assert!(is_stageable_write(&kv_plan(KvOp::Cas {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -486,13 +488,15 @@ mod tests {
                 ttl_ms: 0,
                 surrogate: nodedb_types::Surrogate::ZERO,
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
             },
             KvOp::IncrFloat {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 key: b"k".to_vec(),
-                delta: 1.0,
+                delta: "1".into(),
                 surrogate: nodedb_types::Surrogate::ZERO,
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
             },
             KvOp::Cas {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),

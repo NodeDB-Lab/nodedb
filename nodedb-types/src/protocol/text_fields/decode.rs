@@ -234,7 +234,7 @@ impl<'a> zerompk::FromMessagePack<'a> for TextFields {
                     out.incr_delta = Some(reader.read_i64()?);
                 }
                 FID_INCR_FLOAT_DELTA => {
-                    out.incr_float_delta = Some(reader.read_f64()?);
+                    out.incr_float_delta = Some(reader.read_string()?.into_owned());
                 }
                 FID_EXPECTED => {
                     out.expected = Some(reader.read_binary()?.into_owned());

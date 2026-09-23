@@ -273,6 +273,7 @@ impl CoreLoop {
                 ttl_ms,
                 surrogate,
                 rls_write_check,
+                shape,
             } => self.execute_kv_incr(
                 super::atomic::KvAtomicCtx {
                     task,
@@ -285,6 +286,7 @@ impl CoreLoop {
                 },
                 *delta,
                 *ttl_ms,
+                shape,
             ),
             KvOp::IncrFloat {
                 collection,
@@ -292,6 +294,7 @@ impl CoreLoop {
                 delta,
                 surrogate,
                 rls_write_check,
+                shape,
             } => self.execute_kv_incr_float(
                 super::atomic::KvAtomicCtx {
                     task,
@@ -302,7 +305,8 @@ impl CoreLoop {
                     surrogate: *surrogate,
                     rls_write_check,
                 },
-                *delta,
+                delta,
+                shape,
             ),
             KvOp::Cas {
                 collection,

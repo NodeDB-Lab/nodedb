@@ -171,9 +171,10 @@ pub struct TextFields {
     /// Integer delta for KvIncr.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incr_delta: Option<i64>,
-    /// Float delta for KvIncrFloat.
+    /// Delta for KvIncrFloat, as the client's decimal text, so no digit is
+    /// lost to an `f64` on the wire.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub incr_float_delta: Option<f64>,
+    pub incr_float_delta: Option<String>,
     /// Expected value for KvCas.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected: Option<Vec<u8>>,

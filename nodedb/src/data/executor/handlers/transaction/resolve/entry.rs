@@ -566,6 +566,7 @@ mod tests {
                     ttl_ms: 0,
                     surrogate: Surrogate::ZERO,
                     rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                    shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
                 },
             );
             assert_eq!(resp.status, Status::Ok, "stage incr: {resp:?}");
@@ -595,8 +596,8 @@ mod tests {
         // to 42 — not the last delta (2) nor the first (40).
         assert_eq!(value, overlay_bytes);
         assert_eq!(
-            zerompk::from_msgpack::<i64>(&value).expect("i64"),
-            42,
+            value,
+            b"42".to_vec(),
             "resolve carries the absolute resolved value, not a delta"
         );
     }

@@ -8,9 +8,9 @@
 //! fails to compile here until it is mirrored on the wire instead of silently
 //! degrading to `Internal` and losing its SQLSTATE at the coordinator.
 
-use nodedb_cluster::rpc_codec::{DataPlaneErrorCode, TypedClusterError};
+use nodedb_cluster::rpc_codec::{DataPlaneCounterFault, DataPlaneErrorCode, TypedClusterError};
 
-use crate::bridge::envelope::ErrorCode;
+use crate::bridge::envelope::{CounterFault, ErrorCode};
 
 /// Map a local-execution [`crate::Error`] to the wire error a remote caller
 /// receives.
@@ -121,7 +121,10 @@ impl From<ErrorCode> for DataPlaneErrorCode {
             ErrorCode::TypeMismatch { collection, detail } => {
                 Self::TypeMismatch { collection, detail }
             }
-            ErrorCode::OverflowError { collection } => Self::OverflowError { collection },
+            ErrorCode::CounterFault { collection, fault } => Self::CounterFault {
+                collection,
+                fault: fault.into(),
+            },
             ErrorCode::InsufficientBalance { collection, detail } => {
                 Self::InsufficientBalance { collection, detail }
             }
@@ -219,7 +222,10 @@ impl From<DataPlaneErrorCode> for ErrorCode {
             DataPlaneErrorCode::TypeMismatch { collection, detail } => {
                 Self::TypeMismatch { collection, detail }
             }
-            DataPlaneErrorCode::OverflowError { collection } => Self::OverflowError { collection },
+            DataPlaneErrorCode::CounterFault { collection, fault } => Self::CounterFault {
+                collection,
+                fault: fault.into(),
+            },
             DataPlaneErrorCode::InsufficientBalance { collection, detail } => {
                 Self::InsufficientBalance { collection, detail }
             }
@@ -258,6 +264,28 @@ impl From<DataPlaneErrorCode> for ErrorCode {
             }
             DataPlaneErrorCode::DivisionByZero => Self::DivisionByZero,
             DataPlaneErrorCode::DispatchCapacity { reason } => Self::DispatchCapacity { reason },
+        }
+    }
+}
+
+impl From<CounterFault> for DataPlaneCounterFault {
+    fn from(fault: CounterFault) -> Self {
+        match fault {
+            CounterFault::NotAnInteger => Self::NotAnInteger,
+            CounterFault::NotAFloat => Self::NotAFloat,
+            CounterFault::IntegerOverflow => Self::IntegerOverflow,
+            CounterFault::NonFinite => Self::NonFinite,
+        }
+    }
+}
+
+impl From<DataPlaneCounterFault> for CounterFault {
+    fn from(fault: DataPlaneCounterFault) -> Self {
+        match fault {
+            DataPlaneCounterFault::NotAnInteger => Self::NotAnInteger,
+            DataPlaneCounterFault::NotAFloat => Self::NotAFloat,
+            DataPlaneCounterFault::IntegerOverflow => Self::IntegerOverflow,
+            DataPlaneCounterFault::NonFinite => Self::NonFinite,
         }
     }
 }
@@ -322,6 +350,23 @@ mod tests {
             }
         );
         assert_eq!(ErrorCode::from(wire), original);
+    }
+
+    #[test]
+    fn counter_fault_roundtrips_verbatim() {
+        for fault in [
+            CounterFault::NotAnInteger,
+            CounterFault::NotAFloat,
+            CounterFault::IntegerOverflow,
+            CounterFault::NonFinite,
+        ] {
+            let original = ErrorCode::CounterFault {
+                collection: "counters".into(),
+                fault,
+            };
+            let wire = DataPlaneErrorCode::from(original.clone());
+            assert_eq!(ErrorCode::from(wire), original);
+        }
     }
 
     #[test]

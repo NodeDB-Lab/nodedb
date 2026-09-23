@@ -60,6 +60,10 @@ pub const DIVISION_BY_ZERO: &str = "22012";
 /// negative, fractional, non-numeric, or wider than `usize`)
 pub const INVALID_LIMIT_VALUE: &str = "2201W";
 
+/// `22P02` — `invalid_text_representation` (stored text that does not
+/// parse as the number an operation reads, e.g. `INCR` on `"abc"`)
+pub const INVALID_TEXT_REPRESENTATION: &str = "22P02";
+
 /// `22023` — `invalid_parameter_value` (a `SET` value the parameter's own
 /// grammar refuses, e.g. `SET statement_timeout = 'later'`)
 pub const INVALID_PARAMETER_VALUE: &str = "22023";
@@ -346,6 +350,7 @@ mod tests {
             NUMERIC_VALUE_OUT_OF_RANGE,
             DIVISION_BY_ZERO,
             INVALID_LIMIT_VALUE,
+            INVALID_TEXT_REPRESENTATION,
             INTEGRITY_CONSTRAINT_VIOLATION,
             NOT_NULL_VIOLATION,
             FOREIGN_KEY_VIOLATION,

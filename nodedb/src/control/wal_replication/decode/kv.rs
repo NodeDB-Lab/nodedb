@@ -6,7 +6,7 @@
 //! whole plan afterwards.
 
 use crate::bridge::envelope::PhysicalPlan;
-use nodedb_physical::physical_plan::{KvOp, ReturningSpec};
+use nodedb_physical::physical_plan::{KvCounterShape, KvOp, ReturningSpec};
 use nodedb_types::RlsWriteCheck;
 
 /// A decoded RETURNING projection spec plus the read filters gating it — see
@@ -212,6 +212,7 @@ pub(super) fn incr(
     delta: i64,
     ttl_ms: u64,
     surrogate: u32,
+    shape: &KvCounterShape,
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Incr {
@@ -221,22 +222,25 @@ pub(super) fn incr(
         ttl_ms,
         surrogate,
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+        shape: shape.clone(),
     }))
 }
 
 pub(super) fn incr_float(
     collection: &str,
     key: &[u8],
-    delta: f64,
+    delta: &str,
     surrogate: u32,
+    shape: &KvCounterShape,
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::IncrFloat {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         key: key.to_vec(),
-        delta,
+        delta: delta.to_owned(),
         surrogate,
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+        shape: shape.clone(),
     }))
 }
 

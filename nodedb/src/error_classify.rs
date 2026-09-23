@@ -103,9 +103,6 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::TypeMismatch {
             collection, detail, ..
         } => NodeDbError::type_mismatch(collection.clone(), detail),
-        Error::OverflowError { collection, key } => {
-            NodeDbError::overflow(collection.clone(), format!("key {key}"))
-        }
         Error::InsufficientBalance {
             collection,
             key,
