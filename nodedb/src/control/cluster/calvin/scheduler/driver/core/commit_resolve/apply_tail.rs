@@ -189,11 +189,15 @@ impl Scheduler {
                 self.record_calvin_write_versions(txn_id, lsn);
                 Some(lsn)
             }
-            None => match self.shared.wal.append_calvin_applied(
-                crate::types::VShardId::new(self.vshard_id),
-                txn_id.epoch,
-                txn_id.position,
-            ) {
+            None => match self
+                .shared
+                .wal
+                .appender(crate::wal::manager::NO_APPLY_KEY)
+                .append_calvin_applied(
+                    crate::types::VShardId::new(self.vshard_id),
+                    txn_id.epoch,
+                    txn_id.position,
+                ) {
                 // The CalvinApplied WAL LSN is the committed write-LSN for this
                 // apply — the SAME shard-local WAL-LSN space fast-path writes and
                 // read watermarks use. Record the apply's per-key write versions

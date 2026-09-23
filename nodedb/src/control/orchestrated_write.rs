@@ -43,7 +43,7 @@ pub(crate) async fn apply_orchestrated_write(
         // WAL-only restart rebuilds the index from pre-write records. No-op
         // on a target with no write-set.
         crate::control::server::wal_dispatch::mint_dispatch_local_redo(
-            &state.wal,
+            state.wal.appender(crate::wal::manager::NO_APPLY_KEY),
             tenant_id,
             database_id,
             collection,

@@ -5,7 +5,7 @@
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::credential::CredentialStore;
 use crate::types::{DatabaseId, TenantId, VShardId};
-use crate::wal::manager::WalManager;
+use crate::wal::manager::{NO_APPLY_KEY, WalAppender, WalManager};
 
 use super::super::wal_dispatch_kv;
 
@@ -39,7 +39,8 @@ pub struct WalAppendOutcome {
 /// redo record is to be encoded, and the two optional knobs only some callers
 /// need.
 pub struct WalAppendRequest<'a> {
-    pub wal: &'a WalManager,
+    /// The appender, which names the apply key every appended record carries.
+    pub wal: WalAppender<'a>,
     pub tenant_id: TenantId,
     pub vshard_id: VShardId,
     pub database_id: DatabaseId,
@@ -61,6 +62,8 @@ pub struct WalAppendRequest<'a> {
 ///
 /// Serializes the write as MessagePack and appends to the appropriate
 /// WAL record type. Read operations are no-ops (return Ok immediately).
+/// The records carry no apply key: no replicated proposal owns them. A
+/// proposal's apply goes through [`wal_append`] with a keyed appender.
 ///
 /// Returns the WAL LSN allocated for writes it appended (`Some`), or `None`
 /// for reads / control ops that need no WAL record. The caller stamps the
@@ -89,7 +92,7 @@ pub fn wal_append_if_write_with_creds(
     credentials: Option<&CredentialStore>,
 ) -> crate::Result<WalAppendOutcome> {
     wal_append(WalAppendRequest {
-        wal,
+        wal: wal.appender(NO_APPLY_KEY),
         tenant_id,
         vshard_id,
         database_id,

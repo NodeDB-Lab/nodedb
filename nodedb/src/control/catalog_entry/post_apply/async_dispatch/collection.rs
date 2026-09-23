@@ -102,6 +102,7 @@ pub(crate) async fn reclaim_collection_storage(
     // predecessor writes after a same-name CREATE.
     shared
         .wal
+        .appender(crate::wal::manager::NO_APPLY_KEY)
         .append_collection_tombstone(
             TenantId::new(tenant_id),
             DatabaseId::new(database_id),

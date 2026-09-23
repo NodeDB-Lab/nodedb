@@ -16,6 +16,7 @@ use tracing::{debug, error};
 use super::session::SyncSession;
 use super::wire::*;
 use crate::types::{DatabaseId, TenantId, VShardId};
+use crate::wal::manager::NO_APPLY_KEY;
 
 // ── Dispatcher trait ─────────────────────────────────────────────────────────
 
@@ -93,7 +94,7 @@ impl<'a> TimeseriesDispatcher for SharedStateTimeseriesDispatcher<'a> {
         // Allocate a WAL LSN on the Control Plane before dispatching to the
         // Data Plane. This is the canonical LSN for dedup tracking.
         let appended_lsn = wal_append_timeseries(
-            &self.shared.wal,
+            self.shared.wal.appender(NO_APPLY_KEY),
             TimeseriesWalAppendContext {
                 tenant_id,
                 vshard_id: vshard,

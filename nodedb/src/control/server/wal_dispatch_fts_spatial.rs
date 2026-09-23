@@ -3,7 +3,7 @@
 //! WAL append helpers for FTS and Spatial sync ingest paths.
 //!
 //! Each helper accepts a prebuilt payload struct, serializes it, and appends
-//! to the WAL via `WalManager`.  The CP allocates the LSN here; the gate runs
+//! to the WAL through the caller's `WalAppender`.  The CP allocates the LSN here; the gate runs
 //! Data-Plane-side at the apply handler.
 //!
 //! Callers are responsible for constructing the payload (which bundles
@@ -14,7 +14,7 @@ use nodedb_types::geometry::Geometry;
 use nodedb_types::sync::wire::SyncProvenance;
 
 use crate::types::{DatabaseId, TenantId, VShardId};
-use crate::wal::manager::WalManager;
+use crate::wal::manager::WalAppender;
 
 /// Build a `SpatialPutPayload` from raw op fields, msgpack-encoding the
 /// geometry the same way the sync ingest path (`spatial_handler.rs`) does.
@@ -63,7 +63,7 @@ pub(crate) fn encode_spatial_delete_payload(
 /// The `payload` already carries provenance so replay routes through
 /// `execute_fts_index_doc` and the idempotency gate fires on replay.
 pub fn wal_append_fts_index(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,
@@ -79,7 +79,7 @@ pub fn wal_append_fts_index(
 /// The `payload` already carries provenance so replay routes through
 /// `execute_fts_delete_doc` and the idempotency gate fires on replay.
 pub fn wal_append_fts_delete(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,
@@ -95,7 +95,7 @@ pub fn wal_append_fts_delete(
 /// The `payload` carries provenance and the msgpack-encoded `Geometry`
 /// (identical to what `SpatialInsertMsg.geometry_bytes` carries).
 pub fn wal_append_spatial_put(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,
@@ -108,7 +108,7 @@ pub fn wal_append_spatial_put(
 
 /// Append a spatial delete to the WAL and return the assigned LSN.
 pub fn wal_append_spatial_delete(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,

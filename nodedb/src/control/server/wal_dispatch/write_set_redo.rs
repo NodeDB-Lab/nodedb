@@ -9,7 +9,7 @@
 
 use crate::bridge::envelope::{PhysicalPlan, Response, Status, WriteSetEntry};
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
-use crate::wal::manager::WalManager;
+use crate::wal::manager::WalAppender;
 use nodedb_physical::physical_plan::{DocumentOp, MetaOp};
 
 use super::document::{encode_document_delete_record, encode_document_put_record};
@@ -63,7 +63,7 @@ pub fn plan_post_apply_redo(plan: &PhysicalPlan) -> Option<String> {
 /// the row the way a live event does and the Data Plane replay keys on the
 /// surrogate. Called under the write-admission guard.
 pub fn append_write_set_redo(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,
@@ -103,7 +103,7 @@ pub fn append_write_set_redo(
 /// Mint the post-apply redo for a `dispatch_local` response built outside the
 /// autocommit funnel's own redo minting. No-op when not `Ok` or write-set is empty.
 pub fn mint_dispatch_local_redo(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     database_id: DatabaseId,
     collection: &str,
@@ -127,6 +127,7 @@ pub fn mint_dispatch_local_redo(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::manager::{NO_APPLY_KEY, WalManager};
     use nodedb_physical::physical_plan::ReturningSpec;
     use nodedb_types::sync::wire::SyncProvenance;
     use nodedb_types::{QualifiedCollection, RowIdentity, Surrogate};
@@ -261,7 +262,7 @@ mod tests {
         }];
 
         let lsn = append_write_set_redo(
-            &wal,
+            wal.appender(NO_APPLY_KEY),
             TenantId::new(1),
             VShardId::new(0),
             DatabaseId::DEFAULT,
@@ -303,7 +304,7 @@ mod tests {
         }];
 
         append_write_set_redo(
-            &wal,
+            wal.appender(NO_APPLY_KEY),
             TenantId::new(1),
             VShardId::new(0),
             DatabaseId::DEFAULT,
@@ -337,7 +338,7 @@ mod tests {
         }];
 
         append_write_set_redo(
-            &wal,
+            wal.appender(NO_APPLY_KEY),
             TenantId::new(1),
             VShardId::new(0),
             DatabaseId::DEFAULT,
@@ -364,7 +365,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let wal = open_wal(dir.path());
         let lsn = append_write_set_redo(
-            &wal,
+            wal.appender(NO_APPLY_KEY),
             TenantId::new(1),
             VShardId::new(0),
             DatabaseId::DEFAULT,

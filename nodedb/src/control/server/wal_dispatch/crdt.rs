@@ -8,7 +8,7 @@ use nodedb_physical::physical_plan::CrdtOp;
 use nodedb_wal::record::RecordType;
 
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
-use crate::wal::manager::WalManager;
+use crate::wal::manager::WalAppender;
 
 /// Which CRDT WAL record class a `CrdtOp` write journals as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,7 +37,7 @@ impl CrdtRecordKind {
 /// for every read / constraint / policy variant that carries no durable
 /// per-write effect on THIS path.
 pub(super) fn wal_append_crdt_op(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,
@@ -296,6 +296,7 @@ fn encode_crdt_doc_op_payload(payload: crate::wal::CrdtDocOpWalRecord) -> crate:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::manager::WalManager;
     use nodedb_physical::physical_plan::PhysicalPlan;
     use nodedb_types::{QualifiedCollection, Surrogate};
 

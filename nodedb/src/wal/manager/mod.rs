@@ -7,6 +7,7 @@ pub mod append_metadata;
 pub mod append_transaction;
 pub mod append_truncate;
 pub mod append_vector;
+pub mod appender;
 pub mod audit;
 pub mod core;
 pub mod durable_commit;
@@ -14,4 +15,5 @@ pub mod encryption;
 pub mod ops;
 pub mod replay;
 
+pub use appender::{NO_APPLY_KEY, WalAppender};
 pub use core::WalManager;

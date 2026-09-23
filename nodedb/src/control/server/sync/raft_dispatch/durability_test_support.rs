@@ -60,7 +60,7 @@ pub(super) fn append_buffered_record(state: &SharedState) -> Lsn {
         "00000001",
     );
     crate::control::server::wal_dispatch::wal_append_fts_delete(
-        &state.wal,
+        state.wal.appender(crate::wal::manager::NO_APPLY_KEY),
         tenant(),
         vshard(),
         DatabaseId::DEFAULT,

@@ -4,10 +4,10 @@
 
 use nodedb_wal::record::RecordType;
 
-use super::core::WalManager;
+use super::appender::WalAppender;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 
-impl WalManager {
+impl WalAppender<'_> {
     pub fn append_transaction(
         &self,
         tid: TenantId,

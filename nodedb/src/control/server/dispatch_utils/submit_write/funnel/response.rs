@@ -179,16 +179,14 @@ pub(super) async fn collect_classify_and_finish(
         rollback_on_err(
             shared,
             &ddl_transition,
-            shared.wal.with_apply_key(apply_key, || {
-                wal_dispatch::append_write_set_redo(
-                    &shared.wal,
-                    tenant_id,
-                    vshard_id,
-                    database_id,
-                    collection,
-                    &response.write_set,
-                )
-            }),
+            wal_dispatch::append_write_set_redo(
+                shared.wal.appender(apply_key),
+                tenant_id,
+                vshard_id,
+                database_id,
+                collection,
+                &response.write_set,
+            ),
         )?
     } else {
         None
@@ -196,7 +194,7 @@ pub(super) async fn collect_classify_and_finish(
     drop(deferred_guards);
 
     // Durable-at-ack barrier: an acknowledged write must be WAL-fsync-durable
-    // before this response (the client ack) returns. `WalManager::append_*` only
+    // before this response (the client ack) returns. `WalAppender::append_*` only
     // buffers the record and mints its `Lsn`; without this barrier a `kill -9`
     // loses the buffered bytes, which is invisible for engines whose rows are
     // committed durably by redb but silently destroys every engine whose only

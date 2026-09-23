@@ -6,10 +6,10 @@
 
 use nodedb_wal::record::RecordType;
 
-use super::core::WalManager;
+use super::appender::WalAppender;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 
-impl WalManager {
+impl WalAppender<'_> {
     /// Append a `TemporalPurge` audit record. Emitted by the
     /// Control Plane's bitemporal-retention scheduler after a successful
     /// dispatch of `MetaOp::TemporalPurge*` to the Data Plane, providing
@@ -111,19 +111,19 @@ impl WalManager {
         )
     }
 
-    /// Append a payload-free `ProposalApplied` marker for the replicated
-    /// proposal whose apply is in scope (see [`WalManager::with_apply_key`]).
-    /// An apply that writes no record of its own appends it in place of its
-    /// forward record, so the proposal's key still reaches the WAL.
+    /// Append a payload-free `ProposalApplied` marker carrying this
+    /// appender's apply key. An apply that writes no record of its own
+    /// appends it in place of its forward record, so the proposal's key still
+    /// reaches the WAL.
     ///
-    /// Returns `None` and appends nothing outside a proposal's apply.
+    /// Returns `None` and appends nothing for an appender with no apply key.
     pub fn append_proposal_applied(
         &self,
         tenant_id: TenantId,
         vshard_id: VShardId,
         database_id: DatabaseId,
     ) -> crate::Result<Option<Lsn>> {
-        if super::append::current_apply_key() == 0 {
+        if self.apply_key() == super::appender::NO_APPLY_KEY {
             return Ok(None);
         }
         self.append_record(

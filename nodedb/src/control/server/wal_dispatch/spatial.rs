@@ -5,7 +5,7 @@
 use nodedb_physical::physical_plan::SpatialOp;
 
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
-use crate::wal::manager::WalManager;
+use crate::wal::manager::WalAppender;
 
 use super::super::wal_dispatch_fts_spatial;
 
@@ -23,7 +23,7 @@ use super::super::wal_dispatch_fts_spatial;
 /// `VectorOp::DeleteBySurrogate`'s identical "sync path bypasses it, but log
 /// here too" reasoning in `wal_dispatch/vector.rs`).
 pub(crate) fn wal_append_spatial_op(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,

@@ -6,7 +6,7 @@ use nodedb_physical::physical_plan::TextOp;
 use nodedb_wal::record::RecordType;
 
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
-use crate::wal::manager::WalManager;
+use crate::wal::manager::WalAppender;
 
 /// Append the WAL record for a single `TextOp`, returning the allocated LSN
 /// for the FTS write variants (`Some`) or `None` for every read/search
@@ -22,7 +22,7 @@ use crate::wal::manager::WalManager;
 /// `VectorOp::DeleteBySurrogate`'s identical "sync path bypasses it, but log
 /// here too" reasoning in `wal_dispatch/vector.rs`).
 pub(crate) fn wal_append_text_op(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,

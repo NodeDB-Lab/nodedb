@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use nodedb_types::Surrogate;
 
 use crate::types::{DatabaseId, TenantId, VShardId};
+use crate::wal::manager::NO_APPLY_KEY;
 
 // ── Dispatcher trait ─────────────────────────────────────────────────────────
 
@@ -106,7 +107,7 @@ impl<'a> VectorDispatcher for SharedStateVectorDispatcher<'a> {
         // Data Plane. Sync path MUST write to WAL; non-sync path already does
         // this via `wal_append_if_write_with_creds` in the main dispatch.
         let wal_lsn = wal_append_vector_put(
-            &self.shared.wal,
+            self.shared.wal.appender(NO_APPLY_KEY),
             tenant_id,
             vshard,
             database_id,
@@ -169,7 +170,7 @@ impl<'a> VectorDispatcher for SharedStateVectorDispatcher<'a> {
         // Allocate WAL LSN on the Control Plane before dispatching to the
         // Data Plane.
         let wal_lsn = wal_append_vector_delete_by_surrogate(
-            &self.shared.wal,
+            self.shared.wal.appender(NO_APPLY_KEY),
             tenant_id,
             vshard,
             database_id,

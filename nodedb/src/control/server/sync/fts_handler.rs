@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use nodedb_types::Surrogate;
 
 use crate::types::{DatabaseId, TenantId, VShardId};
+use crate::wal::manager::NO_APPLY_KEY;
 
 // ── Dispatcher trait ─────────────────────────────────────────────────────────
 
@@ -106,7 +107,7 @@ impl<'a> FtsDispatcher for SharedStateFtsDispatcher<'a> {
             &text,
         );
         let wal_lsn = wal_append_fts_index(
-            &self.shared.wal,
+            self.shared.wal.appender(NO_APPLY_KEY),
             tenant_id,
             vshard,
             database_id,
@@ -158,7 +159,7 @@ impl<'a> FtsDispatcher for SharedStateFtsDispatcher<'a> {
         let fts_delete_payload =
             nodedb_wal::record::FtsDeletePayload::new(prov.clone(), &collection, &surrogate_hex);
         let wal_lsn = wal_append_fts_delete(
-            &self.shared.wal,
+            self.shared.wal.appender(NO_APPLY_KEY),
             tenant_id,
             vshard,
             database_id,

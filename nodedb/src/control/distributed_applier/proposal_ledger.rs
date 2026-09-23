@@ -130,6 +130,7 @@ impl ProposalLedger {
 mod tests {
     use super::*;
     use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
+    use crate::wal::manager::NO_APPLY_KEY;
 
     fn applied(payload: &[u8]) -> AppliedWrite {
         AppliedWrite {
@@ -187,9 +188,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let wal = open_wal(&dir);
         let (tid, vs, db) = (TenantId::new(1), VShardId::new(0), DatabaseId::DEFAULT);
-        wal.with_apply_key(0xAB, || wal.append_put(tid, vs, db, b"keyed"))
+        wal.appender(0xAB)
+            .append_put(tid, vs, db, b"keyed")
             .expect("append keyed put");
-        wal.append_put(tid, vs, db, b"unkeyed")
+        wal.appender(NO_APPLY_KEY)
+            .append_put(tid, vs, db, b"unkeyed")
             .expect("append unkeyed put");
         wal.sync().expect("sync wal");
 
@@ -207,17 +210,19 @@ mod tests {
         let wal = open_wal(&dir);
         let (tid, vs, db) = (TenantId::new(1), VShardId::new(0), DatabaseId::DEFAULT);
         let forward = wal
-            .with_apply_key(0xAB, || wal.append_put(tid, vs, db, b"refused"))
+            .appender(0xAB)
+            .append_put(tid, vs, db, b"refused")
             .expect("append keyed put");
-        wal.append_write_aborted(tid, vs, db, forward)
+        wal.appender(NO_APPLY_KEY)
+            .append_write_aborted(tid, vs, db, forward)
             .expect("append unkeyed abort");
         let final_forward = wal
-            .with_apply_key(0xCD, || wal.append_put(tid, vs, db, b"refused for good"))
+            .appender(0xCD)
+            .append_put(tid, vs, db, b"refused for good")
             .expect("append keyed put");
-        wal.with_apply_key(0xCD, || {
-            wal.append_write_aborted(tid, vs, db, final_forward)
-        })
-        .expect("append keyed abort");
+        wal.appender(0xCD)
+            .append_write_aborted(tid, vs, db, final_forward)
+            .expect("append keyed abort");
         wal.sync().expect("sync wal");
 
         let ledger = ProposalLedger::from_records(
@@ -235,18 +240,20 @@ mod tests {
     }
 
     #[test]
-    fn a_proposal_applied_marker_is_appended_only_inside_an_apply() {
+    fn a_proposal_applied_marker_is_appended_only_under_an_apply_key() {
         let dir = tempfile::tempdir().expect("tempdir");
         let wal = open_wal(&dir);
         let (tid, vs, db) = (TenantId::new(1), VShardId::new(0), DatabaseId::DEFAULT);
         assert!(
-            wal.append_proposal_applied(tid, vs, db)
-                .expect("append outside an apply")
+            wal.appender(NO_APPLY_KEY)
+                .append_proposal_applied(tid, vs, db)
+                .expect("append with no apply key")
                 .is_none()
         );
         assert!(
-            wal.with_apply_key(0xEF, || wal.append_proposal_applied(tid, vs, db))
-                .expect("append inside an apply")
+            wal.appender(0xEF)
+                .append_proposal_applied(tid, vs, db)
+                .expect("append under an apply key")
                 .is_some()
         );
         wal.sync().expect("sync wal");

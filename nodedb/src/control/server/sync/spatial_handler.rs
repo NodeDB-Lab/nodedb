@@ -19,6 +19,7 @@ use nodedb_types::Surrogate;
 use nodedb_types::geometry::Geometry;
 
 use crate::types::{DatabaseId, TenantId, VShardId};
+use crate::wal::manager::NO_APPLY_KEY;
 
 // ── Dispatcher trait ─────────────────────────────────────────────────────────
 
@@ -113,7 +114,7 @@ impl<'a> SpatialDispatcher for SharedStateSpatialDispatcher<'a> {
         let spatial_put_payload =
             encode_spatial_put_payload(&collection, &field, surrogate, &geometry, &prov)?;
         let wal_lsn = wal_append_spatial_put(
-            &self.shared.wal,
+            self.shared.wal.appender(NO_APPLY_KEY),
             tenant_id,
             vshard,
             database_id,
@@ -166,7 +167,7 @@ impl<'a> SpatialDispatcher for SharedStateSpatialDispatcher<'a> {
         let spatial_delete_payload =
             encode_spatial_delete_payload(&collection, &field, surrogate, &prov);
         let wal_lsn = wal_append_spatial_delete(
-            &self.shared.wal,
+            self.shared.wal.appender(NO_APPLY_KEY),
             tenant_id,
             vshard,
             database_id,

@@ -7,7 +7,7 @@
 use nodedb_physical::physical_plan::DocumentOp;
 
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
-use crate::wal::manager::WalManager;
+use crate::wal::manager::WalAppender;
 
 /// Encode a document PUT redo record: `(collection, document_id, value,
 /// Option<SyncProvenance>, surrogate)`. Must match `wal_replay_redo_document`'s decode.
@@ -50,7 +50,7 @@ pub(crate) fn encode_document_delete_record(
 /// Append the WAL record for a `DocumentOp`: the allocated LSN for point-write
 /// variants, `None` otherwise. Exhaustive so a new variant can't silently skip durability.
 pub(super) fn wal_append_document_op(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,
@@ -149,6 +149,7 @@ pub(super) fn wal_append_document_op(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::manager::WalManager;
     use nodedb_physical::physical_plan::PhysicalPlan;
     use nodedb_types::{QualifiedCollection, Surrogate};
 

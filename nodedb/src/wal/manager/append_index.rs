@@ -5,10 +5,10 @@
 
 use nodedb_wal::record::RecordType;
 
-use super::core::WalManager;
+use super::appender::WalAppender;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 
-impl WalManager {
+impl WalAppender<'_> {
     /// Append an `FtsIndex` record. Payload is a length-prefixed `FtsIndexPayload`
     /// produced by `nodedb_wal::record::FtsIndexPayload::to_bytes()`.
     pub fn append_fts_index(

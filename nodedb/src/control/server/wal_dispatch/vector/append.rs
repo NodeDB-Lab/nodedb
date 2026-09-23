@@ -10,7 +10,7 @@
 use nodedb_physical::physical_plan::VectorOp;
 
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
-use crate::wal::manager::WalManager;
+use crate::wal::manager::WalAppender;
 
 use super::encode::{
     VectorDirectUpdatePayload, VectorDirectUpsertPayload, VectorResolvedDirectWritePayload,
@@ -54,7 +54,7 @@ pub struct VectorDeleteWalArgs<'a> {
 /// exactly as the non-sync `VectorOp::Insert` arm in `wal_append_if_write_with_creds` does,
 /// so replay decodes both paths with the same 7-element shape.
 pub fn wal_append_vector_put(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,
@@ -83,7 +83,7 @@ pub fn wal_append_vector_put(
 /// silently become non-durable (the class of bug this function was hardened
 /// against). Read and maintenance ops map to `None` explicitly, by name.
 pub(crate) fn wal_append_vector_op(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,
@@ -427,7 +427,7 @@ pub(crate) fn wal_append_vector_op(
 /// back to `execute_vector_delete_by_surrogate`; the legacy 2-element and 3-element
 /// delete arms fall through to direct node-id deletion and remain backward-compatible.
 pub fn wal_append_vector_delete_by_surrogate(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,

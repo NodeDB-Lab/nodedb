@@ -99,14 +99,12 @@ pub(crate) async fn abort_refused_write(
     } else {
         0
     };
-    let abort_lsn = shared.wal.with_apply_key(marker_key, || {
-        shared.wal.append_write_aborted(
-            target.tenant_id,
-            target.vshard_id,
-            target.database_id,
-            wal_lsn,
-        )
-    })?;
+    let abort_lsn = shared.wal.appender(marker_key).append_write_aborted(
+        target.tenant_id,
+        target.vshard_id,
+        target.database_id,
+        wal_lsn,
+    )?;
     shared.wal.wait_durable(abort_lsn).await?;
     tracing::debug!(
         aborted_lsn = wal_lsn.as_u64(),

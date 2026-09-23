@@ -3,7 +3,7 @@
 //! Dispatch of `KvOp` variants to WAL append calls.
 
 use crate::types::{DatabaseId, TenantId, VShardId};
-use crate::wal::manager::WalManager;
+use crate::wal::manager::WalAppender;
 use nodedb_physical::physical_plan::KvOp;
 
 use super::encode::{
@@ -45,7 +45,7 @@ fn resolve_expiry(ttl_ms: u64, now_override: Option<u64>) -> (Option<u64>, Optio
 /// `now_override` pins `expire_at_ms` to an instant decided elsewhere (e.g. a
 /// Raft-committed entry), so every replica's redo installs it verbatim.
 pub fn wal_append_kv_op(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,
@@ -383,7 +383,7 @@ pub fn wal_append_kv_op(
 /// Append one mutation of a resolved KV write and return its LSN. Uses the
 /// absolute expiry already resolved — no clock read here, so redo matches apply.
 fn append_kv_resolved_mutation(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,

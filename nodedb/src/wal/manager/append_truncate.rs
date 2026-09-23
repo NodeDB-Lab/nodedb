@@ -4,10 +4,10 @@
 
 use nodedb_wal::record::RecordType;
 
-use super::core::WalManager;
+use super::appender::WalAppender;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 
-impl WalManager {
+impl WalAppender<'_> {
     /// Append a `ColumnarTruncate` record for a columnar or spatial truncate.
     /// Payload is produced by `encode_columnar_truncate_payload`.
     pub fn append_columnar_truncate(

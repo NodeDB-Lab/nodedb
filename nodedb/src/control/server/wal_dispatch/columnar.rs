@@ -7,7 +7,7 @@
 use nodedb_physical::physical_plan::ColumnarOp;
 
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
-use crate::wal::manager::WalManager;
+use crate::wal::manager::WalAppender;
 
 /// Append the WAL record for a single `ColumnarOp`, returning the allocated LSN
 /// for the write variants (`Some`) or `None` for the scan variants, which carry
@@ -16,7 +16,7 @@ use crate::wal::manager::WalManager;
 /// The match over [`ColumnarOp`] is **exhaustive** (`wildcard_enum_match_arm`
 /// is denied), so a future write variant cannot silently become non-durable.
 pub(super) fn wal_append_columnar_op(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,
@@ -155,6 +155,7 @@ pub(super) fn wal_append_columnar_op(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::manager::WalManager;
     use nodedb_physical::physical_plan::{ColumnarInsertIntent, PhysicalPlan};
 
     fn open_wal(dir: &std::path::Path) -> WalManager {

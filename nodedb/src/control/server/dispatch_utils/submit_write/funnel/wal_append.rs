@@ -82,16 +82,14 @@ pub(super) fn authorize_and_append(
             let outcome = rollback_on_err(
                 shared,
                 &ddl_transition,
-                shared.wal.with_apply_key(apply_key, || {
-                    wal_dispatch::wal_append(WalAppendRequest {
-                        wal: &shared.wal,
-                        tenant_id,
-                        vshard_id,
-                        database_id,
-                        plan: &plan,
-                        credentials: None,
-                        now_override,
-                    })
+                wal_dispatch::wal_append(WalAppendRequest {
+                    wal: shared.wal.appender(apply_key),
+                    tenant_id,
+                    vshard_id,
+                    database_id,
+                    plan: &plan,
+                    credentials: None,
+                    now_override,
                 }),
             )?;
             (outcome.lsn, outcome.resolved_now_ms)

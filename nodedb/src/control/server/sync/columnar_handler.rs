@@ -19,6 +19,7 @@ use nodedb_types::value::Value;
 use super::session::SyncSession;
 use super::wire::*;
 use crate::types::{DatabaseId, TenantId, VShardId};
+use crate::wal::manager::NO_APPLY_KEY;
 
 // ── PK extraction helper ─────────────────────────────────────────────────────
 
@@ -193,7 +194,7 @@ impl<'a> ColumnarDispatcher for SharedStateColumnarDispatcher<'a> {
         // WAL append — surrogates are persisted so followers never mint their
         // own divergent ids.
         let appended_lsn = wal_append_columnar(
-            &self.shared.wal,
+            self.shared.wal.appender(NO_APPLY_KEY),
             tenant_id,
             vshard,
             database_id,

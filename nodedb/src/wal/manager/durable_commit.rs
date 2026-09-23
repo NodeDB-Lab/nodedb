@@ -112,6 +112,7 @@ impl WalManager {
 mod tests {
     use super::*;
     use crate::types::{DatabaseId, TenantId, VShardId};
+    use crate::wal::manager::NO_APPLY_KEY;
 
     fn open_wal(dir: &std::path::Path) -> WalManager {
         WalManager::open_for_testing(&dir.join("test.wal")).expect("open wal")
@@ -122,6 +123,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let wal = open_wal(dir.path());
         let lsn = wal
+            .appender(NO_APPLY_KEY)
             .append_put(
                 TenantId::new(1),
                 VShardId::new(0),
@@ -138,6 +140,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let wal = open_wal(dir.path());
         let lsn = wal
+            .appender(NO_APPLY_KEY)
             .append_put(
                 TenantId::new(1),
                 VShardId::new(0),
@@ -157,13 +160,14 @@ mod tests {
         let mut lsns = Vec::new();
         for _ in 0..16 {
             lsns.push(
-                wal.append_put(
-                    TenantId::new(1),
-                    VShardId::new(0),
-                    DatabaseId::DEFAULT,
-                    b"payload",
-                )
-                .expect("append"),
+                wal.appender(NO_APPLY_KEY)
+                    .append_put(
+                        TenantId::new(1),
+                        VShardId::new(0),
+                        DatabaseId::DEFAULT,
+                        b"payload",
+                    )
+                    .expect("append"),
             );
         }
         let max = *lsns.iter().max().expect("nonempty");

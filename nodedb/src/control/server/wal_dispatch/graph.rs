@@ -11,13 +11,13 @@
 use nodedb_physical::physical_plan::{BatchEdge, GraphOp};
 
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
-use crate::wal::manager::WalManager;
+use crate::wal::manager::WalAppender;
 
 /// Append the WAL record for a single `GraphOp`, returning the allocated LSN
 /// for edge/node-label writes or `None` for traversal/algorithm/read variants.
 /// Exhaustive match so a future write variant can't silently become non-durable.
 pub(super) fn wal_append_graph_op(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,
@@ -99,7 +99,7 @@ pub(super) fn wal_append_graph_op(
 /// Append one `Put` WAL record per edge in a batched edge insert. Returns the
 /// last record's LSN as a "durable through here" watermark. Empty batch → `Ok(None)`.
 pub(crate) fn wal_append_graph_edge_put_batch(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,
@@ -127,7 +127,7 @@ pub(crate) fn wal_append_graph_edge_put_batch(
 /// Append one `Delete` WAL record per edge in a batched edge delete (`CREATE
 /// GRAPH INDEX` rollback). Same last-LSN-as-watermark contract as [`wal_append_graph_edge_put_batch`].
 pub(crate) fn wal_append_graph_edge_delete_batch(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,
@@ -149,6 +149,7 @@ pub(crate) fn wal_append_graph_edge_delete_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::manager::{NO_APPLY_KEY, WalManager};
     use nodedb_types::Surrogate;
 
     fn edge(collection: &str, src: &str, label: &str, dst: &str) -> BatchEdge {
@@ -177,7 +178,7 @@ mod tests {
         ];
 
         let lsn = wal_append_graph_edge_put_batch(
-            &wal,
+            wal.appender(NO_APPLY_KEY),
             TenantId::new(7),
             VShardId::new(0),
             DatabaseId::DEFAULT,
@@ -223,7 +224,7 @@ mod tests {
         ];
 
         let lsn = wal_append_graph_edge_delete_batch(
-            &wal,
+            wal.appender(NO_APPLY_KEY),
             TenantId::new(7),
             VShardId::new(0),
             DatabaseId::DEFAULT,
@@ -263,7 +264,7 @@ mod tests {
         let wal = open_wal(dir.path());
 
         let lsn = wal_append_graph_edge_put_batch(
-            &wal,
+            wal.appender(NO_APPLY_KEY),
             TenantId::new(7),
             VShardId::new(0),
             DatabaseId::DEFAULT,
@@ -280,7 +281,7 @@ mod tests {
         let wal = open_wal(dir.path());
 
         let lsn = wal_append_graph_edge_delete_batch(
-            &wal,
+            wal.appender(NO_APPLY_KEY),
             TenantId::new(7),
             VShardId::new(0),
             DatabaseId::DEFAULT,

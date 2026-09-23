@@ -173,10 +173,16 @@ mod tests {
 
         use crate::types::VShardId;
         // Epoch 5: position 0 applied, position 1 NOT applied. Epoch 2: pos 0.
-        wal.append_calvin_applied(VShardId::new(1), 2, 0).unwrap();
-        wal.append_calvin_applied(VShardId::new(1), 5, 0).unwrap();
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .append_calvin_applied(VShardId::new(1), 2, 0)
+            .unwrap();
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .append_calvin_applied(VShardId::new(1), 5, 0)
+            .unwrap();
         // A different vshard (must be ignored).
-        wal.append_calvin_applied(VShardId::new(2), 99, 0).unwrap();
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .append_calvin_applied(VShardId::new(2), 99, 0)
+            .unwrap();
         wal.sync().unwrap();
 
         let rec = read_applied_recovery(&wal, 1).unwrap();
@@ -205,7 +211,8 @@ mod tests {
 
         // Epoch 7 carries two independent positions on this vShard; only
         // position 0 committed before the crash.
-        wal.append_calvin_applied(VShardId::new(vshard), 7, 0)
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .append_calvin_applied(VShardId::new(vshard), 7, 0)
             .unwrap();
         wal.sync().unwrap();
 
@@ -229,7 +236,8 @@ mod tests {
 
         // A pure-read/empty-ops txn still writes a standalone CalvinApplied
         // marker at (epoch 1, position 0).
-        wal.append_calvin_applied(VShardId::new(vshard), 1, 0)
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .append_calvin_applied(VShardId::new(vshard), 1, 0)
             .unwrap();
 
         // A write-bearing Calvin txn journals its applied-marker as a
@@ -246,13 +254,14 @@ mod tests {
                 vshard_id: vshard,
             }),
         };
-        wal.append_transaction_redo(
-            TenantId::new(0),
-            VShardId::new(vshard),
-            DatabaseId::DEFAULT,
-            &write_bearing,
-        )
-        .unwrap();
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .append_transaction_redo(
+                TenantId::new(0),
+                VShardId::new(vshard),
+                DatabaseId::DEFAULT,
+                &write_bearing,
+            )
+            .unwrap();
 
         // A single-shard TransactionRedo (calvin_stamp: None) must be ignored
         // by Calvin recovery.
@@ -264,13 +273,14 @@ mod tests {
             }],
             calvin_stamp: None,
         };
-        wal.append_transaction_redo(
-            TenantId::new(0),
-            VShardId::new(vshard),
-            DatabaseId::DEFAULT,
-            &single_shard,
-        )
-        .unwrap();
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .append_transaction_redo(
+                TenantId::new(0),
+                VShardId::new(vshard),
+                DatabaseId::DEFAULT,
+                &single_shard,
+            )
+            .unwrap();
 
         wal.sync().unwrap();
 

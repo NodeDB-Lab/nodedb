@@ -294,12 +294,14 @@ pub async fn run_checkpoint_cycle(inputs: CheckpointCycleInputs<'_>) -> Option<L
     let checkpoint_lsn = Lsn::new(global_lsn);
 
     // 5. Write checkpoint marker to WAL.
-    match wal.append_checkpoint(
-        TenantId::new(0),
-        VShardId::new(0),
-        DatabaseId::DEFAULT,
-        global_lsn,
-    ) {
+    match wal
+        .appender(crate::wal::manager::NO_APPLY_KEY)
+        .append_checkpoint(
+            TenantId::new(0),
+            VShardId::new(0),
+            DatabaseId::DEFAULT,
+            global_lsn,
+        ) {
         Ok(marker_lsn) => {
             debug!(
                 marker_lsn = marker_lsn.as_u64(),

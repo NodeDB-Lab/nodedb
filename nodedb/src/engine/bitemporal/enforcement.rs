@@ -156,13 +156,16 @@ async fn run_one(state: &Arc<SharedState>, entry: &Entry) {
         Ok(payload) => {
             let purged = parse_count_from_payload(entry.engine, &payload);
             if purged > 0
-                && let Err(e) = state.wal.append_temporal_purge(
-                    tenant_id,
-                    entry.engine.wire_tag(),
-                    &entry.collection,
-                    cutoff_system_ms,
-                    purged,
-                )
+                && let Err(e) = state
+                    .wal
+                    .appender(crate::wal::manager::NO_APPLY_KEY)
+                    .append_temporal_purge(
+                        tenant_id,
+                        entry.engine.wire_tag(),
+                        &entry.collection,
+                        cutoff_system_ms,
+                        purged,
+                    )
             {
                 warn!(
                     tenant = tenant_id.as_u64(),

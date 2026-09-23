@@ -9,11 +9,11 @@ use nodedb_physical::physical_plan::TimeseriesOp;
 
 use crate::control::security::credential::CredentialStore;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
-use crate::wal::manager::WalManager;
+use crate::wal::manager::WalAppender;
 
 /// Inputs of [`wal_append_timeseries_op`].
 pub(super) struct TimeseriesAppend<'a> {
-    pub wal: &'a WalManager,
+    pub wal: WalAppender<'a>,
     pub tenant_id: TenantId,
     pub vshard_id: VShardId,
     pub database_id: DatabaseId,
@@ -254,7 +254,7 @@ pub(crate) struct TimeseriesWalAppendContext<'a> {
 /// listener and sync handler for dedup tracking and `flush_wal_lsn`.
 /// Returns `None` if WAL is bypassed.
 pub(crate) fn wal_append_timeseries(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     context: TimeseriesWalAppendContext<'_>,
     payload: &[u8],
     provenance: Option<&nodedb_types::sync::wire::SyncProvenance>,
@@ -373,7 +373,7 @@ pub struct ColumnarWalAppendArgs<'a> {
 /// `wal_append_timeseries` but encodes `ColumnarWalRecord` so replay restores
 /// per-row surrogates. Always returns `Some` — columnar has no `wal=false`.
 pub fn wal_append_columnar(
-    wal: &WalManager,
+    wal: WalAppender<'_>,
     tenant_id: TenantId,
     vshard_id: VShardId,
     database_id: DatabaseId,
@@ -400,6 +400,7 @@ pub fn wal_append_columnar(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::manager::{NO_APPLY_KEY, WalManager};
     use nodedb_physical::physical_plan::PhysicalPlan;
 
     fn open_wal(dir: &std::path::Path) -> WalManager {
@@ -462,7 +463,7 @@ mod tests {
         });
 
         let outcome = super::super::wal_append(super::super::WalAppendRequest {
-            wal: &wal,
+            wal: wal.appender(NO_APPLY_KEY),
             tenant_id: TenantId::new(1),
             vshard_id: VShardId::new(0),
             database_id: DatabaseId::DEFAULT,
@@ -486,6 +487,66 @@ mod tests {
         let decoded = crate::wal::decode_batch_record(&record.payload).expect("decode");
         assert_eq!(decoded.default_timestamp_ms, Some(1_700_000_000_123));
         assert_eq!(decoded.format.as_deref(), Some("ilp"));
+    }
+
+    /// A `wal=false` ingest appends no batch record. Under a proposal's apply
+    /// key it appends a `ProposalApplied` marker instead and returns the
+    /// marker's LSN as the write's LSN, so the funnel's durability barrier,
+    /// which waits on that LSN, makes the marker durable before the ack.
+    #[test]
+    fn a_wal_bypassed_ingest_under_an_apply_key_returns_its_marker_lsn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = open_wal(dir.path());
+        let credentials = CredentialStore::new().expect("in-memory credential store");
+        let mut collection =
+            crate::control::security::catalog::StoredCollection::new(1, "metrics", "owner");
+        collection.timeseries_config = Some(r#"{"wal":"false"}"#.to_string());
+        credentials
+            .catalog()
+            .put_collection(DatabaseId::DEFAULT, &collection)
+            .expect("store collection");
+        let plan = PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
+            collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
+            payload: b"metrics value=1".to_vec(),
+            format: "ilp".to_string(),
+            wal_lsn: None,
+            surrogates: vec![],
+            provenance: None,
+            rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            returning: None,
+            rls_filters: vec![],
+        });
+        let append = |apply_key: u64| {
+            super::super::wal_append(super::super::WalAppendRequest {
+                wal: wal.appender(apply_key),
+                tenant_id: TenantId::new(1),
+                vshard_id: VShardId::new(0),
+                database_id: DatabaseId::DEFAULT,
+                plan: &plan,
+                credentials: Some(&credentials),
+                now_override: None,
+            })
+            .expect("append")
+        };
+
+        assert_eq!(
+            append(NO_APPLY_KEY).lsn,
+            None,
+            "outside a proposal's apply nothing is appended"
+        );
+        let marker_lsn = append(0xAB)
+            .lsn
+            .expect("the marker's LSN is the write's LSN");
+
+        wal.sync().expect("sync wal");
+        let records = wal.replay().expect("read wal");
+        assert_eq!(records.len(), 1, "only the marker reaches the WAL");
+        assert_eq!(records[0].header.lsn, marker_lsn.as_u64());
+        assert_eq!(
+            nodedb_wal::record::RecordType::from_raw(records[0].logical_record_type()),
+            Some(nodedb_wal::record::RecordType::ProposalApplied)
+        );
+        assert_eq!(records[0].apply_key(), 0xAB);
     }
 
     #[test]

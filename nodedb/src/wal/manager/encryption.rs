@@ -264,6 +264,7 @@ fn write_signing_root(
 mod tests {
     use super::*;
     use crate::types::{DatabaseId, TenantId, VShardId};
+    use crate::wal::manager::NO_APPLY_KEY;
 
     #[test]
     fn crdt_signing_root_survives_chained_runtime_rotation_and_restart() {
@@ -287,25 +288,27 @@ mod tests {
 
         let mut wal = WalManager::open_encrypted(&wal_dir, false, &key_a).unwrap();
         let stable_root = wal.crdt_signing_root().unwrap().unwrap();
-        wal.append_put(
-            TenantId::new(1),
-            VShardId::new(0),
-            DatabaseId::DEFAULT,
-            b"a",
-        )
-        .unwrap();
+        wal.appender(NO_APPLY_KEY)
+            .append_put(
+                TenantId::new(1),
+                VShardId::new(0),
+                DatabaseId::DEFAULT,
+                b"a",
+            )
+            .unwrap();
         wal.rotate_key(&key_b).unwrap();
         drop(wal);
 
         let mut wal = WalManager::open_encrypted_rotating(&wal_dir, false, &key_b, &key_a).unwrap();
         assert_eq!(wal.crdt_signing_root().unwrap(), Some(stable_root));
-        wal.append_put(
-            TenantId::new(1),
-            VShardId::new(0),
-            DatabaseId::DEFAULT,
-            b"b",
-        )
-        .unwrap();
+        wal.appender(NO_APPLY_KEY)
+            .append_put(
+                TenantId::new(1),
+                VShardId::new(0),
+                DatabaseId::DEFAULT,
+                b"b",
+            )
+            .unwrap();
         wal.rotate_key(&key_c).unwrap();
         drop(wal);
 
@@ -340,26 +343,28 @@ mod tests {
         wal.set_encryption_ring(nodedb_wal::crypto::KeyRing::new(key_a.clone()))
             .unwrap();
         let root = wal.crdt_signing_root().unwrap();
-        wal.append_put(
-            TenantId::new(1),
-            VShardId::new(0),
-            DatabaseId::DEFAULT,
-            b"a",
-        )
-        .unwrap();
+        wal.appender(NO_APPLY_KEY)
+            .append_put(
+                TenantId::new(1),
+                VShardId::new(0),
+                DatabaseId::DEFAULT,
+                b"a",
+            )
+            .unwrap();
         wal.set_encryption_ring(nodedb_wal::crypto::KeyRing::with_previous(
             key_b.clone(),
             key_a,
         ))
         .unwrap();
         assert_eq!(wal.crdt_signing_root().unwrap(), root);
-        wal.append_put(
-            TenantId::new(1),
-            VShardId::new(0),
-            DatabaseId::DEFAULT,
-            b"b",
-        )
-        .unwrap();
+        wal.appender(NO_APPLY_KEY)
+            .append_put(
+                TenantId::new(1),
+                VShardId::new(0),
+                DatabaseId::DEFAULT,
+                b"b",
+            )
+            .unwrap();
         wal.set_encryption_ring(nodedb_wal::crypto::KeyRing::with_previous(key_c, key_b))
             .unwrap();
         assert_eq!(wal.crdt_signing_root().unwrap(), root);

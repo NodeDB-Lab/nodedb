@@ -77,12 +77,16 @@ impl Scheduler {
         let redo_lsn = if redo.ops.is_empty() {
             None
         } else {
-            match self.shared.wal.append_transaction_redo(
-                tenant_id,
-                VShardId::new(self.vshard_id),
-                database_id,
-                &redo,
-            ) {
+            match self
+                .shared
+                .wal
+                .appender(crate::wal::manager::NO_APPLY_KEY)
+                .append_transaction_redo(
+                    tenant_id,
+                    VShardId::new(self.vshard_id),
+                    database_id,
+                    &redo,
+                ) {
                 Ok(lsn) => Some(lsn),
                 Err(e) => {
                     self.halt_apply(

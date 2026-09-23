@@ -18,6 +18,7 @@ use std::sync::Arc;
 use nodedb_types::{DatabaseId, TenantId};
 
 use crate::wal::WalManager;
+use crate::wal::manager::NO_APPLY_KEY;
 
 /// Pluggable WAL appender. Tests substitute `NoopWalAppender`;
 /// production wires [`WalSurrogateAppender`] (a thin wrapper over
@@ -45,7 +46,7 @@ pub trait SurrogateWalAppender: Send + Sync {
 }
 
 /// Production appender — wraps `Arc<WalManager>` and forwards to
-/// `WalManager::append_surrogate_alloc`.
+/// `WalAppender::append_surrogate_alloc`.
 pub struct WalSurrogateAppender {
     wal: Arc<WalManager>,
 }
@@ -58,7 +59,10 @@ impl WalSurrogateAppender {
 
 impl SurrogateWalAppender for WalSurrogateAppender {
     fn record_alloc_to_wal(&self, hi: u32) -> crate::Result<()> {
-        self.wal.append_surrogate_alloc(hi).map(|_| ())
+        self.wal
+            .appender(NO_APPLY_KEY)
+            .append_surrogate_alloc(hi)
+            .map(|_| ())
     }
 
     fn record_bind_to_wal(
@@ -69,8 +73,13 @@ impl SurrogateWalAppender for WalSurrogateAppender {
         collection: &str,
         pk_bytes: &[u8],
     ) -> crate::Result<()> {
-        self.wal
-            .append_surrogate_bind(database_id, tenant_id, surrogate, collection, pk_bytes)?;
+        self.wal.appender(NO_APPLY_KEY).append_surrogate_bind(
+            database_id,
+            tenant_id,
+            surrogate,
+            collection,
+            pk_bytes,
+        )?;
         // Force the record to disk before the assigner releases its
         // write-lock. A crash after `assign` returns must always see
         // the binding on replay; group-commit batching alone does not

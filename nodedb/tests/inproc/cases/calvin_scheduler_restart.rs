@@ -16,7 +16,7 @@ use tempfile::TempDir;
 
 use nodedb::control::cluster::calvin::scheduler::{NOT_YET_APPLIED_EPOCH, read_applied_recovery};
 use nodedb::types::VShardId;
-use nodedb::wal::manager::WalManager;
+use nodedb::wal::manager::{NO_APPLY_KEY, WalManager};
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 
@@ -37,7 +37,8 @@ fn scheduler_restart_reads_applied_markers_after_five_epochs() {
     {
         let wal = open_wal(&dir);
         for epoch in 1u64..=5 {
-            wal.append_calvin_applied(VShardId::new(vshard_id), epoch, 0)
+            wal.appender(NO_APPLY_KEY)
+                .append_calvin_applied(VShardId::new(vshard_id), epoch, 0)
                 .unwrap();
         }
         wal.sync().unwrap();
@@ -65,13 +66,17 @@ fn scheduler_restart_reports_max_and_all_positions_regardless_of_order() {
 
     {
         let wal = open_wal(&dir);
-        wal.append_calvin_applied(VShardId::new(vshard_id), 3, 0)
+        wal.appender(NO_APPLY_KEY)
+            .append_calvin_applied(VShardId::new(vshard_id), 3, 0)
             .unwrap();
-        wal.append_calvin_applied(VShardId::new(vshard_id), 1, 0)
+        wal.appender(NO_APPLY_KEY)
+            .append_calvin_applied(VShardId::new(vshard_id), 1, 0)
             .unwrap();
-        wal.append_calvin_applied(VShardId::new(vshard_id), 5, 0)
+        wal.appender(NO_APPLY_KEY)
+            .append_calvin_applied(VShardId::new(vshard_id), 5, 0)
             .unwrap();
-        wal.append_calvin_applied(VShardId::new(vshard_id), 2, 0)
+        wal.appender(NO_APPLY_KEY)
+            .append_calvin_applied(VShardId::new(vshard_id), 2, 0)
             .unwrap();
         wal.sync().unwrap();
     }
@@ -107,10 +112,12 @@ fn scheduler_restart_multi_position_epoch_does_not_lose_uncommitted_position() {
     {
         let wal = open_wal(&dir);
         // Prior epoch fully applied.
-        wal.append_calvin_applied(VShardId::new(vshard_id), 8, 0)
+        wal.appender(NO_APPLY_KEY)
+            .append_calvin_applied(VShardId::new(vshard_id), 8, 0)
             .unwrap();
         // Torn epoch: position 0 committed, position 1 did NOT (crash between).
-        wal.append_calvin_applied(VShardId::new(vshard_id), torn_epoch, 0)
+        wal.appender(NO_APPLY_KEY)
+            .append_calvin_applied(VShardId::new(vshard_id), torn_epoch, 0)
             .unwrap();
         wal.sync().unwrap();
     }
@@ -158,9 +165,15 @@ fn scheduler_restart_vshard_isolation() {
 
     {
         let wal = open_wal(&dir);
-        wal.append_calvin_applied(VShardId::new(1), 10, 0).unwrap();
-        wal.append_calvin_applied(VShardId::new(2), 99, 0).unwrap();
-        wal.append_calvin_applied(VShardId::new(1), 20, 0).unwrap();
+        wal.appender(NO_APPLY_KEY)
+            .append_calvin_applied(VShardId::new(1), 10, 0)
+            .unwrap();
+        wal.appender(NO_APPLY_KEY)
+            .append_calvin_applied(VShardId::new(2), 99, 0)
+            .unwrap();
+        wal.appender(NO_APPLY_KEY)
+            .append_calvin_applied(VShardId::new(1), 20, 0)
+            .unwrap();
         wal.sync().unwrap();
     }
 
