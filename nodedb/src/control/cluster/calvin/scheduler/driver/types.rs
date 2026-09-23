@@ -23,7 +23,8 @@ pub(super) struct PendingTxn {
     /// reservation owns the lock). Used by `on_txn_complete` to `release` the
     /// correct lock-manager identity.
     pub lock_owner: TxnId,
-    /// Wall-clock time at dispatch (for lock-wait latency metrics).
+    /// Wall-clock time of the last stage dispatch attempt (for executor
+    /// latency metrics). A re-send after a capacity refusal resets it.
     ///
     /// `Instant::now()` is used here for observability only; never
     /// influences WAL bytes.
@@ -47,8 +48,8 @@ pub(super) struct PendingTxn {
     pub change_sets: Vec<crate::control::server::dispatch_utils::WriteChangeSet>,
     /// Commit-resolution state for a static-set Calvin txn.
     ///
-    /// `Some(CommitState::Staged)` for a static txn dispatched via the
-    /// validate-and-stage path: its first executor response carries the local
+    /// `Some(CommitState::Staged)` for a txn dispatched, or parked for re-send,
+    /// via the validate-and-stage path: its first executor response carries the local
     /// commit vote and drives a flush-or-drop before the commit tail runs.
     /// `None` for dependent/active txns, which apply directly.
     pub commit_state: Option<CommitState>,
@@ -82,12 +83,14 @@ pub(in crate::control::cluster::calvin::scheduler::driver) enum CommitState {
     /// vote, so a torn commit (one shard flushes while a peer drops) is
     /// impossible.
     AwaitingVerdict,
-    /// The txn committed and a `MetaOp::CalvinResolve` has been dispatched to
-    /// resolve its staged post-images into a replayable `RedoRecord`; awaiting
-    /// that response before the redo is WAL-appended and the flush dispatched.
+    /// The txn committed and a `MetaOp::CalvinResolve` has been dispatched, or
+    /// parked for re-send at dispatcher capacity, to resolve its staged
+    /// post-images into a replayable `RedoRecord`; awaiting that response
+    /// before the redo is WAL-appended and the flush dispatched.
     AwaitingRedoResolve,
     /// A flush (`committed = true`) or drop (`committed = false`) has been
-    /// dispatched; awaiting its response before the commit tail runs.
+    /// dispatched, or parked for re-send at dispatcher capacity; awaiting its
+    /// response before the commit tail runs.
     ///
     /// `redo_lsn` is `Some(lsn)` when a `TransactionRedo` record was appended
     /// for this commit's non-empty write set — `commit_apply_tail` then only

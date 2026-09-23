@@ -24,6 +24,7 @@
 //! vShard set records both homes so ROLLBACK tears down both.
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::control::server::pgwire::types::error_to_sqlstate;
 use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::server::shared::session::staging_gate::{
     InTxnRoute, StagingGateError, route_in_tx_write,
@@ -155,7 +156,10 @@ pub(super) async fn stage_edge_write_in_txn(
         // caller that already checked `InBlock`; there is no affected count to
         // report for either, so treat them as a no-op tag rather than panicking.
         Ok(InTxnRoute::Read(_)) | Ok(InTxnRoute::Buffered) => Ok(0),
-        Err(StagingGateError::Dispatch(e)) => Err(ddl_err("XX000", e.to_string())),
+        Err(StagingGateError::Dispatch(e)) => {
+            let (_, sqlstate, message) = error_to_sqlstate(&e);
+            Err(ddl_err(sqlstate, message))
+        }
         Err(StagingGateError::Rejected { code }) => {
             let (_, sqlstate, message) = match code {
                 Some(code) => {

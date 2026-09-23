@@ -12,6 +12,7 @@
 //! `finish_resolved_commit` / `commit_apply_tail` complete.
 
 use super::super::types::CommitState;
+use super::deferred::{DispatchOutcome, DispatchStep};
 use super::scheduler::Scheduler;
 use crate::bridge::envelope::{Response, Status};
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
@@ -40,7 +41,7 @@ impl Scheduler {
                 position = txn_id.position,
                 "calvin: CalvinResolve response was not Ok; locks NOT released (shard degraded)"
             );
-            self.abort_redo_resolve_infra_error(txn_id);
+            self.complete_infra_abort(txn_id);
             return;
         }
 
@@ -54,7 +55,7 @@ impl Scheduler {
                     error = %e,
                     "calvin: CalvinResolve redo record decode failed"
                 );
-                self.abort_redo_resolve_infra_error(txn_id);
+                self.complete_infra_abort(txn_id);
                 return;
             }
         };
@@ -92,15 +93,18 @@ impl Scheduler {
                         error = %e,
                         "calvin: TransactionRedo WAL append failed"
                     );
-                    self.abort_redo_resolve_infra_error(txn_id);
+                    self.complete_infra_abort(txn_id);
                     return;
                 }
             }
         };
 
-        if !self.dispatch_commit_resolution(txn_id, true, redo_lsn) {
-            // `dispatch_commit_resolution` already logged the dispatch failure.
-            self.abort_redo_resolve_infra_error(txn_id);
+        // A flush refused at capacity is parked for re-send. The txn awaits its
+        // flush response either way, so the state below is the same.
+        if let DispatchOutcome::Failed(error) =
+            self.dispatch_commit_resolution(txn_id, true, redo_lsn)
+        {
+            self.fail_dispatch_step(txn_id, DispatchStep::Flush, error);
             return;
         }
 
@@ -114,8 +118,12 @@ impl Scheduler {
 
     /// Complete `txn_id` as an infra error: releases its locks so the epoch
     /// advances rather than stalling. Shared by every `finish_redo_resolve`
-    /// failure branch.
-    fn abort_redo_resolve_infra_error(&mut self, txn_id: TxnId) {
+    /// failure branch and every terminal resolve, flush, or drop dispatch
+    /// refusal.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn complete_infra_abort(
+        &mut self,
+        txn_id: TxnId,
+    ) {
         self.metrics.record_executor_error();
         self.metrics
             .record_infra_abort(infra_abort_reason::IO_ERROR);
@@ -130,14 +138,15 @@ impl Scheduler {
     /// Mirrors `dispatch_commit_resolution`'s exempt, no-WAL-LSN dispatch
     /// shape — a resolve reads the staged overlay and writes nothing.
     ///
-    /// Returns `false` if the dispatch failed (the caller then completes the
-    /// txn as an infra error).
+    /// A capacity refusal returns [`DispatchOutcome::Deferred`]: the resolve
+    /// is parked for re-send and the txn stays in flight. A txn with no
+    /// `pending` entry returns [`DispatchOutcome::Failed`].
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn dispatch_calvin_resolve(
         &mut self,
         txn_id: TxnId,
-    ) -> bool {
+    ) -> DispatchOutcome {
         let Some(pending) = self.pending.get(&txn_id) else {
-            return false;
+            return DispatchOutcome::Failed(missing_pending_error(txn_id));
         };
         let tenant_id = pending.txn.tx_class.tenant_id;
         let database_id = pending.txn.tx_class.database_id;
@@ -150,26 +159,21 @@ impl Scheduler {
         // itself, so no committed LSN rides on this envelope.
         let request = self.build_exempt_request(request_id, tenant_id, database_id, plan, None);
 
-        let resp_rx = self.shared.tracker.register(request_id);
-        let dispatch_result = match self.shared.dispatcher.lock() {
-            Ok(mut d) => d.dispatch(request),
-            Err(poisoned) => poisoned.into_inner().dispatch(request),
-        };
-        if let Err(e) = dispatch_result {
-            self.shared.tracker.cancel(&request_id);
-            tracing::error!(
-                vshard_id = self.vshard_id,
-                epoch,
-                position,
-                error = %e,
-                "calvin: CalvinResolve dispatch failed"
-            );
-            return false;
-        }
-
         // The resolve response re-enters the completion loop under the SAME
         // txn_id, now in `AwaitingRedoResolve`, where `finish_redo_resolve` runs.
-        self.spawn_response_bridge(txn_id, request_id, resp_rx);
-        true
+        self.dispatch_sequenced(txn_id, DispatchStep::Resolve, request)
+    }
+}
+
+/// The terminal error for a commit-resolution dispatch whose txn has no
+/// `pending` entry to build the request from.
+pub(in crate::control::cluster::calvin::scheduler::driver::core) fn missing_pending_error(
+    txn_id: TxnId,
+) -> crate::Error {
+    crate::Error::Internal {
+        detail: format!(
+            "calvin txn {}/{} has no pending entry to dispatch from",
+            txn_id.epoch, txn_id.position
+        ),
     }
 }

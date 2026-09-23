@@ -42,6 +42,13 @@ pub(crate) fn execution_error_to_typed(err: crate::Error) -> TypedClusterError {
             constraint,
             detail,
         },
+        // A capacity refusal crosses as its own verdict, so the coordinator
+        // answers the retryable overload class.
+        capacity @ crate::Error::DispatchCapacity { .. } => TypedClusterError::DataPlane {
+            code: DataPlaneErrorCode::DispatchCapacity {
+                reason: capacity.to_string(),
+            },
+        },
         other => {
             let message = other.to_string();
             let code = u32::from(nodedb_types::error::NodeDbError::from(other).code().0);
@@ -148,6 +155,7 @@ impl From<ErrorCode> for DataPlaneErrorCode {
                 limit: to_wire_count(limit),
             },
             ErrorCode::DivisionByZero => Self::DivisionByZero,
+            ErrorCode::DispatchCapacity { reason } => Self::DispatchCapacity { reason },
         }
     }
 }
@@ -249,6 +257,7 @@ impl From<DataPlaneErrorCode> for ErrorCode {
                 }
             }
             DataPlaneErrorCode::DivisionByZero => Self::DivisionByZero,
+            DataPlaneErrorCode::DispatchCapacity { reason } => Self::DispatchCapacity { reason },
         }
     }
 }
@@ -298,6 +307,21 @@ mod tests {
             }
             other => panic!("expected Internal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dispatch_capacity_code_roundtrips_verbatim() {
+        let original = ErrorCode::DispatchCapacity {
+            reason: "tenant 1 holds 64/64 in-flight requests".into(),
+        };
+        let wire = DataPlaneErrorCode::from(original.clone());
+        assert_eq!(
+            wire,
+            DataPlaneErrorCode::DispatchCapacity {
+                reason: "tenant 1 holds 64/64 in-flight requests".into(),
+            }
+        );
+        assert_eq!(ErrorCode::from(wire), original);
     }
 
     #[test]

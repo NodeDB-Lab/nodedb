@@ -69,9 +69,14 @@ pub(super) async fn dispatch_authorized_single_task(
                 .execute(&query, checked)
                 .await
                 .map(gateway_payloads_to_response)
-                .map_err(|error| {
-                    let (_, detail) = GatewayErrorMap::to_native(&error);
-                    crate::Error::Dispatch { detail }
+                .map_err(|error| match error {
+                    // A capacity refusal keeps its type so the client sees
+                    // the retryable overload class.
+                    capacity @ crate::Error::DispatchCapacity { .. } => capacity,
+                    other => {
+                        let (_, detail) = GatewayErrorMap::to_native(&other);
+                        crate::Error::Dispatch { detail }
+                    }
                 })
         }
         None => dispatch_without_gateway(ctx, checked).await,

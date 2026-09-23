@@ -17,6 +17,8 @@
 //! - [`catch_up`] — sequencer-fan-out catch-up drain: replays inputs dropped on
 //!   this replica (channel Full/Closed) from the committed sequencer Raft log.
 //! - [`dispatch`] — static / active dispatch to the Data Plane executor.
+//! - [`deferred`] — capacity-safe dispatch: parks a request the bridge refuses
+//!   at capacity and re-sends it once capacity frees.
 //! - [`routing`] — exhaustive `PhysicalPlan` → vshard routing oracle used by
 //!   `dispatch`'s local-plan filtering.
 //! - [`commit_resolve`] — verdict-driven flush-or-drop of a staged static
@@ -50,6 +52,7 @@ pub mod commit_redo;
 pub mod commit_resolution_dispatch;
 pub mod commit_resolve;
 pub mod completion_route;
+pub mod deferred;
 pub mod dispatch;
 pub mod process;
 pub mod propose;

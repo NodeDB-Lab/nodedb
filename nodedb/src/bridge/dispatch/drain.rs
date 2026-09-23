@@ -27,6 +27,7 @@ use crate::bridge::envelope::{ErrorCode, Payload, Status};
 use crate::types::{Lsn, RequestId};
 
 use super::dispatcher::Dispatcher;
+use super::enqueue::release_inflight_slot;
 
 /// Work one core still owes the Control Plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +129,7 @@ impl Dispatcher {
     /// core, and outstanding work reached one that did not answer in time.
     pub fn abandon_data_plane_work(&mut self) -> Vec<envelope::Response> {
         let mut abandoned = Vec::new();
+        let mut freed = false;
         for (core_id, channel) in self.cores.iter_mut().enumerate() {
             let mut ids: Vec<u64> = channel
                 .wfq
@@ -150,11 +152,8 @@ impl Dispatcher {
                 "data plane drain deadline expired — failing the requests this core still holds"
             );
             for rid in ids {
-                if let Some(tid) = self.request_tenant.remove(&rid)
-                    && let Some(count) = self.tenant_inflight.get_mut(&tid)
-                {
-                    *count = count.saturating_sub(1);
-                }
+                freed |=
+                    release_inflight_slot(&mut self.request_tenant, &mut self.tenant_inflight, rid);
                 abandoned.push(envelope::Response {
                     request_id: RequestId::new(rid),
                     status: Status::Error,
@@ -174,6 +173,9 @@ impl Dispatcher {
                 });
             }
         }
+        if freed {
+            self.capacity_freed.notify_waiters();
+        }
         abandoned
     }
 }
@@ -181,42 +183,7 @@ impl Dispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::envelope::{Admission, ExemptReason, PhysicalPlan, Priority, Request};
-    use crate::types::{DatabaseId, ReadConsistency, TenantId, TraceId, VShardId};
-    use nodedb_physical::physical_plan::DocumentOp;
-    use nodedb_types::QualifiedCollection;
-    use std::time::{Duration, Instant};
-
-    fn make_request(id: u64, vshard: u32) -> Request {
-        Request {
-            request_id: RequestId::new(id),
-            tenant_id: TenantId::new(1),
-            database_id: DatabaseId::DEFAULT,
-            vshard_id: VShardId::new(vshard),
-            plan: PhysicalPlan::Document(DocumentOp::PointGet {
-                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
-                document_id: "d".into(),
-                surrogate: nodedb_types::Surrogate::ZERO,
-                pk_bytes: Vec::new(),
-                rls_filters: Vec::new(),
-                system_time: nodedb_types::SystemTimeScope::Current,
-                valid_at_ms: None,
-            }),
-            deadline: Instant::now() + Duration::from_secs(5),
-            priority: Priority::Normal,
-            trace_id: TraceId::ZERO,
-            consistency: ReadConsistency::Strong,
-            idempotency_key: None,
-            event_source: crate::event::EventSource::User,
-            user_roles: Vec::new(),
-            user_id: None,
-            statement_digest: None,
-            txn_id: None,
-            wal_lsn: None,
-            resolved_now_ms: None,
-            admission: Admission::Exempt(ExemptReason::Read),
-        }
-    }
+    use crate::bridge::dispatch::test_requests::make_request_for_db;
 
     #[test]
     fn a_fresh_dispatcher_accepts_work_and_reports_it_pending() {
@@ -225,7 +192,7 @@ mod tests {
         assert!(dispatcher.data_plane_pending().is_empty());
 
         dispatcher
-            .dispatch(make_request(1, 0))
+            .dispatch(make_request_for_db(0, 0, 1))
             .expect("a running dispatcher accepts work");
         let pending = dispatcher.data_plane_pending();
         assert_eq!(pending.len(), 1, "one core holds the request");
@@ -238,7 +205,7 @@ mod tests {
         dispatcher.begin_data_plane_drain();
 
         let err = dispatcher
-            .dispatch(make_request(1, 0))
+            .dispatch(make_request_for_db(0, 0, 1))
             .expect_err("a draining dispatcher must refuse new work");
         assert!(
             matches!(err, crate::Error::Dispatch { .. }),
@@ -256,7 +223,7 @@ mod tests {
         dispatcher.begin_data_plane_drain();
 
         let err = dispatcher
-            .dispatch_to_core(0, make_request(1, 0))
+            .dispatch_to_core(0, make_request_for_db(0, 0, 1))
             .expect_err("the direct-to-core path uses the same gate");
         assert!(matches!(err, crate::Error::Dispatch { .. }));
     }
@@ -268,7 +235,7 @@ mod tests {
         dispatcher.begin_data_plane_drain();
         assert!(dispatcher.is_data_plane_draining());
         assert!(
-            dispatcher.dispatch(make_request(1, 0)).is_err(),
+            dispatcher.dispatch(make_request_for_db(0, 0, 1)).is_err(),
             "a second drain start changes nothing"
         );
     }
@@ -277,7 +244,7 @@ mod tests {
     fn abandoned_work_is_answered_and_cleared() {
         let (mut dispatcher, _data_sides) = Dispatcher::new(1, 64);
         dispatcher
-            .dispatch(make_request(7, 0))
+            .dispatch(make_request_for_db(0, 0, 7))
             .expect("accept before the drain");
         dispatcher.begin_data_plane_drain();
 

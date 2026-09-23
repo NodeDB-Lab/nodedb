@@ -378,6 +378,13 @@ pub enum Error {
     #[error("dispatch error: {detail}")]
     Dispatch { detail: String },
 
+    /// The bridge dispatcher refused a request at a capacity limit. Nothing
+    /// was enqueued, so the caller retries once capacity frees.
+    #[error("dispatch refused at capacity: {scope}; the request was not enqueued and is retryable")]
+    DispatchCapacity {
+        scope: super::dispatch_capacity::DispatchCapacityScope,
+    },
+
     #[error("storage error ({engine}): {detail}")]
     Storage { engine: String, detail: String },
 

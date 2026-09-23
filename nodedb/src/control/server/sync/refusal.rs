@@ -32,9 +32,10 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
 /// refused on its merits.
 ///
 /// These are the failures where the cluster never judged the write at all — it
-/// timed out, the leader moved, the sequencer was absent, or memory pressure
-/// shed it. Nothing about the write itself is wrong, so the same bytes are
-/// expected to land once the condition clears.
+/// timed out, the leader moved, the sequencer was absent, memory pressure
+/// shed it, or the dispatcher refused it at capacity. Nothing about the write
+/// itself is wrong, so the same bytes are expected to land once the condition
+/// clears.
 fn is_indeterminate(error: &crate::Error) -> bool {
     use crate::bridge::envelope::ErrorCode;
     matches!(
@@ -46,10 +47,12 @@ fn is_indeterminate(error: &crate::Error) -> bool {
             | crate::Error::StaleReadNotLeader { .. }
             | crate::Error::SequencerUnavailable
             | crate::Error::Backpressure { .. }
+            | crate::Error::DispatchCapacity { .. }
             | crate::Error::ConflictRetry { .. }
             | crate::Error::DataPlane(
                 ErrorCode::DeadlineExceeded
                     | ErrorCode::ResourcesExhausted
+                    | ErrorCode::DispatchCapacity { .. }
                     | ErrorCode::ConflictRetry
             )
     )
@@ -161,6 +164,21 @@ mod tests {
     fn shed_load_is_retryable_not_a_refusal_of_the_write() {
         let error = crate::Error::Backpressure {
             engine: nodedb_mem::EngineId::Timeseries,
+        };
+        assert_eq!(
+            ack_status_for_dispatch_error(&error, 4),
+            AckStatus::Gap { expected: 4 }
+        );
+    }
+
+    #[test]
+    fn a_dispatch_refused_at_capacity_is_retryable_not_a_refusal_of_the_write() {
+        let error = crate::Error::DispatchCapacity {
+            scope: crate::DispatchCapacityScope::TenantInflight {
+                tenant_id: crate::types::TenantId::new(1),
+                inflight: 64,
+                cap: 64,
+            },
         };
         assert_eq!(
             ack_status_for_dispatch_error(&error, 4),

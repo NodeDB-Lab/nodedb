@@ -196,6 +196,8 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
 
         Error::Wal(wal_err) => NodeDbError::wal(wal_err),
         Error::Dispatch { detail } => NodeDbError::dispatch(detail),
+        // A capacity refusal enqueued nothing, so it is the retryable overload class.
+        Error::DispatchCapacity { .. } => NodeDbError::server_overload(e),
         Error::Storage { detail, .. } => NodeDbError::storage(detail),
         Error::ColdStorage { detail } => NodeDbError::cold_storage(detail),
         Error::Serialization { format, detail } => {

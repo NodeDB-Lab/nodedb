@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tracing::info;
 
 use nodedb_cluster::MultiRaft;
@@ -18,6 +18,7 @@ use nodedb_cluster::calvin::{
 use super::super::barrier::{PendingDependentBarrier, ReadResultEvent};
 use super::super::config::SchedulerConfig;
 use super::super::types::{BlockedTxn, PendingTxn};
+use super::deferred::DeferredQueue;
 use crate::bridge::envelope::Response;
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
 use crate::control::cluster::calvin::scheduler::metrics::SchedulerMetrics;
@@ -72,7 +73,8 @@ pub struct Scheduler {
     /// for the brief probe the gate takes.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) lock_manager:
         Arc<Mutex<LockManager>>,
-    /// In-flight static/active transactions awaiting executor response.
+    /// In-flight static/active transactions awaiting executor response,
+    /// including those whose request waits in `deferred` for capacity.
     /// `BTreeMap` ensures deterministic iteration order.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) pending:
         BTreeMap<TxnId, PendingTxn>,
@@ -143,6 +145,14 @@ pub struct Scheduler {
     /// push, so a full/closed channel is never a correctness hazard.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) verdict_rx:
         mpsc::Receiver<VerdictSignal>,
+    /// Requests the bridge dispatcher refused at capacity, in refusal order.
+    /// Each txn stays in flight and holds its locks until its request is
+    /// re-sent. Holds at most one step per in-flight txn, plus one
+    /// write-version record per committed txn.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) deferred: DeferredQueue,
+    /// The bridge dispatcher's capacity-freed signal, cloned once at
+    /// construction. The run loop waits on it while requests are deferred.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) capacity_freed: Arc<Notify>,
 }
 
 /// Parameters for [`Scheduler::new`].
@@ -205,6 +215,12 @@ impl Scheduler {
         let completion_cap = config.channel_capacity;
         let (completion_tx, completion_rx) = mpsc::channel(completion_cap);
 
+        let capacity_freed = shared
+            .dispatcher
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .capacity_freed();
+
         Self {
             vshard_id,
             receiver,
@@ -226,6 +242,8 @@ impl Scheduler {
             promotion_rx,
             registry,
             verdict_rx,
+            deferred: DeferredQueue::new(),
+            capacity_freed,
         }
     }
 
@@ -314,7 +332,20 @@ impl Scheduler {
         let mut stall_tick = tokio::time::interval(self.config.verdict_stall_warn() / 4);
         stall_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+        // Woken when a routed Data-Plane response frees dispatcher capacity.
+        let capacity_freed = Arc::clone(&self.capacity_freed);
+
         loop {
+            // Register for the capacity wake BEFORE the re-send pass. A
+            // response routed after a refusal but before this point is
+            // covered by the pass itself. One routed after it wakes the arm.
+            let capacity_notified = capacity_freed.notified();
+            tokio::pin!(capacity_notified);
+            capacity_notified.as_mut().enable();
+            if self.has_deferred_dispatch() {
+                self.redispatch_deferred();
+            }
+
             self.check_dependent_barrier_timeouts();
             self.check_awaiting_verdict_stalls();
 
@@ -357,6 +388,11 @@ impl Scheduler {
                     }
                 }
 
+                _ = &mut capacity_notified, if self.has_deferred_dispatch() => {
+                    // Capacity freed: the next loop pass re-sends deferred
+                    // requests in FIFO order.
+                }
+
                 maybe_txn = self.receiver.recv() => {
                     match maybe_txn {
                         Some(input) => self.process_scheduler_input(input),
@@ -377,9 +413,9 @@ impl Scheduler {
                     // O(1) common case (no pending catch-up). See `drain_catch_up`.
                     self.drain_catch_up();
                     // The top-of-loop check_awaiting_verdict_stalls /
-                    // check_dependent_barrier_timeouts do the stall work on every
-                    // wake; this arm guarantees the loop wakes to run them (and the
-                    // drain) when no other event arrives.
+                    // check_dependent_barrier_timeouts and the deferred re-send
+                    // pass run on every wake; this arm guarantees the loop wakes
+                    // to run them (and the drain) when no other event arrives.
                 }
             }
         }

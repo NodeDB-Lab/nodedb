@@ -58,6 +58,11 @@ pub struct SchedulerMetrics {
     /// flags that catch-up is relying on snapshot coverage rather than log replay
     /// and warrants operator attention.
     pub catch_up_log_compacted: AtomicU64,
+    /// Scheduler dispatches the bridge dispatcher refused at capacity. Each
+    /// refusal parks the request for re-send; none is an abort.
+    pub dispatch_deferred_count: AtomicU64,
+    /// Requests parked for re-send right now, waiting for dispatcher capacity.
+    pub dispatch_deferred_depth: AtomicU64,
 }
 
 /// Reason codes for `nodedb_calvin_infra_abort_total`.
@@ -133,6 +138,17 @@ impl SchedulerMetrics {
     /// Record that the catch-up drain hit a compacted sequencer log.
     pub fn record_catch_up_log_compacted(&self) {
         self.catch_up_log_compacted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record that the dispatcher refused a scheduler dispatch at capacity.
+    pub fn record_dispatch_deferred(&self) {
+        self.dispatch_deferred_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Set the number of requests parked for re-send.
+    pub fn set_dispatch_deferred_depth(&self, depth: usize) {
+        self.dispatch_deferred_depth
+            .store(depth as u64, Ordering::Relaxed);
     }
 
     /// Record the end-to-end executor txn duration (dispatch → response).
@@ -290,6 +306,30 @@ impl SchedulerMetrics {
             self.catch_up_log_compacted.load(Ordering::Relaxed)
         );
 
+        let _ = writeln!(
+            out,
+            "# HELP nodedb_calvin_dispatch_deferred_total \
+             Scheduler dispatches refused at dispatcher capacity and parked for re-send."
+        );
+        let _ = writeln!(out, "# TYPE nodedb_calvin_dispatch_deferred_total counter");
+        let _ = writeln!(
+            out,
+            "nodedb_calvin_dispatch_deferred_total{{{label}}} {}",
+            self.dispatch_deferred_count.load(Ordering::Relaxed)
+        );
+
+        let _ = writeln!(
+            out,
+            "# HELP nodedb_calvin_dispatch_deferred_depth \
+             Scheduler requests parked for re-send, waiting for dispatcher capacity."
+        );
+        let _ = writeln!(out, "# TYPE nodedb_calvin_dispatch_deferred_depth gauge");
+        let _ = writeln!(
+            out,
+            "nodedb_calvin_dispatch_deferred_depth{{{label}}} {}",
+            self.dispatch_deferred_depth.load(Ordering::Relaxed)
+        );
+
         out
     }
 }
@@ -309,6 +349,8 @@ impl Default for SchedulerMetrics {
             verdict_stall_count: AtomicU64::new(0),
             catch_up_replayed: AtomicU64::new(0),
             catch_up_log_compacted: AtomicU64::new(0),
+            dispatch_deferred_count: AtomicU64::new(0),
+            dispatch_deferred_depth: AtomicU64::new(0),
         }
     }
 }

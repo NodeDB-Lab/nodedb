@@ -159,6 +159,12 @@ mod tests {
                 actual: 2,
             },
             Error::BackupKeyMismatch,
+            Error::DispatchCapacity {
+                scope: crate::DispatchCapacityScope::QueueFull {
+                    core_id: 0,
+                    capacity: 4,
+                },
+            },
         ];
 
         for err in samples {

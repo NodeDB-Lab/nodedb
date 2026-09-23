@@ -160,6 +160,11 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::RateExceeded { .. } => {
             ("ERROR", sqlstate::TOO_MANY_CONNECTIONS, err.to_string())
         }
+        // A dispatcher capacity refusal enqueued nothing. SERVER_OVERLOAD
+        // (57P03) is transient: the client retries after a backoff.
+        crate::Error::DispatchCapacity { .. } => {
+            ("ERROR", sqlstate::SERVER_OVERLOAD, err.to_string())
+        }
         crate::Error::MemoryExhausted { .. } => ("ERROR", sqlstate::OUT_OF_MEMORY, err.to_string()),
         crate::Error::Backpressure { .. } => ("ERROR", sqlstate::OUT_OF_MEMORY, err.to_string()),
         crate::Error::FanOutExceeded { .. } => {
@@ -267,6 +272,8 @@ pub(crate) fn numeric_code_to_sqlstate(code: nodedb_types::error::ErrorCode) -> 
         Ec::RATE_EXCEEDED => sqlstate::TOO_MANY_CONNECTIONS,
         // Mirrors the `MemoryExhausted` / `Backpressure` arms.
         Ec::MEMORY_EXHAUSTED => sqlstate::OUT_OF_MEMORY,
+        // Mirrors the `DispatchCapacity` arm.
+        Ec::SERVER_OVERLOAD => sqlstate::SERVER_OVERLOAD,
         // Mirrors the `NoLeader` arm.
         Ec::NO_LEADER => sqlstate::LOCK_NOT_AVAILABLE,
         // Mirrors the `NotLeader` arm.

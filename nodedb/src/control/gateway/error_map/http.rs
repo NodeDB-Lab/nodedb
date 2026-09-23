@@ -13,7 +13,7 @@ impl GatewayErrorMap {
     /// - 400 Bad Request for client-side errors (bad SQL, not found)
     /// - 403 Forbidden for authz errors
     /// - 409 Conflict for write-conflict / constraint violations
-    /// - 503 Service Unavailable for routing/leader errors
+    /// - 503 Service Unavailable for routing/leader errors and dispatch overload
     /// - 504 Gateway Timeout for deadline exceeded
     /// - 500 Internal Server Error as the default fallback
     pub fn to_http(err: &Error) -> (u16, String) {
@@ -32,6 +32,7 @@ impl GatewayErrorMap {
             Error::PlanError { detail } => (400, detail.clone()),
             Error::RejectedConstraint { detail, .. } => (409, detail.clone()),
             Error::NoLeader { .. } => (503, err.to_string()),
+            Error::DispatchCapacity { .. } => (503, err.to_string()),
             Error::Serialization { .. } | Error::Codec { .. } => (500, err.to_string()),
             Error::Internal { .. } => (500, err.to_string()),
             // 501 Not Implemented: a valid op refused because cross-core

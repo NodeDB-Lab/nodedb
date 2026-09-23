@@ -131,6 +131,7 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         // Admission verdicts: the request never reached the mutation at all.
         | ErrorCode::RateExceeded { .. }
         | ErrorCode::CollectionDraining { .. }
+        | ErrorCode::DispatchCapacity { .. }
         | ErrorCode::Unsupported { .. }
         // The target row or collection did not exist, so the write had nothing
         // to mutate.
@@ -203,6 +204,14 @@ mod tests {
                 collection: "ledger".into(),
             }
         ));
+    }
+
+    /// A dispatcher capacity refusal enqueued nothing, so the record aborts.
+    #[test]
+    fn dispatch_capacity_refusal_aborts_the_record() {
+        assert!(write_definitely_not_applied(&ErrorCode::DispatchCapacity {
+            reason: "core 0 queue is full at 64 requests".into(),
+        }));
     }
 
     /// The asymmetry that keeps this safe: an ambiguous outcome must never

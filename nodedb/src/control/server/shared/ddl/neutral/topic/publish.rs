@@ -37,6 +37,9 @@ pub async fn handle_publish(
                 crate::Error::CollectionNotFound { .. } => "42704",
                 crate::Error::BadRequest { .. } => "42601",
                 crate::Error::Dispatch { .. } => "58000",
+                crate::Error::DispatchCapacity { .. } => {
+                    nodedb_types::error::sqlstate::SERVER_OVERLOAD
+                }
                 _ => "XX000",
             };
             Err(DdlError::new(sqlstate.to_string(), e.to_string()))

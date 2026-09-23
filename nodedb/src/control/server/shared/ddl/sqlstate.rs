@@ -187,6 +187,10 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             sqlstate::DIVISION_BY_ZERO,
             "division by zero".into(),
         ),
+        // Transient: the client retries after a backoff.
+        ErrorCode::DispatchCapacity { reason } => {
+            ("ERROR", sqlstate::SERVER_OVERLOAD, reason.clone())
+        }
         ErrorCode::Unsupported { detail } => {
             ("ERROR", sqlstate::FEATURE_NOT_SUPPORTED, detail.clone())
         }

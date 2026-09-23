@@ -8,10 +8,12 @@ use std::time::Instant;
 
 use nodedb_cluster::calvin::VerdictSignal;
 
+use crate::control::cluster::calvin::scheduler::driver::core::deferred::{
+    DispatchOutcome, DispatchStep,
+};
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
-use crate::control::cluster::calvin::scheduler::metrics::infra_abort_reason;
 
 impl Scheduler {
     /// Resume a txn parked in [`CommitState::AwaitingVerdict`] once the durable
@@ -45,27 +47,29 @@ impl Scheduler {
             return;
         }
 
-        let dispatched = if committed {
+        let (outcome, step) = if committed {
             // Resolve the staged post-images into a replayable `RedoRecord`
             // first; the redo is WAL-appended (in `finish_redo_resolve`) before
             // the flush is dispatched, restoring restart durability for this
             // vShard's slice of a multi-shard Calvin commit.
-            self.dispatch_calvin_resolve(txn_id)
+            (self.dispatch_calvin_resolve(txn_id), DispatchStep::Resolve)
         } else {
-            self.dispatch_commit_resolution(txn_id, false, None)
+            (
+                self.dispatch_commit_resolution(txn_id, false, None),
+                DispatchStep::Drop,
+            )
         };
-        if !dispatched {
-            // Resolve/drop dispatch failed: complete the txn as an infra error so
-            // its locks release and the epoch advances rather than stalling. The
-            // staged buffer is reclaimed by a later drop or on core teardown.
-            self.metrics.record_executor_error();
-            self.metrics
-                .record_infra_abort(infra_abort_reason::IO_ERROR);
-            self.metrics.record_completed();
-            self.on_txn_complete(txn_id);
+        if let DispatchOutcome::Failed(error) = outcome {
+            // Terminal resolve/drop refusal: complete the txn as an infra error
+            // so its locks release and the epoch advances rather than stalling.
+            // The staged buffer is reclaimed by a later drop or on core teardown.
+            self.fail_dispatch_step(txn_id, step, error);
             return;
         }
 
+        // Sent or parked for re-send at capacity: either way the txn awaits
+        // this step's response, so a duplicate verdict push or probe is a
+        // no-op under the guard above.
         if let Some(pending) = self.pending.get_mut(&txn_id) {
             pending.commit_state = Some(if committed {
                 CommitState::AwaitingRedoResolve
@@ -165,12 +169,189 @@ mod tests {
     };
     use nodedb_physical::physical_plan::PhysicalPlan;
     use nodedb_physical::physical_plan::meta::MetaOp;
+    use nodedb_types::TenantId;
 
     use super::*;
-    use crate::bridge::envelope::Status;
+    use crate::bridge::dispatch::CoreChannelDataSide;
+    use crate::bridge::envelope::{Payload, Status};
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
-        build_test_scheduler_with_data_side, make_sequenced_txn, staged_pending, staged_response,
+        await_data_plane_request, build_test_scheduler_with_data_side, fill_tenant_inflight,
+        make_sequenced_txn, release_filler, spawn_scheduler_loop, staged_pending, staged_response,
     };
+    use crate::control::state::SharedState;
+    use crate::types::RequestId;
+    use crate::wal::RedoRecord;
+
+    /// A scheduler with one txn parked in a commit state while its tenant sits
+    /// at the dispatcher's in-flight cap.
+    struct ParkedAtCapacity {
+        scheduler: Scheduler,
+        _dir: tempfile::TempDir,
+        data_side: CoreChannelDataSide,
+        shared: Arc<SharedState>,
+        fillers: Vec<RequestId>,
+    }
+
+    /// Park `txn_id` in `state`, then fill its tenant to the in-flight cap.
+    fn parked_at_capacity(txn_id: TxnId, state: CommitState) -> ParkedAtCapacity {
+        let registry = CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, dir, mut data_side) = build_test_scheduler_with_data_side(7, registry);
+        let mut pending = staged_pending(make_sequenced_txn(txn_id.epoch, txn_id.position), txn_id);
+        pending.commit_state = Some(state);
+        scheduler.pending.insert(txn_id, pending);
+        let shared = Arc::clone(&scheduler.shared);
+        let fillers = fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
+        ParkedAtCapacity {
+            scheduler,
+            _dir: dir,
+            data_side,
+            shared,
+            fillers,
+        }
+    }
+
+    /// An Ok resolve response whose redo record carries no ops, so the flush
+    /// dispatch follows at once with no WAL append.
+    fn empty_redo_response() -> crate::bridge::envelope::Response {
+        let redo = RedoRecord {
+            version: 1,
+            ops: Vec::new(),
+            calvin_stamp: None,
+        };
+        let mut response = staged_response(Status::Ok, None);
+        response.payload = Payload::from_vec(redo.to_bytes().expect("encode empty redo record"));
+        response
+    }
+
+    /// Under a COMMIT verdict, a refused resolve dispatch does not complete
+    /// the txn: its position stays unapplied and its pending entry stays.
+    #[tokio::test]
+    async fn commit_verdict_resolve_refused_at_capacity_does_not_complete_txn() {
+        let txn_id = TxnId::new(14, 2);
+        let mut parked = parked_at_capacity(txn_id, CommitState::AwaitingVerdict);
+        let scheduler = &mut parked.scheduler;
+
+        scheduler.resume_on_verdict(txn_id, true);
+
+        assert!(
+            !scheduler.applied.is_applied(14, 2),
+            "a refused resolve must not mark the position applied"
+        );
+        assert!(
+            scheduler.pending.contains_key(&txn_id),
+            "a refused resolve must keep the txn's pending entry"
+        );
+    }
+
+    /// A refused flush dispatch after the redo resolves does not complete the
+    /// txn: its position stays unapplied and its pending entry stays.
+    #[tokio::test]
+    async fn resolved_redo_flush_refused_at_capacity_does_not_complete_txn() {
+        let txn_id = TxnId::new(14, 2);
+        let mut parked = parked_at_capacity(txn_id, CommitState::AwaitingRedoResolve);
+        let scheduler = &mut parked.scheduler;
+
+        scheduler.finish_redo_resolve(txn_id, empty_redo_response());
+
+        assert!(
+            !scheduler.applied.is_applied(14, 2),
+            "a refused flush must not mark the position applied"
+        );
+        assert!(
+            scheduler.pending.contains_key(&txn_id),
+            "a refused flush must keep the txn's pending entry"
+        );
+    }
+
+    /// Under an ABORT verdict, a refused drop dispatch does not complete the
+    /// txn: its position stays unapplied and its pending entry stays.
+    #[tokio::test]
+    async fn abort_verdict_drop_refused_at_capacity_does_not_complete_txn() {
+        let txn_id = TxnId::new(14, 2);
+        let mut parked = parked_at_capacity(txn_id, CommitState::AwaitingVerdict);
+        let scheduler = &mut parked.scheduler;
+
+        scheduler.resume_on_verdict(txn_id, false);
+
+        assert!(
+            !scheduler.applied.is_applied(14, 2),
+            "a refused drop must not mark the position applied"
+        );
+        assert!(
+            scheduler.pending.contains_key(&txn_id),
+            "a refused drop must keep the txn's pending entry"
+        );
+    }
+
+    /// Once a Data Plane response frees tenant capacity, a refused resolve
+    /// reaches the Data Plane.
+    #[tokio::test]
+    async fn refused_resolve_reaches_data_plane_after_capacity_frees() {
+        let txn_id = TxnId::new(14, 2);
+        let ParkedAtCapacity {
+            mut scheduler,
+            _dir,
+            mut data_side,
+            shared,
+            fillers,
+        } = parked_at_capacity(txn_id, CommitState::AwaitingVerdict);
+
+        scheduler.resume_on_verdict(txn_id, true);
+        let running = spawn_scheduler_loop(scheduler);
+        release_filler(&shared, &mut data_side, fillers[0]);
+
+        let arrived = await_data_plane_request(&mut data_side, |plan| {
+            matches!(
+                plan,
+                PhysicalPlan::Meta(MetaOp::CalvinResolve {
+                    epoch: 14,
+                    position: 2
+                })
+            )
+        })
+        .await;
+        running.stop().await;
+
+        assert!(
+            arrived,
+            "the refused resolve must reach the Data Plane once capacity frees"
+        );
+    }
+
+    /// Once a Data Plane response frees tenant capacity, a refused flush
+    /// reaches the Data Plane.
+    #[tokio::test]
+    async fn refused_flush_reaches_data_plane_after_capacity_frees() {
+        let txn_id = TxnId::new(14, 2);
+        let ParkedAtCapacity {
+            mut scheduler,
+            _dir,
+            mut data_side,
+            shared,
+            fillers,
+        } = parked_at_capacity(txn_id, CommitState::AwaitingRedoResolve);
+
+        scheduler.finish_redo_resolve(txn_id, empty_redo_response());
+        let running = spawn_scheduler_loop(scheduler);
+        release_filler(&shared, &mut data_side, fillers[0]);
+
+        let arrived = await_data_plane_request(&mut data_side, |plan| {
+            matches!(
+                plan,
+                PhysicalPlan::Meta(MetaOp::CalvinFlush {
+                    epoch: 14,
+                    position: 2
+                })
+            )
+        })
+        .await;
+        running.stop().await;
+
+        assert!(
+            arrived,
+            "the refused flush must reach the Data Plane once capacity frees"
+        );
+    }
 
     /// A false vote from either participant makes the only global verdict abort;
     /// applying that durable verdict broadcasts the abort to every parked local

@@ -27,6 +27,7 @@ impl GatewayErrorMap {
             Error::RejectedConstraint { detail, .. } => format!("CONSTRAINT {detail}"),
             Error::TypeMismatch { detail, .. } => format!("WRONGTYPE {detail}"),
             Error::RetryableSchemaChanged { .. } => format!("ERR {err}"),
+            Error::DispatchCapacity { .. } => format!("BUSY {err}"),
             Error::RemoteTyped { code, message } => {
                 format!("{} {message}", remote_code_to_resp_prefix(*code))
             }

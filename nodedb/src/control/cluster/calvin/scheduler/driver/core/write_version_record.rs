@@ -12,8 +12,7 @@
 //! write-version recorder at that LSN — the same shard-local WAL-LSN space the
 //! single-shard fast path and read watermarks use.
 
-use std::sync::atomic::Ordering;
-
+use super::deferred::{DispatchOutcome, DispatchStep};
 use super::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::types::Lsn;
@@ -35,11 +34,12 @@ impl Scheduler {
     /// Fire-and-forget: the recorded version is not needed to complete the
     /// transaction, so the response is drained and discarded. A brief index-lag
     /// window before the record op lands is harmless — nothing enforces read-set
-    /// validation against these versions yet. A dropped record (decode failure,
-    /// no local write plan, or dispatch backpressure) simply leaves the version
+    /// validation against these versions yet. A record refused at capacity is
+    /// parked and re-sent once capacity frees, never dropped. A decode or
+    /// routing failure, or a terminal dispatch refusal, leaves the version
     /// unrecorded and never blocks the commit.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn record_calvin_write_versions(
-        &self,
+        &mut self,
         txn_id: TxnId,
         applied_lsn: Lsn,
     ) {
@@ -96,32 +96,65 @@ impl Scheduler {
         let request =
             self.build_exempt_request(request_id, tenant_id, database_id, plan, Some(applied_lsn));
 
-        // Register so the response routes to a real receiver (not the
-        // unknown-request warning path), then discard it — the recording is
-        // one-way.
-        let resp_rx = self.shared.tracker.register(request_id);
-        let dispatch_result = match self.shared.dispatcher.lock() {
-            Ok(mut d) => d.dispatch(request),
-            Err(poisoned) => poisoned.into_inner().dispatch(request),
-        };
-        if let Err(e) = dispatch_result {
-            self.shared.tracker.cancel(&request_id);
-            tracing::warn!(
-                vshard_id = self.vshard_id,
-                epoch,
-                position,
-                error = %e,
-                "calvin: write-version record dispatch failed"
-            );
-            return;
+        // The request carries everything a re-send needs, so a parked record
+        // outlives the txn's `pending` entry.
+        if let DispatchOutcome::Failed(error) =
+            self.dispatch_sequenced(txn_id, DispatchStep::WriteVersionRecord, request)
+        {
+            self.fail_dispatch_step(txn_id, DispatchStep::WriteVersionRecord, error);
         }
-        tokio::spawn(async move {
-            let mut rx = resp_rx;
-            let _ = rx.recv().await;
-        });
-        self.shared
-            .calvin_counters
-            .write_versions_recorded
-            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use nodedb_cluster::calvin::CalvinCompletionRegistry;
+    use nodedb_types::TenantId;
+
+    use super::*;
+    use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
+        await_data_plane_request, build_test_scheduler_with_data_side, fill_tenant_inflight,
+        make_validate_only_txn, release_filler, spawn_scheduler_loop, staged_pending,
+        test_coll_vshard,
+    };
+
+    /// Once a Data Plane response frees tenant capacity, a write-version
+    /// record refused at capacity reaches the Data Plane.
+    #[tokio::test]
+    async fn refused_write_version_record_reaches_data_plane_after_capacity_frees() {
+        let registry = CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, mut data_side) =
+            build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        let txn_id = TxnId::new(21, 0);
+        scheduler.pending.insert(
+            txn_id,
+            staged_pending(make_validate_only_txn(21, 0), txn_id),
+        );
+        let shared = Arc::clone(&scheduler.shared);
+        let fillers = fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
+
+        scheduler.record_calvin_write_versions(txn_id, Lsn::new(42));
+        let running = spawn_scheduler_loop(scheduler);
+        release_filler(&shared, &mut data_side, fillers[0]);
+
+        let arrived = await_data_plane_request(&mut data_side, |plan| {
+            matches!(
+                plan,
+                PhysicalPlan::Meta(MetaOp::RecordCalvinWriteVersions {
+                    epoch: 21,
+                    position: 0,
+                    ..
+                })
+            )
+        })
+        .await;
+        running.stop().await;
+
+        assert!(
+            arrived,
+            "the refused write-version record must reach the Data Plane once capacity frees"
+        );
     }
 }

@@ -11,6 +11,7 @@ use nodedb_cluster::calvin::types::SequencedTxn;
 use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_physical::physical_plan::meta::MetaOp;
 
+use super::super::deferred::{DispatchOutcome, DispatchStep};
 use super::super::scheduler::Scheduler;
 use super::primary_write::{
     participant_change_sets, plans_have_primary_write, plans_have_returning,
@@ -45,7 +46,7 @@ impl Scheduler {
                     error = %e,
                     "calvin scheduler: active plan decode failed; releasing locks"
                 );
-                self.on_txn_complete(txn_id);
+                self.on_unpending_txn_complete(txn_id, lock_owner);
                 return;
             }
         };
@@ -75,7 +76,7 @@ impl Scheduler {
                         "calvin scheduler: active txn homes no local writes; releasing locks"
                     );
                     self.propose_routing_failure(epoch, position, txn_id, &e);
-                    self.on_txn_complete(txn_id);
+                    self.on_unpending_txn_complete(txn_id, lock_owner);
                     return;
                 }
                 Err(e) => {
@@ -87,11 +88,17 @@ impl Scheduler {
                         "calvin scheduler: active txn routing failed; releasing locks"
                     );
                     self.propose_routing_failure(epoch, position, txn_id, &e);
-                    self.on_txn_complete(txn_id);
+                    self.on_unpending_txn_complete(txn_id, lock_owner);
                     return;
                 }
             };
-        if !self.bind_local_identities(&mut plans, txn.tx_class.database_id, tenant_id, txn_id) {
+        if !self.bind_local_identities(
+            &mut plans,
+            txn.tx_class.database_id,
+            tenant_id,
+            txn_id,
+            lock_owner,
+        ) {
             return;
         }
         let has_primary_write = plans_have_primary_write(&plans, has_non_derived_write);
@@ -110,42 +117,18 @@ impl Scheduler {
         // Calvin allocates the CalvinApplied WAL LSN post-apply (in the
         // scheduler's response handler), so no committed LSN is known at
         // dispatch time to stamp here.
-        let request =
-            self.build_exempt_request(request_id, tenant_id, txn.tx_class.database_id, plan, None);
+        let database_id = txn.tx_class.database_id;
+        let request = self.build_exempt_request(request_id, tenant_id, database_id, plan, None);
 
-        let resp_rx = self.shared.tracker.register(request_id);
-
-        let dispatch_result = match self.shared.dispatcher.lock() {
-            Ok(mut d) => d.dispatch(request),
-            Err(poisoned) => poisoned.into_inner().dispatch(request),
-        };
-
-        if let Err(e) = dispatch_result {
-            error!(
-                vshard_id = self.vshard_id,
-                epoch,
-                position,
-                error = %e,
-                "calvin scheduler: active dispatch failed; releasing locks"
-            );
-            self.on_txn_complete(txn_id);
-            return;
-        }
-
-        self.metrics.record_dispatch();
-
-        // no-determinism: executor latency observability, off-WAL path
-        let dispatch_instant = Instant::now();
-
-        self.spawn_response_bridge(txn_id, request_id, resp_rx);
-
+        // The txn enters `pending` before the dispatch, so a stage refused at
+        // capacity stays in flight with its locks until the re-send.
         self.pending.insert(
             txn_id,
             super::super::super::types::PendingTxn {
                 txn,
                 lock_owner,
                 // no-determinism: dispatch_time is scheduler observability, not Calvin WAL data
-                dispatch_time: dispatch_instant,
+                dispatch_time: Instant::now(),
                 has_primary_write,
                 has_returning,
                 change_sets,
@@ -158,6 +141,84 @@ impl Scheduler {
                 // Set only once the txn parks in `AwaitingVerdict`.
                 verdict_deadline: None,
             },
+        );
+
+        if let DispatchOutcome::Failed(error) =
+            self.dispatch_sequenced(txn_id, DispatchStep::StageActive, request)
+        {
+            self.fail_dispatch_step(txn_id, DispatchStep::StageActive, error);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use nodedb_cluster::calvin::CalvinCompletionRegistry;
+    use nodedb_types::TenantId;
+
+    use super::*;
+    use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
+        await_data_plane_request, build_test_scheduler_with_data_side, fill_tenant_inflight,
+        make_local_write_txn, release_filler, spawn_scheduler_loop, test_coll_vshard,
+    };
+
+    /// A refused active dispatch keeps the txn in flight: its position stays
+    /// unapplied and its pending entry stays.
+    #[tokio::test]
+    async fn active_dispatch_refused_at_capacity_leaves_txn_unapplied() {
+        let registry = CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, mut data_side) =
+            build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        let shared = Arc::clone(&scheduler.shared);
+        fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
+        let txn_id = TxnId::new(5, 0);
+
+        scheduler.dispatch_active_txn(make_local_write_txn(5, 0), txn_id, txn_id, BTreeMap::new());
+
+        assert!(
+            !scheduler.applied.is_applied(5, 0),
+            "a refused active dispatch must not mark the position applied"
+        );
+        assert!(
+            scheduler.pending.contains_key(&txn_id),
+            "a refused active dispatch must keep the txn's pending entry"
+        );
+    }
+
+    /// Once a Data Plane response frees tenant capacity, the refused active
+    /// request reaches the Data Plane.
+    #[tokio::test]
+    async fn active_dispatch_refused_at_capacity_is_retried_after_capacity_frees() {
+        let registry = CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, mut data_side) =
+            build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        let shared = Arc::clone(&scheduler.shared);
+        let fillers = fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
+        let txn_id = TxnId::new(5, 0);
+
+        scheduler.dispatch_active_txn(make_local_write_txn(5, 0), txn_id, txn_id, BTreeMap::new());
+        let running = spawn_scheduler_loop(scheduler);
+        release_filler(&shared, &mut data_side, fillers[0]);
+
+        let arrived = await_data_plane_request(&mut data_side, |plan| {
+            matches!(
+                plan,
+                PhysicalPlan::Meta(MetaOp::CalvinExecuteActive {
+                    epoch: 5,
+                    position: 0,
+                    ..
+                })
+            )
+        })
+        .await;
+        running.stop().await;
+
+        assert!(
+            arrived,
+            "the refused active request must reach the Data Plane once capacity frees"
         );
     }
 }

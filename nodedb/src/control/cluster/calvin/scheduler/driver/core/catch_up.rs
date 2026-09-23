@@ -18,6 +18,7 @@
 //! Txn into a no-op, and Reserve/Release re-application is a lock-manager no-op.
 
 use nodedb_cluster::calvin::SEQUENCER_GROUP_ID;
+use nodedb_cluster::calvin::types::SchedulerInput;
 
 use super::scheduler::Scheduler;
 
@@ -113,32 +114,72 @@ impl Scheduler {
 
         // 3. SM-lock scope: decode the raw log entries into this vShard's
         //    `SchedulerInput` stream (a pure `&self` read — no side effects).
-        let inputs = {
+        //    Each entry decodes on its own, so every input keeps the Raft index
+        //    it came from. Decoding holds no cross-entry state, so the stream is
+        //    identical to a whole-range decode.
+        let inputs: Vec<(u64, SchedulerInput)> = {
             let sm = self
                 .sequencer_state_machine
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
-            sm.replay_epochs_for_vshard(&entries, self.vshard_id, 0, u64::MAX)
+            entries
+                .iter()
+                .flat_map(|entry| {
+                    sm.replay_epochs_for_vshard(
+                        std::slice::from_ref(entry),
+                        self.vshard_id,
+                        0,
+                        u64::MAX,
+                    )
+                    .into_iter()
+                    .map(move |input| (entry.index, input))
+                })
+                .collect()
         };
 
         // 4. Feed each replayed input through the SAME live processing path — no
         //    lock held. Determinism: identical inputs through identical code.
         //    The in-flight guard makes an overlapping already-in-flight Txn a
         //    no-op; Reserve/Release re-application is idempotent.
-        let replayed = inputs.len() as u64;
-        for input in inputs {
+        //
+        //    A dispatch refused at capacity stops the feed. The refused txn is
+        //    parked in flight, and the next drain resumes at the first input
+        //    not yet processed.
+        let mut replayed: u64 = 0;
+        let mut resume_from: Option<u64> = None;
+        let mut feed = inputs.into_iter().peekable();
+        while let Some((_, input)) = feed.next() {
+            let deferred_before = self.deferred_dispatch_len();
             self.process_scheduler_input(input);
+            replayed += 1;
+            if self.deferred_dispatch_len() > deferred_before {
+                resume_from = feed.peek().map(|(index, _)| *index);
+                break;
+            }
         }
 
-        // Replay of `lo ..= hi` is complete: clear the armed catch-up, but only
-        // up to `hi` — a concurrent drop recorded at an index `> hi` while this
-        // replay ran is preserved for the next drain. This is the CONFIRM step
-        // the peek-not-take at the top defers to; a transient failure above
-        // returned early and left the entry armed.
-        self.sequencer_state_machine
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clear_catch_up_up_to(self.vshard_id, hi);
+        {
+            let sm = self
+                .sequencer_state_machine
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            match resume_from {
+                // Stopped early: re-arm exactly at the first unprocessed input's
+                // index. Clearing below it first lets the min-collapse arm move
+                // the entry forward. Both run under one SM lock.
+                Some(next) => {
+                    sm.clear_catch_up_up_to(self.vshard_id, next.saturating_sub(1));
+                    sm.arm_catch_up_from(self.vshard_id, next);
+                }
+                // Replay of `lo ..= hi` is complete: clear the armed catch-up,
+                // but only up to `hi` — a concurrent drop recorded at an index
+                // `> hi` while this replay ran is preserved for the next drain.
+                // This is the CONFIRM step the peek-not-take at the top defers
+                // to; a transient failure above returned early and left the
+                // entry armed.
+                None => sm.clear_catch_up_up_to(self.vshard_id, hi),
+            }
+        }
 
         if replayed > 0 {
             self.metrics.record_catch_up_replayed(replayed);
@@ -160,12 +201,14 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
-    use nodedb_cluster::calvin::SequencerEntry;
     use nodedb_cluster::calvin::types::{EpochBatch, SchedulerInput, SequencedTxn};
+    use nodedb_cluster::calvin::{CalvinCompletionRegistry, SequencerEntry};
+    use nodedb_types::TenantId;
     use nodedb_types::id::{DatabaseId, VShardId};
 
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
-        build_test_scheduler, make_sequenced_txn,
+        build_test_scheduler, build_test_scheduler_with_data_side, fill_tenant_inflight,
+        make_sequenced_txn, make_validate_only_txn, test_coll_vshard,
     };
     use crate::control::cluster::calvin::scheduler::lock_manager::{AcquireOutcome, TxnId};
 
@@ -455,6 +498,70 @@ mod tests {
             scheduler.metrics.dispatch_count.load(Ordering::Relaxed),
             dispatched_before,
             "the guarded overlap must not cause a second dispatch"
+        );
+    }
+
+    /// Commit two single-txn batches at epochs 0 and 1, each a validate-only
+    /// txn that stages on this scheduler, and drop both through a full
+    /// fan-out channel. Returns the two committed Raft indexes.
+    fn arm_two_dropped_stage_batches(scheduler: &Scheduler) -> (u64, u64) {
+        ensure_sequencer_leader(scheduler);
+        let txn0 = make_validate_only_txn(0, 0);
+        let txn1 = make_validate_only_txn(1, 0);
+        let (idx0, bytes0) = commit_epoch_batch(scheduler, make_batch(0, &txn0));
+        let (idx1, bytes1) = commit_epoch_batch(scheduler, make_batch(1, &txn1));
+        assert!(idx1 > idx0, "second batch commits at a later Raft index");
+        apply_with_full_channel(scheduler, scheduler.vshard_id, idx0, &bytes0, &txn0);
+        apply_with_full_channel(scheduler, scheduler.vshard_id, idx1, &bytes1, &txn1);
+        (idx0, idx1)
+    }
+
+    /// Draining a replay range against a dispatcher at tenant capacity marks
+    /// no replayed position applied.
+    #[tokio::test]
+    async fn drain_against_full_dispatcher_marks_no_replayed_position_applied() {
+        let registry = CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, mut data_side) =
+            build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        arm_two_dropped_stage_batches(&scheduler);
+        let shared = std::sync::Arc::clone(&scheduler.shared);
+        fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
+
+        scheduler.drain_catch_up();
+
+        assert!(
+            !scheduler.applied.is_applied(0, 0),
+            "the refused replayed txn must stay unapplied"
+        );
+        assert!(
+            !scheduler.applied.is_applied(1, 0),
+            "a replayed txn after the refusal must stay unapplied"
+        );
+    }
+
+    /// Draining against a dispatcher at tenant capacity stops at the first
+    /// refusal and leaves catch-up armed from the first input it did not
+    /// process.
+    #[tokio::test]
+    async fn drain_against_full_dispatcher_stays_armed_from_first_unprocessed_input() {
+        let registry = CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, mut data_side) =
+            build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        let (_idx0, idx1) = arm_two_dropped_stage_batches(&scheduler);
+        let shared = std::sync::Arc::clone(&scheduler.shared);
+        fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
+
+        scheduler.drain_catch_up();
+
+        let armed = scheduler
+            .sequencer_state_machine
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .peek_catch_up_from(scheduler.vshard_id);
+        assert_eq!(
+            armed,
+            Some(idx1),
+            "catch-up must stay armed from the input after the refused one"
         );
     }
 }

@@ -11,7 +11,7 @@
 pub(super) fn remote_code_to_http_status(code: nodedb_types::error::ErrorCode) -> u16 {
     use nodedb_types::error::ErrorCode as Ec;
     match code {
-        Ec::NOT_LEADER | Ec::NO_LEADER => 503,
+        Ec::NOT_LEADER | Ec::NO_LEADER | Ec::SERVER_OVERLOAD => 503,
         Ec::DEADLINE_EXCEEDED => 504,
         Ec::COLLECTION_NOT_FOUND => 404,
         Ec::AUTHORIZATION_DENIED => 403,
@@ -31,6 +31,7 @@ pub(super) fn remote_code_to_resp_prefix(code: nodedb_types::error::ErrorCode) -
         Ec::AUTHORIZATION_DENIED => "NOPERM",
         Ec::CONSTRAINT_VIOLATION => "CONSTRAINT",
         Ec::TYPE_MISMATCH => "WRONGTYPE",
+        Ec::SERVER_OVERLOAD => "BUSY",
         _ => "ERR",
     }
 }

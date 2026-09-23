@@ -121,4 +121,9 @@ pub enum DataPlaneErrorCode {
         status_column: String,
         row_identity: String,
     },
+    /// The bridge dispatcher refused the request at a capacity limit; nothing
+    /// was enqueued. `reason` names the limit and its counts.
+    DispatchCapacity {
+        reason: String,
+    },
 }

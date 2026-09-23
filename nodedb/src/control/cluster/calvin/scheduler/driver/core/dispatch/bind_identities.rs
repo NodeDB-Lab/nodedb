@@ -22,12 +22,15 @@ impl Scheduler {
     /// failure: applying rows nobody can resolve by key is worse than aborting.
     ///
     /// Returns `false` after terminating the txn; the caller returns at once.
+    /// The txn is not yet in `pending`, so its locks release under
+    /// `lock_owner`.
     pub(super) fn bind_local_identities(
         &mut self,
         plans: &mut [PhysicalPlan],
         database_id: DatabaseId,
         tenant_id: TenantId,
         txn_id: TxnId,
+        lock_owner: TxnId,
     ) -> bool {
         let assigner = &self.shared.surrogate_assigner;
         let bound = plans
@@ -46,7 +49,7 @@ impl Scheduler {
                     "calvin scheduler: surrogate binding failed; releasing locks"
                 );
                 self.propose_routing_failure(epoch, position, txn_id, &e);
-                self.on_txn_complete(txn_id);
+                self.on_unpending_txn_complete(txn_id, lock_owner);
                 false
             }
         }

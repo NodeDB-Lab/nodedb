@@ -77,7 +77,9 @@ impl Scheduler {
                 self.metrics.record_infra_abort(
                     crate::control::cluster::calvin::scheduler::metrics::infra_abort_reason::PASSIVE_PARTICIPANT_TIMEOUT,
                 );
-                self.on_txn_complete(txn_id);
+                // A barrier txn never entered `pending`: release its locks
+                // under the owner the barrier recorded.
+                self.on_unpending_txn_complete(txn_id, barrier.lock_owner);
             }
         }
     }

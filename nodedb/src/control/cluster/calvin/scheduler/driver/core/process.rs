@@ -243,21 +243,41 @@ impl Scheduler {
         self.dependent_barrier.insert(txn_id, barrier);
     }
 
-    /// Called when a transaction completes (success or infrastructure error).
+    /// Complete an in-flight txn (success or infrastructure error).
+    ///
+    /// Releases the lock-table owner recorded in its `pending` entry. A txn
+    /// with no `pending` entry has already completed, so this logs and
+    /// releases nothing. A txn that fails before it enters `pending` uses
+    /// [`Self::on_unpending_txn_complete`] instead.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn on_txn_complete(
         &mut self,
         txn_id: TxnId,
     ) {
-        let epoch = txn_id.epoch;
-        // Recover the lock-table owner (equals `txn_id` unless a reservation
-        // owned the lock). Blocked txns never reach here, so `pending` always
-        // holds the entry by the time a txn completes.
-        let lock_owner = self
-            .pending
-            .get(&txn_id)
-            .map(|p| p.lock_owner)
-            .unwrap_or(txn_id);
+        let Some(pending) = self.pending.remove(&txn_id) else {
+            tracing::error!(
+                vshard_id = self.vshard_id,
+                epoch = txn_id.epoch,
+                position = txn_id.position,
+                "calvin: completion for a txn with no pending entry; nothing to release"
+            );
+            return;
+        };
+        self.release_and_mark_applied(txn_id, pending.lock_owner);
+    }
 
+    /// Complete a txn that failed before it entered `pending`, releasing the
+    /// locks held under `lock_owner`.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn on_unpending_txn_complete(
+        &mut self,
+        txn_id: TxnId,
+        lock_owner: TxnId,
+    ) {
+        self.release_and_mark_applied(txn_id, lock_owner);
+    }
+
+    /// Release `lock_owner`'s locks, dispatch the promoted waiters, and mark
+    /// `txn_id`'s position applied.
+    fn release_and_mark_applied(&mut self, txn_id: TxnId, lock_owner: TxnId) {
         // Release this txn's locks. `release` promotes any waiter queued behind
         // each freed key to holder (moving it pending -> held) and returns the
         // fully-promoted ids. Those ids are already holders in the table the
@@ -275,11 +295,9 @@ impl Scheduler {
         // once ALL of its positions for this vShard have terminally completed,
         // so any advertised watermark reflects a FULLY-applied epoch — the value
         // `BEGIN` needs for a torn-free cross-shard snapshot anchor.
-        if let Some(watermark) = self.applied.mark_applied(epoch, txn_id.position) {
+        if let Some(watermark) = self.applied.mark_applied(txn_id.epoch, txn_id.position) {
             self.publish_watermark(watermark);
         }
-
-        self.pending.remove(&txn_id);
     }
 
     /// Dispatch transactions that a `LockManager::release` promoted to holder.
@@ -364,9 +382,111 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::atomic::Ordering;
 
+    use nodedb_cluster::calvin::CalvinCompletionRegistry;
+    use nodedb_physical::physical_plan::PhysicalPlan;
+    use nodedb_physical::physical_plan::meta::MetaOp;
+    use nodedb_types::TenantId;
+
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
-        build_test_scheduler, make_sequenced_txn,
+        await_data_plane_request, build_test_scheduler, build_test_scheduler_with_data_side,
+        fill_tenant_inflight, make_sequenced_txn, make_validate_only_txn, release_filler,
+        spawn_scheduler_loop, test_coll_vshard,
     };
+
+    /// A refused stage dispatch leaves the txn unapplied and publishes no
+    /// watermark for its epoch.
+    #[tokio::test]
+    async fn stage_dispatch_refused_at_capacity_leaves_txn_unapplied() {
+        let registry = CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, mut data_side) =
+            build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        let shared = Arc::clone(&scheduler.shared);
+        fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
+        let watermark_before = shared.last_applied_calvin_epoch.load(Ordering::Acquire);
+
+        scheduler.process_scheduler_input(SchedulerInput::Txn(make_validate_only_txn(3, 0)));
+
+        assert!(
+            !scheduler.applied.is_applied(3, 0),
+            "a capacity refusal must not mark the position applied"
+        );
+        assert_eq!(
+            shared.last_applied_calvin_epoch.load(Ordering::Acquire),
+            watermark_before,
+            "a capacity refusal must not publish a watermark for the txn's epoch"
+        );
+    }
+
+    /// A refused stage dispatch keeps the txn's key locks: a later txn on the
+    /// same key queues behind it.
+    #[tokio::test]
+    async fn stage_dispatch_refused_at_capacity_keeps_key_locks() {
+        let registry = CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, mut data_side) =
+            build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        let shared = Arc::clone(&scheduler.shared);
+        fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
+
+        scheduler.process_scheduler_input(SchedulerInput::Txn(make_validate_only_txn(3, 0)));
+        scheduler.process_scheduler_input(SchedulerInput::Txn(make_validate_only_txn(4, 0)));
+
+        assert!(
+            scheduler.blocked.contains_key(&TxnId::new(4, 0)),
+            "a txn on the same key must block behind the refused txn's held locks"
+        );
+    }
+
+    /// A refused stage dispatch leaves no request-tracker entry behind.
+    #[tokio::test]
+    async fn stage_dispatch_refused_at_capacity_leaves_no_tracker_entry() {
+        let registry = CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, mut data_side) =
+            build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        let shared = Arc::clone(&scheduler.shared);
+        fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
+        let tracked_before = shared.tracker.in_flight();
+
+        scheduler.process_scheduler_input(SchedulerInput::Txn(make_validate_only_txn(3, 0)));
+
+        assert_eq!(
+            shared.tracker.in_flight(),
+            tracked_before,
+            "a refused dispatch must not leave a registered tracker entry"
+        );
+    }
+
+    /// Once a Data Plane response frees tenant capacity, the refused txn's
+    /// stage request reaches the Data Plane.
+    #[tokio::test]
+    async fn stage_dispatch_refused_at_capacity_is_retried_after_capacity_frees() {
+        let registry = CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, mut data_side) =
+            build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        let shared = Arc::clone(&scheduler.shared);
+        let fillers = fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
+
+        scheduler.process_scheduler_input(SchedulerInput::Txn(make_validate_only_txn(3, 0)));
+        let running = spawn_scheduler_loop(scheduler);
+        release_filler(&shared, &mut data_side, fillers[0]);
+
+        let arrived = await_data_plane_request(&mut data_side, |plan| {
+            matches!(
+                plan,
+                PhysicalPlan::Meta(MetaOp::CalvinExecuteStatic {
+                    epoch: 3,
+                    position: 0,
+                    ..
+                })
+            )
+        })
+        .await;
+        running.stop().await;
+
+        assert!(
+            arrived,
+            "the refused stage request must reach the Data Plane once capacity frees"
+        );
+    }
 
     #[tokio::test]
     async fn in_flight_guard_skips_replayed_txn_already_in_flight() {

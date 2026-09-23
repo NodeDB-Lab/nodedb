@@ -32,11 +32,7 @@ impl Scheduler {
             database_id,
             vshard_id: VShardId::new(self.vshard_id),
             plan,
-            // no-determinism: scheduler deadline controls waiting, not ordered state.
-            deadline: Instant::now()
-                + Duration::from_millis(
-                    self.config.epoch_duration_ms * u64::from(self.config.txn_deadline_multiplier),
-                ),
+            deadline: self.request_deadline(),
             priority: Priority::Normal,
             trace_id: nodedb_types::TraceId([0u8; 16]),
             consistency: ReadConsistency::Strong,
@@ -50,5 +46,17 @@ impl Scheduler {
             resolved_now_ms: None,
             admission: Admission::Exempt(ExemptReason::AlreadyOrdered),
         }
+    }
+
+    /// The deadline for a Calvin sub-operation sent now: one epoch duration
+    /// times the configured deadline multiplier.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn request_deadline(
+        &self,
+    ) -> Instant {
+        // no-determinism: scheduler deadline controls waiting, not ordered state.
+        Instant::now()
+            + Duration::from_millis(
+                self.config.epoch_duration_ms * u64::from(self.config.txn_deadline_multiplier),
+            )
     }
 }

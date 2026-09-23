@@ -132,6 +132,10 @@ pub enum ErrorCode {
     /// special-cases `NotFound`) and reaches the client as SQLSTATE `22012`
     /// rather than the generic `XX000` every `Internal` maps to.
     DivisionByZero,
+    /// The bridge dispatcher refused the request at a capacity limit, so
+    /// nothing was enqueued or applied. Transient: the same request succeeds
+    /// once capacity frees. `reason` names the limit and its counts.
+    DispatchCapacity { reason: String },
 }
 
 impl From<crate::Error> for ErrorCode {
@@ -217,6 +221,11 @@ impl From<crate::Error> for ErrorCode {
             } => Self::RateExceeded {
                 gate,
                 retry_after_ms,
+            },
+            // A capacity refusal enqueued nothing, and the same request
+            // succeeds once capacity frees.
+            capacity @ crate::Error::DispatchCapacity { .. } => Self::DispatchCapacity {
+                reason: capacity.to_string(),
             },
             crate::Error::TxnOverlayMemoryExceeded { limit } => {
                 Self::TxnOverlayMemoryExceeded { limit }
