@@ -16,6 +16,8 @@
 //!   txn-completion bookkeeping.
 //! - [`catch_up`] — sequencer-fan-out catch-up drain: replays inputs dropped on
 //!   this replica (channel Full/Closed) from the committed sequencer Raft log.
+//! - [`intake`] — intake gate: stops reading new sequenced input while a
+//!   dispatch is deferred or the in-flight backlog is at its bound.
 //! - [`dispatch`] — static / active dispatch to the Data Plane executor.
 //! - [`deferred`] — capacity-safe dispatch: parks a request the bridge refuses
 //!   at capacity and re-sends it once capacity frees.
@@ -54,6 +56,7 @@ pub mod commit_resolve;
 pub mod completion_route;
 pub mod deferred;
 pub mod dispatch;
+pub mod intake;
 pub mod process;
 pub mod propose;
 pub mod read_result;

@@ -18,7 +18,9 @@ use nodedb_cluster::calvin::{
 use super::super::barrier::{PendingDependentBarrier, ReadResultEvent};
 use super::super::config::SchedulerConfig;
 use super::super::types::{BlockedTxn, PendingTxn};
+use super::catch_up::CatchUpDrain;
 use super::deferred::DeferredQueue;
+use super::intake::IntakeGate;
 use crate::bridge::envelope::Response;
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
 use crate::control::cluster::calvin::scheduler::metrics::SchedulerMetrics;
@@ -153,6 +155,8 @@ pub struct Scheduler {
     /// The bridge dispatcher's capacity-freed signal, cloned once at
     /// construction. The run loop waits on it while requests are deferred.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) capacity_freed: Arc<Notify>,
+    /// Last observed intake gate state. See [`super::intake`].
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) intake: IntakeGate,
 }
 
 /// Parameters for [`Scheduler::new`].
@@ -244,6 +248,7 @@ impl Scheduler {
             verdict_rx,
             deferred: DeferredQueue::new(),
             capacity_freed,
+            intake: IntakeGate::default(),
         }
     }
 
@@ -334,6 +339,9 @@ impl Scheduler {
 
         // Woken when a routed Data-Plane response frees dispatcher capacity.
         let capacity_freed = Arc::clone(&self.capacity_freed);
+        // Set when a tick left armed catch-up unreplayed. The next open-gate
+        // pass fires the tick at once to resume it.
+        let mut catch_up_resume = false;
 
         loop {
             // Register for the capacity wake BEFORE the re-send pass. A
@@ -348,6 +356,12 @@ impl Scheduler {
 
             self.check_dependent_barrier_timeouts();
             self.check_awaiting_verdict_stalls();
+
+            let intake_open = self.refresh_intake_gate();
+            if intake_open && catch_up_resume {
+                catch_up_resume = false;
+                stall_tick.reset_immediately();
+            }
 
             tokio::select! {
                 biased;
@@ -393,7 +407,7 @@ impl Scheduler {
                     // requests in FIFO order.
                 }
 
-                maybe_txn = self.receiver.recv() => {
+                maybe_txn = self.receiver.recv(), if intake_open => {
                     match maybe_txn {
                         Some(input) => self.process_scheduler_input(input),
                         None => {
@@ -411,7 +425,9 @@ impl Scheduler {
                     // (channel Full/Closed) so a missed `SchedulerInput` never
                     // permanently diverges this vShard's lock table from its peers.
                     // O(1) common case (no pending catch-up). See `drain_catch_up`.
-                    self.drain_catch_up();
+                    // A closed intake gate skips the drain until it opens.
+                    catch_up_resume =
+                        !intake_open || self.drain_catch_up() == CatchUpDrain::Remaining;
                     // The top-of-loop check_awaiting_verdict_stalls /
                     // check_dependent_barrier_timeouts and the deferred re-send
                     // pass run on every wake; this arm guarantees the loop wakes

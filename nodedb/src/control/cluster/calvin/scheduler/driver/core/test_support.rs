@@ -368,12 +368,17 @@ pub(super) async fn await_data_plane_request(
 pub(super) struct RunningScheduler {
     shutdown: ShutdownWatch,
     handle: tokio::task::JoinHandle<()>,
-    _input_tx: mpsc::Sender<SchedulerInput>,
+    input_tx: mpsc::Sender<SchedulerInput>,
     _read_result_tx: mpsc::Sender<ReadResultEvent>,
     _promotion_tx: mpsc::UnboundedSender<Vec<TxnId>>,
 }
 
 impl RunningScheduler {
+    /// The sender feeding the loop's sequenced-input receiver.
+    pub(super) fn input_tx(&self) -> &mpsc::Sender<SchedulerInput> {
+        &self.input_tx
+    }
+
     /// Signal shutdown and wait for the loop to exit.
     pub(super) async fn stop(self) {
         self.shutdown.signal();
@@ -401,7 +406,7 @@ pub(super) fn spawn_scheduler_loop(mut scheduler: Scheduler) -> RunningScheduler
     RunningScheduler {
         shutdown,
         handle,
-        _input_tx: input_tx,
+        input_tx,
         _read_result_tx: read_result_tx,
         _promotion_tx: promotion_tx,
     }

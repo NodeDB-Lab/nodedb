@@ -16,17 +16,38 @@
 //! and thereby reconstructs the missed input deterministically. Replay is
 //! idempotent — `process_new_txn`'s in-flight guard turns an already-in-flight
 //! Txn into a no-op, and Reserve/Release re-application is a lock-manager no-op.
+//!
+//! One drain reads at most [`SchedulerConfig::catch_up_window`] log entries.
+//!
+//! [`SchedulerConfig::catch_up_window`]: super::super::config::SchedulerConfig::catch_up_window
 
 use nodedb_cluster::calvin::SEQUENCER_GROUP_ID;
 use nodedb_cluster::calvin::types::SchedulerInput;
 
 use super::scheduler::Scheduler;
 
+/// Result of one [`Scheduler::drain_catch_up`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::control::cluster::calvin::scheduler::driver::core) enum CatchUpDrain {
+    /// Nothing is left to replay now. No catch-up is armed, nothing is
+    /// committed at the armed index yet, the log read failed and the entry
+    /// stays armed for a later tick, or the armed range is fully replayed.
+    Settled,
+    /// The drain stopped before the committed index: the window filled or
+    /// the intake gate closed. Catch-up stays armed at the first unprocessed
+    /// index, and the next drain can resume at once.
+    Remaining,
+}
+
 impl Scheduler {
     /// Replay any sequencer-fan-out inputs dropped on this replica.
     ///
     /// Run on the periodic stall tick. O(1) in the common case (no pending
     /// catch-up → one map probe and return).
+    ///
+    /// Reads and replays at most `catch_up_window` log entries from the armed
+    /// index. Stops feeding at the first input after which the intake gate is
+    /// closed.
     ///
     /// # Lock discipline (deadlock-safety)
     ///
@@ -35,7 +56,9 @@ impl Scheduler {
     /// holds the SM lock while fanning out but never takes MultiRaft underneath
     /// it; this drain takes them strictly one-at-a-time (SM → release → MultiRaft
     /// → release → SM → release), so the two paths can never form a lock cycle.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn drain_catch_up(&mut self) {
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn drain_catch_up(
+        &mut self,
+    ) -> CatchUpDrain {
         // 1. SM-lock scope: PEEK the earliest armed index for this vShard.
         //    `None` (the common case) means no catch-up is pending — return O(1).
         //    Otherwise pair it with the committed-index watermark as the replay
@@ -50,27 +73,30 @@ impl Scheduler {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
             let Some(lo) = sm.peek_catch_up_from(self.vshard_id) else {
-                return;
+                return CatchUpDrain::Settled;
             };
             let Some(hi) = sm.current_committed_index() else {
                 // Armed but nothing applied yet — leave it armed and retry once
                 // an entry is applied and `hi` is known.
-                return;
+                return CatchUpDrain::Settled;
             };
             if lo > hi {
                 // Armed ahead of the committed watermark (e.g. spawn-armed from
                 // the first available index before any entry applied on this
                 // replica). Nothing to replay yet; stay armed.
-                return;
+                return CatchUpDrain::Settled;
             }
             (lo, hi)
         };
+        // Last index this drain reads: the window end, capped at `hi`.
+        let window = self.config.catch_up_window.max(1);
+        let end = lo.saturating_add(window - 1).min(hi);
 
-        // 2. MultiRaft-lock scope: read the committed sequencer log range. No SM
-        //    lock is held here (see the lock-discipline note above).
+        // 2. MultiRaft-lock scope: read the committed sequencer log window. No
+        //    SM lock is held here (see the lock-discipline note above).
         let entries = {
             let mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
-            match mr.read_committed_entries(SEQUENCER_GROUP_ID, lo, hi) {
+            match mr.read_committed_entries(SEQUENCER_GROUP_ID, lo, end) {
                 Ok(entries) => entries,
                 Err(nodedb_cluster::error::ClusterError::Raft(
                     nodedb_raft::RaftError::LogCompacted { .. },
@@ -94,7 +120,7 @@ impl Scheduler {
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
                         .clear_catch_up_up_to(self.vshard_id, hi);
-                    return;
+                    return CatchUpDrain::Settled;
                 }
                 Err(e) => {
                     // Transient infra fault (e.g. group transiently absent).
@@ -103,11 +129,11 @@ impl Scheduler {
                     tracing::warn!(
                         vshard = self.vshard_id,
                         lo,
-                        hi,
+                        end,
                         error = %e,
                         "calvin catch-up: failed to read committed sequencer entries"
                     );
-                    return;
+                    return CatchUpDrain::Settled;
                 }
             }
         };
@@ -142,21 +168,22 @@ impl Scheduler {
         //    The in-flight guard makes an overlapping already-in-flight Txn a
         //    no-op; Reserve/Release re-application is idempotent.
         //
-        //    A dispatch refused at capacity stops the feed. The refused txn is
-        //    parked in flight, and the next drain resumes at the first input
-        //    not yet processed.
+        //    An input after which the intake gate is closed stops the feed: a
+        //    dispatch deferred at capacity, or a full in-flight backlog. The
+        //    next drain resumes at the first input not yet processed.
         let mut replayed: u64 = 0;
         let mut resume_from: Option<u64> = None;
         let mut feed = inputs.into_iter().peekable();
         while let Some((_, input)) = feed.next() {
-            let deferred_before = self.deferred_dispatch_len();
             self.process_scheduler_input(input);
             replayed += 1;
-            if self.deferred_dispatch_len() > deferred_before {
+            if self.intake_closure().is_some() {
                 resume_from = feed.peek().map(|(index, _)| *index);
                 break;
             }
         }
+        // A window that ends before `hi` resumes at the first index past it.
+        let resume_from = resume_from.or(end.checked_add(1).filter(|&next| next <= hi));
 
         {
             let sm = self
@@ -171,12 +198,12 @@ impl Scheduler {
                     sm.clear_catch_up_up_to(self.vshard_id, next.saturating_sub(1));
                     sm.arm_catch_up_from(self.vshard_id, next);
                 }
-                // Replay of `lo ..= hi` is complete: clear the armed catch-up,
-                // but only up to `hi` — a concurrent drop recorded at an index
-                // `> hi` while this replay ran is preserved for the next drain.
-                // This is the CONFIRM step the peek-not-take at the top defers
-                // to; a transient failure above returned early and left the
-                // entry armed.
+                // Replay of `lo ..= hi` is complete (`end == hi` here): clear
+                // the armed catch-up, but only up to `hi` — a concurrent drop
+                // recorded at an index `> hi` while this replay ran is
+                // preserved for the next drain. This is the CONFIRM step the
+                // peek-not-take at the top defers to; a transient failure
+                // above returned early and left the entry armed.
                 None => sm.clear_catch_up_up_to(self.vshard_id, hi),
             }
         }
@@ -186,10 +213,16 @@ impl Scheduler {
             tracing::info!(
                 vshard = self.vshard_id,
                 lo,
+                end,
                 hi,
                 replayed,
                 "calvin catch-up: replayed dropped sequencer inputs from committed log"
             );
+        }
+        if resume_from.is_some() {
+            CatchUpDrain::Remaining
+        } else {
+            CatchUpDrain::Settled
         }
     }
 }
@@ -563,5 +596,69 @@ mod tests {
             Some(idx1),
             "catch-up must stay armed from the input after the refused one"
         );
+    }
+
+    /// A drain over a range longer than its window replays exactly the
+    /// window and stays armed at the first index past it. The next drain
+    /// continues from there.
+    #[tokio::test]
+    async fn drain_replays_one_window_then_resumes_past_it() {
+        let vshard = test_coll_vshard();
+        let (mut scheduler, _dir) = build_test_scheduler(vshard);
+        scheduler.config.catch_up_window = 1;
+        ensure_sequencer_leader(&scheduler);
+
+        let txn0 = make_sequenced_txn(0, 0);
+        let txn1 = make_sequenced_txn(1, 0);
+        let (idx0, bytes0) = commit_epoch_batch(&scheduler, make_batch(0, &txn0));
+        let (idx1, bytes1) = commit_epoch_batch(&scheduler, make_batch(1, &txn1));
+        assert_eq!(idx1, idx0 + 1, "the two batches commit at adjacent indexes");
+        apply_with_full_channel(&scheduler, vshard, idx0, &bytes0, &txn0);
+        apply_with_full_channel(&scheduler, vshard, idx1, &bytes1, &txn1);
+
+        // A conflicting holder on the shared key makes each replayed txn
+        // block, so nothing dispatches.
+        let keys =
+            crate::control::cluster::calvin::scheduler::driver::helpers::expand_rw_set(&txn0);
+        {
+            let mut lm = scheduler
+                .lock_manager
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            assert_eq!(
+                lm.acquire(TxnId::new(u64::MAX, 0), keys),
+                AcquireOutcome::Ready
+            );
+        }
+        let armed = |scheduler: &Scheduler| {
+            scheduler
+                .sequencer_state_machine
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .peek_catch_up_from(vshard)
+        };
+
+        let first = scheduler.drain_catch_up();
+
+        assert_eq!(first, CatchUpDrain::Remaining);
+        assert!(scheduler.blocked.contains_key(&TxnId::new(0, 0)));
+        assert!(
+            !scheduler.blocked.contains_key(&TxnId::new(1, 0)),
+            "the entry past the window must not be replayed"
+        );
+        assert_eq!(
+            armed(&scheduler),
+            Some(idx1),
+            "catch-up stays armed at the first index past the window"
+        );
+
+        let second = scheduler.drain_catch_up();
+
+        assert_eq!(second, CatchUpDrain::Settled);
+        assert!(
+            scheduler.blocked.contains_key(&TxnId::new(1, 0)),
+            "the next drain replays the entry past the first window"
+        );
+        assert_eq!(armed(&scheduler), None, "the armed range is fully replayed");
     }
 }

@@ -63,6 +63,14 @@ pub struct SchedulerMetrics {
     pub dispatch_deferred_count: AtomicU64,
     /// Requests parked for re-send right now, waiting for dispatcher capacity.
     pub dispatch_deferred_depth: AtomicU64,
+    /// Intake gate state: 1 while the scheduler takes no new sequenced input,
+    /// 0 while it does.
+    pub intake_gate_closed: AtomicU64,
+    /// In-flight backlog: pending, blocked, and dependent-barrier txns.
+    pub intake_backlog: AtomicU64,
+    /// Intake gate closures by reason. Indexes are the constants in
+    /// [`intake_closure_reason`].
+    pub intake_gate_closed_counts: [AtomicU64; 2],
 }
 
 /// Reason codes for `nodedb_calvin_infra_abort_total`.
@@ -82,6 +90,14 @@ pub mod infra_abort_reason {
         "corruption_detected",
         "passive_participant_timeout",
     ];
+}
+
+/// Reason codes for `nodedb_calvin_intake_gate_closed_total`.
+pub mod intake_closure_reason {
+    pub const DEFERRED_DISPATCH: usize = 0;
+    pub const BACKLOG_FULL: usize = 1;
+
+    pub const LABELS: &[&str] = &["deferred_dispatch", "backlog_full"];
 }
 
 impl SchedulerMetrics {
@@ -149,6 +165,26 @@ impl SchedulerMetrics {
     pub fn set_dispatch_deferred_depth(&self, depth: usize) {
         self.dispatch_deferred_depth
             .store(depth as u64, Ordering::Relaxed);
+    }
+
+    /// Record that the intake gate closed for `reason`.
+    ///
+    /// `reason` must be one of the constants in [`intake_closure_reason`].
+    pub fn record_intake_gate_closed(&self, reason: usize) {
+        if let Some(counter) = self.intake_gate_closed_counts.get(reason) {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Set the intake gate state gauge.
+    pub fn set_intake_gate_closed(&self, closed: bool) {
+        self.intake_gate_closed
+            .store(u64::from(closed), Ordering::Relaxed);
+    }
+
+    /// Set the in-flight backlog gauge.
+    pub fn set_intake_backlog(&self, backlog: usize) {
+        self.intake_backlog.store(backlog as u64, Ordering::Relaxed);
     }
 
     /// Record the end-to-end executor txn duration (dispatch → response).
@@ -330,6 +366,44 @@ impl SchedulerMetrics {
             self.dispatch_deferred_depth.load(Ordering::Relaxed)
         );
 
+        let _ = writeln!(
+            out,
+            "# HELP nodedb_calvin_intake_gate_closed \
+             1 while the scheduler takes no new sequenced input."
+        );
+        let _ = writeln!(out, "# TYPE nodedb_calvin_intake_gate_closed gauge");
+        let _ = writeln!(
+            out,
+            "nodedb_calvin_intake_gate_closed{{{label}}} {}",
+            self.intake_gate_closed.load(Ordering::Relaxed)
+        );
+
+        let _ = writeln!(
+            out,
+            "# HELP nodedb_calvin_intake_backlog \
+             Pending, blocked, and dependent-barrier txns in the scheduler."
+        );
+        let _ = writeln!(out, "# TYPE nodedb_calvin_intake_backlog gauge");
+        let _ = writeln!(
+            out,
+            "nodedb_calvin_intake_backlog{{{label}}} {}",
+            self.intake_backlog.load(Ordering::Relaxed)
+        );
+
+        let _ = writeln!(
+            out,
+            "# HELP nodedb_calvin_intake_gate_closed_total \
+             Times the scheduler stopped taking new sequenced input, by reason."
+        );
+        let _ = writeln!(out, "# TYPE nodedb_calvin_intake_gate_closed_total counter");
+        for (i, &reason_label) in intake_closure_reason::LABELS.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "nodedb_calvin_intake_gate_closed_total{{{label},reason=\"{reason_label}\"}} {}",
+                self.intake_gate_closed_counts[i].load(Ordering::Relaxed)
+            );
+        }
+
         out
     }
 }
@@ -351,6 +425,9 @@ impl Default for SchedulerMetrics {
             catch_up_log_compacted: AtomicU64::new(0),
             dispatch_deferred_count: AtomicU64::new(0),
             dispatch_deferred_depth: AtomicU64::new(0),
+            intake_gate_closed: AtomicU64::new(0),
+            intake_backlog: AtomicU64::new(0),
+            intake_gate_closed_counts: std::array::from_fn(|_| AtomicU64::new(0)),
         }
     }
 }
