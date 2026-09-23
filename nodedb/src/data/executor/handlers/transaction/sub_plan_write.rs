@@ -10,8 +10,8 @@
 use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
-use crate::types::{DatabaseId, TenantId, TraceId};
 
+use super::sub_request::SubRequestScope;
 use super::undo::UndoEntry;
 
 /// Fields for a transactional primary-vector insert (see `VectorOp::Insert`).
@@ -329,44 +329,20 @@ impl CoreLoop {
         Ok(resp)
     }
 
-    /// Execute a read-only / DDL sub-plan via the standard dispatch path.
+    /// Execute a sub-plan with no undo-tracked arm via the standard dispatch
+    /// path. No undo entry is recorded.
     ///
-    /// None of these variants mutate engine state, so no undo entry is needed.
-    ///
-    /// The sub-plan task copies `parent`'s `deadline` and `admission`, so its
-    /// [`execution_deadline`](crate::bridge::envelope::Request::execution_deadline)
-    /// equals the parent's. A sub-plan is part of the statement that spawned
-    /// it, so it runs on that statement's remaining budget. A fresh budget per
-    /// sub-plan lets a transaction outlive its client's `statement_timeout`.
-    /// An already-ordered parent has no execution deadline, and neither does
-    /// its sub-plan.
+    /// The sub-plan runs under [`SubRequestScope::of`] `parent`: the parent's
+    /// database, vShard, deadline, and admission. A fresh budget per sub-plan
+    /// lets a transaction outlive its client's `statement_timeout`.
     pub(super) fn exec_tx_passthrough(
         &mut self,
         tid: u64,
         plan: &PhysicalPlan,
         parent: &crate::bridge::envelope::Request,
     ) -> Result<Response, ErrorCode> {
-        let resp = self.execute(&ExecutionTask::new(crate::bridge::envelope::Request {
-            request_id: crate::types::RequestId::new(0),
-            tenant_id: TenantId::new(tid),
-            database_id: DatabaseId::DEFAULT,
-            vshard_id: crate::types::VShardId::new(0),
-            plan: plan.clone(),
-            // no-determinism: sub-plan deadline is ephemeral, not written to WAL
-            deadline: parent.deadline,
-            priority: crate::bridge::envelope::Priority::Normal,
-            trace_id: TraceId::ZERO,
-            consistency: crate::types::ReadConsistency::Strong,
-            idempotency_key: None,
-            event_source: crate::event::EventSource::User,
-            user_roles: Vec::new(),
-            user_id: None,
-            statement_digest: None,
-            txn_id: None,
-            wal_lsn: None,
-            resolved_now_ms: None,
-            admission: parent.admission,
-        }));
+        let request = SubRequestScope::of(parent).request(tid, plan.clone());
+        let resp = self.execute(&ExecutionTask::new(request));
         if resp.status == Status::Error {
             return Err(resp.error_code.map(|c| *c).unwrap_or(ErrorCode::Internal {
                 detail: "sub-plan execution failed".into(),

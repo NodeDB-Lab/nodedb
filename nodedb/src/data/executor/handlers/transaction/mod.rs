@@ -17,6 +17,7 @@ mod sub_plan_kv_ops;
 mod sub_plan_kv_ttl_sorted;
 mod sub_plan_kv_writes;
 mod sub_plan_write;
+mod sub_request;
 pub(in crate::data::executor::handlers) mod undo;
 mod write_version;
 mod write_version_kv;

@@ -430,3 +430,60 @@ async fn bulk_update_returning_in_txn_is_refused(engine: &str, coll: &str) {
 async fn bulk_update_returning_in_txn_is_refused_case() {
     bulk_update_returning_in_txn_is_refused("document_schemaless", "bu_ret_ov_upd").await;
 }
+
+/// Sorted `id=n` pairs of the whole collection in the session's database.
+async fn id_n_pairs(server: &TestServer, coll: &str) -> Vec<String> {
+    let mut v: Vec<String> = server
+        .query_rows(&format!("SELECT id, n FROM {coll}"))
+        .await
+        .unwrap_or_else(|e| panic!("read {coll}: {e}"))
+        .into_iter()
+        .map(|row| row.join("="))
+        .collect();
+    v.sort();
+    v
+}
+
+/// Predicate DML committed in a named database applies to that database's
+/// collection. The same-named collection in `default` keeps its rows.
+async fn bulk_dml_commit_applies_in_session_database(engine: &str, coll: &str) {
+    let server = TestServer::start().await;
+    setup(&server, coll, engine).await;
+    server.exec("CREATE DATABASE bulk_dml_named").await.unwrap();
+    server.exec("USE DATABASE bulk_dml_named").await.unwrap();
+    setup(&server, coll, engine).await;
+
+    server.exec("BEGIN").await.unwrap();
+    for sql in [
+        format!("UPDATE {coll} SET n = 7 WHERE n = 1"),
+        format!("DELETE FROM {coll} WHERE n = 2"),
+    ] {
+        server
+            .exec(&sql)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    }
+    server.exec("COMMIT").await.unwrap();
+
+    assert_eq!(
+        id_n_pairs(&server, coll).await,
+        vec!["a=7", "b=7", "unrelated=100"],
+        "{engine}: COMMIT applies the predicate DML in the session's database"
+    );
+    server.exec("USE DATABASE default").await.unwrap();
+    assert_eq!(
+        id_n_pairs(&server, coll).await,
+        vec!["a=1", "b=1", "c=2", "unrelated=100"],
+        "{engine}: a transaction in another database leaves `default` untouched"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn schemaless_bulk_dml_commit_applies_in_session_database() {
+    bulk_dml_commit_applies_in_session_database("document_schemaless", "bu_db_s").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn strict_bulk_dml_commit_applies_in_session_database() {
+    bulk_dml_commit_applies_in_session_database("document_strict", "bu_db_t").await;
+}

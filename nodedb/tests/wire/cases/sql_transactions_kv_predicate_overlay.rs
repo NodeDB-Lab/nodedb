@@ -396,3 +396,38 @@ async fn kv_predicate_update_after_truncate_in_transaction_matches_nothing() {
         "COMMIT replays the truncate and the no-op predicate writes"
     );
 }
+
+/// Predicate DML committed in a named database applies to that database's
+/// collection. The same-named collection in `default` keeps its rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn predicate_dml_commit_applies_in_session_database() {
+    let server = TestServer::start().await;
+    setup(&server, "kvp_db").await;
+    server.exec("CREATE DATABASE kvp_named").await.unwrap();
+    server.exec("USE DATABASE kvp_named").await.unwrap();
+    setup(&server, "kvp_db").await;
+
+    server.exec("BEGIN").await.unwrap();
+    for sql in [
+        "UPDATE kvp_db SET n = 7 WHERE n = 1",
+        "DELETE FROM kvp_db WHERE n = 2",
+    ] {
+        server
+            .exec(sql)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    }
+    server.exec("COMMIT").await.unwrap();
+
+    assert_eq!(
+        rows(&server, "kvp_db").await,
+        pairs(&[("a", "7"), ("b", "7"), ("unrelated", "100")]),
+        "COMMIT applies the predicate DML in the session's database"
+    );
+    server.exec("USE DATABASE default").await.unwrap();
+    assert_eq!(
+        rows(&server, "kvp_db").await,
+        pairs(&[("a", "1"), ("b", "1"), ("c", "2"), ("unrelated", "100")]),
+        "a transaction in another database leaves `default` untouched"
+    );
+}

@@ -6,14 +6,15 @@
 //! and record undo entries) live in `sub_plan_write.rs`; this file only
 //! routes each `PhysicalPlan` variant to its engine-specific handler.
 
-use crate::bridge::envelope::{Admission, ErrorCode, PhysicalPlan, Request, Response, Status};
+use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Request, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
-use crate::types::{DatabaseId, TenantId, TraceId};
+use crate::types::{RequestId, TenantId};
 use nodedb_physical::physical_plan::{CrdtOp, DocumentOp, GraphOp, MetaOp, TimeseriesOp, VectorOp};
 
 use super::sub_plan_doc::{TxPointDelete, TxPointPut};
 use super::sub_plan_write::{TxEdgeDeleteParams, TxEdgePutParams, TxVectorInsertParams};
+use super::sub_request::SubRequestScope;
 use super::undo::UndoEntry;
 
 impl CoreLoop {
@@ -110,61 +111,29 @@ impl CoreLoop {
     /// only carries request metadata for response building.
     #[cfg(test)]
     pub(super) fn build_dummy_task(tid: u64) -> ExecutionTask {
-        Self::build_dummy_task_with(
-            tid,
-            DatabaseId::DEFAULT,
-            crate::types::VShardId::new(0),
+        use crate::bridge::envelope::{Admission, ExemptReason};
+        use crate::types::{DatabaseId, VShardId};
+
+        let scope = SubRequestScope {
+            database_id: DatabaseId::DEFAULT,
+            vshard_id: VShardId::new(0),
             // no-determinism: test-only dummy deadline, never written to Calvin state
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
-            Admission::Exempt(crate::bridge::envelope::ExemptReason::Read),
-        )
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+            admission: Admission::Exempt(ExemptReason::Read),
+        };
+        ExecutionTask::new(scope.request(tid, Self::dummy_plan()))
     }
 
-    /// Copies `parent`'s database, vShard, `deadline`, and `admission`. The
-    /// dummy task's
-    /// [`execution_deadline`](crate::bridge::envelope::Request::execution_deadline)
-    /// then equals the parent's. Every sub-plan this task carries stops when
-    /// the statement does. An already-ordered parent, such as a Calvin apply,
-    /// has no execution deadline, and its sub-plans run to completion.
+    /// The dummy task runs under [`SubRequestScope::of`] `parent`: the
+    /// parent's database, vShard, deadline, and admission. Every sub-plan
+    /// this task carries stops when the statement does.
     fn build_dummy_task_at(tid: u64, parent: &Request) -> ExecutionTask {
-        Self::build_dummy_task_with(
-            tid,
-            parent.database_id,
-            parent.vshard_id,
-            parent.deadline,
-            parent.admission,
-        )
+        ExecutionTask::new(SubRequestScope::of(parent).request(tid, Self::dummy_plan()))
     }
 
-    fn build_dummy_task_with(
-        tid: u64,
-        database_id: DatabaseId,
-        vshard_id: crate::types::VShardId,
-        deadline: std::time::Instant,
-        admission: Admission,
-    ) -> ExecutionTask {
-        ExecutionTask::new(Request {
-            request_id: crate::types::RequestId::new(0),
-            tenant_id: TenantId::new(tid),
-            database_id,
-            vshard_id,
-            plan: PhysicalPlan::Meta(MetaOp::Cancel {
-                target_request_id: crate::types::RequestId::new(0),
-            }),
-            // no-determinism: ephemeral deadline is not written to Calvin state.
-            deadline,
-            priority: crate::bridge::envelope::Priority::Normal,
-            trace_id: TraceId::ZERO,
-            consistency: crate::types::ReadConsistency::Strong,
-            idempotency_key: None,
-            event_source: crate::event::EventSource::User,
-            user_roles: Vec::new(),
-            user_id: None,
-            statement_digest: None,
-            txn_id: None,
-            wal_lsn: None,
-            resolved_now_ms: None,
-            admission,
+    fn dummy_plan() -> PhysicalPlan {
+        PhysicalPlan::Meta(MetaOp::Cancel {
+            target_request_id: RequestId::new(0),
         })
     }
 
