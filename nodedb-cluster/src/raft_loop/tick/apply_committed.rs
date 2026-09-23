@@ -12,10 +12,31 @@ use crate::forward::PlanExecutor;
 
 use super::super::loop_core::{CommitApplier, RaftLoop};
 
+/// The first committed index that is not greater than its predecessor, when
+/// the batch carries one.
+///
+/// Committed entries are contiguous and strictly ascending by construction, so
+/// a non-increasing pair is a producer regression. The applier's delivery guard
+/// stays the boundary that absorbs a repeat; this makes the regression
+/// observable instead of silent.
+fn first_non_increasing_committed_index(entries: &[nodedb_raft::LogEntry]) -> Option<u64> {
+    entries
+        .windows(2)
+        .find(|pair| pair[1].index <= pair[0].index)
+        .map(|pair| pair[1].index)
+}
+
 impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
     /// Apply one group's committed entries from this tick's `Ready` output.
     /// Called only when `!group_ready.committed_entries.is_empty()`.
     pub(super) fn apply_group_commits(&self, group_id: u64, group_ready: &nodedb_raft::Ready) {
+        if let Some(index) = first_non_increasing_committed_index(&group_ready.committed_entries) {
+            warn!(
+                group_id,
+                index,
+                "committed batch is not strictly increasing; the applier guard absorbs a repeat"
+            );
+        }
         for entry in &group_ready.committed_entries {
             if let Some(cc) = ConfChange::from_entry_data(&entry.data) {
                 let mut mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
@@ -109,5 +130,39 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
                 self.propose_cluster_epoch_bump();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nodedb_raft::LogEntry;
+
+    fn entry(index: u64) -> LogEntry {
+        LogEntry {
+            term: 1,
+            index,
+            data: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn detects_a_non_increasing_committed_index() {
+        assert_eq!(first_non_increasing_committed_index(&[]), None);
+        assert_eq!(first_non_increasing_committed_index(&[entry(1)]), None);
+        assert_eq!(
+            first_non_increasing_committed_index(&[entry(1), entry(2)]),
+            None
+        );
+        // A repeat inside the batch: the first index not greater than its
+        // predecessor is reported.
+        assert_eq!(
+            first_non_increasing_committed_index(&[entry(2), entry(2), entry(3)]),
+            Some(2)
+        );
+        assert_eq!(
+            first_non_increasing_committed_index(&[entry(1), entry(2), entry(1)]),
+            Some(1)
+        );
     }
 }
