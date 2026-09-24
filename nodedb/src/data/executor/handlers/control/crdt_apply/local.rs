@@ -13,8 +13,10 @@ use nodedb_types::Surrogate;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::crdt_rejection;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::crdt::tenant_state::ValidatedApplyOutcome;
+use nodedb_types::sync::violation::ViolationType;
 
 use super::params::{CRDT_PENDING_DEPENDENCIES, CRDT_SINGLE_DOCUMENT_DELTA, CrdtApplyParams};
 
@@ -26,6 +28,9 @@ enum LocalRefusal {
     /// Nothing applied, but the identical bytes apply once the missing causal
     /// history arrives.
     Retryable { detail: String },
+    /// Permanent: a row the delta writes violates a constraint. Nothing
+    /// applied, and the delta is in the dead-letter queue.
+    Constraint(ViolationType),
 }
 
 impl CoreLoop {
@@ -105,13 +110,7 @@ impl CoreLoop {
                         Ok(None)
                     }
                 }
-                ValidatedApplyOutcome::Rejected(vt) => {
-                    imported_authoritative = true;
-                    // There is no client to answer here, so the validated
-                    // outcome is observed only for its DLQ side effect.
-                    tracing::debug!(core = self.core_id, %collection, reason = %vt, "crdt apply violated constraint (DLQ)");
-                    Ok(None)
-                }
+                ValidatedApplyOutcome::Rejected(vt) => Err(LocalRefusal::Constraint(vt)),
                 ValidatedApplyOutcome::Malformed => Err(LocalRefusal::Malformed),
                 ValidatedApplyOutcome::PendingDependencies => {
                     // Nothing was imported: the operations are buffered awaiting
@@ -128,8 +127,8 @@ impl CoreLoop {
                 }
             }
         };
-        // Engine borrow dropped here. A clean or constraint-rejected Loro
-        // import changed authoritative state; malformed bytes did not.
+        // Engine borrow dropped here. A clean import changed authoritative
+        // state. A refused one did not.
         if imported_authoritative {
             self.checkpoint_coordinator.mark_dirty("crdt", 1);
         }
@@ -148,8 +147,8 @@ impl CoreLoop {
                 }
             }
             Ok(None) if imported_authoritative => {
-                // Headless and constraint-rejected imports have no sparse
-                // projection, but still changed authoritative Loro state.
+                // A headless import has no sparse projection, but still
+                // changed authoritative Loro state.
                 self.note_collection_write_lsn(task, collection);
             }
             Ok(None) => {}
@@ -168,6 +167,31 @@ impl CoreLoop {
                                  failed its signature check, or wrote rows outside \
                                  {document_id}; nothing was applied"
                             ),
+                        }
+                    }
+                    LocalRefusal::Constraint(violation) => {
+                        tracing::debug!(
+                            core = self.core_id,
+                            %collection,
+                            %document_id,
+                            reason = %violation,
+                            "crdt apply refused: constraint violated"
+                        );
+                        // The record is cancelled, so replay never reaches
+                        // this rejection. Its dead-letter entry is stored
+                        // before the refusal is reported.
+                        match self.store_crdt_dead_letter(
+                            task.request.database_id,
+                            tenant_id,
+                            task.wal_lsn(),
+                        ) {
+                            Ok(()) => crdt_rejection(collection, document_id, &violation),
+                            Err(error) => ErrorCode::Internal {
+                                detail: format!(
+                                    "delta for {collection}/{document_id} violates {violation}, \
+                                     and its dead-letter entry could not be stored: {error}"
+                                ),
+                            },
                         }
                     }
                     LocalRefusal::Retryable { detail } => {
@@ -278,5 +302,130 @@ mod tests {
             engine.row_exists("docs", "one") || engine.row_exists("docs", "two")
         });
         assert!(!imported, "a refused delta must not reach the CRDT state");
+    }
+
+    fn users_params<'a>(document_id: &'a str, delta: &'a [u8]) -> CrdtApplyParams<'a> {
+        CrdtApplyParams {
+            collection: "users",
+            ..params(document_id, delta)
+        }
+    }
+
+    fn user_delta(peer: u64, row_id: &str, email: &str) -> Vec<u8> {
+        let source = nodedb_crdt::CrdtState::new(peer).expect("source state");
+        source
+            .upsert(
+                "users",
+                row_id,
+                &[("email", LoroValue::String(email.into()))],
+            )
+            .expect("source write");
+        source.export_snapshot().expect("source snapshot")
+    }
+
+    fn task_at(lsn: u64) -> ExecutionTask {
+        ExecutionTask::with_wal_lsn(
+            make_default_task().request,
+            Some(crate::types::Lsn::new(lsn)),
+        )
+    }
+
+    /// Install a UNIQUE email constraint under a strict policy, so a clash
+    /// is a rejection.
+    fn install_unique_email(core: &mut CoreLoop, task: &ExecutionTask) {
+        let engine = core
+            .get_crdt_engine(task.request.database_id, task.request.tenant_id)
+            .expect("engine");
+        assert!(engine.set_collection_constraints(
+            "users",
+            1,
+            vec![nodedb_crdt::Constraint {
+                name: "users_email_unique".into(),
+                collection: "users".into(),
+                field: "email".into(),
+                kind: nodedb_crdt::ConstraintKind::Unique,
+            }],
+        ));
+        engine
+            .set_collection_policy_typed("users", nodedb_crdt::policy::CollectionPolicy::strict());
+    }
+
+    /// Seed row `a`, then apply row `b` with the same email at `lsn`.
+    fn reject_duplicate_email(core: &mut CoreLoop, lsn: u64) -> Response {
+        let seed = task_at(lsn - 1);
+        install_unique_email(core, &seed);
+        let first = user_delta(2, "a", "x@y.com");
+        assert_eq!(
+            core.apply_crdt_local(&seed, users_params("a", &first))
+                .status,
+            Status::Ok
+        );
+        let second = user_delta(3, "b", "x@y.com");
+        core.apply_crdt_local(&task_at(lsn), users_params("b", &second))
+    }
+
+    fn dead_letters(core: &mut CoreLoop) -> Vec<nodedb_crdt::DeadLetter> {
+        let task = make_default_task();
+        core.get_crdt_engine(task.request.database_id, task.request.tenant_id)
+            .expect("engine")
+            .dead_letters()
+            .cloned()
+            .collect()
+    }
+
+    /// A delta rejected by a constraint is refused with the constraint, the
+    /// row stays absent, and one dead-letter entry is stored for its record.
+    #[test]
+    fn a_constraint_rejection_is_refused_and_stores_its_dead_letter() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _request_tx, _response_rx) = make_core_with_dir(dir.path());
+
+        let response = reject_duplicate_email(&mut core, 11);
+
+        assert_eq!(response.status, Status::Error);
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(ErrorCode::RejectedConstraint { constraint, .. }) if constraint == "unique"
+            ),
+            "got {:?}",
+            response.error_code
+        );
+        let task = make_default_task();
+        let db = task.request.database_id;
+        let tenant = task.request.tenant_id;
+        assert!(
+            core.crdt_engines
+                .get(&(db, tenant))
+                .is_some_and(|engine| !engine.row_exists("users", "b")),
+            "a rejected delta must not reach the CRDT state"
+        );
+        let live = dead_letters(&mut core);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].source_lsn, Some(11));
+        assert_eq!(
+            core.sparse
+                .load_crdt_dead_letters(db.as_u64(), tenant.as_u64())
+                .expect("load"),
+            live
+        );
+    }
+
+    /// After a restart the queue holds the entries the live path stored. A
+    /// record that rejects again keeps its one entry.
+    #[test]
+    fn a_restart_restores_the_live_dead_letters_without_duplicates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = {
+            let (mut core, _request_tx, _response_rx) = make_core_with_dir(dir.path());
+            assert_eq!(reject_duplicate_email(&mut core, 11).status, Status::Error);
+            dead_letters(&mut core)
+        };
+
+        let (mut core, _request_tx, _response_rx) = make_core_with_dir(dir.path());
+        assert_eq!(dead_letters(&mut core), live);
+
+        assert_eq!(reject_duplicate_email(&mut core, 11).status, Status::Error);
+        assert_eq!(dead_letters(&mut core), live, "the record keeps one entry");
     }
 }

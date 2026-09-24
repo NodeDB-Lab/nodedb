@@ -47,6 +47,7 @@ pub(super) mod provider_scan_compute;
 pub mod purge;
 pub mod query_collection_size;
 pub mod reclaim;
+pub(super) mod reclaim_retry;
 pub mod recursive;
 pub mod recursive_value;
 pub mod returning_doc;

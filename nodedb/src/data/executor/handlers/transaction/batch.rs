@@ -386,6 +386,7 @@ impl CoreLoop {
                             ?outcome,
                             "CRDT delta validation failed; transaction rollback required"
                         );
+                        let code = self.crdt_batch_refusal(task, tenant_id, &collection, outcome);
                         return Some(Response {
                             request_id: task.request_id(),
                             status: Status::Error,
@@ -393,11 +394,7 @@ impl CoreLoop {
                             partial: false,
                             payload: crate::bridge::envelope::Payload::empty(),
                             watermark_lsn: self.watermark,
-                            error_code: Some(Box::new(
-                                crate::bridge::envelope::ErrorCode::Internal {
-                                    detail: format!("CRDT delta validation failed: {outcome:?}"),
-                                },
-                            )),
+                            error_code: Some(Box::new(code)),
                             read_set_valid: None,
                             read_version_lsn: crate::types::Lsn::ZERO,
                             write_set: Vec::new(),

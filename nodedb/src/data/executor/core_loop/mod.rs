@@ -5,6 +5,7 @@ mod bitemporal_time;
 pub(in crate::data::executor) mod checkpoint_floors;
 mod columnar_schema_seed;
 pub(in crate::data::executor) mod commit_pending;
+mod crdt_dead_letters;
 mod decode_stored;
 pub(in crate::data::executor) mod deferred;
 mod doc_config_seed;
@@ -27,6 +28,7 @@ mod vector_index_rebuild;
 mod vector_index_seed;
 pub(in crate::data::executor) mod write_index;
 
+pub(in crate::data::executor) use crdt_dead_letters::crdt_rejection;
 pub use doc_config_seed::DocConfigSeedEntry;
 pub(in crate::data::executor) use segment_keks::SegmentKeks;
 pub use state::CoreLoop;

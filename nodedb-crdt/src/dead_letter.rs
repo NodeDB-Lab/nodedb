@@ -25,7 +25,16 @@ use crate::constraint::Constraint;
 use crate::error::{CrdtError, Result};
 
 /// Suggested action the application should take to resolve a constraint violation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub enum CompensationHint {
     /// Retry with a different value for the conflicting field.
     /// Example: UNIQUE violation — suggest appending a suffix.
@@ -58,7 +67,16 @@ pub enum CompensationHint {
 }
 
 /// A rejected delta with metadata for debugging and recovery.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct DeadLetter {
     /// Unique ID for this dead letter entry.
     pub id: u64,
@@ -103,6 +121,12 @@ pub struct DeadLetter {
 
     /// Number of times this delta has been retried.
     pub retry_count: u32,
+
+    /// The log position of the record whose apply rejected this delta, once
+    /// the applier binds it. One record yields at most one entry, so a
+    /// re-applied record never adds a second.
+    #[serde(default)]
+    pub source_lsn: Option<u64>,
 }
 
 /// Parameters for [`DeadLetterQueue::enqueue`].
@@ -175,9 +199,58 @@ impl DeadLetterQueue {
             hint,
             rejected_at: now,
             retry_count: 0,
+            source_lsn: None,
         });
 
         Ok(id)
+    }
+
+    /// Bind entry `id` to the record at `source_lsn` that produced it.
+    ///
+    /// Returns the bound entry. Returns `None` when another entry already
+    /// names that record: entry `id` is a repeat of it and is removed. Also
+    /// `None` when no entry `id` exists.
+    pub fn bind_source(&mut self, id: u64, source_lsn: u64) -> Option<&DeadLetter> {
+        let repeat = self
+            .entries
+            .iter()
+            .any(|dl| dl.id != id && dl.source_lsn == Some(source_lsn));
+        if repeat {
+            self.remove(id);
+            return None;
+        }
+        let entry = self.entries.iter_mut().find(|dl| dl.id == id)?;
+        entry.source_lsn = Some(source_lsn);
+        Some(&*entry)
+    }
+
+    /// Put back an entry read from durable storage.
+    ///
+    /// An entry whose source record an existing entry already names is
+    /// skipped. Fresh ids stay above every restored id.
+    pub fn restore(&mut self, entry: DeadLetter) -> Result<()> {
+        let known = entry.source_lsn.is_some()
+            && self
+                .entries
+                .iter()
+                .any(|dl| dl.source_lsn == entry.source_lsn);
+        if known {
+            return Ok(());
+        }
+        if self.entries.len() >= self.capacity {
+            return Err(CrdtError::DlqFull {
+                capacity: self.capacity,
+                pending: self.entries.len(),
+            });
+        }
+        self.next_id = self.next_id.max(entry.id.saturating_add(1));
+        self.entries.push_back(entry);
+        Ok(())
+    }
+
+    /// Every pending entry, oldest first.
+    pub fn iter(&self) -> impl Iterator<Item = &DeadLetter> {
+        self.entries.iter()
     }
 
     /// Peek at the oldest dead letter without removing it.
@@ -489,5 +562,56 @@ mod tests {
         let removed = dlq.remove(id1).unwrap();
         assert_eq!(removed.reason, "a");
         assert_eq!(dlq.len(), 1);
+    }
+
+    fn enqueue_one(dlq: &mut DeadLetterQueue, peer_id: u64) -> u64 {
+        dlq.enqueue(EnqueueDeadLetterArgs {
+            peer_id,
+            user_id: 0,
+            tenant_id: 0,
+            delta: b"delta".to_vec(),
+            constraint: &test_constraint(),
+            reason: "duplicate".into(),
+            hint: CompensationHint::ManualIntervention {
+                reason: "duplicate".into(),
+            },
+        })
+        .expect("enqueue")
+    }
+
+    #[test]
+    fn a_record_bound_twice_keeps_one_entry() {
+        let mut dlq = DeadLetterQueue::new(10);
+        let first = enqueue_one(&mut dlq, 1);
+        assert!(dlq.bind_source(first, 7).is_some());
+        let repeat = enqueue_one(&mut dlq, 1);
+        assert!(dlq.bind_source(repeat, 7).is_none());
+        assert_eq!(dlq.len(), 1);
+        assert_eq!(dlq.peek().map(|dl| dl.source_lsn), Some(Some(7)));
+    }
+
+    #[test]
+    fn a_restored_entry_is_kept_once_and_fresh_ids_stay_above_it() {
+        let mut source = DeadLetterQueue::new(10);
+        let id = enqueue_one(&mut source, 1);
+        let stored = source.bind_source(id, 9).cloned().expect("bound");
+
+        let mut restored = DeadLetterQueue::new(10);
+        restored.restore(stored.clone()).expect("restore");
+        restored.restore(stored.clone()).expect("restore again");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored.peek(), Some(&stored));
+        let fresh = enqueue_one(&mut restored, 2);
+        assert!(fresh > stored.id);
+    }
+
+    #[test]
+    fn a_dead_letter_round_trips_through_messagepack() {
+        let mut dlq = DeadLetterQueue::new(10);
+        let id = enqueue_one(&mut dlq, 3);
+        let entry = dlq.bind_source(id, 11).cloned().expect("bound");
+        let bytes = zerompk::to_msgpack_vec(&entry).expect("encode");
+        let decoded: DeadLetter = zerompk::from_msgpack(&bytes).expect("decode");
+        assert_eq!(decoded, entry);
     }
 }

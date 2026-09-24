@@ -102,6 +102,10 @@ pub struct TenantCrdtEngine {
     /// alive across a run of deltas and rebuilt only when a delta is refused.
     /// Cleared by `clear_apply_candidates` when the run ends.
     pub(super) apply_candidates: HashMap<String, CrdtState>,
+
+    /// The dead-letter entry the latest validated apply enqueued. The applier
+    /// binds it to the record that carried the delta.
+    pub(super) last_dead_letter: Option<u64>,
 }
 
 impl TenantCrdtEngine {
@@ -119,6 +123,7 @@ impl TenantCrdtEngine {
             collections: HashMap::new(),
             constraint_versions: HashMap::new(),
             apply_candidates: HashMap::new(),
+            last_dead_letter: None,
         })
     }
 

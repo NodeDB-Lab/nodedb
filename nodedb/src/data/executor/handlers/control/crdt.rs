@@ -244,12 +244,24 @@ impl CoreLoop {
             }
             crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Rejected(reason) => {
                 warn!(core = self.core_id, %reason, "crdt snapshot rejected by constraints");
-                self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!("CRDT snapshot violates constraints: {reason}"),
+                // Nothing applied, so the record is cancelled and replay never
+                // reaches this rejection. Its dead-letter entry is stored first.
+                let code = match self.store_crdt_dead_letter(
+                    task.request.database_id,
+                    tid,
+                    task.wal_lsn(),
+                ) {
+                    Ok(()) => crate::data::executor::core_loop::crdt_rejection(
+                        collection, "snapshot", &reason,
+                    ),
+                    Err(error) => ErrorCode::Internal {
+                        detail: format!(
+                            "CRDT snapshot for {collection} violates {reason}, and its \
+                             dead-letter entry could not be stored: {error}"
+                        ),
                     },
-                )
+                };
+                self.response_error(task, code)
             }
             crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Malformed => {
                 warn!(core = self.core_id, "crdt snapshot import was malformed");

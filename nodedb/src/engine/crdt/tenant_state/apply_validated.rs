@@ -110,6 +110,7 @@ impl TenantCrdtEngine {
         peer_id: u64,
         admission: DeltaSigningAdmission,
     ) -> ValidatedApplyOutcome {
+        self.last_dead_letter = None;
         if admission.required && admission.auth.delta_signature == [0; 32] {
             return ValidatedApplyOutcome::Malformed;
         }
@@ -313,7 +314,7 @@ impl TenantCrdtEngine {
         let reason = violation.reason.clone();
         match constraint {
             Some(constraint) => {
-                if let Err(e) =
+                let enqueued =
                     self.validator
                         .dlq_mut()
                         .enqueue(nodedb_crdt::EnqueueDeadLetterArgs {
@@ -324,14 +325,15 @@ impl TenantCrdtEngine {
                             constraint: &constraint,
                             reason,
                             hint: violation.hint.clone(),
-                        })
-                {
-                    tracing::warn!(
+                        });
+                match enqueued {
+                    Ok(id) => self.last_dead_letter = Some(id),
+                    Err(e) => tracing::warn!(
                         tenant = tenant_id,
                         collection,
                         error = %e,
                         "crdt: failed to enqueue rejected delta to DLQ"
-                    );
+                    ),
                 }
             }
             None => {
@@ -347,7 +349,7 @@ impl TenantCrdtEngine {
                 let hint = nodedb_crdt::CompensationHint::ManualIntervention {
                     reason: reason.clone(),
                 };
-                if let Err(e) =
+                let enqueued =
                     self.validator
                         .dlq_mut()
                         .enqueue(nodedb_crdt::EnqueueDeadLetterArgs {
@@ -358,14 +360,15 @@ impl TenantCrdtEngine {
                             constraint: &fallback,
                             reason,
                             hint,
-                        })
-                {
-                    tracing::warn!(
+                        });
+                match enqueued {
+                    Ok(id) => self.last_dead_letter = Some(id),
+                    Err(e) => tracing::warn!(
                         tenant = tenant_id,
                         collection,
                         error = %e,
                         "crdt: failed to enqueue rejected delta to DLQ (unresolved constraint)"
-                    );
+                    ),
                 }
             }
         }

@@ -9,6 +9,7 @@ pub mod apply;
 pub mod apply_validated;
 pub mod constraints;
 pub mod core;
+pub mod dead_letters;
 pub mod doc_mutate;
 pub mod history;
 pub mod list_ops;

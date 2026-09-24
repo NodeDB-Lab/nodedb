@@ -7,13 +7,49 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use tracing::error;
 
 use crate::bridge::envelope::{ErrorCode, Response};
-use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::{CoreLoop, crdt_rejection};
 use crate::data::executor::task::ExecutionTask;
 use crate::data::panic_payload::panic_payload_to_string;
+use crate::engine::crdt::tenant_state::ValidatedApplyOutcome;
 use crate::types::TenantId;
 
 use super::batch::CrdtDelta;
 use super::undo::UndoEntry;
+
+impl CoreLoop {
+    /// The refusal for a buffered CRDT delta that did not apply cleanly.
+    ///
+    /// A constraint rejection stores its dead-letter entry first, then
+    /// refuses with the constraint. The transaction rolls back either way.
+    pub(super) fn crdt_batch_refusal(
+        &mut self,
+        task: &ExecutionTask,
+        tenant_id: TenantId,
+        collection: &str,
+        outcome: ValidatedApplyOutcome,
+    ) -> ErrorCode {
+        match outcome {
+            ValidatedApplyOutcome::Rejected(violation) => match self.store_crdt_dead_letter(
+                task.request.database_id,
+                tenant_id,
+                task.wal_lsn(),
+            ) {
+                Ok(()) => crdt_rejection(collection, "transaction batch", &violation),
+                Err(error) => ErrorCode::Internal {
+                    detail: format!(
+                        "CRDT delta for {collection} violates {violation}, and its \
+                         dead-letter entry could not be stored: {error}"
+                    ),
+                },
+            },
+            outcome @ (ValidatedApplyOutcome::Clean { .. }
+            | ValidatedApplyOutcome::Malformed
+            | ValidatedApplyOutcome::PendingDependencies) => ErrorCode::Internal {
+                detail: format!("CRDT delta validation failed: {outcome:?}"),
+            },
+        }
+    }
+}
 
 /// A CRDT collection's state before a transaction starts importing its deltas.
 struct CrdtCollectionPreimage {

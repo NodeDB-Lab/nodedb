@@ -11,6 +11,7 @@ use redb::{Database, WriteTransaction};
 use tracing::info;
 
 use super::chain_head::CHAIN_HEADS;
+use super::crdt_dead_letter::CRDT_DEAD_LETTERS;
 use super::tables::{DOCUMENTS, INDEXES, redb_err};
 
 /// redb-backed B-Tree storage engine for sparse/metadata queries.
@@ -41,6 +42,10 @@ impl SparseEngine {
             let _ = write_txn
                 .open_table(CHAIN_HEADS)
                 .map_err(|e| redb_err("open chain heads table", e))?;
+            // Read transactions open it when a CRDT engine is created.
+            let _ = write_txn
+                .open_table(CRDT_DEAD_LETTERS)
+                .map_err(|e| redb_err("open crdt dead letters table", e))?;
         }
         write_txn.commit().map_err(|e| redb_err("commit", e))?;
 

@@ -205,19 +205,26 @@ impl CoreLoop {
         database_id: DatabaseId,
         tenant_id: TenantId,
     ) -> crate::Result<&mut TenantCrdtEngine> {
-        let key = (database_id, tenant_id);
-        if !self.crdt_engines.contains_key(&key) {
-            tracing::debug!(
-                core = self.core_id,
-                %database_id,
-                %tenant_id,
-                "creating CRDT engine for database tenant"
-            );
-            let engine =
-                TenantCrdtEngine::new(tenant_id, self.core_id as u64, ConstraintSet::new())?;
-            self.crdt_engines.insert(key, engine);
+        match self.crdt_engines.entry((database_id, tenant_id)) {
+            std::collections::hash_map::Entry::Occupied(engine) => Ok(engine.into_mut()),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                tracing::debug!(
+                    core = self.core_id,
+                    %database_id,
+                    %tenant_id,
+                    "creating CRDT engine for database tenant"
+                );
+                let mut engine =
+                    TenantCrdtEngine::new(tenant_id, self.core_id as u64, ConstraintSet::new())?;
+                // Rejected deltas leave no replayable record, so their
+                // dead-letter entries come back from storage.
+                engine.restore_dead_letters(
+                    self.sparse
+                        .load_crdt_dead_letters(database_id.as_u64(), tenant_id.as_u64())?,
+                );
+                Ok(slot.insert(engine))
+            }
         }
-        Ok(self.crdt_engines.get_mut(&key).expect("just inserted"))
     }
 
     /// Release the per-collection validation candidates every CRDT engine on

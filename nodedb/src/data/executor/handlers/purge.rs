@@ -176,6 +176,18 @@ impl CoreLoop {
             );
         }
 
+        // Stored CRDT dead-letter entries: a tenant recreated under the same
+        // id must not restore them.
+        if let Err(e) = self.sparse.delete_crdt_dead_letters_for_tenant(tenant_id) {
+            warn!(tenant_id, error = %e, "sparse crdt dead-letter purge failed");
+            return self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: format!("sparse crdt dead-letter purge: {e}"),
+                },
+            );
+        }
+
         // Sparse vector indexes: remove for this tenant (all databases).
         self.sparse_vector_indexes
             .retain(|(_, t, _, _), _| *t != tid_key);

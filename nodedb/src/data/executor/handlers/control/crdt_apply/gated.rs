@@ -282,6 +282,20 @@ impl CoreLoop {
             GateOutcome::Applied(ValidatedApplyOutcome::Rejected(vt)) => {
                 imported_authoritative = true;
                 self.checkpoint_coordinator.mark_dirty("crdt", 1);
+                // Replaying this record binds to the same log position, so
+                // the stored entry stays the only one.
+                if let Err(error) =
+                    self.store_crdt_dead_letter(task.request.database_id, tenant_id, task.wal_lsn())
+                {
+                    warn!(
+                        core = self.core_id,
+                        %collection,
+                        %document_id,
+                        %error,
+                        "crdt sync apply rejected a delta, and its dead-letter entry could not \
+                         be stored; replay of its record rebuilds it"
+                    );
+                }
                 GateDisposition::Terminal(vt)
             }
             GateOutcome::Applied(ValidatedApplyOutcome::Malformed) => {

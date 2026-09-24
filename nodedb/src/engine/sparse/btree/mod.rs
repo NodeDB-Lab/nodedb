@@ -3,6 +3,7 @@
 //! redb-backed B-Tree storage for the sparse engine's non-versioned tables.
 
 pub mod chain_head;
+pub mod crdt_dead_letter;
 pub mod document;
 pub mod engine;
 pub mod keys;

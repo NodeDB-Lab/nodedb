@@ -231,6 +231,7 @@ impl CoreLoop {
                             // The committed record remains a deterministic no-op
                             // whose collection floor advances on every replica.
                             warn!(core = self.core_id, tenant = tid.as_u64(), %collection, %reason, "CRDT WAL delta rejected during replay");
+                            self.store_replayed_dead_letter(database_id, tid, record.header.lsn);
                             None
                         }
                         crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Malformed => {
@@ -279,6 +280,7 @@ impl CoreLoop {
                                 reason,
                             ) => {
                                 warn!(core = self.core_id, tenant = tid.as_u64(), %collection, %reason, "legacy CRDT WAL delta rejected during replay");
+                                self.store_replayed_dead_letter(database_id, tid, record.header.lsn);
                                 None
                             }
                             crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Malformed => {
@@ -733,6 +735,95 @@ mod crdt_replay_tests {
         assert!(
             !engine.row_exists("notes", "row1"),
             "core 0 must not replay a record routed to core 1"
+        );
+    }
+
+    /// A `users` row record at `lsn` whose delta sets `email`.
+    fn email_record(
+        tid: TenantId,
+        row_id: &str,
+        email: &str,
+        peer: u64,
+        lsn: u64,
+    ) -> nodedb_wal::WalRecord {
+        let state = nodedb_crdt::state::CrdtState::new(peer).expect("state");
+        state
+            .upsert(
+                "users",
+                row_id,
+                &[("email", LoroValue::String(email.into()))],
+            )
+            .expect("upsert");
+        let payload = crate::wal::CrdtDeltaWalPayload::new(
+            state.export_snapshot().expect("snapshot"),
+            Some("users".into()),
+            None,
+            None,
+            Some(row_id.to_owned()),
+            Some(0),
+        );
+        nodedb_wal::WalRecord::new(nodedb_wal::WalRecordArgs {
+            record_type: RecordType::CrdtDelta as u32,
+            lsn,
+            tenant_id: tid.as_u64(),
+            vshard_id: 0,
+            database_id: DatabaseId::DEFAULT.as_u64(),
+            payload: payload.encode().expect("encode"),
+            encryption_key: None,
+            preamble_bytes: None,
+        })
+        .expect("record")
+    }
+
+    /// A record whose delta a constraint rejects leaves one stored entry,
+    /// however often it replays.
+    #[test]
+    fn a_replayed_rejection_stores_one_dead_letter_for_its_record() {
+        let tid = TenantId::new(7);
+        let mut h = make_core(0);
+        {
+            let engine = h
+                .core
+                .get_crdt_engine(DatabaseId::DEFAULT, tid)
+                .expect("engine");
+            assert!(engine.set_collection_constraints(
+                "users",
+                1,
+                vec![nodedb_crdt::Constraint {
+                    name: "users_email_unique".into(),
+                    collection: "users".into(),
+                    field: "email".into(),
+                    kind: nodedb_crdt::ConstraintKind::Unique,
+                }],
+            ));
+            engine.set_collection_policy_typed(
+                "users",
+                nodedb_crdt::policy::CollectionPolicy::strict(),
+            );
+        }
+        let tombstones = nodedb_wal::TombstoneSet::new();
+        let records = [
+            email_record(tid, "a", "x@y.com", 2, 19),
+            email_record(tid, "b", "x@y.com", 3, 20),
+        ];
+        h.core.replay_crdt_wal(&records, 1, &tombstones);
+        h.core.replay_crdt_wal(&records[1..], 1, &tombstones);
+
+        let entries: Vec<_> = h
+            .core
+            .get_crdt_engine(DatabaseId::DEFAULT, tid)
+            .expect("engine")
+            .dead_letters()
+            .cloned()
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source_lsn, Some(20));
+        assert_eq!(
+            h.core
+                .sparse
+                .load_crdt_dead_letters(DatabaseId::DEFAULT.as_u64(), tid.as_u64())
+                .expect("load"),
+            entries
         );
     }
 }

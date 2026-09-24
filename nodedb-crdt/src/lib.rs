@@ -38,7 +38,7 @@ pub mod validator;
 
 pub use auth::CrdtAuthContext;
 pub use constraint::{Constraint, ConstraintKind, ConstraintSet};
-pub use dead_letter::{CompensationHint, DeadLetterQueue, EnqueueDeadLetterArgs};
+pub use dead_letter::{CompensationHint, DeadLetter, DeadLetterQueue, EnqueueDeadLetterArgs};
 pub use deferred::DeferredQueue;
 pub use error::{CrdtError, Result};
 pub use policy::{
