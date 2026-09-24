@@ -108,6 +108,10 @@ impl CoreLoop {
                 },
             );
         }
+        if let Some(m) = &self.metrics {
+            m.graph_edges_deleted_total
+                .fetch_add(removed, std::sync::atomic::Ordering::Relaxed);
+        }
         self.response_affected(task, removed)
     }
 }

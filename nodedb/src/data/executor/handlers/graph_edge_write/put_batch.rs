@@ -119,6 +119,10 @@ impl CoreLoop {
                 },
             );
         }
+        if let Some(m) = &self.metrics {
+            m.graph_edges_written_total
+                .fetch_add(edges.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         self.response_affected(task, edges.len() as u64)
     }
 }

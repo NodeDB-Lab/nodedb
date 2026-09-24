@@ -460,3 +460,63 @@ async fn show_session_set_parameter_round_trips() {
         .expect("SHOW application_name must succeed");
     assert_eq!(rows, vec!["mae8_bootstrap".to_string()]);
 }
+
+// ── SHOW SNAPSHOT ─────────────────────────────────────────────────────
+
+/// `SHOW SNAPSHOT` must reach its handler (not the session-parameter
+/// fallback) and return the WAL pin a reader captures before paging. The pin
+/// must not move backwards across two reads.
+#[tokio::test]
+async fn show_snapshot_returns_the_wal_pin() {
+    let server = TestServer::start().await;
+
+    assert!(
+        !is_session_param_fallback(&server, "SHOW SNAPSHOT", "snapshot").await,
+        "SHOW SNAPSHOT must not fall through to the session-parameter fallback"
+    );
+
+    let rows = server
+        .query_named_rows("SHOW SNAPSHOT")
+        .await
+        .expect("SHOW SNAPSHOT must not error");
+    let first: std::collections::BTreeMap<String, String> = rows
+        .into_iter()
+        .map(|r| {
+            (
+                r.get("name").cloned().unwrap_or_default(),
+                r.get("value").cloned().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        first.get("snapshot_pin").map(String::as_str),
+        Some("wal_lsn"),
+        "the pin kind must be named: {first:?}"
+    );
+    let before: u64 = first
+        .get("wal_next_lsn")
+        .expect("wal_next_lsn row")
+        .parse()
+        .expect("wal_next_lsn is a decimal integer");
+
+    // A write advances the WAL; the pin must reflect it and never regress.
+    server
+        .exec("CREATE COLLECTION show_snapshot_probe")
+        .await
+        .expect("seed write");
+    let rows = server
+        .query_named_rows("SHOW SNAPSHOT")
+        .await
+        .expect("SHOW SNAPSHOT after a write");
+    let after_row = rows
+        .iter()
+        .find(|r| r.get("name").map(|n| n == "wal_next_lsn").unwrap_or(false))
+        .expect("wal_next_lsn row after a write");
+    let after: u64 = after_row["value"]
+        .parse()
+        .expect("wal_next_lsn stays a decimal integer");
+    assert!(
+        after >= before,
+        "the pin must not regress: {before} -> {after}"
+    );
+}

@@ -206,6 +206,9 @@ pub(super) async fn try_string(
     if upper == "SHOW SERVER STATS" || upper.starts_with("SHOW SERVER STATS ") {
         return Some(observability::show_server_stats(state, identity));
     }
+    if upper == "SHOW SNAPSHOT" || upper.starts_with("SHOW SNAPSHOT ") {
+        return Some(observability::show_snapshot(state));
+    }
     if upper == "SHOW STATS" || upper.starts_with("SHOW STATS ") {
         return Some(observability::show_server_stats(state, identity));
     }

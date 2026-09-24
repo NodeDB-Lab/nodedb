@@ -203,12 +203,15 @@ impl Dispatcher {
         }
 
         // Enqueue into the WFQ — returns Err if total capacity is full.
-        channel
-            .wfq
-            .try_enqueue(database_id, request)
-            .map_err(|_| crate::Error::Dispatch {
-                detail: format!("core {core_id}: total WFQ capacity exhausted"),
-            })?;
+        channel.wfq.try_enqueue(database_id, request).map_err(|_| {
+            note_capacity_exhausted();
+            crate::Error::Dispatch {
+                detail: format!(
+                    "dispatch_capacity: core {core_id} capacity {}",
+                    self.per_core_capacity
+                ),
+            }
+        })?;
 
         // Update per-DB pressure.
         channel.update_db_pressure(database_id);
@@ -284,12 +287,15 @@ impl Dispatcher {
         let cls = self.priority_resolver.priority_for(database_id);
         channel.wfq.set_priority(database_id, cls);
 
-        channel
-            .wfq
-            .try_enqueue(database_id, request)
-            .map_err(|_| crate::Error::Dispatch {
-                detail: format!("core {core_id}: total WFQ capacity exhausted"),
-            })?;
+        channel.wfq.try_enqueue(database_id, request).map_err(|_| {
+            note_capacity_exhausted();
+            crate::Error::Dispatch {
+                detail: format!(
+                    "dispatch_capacity: core {core_id} capacity {}",
+                    self.per_core_capacity
+                ),
+            }
+        })?;
 
         channel.update_db_pressure(database_id);
         channel.flush_wfq();
@@ -443,6 +449,24 @@ impl Dispatcher {
     pub fn router(&self) -> &VShardRouter {
         &self.router
     }
+}
+
+/// Cumulative count of refused dispatches because a core's WFQ had no room.
+///
+/// Process-global on purpose: the WFQ rejection happens below the per-database
+/// metrics handles, and the operational question ("is dispatch capacity the
+/// thing clients are hitting?") is answered by the total. Per-database
+/// granularity is a follow-up once the sampler owns a metrics handle.
+static DISPATCH_CAPACITY_EXHAUSTED_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn note_capacity_exhausted() {
+    DISPATCH_CAPACITY_EXHAUSTED_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Total refused dispatches since process start (Prometheus export).
+pub fn dispatch_capacity_exhausted_total() -> u64 {
+    DISPATCH_CAPACITY_EXHAUSTED_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -637,7 +661,7 @@ mod tests {
         let _ = dispatcher.db_pressure_on_core(0, 2);
     }
 
-    // --- Dead-core request loss (GitHub #265) ---
+    // --- Dead-core request loss ---
     //
     // When a Data Plane core's consumer/producer is dropped (the core thread
     // died), `Dispatcher` must synthesize an error `Response` for every

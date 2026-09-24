@@ -114,6 +114,12 @@ pub struct SystemMetrics {
     /// dropped on COMMIT/ROLLBACK/teardown. A persistently non-zero idle value
     /// indicates leaked abandoned-transaction overlays.
     pub active_txn_overlays: AtomicU64,
+    /// Cumulative graph edges applied by `EdgePut` / `EdgePutBatch`. A bulk
+    /// loader sizes its pacing from arrival rate vs apply rate; without this
+    /// it estimates from `queries_graph`, which mixes reads in.
+    pub graph_edges_written_total: AtomicU64,
+    /// Cumulative graph edges tombstoned by `EdgeDelete` / `EdgeDeleteBatch`.
+    pub graph_edges_deleted_total: AtomicU64,
 
     // ── Contention ──
     pub mmap_major_faults: AtomicU64,
