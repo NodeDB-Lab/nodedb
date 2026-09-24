@@ -40,7 +40,7 @@ fn send_txn(
         ..make_request(plan)
     };
     req_tx
-        .try_push(nodedb::bridge::dispatch::BridgeRequest { inner: request })
+        .try_push(nodedb::bridge::dispatch::BridgeRequest::unfloored(request))
         .unwrap();
     core.tick();
     resp_rx.try_pop().unwrap().inner

@@ -529,7 +529,7 @@ fn kv_tenant_isolation() {
             rls_filters: Vec::new(),
         }))
     };
-    tx.try_push(nodedb::bridge::dispatch::BridgeRequest { inner: req })
+    tx.try_push(nodedb::bridge::dispatch::BridgeRequest::unfloored(req))
         .unwrap();
     core.tick();
     let resp = rx.try_pop().unwrap();
@@ -551,7 +551,7 @@ fn kv_tenant_isolation() {
             rls_filters: Vec::new(),
         }))
     };
-    tx.try_push(nodedb::bridge::dispatch::BridgeRequest { inner: req })
+    tx.try_push(nodedb::bridge::dispatch::BridgeRequest::unfloored(req))
         .unwrap();
     core.tick();
     let resp = rx.try_pop().unwrap();
@@ -570,7 +570,7 @@ fn kv_tenant_isolation() {
             surrogate_ceiling: None,
         }))
     };
-    tx.try_push(nodedb::bridge::dispatch::BridgeRequest { inner: req })
+    tx.try_push(nodedb::bridge::dispatch::BridgeRequest::unfloored(req))
         .unwrap();
     core.tick();
     let resp = rx.try_pop().unwrap();

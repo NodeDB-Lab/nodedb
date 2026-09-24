@@ -42,6 +42,7 @@ impl Dispatcher {
                 // tenant's in-flight slot mid-stream.
                 if !br.inner.partial {
                     channel.outstanding.remove(&rid);
+                    self.dispatched_lsns.settle(rid);
                     freed |= release_inflight_slot(
                         &mut self.request_tenant,
                         &mut self.tenant_inflight,
@@ -53,7 +54,7 @@ impl Dispatcher {
 
             if !(producer_gone || channel.request_tx.is_disconnected()) {
                 // Opportunistically flush WFQ after draining responses to fill headroom.
-                channel.flush_wfq();
+                channel.flush_wfq(self.outcome_floor.floor());
                 continue;
             }
 
@@ -82,6 +83,8 @@ impl Dispatcher {
             // and emits nothing, so a permanently dead core costs one pass
             // over two empty containers rather than a repeating failure storm.
             for rid in lost {
+                // A dead core never publishes a watermark again.
+                self.dispatched_lsns.settle(rid);
                 freed |=
                     release_inflight_slot(&mut self.request_tenant, &mut self.tenant_inflight, rid);
                 responses.push(envelope::Response {
@@ -385,5 +388,98 @@ mod tests {
             assert_eq!(r.status, Status::Error);
             assert!(r.error_code.is_some());
         }
+    }
+
+    // --- Outcome floor ---
+
+    fn ok_response(request_id: u64) -> BridgeResponse {
+        BridgeResponse {
+            inner: envelope::Response {
+                request_id: RequestId::new(request_id),
+                status: Status::Ok,
+                attempt: 1,
+                partial: false,
+                payload: Payload::empty(),
+                watermark_lsn: Lsn::ZERO,
+                error_code: None,
+                read_set_valid: None,
+                read_version_lsn: Lsn::ZERO,
+                write_set: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_dispatched_lsn_holds_the_outcome_floor_until_its_response() {
+        let (mut dispatcher, mut data_sides) = Dispatcher::new(1, 64);
+        let floor = dispatcher.outcome_floor();
+        let mut request = make_request_for_db(0, 0, 5);
+        request.wal_lsn = Some(Lsn::new(40));
+        dispatcher.dispatch(request).unwrap();
+        assert_eq!(dispatcher.dispatched_lsns.len(), 1);
+        assert_eq!(floor.floor(), Lsn::new(39));
+
+        let pushed = data_sides[0].request_rx.try_pop().unwrap();
+        assert!(
+            pushed.outcome_floor < Lsn::new(40),
+            "the request's own push carries a floor below its lsn"
+        );
+
+        data_sides[0].response_tx.try_push(ok_response(5)).unwrap();
+        assert_eq!(dispatcher.poll_responses().len(), 1);
+        assert_eq!(dispatcher.dispatched_lsns.len(), 0);
+        assert_eq!(floor.floor(), Lsn::new(40));
+
+        dispatcher.dispatch(make_request_for_db(0, 0, 6)).unwrap();
+        let next = data_sides[0].request_rx.try_pop().unwrap();
+        assert_eq!(
+            next.outcome_floor,
+            Lsn::new(40),
+            "a push after the response carries the advanced floor"
+        );
+    }
+
+    #[test]
+    fn a_partial_response_keeps_the_outcome_floor_held() {
+        let (mut dispatcher, mut data_sides) = Dispatcher::new(1, 64);
+        let floor = dispatcher.outcome_floor();
+        let mut request = make_request_for_db(0, 0, 8);
+        request.wal_lsn = Some(Lsn::new(12));
+        dispatcher.dispatch(request).unwrap();
+        let _req = data_sides[0].request_rx.try_pop().unwrap();
+
+        let mut partial = ok_response(8);
+        partial.inner.partial = true;
+        data_sides[0].response_tx.try_push(partial).unwrap();
+        dispatcher.poll_responses();
+        assert_eq!(floor.floor(), Lsn::new(11));
+
+        data_sides[0].response_tx.try_push(ok_response(8)).unwrap();
+        dispatcher.poll_responses();
+        assert_eq!(floor.floor(), Lsn::new(12));
+    }
+
+    #[test]
+    fn a_dead_core_releases_the_outcome_floor_it_held() {
+        let (mut dispatcher, mut data_sides) = Dispatcher::new(1, 64);
+        let floor = dispatcher.outcome_floor();
+        let mut request = make_request_for_db(0, 0, 3);
+        request.wal_lsn = Some(Lsn::new(25));
+        dispatcher.dispatch(request).unwrap();
+        assert_eq!(floor.floor(), Lsn::new(24));
+
+        drop(data_sides.remove(0));
+        let responses = dispatcher.poll_responses();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(dispatcher.dispatched_lsns.len(), 0);
+        assert_eq!(floor.floor(), Lsn::new(25));
+    }
+
+    #[test]
+    fn a_request_without_an_lsn_holds_nothing() {
+        let (mut dispatcher, _data_sides) = Dispatcher::new(1, 64);
+        dispatcher.dispatch(make_request_for_db(0, 0, 4)).unwrap();
+        assert_eq!(dispatcher.dispatched_lsns.len(), 0);
+        assert_eq!(dispatcher.outcome_floor().floor(), Lsn::ZERO);
     }
 }

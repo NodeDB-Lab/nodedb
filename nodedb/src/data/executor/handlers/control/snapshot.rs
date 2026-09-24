@@ -473,6 +473,7 @@ impl CoreLoop {
             core = self.core_id,
             checkpoint_lsn,
             watermark = self.watermark.as_u64(),
+            outcome_floor = self.floors.applied_prefix.outcome_floor().as_u64(),
             kv_durable_lsn = self.floors.kv_durable_lsn.as_u64(),
             sparse_vector_durable_lsn = self.floors.sparse_vector_durable_lsn.as_u64(),
             sync_hwm_durable_lsn = self.floors.sync_hwm_durable_lsn.as_u64(),

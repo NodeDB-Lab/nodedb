@@ -46,10 +46,8 @@ fn run_scan_and_count(
     rx: &mut Consumer<BridgeResponse>,
     plan: PhysicalPlan,
 ) -> (usize, Status, Option<ErrorCode>) {
-    tx.try_push(BridgeRequest {
-        inner: make_request(plan),
-    })
-    .unwrap();
+    tx.try_push(BridgeRequest::unfloored(make_request(plan)))
+        .unwrap();
     core.tick();
 
     let mut total = 0usize;

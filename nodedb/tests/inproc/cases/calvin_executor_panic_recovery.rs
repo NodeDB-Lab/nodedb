@@ -383,13 +383,9 @@ fn calvin_static_replay_sees_only_committed_data() {
         };
 
         // Commit a value before the panic batch.
-        tx.try_push(BridgeRequest {
-            inner: make_req(tx_batch(vec![kv_put_in(
-                "replay_coll",
-                b"pre_commit",
-                b"alive",
-            )])),
-        })
+        tx.try_push(BridgeRequest::unfloored(make_req(tx_batch(vec![
+            kv_put_in("replay_coll", b"pre_commit", b"alive"),
+        ]))))
         .unwrap();
         core.tick();
         let pre_resp = rx.try_pop().unwrap().inner;
@@ -404,15 +400,13 @@ fn calvin_static_replay_sees_only_committed_data() {
         // Ok), then flush (where the panic fires during the replay).
         let _guard = FailGuard::install("transaction_batch::between_subapply", FailAction::Panic);
 
-        tx.try_push(BridgeRequest {
-            inner: make_req(calvin_static(
-                1,
-                vec![
-                    kv_put_in("replay_coll", b"should_not_exist", b"gone"),
-                    kv_put_in("replay_coll", b"should_not_exist2", b"gone"),
-                ],
-            )),
-        })
+        tx.try_push(BridgeRequest::unfloored(make_req(calvin_static(
+            1,
+            vec![
+                kv_put_in("replay_coll", b"should_not_exist", b"gone"),
+                kv_put_in("replay_coll", b"should_not_exist2", b"gone"),
+            ],
+        ))))
         .unwrap();
         core.tick();
         let stage_resp = rx.try_pop().unwrap().inner;
@@ -423,10 +417,8 @@ fn calvin_static_replay_sees_only_committed_data() {
             stage_resp.error_code
         );
 
-        tx.try_push(BridgeRequest {
-            inner: make_req(calvin_flush(1)),
-        })
-        .unwrap();
+        tx.try_push(BridgeRequest::unfloored(make_req(calvin_flush(1))))
+            .unwrap();
         core.tick();
         let panic_resp = rx.try_pop().unwrap().inner;
         assert_eq!(
@@ -498,9 +490,10 @@ fn calvin_static_replay_sees_only_committed_data() {
     // never let the bad writes reach durable storage.
 
     // The rolled-back key must not exist on the fresh core.
-    tx2.try_push(BridgeRequest {
-        inner: make_req2(kv_get_in("replay_coll", b"should_not_exist")),
-    })
+    tx2.try_push(BridgeRequest::unfloored(make_req2(kv_get_in(
+        "replay_coll",
+        b"should_not_exist",
+    ))))
     .unwrap();
     core2.tick();
     let gone_get = rx2.try_pop().unwrap().inner;

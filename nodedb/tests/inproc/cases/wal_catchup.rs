@@ -574,30 +574,28 @@ fn startup_replay_recovers_all_wal_data() {
     use nodedb::bridge::envelope::{Priority, Request};
 
     req_tx
-        .try_push(BridgeRequest {
-            inner: Request {
-                request_id: RequestId::new(1),
-                tenant_id: TenantId::new(1),
-                vshard_id: VShardId::new(0),
-                database_id: nodedb::types::DatabaseId::DEFAULT,
-                plan: scan_plan,
-                deadline: std::time::Instant::now() + Duration::from_secs(10),
-                priority: Priority::Normal,
-                trace_id: nodedb_types::TraceId::ZERO,
-                consistency: ReadConsistency::Strong,
-                idempotency_key: None,
-                event_source: nodedb::event::EventSource::User,
-                user_roles: Vec::new(),
-                user_id: None,
-                statement_digest: None,
-                txn_id: None,
-                wal_lsn: None,
-                resolved_now_ms: None,
-                admission: nodedb::bridge::envelope::Admission::Exempt(
-                    nodedb::bridge::envelope::ExemptReason::Read,
-                ),
-            },
-        })
+        .try_push(BridgeRequest::unfloored(Request {
+            request_id: RequestId::new(1),
+            tenant_id: TenantId::new(1),
+            vshard_id: VShardId::new(0),
+            database_id: nodedb::types::DatabaseId::DEFAULT,
+            plan: scan_plan,
+            deadline: std::time::Instant::now() + Duration::from_secs(10),
+            priority: Priority::Normal,
+            trace_id: nodedb_types::TraceId::ZERO,
+            consistency: ReadConsistency::Strong,
+            idempotency_key: None,
+            event_source: nodedb::event::EventSource::User,
+            user_roles: Vec::new(),
+            user_id: None,
+            statement_digest: None,
+            txn_id: None,
+            wal_lsn: None,
+            resolved_now_ms: None,
+            admission: nodedb::bridge::envelope::Admission::Exempt(
+                nodedb::bridge::envelope::ExemptReason::Read,
+            ),
+        }))
         .unwrap();
     core.tick();
     let resp = resp_rx.try_pop().unwrap();

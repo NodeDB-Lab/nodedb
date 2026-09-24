@@ -96,10 +96,8 @@ pub(super) fn make_stub_request(id: u64) -> Request {
 
 /// Push one request onto the inbound ring.
 pub(super) fn push_request(tx: &mut Producer<BridgeRequest>, id: u64) {
-    tx.try_push(BridgeRequest {
-        inner: make_stub_request(id),
-    })
-    .expect("ring has room");
+    tx.try_push(BridgeRequest::unfloored(make_stub_request(id)))
+        .expect("ring has room");
 }
 
 /// A task wrapping [`make_stub_request`], for the per-handler pressure gate.

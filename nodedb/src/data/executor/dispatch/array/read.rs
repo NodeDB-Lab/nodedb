@@ -585,9 +585,7 @@ mod tests {
             let id = self.next_id;
             self.next_id += 1;
             self.req_tx
-                .try_push(BridgeRequest {
-                    inner: make_request(plan, id),
-                })
+                .try_push(BridgeRequest::unfloored(make_request(plan, id)))
                 .unwrap();
             self.core.tick();
             let resp = self.resp_rx.try_pop().unwrap();

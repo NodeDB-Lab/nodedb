@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use nodedb_types::config::TuningConfig;
 use nodedb_types::protocol::Limits;
 
-use crate::bridge::dispatch::Dispatcher;
+use crate::bridge::dispatch::{Dispatcher, OutcomeFloor};
 use crate::control::request_tracker::RequestTracker;
 use crate::control::security::apikey::ApiKeyStore;
 use crate::control::security::audit::AuditLog;
@@ -27,6 +27,9 @@ pub(super) struct AsyncRaftProposerPair {
 
 pub struct SharedState {
     pub dispatcher: Mutex<Dispatcher>,
+    /// The node's outcome floor. Every write that mints a WAL LSN for the Data
+    /// Plane holds a window on it until its outcome is final.
+    pub outcome_floor: Arc<OutcomeFloor>,
     pub tracker: RequestTracker,
     pub wal: Arc<WalManager>,
     /// Collection-scoped scan quiesce registry for safe `PurgeCollection` reclaim.

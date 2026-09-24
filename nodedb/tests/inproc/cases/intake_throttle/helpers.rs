@@ -78,7 +78,7 @@ pub(super) fn fill_response_ring(
             deadline: Instant::now() - Duration::from_secs(1),
             ..crate::cases::core_loop::helpers::make_request_with_id(id, plan)
         };
-        tx.try_push(BridgeRequest { inner })
+        tx.try_push(BridgeRequest::unfloored(inner))
             .expect("request ring has room");
     }
     core.tick();

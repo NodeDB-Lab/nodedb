@@ -97,8 +97,8 @@ fn transaction_batch_commits_atomically() {
 fn transaction_batch_response_uses_outer_request_id() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
-    tx.try_push(nodedb::bridge::dispatch::BridgeRequest {
-        inner: make_request_with_id(
+    tx.try_push(nodedb::bridge::dispatch::BridgeRequest::unfloored(
+        make_request_with_id(
             42,
             PhysicalPlan::Meta(MetaOp::TransactionBatch {
                 txn_id: None,
@@ -117,7 +117,7 @@ fn transaction_batch_response_uses_outer_request_id() {
                 })],
             }),
         ),
-    })
+    ))
     .unwrap();
     core.tick();
 

@@ -100,10 +100,8 @@ fn send_ok(
     rx: &mut Consumer<BridgeResponse>,
     plan: PhysicalPlan,
 ) -> Vec<u8> {
-    tx.try_push(BridgeRequest {
-        inner: make_req(plan),
-    })
-    .unwrap();
+    tx.try_push(BridgeRequest::unfloored(make_req(plan)))
+        .unwrap();
     core.tick();
     let resp = rx.try_pop().unwrap();
     assert_eq!(
@@ -126,10 +124,8 @@ fn send_batch_ok(
 ) {
     let n = plans.len();
     for plan in plans {
-        tx.try_push(BridgeRequest {
-            inner: make_req(plan),
-        })
-        .unwrap();
+        tx.try_push(BridgeRequest::unfloored(make_req(plan)))
+            .unwrap();
     }
     core.tick();
     for _ in 0..n {

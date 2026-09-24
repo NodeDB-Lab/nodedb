@@ -112,9 +112,7 @@ pub fn send_ok(
     plan: PhysicalPlan,
 ) -> Vec<u8> {
     req_tx
-        .try_push(BridgeRequest {
-            inner: make_request(plan),
-        })
+        .try_push(BridgeRequest::unfloored(make_request(plan)))
         .unwrap();
     core.tick();
     let resp = resp_rx.try_pop().unwrap();
@@ -135,9 +133,7 @@ pub fn send_raw(
     plan: PhysicalPlan,
 ) -> nodedb::bridge::envelope::Response {
     req_tx
-        .try_push(BridgeRequest {
-            inner: make_request(plan),
-        })
+        .try_push(BridgeRequest::unfloored(make_request(plan)))
         .unwrap();
     core.tick();
     resp_rx.try_pop().unwrap().inner
@@ -176,9 +172,9 @@ pub fn send_ok_as_tenant(
     plan: PhysicalPlan,
 ) -> Vec<u8> {
     req_tx
-        .try_push(BridgeRequest {
-            inner: make_request_for_tenant(tenant_id, plan),
-        })
+        .try_push(BridgeRequest::unfloored(make_request_for_tenant(
+            tenant_id, plan,
+        )))
         .unwrap();
     core.tick();
     let resp = resp_rx.try_pop().unwrap();
@@ -200,9 +196,9 @@ pub fn send_raw_as_tenant(
     plan: PhysicalPlan,
 ) -> nodedb::bridge::envelope::Response {
     req_tx
-        .try_push(BridgeRequest {
-            inner: make_request_for_tenant(tenant_id, plan),
-        })
+        .try_push(BridgeRequest::unfloored(make_request_for_tenant(
+            tenant_id, plan,
+        )))
         .unwrap();
     core.tick();
     resp_rx.try_pop().unwrap().inner

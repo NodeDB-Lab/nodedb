@@ -18,8 +18,11 @@ use tokio::sync::Notify;
 use crate::bridge::envelope;
 use crate::control::router::vshard::VShardRouter;
 use crate::data::eventfd::EventFdNotifier;
+use crate::types::Lsn;
 
 use super::core_channel::{CoreChannel, CoreChannelDataSide};
+use super::dispatched_lsns::DispatchedLsns;
+use super::outcome_floor::OutcomeFloor;
 
 /// Per-core request queue capacity of the server's bridge dispatcher.
 ///
@@ -36,6 +39,20 @@ pub const DATA_PLANE_QUEUE_CAPACITY: usize = 1024;
 pub struct BridgeRequest {
     /// The full typed request envelope.
     pub inner: envelope::Request,
+    /// The outcome floor when this request entered the ring: every record at
+    /// or below it that any core receives has a final outcome.
+    pub outcome_floor: Lsn,
+}
+
+impl BridgeRequest {
+    /// A request that carries no outcome floor. A core that reads it learns
+    /// nothing about the floor.
+    pub fn unfloored(inner: envelope::Request) -> Self {
+        Self {
+            inner,
+            outcome_floor: Lsn::ZERO,
+        }
+    }
 }
 
 /// Serialized form of a response coming back from the Data Plane.
@@ -108,6 +125,12 @@ pub struct Dispatcher {
     /// Capacity freed on the bridge dispatcher. Every path that releases an
     /// in-flight slot wakes all waiters once per call.
     pub(super) capacity_freed: Arc<Notify>,
+
+    /// The node's outcome floor. Every ring push carries its current value.
+    pub(super) outcome_floor: Arc<OutcomeFloor>,
+
+    /// The floor windows of accepted requests that carry a WAL LSN.
+    pub(super) dispatched_lsns: DispatchedLsns,
 }
 
 impl Dispatcher {
@@ -162,6 +185,8 @@ impl Dispatcher {
                 priority_resolver,
                 data_plane_draining: false,
                 capacity_freed: Arc::new(Notify::new()),
+                outcome_floor: OutcomeFloor::new(),
+                dispatched_lsns: DispatchedLsns::default(),
             },
             data_sides,
         )
@@ -175,6 +200,11 @@ impl Dispatcher {
     /// enables its `notified()` future before it checks for refused work.
     pub fn capacity_freed(&self) -> Arc<Notify> {
         Arc::clone(&self.capacity_freed)
+    }
+
+    /// The node's outcome floor, shared with every write that opens a window.
+    pub fn outcome_floor(&self) -> Arc<OutcomeFloor> {
+        Arc::clone(&self.outcome_floor)
     }
 
     /// Maximum SPSC request queue utilization across all cores (0-100).

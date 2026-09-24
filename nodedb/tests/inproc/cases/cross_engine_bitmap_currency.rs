@@ -86,10 +86,8 @@ fn send_ok(
     rx: &mut Consumer<BridgeResponse>,
     plan: PhysicalPlan,
 ) -> Vec<u8> {
-    tx.try_push(BridgeRequest {
-        inner: make_req(plan),
-    })
-    .unwrap();
+    tx.try_push(BridgeRequest::unfloored(make_req(plan)))
+        .unwrap();
     core.tick();
     let resp = rx.try_pop().unwrap();
     assert_eq!(
@@ -193,8 +191,8 @@ fn fts_derived_bitmap_filters_vector_search() {
         (s3, [-1.0, 0.0, 0.1]),
     ];
     for (surrogate, vec) in vectors {
-        tx.try_push(BridgeRequest {
-            inner: make_req(PhysicalPlan::Vector(VectorOp::Insert {
+        tx.try_push(BridgeRequest::unfloored(make_req(PhysicalPlan::Vector(
+            VectorOp::Insert {
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     "articles",
@@ -205,8 +203,8 @@ fn fts_derived_bitmap_filters_vector_search() {
                 surrogate: *surrogate,
                 pk_bytes: None,
                 provenance: None,
-            })),
-        })
+            },
+        ))))
         .unwrap();
     }
     core.tick();

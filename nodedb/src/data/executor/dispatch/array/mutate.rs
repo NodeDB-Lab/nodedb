@@ -342,19 +342,17 @@ mod tests {
 
         // 1) OpenArray
         req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(
-                    PhysicalPlan::Array(ArrayOp::OpenArray {
-                        array_id: aid.clone(),
-                        schema_msgpack: schema_bytes.clone(),
-                        schema_hash,
-                        prefix_bits: 8,
-                        audit_retain_ms: None,
-                        minimum_audit_retain_ms: None,
-                    }),
-                    1,
-                ),
-            })
+            .try_push(BridgeRequest::unfloored(make_request(
+                PhysicalPlan::Array(ArrayOp::OpenArray {
+                    array_id: aid.clone(),
+                    schema_msgpack: schema_bytes.clone(),
+                    schema_hash,
+                    prefix_bits: 8,
+                    audit_retain_ms: None,
+                    minimum_audit_retain_ms: None,
+                }),
+                1,
+            )))
             .unwrap();
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
@@ -376,17 +374,15 @@ mod tests {
         }];
         let cells_bytes = zerompk::to_msgpack_vec(&cells).unwrap();
         req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(
-                    PhysicalPlan::Array(ArrayOp::Put {
-                        array_id: aid.clone(),
-                        cells_msgpack: cells_bytes,
-                        wal_lsn: 42,
-                        provenance: None,
-                    }),
-                    2,
-                ),
-            })
+            .try_push(BridgeRequest::unfloored(make_request(
+                PhysicalPlan::Array(ArrayOp::Put {
+                    array_id: aid.clone(),
+                    cells_msgpack: cells_bytes,
+                    wal_lsn: 42,
+                    provenance: None,
+                }),
+                2,
+            )))
             .unwrap();
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
@@ -399,15 +395,13 @@ mod tests {
 
         // 3) Flush
         req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(
-                    PhysicalPlan::Array(ArrayOp::Flush {
-                        array_id: aid.clone(),
-                        wal_lsn: 99,
-                    }),
-                    3,
-                ),
-            })
+            .try_push(BridgeRequest::unfloored(make_request(
+                PhysicalPlan::Array(ArrayOp::Flush {
+                    array_id: aid.clone(),
+                    wal_lsn: 99,
+                }),
+                3,
+            )))
             .unwrap();
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
@@ -459,19 +453,17 @@ mod tests {
 
         // 1) Open v1.
         req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(
-                    PhysicalPlan::Array(ArrayOp::OpenArray {
-                        array_id: aid.clone(),
-                        schema_msgpack: v1_bytes.clone(),
-                        schema_hash: 0xAAAA,
-                        prefix_bits: 8,
-                        audit_retain_ms: None,
-                        minimum_audit_retain_ms: None,
-                    }),
-                    1,
-                ),
-            })
+            .try_push(BridgeRequest::unfloored(make_request(
+                PhysicalPlan::Array(ArrayOp::OpenArray {
+                    array_id: aid.clone(),
+                    schema_msgpack: v1_bytes.clone(),
+                    schema_hash: 0xAAAA,
+                    prefix_bits: 8,
+                    audit_retain_ms: None,
+                    minimum_audit_retain_ms: None,
+                }),
+                1,
+            )))
             .unwrap();
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
@@ -488,17 +480,15 @@ mod tests {
         }];
         let cells_bytes = zerompk::to_msgpack_vec(&cells).unwrap();
         req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(
-                    PhysicalPlan::Array(ArrayOp::Put {
-                        array_id: aid.clone(),
-                        cells_msgpack: cells_bytes,
-                        wal_lsn: 7,
-                        provenance: None,
-                    }),
-                    2,
-                ),
-            })
+            .try_push(BridgeRequest::unfloored(make_request(
+                PhysicalPlan::Array(ArrayOp::Put {
+                    array_id: aid.clone(),
+                    cells_msgpack: cells_bytes,
+                    wal_lsn: 7,
+                    provenance: None,
+                }),
+                2,
+            )))
             .unwrap();
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
@@ -506,14 +496,12 @@ mod tests {
 
         // 3) DropArray — releases per-core store + on-disk segment dir.
         req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(
-                    PhysicalPlan::Array(ArrayOp::DropArray {
-                        array_id: aid.clone(),
-                    }),
-                    3,
-                ),
-            })
+            .try_push(BridgeRequest::unfloored(make_request(
+                PhysicalPlan::Array(ArrayOp::DropArray {
+                    array_id: aid.clone(),
+                }),
+                3,
+            )))
             .unwrap();
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
@@ -530,14 +518,12 @@ mod tests {
 
         // Finalization purges the reversible tombstone before recreation.
         req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(
-                    PhysicalPlan::Array(ArrayOp::PurgeArrayDrop {
-                        array_id: aid.clone(),
-                    }),
-                    4,
-                ),
-            })
+            .try_push(BridgeRequest::unfloored(make_request(
+                PhysicalPlan::Array(ArrayOp::PurgeArrayDrop {
+                    array_id: aid.clone(),
+                }),
+                4,
+            )))
             .unwrap();
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
@@ -547,19 +533,17 @@ mod tests {
         //    would fail with `SchemaMismatch`. The finalized post-drop state
         //    must accept the new hash.
         req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(
-                    PhysicalPlan::Array(ArrayOp::OpenArray {
-                        array_id: aid.clone(),
-                        schema_msgpack: v1_bytes,
-                        schema_hash: 0xBBBB,
-                        prefix_bits: 8,
-                        audit_retain_ms: None,
-                        minimum_audit_retain_ms: None,
-                    }),
-                    5,
-                ),
-            })
+            .try_push(BridgeRequest::unfloored(make_request(
+                PhysicalPlan::Array(ArrayOp::OpenArray {
+                    array_id: aid.clone(),
+                    schema_msgpack: v1_bytes,
+                    schema_hash: 0xBBBB,
+                    prefix_bits: 8,
+                    audit_retain_ms: None,
+                    minimum_audit_retain_ms: None,
+                }),
+                5,
+            )))
             .unwrap();
         core.tick();
         let resp = resp_rx.try_pop().unwrap();

@@ -88,10 +88,8 @@ fn send_ok(
     rx: &mut Consumer<BridgeResponse>,
     plan: PhysicalPlan,
 ) -> Vec<u8> {
-    tx.try_push(BridgeRequest {
-        inner: make_req(plan),
-    })
-    .unwrap();
+    tx.try_push(BridgeRequest::unfloored(make_req(plan)))
+        .unwrap();
     core.tick();
     let resp = rx.try_pop().unwrap();
     assert_eq!(
@@ -235,8 +233,8 @@ fn three_way_fts_vector_doc_bitmap() {
 
     // Insert vector embeddings for all 10 rows.
     for &s in LEARNING_SURS.iter().chain(NON_LEARNING_SURS) {
-        tx.try_push(BridgeRequest {
-            inner: make_req(PhysicalPlan::Vector(VectorOp::Insert {
+        tx.try_push(BridgeRequest::unfloored(make_req(PhysicalPlan::Vector(
+            VectorOp::Insert {
                 collection: nodedb_types::QualifiedCollection::new(
                     nodedb_types::DatabaseId::DEFAULT,
                     COLLECTION,
@@ -251,8 +249,8 @@ fn three_way_fts_vector_doc_bitmap() {
                 surrogate: Surrogate::new(s),
                 pk_bytes: None,
                 provenance: None,
-            })),
-        })
+            },
+        ))))
         .unwrap();
     }
     core.tick();

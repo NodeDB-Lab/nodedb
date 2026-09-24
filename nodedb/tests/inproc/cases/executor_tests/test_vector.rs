@@ -15,20 +15,18 @@ fn vector_insert_and_search() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
     for i in 0..10u32 {
-        tx.try_push(BridgeRequest {
-            inner: make_request_with_id(
-                100 + i as u64,
-                PhysicalPlan::Vector(VectorOp::Insert {
-                    collection: QualifiedCollection::new(DatabaseId::DEFAULT, "embeddings"),
-                    vector: vec![i as f32, 0.0, 0.0],
-                    dim: 3,
-                    field_name: String::new(),
-                    surrogate: nodedb_types::Surrogate::ZERO,
-                    pk_bytes: None,
-                    provenance: None,
-                }),
-            ),
-        })
+        tx.try_push(BridgeRequest::unfloored(make_request_with_id(
+            100 + i as u64,
+            PhysicalPlan::Vector(VectorOp::Insert {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "embeddings"),
+                vector: vec![i as f32, 0.0, 0.0],
+                dim: 3,
+                field_name: String::new(),
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: None,
+                provenance: None,
+            }),
+        )))
         .unwrap();
     }
 

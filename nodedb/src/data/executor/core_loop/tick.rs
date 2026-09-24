@@ -31,6 +31,9 @@ impl CoreLoop {
         // action for the core to take, so the flag is not acted on.
         let (_drained, _control_plane_gone) = self.request_rx.drain_into(&mut batch, depth);
         for br in batch {
+            self.floors
+                .applied_prefix
+                .observe_outcome_floor(br.outcome_floor);
             self.task_queue.push(ExecutionTask::new(br.inner));
         }
     }
@@ -236,20 +239,18 @@ mod tests {
     fn expired_task_returns_deadline_exceeded() {
         let (mut core, mut req_tx, mut resp_rx, _dir) = make_core();
         req_tx
-            .try_push(BridgeRequest {
-                inner: Request {
-                    deadline: Instant::now() - Duration::from_secs(1),
-                    ..make_request(PhysicalPlan::Document(DocumentOp::PointGet {
-                        collection: QualifiedCollection::new(DatabaseId::DEFAULT, "x"),
-                        document_id: "y".into(),
-                        surrogate: nodedb_types::Surrogate::ZERO,
-                        pk_bytes: Vec::new(),
-                        rls_filters: Vec::new(),
-                        system_time: nodedb_types::SystemTimeScope::Current,
-                        valid_at_ms: None,
-                    }))
-                },
-            })
+            .try_push(BridgeRequest::unfloored(Request {
+                deadline: Instant::now() - Duration::from_secs(1),
+                ..make_request(PhysicalPlan::Document(DocumentOp::PointGet {
+                    collection: QualifiedCollection::new(DatabaseId::DEFAULT, "x"),
+                    document_id: "y".into(),
+                    surrogate: nodedb_types::Surrogate::ZERO,
+                    pk_bytes: Vec::new(),
+                    rls_filters: Vec::new(),
+                    system_time: nodedb_types::SystemTimeScope::Current,
+                    valid_at_ms: None,
+                }))
+            }))
             .unwrap();
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
@@ -269,8 +270,8 @@ mod tests {
         );
         for _ in 0..2 {
             req_tx
-                .try_push(BridgeRequest {
-                    inner: make_request(PhysicalPlan::Document(DocumentOp::PointGet {
+                .try_push(BridgeRequest::unfloored(make_request(
+                    PhysicalPlan::Document(DocumentOp::PointGet {
                         collection: QualifiedCollection::new(DatabaseId::DEFAULT, "x"),
                         document_id: "y".into(),
                         surrogate: nodedb_types::Surrogate::ZERO,
@@ -278,8 +279,8 @@ mod tests {
                         rls_filters: Vec::new(),
                         system_time: nodedb_types::SystemTimeScope::Current,
                         valid_at_ms: None,
-                    })),
-                })
+                    }),
+                )))
                 .expect("queue request");
         }
 
@@ -312,8 +313,8 @@ mod tests {
             )
             .unwrap();
         req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::Document(DocumentOp::PointGet {
+            .try_push(BridgeRequest::unfloored(make_request(
+                PhysicalPlan::Document(DocumentOp::PointGet {
                     collection: QualifiedCollection::new(DatabaseId::DEFAULT, "x"),
                     document_id: "y".into(),
                     surrogate: nodedb_types::Surrogate::ZERO,
@@ -321,8 +322,8 @@ mod tests {
                     rls_filters: Vec::new(),
                     system_time: nodedb_types::SystemTimeScope::Current,
                     valid_at_ms: None,
-                })),
-            })
+                }),
+            )))
             .unwrap();
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
@@ -333,36 +334,32 @@ mod tests {
     fn cancel_removes_pending_task() {
         let (mut core, mut req_tx, _resp_rx, _dir) = make_core();
         req_tx
-            .try_push(BridgeRequest {
-                inner: Request {
-                    request_id: RequestId::new(10),
-                    deadline: Instant::now() + Duration::from_secs(60),
-                    ..make_request(PhysicalPlan::Document(DocumentOp::PointGet {
-                        collection: QualifiedCollection::new(DatabaseId::DEFAULT, "x"),
-                        document_id: "y".into(),
-                        surrogate: nodedb_types::Surrogate::ZERO,
-                        pk_bytes: Vec::new(),
-                        rls_filters: Vec::new(),
-                        system_time: nodedb_types::SystemTimeScope::Current,
-                        valid_at_ms: None,
-                    }))
-                },
-            })
+            .try_push(BridgeRequest::unfloored(Request {
+                request_id: RequestId::new(10),
+                deadline: Instant::now() + Duration::from_secs(60),
+                ..make_request(PhysicalPlan::Document(DocumentOp::PointGet {
+                    collection: QualifiedCollection::new(DatabaseId::DEFAULT, "x"),
+                    document_id: "y".into(),
+                    surrogate: nodedb_types::Surrogate::ZERO,
+                    pk_bytes: Vec::new(),
+                    rls_filters: Vec::new(),
+                    system_time: nodedb_types::SystemTimeScope::Current,
+                    valid_at_ms: None,
+                }))
+            }))
             .unwrap();
         core.drain_requests();
         assert_eq!(core.pending_count(), 1);
 
         req_tx
-            .try_push(BridgeRequest {
-                inner: Request {
-                    request_id: RequestId::new(99),
-                    priority: Priority::Critical,
-                    consistency: ReadConsistency::Eventual,
-                    ..make_request(PhysicalPlan::Meta(MetaOp::Cancel {
-                        target_request_id: RequestId::new(10),
-                    }))
-                },
-            })
+            .try_push(BridgeRequest::unfloored(Request {
+                request_id: RequestId::new(99),
+                priority: Priority::Critical,
+                consistency: ReadConsistency::Eventual,
+                ..make_request(PhysicalPlan::Meta(MetaOp::Cancel {
+                    target_request_id: RequestId::new(10),
+                }))
+            }))
             .unwrap();
         // Cancel runs at Critical priority and is drained before the Normal-priority
         // target. The cancel removes id=10 from the queue, so only the Cancel itself
@@ -387,8 +384,8 @@ mod tests {
         let tagged = zerompk::to_msgpack_vec(&nodedb_types::Value::Object(obj)).unwrap();
 
         req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::Document(DocumentOp::PointPut {
+            .try_push(BridgeRequest::unfloored(make_request(
+                PhysicalPlan::Document(DocumentOp::PointPut {
                     collection: QualifiedCollection::new(DatabaseId::DEFAULT, "orders"),
                     document_id: "o1".into(),
                     value: tagged,
@@ -397,8 +394,8 @@ mod tests {
                     returning: None,
                     rls_filters: Vec::new(),
                     resolved_sum_targets: Vec::new(),
-                })),
-            })
+                }),
+            )))
             .unwrap();
         core.tick();
         let resp = resp_rx.try_pop().unwrap();
@@ -436,8 +433,8 @@ mod tests {
             );
             let bytes = zerompk::to_msgpack_vec(&nodedb_types::Value::Object(obj)).unwrap();
             req_tx
-                .try_push(BridgeRequest {
-                    inner: make_request(PhysicalPlan::Document(DocumentOp::PointPut {
+                .try_push(BridgeRequest::unfloored(make_request(
+                    PhysicalPlan::Document(DocumentOp::PointPut {
                         collection: QualifiedCollection::new(DatabaseId::DEFAULT, "things"),
                         document_id: format!("doc_{sur_val}"),
                         value: bytes,
@@ -446,8 +443,8 @@ mod tests {
                         returning: None,
                         rls_filters: Vec::new(),
                         resolved_sum_targets: Vec::new(),
-                    })),
-                })
+                    }),
+                )))
                 .unwrap();
             core.tick();
             let _ = resp_rx.try_pop().unwrap();
@@ -458,8 +455,8 @@ mod tests {
 
         // Issue a scan with the prefilter.
         req_tx
-            .try_push(BridgeRequest {
-                inner: make_request(PhysicalPlan::Document(DocumentOp::Scan {
+            .try_push(BridgeRequest::unfloored(make_request(
+                PhysicalPlan::Document(DocumentOp::Scan {
                     collection: QualifiedCollection::new(DatabaseId::DEFAULT, "things"),
                     limit: 100,
                     offset: 0,
@@ -472,8 +469,8 @@ mod tests {
                     system_time: nodedb_types::SystemTimeScope::Current,
                     valid_at_ms: None,
                     prefilter: Some(prefilter),
-                })),
-            })
+                }),
+            )))
             .unwrap();
         core.tick();
 

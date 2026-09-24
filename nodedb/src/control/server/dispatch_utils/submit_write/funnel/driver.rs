@@ -5,6 +5,7 @@
 
 use crate::control::server::dispatch_utils::change_events::extract_write_change_set;
 use crate::control::server::dispatch_utils::durability_barrier::funnel_minted_redo_engine;
+use crate::control::server::dispatch_utils::write_abort::{AbortTarget, abort_undispatched_write};
 use crate::control::server::shared::session::statement_deadline;
 use crate::control::server::shared::write_admission::{bare_ok_response, route_write_to_calvin};
 use crate::control::server::wal_dispatch;
@@ -13,7 +14,7 @@ use crate::control::state::SharedState;
 use super::super::params::{ChangeFeedOwner, SubmitOutcome, SubmitWrite, WalDurability};
 use super::admission::{AdmissionOutcome, admit_write};
 use super::dispatch::{DispatchTarget, dispatch_to_data_plane};
-use super::response::{ResponsePhaseInput, collect_classify_and_finish};
+use super::response::{ResponsePhaseInput, collect_classify_and_finish, settle_window};
 use super::wal_append::authorize_and_append;
 
 /// Admit, make durable, enqueue, collect, and publish one write.
@@ -119,17 +120,31 @@ pub(crate) async fn submit_write(
             }
         };
 
+    // A write that mints its own LSN opens its outcome-floor window before the
+    // mint. The window settles once the outcome is final.
+    let window = appends_here.then(|| shared.outcome_floor.open_write());
+
     // Array DDL authorization + durability, under the admission guard,
     // immediately before the enqueue below.
     let wal_append_outcome =
-        authorize_and_append(shared, tenant_id, database_id, vshard_id, plan, durability)?;
+        match authorize_and_append(shared, tenant_id, database_id, vshard_id, plan, durability) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // Nothing minted here reaches a core.
+                settle_window(window);
+                return Err(error);
+            }
+        };
     let ddl_transition = wal_append_outcome.ddl_transition;
     let plan = wal_append_outcome.plan;
     let wal_lsn = wal_append_outcome.wal_lsn;
     let resolved_now_ms = wal_append_outcome.resolved_now_ms;
+    if let (Some(window), Some(lsn)) = (&window, wal_lsn) {
+        window.note_minted(lsn);
+    }
 
     // Build the wire request and hand it to the Data-Plane dispatcher.
-    let dispatch_outcome = dispatch_to_data_plane(
+    let dispatched = dispatch_to_data_plane(
         shared,
         &ddl_transition,
         DispatchTarget {
@@ -149,7 +164,29 @@ pub(crate) async fn submit_write(
         admission_guard,
         order_guard,
         post_apply.is_some(),
-    )?;
+    );
+    let dispatch_outcome = match dispatched {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // The dispatcher refused the request, so no core applied it. The
+            // record is cancelled before the window settles. A failed cancel
+            // leaves the window open: restart must still replay from here.
+            abort_undispatched_write(
+                shared,
+                AbortTarget {
+                    tenant_id,
+                    database_id,
+                    vshard_id,
+                    wal_lsn,
+                    appends_here,
+                    final_refusal_key: 0,
+                },
+            )
+            .await?;
+            settle_window(window);
+            return Err(error);
+        }
+    };
 
     // Collect response(s), classify the outcome, and run the post-apply steps
     // a successful write still owes.
@@ -174,6 +211,7 @@ pub(crate) async fn submit_write(
             change_set,
             ddl_transition,
             deferred_guards: dispatch_outcome.deferred_guards,
+            window,
         },
     )
     .await

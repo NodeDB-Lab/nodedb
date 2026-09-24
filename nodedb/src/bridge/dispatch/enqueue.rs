@@ -13,6 +13,7 @@ use tracing::warn;
 use crate::DispatchCapacityScope;
 use crate::bridge::admission_chokepoint::{assert_write_admitted, reject_uninjected_write};
 use crate::bridge::envelope;
+use crate::types::Lsn;
 
 use super::dispatcher::Dispatcher;
 use super::refusal::DispatchRefusal;
@@ -42,6 +43,7 @@ impl Dispatcher {
         let tenant_id = request.tenant_id.as_u64();
         let req_id = request.request_id.as_u64();
         let database_id = request.database_id.as_u64();
+        let wal_lsn = request.wal_lsn;
 
         // Per-tenant fairness: refuse while the tenant holds its in-flight cap.
         if self.max_per_tenant_inflight > 0 {
@@ -96,7 +98,7 @@ impl Dispatcher {
             ));
         }
 
-        self.commit_enqueued(core_id, database_id, tenant_id, req_id);
+        self.commit_enqueued(core_id, database_id, tenant_id, req_id, wal_lsn);
         Ok(())
     }
 
@@ -121,6 +123,7 @@ impl Dispatcher {
         let tenant_id = request.tenant_id.as_u64();
         let req_id = request.request_id.as_u64();
         let database_id = request.database_id.as_u64();
+        let wal_lsn = request.wal_lsn;
         let channel = &mut self.cores[core_id];
 
         let cls = self.priority_resolver.priority_for(database_id);
@@ -135,7 +138,7 @@ impl Dispatcher {
             }
         })?;
 
-        self.commit_enqueued(core_id, database_id, tenant_id, req_id);
+        self.commit_enqueued(core_id, database_id, tenant_id, req_id, wal_lsn);
         Ok(())
     }
 
@@ -148,16 +151,30 @@ impl Dispatcher {
     }
 
     /// Bookkeeping once a request sits in `core_id`'s weighted-fair queue:
-    /// flush it toward the ring, record pressure, track it as outstanding and
-    /// in flight for its tenant, and wake the core.
-    fn commit_enqueued(&mut self, core_id: usize, database_id: u64, tenant_id: u64, req_id: u64) {
+    /// hold the outcome floor below its WAL LSN, flush it toward the ring,
+    /// record pressure, track it as outstanding and in flight for its tenant,
+    /// and wake the core.
+    fn commit_enqueued(
+        &mut self,
+        core_id: usize,
+        database_id: u64,
+        tenant_id: u64,
+        req_id: u64,
+        wal_lsn: Option<Lsn>,
+    ) {
+        // The hold starts before the flush below, so no push carries a floor
+        // at or above this request's LSN while it is unanswered.
+        if let Some(lsn) = wal_lsn {
+            self.dispatched_lsns.track(&self.outcome_floor, req_id, lsn);
+        }
+        let outcome_floor = self.outcome_floor.floor();
         let channel = &mut self.cores[core_id];
 
         // Update per-DB pressure.
         channel.update_db_pressure(database_id);
 
         // Flush WFQ → physical ring.
-        channel.flush_wfq();
+        channel.flush_wfq(outcome_floor);
 
         // Update global backpressure based on ring utilization.
         let util = channel.request_tx.utilization();

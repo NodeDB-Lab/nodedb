@@ -168,6 +168,7 @@ impl SharedState {
         )?;
 
         let state = Arc::new(Self {
+            outcome_floor: dispatcher.outcome_floor(),
             dispatcher: Mutex::new(dispatcher),
             tracker: RequestTracker::new(),
             wal,

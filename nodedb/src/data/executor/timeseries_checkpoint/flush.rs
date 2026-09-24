@@ -145,28 +145,26 @@ mod tests {
             let id = self.next_id;
             self.next_id += 1;
             self.req_tx
-                .try_push(BridgeRequest {
-                    inner: Request {
-                        request_id: RequestId::new(id),
-                        tenant_id: TenantId::new(TID),
-                        database_id: DatabaseId::DEFAULT,
-                        vshard_id: VShardId::new(0),
-                        plan,
-                        deadline: Instant::now() + Duration::from_secs(5),
-                        priority: Priority::Normal,
-                        trace_id: TraceId::ZERO,
-                        consistency: ReadConsistency::Strong,
-                        idempotency_key: None,
-                        event_source: crate::event::EventSource::User,
-                        user_roles: Vec::new(),
-                        user_id: None,
-                        statement_digest: None,
-                        txn_id: None,
-                        wal_lsn: wal_lsn.map(crate::types::Lsn::new),
-                        resolved_now_ms: None,
-                        admission: crate::bridge::envelope::Admission::Admitted,
-                    },
-                })
+                .try_push(BridgeRequest::unfloored(Request {
+                    request_id: RequestId::new(id),
+                    tenant_id: TenantId::new(TID),
+                    database_id: DatabaseId::DEFAULT,
+                    vshard_id: VShardId::new(0),
+                    plan,
+                    deadline: Instant::now() + Duration::from_secs(5),
+                    priority: Priority::Normal,
+                    trace_id: TraceId::ZERO,
+                    consistency: ReadConsistency::Strong,
+                    idempotency_key: None,
+                    event_source: crate::event::EventSource::User,
+                    user_roles: Vec::new(),
+                    user_id: None,
+                    statement_digest: None,
+                    txn_id: None,
+                    wal_lsn: wal_lsn.map(crate::types::Lsn::new),
+                    resolved_now_ms: None,
+                    admission: crate::bridge::envelope::Admission::Admitted,
+                }))
                 .expect("push request");
             self.core.tick();
             self.resp_rx.try_pop().expect("response").inner

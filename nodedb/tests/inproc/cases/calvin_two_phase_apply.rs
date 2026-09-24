@@ -78,9 +78,9 @@ fn send(
     vshard: u32,
     wal_lsn: Option<Lsn>,
 ) -> Response {
-    tx.try_push(BridgeRequest {
-        inner: make_request(plan, vshard, wal_lsn),
-    })
+    tx.try_push(BridgeRequest::unfloored(make_request(
+        plan, vshard, wal_lsn,
+    )))
     .unwrap();
     core.tick();
     rx.try_pop().unwrap().inner
@@ -719,7 +719,7 @@ fn send_request(
     rx: &mut Consumer<BridgeResponse>,
     request: Request,
 ) -> Response {
-    tx.try_push(BridgeRequest { inner: request }).unwrap();
+    tx.try_push(BridgeRequest::unfloored(request)).unwrap();
     core.tick();
     rx.try_pop().unwrap().inner
 }

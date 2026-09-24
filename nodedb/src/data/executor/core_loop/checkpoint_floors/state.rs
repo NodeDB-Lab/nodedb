@@ -7,6 +7,7 @@
 //! nothing may be claimed that was not actually put on stable storage. Failing to
 //! advance one of these costs WAL growth; overstating one costs data.
 
+use crate::data::executor::applied_prefix::AppliedPrefix;
 use crate::data::executor::replay_floors::ReplayFloors;
 use crate::types::Lsn;
 
@@ -182,4 +183,7 @@ pub(in crate::data::executor) struct CheckpointFloors {
     /// so records already folded into a restored checkpoint are not applied a
     /// second time. Empty outside boot, and empty means "replay everything".
     pub(in crate::data::executor) replay_floors: ReplayFloors,
+
+    /// The node's outcome floor as this core last read it from a request.
+    pub(in crate::data::executor) applied_prefix: AppliedPrefix,
 }

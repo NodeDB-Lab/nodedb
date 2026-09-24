@@ -99,6 +99,35 @@ pub(crate) async fn abort_refused_write(
     } else {
         0
     };
+    append_abort_marker(shared, &target, wal_lsn, marker_key).await
+}
+
+/// Cancel a forward write record whose request the dispatcher refused.
+///
+/// The request never reached a core, so the Data Plane applied nothing. The
+/// marker carries no proposal key: a dispatch refusal depends on this node's
+/// load at that moment, so a redelivery of the same entry can apply it.
+pub(crate) async fn abort_undispatched_write(
+    shared: &SharedState,
+    target: AbortTarget,
+) -> crate::Result<()> {
+    if !target.appends_here {
+        return Ok(());
+    }
+    let Some(wal_lsn) = target.wal_lsn else {
+        return Ok(());
+    };
+    append_abort_marker(shared, &target, wal_lsn, 0).await
+}
+
+/// Append a `WriteAborted` marker naming `wal_lsn` and wait until it is
+/// durable.
+async fn append_abort_marker(
+    shared: &SharedState,
+    target: &AbortTarget,
+    wal_lsn: Lsn,
+    marker_key: u64,
+) -> crate::Result<()> {
     let abort_lsn = shared.wal.appender(marker_key).append_write_aborted(
         target.tenant_id,
         target.vshard_id,

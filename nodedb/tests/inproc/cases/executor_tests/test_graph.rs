@@ -216,23 +216,21 @@ fn graph_rag_fusion_pipeline() {
 
     // Insert vectors.
     for i in 0..10u32 {
-        tx.try_push(BridgeRequest {
-            inner: make_request_with_id(
-                100 + i as u64,
-                PhysicalPlan::Vector(VectorOp::Insert {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "docs",
-                    ),
-                    vector: vec![i as f32, 0.0, 0.0],
-                    dim: 3,
-                    field_name: String::new(),
-                    surrogate: nodedb_types::Surrogate::ZERO,
-                    pk_bytes: None,
-                    provenance: None,
-                }),
-            ),
-        })
+        tx.try_push(BridgeRequest::unfloored(make_request_with_id(
+            100 + i as u64,
+            PhysicalPlan::Vector(VectorOp::Insert {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "docs",
+                ),
+                vector: vec![i as f32, 0.0, 0.0],
+                dim: 3,
+                field_name: String::new(),
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: None,
+                provenance: None,
+            }),
+        )))
         .unwrap();
     }
     core.tick();

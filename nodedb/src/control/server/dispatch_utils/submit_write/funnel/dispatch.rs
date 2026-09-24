@@ -90,14 +90,15 @@ pub(super) fn dispatch_to_data_plane(
 
     let rx = shared.tracker.register(request_id);
 
-    match shared.dispatcher.lock() {
-        Ok(mut d) => rollback_on_err(shared, ddl_transition, d.dispatch(request))?,
-        Err(poisoned) => rollback_on_err(
-            shared,
-            ddl_transition,
-            poisoned.into_inner().dispatch(request),
-        )?,
+    let dispatched = match shared.dispatcher.lock() {
+        Ok(mut d) => d.dispatch(request),
+        Err(poisoned) => poisoned.into_inner().dispatch(request),
     };
+    if dispatched.is_err() {
+        // No response will ever arrive for a refused request.
+        shared.tracker.cancel(&request_id);
+    }
+    rollback_on_err(shared, ddl_transition, dispatched)?;
 
     // Release the write-admission guards immediately after the enqueue, before
     // the Data-Plane round-trip. The per-database WFQ is strict FIFO, so once LSN

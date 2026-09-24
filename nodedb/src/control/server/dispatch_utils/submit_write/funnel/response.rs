@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
+use crate::bridge::dispatch::WriteWindow;
 use crate::bridge::envelope::{Response, Status};
 use crate::control::array_catalog::ddl::AuthorizedDdlTransition;
 use crate::control::server::dispatch_utils::change_events::{WriteChangeSet, publish_change_set};
@@ -47,6 +48,15 @@ pub(super) struct ResponsePhaseInput {
     pub change_set: Option<WriteChangeSet>,
     pub ddl_transition: AuthorizedDdlTransition,
     pub deferred_guards: super::dispatch::DeferredGuards,
+    /// The write's outcome-floor window, when the funnel minted its LSN.
+    pub window: Option<WriteWindow>,
+}
+
+/// Settle a write's outcome-floor window: its outcome is final.
+pub(super) fn settle_window(window: Option<WriteWindow>) {
+    if let Some(window) = window {
+        window.settle();
+    }
 }
 
 /// Collect the response(s), classify the outcome, and run every step a
@@ -81,6 +91,7 @@ pub(super) async fn collect_classify_and_finish(
         change_set,
         ddl_transition,
         deferred_guards,
+        window,
     } = input;
 
     let vshard_u32 = vshard_id.as_u32();
@@ -100,6 +111,9 @@ pub(super) async fn collect_classify_and_finish(
     {
         Ok(response) => response,
         Err(_) => {
+            // The dispatcher holds the floor below this record until the core
+            // answers, so this window can settle.
+            settle_window(window);
             observe(shared);
             // Dispatch completed, but the Data Plane may have applied CREATE
             // or ALTER before this deadline. Never roll that catalog state
@@ -115,6 +129,8 @@ pub(super) async fn collect_classify_and_finish(
     let response = match response {
         Ok(r) => r,
         Err(DispatchCollectError::OverBudget { bytes }) => {
+            // The dispatcher holds the floor until the core's final response.
+            settle_window(window);
             shared.tracker.cancel(&request_id);
             observe(shared);
             // A partial response proves dispatch began but not whether an
@@ -131,6 +147,8 @@ pub(super) async fn collect_classify_and_finish(
             });
         }
         Err(DispatchCollectError::ChannelClosed) => {
+            // The dispatcher holds the floor until the core's final response.
+            settle_window(window);
             observe(shared);
             // The producer can close after applying but before sending its
             // response. CREATE/ALTER must remain catalog-finalized here.
@@ -166,6 +184,9 @@ pub(super) async fn collect_classify_and_finish(
         )
         .await?;
     }
+    // The core's outcome is final, and a refusal's abort marker is durable. A
+    // failed abort above returns first and leaves the window open.
+    settle_window(window);
 
     // Mint the post-apply redo record while the guards are still held, then
     // release them. A PointUpdate whose collection carries a secondary vector

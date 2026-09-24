@@ -69,10 +69,8 @@ fn send_raw(
     rx: &mut Consumer<BridgeResponse>,
     plan: PhysicalPlan,
 ) -> nodedb::bridge::envelope::Response {
-    tx.try_push(BridgeRequest {
-        inner: make_request(plan),
-    })
-    .unwrap();
+    tx.try_push(BridgeRequest::unfloored(make_request(plan)))
+        .unwrap();
     core.tick();
     rx.try_pop().unwrap().inner
 }

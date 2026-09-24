@@ -11,6 +11,7 @@ use nodedb_bridge::wfq::WeightedFairQueue;
 
 use crate::bridge::envelope;
 use crate::data::eventfd::EventFdNotifier;
+use crate::types::Lsn;
 
 use super::dispatcher::{BridgeRequest, BridgeResponse};
 
@@ -88,7 +89,10 @@ impl CoreChannel {
     ///
     /// The disconnect is also checked before the first pop, so a core known
     /// to be dead never has another request moved into a doomed `try_push`.
-    pub(super) fn flush_wfq(&mut self) -> usize {
+    ///
+    /// Every pushed request carries `outcome_floor`, the floor the caller read
+    /// just before this flush.
+    pub(super) fn flush_wfq(&mut self, outcome_floor: Lsn) -> usize {
         let mut flushed = 0;
         if self.request_tx.is_disconnected() {
             return 0;
@@ -99,7 +103,10 @@ impl CoreChannel {
             };
             let db_id = req.database_id.as_u64();
             let req_id = req.request_id.as_u64();
-            match self.request_tx.try_push(BridgeRequest { inner: req }) {
+            match self.request_tx.try_push(BridgeRequest {
+                inner: req,
+                outcome_floor,
+            }) {
                 Ok(()) => {
                     flushed += 1;
                     self.update_db_pressure(db_id);

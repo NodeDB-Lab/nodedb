@@ -63,8 +63,9 @@ impl Dispatcher {
     /// Idempotent: a second call re-flushes and changes nothing else.
     pub fn begin_data_plane_drain(&mut self) {
         self.data_plane_draining = true;
+        let outcome_floor = self.outcome_floor.floor();
         for channel in self.cores.iter_mut() {
-            channel.flush_wfq();
+            channel.flush_wfq(outcome_floor);
         }
     }
 
@@ -152,6 +153,8 @@ impl Dispatcher {
                 "data plane drain deadline expired — failing the requests this core still holds"
             );
             for rid in ids {
+                // The node is shutting down, and this core publishes nothing more.
+                self.dispatched_lsns.settle(rid);
                 freed |=
                     release_inflight_slot(&mut self.request_tenant, &mut self.tenant_inflight, rid);
                 abandoned.push(envelope::Response {
