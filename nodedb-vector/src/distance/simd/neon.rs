@@ -96,3 +96,58 @@ unsafe fn ip_impl(a: &[f32], b: &[f32]) -> f32 {
         -dot
     }
 }
+
+use super::bbq::{l2_scalar_from_bytes, recon_scale};
+/// Safe entry for `SimdRuntime`; the feature guard lives in `SimdRuntime::detect`.
+pub fn l2_bbq(centered: &[u8], packed: &[u8], residual_norm: f32, dim: usize) -> f32 {
+    // SAFETY: selected only when `detect()` observed this tier's features.
+    unsafe { l2_bbq_impl(centered, packed, residual_norm, dim) }
+}
+
+/// Per-byte sign weights, MSB-first: the two 4-lane masks a packed byte
+/// expands to.
+static BIT_WEIGHTS: [[u32; 4]; 2] = [[0x80, 0x40, 0x20, 0x10], [0x08, 0x04, 0x02, 0x01]];
+
+#[target_feature(enable = "neon")]
+unsafe fn l2_bbq_impl(centered: &[u8], packed: &[u8], residual_norm: f32, dim: usize) -> f32 {
+    use std::arch::aarch64::*;
+
+    let scale = recon_scale(residual_norm, dim);
+    let pos = vdupq_n_f32(scale);
+    let neg = vdupq_n_f32(-scale);
+    let mut acc_lo = vdupq_n_f32(0.0);
+    let mut acc_hi = vdupq_n_f32(0.0);
+
+    // SAFETY: constant tables, always valid.
+    let (weights_lo, weights_hi) = unsafe {
+        (
+            vld1q_u32(BIT_WEIGHTS[0].as_ptr()),
+            vld1q_u32(BIT_WEIGHTS[1].as_ptr()),
+        )
+    };
+
+    let mut i = 0;
+    while i + 8 <= dim {
+        // SAFETY: `i + 8 <= dim` and the caller guarantees the byte slices.
+        let byte = unsafe { *packed.get_unchecked(i / 8) };
+        // Broadcast the byte and test it against the per-dim weights: lane k of
+        // each mask is 0xFFFF_FFFF when dim (i + k) has a set sign bit.
+        let bits = vdupq_n_u32(byte as u32);
+        let mask_lo = vtstq_u32(bits, weights_lo);
+        let mask_hi = vtstq_u32(bits, weights_hi);
+        let q_lo = unsafe { vld1q_f32(centered.as_ptr().add(i * 4).cast::<f32>()) };
+        let q_hi = unsafe { vld1q_f32(centered.as_ptr().add((i + 4) * 4).cast::<f32>()) };
+        let recon_lo = vbslq_f32(mask_lo, pos, neg);
+        let recon_hi = vbslq_f32(mask_hi, pos, neg);
+        let d_lo = vsubq_f32(q_lo, recon_lo);
+        let d_hi = vsubq_f32(q_hi, recon_hi);
+        acc_lo = vfmaq_f32(acc_lo, d_lo, d_lo);
+        acc_hi = vfmaq_f32(acc_hi, d_hi, d_hi);
+        i += 8;
+    }
+
+    let acc = vaddq_f32(acc_lo, acc_hi);
+    // SAFETY: lane extraction of a register.
+    let sum = vaddvq_f32(acc) + l2_scalar_from_bytes(centered, packed, scale, i, dim);
+    sum.sqrt()
+}

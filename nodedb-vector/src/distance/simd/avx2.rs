@@ -114,3 +114,62 @@ unsafe fn hsum256(v: std::arch::x86_64::__m256) -> f32 {
     let sums2 = _mm_add_ss(sums, shuf2);
     _mm_cvtss_f32(sums2)
 }
+
+use super::bbq::{l2_scalar_from_bytes, recon_scale};
+/// Safe entry for `SimdRuntime`; the feature guard lives in `SimdRuntime::detect`.
+pub fn l2_bbq(centered: &[u8], packed: &[u8], residual_norm: f32, dim: usize) -> f32 {
+    // SAFETY: selected only when `detect()` observed this tier's features.
+    unsafe { l2_bbq_impl(centered, packed, residual_norm, dim) }
+}
+
+#[target_feature(enable = "avx2,fma")]
+unsafe fn l2_bbq_impl(centered: &[u8], packed: &[u8], residual_norm: f32, dim: usize) -> f32 {
+    use std::arch::x86_64::*;
+
+    let scale = recon_scale(residual_norm, dim);
+    let scale_v = _mm256_set1_ps(scale);
+    let mut acc = _mm256_setzero_ps();
+
+    let mut i = 0;
+    while i + 8 <= dim {
+        // SAFETY: `i + 8 <= dim` and the caller guarantees
+        // `centered.len() >= dim * 4`, so the 32-byte unaligned load stays in
+        // bounds; `i / 8` is in range because eight dims consume one byte.
+        let q = unsafe { _mm256_loadu_ps(centered.as_ptr().add(i * 4).cast::<f32>()) };
+        let byte = unsafe { *packed.get_unchecked(i / 8) } as usize;
+        let signs = unsafe { _mm256_load_ps(SIGN_LANES[byte].0.as_ptr()) };
+        let recon = _mm256_mul_ps(signs, scale_v);
+        let d = _mm256_sub_ps(q, recon);
+        acc = _mm256_fmadd_ps(d, d, acc);
+        i += 8;
+    }
+
+    let sum = unsafe { hsum256(acc) } + l2_scalar_from_bytes(centered, packed, scale, i, dim);
+    sum.sqrt()
+}
+
+/// `±1.0` lane patterns for every packed byte, MSB-first, 32-byte aligned for
+/// an aligned load. Precomputed `reverse_bits` mapping (dim `k` → lane `k`).
+#[cfg(all(target_arch = "x86_64", target_endian = "little"))]
+#[derive(Clone, Copy)]
+#[repr(align(32))]
+struct Aligned8([f32; 8]);
+
+#[cfg(all(target_arch = "x86_64", target_endian = "little"))]
+static SIGN_LANES: [Aligned8; 256] = build_sign_lanes();
+
+#[cfg(all(target_arch = "x86_64", target_endian = "little"))]
+const fn build_sign_lanes() -> [Aligned8; 256] {
+    let mut table = [Aligned8([0.0; 8]); 256];
+    let mut byte = 0usize;
+    while byte < 256 {
+        let mut lane = 0usize;
+        while lane < 8 {
+            let bit = (byte >> (7 - lane)) & 1;
+            table[byte].0[lane] = if bit == 1 { 1.0 } else { -1.0 };
+            lane += 1;
+        }
+        byte += 1;
+    }
+    table
+}
