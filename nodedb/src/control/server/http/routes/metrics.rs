@@ -50,6 +50,44 @@ pub async fn metrics(
     output.push_str("# TYPE nodedb_wal_next_lsn gauge\n");
     output.push_str(&format!("nodedb_wal_next_lsn {wal_lsn}\n\n"));
 
+    // Refused dispatches because a core's WFQ had no room. Non-zero means
+    // clients are hitting dispatch capacity: the same condition reports the
+    // retryable `dispatch_capacity` class on the wire, so a bulk writer backs
+    // off instead of aborting.
+    output.push_str(
+        "# HELP nodedb_dispatch_capacity_exhausted_total \
+         Dispatches refused because a core's dispatch queue had no room.\n",
+    );
+    output.push_str("# TYPE nodedb_dispatch_capacity_exhausted_total counter\n");
+    output.push_str(&format!(
+        "nodedb_dispatch_capacity_exhausted_total {}\n\n",
+        crate::bridge::dispatch::dispatch_capacity_exhausted_total()
+    ));
+
+    // Graph write throughput: the counters a bulk loader uses to size its
+    // pacing from arrival vs apply rate.
+    if let Some(sys) = state.shared.system_metrics.as_ref() {
+        use std::sync::atomic::Ordering;
+        output.push_str(
+            "# HELP nodedb_graph_edges_written_total \
+             Graph edges applied since process start.\n",
+        );
+        output.push_str("# TYPE nodedb_graph_edges_written_total counter\n");
+        output.push_str(&format!(
+            "nodedb_graph_edges_written_total {}\n\n",
+            sys.graph_edges_written_total.load(Ordering::Relaxed)
+        ));
+        output.push_str(
+            "# HELP nodedb_graph_edges_deleted_total \
+             Graph edges tombstoned since process start.\n",
+        );
+        output.push_str("# TYPE nodedb_graph_edges_deleted_total counter\n");
+        output.push_str(&format!(
+            "nodedb_graph_edges_deleted_total {}\n\n",
+            sys.graph_edges_deleted_total.load(Ordering::Relaxed)
+        ));
+    }
+
     // Node ID.
     output.push_str("# HELP nodedb_node_id This node's cluster ID.\n");
     output.push_str("# TYPE nodedb_node_id gauge\n");

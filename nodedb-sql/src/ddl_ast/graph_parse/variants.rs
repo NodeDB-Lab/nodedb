@@ -12,11 +12,12 @@ use super::{
     super::statement::{GraphStmt, NodedbStatement},
     fusion_params::{FusionParams, RAG_FUSION_KEYWORDS},
     helpers::{
-        direction_after, extract_properties, missing_clause, quoted_after, quoted_list_after,
-        usize_after, usize_after_checked, word_after,
+        direction_after, extract_properties, find_keyword, missing_clause, quoted_after,
+        quoted_list_after, usize_after, usize_after_checked, word_after,
     },
     tokenizer::Tok,
 };
+use crate::ddl_ast::graph_types::GraphEdgeTuple;
 use crate::error::SqlError;
 
 pub(super) fn parse_insert_edge(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
@@ -34,6 +35,87 @@ pub(super) fn parse_insert_edge(toks: &[Tok<'_>]) -> Result<NodedbStatement, Sql
         label,
         properties,
     }))
+}
+
+/// Maximum number of edges one batch statement may carry. Keeps one
+/// statement's worth of work bounded for the write-admission and lock paths.
+pub const MAX_EDGES_PER_BATCH: usize = 1000;
+
+pub(super) fn parse_insert_edges(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
+    let (collection, edges) = parse_edge_batch(toks, "GRAPH INSERT EDGES")?;
+    Ok(NodedbStatement::Graph(GraphStmt::GraphInsertEdges {
+        collection,
+        edges,
+    }))
+}
+
+pub(super) fn parse_delete_edges(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
+    let (collection, edges) = parse_edge_batch(toks, "GRAPH DELETE EDGES")?;
+    Ok(NodedbStatement::Graph(GraphStmt::GraphDeleteEdges {
+        collection,
+        edges,
+    }))
+}
+
+/// Shared body of the batch parsers.
+///
+/// Grammar: `IN '<collection>' VALUES ('<src>','<dst>','<label>')[, (...)]*`.
+/// The tokenizer drops commas and parentheses, so the tuple structure is
+/// recovered by consuming string tokens in threes; a count that is not a
+/// multiple of three is malformed. Per-edge `PROPERTIES` stays on the
+/// single-edge form until the physical `BatchEdge` can carry one.
+fn parse_edge_batch(
+    toks: &[Tok<'_>],
+    stmt: &str,
+) -> Result<(String, Vec<GraphEdgeTuple>), SqlError> {
+    let collection =
+        quoted_after(toks, "IN").ok_or_else(|| missing_clause(stmt, "IN <collection>"))?;
+    let Some(values_pos) = find_keyword(toks, "VALUES") else {
+        return Err(missing_clause(stmt, "VALUES ('<src>','<dst>','<label>')"));
+    };
+    let mut fields: Vec<String> = Vec::new();
+    for t in &toks[values_pos + 1..] {
+        match t {
+            Tok::Quoted(s) => fields.push(s.clone().into_owned()),
+            Tok::Word(w) => {
+                if w.eq_ignore_ascii_case("PROPERTIES") {
+                    return Err(SqlError::Parse {
+                        detail: format!(
+                            "{stmt}: per-edge PROPERTIES is not supported in the batch form"
+                        ),
+                    });
+                }
+                fields.push((*w).to_string());
+            }
+            Tok::Object(_) => {
+                return Err(SqlError::Parse {
+                    detail: format!("{stmt}: object literals are not supported in the batch form"),
+                });
+            }
+        }
+    }
+    if fields.is_empty() || !fields.len().is_multiple_of(3) {
+        return Err(SqlError::Parse {
+            detail: format!("{stmt}: VALUES takes (src, dst, label) triples"),
+        });
+    }
+    let count = fields.len() / 3;
+    if count > MAX_EDGES_PER_BATCH {
+        return Err(SqlError::Parse {
+            detail: format!(
+                "{stmt}: at most {MAX_EDGES_PER_BATCH} edges per statement, got {count}"
+            ),
+        });
+    }
+    let edges = fields
+        .chunks(3)
+        .map(|c| GraphEdgeTuple {
+            src: c[0].clone(),
+            dst: c[1].clone(),
+            label: c[2].clone(),
+        })
+        .collect();
+    Ok((collection, edges))
 }
 
 pub(super) fn parse_delete_edge(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {

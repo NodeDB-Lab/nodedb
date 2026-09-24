@@ -278,6 +278,34 @@ pub fn spawn_background_loops(
     // Quota period rollover is lazy — see `QuotaManager::rollover_if_due`.
     // Every reader/writer of quota usage rolls the scope's period over on
     // access, computed exactly from `period_start` and `period_secs`, so
+    // Per-database metric sampler (10-second interval). Fills the gauges whose
+    // registry setters have no owning writer: connections from the live
+    // session registry, and bridge queue depth from the dispatch WFQ. Families
+    // without a source yet (memory, storage, WAL commit latency, maintenance
+    // CPU) are left alone rather than published as constants.
+    {
+        let shared_metrics = Arc::clone(shared);
+        crate::control::shutdown::spawn_loop(
+            &shared.loop_registry,
+            &shared.shutdown,
+            "database_metrics_sampler",
+            crate::control::shutdown::ShutdownPhase::DrainingControlPlane,
+            move |mut shutdown| async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(10));
+                loop {
+                    tokio::select! {
+                        _ = shutdown.wait_cancelled() => break,
+                        _ = tick.tick() => {}
+                    }
+                    if shutdown.is_cancelled() {
+                        break;
+                    }
+                    crate::control::metrics::sampler::sample_once(&shared_metrics);
+                }
+            },
+        );
+    }
+
     // there is no background sweep to spawn here and no interval to couple
     // a quota's `period_secs` to.
 

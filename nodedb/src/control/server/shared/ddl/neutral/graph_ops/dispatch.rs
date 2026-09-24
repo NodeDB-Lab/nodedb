@@ -10,7 +10,7 @@ use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 
 use super::super::super::result::{DdlError, DdlResult};
-use super::{algo, edge, rag_fusion, stats, traverse};
+use super::{algo, edge, edge_batch, rag_fusion, stats, traverse};
 
 /// Dispatch a parsed graph-overlay variant to its handler.
 ///
@@ -67,6 +67,14 @@ pub async fn dispatch_graph(
                 txn_ctx,
             )
             .await,
+        ),
+        NodedbStatement::Graph(GraphStmt::GraphInsertEdges { collection, edges }) => Some(
+            edge_batch::insert_edges(state, identity, database_id, collection, edges, txn_ctx)
+                .await,
+        ),
+        NodedbStatement::Graph(GraphStmt::GraphDeleteEdges { collection, edges }) => Some(
+            edge_batch::delete_edges(state, identity, database_id, collection, edges, txn_ctx)
+                .await,
         ),
         NodedbStatement::Graph(GraphStmt::GraphSetLabels {
             node_id,

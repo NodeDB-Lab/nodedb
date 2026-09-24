@@ -124,6 +124,10 @@ impl CoreLoop {
                         properties: None,
                     },
                 );
+                if let Some(m) = &self.metrics {
+                    m.graph_edges_deleted_total
+                        .fetch_add(u64::from(existed), std::sync::atomic::Ordering::Relaxed);
+                }
                 self.response_affected(task, u64::from(existed))
             }
             Err(e) => self.response_error(

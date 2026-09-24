@@ -135,6 +135,13 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
             "vshard_admission",
             format!("vshard {vshard_id} admission queue is full (capacity {capacity})"),
         ),
+        // A saturated dispatch queue reports itself with a `dispatch_capacity:`
+        // prefix on `Error::Dispatch`, so it classifies as retryable without
+        // growing the error enum. Keep this arm ahead of the generic
+        // `Error::Dispatch` arm below.
+        Error::Dispatch { detail } if detail.starts_with("dispatch_capacity:") => {
+            NodeDbError::rate_exceeded("dispatch_capacity", detail.clone())
+        }
         Error::CrdtAdmissionRetriesExhausted { .. } => {
             NodeDbError::write_conflict("crdt", "CRDT frontier changed repeatedly; retry the write")
         }
@@ -366,6 +373,26 @@ mod tests {
         assert_eq!(borrowed.code(), owned.code());
         assert_eq!(borrowed.message(), owned.message());
         assert!(borrowed.is_not_found());
+    }
+
+    /// A full dispatch queue must classify as the retryable rate-exceeded
+    /// class, the same treatment vshard admission capacity already gets. A
+    /// loader that cannot see a retry class here paces blindly.
+    #[test]
+    fn dispatch_capacity_exhausted_is_retryable() {
+        let err = Error::Dispatch {
+            detail: "dispatch_capacity: core 3 capacity 512".to_owned(),
+        };
+        let classified = classify(&err);
+        assert!(
+            classified.is_rate_exceeded(),
+            "dispatch capacity must be retryable: {classified:?}"
+        );
+        assert!(
+            classified.message().contains("dispatch_capacity"),
+            "message must name the condition: {}",
+            classified.message()
+        );
     }
 
     /// A borrowed classification leaves the error intact for the caller to

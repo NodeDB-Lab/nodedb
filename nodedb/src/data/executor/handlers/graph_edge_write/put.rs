@@ -158,6 +158,10 @@ impl CoreLoop {
                                 properties: Some(properties),
                             },
                         );
+                        if let Some(m) = &self.metrics {
+                            m.graph_edges_written_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         self.response_affected(task, 1)
                     }
                     Err(e) => self.response_error(

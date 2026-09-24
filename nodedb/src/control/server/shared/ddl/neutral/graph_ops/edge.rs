@@ -6,8 +6,6 @@
 //! Each function receives already-parsed typed fields; handlers never touch
 //! `&str` parse paths.
 
-use nodedb_sql::ddl_ast::GraphProperties;
-
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::planner::calvin::{build_static_tx_class, submit_calvin_routed};
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -16,8 +14,10 @@ use crate::control::server::shared::sql::staging_predicates::require_affected_co
 use crate::control::server::surrogate_exchange::assign_surrogate_routed;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TraceId, VShardId};
+
 use nodedb_physical::physical_plan::GraphOp;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
+use nodedb_sql::ddl_ast::GraphProperties;
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::edge_parse::{properties_to_json, validate_edge_label};

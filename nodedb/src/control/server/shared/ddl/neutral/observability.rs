@@ -139,7 +139,23 @@ fn server_stats_rows(state: &SharedState) -> Vec<(String, String)> {
             "queries_fts".into(),
             sys.queries_fts.load(Ordering::Relaxed).to_string(),
         ));
+        rows.push((
+            "graph_edges_written_total".into(),
+            sys.graph_edges_written_total
+                .load(Ordering::Relaxed)
+                .to_string(),
+        ));
+        rows.push((
+            "graph_edges_deleted_total".into(),
+            sys.graph_edges_deleted_total
+                .load(Ordering::Relaxed)
+                .to_string(),
+        ));
     }
+    rows.push((
+        "dispatch_capacity_exhausted_total".into(),
+        crate::bridge::dispatch::dispatch_capacity_exhausted_total().to_string(),
+    ));
 
     rows
 }
@@ -156,6 +172,28 @@ pub fn show_server_stats(
 ) -> Result<Vec<DdlResult>, DdlError> {
     require_tenant_admin(identity, "show stats")?;
     key_value_result(server_stats_rows(state))
+}
+
+/// SHOW SNAPSHOT — the current read pin as `(name, value)` rows.
+///
+/// A reader pages with a fresh snapshot per page, so a page can land between
+/// two producer transactions and return a half-applied batch. The pin below
+/// is the monotonic WAL sequence at the moment of the call: capture it once,
+/// and a producer that records the same pin in its commit marker lets the
+/// reader tell whether the batch it paged is complete.
+///
+/// Not tenant-admin gated: it exposes no tenant data, and a reader needs it
+/// before it has paged anything.
+pub fn show_snapshot(state: &SharedState) -> Result<Vec<DdlResult>, DdlError> {
+    key_value_result(vec![
+        ("snapshot_pin".to_string(), "wal_lsn".to_string()),
+        (
+            "wal_next_lsn".to_string(),
+            state.wal.next_lsn().as_u64().to_string(),
+        ),
+        ("node_id".to_string(), state.node_id.to_string()),
+        ("version".to_string(), crate::version::VERSION.to_string()),
+    ])
 }
 
 /// SHOW METRICS — `(name, value)` projection of the same source as
