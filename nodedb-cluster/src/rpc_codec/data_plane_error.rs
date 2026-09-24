@@ -130,9 +130,20 @@ pub enum DataPlaneErrorCode {
     /// The request's deadline passed before the core started it; nothing
     /// ran.
     ExpiredBeforeExecution,
+    /// A sync frame the validator refused for good. Nothing applied. The
+    /// four provenance fields name the stream position the high-water mark
+    /// advanced to.
+    SyncRejected {
+        violation: nodedb_types::sync::violation::ViolationType,
+        applied_seq: u64,
+        producer_id: u64,
+        epoch: u64,
+        stream_id: u64,
+        seq: u64,
+    },
 }
 
-/// Wire mirror of `nodedb::bridge::envelope::CounterFault`.
+/// Wire mirror of `nodedb_physical::kv_atomic::CounterFault`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum DataPlaneCounterFault {
     NotAnInteger,

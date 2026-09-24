@@ -36,15 +36,15 @@ pub enum MetaOp {
         target_request_id: nodedb_types::id::RequestId,
     },
 
-    /// Atomic transaction batch: execute all sub-plans atomically.
+    /// A transaction's plans as one batch. An embedded (Lite) engine executes
+    /// the sub-plans atomically. An Origin core refuses it: a committed
+    /// transaction installs there only through its redo record
+    /// (`ApplyTransactionRedo`, `CalvinFlush`).
     ///
     /// `txn_id` identifies the committing session transaction whose staging
-    /// overlay holds the resolve-time bitemporal stamps this install must reuse
-    /// (so a `bitemporal=true` document put lands on the same version key the
-    /// redo carries, not a fresh one). `None` for install paths with no session
-    /// overlay to consult — Calvin (which threads its stamps in directly) and
-    /// procedural/test callers. Wire-additive: defaults to `None` on decode of
-    /// older entries.
+    /// overlay holds the resolve-time bitemporal stamps an install must reuse.
+    /// `None` for callers with no session overlay to consult. Wire-additive:
+    /// defaults to `None` on decode of older entries.
     TransactionBatch {
         plans: Vec<super::PhysicalPlan>,
         #[serde(default)]
@@ -292,9 +292,10 @@ pub enum MetaOp {
     ///
     /// The Calvin scheduler dispatches this variant after lock acquisition for
     /// transactions whose read/write set is fully known at submission time (the
-    /// common case). The Data Plane handler executes `plans` atomically (same
-    /// semantics as `TransactionBatch`) and the scheduler writes a
-    /// `WalRecord::CalvinApplied` after a successful response.
+    /// common case). The Data Plane handler validates the read-set and stages
+    /// `plans` without mutating base. Once the global verdict is commit, the
+    /// scheduler resolves the staged plans into a redo record, appends it, and
+    /// flushes it (`CalvinResolve`, `CalvinFlush`).
     ///
     /// NOTE: This variant occupies the same msgpack positional tag as the
     /// original `CalvinExecute` variant it replaces, preserving wire
@@ -450,9 +451,9 @@ pub enum MetaOp {
     /// (unique / primary-key) immediately, computes the real affected-row
     /// count, and records the resulting body (or tombstone) in the overlay so
     /// a subsequent same-transaction read-modify-write observes it. It does
-    /// NOT make the write durable — the buffered plan is still replayed
-    /// through the real apply path inside the COMMIT `TransactionBatch`, which
-    /// remains the sole durable apply. Keyed by the request's `txn_id`.
+    /// NOT make the write durable — COMMIT resolves the overlay into the
+    /// transaction's redo record, and the redo install remains the sole
+    /// durable apply. Keyed by the request's `txn_id`.
     StageWrite { plan: Box<super::PhysicalPlan> },
 
     /// Drop the per-transaction staging overlay for a completed (committed
@@ -493,40 +494,42 @@ pub enum MetaOp {
         array_marker: u64,
     },
 
-    /// Record the per-key / per-collection write versions of a committed
-    /// Calvin transaction's locally-applied write plans.
+    /// Record the per-key write versions of a committed Calvin transaction's
+    /// locally-applied write plans.
     ///
-    /// A Calvin apply's committed WAL LSN is known only after the apply
-    /// succeeds, so the apply itself cannot advance the version index. The
-    /// scheduler stamps that LSN onto this op's `wal_lsn` and dispatches it back
-    /// to the same core, which funnels `plans` through the shared write-version
-    /// recorder at that LSN — landing in the same shard-local WAL-LSN space the
+    /// The scheduler stamps the transaction's committed LSN onto this op's
+    /// `wal_lsn` and dispatches it back to the same core once the flush
+    /// completes. The core funnels `plans` through the shared write-version
+    /// recorder at that LSN — the same shard-local WAL-LSN space the
     /// single-shard fast path and read watermarks use. Records only: no base
-    /// mutation, no WAL append, no event emission. Wire-additive (appended last)
-    /// so older log entries decode unchanged.
+    /// mutation, no WAL append, no event emission.
     RecordCalvinWriteVersions {
         /// Tenant scope for all plans.
         tenant_id: TenantId,
         /// The locally-applied write plans whose keys' versions are recorded.
         plans: Vec<super::PhysicalPlan>,
-        /// Calvin epoch of the applied transaction. With `position` and the
-        /// request's vShard, keys the index-value tuples the flush staged so the
-        /// core drains and records them at this op's applied LSN.
-        epoch: u64,
-        /// Calvin position within the epoch (see `epoch`).
-        position: u32,
     },
 
-    /// Flush the staged writes of a Calvin transaction to base storage.
+    /// Install a committed Calvin transaction's redo record on base storage.
     ///
-    /// `CalvinExecuteStatic` validates and STAGES the transaction's plans into
-    /// the per-core commit-pending buffer without mutating base. Once the local
-    /// commit vote resolves to commit, the scheduler dispatches this op back to
-    /// the same core, which pops the staged plans keyed by `(epoch, position)`
-    /// and replays them through the durable apply funnel (base + side effects +
-    /// version recording). Absent key (already flushed/dropped) is an idempotent
-    /// no-op, not an error.
-    CalvinFlush { epoch: u64, position: u32 },
+    /// `CalvinExecuteStatic` STAGES the transaction's plans without mutating
+    /// base, and `CalvinResolve` resolves them into one redo record, which the
+    /// scheduler appends to the WAL as a `TransactionRedo` record. This op
+    /// carries that record's bytes, and the request carries its LSN. The core
+    /// installs it through the same passes restart replay drives: validate,
+    /// install with undo, then settle and cover. It then drops the staged
+    /// state keyed by `(epoch, position)`.
+    ///
+    /// `redo` is empty when the transaction wrote nothing. `collections` names
+    /// every collection the transaction wrote. `sum_targets` is the
+    /// materialized-sum resolution its document writes fold into.
+    CalvinFlush {
+        epoch: u64,
+        position: u32,
+        redo: Vec<u8>,
+        collections: Vec<String>,
+        sum_targets: Vec<super::RedoSumTargets>,
+    },
 
     /// Discard the staged writes of a Calvin transaction.
     ///
@@ -567,11 +570,8 @@ pub enum MetaOp {
     /// `commit_pending` under `(epoch, position, vshard)` and the per-core
     /// staging overlay written under the corresponding synthetic `TxnId`
     /// (see `calvin_synthetic_txn_id`). Dispatched by the scheduler once the
-    /// local commit vote resolves to commit, in place of (or ahead of)
-    /// `CalvinFlush` — the flush path mutates base directly, while resolve
-    /// produces a durable redo record for a later install phase instead. No
-    /// base engine is touched during resolve. Wire-additive: appended last
-    /// so older log entries decode unchanged.
+    /// global verdict is commit, ahead of `CalvinFlush`, which installs the
+    /// record this op returns. No base engine is touched during resolve.
     CalvinResolve { epoch: u64, position: u32 },
 
     /// Apply one committed transaction's resolved redo record on the core that

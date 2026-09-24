@@ -106,7 +106,7 @@ pub enum ClusterError {
     /// `dispatch_remote_stream`). `detail` is the `Debug` rendering for logs.
     #[error("streaming execution terminal error: {detail}")]
     StreamTerminal {
-        error: crate::rpc_codec::TypedClusterError,
+        error: Box<crate::rpc_codec::TypedClusterError>,
         detail: String,
     },
 

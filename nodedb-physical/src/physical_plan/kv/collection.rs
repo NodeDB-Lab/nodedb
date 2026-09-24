@@ -8,8 +8,8 @@
 use super::op::KvOp;
 
 impl KvOp {
-    /// The user collection this op targets, if any. Sorted-index ops (keyed
-    /// only by index name) and `ResolvedWrite` (mutations may span two
+    /// The user collection this op targets, if any. Sorted-index ops keyed
+    /// only by index name and `ResolvedWrite` (mutations may span two
     /// collections) return `None`. `TransferItem` reports its source.
     pub fn collection(&self) -> Option<&str> {
         match self {
@@ -38,7 +38,8 @@ impl KvOp {
             | KvOp::RegisterSortedIndex { collection, .. }
             | KvOp::PredicateUpdate { collection, .. }
             | KvOp::PredicateDelete { collection, .. }
-            | KvOp::MaterializeScan { collection, .. } => Some(collection.as_str()),
+            | KvOp::MaterializeScan { collection, .. }
+            | KvOp::SortedIndexTxnRead { collection, .. } => Some(collection.as_str()),
             KvOp::TransferItem {
                 source_collection, ..
             } => Some(source_collection.as_str()),

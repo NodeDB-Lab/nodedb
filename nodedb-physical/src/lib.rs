@@ -11,6 +11,7 @@
 
 pub mod convert_context;
 pub mod error;
+pub mod kv_atomic;
 pub mod physical_plan;
 pub mod physical_task;
 pub mod surrogate;

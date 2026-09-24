@@ -6,6 +6,7 @@ use nodedb_types::{QualifiedCollection, RlsWriteCheck, Surrogate};
 
 use super::counter_shape::KvCounterShape;
 use super::resolved_mutation::KvResolvedMutation;
+use super::sorted_read::{SortedIndexRead, SortedIndexSpec};
 use crate::physical_plan::document::ReturningSpec;
 
 /// KV engine physical operations.
@@ -473,6 +474,22 @@ pub enum KvOp {
     SortedIndexScore {
         index_name: String,
         primary_key: Vec<u8>,
+    },
+
+    /// A sorted-index read inside an explicit transaction block.
+    ///
+    /// The Data Plane answers it from a transaction-local tree. It builds the
+    /// tree from the collection's base rows with the transaction's staged
+    /// writes folded in, so the read sees the transaction's own writes and an
+    /// index the transaction created. Routed by `collection`, the core that
+    /// holds the rows.
+    SortedIndexTxnRead {
+        collection: QualifiedCollection,
+        index_name: String,
+        /// The definition of an index this transaction created and has not
+        /// committed. `None` reads the definition registered on the core.
+        pending: Option<SortedIndexSpec>,
+        read: SortedIndexRead,
     },
 
     /// Cursor-paginated raw scan for the clone materializer.

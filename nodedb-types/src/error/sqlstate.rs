@@ -118,6 +118,10 @@ pub const PERIOD_LOCK_MISCONFIGURED: &str = "23609";
 /// `28000` — `invalid_authorization_specification` (no valid credentials)
 pub const INVALID_AUTHORIZATION: &str = "28000";
 
+/// `active_sql_transaction`: the statement cannot run inside a transaction
+/// block.
+pub const ACTIVE_SQL_TRANSACTION: &str = "25001";
+
 // ── Class 3D — Invalid Catalog Name ──────────────────────────────────────────
 
 /// `3D000` — `invalid_catalog_name` (the selected database does not exist)

@@ -4558,6 +4558,7 @@ dependencies = [
  "nodedb-query",
  "nodedb-sql",
  "nodedb-types",
+ "rust_decimal",
  "serde",
  "thiserror 2.0.20",
  "zerompk",

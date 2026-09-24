@@ -194,10 +194,10 @@ pub use imp::{FAILPOINTS_ENV, FailAction, FailGuard, clear, eval, eval_fail, loo
 /// Inject a fail point. Expands to nothing without the `failpoints` feature.
 ///
 /// Usage in production code:
-///   `nodedb_types::fail_point!("transaction_batch::between_subapply");`
+///   `nodedb_types::fail_point!("calvin_static::during_overlay_stage");`
 ///
 /// Tests opt in by enabling the feature and installing actions:
-///   `fail_point::set("transaction_batch::between_subapply",
+///   `fail_point::set("calvin_static::during_overlay_stage",
 ///                    fail_point::FailAction::Panic);`
 #[macro_export]
 macro_rules! fail_point {
