@@ -331,6 +331,18 @@ impl Dispatcher {
             .unwrap_or(0)
     }
 
+    /// Queued requests for `database_id` across every core's WFQ.
+    ///
+    /// Read-only and lock-light: metrics sampling asks once per database per
+    /// interval, and the per-queue depth is the raw number the fairness
+    /// thresholds are computed from.
+    pub fn db_queue_depth(&self, database_id: u64) -> u64 {
+        self.cores
+            .iter()
+            .map(|core| core.wfq.depth_for(database_id) as u64)
+            .sum()
+    }
+
     /// Per-database pressure state for the given core (used by metrics exporters).
     ///
     /// Returns `PressureState::Normal` when no pressure has been recorded for

@@ -5,6 +5,7 @@ pub mod histogram;
 pub mod per_vshard;
 pub mod prometheus;
 pub mod purge;
+pub mod sampler;
 pub mod system;
 pub mod tenant;
 
