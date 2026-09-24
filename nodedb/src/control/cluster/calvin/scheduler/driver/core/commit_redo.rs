@@ -90,7 +90,12 @@ impl Scheduler {
                     &redo,
                 );
             match appended {
-                Ok(lsn) => (Some(lsn), Some(records)),
+                Ok(lsn) => {
+                    // The txn committed, so its redo record is never
+                    // cancelled. The flush closes it from its outcome.
+                    records.mark_sent();
+                    (Some(lsn), Some(records))
+                }
                 Err(e) => {
                     // The txn stays pending and unapplied, and a failed append
                     // leaves no record for restart replay to reach.

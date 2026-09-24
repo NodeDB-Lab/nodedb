@@ -96,6 +96,11 @@ impl WalAppender<'_> {
         db: DatabaseId,
         aborted_lsn: Lsn,
     ) -> crate::Result<Lsn> {
+        crate::fail_point_err!("wal::append_write_aborted", |detail: String| {
+            crate::Error::Internal {
+                detail: format!("write-aborted append failed (failpoint): {detail}"),
+            }
+        });
         let payload = nodedb_wal::WriteAbortedPayload::new(aborted_lsn.as_u64()).to_bytes();
         self.append_record(RecordType::WriteAborted, tid, vs, db, &payload)
     }

@@ -15,5 +15,5 @@ pub mod encryption;
 pub mod ops;
 pub mod replay;
 
-pub use appender::{NO_APPLY_KEY, WalAppender};
+pub use appender::{NO_APPLY_KEY, RecordedAppend, WalAppender};
 pub use core::WalManager;

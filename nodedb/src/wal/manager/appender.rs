@@ -20,13 +20,23 @@ use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 /// The apply key of a record no replicated proposal owns.
 pub const NO_APPLY_KEY: u64 = 0;
 
+/// One record a recording appender wrote: its LSN and the header fields
+/// that place it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordedAppend {
+    pub lsn: Lsn,
+    pub tenant_id: TenantId,
+    pub vshard_id: VShardId,
+    pub database_id: DatabaseId,
+}
+
 /// Appends WAL records that all carry one apply key.
 #[derive(Clone, Copy)]
 pub struct WalAppender<'a> {
     wal: &'a WalManager,
     apply_key: u64,
-    /// Collects the LSN of every record this appender writes, when set.
-    sink: Option<&'a Mutex<Vec<Lsn>>>,
+    /// Collects every record this appender writes, when set.
+    sink: Option<&'a Mutex<Vec<RecordedAppend>>>,
 }
 
 impl WalManager {
@@ -41,12 +51,12 @@ impl WalManager {
         }
     }
 
-    /// An appender that also pushes the LSN of every record it writes onto
-    /// `sink`, in append order.
+    /// An appender that also pushes every record it writes onto `sink`, in
+    /// append order.
     pub fn recording_appender<'a>(
         &'a self,
         apply_key: u64,
-        sink: &'a Mutex<Vec<Lsn>>,
+        sink: &'a Mutex<Vec<RecordedAppend>>,
     ) -> WalAppender<'a> {
         WalAppender {
             wal: self,
@@ -87,7 +97,14 @@ impl WalAppender<'_> {
         drop(wal);
         let lsn = Lsn::new(lsn);
         if let Some(sink) = self.sink {
-            sink.lock().unwrap_or_else(|p| p.into_inner()).push(lsn);
+            sink.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(RecordedAppend {
+                    lsn,
+                    tenant_id,
+                    vshard_id,
+                    database_id,
+                });
         }
         Ok(lsn)
     }
@@ -136,7 +153,12 @@ mod tests {
             .expect("append");
         let second = recording.append_put(t, v, db, b"b").expect("append");
 
-        let recorded = sink.lock().expect("sink").clone();
+        let recorded: Vec<Lsn> = sink
+            .lock()
+            .expect("sink")
+            .iter()
+            .map(|record| record.lsn)
+            .collect();
         assert_eq!(recorded, vec![first, second]);
     }
 }

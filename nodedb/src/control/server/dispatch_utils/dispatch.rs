@@ -744,4 +744,102 @@ mod tests {
         assert!(state.outcome_floor.floor() >= lsn);
         assert_eq!(state.outcome_floor.leaked_windows(), 0);
     }
+
+    /// A point write the admission gate serializes on its key.
+    fn incr_plan() -> crate::bridge::envelope::PhysicalPlan {
+        crate::bridge::envelope::PhysicalPlan::Kv(nodedb_physical::physical_plan::KvOp::Incr {
+            collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
+            key: b"k1".to_vec(),
+            delta: 1,
+            ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate::new(1),
+            rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
+        })
+    }
+
+    /// Wait until the floor passes `lsn`, routing responses meanwhile.
+    async fn floor_passes(state: &SharedState, lsn: Lsn) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state.outcome_floor.floor() < lsn && Instant::now() < deadline {
+            state.poll_and_route_responses();
+            tokio::task::yield_now().await;
+        }
+        state.outcome_floor.floor() >= lsn
+    }
+
+    #[tokio::test]
+    async fn a_caller_dropped_while_waiting_for_admission_cancels_its_records() {
+        let (state, _side, _directory) = fixture();
+        let (minted, lsn) = minted_record(&state);
+        let plan = incr_plan();
+        let (_, keys) =
+            crate::control::server::shared::write_admission::lock_keys::plan_lock_keys(&plan)
+                .expect("a point write has a lock key");
+        let key = keys.into_iter().next().expect("one key");
+        let held = state.write_order_locks.lock_owned(key).await;
+        let mut write = write_with(minted, lsn);
+        write.plan = plan;
+
+        let waited = tokio::time::timeout(
+            Duration::from_millis(50),
+            super::dispatch_trusted_internal_write_to_data_plane(&state, write),
+        )
+        .await;
+        drop(held);
+
+        assert!(waited.is_err(), "the write waits behind the held key");
+        assert!(
+            !replayed(&state).contains(&lsn.as_u64()),
+            "a marker names it"
+        );
+        assert!(state.outcome_floor.floor() >= lsn);
+        assert_eq!(state.outcome_floor.leaked_windows(), 0);
+        assert_eq!(state.outcome_floor.held_windows(), 0);
+    }
+
+    /// Drop the caller once its write is enqueued, then answer the write.
+    async fn drop_after_dispatch_then_answer(
+        status: Status,
+        code: Option<crate::bridge::envelope::ErrorCode>,
+    ) -> (Arc<SharedState>, Lsn, tempfile::TempDir) {
+        let (state, side, directory) = fixture();
+        let (minted, lsn) = minted_record(&state);
+        let waited = tokio::time::timeout(
+            Duration::from_millis(50),
+            super::dispatch_trusted_internal_write_to_data_plane(&state, write_with(minted, lsn)),
+        )
+        .await;
+        assert!(waited.is_err(), "no response arrived before the drop");
+        assert!(
+            state.outcome_floor.floor() < lsn,
+            "the core holds the records"
+        );
+        respond_once_with(Arc::clone(&state), side, status, code).await;
+        assert!(
+            floor_passes(&state, lsn).await,
+            "the final response closed the window"
+        );
+        assert_eq!(state.outcome_floor.leaked_windows(), 0);
+        (state, lsn, directory)
+    }
+
+    #[tokio::test]
+    async fn a_caller_dropped_after_dispatch_settles_its_records_from_the_answer() {
+        let (state, lsn, _directory) = drop_after_dispatch_then_answer(Status::Ok, None).await;
+        assert!(replayed(&state).contains(&lsn.as_u64()));
+    }
+
+    #[tokio::test]
+    async fn a_caller_dropped_after_dispatch_cancels_its_records_on_a_refusal() {
+        let (state, lsn, _directory) = drop_after_dispatch_then_answer(
+            Status::Error,
+            Some(crate::bridge::envelope::ErrorCode::RejectedConstraint {
+                constraint: "unique".into(),
+                detail: "duplicate key".into(),
+            }),
+        )
+        .await;
+        assert!(!replayed(&state).contains(&lsn.as_u64()));
+    }
 }

@@ -185,7 +185,14 @@ pub(crate) async fn submit_write(
         post_apply.is_some(),
     );
     let dispatch_outcome = match dispatched {
-        Ok(outcome) => outcome,
+        Ok(outcome) => {
+            // A core holds the request now. From here the records close
+            // from its final response, never from a drop.
+            if let Some(minted) = &minted {
+                minted.mark_sent();
+            }
+            outcome
+        }
         Err(error) => {
             // The dispatcher refused the request, so no core applied it. A
             // dispatch refusal depends on this node's load, so the markers

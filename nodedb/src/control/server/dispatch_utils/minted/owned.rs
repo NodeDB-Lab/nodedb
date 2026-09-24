@@ -153,7 +153,7 @@ mod tests {
         }
     }
 
-    fn minted_record(wal: &WalManager, floor: &Arc<OutcomeFloor>) -> (MintedRecords, Lsn) {
+    fn minted_record(wal: &Arc<WalManager>, floor: &Arc<OutcomeFloor>) -> (MintedRecords, Lsn) {
         let minted = MintedRecords::open(floor);
         let lsn = minted
             .appender(wal, NO_APPLY_KEY)

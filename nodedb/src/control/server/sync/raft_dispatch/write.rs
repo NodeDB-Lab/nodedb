@@ -333,4 +333,101 @@ mod tests {
             holder.abort();
         }
     }
+
+    /// A caller dropped while its frontier write waits for the sequencer
+    /// sent nothing to a core, so the drop cancels its records and their
+    /// window settles.
+    #[tokio::test]
+    async fn a_caller_dropped_in_the_sequencer_wait_cancels_its_records() {
+        use super::super::durability_test_support::{authorized_plan, vshard};
+
+        let (state, _side, _directory) = fixture();
+        let (minted, lsn) = minted_buffered_record(&state);
+        let sequencer = Arc::clone(&state.vshard_admission_sequencer);
+        let holder = tokio::spawn(async move {
+            sequencer
+                .run(vshard(), std::future::pending::<crate::Result<()>>)
+                .await
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        let authorized = authorized_plan(
+            &state,
+            crate::bridge::envelope::PhysicalPlan::Crdt(
+                nodedb_physical::physical_plan::CrdtOp::DocDelete {
+                    collection: nodedb_types::QualifiedCollection::new(
+                        crate::types::DatabaseId::DEFAULT,
+                        COLLECTION,
+                    ),
+                    document_id: "d1".into(),
+                    surrogate: nodedb_types::Surrogate::ZERO,
+                    returning: None,
+                    rls_filters: Vec::new(),
+                },
+            ),
+        );
+
+        let waited = tokio::time::timeout(
+            Duration::from_millis(50),
+            dispatch_write_replicated(
+                &state,
+                COLLECTION,
+                authorized,
+                Duration::from_secs(5),
+                EventSource::CrdtSync,
+                Some(minted),
+            ),
+        )
+        .await;
+
+        assert!(waited.is_err(), "the write waits behind the running holder");
+        state.wal.sync().expect("sync");
+        let replayed: Vec<u64> = state
+            .wal
+            .replay()
+            .expect("replay")
+            .iter()
+            .map(|record| record.header.lsn)
+            .collect();
+        assert!(!replayed.contains(&lsn.as_u64()), "a marker names it");
+        assert!(state.outcome_floor.floor() >= lsn);
+        assert_eq!(state.outcome_floor.leaked_windows(), 0);
+        assert_eq!(state.outcome_floor.held_windows(), 0);
+        holder.abort();
+    }
+
+    /// The Raft entry carried the write, so its result stands although the
+    /// caller's records could not be cancelled. Their window is held, which
+    /// keeps the floor below them and reports it.
+    #[cfg(feature = "failpoints")]
+    #[tokio::test]
+    async fn a_failed_cancel_keeps_the_proposed_result_and_holds_the_window() {
+        let (state, _side, _directory) = fixture();
+        let raw: Arc<crate::control::wal_replication::AsyncRaftProposer> =
+            Arc::new(|_vshard, _key, _data| {
+                Box::pin(async { Ok((b"applied".to_vec(), crate::types::Lsn::ZERO)) })
+            });
+        crate::control::vshard_admission::install_async_raft_proposer(&state, raw)
+            .expect("install proposer");
+        let (minted, lsn) = minted_buffered_record(&state);
+        let _fail = crate::fail_point::FailGuard::fail("wal::append_write_aborted", "disk full");
+        let authorized = authorized_write(&state);
+
+        let payload = dispatch_write_replicated(
+            &state,
+            COLLECTION,
+            authorized,
+            Duration::from_secs(5),
+            EventSource::CrdtSync,
+            Some(minted),
+        )
+        .await
+        .expect("the proposal's result stands");
+
+        assert_eq!(payload, b"applied".to_vec());
+        assert!(state.outcome_floor.floor() < lsn, "the window is held");
+        assert_eq!(state.outcome_floor.held_windows(), 1);
+        assert_eq!(state.outcome_floor.leaked_windows(), 0);
+    }
 }

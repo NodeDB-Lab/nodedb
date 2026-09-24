@@ -156,25 +156,10 @@ pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
         return (status, axum::Json(body));
     }
 
-    // A write window open past the longest statement deadline holds the
-    // outcome floor, so no checkpoint on this node advances past it. The node
-    // serves, so it reports degraded.
-    if let Some(stuck) = state
-        .shared
-        .outcome_floor
-        .stuck(outcome_floor_bound(&state))
-    {
-        let body = json!({
-            "status": "degraded",
-            "reason": "outcome_floor_stuck",
-            "node_id": state.shared.node_id,
-            "outcome_floor": stuck.floor.as_u64(),
-            "oldest_window_horizon": stuck.horizon.as_u64(),
-            "oldest_window_open_secs": stuck.open_for.as_secs(),
-            "open_windows": stuck.open_windows,
-            "leaked_windows": state.shared.outcome_floor.leaked_windows(),
-            "held_windows": state.shared.outcome_floor.held_windows(),
-        });
+    // A write window open past the outcome-floor bound holds the floor, so
+    // no checkpoint on this node advances past it. The node serves, so it
+    // reports degraded.
+    if let Some(body) = outcome_floor_stuck_body(&state, outcome_floor_bound(&state)) {
         return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body));
     }
 
@@ -196,6 +181,27 @@ pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
         return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body));
     }
     (status, axum::Json(body))
+}
+
+/// The degraded body for an outcome floor held past `bound` by a window that
+/// is not held, or `None` when no such window exists.
+fn outcome_floor_stuck_body(
+    state: &AppState,
+    bound: std::time::Duration,
+) -> Option<serde_json::Value> {
+    let floor = &state.shared.outcome_floor;
+    let stuck = floor.stuck(bound)?;
+    Some(json!({
+        "status": "degraded",
+        "reason": "outcome_floor_stuck",
+        "node_id": state.shared.node_id,
+        "outcome_floor": stuck.floor.as_u64(),
+        "oldest_window_horizon": stuck.horizon.as_u64(),
+        "oldest_window_open_secs": stuck.open_for.as_secs(),
+        "open_windows": stuck.open_windows,
+        "leaked_windows": floor.leaked_windows(),
+        "held_windows": floor.held_windows(),
+    }))
 }
 
 /// How long a write window can hold the outcome floor before readiness reports
@@ -407,5 +413,64 @@ mod tests {
         let (_status, body) = healthz_body(state).await;
 
         assert_ne!(body["reason"], "calvin_apply_halted");
+    }
+
+    /// The bound covers the longest statement deadline plus the apply wait,
+    /// and the vector install's two core dispatch deadlines.
+    #[tokio::test]
+    async fn the_outcome_floor_bound_covers_every_path_to_a_final_outcome() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = app_state(&dir);
+        let network = &state.shared.tuning.network;
+        let statement = std::time::Duration::from_secs(
+            network
+                .default_deadline_secs
+                .max(network.copy_deadline_secs),
+        ) + crate::control::metadata_proposer::DEFAULT_PROPOSE_TIMEOUT;
+        let vector = crate::control::catalog_entry::post_apply::vector_install_longest_core_wait();
+
+        let bound = outcome_floor_bound(&state);
+
+        assert!(bound >= statement);
+        assert!(bound >= vector);
+        assert_eq!(bound, statement.max(vector));
+    }
+
+    /// A window open past the bound degrades readiness and names the floor
+    /// it holds.
+    #[tokio::test]
+    async fn a_window_open_past_the_bound_reports_a_stuck_floor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = app_state(&dir);
+        let window = state.shared.outcome_floor.open_write();
+        window.note_minted(crate::types::Lsn::new(7));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let body = outcome_floor_stuck_body(&state, std::time::Duration::ZERO)
+            .expect("the window is older than a zero bound");
+
+        assert_eq!(body["reason"], "outcome_floor_stuck");
+        assert_eq!(body["open_windows"], 1);
+        assert_eq!(body["oldest_window_horizon"], 1);
+        assert_eq!(body["held_windows"], 0);
+        window.settle();
+        assert!(outcome_floor_stuck_body(&state, std::time::Duration::ZERO).is_none());
+    }
+
+    /// A held window never degrades readiness. The healthz body counts it.
+    #[tokio::test]
+    async fn a_held_window_is_reported_without_degrading_readiness() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = app_state(&dir);
+        let window = state.shared.outcome_floor.open_write();
+        window.note_minted(crate::types::Lsn::new(7));
+        window.hold();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        assert!(outcome_floor_stuck_body(&state, std::time::Duration::ZERO).is_none());
+        let (_status, body) = healthz_body(state).await;
+
+        assert_ne!(body["reason"], "outcome_floor_stuck");
+        assert_eq!(body["held_windows"], 1);
     }
 }

@@ -162,6 +162,8 @@ async fn install_params(
         report(&error, "set_params_wal_append", &target);
     }
 
+    // The cores hold the record from here. It closes from their answers.
+    minted.mark_sent();
     let set_params = fan_out(&shared, &fanout(&target), &plan).await;
     let stage = if set_params.pending.is_empty() {
         let refused = set_params.refused;
@@ -304,6 +306,8 @@ async fn drop_index(name: IndexName, shared: Arc<SharedState>, ready: oneshot::S
         Err(error) => report(&error, "drop_index_wal_append", &target),
     }
 
+    // The cores hold the record from here. It closes from their answers.
+    minted.mark_sent();
     let answers = fan_out(&shared, &fanout(&target), &plan).await;
     // Cores still working past the deadline answer later. The caller moves
     // on while this task waits for their final answers.

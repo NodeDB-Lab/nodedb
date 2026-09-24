@@ -17,15 +17,23 @@
 //! Appends go through [`MintedRecords::appender`], which records the LSN of
 //! every record it writes. A plan that appends several records is cancelled
 //! whole.
+//!
+//! Records dropped without a close still close. Records never sent to a core
+//! are cancelled in place: a `WriteAborted` marker names each one and the
+//! window settles. Records a core can hold have no known outcome, so their
+//! window leaks and files its report. A caller dropped at any await before
+//! the dispatch therefore leaves nothing open. After the dispatch the
+//! records belong to the task that waits for the final response.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use crate::bridge::dispatch::{OutcomeFloor, WriteWindow};
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::server::wal_dispatch::{WalAppendOutcome, WalAppendRequest, wal_append};
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::WalManager;
-use crate::wal::manager::{NO_APPLY_KEY, WalAppender};
+use crate::wal::manager::{NO_APPLY_KEY, RecordedAppend, WalAppender};
 
 /// Where a write's records live. The abort markers that cancel them carry it.
 #[derive(Debug, Clone, Copy)]
@@ -37,24 +45,39 @@ pub(crate) struct RecordOwner {
 
 /// The records one write appended, and the window that holds the outcome
 /// floor below them.
-#[derive(Debug)]
 #[must_use = "minted records hold the outcome floor until they settle, cancel, or hold"]
 pub(crate) struct MintedRecords {
-    window: WriteWindow,
-    lsns: Mutex<Vec<Lsn>>,
-    /// Whether this write appended the records. A resent record belongs to
-    /// the write that appended it, and only that write can cancel it.
-    appended_here: bool,
+    /// `None` once a close took it.
+    window: Option<WriteWindow>,
+    appended: Mutex<Vec<RecordedAppend>>,
+    /// The existing record this set resends. A resent record belongs to the
+    /// write that appended it, and only that write can cancel it.
+    resent: Option<Lsn>,
+    /// The WAL the records went to. The first append stores it.
+    wal: OnceLock<Arc<WalManager>>,
+    /// Whether a core can hold the records.
+    sent: AtomicBool,
 }
+
+impl std::fmt::Debug for MintedRecords {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MintedRecords")
+            .field("open", &self.window.is_some())
+            .field("appended", &*self.recorded())
+            .field("resent", &self.resent)
+            .field("sent", &self.sent.load(Ordering::Acquire))
+            .finish()
+    }
+}
+
+/// A closed set's parts: the window, every appended record, and the
+/// resent LSN.
+type Parts = (WriteWindow, Vec<RecordedAppend>, Option<Lsn>);
 
 impl MintedRecords {
     /// Open the window. Call it before the first record is appended.
     pub(crate) fn open(floor: &Arc<OutcomeFloor>) -> Self {
-        Self {
-            window: floor.open_write(),
-            lsns: Mutex::new(Vec::new()),
-            appended_here: true,
-        }
+        Self::with_window(floor.open_write(), None)
     }
 
     /// Hold an existing record at `lsn` that is sent to a core again. `None`
@@ -62,26 +85,37 @@ impl MintedRecords {
     /// apply would land below the floor.
     pub(crate) fn resend(floor: &Arc<OutcomeFloor>, lsn: Lsn) -> Option<Self> {
         let window = floor.open_existing(lsn)?;
-        Some(Self {
-            window,
-            lsns: Mutex::new(vec![lsn]),
-            appended_here: false,
-        })
+        Some(Self::with_window(window, Some(lsn)))
     }
 
-    fn recorded(&self) -> MutexGuard<'_, Vec<Lsn>> {
-        self.lsns.lock().unwrap_or_else(|p| p.into_inner())
+    fn with_window(window: WriteWindow, resent: Option<Lsn>) -> Self {
+        Self {
+            window: Some(window),
+            appended: Mutex::new(Vec::new()),
+            resent,
+            wal: OnceLock::new(),
+            sent: AtomicBool::new(false),
+        }
+    }
+
+    fn recorded(&self) -> MutexGuard<'_, Vec<RecordedAppend>> {
+        self.appended.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// An appender whose records carry `apply_key` and join this set.
-    pub(crate) fn appender<'a>(&'a self, wal: &'a WalManager, apply_key: u64) -> WalAppender<'a> {
-        wal.recording_appender(apply_key, &self.lsns)
+    pub(crate) fn appender<'a>(
+        &'a self,
+        wal: &'a Arc<WalManager>,
+        apply_key: u64,
+    ) -> WalAppender<'a> {
+        self.wal.get_or_init(|| Arc::clone(wal));
+        wal.recording_appender(apply_key, &self.appended)
     }
 
     /// Append `plan`'s redo records under this window.
     pub(crate) fn append_plan(
         &self,
-        wal: &WalManager,
+        wal: &Arc<WalManager>,
         owner: RecordOwner,
         plan: &PhysicalPlan,
     ) -> crate::Result<WalAppendOutcome> {
@@ -96,42 +130,57 @@ impl MintedRecords {
         })
     }
 
-    /// The highest appended LSN, or `None` when nothing was appended.
+    /// Mark the records as held by a core. Call it once the request carrying
+    /// them is enqueued, or once they are committed to a path that carries
+    /// them to their outcome. Dropped records are never cancelled after it.
+    pub(crate) fn mark_sent(&self) {
+        self.sent.store(true, Ordering::Release);
+    }
+
+    /// The highest appended or resent LSN, or `None` when there is none.
     pub(crate) fn highest(&self) -> Option<Lsn> {
-        self.recorded().iter().copied().max()
+        self.recorded()
+            .iter()
+            .map(|record| record.lsn)
+            .chain(self.resent)
+            .max()
     }
 
     /// Every appended LSN, in append order.
     #[cfg(test)]
     pub(crate) fn lsns(&self) -> Vec<Lsn> {
-        self.recorded().clone()
+        self.recorded().iter().map(|record| record.lsn).collect()
     }
 
-    /// Note every recorded LSN on the window and take the list out.
-    fn into_parts(self) -> (WriteWindow, Vec<Lsn>, bool) {
-        let Self {
-            window,
-            lsns,
-            appended_here,
-        } = self;
-        let lsns = lsns.into_inner().unwrap_or_else(|p| p.into_inner());
-        if let Some(highest) = lsns.iter().copied().max() {
+    /// Take the window and the records out, and note the highest LSN on the
+    /// window. `None` when a close already took them.
+    fn take_parts(&mut self) -> Option<Parts> {
+        let window = self.window.take()?;
+        let appended = std::mem::take(&mut *self.recorded());
+        let highest = appended
+            .iter()
+            .map(|record| record.lsn)
+            .chain(self.resent)
+            .max();
+        if let Some(highest) = highest {
             window.note_minted(highest);
         }
-        (window, lsns, appended_here)
+        Some((window, appended, self.resent))
     }
 
     /// The outcome of every record is final.
-    pub(crate) fn settle(self) {
-        let (window, _, _) = self.into_parts();
-        window.settle();
+    pub(crate) fn settle(mut self) {
+        if let Some((window, _, _)) = self.take_parts() {
+            window.settle();
+        }
     }
 
     /// The records have no final outcome in this process.
     #[track_caller]
-    pub(crate) fn hold(self) {
-        let (window, _, _) = self.into_parts();
-        window.hold();
+    pub(crate) fn hold(mut self) {
+        if let Some((window, _, _)) = self.take_parts() {
+            window.hold();
+        }
     }
 
     /// Cancel every record with a `WriteAborted` marker that carries
@@ -163,23 +212,25 @@ impl MintedRecords {
     }
 
     async fn cancel_in_place(
-        self,
+        mut self,
         wal: &WalManager,
         owner: RecordOwner,
         marker_key: u64,
     ) -> crate::Result<()> {
-        let (window, lsns, appended_here) = self.into_parts();
-        if !appended_here {
+        let Some((window, appended, resent)) = self.take_parts() else {
+            return Ok(());
+        };
+        if resent.is_some() {
             window.settle();
             return Ok(());
         }
         let mut last_marker = None;
-        for lsn in &lsns {
+        for record in &appended {
             match wal.appender(marker_key).append_write_aborted(
                 owner.tenant_id,
                 owner.vshard_id,
                 owner.database_id,
-                *lsn,
+                record.lsn,
             ) {
                 Ok(marker) => last_marker = Some(marker),
                 Err(error) => {
@@ -195,7 +246,7 @@ impl MintedRecords {
             return Err(error);
         }
         tracing::debug!(
-            cancelled = lsns.len(),
+            cancelled = appended.len(),
             "refused write records cancelled in the WAL"
         );
         window.settle();
@@ -228,6 +279,65 @@ impl MintedRecords {
             }),
         }
     }
+
+    /// Close records dropped without a close. Runs in the dropping thread and
+    /// spawns nothing.
+    ///
+    /// Records no core holds are cancelled in place, and the window settles
+    /// once each marker is appended. The markers are not awaited: nothing
+    /// reported an outcome for these records, so a crash that loses a marker
+    /// leaves a write whose caller never learned its outcome. A marker that
+    /// fails to append holds the window.
+    ///
+    /// A resent record, or a set with nothing appended, settles. Records a
+    /// core can hold leak their window, which files its report.
+    fn close_dropped(&mut self) {
+        let sent = self.sent.load(Ordering::Acquire);
+        let Some((window, appended, resent)) = self.take_parts() else {
+            return;
+        };
+        if sent {
+            drop(window);
+            return;
+        }
+        if resent.is_some() || appended.is_empty() {
+            window.settle();
+            return;
+        }
+        let Some(wal) = self.wal.get() else {
+            // Only `appender` adds records, and it stores the WAL first.
+            window.hold();
+            return;
+        };
+        for record in &appended {
+            if let Err(error) = wal.appender(NO_APPLY_KEY).append_write_aborted(
+                record.tenant_id,
+                record.vshard_id,
+                record.database_id,
+                record.lsn,
+            ) {
+                tracing::error!(
+                    %error,
+                    lsn = record.lsn.as_u64(),
+                    "records dropped before dispatch could not be cancelled; \
+                     their window is held until restart"
+                );
+                window.hold();
+                return;
+            }
+        }
+        tracing::debug!(
+            cancelled = appended.len(),
+            "records dropped before dispatch cancelled in the WAL"
+        );
+        window.settle();
+    }
+}
+
+impl Drop for MintedRecords {
+    fn drop(&mut self) {
+        self.close_dropped();
+    }
 }
 
 /// The task cancelling records another path superseded.
@@ -257,7 +367,7 @@ mod tests {
         }
     }
 
-    fn append(wal: &WalManager, minted: &MintedRecords, body: &[u8]) -> Lsn {
+    fn append(wal: &Arc<WalManager>, minted: &MintedRecords, body: &[u8]) -> Lsn {
         minted
             .appender(wal, NO_APPLY_KEY)
             .append_put(
@@ -269,10 +379,23 @@ mod tests {
             .expect("append")
     }
 
+    fn open_wal(dir: &tempfile::TempDir) -> Arc<WalManager> {
+        Arc::new(WalManager::open_for_testing(&dir.path().join("wal")).expect("wal"))
+    }
+
+    fn replayed(wal: &WalManager) -> Vec<u64> {
+        wal.sync().expect("sync");
+        wal.replay()
+            .expect("replay")
+            .iter()
+            .map(|record| record.header.lsn)
+            .collect()
+    }
+
     #[test]
     fn settled_records_release_the_floor() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let wal = WalManager::open_for_testing(&dir.path().join("wal")).expect("wal");
+        let wal = open_wal(&dir);
         let floor = OutcomeFloor::new();
         let minted = MintedRecords::open(&floor);
         let lsn = append(&wal, &minted, b"a");
@@ -284,7 +407,7 @@ mod tests {
     #[test]
     fn held_records_keep_the_floor_below_them() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let wal = WalManager::open_for_testing(&dir.path().join("wal")).expect("wal");
+        let wal = open_wal(&dir);
         let floor = OutcomeFloor::new();
         let minted = MintedRecords::open(&floor);
         let lsn = append(&wal, &minted, b"a");
@@ -349,5 +472,87 @@ mod tests {
         assert!(!replayed.contains(&first.as_u64()));
         assert!(!replayed.contains(&second.as_u64()));
         assert!(floor.floor() >= second, "the window settled");
+    }
+
+    #[test]
+    fn records_dropped_before_dispatch_are_cancelled_and_release_the_floor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = open_wal(&dir);
+        let floor = OutcomeFloor::new();
+        let minted = MintedRecords::open(&floor);
+        let first = append(&wal, &minted, b"a");
+        let second = append(&wal, &minted, b"b");
+        drop(minted);
+        let replayed = replayed(&wal);
+        assert!(!replayed.contains(&first.as_u64()));
+        assert!(!replayed.contains(&second.as_u64()));
+        assert!(floor.floor() >= second, "the window settled");
+        assert_eq!(floor.leaked_windows(), 0);
+        assert_eq!(floor.held_windows(), 0);
+    }
+
+    #[test]
+    fn records_dropped_after_dispatch_keep_the_floor_below_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = open_wal(&dir);
+        let floor = OutcomeFloor::new();
+        let minted = MintedRecords::open(&floor);
+        let lsn = append(&wal, &minted, b"a");
+        minted.mark_sent();
+        drop(minted);
+        assert!(replayed(&wal).contains(&lsn.as_u64()), "no marker names it");
+        assert!(floor.floor() < lsn);
+        assert_eq!(
+            floor.leaked_windows(),
+            1,
+            "the dropped window files its leak"
+        );
+    }
+
+    #[test]
+    fn a_dropped_set_with_nothing_appended_settles() {
+        let floor = OutcomeFloor::new();
+        drop(MintedRecords::open(&floor));
+        assert_eq!(floor.leaked_windows(), 0);
+        assert_eq!(floor.held_windows(), 0);
+    }
+
+    #[test]
+    fn a_dropped_resend_settles_without_a_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = open_wal(&dir);
+        let floor = OutcomeFloor::new();
+        let lsn = wal
+            .appender(NO_APPLY_KEY)
+            .append_put(
+                TenantId::new(1),
+                VShardId::new(0),
+                DatabaseId::DEFAULT,
+                b"a",
+            )
+            .expect("append");
+        drop(MintedRecords::resend(&floor, lsn).expect("the floor is below the record"));
+        assert!(replayed(&wal).contains(&lsn.as_u64()), "no marker names it");
+        assert_eq!(floor.floor(), lsn);
+        assert_eq!(floor.leaked_windows(), 0);
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn a_failed_drop_cancel_holds_the_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = open_wal(&dir);
+        let floor = OutcomeFloor::new();
+        let minted = MintedRecords::open(&floor);
+        let lsn = append(&wal, &minted, b"a");
+        {
+            let _fail =
+                crate::fail_point::FailGuard::fail("wal::append_write_aborted", "disk full");
+            drop(minted);
+        }
+        assert!(replayed(&wal).contains(&lsn.as_u64()), "no marker names it");
+        assert!(floor.floor() < lsn);
+        assert_eq!(floor.held_windows(), 1);
+        assert_eq!(floor.leaked_windows(), 0);
     }
 }

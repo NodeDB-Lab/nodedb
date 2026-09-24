@@ -217,6 +217,11 @@ async fn dispatch_plan(state: &SharedState, dispatch: PlanDispatch) -> crate::Re
             detail: error.to_string(),
         });
     }
+    // A core holds the request now. From here the records close from its
+    // final response, never from a drop.
+    if let Some(minted) = &minted {
+        minted.mark_sent();
+    }
 
     // Await to the same instant the envelope carries — yields the thread so the
     // response poller can run. Reaching that instant is the statement running
