@@ -133,6 +133,22 @@ impl CoreLoop {
             return self.sync_ack_response(task, status, current_hwm);
         }
 
+        // A delta must name the one document it writes. With no target the
+        // engine admits rows of any document and installs them before the
+        // write set is known, so the refusal comes before any state change.
+        if document_id.is_empty() {
+            return self.sync_reject_response(
+                task,
+                ViolationType::ConstraintViolation {
+                    detail: format!(
+                        "a CRDT sync delta into {collection} must name the one document its \
+                         delta writes; nothing was applied"
+                    ),
+                },
+                prov,
+            );
+        }
+
         // Borrow the engine in a nested block so the &mut borrow is dropped
         // before sync_commit takes &mut self for sync_hwm.
         //
@@ -223,34 +239,19 @@ impl CoreLoop {
                 );
                 GateDisposition::Retryable
             }
+            // The engine refuses a delta that writes any row but the named
+            // document as malformed, before it installs. A clean apply wrote
+            // that document alone.
             GateOutcome::Applied(ValidatedApplyOutcome::Clean {
-                write_set,
+                write_set: _,
                 imported_ops,
             }) => {
-                // Enforce the one-document-per-delta sync contract. A delta
-                // that coalesced multiple documents (or targeted a synthetic
-                // frame id that matches no written row) cannot be materialized
-                // past its single surrogate; reject it loudly so the client
-                // re-pushes one delta per document instead of silently losing
-                // rows.
-                match Self::single_document_write_set(collection, document_id, &write_set) {
-                    Err(detail) => {
-                        imported_authoritative = true;
-                        self.checkpoint_coordinator.mark_dirty("crdt", 1);
-                        warn!(
-                            core = self.core_id,
-                            %collection,
-                            %document_id,
-                            detail = %detail,
-                            "crdt sync apply rejected: multi-document delta violates one-document-per-delta contract"
-                        );
-                        GateDisposition::Terminal(ViolationType::ConstraintViolation { detail })
-                    }
+                match imported_ops {
                     // The delta contributed no operations: every one it carried
                     // was already in this document, so nothing was written and
                     // nothing is dirty. Reporting `Applied` here is what let a
                     // peer-id collision retire a write that was discarded.
-                    Ok(()) if imported_ops == 0 => {
+                    0 => {
                         if !declared_row_present {
                             // The delta imported nothing AND the row it declared
                             // does not exist. A replayed delete looks like this
@@ -272,28 +273,27 @@ impl CoreLoop {
                         }
                         GateDisposition::Deduplicated
                     }
-                    Ok(()) => {
+                    _ => {
                         imported_authoritative = true;
                         self.checkpoint_coordinator.mark_dirty("crdt", 1);
                         GateDisposition::Applied
                     }
                 }
             }
+            // The candidate was discarded, so authoritative state did not
+            // move. The record is cancelled and replay never reaches this
+            // rejection, so the dead-letter entry is stored now.
             GateOutcome::Applied(ValidatedApplyOutcome::Rejected(vt)) => {
-                imported_authoritative = true;
-                self.checkpoint_coordinator.mark_dirty("crdt", 1);
-                // Replaying this record binds to the same log position, so
-                // the stored entry stays the only one.
                 if let Err(error) =
                     self.store_crdt_dead_letter(task.request.database_id, tenant_id, task.wal_lsn())
                 {
-                    warn!(
+                    tracing::error!(
                         core = self.core_id,
                         %collection,
                         %document_id,
                         %error,
                         "crdt sync apply rejected a delta, and its dead-letter entry could not \
-                         be stored; replay of its record rebuilds it"
+                         be stored; it stays in memory only"
                     );
                 }
                 GateDisposition::Terminal(vt)
@@ -367,8 +367,7 @@ impl CoreLoop {
             GateDisposition::Terminal(violation) => {
                 // Permanently refused: it will never succeed on a re-push, so
                 // holding the stream for it buys nothing.
-                self.sync_commit(prov);
-                self.sync_reject_response(task, violation, prov.seq)
+                self.sync_reject_response(task, violation, prov)
             }
             GateDisposition::Deduplicated => {
                 // The operations are in the document, so the sender is free to
@@ -383,5 +382,97 @@ impl CoreLoop {
                 self.sync_ack_response(task, AckStatus::Applied, prov.seq)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::bridge::envelope::{ErrorCode, Status};
+    use crate::data::executor::core_loop::tests::make_core_with_dir;
+    use nodedb_types::sync::wire::SyncProvenance;
+
+    use super::super::local::tests::{
+        dead_letters, install_unique_email, task_at, user_delta, users_params,
+    };
+
+    fn provenance(seq: u64) -> SyncProvenance {
+        SyncProvenance {
+            producer_id: 9,
+            epoch: 2,
+            stream_id: 1,
+            seq,
+        }
+    }
+
+    /// A peer delta a constraint refuses is an error, so its record is
+    /// cancelled. The stream's mark still advances, the row stays absent, and
+    /// the dead-letter entry names the producing peer.
+    #[test]
+    fn a_terminal_refusal_is_an_error_that_advances_the_mark() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _request_tx, _response_rx) = make_core_with_dir(dir.path());
+        let seed = task_at(10);
+        install_unique_email(&mut core, &seed);
+        let first = user_delta(2, "a", "x@y.com");
+        assert_eq!(
+            core.execute_crdt_apply(&seed, users_params("a", &first))
+                .status,
+            Status::Ok
+        );
+
+        let second = user_delta(3, "b", "x@y.com");
+        let prov = provenance(1);
+        let mut params = users_params("b", &second);
+        params.peer_id = 3;
+        params.provenance = Some(&prov);
+        let response = core.execute_crdt_apply(&task_at(11), params);
+
+        assert_eq!(response.status, Status::Error);
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(ErrorCode::SyncRejected { applied_seq: 1, provenance, .. })
+                    if *provenance == prov
+            ),
+            "got {:?}",
+            response.error_code
+        );
+        assert_eq!(core.sync_hwm_value(9, 1), 1, "the mark advanced");
+        let task = task_at(11);
+        assert!(
+            core.crdt_engines
+                .get(&(task.request.database_id, task.request.tenant_id))
+                .is_some_and(|engine| !engine.row_exists("users", "b"))
+        );
+        let entries = dead_letters(&mut core);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].peer_id, 3);
+        assert_eq!(entries[0].source_lsn, Some(11));
+    }
+
+    /// A delta with no target document is refused before anything installs.
+    #[test]
+    fn a_delta_without_a_target_document_is_refused_before_it_installs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _request_tx, _response_rx) = make_core_with_dir(dir.path());
+        let delta = user_delta(3, "b", "x@y.com");
+        let prov = provenance(1);
+        let mut params = users_params("", &delta);
+        params.provenance = Some(&prov);
+
+        let response = core.execute_crdt_apply(&task_at(11), params);
+
+        assert!(matches!(
+            response.error_code.as_deref(),
+            Some(ErrorCode::SyncRejected { .. })
+        ));
+        let task = task_at(11);
+        assert!(
+            !core
+                .crdt_engines
+                .get(&(task.request.database_id, task.request.tenant_id))
+                .is_some_and(|engine| engine.row_exists("users", "b")),
+            "nothing installed"
+        );
     }
 }

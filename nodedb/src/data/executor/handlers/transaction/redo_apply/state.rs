@@ -19,9 +19,11 @@ use nodedb_physical::physical_plan::{RedoSumTargets, ResolvedSumTarget};
 use nodedb_types::RowIdentity;
 
 use crate::bridge::envelope::ErrorCode;
+use crate::data::executor::core_loop::write_index::KeyRepr;
 use crate::data::executor::enforcement::materialized_sum::apply::TargetWrite;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::event::WriteOp;
+use crate::types::Lsn;
 
 /// Committed-redo apply state owned by one core.
 pub(in crate::data::executor) struct RedoApplyState {
@@ -30,16 +32,54 @@ pub(in crate::data::executor) struct RedoApplyState {
     pub(in crate::data::executor) num_cores: usize,
     /// `Some` only while one committed redo record applies on this core.
     pub(in crate::data::executor) scope: Option<RedoApplyScope>,
+    /// During restart replay: the materialized-sum targets each Calvin redo
+    /// record's stamp carries, keyed by the record's LSN. The document redo
+    /// arm folds a row at such an LSN into its targets, as the live install
+    /// did. Empty outside restart replay.
+    pub(in crate::data::executor) replay_folds: HashMap<u64, Vec<RedoSumTargets>>,
 }
 
 impl RedoApplyState {
+    /// The sum targets restart replay folds a write to `collection` at
+    /// `record_lsn` into, when the record carries any.
+    pub(in crate::data::executor) fn replay_folds_for(
+        &self,
+        record_lsn: u64,
+        collection: &str,
+    ) -> Option<(Vec<ResolvedSumTarget>, Vec<String>)> {
+        self.replay_folds
+            .get(&record_lsn)?
+            .iter()
+            .find(|targets| targets.collection == collection)
+            .map(|targets| (targets.resolved.clone(), targets.deferred.clone()))
+    }
+
     /// A single-core default. Every multi-core runtime sets the real count
     /// through `CoreLoop::set_num_cores` before the core serves requests.
     pub(in crate::data::executor) fn new() -> Self {
         Self {
             num_cores: 1,
             scope: None,
+            replay_folds: HashMap::new(),
         }
+    }
+}
+
+impl crate::data::executor::core_loop::CoreLoop {
+    /// Arm restart replay with the sum targets each Calvin record carries.
+    /// Returns whether this is restart replay: a committed-redo apply folds
+    /// from its open scope instead, and leaves `folds` unused.
+    pub(crate) fn begin_replay_folds(&mut self, folds: HashMap<u64, Vec<RedoSumTargets>>) -> bool {
+        let restart = self.redo_apply.scope.is_none();
+        if restart {
+            self.redo_apply.replay_folds = folds;
+        }
+        restart
+    }
+
+    /// Drop the restart-replay sum targets once the document redo arm ran.
+    pub(crate) fn end_replay_folds(&mut self) {
+        self.redo_apply.replay_folds.clear();
     }
 }
 
@@ -94,6 +134,18 @@ pub(in crate::data::executor) struct RedoApplyScope {
     pub(in crate::data::executor) timeseries_written: Vec<(CollectionKey, u64)>,
     /// Events the install's writes raised, sent once it succeeded.
     pub(in crate::data::executor) pending_events: Vec<crate::event::WriteEvent>,
+    /// Write versions the install's writes produced, published once the
+    /// record settled.
+    pub(in crate::data::executor) write_versions: Vec<DeferredWriteVersion>,
+}
+
+/// One write version an install pass holds back until the record settles.
+pub(in crate::data::executor) struct DeferredWriteVersion {
+    pub db: crate::types::DatabaseId,
+    pub tenant: crate::types::TenantId,
+    pub collection: String,
+    pub key: Option<KeyRepr>,
+    pub lsn: Lsn,
 }
 
 /// `(database, tenant, collection)`.
@@ -120,6 +172,28 @@ impl RedoApplyScope {
             columnar_written: Vec::new(),
             timeseries_written: Vec::new(),
             pending_events: Vec::new(),
+            write_versions: Vec::new(),
+        }
+    }
+
+    /// Hold back one write version until the record settles. The validate
+    /// pass writes nothing, so it holds nothing.
+    pub(in crate::data::executor) fn defer_write_version(
+        &mut self,
+        db: crate::types::DatabaseId,
+        tenant: crate::types::TenantId,
+        collection: &str,
+        key: Option<KeyRepr>,
+        lsn: Lsn,
+    ) {
+        if self.pass == RedoApplyPass::Install {
+            self.write_versions.push(DeferredWriteVersion {
+                db,
+                tenant,
+                collection: collection.to_string(),
+                key,
+                lsn,
+            });
         }
     }
 

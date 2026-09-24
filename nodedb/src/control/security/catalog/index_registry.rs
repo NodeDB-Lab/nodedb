@@ -146,8 +146,23 @@ impl SystemCatalog {
         Ok(removed)
     }
 
-    /// Every index record of one (database, tenant), in key order.
+    /// Every index record of one (database, tenant), in key order, with the
+    /// calling connection's buffered transactional DDL merged in.
     pub fn list_index_records(
+        &self,
+        database_id: u64,
+        tenant_id: u64,
+    ) -> crate::Result<Vec<StoredIndexRecord>> {
+        let committed = self.list_committed_index_records(database_id, tenant_id)?;
+        Ok(crate::control::catalog_overlay::resolve_index_records(
+            database_id,
+            tenant_id,
+            committed,
+        ))
+    }
+
+    /// Committed-only listing, bypassing the transaction DDL overlay.
+    pub fn list_committed_index_records(
         &self,
         database_id: u64,
         tenant_id: u64,

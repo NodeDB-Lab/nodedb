@@ -40,7 +40,7 @@ impl CoreLoop {
         if force {
             return BudgetGate::Granted(None);
         }
-        match self.maintenance_budget.as_ref() {
+        match self.maintenance.maintenance_budget.as_ref() {
             None => BudgetGate::Granted(None),
             Some(tracker) => match tracker.try_acquire(db, 0.0) {
                 Some(lease) => BudgetGate::Granted(Some(lease)),

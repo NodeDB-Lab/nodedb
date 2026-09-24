@@ -2,6 +2,8 @@
 
 mod accessors;
 mod bitemporal_time;
+pub(in crate::data::executor) mod calvin_fence;
+pub(in crate::data::executor) mod calvin_state;
 pub(in crate::data::executor) mod checkpoint_floors;
 mod columnar_schema_seed;
 pub(in crate::data::executor) mod commit_pending;
@@ -15,6 +17,7 @@ pub(in crate::data::executor) mod filter_match;
 mod graph_partition;
 pub(in crate::data::executor) mod index_value_versions;
 pub(in crate::data::executor) mod maintenance;
+pub(in crate::data::executor) mod maintenance_state;
 mod open;
 pub mod pressure;
 pub(in crate::data::executor) mod priority_queues;

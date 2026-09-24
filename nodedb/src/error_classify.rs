@@ -141,6 +141,7 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         | Error::CrdtApplyForbiddenInTransaction => {
             NodeDbError::bad_request("invalid CRDT admission request".to_owned())
         }
+        Error::NotInTransactionBlock { .. } => NodeDbError::bad_request(e.to_string()),
         Error::CrdtAdmissionTimeout { .. } => NodeDbError::deadline_exceeded(),
         Error::NoLeader { vshard_id } => {
             NodeDbError::no_leader(format!("vshard {vshard_id} has no serving leader"))

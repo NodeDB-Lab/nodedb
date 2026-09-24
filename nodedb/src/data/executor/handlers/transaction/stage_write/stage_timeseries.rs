@@ -73,14 +73,14 @@ pub(in crate::data::executor) struct StageTimeseriesInsertParams<'a> {
 /// Borrowed inputs for the canonical line-protocol staging path. Bundled
 /// because the raw parameter list exceeds the project's too-many-arguments
 /// bound.
-struct CanonicalIlpStage<'a> {
-    task: &'a ExecutionTask,
-    tid: u64,
-    txn_id: TxnId,
-    collection: &'a str,
-    payload: &'a [u8],
-    surrogates: &'a [Surrogate],
-    rls_write_check: &'a nodedb_types::RlsWriteCheck,
+pub(super) struct CanonicalIlpStage<'a> {
+    pub task: &'a ExecutionTask,
+    pub tid: u64,
+    pub txn_id: TxnId,
+    pub collection: &'a str,
+    pub payload: &'a [u8],
+    pub surrogates: &'a [Surrogate],
+    pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
 }
 
 impl CoreLoop {
@@ -103,16 +103,25 @@ impl CoreLoop {
             rls_write_check,
         } = params;
 
+        let stage = CanonicalIlpStage {
+            task,
+            tid,
+            txn_id,
+            collection,
+            payload,
+            surrogates,
+            rls_write_check,
+        };
+        // The canonical line list always travels with one token per line.
         if format == "ilp-msgpack" {
-            return self.stage_canonical_ilp_rows(CanonicalIlpStage {
-                task,
-                tid,
-                txn_id,
-                collection,
-                payload,
-                surrogates,
-                rls_write_check,
-            });
+            return self.stage_canonical_ilp_rows(stage);
+        }
+        // An ingest with no surrogates has no overlay key for its rows.
+        if surrogates.is_empty() {
+            return self.stage_unkeyed_timeseries(stage, format);
+        }
+        if format == "ilp" {
+            return self.stage_raw_ilp_rows(stage);
         }
 
         let rows: Vec<Value> = match nodedb_types::value_from_msgpack(payload) {
@@ -227,7 +236,7 @@ impl CoreLoop {
         self.stage_count_response(task, staged)
     }
 
-    fn stage_canonical_ilp_rows(&mut self, args: CanonicalIlpStage<'_>) -> Response {
+    pub(super) fn stage_canonical_ilp_rows(&mut self, args: CanonicalIlpStage<'_>) -> Response {
         let CanonicalIlpStage {
             task,
             tid,

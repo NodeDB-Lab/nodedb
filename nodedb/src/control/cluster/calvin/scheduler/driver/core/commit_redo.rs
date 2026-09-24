@@ -12,6 +12,7 @@
 //! `finish_resolved_commit` / `commit_apply_tail` complete.
 
 use super::super::types::CommitState;
+use super::commit_resolution_dispatch::CommitResolution;
 use super::deferred::{DispatchOutcome, DispatchStep};
 use super::halt::{HaltReason, HaltStep, error_response_text};
 use super::scheduler::Scheduler;
@@ -26,7 +27,7 @@ use nodedb_physical::physical_plan::meta::MetaOp;
 impl Scheduler {
     /// Handle the `MetaOp::CalvinResolve` response: decode the resolved
     /// `RedoRecord`, WAL-append it (unless its op set is empty), then dispatch
-    /// the flush stamped with that record's LSN.
+    /// the flush that installs it, stamped with that record's LSN.
     ///
     /// The verdict is already COMMIT, so a skipped resolve would tear the
     /// committed txn on this replica. A non-`Ok` response, a decode failure,
@@ -59,12 +60,6 @@ impl Scheduler {
                 return;
             }
         };
-        redo.calvin_stamp = Some(CalvinStamp {
-            epoch: txn_id.epoch,
-            position: txn_id.position,
-            vshard_id: self.vshard_id,
-        });
-
         let Some(pending) = self.pending.get(&txn_id) else {
             // Txn state was reclaimed out from under us (should not happen —
             // locks are held until `on_txn_complete`); complete defensively.
@@ -74,6 +69,34 @@ impl Scheduler {
         };
         let tenant_id = pending.txn.tx_class.tenant_id;
         let database_id = pending.txn.tx_class.database_id;
+        // The stamp carries what the slice folds, so the live install and
+        // restart replay fold at this record's LSN.
+        redo.calvin_stamp = Some(CalvinStamp {
+            epoch: txn_id.epoch,
+            position: txn_id.position,
+            vshard_id: self.vshard_id,
+            collections: pending.flush_scope.collections.clone(),
+            sum_targets: pending.flush_scope.sum_targets.clone(),
+        });
+
+        // The flush installs these exact bytes, the payload of the record
+        // appended below.
+        let redo_bytes = if redo.ops.is_empty() {
+            Vec::new()
+        } else {
+            match redo.to_bytes() {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    self.halt_apply(
+                        txn_id,
+                        HaltReason::ResolveFailed,
+                        HaltStep::Resolve,
+                        format!("CalvinResolve redo record encode failed: {e}"),
+                    );
+                    return;
+                }
+            }
+        };
 
         // The record's outcome-floor window opens before the append. It stays
         // with the pending txn until the flush completes.
@@ -112,12 +135,13 @@ impl Scheduler {
         };
         if let Some(pending) = self.pending.get_mut(&txn_id) {
             pending.redo_records = redo_records;
+            pending.flush_scope.redo = redo_bytes;
         }
 
         // A flush refused at capacity is parked for re-send. The txn awaits its
         // flush response either way, so the state below is the same.
         if let DispatchOutcome::Failed(error) =
-            self.dispatch_commit_resolution(txn_id, true, redo_lsn)
+            self.dispatch_commit_resolution(txn_id, CommitResolution::Flush { redo_lsn })
         {
             self.fail_dispatch_step(txn_id, DispatchStep::Flush, error);
             return;

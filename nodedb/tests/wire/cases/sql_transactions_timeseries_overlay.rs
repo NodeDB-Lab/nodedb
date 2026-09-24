@@ -4,9 +4,8 @@
 //! transaction -- staged into the per-transaction overlay with
 //! read-your-own-writes on RAW timeseries scans, a real affected-row count,
 //! and `ROLLBACK` discarding the staged rows -- mirroring the columnar staging
-//! already in place. COMMIT's durable replay is unchanged: the buffered
-//! `TimeseriesOp::Ingest` plan is still replayed through
-//! `execute_timeseries_ingest` inside the COMMIT `TransactionBatch`.
+//! already in place. COMMIT resolves the staged ingest into the
+//! transaction's redo record, which the redo install applies.
 //!
 //! A timeseries base row has no cross-engine surrogate identity in the scan
 //! (it is keyed internally by `series_id`), so the overlay merge is

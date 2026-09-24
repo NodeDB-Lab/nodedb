@@ -9,7 +9,7 @@ use crate::control::server::shared::clone_write::CloneCheckedTask;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId, VShardId};
 
-use super::minted::{MintedRecords, RecordOwner, resolve_on_response};
+use super::minted::{MintedRecords, RecordOwner};
 use super::submit_write::{
     ChangeFeedOwner, SubmitWrite, WalDurability, WriteOrdering, submit_write,
 };
@@ -228,9 +228,7 @@ pub(crate) async fn dispatch_trusted_internal_write_to_data_plane(
             trace_id,
             event_source,
             txn_id,
-            // Caller pre-appended and supplied `wal_lsn` (e.g. the procedural
-            // batch-flush path whose dispatched plan is a `TransactionBatch`
-            // whose per-task records were appended upstream): the funnel must not
+            // Caller pre-appended and supplied `wal_lsn`: the funnel must not
             // append again.
             durability: WalDurability::CallerSupplied {
                 wal_lsn,
@@ -342,58 +340,51 @@ async fn dispatch_to_data_plane_inner(
         database_id,
         vshard_id,
     };
-    // Resolve any Exchange data-movement nodes before dispatch: a root-level
-    // Gather fans the child to all cores and returns the merged response here;
-    // a Broadcast join child is gathered and embedded so the plan reaching a
-    // core is self-contained. Safe no-op for the many non-Exchange callers
-    // (writes, metrics, triggers). Catalog materialization is identity-scoped
-    // and already done upstream on the pgwire/native paths.
-    // Internal funnel (COPY, cursors, materialized-view refresh, constraint
-    // subqueries): not session-transaction-scoped, so `None`.
-    let resolved = crate::control::server::exchange::resolve_exchange_in_plan(
-        shared,
-        database_id,
-        tenant_id,
-        plan,
-        trace_id,
-        None,
-    )
-    .await;
-    // A plan that never reaches the funnel closes the caller's records here.
-    let plan = match resolved {
-        Ok(crate::control::server::exchange::Resolved::Plan(p)) => *p,
-        Ok(crate::control::server::exchange::Resolved::Gathered(
-            resp,
-            _shard_watermarks,
-            _shuffle_reads,
-        )) => {
-            if let Some(minted) = durability.take_minted() {
-                resolve_on_response(&shared.wal, owner, 0, &resp, minted).await?;
-            }
-            return Ok(resp);
-        }
-        // Internal funnel callers want a fully-collected Response, not a lazy
-        // stream: materialize the stream into one merged-array Response,
-        // preserving the prior gather-then-return behaviour on this path.
-        Ok(crate::control::server::exchange::Resolved::Stream(s)) => {
-            let collected = crate::control::server::exchange::gather::stream_to_response(s).await;
-            if let Some(minted) = durability.take_minted() {
-                match &collected {
-                    Ok(resp) => resolve_on_response(&shared.wal, owner, 0, resp, minted).await?,
-                    // The gather failed part way: what reached the cores is
-                    // unknown here.
-                    Err(_) => minted.hold(),
-                }
-            }
-            return collected;
-        }
-        Err(error) => {
-            // A write plan carries no exchange node, so a failed resolution
-            // dispatched none of it.
+    // A write that carries its own records is never a query. Only a query
+    // plan holds Exchange nodes, and resolving one fans it out to the cores,
+    // so a record-carrying query would reach the cores before any close.
+    let plan = if durability.has_minted() {
+        if matches!(plan, PhysicalPlan::Query(_)) {
             if let Some(minted) = durability.take_minted() {
                 minted.cancel(&shared.wal, owner, 0).await?;
             }
-            return Err(error);
+            return Err(crate::Error::Internal {
+                detail: "a write carrying WAL records reached the funnel as a query plan; \
+                         nothing was dispatched"
+                    .into(),
+            });
+        }
+        plan
+    } else {
+        // Resolve any Exchange data-movement nodes before dispatch: a
+        // root-level Gather fans the child to all cores and returns the merged
+        // response here. A Broadcast join child is gathered and embedded so
+        // the plan reaching a core is self-contained. Plans with no Exchange
+        // node pass through unchanged. Catalog materialization is
+        // identity-scoped and already done upstream on the pgwire and native
+        // paths. The internal funnel is not session-transaction-scoped, so the
+        // transaction id is `None`.
+        let resolved = crate::control::server::exchange::resolve_exchange_in_plan(
+            shared,
+            database_id,
+            tenant_id,
+            plan,
+            trace_id,
+            None,
+        )
+        .await?;
+        match resolved {
+            crate::control::server::exchange::Resolved::Plan(p) => *p,
+            crate::control::server::exchange::Resolved::Gathered(
+                resp,
+                _shard_watermarks,
+                _shuffle_reads,
+            ) => return Ok(resp),
+            // Internal funnel callers want one merged `Response`, not a lazy
+            // stream.
+            crate::control::server::exchange::Resolved::Stream(s) => {
+                return crate::control::server::exchange::gather::stream_to_response(s).await;
+            }
         }
     };
 
@@ -841,5 +832,100 @@ mod tests {
         )
         .await;
         assert!(!replayed(&state).contains(&lsn.as_u64()));
+    }
+
+    /// A record-carrying write never resolves an Exchange, so nothing of it
+    /// reaches a core before its records close.
+    #[tokio::test]
+    async fn a_record_carrying_query_is_refused_before_any_fan_out() {
+        let (state, mut side, _directory) = fixture();
+        let (minted, lsn) = minted_record(&state);
+        let mut write = write_with(minted, lsn);
+        write.plan = crate::bridge::envelope::PhysicalPlan::Query(
+            nodedb_physical::physical_plan::QueryOp::Exchange(
+                nodedb_physical::physical_plan::ExchangeOp {
+                    child: Box::new(point_get_plan()),
+                    mode: nodedb_physical::physical_plan::ExchangeMode::Gather {
+                        as_aggregate: false,
+                    },
+                },
+            ),
+        );
+
+        let result = super::dispatch_trusted_internal_write_to_data_plane(&state, write).await;
+
+        assert!(result.is_err(), "a query plan cannot carry records");
+        assert!(
+            side.request_rx.try_pop().is_err(),
+            "no request reached a core"
+        );
+        assert!(
+            !replayed(&state).contains(&lsn.as_u64()),
+            "a marker names it"
+        );
+        assert!(state.outcome_floor.floor() >= lsn);
+        assert_eq!(state.outcome_floor.leaked_windows(), 0);
+    }
+
+    /// A committed proposal refused for good is refused on every replica, so
+    /// its abort marker carries the proposal key and a redelivered copy finds
+    /// the refusal in the ledger rebuilt after a restart.
+    #[tokio::test]
+    async fn a_final_refusal_of_a_keyed_proposal_is_its_ledger_outcome() {
+        const KEY: u64 = 0xC0FF_EE01;
+        let (state, side, _directory) = fixture();
+        let plan =
+            crate::bridge::envelope::PhysicalPlan::Kv(nodedb_physical::physical_plan::KvOp::Put {
+                collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "cache"),
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+                ttl_ms: 0,
+                surrogate: nodedb_types::Surrogate::new(1),
+                returning: None,
+                rls_filters: Vec::new(),
+            });
+        let responder = tokio::spawn(respond_once_with(
+            Arc::clone(&state),
+            side,
+            Status::Error,
+            Some(crate::bridge::envelope::ErrorCode::RejectedConstraint {
+                constraint: "unique".into(),
+                detail: "duplicate key".into(),
+            }),
+        ));
+
+        let outcome = super::submit_write(
+            &state,
+            super::SubmitWrite {
+                tenant_id: TenantId::new(1),
+                database_id: DatabaseId::DEFAULT,
+                vshard_id: VShardId::new(0),
+                plan,
+                trace_id: crate::types::TraceId::ZERO,
+                event_source: crate::event::EventSource::User,
+                txn_id: None,
+                user_id: None,
+                durability: super::WalDurability::AppendHere {
+                    now_override: None,
+                    apply_key: KEY,
+                },
+                ordering: super::WriteOrdering::AlreadyOrdered,
+                change_feed: super::ChangeFeedOwner::Unowned,
+            },
+        )
+        .await
+        .expect("the refusal is a response");
+        responder.await.expect("responder completes");
+        assert_eq!(outcome.response.status, Status::Error);
+
+        state.wal.sync().expect("sync");
+        let ledger = crate::control::distributed_applier::ProposalLedger::from_records(
+            &state.wal.replay().expect("replay"),
+            8,
+        );
+        assert!(
+            ledger.prior(KEY).is_some(),
+            "the refusal's marker names the proposal"
+        );
     }
 }

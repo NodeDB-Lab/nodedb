@@ -11,12 +11,18 @@
 //!   holds none of the record, which is what restart replay reproduces once
 //!   the funnel cancels the record in the WAL. The refusal is retryable: the
 //!   failure did not come from the record.
+//! * A panic in either pass rolls back what the pass wrote and refuses the
+//!   record as retryable.
+
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use nodedb_physical::physical_plan::RedoSumTargets;
 use nodedb_wal::WalRecord;
 
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::transaction::undo::UndoEntry;
+use crate::data::panic_payload::panic_payload_to_string;
 
 use super::state::{RedoApplyPass, RedoApplyScope};
 
@@ -64,7 +70,7 @@ impl CoreLoop {
         sum_targets: &[RedoSumTargets],
     ) -> Result<(), PassRefusal> {
         let (applied, scope) = self.run_redo_arms(
-            target.record,
+            target,
             RedoApplyScope::new(RedoApplyPass::Validate, sum_targets.to_vec()),
         )?;
         if let Some(code) = applied.err().or(scope.error) {
@@ -90,50 +96,72 @@ impl CoreLoop {
         sum_targets: &[RedoSumTargets],
     ) -> Result<RedoApplyScope, PassRefusal> {
         let (applied, mut scope) = self.run_redo_arms(
-            target.record,
+            target,
             RedoApplyScope::new(RedoApplyPass::Install, sum_targets.to_vec()),
         )?;
         let Some(cause) = applied.err().or(scope.error.take()) else {
             return Ok(scope);
         };
         let undo = std::mem::take(&mut scope.undo);
+        Err(self.roll_back_redo(target, undo, cause))
+    }
+
+    /// Reverse `undo` after a pass failed with `cause`.
+    fn roll_back_redo(
+        &mut self,
+        target: &RedoTarget<'_>,
+        undo: Vec<UndoEntry>,
+        cause: ErrorCode,
+    ) -> PassRefusal {
         match self.rollback_undo_log(target.database_id, target.tid, undo) {
-            Ok(()) => Err(PassRefusal::RolledBack(cause)),
-            Err((entry_index, detail)) => {
-                Err(PassRefusal::RollbackFailed(ErrorCode::RollbackFailed {
-                    entry_index,
-                    detail: format!(
-                        "rolling back a committed redo install that failed with {cause:?}: \
-                         {detail}"
-                    ),
-                }))
-            }
+            Ok(()) => PassRefusal::RolledBack(cause),
+            Err((entry_index, detail)) => PassRefusal::RollbackFailed(ErrorCode::RollbackFailed {
+                entry_index,
+                detail: format!(
+                    "rolling back a committed redo install that failed with {cause:?}: {detail}"
+                ),
+            }),
         }
     }
 
-    /// Drive every replay arm over `record` with `scope` open. Returns the
+    /// Drive every replay arm over the record with `scope` open. Returns the
     /// arms' own result and the scope they filled.
+    ///
+    /// A panic in an arm rolls back what the pass wrote and refuses the
+    /// record as retryable: it is no verdict on the record's bytes.
     fn run_redo_arms(
         &mut self,
-        record: &WalRecord,
+        target: &RedoTarget<'_>,
         scope: RedoApplyScope,
     ) -> Result<(Result<(), ErrorCode>, RedoApplyScope), PassRefusal> {
         // The arms route a record to `vshard_id % num_cores`. A committed
         // record carries no collection tombstone of its own: a collection
         // dropped before this entry committed refused the commit instead.
         self.redo_apply.scope = Some(scope);
-        let applied = self
-            .replay_engines_in_lsn_order(
-                std::slice::from_ref(record),
-                self.redo_apply.num_cores,
+        let num_cores = self.redo_apply.num_cores;
+        let applied = catch_unwind(AssertUnwindSafe(|| {
+            self.replay_engines_in_lsn_order(
+                std::slice::from_ref(target.record),
+                num_cores,
                 &nodedb_wal::TombstoneSet::new(),
             )
-            .map_err(ErrorCode::from);
-        match self.redo_apply.scope.take() {
-            Some(scope) => Ok((applied, scope)),
+        }));
+        let scope = self.redo_apply.scope.take();
+        match (applied, scope) {
+            (Ok(applied), Some(scope)) => Ok((applied.map_err(ErrorCode::from), scope)),
+            (Err(payload), Some(mut scope)) => {
+                let cause = ErrorCode::Internal {
+                    detail: format!(
+                        "panic while applying a committed redo record: {}",
+                        panic_payload_to_string(payload.as_ref())
+                    ),
+                };
+                let undo = std::mem::take(&mut scope.undo);
+                Err(self.roll_back_redo(target, undo, cause))
+            }
             // The scope held the undo log. Without it nothing can be rolled
             // back, so the core's state is unknown.
-            None => Err(PassRefusal::RollbackFailed(ErrorCode::RollbackFailed {
+            (_, None) => Err(PassRefusal::RollbackFailed(ErrorCode::RollbackFailed {
                 entry_index: 0,
                 detail: "committed transaction redo lost its apply scope and its undo log".into(),
             })),

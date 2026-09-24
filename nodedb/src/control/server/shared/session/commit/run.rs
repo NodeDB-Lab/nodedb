@@ -82,6 +82,10 @@ pub async fn run_commit(
     dp: &impl TxnDataPlane,
 ) -> CommitOutcome {
     let read_set = sessions.take_read_set(session_id);
+    // The engine side effects this transaction's index DDL deferred. They run
+    // once its catalog entries landed, below. An abort before then drops them
+    // with the buffer.
+    let deferred_effects = super::super::ddl_buffer::drain_effects();
     // Collections this transaction wrote itself. A read of a collection the
     // same transaction has written is a read-your-own-write, not a
     // serialization conflict — reading uncommitted own state (served from the
@@ -372,6 +376,21 @@ pub async fn run_commit(
         && let Some(reason) = ddl_flush::flush_local(state, buffered)
     {
         return CommitOutcome::Aborted { reason };
+    }
+
+    // Index DDL's engine work follows its catalog entries: backfills, index
+    // teardown, analyzer bindings and sorted-index trees. A failure after the
+    // catalog landed reports as an abort, as a failed `flush_local` does.
+    if let Err(error) =
+        crate::control::server::shared::ddl::neutral::deferred_effects::run_deferred_effects(
+            state,
+            deferred_effects,
+        )
+        .await
+    {
+        return CommitOutcome::Aborted {
+            reason: AbortReason::DdlPropose(error),
+        };
     }
 
     // Record the schema fields this transaction's writes inferred, deferred

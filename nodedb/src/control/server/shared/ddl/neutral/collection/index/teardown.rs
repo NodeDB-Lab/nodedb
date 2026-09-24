@@ -7,7 +7,7 @@
 //!
 //! | kind      | durable state created                              |
 //! |-----------|----------------------------------------------------|
-//! | secondary | `StoredCollection.indexes` entry + sparse-engine index entries |
+//! | secondary | `StoredCollection.indexes` entry + sparse-engine index entries, or the KV engine's field index on a key-value collection |
 //! | vector    | `_system.vector_index_params` row + Data Plane index + checkpoint |
 //! | fulltext  | the collection's analyzer / fuzzy binding (per collection) |
 //! | spatial   | none beyond the registry + ownership rows           |
@@ -28,6 +28,9 @@ use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId};
 
 use super::super::super::super::result::DdlError;
+use crate::control::server::shared::session::ddl_buffer;
+use crate::control::server::shared::session::ddl_effect::DeferredDdlEffect;
+
 use super::commit::{commit_collection_mutation, err};
 
 /// Remove every piece of engine and catalog state belonging to `record`,
@@ -54,6 +57,15 @@ pub(super) async fn teardown(
         // write — so its removal goes through the same route
         // `DROP SORTED INDEX` uses.
         IndexKind::Sorted => {
+            let deferred = ddl_buffer::defer_effect(DeferredDdlEffect::SortedIndexDrop {
+                tenant_id,
+                database_id,
+                collection: record.collection.clone(),
+                index_name: record.name.clone(),
+            });
+            if deferred {
+                return Ok(());
+            }
             super::super::super::kv_sorted_index::drop_in_engine(
                 state,
                 &super::super::super::kv_sorted_index::SortedIndexTarget {
@@ -69,7 +81,8 @@ pub(super) async fn teardown(
 }
 
 /// Drop the `StoredIndex` entry from the owning collection and purge the
-/// sparse engine's entries for the indexed path.
+/// indexed path's entries: from the sparse engine, or from the KV engine on
+/// a key-value collection.
 async fn secondary(
     state: &SharedState,
     record: &StoredIndexRecord,
@@ -100,21 +113,34 @@ async fn secondary(
     let Some(field) = dropped_field.or_else(|| record.fields.first().cloned()) else {
         return Ok(());
     };
+    // A key-value collection's index lives in the KV engine.
+    if coll.collection_type.is_kv() {
+        let field = field.strip_prefix("$.").unwrap_or(&field).to_string();
+        let deferred = ddl_buffer::defer_effect(DeferredDdlEffect::KvIndexDrop {
+            tenant_id,
+            database_id,
+            collection: record.collection.clone(),
+            field: field.clone(),
+        });
+        if deferred {
+            return Ok(());
+        }
+        return super::kv_index::drop_kv_index(
+            state,
+            tenant_id,
+            database_id,
+            &record.collection,
+            &field,
+        )
+        .await;
+    }
     let plan = crate::bridge::envelope::PhysicalPlan::Document(
         nodedb_physical::physical_plan::DocumentOp::DropIndex {
             collection: nodedb_types::QualifiedCollection::new(database_id, &record.collection),
             field,
         },
     );
-    dispatch(
-        state,
-        tenant_id,
-        database_id,
-        &record.collection,
-        plan,
-        None,
-    )
-    .await
+    teardown_now_or_at_commit(state, tenant_id, database_id, &record.collection, plan).await
 }
 
 /// Remove the vector index's durable build parameters and its Data Plane
@@ -239,21 +265,35 @@ async fn fulltext(
             fuzzy_default: Some(false),
         },
     );
-    dispatch(
-        state,
+    teardown_now_or_at_commit(state, tenant_id, database_id, &record.collection, plan).await
+}
+
+/// Run one teardown plan now, or at COMMIT inside an explicit transaction:
+/// the catalog entry that drops the index is buffered, so its engine state
+/// must survive a ROLLBACK.
+async fn teardown_now_or_at_commit(
+    state: &SharedState,
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+    collection: &str,
+    plan: crate::bridge::envelope::PhysicalPlan,
+) -> Result<(), DdlError> {
+    let deferred = ddl_buffer::defer_effect(DeferredDdlEffect::IndexTeardown {
         tenant_id,
         database_id,
-        &record.collection,
-        plan,
-        None,
-    )
-    .await
+        collection: collection.to_string(),
+        plan: plan.clone(),
+    });
+    if deferred {
+        return Ok(());
+    }
+    dispatch(state, tenant_id, database_id, collection, plan, None).await
 }
 
 /// Dispatch one teardown plan to the Data Plane, surfacing both transport and
 /// handler-side failures. `minted` holds the record appended for the plan;
 /// the funnel closes its outcome-floor window from the plan's outcome.
-async fn dispatch(
+pub(crate) async fn dispatch(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,

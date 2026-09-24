@@ -356,7 +356,7 @@ pub(super) async fn dispatch_remote_stream(
 fn map_stream_cluster_error(err: nodedb_cluster::ClusterError, vshard_id: u64) -> Error {
     match err {
         nodedb_cluster::ClusterError::StreamTerminal { error, .. } => {
-            map_typed_cluster_error(error, vshard_id)
+            map_typed_cluster_error(*error, vshard_id)
         }
         other => Error::NotLeader {
             vshard_id: VShardId::new((vshard_id % VShardId::COUNT as u64) as u32),

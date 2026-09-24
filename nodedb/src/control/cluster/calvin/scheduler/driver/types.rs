@@ -75,6 +75,49 @@ pub(super) struct PendingTxn {
     /// completes, and holds when the scheduler halts or stops with the txn
     /// still pending.
     pub redo_records: Option<crate::control::server::dispatch_utils::MintedRecords>,
+    /// What a committed flush names beside its redo record, derived once
+    /// from this vShard's slice when it stages.
+    pub flush_scope: FlushScope,
+}
+
+/// What a vShard's committed flush carries: the collections its slice
+/// writes, their materialized-sum targets, and the redo record. The Data
+/// Plane installs the record the way every committed transaction installs.
+///
+/// The collections and sum targets are derived when the slice stages, from
+/// the plans the stage sends. A flush that follows a COMMIT verdict
+/// therefore never decodes or routes a plan, so it cannot fail after the
+/// verdict is durable.
+#[derive(Debug, Clone, Default)]
+pub(super) struct FlushScope {
+    pub collections: Vec<String>,
+    pub sum_targets: Vec<nodedb_physical::physical_plan::RedoSumTargets>,
+    /// The encoded redo record the resolve appended. Empty until the resolve
+    /// answers, and empty when the slice wrote nothing on this vShard. A
+    /// resent flush carries the same bytes.
+    pub redo: Vec<u8>,
+    /// Flushes sent for this txn. A refused install resends the flush until
+    /// the count reaches its bound.
+    pub sends: u32,
+}
+
+impl FlushScope {
+    /// The flush scope of the local plans `plans`.
+    pub(super) fn of_plans(plans: &[nodedb_physical::physical_plan::PhysicalPlan]) -> Self {
+        Self {
+            collections:
+                crate::control::wal_replication::transaction_redo::collections::written_collections(
+                    plans,
+                ),
+            sum_targets:
+                crate::control::wal_replication::transaction_redo::sum_targets::redo_sum_targets(
+                    plans,
+                ),
+            // The resolve fills these once it answers.
+            redo: Vec::new(),
+            sends: 0,
+        }
+    }
 }
 
 /// Commit-resolution state of a staged static Calvin transaction.

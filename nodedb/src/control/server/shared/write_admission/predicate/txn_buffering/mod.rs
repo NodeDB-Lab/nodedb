@@ -52,8 +52,8 @@
 //! / `crdt_variants_match_oracle` below. Without buffering,
 //! each of these executed immediately against base state inside an explicit
 //! transaction, was visible before COMMIT, and survived ROLLBACK: a
-//! correctness bug, not a classification nuance. Closing it costs two
-//! deliberate, documented trade-offs:
+//! correctness bug, not a classification nuance. Closing it has two
+//! documented consequences:
 //!
 //! 1. RYOW LOSS: a `Buffered` plan does not stage into the per-transaction
 //!    overlay, so a read later in the SAME transaction does not observe the
@@ -62,13 +62,10 @@
 //!    `ArrayOp::{Put, Delete}` is exempt: `is_stageable_write` routes it
 //!    through `MetaOp::StageWrite` into `ArrayTxnOverlay`, so same-transaction
 //!    array reads see it. The `ClusterArrayOp` wrapper is still `Buffered`.
-//! 2. NO-UNDO GAP (pre-existing, not fixed here): every flipped variant
-//!    reaches `exec_tx_passthrough`
-//!    (`data/executor/handlers/transaction/sub_plan_write.rs`) at COMMIT,
-//!    which pushes no `UndoEntry`. If a sibling sub-plan fails later in the
-//!    same COMMIT batch, these writes cannot be reversed by
-//!    `rollback_undo_log`. Spatial, Text, and bulk Document writes already
-//!    ride this exact path.
+//! 2. ONE INSTALL: COMMIT resolves every buffered plan into the
+//!    transaction's redo record, and the record installs with undo. A
+//!    sub-record that fails while it installs rolls back every write of the
+//!    record before it.
 //!
 //! `ClusterArrayOp::{Put, Delete}` also classifies `true` while
 //! `to_replicated_entry` has no encoder arm for either: they are Control-Plane
@@ -90,7 +87,10 @@
 //! normally. Pinned by `truncate_is_buffered_and_index_variants_are_not`
 //! below via `assert_encoded_but_not_buffered` — the inverse of
 //! `assert_buffered_but_unencoded` — and correspondingly excluded from
-//! `kv_variants_match_oracle`.
+//! `kv_variants_match_oracle`. `VectorOp::{SetParams, DropIndex}` take the
+//! same inverse divergence for the same reason: each rides its own
+//! autocommit `VectorParams` / `VectorIndexDrop` record, and a transaction's
+//! redo record carries no index DDL.
 //!
 //! `DocumentOp::Truncate`, `KvOp::Truncate`, `VectorOp::DirectTruncate`,
 //! `ColumnarOp::Truncate`, and `TimeseriesOp::Truncate` classify `true`: in a

@@ -17,7 +17,8 @@ use crate::control::array_sync::raft_apply::{
 };
 use crate::control::distributed_applier::propose_tracker::{AppliedWrite, ProposeTracker};
 use crate::control::server::dispatch_utils::{
-    ChangeFeedOwner, SubmitWrite, WalDurability, WriteOrdering, submit_write,
+    ChangeFeedOwner, SubmitWrite, WalDurability, WriteOrdering, error_is_final_refusal,
+    submit_write,
 };
 use crate::control::state::SharedState;
 use crate::control::wal_replication::from_replicated_entry;
@@ -195,7 +196,10 @@ pub(super) async fn apply_generic_entry(
         }
     };
 
-    let applied_ok = result.is_ok() || deterministic_crdt_fence_noop(&result);
+    // A final refusal is the entry's outcome: its marker carries the key.
+    let applied_ok = result.is_ok()
+        || deterministic_crdt_fence_noop(&result)
+        || result.as_ref().is_err_and(error_is_final_refusal);
     let applied = ledger_outcome(&result);
     tracker.complete(group_id, entry.index, applied_key, result);
 

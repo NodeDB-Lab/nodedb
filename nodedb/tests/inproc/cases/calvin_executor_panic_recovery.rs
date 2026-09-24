@@ -1,33 +1,29 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Executor panic-recovery test for `MetaOp::CalvinExecuteStatic`.
+//! Executor panic-recovery test for a committed Calvin transaction's flush.
 //!
-//! Compiled only with `--features failpoints`. Tests the Calvin executor's
-//! panic-recovery path: when a panic fires mid-execution inside
-//! `execute_transaction_batch` (called by `execute_calvin_execute_static`),
-//! the `catch_unwind` in the batch handler must:
+//! Compiled only with `--features failpoints`. Tests the flush's
+//! panic-recovery path: when a panic fires while the flush installs the
+//! transaction's redo record (`replay::between_standalone_and_redo`, after
+//! the KV writes landed), the install must:
 //!
-//! - Catch the panic and route through the typed-rollback path.
-//! - Return `Status::Error` with `ErrorCode::Internal { detail }` naming
-//!   the panic site.
-//! - Leave the WAL in a recoverable state (all previous sub-plan writes
-//!   rolled back before the response is returned).
-//! - Allow normal operation to resume after the fail point is disabled.
+//! - Catch the panic and roll back every write the install made.
+//! - Return `Status::Error` with a retryable refusal naming the panic.
+//! - Leave the core in a state normal operation resumes from.
 //!
 //! ## Failure model alignment
 //!
-//! Per the Calvin failure model: an executor panic during `CalvinExecuteStatic`
-//! causes the shard to return `Status::Error`. The lock-manager invariant
-//! ("locks NOT released on panic") is enforced by the scheduler layer in
-//! production; the executor's contract is:
+//! Per the Calvin failure model: a panic while the flush installs causes the
+//! shard to return `Status::Error`. The lock-manager invariant ("locks NOT
+//! released on a failed flush") is enforced by the scheduler layer, which
+//! halts. The executor's contract is:
 //!
-//!   1. Rolled-back writes are not visible after the failed batch.
-//!   2. The error response carries `ErrorCode::Internal` naming the panic site.
+//!   1. Rolled-back writes are not visible after the failed flush.
+//!   2. The error response is a retryable refusal naming the panic.
 //!   3. Subsequent operations on the same `CoreLoop` succeed (no state
 //!      corruption from the unwind).
-//!   4. WAL replay correctness: a fresh `CoreLoop` opened at the same data
-//!      directory sees only writes that were committed before the panic batch
-//!      (the rolled-back writes were never durably committed).
+//!   4. A fresh `CoreLoop` opened at the same data directory does not see the
+//!      rolled-back writes.
 //!
 //! ## Note on test scope
 //!
@@ -40,6 +36,8 @@
 #[allow(unused_imports)]
 use nodedb_test_support::tx_batch_helpers::*;
 
+#[cfg(feature = "failpoints")]
+use nodedb::bridge::dispatch::BridgeRequest;
 #[cfg(feature = "failpoints")]
 use nodedb::bridge::envelope::{ErrorCode, Status};
 #[cfg(feature = "failpoints")]
@@ -67,30 +65,18 @@ fn calvin_static(epoch: u64, plans: Vec<PhysicalPlan>) -> PhysicalPlan {
     })
 }
 
-/// Build a `MetaOp::TransactionBatch` with the given sub-plans.
+/// The fail point the install passes between the KV and the document arms.
 #[cfg(feature = "failpoints")]
-fn tx_batch(plans: Vec<PhysicalPlan>) -> PhysicalPlan {
-    PhysicalPlan::Meta(MetaOp::TransactionBatch {
-        plans,
-        txn_id: None,
-    })
-}
+const INSTALL_FAIL_POINT: &str = "replay::between_standalone_and_redo";
 
-/// Build the `MetaOp::CalvinFlush` that resolves a staged transaction to
-/// commit. `CalvinExecuteStatic` stages the plans; the flush replays them
-/// through `execute_transaction_batch` (where the panic fail point fires).
-#[cfg(feature = "failpoints")]
-fn calvin_flush(epoch: u64) -> PhysicalPlan {
-    PhysicalPlan::Meta(MetaOp::CalvinFlush { epoch, position: 0 })
-}
-
-/// Stage a static Calvin batch (validate + buffer) then flush it to base,
-/// returning the flush response (where any apply-time panic surfaces). The
-/// stage step must always return `Status::Ok`.
+/// Stage a static Calvin transaction (validate + stage), resolve it into its
+/// redo record, and flush the record at `lsn`, returning the flush response
+/// (where any install-time panic surfaces). The stage and resolve steps must
+/// always return `Status::Ok`.
 #[cfg(feature = "failpoints")]
 fn stage_then_flush(
     core: &mut nodedb::data::executor::core_loop::CoreLoop,
-    tx: &mut nodedb_bridge::buffer::Producer<nodedb::bridge::dispatch::BridgeRequest>,
+    tx: &mut nodedb_bridge::buffer::Producer<BridgeRequest>,
     rx: &mut nodedb_bridge::buffer::Consumer<nodedb::bridge::dispatch::BridgeResponse>,
     epoch: u64,
     plans: Vec<PhysicalPlan>,
@@ -99,10 +85,47 @@ fn stage_then_flush(
     assert_eq!(
         staged.status,
         Status::Ok,
-        "stage must succeed (validate + buffer, no apply); got {:?}",
+        "stage must succeed (validate + stage, no apply); got {:?}",
         staged.error_code
     );
-    send_raw(core, tx, rx, calvin_flush(epoch))
+    let resolved = send_raw(
+        core,
+        tx,
+        rx,
+        PhysicalPlan::Meta(MetaOp::CalvinResolve { epoch, position: 0 }),
+    );
+    assert_eq!(
+        resolved.status,
+        Status::Ok,
+        "resolve must succeed; got {:?}",
+        resolved.error_code
+    );
+    let mut request = make_request(PhysicalPlan::Meta(MetaOp::CalvinFlush {
+        epoch,
+        position: 0,
+        redo: resolved.payload.to_vec(),
+        collections: Vec::new(),
+        sum_targets: Vec::new(),
+    }));
+    request.wal_lsn = Some(nodedb::types::Lsn::new(epoch * 10));
+    tx.try_push(BridgeRequest::unfloored(request)).unwrap();
+    core.tick();
+    rx.try_pop().unwrap().inner
+}
+
+/// Assert `resp` is the retryable refusal a panic mid-install answers with.
+#[cfg(feature = "failpoints")]
+fn assert_panic_refusal(resp: &nodedb::bridge::envelope::Response) {
+    assert_eq!(resp.status, Status::Error, "got {:?}", resp.error_code);
+    match resp.error_code.as_deref() {
+        Some(ErrorCode::RetryableRefusal { reason }) => {
+            assert!(
+                reason.contains("panic"),
+                "the refusal must name the panic: {reason}"
+            );
+        }
+        other => panic!("expected ErrorCode::RetryableRefusal, got {other:?}"),
+    }
 }
 
 /// Build a KV Put plan for the given collection.
@@ -130,22 +153,21 @@ fn kv_get_in(coll: &str, key: &[u8]) -> PhysicalPlan {
     })
 }
 
-// ── Test 1: CalvinExecuteStatic panic caught, typed response returned ─────────
+// ── Test 1: install panic caught, typed response returned ─────────────────────
 
-/// Panic injected between sub-applies inside a `CalvinExecuteStatic` batch.
+/// Panic injected while the flush installs the transaction's redo record.
 ///
-/// The batch has two sub-plans: the first KV put succeeds, then the fail
-/// point fires. The handler must catch the unwind and return a typed
-/// `ErrorCode::Internal` response. The first sub-plan's write must be rolled
-/// back before the response is returned (all-or-nothing guarantee).
+/// The record carries two KV puts, which land before the fail point fires.
+/// The install must catch the unwind, roll both writes back, and answer with
+/// a retryable refusal naming the panic.
 #[cfg(feature = "failpoints")]
 #[test]
 fn calvin_static_panic_returns_internal_error() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
-    let _guard = FailGuard::install("transaction_batch::between_subapply", FailAction::Panic);
+    let _guard = FailGuard::install(INSTALL_FAIL_POINT, FailAction::Panic);
 
-    // Stage succeeds (no apply); the panic fires when the flush replays the plans.
+    // Stage and resolve write nothing; the panic fires in the flush's install.
     let resp = stage_then_flush(
         &mut core,
         &mut tx,
@@ -156,27 +178,12 @@ fn calvin_static_panic_returns_internal_error() {
             kv_put_in("orders", b"panic_key2", b"should_not_persist"),
         ],
     );
-
-    assert_eq!(
-        resp.status,
-        Status::Error,
-        "expected Status::Error after Calvin executor panic; got {:?}",
-        resp.status
-    );
-    match resp.error_code.as_deref() {
-        Some(ErrorCode::Internal { detail }) => {
-            assert!(
-                detail.contains("panic in sub-apply"),
-                "error detail must name the panic site: {detail}"
-            );
-        }
-        other => panic!("expected ErrorCode::Internal, got {other:?}"),
-    }
+    assert_panic_refusal(&resp);
 }
 
 // ── Test 2: rolled-back writes not visible after Calvin panic ─────────────────
 
-/// After a Calvin executor panic, writes from the failed batch must not be
+/// After a Calvin executor panic, writes from the failed flush must not be
 /// visible. The CoreLoop remains functional for subsequent requests.
 #[cfg(feature = "failpoints")]
 #[test]
@@ -188,15 +195,11 @@ fn calvin_static_panic_rollback_not_visible() {
         &mut core,
         &mut tx,
         &mut rx,
-        tx_batch(vec![kv_put_in(
-            "orders",
-            b"committed_key",
-            b"committed_val",
-        )]),
+        kv_put_in("orders", b"committed_key", b"committed_val"),
     );
 
     // Inject a panic on the second sub-apply.
-    let _guard = FailGuard::install("transaction_batch::between_subapply", FailAction::Panic);
+    let _guard = FailGuard::install(INSTALL_FAIL_POINT, FailAction::Panic);
 
     let resp = stage_then_flush(
         &mut core,
@@ -211,7 +214,7 @@ fn calvin_static_panic_rollback_not_visible() {
     assert_eq!(
         resp.status,
         Status::Error,
-        "panic batch must return Error; got {:?}",
+        "a panicking flush must return Error; got {:?}",
         resp.status
     );
 
@@ -253,17 +256,17 @@ fn calvin_static_panic_rollback_not_visible() {
 
 // ── Test 3: normal operation resumes after fail point disabled ────────────────
 
-/// After clearing the fail point, `CalvinExecuteStatic` batches must commit
+/// After clearing the fail point, Calvin transactions must commit
 /// successfully. This confirms there is no state corruption from the earlier
-/// panicked batch.
+/// panicking flush.
 #[cfg(feature = "failpoints")]
 #[test]
 fn calvin_static_normal_operation_resumes_after_panic() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
-    // Trigger a panic batch.
+    // Trigger a panicking flush.
     {
-        let _guard = FailGuard::install("transaction_batch::between_subapply", FailAction::Panic);
+        let _guard = FailGuard::install(INSTALL_FAIL_POINT, FailAction::Panic);
         let resp = stage_then_flush(
             &mut core,
             &mut tx,
@@ -277,13 +280,13 @@ fn calvin_static_normal_operation_resumes_after_panic() {
         assert_eq!(
             resp.status,
             Status::Error,
-            "panic batch must return Error; got {:?}",
+            "a panicking flush must return Error; got {:?}",
             resp.status
         );
         // Guard drops here, clearing the fail point.
     }
 
-    // Normal staged Calvin batch after the fail point is cleared: stage + flush.
+    // A normal Calvin transaction after the fail point is cleared.
     let success_resp = stage_then_flush(
         &mut core,
         &mut tx,
@@ -294,7 +297,7 @@ fn calvin_static_normal_operation_resumes_after_panic() {
     assert_eq!(
         success_resp.status,
         Status::Ok,
-        "Calvin batch after fail-point clear must succeed; got {:?}",
+        "a Calvin flush after the fail point is cleared must succeed; got {:?}",
         success_resp.error_code
     );
 
@@ -319,13 +322,14 @@ fn calvin_static_normal_operation_resumes_after_panic() {
 
 // ── Test 4: WAL replay correctness — fresh CoreLoop sees only committed data ──
 
-/// After a panicked Calvin batch, create a fresh `CoreLoop` at the same data
+/// After a panicking Calvin flush, create a fresh `CoreLoop` at the same data
 /// directory. The fresh core must see only data that was committed before the
-/// panic batch — the rolled-back writes must not appear after replay.
+/// panicking flush — the rolled-back writes must not appear after replay.
 ///
-/// This verifies the WAL-recoverability invariant: the panic batch's sub-plan
-/// writes were rolled back before the response was returned, so they were never
-/// durably committed to any WAL record. A fresh core therefore starts clean.
+/// The install rolled its writes back before the response returned, so a
+/// fresh core opened over the same directory holds none of them. The redo
+/// record itself lives in the WAL the scheduler appends, which this
+/// core-level test does not write.
 #[cfg(feature = "failpoints")]
 #[test]
 fn calvin_static_replay_sees_only_committed_data() {
@@ -354,7 +358,7 @@ fn calvin_static_replay_sees_only_committed_data() {
         (core, req_tx, resp_rx)
     };
 
-    // Commit a reference write before the panic batch.
+    // Commit a reference write before the panicking flush.
     {
         use nodedb::bridge::dispatch::BridgeRequest;
         use nodedb::bridge::envelope::{Priority, Request};
@@ -382,10 +386,12 @@ fn calvin_static_replay_sees_only_committed_data() {
             admission: nodedb::bridge::envelope::Admission::Admitted,
         };
 
-        // Commit a value before the panic batch.
-        tx.try_push(BridgeRequest::unfloored(make_req(tx_batch(vec![
-            kv_put_in("replay_coll", b"pre_commit", b"alive"),
-        ]))))
+        // Commit a value before the panicking flush.
+        tx.try_push(BridgeRequest::unfloored(make_req(kv_put_in(
+            "replay_coll",
+            b"pre_commit",
+            b"alive",
+        ))))
         .unwrap();
         core.tick();
         let pre_resp = rx.try_pop().unwrap().inner;
@@ -396,37 +402,20 @@ fn calvin_static_replay_sees_only_committed_data() {
             pre_resp.error_code
         );
 
-        // Panic batch — writes must not persist. Stage first (no apply, always
-        // Ok), then flush (where the panic fires during the replay).
-        let _guard = FailGuard::install("transaction_batch::between_subapply", FailAction::Panic);
-
-        tx.try_push(BridgeRequest::unfloored(make_req(calvin_static(
+        // Panicking install — writes must not persist. Stage and resolve
+        // write nothing; the panic fires while the flush installs.
+        let _guard = FailGuard::install(INSTALL_FAIL_POINT, FailAction::Panic);
+        let panic_resp = stage_then_flush(
+            &mut core,
+            &mut tx,
+            &mut rx,
             1,
             vec![
                 kv_put_in("replay_coll", b"should_not_exist", b"gone"),
                 kv_put_in("replay_coll", b"should_not_exist2", b"gone"),
             ],
-        ))))
-        .unwrap();
-        core.tick();
-        let stage_resp = rx.try_pop().unwrap().inner;
-        assert_eq!(
-            stage_resp.status,
-            Status::Ok,
-            "stage must succeed (validate + buffer); got {:?}",
-            stage_resp.error_code
         );
-
-        tx.try_push(BridgeRequest::unfloored(make_req(calvin_flush(1))))
-            .unwrap();
-        core.tick();
-        let panic_resp = rx.try_pop().unwrap().inner;
-        assert_eq!(
-            panic_resp.status,
-            Status::Error,
-            "flush of panic batch must return Error; got {:?}",
-            panic_resp.status
-        );
+        assert_panic_refusal(&panic_resp);
         // Guard drops, clearing the fail point.
     }
 
@@ -485,7 +474,7 @@ fn calvin_static_replay_sees_only_committed_data() {
     // on a single-CoreLoop reopen. WAL-driven KV state recovery is a property
     // of the cluster apply path (replicated entries → applier → engine), not
     // of CoreLoop::open. The meaningful invariant exercised below is that the
-    // rolled-back writes from the panicked batch do NOT appear, which holds
+    // rolled-back writes from the panicking flush do NOT appear, which holds
     // trivially under empty-replay state and confirms the panic-rollback path
     // never let the bad writes reach durable storage.
 

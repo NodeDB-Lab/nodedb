@@ -226,8 +226,12 @@ pub(crate) async fn apply_array_op(
                 group_id, index = log_index, array = %op.header.array, error = %e,
                 "apply_array_op: apply failed"
             );
+            // A final refusal is the entry's outcome: its marker carries the
+            // key, so a redelivered copy is never applied.
+            let refused_finally =
+                crate::control::server::dispatch_utils::error_is_final_refusal(&e);
             tracker.complete(group_id, log_index, applied_key, Err(e));
-            false
+            refused_finally
         }
     }
 }

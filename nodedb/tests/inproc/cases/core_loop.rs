@@ -102,7 +102,5 @@ mod test_transaction_matrix;
 mod test_transaction_matrix_helpers;
 #[path = "executor_tests/test_transaction_matrix_kv.rs"]
 mod test_transaction_matrix_kv;
-#[path = "executor_tests/test_transaction_matrix_side_effects.rs"]
-mod test_transaction_matrix_side_effects;
 #[path = "executor_tests/test_vector.rs"]
 mod test_vector;

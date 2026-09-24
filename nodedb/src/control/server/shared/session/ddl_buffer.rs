@@ -17,6 +17,7 @@ use std::cell::RefCell;
 use crate::control::catalog_entry::CatalogEntry;
 
 use super::audit_context::AuditCtx;
+use super::ddl_effect::DeferredDdlEffect;
 
 /// One buffered DDL statement: the unstamped `CatalogEntry`
 /// plus the optional audit context captured from
@@ -28,6 +29,9 @@ use super::audit_context::AuditCtx;
 pub struct BufferedDdl {
     pub entry: CatalogEntry,
     pub audit: Option<AuditCtx>,
+    /// Engine side effects the statement that buffered this entry owes at
+    /// COMMIT, in statement order.
+    pub effects: Vec<DeferredDdlEffect>,
 }
 
 /// Unstamped DDL entries buffered during a transaction.
@@ -61,11 +65,44 @@ pub fn try_buffer(entry: CatalogEntry) -> bool {
             buf.push(BufferedDdl {
                 entry,
                 audit: super::audit_context::current(),
+                effects: Vec::new(),
             });
             true
         } else {
             false
         }
+    })
+}
+
+/// Attach an engine side effect to the entry buffered last, to run at
+/// COMMIT. Returns `false` when no buffer is active or it holds no entry: the
+/// caller then runs the effect at once.
+pub fn defer_effect(effect: DeferredDdlEffect) -> bool {
+    with_slot(false, |b| {
+        let mut guard = b.borrow_mut();
+        match guard.as_mut().and_then(|buf| buf.last_mut()) {
+            Some(last) => {
+                last.effects.push(effect);
+                true
+            }
+            None => false,
+        }
+    })
+}
+
+/// Remove every deferred engine side effect from the active buffer, in
+/// statement order, leaving its entries in place. COMMIT calls this once,
+/// before it takes the entries.
+pub fn drain_effects() -> Vec<DeferredDdlEffect> {
+    with_slot(Vec::new(), |b| {
+        b.borrow_mut()
+            .as_mut()
+            .map(|buf| {
+                buf.iter_mut()
+                    .flat_map(|item| std::mem::take(&mut item.effects))
+                    .collect()
+            })
+            .unwrap_or_default()
     })
 }
 
@@ -155,6 +192,38 @@ mod tests {
                 CatalogEntry::DeleteSequence { name, .. } if name == "two"
             ));
             assert!(!is_active());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_deferred_effect_rides_the_last_entry_and_a_truncate_drops_it() {
+        use super::super::ddl_effect::DeferredDdlEffect;
+        let drop = |name: &str| DeferredDdlEffect::SortedIndexDrop {
+            tenant_id: crate::types::TenantId::new(1),
+            database_id: crate::types::DatabaseId::DEFAULT,
+            collection: "scores".into(),
+            index_name: name.into(),
+        };
+        conn_scope::scoped(async {
+            activate();
+            assert!(
+                !defer_effect(drop("none")),
+                "an empty buffer takes no effect"
+            );
+            try_buffer(sample_entry("one"));
+            assert!(defer_effect(drop("kept")));
+            try_buffer(sample_entry("two"));
+            assert!(defer_effect(drop("dropped")));
+            truncate(1);
+            let effects = drain_effects();
+            assert_eq!(effects.len(), 1);
+            assert!(matches!(
+                &effects[0],
+                DeferredDdlEffect::SortedIndexDrop { index_name, .. } if index_name == "kept"
+            ));
+            assert!(drain_effects().is_empty(), "draining removes them");
+            assert_eq!(buffer_len(), 1, "the entries stay");
         })
         .await;
     }

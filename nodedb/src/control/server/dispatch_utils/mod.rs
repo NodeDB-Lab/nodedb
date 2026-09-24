@@ -34,4 +34,6 @@ pub(crate) use submit_write::{
     ChangeFeedOwner, SubmitOutcome, SubmitWrite, WalDurability, WriteOrdering, submit_write,
 };
 pub(crate) use types::{AutocommitWrite, WriteDispatch};
-pub(crate) use write_abort::{refusal_is_final, write_definitely_not_applied};
+pub(crate) use write_abort::{
+    error_is_final_refusal, refusal_is_final, write_definitely_not_applied,
+};

@@ -191,7 +191,6 @@ mod tenant_drop_owned_objects;
 mod tls_policy_enforcement;
 mod topic_replication_apply;
 mod transaction_batch_cross_engine;
-mod transaction_batch_cross_engine_crash;
 mod transaction_batch_cross_engine_mixed;
 mod transaction_batch_cross_shard;
 mod trigger_batching;

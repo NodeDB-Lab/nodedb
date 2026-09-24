@@ -15,7 +15,6 @@ use crate::data::executor::task::ExecutionTask;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::data::executor) enum TimeseriesApplyMode {
     Immediate,
-    CommitDeferred,
     /// The install pass of a committed redo record. The memtable flushes the
     /// rows it already holds when it has no room, then the ingest records
     /// the pre-image its undo restores. No flush, budget recharge or timer
@@ -114,32 +113,6 @@ impl CoreLoop {
         }
 
         let key = (task.request.database_id, tid, collection.to_string());
-        if mode == TimeseriesApplyMode::CommitDeferred {
-            let governor_pressure = self
-                .governor
-                .try_reserve(
-                    task.request.database_id,
-                    tid,
-                    nodedb_mem::EngineId::Timeseries,
-                    0,
-                )
-                .is_err();
-            let needs_flush = self.columnar_memtables.get(&key).is_some_and(|memtable| {
-                memtable.memory_bytes() >= self.ts_tuning.memtable_budget_bytes
-                    || memtable.memory_bytes() >= self.ts_tuning.memtable_hard_limit_bytes
-                    || governor_pressure
-            });
-            if needs_flush {
-                return self.response_error(
-                    task,
-                    ErrorCode::RejectedPrevalidation {
-                        reason: "transactional timeseries ingest requires a flush before mutation"
-                            .into(),
-                    },
-                );
-            }
-        }
-
         let already_flushed = if let Some(lsn) = wal_lsn
             && let Some(registry) = self.ts_registries.get(&key)
         {
@@ -284,13 +257,12 @@ impl CoreLoop {
 
         if let Some(prov) = provenance
             && ingest_response.status == Status::Ok
-            && mode != TimeseriesApplyMode::CommitDeferred
         {
             self.sync_commit(prov);
             let applied_seq = self.sync_hwm_value(prov.producer_id, prov.stream_id);
             return self.sync_ack_response(task, AckStatus::Applied, applied_seq);
         }
-        if ingest_response.status == Status::Ok && mode != TimeseriesApplyMode::CommitDeferred {
+        if ingest_response.status == Status::Ok {
             self.note_collection_write_lsn(task, collection);
         }
         ingest_response

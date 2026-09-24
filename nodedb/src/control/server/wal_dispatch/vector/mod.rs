@@ -12,14 +12,11 @@ pub use append::{
     wal_append_vector_put,
 };
 pub(crate) use encode::{
-    VectorDirectDeleteRecord, VectorDirectTruncateRecord, VectorDirectUpdatePayload,
-    VectorDirectUpdateRecord, VectorDirectUpsertPayload, VectorDirectUpsertRecord,
-    encode_multi_vector_delete_payload, encode_multi_vector_put_payload,
+    VectorDirectDeleteRecord, VectorDirectTruncateRecord, VectorDirectUpdateRecord,
+    VectorDirectUpsertRecord, encode_multi_vector_delete_payload, encode_multi_vector_put_payload,
     encode_sparse_vector_delete_payload, encode_sparse_vector_put_payload,
     encode_vector_batch_put_payload, encode_vector_delete_by_surrogate_payload,
-    encode_vector_delete_payload, encode_vector_direct_delete_payload,
-    encode_vector_direct_truncate_payload, encode_vector_direct_update_payload,
-    encode_vector_direct_upsert_payload, encode_vector_put_payload,
+    encode_vector_delete_payload, encode_vector_direct_truncate_payload, encode_vector_put_payload,
 };
 pub(crate) use encode::{
     VectorResolvedDirectWritePayload, VectorResolvedDirectWriteRecord,

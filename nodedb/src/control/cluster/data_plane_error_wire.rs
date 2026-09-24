@@ -77,6 +77,18 @@ impl From<ErrorCode> for DataPlaneErrorCode {
             }
             ErrorCode::RejectedPrevalidation { reason } => Self::RejectedPrevalidation { reason },
             ErrorCode::RetryableRefusal { reason } => Self::RetryableRefusal { reason },
+            ErrorCode::SyncRejected {
+                violation,
+                applied_seq,
+                provenance,
+            } => Self::SyncRejected {
+                violation,
+                applied_seq,
+                producer_id: provenance.producer_id,
+                epoch: provenance.epoch,
+                stream_id: provenance.stream_id,
+                seq: provenance.seq,
+            },
             ErrorCode::NotFound => Self::NotFound,
             ErrorCode::RejectedAuthz { resource } => Self::RejectedAuthz { resource },
             ErrorCode::ConflictRetry => Self::ConflictRetry,
@@ -123,7 +135,7 @@ impl From<ErrorCode> for DataPlaneErrorCode {
             }
             ErrorCode::CounterFault { collection, fault } => Self::CounterFault {
                 collection,
-                fault: fault.into(),
+                fault: counter_fault_to_wire(fault),
             },
             ErrorCode::InsufficientBalance { collection, detail } => {
                 Self::InsufficientBalance { collection, detail }
@@ -175,6 +187,23 @@ impl From<DataPlaneErrorCode> for ErrorCode {
                 Self::RejectedPrevalidation { reason }
             }
             DataPlaneErrorCode::RetryableRefusal { reason } => Self::RetryableRefusal { reason },
+            DataPlaneErrorCode::SyncRejected {
+                violation,
+                applied_seq,
+                producer_id,
+                epoch,
+                stream_id,
+                seq,
+            } => Self::SyncRejected {
+                violation,
+                applied_seq,
+                provenance: nodedb_types::sync::wire::SyncProvenance {
+                    producer_id,
+                    epoch,
+                    stream_id,
+                    seq,
+                },
+            },
             DataPlaneErrorCode::NotFound => Self::NotFound,
             DataPlaneErrorCode::RejectedAuthz { resource } => Self::RejectedAuthz { resource },
             DataPlaneErrorCode::ConflictRetry => Self::ConflictRetry,
@@ -225,7 +254,7 @@ impl From<DataPlaneErrorCode> for ErrorCode {
             }
             DataPlaneErrorCode::CounterFault { collection, fault } => Self::CounterFault {
                 collection,
-                fault: fault.into(),
+                fault: counter_fault_from_wire(fault),
             },
             DataPlaneErrorCode::InsufficientBalance { collection, detail } => {
                 Self::InsufficientBalance { collection, detail }
@@ -270,25 +299,24 @@ impl From<DataPlaneErrorCode> for ErrorCode {
     }
 }
 
-impl From<CounterFault> for DataPlaneCounterFault {
-    fn from(fault: CounterFault) -> Self {
-        match fault {
-            CounterFault::NotAnInteger => Self::NotAnInteger,
-            CounterFault::NotAFloat => Self::NotAFloat,
-            CounterFault::IntegerOverflow => Self::IntegerOverflow,
-            CounterFault::NonFinite => Self::NonFinite,
-        }
+/// The wire form of a counter fault. Both types live in other crates, so the
+/// mapping is a function, not a `From` impl.
+fn counter_fault_to_wire(fault: CounterFault) -> DataPlaneCounterFault {
+    match fault {
+        CounterFault::NotAnInteger => DataPlaneCounterFault::NotAnInteger,
+        CounterFault::NotAFloat => DataPlaneCounterFault::NotAFloat,
+        CounterFault::IntegerOverflow => DataPlaneCounterFault::IntegerOverflow,
+        CounterFault::NonFinite => DataPlaneCounterFault::NonFinite,
     }
 }
 
-impl From<DataPlaneCounterFault> for CounterFault {
-    fn from(fault: DataPlaneCounterFault) -> Self {
-        match fault {
-            DataPlaneCounterFault::NotAnInteger => Self::NotAnInteger,
-            DataPlaneCounterFault::NotAFloat => Self::NotAFloat,
-            DataPlaneCounterFault::IntegerOverflow => Self::IntegerOverflow,
-            DataPlaneCounterFault::NonFinite => Self::NonFinite,
-        }
+/// The counter fault a wire form carries.
+fn counter_fault_from_wire(fault: DataPlaneCounterFault) -> CounterFault {
+    match fault {
+        DataPlaneCounterFault::NotAnInteger => CounterFault::NotAnInteger,
+        DataPlaneCounterFault::NotAFloat => CounterFault::NotAFloat,
+        DataPlaneCounterFault::IntegerOverflow => CounterFault::IntegerOverflow,
+        DataPlaneCounterFault::NonFinite => CounterFault::NonFinite,
     }
 }
 

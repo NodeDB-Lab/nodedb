@@ -15,7 +15,6 @@ use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::kv::current_ms;
 use crate::types::{DatabaseId, TenantId, TxnId};
 
 /// Lowercase-hex encode a raw KV key. [`unhex_key`] is the inverse.
@@ -198,6 +197,7 @@ impl CoreLoop {
             | KvOp::SortedIndexRange { .. }
             | KvOp::SortedIndexCount { .. }
             | KvOp::SortedIndexScore { .. }
+            | KvOp::SortedIndexTxnRead { .. }
             | KvOp::MaterializeScan { .. }
             // Resolve-before-propose is autocommit-only: it decides against
             // committed state and proposes directly, never through staging.
@@ -297,7 +297,7 @@ impl CoreLoop {
             super::constraint::OverlayPk::Present => true,
             super::constraint::OverlayPk::Absent => false,
             super::constraint::OverlayPk::Unstaged => {
-                let now_ms = current_ms();
+                let now_ms = self.kv_read_now_ms();
                 self.kv_engine
                     .get(ctx.database_id, ctx.tid, ctx.collection, key, now_ms)
                     .is_some()
@@ -336,7 +336,7 @@ impl CoreLoop {
                     coll_key.1.as_u64(),
                     coll_key.2.as_str(),
                     key,
-                    current_ms(),
+                    self.kv_read_now_ms(),
                 )
                 .map(|(_, s)| s),
         }
@@ -355,7 +355,7 @@ impl CoreLoop {
             Some(Staged::Tombstone) => None,
             None if !self.stage_base_visible(ctx) => None,
             None => {
-                let now_ms = current_ms();
+                let now_ms = self.kv_read_now_ms();
                 self.kv_engine
                     .get(ctx.database_id, ctx.tid, ctx.collection, key, now_ms)
             }

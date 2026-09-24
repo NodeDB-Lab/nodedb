@@ -15,6 +15,8 @@ use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::index_registry::{
     IndexRegistration, propose_index_record,
 };
+use crate::control::server::shared::session::ddl_buffer;
+use crate::control::server::shared::session::ddl_effect::DeferredDdlEffect;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 use nodedb_physical::physical_plan::TextOp;
@@ -183,16 +185,28 @@ async fn create_text_index(
             analyzer_name: analyzer_name.clone(),
             fuzzy_default,
         });
-        crate::control::server::shared::ddl::engine_apply::apply_in_engine(
-            state,
+        // Inside an explicit transaction the binding waits for COMMIT, after
+        // the buffered index record lands.
+        let deferred = ddl_buffer::defer_effect(DeferredDdlEffect::EngineApply {
             tenant_id,
             database_id,
-            &collection,
-            set_config_plan,
-            "58000",
-            command,
-        )
-        .await?;
+            collection: collection.clone(),
+            plan: set_config_plan.clone(),
+            sqlstate: "58000".to_string(),
+            context: command.to_string(),
+        });
+        if !deferred {
+            crate::control::server::shared::ddl::engine_apply::apply_in_engine(
+                state,
+                tenant_id,
+                database_id,
+                &collection,
+                set_config_plan,
+                "58000",
+                command,
+            )
+            .await?;
+        }
 
         state.audit_record(
             crate::control::security::audit::AuditEvent::AdminAction,

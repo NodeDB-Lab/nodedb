@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Data Plane apply and rollback coverage for `MetaOp::TransactionBatch`.
+//! Data Plane apply and rollback coverage for a committed Calvin transaction.
 //!
-//! These tests exercise the cross-shard apply path using
-//! `MetaOp::TransactionBatch` (CalvinExecuteStatic) directly — no
-//! `ReplicatedWrite::CrossShardForward`, no `decode_forwarded_plans`.
+//! These drive the participant's Data Plane steps directly: stage
+//! (`CalvinExecuteStatic`), resolve (`CalvinResolve`) and flush the resolved
+//! redo record at its LSN (`CalvinFlush`) — the steps the scheduler dispatches
+//! once the global verdict is commit.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,8 +14,9 @@ use nodedb::bridge::dispatch::{BridgeRequest, BridgeResponse};
 use nodedb::bridge::envelope::{ErrorCode, Priority, Request, Status};
 use nodedb::data::executor::core_loop::CoreLoop;
 use nodedb::types::*;
+use nodedb::wal::{RedoRecord, RedoSubRecord};
 use nodedb_bridge::buffer::{Consumer, Producer, RingBuffer};
-use nodedb_physical::physical_plan::{KvOp, MetaOp, PhysicalPlan, VectorOp};
+use nodedb_physical::physical_plan::{KvOp, MetaOp, PhysicalPlan};
 use nodedb_types::{OrdinalClock, QualifiedCollection};
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -112,122 +114,144 @@ fn kv_get(coll: &str, key: &[u8]) -> PhysicalPlan {
     })
 }
 
-// ── Test 1: successful Calvin static-set apply ───────────────────────────────
+/// Stage `plans` as the Calvin transaction at `(epoch, 0)` and resolve it.
+/// Returns the resolved redo record.
+fn stage_and_resolve(
+    core: &mut CoreLoop,
+    tx: &mut Producer<BridgeRequest>,
+    rx: &mut Consumer<BridgeResponse>,
+    epoch: u64,
+    plans: Vec<PhysicalPlan>,
+) -> RedoRecord {
+    send_ok(
+        core,
+        tx,
+        rx,
+        PhysicalPlan::Meta(MetaOp::CalvinExecuteStatic {
+            epoch,
+            position: 0,
+            tenant_id: TenantId::new(1),
+            plans,
+            epoch_system_ms: 0,
+            is_group_leader: true,
+            versioned_reads: Vec::new(),
+        }),
+    );
+    let redo = send_ok(
+        core,
+        tx,
+        rx,
+        PhysicalPlan::Meta(MetaOp::CalvinResolve { epoch, position: 0 }),
+    );
+    RedoRecord::from_bytes(&redo).expect("decode resolved redo")
+}
 
-/// A `MetaOp::TransactionBatch` dispatched directly (CalvinExecuteStatic) must
-/// apply atomically. After a successful apply the written key must be readable.
+/// Flush `redo` as the Calvin transaction at `(epoch, 0)` with its record at
+/// `lsn`.
+fn flush(
+    core: &mut CoreLoop,
+    tx: &mut Producer<BridgeRequest>,
+    rx: &mut Consumer<BridgeResponse>,
+    epoch: u64,
+    redo: &RedoRecord,
+    lsn: u64,
+) -> nodedb::bridge::envelope::Response {
+    let mut request = make_request(PhysicalPlan::Meta(MetaOp::CalvinFlush {
+        epoch,
+        position: 0,
+        redo: redo.to_bytes().expect("encode redo"),
+        collections: vec!["orders".into(), "rollback_coll".into()],
+        sum_targets: Vec::new(),
+    }));
+    request.wal_lsn = Some(Lsn::new(lsn));
+    tx.try_push(BridgeRequest::unfloored(request)).unwrap();
+    core.tick();
+    rx.try_pop().unwrap().inner
+}
+
+/// A timeseries batch whose line names another measurement than its
+/// collection: it passes validation and fails while it installs.
+fn failing_install_sub_record() -> RedoSubRecord {
+    let lines = zerompk::to_msgpack_vec(&vec!["other_probe,host=a value=1 1".to_string()])
+        .expect("encode lines");
+    RedoSubRecord {
+        record_type: nodedb_wal::record::RecordType::TimeseriesBatch as u32,
+        payload: zerompk::to_msgpack_vec(&(
+            "timeseries",
+            "refusal_probe",
+            lines.as_slice(),
+            None::<&nodedb_types::sync::wire::SyncProvenance>,
+            "ilp-msgpack",
+        ))
+        .expect("encode ingest"),
+    }
+}
+
+// ── Test 1: successful Calvin flush ──────────────────────────────────────────
+
+/// A committed Calvin transaction installs its redo record at the flush. The
+/// written key is readable after it.
 #[test]
 fn calvin_static_apply_success() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
-    let batch_plan = PhysicalPlan::Meta(MetaOp::TransactionBatch {
-        txn_id: None,
-        plans: vec![kv_put("orders", b"k1", b"v1")],
-    });
-
-    let resp = send_raw(&mut core, &mut tx, &mut rx, batch_plan);
+    let redo = stage_and_resolve(
+        &mut core,
+        &mut tx,
+        &mut rx,
+        1,
+        vec![kv_put("orders", b"k1", b"v1")],
+    );
+    let resp = flush(&mut core, &mut tx, &mut rx, 1, &redo, 10);
     assert_eq!(
         resp.status,
         Status::Ok,
-        "Calvin apply must succeed; got {:?}",
+        "Calvin flush must succeed; got {:?}",
         resp.error_code
     );
 
     let payload = send_ok(&mut core, &mut tx, &mut rx, kv_get("orders", b"k1"));
     assert!(
         !payload.is_empty(),
-        "row must exist after successful Calvin apply"
+        "row must exist after a successful Calvin flush"
     );
 }
 
-// ── Test 2: failing sub-plan → error without RollbackFailed ──────────────────
+// ── Test 2: failing install → error without RollbackFailed ───────────────────
 
-/// When a sub-plan in the batch fails, the batch must roll back cleanly.
-/// The response must be `Status::Error` and must NOT be `RollbackFailed`
-/// (the rollback itself must succeed).
-///
-/// We trigger the failure via a `VectorOp::Insert` with a dimension mismatch:
-/// the vector index is configured for dim=3 but we insert a dim=2 vector.
+/// When a sub-record of the redo record fails while it installs, the flush
+/// rolls every write back. The response is `Status::Error` and is NOT
+/// `RollbackFailed` (the rollback itself succeeded), and the transaction's
+/// write is gone.
 #[test]
 fn calvin_static_apply_failure_rolls_back_cleanly() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
-    // Configure and seed the vector collection (dim=3).
-    send_ok(
+    let mut redo = stage_and_resolve(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Vector(VectorOp::SetParams {
-            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vec_coll"),
-            field_name: String::new(),
-            dim: 3,
-            m: 16,
-            ef_construction: 200,
-            metric: "cosine".into(),
-            index_type: String::new(),
-            pq_m: 0,
-            ivf_cells: 0,
-            ivf_nprobe: 0,
-        }),
+        2,
+        vec![kv_put("rollback_coll", b"should_be_gone", b"present")],
     );
-    // Seed one valid vector so the index knows dim=3.
-    send_ok(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Vector(VectorOp::Insert {
-            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vec_coll"),
-            vector: vec![1.0, 2.0, 3.0],
-            dim: 3,
-            field_name: String::new(),
-            surrogate: nodedb_types::Surrogate::ZERO,
-            pk_bytes: None,
-            provenance: None,
-        }),
-    );
-
-    let plans = vec![
-        // First sub-plan succeeds.
-        kv_put("rollback_coll", b"should_be_gone", b"present"),
-        // Second sub-plan fails: dim mismatch (index expects 3, we provide 2).
-        PhysicalPlan::Vector(VectorOp::Insert {
-            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vec_coll"),
-            vector: vec![1.0, 2.0],
-            dim: 3,
-            field_name: String::new(),
-            surrogate: nodedb_types::Surrogate::new(99),
-            pk_bytes: None,
-            provenance: None,
-        }),
-    ];
-
-    let resp = send_raw(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
-            plans,
-        }),
-    );
+    redo.ops.push(failing_install_sub_record());
+    let resp = flush(&mut core, &mut tx, &mut rx, 2, &redo, 20);
 
     assert_eq!(
         resp.status,
         Status::Error,
-        "a failing sub-plan must cause the batch to fail; got {:?}",
+        "a failing sub-record must fail the flush; got {:?}",
         resp.error_code
     );
-    // Rollback must succeed — the engine must not be in an unknown state.
     assert!(
-        !matches!(
+        matches!(
             resp.error_code.as_deref(),
-            Some(ErrorCode::RollbackFailed { .. })
+            Some(ErrorCode::RetryableRefusal { .. })
         ),
-        "rollback must succeed on failure path; got {:?}",
+        "the install rolled back every write; got {:?}",
         resp.error_code
     );
 
-    // The first sub-plan's write ("should_be_gone") must have been rolled back.
     let get_resp = send_raw(
         &mut core,
         &mut tx,

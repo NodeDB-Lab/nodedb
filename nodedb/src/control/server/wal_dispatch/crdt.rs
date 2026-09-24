@@ -80,6 +80,7 @@ pub(crate) fn encode_crdt_op_record(
             surrogate,
             provenance,
             expected_frontier_digest,
+            peer_id,
             ..
         } => {
             // Versioned payload preserves the admission fence for deterministic
@@ -91,7 +92,8 @@ pub(crate) fn encode_crdt_op_record(
                 *expected_frontier_digest,
                 Some(document_id.clone()),
                 Some(surrogate.as_u32()),
-            );
+            )
+            .with_peer_id(*peer_id);
             let crdt_payload = payload.encode().map_err(|e| crate::Error::Serialization {
                 format: "msgpack".into(),
                 detail: format!("wal crdt delta: {e}"),
@@ -110,6 +112,7 @@ pub(crate) fn encode_crdt_op_record(
             auth_seq_no,
             delta_signature,
             signing_required,
+            peer_id,
             ..
         } => {
             let payload = crate::wal::CrdtDeltaWalPayload::new(
@@ -126,7 +129,8 @@ pub(crate) fn encode_crdt_op_record(
                 auth_seq_no: *auth_seq_no,
                 delta_signature: *delta_signature,
                 required: *signing_required,
-            });
+            })
+            .with_peer_id(*peer_id);
             let crdt_payload = payload.encode().map_err(|e| crate::Error::Serialization {
                 format: "msgpack".into(),
                 detail: format!("wal authenticated crdt delta: {e}"),

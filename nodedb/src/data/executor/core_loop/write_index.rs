@@ -246,7 +246,27 @@ impl CoreLoop {
     /// the write task. `key` is `None` for engines whose per-key identity is
     /// internal (columnar / timeseries / array / spatial / FTS) — those record
     /// only the collection floor.
+    ///
+    /// In the install pass of a committed-redo apply the version waits in the
+    /// apply scope. The apply publishes it once the record settled, so a
+    /// rolled-back install leaves no version and no watermark behind.
     pub(in crate::data::executor) fn note_write_lsn(
+        &mut self,
+        db: DatabaseId,
+        tenant: TenantId,
+        collection: &str,
+        key: Option<KeyRepr>,
+        lsn: Lsn,
+    ) {
+        if let Some(scope) = self.redo_apply.scope.as_mut() {
+            scope.defer_write_version(db, tenant, collection, key, lsn);
+            return;
+        }
+        self.publish_write_version(db, tenant, collection, key, lsn);
+    }
+
+    /// Record a write version and advance the core watermark monotonically.
+    pub(in crate::data::executor) fn publish_write_version(
         &mut self,
         db: DatabaseId,
         tenant: TenantId,
@@ -949,7 +969,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn transaction_batch_records_sub_plan_versions() {
+    fn a_committed_transaction_records_its_write_versions() {
         let (mut core, _, _, _dir) = make_core();
         let task = wal_task(60);
         let plans = vec![PhysicalPlan::Document(DocumentOp::PointPut {
@@ -962,8 +982,8 @@ pub(crate) mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
         })];
-        let resp = core.execute_transaction_batch(&task, 1, &plans, &[], None);
-        assert_eq!(resp.status, Status::Ok);
+        let resp = core.commit_plans_for_test(&task, 1, &plans, 60);
+        assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
 
         assert_eq!(
             core.write_index.key_write_lsn(&surrogate_key("batch", 11)),
@@ -1202,12 +1222,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn conflicting_read_set_is_flagged_invalid_but_batch_still_applies() {
+    fn a_read_that_predates_a_committed_write_is_no_longer_current() {
         let (mut core, _, _, _dir) = make_core();
         let vshard = local_vshard("orders");
 
-        // First batch: a write to key 7 in "orders", recording its version at
-        // LSN 10 (this is the same chokepoint a Calvin apply funnels through).
+        // A committed write to key 7 in "orders" records its version at LSN 10.
         let write_task = wal_task_with_vshard(10, vshard);
         let write_plans = vec![PhysicalPlan::Document(DocumentOp::PointPut {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "orders"),
@@ -1219,50 +1238,13 @@ pub(crate) mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
         })];
-        let write_resp = core.execute_transaction_batch(&write_task, 1, &write_plans, &[], None);
-        assert_eq!(write_resp.status, Status::Ok);
-        assert_eq!(
-            write_resp.read_set_valid,
-            Some(true),
-            "empty read-set is vacuously current"
-        );
+        let write_resp = core.commit_plans_for_test(&write_task, 1, &write_plans, 10);
+        assert_eq!(write_resp.status, Status::Ok, "{:?}", write_resp.error_code);
 
-        // Second batch carries a synthetic read-set observing key 7 BEFORE the
-        // write above (read_lsn = 5 < the recorded write's LSN 10), alongside its
-        // own unrelated write. Proves: (a) the first batch's write really was
-        // recorded into the version index (without it this would false-report
-        // valid), and (b) an invalid read-set does not block the batch's own
-        // apply (non-enforcing).
-        let second_task = wal_task_with_vshard(20, vshard);
-        let second_plans = vec![PhysicalPlan::Document(DocumentOp::PointPut {
-            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "orders"),
-            document_id: "o8".into(),
-            value: doc_value("a", "2"),
-            surrogate: Surrogate::new(8),
-            pk_bytes: Vec::new(),
-            returning: None,
-            rls_filters: Vec::new(),
-            resolved_sum_targets: Vec::new(),
-        })];
-        let stale_reads = vec![point_entry("orders", 7, 5)];
-        let second_resp =
-            core.execute_transaction_batch(&second_task, 1, &second_plans, &stale_reads, None);
-
-        assert_eq!(
-            second_resp.status,
-            Status::Ok,
-            "apply proceeds regardless of the read-set validation outcome"
-        );
-        assert_eq!(
-            second_resp.read_set_valid,
-            Some(false),
-            "stale read against the recorded write must be detected as no longer current"
-        );
-
-        // The second batch's own write still landed despite the invalid read-set.
-        assert_eq!(
-            core.write_index.key_write_lsn(&surrogate_key("orders", 8)),
-            Some(Lsn::new(20))
-        );
+        // A read of key 7 observed at LSN 5 predates the write; one observed
+        // at LSN 10 does not.
+        let task = task_with_vshard(vshard);
+        assert!(!core.read_set_still_current(&task, 1, &[point_entry("orders", 7, 5)]));
+        assert!(core.read_set_still_current(&task, 1, &[point_entry("orders", 7, 10)]));
     }
 }

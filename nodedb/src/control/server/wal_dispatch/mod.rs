@@ -43,15 +43,12 @@ pub(crate) use timeseries::{
     encode_columnar_truncate_payload, encode_timeseries_batch_payload_with_format,
 };
 pub(crate) use vector::{
-    VectorDirectDeleteRecord, VectorDirectTruncateRecord, VectorDirectUpdatePayload,
-    VectorDirectUpdateRecord, VectorDirectUpsertPayload, VectorDirectUpsertRecord,
-    VectorResolvedDirectWritePayload, VectorResolvedDirectWriteRecord,
+    VectorDirectDeleteRecord, VectorDirectTruncateRecord, VectorDirectUpdateRecord,
+    VectorDirectUpsertRecord, VectorResolvedDirectWritePayload, VectorResolvedDirectWriteRecord,
     encode_multi_vector_delete_payload, encode_multi_vector_put_payload,
     encode_sparse_vector_delete_payload, encode_sparse_vector_put_payload,
     encode_vector_batch_put_payload, encode_vector_delete_by_surrogate_payload,
-    encode_vector_delete_payload, encode_vector_direct_delete_payload,
-    encode_vector_direct_truncate_payload, encode_vector_direct_update_payload,
-    encode_vector_direct_upsert_payload, encode_vector_put_payload,
+    encode_vector_delete_payload, encode_vector_direct_truncate_payload, encode_vector_put_payload,
     encode_vector_resolved_direct_write_payload,
 };
 

@@ -130,6 +130,7 @@ pub(super) fn resolver_for_kv_op(op: &KvOp) -> Option<Box<dyn EngineWriteResolve
         | KvOp::SortedIndexRange { .. }
         | KvOp::SortedIndexCount { .. }
         | KvOp::SortedIndexScore { .. }
+        | KvOp::SortedIndexTxnRead { .. }
         | KvOp::MaterializeScan { .. }
         | KvOp::ResolveWrite(_)
         | KvOp::ResolvedWrite { .. } => return None,

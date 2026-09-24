@@ -66,6 +66,8 @@ mod tests {
                     epoch: 11,
                     position: 2,
                     vshard_id: 7,
+                    collections: Vec::new(),
+                    sum_targets: Vec::new(),
                 }),
             },
             collections: vec!["accounts".into(), "entries".into()],

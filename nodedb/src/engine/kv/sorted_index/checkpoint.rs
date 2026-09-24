@@ -18,7 +18,8 @@
 //! the tree that was actually live.
 
 use super::super::engine_helpers::table_key;
-use super::manager::{SortedIndex, SortedIndexDef, SortedIndexManager, index_key};
+use super::index::SortedIndex;
+use super::manager::{SortedIndexDef, SortedIndexManager, index_key};
 use super::tree::OrderStatTree;
 
 /// One sorted index as a checkpoint sees it: its definition plus its full tree

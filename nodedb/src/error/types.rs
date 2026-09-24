@@ -210,6 +210,11 @@ pub enum Error {
     #[error("CRDT Apply is not supported inside explicit transactions")]
     CrdtApplyForbiddenInTransaction,
 
+    /// A statement that applies at once and cannot be rolled back ran
+    /// inside an explicit transaction block. SQLSTATE 25001.
+    #[error("{statement} cannot run inside a transaction block")]
+    NotInTransactionBlock { statement: String },
+
     #[error("CRDT admission timed out on {vshard_id} after {timeout_ms}ms")]
     CrdtAdmissionTimeout {
         vshard_id: VShardId,

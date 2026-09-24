@@ -3,9 +3,10 @@
 //! Staged Calvin apply on the Data Plane: `MetaOp::CalvinExecuteStatic`
 //! VALIDATES + STAGES a transaction's write plans into the commit-pending
 //! buffer WITHOUT mutating base, returning the local commit vote on
-//! `read_set_valid`. A subsequent `MetaOp::CalvinFlush` replays the staged
-//! plans to base (making the write visible), or `MetaOp::CalvinDrop` discards
-//! them (leaving base unchanged).
+//! `read_set_valid`. `MetaOp::CalvinResolve` then resolves the staged plans
+//! into the transaction's redo record, and `MetaOp::CalvinFlush` installs it
+//! at its LSN (making the write visible), or `MetaOp::CalvinDrop` discards
+//! the staged state (leaving base unchanged).
 //!
 //! These drive a `CoreLoop` directly through the SPSC ring so the atomicity
 //! seam is observed without any scheduler timing: nothing a stage writes is
@@ -84,6 +85,102 @@ fn send(
     .unwrap();
     core.tick();
     rx.try_pop().unwrap().inner
+}
+
+/// Resolve the transaction staged at `(epoch, 0)` on `vshard` and build the
+/// flush that installs its redo record.
+fn resolved_flush(
+    core: &mut CoreLoop,
+    tx: &mut Producer<BridgeRequest>,
+    rx: &mut Consumer<BridgeResponse>,
+    epoch: u64,
+    vshard: u32,
+) -> PhysicalPlan {
+    let resolved = send(
+        core,
+        tx,
+        rx,
+        PhysicalPlan::Meta(MetaOp::CalvinResolve { epoch, position: 0 }),
+        vshard,
+        None,
+    );
+    assert_eq!(
+        resolved.status,
+        Status::Ok,
+        "resolve must succeed: {resolved:?}"
+    );
+    PhysicalPlan::Meta(MetaOp::CalvinFlush {
+        epoch,
+        position: 0,
+        redo: resolved.payload.to_vec(),
+        collections: Vec::new(),
+        sum_targets: Vec::new(),
+    })
+}
+
+/// A write committed through the Calvin path to seed a write version.
+struct CalvinSeed<'a> {
+    epoch: u64,
+    vshard: u32,
+    /// The collection `plans` write; the install records its floor at `lsn`.
+    collection: &'a str,
+    plans: Vec<PhysicalPlan>,
+    lsn: u64,
+}
+
+/// Commit `seed.plans` as the Calvin transaction at `(seed.epoch, 0)` on
+/// `seed.vshard` and install its redo record at `seed.lsn`: the path a
+/// committed multi-shard write takes. The install records each written key
+/// and the collection floor at that LSN.
+fn commit_calvin(
+    core: &mut CoreLoop,
+    tx: &mut Producer<BridgeRequest>,
+    rx: &mut Consumer<BridgeResponse>,
+    seed: CalvinSeed<'_>,
+) -> Response {
+    let staged = send(
+        core,
+        tx,
+        rx,
+        stage_static(seed.epoch, 0, seed.plans, Vec::new()),
+        seed.vshard,
+        None,
+    );
+    assert_eq!(
+        staged.status,
+        Status::Ok,
+        "seed stage must succeed: {staged:?}"
+    );
+    let resolved = send(
+        core,
+        tx,
+        rx,
+        PhysicalPlan::Meta(MetaOp::CalvinResolve {
+            epoch: seed.epoch,
+            position: 0,
+        }),
+        seed.vshard,
+        None,
+    );
+    assert_eq!(
+        resolved.status,
+        Status::Ok,
+        "seed resolve must succeed: {resolved:?}"
+    );
+    send(
+        core,
+        tx,
+        rx,
+        PhysicalPlan::Meta(MetaOp::CalvinFlush {
+            epoch: seed.epoch,
+            position: 0,
+            redo: resolved.payload.to_vec(),
+            collections: vec![seed.collection.to_string()],
+            sum_targets: Vec::new(),
+        }),
+        seed.vshard,
+        Some(Lsn::new(seed.lsn)),
+    )
 }
 
 fn kv_put(coll: &str, key: &[u8], value: &[u8]) -> PhysicalPlan {
@@ -183,17 +280,15 @@ fn flush_makes_staged_calvin_write_visible() {
         "staged write must NOT be visible before flush; got {before:?}"
     );
 
-    // Flush replays the staged plans to base.
+    // The flush installs the resolved redo record to base.
+    let flush_plan = resolved_flush(&mut core, &mut tx, &mut rx, 6, 0);
     let flush = send(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::CalvinFlush {
-            epoch: 6,
-            position: 0,
-        }),
+        flush_plan,
         0,
-        None,
+        Some(Lsn::new(60)),
     );
     assert_eq!(flush.status, Status::Ok, "flush must succeed: {flush:?}");
 
@@ -225,16 +320,17 @@ fn drop_discards_invalid_staged_calvin_write() {
 
     // Seed a committed write to `dropcoll` at LSN 100 so its collection write
     // version floor is 100. The seed carries a WAL LSN so the version records.
-    let seed = send(
+    let seed = commit_calvin(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
+        CalvinSeed {
+            epoch: 1,
+            vshard: 0,
+            collection: "dropcoll",
             plans: vec![kv_put("dropcoll", b"seed", b"v")],
-        }),
-        0,
-        Some(Lsn::new(100)),
+            lsn: 100,
+        },
     );
     assert_eq!(seed.status, Status::Ok, "seed write must commit: {seed:?}");
 
@@ -328,16 +424,17 @@ fn point_read_at_write_lsn_commits_and_flush_applies() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
     // Seed a committed write to key `pk` in `pointcoll` at LSN 10.
-    let seed = send(
+    let seed = commit_calvin(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
+        CalvinSeed {
+            epoch: 1,
+            vshard: 0,
+            collection: "pointcoll",
             plans: vec![kv_put("pointcoll", b"pk", b"v1")],
-        }),
-        0,
-        Some(Lsn::new(10)),
+            lsn: 10,
+        },
     );
     assert_eq!(seed.status, Status::Ok, "seed write must commit: {seed:?}");
 
@@ -373,16 +470,14 @@ fn point_read_at_write_lsn_commits_and_flush_applies() {
         "a read at or after the last write LSN must be current -> commit vote"
     );
 
+    let flush_plan = resolved_flush(&mut core, &mut tx, &mut rx, 8, point_vshard);
     let flush = send(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::CalvinFlush {
-            epoch: 8,
-            position: 0,
-        }),
+        flush_plan,
         point_vshard,
-        None,
+        Some(Lsn::new(80)),
     );
     assert_eq!(flush.status, Status::Ok, "flush must succeed: {flush:?}");
 
@@ -411,16 +506,17 @@ fn stale_point_read_of_kv_key_aborts_stage_and_drop_discards() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
     // Seed a committed write to key `pk` in `stalecoll` at LSN 10.
-    let seed = send(
+    let seed = commit_calvin(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
+        CalvinSeed {
+            epoch: 1,
+            vshard: 0,
+            collection: "stalecoll",
             plans: vec![kv_put("stalecoll", b"pk", b"v1")],
-        }),
-        0,
-        Some(Lsn::new(10)),
+            lsn: 10,
+        },
     );
     assert_eq!(seed.status, Status::Ok, "seed write must commit: {seed:?}");
 
@@ -523,12 +619,14 @@ fn absent_kv_key_phantom_insert_causes_abort() {
     };
 
     // Concurrently, the exact same key is inserted and commits at LSN 8.
-    let insert = send(
+    let insert = commit_calvin(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
+        CalvinSeed {
+            epoch: 1,
+            vshard: phantom_vshard,
+            collection: "phantomkv",
             plans: vec![PhysicalPlan::Kv(KvOp::Insert {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "phantomkv"),
                 key: b"newkey".to_vec(),
@@ -538,9 +636,8 @@ fn absent_kv_key_phantom_insert_causes_abort() {
                 returning: None,
                 rls_filters: Vec::new(),
             })],
-        }),
-        phantom_vshard,
-        Some(Lsn::new(8)),
+            lsn: 8,
+        },
     );
     assert_eq!(
         insert.status,
@@ -602,20 +699,21 @@ fn absent_document_phantom_insert_is_caught() {
     // at LSN 8. Its collection floor advance (phantomdocs -> 8) is what the
     // predicate read validates against.
     const NEWLY_ALLOCATED_SURROGATE: u32 = 42;
-    let insert = send(
+    let insert = commit_calvin(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
+        CalvinSeed {
+            epoch: 1,
+            vshard: doc_vshard,
+            collection: "phantomdocs",
             plans: vec![doc_insert(
                 "phantomdocs",
                 "the-doc-id",
                 NEWLY_ALLOCATED_SURROGATE,
             )],
-        }),
-        doc_vshard,
-        Some(Lsn::new(8)),
+            lsn: 8,
+        },
     );
     assert_eq!(
         insert.status,
@@ -671,16 +769,17 @@ fn absent_document_read_without_matching_insert_still_commits() {
     // A concurrent insert into a DIFFERENT collection commits at LSN 8. It
     // advances only "othercoll"'s floor; phantomdocs is untouched.
     const UNRELATED_SURROGATE: u32 = 42;
-    let insert = send(
+    let insert = commit_calvin(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
+        CalvinSeed {
+            epoch: 1,
+            vshard: doc_vshard,
+            collection: "othercoll",
             plans: vec![doc_insert("othercoll", "other-id", UNRELATED_SURROGATE)],
-        }),
-        doc_vshard,
-        Some(Lsn::new(8)),
+            lsn: 8,
+        },
     );
     assert_eq!(
         insert.status,
@@ -753,14 +852,15 @@ fn already_ordered_stage_and_flush_run_past_their_deadline() {
     assert_eq!(staged.status, Status::Ok, "late stage must run: {staged:?}");
     assert_eq!(staged.read_set_valid, Some(true));
 
+    let flush_plan = resolved_flush(&mut core, &mut tx, &mut rx, 9, 0);
     let flush = send_request(
         &mut core,
         &mut tx,
         &mut rx,
-        already_ordered(PhysicalPlan::Meta(MetaOp::CalvinFlush {
-            epoch: 9,
-            position: 0,
-        })),
+        Request {
+            wal_lsn: Some(Lsn::new(90)),
+            ..already_ordered(flush_plan)
+        },
     );
     assert_eq!(flush.status, Status::Ok, "late flush must run: {flush:?}");
 

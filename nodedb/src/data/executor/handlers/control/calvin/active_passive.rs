@@ -3,6 +3,7 @@
 //! Passive and active participants for a dependent-read Calvin transaction.
 
 use std::collections::BTreeMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use tracing::{debug, info_span};
 
@@ -12,6 +13,7 @@ use nodedb_types::Value;
 use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::commit_pending::PendingCommit;
+use crate::data::executor::handlers::control::calvin_reply::CalvinReply;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
@@ -19,6 +21,7 @@ use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_physical::physical_plan::meta::PassiveReadKeyId;
 
 use crate::data::executor::handlers::control::calvin_txn_id::calvin_synthetic_txn_id;
+use crate::data::panic_payload::panic_payload_to_string;
 
 use super::shared::CalvinExecCtx;
 
@@ -74,27 +77,22 @@ impl CoreLoop {
     /// Stage an active-participant dependent-read Calvin txn for commit.
     ///
     /// Mirrors [`CoreLoop::execute_calvin_execute_static`]: it performs NO base
-    /// mutation and fires NO side effects — it buffers the write plans in
-    /// `commit_pending` and stages each into `txn_overlays` under the synthetic
-    /// `TxnId`, so a subsequent `CalvinResolve` reconstitutes them as one
-    /// replayable `RedoRecord` and [`CoreLoop::execute_calvin_flush`] applies
-    /// them. This restores WAL-only-restart durability for the dependent-read
-    /// path, which previously applied directly with `wal_lsn: None` (only a
-    /// non-replayable `CalvinApplied` marker survived).
+    /// mutation and fires NO side effects. It stages each write plan into
+    /// `txn_overlays` under the synthetic `TxnId` and buffers the plans in
+    /// `commit_pending`, so a subsequent `CalvinResolve` builds one redo record
+    /// and [`CoreLoop::execute_calvin_flush`] installs it.
     ///
     /// The one divergence from the static path: OLLP predicate verification
     /// (leader-only) runs HERE, before staging, via
     /// [`CoreLoop::verify_calvin_active_ollp`]. The dependent-read path has no
     /// LSN-versioned read-set to vote on; its conflict detector is the OLLP
-    /// `actual != predicted` re-check. Running it at stage time (not flush)
-    /// ensures a mismatch returns `OllpRetryRequired` and stages nothing —
-    /// otherwise a stale redo would be WAL-appended before the flush-time check
-    /// (whose retry signal is swallowed as a degraded shard). The Control Plane
-    /// scheduler releases locks and re-recons on `OllpRetryRequired`.
+    /// `actual != predicted` re-check. A mismatch returns `OllpRetryRequired`
+    /// and stages nothing, so no redo record is appended for it. The Control
+    /// Plane scheduler releases locks and re-recons on `OllpRetryRequired`.
     ///
     /// `injected_reads` is retained on the wire for future plan variants that
-    /// reference resolved read values by `PassiveReadKeyId`; in v1 the
-    /// coordinator baked the read values into concrete point ops / the predicted
+    /// reference resolved read values by `PassiveReadKeyId`. The coordinator
+    /// bakes the read values into concrete point ops and the predicted
     /// surrogate set at recon, so the plans are self-contained and stage
     /// byte-identically to the static path.
     pub(in crate::data::executor) fn execute_calvin_execute_active(
@@ -137,48 +135,65 @@ impl CoreLoop {
         // mismatch surfaces on THIS stage response (where the scheduler releases
         // locks and re-recons) and nothing is staged, resolved, or WAL-appended.
         // Scoped to this replica's staged leadership for the check, then the
-        // resting (authoritative) state is restored. A read-only scan needs no
-        // time anchor, so `epoch_system_ms`/`hlc` stay unset until flush
-        // (mirroring the static path, where they ride `PendingCommit`).
-        let prev_group_leader = self.ollp_is_group_leader;
-        self.ollp_is_group_leader = is_group_leader;
+        // resting (authoritative) state is restored.
+        let prev_group_leader = self.calvin.ollp_is_group_leader;
+        self.calvin.ollp_is_group_leader = is_group_leader;
         let verified = self.verify_calvin_active_ollp(task, tenant_id.as_u64(), plans);
-        self.ollp_is_group_leader = prev_group_leader;
+        self.calvin.ollp_is_group_leader = prev_group_leader;
         match verified {
             Ok(true) => {}
             Ok(false) => return self.response_error(task, ErrorCode::OllpRetryRequired),
             Err(e) => return self.response_error(task, e),
         }
 
-        // Stage exactly like `execute_calvin_execute_static`: buffer the plans in
-        // `commit_pending` (the sole durable apply the flush replays) and stage
-        // each write into `txn_overlays` under the synthetic `TxnId` (producer
-        // side for `CalvinResolve`). No base mutation, no side effects; the time
-        // anchor + leadership scope captured here are restored at flush time.
-        self.commit_pending.insert(
-            (epoch, position, vshard_id),
-            PendingCommit {
-                plans: plans.to_vec(),
-                tenant_id: *tenant_id,
-                epoch_system_ms,
-                is_group_leader,
-            },
-        );
         let synthetic_txn_id = match calvin_synthetic_txn_id(epoch, position, vshard_id) {
             Ok(id) => id,
-            Err(e) => return self.response_error(task, e),
+            Err(e) => return self.calvin_stage_failure(task, epoch, position, vshard_id, e),
         };
         // Staging reads the epoch's time anchor, so every replica stages the
         // same images.
         let prev_epoch_ms = self.epoch_system_ms;
         self.epoch_system_ms = Some(epoch_system_ms);
-        let staged = plans.iter().try_for_each(|plan| {
-            self.stage_calvin_overlay(task, synthetic_txn_id, *tenant_id, plan)
-        });
+        // A panic while staging drops the staged state like any refusal,
+        // instead of unwinding past a half-staged overlay.
+        let staged = catch_unwind(AssertUnwindSafe(|| {
+            let mut reply = CalvinReply::default();
+            for plan in plans {
+                self.stage_calvin_plan(task, synthetic_txn_id, *tenant_id, plan, &mut reply)?;
+            }
+            Ok::<CalvinReply, ErrorCode>(reply)
+        }));
         self.epoch_system_ms = prev_epoch_ms;
-        if let Err(e) = staged {
-            return self.response_error(task, e);
-        }
+        let reply = match staged {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(e)) => return self.calvin_stage_failure(task, epoch, position, vshard_id, e),
+            Err(payload) => {
+                return self.calvin_stage_failure(
+                    task,
+                    epoch,
+                    position,
+                    vshard_id,
+                    ErrorCode::Internal {
+                        detail: format!(
+                            "panic while staging active Calvin transaction: {}",
+                            panic_payload_to_string(payload.as_ref())
+                        ),
+                    },
+                );
+            }
+        };
+
+        // Publish only a fully staged transaction. Resolve reads these plans
+        // against the overlay; a global abort drops both.
+        self.calvin.commit_pending.insert(
+            (epoch, position, vshard_id),
+            PendingCommit {
+                plans: plans.to_vec(),
+                tenant_id: *tenant_id,
+                epoch_system_ms,
+                reply,
+            },
+        );
 
         Response {
             request_id: task.request_id(),
@@ -212,12 +227,10 @@ mod tests {
     };
 
     /// The dependent-read ACTIVE path STAGES its writes (into `commit_pending` +
-    /// the synthetic overlay) instead of applying them to base directly. This is
-    /// the direct regression guard for U-CAL5: before it, this handler called
-    /// `execute_transaction_batch` inline (`wal_lsn: None`), so a Calvin-committed
-    /// dependent-read write left only a non-replayable `CalvinApplied` marker and
-    /// was lost on a WAL-only restart. Staging routes it through the same
-    /// resolve → redo → flush the static path uses.
+    /// the synthetic overlay) instead of applying them to base directly, so a
+    /// Calvin-committed dependent-read write reaches the WAL as a redo record.
+    /// Staging routes it through the same resolve → redo → flush the static
+    /// path uses.
     #[test]
     fn calvin_execute_active_stages_point_insert_into_overlay() {
         let dir = tempfile::tempdir().unwrap();
@@ -244,7 +257,7 @@ mod tests {
 
         // STAGED, not applied: the plans are buffered for the flush replay.
         assert!(
-            core.commit_pending.contains_key(&(1, 0, vshard_id)),
+            core.calvin.commit_pending.contains_key(&(1, 0, vshard_id)),
             "active-path write must be STAGED into commit_pending, not applied directly"
         );
 
@@ -307,7 +320,7 @@ mod tests {
         // Drift stages NOTHING — neither the raw buffer nor the overlay.
         let vshard_id = task.request.vshard_id.as_u32();
         assert!(
-            !core.commit_pending.contains_key(&(1, 0, vshard_id)),
+            !core.calvin.commit_pending.contains_key(&(1, 0, vshard_id)),
             "an OLLP-drift retry must not leave a staged commit buffer"
         );
         let synthetic = calvin_synthetic_txn_id(1, 0, vshard_id).unwrap();

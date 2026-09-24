@@ -27,8 +27,8 @@ impl CoreLoop {
         interval: std::time::Duration,
         tombstone_threshold: f64,
     ) {
-        self.compaction_interval = interval;
-        self.compaction_tombstone_threshold = tombstone_threshold;
+        self.maintenance.compaction_interval = interval;
+        self.maintenance.compaction_tombstone_threshold = tombstone_threshold;
     }
 
     /// Set shared system metrics reference (called after open, before event loop).
@@ -55,7 +55,7 @@ impl CoreLoop {
         &mut self,
         tracker: Arc<crate::control::maintenance::MaintenanceBudgetTracker>,
     ) {
-        self.maintenance_budget = Some(tracker);
+        self.maintenance.maintenance_budget = Some(tracker);
     }
 
     /// Set checkpoint coordinator config (called after open, before event loop).
@@ -69,7 +69,7 @@ impl CoreLoop {
         &mut self,
         config: crate::storage::compaction::CompactionConfig,
     ) {
-        self.segment_compaction_config = config;
+        self.maintenance.segment_compaction_config = config;
     }
 
     /// Set the number of Data Plane cores on this node. The committed-redo

@@ -38,7 +38,11 @@ impl WrittenEngines {
     pub(super) fn of(redo: &RedoRecord) -> Self {
         Self {
             vectors: redo.ops.iter().any(writes_vector_index),
-            kv: !kv_ops(&redo.ops).is_empty() || redo.ops.iter().any(is_kv_truncate),
+            kv: !kv_ops(&redo.ops).is_empty()
+                || redo
+                    .ops
+                    .iter()
+                    .any(|op| is_kv_truncate(op) || is_kv_ttl(op)),
             columnar: redo.ops.iter().any(writes_columnar),
         }
     }
@@ -65,6 +69,16 @@ fn is_kv_truncate(op: &RedoSubRecord) -> bool {
     RecordType::from_raw(op.record_type) == Some(RecordType::Delete)
         && zerompk::from_msgpack::<(String, String)>(&op.payload)
             .is_ok_and(|(disc, _)| disc == "kv_truncate")
+}
+
+/// A `kv_expire` or `kv_persist` sub-record: both lead with their
+/// discriminator, and the collection follows it.
+fn is_kv_ttl(op: &RedoSubRecord) -> bool {
+    RecordType::from_raw(op.record_type) == Some(RecordType::Put)
+        && (zerompk::from_msgpack::<(String, String, Vec<u8>)>(&op.payload)
+            .is_ok_and(|(disc, ..)| disc == "kv_persist")
+            || zerompk::from_msgpack::<(String, String, Vec<u8>, u64, u64)>(&op.payload)
+                .is_ok_and(|(disc, ..)| disc == "kv_expire"))
 }
 
 fn writes_columnar(op: &RedoSubRecord) -> bool {

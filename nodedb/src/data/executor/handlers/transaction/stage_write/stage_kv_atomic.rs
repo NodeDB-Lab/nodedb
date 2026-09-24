@@ -8,7 +8,7 @@
 //! `InsertOnConflictUpdate` handler: resolve the current value under
 //! BASE ∪ OVERLAY via [`CoreLoop::resolve_kv_current`], compute the new value
 //! with the SAME pure function the autocommit engine methods call
-//! (`nodedb::engine::kv::atomic_compute`, see `engine_atomic_compute.rs`) so
+//! (`nodedb_physical::kv_atomic::compute`) so
 //! a staged value and its COMMIT-time durable replay never diverge, then
 //! stage the new bytes via [`CoreLoop::stage_put_capped`].
 //!
@@ -36,6 +36,7 @@
 //! realistic transaction, and never persisted (COMMIT replay uses the real
 //! `KvEngine` atomic path, which ignores the overlay's surrogate entirely).
 
+use nodedb_physical::kv_atomic::compute as atomic_compute;
 use nodedb_physical::physical_plan::{KvCounterShape, KvOp};
 use nodedb_types::Surrogate;
 
@@ -47,7 +48,6 @@ use crate::data::executor::handlers::kv::atomic::incr_float_reply;
 use crate::data::executor::handlers::transaction::overlay::StagedTtl;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::kv::{atomic_compute, current_ms};
 use crate::types::TxnId;
 
 /// FNV-1a 32-bit hash, used only to derive a stable, collection-local overlay
@@ -205,7 +205,7 @@ impl CoreLoop {
                 }
                 self.kv_atomic_json_response(ctx.task, &serde_json::json!({ "value": new_i64 }))
             }
-            Err(e) => self.response_atomic_error(ctx.task, ctx.collection, e),
+            Err(e) => self.response_atomic_error(ctx.task, ctx.collection, e.into()),
         }
     }
 
@@ -229,7 +229,7 @@ impl CoreLoop {
                 }
                 self.kv_atomic_json_response(ctx.task, &reply)
             }
-            Err(e) => self.response_atomic_error(ctx.task, ctx.collection, e),
+            Err(e) => self.response_atomic_error(ctx.task, ctx.collection, e.into()),
         }
     }
 
@@ -269,7 +269,7 @@ impl CoreLoop {
         let (matches, write_bytes) =
             match atomic_compute::cas(current.as_deref(), expected, new_value) {
                 Ok(outcome) => outcome,
-                Err(e) => return self.response_atomic_error(ctx.task, ctx.collection, e),
+                Err(e) => return self.response_atomic_error(ctx.task, ctx.collection, e.into()),
             };
 
         if matches {
@@ -306,7 +306,7 @@ impl CoreLoop {
         let current = self.resolve_kv_current(ctx, key);
         let write_bytes = match atomic_compute::getset(current.as_deref(), new_value) {
             Ok(bytes) => bytes,
-            Err(e) => return self.response_atomic_error(ctx.task, ctx.collection, e),
+            Err(e) => return self.response_atomic_error(ctx.task, ctx.collection, e.into()),
         };
         if let Err(e) = self.stage_admit_kv_image(ctx, &write_bytes, rls_write_check) {
             return self.response_error(ctx.task, e);
@@ -363,10 +363,7 @@ impl CoreLoop {
         if ttl_ms == 0 {
             return;
         }
-        let now_ms: u64 = self
-            .epoch_system_ms
-            .map(|ms| ms as u64)
-            .unwrap_or_else(current_ms);
+        let now_ms = self.kv_read_now_ms();
         self.txn_overlay_mut(ctx.txn_id).set_ttl(
             ctx.coll_key.clone(),
             ctx.surrogate.0,

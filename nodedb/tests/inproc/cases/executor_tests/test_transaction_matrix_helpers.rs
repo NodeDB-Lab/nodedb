@@ -2,62 +2,11 @@
 
 //! Plan builders shared by the cross-engine transaction rollback matrices.
 
-use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan, VectorOp};
+use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
-
-/// Return a `VectorOp::SetParams` plan for a named collection with dim=3.
-pub fn vector_set_params(collection: &str) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::SetParams {
-        collection: nodedb_types::QualifiedCollection::new(
-            nodedb_types::DatabaseId::DEFAULT,
-            collection,
-        ),
-        field_name: String::new(),
-        dim: 3,
-        m: 16,
-        ef_construction: 200,
-        metric: "cosine".into(),
-        index_type: String::new(),
-        pq_m: 0,
-        ivf_cells: 0,
-        ivf_nprobe: 0,
-    })
-}
-
-/// Seed a dim=3 vector index with one vector so the index exists.
-pub fn vector_seed(collection: &str) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::Insert {
-        collection: nodedb_types::QualifiedCollection::new(
-            nodedb_types::DatabaseId::DEFAULT,
-            collection,
-        ),
-        vector: vec![1.0, 2.0, 3.0],
-        dim: 3,
-        field_name: String::new(),
-        surrogate: nodedb_types::Surrogate::ZERO,
-        pk_bytes: None,
-        provenance: None,
-    })
-}
-
-/// A vector insert that will fail with dimension mismatch (index expects dim=3).
-pub fn vector_fail(collection: &str) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::Insert {
-        collection: nodedb_types::QualifiedCollection::new(
-            nodedb_types::DatabaseId::DEFAULT,
-            collection,
-        ),
-        vector: vec![1.0, 2.0],
-        dim: 3,
-        field_name: String::new(),
-        surrogate: nodedb_types::Surrogate::ZERO,
-        pk_bytes: None,
-        provenance: None,
-    })
-}
 
 /// A document PointPut for "doc1" in collection `coll`.
 pub fn doc_put(coll: &str, val: &[u8]) -> PhysicalPlan {

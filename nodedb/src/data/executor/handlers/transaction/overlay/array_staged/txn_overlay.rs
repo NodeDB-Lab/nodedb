@@ -9,9 +9,9 @@
 //!
 //! Scope: this overlay serves read-your-own-writes for Slice / Project /
 //! Aggregate / Elementwise reads and the statement-time affected count of
-//! `ArrayOp::Put` / `ArrayOp::Delete`. COMMIT durability is unchanged: the
-//! buffered `ArrayOp` plan is replayed through the real `handle_array_put` /
-//! `handle_array_delete` handlers inside the COMMIT `TransactionBatch`. This
+//! `ArrayOp::Put` / `ArrayOp::Delete`. COMMIT serializes the buffered
+//! `ArrayOp` plan into the transaction's redo record, which the redo install
+//! applies. This
 //! overlay is in-memory only and is dropped at commit or rollback, same
 //! lifecycle as `super::TxnOverlay`.
 //!

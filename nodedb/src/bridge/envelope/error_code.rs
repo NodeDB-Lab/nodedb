@@ -25,6 +25,14 @@ pub enum ErrorCode {
     /// a retry channel can tell a retry apart from a permanent refusal instead
     /// of collapsing both into a terminal rejection.
     RetryableRefusal { reason: String },
+    /// A sync frame the validator refused for good. Nothing applied. The
+    /// stream's high-water mark advanced to `provenance`, so the frame is
+    /// never admitted again, and `applied_seq` is the mark after the refusal.
+    SyncRejected {
+        violation: nodedb_types::sync::violation::ViolationType,
+        applied_seq: u64,
+        provenance: nodedb_types::sync::wire::SyncProvenance,
+    },
     /// Document/collection not found.
     NotFound,
     /// Authorization failure.

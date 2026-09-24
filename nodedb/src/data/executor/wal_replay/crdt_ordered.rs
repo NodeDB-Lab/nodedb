@@ -44,7 +44,24 @@ impl CoreLoop {
     /// In the install pass it records the collection's Loro pre-image and
     /// returns whether the write proceeds. A record naming no collection is
     /// left unclaimed, so the validate pass refuses the record.
+    ///
+    /// A raw delta is refused. A rejected delta's dead-letter entry is keyed
+    /// by the LSN of the record that carried it, and every sub-record of a
+    /// committed record shares that record's LSN, so two rejected deltas in
+    /// one record would claim one key.
     fn redo_crdt_prelude(&mut self, record: &nodedb_wal::WalRecord) -> bool {
+        if RecordType::from_raw(record.logical_record_type()) == Some(RecordType::CrdtDelta) {
+            if let Some(scope) = self.redo_apply.scope.as_mut() {
+                scope.record_error(crate::Error::Internal {
+                    detail: format!(
+                        "committed redo record at lsn {} carries a raw CRDT delta; a \
+                         transaction journals CRDT row intents only",
+                        record.header.lsn
+                    ),
+                });
+            }
+            return false;
+        }
         let Some(collection) = crdt_record_collection(record) else {
             return false;
         };

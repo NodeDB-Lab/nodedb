@@ -8,9 +8,9 @@
 //! violations immediately (at the statement, not deferred to COMMIT), computes
 //! the real affected-row count, and records the resulting encoded body (or a
 //! tombstone) in the per-transaction overlay so a later same-transaction
-//! read-modify-write observes it. The write is NOT made durable here — the
-//! buffered plan is still replayed through the real apply path inside the
-//! COMMIT `TransactionBatch`, which remains the sole durable apply.
+//! read-modify-write observes it. The write is NOT made durable here —
+//! COMMIT resolves the overlay into the transaction's redo record, and the
+//! redo install remains the sole durable apply.
 //!
 //! Split out of `dispatch.rs` (which owns the `MetaOp::StageWrite` routing and
 //! the shared `stage_overlay_pk` / `stage_put_capped` / `stage_count_response`

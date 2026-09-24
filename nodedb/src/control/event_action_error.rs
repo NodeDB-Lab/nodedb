@@ -108,6 +108,7 @@ mod tests {
         TriggerActionError::Transaction {
             source: SystemTxnError::Commit {
                 detail: "serialization failure against a concurrent write".to_owned(),
+                code: None,
             },
         }
     }

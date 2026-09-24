@@ -30,7 +30,6 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::StagedTtl;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::kv::current_ms;
 use crate::types::TxnId;
 
 /// The row a staged TTL mutation targets, plus the policy that decides it.
@@ -78,10 +77,7 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
 
-        let now_ms: u64 = self
-            .epoch_system_ms
-            .map(|ms| ms as u64)
-            .unwrap_or_else(current_ms);
+        let now_ms = self.kv_read_now_ms();
         let coll_key = ctx.coll_key.clone();
         let document_id = ctx.document_id.clone();
         let surrogate: Surrogate = ctx.surrogate;

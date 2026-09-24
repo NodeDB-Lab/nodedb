@@ -429,6 +429,8 @@ pub(super) fn staged_pending(txn: SequencedTxn, txn_id: TxnId) -> PendingTxn {
         verdict_deadline: None,
         stage_error: None,
         redo_records: None,
+        flush_scope: crate::control::cluster::calvin::scheduler::driver::types::FlushScope::default(
+        ),
     }
 }
 

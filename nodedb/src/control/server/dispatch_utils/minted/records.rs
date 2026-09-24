@@ -28,12 +28,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-use crate::bridge::dispatch::{OutcomeFloor, WriteWindow};
+use crate::bridge::dispatch::{OutcomeFloor, ResendRefusal, WriteWindow};
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::server::wal_dispatch::{WalAppendOutcome, WalAppendRequest, wal_append};
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::WalManager;
-use crate::wal::manager::{NO_APPLY_KEY, RecordedAppend, WalAppender};
+use crate::wal::manager::{AppendSink, NO_APPLY_KEY, RecordedAppend, WalAppender};
 
 /// Where a write's records live. The abort markers that cancel them carry it.
 #[derive(Debug, Clone, Copy)]
@@ -80,12 +80,13 @@ impl MintedRecords {
         Self::with_window(floor.open_write(), None)
     }
 
-    /// Hold an existing record at `lsn` that is sent to a core again. `None`
-    /// when the floor already passed it: its outcome is final, and a second
-    /// apply would land below the floor.
-    pub(crate) fn resend(floor: &Arc<OutcomeFloor>, lsn: Lsn) -> Option<Self> {
+    /// Hold an existing record at `lsn` that is sent to a core again.
+    /// Refused, with the reason, when its outcome is final or a live or held
+    /// window carries it to one: a second apply would land below the floor,
+    /// or apply the record twice.
+    pub(crate) fn resend(floor: &Arc<OutcomeFloor>, lsn: Lsn) -> Result<Self, ResendRefusal> {
         let window = floor.open_existing(lsn)?;
-        Some(Self::with_window(window, Some(lsn)))
+        Ok(Self::with_window(window, Some(lsn)))
     }
 
     fn with_window(window: WriteWindow, resent: Option<Lsn>) -> Self {
@@ -109,7 +110,7 @@ impl MintedRecords {
         apply_key: u64,
     ) -> WalAppender<'a> {
         self.wal.get_or_init(|| Arc::clone(wal));
-        wal.recording_appender(apply_key, &self.appended)
+        wal.recording_appender(apply_key, self)
     }
 
     /// Append `plan`'s redo records under this window.
@@ -152,19 +153,11 @@ impl MintedRecords {
         self.recorded().iter().map(|record| record.lsn).collect()
     }
 
-    /// Take the window and the records out, and note the highest LSN on the
-    /// window. `None` when a close already took them.
+    /// Take the window and the records out. `None` when a close already
+    /// took them.
     fn take_parts(&mut self) -> Option<Parts> {
         let window = self.window.take()?;
         let appended = std::mem::take(&mut *self.recorded());
-        let highest = appended
-            .iter()
-            .map(|record| record.lsn)
-            .chain(self.resent)
-            .max();
-        if let Some(highest) = highest {
-            window.note_minted(highest);
-        }
         Some((window, appended, self.resent))
     }
 
@@ -334,6 +327,17 @@ impl MintedRecords {
     }
 }
 
+/// Each append joins the set, and the window owns its LSN from the moment
+/// the record exists. A resend of the record is refused while it is owned.
+impl AppendSink for MintedRecords {
+    fn record(&self, append: RecordedAppend) {
+        if let Some(window) = &self.window {
+            window.own(append.lsn);
+        }
+        self.recorded().push(append);
+    }
+}
+
 impl Drop for MintedRecords {
     fn drop(&mut self) {
         self.close_dropped();
@@ -443,7 +447,7 @@ mod tests {
         assert!(replayed.contains(&lsn.as_u64()), "no marker names it");
         assert_eq!(floor.floor(), lsn);
         assert!(
-            MintedRecords::resend(&floor, lsn).is_none(),
+            MintedRecords::resend(&floor, lsn).is_err(),
             "the floor passed the record"
         );
     }
@@ -554,5 +558,47 @@ mod tests {
         assert!(floor.floor() < lsn);
         assert_eq!(floor.held_windows(), 1);
         assert_eq!(floor.leaked_windows(), 0);
+    }
+
+    /// A writer that appended a record and has not sent it yet owns it, so a
+    /// resend cannot race it to a core.
+    #[test]
+    fn a_resend_is_refused_while_a_live_window_owns_the_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = open_wal(&dir);
+        let floor = OutcomeFloor::new();
+        let minted = MintedRecords::open(&floor);
+        let lsn = append(&wal, &minted, b"a");
+
+        assert!(floor.floor() < lsn);
+        assert!(
+            MintedRecords::resend(&floor, lsn).is_err(),
+            "the writer owns it"
+        );
+
+        minted.settle();
+    }
+
+    /// A record whose owner closed has a final outcome, even while an older
+    /// window keeps the floor below it.
+    #[test]
+    fn a_resend_is_refused_after_the_owner_closed_above_the_floor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = open_wal(&dir);
+        let floor = OutcomeFloor::new();
+        let older = MintedRecords::open(&floor);
+        append(&wal, &older, b"a");
+        let newer = MintedRecords::open(&floor);
+        let lsn = append(&wal, &newer, b"b");
+        newer.settle();
+
+        assert!(floor.floor() < lsn, "the older window holds the floor");
+        assert!(
+            MintedRecords::resend(&floor, lsn).is_err(),
+            "its outcome is final"
+        );
+
+        older.settle();
+        assert!(floor.floor() >= lsn);
     }
 }

@@ -25,7 +25,6 @@ use crate::data::executor::handlers::kv::field_compute::merge_field_updates;
 use crate::data::executor::response_codec;
 use crate::data::executor::scan_normalize::kv_row_to_doc;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::kv::current_ms;
 use crate::types::{DatabaseId, TenantId, TxnId};
 
 /// Routing identity + payload for one staged `KvOp::PredicateUpdate`.
@@ -202,7 +201,7 @@ impl CoreLoop {
             decode_scan_filters(filter_bytes, "kv predicate dml filters")
                 .map_err(|e| self.response_error(task, e))?;
         let mut rows = self
-            .kv_predicate_matches(did, tid, collection, filter_bytes, current_ms())
+            .kv_predicate_matches(did, tid, collection, filter_bytes, self.kv_read_now_ms())
             .map_err(|e| self.response_error(task, e))?;
 
         // `merge_kv_overlay_into_scan` takes an infallible predicate, so a
@@ -260,6 +259,7 @@ mod tests {
     use crate::data::executor::core_loop::tests::make_core_with_dir;
     use crate::data::executor::handlers::transaction::overlay::Staged;
     use crate::engine::kv::KvPutParams;
+    use crate::engine::kv::current_ms;
     use crate::types::*;
 
     fn make_task() -> ExecutionTask {

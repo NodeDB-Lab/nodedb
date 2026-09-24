@@ -337,6 +337,7 @@ fn kv_op_name(op: &KvOp) -> &'static str {
         KvOp::SortedIndexRange { .. } => "SortedIndexRange",
         KvOp::SortedIndexCount { .. } => "SortedIndexCount",
         KvOp::SortedIndexScore { .. } => "SortedIndexScore",
+        KvOp::SortedIndexTxnRead { .. } => "SortedIndexTxnRead",
         KvOp::MaterializeScan { .. } => "MaterializeScan",
         KvOp::ResolveWrite(_) => "ResolveWrite",
         KvOp::ResolvedWrite { .. } => "ResolvedWrite",

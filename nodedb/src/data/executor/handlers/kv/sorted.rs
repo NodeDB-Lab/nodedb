@@ -113,23 +113,10 @@ impl CoreLoop {
         debug!(core = self.core_id, %index_name, "kv sorted index rank");
         let now_ms = current_ms();
 
-        match self
+        let rank = self
             .kv_engine
-            .sorted_index_rank(did, tid, index_name, primary_key, now_ms)
-        {
-            Some(rank) => {
-                match response_codec::encode_json_as_msgpack(&serde_json::json!({ "rank": rank })) {
-                    Ok(payload) => self.response_with_payload(task, payload),
-                    Err(e) => self.response_error(task, e),
-                }
-            }
-            None => {
-                match response_codec::encode_json_as_msgpack(&serde_json::json!({ "rank": null })) {
-                    Ok(payload) => self.response_with_payload(task, payload),
-                    Err(e) => self.response_error(task, e),
-                }
-            }
-        }
+            .sorted_index_rank(did, tid, index_name, primary_key, now_ms);
+        self.sorted_rank_response(task, rank)
     }
 
     pub(in crate::data::executor) fn execute_kv_sorted_index_top_k(
@@ -147,21 +134,7 @@ impl CoreLoop {
             .kv_engine
             .sorted_index_top_k(did, tid, index_name, k, now_ms)
         {
-            Some(entries) => {
-                let rows: Vec<serde_json::Value> = entries
-                    .into_iter()
-                    .map(|(rank, pk)| {
-                        serde_json::json!({
-                            "rank": rank,
-                            "key": String::from_utf8_lossy(&pk),
-                        })
-                    })
-                    .collect();
-                match response_codec::encode_json_vec_as_msgpack(&rows) {
-                    Ok(payload) => self.response_with_payload(task, payload),
-                    Err(e) => self.response_error(task, e),
-                }
-            }
+            Some(entries) => self.sorted_rows_response(task, entries),
             None => self.response_error(task, ErrorCode::NotFound),
         }
     }
@@ -191,21 +164,7 @@ impl CoreLoop {
                 score_max,
                 now_ms,
             }) {
-            Some(entries) => {
-                let rows: Vec<serde_json::Value> = entries
-                    .into_iter()
-                    .map(|(rank, pk)| {
-                        serde_json::json!({
-                            "rank": rank,
-                            "key": String::from_utf8_lossy(&pk),
-                        })
-                    })
-                    .collect();
-                match response_codec::encode_json_vec_as_msgpack(&rows) {
-                    Ok(payload) => self.response_with_payload(task, payload),
-                    Err(e) => self.response_error(task, e),
-                }
-            }
+            Some(entries) => self.sorted_rows_response(task, entries),
             None => self.response_error(task, ErrorCode::NotFound),
         }
     }
@@ -224,10 +183,7 @@ impl CoreLoop {
             .kv_engine
             .sorted_index_count(did, tid, index_name, now_ms)
         {
-            Some(count) => match response_codec::encode_count("count", count as usize) {
-                Ok(payload) => self.response_with_payload(task, payload),
-                Err(e) => self.response_error(task, e),
-            },
+            Some(count) => self.sorted_count_response(task, count),
             None => self.response_error(task, ErrorCode::NotFound),
         }
     }
@@ -242,25 +198,9 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, %index_name, "kv sorted index score");
 
-        match self
+        let score = self
             .kv_engine
-            .sorted_index_score(did, tid, index_name, primary_key)
-        {
-            Some(sort_key) => {
-                let b64 =
-                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &sort_key);
-                match response_codec::encode_json_as_msgpack(&serde_json::json!({ "score": b64 })) {
-                    Ok(payload) => self.response_with_payload(task, payload),
-                    Err(e) => self.response_error(task, e),
-                }
-            }
-            None => {
-                match response_codec::encode_json_as_msgpack(&serde_json::json!({ "score": null }))
-                {
-                    Ok(payload) => self.response_with_payload(task, payload),
-                    Err(e) => self.response_error(task, e),
-                }
-            }
-        }
+            .sorted_index_score(did, tid, index_name, primary_key);
+        self.sorted_score_response(task, score)
     }
 }

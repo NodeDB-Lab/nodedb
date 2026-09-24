@@ -325,6 +325,27 @@ impl NativeSession {
                 dispatch::handle_sql(&ctx, seq, &format!("EXPLAIN {sql}"), None).await
             }
 
+            // Sorted-index reads name only an index: gated on its owning
+            // collection and run in the caller's transaction, like the SQL
+            // sorted-index functions.
+            OpCode::KvSortedIndexRank
+            | OpCode::KvSortedIndexTopK
+            | OpCode::KvSortedIndexRange
+            | OpCode::KvSortedIndexCount
+            | OpCode::KvSortedIndexScore => {
+                dispatch::handle_sorted_read_op(&ctx, seq, op, fields).await
+            }
+
+            // Index DDL runs as the SQL statement it names, so it reaches the
+            // catalog and the transaction's DDL buffer.
+            OpCode::KvRegisterSortedIndex
+            | OpCode::KvDropSortedIndex
+            | OpCode::VectorSetParams
+            | OpCode::DocumentDropIndex
+            | OpCode::DocumentRegister
+            | OpCode::KvRegisterIndex
+            | OpCode::KvDropIndex => dispatch::handle_index_ddl_op(&ctx, seq, op, fields).await,
+
             // Direct Data Plane operations.
             OpCode::PointGet
             | OpCode::PointPut
@@ -369,23 +390,11 @@ impl NativeSession {
             | OpCode::DocumentTruncate
             | OpCode::DocumentEstimateCount
             | OpCode::DocumentInsertSelect
-            | OpCode::DocumentRegister
-            | OpCode::DocumentDropIndex
-            | OpCode::KvRegisterIndex
-            | OpCode::KvDropIndex
             | OpCode::KvTruncate
-            | OpCode::VectorSetParams
             | OpCode::KvIncr
             | OpCode::KvIncrFloat
             | OpCode::KvCas
             | OpCode::KvGetSet
-            | OpCode::KvRegisterSortedIndex
-            | OpCode::KvDropSortedIndex
-            | OpCode::KvSortedIndexRank
-            | OpCode::KvSortedIndexTopK
-            | OpCode::KvSortedIndexRange
-            | OpCode::KvSortedIndexCount
-            | OpCode::KvSortedIndexScore
             | OpCode::CrdtListInsert
             | OpCode::CrdtListDelete
             | OpCode::CrdtListMove => dispatch::handle_direct_op(&ctx, seq, op, fields).await,

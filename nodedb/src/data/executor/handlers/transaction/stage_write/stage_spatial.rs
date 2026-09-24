@@ -21,9 +21,8 @@
 //! sparse store, built via the same `geometry_to_value` helper and encoded
 //! with `nodedb_types::value_to_msgpack` -- decoded the same way by
 //! `merge_overlay_into_spatial_scan` (the `Value::Object` staged-body
-//! branch). COMMIT durable replay is unchanged: the buffered `SpatialOp`
-//! plan is still replayed through `execute_spatial_insert` /
-//! `execute_spatial_delete` inside the COMMIT `TransactionBatch`.
+//! branch). COMMIT installs the spatial write from the transaction's redo
+//! record, which serializes it from the buffered `SpatialOp` plan node.
 
 use nodedb_types::geometry::Geometry;
 use nodedb_types::{RowIdentity, Surrogate};

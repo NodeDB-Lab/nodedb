@@ -229,9 +229,10 @@ impl CoreLoop {
                         collection: None,
                     });
                 }
-                // On an error neither edge store changed: the edges stay in
-                // both, and the dangling-edge sweep retries them.
-                if let Err(e) = self.cascade_node_edges(database_id, tid, &doc_id) {
+                // The graph keys a row's node by its client key. On an error
+                // neither edge store changed: the edges stay in both, and the
+                // dangling-edge sweep retries them.
+                if let Err(e) = self.cascade_node_edges(database_id, tid, row_identity.as_str()) {
                     warn!(core = self.core_id, %doc_id, error = %e, "truncate: edge cascade failed");
                 }
                 self.doc_cache.invalidate(

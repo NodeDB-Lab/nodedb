@@ -22,9 +22,9 @@
 //! The match is exhaustive on purpose. A new [`ErrorCode`] must be classified by
 //! whoever adds it, not silently inherit either answer.
 //!
-//! [`resolve_on_response`](super::minted::resolve_on_response) is the one
-//! place that acts on that verdict. Every write that mints a record for a
-//! Data-Plane dispatch resolves its records there.
+//! `minted::resolve_on_response` is the one place that acts on that
+//! verdict. Every write that mints a record for a Data-Plane dispatch
+//! resolves its records there.
 
 use crate::bridge::envelope::ErrorCode;
 
@@ -53,6 +53,12 @@ pub(crate) fn refusal_is_final(code: &ErrorCode) -> bool {
         )
 }
 
+/// Whether a committed proposal's apply `error` is a final refusal: the
+/// entry's outcome, which a redelivery must answer with and never apply.
+pub(crate) fn error_is_final_refusal(error: &crate::Error) -> bool {
+    matches!(error, crate::Error::DataPlane(code) if refusal_is_final(code))
+}
+
 /// Whether `code` proves the write was refused without applying anything.
 ///
 /// `false` means "not established", not "the write applied".
@@ -63,6 +69,8 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         // refusal instead of installing the write.
         ErrorCode::RejectedConstraint { .. }
         | ErrorCode::RejectedPrevalidation { .. }
+        // The sync gate refused the frame before its delta installed.
+        | ErrorCode::SyncRejected { .. }
         | ErrorCode::RejectedAuthz { .. }
         | ErrorCode::RejectedDanglingEdge { .. }
         | ErrorCode::AppendOnlyViolation { .. }

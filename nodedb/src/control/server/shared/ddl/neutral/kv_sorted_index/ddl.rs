@@ -14,6 +14,8 @@ use crate::control::security::audit::AuditEvent;
 use crate::control::security::catalog::IndexKind;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::sql_parse::parse_ident_token;
+use crate::control::server::shared::session::ddl_buffer;
+use crate::control::server::shared::session::ddl_effect::DeferredDdlEffect;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 use nodedb_physical::physical_plan::{KvOp, PhysicalPlan};
@@ -108,22 +110,33 @@ pub async fn create_sorted_index(
         window_end_ms: window_end,
     });
 
+    // Inside an explicit transaction the records are buffered first and the
+    // tree is built at COMMIT, so a ROLLBACK leaves no tree behind.
+    let in_transaction = ddl_buffer::is_active();
+
     // Routed by the collection, not by the index name: the backfill this plan
     // performs reads the collection's rows out of the `KvEngine` of whichever
     // core executes it, and every later write that must keep the tree current
     // lands on the collection's own core. Registering anywhere else builds an
     // empty tree that no write ever updates.
-    let response = register_in_engine(
-        state,
-        &SortedIndexTarget {
-            tenant_id,
-            database_id,
-            collection: &collection,
-        },
-        plan,
-        "CREATE SORTED INDEX",
-    )
-    .await?;
+    let response = if in_transaction {
+        vec![DdlResult::Status {
+            command: "CREATE SORTED INDEX".to_string(),
+            rows_affected: None,
+        }]
+    } else {
+        register_in_engine(
+            state,
+            &SortedIndexTarget {
+                tenant_id,
+                database_id,
+                collection: &collection,
+            },
+            plan.clone(),
+            "CREATE SORTED INDEX",
+        )
+        .await?
+    };
 
     // Identity record: what resolves the index's owning collection on every
     // later read, what SHOW INDEXES lists, and what DROP INDEX resolves.
@@ -148,6 +161,22 @@ pub async fn create_sorted_index(
         &index_name,
         &identity.username,
     )?;
+
+    if in_transaction {
+        let deferred = ddl_buffer::defer_effect(DeferredDdlEffect::SortedIndexRegister {
+            tenant_id,
+            database_id,
+            collection: collection.clone(),
+            plan,
+        });
+        if !deferred {
+            return Err(ddl_err(
+                "XX000",
+                "CREATE SORTED INDEX: the transaction buffer took no entry to defer the \
+                 index build on",
+            ));
+        }
+    }
 
     state.audit_record(
         AuditEvent::AdminAction,
@@ -207,16 +236,18 @@ pub async fn drop_sorted_index(
         ));
     }
 
-    drop_in_engine(
-        state,
-        &SortedIndexTarget {
-            tenant_id,
-            database_id,
-            collection: &collection,
-        },
-        &index_name,
-    )
-    .await?;
+    // Autocommit drops the tree first, so a failed drop keeps the records a
+    // retry resolves through. Inside an explicit transaction the records are
+    // buffered first and the tree is dropped at COMMIT.
+    let target = SortedIndexTarget {
+        tenant_id,
+        database_id,
+        collection: &collection,
+    };
+    let in_transaction = ddl_buffer::is_active();
+    if !in_transaction {
+        drop_in_engine(state, &target, &index_name).await?;
+    }
 
     propose_delete_index_record(state, database_id, tenant_id, &index_name, &collection)?;
     crate::control::server::shared::ddl::owner::propose_delete_owner(
@@ -226,6 +257,21 @@ pub async fn drop_sorted_index(
         tenant_id,
         &index_name,
     )?;
+
+    if in_transaction
+        && !ddl_buffer::defer_effect(DeferredDdlEffect::SortedIndexDrop {
+            tenant_id,
+            database_id,
+            collection: collection.clone(),
+            index_name: index_name.clone(),
+        })
+    {
+        return Err(ddl_err(
+            "XX000",
+            "DROP SORTED INDEX: the transaction buffer took no entry to defer the index \
+             drop on",
+        ));
+    }
 
     Ok(vec![DdlResult::Status {
         command: "DROP SORTED INDEX".to_string(),

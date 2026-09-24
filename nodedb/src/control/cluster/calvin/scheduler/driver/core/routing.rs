@@ -196,7 +196,8 @@ fn kv_routing(op: &KvOp, database_id: DatabaseId) -> PlanRouting {
         | KvOp::SortedIndexTopK { .. }
         | KvOp::SortedIndexRange { .. }
         | KvOp::SortedIndexCount { .. }
-        | KvOp::SortedIndexScore { .. } => PlanRouting::NotAWrite,
+        | KvOp::SortedIndexScore { .. }
+        | KvOp::SortedIndexTxnRead { .. } => PlanRouting::NotAWrite,
     }
 }
 

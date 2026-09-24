@@ -144,6 +144,15 @@ fn reject_frame(delta_msg: &DeltaPushMsg, violation: &ViolationType) -> Option<S
 /// classified it as one, and re-wrapping it as a rejection would reintroduce
 /// exactly the loss this module exists to prevent.
 fn frame_for_dispatch_error(delta_msg: &DeltaPushMsg, error: &crate::Error) -> Option<SyncFrame> {
+    // The validator's terminal verdict on the frame keeps its structured
+    // violation and compensation hint.
+    if let crate::Error::DataPlane(crate::bridge::envelope::ErrorCode::SyncRejected {
+        violation,
+        ..
+    }) = error
+    {
+        return reject_frame(delta_msg, violation);
+    }
     if let Some(reason) = retryable_refusal_reason(error) {
         warn!(
             collection = %delta_msg.collection,
@@ -305,6 +314,35 @@ mod tests {
         ))
         .expect("encode gate result");
         let frame = frame_for_dispatch(&delta(), &provisional(), Ok(payload)).expect("frame");
+        assert_eq!(frame.msg_type, SyncMessageType::DeltaReject);
+        let reject: DeltaRejectMsg = frame.decode_body().expect("reject decodes");
+        assert_eq!(
+            reject.compensation,
+            Some(CompensationHint::UniqueViolation {
+                field: "email".into(),
+                conflicting_value: "a@b.com".into(),
+            })
+        );
+    }
+
+    /// A frame the gate refused for good arrives on the error channel, since
+    /// its record is cancelled. It keeps the validator's structured hint.
+    #[test]
+    fn a_terminal_refusal_on_the_error_channel_reaches_the_client_as_a_rejection() {
+        let error = crate::Error::DataPlane(ErrorCode::SyncRejected {
+            violation: ViolationType::UniqueViolation {
+                field: "email".into(),
+                value: "a@b.com".into(),
+            },
+            applied_seq: 5,
+            provenance: nodedb_types::sync::wire::SyncProvenance {
+                producer_id: 1,
+                epoch: 1,
+                stream_id: 1,
+                seq: 5,
+            },
+        });
+        let frame = frame_for_dispatch(&delta(), &provisional(), Err(error)).expect("frame");
         assert_eq!(frame.msg_type, SyncMessageType::DeltaReject);
         let reject: DeltaRejectMsg = frame.decode_body().expect("reject decodes");
         assert_eq!(

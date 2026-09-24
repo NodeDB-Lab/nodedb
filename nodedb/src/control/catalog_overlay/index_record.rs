@@ -51,6 +51,49 @@ pub fn resolve_index_record(
     )
 }
 
+/// Every index record of one `(database, tenant)`, with this connection's
+/// uncommitted DDL replayed over the committed list in statement order. A
+/// buffered create is listed, a buffered drop is not, and the result stays
+/// in name order.
+pub fn resolve_index_records(
+    database_id: u64,
+    tenant_id: u64,
+    committed: Vec<StoredIndexRecord>,
+) -> Vec<StoredIndexRecord> {
+    let replayed = crate::control::server::shared::session::ddl_buffer::with_buffered(|buffered| {
+        let mut by_name: std::collections::BTreeMap<String, StoredIndexRecord> = committed
+            .iter()
+            .map(|record| (record.name.clone(), record.clone()))
+            .collect();
+        let mut touched = false;
+        for item in buffered {
+            match &item.entry {
+                CatalogEntry::PutIndexRecord(stored)
+                    if stored.database_id == database_id && stored.tenant_id == tenant_id =>
+                {
+                    by_name.insert(stored.name.clone(), (**stored).clone());
+                    touched = true;
+                }
+                CatalogEntry::DeleteIndexRecord {
+                    database_id: entry_db,
+                    tenant_id: entry_tenant,
+                    name,
+                    ..
+                } if *entry_db == database_id && *entry_tenant == tenant_id => {
+                    by_name.remove(name);
+                    touched = true;
+                }
+                _ => {}
+            }
+        }
+        touched.then(|| by_name.into_values().collect::<Vec<_>>())
+    });
+    match replayed {
+        Some(Some(records)) => records,
+        Some(None) | None => committed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +147,21 @@ mod tests {
             ddl_buffer::try_buffer(put("idx_a"));
             ddl_buffer::try_buffer(delete("idx_a"));
             assert!(resolve("idx_a", None).is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_listing_shows_a_buffered_create_and_hides_a_buffered_drop() {
+        conn_scope::scoped(async {
+            ddl_buffer::activate();
+            ddl_buffer::try_buffer(put("idx_new"));
+            ddl_buffer::try_buffer(delete("idx_old"));
+            let names: Vec<String> = resolve_index_records(0, 1, vec![stored("idx_old")])
+                .into_iter()
+                .map(|record| record.name)
+                .collect();
+            assert_eq!(names, vec!["idx_new".to_string()]);
         })
         .await;
     }

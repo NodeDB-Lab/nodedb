@@ -252,6 +252,8 @@ mod tests {
                 epoch: 1,
                 position: 1,
                 vshard_id: vshard,
+                collections: Vec::new(),
+                sum_targets: Vec::new(),
             }),
         };
         wal.appender(crate::wal::manager::NO_APPLY_KEY)

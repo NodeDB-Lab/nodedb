@@ -63,6 +63,7 @@ impl CoreLoop {
 
         // Reject duplicate concurrent rebuild for same collection.
         if self
+            .maintenance
             .pending_reindex
             .iter()
             .any(|p| p.tenant_id == tenant_id && p.collection_key == collection_key)
@@ -112,7 +113,7 @@ impl CoreLoop {
         // Collect completed and failed entries, leaving only still-running ones.
         // We must separate the poll loop from the apply loop to satisfy the borrow checker:
         // apply_* functions take &mut self, which conflicts with holding a reference into
-        // self.pending_reindex at the same time.
+        // self.maintenance.pending_reindex at the same time.
         enum Outcome {
             Done {
                 database_id: nodedb_types::DatabaseId,
@@ -129,7 +130,7 @@ impl CoreLoop {
         let mut outcomes: Vec<Outcome> = Vec::new();
         let mut still_running: Vec<PendingReindex> = Vec::new();
 
-        for pending in self.pending_reindex.drain(..) {
+        for pending in self.maintenance.pending_reindex.drain(..) {
             match pending.rx.try_recv() {
                 Ok(Ok(output)) => outcomes.push(Outcome::Done {
                     database_id: pending.database_id,
@@ -148,7 +149,7 @@ impl CoreLoop {
                 Err(mpsc::TryRecvError::Empty) => still_running.push(pending),
             }
         }
-        self.pending_reindex = still_running;
+        self.maintenance.pending_reindex = still_running;
 
         for outcome in outcomes {
             match outcome {
@@ -291,7 +292,7 @@ impl CoreLoop {
                 let _ = tx.send(rebuild_hnsw_thread(vectors, dim, params));
             });
 
-            self.pending_reindex.push(PendingReindex {
+            self.maintenance.pending_reindex.push(PendingReindex {
                 database_id: db,
                 tenant_id,
                 collection_key: key.2,
@@ -374,7 +375,7 @@ impl CoreLoop {
             let _ = tx.send(rebuild_fts_thread(input));
         });
 
-        self.pending_reindex.push(PendingReindex {
+        self.maintenance.pending_reindex.push(PendingReindex {
             database_id,
             tenant_id,
             collection_key: collection_key.to_string(),
@@ -414,7 +415,7 @@ impl CoreLoop {
             let _ = tx.send(rebuild_csr_thread(snapshot_bytes, memory));
         });
 
-        self.pending_reindex.push(PendingReindex {
+        self.maintenance.pending_reindex.push(PendingReindex {
             database_id,
             tenant_id,
             collection_key: collection_key.to_string(),

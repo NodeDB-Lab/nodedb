@@ -98,6 +98,7 @@ impl Scheduler {
         let has_primary_write = plans_have_primary_write(&plans, has_non_derived_write);
         let has_returning = plans_have_returning(&plans);
         let change_sets = participant_change_sets(&plans, tenant_id, self.vshard_id);
+        let flush_scope = super::super::super::types::FlushScope::of_plans(&plans);
         let plan = PhysicalPlan::Meta(MetaOp::CalvinExecuteActive {
             epoch,
             position,
@@ -137,6 +138,7 @@ impl Scheduler {
                 stage_error: None,
                 // Set once a committed txn appends its redo record.
                 redo_records: None,
+                flush_scope,
             },
         );
 

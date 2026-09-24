@@ -4,7 +4,6 @@ mod batch_put;
 mod clock;
 pub mod engine;
 pub mod engine_atomic;
-pub mod engine_atomic_compute;
 mod engine_helpers;
 mod engine_index;
 mod engine_rename;
@@ -13,7 +12,6 @@ mod engine_stats;
 mod engine_write;
 pub mod entry;
 pub mod expiry_wheel;
-pub mod float_text;
 mod hash_helpers;
 pub mod hash_table;
 pub mod index;
@@ -30,7 +28,6 @@ pub use engine_atomic::{
     AtomicAdmission, AtomicError, AtomicKeyCtx, CasResult, GetSetResult, IncrStep, Incremented,
     admit_any,
 };
-pub use engine_atomic_compute as atomic_compute;
 pub use engine_index::RegisterIndexParams;
 pub use engine_rename::RenameCollectionParams;
 pub use engine_sorted::SortedIndexRangeParams;

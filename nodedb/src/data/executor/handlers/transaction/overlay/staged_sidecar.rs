@@ -8,7 +8,7 @@
 
 use nodedb_types::RowIdentity;
 
-use super::staged::TxnOverlay;
+use super::staged::{JournalEntry, TxnOverlay};
 use crate::types::{DatabaseId, TenantId};
 
 /// A staged TTL delta for one KV row, kept OUTSIDE `Staged` because TTL is
@@ -87,6 +87,30 @@ impl TxnOverlay {
         let overlay = self.collections.get(coll_key)?;
         let surrogate = overlay.doc_id_to_surrogate.get(doc_id)?;
         overlay.ttl_by_surrogate.get(surrogate).copied()
+    }
+
+    /// Every staged TTL delta of `coll_key` whose row has no staged value:
+    /// an `EXPIRE` or `PERSIST` of a base row. Yields the row's client
+    /// identity and its delta.
+    pub fn iter_ttl_only_for_collection<'a>(
+        &'a self,
+        coll_key: &(DatabaseId, TenantId, String),
+    ) -> impl Iterator<Item = (&'a RowIdentity, StagedTtl)> {
+        self.collections
+            .get(coll_key)
+            .into_iter()
+            .flat_map(|overlay| {
+                overlay
+                    .doc_id_to_surrogate
+                    .iter()
+                    .filter(move |(_, surrogate)| !overlay.by_surrogate.contains_key(surrogate))
+                    .filter_map(move |(doc_id, surrogate)| {
+                        overlay
+                            .ttl_by_surrogate
+                            .get(surrogate)
+                            .map(|ttl| (doc_id, *ttl))
+                    })
+            })
     }
 
     /// Record the resolve-time bitemporal stamp for `surrogate` in the given
@@ -186,15 +210,33 @@ impl TxnOverlay {
             .copied()
     }
 
-    /// Iterate every `(surrogate, BitemporalStamp)` staged across all
-    /// collections in this overlay. Surrogates are globally unique, so the
-    /// commit-time install flattens these into one per-core scratch map.
-    pub fn all_bitemporal_stamps(&self) -> impl Iterator<Item = (u32, BitemporalStamp)> + '_ {
-        self.collections.values().flat_map(|overlay| {
-            overlay
-                .bitemporal_by_surrogate
-                .iter()
-                .map(|(surrogate, stamp)| (*surrogate, *stamp))
-        })
+    /// Record the instant a staged unkeyed timeseries ingest read as its
+    /// default row timestamp. A savepoint rollback removes it.
+    pub fn note_unkeyed_ingest_now(
+        &mut self,
+        coll_key: &(DatabaseId, TenantId, String),
+        now_ms: i64,
+    ) {
+        self.collections
+            .entry(coll_key.clone())
+            .or_default()
+            .unkeyed_ingest_now
+            .push(now_ms);
+        self.journal.push(JournalEntry::UnkeyedIngest {
+            coll_key: coll_key.clone(),
+        });
+    }
+
+    /// The instant the `ordinal`-th unkeyed ingest into `coll_key` read.
+    pub fn unkeyed_ingest_now(
+        &self,
+        coll_key: &(DatabaseId, TenantId, String),
+        ordinal: usize,
+    ) -> Option<i64> {
+        self.collections
+            .get(coll_key)?
+            .unkeyed_ingest_now
+            .get(ordinal)
+            .copied()
     }
 }

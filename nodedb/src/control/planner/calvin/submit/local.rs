@@ -155,7 +155,12 @@ pub async fn submit_and_await_calvin_with_timeout(
         .unwrap_or_else(|p| p.into_inner())
         .remove(&TxnId::new(epoch, position));
     match drained {
-        Some(CalvinApplyResult::Single { response, .. }) => Ok(Some(response)),
+        Some(CalvinApplyResult::Single { response, .. }) => {
+            // An installed txn whose reply failed to render deposits it as an
+            // error for the statement.
+            crate::control::server::dispatch_utils::reject_data_plane_error(&response)?;
+            Ok(Some(response))
+        }
         Some(CalvinApplyResult::Conflict) => Err(Error::Internal {
             detail: "multi-participant cross-shard RETURNING not supported".to_owned(),
         }),

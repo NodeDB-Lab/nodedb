@@ -59,6 +59,7 @@ pub(super) fn classify_kv_op(op: &KvOp, collections: &mut BTreeSet<String>) -> c
         | KvOp::SortedIndexRange { .. }
         | KvOp::SortedIndexCount { .. }
         | KvOp::SortedIndexScore { .. }
+        | KvOp::SortedIndexTxnRead { .. }
         // Read-only: reports what a governed write would apply, stages
         // nothing.
         | KvOp::ResolveWrite(_) => Ok(()),
@@ -69,11 +70,12 @@ pub(super) fn classify_kv_op(op: &KvOp, collections: &mut BTreeSet<String>) -> c
             detail: "kv resolved write is not supported in transaction resolve".to_string(),
         }),
 
-        // A standalone TTL delta has no value post-image, and KV redo carries
-        // TTL only as part of a value put, so rejecting avoids a silent drop.
-        KvOp::Expire { .. } | KvOp::Persist { .. } => Err(crate::Error::PlanError {
-            detail: "kv EXPIRE/PERSIST is not supported in transaction resolve".to_string(),
-        }),
+        // A TTL delta resolves to a put of the row's base value carrying the
+        // staged expiry, so it contributes its collection like a value write.
+        KvOp::Expire { collection, .. } | KvOp::Persist { collection, .. } => {
+            collections.insert(collection.to_string());
+            Ok(())
+        }
 
         // Truncate: staged as an overlay marker; the serializer emits the
         // `kv_truncate` redo ahead of the collection's row entries.
@@ -113,7 +115,9 @@ pub(super) fn classify_document_op(
         | DocumentOp::BulkDelete { collection, .. }
         // A balance write stages like any other point write: one target row,
         // one absolute post-image, keyed by the row's own surrogate.
-        | DocumentOp::ApplyBalanceDelta { collection, .. } => {
+        | DocumentOp::ApplyBalanceDelta { collection, .. }
+        // A Calvin batch insert stages each row as a point put.
+        | DocumentOp::BatchInsert { collection, .. } => {
             collections.insert(collection.to_string());
             Ok(())
         }
@@ -142,15 +146,15 @@ pub(super) fn classify_document_op(
             detail: "document resolved write is not supported in transaction resolve".to_string(),
         }),
 
-        // Join/merge have no per-surrogate post-image; `BatchInsert` rides the
-        // buffered-plan path. None is staged, so rejecting avoids a lossy redo.
-        DocumentOp::UpdateFromJoin { .. }
-        | DocumentOp::Merge { .. }
-        | DocumentOp::BatchInsert { .. } => Err(crate::Error::PlanError {
-            detail: "document join/merge/batch DML has no staged post-image and is not \
-                     supported in transaction resolve"
-                .to_string(),
-        }),
+        // Join/merge have no per-surrogate post-image. Neither is staged, so
+        // rejecting avoids a lossy redo.
+        DocumentOp::UpdateFromJoin { .. } | DocumentOp::Merge { .. } => {
+            Err(crate::Error::PlanError {
+                detail: "document join/merge DML has no staged post-image and is not \
+                         supported in transaction resolve"
+                    .to_string(),
+            })
+        }
 
         // Truncate: staged as an overlay marker; the serializer emits a
         // `Delete` per removed base row ahead of the collection's overlay

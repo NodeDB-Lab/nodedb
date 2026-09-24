@@ -2,7 +2,7 @@
 
 //! `KvOp` classification.
 
-use nodedb_physical::physical_plan::KvOp;
+use nodedb_physical::physical_plan::{KvOp, SortedIndexRead};
 
 use super::kind::PlanKind;
 
@@ -71,6 +71,14 @@ pub(super) fn describe_kv(op: &KvOp) -> PlanKind {
 
         // One row per sorted-index entry.
         KvOp::SortedIndexTopK { .. } | KvOp::SortedIndexRange { .. } => PlanKind::MultiRow,
+
+        // Shaped like the autocommit read it stands for.
+        KvOp::SortedIndexTxnRead { read, .. } => match read {
+            SortedIndexRead::Rank { .. }
+            | SortedIndexRead::Count
+            | SortedIndexRead::Score { .. } => PlanKind::SingleDocument,
+            SortedIndexRead::TopK { .. } | SortedIndexRead::Range { .. } => PlanKind::MultiRow,
+        },
 
         // TTL metadata mutations: no row count.
         KvOp::Expire { .. }

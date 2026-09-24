@@ -57,8 +57,17 @@ impl CoreLoop {
         };
         self.io_metrics.record_wait(tier, wait_ns);
 
-        let mut task = qt.task;
+        // A write to a row a staged Calvin transaction owns waits for it.
+        if let Some(task) = self.park_if_calvin_owned(qt.task) {
+            self.run_task(task);
+        }
+        self.release_resolved_calvin_owners();
+        true
+    }
 
+    /// Execute `task` and send its response: an idempotent replay answers
+    /// from the cache, and an expired task answers that it never started.
+    pub(in crate::data::executor) fn run_task(&mut self, mut task: ExecutionTask) {
         if let Some(key) = task.request.idempotency_key
             && let Some(&succeeded) = self.idempotency_cache.get(&key)
         {
@@ -73,7 +82,7 @@ impl CoreLoop {
             {
                 warn!(core = self.core_id, error = %e, "failed to send idempotent response");
             }
-            return true;
+            return;
         }
 
         let response = if task.is_expired() {
@@ -127,8 +136,6 @@ impl CoreLoop {
         {
             warn!(core = self.core_id, error = %e, "failed to send response — response queue full");
         }
-
-        true
     }
 
     /// Run one iteration of the event loop: drain requests, process tasks.
@@ -141,6 +148,7 @@ impl CoreLoop {
         // Adjust SPSC read depth based on current memory pressure.
         self.apply_spsc_pressure();
         self.drain_requests();
+        self.expire_calvin_parked();
         let mut processed = 0;
         while !self.task_queue.is_empty() {
             // A fail-stopped core serves nothing, including the rest of the

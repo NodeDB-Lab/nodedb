@@ -76,21 +76,13 @@ pub(crate) async fn submit_write(
         WalDurability::AppendHere { apply_key, .. } => *apply_key,
         WalDurability::CallerSupplied { .. } => 0,
     };
-    // A transaction redo's refusal is final: every replica reaches it at the
-    // same log position against the same state. Its abort marker carries the
-    // entry's key, so the proposal ledger counts the refusal as the entry's
-    // outcome after a restart. Any other refused write keeps its entry
-    // replayable, so its abort marker carries no key.
-    let final_refusal_key = if matches!(
-        plan,
-        nodedb_physical::physical_plan::PhysicalPlan::Meta(
-            nodedb_physical::physical_plan::MetaOp::ApplyTransactionRedo { .. }
-        )
-    ) {
-        apply_key
-    } else {
-        0
-    };
+    // A committed proposal applies in log order against the same state on
+    // every replica, so a final refusal is its outcome everywhere. The abort
+    // marker of a final refusal carries the proposal's key, so the proposal
+    // ledger counts the refusal as the entry's outcome after a restart and a
+    // redelivered copy is never applied. A write no proposal carries has key
+    // `0`.
+    let final_refusal_key = apply_key;
 
     // Durable-at-ack obligation, also computed before `plan` moves. `Some` only
     // for a write whose redo record THIS funnel is required to mint; a caller

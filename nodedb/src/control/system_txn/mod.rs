@@ -12,6 +12,10 @@
 mod data_plane;
 mod run;
 mod scope;
+#[cfg(test)]
+mod tests;
 
-pub use self::run::{SystemTxnError, run_tasks_atomically};
+pub use self::run::{
+    SystemTxnError, SystemTxnStatement, run_statements_atomically, run_tasks_atomically,
+};
 pub use self::scope::SystemTxnScope;

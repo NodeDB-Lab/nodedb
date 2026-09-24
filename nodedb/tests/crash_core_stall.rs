@@ -31,9 +31,21 @@ const WEDGE_SLEEP_MILLIS: u64 = 12_000;
 /// windows, with slack for a loaded runner.
 const STALL_DETECT_DEADLINE: Duration = Duration::from_secs(60);
 
-/// Deadline for `/healthz` to return to 200. The marker clears one sampling
-/// window after the core resumes.
-const RECOVERY_DEADLINE: Duration = Duration::from_secs(20);
+/// Static stage calls the wedge write runs on the one core. The edge's two
+/// endpoints sit on distinct vShards, and each vShard stages separately, so
+/// the failpoint sleeps once per vShard.
+const WEDGED_STAGES: u64 = 2;
+
+/// Monitor sampling window.
+const SAMPLE_WINDOW_MILLIS: u64 = 5_000;
+
+/// Deadline for `/healthz` to return to 200, counted from the first 503.
+/// The 503 can appear as early as two sampling windows into the first sleep.
+/// The core then stays frozen for the rest of every stage's sleep. The marker
+/// clears one sampling window after the core resumes. The deadline covers the
+/// whole freeze plus two sampling windows of slack for a loaded runner.
+const RECOVERY_DEADLINE: Duration =
+    Duration::from_millis(WEDGE_SLEEP_MILLIS * WEDGED_STAGES + 2 * SAMPLE_WINDOW_MILLIS);
 
 /// Deadline for the write to terminate, so a hung write fails with a clear
 /// message instead of running out nextest's kill budget.

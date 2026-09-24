@@ -1,26 +1,25 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Stage a Calvin static-execute write plan into the shared per-core
-//! `txn_overlays` (and `graph_txn_overlays` / `array_txn_overlays`), keyed by
-//! a synthetic `TxnId`
+//! Stage a Calvin write plan into the shared per-core `txn_overlays` (and
+//! `graph_txn_overlays` / `array_txn_overlays`), keyed by a synthetic `TxnId`
 //! (see `calvin_txn_id.rs`).
 //!
-//! This is purely additive to
-//! [`CoreLoop::execute_calvin_execute_static`]'s existing `commit_pending`
-//! raw-plan buffering, which remains untouched and still drives the base
-//! install at flush time. Staging here is the producer side for a later
-//! `CalvinResolve` op that reads the overlay the same way
-//! `MetaOp::ResolveTxn` already does for session transactions
-//! (`resolve/entry.rs`).
+//! Staging is the producer side for `CalvinResolve`, which reads the overlay
+//! the same way `MetaOp::ResolveTxn` does for session transactions
+//! (`resolve/entry.rs`). The redo record it builds is what the flush
+//! installs.
 
-use nodedb_physical::physical_plan::{ColumnarOp, DocumentOp, GraphOp, PhysicalPlan, TimeseriesOp};
+use nodedb_physical::physical_plan::{
+    ArrayOp, ColumnarOp, CrdtOp, DocumentOp, GraphOp, PhysicalPlan, TimeseriesOp, VectorOp,
+};
 use nodedb_types::RowIdentity;
 
 use crate::bridge::envelope::{ErrorCode, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::stage_write::{
-    StageCtx, StageTimeseriesInsertParams,
+    StageBalanceDeltaParams, StageBatchInsertParams, StageCtx, StageTimeseriesInsertParams,
 };
+use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{TenantId, TxnId};
 
@@ -28,35 +27,36 @@ use super::calvin_txn_id::calvin_synthetic_txn_id;
 
 impl CoreLoop {
     /// Stage one Calvin write plan into the transaction overlay under the
-    /// synthetic `txn_id`, reusing the exact same statement-time staging
-    /// handlers a session `BEGIN..COMMIT` point write uses.
+    /// synthetic `txn_id`, reusing the statement-time staging handlers a
+    /// session `BEGIN..COMMIT` write uses, and return the handler's reply.
     ///
-    /// Concrete, surrogate-carrying point ops are staged here: the Document
-    /// point family (`PointInsert` / `PointPut` / `PointDelete` /
-    /// `PointUpdate` / `Upsert`), KV point ops, and GRAPH edge/label ops.
-    /// These are also the only op shapes that reach Calvin buffering for the
-    /// Document family in the first place — `MERGE` / `UPDATE ... FROM` /
-    /// `INSERT ... SELECT` are already expanded to concrete point ops at
-    /// statement time before Calvin buffering (`commit.rs`).
+    /// Staged here: the Document point family (`PointInsert` / `PointPut` /
+    /// `PointDelete` / `PointUpdate` / `Upsert`), `BatchInsert`,
+    /// `ApplyBalanceDelta`, `Truncate`, KV ops, GRAPH edge/label ops,
+    /// `TimeseriesOp::Ingest`, every columnar write, the vector-primary direct
+    /// writes, CRDT row writes, and ARRAY cell writes. `MERGE` /
+    /// `UPDATE ... FROM` / `INSERT ... SELECT` are resolved into point writes
+    /// on the Control Plane before dispatch, so one reaching here is refused.
     ///
-    /// `DocumentOp::BulkUpdate` / `BulkDelete` (predicate DML) are also
-    /// staged, but via the predicted-surrogate-set primitives in
+    /// The remaining write families stage nothing because resolve serializes
+    /// them from the plan node itself: the other vector writes, CRDT deltas,
+    /// FTS and spatial writes, timeseries truncates and array flushes.
+    ///
+    /// `DocumentOp::BulkUpdate` / `BulkDelete` (predicate DML) are staged via
+    /// the predicted-surrogate-set primitives in
     /// [`calvin_overlay_stage_bulk`][super::calvin_overlay_stage_bulk] rather
-    /// than a live predicate rescan — see that module's docs for the
-    /// determinism rationale. `TimeseriesOp::Ingest` is staged through the
-    /// same canonical row decoder as session writes; its per-row tokens are
-    /// overlay-local and never become base-storage identities. Every columnar
-    /// write is staged through the session handlers, so COMMIT resolve reads
-    /// its post-images from the overlay. Staging runs under the epoch's time
-    /// anchor, so every replica stages the same images. Spatial writes carry
-    /// their absolute post-image on the plan node and stay unstaged.
+    /// than a live predicate rescan. See that module's docs for the
+    /// determinism rationale. Staging runs under the epoch's time anchor, so
+    /// every replica stages the same images. Spatial and text writes carry
+    /// their absolute post-image on the plan node, stay unstaged, and answer
+    /// an empty reply.
     pub(in crate::data::executor) fn stage_calvin_overlay(
         &mut self,
         task: &ExecutionTask,
         txn_id: TxnId,
         tenant_id: TenantId,
         plan: &PhysicalPlan,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<Vec<u8>, ErrorCode> {
         let tid = tenant_id.as_u64();
         match plan {
             PhysicalPlan::Document(DocumentOp::PointInsert {
@@ -176,6 +176,7 @@ impl CoreLoop {
                     rls_write_check,
                     declared_primary_key: declared_primary_key.as_deref(),
                 })
+                .and_then(affected_reply)
                 .map_err(ErrorCode::from),
             PhysicalPlan::Document(DocumentOp::BulkUpdate {
                 collection,
@@ -195,7 +196,66 @@ impl CoreLoop {
                     rls_write_check,
                     declared_primary_key: declared_primary_key.as_deref(),
                 })
+                .and_then(affected_reply)
                 .map_err(ErrorCode::from),
+            PhysicalPlan::Document(DocumentOp::BatchInsert {
+                collection,
+                documents,
+                surrogates,
+                ..
+            }) => {
+                let resp = self.stage_document_batch_insert(StageBatchInsertParams {
+                    task,
+                    tid,
+                    txn_id,
+                    collection: collection.as_str(),
+                    documents,
+                    surrogates,
+                });
+                Self::stage_result(&resp)
+            }
+            PhysicalPlan::Document(DocumentOp::ApplyBalanceDelta {
+                collection,
+                document_id,
+                surrogate,
+                column,
+                delta,
+                join_column,
+                join_value,
+                declared_primary_key,
+            }) => {
+                let resp = self.stage_apply_balance_delta(StageBalanceDeltaParams {
+                    task,
+                    tid,
+                    txn_id,
+                    collection: collection.as_str(),
+                    document_id,
+                    surrogate: *surrogate,
+                    column,
+                    delta,
+                    join_column,
+                    join_value,
+                    declared_primary_key: declared_primary_key.as_deref(),
+                });
+                Self::stage_result(&resp)
+            }
+            PhysicalPlan::Document(DocumentOp::Truncate { collection, .. }) => {
+                let resp = self.stage_collection_truncate(task, tid, txn_id, collection.as_str());
+                Self::stage_result(&resp)
+            }
+            // The Control Plane resolves these into point writes, or proposes
+            // them through Raft, before any Calvin dispatch. Staging one would
+            // install nothing, so it is refused.
+            PhysicalPlan::Document(
+                DocumentOp::InsertSelect { .. }
+                | DocumentOp::UpdateFromJoin { .. }
+                | DocumentOp::Merge { .. }
+                | DocumentOp::ResolvedWrite { .. },
+            ) => Err(ErrorCode::Internal {
+                detail: "a cross-collection or pre-resolved document write reached Calvin \
+                          staging; the Control Plane resolves it before dispatch"
+                    .into(),
+            }),
             PhysicalPlan::Kv(op) => {
                 let resp = self.execute_stage_kv(task, tid, txn_id, op);
                 Self::stage_result(&resp)
@@ -247,14 +307,60 @@ impl CoreLoop {
                 let resp = self.execute_stage_graph(task, tid, txn_id, op);
                 Self::stage_result(&resp)
             }
-            _ => Ok(()),
+            PhysicalPlan::Vector(
+                op @ (VectorOp::DirectInsert { .. }
+                | VectorOp::DirectInsertIfAbsent { .. }
+                | VectorOp::DirectUpsert { .. }
+                | VectorOp::DirectUpdate { .. }
+                | VectorOp::DirectDelete { .. }
+                | VectorOp::DirectTruncate { .. }),
+            ) => {
+                let resp = self.execute_stage_vector(task, tid, txn_id, op);
+                Self::stage_result(&resp)
+            }
+            PhysicalPlan::Crdt(op @ (CrdtOp::DocUpsert { .. } | CrdtOp::DocDelete { .. })) => {
+                let resp = self.execute_stage_crdt(task, tid, txn_id, op);
+                Self::stage_result(&resp)
+            }
+            PhysicalPlan::Array(op @ (ArrayOp::Put { .. } | ArrayOp::Delete { .. })) => {
+                let resp = self.execute_stage_array(task, txn_id, op);
+                Self::stage_result(&resp)
+            }
+            // Document reads and index DDL write no row.
+            PhysicalPlan::Document(
+                DocumentOp::ResolveWrite(_)
+                | DocumentOp::PointGet { .. }
+                | DocumentOp::Scan { .. }
+                | DocumentOp::RangeScan { .. }
+                | DocumentOp::IndexLookup { .. }
+                | DocumentOp::IndexedFetch { .. }
+                | DocumentOp::EstimateCount { .. }
+                | DocumentOp::MaterializeScan { .. }
+                | DocumentOp::Register { .. }
+                | DocumentOp::DropIndex { .. }
+                | DocumentOp::BackfillIndex { .. },
+            ) => Ok(Vec::new()),
+            // Resolve serializes these writes from the plan node, and the
+            // rest of these families write nothing.
+            PhysicalPlan::Timeseries(_)
+            | PhysicalPlan::Columnar(_)
+            | PhysicalPlan::Graph(_)
+            | PhysicalPlan::Vector(_)
+            | PhysicalPlan::Crdt(_)
+            | PhysicalPlan::Array(_)
+            | PhysicalPlan::Text(_)
+            | PhysicalPlan::Spatial(_)
+            | PhysicalPlan::Query(_)
+            | PhysicalPlan::Meta(_)
+            | PhysicalPlan::ClusterArray(_)
+            | PhysicalPlan::ClusterEvent(_) => Ok(Vec::new()),
         }
     }
 
-    /// Turn a staging handler's `Response` into a `Result`, so a staging
+    /// Turn a staging handler's `Response` into its reply, so a staging
     /// failure propagates loudly to the Calvin caller instead of being
     /// silently swallowed.
-    fn stage_result(resp: &Response) -> Result<(), ErrorCode> {
+    fn stage_result(resp: &Response) -> Result<Vec<u8>, ErrorCode> {
         if resp.status == Status::Error {
             return Err(resp.error_code.as_deref().cloned().unwrap_or_else(|| {
                 ErrorCode::Internal {
@@ -262,7 +368,7 @@ impl CoreLoop {
                 }
             }));
         }
-        Ok(())
+        Ok(resp.payload.as_bytes().to_vec())
     }
 
     /// Discard the synthetic-`TxnId` overlay entries staged for
@@ -291,4 +397,9 @@ impl CoreLoop {
             self.drop_overlay_entry(synthetic_txn_id);
         }
     }
+}
+
+/// The `{"affected": n}` reply of a Calvin bulk stage.
+fn affected_reply(affected: usize) -> crate::Result<Vec<u8>> {
+    response_codec::encode_count("affected", affected)
 }

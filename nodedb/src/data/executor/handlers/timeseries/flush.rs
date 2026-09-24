@@ -5,12 +5,9 @@
 //! The boot-side counterpart — rebuilding `ts_registries` from the partitions
 //! this writes — lives in `data::executor::timeseries_checkpoint`.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::transaction::undo::UndoEntry;
-use crate::data::executor::task::ExecutionTask;
 use crate::engine::timeseries::columnar_segment::ColumnarSegmentWriter;
 use crate::engine::timeseries::partition_registry::PartitionRegistry;
 use crate::types::{DatabaseId, TenantId};
@@ -160,82 +157,6 @@ impl CoreLoop {
         }
 
         Ok(())
-    }
-
-    /// Finalize the metadata deliberately deferred by transaction-batch
-    /// timeseries ingestion. At this point all sub-plans, constraints and CRDT
-    /// application succeeded, so publication is safe. A maintenance flush is
-    /// post-commit: failure leaves the committed memtable/WAL intact and is
-    /// logged as retryable backlog. It cannot set `Response::partial`, which
-    /// means a further stream frame is coming and would strand a COMMIT waiter.
-    pub(in crate::data::executor) fn finalize_deferred_timeseries_ingests(
-        &mut self,
-        task: &ExecutionTask,
-        undo_log: &[UndoEntry],
-    ) {
-        let mut collections = HashMap::new();
-        for entry in undo_log {
-            if let UndoEntry::TimeseriesIngest(token) = entry {
-                let prior_rows = token
-                    .memtable_before
-                    .as_ref()
-                    .map(|snapshot| snapshot.row_count)
-                    .unwrap_or(0);
-                collections
-                    .entry(token.collection_key.clone())
-                    .and_modify(|prior: &mut u64| *prior = (*prior).min(prior_rows))
-                    .or_insert(prior_rows);
-            }
-        }
-
-        if collections.is_empty() {
-            return;
-        }
-
-        let mut accepted_any = false;
-        let mut flush_backlog = false;
-        for ((database_id, tenant_id, collection), prior_rows) in collections {
-            let accepted = self
-                .columnar_memtables
-                .get(&(database_id, tenant_id, collection.clone()))
-                .map(|memtable| memtable.row_count().saturating_sub(prior_rows) as usize)
-                .unwrap_or(0);
-            accepted_any |= accepted > 0;
-            self.checkpoint_coordinator
-                .mark_dirty("timeseries", accepted);
-            self.note_collection_write_lsn(task, &collection);
-            self.recharge_ts_memtable_budget(tenant_id, database_id, &collection);
-            let needs_flush = self
-                .columnar_memtables
-                .get(&(database_id, tenant_id, collection.clone()))
-                .is_some_and(|memtable| {
-                    memtable.memory_bytes() >= self.ts_tuning.memtable_budget_bytes
-                });
-            if needs_flush
-                && let Err(error) = self.flush_ts_collection(
-                    tenant_id,
-                    database_id,
-                    &collection,
-                    self.epoch_system_ms.unwrap_or(0),
-                )
-            {
-                flush_backlog = true;
-                tracing::error!(
-                    collection,
-                    error = %error,
-                    "committed timeseries flush deferred as retryable backlog"
-                );
-            }
-        }
-        if accepted_any {
-            self.last_ts_ingest = Some(std::time::Instant::now());
-        }
-        if flush_backlog {
-            tracing::warn!(
-                core = self.core_id,
-                "committed timeseries rows remain in the retryable flush backlog"
-            );
-        }
     }
 
     /// Charge the memtable's current resident footprint, replacing the

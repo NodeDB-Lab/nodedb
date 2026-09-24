@@ -42,7 +42,9 @@ impl CoreLoop {
             .task_queue
             .front()
             .is_some_and(|t| is_batchable_put(t) && !t.is_expired());
-        if !front_is_put {
+        // While a staged Calvin transaction owns rows, every write passes the
+        // fence in `poll_one` one at a time.
+        if !front_is_put || !self.calvin.commit_pending.is_empty() {
             return 0;
         }
 

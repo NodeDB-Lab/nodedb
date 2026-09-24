@@ -88,12 +88,19 @@ pub(crate) fn build_point_put(
         Some(CollectionType::Columnar(ColumnarProfile::Timeseries { .. })) => {
             let json_str = String::from_utf8_lossy(&value);
             let ilp_line = format!("{collection} value={json_str}\n");
+            // The line's own surrogate keys its staged row, so a read later in
+            // the same transaction observes it.
+            let (surrogate, _identity) = ctx.state.surrogate_assigner.assign_fresh(
+                ctx.database_id(),
+                ctx.tenant_id(),
+                collection,
+            )?;
             Ok(PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
                 collection: QualifiedCollection::new(ctx.database_id(), collection),
                 payload: ilp_line.into_bytes(),
                 format: "ilp".to_string(),
                 wal_lsn: None,
-                surrogates: Vec::new(),
+                surrogates: vec![surrogate],
                 provenance: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
                 returning: None,
@@ -351,185 +358,5 @@ pub(crate) fn build_upsert(
         returning: None,
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),
-    }))
-}
-
-pub(crate) fn build_bulk_update(
-    ctx: &DispatchCtx<'_>,
-    fields: &TextFields,
-    collection: &str,
-) -> crate::Result<PhysicalPlan> {
-    let filters = fields
-        .filters
-        .as_ref()
-        .ok_or_else(|| crate::Error::BadRequest {
-            detail: "missing 'filters'".to_string(),
-        })?
-        .clone();
-    let updates: Vec<(String, nodedb_physical::physical_plan::UpdateValue)> = fields
-        .updates
-        .as_ref()
-        .ok_or_else(|| crate::Error::BadRequest {
-            detail: "missing 'updates'".to_string(),
-        })?
-        .iter()
-        .map(|(f, b)| {
-            (
-                f.clone(),
-                nodedb_physical::physical_plan::UpdateValue::Literal(b.clone()),
-            )
-        })
-        .collect();
-    Ok(PhysicalPlan::Document(DocumentOp::BulkUpdate {
-        collection: QualifiedCollection::new(ctx.database_id(), collection),
-        filters,
-        updates,
-        returning: None,
-        ollp_predicted_surrogates: None,
-        ollp_predicted_edges: None,
-        rls_filters: Vec::new(),
-        rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
-        // Filled in by the materialized-sum resolution pass.
-        resolved_sum_targets: Vec::new(),
-        // See `build_update`: reads the declared PRIMARY KEY from the catalog.
-        declared_primary_key: declared_primary_key(ctx, collection)?,
-    }))
-}
-
-pub(crate) fn build_bulk_delete(
-    ctx: &DispatchCtx<'_>,
-    fields: &TextFields,
-    collection: &str,
-) -> crate::Result<PhysicalPlan> {
-    let filters = fields
-        .filters
-        .as_ref()
-        .ok_or_else(|| crate::Error::BadRequest {
-            detail: "missing 'filters'".to_string(),
-        })?
-        .clone();
-    Ok(PhysicalPlan::Document(DocumentOp::BulkDelete {
-        collection: QualifiedCollection::new(ctx.database_id(), collection),
-        filters,
-        returning: None,
-        ollp_predicted_surrogates: None,
-        ollp_predicted_edges: None,
-        rls_filters: Vec::new(),
-        rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
-        // Filled in by the materialized-sum resolution pass.
-        resolved_sum_targets: Vec::new(),
-        // See `build_update`: reads the declared PRIMARY KEY from the catalog.
-        declared_primary_key: declared_primary_key(ctx, collection)?,
-    }))
-}
-
-pub(crate) fn build_truncate(
-    ctx: &DispatchCtx<'_>,
-    collection: &str,
-) -> crate::Result<PhysicalPlan> {
-    Ok(PhysicalPlan::Document(DocumentOp::Truncate {
-        collection: QualifiedCollection::new(ctx.database_id(), collection),
-        restart_identity: false,
-        // Filled in by the materialized-sum resolution pass.
-        resolved_sum_targets: Vec::new(),
-        // See `build_update`: reads the declared PRIMARY KEY from the catalog.
-        declared_primary_key: declared_primary_key(ctx, collection)?,
-    }))
-}
-
-pub(crate) fn build_estimate_count(
-    ctx: &DispatchCtx<'_>,
-    fields: &TextFields,
-    collection: &str,
-) -> crate::Result<PhysicalPlan> {
-    let field = fields.field.as_deref().unwrap_or("id").to_string();
-
-    Ok(PhysicalPlan::Document(DocumentOp::EstimateCount {
-        collection: QualifiedCollection::new(ctx.database_id(), collection),
-        field,
-    }))
-}
-
-pub(crate) fn build_insert_select(
-    ctx: &DispatchCtx<'_>,
-    fields: &TextFields,
-    collection: &str,
-) -> crate::Result<PhysicalPlan> {
-    let source = fields
-        .source_collection
-        .as_ref()
-        .ok_or_else(|| crate::Error::BadRequest {
-            detail: "missing 'source_collection'".to_string(),
-        })?
-        .clone();
-    let filters = fields.filters.clone().unwrap_or_default();
-    let limit = fields.limit.unwrap_or(10_000) as usize;
-
-    Ok(PhysicalPlan::Document(DocumentOp::InsertSelect {
-        target_collection: QualifiedCollection::new(ctx.database_id(), collection),
-        source_collection: QualifiedCollection::new(ctx.database_id(), &source),
-        source_filters: filters,
-        source_limit: limit,
-        // The native text-field form names no projection, so every source row
-        // copies unchanged.
-        column_map: Vec::new(),
-    }))
-}
-
-pub(crate) fn build_register(
-    ctx: &DispatchCtx<'_>,
-    fields: &TextFields,
-    collection: &str,
-) -> crate::Result<PhysicalPlan> {
-    // Native protocol exposes only a legacy `index_paths` text list — promote
-    // each entry to a `Ready`, non-unique `RegisteredIndex` named after the
-    // path. UNIQUE / COLLATE / build-state come from SQL DDL only.
-    let indexes = fields
-        .index_paths
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|path| nodedb_physical::physical_plan::RegisteredIndex {
-            name: path.clone(),
-            path,
-            unique: false,
-            case_insensitive: false,
-            state: nodedb_physical::physical_plan::RegisteredIndexState::Ready,
-            predicate: None,
-        })
-        .collect();
-
-    Ok(PhysicalPlan::Document(DocumentOp::Register {
-        collection: QualifiedCollection::new(ctx.database_id(), collection),
-        indexes,
-        crdt_enabled: false,
-        storage_mode: nodedb_physical::physical_plan::StorageMode::Schemaless,
-        enforcement: Box::new(nodedb_physical::physical_plan::EnforcementOptions::default()),
-        bitemporal: false,
-        conflict_policy: None,
-        timeseries: None,
-        // The native protocol's register frame carries only index paths; a
-        // vector-primary collection is created through SQL DDL, which goes
-        // through the catalog-sourced builder instead.
-        vector_primary: None,
-    }))
-}
-
-pub(crate) fn build_drop_index(
-    ctx: &DispatchCtx<'_>,
-    fields: &TextFields,
-    collection: &str,
-) -> crate::Result<PhysicalPlan> {
-    let field = fields
-        .field
-        .as_ref()
-        .ok_or_else(|| crate::Error::BadRequest {
-            detail: "missing 'field'".to_string(),
-        })?
-        .clone();
-
-    Ok(PhysicalPlan::Document(DocumentOp::DropIndex {
-        collection: QualifiedCollection::new(ctx.database_id(), collection),
-        field,
     }))
 }

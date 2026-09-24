@@ -15,6 +15,10 @@
 //!   ([`StagedTtl::ExpireAt`]) for the slot it travels verbatim so replay
 //!   installs the exact instant instead of recomputing `now + ttl`; a `Persist`
 //!   (or no TTL delta) emits `None`.
+//! * A TTL-only slot (an `EXPIRE` / `PERSIST` of a row the transaction did
+//!   not otherwise write) → `RecordType::Put`, `encode_kv_expire`'s
+//!   `("kv_expire", collection, key, ttl_ms, expire_at_ms)` or
+//!   `encode_kv_persist`'s `("kv_persist", collection, key)`.
 //! * A staged tombstone ([`Staged::Tombstone`]) → `RecordType::Delete`,
 //!   `("kv_delete", collection, [key])`.
 //! * A staged TRUNCATE → `RecordType::Delete`, `encode_kv_truncate`'s
@@ -41,7 +45,9 @@ use std::collections::BTreeMap;
 use nodedb_types::RowIdentity;
 use nodedb_wal::record::RecordType;
 
-use crate::control::server::wal_dispatch_kv::encode::{encode_kv_put, encode_kv_truncate};
+use crate::control::server::wal_dispatch_kv::encode::{
+    encode_kv_expire, encode_kv_persist, encode_kv_put, encode_kv_truncate,
+};
 use crate::data::executor::handlers::transaction::overlay::{Staged, StagedTtl, TxnOverlay};
 use crate::data::executor::handlers::transaction::stage_write::unhex_key;
 use crate::types::{DatabaseId, TenantId};
@@ -67,23 +73,57 @@ pub(super) fn serialize_kv_truncate(
     Ok(())
 }
 
+/// One staged KV row: a value or tombstone, or a TTL delta on a base row.
+enum KvSlot<'a> {
+    Staged(&'a Staged),
+    TtlOnly(StagedTtl),
+}
+
 /// Append the redo sub-records for every KV post-image staged in `overlay`
 /// for `coll_key` to `ops`, in deterministic doc-id order.
+///
+/// An `EXPIRE` or `PERSIST` of a row the transaction did not otherwise
+/// write resolves to a `kv_expire` or `kv_persist` sub-record, the shapes
+/// the autocommit TTL writes append. The install changes only the expiry of
+/// the value the key holds when the record applies. A write committed
+/// between stage and install keeps its value.
 pub(super) fn serialize_kv_collection(
     overlay: &TxnOverlay,
     coll_key: &(DatabaseId, TenantId, String),
     collection: &str,
     ops: &mut Vec<RedoSubRecord>,
 ) -> crate::Result<()> {
-    let mut entries: BTreeMap<&RowIdentity, &Staged> = BTreeMap::new();
+    let mut entries: BTreeMap<&RowIdentity, KvSlot<'_>> = BTreeMap::new();
     for (doc_id, staged) in overlay.iter_doc_entries_for_collection(coll_key) {
-        entries.insert(doc_id, staged);
+        entries.insert(doc_id, KvSlot::Staged(staged));
+    }
+    // A staged TRUNCATE hides every base row, so no TTL delta can target one.
+    if !overlay.is_truncated(coll_key) {
+        for (doc_id, ttl) in overlay.iter_ttl_only_for_collection(coll_key) {
+            entries.insert(doc_id, KvSlot::TtlOnly(ttl));
+        }
     }
 
-    for (doc_id, staged) in entries {
+    for (doc_id, slot) in entries {
         let key = unhex_key(doc_id.as_str()).ok_or_else(|| crate::Error::Internal {
             detail: format!("kv resolve: overlay doc-id '{doc_id}' is not valid hex"),
         })?;
+        let staged = match slot {
+            KvSlot::Staged(staged) => staged,
+            KvSlot::TtlOnly(ttl) => {
+                let payload = match ttl {
+                    StagedTtl::ExpireAt(ms) => {
+                        encode_kv_expire(collection, &key, RESOLVE_TTL_MS, ms)?
+                    }
+                    StagedTtl::Persist => encode_kv_persist(collection, &key)?,
+                };
+                ops.push(RedoSubRecord {
+                    record_type: RecordType::Put as u32,
+                    payload,
+                });
+                continue;
+            }
+        };
         match staged {
             Staged::Put(value) => {
                 let expire_at_ms = match overlay.get_ttl_by_doc_id(coll_key, doc_id) {

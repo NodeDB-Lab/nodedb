@@ -28,7 +28,10 @@ impl CoreLoop {
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
 
-        let max_per_pass = self.segment_compaction_config.max_segments_per_pass;
+        let max_per_pass = self
+            .maintenance
+            .segment_compaction_config
+            .max_segments_per_pass;
         let mut total_merged = 0usize;
         let mut total_deferred = 0usize;
 
@@ -46,7 +49,7 @@ impl CoreLoop {
             })
             .collect();
 
-        let budget = self.maintenance_budget.clone();
+        let budget = self.maintenance.maintenance_budget.clone();
         let core_id = self.core_id;
 
         for ((db, tid, collection), registry) in &mut self.ts_registries {

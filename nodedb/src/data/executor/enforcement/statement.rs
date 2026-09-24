@@ -10,11 +10,10 @@
 //! definition and is refused. That is the point of the constraint: a balanced
 //! ledger cannot be populated one leg at a time.
 //!
-//! Which boundary a write belongs to is decided by
-//! [`CoreLoop::balanced_txn_entries`]: with a transaction batch open the
-//! entries accumulate onto it and the batch checks them once at commit; with
-//! none open the statement is its own boundary and checks immediately, before
-//! it commits, so a refusal writes nothing.
+//! An autocommit statement checks its entries immediately, before it commits,
+//! so a refusal writes nothing. A committed transaction's redo install checks
+//! the entries of every write in the record at its own commit boundary
+//! (`redo_apply::validate`).
 //!
 //! # Why some callers pre-compute their entries here instead of collecting the
 //! # funnel's
@@ -54,25 +53,15 @@ impl CoreLoop {
 
     /// Account for the entries one write boundary produced.
     ///
-    /// Inside a transaction batch the entries are accumulated onto the batch,
-    /// which checks them once at its own commit boundary. Outside one, the
-    /// caller IS the boundary and the check runs here — the caller must not
-    /// have committed yet, so an `Err` leaves nothing written.
+    /// The caller IS the boundary and the check runs here — the caller must
+    /// not have committed yet, so an `Err` leaves nothing written.
     pub(in crate::data::executor) fn settle_balanced_entries(
-        &mut self,
+        &self,
         database_id: u64,
         tid: u64,
         collection: &str,
         entries: Vec<BalancedEntry>,
     ) -> crate::Result<()> {
-        if let Some(pending) = self.balanced_txn_entries.as_mut() {
-            pending.extend(
-                entries
-                    .into_iter()
-                    .map(|entry| (collection.to_string(), entry)),
-            );
-            return Ok(());
-        }
         if entries.is_empty() {
             return Ok(());
         }

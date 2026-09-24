@@ -6,12 +6,13 @@
 //! - Affected row count is correctly returned for bulk updates
 //! - Conditional UPDATE WHERE with predicates (stock >= N) works atomically
 //! - RETURNING flag returns post-update documents
-//! - TransactionBatch does not auto-abort on 0-row conditional update
+//! - A committed transaction does not abort on a 0-row conditional update
 //! - PointUpdate returns affected count
 
 use nodedb::bridge::envelope::Status;
 use nodedb::bridge::scan_filter::{FilterOp, ScanFilter};
-use nodedb_physical::physical_plan::{DocumentOp, MetaOp, PhysicalPlan, UpdateValue};
+use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan, UpdateValue};
+use nodedb_test_support::tx_batch_helpers::commit_plans;
 
 use super::helpers::*;
 
@@ -412,14 +413,14 @@ fn point_update_returning_returns_updated_document() {
 }
 
 #[test]
-fn transaction_batch_does_not_abort_on_zero_row_update() {
+fn a_transaction_does_not_abort_on_zero_row_update() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
     insert_product(&mut core, &mut tx, &mut rx, "t1", 1);
     insert_product(&mut core, &mut tx, &mut rx, "t2", 0);
 
     // Transaction: first update matches (stock >= 1), second doesn't (stock >= 100).
-    // Batch should NOT auto-abort on 0-row update.
+    // The transaction must NOT abort on the 0-row update.
     let filters_match = zerompk::to_msgpack_vec(&vec![filter(
         "stock",
         FilterOp::Gte,
@@ -434,55 +435,53 @@ fn transaction_batch_does_not_abort_on_zero_row_update() {
     )])
     .unwrap();
 
-    let resp = send_raw(
+    let resp = commit_plans(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
-            plans: vec![
-                PhysicalPlan::Document(DocumentOp::BulkUpdate {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "products",
+        vec![
+            PhysicalPlan::Document(DocumentOp::BulkUpdate {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "products",
+                ),
+                filters: filters_match,
+                updates: vec![(
+                    "stock".to_string(),
+                    UpdateValue::Literal(
+                        nodedb_types::json_to_msgpack(&serde_json::json!(0)).unwrap(),
                     ),
-                    filters: filters_match,
-                    updates: vec![(
-                        "stock".to_string(),
-                        UpdateValue::Literal(
-                            nodedb_types::json_to_msgpack(&serde_json::json!(0)).unwrap(),
-                        ),
-                    )],
-                    returning: None,
-                    ollp_predicted_surrogates: None,
-                    ollp_predicted_edges: None,
-                    rls_filters: Vec::new(),
-                    rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-                    resolved_sum_targets: Vec::new(),
-                    declared_primary_key: None,
-                }),
-                PhysicalPlan::Document(DocumentOp::BulkUpdate {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "products",
+                )],
+                returning: None,
+                ollp_predicted_surrogates: None,
+                ollp_predicted_edges: None,
+                rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
+            }),
+            PhysicalPlan::Document(DocumentOp::BulkUpdate {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "products",
+                ),
+                filters: filters_nomatch,
+                updates: vec![(
+                    "stock".to_string(),
+                    UpdateValue::Literal(
+                        nodedb_types::json_to_msgpack(&serde_json::json!(999)).unwrap(),
                     ),
-                    filters: filters_nomatch,
-                    updates: vec![(
-                        "stock".to_string(),
-                        UpdateValue::Literal(
-                            nodedb_types::json_to_msgpack(&serde_json::json!(999)).unwrap(),
-                        ),
-                    )],
-                    returning: None,
-                    ollp_predicted_surrogates: None,
-                    ollp_predicted_edges: None,
-                    rls_filters: Vec::new(),
-                    rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-                    resolved_sum_targets: Vec::new(),
-                    declared_primary_key: None,
-                }),
-            ],
-        }),
+                )],
+                returning: None,
+                ollp_predicted_surrogates: None,
+                ollp_predicted_edges: None,
+                rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
+            }),
+        ],
+        10,
     );
 
     assert_eq!(

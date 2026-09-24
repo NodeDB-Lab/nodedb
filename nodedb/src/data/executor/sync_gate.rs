@@ -187,20 +187,33 @@ impl CoreLoop {
         self.sync_outcome_response(task, SyncAckResult::acked(status, applied_seq))
     }
 
-    /// Build the gate reply for a frame the validator refused **permanently**.
+    /// Refuse a frame **permanently**, before anything of it installed.
     ///
-    /// The high-water-mark still advances: the same bytes will fail identically
-    /// on a re-push, so holding the stream for them buys nothing. A refusal the
-    /// sender *should* retry is not this — it reports an
+    /// The high-water-mark advances: the same bytes will fail identically on a
+    /// re-push, so holding the stream for them buys nothing. The refusal is an
+    /// error response, so the Control Plane cancels the frame's record and
+    /// journals the mark in a `SyncSeqAdvance` record of its own. Restart
+    /// replay then restores the mark and never applies the frame.
+    ///
+    /// A refusal the sender *should* retry is not this: it reports an
     /// [`AckStatus::Gap`] through [`Self::sync_ack_response`] and holds the
     /// mark, which is what keeps the re-push admissible.
     pub(in crate::data::executor) fn sync_reject_response(
-        &self,
+        &mut self,
         task: &ExecutionTask,
         violation: nodedb_types::sync::violation::ViolationType,
-        applied_seq: u64,
+        prov: &SyncProvenance,
     ) -> Response {
-        self.sync_outcome_response(task, SyncAckResult::rejected(violation, applied_seq))
+        self.sync_commit(prov);
+        let applied_seq = self.sync_hwm_value(prov.producer_id, prov.stream_id);
+        self.response_error(
+            task,
+            ErrorCode::SyncRejected {
+                violation,
+                applied_seq,
+                provenance: prov.clone(),
+            },
+        )
     }
 
     fn sync_outcome_response(&self, task: &ExecutionTask, gate_result: SyncAckResult) -> Response {

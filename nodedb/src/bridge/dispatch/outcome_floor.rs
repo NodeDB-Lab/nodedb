@@ -42,6 +42,13 @@
 //! back. Its record was minted outside a window, and the floor passed it
 //! before it reached the dispatcher. The open logs that record.
 //!
+//! ## Owned records
+//!
+//! A window owns every LSN it records with [`WriteWindow::own`]. A record
+//! sent to a core again through [`OutcomeFloor::open_existing`] must have no
+//! owner and no final outcome: an owner carries its record to an outcome, and
+//! a closed owner already did. Both refuse the resend, as the floor does.
+//!
 //! ## Closing a window
 //!
 //! [`WriteWindow::settle`] states that the outcome is final.
@@ -57,6 +64,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{error, warn};
 
+use super::closed_lsns::ClosedLsns;
 use crate::types::Lsn;
 
 /// The node's registry of open write windows.
@@ -73,6 +81,8 @@ struct OpenWindow {
     opened_at: Instant,
     /// Held until restart: the floor stays below it by design.
     held: bool,
+    /// LSNs this window owns.
+    lsns: Vec<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -89,6 +99,11 @@ struct Windows {
     published: u64,
     /// Number of held windows.
     held: usize,
+    /// Open windows owning each LSN.
+    owners: BTreeMap<u64, usize>,
+    /// LSNs above the published floor whose last owner closed. Bounded by
+    /// the number of live owned LSNs, whatever the floor does.
+    closed: ClosedLsns,
 }
 
 impl Windows {
@@ -101,6 +116,7 @@ impl Windows {
                 horizon,
                 opened_at: Instant::now(),
                 held: false,
+                lsns: Vec::new(),
             },
         );
         *self.horizons.entry(horizon).or_insert(0) += 1;
@@ -116,6 +132,43 @@ impl Windows {
             if *count == 0 {
                 self.horizons.remove(&window.horizon);
             }
+        }
+        let mut released = Vec::new();
+        for lsn in window.lsns {
+            if let Some(count) = self.owners.get_mut(&lsn) {
+                *count -= 1;
+                if *count == 0 {
+                    self.owners.remove(&lsn);
+                    released.push(lsn);
+                }
+            }
+        }
+        for lsn in released {
+            self.closed.insert(lsn, &self.owners);
+        }
+    }
+
+    /// Record that window `ticket` owns `lsn`.
+    fn own(&mut self, ticket: u64, lsn: u64) {
+        self.note(lsn);
+        let Some(window) = self.open.get_mut(&ticket) else {
+            return;
+        };
+        if !window.lsns.contains(&lsn) {
+            window.lsns.push(lsn);
+            *self.owners.entry(lsn).or_insert(0) += 1;
+        }
+    }
+
+    /// Why `lsn` is claimed: a live window owns it, or its last owner
+    /// closed. `None` when it is free.
+    fn claim(&self, lsn: u64) -> Option<ResendRefusal> {
+        if self.owners.contains_key(&lsn) {
+            Some(ResendRefusal::Owned)
+        } else if self.closed.contains(lsn) {
+            Some(ResendRefusal::Closed)
+        } else {
+            None
         }
     }
 
@@ -144,8 +197,21 @@ impl Windows {
             None => self.max_noted,
         };
         self.published = self.published.max(computed);
+        // A closed LSN at or below the floor is refused by the floor itself.
+        self.closed.prune_through(self.published);
         self.published
     }
+}
+
+/// Why [`OutcomeFloor::open_existing`] refused to send a record again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResendRefusal {
+    /// The floor passed the record: its outcome is final.
+    BelowFloor,
+    /// A live or held window owns the record and carries it to its outcome.
+    Owned,
+    /// The record's last owner closed: its outcome is final.
+    Closed,
 }
 
 /// The oldest window that holds the floor, and how long it has held it.
@@ -194,25 +260,33 @@ impl OutcomeFloor {
                      it was minted outside a write window"
                 );
             }
-            windows.note(lsn.as_u64());
-            windows.open(lsn.as_u64())
+            let ticket = windows.open(lsn.as_u64());
+            windows.own(ticket, lsn.as_u64());
+            ticket
         };
         WriteWindow::new(Arc::clone(self), ticket)
     }
 
     /// Open a window for an existing record at `lsn` that is sent to a core
-    /// again. `None` when the floor already passed `lsn`: the record's
-    /// outcome is final, and a second apply would land below the floor.
-    pub fn open_existing(self: &Arc<Self>, lsn: Lsn) -> Option<WriteWindow> {
+    /// again. Refused, with the reason, when the record must not be sent:
+    ///
+    /// - the floor passed `lsn`, so its outcome is final;
+    /// - a live or held window owns it, and carries it to its outcome;
+    /// - a window that owned it closed, so its outcome is final.
+    pub fn open_existing(self: &Arc<Self>, lsn: Lsn) -> Result<WriteWindow, ResendRefusal> {
         let ticket = {
             let mut windows = self.lock();
             if lsn.as_u64() <= windows.floor() {
-                return None;
+                return Err(ResendRefusal::BelowFloor);
             }
-            windows.note(lsn.as_u64());
-            windows.open(lsn.as_u64())
+            if let Some(refusal) = windows.claim(lsn.as_u64()) {
+                return Err(refusal);
+            }
+            let ticket = windows.open(lsn.as_u64());
+            windows.own(ticket, lsn.as_u64());
+            ticket
         };
-        Some(WriteWindow::new(Arc::clone(self), ticket))
+        Ok(WriteWindow::new(Arc::clone(self), ticket))
     }
 
     /// The current floor. Never lower than a value returned before.
@@ -303,6 +377,12 @@ impl WriteWindow {
     /// Record an LSN this window minted. Call it before the window settles.
     pub fn note_minted(&self, lsn: Lsn) {
         self.owner.lock().note(lsn.as_u64());
+    }
+
+    /// Record that this window owns the record at `lsn`. Call it when the
+    /// record is appended.
+    pub fn own(&self, lsn: Lsn) {
+        self.owner.lock().own(self.ticket, lsn.as_u64());
     }
 
     /// Close the window: the write's outcome is final.
@@ -492,13 +572,46 @@ mod tests {
         let window = floor.open_write();
         window.note_minted(Lsn::new(8));
         window.settle();
-        assert!(floor.open_existing(Lsn::new(8)).is_none());
+        assert_eq!(
+            floor.open_existing(Lsn::new(8)).err(),
+            Some(ResendRefusal::BelowFloor)
+        );
         let resent = floor
             .open_existing(Lsn::new(9))
             .expect("the floor has not passed 9");
         assert_eq!(floor.floor(), Lsn::new(8));
         resent.settle();
         assert_eq!(floor.floor(), Lsn::new(9));
+    }
+
+    /// A held window keeps the floor down for the rest of the process. The
+    /// closed LSNs above it stay a bounded number of ranges however many
+    /// records close, and each stays refused.
+    #[test]
+    fn closed_lsns_stay_bounded_while_a_window_is_held() {
+        let floor = OutcomeFloor::new();
+        floor.open_dispatched(Lsn::new(10)).hold();
+        for lsn in 11..5_011u64 {
+            floor.open_dispatched(Lsn::new(lsn)).settle();
+        }
+        assert_eq!(
+            floor.floor(),
+            Lsn::new(9),
+            "the held window keeps the floor down"
+        );
+        assert!(
+            floor.lock().closed.range_count() <= 2,
+            "closed LSNs must stay bounded while a window is held"
+        );
+        assert_eq!(
+            floor.open_existing(Lsn::new(2_500)).err(),
+            Some(ResendRefusal::Closed)
+        );
+        assert_eq!(
+            floor.open_existing(Lsn::new(10)).err(),
+            Some(ResendRefusal::Owned),
+            "the held window still owns its record"
+        );
     }
 
     #[test]

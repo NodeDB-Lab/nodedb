@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+mod closed_lsns;
 mod core_channel;
 mod dispatched_lsns;
 mod dispatcher;
@@ -17,5 +18,5 @@ pub use dispatcher::{
     DefaultPriorityResolver, Dispatcher,
 };
 pub use drain::CorePending;
-pub use outcome_floor::{OutcomeFloor, StuckFloor, WriteWindow};
+pub use outcome_floor::{OutcomeFloor, ResendRefusal, StuckFloor, WriteWindow};
 pub use refusal::DispatchRefusal;

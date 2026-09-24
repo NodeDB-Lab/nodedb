@@ -26,6 +26,8 @@ pub(in crate::data::executor) struct PointDeleteParams<'a> {
     pub database_id: u64,
     pub tid: u64,
     pub collection: &'a str,
+    /// The row's client identity. The graph cascade removes the edges of,
+    /// and marks deleted, the node this names.
     pub document_id: &'a str,
     pub surrogate: Surrogate,
     /// Roles held by the authenticated user. Currently unused by DELETE

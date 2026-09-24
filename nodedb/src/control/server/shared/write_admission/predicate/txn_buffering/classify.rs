@@ -62,7 +62,8 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
         ) => false,
 
         // `Merge`/`UpdateFromJoin` never reach this — staged as point ops instead.
-        // `BatchInsert` replays via `exec_tx_passthrough` (oracle divergence, see module doc).
+        // The session expander reshapes a `BatchInsert` page into point inserts,
+        // which stage like any other point write.
         PhysicalPlan::Document(
             DocumentOp::BatchInsert { .. }
             | DocumentOp::Merge { .. }
@@ -77,11 +78,11 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
         PhysicalPlan::Vector(
             VectorOp::Insert { .. } | VectorOp::BatchInsert { .. } | VectorOp::Delete { .. },
         ) => true,
-        // `SetParams` is `Permission::Alter`, but `to_replicated_entry` encodes it —
-        // classified as a write despite the DDL-like permission tier.
-        PhysicalPlan::Vector(VectorOp::SetParams { .. }) => true,
-        // `DropIndex` replicates the same way as `SetParams`.
-        PhysicalPlan::Vector(VectorOp::DropIndex { .. }) => true,
+        // ---- Vector: index DDL — encoded, but autocommit-only ----
+        // Like the KV and document index DDL: each rides its own autocommit
+        // `VectorParams` / `VectorIndexDrop` record, and a transaction's redo
+        // record carries no index DDL, so it executes at the statement.
+        PhysicalPlan::Vector(VectorOp::SetParams { .. } | VectorOp::DropIndex { .. }) => false,
 
         // ---- Vector: reads, not encoded ----
         PhysicalPlan::Vector(
@@ -144,8 +145,9 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | CrdtOp::ExportDelta { .. },
         ) => false,
 
-        // No encoder arm here (see module doc); reaches `exec_tx_passthrough` at COMMIT
-        // with no reject arm, at the cost of RYOW loss + the no-undo gap.
+        // Constraint installs arrive from the committed Raft applier, and a
+        // restore only previews a delta. Resolve emits no redo sub-record for
+        // either: neither changes a row.
         PhysicalPlan::Crdt(
             CrdtOp::SetConstraints { .. }
             | CrdtOp::DropConstraints { .. }
@@ -204,8 +206,8 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | KvOp::Transfer { .. }
             | KvOp::TransferItem { .. },
         ) => true,
-        // `Expire`/`Persist` are encoded (buffered), but `execute_tx_kv` rejects
-        // them inside a `TransactionBatch` — a COMMIT replay fails there regardless.
+        // `Expire`/`Persist` are buffered: staging records the TTL change in
+        // the overlay and COMMIT resolves it into the redo record.
         PhysicalPlan::Kv(KvOp::Expire { .. } | KvOp::Persist { .. }) => true,
 
         // ---- Kv: reads, not encoded ----
@@ -220,6 +222,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | KvOp::SortedIndexRange { .. }
             | KvOp::SortedIndexCount { .. }
             | KvOp::SortedIndexScore { .. }
+            | KvOp::SortedIndexTxnRead { .. }
             | KvOp::MaterializeScan { .. }
             // Read-only: reports what a governed write would apply; encodes nothing.
             | KvOp::ResolveWrite(_),
@@ -781,18 +784,6 @@ mod tests {
             PhysicalPlan::Vector(VectorOp::Delete {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 vector_id: 0,
-            }),
-            PhysicalPlan::Vector(VectorOp::SetParams {
-                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
-                field_name: String::new(),
-                dim: 0,
-                m: 0,
-                ef_construction: 0,
-                metric: String::new(),
-                index_type: String::new(),
-                pq_m: 0,
-                ivf_cells: 0,
-                ivf_nprobe: 0,
             }),
             PhysicalPlan::Vector(VectorOp::QueryStats {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1929,12 +1920,13 @@ mod tests {
             PhysicalPlan::Meta(MetaOp::RecordCalvinWriteVersions {
                 tenant_id: tenant(),
                 plans: Vec::new(),
-                epoch: 0,
-                position: 0,
             }),
             PhysicalPlan::Meta(MetaOp::CalvinFlush {
                 epoch: 0,
                 position: 0,
+                redo: Vec::new(),
+                collections: Vec::new(),
+                sum_targets: Vec::new(),
             }),
             PhysicalPlan::Meta(MetaOp::CalvinDrop {
                 epoch: 0,
@@ -2164,6 +2156,22 @@ mod tests {
             PhysicalPlan::Kv(KvOp::DropIndex {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 field: "f".into(),
+            }),
+            PhysicalPlan::Vector(VectorOp::SetParams {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                field_name: String::new(),
+                dim: 0,
+                m: 0,
+                ef_construction: 0,
+                metric: String::new(),
+                index_type: String::new(),
+                pq_m: 0,
+                ivf_cells: 0,
+                ivf_nprobe: 0,
+            }),
+            PhysicalPlan::Vector(VectorOp::DropIndex {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                field_name: String::new(),
             }),
         ];
         for p in &plans {

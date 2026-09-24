@@ -4,7 +4,11 @@
 //! applied result, marking the apply durable, recording write versions, and
 //! proposing the `CompletionAck`.
 
-use crate::bridge::envelope::{Response, Status};
+use crate::bridge::envelope::{ErrorCode, Response, Status};
+use crate::control::cluster::calvin::scheduler::driver::core::commit_resolution_dispatch::CommitResolution;
+use crate::control::cluster::calvin::scheduler::driver::core::deferred::{
+    DispatchOutcome, DispatchStep,
+};
 use crate::control::cluster::calvin::scheduler::driver::core::halt::{
     HaltReason, HaltStep, error_response_text,
 };
@@ -12,6 +16,11 @@ use crate::control::cluster::calvin::scheduler::driver::core::owed::SchedulerPro
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::control::cluster::calvin::scheduler::metrics::infra_abort_reason;
+
+/// The most flushes one committed txn sends. Each refused install rolled
+/// every write back, so a resend is safe. A refusal that outlasts the bound
+/// halts the scheduler.
+pub(in crate::control::cluster::calvin::scheduler::driver::core) const MAX_FLUSH_SENDS: u32 = 8;
 
 impl Scheduler {
     /// Run the commit tail once a flush/drop response has returned.
@@ -23,10 +32,12 @@ impl Scheduler {
     /// written so there is no result to deposit, no apply LSN, and no versions
     /// to record.
     ///
-    /// A non-`Ok` flush halts the scheduler. The flush handler removes the
-    /// staged buffer before it applies, so a second flush applies nothing, and
-    /// a skipped flush tears the committed txn on this replica. A non-`Ok` drop
-    /// completes the txn: under an abort verdict no replica writes anything.
+    /// A flush refused with `RetryableRefusal` rolled its install back and
+    /// kept the staged buffer, so the scheduler sends the same flush again, up
+    /// to [`MAX_FLUSH_SENDS`] sends. Any other non-`Ok` flush, or a refusal
+    /// past the bound, halts the scheduler: a skipped flush tears the
+    /// committed txn on this replica. A non-`Ok` drop completes the txn:
+    /// under an abort verdict no replica writes anything.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn finish_resolved_commit(
         &mut self,
         txn_id: TxnId,
@@ -35,6 +46,9 @@ impl Scheduler {
         redo_lsn: Option<crate::types::Lsn>,
     ) {
         if response.status != Status::Ok {
+            if committed && self.resend_refused_flush(txn_id, &response, redo_lsn) {
+                return;
+            }
             if committed {
                 self.halt_apply(
                     txn_id,
@@ -73,6 +87,44 @@ impl Scheduler {
         }
     }
 
+    /// Send the flush of `txn_id` again when the install refused it as
+    /// retryable and the send bound allows another. Returns whether the
+    /// refusal is handled: the flush went out again, or its dispatch failed
+    /// and the step's terminal handling ran.
+    fn resend_refused_flush(
+        &mut self,
+        txn_id: TxnId,
+        response: &Response,
+        redo_lsn: Option<crate::types::Lsn>,
+    ) -> bool {
+        if !matches!(
+            response.error_code.as_deref(),
+            Some(ErrorCode::RetryableRefusal { .. })
+        ) {
+            return false;
+        }
+        let sends = self
+            .pending
+            .get(&txn_id)
+            .map_or(MAX_FLUSH_SENDS, |pending| pending.flush_scope.sends);
+        if sends >= MAX_FLUSH_SENDS {
+            return false;
+        }
+        tracing::warn!(
+            vshard_id = self.vshard_id,
+            epoch = txn_id.epoch,
+            position = txn_id.position,
+            sends,
+            "calvin: the flush install was refused as retryable; sending it again"
+        );
+        if let DispatchOutcome::Failed(error) =
+            self.dispatch_commit_resolution(txn_id, CommitResolution::Flush { redo_lsn })
+        {
+            self.fail_dispatch_step(txn_id, DispatchStep::Flush, error);
+        }
+        true
+    }
+
     /// Deposit the applied result, durably mark the apply, record the apply's
     /// write versions, and propose the `CompletionAck`.
     ///
@@ -96,6 +148,9 @@ impl Scheduler {
         response: Response,
         redo_lsn: Option<crate::types::Lsn>,
     ) -> bool {
+        // The install folded materialized sums into target rows no redo
+        // sub-record names. The redo record's stamp carries the sum targets,
+        // so restart replay folds at the same LSN.
         // Deposit the FULL applied Response (affected-count + watermark + any
         // RETURNING rows) into the local sidecar BEFORE proposing the replicated
         // CompletionAck. The ack fires the coordinator's completion oneshot on
@@ -121,6 +176,8 @@ impl Scheduler {
             .unwrap_or((false, false));
         if has_primary_write {
             use std::collections::hash_map::Entry;
+
+            let response = statement_reply(response);
 
             use crate::control::state::CalvinApplyResult;
 
@@ -247,10 +304,20 @@ impl Scheduler {
     }
 }
 
+/// The response the statement drains. A flush whose install succeeded but
+/// whose reply failed to render answers `Ok` with the render error in
+/// `error_code`. The statement reports that error.
+fn statement_reply(mut response: Response) -> Response {
+    if response.status == Status::Ok && response.error_code.is_some() {
+        response.status = Status::Error;
+        response.payload = crate::bridge::envelope::Payload::empty();
+    }
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::envelope::ErrorCode;
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
         error_response, scheduler_with_pending,
     };
@@ -304,5 +371,94 @@ mod tests {
         assert!(scheduler.applied.is_applied(9, 2));
         assert!(!scheduler.pending.contains_key(&txn_id));
         assert!(!scheduler.is_apply_halted());
+    }
+    fn retryable_refusal() -> Response {
+        error_response(ErrorCode::RetryableRefusal {
+            reason: "install rolled back".to_string(),
+        })
+    }
+
+    /// A flush refused as retryable reaches the Data Plane again with the
+    /// same redo record, and the txn stays pending and unhalted.
+    #[tokio::test]
+    async fn retryable_flush_refusal_resends_the_same_flush() {
+        use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
+            await_data_plane_request, build_test_scheduler_with_data_side, make_sequenced_txn,
+            staged_pending,
+        };
+        use nodedb_physical::physical_plan::PhysicalPlan;
+        use nodedb_physical::physical_plan::meta::MetaOp;
+
+        let txn_id = TxnId::new(9, 2);
+        let registry = nodedb_cluster::calvin::CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, mut data_side) = build_test_scheduler_with_data_side(7, registry);
+        let mut pending = staged_pending(make_sequenced_txn(9, 2), txn_id);
+        pending.commit_state = Some(CommitState::AwaitingResolve {
+            committed: true,
+            redo_lsn: None,
+        });
+        pending.flush_scope.redo = vec![7, 7, 7];
+        pending.flush_scope.sends = 1;
+        scheduler.pending.insert(txn_id, pending);
+
+        scheduler.finish_resolved_commit(txn_id, retryable_refusal(), true, None);
+
+        assert!(!scheduler.is_apply_halted());
+        assert!(!scheduler.applied.is_applied(9, 2));
+        assert_eq!(
+            scheduler.pending.get(&txn_id).map(|p| p.flush_scope.sends),
+            Some(2)
+        );
+        assert!(
+            await_data_plane_request(&mut data_side, |plan| matches!(
+                plan,
+                PhysicalPlan::Meta(MetaOp::CalvinFlush { epoch: 9, position: 2, redo, .. })
+                    if redo == &vec![7, 7, 7]
+            ))
+            .await,
+            "the resent flush carries the same redo record"
+        );
+    }
+
+    /// A retryable refusal past the send bound halts like any flush error.
+    #[tokio::test]
+    async fn retryable_flush_refusal_past_the_bound_halts() {
+        let txn_id = TxnId::new(9, 2);
+        let (mut scheduler, _dir) = scheduler_with_pending(
+            txn_id,
+            CommitState::AwaitingResolve {
+                committed: true,
+                redo_lsn: None,
+            },
+        );
+        if let Some(pending) = scheduler.pending.get_mut(&txn_id) {
+            pending.flush_scope.sends = MAX_FLUSH_SENDS;
+        }
+
+        scheduler.finish_resolved_commit(txn_id, retryable_refusal(), true, None);
+
+        assert!(scheduler.pending.contains_key(&txn_id));
+        assert_eq!(
+            scheduler.apply_halt().map(|h| h.reason),
+            Some(HaltReason::FlushFailed)
+        );
+    }
+
+    /// A render error on an installed flush reaches the statement as a typed
+    /// error, and the txn completes.
+    #[test]
+    fn a_render_error_on_an_installed_flush_becomes_the_statement_error() {
+        let mut response = error_response(ErrorCode::Internal {
+            detail: "render".to_string(),
+        });
+        response.status = Status::Ok;
+
+        let reply = statement_reply(response);
+
+        assert_eq!(reply.status, Status::Error);
+        assert!(matches!(
+            reply.error_code.as_deref(),
+            Some(ErrorCode::Internal { .. })
+        ));
     }
 }

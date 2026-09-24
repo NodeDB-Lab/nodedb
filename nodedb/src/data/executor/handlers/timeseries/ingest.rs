@@ -24,8 +24,8 @@ use super::ingest_dispatch::{TimeseriesApplyMode, TimeseriesIngestParams};
 use super::rls_gate;
 
 impl CoreLoop {
-    /// Check every condition that could reject a commit-deferred ILP ingest
-    /// before it is allowed to cast a Calvin commit vote. The simulation is
+    /// Check every condition that could reject a staged ILP ingest before the
+    /// transaction is allowed to commit. The simulation is
     /// deliberately isolated from live state: schema evolution and dictionary
     /// probes run against an exact snapshot clone, so this cannot publish a
     /// schema, consume tag IDs, or create a memtable.
@@ -206,12 +206,6 @@ impl CoreLoop {
             );
         }
 
-        if mode == TimeseriesApplyMode::CommitDeferred
-            && let Err(error) = self.prevalidate_deferred_ilp_ingest(task, tid, collection, &lines)
-        {
-            return self.response_error(task, error);
-        }
-
         if mode == TimeseriesApplyMode::RedoInstall
             && let Err(error) = self.prepare_redo_ts_ingest(
                 task.request.database_id,
@@ -258,15 +252,6 @@ impl CoreLoop {
         // resolves every possible mid-record stop before the first row lands.
         let soft_limit = self.ts_tuning.memtable_budget_bytes;
         if self.ts_ingest_needs_flush(&key, &lines) {
-            if mode == TimeseriesApplyMode::CommitDeferred {
-                return self.response_error(
-                    task,
-                    ErrorCode::RejectedPrevalidation {
-                        reason: "transactional timeseries ingest requires a flush before mutation"
-                            .into(),
-                    },
-                );
-            }
             // A redo install flushed before it took its pre-image. A flush
             // now would drain rows that pre-image holds, so the install
             // fails and rolls back instead.

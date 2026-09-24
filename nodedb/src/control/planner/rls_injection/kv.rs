@@ -63,6 +63,14 @@ pub(super) fn inject_kv(ctx: &RlsCtx<'_>, op: &mut KvOp) -> crate::Result<()> {
              and the plan names only the index",
         ),
 
+        // Refuse: the reply is ranked keys, a rank, or a count, with no row
+        // body to filter. The plan names the owning collection.
+        KvOp::SortedIndexTxnRead { collection, .. } => ctx.refuse_if_policy(
+            collection,
+            "a sorted-index read returns ranked keys, a rank, or a count taken from stored rows, \
+             so the row filter cannot be evaluated",
+        ),
+
         // Admit now: a single-scalar `value` write has no field to name,
         // so it fails the same evaluation rather than a carve-out.
         KvOp::Put {

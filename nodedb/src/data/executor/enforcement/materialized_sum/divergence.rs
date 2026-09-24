@@ -78,7 +78,7 @@ impl CoreLoop {
         check: &SumTargetCheck<'_>,
         rows: &[serde_json::Value],
     ) -> bool {
-        if !self.ollp_is_group_leader {
+        if !self.calvin.ollp_is_group_leader {
             return false;
         }
         let key = (
@@ -147,7 +147,7 @@ impl CoreLoop {
         check: &SumTargetCheck<'_>,
         doc_ids: &[nodedb_types::StorageKey],
     ) -> bool {
-        if !self.ollp_is_group_leader || !self.declares_materialized_sums(check) {
+        if !self.calvin.ollp_is_group_leader || !self.declares_materialized_sums(check) {
             return false;
         }
         let mut rows: Vec<serde_json::Value> = Vec::with_capacity(doc_ids.len());

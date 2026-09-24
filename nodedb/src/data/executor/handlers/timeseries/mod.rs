@@ -16,6 +16,7 @@ pub mod paths;
 pub mod raw_scan;
 mod redo_ingest;
 mod resolve_ingest;
+mod returning_preview;
 mod rls_gate;
 mod scan;
 mod sort;

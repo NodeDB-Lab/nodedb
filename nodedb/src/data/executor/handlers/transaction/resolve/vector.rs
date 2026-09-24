@@ -20,11 +20,9 @@
 //! * `DeleteBySurrogate` → `RecordType::VectorDelete`,
 //!   `(collection, surrogate, field_name, provenance)`.
 //! * `DirectInsert` / `DirectInsertIfAbsent` / `DirectUpsert` /
-//!   `DirectUpdate` / `DirectDelete` / `DirectTruncate` in a session
-//!   transaction register their collection only: a vector-primary row is
-//!   staged whole, so those resolve from the overlay (`vector_primary`). In
-//!   a Calvin transaction, which stages none of them, each serializes to its
-//!   autocommit record shape (`vector_direct`).
+//!   `DirectUpdate` / `DirectDelete` / `DirectTruncate` register their
+//!   collection only: a vector-primary row is staged whole, so those resolve
+//!   from the overlay (`vector_primary`).
 //! * `MultiVectorInsert` → `RecordType::MultiVectorPut`, the 6-element
 //!   flattened multi-vector shape (`replay_multi_vector_put`).
 //! * `MultiVectorDelete` → `RecordType::MultiVectorDelete`,
@@ -58,11 +56,10 @@
 //! puts on replay, but `SetParams` is rejected here, so ordering reduces to the
 //! given plan order.
 
-use nodedb_physical::physical_plan::{VectorDirectWriteIntent, VectorOp};
+use nodedb_physical::physical_plan::VectorOp;
 use nodedb_wal::record::RecordType;
 
-use super::vector_direct::{DirectInsert, DirectUpdate, DirectWrites};
-use super::vector_primary::VectorPrimarySpec;
+use super::vector_primary::{VectorPrimaryCollections, VectorPrimarySpec, note_direct_write};
 use crate::control::server::wal_dispatch::{
     VectorResolvedDirectWritePayload, encode_multi_vector_delete_payload,
     encode_multi_vector_put_payload, encode_sparse_vector_delete_payload,
@@ -76,13 +73,13 @@ use crate::wal::RedoSubRecord;
 ///
 /// Writes serialize to their engine-native record shape (`VectorPut` /
 /// `VectorDelete` / `MultiVectorPut` / `MultiVectorDelete` / `SparseVectorPut`
-/// / `SparseVectorDelete`); a vector-primary direct write goes through
-/// `direct`; read and index-maintenance ops emit nothing; vector-index DDL
-/// (`SetParams`) raises a typed error (see module docs).
+/// / `SparseVectorDelete`); a vector-primary direct write registers its
+/// collection in `direct_writes`; read and index-maintenance ops emit nothing;
+/// vector-index DDL (`SetParams`) raises a typed error (see module docs).
 pub(super) fn serialize_vector_op(
     op: &VectorOp,
     ops: &mut Vec<RedoSubRecord>,
-    direct: &mut DirectWrites<'_>,
+    direct_writes: &mut VectorPrimaryCollections,
 ) -> crate::Result<()> {
     match op {
         VectorOp::Insert {
@@ -178,116 +175,73 @@ pub(super) fn serialize_vector_op(
                 .to_string(),
         }),
 
-        // Vector-primary direct writes: a session transaction resolves the
-        // staged rows from the overlay, a Calvin transaction serializes each
-        // op from its plan node (`vector_direct`).
+        // Vector-primary direct writes: the overlay holds each staged row, so
+        // the op only registers its collection (`vector_primary`).
         VectorOp::DirectUpsert {
             collection,
             field,
             surrogate,
             pk_bytes,
-            vector,
-            payload,
             quantization,
             storage_dtype,
             payload_indexes,
-            returning: _,
-            rls_filters: _,
-            on_conflict_updates,
-            rls_write_check: _,
-        } => direct.insert(
-            DirectInsert {
-                collection: collection.as_str(),
-                field,
-                surrogate: *surrogate,
-                pk_bytes,
-                vector,
-                payload,
-                spec: spec(*quantization, *storage_dtype, payload_indexes),
-                intent: VectorDirectWriteIntent::Upsert,
-                on_conflict_updates,
-            },
-            ops,
-        ),
-        VectorOp::DirectInsert {
+            ..
+        }
+        | VectorOp::DirectInsert {
             collection,
             field,
             surrogate,
             pk_bytes,
-            vector,
-            payload,
             quantization,
             storage_dtype,
             payload_indexes,
-            returning: _,
-            rls_filters: _,
+            ..
         }
         | VectorOp::DirectInsertIfAbsent {
             collection,
             field,
             surrogate,
             pk_bytes,
-            vector,
-            payload,
             quantization,
             storage_dtype,
             payload_indexes,
-            returning: _,
-            rls_filters: _,
-        } => direct.insert(
-            DirectInsert {
-                collection: collection.as_str(),
+            ..
+        } => {
+            note_direct_write(
+                direct_writes,
+                collection.as_str(),
                 field,
-                surrogate: *surrogate,
-                pk_bytes,
-                vector,
-                payload,
-                spec: spec(*quantization, *storage_dtype, payload_indexes),
-                intent: if matches!(op, VectorOp::DirectInsertIfAbsent { .. }) {
-                    VectorDirectWriteIntent::InsertIfAbsent
-                } else {
-                    VectorDirectWriteIntent::Insert
-                },
-                on_conflict_updates: &[],
-            },
-            ops,
-        ),
+                Some(spec(*quantization, *storage_dtype, payload_indexes)),
+                Some((*surrogate, pk_bytes.as_slice())),
+            );
+            Ok(())
+        }
         VectorOp::DirectUpdate {
             collection,
             field,
-            targets,
-            new_vector,
-            payload_patch,
             quantization,
             storage_dtype,
             payload_indexes,
-            returning: _,
-            rls_filters: _,
-            rls_write_check: _,
-        } => direct.update(
-            DirectUpdate {
-                collection: collection.as_str(),
+            ..
+        } => {
+            note_direct_write(
+                direct_writes,
+                collection.as_str(),
                 field,
-                targets,
-                new_vector: new_vector.as_deref(),
-                payload_patch,
-                spec: spec(*quantization, *storage_dtype, payload_indexes),
-            },
-            ops,
-        ),
+                Some(spec(*quantization, *storage_dtype, payload_indexes)),
+                None,
+            );
+            Ok(())
+        }
         VectorOp::DirectDelete {
-            collection,
-            field,
-            targets,
-            returning: _,
-            rls_filters: _,
-            rls_write_check: _,
-        } => direct.delete(collection.as_str(), field, targets, ops),
-        VectorOp::DirectTruncate {
-            collection,
-            field,
-            restart_identity: _,
-        } => direct.truncate(collection.as_str(), field, ops),
+            collection, field, ..
+        }
+        | VectorOp::DirectTruncate {
+            collection, field, ..
+        } => {
+            note_direct_write(direct_writes, collection.as_str(), field, None, None);
+            Ok(())
+        }
         // Resolved vector-primary write, replayed via
         // `replay_vector_resolved_direct_write`: the same record the
         // autocommit path appends, carrying every row's stored image.

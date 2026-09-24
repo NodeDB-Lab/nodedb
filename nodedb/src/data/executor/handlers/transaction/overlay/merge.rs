@@ -39,7 +39,6 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::filter_match::matches_with_resolved_schema;
 use crate::data::executor::handlers::transaction::overlay::{Staged, StagedTtl};
 use crate::engine::document::store::extract_index_values;
-use crate::engine::kv::current_ms;
 use crate::types::{DatabaseId, TenantId, TxnId};
 
 /// Inputs for [`CoreLoop::merge_overlay_into_index_lookup`].
@@ -209,7 +208,7 @@ impl CoreLoop {
             .map(|(key, _)| super::super::stage_write::kv_row_identity(key))
             .collect();
 
-        let now_ms = current_ms();
+        let now_ms = self.kv_read_now_ms();
         let staged_expired = |doc_id: &RowIdentity| -> bool {
             matches!(
                 overlay.get_ttl_by_doc_id(coll_key, doc_id),

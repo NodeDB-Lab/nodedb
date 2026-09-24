@@ -4,14 +4,16 @@
 //!
 //! Each test follows the same pattern as `test_transaction_matrix`:
 //!   1. Pre-condition: write a known state.
-//!   2. TransactionBatch: valid write (first op) + deterministically failing write (second op).
-//!   3. Assert: the first write was fully rolled back.
+//!   2. Transaction: valid write (first op) + deterministically refused write (second op).
+//!   3. Assert: the transaction committed none of its writes.
 
 use nodedb::bridge::envelope::Status;
 use nodedb_physical::physical_plan::{
-    AggregateSpec, ColumnarInsertIntent, ColumnarOp, DocumentOp, KvOp, MetaOp, PhysicalPlan,
-    QueryOp, TimeseriesOp,
+    AggregateSpec, ColumnarInsertIntent, ColumnarOp, DocumentOp, KvOp, PhysicalPlan, QueryOp,
+    TimeseriesOp,
 };
+
+use nodedb_test_support::tx_batch_helpers::commit_plans;
 
 use super::helpers::*;
 
@@ -98,17 +100,19 @@ fn rollback_matrix_kv_then_doc_fail() {
     // Seed the doc that will be used as a conflict trigger.
     send_ok(&mut core, &mut tx, &mut rx, doc_put_conflict_seed("docs"));
 
-    // TransactionBatch: overwrite KV key + failing doc insert (key exists, not if_absent).
-    let resp = send_raw(
+    // Transaction: overwrite KV key + failing doc insert (key exists, not if_absent).
+    let resp = commit_plans(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
-            plans: vec![kv_put(b"k1", b"modified"), doc_insert_conflict("docs")],
-        }),
+        vec![kv_put(b"k1", b"modified"), doc_insert_conflict("docs")],
+        10,
     );
-    assert_eq!(resp.status, Status::Error, "batch must fail on conflict");
+    assert_eq!(
+        resp.status,
+        Status::Error,
+        "the transaction must be refused on conflict"
+    );
 
     // KV key must be rolled back to "original".
     let r = send_raw(&mut core, &mut tx, &mut rx, kv_get(b"k1"));
@@ -117,10 +121,10 @@ fn rollback_matrix_kv_then_doc_fail() {
 }
 
 // ---------------------------------------------------------------------------
-// Pair: Document write (first) × KV DDL inside batch (rejected)
+// Pair: Document write (first) × KV DDL inside a transaction (rejected)
 // ---------------------------------------------------------------------------
 // KV DDL ops (RegisterIndex, Truncate, etc.) are rejected with a typed error
-// when inside a TransactionBatch. This test verifies the document write rolled
+// when inside a committed transaction. This test verifies the document write rolled
 // back correctly when the KV write itself fails due to a prior-doc write
 // combined with a KV Put that fails.
 //
@@ -136,21 +140,23 @@ fn rollback_matrix_doc_then_kv_fail() {
     // Seed the conflict document.
     send_ok(&mut core, &mut tx, &mut rx, doc_put_conflict_seed("docs"));
 
-    // TransactionBatch: write a new KV key + failing doc insert.
+    // Transaction: write a new KV key + failing doc insert.
     // On failure the new KV key must not persist.
-    let resp = send_raw(
+    let resp = commit_plans(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
-            plans: vec![
-                kv_put(b"new_key", b"should_not_persist"),
-                doc_insert_conflict("docs"),
-            ],
-        }),
+        vec![
+            kv_put(b"new_key", b"should_not_persist"),
+            doc_insert_conflict("docs"),
+        ],
+        20,
     );
-    assert_eq!(resp.status, Status::Error, "batch must fail on conflict");
+    assert_eq!(
+        resp.status,
+        Status::Error,
+        "the transaction must be refused on conflict"
+    );
 
     // "new_key" must have been rolled back — Get should return empty/NotFound.
     let r = send_raw(&mut core, &mut tx, &mut rx, kv_get(b"new_key"));
@@ -175,29 +181,31 @@ fn rollback_matrix_kv_delete_then_doc_fail() {
     // Seed conflict doc.
     send_ok(&mut core, &mut tx, &mut rx, doc_put_conflict_seed("docs"));
 
-    // TransactionBatch: delete the KV key + failing doc insert.
-    let resp = send_raw(
+    // Transaction: delete the KV key + failing doc insert.
+    let resp = commit_plans(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
-            plans: vec![
-                PhysicalPlan::Kv(KvOp::Delete {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "kv_coll",
-                    ),
-                    keys: vec![b"del_key".to_vec()],
-                    rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-                    returning: None,
-                    rls_filters: Vec::new(),
-                }),
-                doc_insert_conflict("docs"),
-            ],
-        }),
+        vec![
+            PhysicalPlan::Kv(KvOp::Delete {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "kv_coll",
+                ),
+                keys: vec![b"del_key".to_vec()],
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: Vec::new(),
+            }),
+            doc_insert_conflict("docs"),
+        ],
+        30,
     );
-    assert_eq!(resp.status, Status::Error, "batch must fail");
+    assert_eq!(
+        resp.status,
+        Status::Error,
+        "the transaction must be refused"
+    );
 
     // "del_key" must be restored to "keep_me".
     let r = send_raw(&mut core, &mut tx, &mut rx, kv_get(b"del_key"));
@@ -217,32 +225,34 @@ fn rollback_matrix_kv_batch_put_then_doc_fail() {
     send_ok(&mut core, &mut tx, &mut rx, kv_put(b"k_a", b"a_orig"));
     send_ok(&mut core, &mut tx, &mut rx, doc_put_conflict_seed("docs"));
 
-    let resp = send_raw(
+    let resp = commit_plans(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
-            plans: vec![
-                PhysicalPlan::Kv(KvOp::BatchPut {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "kv_coll",
-                    ),
-                    entries: vec![
-                        (b"k_a".to_vec(), b"a_new".to_vec()),
-                        (b"k_b".to_vec(), b"b_new".to_vec()),
-                    ],
-                    ttl_ms: 0,
-                    surrogates: vec![nodedb_types::Surrogate::ZERO; 2],
-                    returning: None,
-                    rls_filters: Vec::new(),
-                }),
-                doc_insert_conflict("docs"),
-            ],
-        }),
+        vec![
+            PhysicalPlan::Kv(KvOp::BatchPut {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "kv_coll",
+                ),
+                entries: vec![
+                    (b"k_a".to_vec(), b"a_new".to_vec()),
+                    (b"k_b".to_vec(), b"b_new".to_vec()),
+                ],
+                ttl_ms: 0,
+                surrogates: vec![nodedb_types::Surrogate::ZERO; 2],
+                returning: None,
+                rls_filters: Vec::new(),
+            }),
+            doc_insert_conflict("docs"),
+        ],
+        40,
     );
-    assert_eq!(resp.status, Status::Error, "batch must fail");
+    assert_eq!(
+        resp.status,
+        Status::Error,
+        "the transaction must be refused"
+    );
 
     // k_a must be restored to "a_orig".
     let r = send_raw(&mut core, &mut tx, &mut rx, kv_get(b"k_a"));
@@ -256,7 +266,7 @@ fn rollback_matrix_kv_batch_put_then_doc_fail() {
 }
 
 // ---------------------------------------------------------------------------
-// Verify: doc get after the batch returns the pre-batch state
+// Verify: doc get after the transaction returns the pre-transaction state
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -273,17 +283,15 @@ fn rollback_matrix_doc_then_doc_conflict_kv_intact() {
     send_ok(&mut core, &mut tx, &mut rx, doc_put_conflict_seed("docs"));
 
     // Batch: KV write + doc conflict — the KV write happened, must roll back.
-    let resp = send_raw(
+    let resp = commit_plans(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
-            plans: vec![
-                kv_put(b"anchor", b"anchor_modified"),
-                doc_insert_conflict("docs"),
-            ],
-        }),
+        vec![
+            kv_put(b"anchor", b"anchor_modified"),
+            doc_insert_conflict("docs"),
+        ],
+        50,
     );
     assert_eq!(resp.status, Status::Error);
 
@@ -292,7 +300,7 @@ fn rollback_matrix_doc_then_doc_conflict_kv_intact() {
     assert_eq!(r.status, Status::Ok);
     assert_eq!(&*r.payload, b"anchor_val");
 
-    // The seeded conflict doc must still be readable (it was not part of the batch).
+    // The seeded conflict doc must still be readable (it was not part of the transaction).
     let r = send_raw(&mut core, &mut tx, &mut rx, doc_get("docs", "conflict_doc"));
     assert_eq!(r.status, Status::Ok, "conflict_doc must still exist");
 }
@@ -300,7 +308,7 @@ fn rollback_matrix_doc_then_doc_conflict_kv_intact() {
 // ---------------------------------------------------------------------------
 // Pair: Columnar insert (first) × Document conflict (second) — columnar rolled back
 //
-// A row is inserted into a plain columnar collection inside a TransactionBatch.
+// A row is inserted into a plain columnar collection inside a committed transaction.
 // The second plan is a PointInsert that conflicts (doc already exists).
 // After rollback, the columnar collection must be empty.
 // ---------------------------------------------------------------------------
@@ -317,47 +325,48 @@ fn rollback_matrix_columnar_then_doc_fail() {
         doc_put_conflict_seed("conflict_coll"),
     );
 
-    // Confirm columnar collection is empty before the batch.
+    // Confirm columnar collection is empty before the transaction.
     let before = core.scan_collection(0, 1, "metrics", 100).unwrap();
-    assert!(before.is_empty(), "columnar must be empty before batch");
+    assert!(
+        before.is_empty(),
+        "columnar must be empty before the transaction"
+    );
 
     // Build a columnar insert payload: one row.
     let rows = serde_json::json!([{"id": "r1", "val": 42}]);
     let payload = nodedb_types::json_to_msgpack(&rows).unwrap();
 
-    // TransactionBatch: columnar insert + failing doc insert.
-    let resp = send_raw(
+    // Transaction: columnar insert + failing doc insert.
+    let resp = commit_plans(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
-            plans: vec![
-                PhysicalPlan::Columnar(ColumnarOp::Insert {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "metrics",
-                    ),
-                    payload,
-                    format: "msgpack".into(),
-                    intent: ColumnarInsertIntent::Insert,
-                    on_conflict_updates: Vec::new(),
-                    surrogates: Vec::new(),
-                    schema_bytes: Vec::new(),
-                    provenance: None,
-                    wal_lsn: None,
-                    rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-                    returning: None,
-                    rls_filters: Vec::new(),
-                }),
-                doc_insert_conflict("conflict_coll"),
-            ],
-        }),
+        vec![
+            PhysicalPlan::Columnar(ColumnarOp::Insert {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "metrics",
+                ),
+                payload,
+                format: "msgpack".into(),
+                intent: ColumnarInsertIntent::Insert,
+                on_conflict_updates: Vec::new(),
+                surrogates: Vec::new(),
+                schema_bytes: Vec::new(),
+                provenance: None,
+                wal_lsn: None,
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: Vec::new(),
+            }),
+            doc_insert_conflict("conflict_coll"),
+        ],
+        60,
     );
     assert_eq!(
         resp.status,
         Status::Error,
-        "batch must fail on doc conflict"
+        "the transaction must be refused on doc conflict"
     );
     assert!(
         !matches!(
@@ -380,7 +389,7 @@ fn rollback_matrix_columnar_then_doc_fail() {
 // ---------------------------------------------------------------------------
 // Pair: Columnar insert (first) × Columnar insert — verify aggregate count
 //
-// Inserts one row outside the batch (baseline), then in a failing batch inserts
+// Inserts one row outside the transaction (baseline), then in a refused transaction inserts
 // another row + conflicts. After rollback the aggregate count must be 1.
 // ---------------------------------------------------------------------------
 
@@ -396,7 +405,7 @@ fn rollback_matrix_columnar_count_after_rollback() {
         doc_put_conflict_seed("conflict_coll"),
     );
 
-    // Baseline: insert one row outside any batch (committed).
+    // Baseline: insert one row outside any transaction (committed).
     let baseline = serde_json::json!([{"id": "baseline", "val": 1}]);
     let baseline_payload = nodedb_types::json_to_msgpack(&baseline).unwrap();
     send_ok(
@@ -422,38 +431,40 @@ fn rollback_matrix_columnar_count_after_rollback() {
         }),
     );
 
-    // Failed batch: inserts a second row + doc conflict.
+    // Refused transaction: inserts a second row + doc conflict.
     let extra = serde_json::json!([{"id": "rolled_back", "val": 2}]);
     let extra_payload = nodedb_types::json_to_msgpack(&extra).unwrap();
-    let resp = send_raw(
+    let resp = commit_plans(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
-            plans: vec![
-                PhysicalPlan::Columnar(ColumnarOp::Insert {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "metrics2",
-                    ),
-                    payload: extra_payload,
-                    format: "msgpack".into(),
-                    intent: ColumnarInsertIntent::Insert,
-                    on_conflict_updates: Vec::new(),
-                    surrogates: Vec::new(),
-                    schema_bytes: Vec::new(),
-                    provenance: None,
-                    wal_lsn: None,
-                    rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-                    returning: None,
-                    rls_filters: Vec::new(),
-                }),
-                doc_insert_conflict("conflict_coll"),
-            ],
-        }),
+        vec![
+            PhysicalPlan::Columnar(ColumnarOp::Insert {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "metrics2",
+                ),
+                payload: extra_payload,
+                format: "msgpack".into(),
+                intent: ColumnarInsertIntent::Insert,
+                on_conflict_updates: Vec::new(),
+                surrogates: Vec::new(),
+                schema_bytes: Vec::new(),
+                provenance: None,
+                wal_lsn: None,
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: Vec::new(),
+            }),
+            doc_insert_conflict("conflict_coll"),
+        ],
+        70,
     );
-    assert_eq!(resp.status, Status::Error, "batch must fail");
+    assert_eq!(
+        resp.status,
+        Status::Error,
+        "the transaction must be refused"
+    );
 
     // Aggregate count must be 1 (only the baseline row).
     let agg_payload = send_ok(
@@ -500,7 +511,7 @@ fn rollback_matrix_columnar_count_after_rollback() {
 // ---------------------------------------------------------------------------
 // Pair: Timeseries ingest (first) × Document conflict (second) — ts rolled back
 //
-// A timeseries ingest inside a TransactionBatch followed by a failing doc insert
+// A timeseries ingest inside a committed transaction followed by a failing doc insert
 // must leave the timeseries memtable empty (truncated back by apply_undo_timeseries).
 // ---------------------------------------------------------------------------
 
@@ -516,39 +527,37 @@ fn rollback_matrix_timeseries_then_doc_fail() {
         doc_put_conflict_seed("conflict_coll"),
     );
 
-    // TransactionBatch: timeseries ingest (3 rows) + doc conflict (fails).
+    // Transaction: timeseries ingest (3 rows) + doc conflict (fails).
     let ilp = "cpu,host=s1 value=0.5 1000000000\n\
                cpu,host=s1 value=0.6 2000000000\n\
                cpu,host=s1 value=0.7 3000000000\n";
-    let resp = send_raw(
+    let resp = commit_plans(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
-            plans: vec![
-                PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "cpu",
-                    ),
-                    payload: ilp.as_bytes().to_vec(),
-                    format: "ilp".into(),
-                    wal_lsn: None,
-                    surrogates: Vec::new(),
-                    provenance: None,
-                    rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-                    returning: None,
-                    rls_filters: Vec::new(),
-                }),
-                doc_insert_conflict("conflict_coll"),
-            ],
-        }),
+        vec![
+            PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "cpu",
+                ),
+                payload: ilp.as_bytes().to_vec(),
+                format: "ilp".into(),
+                wal_lsn: None,
+                surrogates: Vec::new(),
+                provenance: None,
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: Vec::new(),
+            }),
+            doc_insert_conflict("conflict_coll"),
+        ],
+        80,
     );
     assert_eq!(
         resp.status,
         Status::Error,
-        "batch must fail on doc conflict"
+        "the transaction must be refused on doc conflict"
     );
     assert!(
         !matches!(
@@ -598,9 +607,9 @@ fn rollback_matrix_timeseries_then_doc_fail() {
 }
 
 // ---------------------------------------------------------------------------
-// Pair: Timeseries ingest (first) — baseline + batch — count after rollback
+// Pair: Timeseries ingest (first) — baseline + transaction — count after rollback
 //
-// Ingests rows outside any batch (committed), then a failing batch ingests more.
+// Ingests rows outside any transaction (committed), then a refused transaction ingests more.
 // After rollback the scan must return only the committed rows.
 // ---------------------------------------------------------------------------
 
@@ -639,36 +648,38 @@ fn rollback_matrix_timeseries_count_after_rollback() {
         }),
     );
 
-    // Failed batch: ingest 3 more rows + doc conflict.
+    // Refused transaction: ingest 3 more rows + doc conflict.
     let extra_ilp = "temp,host=s1 value=3.0 3000000000\n\
                      temp,host=s1 value=4.0 4000000000\n\
                      temp,host=s1 value=5.0 5000000000\n";
-    let resp = send_raw(
+    let resp = commit_plans(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
-            plans: vec![
-                PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "temp",
-                    ),
-                    payload: extra_ilp.as_bytes().to_vec(),
-                    format: "ilp".into(),
-                    wal_lsn: None,
-                    surrogates: Vec::new(),
-                    provenance: None,
-                    rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-                    returning: None,
-                    rls_filters: Vec::new(),
-                }),
-                doc_insert_conflict("conflict_coll"),
-            ],
-        }),
+        vec![
+            PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "temp",
+                ),
+                payload: extra_ilp.as_bytes().to_vec(),
+                format: "ilp".into(),
+                wal_lsn: None,
+                surrogates: Vec::new(),
+                provenance: None,
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                returning: None,
+                rls_filters: Vec::new(),
+            }),
+            doc_insert_conflict("conflict_coll"),
+        ],
+        90,
     );
-    assert_eq!(resp.status, Status::Error, "batch must fail");
+    assert_eq!(
+        resp.status,
+        Status::Error,
+        "the transaction must be refused"
+    );
 
     // Scan must return exactly 2 rows (the baseline only).
     let scan_resp = send_raw(

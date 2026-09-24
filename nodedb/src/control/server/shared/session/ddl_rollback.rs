@@ -110,7 +110,11 @@ mod tests {
     const TENANT: u64 = 3;
 
     fn buffered(entry: CatalogEntry) -> BufferedDdl {
-        BufferedDdl { entry, audit: None }
+        BufferedDdl {
+            entry,
+            audit: None,
+            effects: Vec::new(),
+        }
     }
 
     fn put(name: &str) -> BufferedDdl {

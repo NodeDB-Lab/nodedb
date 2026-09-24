@@ -25,7 +25,7 @@ impl CoreLoop {
         tid: u64,
         plans: &[PhysicalPlan],
     ) -> crate::Result<bool> {
-        if !self.ollp_is_group_leader {
+        if !self.calvin.ollp_is_group_leader {
             return Ok(true);
         }
         let database_id = task.request.database_id.as_u64();

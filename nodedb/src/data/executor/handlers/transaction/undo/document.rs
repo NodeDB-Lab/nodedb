@@ -37,9 +37,6 @@ impl CoreLoop {
             UndoEntry::PutDocument {
                 collection,
                 document_id,
-                // Rollback restores prior storage state; it emits no event, so
-                // the row's client identity has no reader here.
-                identity: _,
                 old_value,
                 bitemporal_sys_from_ms,
                 bitemporal_index_tuples,
@@ -131,9 +128,6 @@ impl CoreLoop {
             UndoEntry::DeleteDocument {
                 collection,
                 document_id,
-                // Rollback restores prior storage state; it emits no event, so
-                // the row's client identity has no reader here.
-                identity: _,
                 old_value,
                 bitemporal_sys_from_ms,
                 bitemporal_index_tuples,
@@ -428,7 +422,6 @@ mod tests {
         let entry = UndoEntry::PutDocument {
             collection: "c".into(),
             document_id: d1,
-            identity: d1.to_identity(),
             old_value: None,
             bitemporal_sys_from_ms: Some(t),
             bitemporal_index_tuples: vec![("status".into(), "active".into())],
@@ -483,7 +476,6 @@ mod tests {
         let entry = UndoEntry::DeleteDocument {
             collection: "c".into(),
             document_id: d1,
-            identity: d1.to_identity(),
             old_value: b"v1".to_vec(),
             bitemporal_sys_from_ms: Some(2_000),
             bitemporal_index_tuples: vec![("status".into(), "active".into())],
@@ -519,7 +511,6 @@ mod tests {
         let restore = UndoEntry::PutDocument {
             collection: "c".into(),
             document_id: storage_key(0),
-            identity: storage_key(0).to_identity(),
             old_value: None,
             bitemporal_sys_from_ms: None,
             bitemporal_index_tuples: Vec::new(),
@@ -537,7 +528,6 @@ mod tests {
         let genesis = UndoEntry::PutDocument {
             collection: "c".into(),
             document_id: storage_key(0),
-            identity: storage_key(0).to_identity(),
             old_value: None,
             bitemporal_sys_from_ms: None,
             bitemporal_index_tuples: Vec::new(),
@@ -562,7 +552,6 @@ mod tests {
         let overwrite = UndoEntry::PutDocument {
             collection: "c".into(),
             document_id: key1,
-            identity: key1.to_identity(),
             old_value: Some(b"old".to_vec()),
             bitemporal_sys_from_ms: None,
             bitemporal_index_tuples: Vec::new(),
@@ -582,7 +571,6 @@ mod tests {
         let insert = UndoEntry::PutDocument {
             collection: "c".into(),
             document_id: key2,
-            identity: key2.to_identity(),
             old_value: None,
             bitemporal_sys_from_ms: None,
             bitemporal_index_tuples: Vec::new(),
@@ -604,7 +592,6 @@ mod tests {
         let entry = UndoEntry::DeleteDocument {
             collection: "c".into(),
             document_id: key1,
-            identity: key1.to_identity(),
             old_value: b"prior".to_vec(),
             bitemporal_sys_from_ms: None,
             bitemporal_index_tuples: Vec::new(),

@@ -26,10 +26,12 @@ mod index_record;
 mod materialized_view;
 mod procedure;
 mod trigger;
+mod vector_index_params;
 
 pub use self::collection::{resolve_collection, resolve_tenant_collections};
 pub use self::function::resolve_function;
-pub use self::index_record::resolve_index_record;
+pub use self::index_record::{resolve_index_record, resolve_index_records};
 pub use self::materialized_view::resolve_materialized_view;
 pub use self::procedure::resolve_procedure;
 pub use self::trigger::resolve_trigger;
+pub use self::vector_index_params::resolve_vector_index_params;

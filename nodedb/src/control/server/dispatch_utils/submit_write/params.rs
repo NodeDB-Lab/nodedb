@@ -49,6 +49,17 @@ pub(crate) enum WalDurability {
 }
 
 impl WalDurability {
+    /// Whether the caller supplied records it appended for this write.
+    pub(crate) fn has_minted(&self) -> bool {
+        matches!(
+            self,
+            Self::CallerSupplied {
+                minted: Some(_),
+                ..
+            }
+        )
+    }
+
     /// Take the caller's minted records out, leaving `None` in their place.
     pub(crate) fn take_minted(&mut self) -> Option<MintedRecords> {
         match self {

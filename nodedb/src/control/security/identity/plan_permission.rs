@@ -288,6 +288,7 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             | KvOp::SortedIndexRange { .. }
             | KvOp::SortedIndexCount { .. }
             | KvOp::SortedIndexScore { .. }
+            | KvOp::SortedIndexTxnRead { .. }
             // Read-only: reports what a governed write would apply; that write is authorized separately.
             | KvOp::ResolveWrite(_),
         ) => Permission::Read,

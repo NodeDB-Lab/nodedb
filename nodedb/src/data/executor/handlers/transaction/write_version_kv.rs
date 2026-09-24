@@ -105,7 +105,8 @@ impl CoreLoop {
             | KvOp::SortedIndexTopK { .. }
             | KvOp::SortedIndexRange { .. }
             | KvOp::SortedIndexCount { .. }
-            | KvOp::SortedIndexScore { .. } => {}
+            | KvOp::SortedIndexScore { .. }
+            | KvOp::SortedIndexTxnRead { .. } => {}
             // Index DDL: no row key written.
             KvOp::RegisterIndex { .. }
             | KvOp::DropIndex { .. }

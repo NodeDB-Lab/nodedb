@@ -12,7 +12,4 @@ mod spatial;
 mod text;
 mod timeseries;
 mod vector;
-mod vector_direct;
 mod vector_primary;
-
-pub(in crate::data::executor) use entry::StagedWrites;

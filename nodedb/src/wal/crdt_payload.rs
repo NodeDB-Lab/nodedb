@@ -30,6 +30,9 @@ pub(crate) struct CrdtDeltaWalPayload {
     pub document_id: Option<String>,
     pub surrogate: Option<u32>,
     pub signing: Option<CrdtDeltaSigning>,
+    /// The peer that produced the delta. Replay validates under it, so a
+    /// dead-letter entry replay stores names the same peer the live apply did.
+    pub peer_id: u64,
 }
 
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
@@ -41,6 +44,7 @@ struct CrdtDeltaWalPayloadV4 {
     expected_frontier_digest: Option<[u8; 32]>,
     document_id: Option<String>,
     surrogate: Option<u32>,
+    peer_id: u64,
     auth_user_id: u64,
     auth_device_id: u64,
     auth_seq_no: u64,
@@ -57,6 +61,7 @@ struct CrdtDeltaWalPayloadV3 {
     expected_frontier_digest: Option<[u8; 32]>,
     document_id: Option<String>,
     surrogate: Option<u32>,
+    peer_id: u64,
 }
 
 /// Exact fenced wire shape emitted before sparse replay identity was retained.
@@ -94,11 +99,17 @@ impl CrdtDeltaWalPayload {
             document_id,
             surrogate,
             signing: None,
+            peer_id: 0,
         }
     }
 
     pub(crate) fn with_signing(mut self, signing: CrdtDeltaSigning) -> Self {
         self.signing = Some(signing);
+        self
+    }
+
+    pub(crate) fn with_peer_id(mut self, peer_id: u64) -> Self {
+        self.peer_id = peer_id;
         self
     }
 
@@ -113,6 +124,7 @@ impl CrdtDeltaWalPayload {
                 expected_frontier_digest: self.expected_frontier_digest,
                 document_id: self.document_id.clone(),
                 surrogate: self.surrogate,
+                peer_id: self.peer_id,
                 auth_user_id: signing.auth_user_id,
                 auth_device_id: signing.auth_device_id,
                 auth_seq_no: signing.auth_seq_no,
@@ -128,6 +140,7 @@ impl CrdtDeltaWalPayload {
             expected_frontier_digest: self.expected_frontier_digest,
             document_id: self.document_id.clone(),
             surrogate: self.surrogate,
+            peer_id: self.peer_id,
         })
     }
 
@@ -151,7 +164,8 @@ impl CrdtDeltaWalPayload {
                 auth_seq_no: v4.auth_seq_no,
                 delta_signature: v4.delta_signature,
                 required: v4.signing_required,
-            }));
+            })
+            .with_peer_id(v4.peer_id));
         }
         if let Ok(v3) = zerompk::from_msgpack::<CrdtDeltaWalPayloadV3>(bytes)
             && v3.format == CRDT_DELTA_WAL_FORMAT_V3
@@ -163,7 +177,8 @@ impl CrdtDeltaWalPayload {
                 v3.expected_frontier_digest,
                 v3.document_id,
                 v3.surrogate,
-            ));
+            )
+            .with_peer_id(v3.peer_id));
         }
         if let Ok(v2) = zerompk::from_msgpack::<CrdtDeltaWalPayloadV2>(bytes)
             && v2.format == CRDT_DELTA_WAL_FORMAT_V2
@@ -274,5 +289,26 @@ mod tests {
         let decoded =
             CrdtDeltaWalPayload::decode(&payload.encode().expect("encode")).expect("decode v3");
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn the_producing_peer_round_trips_in_both_current_formats() {
+        let unsigned =
+            CrdtDeltaWalPayload::new(vec![1], Some("docs".into()), None, None, None, None)
+                .with_peer_id(0xFEED);
+        let decoded =
+            CrdtDeltaWalPayload::decode(&unsigned.encode().expect("encode")).expect("decode v3");
+        assert_eq!(decoded.peer_id, 0xFEED);
+
+        let signed = unsigned.clone().with_signing(CrdtDeltaSigning {
+            auth_user_id: 1,
+            auth_device_id: 2,
+            auth_seq_no: 3,
+            delta_signature: [4; 32],
+            required: true,
+        });
+        let decoded =
+            CrdtDeltaWalPayload::decode(&signed.encode().expect("encode")).expect("decode v4");
+        assert_eq!(decoded.peer_id, 0xFEED);
     }
 }

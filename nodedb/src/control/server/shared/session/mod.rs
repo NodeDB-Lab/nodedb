@@ -11,6 +11,7 @@ pub mod cross_shard_mode;
 mod cursor;
 pub mod cursor_spill;
 pub mod ddl_buffer;
+pub mod ddl_effect;
 mod ddl_flush;
 pub mod ddl_rollback;
 pub mod deadline;

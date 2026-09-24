@@ -134,17 +134,12 @@ pub(super) struct NodeLabelsUndo {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
-
     use super::*;
-    use crate::bridge::envelope::{PhysicalPlan, Priority, Request};
     use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
     use crate::data::executor::handlers::point::apply_put::PointPutParams;
-    use crate::data::executor::handlers::transaction::sub_plan_doc::TxPointDelete;
-    use crate::data::executor::task::ExecutionTask;
+    use crate::data::executor::handlers::transaction::redo_apply::test_commit::doc_delete_sub_record;
     use crate::engine::document::store::CollectionConfig;
-    use crate::types::{DatabaseId, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
-    use nodedb_physical::physical_plan::DocumentOp;
+    use crate::types::TenantId;
     use nodedb_types::Surrogate;
 
     const DB: u64 = 0;
@@ -201,41 +196,6 @@ mod tests {
         txn.commit().unwrap();
     }
 
-    /// A throwaway `ExecutionTask` (DEFAULT database id, inert `PointGet` plan) —
-    /// the only fields the tx doc helpers read are `database_id` and `request_id`.
-    fn dummy_task() -> ExecutionTask {
-        ExecutionTask::new(Request {
-            request_id: RequestId::new(1),
-            tenant_id: TenantId::new(TID),
-            database_id: DatabaseId::DEFAULT,
-            vshard_id: VShardId::new(0),
-            plan: PhysicalPlan::Document(DocumentOp::PointGet {
-                collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, COLL),
-                document_id: PK.into(),
-                surrogate: Surrogate::ZERO,
-                pk_bytes: Vec::new(),
-                rls_filters: Vec::new(),
-                system_time: nodedb_types::SystemTimeScope::Current,
-                valid_at_ms: None,
-            }),
-            deadline: Instant::now() + Duration::from_secs(30),
-            priority: Priority::Normal,
-            trace_id: TraceId::ZERO,
-            consistency: ReadConsistency::Strong,
-            idempotency_key: None,
-            event_source: crate::event::EventSource::User,
-            user_roles: Vec::new(),
-            user_id: None,
-            statement_digest: None,
-            txn_id: None,
-            wal_lsn: None,
-            resolved_now_ms: None,
-            admission: crate::bridge::envelope::Admission::Exempt(
-                crate::bridge::envelope::ExemptReason::Read,
-            ),
-        })
-    }
-
     #[test]
     fn mark_node_returns_true_only_on_first_insert() {
         let dir = tempfile::tempdir().unwrap();
@@ -265,21 +225,8 @@ mod tests {
         assert!(core.mark_node_deleted(DB, TID, PK));
         assert!(core.is_node_deleted(DB, TID, PK));
 
-        let task = dummy_task();
-        let mut undo_log = Vec::new();
-        core.tx_point_delete(
-            TxPointDelete {
-                task: &task,
-                tid: TID,
-                collection: COLL,
-                document_id: PK,
-                surrogate: Surrogate::new(1),
-                user_roles: &[],
-                resolved_sum_targets: &[],
-            },
-            &mut undo_log,
-        )
-        .unwrap();
+        let undo_log =
+            core.install_with_undo_for_test(TID, 20, vec![doc_delete_sub_record(COLL, PK, 1)]);
         // The delete's mark was a no-op (already marked) → no MarkNodeDeleted undo
         // was captured, so rollback must leave the tombstone intact.
         assert!(

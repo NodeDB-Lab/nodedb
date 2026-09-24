@@ -182,7 +182,9 @@ impl CoreLoop {
         labels: &[String],
         op: crate::event::WriteOp,
     ) {
-        if let Some(lsn) = task.wal_lsn()
+        // A committed-redo apply moves the watermark once the record settled.
+        if self.redo_apply.scope.is_none()
+            && let Some(lsn) = task.wal_lsn()
             && lsn > self.watermark
         {
             self.watermark = lsn;

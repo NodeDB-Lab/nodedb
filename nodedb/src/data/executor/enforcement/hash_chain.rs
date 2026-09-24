@@ -285,12 +285,11 @@ mod tests {
             core.doc_configs.insert(config_key.clone(), config);
 
             for (surrogate, doc_id, value) in rows.iter().take(2) {
-                let resp = core.execute_transaction_batch(
+                let resp = core.commit_plans_for_test(
                     &task,
                     TID,
                     &[put_plan(*surrogate, doc_id, value)],
-                    &[],
-                    None,
+                    10 + u64::from(*surrogate),
                 );
                 assert_eq!(resp.status, Status::Ok, "pre-restart insert must succeed");
             }
@@ -318,12 +317,11 @@ mod tests {
         core.doc_configs.insert(config_key.clone(), config);
 
         let (surrogate, doc_id, value) = &rows[2];
-        let resp = core.execute_transaction_batch(
+        let resp = core.commit_plans_for_test(
             &task,
             TID,
             &[put_plan(*surrogate, doc_id, value)],
-            &[],
-            None,
+            10 + u64::from(*surrogate),
         );
         assert_eq!(resp.status, Status::Ok, "post-restart insert must succeed");
 

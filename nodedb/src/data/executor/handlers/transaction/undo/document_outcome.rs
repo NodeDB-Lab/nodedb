@@ -12,7 +12,7 @@
 //! Entries are pushed in the order the writes happened. Rollback runs the log
 //! in reverse.
 
-use nodedb_types::{RowIdentity, StorageKey};
+use nodedb_types::StorageKey;
 
 use crate::data::executor::enforcement::materialized_sum::apply::TargetWrite;
 use crate::data::executor::handlers::point::apply_delete::PointDeleteOutcome;
@@ -27,8 +27,6 @@ pub(in crate::data::executor::handlers) struct DocumentRow<'a> {
     pub tid: u64,
     pub collection: &'a str,
     pub storage_key: StorageKey,
-    /// The row's client identity, as its event names it.
-    pub identity: RowIdentity,
 }
 
 /// Push the undo entries that reverse every materialized-sum target row the
@@ -44,7 +42,6 @@ pub(in crate::data::executor::handlers) fn push_target_undo(
         undo_log.push(UndoEntry::PutDocument {
             collection: target.collection.clone(),
             document_id: StorageKey::for_surrogate(target.surrogate),
-            identity: target.identity.clone(),
             old_value: outcome.prior_value.clone(),
             bitemporal_sys_from_ms: outcome.bitemporal_sys_from_ms,
             bitemporal_index_tuples: outcome.bitemporal_index_tuples.clone(),
@@ -73,7 +70,6 @@ pub(in crate::data::executor::handlers) fn push_put_undo(
     undo_log.push(UndoEntry::PutDocument {
         collection: row.collection.to_string(),
         document_id: row.storage_key,
-        identity: row.identity,
         old_value: outcome.prior_value,
         bitemporal_sys_from_ms: outcome.bitemporal_sys_from_ms,
         bitemporal_index_tuples: outcome.bitemporal_index_tuples,
@@ -100,7 +96,6 @@ pub(in crate::data::executor::handlers) fn push_delete_undo(
         undo_log.push(UndoEntry::DeleteDocument {
             collection: row.collection.to_string(),
             document_id: row.storage_key,
-            identity: row.identity,
             old_value,
             bitemporal_sys_from_ms: outcome.bitemporal_sys_from_ms,
             bitemporal_index_tuples: outcome.bitemporal_index_tuples,

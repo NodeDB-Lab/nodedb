@@ -79,6 +79,32 @@ enum CatchupResult {
     Idle,
 }
 
+/// What catch-up does with one timeseries record.
+enum Resend {
+    /// Send the record again under this window.
+    Send(crate::control::server::dispatch_utils::MintedRecords),
+    /// The record's outcome is final: step past it.
+    Skip,
+    /// A live or held window owns the record and carries it to its outcome.
+    /// The cursor must not pass it, or the record is never reached again.
+    Wait,
+}
+
+/// Decide whether the record at `lsn` is sent again.
+///
+/// A record at or below the outcome floor, or one whose last owner closed,
+/// has a final outcome: sending it again would apply it twice or below a
+/// published watermark. A record a window still owns is left for that
+/// window.
+fn plan_resend(floor: &Arc<crate::bridge::dispatch::OutcomeFloor>, lsn: Lsn) -> Resend {
+    use crate::bridge::dispatch::ResendRefusal;
+    match crate::control::server::dispatch_utils::MintedRecords::resend(floor, lsn) {
+        Ok(minted) => Resend::Send(minted),
+        Err(ResendRefusal::BelowFloor | ResendRefusal::Closed) => Resend::Skip,
+        Err(ResendRefusal::Owned) => Resend::Wait,
+    }
+}
+
 /// Run one catch-up cycle: read new WAL records, dispatch timeseries batches.
 ///
 /// Uses paginated mmap replay to bound memory. Passes WAL LSNs to the
@@ -176,15 +202,15 @@ async fn run_catchup_cycle(shared: &SharedState) -> CatchupResult {
             continue;
         }
 
-        // A record at or below the outcome floor has a final outcome. Sending
-        // it again would apply it below the floor, where a published
-        // watermark already claims its outcome.
-        let Some(minted) = crate::control::server::dispatch_utils::MintedRecords::resend(
-            &shared.outcome_floor,
-            Lsn::new(record.header.lsn),
-        ) else {
-            max_lsn = max_lsn.max(record.header.lsn);
-            continue;
+        let minted = match plan_resend(&shared.outcome_floor, Lsn::new(record.header.lsn)) {
+            Resend::Send(minted) => minted,
+            Resend::Skip => {
+                max_lsn = max_lsn.max(record.header.lsn);
+                continue;
+            }
+            // The cursor stays below this record, so a later cycle reaches
+            // it again once its window settles.
+            Resend::Wait => break,
         };
 
         let tenant_id = TenantId::new(record.header.tenant_id);
@@ -256,5 +282,27 @@ async fn run_catchup_cycle(shared: &SharedState) -> CatchupResult {
         CatchupResult::Dispatched
     } else {
         CatchupResult::Idle
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::dispatch::OutcomeFloor;
+
+    /// Catch-up never steps past a record a live or held window owns, skips
+    /// one whose outcome is final, and sends a free one.
+    #[test]
+    fn catchup_waits_on_an_owned_record_and_skips_a_closed_one() {
+        let floor = OutcomeFloor::new();
+        floor.open_dispatched(Lsn::new(5)).hold();
+        floor.open_dispatched(Lsn::new(6)).settle();
+
+        assert!(matches!(plan_resend(&floor, Lsn::new(5)), Resend::Wait));
+        assert!(matches!(plan_resend(&floor, Lsn::new(6)), Resend::Skip));
+        match plan_resend(&floor, Lsn::new(7)) {
+            Resend::Send(minted) => minted.settle(),
+            Resend::Skip | Resend::Wait => panic!("a free record above the floor is sent"),
+        }
     }
 }

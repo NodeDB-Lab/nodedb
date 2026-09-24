@@ -4,9 +4,8 @@
 //! transaction -- staged into the per-transaction overlay with
 //! read-your-own-writes on columnar scans, a real affected-row count, and
 //! `ROLLBACK` discarding the staged rows -- mirroring the Document/KV/FTS
-//! staging already in place. COMMIT's durable replay is unchanged: the
-//! buffered `ColumnarOp::Insert` plan is still replayed through
-//! `execute_columnar_insert` inside the COMMIT `TransactionBatch`.
+//! staging already in place. COMMIT resolves the staged rows into the
+//! transaction's redo record, which the redo install applies.
 //!
 //! Columnar is the first non-point-write, non-Document/KV engine wired into
 //! the staging overlay; row identity is the cross-engine surrogate rather

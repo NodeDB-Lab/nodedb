@@ -205,6 +205,7 @@ fn kv_write_shape(op: &KvOp) -> Option<StagedWriteShape> {
         | KvOp::SortedIndexRange { .. }
         | KvOp::SortedIndexCount { .. }
         | KvOp::SortedIndexScore { .. }
+        | KvOp::SortedIndexTxnRead { .. }
         | KvOp::MaterializeScan { .. }
         // Autocommit-only: transaction resolve rejects both.
         | KvOp::ResolveWrite(_)

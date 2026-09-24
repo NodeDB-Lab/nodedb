@@ -18,6 +18,7 @@ pub(in crate::data::executor) mod rls;
 mod scan;
 pub(in crate::data::executor) mod sorted;
 pub(in crate::data::executor) mod sorted_index_compute;
+mod sorted_txn;
 pub(in crate::data::executor) mod transfer;
 pub(in crate::data::executor) mod ttl;
 

@@ -350,7 +350,8 @@ pub(super) fn kv_write(op: &KvOp) -> crate::Result<Option<ReplicatedWrite>> {
         | KvOp::SortedIndexTopK { .. }
         | KvOp::SortedIndexRange { .. }
         | KvOp::SortedIndexCount { .. }
-        | KvOp::SortedIndexScore { .. } => return Ok(None),
+        | KvOp::SortedIndexScore { .. }
+        | KvOp::SortedIndexTxnRead { .. } => return Ok(None),
     }))
 }
 

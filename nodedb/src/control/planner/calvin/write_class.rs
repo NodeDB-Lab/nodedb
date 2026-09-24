@@ -139,13 +139,14 @@ fn kv_is_write(op: &KvOp) -> bool {
         | KvOp::BatchGet { .. }
         | KvOp::FieldGet { .. }
         | KvOp::MaterializeScan { .. }
-        // `SortedIndexRank`/`TopK`/`Range`/`Count`/`Score` are `Permission::Read`
-        // (query-only) despite the `SortedIndex*` naming.
+        // `SortedIndexRank`/`TopK`/`Range`/`Count`/`Score`/`TxnRead` are
+        // `Permission::Read` (query-only) despite the `SortedIndex*` naming.
         | KvOp::SortedIndexRank { .. }
         | KvOp::SortedIndexTopK { .. }
         | KvOp::SortedIndexRange { .. }
         | KvOp::SortedIndexCount { .. }
         | KvOp::SortedIndexScore { .. }
+        | KvOp::SortedIndexTxnRead { .. }
         // Read-only: reports what a governed write would apply, mutates
         // nothing, and is `NotAWrite` in `plan_vshard`.
         | KvOp::ResolveWrite(_)

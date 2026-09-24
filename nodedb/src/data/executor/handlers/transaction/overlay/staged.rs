@@ -5,7 +5,7 @@
 //! Holds the not-yet-durable writes an in-flight transaction has executed at
 //! statement time (`MetaOp::StageWrite`), so an in-transaction point write
 //! returns its real command tag and raises constraint violations immediately,
-//! while COMMIT's `TransactionBatch` replay remains the sole durable apply.
+//! while COMMIT's redo install remains the sole durable apply.
 //!
 //! Keying rationale: the real storage key for a document is the SURROGATE
 //! (`u32`) — `apply_point_put` keys `sparse.versioned_put_in_txn` by
@@ -63,6 +63,10 @@ pub struct CollectionOverlay {
     /// timestamp, keyed by the batch's first surrogate. COMMIT resolve stamps
     /// the batch's untimed rows with it. Never consulted by other engines.
     pub(super) ingest_now_by_surrogate: HashMap<u32, i64>,
+    /// The instant each staged unkeyed timeseries ingest read, in stage
+    /// order. COMMIT resolve stamps the untimed rows of the Nth unkeyed
+    /// ingest with the Nth instant.
+    pub(super) unkeyed_ingest_now: Vec<i64>,
 }
 
 impl CollectionOverlay {
@@ -74,6 +78,7 @@ impl CollectionOverlay {
             && self.bitemporal_by_surrogate.is_empty()
             && self.base_pk_by_surrogate.is_empty()
             && self.ingest_now_by_surrogate.is_empty()
+            && self.unkeyed_ingest_now.is_empty()
     }
 }
 
@@ -84,7 +89,7 @@ impl CollectionOverlay {
 /// dropping post-savepoint entries would lose an earlier same-slot write.
 /// Restoring the recorded prior slot rewinds without that loss.
 #[derive(Debug, Clone)]
-struct OverlayUndo {
+pub(super) struct OverlayUndo {
     coll_key: (DatabaseId, TenantId, String),
     surrogate: u32,
     doc_id: RowIdentity,
@@ -96,9 +101,22 @@ struct OverlayUndo {
     prev_doc_binding: Option<u32>,
 }
 
+/// One overlay slot a staged mutation touched after a journal marker.
+#[derive(Debug)]
+pub struct TouchedSlot<'a> {
+    pub surrogate: u32,
+    /// The client identity the first mutation after the marker bound.
+    pub doc_id: &'a RowIdentity,
+    /// The slot's staged value at the marker. `None` means the row was
+    /// unstaged, so its value at the marker is its base row.
+    pub before: Option<&'a Staged>,
+    /// The slot's staged value now.
+    pub after: Option<&'a Staged>,
+}
+
 /// One undo-journal entry: a slot mutation or a truncate marker.
 #[derive(Debug, Clone)]
-enum JournalEntry {
+pub(super) enum JournalEntry {
     /// A slot's prior state, captured before a staged value/TTL mutation.
     Slot(OverlayUndo),
     /// A truncate marker set on `coll_key`. `prev` is the journal position
@@ -107,6 +125,10 @@ enum JournalEntry {
     Truncated {
         coll_key: (DatabaseId, TenantId, String),
         prev: Option<usize>,
+    },
+    /// An unkeyed timeseries ingest instant appended to `coll_key`.
+    UnkeyedIngest {
+        coll_key: (DatabaseId, TenantId, String),
     },
 }
 
@@ -126,7 +148,7 @@ pub struct TxnOverlay {
     /// reverse down to a marker. Always appended to by the value/TTL mutators
     /// and `mark_truncated` so nothing escapes it; dropped with the overlay
     /// when the transaction resolves.
-    journal: Vec<JournalEntry>,
+    pub(super) journal: Vec<JournalEntry>,
     /// Advanced by every staged write AND every in-transaction
     /// read-your-own-write, so a live transaction's stamp always tracks the
     /// clock. See [`LeaseStamp`].
@@ -218,6 +240,12 @@ impl TxnOverlay {
         self.truncated.contains_key(coll_key)
     }
 
+    /// Whether this transaction staged anything for `coll_key`: a value, a
+    /// tombstone, a TTL delta, or a truncate marker.
+    pub fn stages_collection(&self, coll_key: &(DatabaseId, TenantId, String)) -> bool {
+        self.is_truncated(coll_key) || self.collections.contains_key(coll_key)
+    }
+
     /// Whether a base row of `coll_key` with no staged mutation is visible to
     /// this transaction: hidden while the collection is truncated.
     pub fn base_visible(&self, coll_key: &(DatabaseId, TenantId, String)) -> bool {
@@ -300,6 +328,33 @@ impl TxnOverlay {
         self.journal.len()
     }
 
+    /// Every slot of `coll_key` that a staged value or TTL mutation touched
+    /// after `marker`. Each slot appears once, in the order it was first
+    /// touched.
+    pub fn slots_touched_since(
+        &self,
+        marker: usize,
+        coll_key: &(DatabaseId, TenantId, String),
+    ) -> Vec<TouchedSlot<'_>> {
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut slots = Vec::new();
+        for entry in self.journal.iter().skip(marker) {
+            let JournalEntry::Slot(undo) = entry else {
+                continue;
+            };
+            if &undo.coll_key != coll_key || !seen.insert(undo.surrogate) {
+                continue;
+            }
+            slots.push(TouchedSlot {
+                surrogate: undo.surrogate,
+                doc_id: &undo.doc_id,
+                before: undo.prev_value.as_ref(),
+                after: self.get(coll_key, undo.surrogate),
+            });
+        }
+        slots
+    }
+
     /// Revert every staged value/TTL mutation and truncate marker recorded
     /// after `marker`, restoring each slot to its pre-mutation state (or
     /// removing it when the prior slot was absent), then truncate the journal
@@ -320,6 +375,12 @@ impl TxnOverlay {
                         Some(position) => self.truncated.insert(coll_key, position),
                         None => self.truncated.remove(&coll_key),
                     };
+                    continue;
+                }
+                JournalEntry::UnkeyedIngest { coll_key } => {
+                    if let Some(overlay) = self.collections.get_mut(&coll_key) {
+                        overlay.unkeyed_ingest_now.pop();
+                    }
                     continue;
                 }
             };
@@ -467,6 +528,31 @@ mod tests {
         );
         let collected: Vec<_> = overlay.iter_for_collection(&key("users")).collect();
         assert_eq!(collected.len(), 1);
+    }
+
+    /// A slot touched twice after the marker is reported once, with its value
+    /// at the marker and its value now. Other collections and earlier
+    /// mutations are left out.
+    #[test]
+    fn slots_touched_since_reports_each_slot_once_with_its_marker_value() {
+        let mut overlay = TxnOverlay::new();
+        overlay.insert_put(key("users"), 1, &id("a"), vec![1]);
+        let marker = overlay.journal_len();
+        overlay.insert_put(key("users"), 1, &id("a"), vec![2]);
+        overlay.insert_put(key("users"), 2, &id("b"), vec![3]);
+        overlay.insert_tombstone(key("users"), 1, &id("a"));
+        overlay.insert_put(key("orders"), 1, &id("x"), vec![4]);
+
+        let slots = overlay.slots_touched_since(marker, &key("users"));
+
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].surrogate, 1);
+        assert_eq!(slots[0].doc_id, &id("a"));
+        assert_eq!(slots[0].before, Some(&Staged::Put(vec![1])));
+        assert_eq!(slots[0].after, Some(&Staged::Tombstone));
+        assert_eq!(slots[1].surrogate, 2);
+        assert_eq!(slots[1].before, None);
+        assert_eq!(slots[1].after, Some(&Staged::Put(vec![3])));
     }
 
     #[test]

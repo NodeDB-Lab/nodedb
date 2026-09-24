@@ -251,6 +251,7 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | KvOp::SortedIndexRange { .. }
             | KvOp::SortedIndexCount { .. }
             | KvOp::SortedIndexScore { .. }
+            | KvOp::SortedIndexTxnRead { .. }
             | KvOp::MaterializeScan { .. }
             | KvOp::ResolveWrite(_)
             | KvOp::ResolvedWrite { .. },

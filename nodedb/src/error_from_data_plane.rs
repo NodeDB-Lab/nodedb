@@ -11,7 +11,7 @@
 
 use nodedb_types::error::{ErrorCode as PublicCode, NodeDbError};
 
-use crate::bridge::envelope::{CounterFault, ErrorCode};
+use crate::bridge::envelope::ErrorCode;
 
 /// Convert a deterministic Data-Plane code into the public error a client
 /// can classify.
@@ -34,6 +34,11 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
         }
         ErrorCode::RejectedPrevalidation { reason } => {
             NodeDbError::prevalidation_rejected("data plane", reason)
+        }
+        // A sync frame the validator refused is a constraint verdict on the
+        // frame.
+        ErrorCode::SyncRejected { violation, .. } => {
+            NodeDbError::constraint_violation("", "sync", violation.to_string())
         }
         // Nothing was applied and the identical frame is expected to succeed
         // once the transient precondition resolves, so it presents as the
@@ -111,14 +116,9 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
         }
         // The same text the SQL surfaces send, with the collection in the
         // details. RESP renders the bare Redis text from the code itself.
-        ErrorCode::CounterFault { collection, fault } => NodeDbError::kv_counter_fault(
-            collection,
-            fault.message(),
-            matches!(
-                fault,
-                CounterFault::IntegerOverflow | CounterFault::NonFinite
-            ),
-        ),
+        ErrorCode::CounterFault { collection, fault } => {
+            NodeDbError::kv_counter_fault(collection, fault.message(), fault.is_out_of_range())
+        }
         ErrorCode::InsufficientBalance { collection, detail } => {
             NodeDbError::insufficient_balance(collection, detail)
         }
@@ -166,6 +166,7 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::envelope::CounterFault;
 
     #[test]
     fn constraint_code_classifies_as_constraint_violation() {

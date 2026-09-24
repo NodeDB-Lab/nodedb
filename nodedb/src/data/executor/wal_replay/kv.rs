@@ -82,9 +82,36 @@ impl CoreLoop {
                     puts += applied;
                     continue;
                 }
+                // kv_expire / kv_persist change only the expiry of the value
+                // the key holds when the record applies — see
+                // `wal_replay_kv_expiry.rs`. A committed redo record carries
+                // them for a transaction's TTL-only writes.
+                if let Some(applied) = self.try_replay_kv_expire(
+                    &record.payload,
+                    tenant_id,
+                    database_id,
+                    now_ms,
+                    record_lsn,
+                    tombstones,
+                ) {
+                    puts += applied;
+                    continue;
+                }
+                if let Some(applied) = self.try_replay_kv_persist(
+                    &record.payload,
+                    tenant_id,
+                    database_id,
+                    now_ms,
+                    record_lsn,
+                    tombstones,
+                ) {
+                    puts += applied;
+                    continue;
+                }
                 // A committed redo record carries only absolute `kv_put`
-                // post-images. Every other shape is left unclaimed, so the
-                // validate pass refuses the record before any arm writes.
+                // post-images and TTL changes. Every other shape is left
+                // unclaimed, so the validate pass refuses the record before
+                // any arm writes.
                 if self.applying_committed_redo() {
                     continue;
                 }
@@ -180,30 +207,6 @@ impl CoreLoop {
 
                 // kv_register_sorted_index — see `wal_replay_kv_sorted_index.rs`.
                 if let Some(applied) = self.try_replay_kv_register_sorted_index(
-                    &record.payload,
-                    tenant_id,
-                    database_id,
-                    record_lsn,
-                    tombstones,
-                ) {
-                    puts += applied;
-                    continue;
-                }
-
-                // kv_expire — see `wal_replay_kv_expiry.rs`.
-                if let Some(applied) = self.try_replay_kv_expire(
-                    &record.payload,
-                    tenant_id,
-                    database_id,
-                    record_lsn,
-                    tombstones,
-                ) {
-                    puts += applied;
-                    continue;
-                }
-
-                // kv_persist — see `wal_replay_kv_expiry.rs`.
-                if let Some(applied) = self.try_replay_kv_persist(
                     &record.payload,
                     tenant_id,
                     database_id,

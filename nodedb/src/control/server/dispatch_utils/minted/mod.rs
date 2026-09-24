@@ -9,4 +9,3 @@ mod resolve;
 
 pub(crate) use owned::{Collect, OwnedResponse, OwnedWait, await_response_owned};
 pub(crate) use records::{MintedRecords, RecordOwner};
-pub(crate) use resolve::resolve_on_response;

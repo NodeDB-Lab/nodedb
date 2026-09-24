@@ -2,15 +2,14 @@
 
 //! Post-apply write-version recording for committed Calvin transactions.
 //!
-//! A Calvin apply's committed WAL LSN is allocated only AFTER the apply
-//! succeeds — the `CalvinApplied` WAL record is appended on the Control Plane
-//! once the executor response returns — so the apply itself carries no
-//! committed LSN and the per-core write-version index cannot be advanced in
-//! place (the dispatch stamps `wal_lsn: None`). Once the scheduler has that
-//! LSN it dispatches a one-way, record-only op back to the same core, which
-//! funnels the transaction's locally-applied write plans through the shared
-//! write-version recorder at that LSN — the same shard-local WAL-LSN space the
-//! single-shard fast path and read watermarks use.
+//! A Calvin apply's committed WAL LSN is the LSN of its `TransactionRedo`
+//! record, or of the `CalvinApplied` marker a transaction that wrote nothing
+//! here appends. The install records the collection floors and index-value
+//! versions of the record at its LSN. The per-key versions of the local write
+//! plans are recorded here: the scheduler dispatches a one-way, record-only op
+//! back to the same core, which funnels the plans through the shared
+//! write-version recorder at that LSN — the same shard-local WAL-LSN space
+//! the single-shard fast path and read watermarks use.
 
 use super::deferred::{DispatchOutcome, DispatchStep};
 use super::scheduler::Scheduler;
@@ -21,7 +20,7 @@ use nodedb_physical::physical_plan::meta::MetaOp;
 
 impl Scheduler {
     /// Record the per-key write versions of a just-committed Calvin
-    /// transaction's locally-applied write plans at its CalvinApplied WAL
+    /// transaction's locally-applied write plans at its committed WAL
     /// `applied_lsn`.
     ///
     /// Dispatches a record-only [`MetaOp::RecordCalvinWriteVersions`] op back to
@@ -88,8 +87,6 @@ impl Scheduler {
         let plan = PhysicalPlan::Meta(MetaOp::RecordCalvinWriteVersions {
             tenant_id,
             plans: local,
-            epoch,
-            position,
         });
         // The committed write-LSN for this Calvin apply — recorded against
         // every key the plans wrote, in the same WAL-LSN space as fast-path.
@@ -142,11 +139,7 @@ mod tests {
         let arrived = await_data_plane_request(&mut data_side, |plan| {
             matches!(
                 plan,
-                PhysicalPlan::Meta(MetaOp::RecordCalvinWriteVersions {
-                    epoch: 21,
-                    position: 0,
-                    ..
-                })
+                PhysicalPlan::Meta(MetaOp::RecordCalvinWriteVersions { .. })
             )
         })
         .await;

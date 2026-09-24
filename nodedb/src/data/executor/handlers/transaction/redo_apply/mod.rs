@@ -12,15 +12,26 @@
 //! - [`events`]: the record's Event Plane output.
 //! - [`sub_ops`]: typed views of the redo sub-records.
 //! - [`state`]: the per-core state and per-record scope.
+//! - [`test_commit`]: a test driver for a session commit on one core.
+//! - [`install_refusal_tests`]: one committed and one refused install per
+//!   engine kind.
+//! - [`calvin_fold_tests`]: a Calvin record folds the same live and in
+//!   restart replay.
 
+#[cfg(test)]
+mod calvin_fold_tests;
 mod cover;
 mod document;
 mod entry;
 mod events;
+#[cfg(test)]
+mod install_refusal_tests;
 mod passes;
 mod settle;
 mod state;
 mod sub_ops;
+#[cfg(test)]
+pub(in crate::data::executor) mod test_commit;
 mod validate;
 
 pub(in crate::data::executor) use document::CommittedDocWrite;

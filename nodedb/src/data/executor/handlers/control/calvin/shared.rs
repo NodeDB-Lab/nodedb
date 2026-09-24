@@ -33,8 +33,13 @@ impl CoreLoop {
     where
         E: Into<ErrorCode>,
     {
-        self.commit_pending.remove(&(epoch, position, vshard_id));
+        self.calvin
+            .commit_pending
+            .remove(&(epoch, position, vshard_id));
         self.drop_calvin_synthetic_overlay(epoch, position, vshard_id);
+        self.calvin
+            .fence
+            .note_resolved((epoch, position, vshard_id), None);
         let mut response = self.response_error(task, error.into());
         // Scheduler treats this as a durable local abort vote and still waits
         // for the authoritative global verdict before issuing any drop.

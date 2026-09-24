@@ -19,7 +19,6 @@ use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::kv::current_ms;
 use crate::types::TxnId;
 
 use super::stage_kv::kv_row_identity;
@@ -68,7 +67,7 @@ impl CoreLoop {
                     Some(Staged::Put(body)) => Some(body.clone()),
                     Some(Staged::Tombstone) => None,
                     None => {
-                        let now_ms = current_ms();
+                        let now_ms = self.kv_read_now_ms();
                         self.kv_engine
                             .get(did.as_u64(), tid, collection, key, now_ms)
                     }

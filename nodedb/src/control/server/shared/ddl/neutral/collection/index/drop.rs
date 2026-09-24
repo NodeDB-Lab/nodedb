@@ -20,6 +20,7 @@
 use crate::control::security::audit::AuditEvent;
 use crate::control::security::catalog::{IndexKind, StoredIndexRecord};
 use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::server::shared::session::ddl_buffer;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 
@@ -118,9 +119,16 @@ pub async fn drop_index(
         ));
     }
 
-    // Engine + kind-specific catalog state first: if any of it survives, the
-    // identity record must survive with it so the drop can be retried.
-    super::teardown::teardown(state, &record, database_id, tenant_id).await?;
+    // Autocommit: engine and kind-specific catalog state first. If any of it
+    // survives, the identity record survives with it so the drop can be
+    // retried. Inside an explicit transaction every entry is buffered and
+    // the engine teardown waits for COMMIT, so the records are buffered
+    // first and the teardown's deferred effects ride on this statement's
+    // own entries: a ROLLBACK TO SAVEPOINT then discards them together.
+    let in_transaction = ddl_buffer::is_active();
+    if !in_transaction {
+        super::teardown::teardown(state, &record, database_id, tenant_id).await?;
+    }
 
     super::super::super::super::index_registry::propose_delete_index_record(
         state,
@@ -137,6 +145,10 @@ pub async fn drop_index(
         tenant_id,
         index_name,
     )?;
+
+    if in_transaction {
+        super::teardown::teardown(state, &record, database_id, tenant_id).await?;
+    }
 
     state.audit_record(
         AuditEvent::AdminAction,

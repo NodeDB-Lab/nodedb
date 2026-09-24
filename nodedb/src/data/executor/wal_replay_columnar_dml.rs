@@ -140,9 +140,10 @@ impl CoreLoop {
             Some(Lsn::new(record_lsn)),
         );
 
-        // Re-execute via the same live handlers the autocommit dispatch used —
-        // `undo_log: None` mirrors the autocommit path (no transaction batch
-        // to roll back).
+        // Re-execute via the same live handlers the autocommit dispatch used.
+        // Inside a committed-redo install the handlers capture the pre-image
+        // of every row they change, so a later sub-record's failure rolls the
+        // mutation back with the rest of the record.
         //
         // Replay carries no predicate. The policy decided these rows when the
         // record was written, and the identity that wrote it is not present at
@@ -150,6 +151,8 @@ impl CoreLoop {
         // replay: its record is cancelled by a `WriteAborted` marker before
         // the refusal is acknowledged.
         let replay_check = nodedb_types::RlsWriteCheck::already_decided_elsewhere();
+        let mut undo = Vec::new();
+        let recording = self.recording_redo_undo();
         let response = if record.is_update {
             self.execute_columnar_update(
                 &task,
@@ -157,7 +160,7 @@ impl CoreLoop {
                 &record.filters,
                 &record.updates,
                 &replay_check,
-                None,
+                recording.then_some(&mut undo),
             )
         } else {
             self.execute_columnar_delete(
@@ -165,9 +168,10 @@ impl CoreLoop {
                 &record.collection,
                 &record.filters,
                 &replay_check,
-                None,
+                recording.then_some(&mut undo),
             )
         };
+        self.record_redo_undo(undo);
 
         if response.status != Status::Ok {
             self.replay_record_rejected(

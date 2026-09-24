@@ -96,23 +96,31 @@ pub(super) async fn try_string(
     // doc-object UPSERT body, string literal, or comment carrying the token
     // can never reach these arms.
     if upper.starts_with("SELECT RANK(") || upper.starts_with("SELECT RANK (") {
-        return Some(kv_sorted_index::select_rank(state, identity, database_id, sql).await);
+        return Some(
+            kv_sorted_index::select_rank(state, identity, database_id, sql, txn_ctx).await,
+        );
     }
     if upper.starts_with("SELECT TOPK(")
         || upper.starts_with("SELECT TOPK (")
         || upper.starts_with("SELECT * FROM TOPK(")
         || upper.starts_with("SELECT * FROM TOPK (")
     {
-        return Some(kv_sorted_index::select_topk(state, identity, database_id, sql).await);
+        return Some(
+            kv_sorted_index::select_topk(state, identity, database_id, sql, txn_ctx).await,
+        );
     }
     if upper.starts_with("SELECT SORTED_COUNT(") || upper.starts_with("SELECT SORTED_COUNT (") {
-        return Some(kv_sorted_index::select_sorted_count(state, identity, database_id, sql).await);
+        return Some(
+            kv_sorted_index::select_sorted_count(state, identity, database_id, sql, txn_ctx).await,
+        );
     }
     // RANGE as a sorted index function (check it's not a standard SQL RANGE).
     if (upper.starts_with("SELECT * FROM RANGE(") || upper.starts_with("SELECT * FROM RANGE ("))
         && !upper.contains(" BETWEEN ")
     {
-        return Some(kv_sorted_index::select_range(state, identity, database_id, sql).await);
+        return Some(
+            kv_sorted_index::select_range(state, identity, database_id, sql, txn_ctx).await,
+        );
     }
 
     // KV_INCR / KV_DECR / KV_INCR_FLOAT / KV_CAS / KV_GETSET — atomic KV operations.

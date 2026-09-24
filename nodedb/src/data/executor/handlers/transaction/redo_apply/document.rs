@@ -6,8 +6,9 @@
 //! path. A replica applying a committed record re-executes the write the way
 //! the transaction batch did: it links the hash chain on an insert and folds
 //! the row into its materialized-sum targets inside the row's own write
-//! transaction. Restart replay does neither, because the chained row and the
-//! target rows are already durable by then.
+//! transaction. Restart replay runs this path only for a Calvin record whose
+//! stamp names sum targets: the fold subtracts the row's prior image, so a
+//! row that already holds its post-image folds nothing.
 //!
 //! Constraint checks ran before the first write (see `validate`), so the
 //! writes run with `enforce = false`. In the install pass every written row
@@ -51,7 +52,7 @@ impl CoreLoop {
         value: &[u8],
     ) -> bool {
         let result = self.committed_document_put(&row, value);
-        self.settle_committed_write(result.map(|()| true))
+        self.settle_committed_write(row.record_lsn, result.map(|()| true))
     }
 
     /// Remove one document row of a committed record. Returns whether a row
@@ -61,15 +62,23 @@ impl CoreLoop {
         row: CommittedDocWrite<'_>,
     ) -> bool {
         let result = self.committed_document_delete(&row);
-        self.settle_committed_write(result)
+        self.settle_committed_write(row.record_lsn, result)
     }
 
-    fn settle_committed_write(&mut self, result: crate::Result<bool>) -> bool {
+    /// Keep a failed write's error on the open scope. Restart replay logs it
+    /// with the record's LSN and skips the row, as its plain path does.
+    fn settle_committed_write(&mut self, record_lsn: u64, result: crate::Result<bool>) -> bool {
         match result {
             Ok(applied) => applied,
             Err(error) => {
-                if let Some(scope) = self.redo_apply.scope.as_mut() {
-                    scope.record_error(error);
+                match self.redo_apply.scope.as_mut() {
+                    Some(scope) => scope.record_error(error),
+                    None => self.replay_record_rejected(
+                        "document",
+                        record_lsn,
+                        None,
+                        &format!("folding a Calvin redo document write failed: {error}"),
+                    ),
                 }
                 false
             }
@@ -81,7 +90,7 @@ impl CoreLoop {
         row: &CommittedDocWrite<'_>,
         value: &[u8],
     ) -> crate::Result<()> {
-        let (resolved, deferred) = self.committed_sum_targets(row.collection);
+        let (resolved, deferred) = self.committed_sum_targets(row.collection, row.record_lsn);
         let surrogate = Surrogate::new(row.surrogate);
         let storage_key = StorageKey::for_surrogate(surrogate);
         let wal_lsn = (row.record_lsn != 0).then(|| Lsn::new(row.record_lsn));
@@ -190,7 +199,6 @@ impl CoreLoop {
                     tid: row.tenant_id,
                     collection: row.collection,
                     storage_key,
-                    identity: RowIdentity::from_user_key(row.document_id),
                 },
                 outcome,
                 chain.prior(),
@@ -202,10 +210,9 @@ impl CoreLoop {
     }
 
     fn committed_document_delete(&mut self, row: &CommittedDocWrite<'_>) -> crate::Result<bool> {
-        let (resolved, _) = self.committed_sum_targets(row.collection);
+        let (resolved, _) = self.committed_sum_targets(row.collection, row.record_lsn);
         let surrogate = Surrogate::new(row.surrogate);
         let storage_key = StorageKey::for_surrogate(surrogate);
-        let row_key = storage_key.to_string();
         let hook_ctx = HookCtx {
             database_id: row.database_id,
             tid: row.tenant_id,
@@ -223,7 +230,9 @@ impl CoreLoop {
                 database_id: row.database_id,
                 tid: row.tenant_id,
                 collection: row.collection,
-                document_id: row_key.as_str(),
+                // The graph cascade keys nodes by the client key, as the
+                // autocommit delete does.
+                document_id: row.document_id,
                 surrogate,
                 user_roles: &[],
                 enforce: false,
@@ -262,7 +271,6 @@ impl CoreLoop {
                     tid: row.tenant_id,
                     collection: row.collection,
                     storage_key,
-                    identity: RowIdentity::from_user_key(row.document_id),
                 },
                 outcome,
             );
@@ -300,18 +308,24 @@ impl CoreLoop {
         );
     }
 
+    /// The sum targets a write to `collection` folds into: the open scope's
+    /// under a committed-redo apply, else the restart-replay folds of the
+    /// record at `record_lsn`.
     fn committed_sum_targets(
         &self,
         collection: &str,
+        record_lsn: u64,
     ) -> (
         Vec<nodedb_physical::physical_plan::ResolvedSumTarget>,
         Vec<String>,
     ) {
-        self.redo_apply
-            .scope
-            .as_ref()
-            .map(|scope| scope.sum_targets_for(collection))
-            .unwrap_or_default()
+        match self.redo_apply.scope.as_ref() {
+            Some(scope) => scope.sum_targets_for(collection),
+            None => self
+                .redo_apply
+                .replay_folds_for(record_lsn, collection)
+                .unwrap_or_default(),
+        }
     }
 
     fn record_committed_doc_write(&mut self, write: AppliedDocWrite) {

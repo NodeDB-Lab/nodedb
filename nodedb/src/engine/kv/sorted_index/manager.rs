@@ -11,10 +11,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use super::index::SortedIndex;
 use super::key::SortKeyEncoder;
-use super::tree::OrderStatTree;
 use super::window::WindowConfig;
-use super::windowed_query::{self, SortedIndexRef};
 
 /// Definition of a sorted index (metadata).
 #[derive(Debug, Clone)]
@@ -29,12 +28,6 @@ pub struct SortedIndexDef {
     pub encoder: SortKeyEncoder,
     /// Time-window configuration (optional).
     pub window: WindowConfig,
-}
-
-/// A live sorted index: definition + data.
-pub(super) struct SortedIndex {
-    pub(super) def: SortedIndexDef,
-    pub(super) tree: OrderStatTree,
 }
 
 /// Manages all sorted indexes on a single TPC core.
@@ -56,16 +49,6 @@ pub struct SortedIndexManager {
     /// export walks — a `HashSet` would reorder a collection's indexes between
     /// generations for no reason.
     pub(super) collection_indexes: HashMap<u64, BTreeSet<String>>,
-}
-
-impl std::fmt::Debug for SortedIndex {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SortedIndex")
-            .field("name", &self.def.name)
-            .field("collection", &self.def.collection)
-            .field("count", &self.tree.count())
-            .finish()
-    }
 }
 
 impl SortedIndexManager {
@@ -112,23 +95,14 @@ impl SortedIndexManager {
         let tbl_key =
             super::super::engine_helpers::table_key(database_id, tenant_id, &def.collection);
 
-        let mut tree = OrderStatTree::new();
-        let mut backfilled = 0u32;
-
-        // Backfill from existing data.
-        for (pk_bytes, value_bytes) in existing_entries {
-            if let Some(sort_key) = extract_sort_key_from_value(&def, &value_bytes) {
-                tree.insert(sort_key, pk_bytes);
-                backfilled += 1;
-            }
-        }
+        let (index, backfilled) = SortedIndex::build(def, existing_entries);
 
         self.collection_indexes
             .entry(tbl_key)
             .or_default()
             .insert(idx_key.clone());
 
-        self.indexes.insert(idx_key, SortedIndex { def, tree });
+        self.indexes.insert(idx_key, index);
         backfilled
     }
 
@@ -261,19 +235,8 @@ impl SortedIndexManager {
         primary_key: &[u8],
         now_ms: u64,
     ) -> Option<u32> {
-        let idx = self.get_index(database_id, tenant_id, index_name)?;
-
-        if idx.def.window.is_unwindowed() {
-            return idx.tree.rank(primary_key);
-        }
-
-        // Windowed: need to count how many entries with a lower sort key
-        // are within the current window. This is the expensive path.
-        let idx_ref = SortedIndexRef {
-            def: &idx.def,
-            tree: &idx.tree,
-        };
-        windowed_query::windowed_rank(&idx_ref, primary_key, now_ms)
+        self.get_index(database_id, tenant_id, index_name)?
+            .rank(primary_key, now_ms)
     }
 
     /// Get the top K entries from a sorted index.
@@ -287,33 +250,14 @@ impl SortedIndexManager {
         k: u32,
         now_ms: u64,
     ) -> Option<Vec<(u32, Vec<u8>)>> {
-        let idx = self.get_index(database_id, tenant_id, index_name)?;
-
-        if idx.def.window.is_unwindowed() {
-            let entries = idx.tree.top_k(k);
-            return Some(
-                entries
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, (_, pk))| (i as u32 + 1, pk.to_vec()))
-                    .collect(),
-            );
-        }
-
-        let idx_ref = SortedIndexRef {
-            def: &idx.def,
-            tree: &idx.tree,
-        };
-        Some(windowed_query::windowed_top_k(&idx_ref, k, now_ms))
+        Some(
+            self.get_index(database_id, tenant_id, index_name)?
+                .top_k(k, now_ms),
+        )
     }
 
-    /// Get entries in a score range from a sorted index.
-    ///
-    /// `score_min` and `score_max` are the raw value bytes of the index's
-    /// LEADING sort column (as [`extract_sort_key_from_value`] produces them),
-    /// not encoded tree keys: the caller names a score, and only the index's
-    /// own encoder knows the framing and direction that turn it into a bound
-    /// the tree can be compared against.
+    /// Get entries in a score range from a sorted index. See
+    /// [`SortedIndex::range`] for what the bounds hold.
     ///
     /// Returns `(rank, primary_key)` pairs.
     pub fn range(
@@ -325,32 +269,10 @@ impl SortedIndexManager {
         score_max: Option<&[u8]>,
         now_ms: u64,
     ) -> Option<Vec<(u32, Vec<u8>)>> {
-        let idx = self.get_index(database_id, tenant_id, index_name)?;
-
-        let (lower, upper) = idx
-            .def
-            .encoder
-            .first_column_range_bounds(score_min, score_max);
-        let entries = idx.tree.range(lower.as_deref(), upper.as_deref());
-
-        if idx.def.window.is_unwindowed() {
-            // Compute rank for each entry.
-            return Some(
-                entries
-                    .into_iter()
-                    .filter_map(|(_, pk)| {
-                        let rank = idx.tree.rank(pk)?;
-                        Some((rank, pk.to_vec()))
-                    })
-                    .collect(),
-            );
-        }
-
-        let idx_ref = SortedIndexRef {
-            def: &idx.def,
-            tree: &idx.tree,
-        };
-        Some(windowed_query::windowed_range(&idx_ref, &entries, now_ms))
+        Some(
+            self.get_index(database_id, tenant_id, index_name)?
+                .range(score_min, score_max, now_ms),
+        )
     }
 
     /// Get the total count of entries in a sorted index.
@@ -361,17 +283,10 @@ impl SortedIndexManager {
         index_name: &str,
         now_ms: u64,
     ) -> Option<u32> {
-        let idx = self.get_index(database_id, tenant_id, index_name)?;
-
-        if idx.def.window.is_unwindowed() {
-            return Some(idx.tree.count());
-        }
-
-        let idx_ref = SortedIndexRef {
-            def: &idx.def,
-            tree: &idx.tree,
-        };
-        Some(windowed_query::windowed_count(&idx_ref, now_ms))
+        Some(
+            self.get_index(database_id, tenant_id, index_name)?
+                .count(now_ms),
+        )
     }
 
     /// Get the sort key for a primary key in a sorted index (ZSCORE equivalent).
@@ -382,8 +297,8 @@ impl SortedIndexManager {
         index_name: &str,
         primary_key: &[u8],
     ) -> Option<Vec<u8>> {
-        let idx = self.get_index(database_id, tenant_id, index_name)?;
-        idx.tree.get_sort_key(primary_key).map(|s| s.to_vec())
+        self.get_index(database_id, tenant_id, index_name)?
+            .score(primary_key)
     }
 
     /// Get the index definition.
@@ -393,8 +308,7 @@ impl SortedIndexManager {
         tenant_id: u64,
         index_name: &str,
     ) -> Option<&SortedIndexDef> {
-        let idx = self.get_index(database_id, tenant_id, index_name)?;
-        Some(&idx.def)
+        Some(self.get_index(database_id, tenant_id, index_name)?.def())
     }
 
     fn get_index(
@@ -420,22 +334,6 @@ pub(super) fn index_key(database_id: u64, tenant_id: u64, index_name: &str) -> S
     format!("{database_id}:{tenant_id}:{index_name}")
 }
 
-/// Extract field values from a MessagePack-encoded KV value and build a sort key.
-fn extract_sort_key_from_value(def: &SortedIndexDef, value_bytes: &[u8]) -> Option<Vec<u8>> {
-    let doc: serde_json::Value = nodedb_types::json_from_msgpack(value_bytes).ok()?;
-    let obj = doc.as_object()?;
-
-    let mut values: Vec<Vec<u8>> = Vec::with_capacity(def.encoder.column_count());
-    for col in def.encoder.columns() {
-        let field_val = obj.get(&col.name)?;
-        let bytes = field_value_to_sort_bytes(field_val);
-        values.push(bytes);
-    }
-
-    let refs: Vec<&[u8]> = values.iter().map(|v| v.as_slice()).collect();
-    Some(def.encoder.encode(&refs))
-}
-
 /// Build a sort key from pre-extracted field name/value pairs.
 fn build_sort_key_from_fields(
     def: &SortedIndexDef,
@@ -457,23 +355,6 @@ fn build_sort_key_from_fields(
 
     let refs: Vec<&[u8]> = values.iter().map(|v| v.as_slice()).collect();
     Some(def.encoder.encode(&refs))
-}
-
-/// Convert a JSON field value to sortable bytes.
-fn field_value_to_sort_bytes(val: &serde_json::Value) -> Vec<u8> {
-    match val {
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                SortKeyEncoder::encode_i64(i).to_vec()
-            } else if let Some(f) = n.as_f64() {
-                SortKeyEncoder::encode_f64(f).to_vec()
-            } else {
-                Vec::new()
-            }
-        }
-        serde_json::Value::String(s) => s.as_bytes().to_vec(),
-        _ => Vec::new(),
-    }
 }
 
 #[cfg(test)]

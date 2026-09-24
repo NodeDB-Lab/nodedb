@@ -69,11 +69,11 @@ pub struct RedoSubRecord {
 }
 
 /// Calvin sequencer coordinates that a [`RedoRecord`] may carry to double as an
-/// applied-marker. Mirrors `nodedb_wal::CalvinAppliedPayload`.
+/// applied-marker, and what the vShard's slice folds. Mirrors
+/// `nodedb_wal::CalvinAppliedPayload` in its coordinates.
 #[derive(
     Debug,
     Clone,
-    Copy,
     PartialEq,
     Eq,
     Serialize,
@@ -89,6 +89,17 @@ pub struct CalvinStamp {
     pub position: u32,
     /// The vshard that applied this transaction.
     pub vshard_id: u32,
+    /// Every collection the vShard's slice writes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[msgpack(default)]
+    pub collections: Vec<String>,
+    /// The materialized-sum targets the slice's document writes fold into,
+    /// keyed by source collection. The live install and restart replay both
+    /// fold from them at the record's LSN, so no later record carries the
+    /// target rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[msgpack(default)]
+    pub sum_targets: Vec<nodedb_physical::physical_plan::RedoSumTargets>,
 }
 
 /// Redo sub-record payload for a graph edge upsert — the payload bytes of a
@@ -215,6 +226,8 @@ mod tests {
                 epoch: 42,
                 position: 7,
                 vshard_id: 3,
+                collections: Vec::new(),
+                sum_targets: Vec::new(),
             }),
         };
         let bytes = record.to_bytes().expect("encode");

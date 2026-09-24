@@ -4,7 +4,7 @@
 //! the autocommit handler (`field.rs`), the predicate update, the transaction
 //! resolver, in-transaction staging, and WAL replay, so a staged value and its
 //! COMMIT-time durable replay are always computed by the exact same code —
-//! mirrors the `engine_atomic_compute` / `stage_kv_atomic` split for
+//! mirrors the `nodedb_physical::kv_atomic::compute` / `stage_kv_atomic` split for
 //! `Incr`/`Cas`/etc.
 
 use nodedb_query::msgpack_scan::{KvBodyError, KvBodyShape, kv_body_to_row, row_to_kv_body};

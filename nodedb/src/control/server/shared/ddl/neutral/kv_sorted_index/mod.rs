@@ -18,7 +18,9 @@ pub mod dispatch;
 pub mod gate;
 pub mod parse;
 pub mod query;
+mod txn_read;
 
 pub use ddl::{create_sorted_index, drop_sorted_index};
 pub use dispatch::{SortedIndexTarget, drop_in_engine};
+pub(crate) use query::run_read;
 pub use query::{select_range, select_rank, select_sorted_count, select_topk};

@@ -372,6 +372,7 @@ pub fn wal_append_kv_op(
         | KvOp::SortedIndexCount { .. }
         | KvOp::SortedIndexScore { .. }
         | KvOp::SortedIndexTopK { .. }
+        | KvOp::SortedIndexTxnRead { .. }
         | KvOp::MaterializeScan { .. } => None,
     };
     Ok(KvAppendOutcome {

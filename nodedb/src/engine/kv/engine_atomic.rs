@@ -6,10 +6,10 @@
 //! hash slot). No cross-core coordination is needed because each key maps
 //! to exactly one core.
 
+use nodedb_physical::kv_atomic::{AtomicComputeError, compute};
 use nodedb_physical::physical_plan::KvCounterShape;
 
 use super::engine::KvEngine;
-use super::engine_atomic_compute as compute;
 use super::engine_helpers::{expiry_key, table_key};
 use super::entry::NO_EXPIRY;
 use super::hash_table::KvHashTable;
@@ -77,6 +77,16 @@ pub enum AtomicError {
     /// The [`AtomicAdmission`] gate refused the computed post-image, so nothing
     /// was written. Boxed to keep the error small on the success path.
     Rejected(Box<crate::Error>),
+}
+
+impl From<AtomicComputeError> for AtomicError {
+    fn from(error: AtomicComputeError) -> Self {
+        match error {
+            AtomicComputeError::TypeMismatch { detail } => Self::TypeMismatch { detail },
+            AtomicComputeError::Counter(fault) => Self::Counter(fault),
+            AtomicComputeError::Encode { detail } => Self::Encode { detail },
+        }
+    }
 }
 
 /// A gate consulted with the computed post-image before an atomic commits.

@@ -209,9 +209,6 @@ pub struct CoreLoop {
         super::super::handlers::aggregate::AggregateCacheEntry,
     >,
 
-    /// Last time periodic maintenance (compaction, edge sweep) was run.
-    pub(in crate::data::executor) last_maintenance: Option<std::time::Instant>,
-
     /// Per-collection full index config (includes index_type, PQ params, IVF params).
     /// Stored alongside vector_params for collections that use non-default index types.
     /// Key: `(DatabaseId, TenantId, collection_key)` — same shape as `vector_collections`.
@@ -228,12 +225,6 @@ pub struct CoreLoop {
     /// The field is `"_sparse"` when no named field is specified.
     pub(in crate::data::executor) sparse_vector_indexes:
         HashMap<(DatabaseId, TenantId, String, String), SparseInvertedIndex>,
-
-    /// Compaction interval (how often `maybe_run_maintenance` triggers).
-    pub(in crate::data::executor) compaction_interval: std::time::Duration,
-
-    /// Tombstone ratio threshold for auto-compaction (0.0–1.0).
-    pub(in crate::data::executor) compaction_tombstone_threshold: f64,
 
     /// Per-core LRU document cache for O(1) hot-key point lookups.
     /// Invalidated write-through on PointPut/Delete/Update.
@@ -338,10 +329,6 @@ pub struct CoreLoop {
     pub(in crate::data::executor) checkpoint_coordinator:
         crate::storage::checkpoint::CheckpointCoordinator,
 
-    /// L1 segment compaction config for the storage layer.
-    pub(in crate::data::executor) segment_compaction_config:
-        crate::storage::compaction::CompactionConfig,
-
     /// Per-collection document index configurations.
     /// Maps (DatabaseId, TenantId, collection) → CollectionConfig.
     /// Populated via RegisterDocumentCollection plans.
@@ -391,14 +378,6 @@ pub struct CoreLoop {
     /// Memory governor for per-engine budget enforcement.
     pub(in crate::data::executor) governor: Arc<nodedb_mem::MemoryGovernor>,
 
-    /// Shared per-database maintenance CPU budget tracker.
-    ///
-    /// Used by all maintenance sites (`run_compaction` and friends) to gate
-    /// per-database background work against the quota's `maintenance_cpu_pct`.
-    /// Set by `set_maintenance_budget` after core spawn.
-    pub(in crate::data::executor) maintenance_budget:
-        Option<Arc<crate::control::maintenance::MaintenanceBudgetTracker>>,
-
     /// Request intake level for this tick, folded from engine memory
     /// pressure and response-ring utilization. Drain depth and the suspend
     /// decision both read off it.
@@ -445,51 +424,22 @@ pub struct CoreLoop {
     pub(in crate::data::executor) quarantine_registry:
         Option<std::sync::Arc<crate::storage::quarantine::QuarantineRegistry>>,
 
-    /// In-flight concurrent index rebuilds, polled each tick.
-    ///
-    /// Each entry is a `(collection_key, receiver)` pair.  The receiver
-    /// yields a `RebuildResult` once the background OS thread finishes
-    /// the shadow build.  Only one rebuild per collection may be in
-    /// progress at a time; `execute_rebuild_index` returns
-    /// `ErrorCode::Conflict` when a second is attempted.
-    pub(in crate::data::executor) pending_reindex:
-        Vec<crate::data::executor::handlers::control::reindex::PendingReindex>,
+    /// Compaction pacing, the maintenance CPU budget, and index rebuilds.
+    pub(in crate::data::executor) maintenance: super::maintenance_state::MaintenanceState,
 
     /// Ambient deterministic timestamp for the current Calvin epoch.
     ///
-    /// Set to `Some(ms)` by `execute_calvin_execute_static` and
-    /// `execute_calvin_execute_active` before dispatching the inner
-    /// transaction batch, then reset to `None` immediately after.
-    /// Engine handlers that need "current time" (bitemporal sys_from, KV TTL
-    /// expire_at, timeseries system_ms) call
+    /// Set to `Some(ms)` by `execute_calvin_execute_static`,
+    /// `execute_calvin_execute_active` and `execute_calvin_resolve` while they
+    /// stage or resolve a transaction's plans, and by `execute_calvin_flush`
+    /// while it renders the reply, then restored immediately after. Engine handlers that need "current time" (bitemporal sys_from,
+    /// KV TTL expire_at, timeseries system_ms) call
     /// `self.epoch_system_ms.unwrap_or_else(<wall_clock_read>)` so that
-    /// single-shard (non-Calvin) paths continue working without change.
+    /// single-shard (non-Calvin) paths read the wall clock.
     ///
     /// Safety: this is safe because `CoreLoop` is `!Send` and single-threaded
-    /// per core. Sub-plans inside `execute_transaction_batch` do not recurse
-    /// back into a Calvin execute variant, so the reset after the batch is not
-    /// premature.
+    /// per core, and staging never recurses into another Calvin execute.
     pub(in crate::data::executor) epoch_system_ms: Option<i64>,
-
-    /// Whether THIS node is the leader of the data-group owning the vshard for
-    /// the currently-executing Calvin transaction.
-    ///
-    /// Set to `true`/`false` by `execute_calvin_execute_static` and
-    /// `execute_calvin_execute_active` (from the scheduler-stamped, per-node,
-    /// non-replicated `MetaOp::is_group_leader`) before dispatching the inner
-    /// transaction batch, then reset to `false` immediately after.
-    ///
-    /// OLLP determinism: the bulk-DML handlers run the optimistic-lock
-    /// verification (`actual != predicted`) and emit `OllpRetryRequired` ONLY
-    /// when this is `true`. Every replica — leader and follower alike — applies
-    /// the carried `ollp_predicted_surrogates` set verbatim, so all replicas
-    /// mutate the identical surrogate set regardless of any per-replica local
-    /// scan drift.
-    ///
-    /// Defaults to `false` outside a Calvin execute (single-shard / non-Calvin
-    /// paths never set predicted surrogates, so the flag is never read there).
-    /// Safe for the same single-threaded `!Send` reasons as `epoch_system_ms`.
-    pub(in crate::data::executor) ollp_is_group_leader: bool,
 
     /// Per-transaction staging overlay: not-yet-durable writes for each
     /// in-flight transaction on this core, keyed by `TxnId`. Populated by
@@ -536,46 +486,9 @@ pub struct CoreLoop {
     /// mutation in the current live apply/replay scope.
     pub(in crate::data::executor) active_graph_system_from: Option<i64>,
 
-    /// Signed BALANCED entries accumulated for the transaction batch currently
-    /// applying on this core, as `(collection, entry)`.
-    ///
-    /// `Some` ONLY between the start and the end of
-    /// `execute_transaction_batch`, which is what makes the same write handler
-    /// serve both scopes: with a batch open, a handler's entries accumulate
-    /// here and the batch checks them once at its commit boundary; with none
-    /// open the handler is its own boundary and checks its entries itself. An
-    /// explicit transaction may legitimately write one leg of a journal per
-    /// statement, so a per-statement check inside a batch would refuse writes
-    /// the constraint permits.
-    pub(in crate::data::executor) balanced_txn_entries: Option<
-        Vec<(
-            String,
-            crate::data::executor::enforcement::balanced::BalancedEntry,
-        )>,
-    >,
-
-    /// Staged Calvin write plans awaiting the local commit verdict, keyed by
-    /// `(epoch, position, vshard)`. `CalvinExecuteStatic` validates a
-    /// transaction and inserts its plans here WITHOUT mutating base; the
-    /// verdict-driven `CalvinFlush` replays them through
-    /// `execute_transaction_batch` to make them durable, and `CalvinDrop`
-    /// discards them. Nothing staged here is observable in the base engines
-    /// until a flush.
-    ///
-    /// The vShard is part of the key because vShards round-robin onto cores:
-    /// several vShard slices of one multi-participant transaction — which share
-    /// the same `(epoch, position)` — can land on the same core, and each must
-    /// stage and flush its own slice independently rather than clobber a peer's.
-    pub(in crate::data::executor) commit_pending:
-        HashMap<(u64, u32, u32), super::commit_pending::PendingCommit>,
-
-    /// `Some((epoch, position, vshard))` only during a distributed Calvin flush apply (staging gate).
-    pub(in crate::data::executor) calvin_flush_key: Option<(u64, u32, u32)>,
-
-    /// Per-`(epoch, position, vshard)` index-value tuples drained from a Calvin
-    /// flush's undo log, awaiting the post-apply `RecordCalvinWriteVersions` op.
-    pub(in crate::data::executor) calvin_flush_index_tuples:
-        crate::data::executor::handlers::transaction::index_write_values::StagedCalvinIndexTuples,
+    /// Staged Calvin transactions, the writes waiting on them, and the
+    /// executing transaction's leader flag.
+    pub(in crate::data::executor) calvin: super::calvin_state::CalvinCoreState,
 
     /// Core count and per-record scratch of the committed-redo apply.
     pub(in crate::data::executor) redo_apply:

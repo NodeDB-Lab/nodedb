@@ -64,6 +64,19 @@ impl CoreLoop {
         tid: u64,
         committed: CommittedRedo<'_>,
     ) -> Response {
+        self.install_committed_redo(task, tid, committed)
+    }
+
+    /// Install one committed redo record at the LSN the request carries:
+    /// validate every sub-record, install with undo, then settle and cover.
+    /// Every committed transaction installs here, whichever path committed it,
+    /// and restart replay drives the same arms over the same record.
+    pub(in crate::data::executor) fn install_committed_redo(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        committed: CommittedRedo<'_>,
+    ) -> Response {
         let Some(lsn) = task.wal_lsn() else {
             return self.response_error(
                 task,
@@ -139,8 +152,21 @@ impl CoreLoop {
             );
             return self.response_error(task, error);
         }
-        // Events leave only once the record is settled and covered.
-        for event in std::mem::take(&mut scope.pending_events) {
+        // Write versions and the watermark move only once the record is
+        // settled and covered.
+        for version in std::mem::take(&mut scope.write_versions) {
+            self.publish_write_version(
+                version.db,
+                version.tenant,
+                &version.collection,
+                version.key,
+                version.lsn,
+            );
+        }
+        // Events leave only once the record is settled and covered. Every
+        // one names the record's LSN: the install held the watermark back.
+        for mut event in std::mem::take(&mut scope.pending_events) {
+            event.lsn = lsn;
             self.send_write_event(event);
         }
 

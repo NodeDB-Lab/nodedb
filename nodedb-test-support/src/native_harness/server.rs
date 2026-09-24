@@ -77,6 +77,8 @@ impl NativeTestServer {
         let shared =
             SharedState::new_with_credentials(dispatcher, Arc::clone(&wal), credentials, false)
                 .expect("build shared state");
+        // The same gateway install production boot runs.
+        nodedb::bootstrap::state_wiring::install_gateway(&shared);
 
         let data_side = data_sides.into_iter().next().expect("data side");
         let core_dir = dir.path().to_path_buf();

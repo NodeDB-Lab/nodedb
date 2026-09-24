@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Plan-builder helpers shared by transaction batch cross-engine tests.
+//! Plan builders and a single-core commit driver shared by the transaction
+//! cross-engine tests.
 #![allow(dead_code)]
 
 use std::sync::Arc;
@@ -15,6 +16,8 @@ use nodedb_physical::physical_plan::{
     AggregateSpec, ColumnarInsertIntent, ColumnarOp, CrdtOp, DocumentOp, GraphOp, KvOp,
     PhysicalPlan, QueryOp, TimeseriesOp, VectorOp,
 };
+
+pub use crate::tx_commit::commit_plans;
 use nodedb_types::OrdinalClock;
 
 // ── Core setup ──────────────────────────────────────────────────────────────
@@ -104,58 +107,6 @@ pub fn payload_json(payload: &[u8]) -> String {
 /// helpers below: every caller here operates on the default database.
 fn qualify(collection: &str) -> nodedb_types::QualifiedCollection {
     nodedb_types::QualifiedCollection::new(nodedb_types::DatabaseId::DEFAULT, collection)
-}
-
-pub fn vector_set_params(collection: &str) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::SetParams {
-        collection: qualify(collection),
-        field_name: String::new(),
-        dim: 0,
-        m: 16,
-        ef_construction: 200,
-        metric: "cosine".into(),
-        index_type: String::new(),
-        pq_m: 0,
-        ivf_cells: 0,
-        ivf_nprobe: 0,
-    })
-}
-
-pub fn vector_seed(collection: &str) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::Insert {
-        collection: qualify(collection),
-        vector: vec![1.0, 2.0, 3.0],
-        dim: 3,
-        field_name: String::new(),
-        surrogate: nodedb_types::Surrogate::ZERO,
-        pk_bytes: None,
-        provenance: None,
-    })
-}
-
-pub fn vector_insert_ok(collection: &str) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::Insert {
-        collection: qualify(collection),
-        vector: vec![0.5, 0.5, 0.5],
-        dim: 3,
-        field_name: String::new(),
-        surrogate: nodedb_types::Surrogate::new(101),
-        pk_bytes: None,
-        provenance: None,
-    })
-}
-
-/// Always fails: dim mismatch (index expects dim=3).
-pub fn vector_fail(collection: &str) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::Insert {
-        collection: qualify(collection),
-        vector: vec![1.0, 2.0],
-        dim: 3,
-        field_name: String::new(),
-        surrogate: nodedb_types::Surrogate::ZERO,
-        pk_bytes: None,
-        provenance: None,
-    })
 }
 
 pub fn doc_put(collection: &str, doc_id: &str, val: &[u8]) -> PhysicalPlan {
@@ -250,7 +201,9 @@ pub fn columnar_insert(collection: &str, id: &str, val: i64) -> PhysicalPlan {
         format: "msgpack".into(),
         intent: ColumnarInsertIntent::Insert,
         on_conflict_updates: Vec::new(),
-        surrogates: Vec::new(),
+        // One surrogate per row, as the planner binds it: a transaction
+        // stages each columnar row under its surrogate.
+        surrogates: vec![row_surrogate(id)],
         schema_bytes: Vec::new(),
         provenance: None,
         wal_lsn: None,
@@ -260,6 +213,15 @@ pub fn columnar_insert(collection: &str, id: &str, val: i64) -> PhysicalPlan {
         returning: None,
         rls_filters: Vec::new(),
     })
+}
+
+/// A stable surrogate for the row whose primary key is `id`. Never zero, and
+/// distinct from the small fixed surrogates the other helpers use.
+fn row_surrogate(id: &str) -> nodedb_types::Surrogate {
+    let hash = id.bytes().fold(2_166_136_261u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(16_777_619)
+    });
+    nodedb_types::Surrogate::new(hash | 0x8000_0000)
 }
 
 pub fn columnar_count(collection: &str) -> PhysicalPlan {
@@ -330,6 +292,62 @@ pub fn crdt_apply(collection: &str, doc_id: &str) -> PhysicalPlan {
         constraint_version_required: 0,
         expected_frontier_digest: None,
     })
+}
+
+/// A vector-primary direct insert of a 3-dimensional vector.
+pub fn vector_direct_insert(collection: &str, surrogate: u32) -> PhysicalPlan {
+    let mut payload = std::collections::HashMap::new();
+    payload.insert(
+        "id".to_string(),
+        nodedb_types::Value::String(format!("r{surrogate}")),
+    );
+    PhysicalPlan::Vector(VectorOp::DirectInsert {
+        collection: qualify(collection),
+        field: "vec".into(),
+        surrogate: nodedb_types::Surrogate::new(surrogate),
+        pk_bytes: format!("r{surrogate}").into_bytes(),
+        vector: vec![0.5, 0.5, 0.5],
+        payload: zerompk::to_msgpack_vec(&payload).unwrap(),
+        quantization: nodedb_types::VectorQuantization::None,
+        storage_dtype: nodedb_types::VectorStorageDtype::F32,
+        payload_indexes: Vec::new(),
+        returning: None,
+        rls_filters: Vec::new(),
+    })
+}
+
+/// A CRDT row write of `{"title": title}`.
+pub fn crdt_upsert(collection: &str, doc_id: &str, surrogate: u32) -> PhysicalPlan {
+    PhysicalPlan::Crdt(CrdtOp::DocUpsert {
+        collection: qualify(collection),
+        document_id: doc_id.into(),
+        fields_json: r#"{"title":"staged"}"#.into(),
+        surrogate: nodedb_types::Surrogate::new(surrogate),
+        partial: false,
+        verb: nodedb_physical::physical_plan::CrdtWriteVerb::Insert,
+        returning: None,
+        rls_filters: Vec::new(),
+    })
+}
+
+/// `plans` followed by two inserts of one key: the transaction's staging
+/// refuses the second as a unique violation, so the transaction commits
+/// none of `plans`.
+pub fn with_unique_refusal(mut plans: Vec<PhysicalPlan>) -> Vec<PhysicalPlan> {
+    let insert = PhysicalPlan::Document(DocumentOp::PointInsert {
+        collection: qualify("refusal_probe"),
+        document_id: "dup".into(),
+        value: nodedb_types::json_to_msgpack(&serde_json::json!({"n": 1})).unwrap(),
+        surrogate: nodedb_types::Surrogate::new(9_001),
+        if_absent: false,
+        returning: None,
+        rls_filters: Vec::new(),
+        resolved_sum_targets: Vec::new(),
+        deferred_sum_targets: Vec::new(),
+    });
+    plans.push(insert.clone());
+    plans.push(insert);
+    plans
 }
 
 // ── Assertion helpers ─────────────────────────────────────────────────────────

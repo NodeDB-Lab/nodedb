@@ -129,7 +129,11 @@ pub(crate) async fn apply_array_cell_write(
             "apply_array_cell_write: apply failed"
         );
     }
-    let applied_ok = result.is_ok();
+    // A final refusal is the entry's outcome: its marker carries the key.
+    let applied_ok = result.is_ok()
+        || result
+            .as_ref()
+            .is_err_and(crate::control::server::dispatch_utils::error_is_final_refusal);
     tracker.complete(group_id, log_index, applied_key, result);
     applied_ok
 }

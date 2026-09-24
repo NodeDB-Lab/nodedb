@@ -23,12 +23,17 @@ impl CoreLoop {
     ) -> Response {
         let vshard_id = task.request.vshard_id.as_u32();
         let existed = self
+            .calvin
             .commit_pending
             .remove(&(epoch, position, vshard_id))
             .is_some();
         // Discard the synthetic overlay entry alongside the raw plan buffer;
         // idempotent no-op if it was never staged or already removed.
         self.drop_calvin_synthetic_overlay(epoch, position, vshard_id);
+        // Writes waiting on the rows this transaction owned run next.
+        self.calvin
+            .fence
+            .note_resolved((epoch, position, vshard_id), None);
         debug!(
             core = self.core_id,
             epoch, position, vshard_id, existed, "calvin drop: discarding staged commit"

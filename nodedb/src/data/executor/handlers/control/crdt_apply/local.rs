@@ -214,7 +214,7 @@ impl CoreLoop {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::data::executor::handlers::control::crdt_apply) mod tests {
     use loro::LoroValue;
     use nodedb_types::Surrogate;
 
@@ -222,7 +222,10 @@ mod tests {
     use crate::bridge::envelope::Status;
     use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
 
-    fn params<'a>(document_id: &'a str, delta: &'a [u8]) -> CrdtApplyParams<'a> {
+    pub(in crate::data::executor::handlers::control::crdt_apply) fn params<'a>(
+        document_id: &'a str,
+        delta: &'a [u8],
+    ) -> CrdtApplyParams<'a> {
         CrdtApplyParams {
             collection: "docs",
             document_id,
@@ -304,14 +307,21 @@ mod tests {
         assert!(!imported, "a refused delta must not reach the CRDT state");
     }
 
-    fn users_params<'a>(document_id: &'a str, delta: &'a [u8]) -> CrdtApplyParams<'a> {
+    pub(in crate::data::executor::handlers::control::crdt_apply) fn users_params<'a>(
+        document_id: &'a str,
+        delta: &'a [u8],
+    ) -> CrdtApplyParams<'a> {
         CrdtApplyParams {
             collection: "users",
             ..params(document_id, delta)
         }
     }
 
-    fn user_delta(peer: u64, row_id: &str, email: &str) -> Vec<u8> {
+    pub(in crate::data::executor::handlers::control::crdt_apply) fn user_delta(
+        peer: u64,
+        row_id: &str,
+        email: &str,
+    ) -> Vec<u8> {
         let source = nodedb_crdt::CrdtState::new(peer).expect("source state");
         source
             .upsert(
@@ -323,7 +333,9 @@ mod tests {
         source.export_snapshot().expect("source snapshot")
     }
 
-    fn task_at(lsn: u64) -> ExecutionTask {
+    pub(in crate::data::executor::handlers::control::crdt_apply) fn task_at(
+        lsn: u64,
+    ) -> ExecutionTask {
         ExecutionTask::with_wal_lsn(
             make_default_task().request,
             Some(crate::types::Lsn::new(lsn)),
@@ -332,7 +344,10 @@ mod tests {
 
     /// Install a UNIQUE email constraint under a strict policy, so a clash
     /// is a rejection.
-    fn install_unique_email(core: &mut CoreLoop, task: &ExecutionTask) {
+    pub(in crate::data::executor::handlers::control::crdt_apply) fn install_unique_email(
+        core: &mut CoreLoop,
+        task: &ExecutionTask,
+    ) {
         let engine = core
             .get_crdt_engine(task.request.database_id, task.request.tenant_id)
             .expect("engine");
@@ -364,7 +379,9 @@ mod tests {
         core.apply_crdt_local(&task_at(lsn), users_params("b", &second))
     }
 
-    fn dead_letters(core: &mut CoreLoop) -> Vec<nodedb_crdt::DeadLetter> {
+    pub(in crate::data::executor::handlers::control::crdt_apply) fn dead_letters(
+        core: &mut CoreLoop,
+    ) -> Vec<nodedb_crdt::DeadLetter> {
         let task = make_default_task();
         core.get_crdt_engine(task.request.database_id, task.request.tenant_id)
             .expect("engine")

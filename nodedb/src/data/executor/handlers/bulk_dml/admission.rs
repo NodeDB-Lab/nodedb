@@ -59,7 +59,7 @@ impl CoreLoop {
         let apply_ids: Vec<StorageKey> = match admission.predicted_surrogates {
             Some(predicted) => {
                 // The set comparison is deterministic: both sides are sorted.
-                if self.ollp_is_group_leader
+                if self.calvin.ollp_is_group_leader
                     && !super::scan::ollp_surrogates_match(&matching_ids, predicted)
                 {
                     return Err(ErrorCode::OllpRetryRequired);
@@ -78,7 +78,7 @@ impl CoreLoop {
         // unchanged. This runs BEFORE any write, so `sparse.get` still returns
         // pre-mutation content.
         if let Some(predicted) = admission.predicted_edges
-            && self.ollp_is_group_leader
+            && self.calvin.ollp_is_group_leader
         {
             let actual = self.ollp_actual_edges(database_id, tid, admission.collection, &apply_ids);
             if !super::scan::ollp_edges_match(actual, predicted) {

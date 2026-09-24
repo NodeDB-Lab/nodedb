@@ -145,6 +145,7 @@ pub(super) fn bind(binder: &IdentityBinder<'_>, op: &mut KvOp) -> crate::Result<
         | KvOp::SortedIndexRange { .. }
         | KvOp::SortedIndexCount { .. }
         | KvOp::SortedIndexScore { .. }
+        | KvOp::SortedIndexTxnRead { .. }
         | KvOp::MaterializeScan { .. } => Ok(()),
     }
 }

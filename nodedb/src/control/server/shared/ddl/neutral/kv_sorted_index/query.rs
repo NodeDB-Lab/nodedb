@@ -4,24 +4,81 @@
 //!
 //! Each names an index and returns keys, ranks, or counts drawn from the
 //! collection it was built over, so each resolves that collection and gates on
-//! it before a plan is built (see [`super::gate`]).
+//! it before a plan is built (see [`super::gate`]). The native sorted-index
+//! read opcodes run through [`run_read`] too, so both protocols gate, route and
+//! see the caller's transaction the same way.
 
+use crate::bridge::envelope::Response;
 use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
-use nodedb_physical::physical_plan::{KvOp, PhysicalPlan};
+use nodedb_physical::physical_plan::{PhysicalPlan, SortedIndexRead};
 
 use super::super::super::result::{DdlError, DdlResult};
-use super::dispatch::{SortedIndexTarget, dispatch_and_respond_json, dispatch_and_respond_rows};
+use super::dispatch::{SortedIndexTarget, dispatch_read, respond_json, respond_rows};
 use super::gate::gate_read;
 use super::parse::{ddl_err, parse_function_args, parse_score_arg, unquote};
+use super::txn_read::{ReadScope, plan_read};
 
-/// What each function delivers instead of row bodies, for the refusal message.
-const RANK_WHAT: &str = "RANK(), which returns a position in the sorted index rather than rows";
-const TOPK_WHAT: &str = "TOPK(), which returns the sorted index's ranked keys rather than rows";
-const RANGE_WHAT: &str = "RANGE(), which returns the sorted index's ranked keys rather than rows";
-const COUNT_WHAT: &str =
-    "SORTED_COUNT(), which returns a count over the sorted index rather than rows";
+/// What a read delivers instead of row bodies, for the refusal message.
+fn what(read: &SortedIndexRead) -> &'static str {
+    match read {
+        SortedIndexRead::Rank { .. } => {
+            "RANK(), which returns a position in the sorted index rather than rows"
+        }
+        SortedIndexRead::TopK { .. } => {
+            "TOPK(), which returns the sorted index's ranked keys rather than rows"
+        }
+        SortedIndexRead::Range { .. } => {
+            "RANGE(), which returns the sorted index's ranked keys rather than rows"
+        }
+        SortedIndexRead::Count => {
+            "SORTED_COUNT(), which returns a count over the sorted index rather than rows"
+        }
+        SortedIndexRead::Score { .. } => {
+            "a sorted-index score read, which returns a sort key rather than rows"
+        }
+    }
+}
+
+/// Gate, plan and dispatch one sorted-index read.
+///
+/// Gated on the index's owning collection, routed to the core that holds its
+/// rows, and run in the caller's transaction when one is open. Returns the
+/// plan that ran and the Data Plane reply.
+pub(crate) async fn run_read(
+    state: &SharedState,
+    identity: &AuthenticatedIdentity,
+    database_id: DatabaseId,
+    txn_ctx: &DmlTxnCtx<'_>,
+    index_name: &str,
+    read: SortedIndexRead,
+) -> Result<(PhysicalPlan, Response), DdlError> {
+    let collection = gate_read(state, identity, database_id, index_name, what(&read))?;
+    let sorted = plan_read(
+        &ReadScope {
+            txn_ctx,
+            tenant_id: identity.tenant_id,
+            database_id,
+            collection: &collection,
+            index_name,
+        },
+        read,
+    );
+    let plan = sorted.plan.clone();
+    let response = dispatch_read(
+        state,
+        &SortedIndexTarget {
+            tenant_id: identity.tenant_id,
+            database_id,
+            collection: &collection,
+        },
+        sorted,
+    )
+    .await?;
+    Ok((plan, response))
+}
 
 /// Handle `SELECT RANK(index_name, 'key_value')`
 pub async fn select_rank(
@@ -29,6 +86,7 @@ pub async fn select_rank(
     identity: &AuthenticatedIdentity,
     database_id: DatabaseId,
     sql: &str,
+    txn_ctx: &DmlTxnCtx<'_>,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let args = parse_function_args(sql)?;
     if args.len() < 2 {
@@ -41,26 +99,11 @@ pub async fn select_rank(
     // A string literal is data: the index name resolves exactly as written,
     // with no case folding.
     let index_name = unquote(&args[0]);
-    let key_value = unquote(&args[1]);
+    let primary_key = unquote(&args[1]).into_bytes();
 
-    let collection = gate_read(state, identity, database_id, &index_name, RANK_WHAT)?;
-
-    let plan = PhysicalPlan::Kv(KvOp::SortedIndexRank {
-        index_name,
-        primary_key: key_value.into_bytes(),
-    });
-
-    dispatch_and_respond_json(
-        state,
-        &SortedIndexTarget {
-            tenant_id: identity.tenant_id,
-            database_id,
-            collection: &collection,
-        },
-        plan,
-        "rank",
-    )
-    .await
+    let read = SortedIndexRead::Rank { primary_key };
+    let (_, response) = run_read(state, identity, database_id, txn_ctx, &index_name, read).await?;
+    Ok(respond_json(&response, "rank"))
 }
 
 /// Handle `SELECT * FROM TOPK(index_name, k)` or `SELECT TOPK(index_name, k)`
@@ -69,6 +112,7 @@ pub async fn select_topk(
     identity: &AuthenticatedIdentity,
     database_id: DatabaseId,
     sql: &str,
+    txn_ctx: &DmlTxnCtx<'_>,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let args = parse_function_args(sql)?;
     if args.len() < 2 {
@@ -88,20 +132,9 @@ pub async fn select_topk(
         )
     })?;
 
-    let collection = gate_read(state, identity, database_id, &index_name, TOPK_WHAT)?;
-
-    let plan = PhysicalPlan::Kv(KvOp::SortedIndexTopK { index_name, k });
-
-    dispatch_and_respond_rows(
-        state,
-        &SortedIndexTarget {
-            tenant_id: identity.tenant_id,
-            database_id,
-            collection: &collection,
-        },
-        plan,
-    )
-    .await
+    let read = SortedIndexRead::TopK { k };
+    let (_, response) = run_read(state, identity, database_id, txn_ctx, &index_name, read).await?;
+    respond_rows(&response)
 }
 
 /// Handle `SELECT * FROM RANGE(index_name, score_min, score_max)`
@@ -110,6 +143,7 @@ pub async fn select_range(
     identity: &AuthenticatedIdentity,
     database_id: DatabaseId,
     sql: &str,
+    txn_ctx: &DmlTxnCtx<'_>,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let args = parse_function_args(sql)?;
     if args.len() < 3 {
@@ -122,27 +156,12 @@ pub async fn select_range(
     // A string literal is data: the index name resolves exactly as written,
     // with no case folding.
     let index_name = unquote(&args[0]);
-    let score_min = parse_score_arg(&args[1]);
-    let score_max = parse_score_arg(&args[2]);
-
-    let collection = gate_read(state, identity, database_id, &index_name, RANGE_WHAT)?;
-
-    let plan = PhysicalPlan::Kv(KvOp::SortedIndexRange {
-        index_name,
-        score_min,
-        score_max,
-    });
-
-    dispatch_and_respond_rows(
-        state,
-        &SortedIndexTarget {
-            tenant_id: identity.tenant_id,
-            database_id,
-            collection: &collection,
-        },
-        plan,
-    )
-    .await
+    let read = SortedIndexRead::Range {
+        score_min: parse_score_arg(&args[1]),
+        score_max: parse_score_arg(&args[2]),
+    };
+    let (_, response) = run_read(state, identity, database_id, txn_ctx, &index_name, read).await?;
+    respond_rows(&response)
 }
 
 /// Handle `SELECT SORTED_COUNT(index_name)`
@@ -151,6 +170,7 @@ pub async fn select_sorted_count(
     identity: &AuthenticatedIdentity,
     database_id: DatabaseId,
     sql: &str,
+    txn_ctx: &DmlTxnCtx<'_>,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let args = parse_function_args(sql)?;
     if args.is_empty() {
@@ -163,20 +183,14 @@ pub async fn select_sorted_count(
     // A string literal is data: the index name resolves exactly as written,
     // with no case folding.
     let index_name = unquote(&args[0]);
-
-    let collection = gate_read(state, identity, database_id, &index_name, COUNT_WHAT)?;
-
-    let plan = PhysicalPlan::Kv(KvOp::SortedIndexCount { index_name });
-
-    dispatch_and_respond_json(
+    let (_, response) = run_read(
         state,
-        &SortedIndexTarget {
-            tenant_id: identity.tenant_id,
-            database_id,
-            collection: &collection,
-        },
-        plan,
-        "sorted_count",
+        identity,
+        database_id,
+        txn_ctx,
+        &index_name,
+        SortedIndexRead::Count,
     )
-    .await
+    .await?;
+    Ok(respond_json(&response, "sorted_count"))
 }

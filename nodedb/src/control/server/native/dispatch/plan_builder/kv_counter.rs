@@ -60,7 +60,7 @@ pub(crate) fn build_incr_float(
     // The delta stays the client's decimal text, so the engine adds every
     // digit the client sent.
     let delta = fields.incr_float_delta.as_deref().unwrap_or("1");
-    if !crate::engine::kv::float_text::is_decimal_number(delta) {
+    if !nodedb_physical::kv_atomic::float_text::is_decimal_number(delta) {
         return Err(crate::Error::BadRequest {
             detail: format!("KvIncrFloat: delta must be a decimal number, got '{delta}'"),
         });

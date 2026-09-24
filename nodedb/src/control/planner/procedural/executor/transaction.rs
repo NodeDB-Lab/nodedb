@@ -23,7 +23,7 @@ struct BufferedStatementScope {
 /// Buffered transaction context for stored procedure execution.
 ///
 /// DML statements inside a procedure body are collected here until
-/// an explicit COMMIT flushes them as a TransactionBatch, or ROLLBACK
+/// an explicit COMMIT flushes them as one system transaction, or ROLLBACK
 /// discards them. An implicit COMMIT occurs at the end of the procedure.
 #[derive(Default)]
 pub struct ProcedureTransactionCtx {
@@ -72,6 +72,26 @@ impl ProcedureTransactionCtx {
             .map(|statement| statement.scope)
             .collect();
         (std::mem::take(&mut self.buffer), scopes)
+    }
+
+    /// Take every buffered statement with its lease scope, in buffer order
+    /// (on COMMIT). Clears the savepoint stack.
+    pub fn take_statements(&mut self) -> Vec<(Vec<PhysicalTask>, QueryLeaseScope)> {
+        self.savepoints.clear();
+        let mut tasks = std::mem::take(&mut self.buffer);
+        let scopes = std::mem::take(&mut self.statement_scopes);
+        let mut statements = Vec::with_capacity(scopes.len() + 1);
+        // Each statement owns the tasks from its start to the next start.
+        for statement in scopes.into_iter().rev() {
+            let own = tasks.split_off(statement.task_start.min(tasks.len()));
+            statements.push((own, statement.scope));
+        }
+        // Tasks buffered ahead of the first statement carry no lease.
+        if !tasks.is_empty() {
+            statements.push((tasks, QueryLeaseScope::empty()));
+        }
+        statements.reverse();
+        statements
     }
 
     /// Take tasks only. Kept for existing task-oriented tests; it intentionally
@@ -184,6 +204,20 @@ mod tests {
         ctx.buffer_task(dummy_task("a"));
         ctx.rollback();
         assert!(ctx.take_buffered_tasks().is_empty());
+    }
+
+    #[test]
+    fn commit_takes_each_statement_with_its_own_tasks() {
+        let mut ctx = ProcedureTransactionCtx::new();
+        ctx.buffer_statement(
+            vec![dummy_task("a"), dummy_task("b")],
+            QueryLeaseScope::empty(),
+        );
+        ctx.buffer_statement(vec![dummy_task("c")], QueryLeaseScope::empty());
+        let statements = ctx.take_statements();
+        let sizes: Vec<usize> = statements.iter().map(|(tasks, _)| tasks.len()).collect();
+        assert_eq!(sizes, vec![2, 1]);
+        assert!(ctx.take_statements().is_empty());
     }
 
     #[test]

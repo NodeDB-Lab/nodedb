@@ -21,11 +21,13 @@ use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::index_registry::{
     IndexRegistration, propose_index_record,
 };
+use crate::control::server::shared::session::ddl_buffer;
+use crate::control::server::shared::session::ddl_effect::{DeferredDdlEffect, SecondaryIndexBuild};
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
-use crate::types::TraceId;
 
 use super::super::super::super::result::{DdlError, DdlResult};
+use super::build::build_secondary_index;
 use super::commit::{commit_collection_mutation, err};
 
 /// Normalize a user-supplied field reference into the canonical JSON path
@@ -170,6 +172,21 @@ pub async fn create_index(
         .unwrap_or(&canonical_field)
         .to_string();
 
+    // A key-value collection's index lives in the KV engine, which indexes
+    // one top-level field by equality. Refuse what it cannot build before
+    // any catalog entry is written.
+    if coll.collection_type.is_kv() {
+        super::kv_index::kv_field(
+            collection,
+            &canonical_field,
+            &super::kv_index::KvIndexOptions {
+                unique: is_unique,
+                case_insensitive,
+                predicate: where_condition.as_deref(),
+            },
+        )?;
+    }
+
     // Two-phase Building→Ready pipeline. Phase 1: stamp `Building` and
     // commit — readers skip the index (planner filters to Ready), writers
     // dual-write (extraction iterates every registered path regardless of
@@ -189,85 +206,22 @@ pub async fn create_index(
 
     commit_collection_mutation(state, &coll, database_id).await?;
 
-    // Phase 2: dispatch the backfill op. This runs on the local Data
-    // Plane (single-node) or the leader (cluster — distributed backfill
-    // across vShards is handled inside the handler by the existing scan
-    // primitive, which is vShard-local per core). UNIQUE violations here
-    // surface as a Data Plane error; we propagate as SQLSTATE 23505 and
-    // leave the index in `Building` so a subsequent retry can DROP + try
-    // with a wider data fix.
-    let vshard = crate::types::VShardId::from_collection_in_database(database_id, collection);
-    let backfill_plan = crate::bridge::envelope::PhysicalPlan::Document(
-        nodedb_physical::physical_plan::DocumentOp::BackfillIndex {
-            collection: nodedb_types::QualifiedCollection::new(database_id, collection),
-            path: extraction_path.clone(),
-            is_array,
-            unique: is_unique,
-            case_insensitive,
-            predicate: where_condition.clone(),
-        },
-    );
-    let backfill_resp = crate::control::server::dispatch_utils::dispatch_to_data_plane(
-        state,
+    // Phase 2 and 3: backfill on every node, then flip to Ready. Inside an
+    // explicit transaction the build waits for COMMIT, after the Building
+    // entry lands; a ROLLBACK discards it with the entry.
+    let build = SecondaryIndexBuild {
         tenant_id,
         database_id,
-        vshard,
-        backfill_plan,
-        TraceId::ZERO,
-    )
-    .await
-    .map_err(|e| err("XX000", e.to_string()))?;
-
-    if backfill_resp.status == crate::bridge::envelope::Status::Error {
-        let detail = match backfill_resp.error_code.as_deref() {
-            Some(crate::bridge::envelope::ErrorCode::Internal { detail, .. }) => detail.clone(),
-            Some(other) => format!("{other:?}"),
-            None => String::from_utf8_lossy(&backfill_resp.payload).into_owned(),
-        };
-        let code = if detail.to_lowercase().contains("unique") {
-            "23505"
-        } else {
-            "XX000"
-        };
-        return Err(err(code, detail));
-    }
-
-    // Phase 2b: fan the same backfill op to every other cluster node.
-    // `execute_backfill_index` is vShard-local per core, so without
-    // this step non-coordinator nodes never populate the index for
-    // the rows they host — the silent-miss bug. Single-node and
-    // peerless clusters short-circuit inside the helper.
-    super::super::index_fanout::backfill_on_peers(
-        state,
-        super::super::index_fanout::PeerBackfill {
-            tenant_id,
-            database_id,
-            collection,
-            path: &extraction_path,
-            is_array,
-            unique: is_unique,
-            case_insensitive,
-            predicate: where_condition.as_deref(),
-        },
-    )
-    .await?;
-
-    // Phase 3: flip to Ready. Re-read the collection so any concurrent
-    // mutation (e.g. another DDL on the same collection — blocked by
-    // descriptor drain in cluster mode, serialized by pgwire session in
-    // single-node) is folded in before we rewrite the index vector.
-    if let Some(latest) = catalog
-        .get_collection(database_id, tenant_id.as_u64(), collection)
-        .ok()
-        .flatten()
-    {
-        let mut ready_coll = latest;
-        for idx in ready_coll.indexes.iter_mut() {
-            if idx.name == index_name {
-                idx.state = IndexBuildState::Ready;
-            }
-        }
-        commit_collection_mutation(state, &ready_coll, database_id).await?;
+        collection: collection.to_string(),
+        index_name: index_name.clone(),
+        extraction_path: extraction_path.clone(),
+        is_array,
+        unique: is_unique,
+        case_insensitive,
+        predicate: where_condition.clone(),
+    };
+    if !ddl_buffer::defer_effect(DeferredDdlEffect::SecondaryIndexBuild(build.clone())) {
+        build_secondary_index(state, &build).await?;
     }
 
     // Identity record: what SHOW INDEXES lists and DROP INDEX resolves.

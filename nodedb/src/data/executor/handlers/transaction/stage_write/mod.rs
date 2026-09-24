@@ -8,9 +8,9 @@
 //! statement, not deferred to COMMIT), the real affected-row count is
 //! computed, and the resulting encoded body (or a tombstone) is recorded in
 //! the overlay so a later same-transaction read-modify-write observes it. The
-//! write is NOT made durable here — the buffered plan is still replayed
-//! through the real apply path inside the COMMIT `TransactionBatch`, which
-//! remains the sole durable apply.
+//! write is NOT made durable here — COMMIT resolves the overlay into the
+//! transaction's redo record, and the redo install remains the sole durable
+//! apply.
 
 mod body;
 mod constraint;
@@ -26,6 +26,7 @@ mod stage_columnar_family;
 mod stage_columnar_resolved_dml;
 mod stage_crdt;
 mod stage_current_body;
+mod stage_document_batch;
 mod stage_graph;
 mod stage_kv;
 mod stage_kv_atomic;
@@ -38,6 +39,7 @@ mod stage_point_document;
 mod stage_rls;
 mod stage_spatial;
 mod stage_timeseries;
+mod stage_timeseries_ilp;
 mod stage_timeseries_now;
 mod stage_truncate;
 mod stage_upsert;
@@ -54,6 +56,9 @@ pub(in crate::data::executor) use stage_columnar_dml::{
 };
 pub(in crate::data::executor) use stage_columnar_resolved_dml::{
     StageColumnarResolvedDeleteParams, StageColumnarResolvedUpdateParams,
+};
+pub(in crate::data::executor) use stage_document_batch::{
+    StageBalanceDeltaParams, StageBatchInsertParams,
 };
 pub(in crate::data::executor) use stage_graph::GRAPH_LABEL_COLL_KEY;
 pub(in crate::data::executor) use stage_kv::{kv_row_identity, unhex_key};

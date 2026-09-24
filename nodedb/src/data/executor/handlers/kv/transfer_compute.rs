@@ -4,7 +4,7 @@
 //! move), shared by the autocommit handler (`transfer.rs`) and the
 //! in-transaction staging handler (`stage_kv_transfer.rs`) so a staged
 //! value and its COMMIT-time durable replay are always computed by the
-//! exact same code — mirrors the `engine_atomic_compute` / `stage_kv_atomic`
+//! exact same code — mirrors the `nodedb_physical::kv_atomic::compute` / `stage_kv_atomic`
 //! split for `Incr`/`Cas`/etc.
 
 use std::collections::HashMap;

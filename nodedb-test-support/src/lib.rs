@@ -15,6 +15,7 @@ pub mod pgwire_harness;
 pub mod sync_client;
 pub mod test_tracing;
 pub mod tx_batch_helpers;
+pub mod tx_commit;
 
 use nodedb::event::cdc::event::CdcEvent;
 use nodedb_types::DatabaseId;

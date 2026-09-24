@@ -37,7 +37,8 @@ fn kv_touched_collections(op: &nodedb_physical::physical_plan::KvOp, out: &mut V
         | RegisterSortedIndex { collection, .. }
         | PredicateUpdate { collection, .. }
         | PredicateDelete { collection, .. }
-        | MaterializeScan { collection, .. } => out.push(collection.as_str().to_owned()),
+        | MaterializeScan { collection, .. }
+        | SortedIndexTxnRead { collection, .. } => out.push(collection.as_str().to_owned()),
 
         // TransferItem touches two collections.
         TransferItem {

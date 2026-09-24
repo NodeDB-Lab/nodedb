@@ -11,7 +11,7 @@
 //! (`kv::field_compute::merge_field_updates`, `kv::transfer_compute::
 //! compute_transfer`), so a staged value and its COMMIT-time durable replay
 //! are never derived from different code paths -- mirrors `stage_kv_atomic.rs`'s
-//! reuse of `engine_atomic_compute`.
+//! reuse of `nodedb_physical::kv_atomic::compute`.
 //!
 //! Like `Incr` / `IncrFloat` / `Cas` / `GetSet`, these three ops carry a
 //! planner-assigned cross-engine surrogate on their plan. That surrogate binds

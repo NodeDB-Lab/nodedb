@@ -30,13 +30,26 @@ pub struct RecordedAppend {
     pub database_id: DatabaseId,
 }
 
+/// Where a recording appender reports each record it writes. The report
+/// runs while the WAL lock is held, so no reader sees the record before its
+/// recorder does.
+pub trait AppendSink: Sync {
+    fn record(&self, append: RecordedAppend);
+}
+
+impl AppendSink for Mutex<Vec<RecordedAppend>> {
+    fn record(&self, append: RecordedAppend) {
+        self.lock().unwrap_or_else(|p| p.into_inner()).push(append);
+    }
+}
+
 /// Appends WAL records that all carry one apply key.
 #[derive(Clone, Copy)]
 pub struct WalAppender<'a> {
     wal: &'a WalManager,
     apply_key: u64,
     /// Collects every record this appender writes, when set.
-    sink: Option<&'a Mutex<Vec<RecordedAppend>>>,
+    sink: Option<&'a dyn AppendSink>,
 }
 
 impl WalManager {
@@ -51,12 +64,12 @@ impl WalManager {
         }
     }
 
-    /// An appender that also pushes every record it writes onto `sink`, in
+    /// An appender that also reports every record it writes to `sink`, in
     /// append order.
     pub fn recording_appender<'a>(
         &'a self,
         apply_key: u64,
-        sink: &'a Mutex<Vec<RecordedAppend>>,
+        sink: &'a dyn AppendSink,
     ) -> WalAppender<'a> {
         WalAppender {
             wal: self,
@@ -94,18 +107,16 @@ impl WalAppender<'_> {
                 self.apply_key,
             )
             .map_err(crate::Error::Wal)?;
-        drop(wal);
         let lsn = Lsn::new(lsn);
         if let Some(sink) = self.sink {
-            sink.lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push(RecordedAppend {
-                    lsn,
-                    tenant_id,
-                    vshard_id,
-                    database_id,
-                });
+            sink.record(RecordedAppend {
+                lsn,
+                tenant_id,
+                vshard_id,
+                database_id,
+            });
         }
+        drop(wal);
         Ok(lsn)
     }
 }

@@ -490,7 +490,7 @@ mod tests {
             }),
             PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
-                payload: b"other_measurement value=2i 2000000000\n".to_vec(),
+                payload: b"metrics value=2i 2000000000\n".to_vec(),
                 format: "ilp".into(),
                 wal_lsn: None,
                 surrogates: Vec::new(),
@@ -501,16 +501,23 @@ mod tests {
             }),
         ];
 
-        let response = core.execute_transaction_batch(&task, TID, &plans, &[], None);
+        let response = core.commit_plans_then_refuse_for_test(&task, TID, &plans, 70);
 
-        assert_eq!(response.status, crate::bridge::envelope::Status::Error);
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(crate::bridge::envelope::ErrorCode::RetryableRefusal { .. })
+            ),
+            "the install fails after the transaction's writes: {:?}",
+            response.error_code
+        );
         assert!(
             !core.columnar_memtables.contains_key(&(
                 crate::types::DatabaseId::DEFAULT,
                 TenantId::new(TID),
                 "metrics".to_string(),
             )),
-            "reverse-order rollback must restore the pre-transaction absence after repeated ingests"
+            "the rolled-back install must restore the pre-transaction absence after repeated ingests"
         );
         assert!(
             !core.ts_last_value_caches.contains_key(&(
@@ -573,8 +580,8 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
             payload: b"metrics value=1i 1000000000\n".to_vec(),
             format: "ilp".into(),
-            // Buffered transaction plans normally have no per-op LSN. The
-            // transaction record's LSN above must become the partition stamp.
+            // Buffered transaction plans carry no per-op LSN. The
+            // transaction record's LSN must become the partition stamp.
             wal_lsn: None,
             surrogates: Vec::new(),
             provenance: None,
@@ -583,8 +590,8 @@ mod tests {
             rls_filters: Vec::new(),
         })];
 
-        let response = core.execute_transaction_batch(&task, TID, &plans, &[], None);
-        assert_eq!(response.status, Status::Ok);
+        let response = core.commit_plans_for_test(&task, TID, &plans, lsn);
+        assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
         let key = (
             crate::types::DatabaseId::new(DB),
             TenantId::new(TID),
@@ -612,17 +619,9 @@ mod tests {
     // ── Columnar predicate UPDATE / DELETE undo ─────────────────────────────
     //
     // A columnar predicate UPDATE / DELETE is staged at statement time and
-    // replayed durably at COMMIT through `execute_tx_sub_plan`. Before the undo
-    // parity fix, that replay hit the undo-less passthrough arm, so a SIBLING
-    // sub-plan failing later in the same COMMIT batch left the columnar mutation
-    // applied — a partial, non-atomic commit. These tests drive the real capture
-    // path (`execute_tx_sub_plan`) then reverse via `rollback_undo_log` — the same
-    // reverse-order driver `execute_transaction_batch` runs on a sibling failure —
-    // and assert the columnar state is fully restored.
-    //
-    // PRE-FIX the `undo_log.len() == 1` assertion fails (the passthrough pushed no
-    // undo entry), and the post-rollback state assertion fails (the mutation
-    // survived the aborted batch).
+    // installed at COMMIT from the transaction's redo record. A sub-record
+    // failing later in the same record rolls the columnar mutation back with
+    // every other write of the record.
 
     use nodedb_physical::physical_plan::{ColumnarOp, PhysicalPlan};
 
@@ -685,7 +684,7 @@ mod tests {
         seed_columnar_engine(&mut core, &[(1, 10), (2, 20)]);
         assert_eq!(columnar_rows(&core), vec![(1, 10), (2, 20)]);
 
-        // Durable COMMIT replay of `UPDATE m SET v = 999` (empty filter = all rows).
+        // COMMIT of `UPDATE m SET v = 999` (empty filter = all rows).
         let updates = vec![(
             "v".to_string(),
             nodedb_types::value_to_msgpack(&Value::Integer(999)).unwrap(),
@@ -697,24 +696,17 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
 
-        let mut undo_log = Vec::new();
-        let mut crdt_deltas = Vec::new();
-        core.execute_tx_sub_plan(TID, &plan, &mut undo_log, &mut crdt_deltas, &[])
-            .expect("columnar update sub-plan must succeed");
+        let task = make_default_task();
+        let response = core.commit_plans_then_refuse_for_test(&task, TID, &[plan], 71);
 
-        // The mutation applied, and — critically — an undo entry was captured.
-        assert_eq!(columnar_rows(&core), vec![(1, 999), (2, 999)]);
-        assert_eq!(
-            undo_log.len(),
-            1,
-            "columnar UPDATE must push exactly one undo entry (pre-fix: 0, on the undo-less passthrough)"
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(crate::bridge::envelope::ErrorCode::RetryableRefusal { .. })
+            ),
+            "the install fails after the transaction's writes: {:?}",
+            response.error_code
         );
-        assert!(matches!(undo_log[0], UndoEntry::ColumnarUpdate { .. }));
-
-        // A sibling sub-plan fails later in the same COMMIT: reverse the batch.
-        core.rollback_undo_log(nodedb_types::DatabaseId::DEFAULT.as_u64(), TID, undo_log)
-            .expect("rollback must succeed");
-
         assert_eq!(
             columnar_rows(&core),
             vec![(1, 10), (2, 20)],
@@ -730,33 +722,24 @@ mod tests {
         seed_columnar_engine(&mut core, &[(1, 10), (2, 20), (3, 30)]);
         assert_eq!(columnar_rows(&core), vec![(1, 10), (2, 20), (3, 30)]);
 
-        // Durable COMMIT replay of `DELETE FROM m` (empty filter = all rows).
+        // COMMIT of `DELETE FROM m` (empty filter = all rows).
         let plan = PhysicalPlan::Columnar(ColumnarOp::Delete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "m"),
             filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
 
-        let mut undo_log = Vec::new();
-        let mut crdt_deltas = Vec::new();
-        core.execute_tx_sub_plan(TID, &plan, &mut undo_log, &mut crdt_deltas, &[])
-            .expect("columnar delete sub-plan must succeed");
+        let task = make_default_task();
+        let response = core.commit_plans_then_refuse_for_test(&task, TID, &[plan], 72);
 
         assert!(
-            columnar_rows(&core).is_empty(),
-            "all rows must be deleted by the durable replay"
+            matches!(
+                response.error_code.as_deref(),
+                Some(crate::bridge::envelope::ErrorCode::RetryableRefusal { .. })
+            ),
+            "the install fails after the transaction's writes: {:?}",
+            response.error_code
         );
-        assert_eq!(
-            undo_log.len(),
-            1,
-            "columnar DELETE must push exactly one undo entry (pre-fix: 0, on the undo-less passthrough)"
-        );
-        assert!(matches!(undo_log[0], UndoEntry::ColumnarDelete { .. }));
-
-        // A sibling sub-plan fails later in the same COMMIT: reverse the batch.
-        core.rollback_undo_log(nodedb_types::DatabaseId::DEFAULT.as_u64(), TID, undo_log)
-            .expect("rollback must succeed");
-
         assert_eq!(
             columnar_rows(&core),
             vec![(1, 10), (2, 20), (3, 30)],

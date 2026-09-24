@@ -77,7 +77,6 @@ impl CoreLoop {
 
         for del in deletes {
             let surrogate = del.key.surrogate();
-            let row_key = del.key.to_string();
             // The identity INSERT minted for this row, from the plan's
             // captured MessagePack body: the declared primary key, else the
             // decimal surrogate.
@@ -95,7 +94,8 @@ impl CoreLoop {
                     database_id,
                     tid,
                     collection,
-                    document_id: &row_key,
+                    // The graph cascade keys nodes by the client key.
+                    document_id: row_identity.as_str(),
                     surrogate,
                     user_roles: &task.request.user_roles,
                     enforce: true,

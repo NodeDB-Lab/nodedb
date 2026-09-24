@@ -17,6 +17,7 @@ use nodedb_physical::physical_plan::{KvOp, PhysicalPlan};
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::parse::ddl_err;
+use super::txn_read::SortedRead;
 
 /// Where one sorted index's Data Plane state lives.
 ///
@@ -79,19 +80,22 @@ fn refusal(target: &SortedIndexTarget<'_>, resp: &Response) -> Option<DdlError> 
 }
 
 /// Dispatch a sorted-index read (`RANK` / `TOPK` / `RANGE` / `SORTED_COUNT` /
-/// `ZSCORE`), which mints no durable record.
-async fn dispatch_read(
+/// score), which mints no durable record. A read inside a transaction carries
+/// its transaction id, so the Data Plane folds in that transaction's staged
+/// writes.
+pub(super) async fn dispatch_read(
     state: &SharedState,
     target: &SortedIndexTarget<'_>,
-    plan: PhysicalPlan,
+    read: SortedRead,
 ) -> Result<Response, DdlError> {
-    let resp = crate::control::server::dispatch_utils::dispatch_to_data_plane(
+    let resp = crate::control::server::dispatch_utils::dispatch_to_data_plane_with_txn(
         state,
         target.tenant_id,
         target.database_id,
         target.vshard(),
-        plan,
+        read.plan,
         TraceId::ZERO,
+        read.txn_id,
     )
     .await
     .map_err(|e| ddl_err("XX000", e.to_string()))?;
@@ -152,7 +156,7 @@ fn decode_rows(payload: &[u8]) -> Result<Vec<serde_json::Value>, DdlError> {
 /// an apply that did not happen files a record for an index that exists
 /// nowhere, and every read of it then answers from an index that was never
 /// built.
-pub(super) async fn register_in_engine(
+pub(crate) async fn register_in_engine(
     state: &SharedState,
     target: &SortedIndexTarget<'_>,
     plan: PhysicalPlan,
@@ -194,30 +198,19 @@ pub async fn drop_in_engine(
     Ok(())
 }
 
-/// Dispatch plan and return a single-row JSON response.
-pub(super) async fn dispatch_and_respond_json(
-    state: &SharedState,
-    target: &SortedIndexTarget<'_>,
-    plan: PhysicalPlan,
-    col_name: &str,
-) -> Result<Vec<DdlResult>, DdlError> {
-    let resp = dispatch_read(state, target, plan).await?;
+/// A read's reply as a single-row JSON response.
+pub(super) fn respond_json(resp: &Response, col_name: &str) -> Vec<DdlResult> {
     let payload_text = crate::data::executor::response_codec::decode_payload_to_json(&resp.payload);
     let mut row = Map::new();
     row.insert(col_name.to_string(), JsonValue::String(payload_text));
-    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
+    vec![DdlResult::Rows(ShapedRows::text_rows(
         vec![col_name.to_string()],
         vec![row],
-    ))])
+    ))]
 }
 
-/// Dispatch plan and return multi-row response (for TOPK, RANGE).
-pub(super) async fn dispatch_and_respond_rows(
-    state: &SharedState,
-    target: &SortedIndexTarget<'_>,
-    plan: PhysicalPlan,
-) -> Result<Vec<DdlResult>, DdlError> {
-    let resp = dispatch_read(state, target, plan).await?;
+/// A read's reply as a multi-row response (for TOPK, RANGE).
+pub(super) fn respond_rows(resp: &Response) -> Result<Vec<DdlResult>, DdlError> {
     let rows_json = decode_rows(&resp.payload)?;
 
     let mut rows = Vec::with_capacity(rows_json.len());

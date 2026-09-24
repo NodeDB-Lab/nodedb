@@ -75,6 +75,9 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::FeatureNotSupported { detail } => {
             ("ERROR", sqlstate::FEATURE_NOT_SUPPORTED, detail.clone())
         }
+        crate::Error::NotInTransactionBlock { .. } => {
+            ("ERROR", sqlstate::ACTIVE_SQL_TRANSACTION, err.to_string())
+        }
         crate::Error::UndefinedFunction { name } => (
             "ERROR",
             sqlstate::UNDEFINED_FUNCTION,

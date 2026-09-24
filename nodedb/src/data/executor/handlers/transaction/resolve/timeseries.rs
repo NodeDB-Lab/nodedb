@@ -37,6 +37,7 @@ impl CoreLoop {
         tid: u64,
         txn_id: TxnId,
         op: &TimeseriesOp,
+        unkeyed_seen: &mut std::collections::HashMap<String, usize>,
         ops: &mut Vec<RedoSubRecord>,
     ) -> crate::Result<()> {
         match op {
@@ -59,16 +60,24 @@ impl CoreLoop {
                     tenant,
                     collection.as_str().to_string(),
                 );
-                // The instant the statement read. An ingest staged with no
-                // surrogate recorded none, and resolve reads the clock now.
-                let now_ms = surrogates
-                    .first()
-                    .and_then(|first| {
-                        self.txn_overlays
-                            .get(&txn_id)?
-                            .ingest_now(&coll_key, first.as_u32())
-                    })
-                    .unwrap_or_else(|| self.ingest_now_ms());
+                // The instant the statement read. A keyed ingest recorded it
+                // under its first surrogate. An unkeyed ingest recorded it in
+                // stage order, so the Nth unkeyed ingest into a collection
+                // reads the Nth instant.
+                let overlay = self.txn_overlays.get(&txn_id);
+                let staged_now = match surrogates.first() {
+                    Some(first) => {
+                        overlay.and_then(|overlay| overlay.ingest_now(&coll_key, first.as_u32()))
+                    }
+                    None => {
+                        let ordinal = unkeyed_seen.entry(coll_key.2.clone()).or_insert(0);
+                        let now = overlay
+                            .and_then(|overlay| overlay.unkeyed_ingest_now(&coll_key, *ordinal));
+                        *ordinal += 1;
+                        now
+                    }
+                };
+                let now_ms = staged_now.unwrap_or_else(|| self.ingest_now_ms());
                 let lines = self
                     .stamped_ingest_lines(StampedIngest {
                         database_id: task.request.database_id,

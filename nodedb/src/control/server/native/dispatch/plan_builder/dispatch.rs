@@ -9,7 +9,8 @@ use crate::bridge::envelope::PhysicalPlan;
 
 use super::super::DispatchCtx;
 use super::{
-    columnar, crdt, document, graph, kv, kv_counter, query, spatial, text, timeseries, vector,
+    columnar, crdt, document, document_bulk, graph, kv, kv_counter, query, spatial, text,
+    timeseries, vector,
 };
 
 /// Build a PhysicalPlan from an opcode and request fields.
@@ -29,8 +30,8 @@ pub(crate) fn build_plan(
         OpCode::DocumentUpdate => document::build_update(ctx, fields, collection),
         OpCode::DocumentScan => document::build_scan(ctx, fields, collection),
         OpCode::DocumentUpsert => document::build_upsert(ctx, fields, collection),
-        OpCode::DocumentBulkUpdate => document::build_bulk_update(ctx, fields, collection),
-        OpCode::DocumentBulkDelete => document::build_bulk_delete(ctx, fields, collection),
+        OpCode::DocumentBulkUpdate => document_bulk::build_bulk_update(ctx, fields, collection),
+        OpCode::DocumentBulkDelete => document_bulk::build_bulk_delete(ctx, fields, collection),
         // Vector.
         OpCode::VectorSearch => vector::build_search(ctx, fields, collection),
         OpCode::VectorBatchInsert => vector::build_batch_insert(ctx, fields, collection),
@@ -76,30 +77,18 @@ pub(crate) fn build_plan(
         OpCode::GraphAlgo => graph::build_algo(fields, collection),
         OpCode::GraphMatch => graph::build_match(fields, collection),
         // Document DDL.
-        OpCode::DocumentTruncate => document::build_truncate(ctx, collection),
-        OpCode::DocumentEstimateCount => document::build_estimate_count(ctx, fields, collection),
-        OpCode::DocumentInsertSelect => document::build_insert_select(ctx, fields, collection),
-        OpCode::DocumentRegister => document::build_register(ctx, fields, collection),
-        OpCode::DocumentDropIndex => document::build_drop_index(ctx, fields, collection),
-        // KV DDL.
-        OpCode::KvRegisterIndex => kv::build_register_index(ctx, fields, collection),
-        OpCode::KvDropIndex => kv::build_drop_index(ctx, fields, collection),
+        OpCode::DocumentTruncate => document_bulk::build_truncate(ctx, collection),
+        OpCode::DocumentEstimateCount => {
+            document_bulk::build_estimate_count(ctx, fields, collection)
+        }
+        OpCode::DocumentInsertSelect => document_bulk::build_insert_select(ctx, fields, collection),
+        // KV truncate.
         OpCode::KvTruncate => kv::build_truncate(ctx, collection),
         // KV atomic operations.
         OpCode::KvIncr => kv_counter::build_incr(ctx, collection, fields),
         OpCode::KvIncrFloat => kv_counter::build_incr_float(ctx, collection, fields),
         OpCode::KvCas => kv::build_cas(ctx, collection, fields),
         OpCode::KvGetSet => kv::build_getset(ctx, collection, fields),
-        // KV sorted index operations.
-        OpCode::KvRegisterSortedIndex => kv::build_register_sorted_index(ctx, collection, fields),
-        OpCode::KvDropSortedIndex => kv::build_drop_sorted_index(fields),
-        OpCode::KvSortedIndexRank => kv::build_sorted_index_rank(fields),
-        OpCode::KvSortedIndexTopK => kv::build_sorted_index_top_k(fields),
-        OpCode::KvSortedIndexRange => kv::build_sorted_index_range(fields),
-        OpCode::KvSortedIndexCount => kv::build_sorted_index_count(fields),
-        OpCode::KvSortedIndexScore => kv::build_sorted_index_score(fields),
-        // Vector DDL.
-        OpCode::VectorSetParams => vector::build_set_params(ctx, fields, collection),
         // Query.
         OpCode::RecursiveScan => query::build_recursive_scan(ctx, fields, collection),
         _ => Err(crate::Error::BadRequest {

@@ -403,6 +403,22 @@ impl CoreLoop {
                 index_name,
                 primary_key,
             } => self.execute_kv_sorted_index_score(task, did, tid, index_name, primary_key),
+            KvOp::SortedIndexTxnRead {
+                collection,
+                index_name,
+                pending,
+                read,
+            } => self.execute_kv_sorted_index_txn_read(
+                task,
+                super::sorted_txn::SortedIndexTxnReadParams {
+                    did,
+                    tid,
+                    collection: collection.as_str(),
+                    index_name,
+                    pending: pending.as_ref(),
+                    read,
+                },
+            ),
             KvOp::Transfer { .. } => self.dispatch_kv_transfer(task, did, tid, op),
             KvOp::TransferItem { .. } => self.dispatch_kv_transfer_item(task, did, tid, op),
             KvOp::MaterializeScan {

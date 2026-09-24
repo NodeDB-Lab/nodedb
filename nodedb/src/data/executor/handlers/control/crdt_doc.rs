@@ -216,7 +216,6 @@ impl CoreLoop {
 
         let tid = tenant_id.as_u64();
         let storage_key = StorageKey::for_surrogate(surrogate);
-        let row_key = storage_key.to_string();
         // The sparse-store removal and its index cascades run in one write txn
         // this handler owns: on any failure it is dropped un-committed and none
         // of them land.
@@ -237,7 +236,8 @@ impl CoreLoop {
                 database_id: task.request.database_id.as_u64(),
                 tid,
                 collection,
-                document_id: row_key.as_str(),
+                // The graph cascade keys nodes by the client key.
+                document_id,
                 surrogate,
                 user_roles: &task.request.user_roles,
                 enforce: false,
@@ -273,7 +273,6 @@ impl CoreLoop {
                     tid,
                     collection,
                     storage_key,
-                    identity: RowIdentity::from_user_key(document_id),
                 },
                 outcome,
             );

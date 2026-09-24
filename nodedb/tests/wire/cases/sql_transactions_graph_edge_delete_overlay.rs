@@ -8,7 +8,7 @@
 //!
 //! Every edge here is a SELF-LOOP (`_from == _to == node`), keeping both
 //! endpoints on one home vShard so the delete is SINGLE-HOME and stages
-//! through the single-shard WAL + `TransactionBatch` commit path.
+//! through the single-shard redo-record commit path.
 
 use crate::harness::TestServer;
 
@@ -118,8 +118,8 @@ async fn in_tx_edge_delete_commit_persists_removal() {
         .expect("in-tx GRAPH DELETE EDGE should stage at statement time");
     server.exec("COMMIT").await.unwrap();
 
-    // A single-home staged edge delete replays durably at COMMIT via the
-    // single-shard WAL + TransactionBatch path.
+    // A single-home staged edge delete lands durably at COMMIT through the
+    // single-shard redo-record install.
     let after_commit = neighbors_of(&server, "commit_node", "knows").await;
     assert!(
         !after_commit.contains(&"commit_node".to_string()),

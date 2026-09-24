@@ -7,6 +7,7 @@ mod calvin_active_verify;
 mod calvin_overlay_stage;
 mod calvin_overlay_stage_bulk;
 mod calvin_passive_read;
+pub mod calvin_reply;
 mod calvin_resolve;
 mod calvin_txn_id;
 mod checkpoint_crdt;
@@ -25,3 +26,5 @@ pub mod reindex;
 mod reindex_apply;
 pub mod snapshot;
 pub mod synonym_group;
+
+pub(in crate::data::executor) use calvin_txn_id::calvin_synthetic_txn_id;

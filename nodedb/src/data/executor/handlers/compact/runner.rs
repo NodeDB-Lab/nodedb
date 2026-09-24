@@ -99,7 +99,7 @@ impl CoreLoop {
                 0.0
             };
 
-            if !force && ratio < self.compaction_tombstone_threshold {
+            if !force && ratio < self.maintenance.compaction_tombstone_threshold {
                 continue;
             }
 

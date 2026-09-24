@@ -84,8 +84,6 @@ pub(in crate::data::executor) enum UndoEntry {
         /// The redb storage key. `.surrogate()` recovers the numeric surrogate
         /// FTS index rollback needs.
         document_id: nodedb_types::StorageKey,
-        /// The row's client identity, as the deferred event names it.
-        identity: nodedb_types::RowIdentity,
         /// `None` if the document didn't exist before (inserted); `Some(bytes)`
         /// if it was overwritten (updated).
         old_value: Option<Vec<u8>>,
@@ -117,8 +115,6 @@ pub(in crate::data::executor) enum UndoEntry {
         /// delete cascade removed this document's postings, and a
         /// rolled-back delete recomputes and re-inserts them under it.
         document_id: nodedb_types::StorageKey,
-        /// The row's client identity, as the deferred event names it.
-        identity: nodedb_types::RowIdentity,
         old_value: Vec<u8>,
         /// System-time key of the versioned tombstone row this op appended on a
         /// bitemporal collection. `None` = plain op → re-insert via the
@@ -213,69 +209,20 @@ pub(in crate::data::executor) enum UndoEntry {
         key: Vec<u8>,
         prior: crate::engine::kv::KvEntryImage,
     },
-    /// Undo a KV BatchPut by reinstating the prior state of every key.
+    /// Undo a KV `EXPIRE` / `PERSIST` by putting back the key's prior expiry.
+    /// The value is untouched: a TTL change writes only the expiry.
     ///
-    /// Each element is `(key, prior)` where `prior == None` means the key was
-    /// newly inserted.
-    KvBatchPut {
+    /// `prior_expire_at_ms` is the absolute instant the key expired at, or
+    /// [`NO_EXPIRY`](crate::engine::kv::entry::NO_EXPIRY) when it had none.
+    KvTtl {
         collection: String,
-        entries: Vec<(Vec<u8>, Option<crate::engine::kv::KvEntryImage>)>,
-    },
-    /// Undo a KV Transfer (fungible) by reinstating the source and destination
-    /// prior state.
-    KvTransfer {
-        collection: String,
-        source_key: Vec<u8>,
-        source_prior: crate::engine::kv::KvEntryImage,
-        dest_key: Vec<u8>,
-        dest_prior: Option<crate::engine::kv::KvEntryImage>,
-    },
-    /// Undo a KV TransferItem by reinstating the source and destination prior
-    /// state.
-    KvTransferItem {
-        source_collection: String,
-        dest_collection: String,
-        item_key: Vec<u8>,
-        dest_key: Vec<u8>,
-        source_prior: crate::engine::kv::KvEntryImage,
-        dest_prior: Option<crate::engine::kv::KvEntryImage>,
+        key: Vec<u8>,
+        prior_expire_at_ms: u64,
     },
     /// Undo a KV `TRUNCATE` by reinstalling every row the collection held.
     KvTruncate {
         collection: String,
         rows: Vec<crate::engine::kv::hash_table::KvExportEntry>,
-    },
-    /// Undo a KV `Expire`/`Persist` by restoring the key's prior TTL state.
-    ///
-    /// `prior_expiry == None` means the key had no TTL (persistent) before
-    /// the forward op; undo calls `KvEngine::persist`. `prior_expiry ==
-    /// Some(expire_at_ms)` means the key had a TTL expiring at that exact
-    /// absolute instant; undo calls `KvEngine::expire_with_absolute_expiry`
-    /// with it verbatim (not a freshly-derived `now_ms + ttl_ms`, which
-    /// would drift from the original instant by the elapsed time).
-    KvTtl {
-        collection: String,
-        key: Vec<u8>,
-        prior_expiry: Option<u64>,
-    },
-    /// Undo a KV `RegisterSortedIndex`/`DropSortedIndex` by restoring the
-    /// index name's prior definition state.
-    ///
-    /// `prior_def == None` means no index existed under this name before
-    /// the forward op (a fresh `RegisterSortedIndex`); undo drops it.
-    /// `prior_def == Some(def)` means an index existed under this name
-    /// before the forward op (either overwritten by `RegisterSortedIndex`,
-    /// or removed by `DropSortedIndex`); undo re-registers `def`, which
-    /// rebuilds the order-statistic tree by backfilling from the KV
-    /// collection's CURRENT contents at undo time -- correct regardless of
-    /// undo-log ordering relative to sibling KV-write undos, since
-    /// `SortedIndexManager::register` always derives the tree fresh from
-    /// live table state rather than from a point-in-time snapshot.
-    SortedIndexDdl {
-        database_id: u64,
-        tenant_id: u64,
-        index_name: String,
-        prior_def: Option<crate::engine::kv::sorted_index::manager::SortedIndexDef>,
     },
     /// Undo a `mark_node_deleted` by removing the node from the in-memory
     /// deleted-nodes set (edge referential-integrity tracker).

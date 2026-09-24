@@ -100,6 +100,14 @@ pub(super) fn apply_kv(ctx: &PermCtx<'_>, op: &mut KvOp) -> crate::Result<()> {
              and the plan names only the index",
         ),
 
+        // Refuse: the reply is ranked keys, a rank, or a count, with no row
+        // body to filter. The plan names the owning collection.
+        KvOp::SortedIndexTxnRead { collection, .. } => ctx.refuse_if_tree(
+            collection,
+            "a sorted-index read returns ranked keys, a rank, or a count taken from stored rows, \
+             so the subtree filter cannot be evaluated",
+        ),
+
         // Resolve against the wrapped op: it is the intercepted write
         // verbatim, so it authorizes at exactly the level that write does.
         KvOp::ResolveWrite(inner) => apply_kv(ctx, inner),

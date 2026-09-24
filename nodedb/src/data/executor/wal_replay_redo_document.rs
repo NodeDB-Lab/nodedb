@@ -47,7 +47,8 @@
 //! redb-synchronous-durable: by the time this replay runs, the target balance
 //! the original write produced is already on disk, and the derived target write
 //! carries its own redo record naming the target collection. Folding again on
-//! replay would add the same amount a second time.
+//! replay would add the same amount a second time. A Calvin record is the
+//! exception: see "Calvin records in restart replay" below.
 //!
 //! ### Why Raft replication does the opposite
 //!
@@ -76,6 +77,14 @@
 //! their targets and link their hash chain, exactly as replication does (see
 //! `handlers::transaction::redo_apply`). With no scope open this arm is plain
 //! restart replay.
+//!
+//! ### Calvin records in restart replay
+//!
+//! A Calvin redo record's stamp carries the sum targets its slice folds, and
+//! no later record carries the target rows. Restart replay runs its document
+//! rows through the committed path, which folds them at the record's LSN.
+//! The fold subtracts the row's prior image, so a row that already holds its
+//! post-image folds nothing.
 
 use nodedb_types::Surrogate;
 use nodedb_types::sync::wire::SyncProvenance;
@@ -187,7 +196,8 @@ impl CoreLoop {
                     self.observe_bitemporal_stamp(s.sys_from_ms);
                     self.active_bitemporal_stamps.insert(surrogate_u32, s);
                 }
-                let applied = if self.redo_apply.scope.is_some() {
+                let folds = self.redo_folds_at(record_lsn, &collection);
+                let applied = if folds {
                     self.apply_committed_document_put(
                         CommittedDocWrite {
                             database_id,
@@ -223,9 +233,10 @@ impl CoreLoop {
                     );
                 }
             } else {
-                // Replay keys the row by its surrogate; the record's text
-                // `document_id` is the client key, read only by a committed
-                // redo apply for the row's event identity.
+                // Replay keys the row by its surrogate. The record's text
+                // `document_id` is the client key. The graph cascade keys
+                // nodes by it, and a committed redo apply names the row's
+                // event by it.
                 // A `bitemporal=true` collection's delete carries its
                 // resolve-time system time as a fifth element; the plain form
                 // has four. The stamp forces the versioned tombstone at that
@@ -263,7 +274,8 @@ impl CoreLoop {
                         },
                     );
                 }
-                let removed = if self.redo_apply.scope.is_some() {
+                let folds = self.redo_folds_at(record_lsn, &collection);
+                let removed = if folds {
                     self.apply_committed_document_delete(CommittedDocWrite {
                         database_id,
                         tenant_id,
@@ -273,7 +285,13 @@ impl CoreLoop {
                         record_lsn,
                     })
                 } else {
-                    self.apply_document_delete(database_id, tenant_id, &collection, surrogate_u32)
+                    self.apply_document_delete(
+                        database_id,
+                        tenant_id,
+                        &collection,
+                        &document_id,
+                        surrogate_u32,
+                    )
                 };
                 if sys_from_ms.is_some() {
                     self.active_bitemporal_stamps.remove(&surrogate_u32);
@@ -299,6 +317,20 @@ impl CoreLoop {
                 "WAL document redo replay complete"
             );
         }
+    }
+
+    /// Whether a document write at `record_lsn` to `collection` runs the
+    /// committed path, which folds materialized sums: always under a
+    /// committed-redo apply, and in restart replay when the record's Calvin
+    /// stamp names sum targets for `collection`. Folding reads the row's
+    /// prior image, so a replay over a row that already holds the post-image
+    /// folds nothing.
+    fn redo_folds_at(&self, record_lsn: u64, collection: &str) -> bool {
+        self.redo_apply.scope.is_some()
+            || self
+                .redo_apply
+                .replay_folds_for(record_lsn, collection)
+                .is_some()
     }
 
     /// Apply one document PUT through the shared `apply_point_put` core write
@@ -383,11 +415,10 @@ impl CoreLoop {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
+        document_id: &str,
         surrogate_u32: u32,
     ) -> bool {
         let surrogate = Surrogate::new(surrogate_u32);
-        let storage_key = StorageKey::for_surrogate(surrogate);
-        let row_key = storage_key.to_string();
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
             Err(e) => {
@@ -406,7 +437,8 @@ impl CoreLoop {
                 database_id,
                 tid: tenant_id,
                 collection,
-                document_id: row_key.as_str(),
+                // The graph cascade keys nodes by the client key.
+                document_id,
                 surrogate,
                 user_roles: &[],
                 enforce: false,

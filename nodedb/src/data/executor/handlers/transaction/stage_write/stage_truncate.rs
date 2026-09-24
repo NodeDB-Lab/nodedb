@@ -6,10 +6,10 @@
 //! transaction's overlay (`TxnOverlay::mark_truncated`). Every row staged
 //! earlier in the same transaction is tombstoned through the undo journal,
 //! and every base row with no newer overlay entry is hidden from the
-//! transaction's own reads and existence probes. Nothing touches base: the
-//! buffered plan replays through the live truncate inside the COMMIT
-//! `TransactionBatch`, in statement order, and `ROLLBACK` / `ROLLBACK TO
-//! SAVEPOINT` drop the marker.
+//! transaction's own reads and existence probes. Nothing touches base: COMMIT
+//! resolves the truncate into the transaction's redo record ahead of the
+//! rows staged after it, and `ROLLBACK` / `ROLLBACK TO SAVEPOINT` drop the
+//! marker.
 //!
 //! The response carries no payload: the statement's tag is the bare
 //! `TRUNCATE` autocommit answers with, so there is no row count to report.

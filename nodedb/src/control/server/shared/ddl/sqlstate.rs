@@ -35,6 +35,11 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             sqlstate::CHECK_VIOLATION,
             format!("pre-validation rejected: {reason}"),
         ),
+        ErrorCode::SyncRejected { violation, .. } => (
+            "ERROR",
+            sqlstate::CHECK_VIOLATION,
+            format!("sync frame rejected: {violation}"),
+        ),
         // Nothing applied and the identical statement is expected to succeed
         // later, so drivers get the same class they already retry on rather
         // than a check violation they would surface as permanent.

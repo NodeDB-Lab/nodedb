@@ -27,6 +27,7 @@ pub mod convert;
 pub mod crdt_ops;
 pub mod custom_type;
 pub mod database;
+pub mod deferred_effects;
 pub mod dsl;
 pub mod emergency_ddl;
 pub mod estimate_count;

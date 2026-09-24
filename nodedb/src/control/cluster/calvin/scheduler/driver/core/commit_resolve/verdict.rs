@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use nodedb_cluster::calvin::VerdictSignal;
 
+use crate::control::cluster::calvin::scheduler::driver::core::commit_resolution_dispatch::CommitResolution;
 use crate::control::cluster::calvin::scheduler::driver::core::deferred::{
     DispatchOutcome, DispatchStep,
 };
@@ -74,7 +75,7 @@ impl Scheduler {
             (self.dispatch_calvin_resolve(txn_id), DispatchStep::Resolve)
         } else {
             (
-                self.dispatch_commit_resolution(txn_id, false, None),
+                self.dispatch_commit_resolution(txn_id, CommitResolution::Drop),
                 DispatchStep::Drop,
             )
         };
@@ -365,7 +366,8 @@ mod tests {
                 plan,
                 PhysicalPlan::Meta(MetaOp::CalvinFlush {
                     epoch: 14,
-                    position: 2
+                    position: 2,
+                    ..
                 })
             )
         })

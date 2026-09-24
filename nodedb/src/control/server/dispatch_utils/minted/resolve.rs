@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::bridge::envelope::{Response, Status};
+use crate::bridge::envelope::{ErrorCode, Response, Status};
 use crate::wal::WalManager;
 
 use super::super::write_abort::{refusal_is_final, write_definitely_not_applied};
@@ -17,8 +17,8 @@ use super::records::{MintedRecords, RecordOwner};
 /// Close `minted` from the core's final `response`.
 ///
 /// `final_refusal_key` is the proposal key a final refusal's marker carries,
-/// `0` when this write's refusals are never final. A failed cancel returns
-/// the error and holds the window.
+/// `0` when no proposal carries this write. A failed cancel returns the error
+/// and holds the window.
 pub(crate) async fn resolve_on_response(
     wal: &Arc<WalManager>,
     owner: RecordOwner,
@@ -37,6 +37,20 @@ pub(crate) async fn resolve_on_response(
             } else {
                 0
             };
+            // A refused sync frame advanced its stream's high-water mark. The
+            // frame's record is cancelled, so the mark gets a record of its
+            // own, durable with the markers.
+            if let ErrorCode::SyncRejected { provenance, .. } = code
+                && let Err(error) = wal.appender(marker_key).append_sync_seq_advance(
+                    provenance.producer_id,
+                    provenance.epoch,
+                    provenance.stream_id,
+                    provenance.seq,
+                )
+            {
+                minted.hold();
+                return Err(error);
+            }
             minted.cancel(wal, owner, marker_key).await
         }
         None => {
@@ -237,5 +251,55 @@ mod tests {
         waiter.await.expect("waiter");
         assert!(floor.floor() < lsn);
         assert_eq!(floor.leaked_windows(), 0);
+    }
+
+    /// A sync frame the gate refused for good is cancelled, and the
+    /// high-water mark it advanced is journalled on its own. Restart replay
+    /// then restores the mark, never applies the frame, and counts the
+    /// refusal as the proposal's outcome.
+    #[tokio::test]
+    async fn a_refused_sync_frame_journals_its_mark_and_cancels_its_record() {
+        const KEY: u64 = 0xAB;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = Arc::new(WalManager::open_for_testing(&dir.path().join("wal")).expect("wal"));
+        let floor = OutcomeFloor::new();
+        let (minted, lsn) = minted_record(&wal, &floor);
+        let rejected = response(
+            Status::Error,
+            Some(ErrorCode::SyncRejected {
+                violation: nodedb_types::sync::violation::ViolationType::PermissionDenied,
+                applied_seq: 4,
+                provenance: nodedb_types::sync::wire::SyncProvenance {
+                    producer_id: 9,
+                    epoch: 2,
+                    stream_id: 1,
+                    seq: 4,
+                },
+            }),
+            false,
+        );
+
+        resolve_on_response(&wal, owner(), KEY, &rejected, minted)
+            .await
+            .expect("resolve");
+
+        wal.sync().expect("sync");
+        let records = wal.replay().expect("replay");
+        assert!(
+            !records
+                .iter()
+                .any(|record| record.header.lsn == lsn.as_u64()),
+            "the refused frame never replays"
+        );
+        let (maps, _) =
+            crate::wal::replay::replay_sync_hwm_records(&records).expect("replay marks");
+        assert_eq!(maps.sync_hwm.get(&(9, 1)), Some(&4));
+        assert_eq!(maps.producer_epoch_floor.get(&9), Some(&2));
+        let ledger = crate::control::distributed_applier::ProposalLedger::from_records(&records, 8);
+        assert!(
+            ledger.prior(KEY).is_some(),
+            "the refusal is the proposal's outcome"
+        );
+        assert!(floor.floor() >= lsn);
     }
 }

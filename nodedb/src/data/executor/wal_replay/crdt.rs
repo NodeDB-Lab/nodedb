@@ -151,7 +151,7 @@ impl CoreLoop {
                                 &payload.bytes,
                                 nodedb_types::Surrogate::new(surrogate),
                                 document_id,
-                                0,
+                                payload.peer_id,
                                 crate::engine::crdt::tenant_state::DeltaSigningAdmission {
                                     auth: nodedb_crdt::CrdtAuthContext {
                                         user_id: signing.auth_user_id,
@@ -169,7 +169,7 @@ impl CoreLoop {
                                 &payload.bytes,
                                 nodedb_types::Surrogate::new(surrogate),
                                 document_id,
-                                0,
+                                payload.peer_id,
                             ),
                         },
                         Err(e) => {
@@ -271,7 +271,7 @@ impl CoreLoop {
                             &payload.bytes,
                             nodedb_types::Surrogate::ZERO,
                             "",
-                            0,
+                            payload.peer_id,
                         ) {
                             crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Clean {
                                 ..
@@ -761,7 +761,8 @@ mod crdt_replay_tests {
             None,
             Some(row_id.to_owned()),
             Some(0),
-        );
+        )
+        .with_peer_id(peer);
         nodedb_wal::WalRecord::new(nodedb_wal::WalRecordArgs {
             record_type: RecordType::CrdtDelta as u32,
             lsn,
@@ -818,6 +819,7 @@ mod crdt_replay_tests {
             .collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].source_lsn, Some(20));
+        assert_eq!(entries[0].peer_id, 3, "the entry names the producing peer");
         assert_eq!(
             h.core
                 .sparse

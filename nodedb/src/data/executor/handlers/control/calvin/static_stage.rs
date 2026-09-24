@@ -11,6 +11,7 @@ use nodedb_types::calvin::VersionedReadEntry;
 use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::commit_pending::PendingCommit;
+use crate::data::executor::handlers::control::calvin_reply::CalvinReply;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
 use nodedb_physical::physical_plan::PhysicalPlan;
@@ -26,13 +27,14 @@ impl CoreLoop {
     /// Computes the local commit vote by checking whether this participant's
     /// slice of the transaction's LSN-versioned read-set is still current
     /// against the per-core write versions, then STAGES the write plans into
-    /// the commit-pending buffer keyed by `(epoch, position)`. It performs NO
-    /// base mutation and fires NO side effects — nothing is observable until a
-    /// subsequent [`CoreLoop::execute_calvin_flush`] replays the staged plans
-    /// (or [`CoreLoop::execute_calvin_drop`] discards them). The response
-    /// carries the vote on `read_set_valid`; the deterministic time anchor and
-    /// leadership scope are captured with the staged plans and restored at
-    /// flush time (when the actual apply — and any time-dependent writes — run).
+    /// the synthetic overlay and the commit-pending buffer keyed by
+    /// `(epoch, position)`. It performs NO base mutation and fires NO side
+    /// effects — nothing is observable until a subsequent
+    /// [`CoreLoop::execute_calvin_flush`] installs the transaction's redo
+    /// record (or [`CoreLoop::execute_calvin_drop`] discards the staged
+    /// state). The response carries the vote on `read_set_valid`. Staging runs
+    /// under the epoch's deterministic time anchor, which the pending entry
+    /// keeps for resolve.
     pub(in crate::data::executor) fn execute_calvin_execute_static(
         &mut self,
         task: &ExecutionTask,
@@ -85,16 +87,17 @@ impl CoreLoop {
         let prev_epoch_ms = self.epoch_system_ms;
         self.epoch_system_ms = Some(epoch_system_ms);
         let stage_result = catch_unwind(AssertUnwindSafe(|| {
+            let mut reply = CalvinReply::default();
             for plan in plans {
-                self.stage_calvin_overlay(task, synthetic_txn_id, *tenant_id, plan)?;
+                self.stage_calvin_plan(task, synthetic_txn_id, *tenant_id, plan, &mut reply)?;
                 // Test-only fault boundary after a potentially-mutating stage.
                 crate::fail_point!("calvin_static::during_overlay_stage");
             }
-            Ok::<(), ErrorCode>(())
+            Ok::<CalvinReply, ErrorCode>(reply)
         }));
         self.epoch_system_ms = prev_epoch_ms;
-        match stage_result {
-            Ok(Ok(())) => {}
+        let reply = match stage_result {
+            Ok(Ok(reply)) => reply,
             Ok(Err(error)) => {
                 return self.calvin_stage_failure(task, epoch, position, vshard_id, error);
             }
@@ -112,7 +115,7 @@ impl CoreLoop {
                     },
                 );
             }
-        }
+        };
 
         // Local commit vote: is this participant's slice of the read-set still
         // current against the local write versions? Empty read-set is vacuously
@@ -120,15 +123,15 @@ impl CoreLoop {
         // retains the fully staged state until the durable global verdict.
         let vote = self.read_set_still_current(task, tenant_id.as_u64(), versioned_reads);
 
-        // Publish only a fully staged transaction. The verdict-driven flush
-        // replays this raw plan buffer; a global abort drops it and its overlay.
-        self.commit_pending.insert(
+        // Publish only a fully staged transaction. Resolve reads these plans
+        // against the overlay; a global abort drops both.
+        self.calvin.commit_pending.insert(
             (epoch, position, vshard_id),
             PendingCommit {
                 plans: plans.to_vec(),
                 tenant_id: *tenant_id,
                 epoch_system_ms,
-                is_group_leader,
+                reply,
             },
         );
 
@@ -182,11 +185,10 @@ mod tests {
 
         let vshard_id = task.request.vshard_id.as_u32();
 
-        // `commit_pending` is unchanged -- it still holds the raw plans that
-        // drive the base install at flush time.
+        // `commit_pending` holds the staged plans resolve reads.
         assert!(
-            core.commit_pending.contains_key(&(1, 0, vshard_id)),
-            "commit_pending must still be populated exactly as before this unit"
+            core.calvin.commit_pending.contains_key(&(1, 0, vshard_id)),
+            "commit_pending must hold the staged transaction"
         );
 
         // The synthetic overlay entry additionally holds the resolved
@@ -226,7 +228,7 @@ mod tests {
 
         assert_eq!(response.status, Status::Error);
         assert_eq!(response.read_set_valid, Some(false));
-        assert!(core.commit_pending.is_empty());
+        assert!(core.calvin.commit_pending.is_empty());
         assert!(core.txn_overlays.is_empty());
         assert!(core.graph_txn_overlays.is_empty());
     }
@@ -270,7 +272,7 @@ mod tests {
 
         assert_eq!(response.status, Status::Error);
         assert_eq!(response.read_set_valid, Some(false));
-        assert!(!core.commit_pending.contains_key(&(9, 3, vshard)));
+        assert!(!core.calvin.commit_pending.contains_key(&(9, 3, vshard)));
         assert!(!core.txn_overlays.contains_key(&synthetic));
         assert!(!core.graph_txn_overlays.contains_key(&synthetic));
         assert_eq!(
@@ -353,7 +355,7 @@ mod tests {
 
         assert_eq!(response.status, Status::Error);
         assert_eq!(response.read_set_valid, Some(false));
-        assert!(!core.commit_pending.contains_key(&(9, 4, vshard)));
+        assert!(!core.calvin.commit_pending.contains_key(&(9, 4, vshard)));
         assert!(!core.txn_overlays.contains_key(&synthetic));
         assert!(!core.graph_txn_overlays.contains_key(&synthetic));
         assert_eq!(
@@ -400,7 +402,7 @@ mod tests {
             failed.error_code.as_deref(),
             Some(ErrorCode::RejectedPrevalidation { .. })
         ));
-        assert!(!core.commit_pending.contains_key(&(21, 1, vshard)));
+        assert!(!core.calvin.commit_pending.contains_key(&(21, 1, vshard)));
         assert!(!core.txn_overlays.contains_key(&synthetic));
 
         let valid = canonical_ilp_plan("cpu", vec!["cpu value=1i", "cpu value=2i"], vec![1, 2]);
@@ -439,7 +441,7 @@ mod tests {
         );
         let mismatch_id = calvin_synthetic_txn_id(21, 2, vshard).expect("synthetic transaction id");
         assert_eq!(failed.read_set_valid, Some(false));
-        assert!(!core.commit_pending.contains_key(&(21, 2, vshard)));
+        assert!(!core.calvin.commit_pending.contains_key(&(21, 2, vshard)));
         assert!(!core.txn_overlays.contains_key(&mismatch_id));
 
         core.ts_tuning.max_tag_cardinality = 1;
@@ -468,7 +470,7 @@ mod tests {
             Some(ErrorCode::RejectedPrevalidation { .. })
         ));
         assert!(
-            !core.commit_pending.contains_key(&(21, 3, vshard)),
+            !core.calvin.commit_pending.contains_key(&(21, 3, vshard)),
             "a rejected stage cannot reach the TransactionRedo-producing flush path"
         );
         assert!(!core.txn_overlays.contains_key(&overflow_id));

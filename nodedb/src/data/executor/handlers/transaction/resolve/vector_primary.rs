@@ -23,8 +23,8 @@
 //! Rows are emitted in surrogate order, so two resolves of one transaction
 //! produce byte-identical records.
 //!
-//! This covers session transactions. A Calvin transaction stages no
-//! vector-primary write and resolves from its plans instead (`vector_direct`).
+//! Session and Calvin transactions stage every direct write, so both
+//! resolve here.
 
 use std::collections::BTreeMap;
 

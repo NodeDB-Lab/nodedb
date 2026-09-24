@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 // `pub` so a crash test can read faultbox reports directly, not just via
 // the panic-path diagnostics wired into `pgwire.rs`.
 pub mod diagnostics;
+// `wait_ready` and its bind-collision respawn.
+mod boot;
 // The ILP client helper lives in `nodedb-test-support` and is imported
 // directly by tests that need it, not re-exported here.
 mod pgwire;
@@ -312,23 +314,6 @@ impl CrashHarness {
         // across spawns in one file, so a tail dump is otherwise ambiguous.
         diagnostics::mark_boot(&self.server_log_path(), self.boot_count, child.id());
         self.child = Some(child);
-    }
-
-    /// Block until `/healthz` reports ready, panicking on timeout.
-    pub fn wait_ready(&self) {
-        self.wait_ready_within(BOOT_READY_TIMEOUT);
-    }
-
-    /// [`wait_ready`] for a test whose nextest kill budget is raised.
-    pub fn wait_ready_extended(&self) {
-        self.wait_ready_within(BOOT_READY_TIMEOUT_EXTENDED);
-    }
-
-    fn wait_ready_within(&self, budget: Duration) {
-        assert!(
-            wait_for_healthz(self.http_port, budget),
-            "nodedb did not become ready within {budget:?}"
-        );
     }
 
     /// Spawn the server and assert that boot fails-stop rather than coming up.

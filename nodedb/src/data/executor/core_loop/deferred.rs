@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Deferred trigger event collection during transaction batches.
+//! Deferred trigger events of a committed transaction.
 //!
-//! Accumulates write metadata during `execute_transaction_batch()`.
-//! After successful commit, emits these as WriteEvents with
+//! The redo install collects the document writes of a committed record and,
+//! once the record settled, emits them as WriteEvents with
 //! `EventSource::Deferred` so the Event Plane fires DEFERRED-mode triggers.
 
 use std::sync::Arc;
@@ -22,9 +22,9 @@ pub(in crate::data::executor) struct DeferredWrite {
 }
 
 impl CoreLoop {
-    /// Emit deferred trigger events for a completed transaction batch.
+    /// Emit deferred trigger events for a committed transaction.
     ///
-    /// Called after `execute_transaction_batch()` commits successfully.
+    /// Called after a committed redo record installed and settled.
     /// Each write in the transaction is emitted as a WriteEvent with
     /// `EventSource::Deferred`, which the Event Plane consumer routes
     /// to DEFERRED-mode triggers.

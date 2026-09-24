@@ -41,7 +41,7 @@ impl CoreLoop {
         tid: u64,
         ops: Vec<RedoKvOp>,
     ) -> Vec<KvPriorImage> {
-        let now_ms = crate::engine::kv::current_ms();
+        let now_ms = self.kv_read_now_ms();
         let mut images = Vec::new();
         for op in ops {
             match op {

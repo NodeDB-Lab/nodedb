@@ -19,7 +19,6 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 
 use super::calvin_txn_id::calvin_synthetic_txn_id;
-use crate::data::executor::handlers::transaction::resolve::StagedWrites;
 
 impl CoreLoop {
     /// Resolve the Calvin transaction staged under `(epoch, position)` on
@@ -53,37 +52,37 @@ impl CoreLoop {
         // `commit_pending` so the `&mut self` resolve call — which assigns
         // bitemporal stamps into the overlay — does not overlap the immutable
         // borrow of the pending buffer.
-        let (tid, plans, epoch_system_ms) =
-            match self.commit_pending.get(&(epoch, position, vshard_id)) {
-                Some(pending) => (
-                    pending.tenant_id.as_u64(),
-                    pending.plans.clone(),
-                    pending.epoch_system_ms,
-                ),
-                None => {
-                    return self.response_error(
-                        task,
-                        crate::Error::Internal {
-                            detail: format!(
-                                "calvin resolve: no staged commit for epoch={epoch} \
+        let (tid, plans, epoch_system_ms) = match self
+            .calvin
+            .commit_pending
+            .get(&(epoch, position, vshard_id))
+        {
+            Some(pending) => (
+                pending.tenant_id.as_u64(),
+                pending.plans.clone(),
+                pending.epoch_system_ms,
+            ),
+            None => {
+                return self.response_error(
+                    task,
+                    crate::Error::Internal {
+                        detail: format!(
+                            "calvin resolve: no staged commit for epoch={epoch} \
                                  position={position} vshard={vshard_id} (must be staged via \
                                  CalvinExecuteStatic before CalvinResolve)"
-                            ),
-                        },
-                    );
-                }
-            };
+                        ),
+                    },
+                );
+            }
+        };
 
         // Restore the epoch's deterministic time anchor around resolve so the
         // bitemporal stamps `execute_resolve_txn` assigns are identical across
-        // replicas (mirrors `execute_calvin_flush`). `CalvinFlush` reads these
-        // stamps back from the overlay, so redo and base install agree.
+        // replicas. The redo record carries them, so every install writes the
+        // same version key.
         let prev_epoch_ms = self.epoch_system_ms;
         self.epoch_system_ms = Some(epoch_system_ms);
-        // Calvin stages no vector-primary direct write, so those resolve from
-        // their plan nodes.
-        let resp =
-            self.execute_resolve_staged(task, tid, synthetic_txn_id, &plans, StagedWrites::Calvin);
+        let resp = self.execute_resolve_txn(task, tid, synthetic_txn_id, &plans);
         self.epoch_system_ms = prev_epoch_ms;
         resp
     }

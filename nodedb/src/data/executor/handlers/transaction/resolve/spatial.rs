@@ -23,16 +23,13 @@
 //! append its `SpatialPut` / `SpatialDelete` WAL records, so producer and
 //! `replay_spatial_wal` never drift.
 //!
-//! ## Provenance is mandatory
+//! ## Provenance
 //!
-//! `SpatialOp::Insert` / `Delete` inside a transaction arise ONLY from the
-//! Lite sync replication path (see `stage_spatial.rs`'s module docs), which
-//! always supplies `provenance: Some(..)`. The WAL wire shape
-//! (`SpatialPutPayload` / `SpatialDeletePayload`) carries provenance as a
-//! mandatory field, not optional, so a staged spatial op with `provenance:
-//! None` is an invariant violation, not a case to invent a zero provenance
-//! for — it raises a typed error rather than being silently dropped or
-//! fabricated.
+//! A spatial write from the Lite sync path carries its producer provenance. A
+//! write from SQL carries none, and resolve writes the empty provenance
+//! (`producer_id` 0) in its place, as the autocommit spatial WAL path does.
+//! Replay and the sync gate treat producer 0 as "no producer": no
+//! high-water mark moves and no undo is captured for one.
 //!
 //! ## Reads
 //!
@@ -49,8 +46,7 @@ use crate::wal::RedoSubRecord;
 /// Append the redo sub-record for a single spatial plan op to `ops`.
 ///
 /// `Insert` / `Delete` serialize to their engine-native `SpatialPut` /
-/// `SpatialDelete` shape; `Scan` emits nothing; either write with no
-/// provenance raises a typed error (see module docs).
+/// `SpatialDelete` shape. `Scan` emits nothing.
 pub(super) fn serialize_spatial_op(
     op: &SpatialOp,
     ops: &mut Vec<RedoSubRecord>,
@@ -63,13 +59,14 @@ pub(super) fn serialize_spatial_op(
             geometry,
             provenance,
         } => {
-            let prov = provenance.as_ref().ok_or_else(|| crate::Error::PlanError {
-                detail: "spatial insert with no sync provenance has no redo sub-record shape \
-                         and is not supported in transaction resolve"
-                    .to_string(),
-            })?;
-            let payload =
-                encode_spatial_put_payload(collection.as_str(), field, *surrogate, geometry, prov)?;
+            let prov = provenance.clone().unwrap_or_default();
+            let payload = encode_spatial_put_payload(
+                collection.as_str(),
+                field,
+                *surrogate,
+                geometry,
+                &prov,
+            )?;
             let bytes = payload.to_bytes().map_err(crate::Error::Wal)?;
             ops.push(RedoSubRecord {
                 record_type: RecordType::SpatialPut as u32,
@@ -83,13 +80,9 @@ pub(super) fn serialize_spatial_op(
             surrogate,
             provenance,
         } => {
-            let prov = provenance.as_ref().ok_or_else(|| crate::Error::PlanError {
-                detail: "spatial delete with no sync provenance has no redo sub-record shape \
-                         and is not supported in transaction resolve"
-                    .to_string(),
-            })?;
+            let prov = provenance.clone().unwrap_or_default();
             let payload =
-                encode_spatial_delete_payload(collection.as_str(), field, *surrogate, prov);
+                encode_spatial_delete_payload(collection.as_str(), field, *surrogate, &prov);
             let bytes = payload.to_bytes().map_err(crate::Error::Wal)?;
             ops.push(RedoSubRecord {
                 record_type: RecordType::SpatialDelete as u32,
@@ -186,8 +179,10 @@ mod tests {
         assert!(ops.is_empty(), "read-only scan emits no sub-record");
     }
 
+    /// A SQL spatial insert carries no provenance. It resolves to a
+    /// `SpatialPut` with the empty provenance, never a dropped write.
     #[test]
-    fn insert_without_provenance_errors_rather_than_dropping() {
+    fn insert_without_provenance_resolves_with_the_empty_provenance() {
         let op = SpatialOp::Insert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "places"),
             field: "loc".to_string(),
@@ -196,16 +191,18 @@ mod tests {
             provenance: None,
         };
         let mut ops = Vec::new();
-        let err = serialize_spatial_op(&op, &mut ops);
-        assert!(
-            err.is_err(),
-            "a spatial insert with no provenance must error, not silently drop"
-        );
-        assert!(ops.is_empty());
+        serialize_spatial_op(&op, &mut ops).expect("serialize insert");
+        assert_eq!(ops.len(), 1, "the insert is never dropped");
+        assert_eq!(ops[0].record_type, RecordType::SpatialPut as u32);
+        let decoded = nodedb_wal::record::SpatialPutPayload::from_bytes(&ops[0].payload)
+            .expect("decode SpatialPutPayload");
+        assert_eq!(decoded.provenance, SyncProvenance::default());
     }
 
+    /// A SQL spatial delete carries no provenance. It resolves to a
+    /// `SpatialDelete` with the empty provenance, never a dropped write.
     #[test]
-    fn delete_without_provenance_errors_rather_than_dropping() {
+    fn delete_without_provenance_resolves_with_the_empty_provenance() {
         let op = SpatialOp::Delete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "places"),
             field: "loc".to_string(),
@@ -213,11 +210,11 @@ mod tests {
             provenance: None,
         };
         let mut ops = Vec::new();
-        let err = serialize_spatial_op(&op, &mut ops);
-        assert!(
-            err.is_err(),
-            "a spatial delete with no provenance must error, not silently drop"
-        );
-        assert!(ops.is_empty());
+        serialize_spatial_op(&op, &mut ops).expect("serialize delete");
+        assert_eq!(ops.len(), 1, "the delete is never dropped");
+        assert_eq!(ops[0].record_type, RecordType::SpatialDelete as u32);
+        let decoded = nodedb_wal::record::SpatialDeletePayload::from_bytes(&ops[0].payload)
+            .expect("decode SpatialDeletePayload");
+        assert_eq!(decoded.provenance, SyncProvenance::default());
     }
 }

@@ -224,6 +224,7 @@ fn collect_requirements(plan: &PhysicalPlan, out: &mut Vec<AuthorizationRequirem
                 | KvOp::SortedIndexRange { .. }
                 | KvOp::SortedIndexCount { .. }
                 | KvOp::SortedIndexScore { .. }
+                | KvOp::SortedIndexTxnRead { .. }
                 | KvOp::MaterializeScan { .. }
                 // One collection each — the general extractor reads `KvOp::collection`.
                 | KvOp::PredicateUpdate { .. }
@@ -323,6 +324,7 @@ fn kv_op_collections(op: &nodedb_physical::physical_plan::KvOp) -> Vec<&str> {
         | KvOp::SortedIndexRange { .. }
         | KvOp::SortedIndexCount { .. }
         | KvOp::SortedIndexScore { .. }
+        | KvOp::SortedIndexTxnRead { .. }
         | KvOp::PredicateUpdate { .. }
         | KvOp::PredicateDelete { .. }
         | KvOp::MaterializeScan { .. }) => other.collection().into_iter().collect(),

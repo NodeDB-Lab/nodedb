@@ -40,6 +40,8 @@ impl NativeTestServer {
         let (event_producers, event_consumers) = create_event_bus(1);
 
         let shared = SharedState::new(dispatcher, Arc::clone(&wal)).unwrap();
+        // The same gateway install production boot runs.
+        nodedb::bootstrap::state_wiring::install_gateway(&shared);
         shared
             .credentials
             .bootstrap_trust_superuser("nodedb")

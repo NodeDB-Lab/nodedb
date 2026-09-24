@@ -238,6 +238,16 @@ impl CoreLoop {
             .unwrap_or_else(crate::engine::kv::current_ms)
     }
 
+    /// The instant a KV liveness read evaluates expiry at. A Calvin
+    /// transaction reads at its epoch instant while it stages, resolves or
+    /// renders its reply, so every replica sees the same live rows. Every
+    /// other read uses the wall clock.
+    pub(in crate::data::executor) fn kv_read_now_ms(&self) -> u64 {
+        self.epoch_system_ms
+            .map(|ms| ms as u64)
+            .unwrap_or_else(crate::engine::kv::current_ms)
+    }
+
     /// Write a raw segment blob directly into the FTS LSM segment store for
     /// a given `(tenant, collection)`.
     ///

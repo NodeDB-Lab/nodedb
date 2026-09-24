@@ -2,7 +2,7 @@
 
 //! Dispatch for MetaOp variants (WAL, snapshots, retention, continuous aggregates).
 
-use crate::bridge::envelope::Response;
+use crate::bridge::envelope::{ErrorCode, Response};
 use nodedb_physical::physical_plan::{MetaOp, SAVEPOINT_MARKER_BYTES};
 
 use crate::data::executor::core_loop::CoreLoop;
@@ -22,9 +22,16 @@ impl CoreLoop {
 
             MetaOp::Cancel { target_request_id } => self.execute_cancel(task, *target_request_id),
 
-            MetaOp::TransactionBatch { plans, txn_id } => {
-                self.execute_transaction_batch(task, tid, plans, &[], *txn_id)
-            }
+            // A committed transaction installs only through its redo record
+            // (`ApplyTransactionRedo`, `CalvinFlush`). A plan batch carries no
+            // record restart replay reads, so an Origin core refuses it.
+            MetaOp::TransactionBatch { .. } => self.response_error(
+                task,
+                ErrorCode::Unsupported {
+                    detail: "a transaction batch installs only through a committed redo record"
+                        .into(),
+                },
+            ),
 
             MetaOp::CreateSnapshot => self.execute_create_snapshot(task),
             MetaOp::Compact => self.execute_compact(task),
@@ -249,36 +256,32 @@ impl CoreLoop {
                 },
             ),
 
-            MetaOp::RecordCalvinWriteVersions {
-                tenant_id,
-                plans,
-                epoch,
-                position,
-            } => {
+            MetaOp::RecordCalvinWriteVersions { tenant_id, plans } => {
                 // The Calvin apply already committed; this records the write
-                // version of every key it wrote at the CalvinApplied WAL LSN the
-                // scheduler threaded onto the request envelope, reusing the same
-                // recorder the single-shard fast-path commit funnels through. A
-                // no-op when the envelope carries no LSN.
+                // version of every key it wrote at the applied WAL LSN the
+                // scheduler threaded onto the request envelope. A no-op when
+                // the envelope carries no LSN. The install recorded the
+                // index-value versions of its document rows itself.
                 self.record_batch_write_versions(task, tenant_id.as_u64(), plans);
-                // Drain the per-index value tuples the distributed flush staged
-                // for this batch and record them at the same applied LSN.
-                if let Some(lsn) = task.wal_lsn() {
-                    self.record_staged_calvin_index_values(
-                        task.request.database_id,
-                        *tenant_id,
-                        *epoch,
-                        *position,
-                        task.request.vshard_id.as_u32(),
-                        lsn,
-                    );
-                }
                 self.response_ok(task)
             }
 
-            MetaOp::CalvinFlush { epoch, position } => {
-                self.execute_calvin_flush(task, *epoch, *position)
-            }
+            MetaOp::CalvinFlush {
+                epoch,
+                position,
+                redo,
+                collections,
+                sum_targets,
+            } => self.execute_calvin_flush(
+                task,
+                crate::data::executor::handlers::control::calvin::CalvinFlushRedo {
+                    epoch: *epoch,
+                    position: *position,
+                    redo,
+                    collections,
+                    sum_targets,
+                },
+            ),
 
             MetaOp::CalvinDrop { epoch, position } => {
                 self.execute_calvin_drop(task, *epoch, *position)
@@ -328,10 +331,9 @@ impl CoreLoop {
             // dropped here too, but ONLY if still empty. On ROLLBACK the
             // staged rows never left the overlay, so the engine's memtable is
             // still empty and gets dropped -- no phantom empty engine survives
-            // the rollback. On COMMIT, `TransactionBatch` has already replayed
-            // the insert through `execute_columnar_insert` (populating the
-            // memtable) before this dispatches, so the empty-check fails and
-            // the engine correctly stays registered with its committed rows.
+            // the rollback. On COMMIT, the redo install has already written
+            // the committed rows into the memtable before this dispatches, so
+            // the empty-check fails and the engine stays registered with them.
             MetaOp::DropTxnOverlay { txn_id } => {
                 // Behaviour-preserving delegation to the shared teardown, which
                 // the lease reaper also calls (see `CoreLoop::drop_overlay_entry`).
@@ -402,7 +404,7 @@ mod txn_created_columnar_engine_tests {
     //! per-txn overlay for the engine's memtable) — but ONLY while that engine
     //! is still empty. On ROLLBACK the memtable is empty, so the phantom engine
     //! is dropped; on COMMIT the memtable has already been populated by the
-    //! `TransactionBatch` replay, so the engine (and its rows) survive.
+    //! redo install, so the engine (and its rows) survive.
     //!
     //! Observed directly on `CoreLoop::columnar_engines` membership — the field
     //! the fix mutates — because a leaked empty engine is invisible to ordinary
@@ -579,8 +581,8 @@ mod txn_created_columnar_engine_tests {
         let key = stage_new_collection(&mut core, &task, txn_id, "committed");
         assert!(core.columnar_engines.contains_key(&key));
 
-        // Mimic COMMIT: the `TransactionBatch` replay applies the buffered
-        // insert to the engine's memtable BEFORE DropTxnOverlay dispatches.
+        // Mimic COMMIT: the redo install writes the committed row into the
+        // engine's memtable BEFORE DropTxnOverlay dispatches.
         core.columnar_engines
             .get_mut(&key)
             .expect("engine present")

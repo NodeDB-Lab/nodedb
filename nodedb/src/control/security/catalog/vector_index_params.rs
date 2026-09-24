@@ -37,8 +37,30 @@ impl SystemCatalog {
         write_txn.commit().map_err(|e| catalog_err("commit", e))
     }
 
-    /// Load vector index parameters for a specific collection/field.
+    /// Load vector index parameters for a specific collection/field, with
+    /// this connection's uncommitted transactional DDL merged in.
     pub fn get_vector_index_params(
+        &self,
+        database_id: u64,
+        tenant_id: u64,
+        collection: &str,
+        field_name: &str,
+    ) -> crate::Result<Option<StoredVectorIndexParams>> {
+        let committed =
+            self.get_committed_vector_index_params(database_id, tenant_id, collection, field_name)?;
+        Ok(
+            crate::control::catalog_overlay::resolve_vector_index_params(
+                database_id,
+                tenant_id,
+                collection,
+                field_name,
+                committed,
+            ),
+        )
+    }
+
+    /// Committed-only read, bypassing the transaction DDL overlay.
+    pub fn get_committed_vector_index_params(
         &self,
         database_id: u64,
         tenant_id: u64,

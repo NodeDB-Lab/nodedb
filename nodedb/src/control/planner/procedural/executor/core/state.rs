@@ -35,7 +35,6 @@ pub struct CrossShardOrigin {
 /// Statement executor: steps through procedural SQL blocks with DML.
 pub struct StatementExecutor<'a> {
     pub(super) state: &'a SharedState,
-    #[allow(dead_code)]
     pub(super) identity: AuthenticatedIdentity,
     pub(super) tenant_id: TenantId,
     /// Database scope fixed for this executor's lifetime.

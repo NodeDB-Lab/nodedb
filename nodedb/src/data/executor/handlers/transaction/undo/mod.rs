@@ -3,7 +3,7 @@
 //! Undo log types and rollback logic for transaction batches.
 
 pub(super) mod apply;
-pub(super) mod balanced;
+pub(super) mod columnar_insert;
 pub(in crate::data::executor) mod crdt_collection;
 pub(super) mod document;
 pub(super) mod document_fts;

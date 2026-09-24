@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Transaction batches spanning more than one engine.
+//! Committed transactions spanning more than one engine.
 //!
-//! A graph edge or a vector node written inside a batch must commit and
-//! roll back with the document writes beside it — a surviving edge or
-//! HNSW node after a failed batch is state no read path can account for.
+//! A graph edge written inside a transaction must commit with the document
+//! writes beside it, and a refused transaction must commit none of them — a
+//! surviving edge after a refused transaction is state no read path can
+//! account for.
 
 use nodedb::bridge::envelope::Status;
-use nodedb_physical::physical_plan::{DocumentOp, GraphOp, MetaOp, PhysicalPlan, VectorOp};
+use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan};
+use nodedb_test_support::tx_batch_helpers::{commit_plans, with_unique_refusal};
 
 use super::helpers::*;
 
@@ -54,40 +56,38 @@ fn transaction_edge_put_committed() {
     );
 
     // Transaction: insert doc + edge.
-    let resp = send_raw(
+    let resp = commit_plans(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
-            plans: vec![
-                PhysicalPlan::Document(DocumentOp::PointPut {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "nodes",
-                    ),
-                    document_id: "carol".into(),
-                    value: b"{\"name\":\"carol\"}".to_vec(),
-                    surrogate: nodedb_types::Surrogate::ZERO,
-                    pk_bytes: Vec::new(),
-                    returning: None,
-                    rls_filters: Vec::new(),
-                    resolved_sum_targets: Vec::new(),
-                }),
-                PhysicalPlan::Graph(GraphOp::EdgePut {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "col",
-                    ),
-                    src_id: "alice".into(),
-                    label: "KNOWS".into(),
-                    dst_id: "bob".into(),
-                    properties: Vec::new(),
-                    src_surrogate: nodedb_types::Surrogate::ZERO,
-                    dst_surrogate: nodedb_types::Surrogate::ZERO,
-                }),
-            ],
-        }),
+        vec![
+            PhysicalPlan::Document(DocumentOp::PointPut {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "nodes",
+                ),
+                document_id: "carol".into(),
+                value: b"{\"name\":\"carol\"}".to_vec(),
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
+                returning: None,
+                rls_filters: Vec::new(),
+                resolved_sum_targets: Vec::new(),
+            }),
+            PhysicalPlan::Graph(GraphOp::EdgePut {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "col",
+                ),
+                src_id: "alice".into(),
+                label: "KNOWS".into(),
+                dst_id: "bob".into(),
+                properties: Vec::new(),
+                src_surrogate: nodedb_types::Surrogate::ZERO,
+                dst_surrogate: nodedb_types::Surrogate::ZERO,
+            }),
+        ],
+        10,
     );
     assert_eq!(resp.status, Status::Ok);
 
@@ -109,7 +109,7 @@ fn transaction_edge_put_committed() {
 }
 
 #[test]
-fn transaction_edge_put_rolled_back_on_failure() {
+fn a_refused_transaction_leaves_no_edge() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
     // Pre-insert nodes.
@@ -150,84 +150,28 @@ fn transaction_edge_put_rolled_back_on_failure() {
         }),
     );
 
-    // Set up vector index with dim=3.
-    send_ok(
+    // Transaction: edge put, then a refused insert.
+    let resp = commit_plans(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Vector(VectorOp::SetParams {
+        with_unique_refusal(vec![PhysicalPlan::Graph(GraphOp::EdgePut {
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
-                "emb",
+                "col",
             ),
-            field_name: String::new(),
-            dim: 3,
-            m: 16,
-            ef_construction: 200,
-            metric: "cosine".into(),
-            index_type: String::new(),
-            pq_m: 0,
-            ivf_cells: 0,
-            ivf_nprobe: 0,
-        }),
-    );
-    send_ok(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Vector(VectorOp::Insert {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "emb",
-            ),
-            vector: vec![1.0, 2.0, 3.0],
-            dim: 3,
-            field_name: String::new(),
-            surrogate: nodedb_types::Surrogate::ZERO,
-            pk_bytes: None,
-            provenance: None,
-        }),
-    );
-
-    // Transaction: edge put + vector with wrong dimension (triggers rollback).
-    let resp = send_raw(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
-            plans: vec![
-                PhysicalPlan::Graph(GraphOp::EdgePut {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "col",
-                    ),
-                    src_id: "alice".into(),
-                    label: "KNOWS".into(),
-                    dst_id: "bob".into(),
-                    properties: Vec::new(),
-                    src_surrogate: nodedb_types::Surrogate::ZERO,
-                    dst_surrogate: nodedb_types::Surrogate::ZERO,
-                }),
-                // Dimension mismatch: index is dim=3 but vector has 2 elements.
-                PhysicalPlan::Vector(VectorOp::Insert {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "emb",
-                    ),
-                    vector: vec![1.0, 2.0],
-                    dim: 3,
-                    field_name: String::new(),
-                    surrogate: nodedb_types::Surrogate::ZERO,
-                    pk_bytes: None,
-                    provenance: None,
-                }),
-            ],
-        }),
+            src_id: "alice".into(),
+            label: "KNOWS".into(),
+            dst_id: "bob".into(),
+            properties: Vec::new(),
+            src_surrogate: nodedb_types::Surrogate::ZERO,
+            dst_surrogate: nodedb_types::Surrogate::ZERO,
+        })]),
+        20,
     );
     assert_eq!(resp.status, Status::Error);
 
-    // Verify edge was rolled back: neighbors should be empty.
+    // The edge never landed: neighbors are empty.
     let n = send_raw(
         &mut core,
         &mut tx,
@@ -247,13 +191,13 @@ fn transaction_edge_put_rolled_back_on_failure() {
     // Empty result = msgpack empty array [0x90] or very short payload.
     assert!(
         payload.len() <= 3,
-        "edge should have been rolled back, but payload len: {}",
+        "the edge must not land, but payload len: {}",
         payload.len()
     );
 }
 
 #[test]
-fn transaction_mixed_doc_edge_vector_rollback() {
+fn a_refused_transaction_leaves_neither_doc_nor_edge() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
     // Pre-insert nodes.
@@ -294,97 +238,43 @@ fn transaction_mixed_doc_edge_vector_rollback() {
         }),
     );
 
-    // Set up vector index.
-    send_ok(
+    // Transaction: doc update + edge put, then a refused insert. Neither lands.
+    let resp = commit_plans(
         &mut core,
         &mut tx,
         &mut rx,
-        PhysicalPlan::Vector(VectorOp::SetParams {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "vec",
-            ),
-            field_name: String::new(),
-            dim: 3,
-            m: 16,
-            ef_construction: 200,
-            metric: "cosine".into(),
-            index_type: String::new(),
-            pq_m: 0,
-            ivf_cells: 0,
-            ivf_nprobe: 0,
-        }),
-    );
-    send_ok(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Vector(VectorOp::Insert {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "vec",
-            ),
-            vector: vec![1.0, 2.0, 3.0],
-            dim: 3,
-            field_name: String::new(),
-            surrogate: nodedb_types::Surrogate::ZERO,
-            pk_bytes: None,
-            provenance: None,
-        }),
-    );
-
-    // Transaction: doc update + edge put + vector insert (wrong dim) — all should rollback.
-    let resp = send_raw(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Meta(MetaOp::TransactionBatch {
-            txn_id: None,
-            plans: vec![
-                PhysicalPlan::Document(DocumentOp::PointPut {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "nodes",
-                    ),
-                    document_id: "n1".into(),
-                    value: b"modified_n1".to_vec(),
-                    surrogate: nodedb_types::Surrogate::new(1),
-                    pk_bytes: b"n1".to_vec(),
-                    returning: None,
-                    rls_filters: Vec::new(),
-                    resolved_sum_targets: Vec::new(),
-                }),
-                PhysicalPlan::Graph(GraphOp::EdgePut {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "col",
-                    ),
-                    src_id: "n1".into(),
-                    label: "LINKED".into(),
-                    dst_id: "n2".into(),
-                    properties: Vec::new(),
-                    src_surrogate: nodedb_types::Surrogate::ZERO,
-                    dst_surrogate: nodedb_types::Surrogate::ZERO,
-                }),
-                // Fail: dim mismatch.
-                PhysicalPlan::Vector(VectorOp::Insert {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        nodedb_types::DatabaseId::DEFAULT,
-                        "vec",
-                    ),
-                    vector: vec![1.0],
-                    dim: 3,
-                    field_name: String::new(),
-                    surrogate: nodedb_types::Surrogate::ZERO,
-                    pk_bytes: None,
-                    provenance: None,
-                }),
-            ],
-        }),
+        with_unique_refusal(vec![
+            PhysicalPlan::Document(DocumentOp::PointPut {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "nodes",
+                ),
+                document_id: "n1".into(),
+                value: b"modified_n1".to_vec(),
+                surrogate: nodedb_types::Surrogate::new(1),
+                pk_bytes: b"n1".to_vec(),
+                returning: None,
+                rls_filters: Vec::new(),
+                resolved_sum_targets: Vec::new(),
+            }),
+            PhysicalPlan::Graph(GraphOp::EdgePut {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "col",
+                ),
+                src_id: "n1".into(),
+                label: "LINKED".into(),
+                dst_id: "n2".into(),
+                properties: Vec::new(),
+                src_surrogate: nodedb_types::Surrogate::ZERO,
+                dst_surrogate: nodedb_types::Surrogate::ZERO,
+            }),
+        ]),
+        30,
     );
     assert_eq!(resp.status, Status::Error);
 
-    // Document should be rolled back to original.
+    // The document keeps its original value.
     let r = send_raw(
         &mut core,
         &mut tx,
@@ -405,7 +295,7 @@ fn transaction_mixed_doc_edge_vector_rollback() {
     assert_eq!(r.status, Status::Ok);
     assert_eq!(&*r.payload, b"original_n1");
 
-    // Edge should be rolled back (no neighbors).
+    // The edge never landed (no neighbors).
     let n = send_raw(
         &mut core,
         &mut tx,
@@ -420,5 +310,5 @@ fn transaction_mixed_doc_edge_vector_rollback() {
     );
     assert_eq!(n.status, Status::Ok);
     // Empty result = msgpack empty array [0x90] or very short payload.
-    assert!(n.payload.len() <= 3, "edge should have been rolled back");
+    assert!(n.payload.len() <= 3, "the edge must not land");
 }

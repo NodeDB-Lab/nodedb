@@ -9,6 +9,7 @@ pub(crate) mod columnar;
 pub(crate) mod crdt;
 mod dispatch;
 pub(crate) mod document;
+pub(crate) mod document_bulk;
 pub(crate) mod graph;
 mod helpers;
 pub(crate) mod kv;

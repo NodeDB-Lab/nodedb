@@ -20,6 +20,7 @@ use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::index_registry::{
     IndexRegistration, propose_index_record,
 };
+use crate::control::server::shared::session::ddl_buffer;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 use nodedb_physical::physical_plan::VectorOp;
@@ -183,16 +184,33 @@ pub async fn create_vector_index(
     // client — this pre-flight is the only place the statement can fail
     // closed. The post-apply dispatch that follows re-installs the same
     // parameters on this node, which is a no-op on an unmaterialized index.
-    crate::control::server::shared::ddl::engine_apply::apply_in_engine(
-        state,
-        tenant_id,
-        database_id,
-        collection,
-        set_params_plan.clone(),
-        "42P16",
-        CONTEXT,
-    )
-    .await?;
+    //
+    // Inside an explicit transaction the parameters install at COMMIT from
+    // the buffered catalog row, so the pre-flight changes nothing: it probes
+    // for a materialized index and refuses the same way.
+    if ddl_buffer::is_active() {
+        crate::control::server::shared::ddl::engine_apply::refuse_materialized_vector_index(
+            state,
+            tenant_id,
+            database_id,
+            collection,
+            &field_name,
+            "42P16",
+            CONTEXT,
+        )
+        .await?;
+    } else {
+        crate::control::server::shared::ddl::engine_apply::apply_in_engine(
+            state,
+            tenant_id,
+            database_id,
+            collection,
+            set_params_plan,
+            "42P16",
+            CONTEXT,
+        )
+        .await?;
+    }
 
     // Only now make it durable. The replicated catalog row re-registers the
     // index at boot via `seed_vector_index_params`, and each node's post-apply

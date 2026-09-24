@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! WAL replay for the KV `Expire` / `Persist` TTL-mutation records.
+//! WAL replay and committed-redo install for the KV `Expire` / `Persist`
+//! TTL-mutation records.
 //!
-//! Both records were durably WAL-appended (`wal_append_kv_op`'s `KvOp::Expire`
-//! / `KvOp::Persist` arms) but had no decode arm in `replay_kv_wal` before this
-//! module existed, so both were silently lost on every crash-restart. WAL replay
-//! is the recovery path for these writes above the KV checkpoint's replay floor;
-//! at or below that floor the checkpoint already carries each row's resolved
-//! absolute `expire_at_ms`, so the gate in `skip_kv_replay_record` is what stops
-//! a TTL mutation from being applied twice.
+//! `wal_append_kv_op` appends both records for autocommit writes. A
+//! transaction's TTL-only writes reach its committed redo record in the same
+//! shapes. Each record changes only the expiry of the value the key holds
+//! when it applies, so a write committed between stage and install keeps its
+//! value. At or below the KV checkpoint's replay floor the checkpoint already
+//! carries each row's absolute `expire_at_ms`. The gate in
+//! `skip_kv_replay_record` stops a TTL mutation from applying twice.
 //!
 //! `kv_expire` always carries the Control-Plane-resolved absolute
 //! `expire_at_ms` (see `encode_kv_expire`'s doc comment for why `EXPIRE` has
@@ -30,6 +31,7 @@ use tracing::warn;
 
 use super::core_loop::CoreLoop;
 use crate::data::executor::core_loop::write_index::KeyRepr;
+use crate::data::executor::handlers::transaction::undo::UndoEntry;
 
 impl CoreLoop {
     /// Decode + tombstone-gate + replay one `kv_expire` WAL record.
@@ -50,6 +52,7 @@ impl CoreLoop {
         payload: &[u8],
         tenant_id: u64,
         database_id: u64,
+        now_ms: u64,
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> Option<usize> {
@@ -62,6 +65,10 @@ impl CoreLoop {
         if self.skip_kv_replay_record(tombstones, tenant_id, &collection, record_lsn) {
             return Some(0);
         }
+        if self.claim_for_validation() {
+            return Some(0);
+        }
+        self.record_kv_ttl_undo(database_id, tenant_id, &collection, &key, now_ms);
 
         let applied = self.kv_engine.expire_with_absolute_expiry(
             database_id,
@@ -102,6 +109,7 @@ impl CoreLoop {
         payload: &[u8],
         tenant_id: u64,
         database_id: u64,
+        now_ms: u64,
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> Option<usize> {
@@ -114,6 +122,10 @@ impl CoreLoop {
         if self.skip_kv_replay_record(tombstones, tenant_id, &collection, record_lsn) {
             return Some(0);
         }
+        if self.claim_for_validation() {
+            return Some(0);
+        }
+        self.record_kv_ttl_undo(database_id, tenant_id, &collection, &key, now_ms);
 
         let applied = self
             .kv_engine
@@ -135,6 +147,36 @@ impl CoreLoop {
             record_lsn,
         );
         Some(1)
+    }
+}
+
+impl CoreLoop {
+    /// In the install pass of a committed-redo apply, record the undo that
+    /// puts the key's current expiry back. The value is not touched, so the
+    /// undo restores only the expiry. A key that is absent now records
+    /// nothing: the TTL change will find no key either.
+    fn record_kv_ttl_undo(
+        &mut self,
+        database_id: u64,
+        tenant_id: u64,
+        collection: &str,
+        key: &[u8],
+        now_ms: u64,
+    ) {
+        if !self.recording_redo_undo() {
+            return;
+        }
+        let Some(image) =
+            self.kv_engine
+                .entry_image(database_id, tenant_id, collection, key, now_ms)
+        else {
+            return;
+        };
+        self.record_redo_undo([UndoEntry::KvTtl {
+            collection: collection.to_string(),
+            key: key.to_vec(),
+            prior_expire_at_ms: image.expire_at_ms,
+        }]);
     }
 }
 

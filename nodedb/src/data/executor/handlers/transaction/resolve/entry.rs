@@ -24,25 +24,15 @@ use crate::wal::{RedoRecord, RedoSubRecord};
 use super::classify::{classify_document_op, classify_kv_op};
 use super::columnar_image::{ColumnarCollectionImages, ColumnarCollections};
 use super::graph::EdgeIdentityKey;
-use super::vector_direct::DirectWrites;
 use super::vector_primary::VectorPrimaryCollections;
 use super::{array, columnar_image, crdt, document, graph, kv, spatial, text, vector};
 
-/// Which writes of a transaction its statements staged into the overlay.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::data::executor) enum StagedWrites {
-    /// A session transaction: every write is staged at its statement.
-    Session,
-    /// A Calvin transaction: document, KV, graph, timeseries and columnar
-    /// writes are staged; vector-primary direct writes are not, so they
-    /// resolve from their plan nodes.
-    Calvin,
-}
-
 impl CoreLoop {
-    /// Resolve a committing session transaction's staged writes into a
+    /// Resolve a committing transaction's staged writes into a
     /// [`RedoRecord`] and return its encoded bytes in the response payload.
-    /// Reads the overlay by `&` and never mutates any base engine.
+    /// Reads the overlay by `&` and never mutates any base engine. A session
+    /// transaction and a Calvin transaction stage the same way, so both
+    /// resolve here.
     pub(in crate::data::executor) fn execute_resolve_txn(
         &mut self,
         task: &ExecutionTask,
@@ -50,19 +40,7 @@ impl CoreLoop {
         txn_id: TxnId,
         plans: &[PhysicalPlan],
     ) -> Response {
-        self.execute_resolve_staged(task, tid, txn_id, plans, StagedWrites::Session)
-    }
-
-    /// Resolve a transaction whose staging follows `staged`.
-    pub(in crate::data::executor) fn execute_resolve_staged(
-        &mut self,
-        task: &ExecutionTask,
-        tid: u64,
-        txn_id: TxnId,
-        plans: &[PhysicalPlan],
-        staged: StagedWrites,
-    ) -> Response {
-        let ops = match self.resolve_txn_ops(task, tid, txn_id, plans, staged) {
+        let ops = match self.resolve_txn_ops(task, tid, txn_id, plans) {
             Ok(ops) => ops,
             Err(e) => return self.response_error(task, e),
         };
@@ -86,7 +64,6 @@ impl CoreLoop {
         tid: u64,
         txn_id: TxnId,
         plans: &[PhysicalPlan],
-        staged: StagedWrites,
     ) -> crate::Result<Vec<RedoSubRecord>> {
         let mut kv_collections: BTreeSet<String> = BTreeSet::new();
         let mut doc_collections: BTreeSet<String> = BTreeSet::new();
@@ -94,10 +71,6 @@ impl CoreLoop {
         let mut edge_surrogates: BTreeMap<EdgeIdentityKey, (u32, u32)> = BTreeMap::new();
         let mut columnar_collections: ColumnarCollections = BTreeMap::new();
         let mut vector_primary_collections: VectorPrimaryCollections = BTreeMap::new();
-        let mut direct_writes = match staged {
-            StagedWrites::Session => DirectWrites::Staged(&mut vector_primary_collections),
-            StagedWrites::Calvin => DirectWrites::Plan,
-        };
 
         // Plan-driven serializers emit into `ops` during this walk; overlay-driven
         // serializers only collect collections here, serialized in phase two below.
@@ -105,6 +78,8 @@ impl CoreLoop {
         // The declared primary key of each truncated document collection,
         // from the plan: names every removed base row in its redo entry.
         let truncate_primary_keys = truncate_declared_primary_keys(plans);
+        // Unkeyed timeseries ingests seen per collection, in plan order.
+        let mut unkeyed_seen = std::collections::HashMap::new();
 
         for plan in plans {
             match plan {
@@ -138,12 +113,17 @@ impl CoreLoop {
                 // errors. A vector-primary direct write only registers its
                 // collection; its staged row is serialized from the overlay.
                 PhysicalPlan::Vector(op) => {
-                    vector::serialize_vector_op(op, &mut ops, &mut direct_writes)?
+                    vector::serialize_vector_op(op, &mut ops, &mut vector_primary_collections)?
                 }
                 PhysicalPlan::Array(op) => array::serialize_array_op(op, &mut ops)?,
-                PhysicalPlan::Timeseries(op) => {
-                    self.serialize_timeseries_op(task, tid, txn_id, op, &mut ops)?
-                }
+                PhysicalPlan::Timeseries(op) => self.serialize_timeseries_op(
+                    task,
+                    tid,
+                    txn_id,
+                    op,
+                    &mut unkeyed_seen,
+                    &mut ops,
+                )?,
 
                 // Columnar: every write is staged per surrogate, so the image
                 // the transaction was shown is serialized from the overlay.
@@ -165,15 +145,13 @@ impl CoreLoop {
             }
         }
 
-        if staged == StagedWrites::Session {
-            let reads_overlay = !kv_collections.is_empty()
-                || !doc_collections.is_empty()
-                || !graph_collections.is_empty()
-                || !columnar_collections.is_empty()
-                || !vector_primary_collections.is_empty()
-                || plans.iter().any(graph::is_label_write);
-            self.require_staging_overlay(txn_id, reads_overlay)?;
-        }
+        let reads_overlay = !kv_collections.is_empty()
+            || !doc_collections.is_empty()
+            || !graph_collections.is_empty()
+            || !columnar_collections.is_empty()
+            || !vector_primary_collections.is_empty()
+            || plans.iter().any(graph::is_label_write);
+        self.require_staging_overlay(txn_id, reads_overlay)?;
 
         // Pin the resolve-time bitemporal stamp once, in the overlay sidecar, for
         // every staged put AND tombstone, so the redo carries it and every apply
@@ -1056,7 +1034,7 @@ mod tests {
     }
 
     #[test]
-    fn join_merge_batch_dml_still_yield_typed_error() {
+    fn join_merge_dml_still_yield_typed_error() {
         let (mut core, _dir) = make_core();
         let task = make_task();
         let txn = TxnId::new(45);
@@ -1095,15 +1073,6 @@ mod tests {
                 resolved_sum_targets: Vec::new(),
                 declared_primary_key: None,
             }),
-            PhysicalPlan::Document(DocumentOp::BatchInsert {
-                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
-                documents: vec![("d1".to_string(), Vec::new())],
-                surrogates: vec![Surrogate::ZERO],
-                returning: None,
-                rls_filters: Vec::new(),
-                resolved_sum_targets: Vec::new(),
-                deferred_sum_targets: Vec::new(),
-            }),
         ];
 
         for plan in plans {
@@ -1115,6 +1084,50 @@ mod tests {
             );
             assert!(resp.error_code.is_some());
         }
+    }
+
+    /// A batch insert staged row by row resolves to one document put per row,
+    /// read from the overlay.
+    #[test]
+    fn a_staged_batch_insert_resolves_to_a_put_per_row() {
+        let (mut core, _dir) = make_core();
+        let task = make_task();
+        let txn = TxnId::new(46);
+        let documents = vec![
+            ("d1".to_string(), schemaless_body("ann")),
+            ("d2".to_string(), schemaless_body("bob")),
+        ];
+        let surrogates = vec![Surrogate::new(3), Surrogate::new(4)];
+        let staged = core.stage_document_batch_insert(
+            crate::data::executor::handlers::transaction::stage_write::StageBatchInsertParams {
+                task: &task,
+                tid: TID,
+                txn_id: txn,
+                collection: "notes",
+                documents: &documents,
+                surrogates: &surrogates,
+            },
+        );
+        assert_eq!(staged.status, Status::Ok, "{:?}", staged.error_code);
+        let plan = PhysicalPlan::Document(DocumentOp::BatchInsert {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "notes"),
+            documents,
+            surrogates,
+            returning: None,
+            rls_filters: Vec::new(),
+            resolved_sum_targets: Vec::new(),
+            deferred_sum_targets: Vec::new(),
+        });
+
+        let resp = core.execute_resolve_txn(&task, TID, txn, &[plan]);
+
+        let redo = decode_redo(&resp);
+        assert_eq!(redo.ops.len(), 2, "one sub-record per staged row");
+        assert!(
+            redo.ops
+                .iter()
+                .all(|op| op.record_type == RecordType::Put as u32)
+        );
     }
 
     /// The five extended vector writes (`DirectUpsert`, `MultiVectorInsert`,
@@ -3588,25 +3601,47 @@ mod tests {
     }
 
     #[test]
-    fn spatial_insert_without_provenance_yields_typed_error() {
-        let (mut core, _dir) = make_core();
+    fn spatial_insert_without_provenance_resolves_and_replays() {
+        let (mut src, _src_dir) = make_core();
         let task = make_task();
         let txn = TxnId::new(46);
+        let surrogate = 1u32;
 
         let plan = PhysicalPlan::Spatial(SpatialOp::Insert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "places"),
             field: "loc".to_string(),
-            surrogate: Surrogate::new(1),
+            surrogate: Surrogate::new(surrogate),
             geometry: spatial_point(0.0, 0.0),
             provenance: None,
         });
-        let resp = core.execute_resolve_txn(&task, TID, txn, &[plan]);
-        assert_eq!(
-            resp.status,
-            Status::Error,
-            "a spatial insert with no provenance must raise a typed error, not silently drop"
+        let resp = src.execute_resolve_txn(&task, TID, txn, &[plan]);
+        // A plain SQL spatial insert carries no sync producer. It resolves
+        // with the empty provenance the autocommit spatial WAL path writes.
+        let redo = decode_redo(&resp);
+        assert_eq!(redo.ops.len(), 1, "one spatial insert -> one sub-record");
+        assert_eq!(redo.ops[0].record_type, RecordType::SpatialPut as u32);
+
+        let record = wrap_redo(&redo);
+        let (mut dst, _dst_dir) = make_core();
+        dst.replay_transaction_redo_wal(
+            std::slice::from_ref(&record),
+            1,
+            &nodedb_wal::TombstoneSet::new(),
+        )
+        .expect("redo replay must succeed");
+        let key = (
+            DatabaseId::DEFAULT,
+            TenantId::new(TID),
+            "places".to_string(),
+            "loc".to_string(),
         );
-        assert!(resp.error_code.is_some());
+        let entries = dst
+            .spatial_indexes
+            .get(&key)
+            .expect("R-tree index rebuilt by replay")
+            .entries();
+        assert_eq!(entries.len(), 1, "the insert must not be dropped");
+        assert_eq!(entries[0].id, spatial_entry_id(surrogate));
     }
 
     #[test]

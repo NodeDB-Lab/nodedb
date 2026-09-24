@@ -200,12 +200,12 @@ impl CoreLoop {
 
         // Compaction: periodic tombstone removal + segment merge.
         let now = std::time::Instant::now();
-        if let Some(last) = self.last_maintenance
-            && now.duration_since(last) < self.compaction_interval
+        if let Some(last) = self.maintenance.last_maintenance
+            && now.duration_since(last) < self.maintenance.compaction_interval
         {
             return !flush_plan.is_empty();
         }
-        self.last_maintenance = Some(now);
+        self.maintenance.last_maintenance = Some(now);
         // Horizon-GC the per-core last-write-LSN version index: evict entries
         // far below the watermark and enforce the entry-count backstop. Rides
         // the compaction interval — no dedicated timer.

@@ -136,7 +136,7 @@ pub(in crate::control::server::resp) async fn handle_incrbyfloat(
     // The delta stays the client's decimal text, so the engine adds every
     // digit the client sent.
     let delta = match cmd.arg_str(1) {
-        Some(s) if crate::engine::kv::float_text::is_decimal_number(s) => s.to_string(),
+        Some(s) if nodedb_physical::kv_atomic::float_text::is_decimal_number(s) => s.to_string(),
         _ => return RespValue::err("ERR value is not a valid float"),
     };
 

@@ -194,7 +194,6 @@ impl CoreLoop {
                     tid,
                     collection,
                     storage_key,
-                    identity: RowIdentity::from_user_key(document_id),
                 },
                 outcome,
                 None,

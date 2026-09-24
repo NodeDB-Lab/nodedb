@@ -110,7 +110,7 @@ pub async fn kv_incr_float(
     // The delta stays the client's decimal text, so the engine adds every
     // digit the client wrote.
     let delta = unquote(&args[2]).trim().to_string();
-    if !crate::engine::kv::float_text::is_decimal_number(&delta) {
+    if !nodedb_physical::kv_atomic::float_text::is_decimal_number(&delta) {
         return Err(ddl_err(
             "42601",
             format!(

@@ -57,9 +57,9 @@ impl Scheduler {
         self.metrics.record_executor_txn_duration_ms(elapsed_ms);
 
         // A staged transaction resolves through its commit-barrier state, OLLP
-        // answer included. A flush under a commit verdict that answers
-        // `OllpRetryRequired` wrote nothing on this replica while the others
-        // applied, so it halts and holds. It never settles as a retry.
+        // answer included. The flush installs a resolved redo record and runs
+        // no OLLP check, so an OLLP answer under a commit state is a failed
+        // step that halts and holds. It never settles as a retry.
         let commit_state = self.pending.get(&txn_id).and_then(|p| p.commit_state);
 
         // OLLP mismatch: the active executor detected predicate drift and returned
