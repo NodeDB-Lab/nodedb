@@ -41,7 +41,6 @@ impl NodeDbPgHandler {
     pub(in crate::control::server::pgwire::handler) async fn dispatch_task_no_wal(
         &self,
         task: PhysicalTask,
-        user_id: Option<Arc<str>>,
     ) -> crate::Result<Response> {
         // Without this, a transaction begun before the freeze could COMMIT mid-scan and
         // break the as-of contract.
@@ -63,7 +62,7 @@ impl NodeDbPgHandler {
             vshard_id: task.vshard_id,
             database_id: task.database_id,
             plan: task.plan,
-            user_id,
+            user_id: None,
             txn_id,
             // No per-task TTL instant (see `flush_transaction_buffer`), so a TTL-bearing
             // KV write falls back to `epoch_system_ms` at apply time.

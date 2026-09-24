@@ -39,7 +39,7 @@ impl TxnDataPlane for PgwireTxnDp<'_> {
         &'a self,
         task: PhysicalTask,
     ) -> Pin<Box<dyn Future<Output = crate::Result<DpResponse>> + Send + 'a>> {
-        Box::pin(self.handler.dispatch_task_no_wal(task, None))
+        Box::pin(self.handler.dispatch_task_no_wal(task))
     }
 
     fn event_source(&self) -> crate::event::EventSource {
