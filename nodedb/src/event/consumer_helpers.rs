@@ -224,6 +224,15 @@ pub async fn dispatch_event(
         .watermark_tracker
         .advance_lsn_only(event.vshard_id.as_u32(), event.lsn.as_u64());
     cdc_router.route_event(event, &shared_state.watermark_tracker);
+    // A grant or hierarchy row consumed here never reaches the Normal-mode
+    // batch, so catchup applies it to the permission cache too.
+    if event.op.is_data_event() {
+        crate::control::security::permission_tree::event_handler::handle_permission_event(
+            event,
+            &shared_state.permission_cache,
+        )
+        .await;
+    }
 }
 
 /// Dispatch the awaited trigger actions shared by normal Event Plane delivery
@@ -260,7 +269,7 @@ fn event_actions_required(event: &WriteEvent) -> bool {
 /// by [`dispatch_triggers`] (called once per event by both the Normal-mode
 /// and WAL-catchup paths) so a per-row event fires its AFTER-ROW trigger
 /// exactly once regardless of which path consumed it.
-pub fn accumulate_data_event(
+pub async fn accumulate_data_event(
     event: &WriteEvent,
     shared_state: &Arc<SharedState>,
     cdc_router: &Arc<super::cdc::CdcRouter>,
@@ -279,7 +288,8 @@ pub fn accumulate_data_event(
     crate::control::security::permission_tree::event_handler::handle_permission_event(
         event,
         &shared_state.permission_cache,
-    );
+    )
+    .await;
     let matching_streams = shared_state.stream_registry.find_matching(
         event.database_id,
         event.tenant_id.as_u64(),

@@ -438,12 +438,19 @@ async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetrics>) {
 
                 // Discard ring-buffer events already re-dispatched by replay
                 // (`lsn <= last_lsn`); the first event past the replay point is
-                // returned and dispatched here rather than dropped (the ring is
-                // SPSC and cannot un-receive it). Everything after it is fresh
-                // and is served by the Normal-mode drain on the next iteration.
+                // returned and processed here rather than dropped (the ring is
+                // SPSC and cannot un-receive it). It is a live ring event, so it
+                // takes the same Normal-mode path as the events after it, which
+                // the Normal-mode drain serves on the next iteration.
                 if let Some(event) = drain_and_skip_stale(&mut rx, last_lsn) {
                     record_event(core_id, &event, &metrics);
-                    dispatch_event(&event, &shared_state, &mut retry_queue, &cdc_router).await;
+                    process_normal_batch(
+                        std::slice::from_ref(&event),
+                        &shared_state,
+                        &mut retry_queue,
+                        &cdc_router,
+                    )
+                    .await;
                     last_sequence = event.sequence;
                     if event.lsn.is_ahead_of(last_lsn) {
                         last_lsn = event.lsn;
@@ -551,7 +558,7 @@ async fn process_normal_batch(
         dispatch_event_actions(event, shared_state, retry_queue).await;
 
         // Non-trigger side effects (watermark, CDC, permission cache, MVs, CRDT).
-        accumulate_data_event(event, shared_state, cdc_router);
+        accumulate_data_event(event, shared_state, cdc_router).await;
     }
 }
 
