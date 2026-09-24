@@ -13,7 +13,8 @@ pub mod pool;
 pub mod raft_impl;
 pub mod send;
 pub mod serve;
+pub mod shuffle_push;
 pub mod transport;
 
-pub use send::ShufflePushStream;
+pub use shuffle_push::ShufflePushStream;
 pub use transport::{NexarTransport, TransportPeerSnapshot};
