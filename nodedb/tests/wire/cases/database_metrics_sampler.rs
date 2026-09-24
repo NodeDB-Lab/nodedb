@@ -72,3 +72,98 @@ async fn sampler_publishes_queue_depth() {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 }
+
+/// A capped database gains a live connection count after a client binds to
+/// it. The uncapped database must never publish a fabricated value: either it
+/// has no permit entry and no line, or it has an entry with a measured zero.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sampler_publishes_capped_connections_and_skips_uncapped() {
+    let server = TestServer::start().await;
+    let suffix = std::process::id();
+    let capped = format!("sampler_capped_{suffix}");
+    let uncapped = format!("sampler_uncapped_{suffix}");
+    server
+        .exec(&format!("CREATE DATABASE {capped}"))
+        .await
+        .unwrap();
+    server
+        .exec(&format!(
+            "ALTER DATABASE {capped} SET QUOTA (max_connections = 4)"
+        ))
+        .await
+        .unwrap();
+    server
+        .exec(&format!("CREATE DATABASE {uncapped}"))
+        .await
+        .unwrap();
+
+    // The cap must be visible in the usage report before the connection
+    // opens: the admission registry is seeded from the applied quota, and a
+    // connection admitted before that seeding holds no permit.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(WAIT_SECS);
+    loop {
+        let visible = server
+            .query_named_rows(&format!("SHOW DATABASE USAGE FOR {capped}"))
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .any(|row| {
+                row.get("quota_name").map(String::as_str) == Some("max_connections")
+                    && row.get("limit").map(String::as_str) == Some("4")
+            });
+        if visible {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the max_connections cap never became visible in SHOW DATABASE USAGE"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    let (client, handle) = server
+        .connect_as_database("nodedb", "nodedb", &capped)
+        .await
+        .expect("a connection to a capped database must be admitted");
+
+    let capped_label = format!("database=\"{capped}\"");
+    let uncapped_label = format!("database=\"{uncapped}\"");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(WAIT_SECS);
+    loop {
+        let body = fetch_metrics_body(server.http_port).await;
+        let live = labeled_metric_value(&body, "nodedb_database_connections", &capped_label);
+        if live.is_some_and(|v| v >= 1) {
+            if let Some(uncapped) =
+                labeled_metric_value(&body, "nodedb_database_connections", &uncapped_label)
+            {
+                assert_eq!(
+                    uncapped, 0,
+                    "an uncapped database without a permit must publish a measured zero, \
+                     never a fabricated count"
+                );
+            }
+            break;
+        }
+        let published: Vec<&str> = body
+            .lines()
+            .filter(|line| line.starts_with("nodedb_database_connections{"))
+            .collect();
+        let usage_current = server
+            .query_named_rows(&format!("SHOW DATABASE USAGE FOR {capped}"))
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|row| row.get("quota_name").map(String::as_str) == Some("max_connections"))
+            .and_then(|row| row.get("current").cloned())
+            .unwrap_or_else(|| "<no row>".to_string());
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "sampler did not publish a capped connection count within {WAIT_SECS}s: \
+             live={live:?} published={published:?} usage_current={usage_current:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    drop(client);
+    let _ = handle.await;
+}
