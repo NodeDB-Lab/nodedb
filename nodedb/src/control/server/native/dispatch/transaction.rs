@@ -21,7 +21,6 @@ use crate::control::server::shared::session::{
     AbortReason, CommitOutcome, TxnDataPlane, commit, lifecycle,
 };
 use crate::control::state::SharedState;
-use crate::types::Lsn;
 use nodedb_physical::physical_task::PhysicalTask;
 
 use super::super::super::dispatch_utils;
@@ -43,7 +42,6 @@ impl TxnDataPlane for NativeTxnDp<'_> {
     fn dispatch_no_wal<'a>(
         &'a self,
         task: PhysicalTask,
-        wal_lsn: Option<Lsn>,
     ) -> Pin<Box<dyn Future<Output = crate::Result<Response>> + Send + 'a>> {
         let state = self.state;
         Box::pin(async move {
@@ -57,10 +55,11 @@ impl TxnDataPlane for NativeTxnDp<'_> {
                     trace_id: TraceId::ZERO,
                     event_source: crate::event::EventSource::User,
                     txn_id: None,
-                    wal_lsn,
+                    wal_lsn: None,
                     // Batch COMMIT record, not per-task WAL append — see
                     // `dispatch_task_no_wal`'s equivalent limitation.
                     resolved_now_ms: None,
+                    minted: None,
                 },
             )
             .await

@@ -33,7 +33,7 @@ pub(super) async fn drop_txn_overlay(
     };
     match resolve_leader(&task, state) {
         RouteDecision::Local => {
-            dp.dispatch_no_wal(task, None).await?;
+            dp.dispatch_no_wal(task).await?;
             Ok(())
         }
         _ => {
@@ -44,7 +44,7 @@ pub(super) async fn drop_txn_overlay(
                 let drop_plan = drop_plan.clone();
                 async move {
                     match resolve_leader(&task, state) {
-                        RouteDecision::Local => dp.dispatch_no_wal(task, None).await,
+                        RouteDecision::Local => dp.dispatch_no_wal(task).await,
                         remote => forward_to_leader(state, remote, task, &drop_plan).await,
                     }
                 }

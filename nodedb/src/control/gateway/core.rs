@@ -34,6 +34,7 @@ use nodedb_physical::physical_plan::PhysicalPlan;
 use super::dispatcher::{DispatchRouteParams, dispatch_route, statement_deadline_ms};
 use super::fuser::fuse_payloads;
 use super::key_extractor::UnwiredKeyExtractor;
+use super::outcome::GatewayOutcome;
 use super::plan_cache::PlanCache;
 use super::retry::retry_not_leader;
 use super::route::TaskRoute;
@@ -163,7 +164,9 @@ impl Gateway {
         ctx: &QueryContext,
         plan: PhysicalPlan,
     ) -> Result<(Vec<Vec<u8>>, Vec<(VShardId, Lsn)>, Lsn), Error> {
-        self.execute_plan_with_watermarks(ctx, plan).await
+        self.execute_plan_outcome(ctx, plan)
+            .await
+            .map(GatewayOutcome::into_parts)
     }
 
     /// Execute a pre-planned `PhysicalPlan`, returning both the raw payloads and
@@ -180,14 +183,17 @@ impl Gateway {
         checked: CloneCheckedTask,
     ) -> Result<(Vec<Vec<u8>>, Vec<(VShardId, Lsn)>, Lsn), Error> {
         let plan = authorized_plan_for_context(ctx, checked)?;
-        self.execute_plan_with_watermarks(ctx, plan).await
+        self.execute_plan_outcome(ctx, plan)
+            .await
+            .map(GatewayOutcome::into_parts)
     }
 
-    async fn execute_plan_with_watermarks(
+    /// Execute an authorized plan and keep every route's result detail.
+    pub(super) async fn execute_plan_outcome(
         &self,
         ctx: &QueryContext,
         plan: PhysicalPlan,
-    ) -> Result<(Vec<Vec<u8>>, Vec<(VShardId, Lsn)>, Lsn), Error> {
+    ) -> Result<GatewayOutcome, Error> {
         let shared = self.shared()?;
         let span = info_span!(
             "gateway.execute",
@@ -240,9 +246,13 @@ impl Gateway {
         ctx: &QueryContext,
         plan: PhysicalPlan,
         version_set: GatewayVersionSet,
-    ) -> Result<(Vec<Vec<u8>>, Vec<(VShardId, Lsn)>, Lsn), Error> {
+    ) -> Result<GatewayOutcome, Error> {
         let shared = self.shared()?;
         let routes = self.compute_routes(plan, ctx)?;
+        // A fan-out reads a `NotFound` route as a shard with no slice. A
+        // single-route plan keeps it as the Data Plane's verdict.
+        let single_route = routes.len() == 1;
+        let mut not_found = false;
 
         let deadline_ms = statement_deadline_ms(&shared);
         // Gateway-level byte ceiling: per-route `dispatch_to_data_plane`
@@ -341,6 +351,7 @@ impl Gateway {
             // participating shard, never collapsed to a scalar, so a multi-route
             // read produces one read-set entry per shard.
             all_shard_watermarks.extend(outcome.shard_watermarks);
+            not_found = single_route && outcome.not_found;
             if outcome.read_version_lsn > max_read_version {
                 max_read_version = outcome.read_version_lsn;
             }
@@ -362,12 +373,17 @@ impl Gateway {
         // For broadcast scans, fuse all shard payloads into one. The per-shard
         // watermarks are NOT fused — each participating shard keeps its own
         // read-set entry.
-        if all_payloads.len() > 1 {
-            let fused = fuse_payloads(all_payloads)?;
-            Ok((vec![fused.payload], all_shard_watermarks, max_read_version))
+        let payloads = if all_payloads.len() > 1 {
+            vec![fuse_payloads(all_payloads)?.payload]
         } else {
-            Ok((all_payloads, all_shard_watermarks, max_read_version))
-        }
+            all_payloads
+        };
+        Ok(GatewayOutcome {
+            payloads,
+            shard_watermarks: all_shard_watermarks,
+            read_version_lsn: max_read_version,
+            not_found,
+        })
     }
 
     /// Compute routing decisions for a plan.

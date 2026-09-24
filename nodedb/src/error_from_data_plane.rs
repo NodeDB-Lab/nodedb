@@ -23,7 +23,9 @@ use crate::bridge::envelope::{CounterFault, ErrorCode};
 /// one.
 pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
     match code {
-        ErrorCode::DeadlineExceeded => NodeDbError::deadline_exceeded(),
+        ErrorCode::DeadlineExceeded | ErrorCode::ExpiredBeforeExecution => {
+            NodeDbError::deadline_exceeded()
+        }
         // The Data Plane's `RejectedConstraint` carries no collection name,
         // only the constraint kind and detail — leave collection blank
         // rather than misreport the kind string as the collection.

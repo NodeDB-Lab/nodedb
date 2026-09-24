@@ -11,9 +11,10 @@
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::array_catalog::ddl::AuthorizedDdlTransition;
+use crate::control::server::dispatch_utils::minted::{MintedRecords, RecordOwner};
 use crate::control::server::wal_dispatch::{self, WalAppendRequest};
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
+use crate::types::Lsn;
 
 use super::super::params::WalDurability;
 
@@ -59,14 +60,21 @@ pub(super) fn rollback_on_err<T>(
 /// Plane is about to execute must name the record that reproduces it. This is
 /// the only place that knows both, and it knows them for every caller: no
 /// upstream path may allocate an LSN of its own and hope it matches.
+///
+/// An `AppendHere` write appends through `minted`, so every record it writes
+/// joins the write's outcome-floor window.
 pub(super) fn authorize_and_append(
     shared: &SharedState,
-    tenant_id: TenantId,
-    database_id: DatabaseId,
-    vshard_id: VShardId,
+    owner: RecordOwner,
     mut plan: PhysicalPlan,
     durability: WalDurability,
+    minted: Option<&MintedRecords>,
 ) -> crate::Result<WalAppendOutcome> {
+    let RecordOwner {
+        tenant_id,
+        database_id,
+        vshard_id,
+    } = owner;
     let ddl_transition = crate::control::array_catalog::ddl::apply_authorized_ddl(
         shared,
         tenant_id,
@@ -83,7 +91,10 @@ pub(super) fn authorize_and_append(
                 shared,
                 &ddl_transition,
                 wal_dispatch::wal_append(WalAppendRequest {
-                    wal: shared.wal.appender(apply_key),
+                    wal: match minted {
+                        Some(minted) => minted.appender(&shared.wal, apply_key),
+                        None => shared.wal.appender(apply_key),
+                    },
                     tenant_id,
                     vshard_id,
                     database_id,
@@ -97,6 +108,7 @@ pub(super) fn authorize_and_append(
         WalDurability::CallerSupplied {
             wal_lsn,
             resolved_now_ms,
+            ..
         } => (wal_lsn, resolved_now_ms),
     };
 

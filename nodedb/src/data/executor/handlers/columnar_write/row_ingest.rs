@@ -56,16 +56,91 @@ impl CoreLoop {
     /// (upsert-overwrite for `Insert` and `Put`, silent skip for
     /// `InsertIfAbsent`, merge-via-`apply_on_conflict_updates` for `Put`
     /// with non-empty `on_conflict_updates`, `RejectedConstraint` error for
-    /// `InsertUnique` on a PK the index already carries).
+    /// `InsertUnique` on a PK the index or an earlier row of the batch
+    /// already carries).
     ///
-    /// Returns the accepted row count (and, on request, the stored post-images),
-    /// or `Err(Response)` on the first unrecoverable error (short-circuits the
-    /// remaining rows).
+    /// Every row is resolved and checked before any row is written, so a
+    /// refusal applies nothing. Returns the accepted row count (and, on
+    /// request, the stored post-images), or `Err(Response)` on the first
+    /// error.
     pub(in crate::data::executor) fn insert_columnar_rows(
         &mut self,
         task: &ExecutionTask,
         params: RowIngestParams<'_>,
     ) -> Result<RowIngestOutcome, Response> {
+        let resolved = self.resolve_columnar_rows(task, &params)?;
+        let RowIngestParams {
+            engine_key,
+            intent,
+            collect_stored_rows,
+            ..
+        } = params;
+        let mut accepted = 0u64;
+        let mut stored_rows: Vec<Vec<Value>> = Vec::new();
+
+        for row in resolved {
+            let engine = match self.columnar_engines.get_mut(engine_key) {
+                Some(e) => e,
+                None => {
+                    return Err(self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: "columnar engine vanished during insert".into(),
+                        },
+                    ));
+                }
+            };
+            let result = match intent {
+                ColumnarInsertIntent::InsertIfAbsent => engine.insert_if_absent(&row.values),
+                ColumnarInsertIntent::InsertUnique
+                | ColumnarInsertIntent::Insert
+                | ColumnarInsertIntent::Put => match row.surrogate {
+                    Some(s) => engine.insert_with_surrogate(&row.values, s),
+                    None => engine.insert(&row.values),
+                },
+            };
+
+            match result {
+                // An `insert_if_absent` that hit an existing key returns an
+                // EMPTY `wal_records` — that is the engine's documented no-op
+                // signal, and the only way to tell a skip from a write. Counting
+                // it reported an `INSERT 1` for a row that was never stored, and
+                // returning it would hand back a row that does not exist.
+                Ok(mutation) if mutation.wal_records.is_empty() => {}
+                Ok(_) => {
+                    accepted += 1;
+                    if collect_stored_rows {
+                        stored_rows.push(row.values);
+                    }
+                }
+                Err(e) => {
+                    return Err(self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("columnar insert failed: {e}"),
+                        },
+                    ));
+                }
+            }
+        }
+
+        Ok(RowIngestOutcome {
+            accepted,
+            stored_rows,
+        })
+    }
+
+    /// Resolve every row of the batch to the values it writes, and run every
+    /// check a row can fail, without writing anything.
+    ///
+    /// An ON CONFLICT DO UPDATE merge reads the prior row from the earlier rows
+    /// of this batch first, then from the engine: the same prior a
+    /// row-by-row write reads.
+    fn resolve_columnar_rows(
+        &self,
+        task: &ExecutionTask,
+        params: &RowIngestParams<'_>,
+    ) -> Result<Vec<ResolvedRow>, Response> {
         let RowIngestParams {
             engine_key,
             schema,
@@ -75,10 +150,16 @@ impl CoreLoop {
             surrogates,
             ndb_rows,
             rls_write_check,
-            collect_stored_rows,
-        } = params;
-        let mut accepted = 0u64;
-        let mut stored_rows: Vec<Vec<Value>> = Vec::new();
+            ..
+        } = *params;
+        let mut resolved: Vec<ResolvedRow> = Vec::with_capacity(ndb_rows.len());
+        let merging = intent == ColumnarInsertIntent::Put && !on_conflict_updates.is_empty();
+        let unique = intent == ColumnarInsertIntent::InsertUnique;
+        // Primary key → values of the latest earlier row of this batch. Kept
+        // only for the intents whose checks read it: a merge reads the prior
+        // row, and a unique insert reads the key alone.
+        let mut batch_rows: std::collections::HashMap<Vec<u8>, Vec<Value>> =
+            std::collections::HashMap::new();
 
         for (row_idx, row) in ndb_rows.iter().enumerate() {
             let obj = match row {
@@ -126,88 +207,52 @@ impl CoreLoop {
                 }
             };
 
-            // Resolve the actual row to write (merged for ON CONFLICT DO
-            // UPDATE, plain otherwise). This runs before the mutable
-            // engine borrow needed by the insert call.
+            let pk_bytes = if merging || unique {
+                let engine = match self.columnar_engines.get(engine_key) {
+                    Some(e) => e,
+                    None => {
+                        return Err(self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: "columnar engine vanished during insert".into(),
+                            },
+                        ));
+                    }
+                };
+                match engine.encode_pk_from_row(&values) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return Err(self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: format!("columnar insert: pk encode failed: {e}"),
+                            },
+                        ));
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+
+            // Resolve the actual row to write: merged for ON CONFLICT DO
+            // UPDATE, plain otherwise.
             let final_values: Vec<Value> = match intent {
-                ColumnarInsertIntent::Put if !on_conflict_updates.is_empty() => {
-                    let pk_bytes = {
-                        let engine = match self.columnar_engines.get(engine_key) {
-                            Some(e) => e,
-                            None => {
-                                return Err(self.response_error(
-                                    task,
-                                    ErrorCode::Internal {
-                                        detail: "columnar engine vanished during insert".into(),
-                                    },
-                                ));
-                            }
-                        };
-                        match engine.encode_pk_from_row(&values) {
-                            Ok(b) => b,
-                            Err(e) => {
-                                return Err(self.response_error(
-                                    task,
-                                    ErrorCode::Internal {
-                                        detail: format!("columnar insert: pk encode failed: {e}"),
-                                    },
-                                ));
-                            }
-                        }
-                    };
-
-                    let prior_row = self
-                        .columnar_engines
-                        .get(engine_key)
-                        .and_then(|e| e.lookup_memtable_row_by_pk(&pk_bytes))
-                        .or_else(|| self.read_flushed_row_by_pk(engine_key, &pk_bytes));
-
+                ColumnarInsertIntent::Put if merging => {
+                    let prior_row = batch_rows.get(&pk_bytes).cloned().or_else(|| {
+                        self.columnar_engines
+                            .get(engine_key)
+                            .and_then(|e| e.lookup_memtable_row_by_pk(&pk_bytes))
+                            .or_else(|| self.read_flushed_row_by_pk(engine_key, &pk_bytes))
+                    });
                     match prior_row {
                         None => values,
-                        Some(prior) => {
-                            let existing_val = row_values_to_object(schema, &prior);
-                            let excluded_val = row_values_to_object(schema, &values);
-                            let merged = match apply_on_conflict_updates(
-                                existing_val,
-                                &excluded_val,
-                                on_conflict_updates,
-                            ) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    return Err(self.response_error(task, e));
-                                }
-                            };
-                            let merged_obj = match merged {
-                                nodedb_types::Value::Object(m) => m,
-                                _ => {
-                                    return Err(self.response_error(
-                                        task,
-                                        ErrorCode::Internal {
-                                            detail: "merged ON CONFLICT value was not an object"
-                                                .into(),
-                                        },
-                                    ));
-                                }
-                            };
-                            match schema
-                                .columns
-                                .iter()
-                                .map(|col| {
-                                    ndb_field_to_value(merged_obj.get(&col.name), &col.column_type)
-                                })
-                                .collect::<Result<Vec<Value>, crate::Error>>()
-                            {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    return Err(self.response_error(
-                                        task,
-                                        ErrorCode::Internal {
-                                            detail: format!("columnar ON CONFLICT coercion: {e}"),
-                                        },
-                                    ));
-                                }
-                            }
-                        }
+                        Some(prior) => self.merge_on_conflict(
+                            task,
+                            schema,
+                            &prior,
+                            &values,
+                            on_conflict_updates,
+                        )?,
                     }
                 }
                 ColumnarInsertIntent::Put
@@ -231,92 +276,221 @@ impl CoreLoop {
                 return Err(self.response_error(task, error));
             }
 
-            let engine = match self.columnar_engines.get_mut(engine_key) {
-                Some(e) => e,
-                None => {
+            if unique {
+                let taken = batch_rows.contains_key(&pk_bytes)
+                    || self
+                        .columnar_engines
+                        .get(engine_key)
+                        .is_some_and(|e| e.pk_index().contains(&pk_bytes));
+                if taken {
+                    let key_desc = schema
+                        .columns
+                        .iter()
+                        .zip(final_values.iter())
+                        .filter(|(col, _)| col.primary_key)
+                        .map(|(col, v)| format!("{}={v}", col.name))
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     return Err(self.response_error(
                         task,
-                        ErrorCode::Internal {
-                            detail: "columnar engine vanished during insert".into(),
-                        },
-                    ));
-                }
-            };
-            let row_surrogate = surrogates.get(row_idx).copied();
-            let result = match intent {
-                ColumnarInsertIntent::InsertIfAbsent => engine.insert_if_absent(&final_values),
-                ColumnarInsertIntent::InsertUnique => {
-                    let pk_bytes = match engine.encode_pk_from_row(&final_values) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            return Err(self.response_error(
-                                task,
-                                ErrorCode::Internal {
-                                    detail: format!("columnar insert: pk encode failed: {e}"),
-                                },
-                            ));
-                        }
-                    };
-                    if engine.pk_index().contains(&pk_bytes) {
-                        let key_desc = schema
-                            .columns
-                            .iter()
-                            .zip(final_values.iter())
-                            .filter(|(col, _)| col.primary_key)
-                            .map(|(col, v)| format!("{}={v}", col.name))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        return Err(self.response_error(
-                            task,
-                            crate::Error::RejectedConstraint {
-                                collection: engine_key.2.clone(),
-                                constraint: "unique".to_string(),
-                                detail: format!(
-                                    "duplicate key value '{key_desc}' violates primary-key \
-                                     uniqueness on '{}'",
-                                    engine_key.2
-                                ),
-                            },
-                        ));
-                    }
-                    match row_surrogate {
-                        Some(s) => engine.insert_with_surrogate(&final_values, s),
-                        None => engine.insert(&final_values),
-                    }
-                }
-                ColumnarInsertIntent::Insert | ColumnarInsertIntent::Put => match row_surrogate {
-                    Some(s) => engine.insert_with_surrogate(&final_values, s),
-                    None => engine.insert(&final_values),
-                },
-            };
-
-            match result {
-                // An `insert_if_absent` that hit an existing key returns an
-                // EMPTY `wal_records` — that is the engine's documented no-op
-                // signal, and the only way to tell a skip from a write. Counting
-                // it reported an `INSERT 1` for a row that was never stored, and
-                // returning it would hand back a row that does not exist.
-                Ok(mutation) if mutation.wal_records.is_empty() => {}
-                Ok(_) => {
-                    accepted += 1;
-                    if collect_stored_rows {
-                        stored_rows.push(final_values);
-                    }
-                }
-                Err(e) => {
-                    return Err(self.response_error(
-                        task,
-                        ErrorCode::Internal {
-                            detail: format!("columnar insert failed: {e}"),
+                        crate::Error::RejectedConstraint {
+                            collection: engine_key.2.clone(),
+                            constraint: "unique".to_string(),
+                            detail: format!(
+                                "duplicate key value '{key_desc}' violates primary-key \
+                                 uniqueness on '{}'",
+                                engine_key.2
+                            ),
                         },
                     ));
                 }
             }
-        }
 
-        Ok(RowIngestOutcome {
-            accepted,
-            stored_rows,
-        })
+            if merging {
+                batch_rows.insert(pk_bytes, final_values.clone());
+            } else if unique {
+                batch_rows.insert(pk_bytes, Vec::new());
+            }
+            resolved.push(ResolvedRow {
+                values: final_values,
+                surrogate: surrogates.get(row_idx).copied(),
+            });
+        }
+        Ok(resolved)
+    }
+
+    /// Merge an incoming row into its prior row by the ON CONFLICT DO UPDATE
+    /// assignments.
+    fn merge_on_conflict(
+        &self,
+        task: &ExecutionTask,
+        schema: &ColumnarSchema,
+        prior: &[Value],
+        values: &[Value],
+        on_conflict_updates: &[(String, UpdateValue)],
+    ) -> Result<Vec<Value>, Response> {
+        let existing_val = row_values_to_object(schema, prior);
+        let excluded_val = row_values_to_object(schema, values);
+        let merged =
+            match apply_on_conflict_updates(existing_val, &excluded_val, on_conflict_updates) {
+                Ok(v) => v,
+                Err(e) => return Err(self.response_error(task, e)),
+            };
+        let merged_obj = match merged {
+            nodedb_types::Value::Object(m) => m,
+            _ => {
+                return Err(self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: "merged ON CONFLICT value was not an object".into(),
+                    },
+                ));
+            }
+        };
+        schema
+            .columns
+            .iter()
+            .map(|col| ndb_field_to_value(merged_obj.get(&col.name), &col.column_type))
+            .collect::<Result<Vec<Value>, crate::Error>>()
+            .map_err(|e| {
+                self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("columnar ON CONFLICT coercion: {e}"),
+                    },
+                )
+            })
+    }
+}
+
+/// One batch row resolved to the values it writes.
+struct ResolvedRow {
+    values: Vec<Value>,
+    surrogate: Option<Surrogate>,
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_physical::physical_plan::{ColumnarInsertIntent, ColumnarOp};
+    use nodedb_types::{RlsWriteCheck, Value};
+
+    use crate::bridge::envelope::{ErrorCode, Status};
+    use crate::data::executor::core_loop::CoreLoop;
+    use crate::data::executor::core_loop::tests::make_core_with_dir;
+    use crate::data::executor::handlers::columnar_write::ColumnarInsertParams;
+    use crate::data::executor::task::ExecutionTask;
+    use crate::types::{DatabaseId, TenantId, VShardId};
+
+    const TID: u64 = 1;
+    const COLLECTION: &str = "unique_rows";
+
+    fn task() -> ExecutionTask {
+        CoreLoop::replay_task(
+            TenantId::new(TID),
+            DatabaseId::DEFAULT,
+            VShardId::new(0),
+            crate::bridge::envelope::PhysicalPlan::Columnar(ColumnarOp::Truncate {
+                collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
+                restart_identity: false,
+            }),
+            None,
+        )
+    }
+
+    fn row(id: &str) -> Value {
+        Value::Object(std::collections::HashMap::from([
+            ("id".to_string(), Value::String(id.into())),
+            ("v".to_string(), Value::Integer(1)),
+        ]))
+    }
+
+    fn schema_bytes() -> Vec<u8> {
+        use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
+        let schema = ColumnarSchema::new(vec![
+            ColumnDef::required("id", ColumnType::String).with_primary_key(),
+            ColumnDef::required("v", ColumnType::Int64),
+        ])
+        .expect("valid schema");
+        zerompk::to_msgpack_vec(&schema).expect("encode schema")
+    }
+
+    fn insert(
+        core: &mut CoreLoop,
+        intent: ColumnarInsertIntent,
+        rows: Vec<Value>,
+    ) -> crate::bridge::envelope::Response {
+        let payload = nodedb_types::value_to_msgpack(&Value::Array(rows)).expect("encode rows");
+        let schema = schema_bytes();
+        core.execute_columnar_insert(
+            &task(),
+            ColumnarInsertParams {
+                collection: COLLECTION,
+                payload: &payload,
+                format: "msgpack",
+                intent,
+                on_conflict_updates: &[],
+                surrogates: &[],
+                schema_bytes: &schema,
+                provenance: None,
+                rls_write_check: &RlsWriteCheck::already_decided_elsewhere(),
+                returning: None,
+                rls_filters: &[],
+                spatial_undo: None,
+            },
+        )
+    }
+
+    fn live_rows(core: &CoreLoop) -> usize {
+        core.columnar_engines
+            .get(&(
+                DatabaseId::DEFAULT,
+                TenantId::new(TID),
+                COLLECTION.to_string(),
+            ))
+            .map_or(0, |e| e.live_row_count())
+    }
+
+    /// The funnel cancels the batch's record on a unique refusal, so the
+    /// refusal must leave no row of the batch behind.
+    #[test]
+    fn a_duplicate_key_late_in_a_unique_batch_writes_no_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let seeded = insert(&mut core, ColumnarInsertIntent::Insert, vec![row("a")]);
+        assert_eq!(seeded.status, Status::Ok, "{:?}", seeded.error_code);
+
+        let refused = insert(
+            &mut core,
+            ColumnarInsertIntent::InsertUnique,
+            vec![row("b"), row("a")],
+        );
+
+        assert!(matches!(
+            refused.error_code.as_deref(),
+            Some(ErrorCode::RejectedConstraint { .. })
+        ));
+        assert_eq!(
+            live_rows(&core),
+            1,
+            "the row before the duplicate is not written"
+        );
+    }
+
+    #[test]
+    fn a_key_repeated_inside_a_unique_batch_writes_no_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+
+        let refused = insert(
+            &mut core,
+            ColumnarInsertIntent::InsertUnique,
+            vec![row("c"), row("c")],
+        );
+
+        assert!(matches!(
+            refused.error_code.as_deref(),
+            Some(ErrorCode::RejectedConstraint { .. })
+        ));
+        assert_eq!(live_rows(&core), 0);
     }
 }

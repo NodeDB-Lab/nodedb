@@ -17,8 +17,8 @@ use async_trait::async_trait;
 
 use nodedb_types::Surrogate;
 
+use crate::control::server::dispatch_utils::RecordOwner;
 use crate::types::{DatabaseId, TenantId, VShardId};
-use crate::wal::manager::NO_APPLY_KEY;
 
 // ── Dispatcher trait ─────────────────────────────────────────────────────────
 
@@ -106,13 +106,17 @@ impl<'a> FtsDispatcher for SharedStateFtsDispatcher<'a> {
             &surrogate_hex,
             &text,
         );
-        let wal_lsn = wal_append_fts_index(
-            self.shared.wal.appender(NO_APPLY_KEY),
+        let owner = RecordOwner {
             tenant_id,
-            vshard,
             database_id,
-            &fts_index_payload,
-        )?;
+            vshard_id: vshard,
+        };
+        // The record's outcome-floor window opens before the append and
+        // closes from the dispatch's outcome.
+        let (minted, _) = super::raft_dispatch::append_under_window(self.shared, owner, |wal| {
+            wal_append_fts_index(wal, tenant_id, vshard, database_id, &fts_index_payload).map(Some)
+        })
+        .await?;
 
         let plan = PhysicalPlan::Text(TextOp::FtsIndexDoc {
             collection: nodedb_types::QualifiedCollection::new(database_id, &collection),
@@ -121,15 +125,14 @@ impl<'a> FtsDispatcher for SharedStateFtsDispatcher<'a> {
             provenance: Some(prov),
         });
 
-        let authorized = super::raft_dispatch::authorize_sync_task(
+        super::raft_dispatch::authorize_and_dispatch_minted(
             self.shared,
             self.identity,
-            tenant_id,
-            database_id,
-            vshard,
+            owner,
             plan,
-        )?;
-        super::raft_dispatch::dispatch_sync_payload(self.shared, authorized, Some(wal_lsn)).await
+            minted,
+        )
+        .await
     }
 
     async fn dispatch_delete(
@@ -158,13 +161,18 @@ impl<'a> FtsDispatcher for SharedStateFtsDispatcher<'a> {
             crate::engine::document::store::StorageKey::for_surrogate(surrogate).to_string();
         let fts_delete_payload =
             nodedb_wal::record::FtsDeletePayload::new(prov.clone(), &collection, &surrogate_hex);
-        let wal_lsn = wal_append_fts_delete(
-            self.shared.wal.appender(NO_APPLY_KEY),
+        let owner = RecordOwner {
             tenant_id,
-            vshard,
             database_id,
-            &fts_delete_payload,
-        )?;
+            vshard_id: vshard,
+        };
+        // The record's outcome-floor window opens before the append and
+        // closes from the dispatch's outcome.
+        let (minted, _) = super::raft_dispatch::append_under_window(self.shared, owner, |wal| {
+            wal_append_fts_delete(wal, tenant_id, vshard, database_id, &fts_delete_payload)
+                .map(Some)
+        })
+        .await?;
 
         let plan = PhysicalPlan::Text(TextOp::FtsDeleteDoc {
             collection: nodedb_types::QualifiedCollection::new(database_id, &collection),
@@ -172,15 +180,14 @@ impl<'a> FtsDispatcher for SharedStateFtsDispatcher<'a> {
             provenance: Some(prov),
         });
 
-        let authorized = super::raft_dispatch::authorize_sync_task(
+        super::raft_dispatch::authorize_and_dispatch_minted(
             self.shared,
             self.identity,
-            tenant_id,
-            database_id,
-            vshard,
+            owner,
             plan,
-        )?;
-        super::raft_dispatch::dispatch_sync_payload(self.shared, authorized, Some(wal_lsn)).await
+            minted,
+        )
+        .await
     }
 
     fn assign_surrogate(

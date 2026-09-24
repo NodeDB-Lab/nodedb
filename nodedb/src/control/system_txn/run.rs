@@ -137,6 +137,7 @@ async fn dispatch_staged(
             txn_id: task.txn_id,
             wal_lsn: None,
             resolved_now_ms: None,
+            minted: None,
         },
     )
     .await

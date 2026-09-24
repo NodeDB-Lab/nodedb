@@ -23,6 +23,7 @@
 //! cannot propagate and files a `Capture` instead.
 
 use crate::control::security::catalog::{IndexKind, StoredIndexRecord};
+use crate::control::server::dispatch_utils::{MintedRecords, RecordOwner};
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId};
 
@@ -105,7 +106,15 @@ async fn secondary(
             field,
         },
     );
-    dispatch(state, tenant_id, database_id, &record.collection, plan).await
+    dispatch(
+        state,
+        tenant_id,
+        database_id,
+        &record.collection,
+        plan,
+        None,
+    )
+    .await
 }
 
 /// Remove the vector index's durable build parameters and its Data Plane
@@ -144,30 +153,54 @@ async fn vector(
     // WAL first: the `VectorParams` record that created this index is still
     // in the log, so without a durable drop record a restart rebuilds the
     // index the user just dropped.
+    //
+    // The record's outcome-floor window opens before the append and closes
+    // from the drop's outcome.
     let vshard =
         crate::types::VShardId::from_collection_in_database(database_id, &record.collection);
-    let appended = crate::control::server::wal_dispatch::wal_append_if_write(
-        &state.wal,
+    let owner = RecordOwner {
         tenant_id,
-        vshard,
         database_id,
-        &plan,
-    )
-    .map_err(|e| err("XX000", format!("persist vector index drop to WAL: {e}")))?;
+        vshard_id: vshard,
+    };
+    let minted = MintedRecords::open(&state.outcome_floor);
+    let appended = match minted.append_plan(&state.wal, owner, &plan) {
+        Ok(appended) => appended,
+        Err(e) => {
+            // Any record appended before the error never reaches a core.
+            minted
+                .cancel(&state.wal, owner, 0)
+                .await
+                .map_err(|c| err("XX000", format!("cancel vector index drop record: {c}")))?;
+            return Err(err(
+                "XX000",
+                format!("persist vector index drop to WAL: {e}"),
+            ));
+        }
+    };
 
     // An append only buffers. The records this drop cancels were already
     // fsynced by the writes that acked them, so a buffered-only drop is lost on
     // restart while replay still rebuilds the index from those records.
-    let lsn = appended
-        .lsn
-        .ok_or_else(|| err("XX000", "vector index drop minted no WAL record"))?;
-    state
-        .wal
-        .wait_durable(lsn)
-        .await
-        .map_err(|e| err("XX000", format!("fsync vector index drop: {e}")))?;
+    let Some(lsn) = appended.lsn else {
+        minted.settle();
+        return Err(err("XX000", "vector index drop minted no WAL record"));
+    };
+    if let Err(e) = state.wal.wait_durable(lsn).await {
+        // The record can still be on disk, so restart replay can reach it.
+        minted.hold();
+        return Err(err("XX000", format!("fsync vector index drop: {e}")));
+    }
 
-    dispatch(state, tenant_id, database_id, &record.collection, plan).await
+    dispatch(
+        state,
+        tenant_id,
+        database_id,
+        &record.collection,
+        plan,
+        Some(minted),
+    )
+    .await
 }
 
 /// Reset the collection's FTS binding once its last full-text index is gone.
@@ -206,29 +239,47 @@ async fn fulltext(
             fuzzy_default: Some(false),
         },
     );
-    dispatch(state, tenant_id, database_id, &record.collection, plan).await
+    dispatch(
+        state,
+        tenant_id,
+        database_id,
+        &record.collection,
+        plan,
+        None,
+    )
+    .await
 }
 
 /// Dispatch one teardown plan to the Data Plane, surfacing both transport and
-/// handler-side failures.
+/// handler-side failures. `minted` holds the record appended for the plan;
+/// the funnel closes its outcome-floor window from the plan's outcome.
 async fn dispatch(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
     collection: &str,
     plan: crate::bridge::envelope::PhysicalPlan,
+    minted: Option<MintedRecords>,
 ) -> Result<(), DdlError> {
     let vshard = crate::types::VShardId::from_collection_in_database(database_id, collection);
-    let response = crate::control::server::dispatch_utils::dispatch_to_data_plane(
-        state,
-        tenant_id,
-        database_id,
-        vshard,
-        plan,
-        TraceId::ZERO,
-    )
-    .await
-    .map_err(|e| err("XX000", format!("index teardown dispatch failed: {e}")))?;
+    let response =
+        crate::control::server::dispatch_utils::dispatch_trusted_internal_write_to_data_plane(
+            state,
+            crate::control::server::dispatch_utils::WriteDispatch {
+                tenant_id,
+                database_id,
+                vshard_id: vshard,
+                plan,
+                trace_id: TraceId::ZERO,
+                event_source: crate::event::EventSource::User,
+                txn_id: None,
+                wal_lsn: None,
+                resolved_now_ms: None,
+                minted,
+            },
+        )
+        .await
+        .map_err(|e| err("XX000", format!("index teardown dispatch failed: {e}")))?;
 
     if response.status == crate::bridge::envelope::Status::Error {
         let detail = match response.error_code.as_deref() {

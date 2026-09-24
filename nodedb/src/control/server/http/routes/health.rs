@@ -156,8 +156,33 @@ pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
         return (status, axum::Json(body));
     }
 
+    // A write window open past the longest statement deadline holds the
+    // outcome floor, so no checkpoint on this node advances past it. The node
+    // serves, so it reports degraded.
+    if let Some(stuck) = state
+        .shared
+        .outcome_floor
+        .stuck(outcome_floor_bound(&state))
+    {
+        let body = json!({
+            "status": "degraded",
+            "reason": "outcome_floor_stuck",
+            "node_id": state.shared.node_id,
+            "outcome_floor": stuck.floor.as_u64(),
+            "oldest_window_horizon": stuck.horizon.as_u64(),
+            "oldest_window_open_secs": stuck.open_for.as_secs(),
+            "open_windows": stuck.open_windows,
+            "leaked_windows": state.shared.outcome_floor.leaked_windows(),
+            "held_windows": state.shared.outcome_floor.held_windows(),
+        });
+        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body));
+    }
+
     let health = crate::control::startup::health::observe(&state.shared.startup);
-    let (status, body) = crate::control::startup::health::to_http_response(&health);
+    let (status, mut body) = crate::control::startup::health::to_http_response(&health);
+    // A held window keeps the outcome floor below it by design, so it never
+    // degrades readiness. The count shows how many restart replay will reach.
+    body["held_windows"] = json!(state.shared.outcome_floor.held_windows());
     // Checked only once the startup gate is otherwise green, so a node still
     // advancing through phases keeps reporting the phase it is stuck in.
     if status == StatusCode::OK
@@ -171,6 +196,25 @@ pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
         return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body));
     }
     (status, axum::Json(body))
+}
+
+/// How long a write window can hold the outcome floor before readiness reports
+/// it: the longest path from a window's open to its final outcome.
+///
+/// - A statement write reaches its outcome by the longest statement deadline,
+///   plus the wait the node gives a committed entry to apply.
+/// - A vector index install waits two core dispatch deadlines.
+///
+/// A window older than both is stuck.
+fn outcome_floor_bound(state: &AppState) -> std::time::Duration {
+    let network = &state.shared.tuning.network;
+    let statement = std::time::Duration::from_secs(
+        network
+            .default_deadline_secs
+            .max(network.copy_deadline_secs),
+    )
+    .saturating_add(crate::control::metadata_proposer::DEFAULT_PROPOSE_TIMEOUT);
+    statement.max(crate::control::catalog_entry::post_apply::vector_install_longest_core_wait())
 }
 
 /// Why a cross-shard Calvin write would be refused on this node right now,

@@ -60,7 +60,7 @@ pub(crate) fn eager_dispatch_to_all_cores(
     Vec<(
         usize,
         crate::types::RequestId,
-        tokio::sync::mpsc::Receiver<crate::bridge::envelope::Response>,
+        crate::control::ResponseReceiver,
     )>,
 > {
     // Every core in this fan-out belongs to ONE statement, so all of them

@@ -15,8 +15,9 @@ use crate::bridge::envelope::{ErrorCode, Response, Status};
 /// other code crosses as `Error::DataPlane` so its SQLSTATE survives. An
 /// error status carrying no code fails closed rather than reading as success.
 ///
-/// `DeadlineExceeded` is the exception, and it crosses as
-/// [`crate::Error::DeadlineExceeded`]. A shard refusing an expired task is the
+/// `DeadlineExceeded` and `ExpiredBeforeExecution` are the exception, and
+/// they cross as [`crate::Error::DeadlineExceeded`]. A shard refusing an
+/// expired task is the
 /// statement running out of time — the same condition the Control-Plane timer
 /// reports — so both produce one variant and one SQLSTATE. Leaving it wrapped
 /// would make the SQLSTATE a client sees depend on which half of that race
@@ -27,9 +28,11 @@ pub(crate) fn reject_data_plane_error(resp: &Response) -> crate::Result<()> {
     }
     match resp.error_code.as_deref() {
         Some(ErrorCode::NotFound) => Ok(()),
-        Some(ErrorCode::DeadlineExceeded) => Err(crate::Error::DeadlineExceeded {
-            request_id: resp.request_id,
-        }),
+        Some(ErrorCode::DeadlineExceeded | ErrorCode::ExpiredBeforeExecution) => {
+            Err(crate::Error::DeadlineExceeded {
+                request_id: resp.request_id,
+            })
+        }
         Some(code) => Err(crate::Error::DataPlane(code.clone())),
         None => Err(crate::Error::DataPlane(ErrorCode::Internal {
             detail: "data plane returned an error status with no error code".into(),
@@ -63,6 +66,17 @@ mod tests {
         // The other half of the race — the Control-Plane timer — raises this
         // same variant, so a client sees one SQLSTATE either way.
         match reject_data_plane_error(&refusal(ErrorCode::DeadlineExceeded)) {
+            Err(crate::Error::DeadlineExceeded { request_id }) => {
+                assert_eq!(request_id, RequestId::new(9));
+            }
+            other => panic!("expected the deadline variant, got {other:?}"),
+        }
+    }
+
+    /// A task that expired before it started reports the same deadline.
+    #[test]
+    fn a_task_that_never_started_reports_the_deadline() {
+        match reject_data_plane_error(&refusal(ErrorCode::ExpiredBeforeExecution)) {
             Err(crate::Error::DeadlineExceeded { request_id }) => {
                 assert_eq!(request_id, RequestId::new(9));
             }

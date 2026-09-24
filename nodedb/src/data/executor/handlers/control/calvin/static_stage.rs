@@ -16,8 +16,9 @@ use crate::types::TenantId;
 use nodedb_physical::physical_plan::PhysicalPlan;
 
 use crate::data::executor::handlers::control::calvin_txn_id::calvin_synthetic_txn_id;
+use crate::data::panic_payload::panic_payload_to_string;
 
-use super::shared::{CalvinExecCtx, calvin_panic_payload_to_string};
+use super::shared::CalvinExecCtx;
 
 impl CoreLoop {
     /// Validate a static-set Calvin transaction and stage it for commit.
@@ -106,7 +107,7 @@ impl CoreLoop {
                     ErrorCode::Internal {
                         detail: format!(
                             "panic while staging static Calvin transaction: {}",
-                            calvin_panic_payload_to_string(payload.as_ref())
+                            panic_payload_to_string(payload.as_ref())
                         ),
                     },
                 );

@@ -6,11 +6,11 @@ use crate::bridge::envelope::{ErrorCode, Response, WriteSetEntry};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::write_hook;
+use crate::data::executor::handlers::partial_refusal::refusal_after_partial_apply;
 use crate::data::executor::handlers::point::update_reindex::NonbitemporalUpdateReindex;
 use crate::data::executor::handlers::point::update_reindex_vector::UpdateVectorReindex;
 use crate::data::executor::handlers::returning_doc;
 use crate::data::executor::handlers::returning_rows;
-use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::handlers::transaction::stage_write::stored_row_identity;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
@@ -225,6 +225,16 @@ impl CoreLoop {
         {
             return self.response_error(task, e);
         }
+        if let Err(code) = self.gate_bulk_update_rows(
+            task,
+            tid,
+            collection,
+            &projected,
+            rls_write_check,
+            resolved_sum_targets,
+        ) {
+            return self.response_error(task, code);
+        }
         for row in projected {
             let ProjectedUpdateRow {
                 key: storage_key,
@@ -233,45 +243,6 @@ impl CoreLoop {
                 doc,
                 updated_bytes,
             } = row;
-            // Period lock, both images — matching `execute_point_update`: a
-            // closed period must reject an edit to a row it already holds,
-            // and must reject an edit that assigns the period column into it.
-            if let Some(config) = self.doc_configs.get(&config_key)
-                && let Some(ref pl) = config.enforcement.period_lock
-            {
-                if let Err(e) = crate::data::executor::enforcement::period_lock::check_period_lock(
-                    &self.sparse,
-                    database_id,
-                    tid,
-                    collection,
-                    &current_bytes,
-                    pl,
-                    resolved_sum_targets,
-                ) {
-                    return self.response_error(task, e);
-                }
-                if let Err(e) = crate::data::executor::enforcement::period_lock::check_period_lock(
-                    &self.sparse,
-                    database_id,
-                    tid,
-                    collection,
-                    &updated_bytes,
-                    pl,
-                    resolved_sum_targets,
-                ) {
-                    return self.response_error(task, e);
-                }
-            }
-            // Gate the persist on the collection's write policy, decided
-            // against this row's post-update image — `doc` already has
-            // the assignments and any regenerated columns applied, so it
-            // is the row that would exist afterwards. A rejected row
-            // fails the statement rather than being skipped: a skipped
-            // row would be reported as unaffected while the rest of the
-            // predicate's matches were rewritten.
-            if let Err(e) = rls_write_gate::admit_row(rls_write_check, &doc, tid, collection) {
-                return self.response_error(task, e);
-            }
             // Both images are already materialized here — `old_doc_json`
             // for the secondary-index diff and `doc` as the post-image —
             // so the row's materialized-sum delta costs no extra read
@@ -307,7 +278,12 @@ impl CoreLoop {
                 // skipping it would report a smaller affected count as
                 // the truth while the rest of the predicate's matches
                 // were rewritten, and leave the stored total short of the
-                // `SUM(...)` over the rows that did land.
+                // `SUM(...)` over the rows that did land. The row's own
+                // transaction did not commit, but earlier rows did.
+                Err(e) if affected > 0 => {
+                    return self
+                        .response_error(task, refusal_after_partial_apply(ErrorCode::from(e)));
+                }
                 Err(e) => return self.response_error(task, e),
             };
             // One durable redo entry per derived target row, naming the
@@ -353,7 +329,8 @@ impl CoreLoop {
                     has_vectors,
                 })
             {
-                return self.response_error(task, e);
+                // The row's body already committed.
+                return self.response_error(task, refusal_after_partial_apply(ErrorCode::from(e)));
             }
             // Emit an update event per affected row to the Event Plane,
             // so AFTER-UPDATE triggers and CDC/change-stream consumers
@@ -442,5 +419,115 @@ impl CoreLoop {
             response.write_set = write_set;
         }
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::envelope::Status;
+    use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
+    use crate::data::executor::doc_format;
+    use nodedb_physical::physical_plan::UpdateValue;
+    use nodedb_types::{StorageKey, Surrogate};
+
+    const TID: u64 = 1;
+    const COLLECTION: &str = "orders";
+
+    fn seed(core: &mut CoreLoop, database_id: u64, surrogate: u32, owner: &str) {
+        let row = serde_json::json!({"owner": owner, "note": "old"});
+        core.sparse
+            .put(
+                database_id,
+                TID,
+                COLLECTION,
+                &StorageKey::for_surrogate(Surrogate(surrogate)),
+                &doc_format::encode_to_msgpack(&row),
+            )
+            .expect("seed row");
+    }
+
+    fn note_of(core: &CoreLoop, database_id: u64, surrogate: u32) -> serde_json::Value {
+        let stored = core
+            .sparse
+            .get(
+                database_id,
+                TID,
+                COLLECTION,
+                &StorageKey::for_surrogate(Surrogate(surrogate)),
+            )
+            .expect("read row")
+            .expect("row exists");
+        doc_format::decode_document(&stored)
+            .expect("row decodes")
+            .get("note")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    fn owner_policy(owner: &str) -> Vec<u8> {
+        let filter = ScanFilter {
+            field: "owner".into(),
+            op: crate::bridge::scan_filter::FilterOp::Eq,
+            value: nodedb_types::Value::String(owner.into()),
+            clauses: Vec::new(),
+            expr: None,
+        };
+        zerompk::to_msgpack_vec(&vec![filter]).expect("encode policy")
+    }
+
+    /// The write policy refuses one matched row. The refusal code claims
+    /// nothing applied, so no matched row can be rewritten, including the
+    /// rows the policy admits.
+    #[test]
+    fn a_policy_refusal_on_any_matched_row_rewrites_no_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        let task = make_default_task();
+        let database_id = task.request.database_id.as_u64();
+        seed(&mut core, database_id, 1, "alice");
+        seed(&mut core, database_id, 2, "bob");
+        seed(&mut core, database_id, 3, "alice");
+
+        let updates = vec![(
+            "note".to_string(),
+            UpdateValue::Literal(
+                nodedb_types::json_to_msgpack(&serde_json::json!("new")).expect("encode"),
+            ),
+        )];
+        let policy = nodedb_types::RlsWriteCheck::Predicate(owner_policy("alice"));
+        let response = core.execute_bulk_update(
+            &task,
+            TID,
+            BulkUpdateParams {
+                collection: COLLECTION,
+                filter_bytes: &[],
+                updates: &updates,
+                returning: None,
+                ollp_predicted_surrogates: None,
+                ollp_predicted_edges: None,
+                rls_filters: &[],
+                rls_write_check: &policy,
+                resolved_sum_targets: &[],
+                declared_primary_key: None,
+            },
+        );
+
+        assert_eq!(response.status, Status::Error);
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(ErrorCode::RejectedAuthz { .. })
+            ),
+            "got {:?}",
+            response.error_code
+        );
+        for surrogate in [1, 2, 3] {
+            assert_eq!(
+                note_of(&core, database_id, surrogate),
+                serde_json::json!("old"),
+                "row {surrogate} must be unchanged"
+            );
+        }
     }
 }

@@ -9,6 +9,7 @@ use tracing::error;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
+use crate::data::panic_payload::panic_payload_to_string;
 use crate::types::TenantId;
 
 use super::batch::CrdtDelta;
@@ -88,7 +89,7 @@ impl CoreLoop {
                 undo_len,
                 format!(
                     "panic during transaction rollback: {}",
-                    super::batch::panic_payload_to_string(payload.as_ref())
+                    panic_payload_to_string(payload.as_ref())
                 ),
             )),
         };
@@ -141,7 +142,7 @@ impl CoreLoop {
                     ErrorCode::Internal {
                         detail: format!(
                             "panic while capturing CRDT transaction pre-images: {}",
-                            super::batch::panic_payload_to_string(payload.as_ref())
+                            panic_payload_to_string(payload.as_ref())
                         ),
                     },
                 );
@@ -159,7 +160,7 @@ impl CoreLoop {
                 ErrorCode::Internal {
                     detail: format!(
                         "panic during CRDT transaction gate: {}",
-                        super::batch::panic_payload_to_string(payload.as_ref())
+                        panic_payload_to_string(payload.as_ref())
                     ),
                 },
             ),
@@ -239,7 +240,7 @@ impl CoreLoop {
                     collection: "<transaction-rollback>".into(),
                     detail: format!(
                         "panic while restoring CRDT pre-images: {}",
-                        super::batch::panic_payload_to_string(payload.as_ref())
+                        panic_payload_to_string(payload.as_ref())
                     ),
                 }],
             }),
@@ -321,7 +322,7 @@ impl CoreLoop {
                     collection,
                     detail: format!(
                         "panic while restoring CRDT pre-image: {}",
-                        super::batch::panic_payload_to_string(payload.as_ref())
+                        panic_payload_to_string(payload.as_ref())
                     ),
                 }),
             }

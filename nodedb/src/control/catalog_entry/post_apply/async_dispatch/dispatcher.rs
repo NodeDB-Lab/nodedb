@@ -185,7 +185,7 @@ pub fn spawn_post_apply_async_side_effects(
         CatalogEntry::PutVectorIndexParams(stored) => {
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async move {
-                    super::vector::put_async(*stored, &shared).await;
+                    super::vector::put_async(*stored, Arc::clone(&shared)).await;
                 });
             });
         }
@@ -204,7 +204,7 @@ pub fn spawn_post_apply_async_side_effects(
                         tenant_id,
                         collection,
                         field_name,
-                        &shared,
+                        Arc::clone(&shared),
                     )
                     .await;
                 });

@@ -9,7 +9,7 @@ use crate::bridge::envelope::Response;
 use crate::control::server::dispatch_utils;
 use crate::control::server::shared::session::TxnDataPlane;
 use crate::control::state::SharedState;
-use crate::types::{Lsn, TraceId};
+use crate::types::TraceId;
 use nodedb_physical::physical_task::PhysicalTask;
 
 /// Dispatches a system transaction's commit-time tasks straight to the core
@@ -33,7 +33,6 @@ impl TxnDataPlane for SystemTxnDataPlane<'_> {
     fn dispatch_no_wal<'a>(
         &'a self,
         task: PhysicalTask,
-        wal_lsn: Option<Lsn>,
     ) -> Pin<Box<dyn Future<Output = crate::Result<Response>> + Send + 'a>> {
         let state = self.state;
         let event_source = self.event_source;
@@ -48,8 +47,9 @@ impl TxnDataPlane for SystemTxnDataPlane<'_> {
                     trace_id: TraceId::ZERO,
                     event_source,
                     txn_id: None,
-                    wal_lsn,
+                    wal_lsn: None,
                     resolved_now_ms: None,
+                    minted: None,
                 },
             )
             .await

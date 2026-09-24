@@ -85,8 +85,13 @@ impl CoreLoop {
             "vector resolved direct write"
         );
         let database_id = task.request.database_id.as_u64();
-        if let Err(e) = self.check_vector_resolved_preconditions(database_id, tid, index, mutations)
-        {
+        if let Err(e) = self.check_vector_resolved_preconditions(
+            database_id,
+            tid,
+            index,
+            mutations,
+            rls_write_check,
+        ) {
             return self.response_error(task, e);
         }
         let touched = match self.apply_vector_resolved_mutations(
@@ -109,18 +114,62 @@ impl CoreLoop {
 
     /// Refuse the whole write when any row moved past what the resolve read.
     /// A vector that no longer fits the index is the same constraint error
-    /// the live write reports.
+    /// the live write reports. Every refusal the apply pass can answer is
+    /// decided here, before the first mutation lands.
     fn check_vector_resolved_preconditions(
         &self,
         database_id: u64,
         tid: u64,
         index: VectorResolvedIndexSpec<'_>,
         mutations: &[VectorResolvedMutation],
+        rls_write_check: &RlsWriteCheck,
     ) -> Result<(), ErrorCode> {
         let index_key = CoreLoop::vector_index_key(database_id, tid, index.collection, index.field);
+        // An absent index takes the width of the first vector written into
+        // it, so every vector in the write must share one width.
+        let mut width: Option<usize> = None;
         for mutation in mutations {
             if let Some(vector) = mutation.stored_vector() {
                 self.check_vector_direct_index(database_id, tid, &index.with_dim(vector.len()))?;
+                if let Some(&declared) = self.declared_dims.get(&index_key)
+                    && declared != 0
+                    && declared != vector.len()
+                {
+                    return Err(ErrorCode::RejectedConstraint {
+                        detail: String::new(),
+                        constraint: format!(
+                            "dimension mismatch: index declares {declared}, got {}",
+                            vector.len()
+                        ),
+                    });
+                }
+                match width {
+                    Some(first) if first != vector.len() => {
+                        return Err(ErrorCode::RejectedConstraint {
+                            detail: String::new(),
+                            constraint: format!(
+                                "vector dimension mismatch: the write's first vector has {first}, got {}",
+                                vector.len()
+                            ),
+                        });
+                    }
+                    Some(_) => {}
+                    None => width = Some(vector.len()),
+                }
+            }
+            match mutation {
+                VectorResolvedMutation::Update { merged_payload, .. } => {
+                    decode_resolved_payload(
+                        merged_payload,
+                        rls_write_check,
+                        tid,
+                        index.collection,
+                    )?;
+                }
+                VectorResolvedMutation::Upsert { payload, .. } => {
+                    decode_resolved_payload(payload, rls_write_check, tid, index.collection)?;
+                }
+                VectorResolvedMutation::Delete { .. } => {}
             }
             let surrogate = mutation.surrogate();
             let bound = self.vector_direct_node(&index_key, surrogate).is_some();
@@ -629,5 +678,45 @@ mod tests {
             Some(node_before),
             "a payload-only update keeps the HNSW node"
         );
+    }
+
+    /// Two upserts into an absent index carry different widths. The refusal
+    /// code claims nothing applied, so the first upsert does not land either.
+    #[test]
+    fn a_width_mismatch_late_in_the_write_applies_no_mutation() {
+        let mut h = make_core();
+        let mutations = vec![
+            VectorResolvedMutation::Upsert {
+                surrogate: Surrogate::new(1),
+                pk_bytes: Vec::new(),
+                vector: vec![1.0, 0.0],
+                payload: payload("alice"),
+                old_payload: None,
+            },
+            VectorResolvedMutation::Upsert {
+                surrogate: Surrogate::new(2),
+                pk_bytes: Vec::new(),
+                vector: vec![1.0, 0.0, 0.0],
+                payload: payload("alice"),
+                old_payload: None,
+            },
+        ];
+        let outcome = VectorResolveOutcome {
+            mutations,
+            response_payload: Vec::new(),
+        };
+
+        let resp = apply(&mut h, &outcome);
+
+        assert_eq!(resp.status, Status::Error);
+        assert!(
+            matches!(
+                resp.error_code.as_deref(),
+                Some(ErrorCode::RejectedConstraint { .. })
+            ),
+            "got {:?}",
+            resp.error_code
+        );
+        assert_eq!(stored_owner(&h, Surrogate::new(1)), None);
     }
 }

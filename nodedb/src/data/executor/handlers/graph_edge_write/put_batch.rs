@@ -25,23 +25,17 @@ impl CoreLoop {
     ) -> Response {
         debug!(core = self.core_id, count = edges.len(), "edge put batch");
         let database_id = task.request.database_id.as_u64();
+        // Every endpoint is checked before any edge is written, so a dangling
+        // refusal applies nothing.
+        if let Some(missing_node) = edges.iter().find_map(|edge| {
+            [&edge.src_id, &edge.dst_id]
+                .into_iter()
+                .find(|node| self.is_node_deleted(database_id, tid, node))
+                .cloned()
+        }) {
+            return self.response_error(task, ErrorCode::RejectedDanglingEdge { missing_node });
+        }
         for (idx, edge) in edges.iter().enumerate() {
-            if self.is_node_deleted(database_id, tid, &edge.src_id) {
-                return self.response_error(
-                    task,
-                    ErrorCode::RejectedDanglingEdge {
-                        missing_node: edge.src_id.clone(),
-                    },
-                );
-            }
-            if self.is_node_deleted(database_id, tid, &edge.dst_id) {
-                return self.response_error(
-                    task,
-                    ErrorCode::RejectedDanglingEdge {
-                        missing_node: edge.dst_id.clone(),
-                    },
-                );
-            }
             let ord = self
                 .active_graph_system_from
                 .unwrap_or_else(|| self.hlc.next_ordinal());
@@ -120,5 +114,61 @@ impl CoreLoop {
             );
         }
         self.response_affected(task, edges.len() as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::bridge::envelope::{ErrorCode, Status};
+    use crate::types::TenantId;
+    use nodedb_physical::physical_plan::BatchEdge;
+    use nodedb_types::{DatabaseId, QualifiedCollection, Surrogate};
+
+    use super::super::shared::test_support::{make_core, make_task_with_lsn};
+
+    fn edge(src: &str, dst: &str) -> BatchEdge {
+        BatchEdge {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "knows"),
+            src_id: src.to_string(),
+            label: "KNOWS".to_string(),
+            dst_id: dst.to_string(),
+            src_surrogate: Surrogate::new(1),
+            dst_surrogate: Surrogate::new(2),
+        }
+    }
+
+    /// The funnel cancels the batch's record on a dangling refusal, so the
+    /// refusal must leave no edge of the batch behind.
+    #[test]
+    fn a_dangling_edge_late_in_the_batch_writes_no_edge() {
+        let mut h = make_core();
+        h.core
+            .mark_node_deleted(DatabaseId::DEFAULT.as_u64(), 1, "gone");
+        let task = make_task_with_lsn(9);
+        let edges = vec![edge("a", "b"), edge("c", "gone")];
+
+        let resp = h.core.execute_edge_put_batch(&task, 1, &edges);
+
+        assert_eq!(resp.status, Status::Error);
+        assert!(matches!(
+            resp.error_code.as_deref(),
+            Some(ErrorCode::RejectedDanglingEdge { missing_node }) if missing_node == "gone"
+        ));
+        let first = h
+            .core
+            .edge_store
+            .get_edge(
+                DatabaseId::DEFAULT.as_u64(),
+                TenantId::new(1),
+                "knows",
+                "a",
+                "KNOWS",
+                "b",
+            )
+            .expect("read edge");
+        assert!(
+            first.is_none(),
+            "the edge before the dangling one is not written"
+        );
     }
 }

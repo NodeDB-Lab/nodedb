@@ -428,6 +428,7 @@ pub(super) fn staged_pending(txn: SequencedTxn, txn_id: TxnId) -> PendingTxn {
         commit_state: Some(CommitState::Staged),
         verdict_deadline: None,
         stage_error: None,
+        redo_records: None,
     }
 }
 

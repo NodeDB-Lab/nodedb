@@ -10,6 +10,7 @@ pub mod fuser;
 pub mod invalidation;
 pub mod key_extractor;
 pub mod lowered_plan;
+pub mod outcome;
 pub mod plan_cache;
 pub mod retry;
 pub mod route;

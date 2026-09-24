@@ -5,7 +5,7 @@
 
 use crate::control::server::dispatch_utils::change_events::extract_write_change_set;
 use crate::control::server::dispatch_utils::durability_barrier::funnel_minted_redo_engine;
-use crate::control::server::dispatch_utils::write_abort::{AbortTarget, abort_undispatched_write};
+use crate::control::server::dispatch_utils::minted::{MintedRecords, RecordOwner};
 use crate::control::server::shared::session::statement_deadline;
 use crate::control::server::shared::write_admission::{bare_ok_response, route_write_to_calvin};
 use crate::control::server::wal_dispatch;
@@ -14,7 +14,7 @@ use crate::control::state::SharedState;
 use super::super::params::{ChangeFeedOwner, SubmitOutcome, SubmitWrite, WalDurability};
 use super::admission::{AdmissionOutcome, admit_write};
 use super::dispatch::{DispatchTarget, dispatch_to_data_plane};
-use super::response::{ResponsePhaseInput, collect_classify_and_finish, settle_window};
+use super::response::{ResponsePhaseInput, collect_classify_and_finish};
 use super::wal_append::authorize_and_append;
 
 /// Admit, make durable, enqueue, collect, and publish one write.
@@ -33,10 +33,18 @@ pub(crate) async fn submit_write(
         event_source,
         txn_id,
         user_id,
-        durability,
+        mut durability,
         ordering,
         change_feed,
     } = params;
+    let owner = RecordOwner {
+        tenant_id,
+        database_id,
+        vshard_id,
+    };
+    // Records the caller appended for this write, under their outcome-floor
+    // window. Every path below closes the window.
+    let caller_minted = durability.take_minted();
 
     // The running statement's deadline, pinned once at the session boundary and
     // shared by every request the statement fans out into. Used for both the
@@ -110,8 +118,17 @@ pub(crate) async fn submit_write(
                 order_guard,
             } => (admission, admission_guard, order_guard),
             AdmissionOutcome::RouteToCalvin => {
+                // The scheduler applies the write from its own records, so
+                // the caller's records never apply.
+                let superseded = caller_minted.map(|minted| {
+                    minted.supersede(std::sync::Arc::clone(&shared.wal), owner, "calvin_route")
+                });
                 let routed =
-                    route_write_to_calvin(shared, tenant_id, database_id, vshard_id, plan).await?;
+                    route_write_to_calvin(shared, tenant_id, database_id, vshard_id, plan).await;
+                if let Some(superseded) = superseded {
+                    superseded.finish().await;
+                }
+                let routed = routed?;
                 return Ok(SubmitOutcome {
                     response: routed
                         .unwrap_or_else(|| bare_ok_response(crate::types::RequestId::new(0))),
@@ -121,17 +138,22 @@ pub(crate) async fn submit_write(
         };
 
     // A write that mints its own LSN opens its outcome-floor window before the
-    // mint. The window settles once the outcome is final.
-    let window = appends_here.then(|| shared.outcome_floor.open_write());
+    // mint, and appends through it.
+    let minted = match caller_minted {
+        Some(minted) => Some(minted),
+        None => appends_here.then(|| MintedRecords::open(&shared.outcome_floor)),
+    };
 
     // Array DDL authorization + durability, under the admission guard,
     // immediately before the enqueue below.
     let wal_append_outcome =
-        match authorize_and_append(shared, tenant_id, database_id, vshard_id, plan, durability) {
+        match authorize_and_append(shared, owner, plan, durability, minted.as_ref()) {
             Ok(outcome) => outcome,
             Err(error) => {
-                // Nothing minted here reaches a core.
-                settle_window(window);
+                // No record of this write reaches a core.
+                if let Some(minted) = minted {
+                    minted.cancel(&shared.wal, owner, 0).await?;
+                }
                 return Err(error);
             }
         };
@@ -139,9 +161,6 @@ pub(crate) async fn submit_write(
     let plan = wal_append_outcome.plan;
     let wal_lsn = wal_append_outcome.wal_lsn;
     let resolved_now_ms = wal_append_outcome.resolved_now_ms;
-    if let (Some(window), Some(lsn)) = (&window, wal_lsn) {
-        window.note_minted(lsn);
-    }
 
     // Build the wire request and hand it to the Data-Plane dispatcher.
     let dispatched = dispatch_to_data_plane(
@@ -168,22 +187,12 @@ pub(crate) async fn submit_write(
     let dispatch_outcome = match dispatched {
         Ok(outcome) => outcome,
         Err(error) => {
-            // The dispatcher refused the request, so no core applied it. The
-            // record is cancelled before the window settles. A failed cancel
-            // leaves the window open: restart must still replay from here.
-            abort_undispatched_write(
-                shared,
-                AbortTarget {
-                    tenant_id,
-                    database_id,
-                    vshard_id,
-                    wal_lsn,
-                    appends_here,
-                    final_refusal_key: 0,
-                },
-            )
-            .await?;
-            settle_window(window);
+            // The dispatcher refused the request, so no core applied it. A
+            // dispatch refusal depends on this node's load, so the markers
+            // carry no proposal key.
+            if let Some(minted) = minted {
+                minted.cancel(&shared.wal, owner, 0).await?;
+            }
             return Err(error);
         }
     };
@@ -211,7 +220,7 @@ pub(crate) async fn submit_write(
             change_set,
             ddl_transition,
             deferred_guards: dispatch_outcome.deferred_guards,
-            window,
+            minted,
         },
     )
     .await

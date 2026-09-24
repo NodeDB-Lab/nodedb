@@ -178,6 +178,34 @@ impl CoreLoop {
             return self.response_error(task, error);
         }
 
+        // A `RETURNING` ingest must take every row or none, because its
+        // row set has no place to report a rejected row. The tag ceiling is
+        // the one rejection a flush cannot clear, so it is decided here,
+        // before the first write.
+        if returning.is_some()
+            && admission::exceeds_tag_ceiling(
+                &self.ts_symbol_columns_for_ingest(
+                    task.request.database_id,
+                    tid,
+                    collection,
+                    &lines,
+                ),
+                &lines,
+                self.ts_tuning.max_tag_cardinality,
+            )
+        {
+            return self.response_error(
+                task,
+                ErrorCode::RejectedPrevalidation {
+                    reason: format!(
+                        "timeseries ingest with RETURNING carries more distinct tag values \
+                         than the tag cardinality limit ({}) allows",
+                        self.ts_tuning.max_tag_cardinality
+                    ),
+                },
+            );
+        }
+
         if mode == TimeseriesApplyMode::CommitDeferred
             && let Err(error) = self.prevalidate_deferred_ilp_ingest(task, tid, collection, &lines)
         {
@@ -302,22 +330,20 @@ impl CoreLoop {
             );
         }
 
-        // A rejected row is a FAILURE, not a requested skip, and the two answer
-        // shapes report it differently: the count response below carries
-        // `rejected`, so a client can see rows were dropped, but a `RETURNING`
-        // response is a row set with nowhere to put that number — a short row
-        // set is indistinguishable from a complete one. Rather than tell the
-        // client less than the truth, a projecting ingest fails outright and
-        // names the count and the first reason. The non-projecting path keeps
-        // its counts unchanged because it already reports them honestly.
+        // A rejected row is a FAILURE, not a requested skip. The count
+        // response below reports `rejected`, but a `RETURNING` row set has no
+        // place for that number. The tag-ceiling check above refuses every
+        // rejection it can foresee before any row lands. A rejection that
+        // still reaches here follows accepted rows, so the error is
+        // `Internal`: a refusal code would claim nothing applied.
         if returning.is_some() && rejected > 0 {
             let reason = outcome
                 .first_rejection
                 .unwrap_or_else(|| "no reason recorded".to_string());
             return self.response_error(
                 task,
-                ErrorCode::RejectedPrevalidation {
-                    reason: format!(
+                ErrorCode::Internal {
+                    detail: format!(
                         "timeseries ingest with RETURNING rejected {rejected} of {} rows and \
                          cannot report them alongside a row set; first rejection: {reason}",
                         accepted + rejected

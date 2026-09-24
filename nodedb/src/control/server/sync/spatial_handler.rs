@@ -18,8 +18,8 @@ use async_trait::async_trait;
 use nodedb_types::Surrogate;
 use nodedb_types::geometry::Geometry;
 
+use crate::control::server::dispatch_utils::RecordOwner;
 use crate::types::{DatabaseId, TenantId, VShardId};
-use crate::wal::manager::NO_APPLY_KEY;
 
 // ── Dispatcher trait ─────────────────────────────────────────────────────────
 
@@ -113,13 +113,18 @@ impl<'a> SpatialDispatcher for SharedStateSpatialDispatcher<'a> {
         )?;
         let spatial_put_payload =
             encode_spatial_put_payload(&collection, &field, surrogate, &geometry, &prov)?;
-        let wal_lsn = wal_append_spatial_put(
-            self.shared.wal.appender(NO_APPLY_KEY),
+        let owner = RecordOwner {
             tenant_id,
-            vshard,
             database_id,
-            &spatial_put_payload,
-        )?;
+            vshard_id: vshard,
+        };
+        // The record's outcome-floor window opens before the append and
+        // closes from the dispatch's outcome.
+        let (minted, _) = super::raft_dispatch::append_under_window(self.shared, owner, |wal| {
+            wal_append_spatial_put(wal, tenant_id, vshard, database_id, &spatial_put_payload)
+                .map(Some)
+        })
+        .await?;
 
         let plan = PhysicalPlan::Spatial(SpatialOp::Insert {
             collection: nodedb_types::QualifiedCollection::new(database_id, &collection),
@@ -129,15 +134,14 @@ impl<'a> SpatialDispatcher for SharedStateSpatialDispatcher<'a> {
             provenance: Some(prov),
         });
 
-        let authorized = super::raft_dispatch::authorize_sync_task(
+        super::raft_dispatch::authorize_and_dispatch_minted(
             self.shared,
             self.identity,
-            tenant_id,
-            database_id,
-            vshard,
+            owner,
             plan,
-        )?;
-        super::raft_dispatch::dispatch_sync_payload(self.shared, authorized, Some(wal_lsn)).await
+            minted,
+        )
+        .await
     }
 
     async fn dispatch_delete(
@@ -166,13 +170,18 @@ impl<'a> SpatialDispatcher for SharedStateSpatialDispatcher<'a> {
 
         let spatial_delete_payload =
             encode_spatial_delete_payload(&collection, &field, surrogate, &prov);
-        let wal_lsn = wal_append_spatial_delete(
-            self.shared.wal.appender(NO_APPLY_KEY),
+        let owner = RecordOwner {
             tenant_id,
-            vshard,
             database_id,
-            &spatial_delete_payload,
-        )?;
+            vshard_id: vshard,
+        };
+        // The record's outcome-floor window opens before the append and
+        // closes from the dispatch's outcome.
+        let (minted, _) = super::raft_dispatch::append_under_window(self.shared, owner, |wal| {
+            wal_append_spatial_delete(wal, tenant_id, vshard, database_id, &spatial_delete_payload)
+                .map(Some)
+        })
+        .await?;
 
         let plan = PhysicalPlan::Spatial(SpatialOp::Delete {
             collection: nodedb_types::QualifiedCollection::new(database_id, &collection),
@@ -181,15 +190,14 @@ impl<'a> SpatialDispatcher for SharedStateSpatialDispatcher<'a> {
             provenance: Some(prov),
         });
 
-        let authorized = super::raft_dispatch::authorize_sync_task(
+        super::raft_dispatch::authorize_and_dispatch_minted(
             self.shared,
             self.identity,
-            tenant_id,
-            database_id,
-            vshard,
+            owner,
             plan,
-        )?;
-        super::raft_dispatch::dispatch_sync_payload(self.shared, authorized, Some(wal_lsn)).await
+            minted,
+        )
+        .await
     }
 
     fn assign_surrogate(

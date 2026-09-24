@@ -236,28 +236,21 @@ pub async fn create_graph_index(
         let plan = PhysicalPlan::Graph(GraphOp::EdgePutBatch {
             edges: edges.clone(),
         });
-        // Append locally first so the batch is durable even on a single-node
+        // Append locally first so the batch is durable on a single-node
         // deployment with no Raft proposer configured (see the module doc
-        // comment, point 4). `dispatch_sync_response` below additionally
-        // replicates via Raft under RF>1 — a second, independent durability
-        // mechanism, not a duplicate WAL record.
-        crate::control::server::wal_dispatch::wal_append_if_write(
-            &state.wal,
-            tenant_id,
-            shard,
-            DatabaseId::DEFAULT,
-            &plan,
-        )
-        .map_err(|e| ddl_err("XX000", format!("edge-insert WAL append failed: {e}")))?;
+        // comment, point 4). Under RF>1 the dispatch below proposes through
+        // Raft: the entry's apply appends its own record, and the dispatch
+        // cancels this one.
+        let minted = append_edge_batch(state, tenant_id, shard, &plan)
+            .await
+            .map_err(|e| ddl_err("XX000", format!("edge-insert WAL append failed: {e}")))?;
 
-        match crate::control::server::sync::raft_dispatch::dispatch_trusted_internal_sync_response(
+        match crate::control::server::sync::raft_dispatch::dispatch_trusted_internal_minted_sync_response(
             state,
-            tenant_id,
-            DatabaseId::DEFAULT,
-            shard,
+            edge_batch_owner(tenant_id, shard),
             plan,
-            TraceId::ZERO,
             crate::event::EventSource::User,
+            minted,
         )
         .await
         {
@@ -289,6 +282,38 @@ pub async fn create_graph_index(
     ))])
 }
 
+/// Append an edge batch's records under an outcome-floor window opened before
+/// the first append. The dispatch that follows closes the window.
+async fn append_edge_batch(
+    state: &SharedState,
+    tenant_id: TenantId,
+    shard: VShardId,
+    plan: &PhysicalPlan,
+) -> crate::Result<crate::control::server::dispatch_utils::MintedRecords> {
+    let owner = edge_batch_owner(tenant_id, shard);
+    let minted = crate::control::server::dispatch_utils::MintedRecords::open(&state.outcome_floor);
+    match minted.append_plan(&state.wal, owner, plan) {
+        Ok(_) => Ok(minted),
+        Err(e) => {
+            // Any record appended before the error never reaches a core.
+            minted.cancel(&state.wal, owner, 0).await?;
+            Err(e)
+        }
+    }
+}
+
+/// Where an edge batch's record lives.
+fn edge_batch_owner(
+    tenant_id: TenantId,
+    shard: VShardId,
+) -> crate::control::server::dispatch_utils::RecordOwner {
+    crate::control::server::dispatch_utils::RecordOwner {
+        tenant_id,
+        database_id: DatabaseId::DEFAULT,
+        vshard_id: shard,
+    }
+}
+
 /// Surface a build-time failure.
 ///
 /// Runs rollback in parallel across all committed shards. If **every**
@@ -315,29 +340,21 @@ async fn surface_failure(
         });
         let shard = *shard;
         async move {
-            // Same local-WAL-then-Raft-dispatch discipline as the forward
-            // path above: append locally first so the rollback tombstones
-            // are durable on single-node, then dispatch (which additionally
-            // replicates via Raft under RF>1).
-            if let Err(e) = crate::control::server::wal_dispatch::wal_append_if_write(
-                &state.wal,
-                tenant_id,
-                shard,
-                DatabaseId::DEFAULT,
-                &plan,
-            ) {
-                return (shard, Err(e));
-            }
+            // Same discipline as the forward path above: append locally
+            // first so the rollback tombstones are durable on single-node,
+            // then dispatch, which proposes through Raft under RF>1.
+            let minted = match append_edge_batch(state, tenant_id, shard, &plan).await {
+                Ok(minted) => minted,
+                Err(e) => return (shard, Err(e)),
+            };
             (
                 shard,
-                crate::control::server::sync::raft_dispatch::dispatch_trusted_internal_sync_response(
+                crate::control::server::sync::raft_dispatch::dispatch_trusted_internal_minted_sync_response(
                     state,
-                    tenant_id,
-                    DatabaseId::DEFAULT,
-                    shard,
+                    edge_batch_owner(tenant_id, shard),
                     plan,
-                    TraceId::ZERO,
                     crate::event::EventSource::User,
+                    minted,
                 )
                 .await,
             )

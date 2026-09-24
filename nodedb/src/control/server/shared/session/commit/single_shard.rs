@@ -64,7 +64,7 @@ pub(super) async fn dispatch_single_shard(
         post_set_op: PostSetOp::None,
         txn_id: None,
     };
-    let resolve_resp = match dp.dispatch_no_wal(resolve_task, None).await {
+    let resolve_resp = match dp.dispatch_no_wal(resolve_task).await {
         Ok(r) if r.status == Status::Ok => r,
         Ok(r) => {
             return Some(AbortReason::BatchRejected {

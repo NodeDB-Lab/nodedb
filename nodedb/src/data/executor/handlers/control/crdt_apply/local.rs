@@ -20,11 +20,9 @@ use super::params::{CRDT_PENDING_DEPENDENCIES, CRDT_SINGLE_DOCUMENT_DELTA, CrdtA
 
 /// Why a local apply produced no materializable row.
 enum LocalRefusal {
-    /// Permanent: the same bytes fail identically on a retry.
-    Terminal {
-        constraint: &'static str,
-        detail: String,
-    },
+    /// Permanent: the delta fails to decode, fails its signature
+    /// check, or writes rows outside its frame target. Nothing is imported.
+    Malformed,
     /// Nothing applied, but the identical bytes apply once the missing causal
     /// history arrives.
     Retryable { detail: String },
@@ -56,6 +54,23 @@ impl CoreLoop {
             }
         }
 
+        // The engine accepts a delta only when every row it writes is the
+        // frame target. An empty target admits any row, and the import is
+        // installed before its write set is known. Refusing it here keeps
+        // the refusal ahead of every state change.
+        if document_id.is_empty() {
+            return self.response_error(
+                task,
+                ErrorCode::RejectedConstraint {
+                    constraint: CRDT_SINGLE_DOCUMENT_DELTA.to_string(),
+                    detail: format!(
+                        "a CRDT apply into {collection} must name the one document its delta \
+                         writes; nothing was applied"
+                    ),
+                },
+            );
+        }
+
         // Borrow the engine in a nested block so the &mut borrow is dropped
         // before the sparse write below takes &self. On a Clean apply we read
         // the merged row back and encode it while the borrow is live, carrying
@@ -82,25 +97,12 @@ impl CoreLoop {
                 peer_id,
             );
             match outcome {
-                ValidatedApplyOutcome::Clean { write_set, .. } => {
+                ValidatedApplyOutcome::Clean { .. } => {
                     imported_authoritative = true;
-                    // Enforce the one-document-per-delta contract before
-                    // materializing: a delta that wrote rows other than the
-                    // frame target has no surrogate for those rows, so
-                    // materializing only `document_id` would silently drop the
-                    // rest.
-                    match Self::single_document_write_set(collection, document_id, &write_set) {
-                        Ok(()) => {
-                            if surrogate != Surrogate::ZERO {
-                                Ok(Self::encode_crdt_row(engine, collection, document_id))
-                            } else {
-                                Ok(None)
-                            }
-                        }
-                        Err(detail) => Err(LocalRefusal::Terminal {
-                            constraint: CRDT_SINGLE_DOCUMENT_DELTA,
-                            detail,
-                        }),
+                    if surrogate != Surrogate::ZERO {
+                        Ok(Self::encode_crdt_row(engine, collection, document_id))
+                    } else {
+                        Ok(None)
                     }
                 }
                 ValidatedApplyOutcome::Rejected(vt) => {
@@ -110,10 +112,7 @@ impl CoreLoop {
                     tracing::debug!(core = self.core_id, %collection, reason = %vt, "crdt apply violated constraint (DLQ)");
                     Ok(None)
                 }
-                ValidatedApplyOutcome::Malformed => {
-                    warn!(core = self.core_id, %collection, "crdt apply skipped malformed delta");
-                    Ok(None)
-                }
+                ValidatedApplyOutcome::Malformed => Err(LocalRefusal::Malformed),
                 ValidatedApplyOutcome::PendingDependencies => {
                     // Nothing was imported: the operations are buffered awaiting
                     // predecessors this collection's document has never seen.
@@ -155,22 +154,20 @@ impl CoreLoop {
             }
             Ok(None) => {}
             Err(refusal) => {
-                if imported_authoritative {
-                    self.note_collection_write_lsn(task, collection);
-                }
                 let code = match refusal {
-                    LocalRefusal::Terminal { constraint, detail } => {
+                    LocalRefusal::Malformed => {
                         warn!(
                             core = self.core_id,
                             %collection,
                             %document_id,
-                            constraint,
-                            detail = %detail,
-                            "crdt apply rejected: delta could not be materialized"
+                            "crdt apply refused a malformed delta"
                         );
-                        ErrorCode::RejectedConstraint {
-                            constraint: constraint.to_string(),
-                            detail,
+                        ErrorCode::RejectedPrevalidation {
+                            reason: format!(
+                                "delta for {collection}/{document_id} could not be decoded, \
+                                 failed its signature check, or wrote rows outside \
+                                 {document_id}; nothing was applied"
+                            ),
                         }
                     }
                     LocalRefusal::Retryable { detail } => {
@@ -189,5 +186,97 @@ impl CoreLoop {
             }
         }
         self.response_ok(task)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use loro::LoroValue;
+    use nodedb_types::Surrogate;
+
+    use super::*;
+    use crate::bridge::envelope::Status;
+    use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
+
+    fn params<'a>(document_id: &'a str, delta: &'a [u8]) -> CrdtApplyParams<'a> {
+        CrdtApplyParams {
+            collection: "docs",
+            document_id,
+            delta,
+            surrogate: Surrogate::ZERO,
+            peer_id: 7,
+            provenance: None,
+            constraint_version_required: 0,
+            expected_frontier_digest: None,
+            auth_user_id: 0,
+            auth_device_id: 0,
+            auth_seq_no: 0,
+            delta_signature: [0; 32],
+            signing_required: false,
+        }
+    }
+
+    fn two_row_delta() -> Vec<u8> {
+        let source = nodedb_crdt::CrdtState::new(42).expect("source state");
+        for row in ["one", "two"] {
+            source
+                .upsert("docs", row, &[("value", LoroValue::String(row.into()))])
+                .expect("source write");
+        }
+        source.export_snapshot().expect("source snapshot")
+    }
+
+    /// A delta with no named target is refused before the import. The
+    /// refusal code claims nothing applied, so no row can exist afterwards.
+    #[test]
+    fn a_delta_without_a_target_document_imports_no_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _request_tx, _response_rx) = make_core_with_dir(dir.path());
+        let task = make_default_task();
+        let delta = two_row_delta();
+
+        let response = core.apply_crdt_local(&task, params("", &delta));
+
+        assert_eq!(response.status, Status::Error);
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(ErrorCode::RejectedConstraint { .. })
+            ),
+            "got {:?}",
+            response.error_code
+        );
+        let key = (task.request.database_id, task.request.tenant_id);
+        let imported = core.crdt_engines.get(&key).is_some_and(|engine| {
+            engine.row_exists("docs", "one") || engine.row_exists("docs", "two")
+        });
+        assert!(!imported, "a refused delta must not reach the CRDT state");
+    }
+
+    /// A delta that writes rows beyond its named target is refused as
+    /// malformed, and neither row is imported.
+    #[test]
+    fn a_delta_writing_a_foreign_row_imports_no_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _request_tx, _response_rx) = make_core_with_dir(dir.path());
+        let task = make_default_task();
+        let delta = two_row_delta();
+
+        let response = core.apply_crdt_local(&task, params("one", &delta));
+
+        assert_eq!(response.status, Status::Error);
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(ErrorCode::RejectedPrevalidation { .. })
+            ),
+            "got {:?}",
+            response.error_code
+        );
+        let key = (task.request.database_id, task.request.tenant_id);
+        let imported = core.crdt_engines.get(&key).is_some_and(|engine| {
+            engine.row_exists("docs", "one") || engine.row_exists("docs", "two")
+        });
+        assert!(!imported, "a refused delta must not reach the CRDT state");
     }
 }

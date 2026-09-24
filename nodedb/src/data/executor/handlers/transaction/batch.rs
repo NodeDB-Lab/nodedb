@@ -2,10 +2,11 @@
 
 //! Transaction batch execution handler.
 //!
-//! Executes a `PhysicalPlan::TransactionBatch` atomically: all sub-plans
-//! succeed or all are rolled back. Write operations (PointPut, PointDelete,
-//! VectorInsert, EdgePut, EdgeDelete) are tracked for rollback on failure.
-//! CRDT deltas are accumulated in a scratch buffer and only applied on success.
+//! Executes a `PhysicalPlan::TransactionBatch`: on a failure, every write an
+//! engine-specific handler made is rolled back. A sub-plan with no such
+//! handler runs through the ordinary dispatch path and records no undo, so
+//! its write stays (see `batch_irreversible`). CRDT deltas are accumulated in
+//! a scratch buffer and only applied on success.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -17,6 +18,9 @@ use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_types::calvin::VersionedReadEntry;
 
+use crate::data::panic_payload::panic_payload_to_string;
+
+use super::batch_irreversible::{applied_irreversibly, batch_failure_code, batch_failure_response};
 use super::undo::UndoEntry;
 
 /// A CRDT delta buffered during a transaction batch: `(delta_bytes, id,
@@ -97,7 +101,7 @@ impl CoreLoop {
         };
         self.active_bitemporal_stamps.clear();
         self.active_graph_system_from = None;
-        let (last_response, undo_log, crdt_deltas) = match sub {
+        let (last_response, undo_log, crdt_deltas, irreversible) = match sub {
             Ok(v) => v,
             Err(resp) => return resp,
         };
@@ -117,12 +121,13 @@ impl CoreLoop {
                     "BALANCED constraint violated, rolling back {} operations",
                     undo_log.len()
                 );
-                return self.rollback_transaction_failure(
+                let response = self.rollback_transaction_failure(
                     task,
                     tid,
                     undo_log,
                     self.response_error(task, error_code),
                 );
+                return batch_failure_response(response, irreversible);
             }
             Err(payload) => {
                 let detail = panic_payload_to_string(payload.as_ref());
@@ -148,7 +153,7 @@ impl CoreLoop {
         let crdt_delta_count = crdt_deltas.len();
         let undo_log = match self.apply_crdt_deltas_or_rollback(task, tid, undo_log, crdt_deltas) {
             Ok(undo_log) => undo_log,
-            Err(response) => return response,
+            Err(response) => return batch_failure_response(response, irreversible),
         };
         if crdt_delta_count > 0 {
             // Match the direct CRDT apply path: successful transaction-batch
@@ -230,10 +235,12 @@ impl CoreLoop {
         plans: &[PhysicalPlan],
         mut undo_log: Vec<UndoEntry>,
         mut crdt_deltas: Vec<CrdtDelta>,
-    ) -> Result<(Response, Vec<UndoEntry>, Vec<CrdtDelta>), Response> {
+    ) -> Result<(Response, Vec<UndoEntry>, Vec<CrdtDelta>, bool), Response> {
         let mut last_response = self.response_ok(task);
+        let mut irreversible = false;
 
         for (i, plan) in plans.iter().enumerate() {
+            let undo_before = undo_log.len();
             let user_roles = &task.request.user_roles;
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 let r = self.execute_tx_sub_plan_from_batch(
@@ -265,6 +272,7 @@ impl CoreLoop {
 
             match result {
                 Ok(resp) => {
+                    irreversible |= applied_irreversibly(plan, undo_before, undo_log.len());
                     last_response = resp;
                 }
                 Err(error_code) => {
@@ -283,7 +291,7 @@ impl CoreLoop {
                     let rollback_error_code = match catch_unwind(AssertUnwindSafe(|| {
                         self.rollback_undo_log(task.request.database_id.as_u64(), tid, undo_log)
                     })) {
-                        Ok(Ok(())) => error_code,
+                        Ok(Ok(())) => batch_failure_code(error_code, irreversible),
                         Ok(Err((entry_index, detail))) => {
                             error!(
                                 core = self.core_id,
@@ -337,7 +345,7 @@ impl CoreLoop {
             }
         }
 
-        Ok((last_response, undo_log, crdt_deltas))
+        Ok((last_response, undo_log, crdt_deltas, irreversible))
     }
 
     /// Apply all buffered CRDT deltas only after every sub-plan and the
@@ -476,19 +484,6 @@ impl CoreLoop {
                 task.request.vshard_id,
             );
         }
-    }
-}
-
-/// Best-effort conversion of a panic payload to a human-readable string.
-/// Tries the two common payload types (`&'static str` and `String`); falls
-/// back to `"<non-string panic payload>"` for anything else.
-pub(super) fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<&'static str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "<non-string panic payload>".to_string()
     }
 }
 

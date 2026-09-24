@@ -17,6 +17,7 @@ use super::halt::{HaltReason, HaltStep, error_response_text};
 use super::scheduler::Scheduler;
 use crate::bridge::envelope::{Response, Status};
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
+use crate::control::server::dispatch_utils::MintedRecords;
 use crate::types::VShardId;
 use crate::wal::{CalvinStamp, RedoRecord};
 use nodedb_physical::physical_plan::PhysicalPlan;
@@ -74,21 +75,26 @@ impl Scheduler {
         let tenant_id = pending.txn.tx_class.tenant_id;
         let database_id = pending.txn.tx_class.database_id;
 
-        let redo_lsn = if redo.ops.is_empty() {
-            None
+        // The record's outcome-floor window opens before the append. It stays
+        // with the pending txn until the flush completes.
+        let (redo_lsn, redo_records) = if redo.ops.is_empty() {
+            (None, None)
         } else {
-            match self
-                .shared
-                .wal
-                .appender(crate::wal::manager::NO_APPLY_KEY)
+            let records = MintedRecords::open(&self.shared.outcome_floor);
+            let appended = records
+                .appender(&self.shared.wal, crate::wal::manager::NO_APPLY_KEY)
                 .append_transaction_redo(
                     tenant_id,
                     VShardId::new(self.vshard_id),
                     database_id,
                     &redo,
-                ) {
-                Ok(lsn) => Some(lsn),
+                );
+            match appended {
+                Ok(lsn) => (Some(lsn), Some(records)),
                 Err(e) => {
+                    // The txn stays pending and unapplied, and a failed append
+                    // leaves no record for restart replay to reach.
+                    records.settle();
                     self.halt_apply(
                         txn_id,
                         HaltReason::WalAppendFailed,
@@ -99,6 +105,9 @@ impl Scheduler {
                 }
             }
         };
+        if let Some(pending) = self.pending.get_mut(&txn_id) {
+            pending.redo_records = redo_records;
+        }
 
         // A flush refused at capacity is parked for re-send. The txn awaits its
         // flush response either way, so the state below is the same.

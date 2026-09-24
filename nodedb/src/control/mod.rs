@@ -64,7 +64,7 @@ pub mod wal_replication;
 pub mod write_resolve;
 
 pub use exec_receiver::LocalPlanExecutor;
-pub use request_tracker::RequestTracker;
+pub use request_tracker::{RequestTracker, ResponseReceiver};
 pub use rolling_upgrade::ClusterVersionView;
 pub use state::SharedState;
 pub use wal_replication::{DistributedApplier, ProposeTracker, create_distributed_applier};

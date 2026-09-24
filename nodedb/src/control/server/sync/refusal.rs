@@ -51,6 +51,7 @@ fn is_indeterminate(error: &crate::Error) -> bool {
             | crate::Error::ConflictRetry { .. }
             | crate::Error::DataPlane(
                 ErrorCode::DeadlineExceeded
+                    | ErrorCode::ExpiredBeforeExecution
                     | ErrorCode::ResourcesExhausted
                     | ErrorCode::DispatchCapacity { .. }
                     | ErrorCode::ConflictRetry

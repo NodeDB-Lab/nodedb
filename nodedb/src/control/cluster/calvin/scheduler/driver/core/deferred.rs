@@ -15,12 +15,11 @@ use std::time::Instant;
 
 use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_physical::physical_plan::meta::MetaOp;
-use tokio::sync::mpsc;
 
 use super::halt::{HaltReason, HaltStep};
 use super::scheduler::Scheduler;
 use crate::bridge::dispatch::DispatchRefusal;
-use crate::bridge::envelope::{Request, Response};
+use crate::bridge::envelope::Request;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::types::RequestId;
 
@@ -245,7 +244,7 @@ impl Scheduler {
         txn_id: TxnId,
         step: DispatchStep,
         request_id: RequestId,
-        resp_rx: mpsc::Receiver<Response>,
+        resp_rx: crate::control::ResponseReceiver,
     ) {
         match step {
             DispatchStep::StageStatic | DispatchStep::StageActive => {

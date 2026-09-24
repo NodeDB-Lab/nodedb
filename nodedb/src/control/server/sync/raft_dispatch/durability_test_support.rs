@@ -49,6 +49,20 @@ pub(super) fn fixture() -> (Arc<SharedState>, CoreChannelDataSide, tempfile::Tem
 
 /// Append a real FTS-delete redo and return its LSN, buffered but not durable.
 pub(super) fn append_buffered_record(state: &SharedState) -> Lsn {
+    append_fts_delete(state.wal.appender(crate::wal::manager::NO_APPLY_KEY))
+}
+
+/// Append a real FTS-delete redo under an outcome-floor window, as a caller
+/// that dispatches it does. The record is buffered but not durable.
+pub(super) fn minted_buffered_record(
+    state: &SharedState,
+) -> (crate::control::server::dispatch_utils::MintedRecords, Lsn) {
+    let minted = crate::control::server::dispatch_utils::MintedRecords::open(&state.outcome_floor);
+    let lsn = append_fts_delete(minted.appender(&state.wal, crate::wal::manager::NO_APPLY_KEY));
+    (minted, lsn)
+}
+
+fn append_fts_delete(wal: crate::wal::manager::WalAppender<'_>) -> Lsn {
     let payload = nodedb_wal::record::FtsDeletePayload::new(
         nodedb_types::sync::wire::SyncProvenance {
             producer_id: 1,
@@ -60,7 +74,7 @@ pub(super) fn append_buffered_record(state: &SharedState) -> Lsn {
         "00000001",
     );
     crate::control::server::wal_dispatch::wal_append_fts_delete(
-        state.wal.appender(crate::wal::manager::NO_APPLY_KEY),
+        wal,
         tenant(),
         vshard(),
         DatabaseId::DEFAULT,
@@ -71,15 +85,23 @@ pub(super) fn append_buffered_record(state: &SharedState) -> Lsn {
 
 /// A write-class plan matching the appended record, authorized for dispatch.
 pub(super) fn authorized_write(state: &SharedState) -> AuthorizedTask {
-    let task = PhysicalTask {
-        tenant_id: tenant(),
-        database_id: DatabaseId::DEFAULT,
-        vshard_id: vshard(),
-        plan: PhysicalPlan::Text(TextOp::FtsDeleteDoc {
+    authorized_plan(
+        state,
+        PhysicalPlan::Text(TextOp::FtsDeleteDoc {
             collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
             surrogate: nodedb_types::Surrogate::ZERO,
             provenance: None,
         }),
+    )
+}
+
+/// `plan` on the test collection, authorized for dispatch.
+pub(super) fn authorized_plan(state: &SharedState, plan: PhysicalPlan) -> AuthorizedTask {
+    let task = PhysicalTask {
+        tenant_id: tenant(),
+        database_id: DatabaseId::DEFAULT,
+        vshard_id: vshard(),
+        plan,
         post_set_op: PostSetOp::None,
         txn_id: None,
     };

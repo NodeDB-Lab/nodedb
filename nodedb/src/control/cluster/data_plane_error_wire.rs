@@ -159,6 +159,7 @@ impl From<ErrorCode> for DataPlaneErrorCode {
             },
             ErrorCode::DivisionByZero => Self::DivisionByZero,
             ErrorCode::DispatchCapacity { reason } => Self::DispatchCapacity { reason },
+            ErrorCode::ExpiredBeforeExecution => Self::ExpiredBeforeExecution,
         }
     }
 }
@@ -264,6 +265,7 @@ impl From<DataPlaneErrorCode> for ErrorCode {
             }
             DataPlaneErrorCode::DivisionByZero => Self::DivisionByZero,
             DataPlaneErrorCode::DispatchCapacity { reason } => Self::DispatchCapacity { reason },
+            DataPlaneErrorCode::ExpiredBeforeExecution => Self::ExpiredBeforeExecution,
         }
     }
 }
@@ -350,6 +352,13 @@ mod tests {
             }
         );
         assert_eq!(ErrorCode::from(wire), original);
+    }
+
+    #[test]
+    fn expired_before_execution_roundtrips_verbatim() {
+        let wire = DataPlaneErrorCode::from(ErrorCode::ExpiredBeforeExecution);
+        assert_eq!(wire, DataPlaneErrorCode::ExpiredBeforeExecution);
+        assert_eq!(ErrorCode::from(wire), ErrorCode::ExpiredBeforeExecution);
     }
 
     #[test]

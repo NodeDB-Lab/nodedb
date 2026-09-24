@@ -21,7 +21,7 @@ pub(crate) enum DispatchCollectError {
 /// concatenated payload) or an error if the channel closed without a
 /// final chunk or if the accumulated payload would exceed the ceiling.
 pub(crate) async fn collect_bounded_response(
-    rx: &mut tokio::sync::mpsc::Receiver<Response>,
+    rx: &mut crate::control::ResponseReceiver,
     max_result_bytes: usize,
 ) -> Result<Response, DispatchCollectError> {
     // Each streamed chunk is its OWN msgpack array (`encode_raw_document_rows`
@@ -108,7 +108,7 @@ pub(crate) struct DeadlineCollect<'a> {
 /// the symptom and hand the client a generic internal error for its own
 /// timeout.
 pub(crate) async fn collect_under_deadline(
-    rx: &mut tokio::sync::mpsc::Receiver<Response>,
+    rx: &mut crate::control::ResponseReceiver,
     params: DeadlineCollect<'_>,
 ) -> crate::Result<Response> {
     let DeadlineCollect {
@@ -223,7 +223,8 @@ mod collect_budget_tests {
 
     #[tokio::test]
     async fn non_streaming_single_response_passes_through() {
-        let (tx, mut rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::channel(4);
+        let mut rx = crate::control::ResponseReceiver::from_channel(rx);
         tx.send(final_bytes(100)).await.unwrap();
         drop(tx);
         // Single terminal frame returns unmodified — no merge, exact bytes.
@@ -235,7 +236,8 @@ mod collect_budget_tests {
     async fn streaming_merges_all_chunk_arrays() {
         // Three standalone array chunks must merge into ONE array with every
         // element — the regression: raw concatenation kept only the first array.
-        let (tx, mut rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::channel(4);
+        let mut rx = crate::control::ResponseReceiver::from_channel(rx);
         tx.send(partial_rows(1000)).await.unwrap();
         tx.send(partial_rows(1000)).await.unwrap();
         tx.send(final_rows(500)).await.unwrap();
@@ -251,7 +253,8 @@ mod collect_budget_tests {
 
     #[tokio::test]
     async fn streaming_over_budget_on_partial_aborts() {
-        let (tx, mut rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::channel(4);
+        let mut rx = crate::control::ResponseReceiver::from_channel(rx);
         tx.send(partial_bytes(600)).await.unwrap();
         tx.send(partial_bytes(600)).await.unwrap();
         drop(tx);
@@ -264,7 +267,8 @@ mod collect_budget_tests {
 
     #[tokio::test]
     async fn streaming_over_budget_on_final_chunk_aborts() {
-        let (tx, mut rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::channel(4);
+        let mut rx = crate::control::ResponseReceiver::from_channel(rx);
         tx.send(partial_bytes(500)).await.unwrap();
         tx.send(final_bytes(600)).await.unwrap();
         drop(tx);
@@ -274,7 +278,8 @@ mod collect_budget_tests {
 
     #[tokio::test]
     async fn a_collect_past_the_deadline_reports_the_deadline() {
-        let (_tx, mut rx) = mpsc::channel(4);
+        let (_tx, rx) = mpsc::channel(4);
+        let mut rx = crate::control::ResponseReceiver::from_channel(rx);
         let result = collect_under_deadline(
             &mut rx,
             DeadlineCollect {
@@ -298,7 +303,8 @@ mod collect_budget_tests {
         // The channel closes rather than answering, and the deadline has
         // already passed: the closure follows from the statement running out
         // of time, so reporting it would report the symptom.
-        let (tx, mut rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::channel(4);
+        let mut rx = crate::control::ResponseReceiver::from_channel(rx);
         tx.send(partial_bytes(10)).await.unwrap();
         drop(tx);
         let result = collect_under_deadline(
@@ -319,7 +325,8 @@ mod collect_budget_tests {
 
     #[tokio::test]
     async fn a_producer_that_stopped_inside_the_budget_reports_the_closure() {
-        let (tx, mut rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::channel(4);
+        let mut rx = crate::control::ResponseReceiver::from_channel(rx);
         tx.send(partial_bytes(10)).await.unwrap();
         drop(tx);
         let result = collect_under_deadline(
@@ -340,7 +347,8 @@ mod collect_budget_tests {
 
     #[tokio::test]
     async fn channel_closed_without_final_is_explicit_error() {
-        let (tx, mut rx) = mpsc::channel(4);
+        let (tx, rx) = mpsc::channel(4);
+        let mut rx = crate::control::ResponseReceiver::from_channel(rx);
         tx.send(partial_bytes(10)).await.unwrap();
         drop(tx);
         let err = collect_bounded_response(&mut rx, 1024).await.unwrap_err();

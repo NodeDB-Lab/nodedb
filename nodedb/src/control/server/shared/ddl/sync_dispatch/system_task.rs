@@ -17,6 +17,7 @@
 //! authorization instead.
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::control::server::dispatch_utils::MintedRecords;
 use crate::types::{DatabaseId, TenantId};
 
 /// Why a Data-Plane dispatch carries no user identity.
@@ -71,6 +72,9 @@ pub(crate) struct SystemTask<'a> {
     pub(super) database_id: DatabaseId,
     pub(super) collection: &'a str,
     pub(super) plan: PhysicalPlan,
+    /// Records the caller appended for this task, under their outcome-floor
+    /// window. `None` when the task appends nothing.
+    pub(super) minted: Option<MintedRecords>,
 }
 
 impl<'a> SystemTask<'a> {
@@ -92,6 +96,14 @@ impl<'a> SystemTask<'a> {
             database_id,
             collection,
             plan,
+            minted: None,
         }
+    }
+
+    /// Attach the records the caller appended for this task. The dispatch
+    /// closes their outcome-floor window from the task's outcome.
+    pub(crate) fn with_minted(mut self, minted: MintedRecords) -> Self {
+        self.minted = Some(minted);
+        self
     }
 }

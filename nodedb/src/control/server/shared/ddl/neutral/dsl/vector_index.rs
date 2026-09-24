@@ -219,7 +219,11 @@ pub async fn create_vector_index(
     // record plus the fan-out that reaches every core, not just the one the
     // pre-flight dispatched to.
     if outcome.needs_local_apply() {
-        crate::control::catalog_entry::post_apply::install_vector_index_params(stored, state).await;
+        let shared = state
+            .self_arc()
+            .map_err(|e| ddl_err("XX000", format!("install vector index params: {e}")))?;
+        crate::control::catalog_entry::post_apply::install_vector_index_params(stored, shared)
+            .await;
     }
 
     propose_index_record(

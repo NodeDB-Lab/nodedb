@@ -85,7 +85,8 @@ impl CoreLoop {
                 partial: false,
                 payload: Payload::empty(),
                 watermark_lsn: self.watermark,
-                error_code: Some(Box::new(ErrorCode::DeadlineExceeded)),
+                // The task never started, so nothing it would write ran.
+                error_code: Some(Box::new(ErrorCode::ExpiredBeforeExecution)),
                 read_set_valid: None,
                 read_version_lsn: crate::types::Lsn::ZERO,
                 write_set: Vec::new(),
@@ -236,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_task_returns_deadline_exceeded() {
+    fn an_expired_task_answers_that_it_never_started() {
         let (mut core, mut req_tx, mut resp_rx, _dir) = make_core();
         req_tx
             .try_push(BridgeRequest::unfloored(Request {
@@ -257,7 +258,7 @@ mod tests {
         assert_eq!(resp.inner.status, Status::Error);
         assert_eq!(
             resp.inner.error_code.as_deref(),
-            Some(&ErrorCode::DeadlineExceeded)
+            Some(&ErrorCode::ExpiredBeforeExecution)
         );
     }
 

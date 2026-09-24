@@ -2,9 +2,13 @@
 
 //! Async Data-Plane dispatch for system-initiated and authorized work.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Response, Status};
+use crate::control::server::dispatch_utils::{
+    Collect, MintedRecords, OwnedResponse, OwnedWait, RecordOwner, await_response_owned,
+};
 use crate::control::server::shared::clone_write::CloneCheckedTask;
 use crate::control::server::shared::session::statement_deadline;
 use crate::control::state::SharedState;
@@ -75,12 +79,15 @@ pub(crate) async fn dispatch_system_response_with_source(
     );
     dispatch_plan(
         state,
-        task.tenant_id,
-        task.database_id,
-        vshard_id,
-        task.plan,
-        timeout,
-        event_source,
+        PlanDispatch {
+            tenant_id: task.tenant_id,
+            database_id: task.database_id,
+            vshard_id,
+            plan: task.plan,
+            timeout,
+            event_source,
+            minted: task.minted,
+        },
     )
     .await
 }
@@ -109,12 +116,15 @@ pub(crate) async fn dispatch_authorized(
     let tenant_id = task.tenant_id;
     let resp = dispatch_plan(
         state,
-        tenant_id,
-        task.database_id,
-        vshard_id,
-        task.plan,
-        timeout,
-        crate::event::EventSource::User,
+        PlanDispatch {
+            tenant_id,
+            database_id: task.database_id,
+            vshard_id,
+            plan: task.plan,
+            timeout,
+            event_source: crate::event::EventSource::User,
+            minted: None,
+        },
     )
     .await?;
 
@@ -130,16 +140,35 @@ pub(crate) async fn dispatch_authorized(
     Ok(resp.payload.to_vec())
 }
 
-/// Shared transport: build the request envelope, dispatch, await the response.
-async fn dispatch_plan(
-    state: &SharedState,
+/// What [`dispatch_plan`] sends, and where.
+struct PlanDispatch {
     tenant_id: TenantId,
     database_id: DatabaseId,
     vshard_id: VShardId,
     plan: PhysicalPlan,
     timeout: Duration,
     event_source: crate::event::EventSource,
-) -> crate::Result<Response> {
+    /// Records the caller appended for this plan, under their outcome-floor
+    /// window. The transport closes the window from the plan's outcome.
+    minted: Option<MintedRecords>,
+}
+
+/// Shared transport: build the request envelope, dispatch, await the response.
+async fn dispatch_plan(state: &SharedState, dispatch: PlanDispatch) -> crate::Result<Response> {
+    let PlanDispatch {
+        tenant_id,
+        database_id,
+        vshard_id,
+        plan,
+        timeout,
+        event_source,
+        minted,
+    } = dispatch;
+    let owner = RecordOwner {
+        tenant_id,
+        database_id,
+        vshard_id,
+    };
     let request_id = state.next_request_id();
 
     // Whichever comes first: the running statement's deadline, or the caller's
@@ -174,30 +203,69 @@ async fn dispatch_plan(
 
     let mut rx = state.tracker.register(request_id);
 
-    match state.dispatcher.lock() {
-        Ok(mut d) => d.dispatch(request).map_err(|e| crate::Error::Internal {
-            detail: e.to_string(),
-        })?,
-        Err(p) => p
-            .into_inner()
-            .dispatch(request)
-            .map_err(|e| crate::Error::Internal {
-                detail: e.to_string(),
-            })?,
+    let dispatched = match state.dispatcher.lock() {
+        Ok(mut d) => d.dispatch(request),
+        Err(p) => p.into_inner().dispatch(request),
     };
+    if let Err(error) = dispatched {
+        // No response will arrive, and no core applied the plan.
+        state.tracker.cancel(&request_id);
+        if let Some(minted) = minted {
+            minted.cancel(&state.wal, owner, 0).await?;
+        }
+        return Err(crate::Error::Internal {
+            detail: error.to_string(),
+        });
+    }
 
     // Await to the same instant the envelope carries — yields the thread so the
     // response poller can run. Reaching that instant is the statement running
     // out of time, so it reports the deadline, and so does a producer that
     // stopped after it: the closure there is the symptom, not the cause.
-    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), rx.recv()).await {
-        Ok(Some(response)) => Ok(response),
-        Ok(None) if Instant::now() >= deadline => {
-            Err(crate::Error::DeadlineExceeded { request_id })
+    let Some(minted) = minted else {
+        let received =
+            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), rx.recv()).await;
+        return match received {
+            Ok(Some(response)) => Ok(response),
+            Ok(None) => Err(closed_error(request_id, deadline)),
+            Err(_) => Err(crate::Error::DeadlineExceeded { request_id }),
+        };
+    };
+    // The records close in a task this future does not own, so a caller
+    // dropped mid-wait still closes them. A late refusal still cancels them.
+    let outcome = await_response_owned(
+        OwnedWait {
+            wal: Arc::clone(&state.wal),
+            owner,
+            final_refusal_key: 0,
+            deadline,
+            collect: Collect::First,
+        },
+        rx,
+        minted,
+    )
+    .await?;
+    match outcome {
+        OwnedResponse::Answered { response, closed } => {
+            closed?;
+            Ok(response)
         }
-        Ok(None) => Err(crate::Error::Internal {
-            detail: "response channel closed".into(),
+        OwnedResponse::ChannelClosed => Err(closed_error(request_id, deadline)),
+        OwnedResponse::DeadlineExceeded => Err(crate::Error::DeadlineExceeded { request_id }),
+        OwnedResponse::OverBudget { bytes } => Err(crate::Error::ExecutionLimitExceeded {
+            detail: format!("system task response exceeded its byte budget ({bytes} bytes)"),
         }),
-        Err(_) => Err(crate::Error::DeadlineExceeded { request_id }),
+    }
+}
+
+/// The error for a response channel that closed before a response: the
+/// deadline when it already passed, since the closure is then its symptom.
+fn closed_error(request_id: crate::types::RequestId, deadline: Instant) -> crate::Error {
+    if Instant::now() >= deadline {
+        crate::Error::DeadlineExceeded { request_id }
+    } else {
+        crate::Error::Internal {
+            detail: "response channel closed".into(),
+        }
     }
 }

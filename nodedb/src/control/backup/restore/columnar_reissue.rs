@@ -18,8 +18,8 @@ use nodedb_types::value::Value;
 
 use crate::Error;
 use crate::bridge::envelope::PhysicalPlan;
+use crate::control::server::dispatch_utils::{MintedRecords, RecordOwner};
 use crate::control::server::shared::ddl::sync_dispatch;
-use crate::control::server::wal_dispatch::wal_append_if_write;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, VShardId};
 use nodedb_physical::physical_plan::{ColumnarInsertIntent, ColumnarOp};
@@ -165,7 +165,8 @@ pub fn build_columnar_insert_plan(
 ///
 /// Branches identically to a normal write:
 /// - Cluster: `to_replicated_entry` + `propose_replicated_entry`.
-/// - Single-node: `wal_append_if_write` then `sync_dispatch::dispatch_system`.
+/// - Single-node: append the redo under an outcome-floor window, then
+///   `sync_dispatch::dispatch_system`, which closes the window.
 pub async fn reissue_columnar_durably(
     state: &SharedState,
     tenant_id: TenantId,
@@ -193,7 +194,19 @@ pub async fn reissue_columnar_durably(
     }
 
     // Single-node: WAL first (durable for restart replay), then install live.
-    wal_append_if_write(&state.wal, tenant_id, vshard, database_id, &plan)?;
+    // The record's outcome-floor window opens before the append and closes
+    // from the install's outcome.
+    let owner = RecordOwner {
+        tenant_id,
+        database_id,
+        vshard_id: vshard,
+    };
+    let minted = MintedRecords::open(&state.outcome_floor);
+    if let Err(error) = minted.append_plan(&state.wal, owner, &plan) {
+        // Any record appended before the error never reaches a core.
+        minted.cancel(&state.wal, owner, 0).await?;
+        return Err(error);
+    }
     sync_dispatch::dispatch_system(
         state,
         sync_dispatch::SystemTask::new(
@@ -202,7 +215,8 @@ pub async fn reissue_columnar_durably(
             database_id,
             collection,
             plan,
-        ),
+        )
+        .with_minted(minted),
         REISSUE_TIMEOUT,
     )
     .await?;

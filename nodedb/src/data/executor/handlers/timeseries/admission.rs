@@ -96,6 +96,30 @@ pub(super) fn has_tag_headroom(
     true
 }
 
+/// Whether some symbol column in `symbol_columns` receives more distinct
+/// values from `lines` than `max_tag_cardinality` allows.
+///
+/// Such a batch cannot fit in any memtable generation. A flush resets the
+/// dictionaries, and some of its rows are rejected all the same. A batch no
+/// longer than the ceiling cannot trip it, so that case costs nothing.
+pub(super) fn exceeds_tag_ceiling(
+    symbol_columns: &[String],
+    lines: &[IlpLine<'_>],
+    max_tag_cardinality: u32,
+) -> bool {
+    let ceiling = max_tag_cardinality as usize;
+    if lines.len() <= ceiling {
+        return false;
+    }
+    symbol_columns.iter().any(|col_name| {
+        let distinct: HashSet<&str> = lines
+            .iter()
+            .map(|line| symbol_value(line, col_name))
+            .collect();
+        distinct.len() > ceiling
+    })
+}
+
 /// The value `ingest_batch_with_lvc` would resolve for symbol column
 /// `col_name` on `line`.
 ///

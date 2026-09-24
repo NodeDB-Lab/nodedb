@@ -7,6 +7,7 @@ mod collect;
 mod dispatch;
 mod durability_barrier;
 mod error_status;
+mod minted;
 mod submit_write;
 mod types;
 mod write_abort;
@@ -20,14 +21,17 @@ pub(crate) use collect::{
 };
 pub use dispatch::{dispatch_authorized_autocommit_write, dispatch_authorized_to_data_plane};
 pub(crate) use dispatch::{
-    dispatch_authorized_autocommit_write_with_source, dispatch_autocommit_write,
-    dispatch_to_data_plane, dispatch_to_data_plane_with_txn,
+    dispatch_authorized_autocommit_write_with_source, dispatch_authorized_minted_to_data_plane,
+    dispatch_autocommit_write, dispatch_to_data_plane, dispatch_to_data_plane_with_txn,
     dispatch_trusted_internal_write_to_data_plane,
 };
 pub use durability_barrier::writes_acked_without_durability;
 pub(crate) use error_status::reject_data_plane_error;
+pub(crate) use minted::{
+    Collect, MintedRecords, OwnedResponse, OwnedWait, RecordOwner, await_response_owned,
+};
 pub(crate) use submit_write::{
     ChangeFeedOwner, SubmitOutcome, SubmitWrite, WalDurability, WriteOrdering, submit_write,
 };
 pub(crate) use types::{AutocommitWrite, WriteDispatch};
-pub(crate) use write_abort::refusal_is_final;
+pub(crate) use write_abort::{refusal_is_final, write_definitely_not_applied};

@@ -140,6 +140,11 @@ pub enum ErrorCode {
     /// nothing was enqueued or applied. Transient: the same request succeeds
     /// once capacity frees. `reason` names the limit and its counts.
     DispatchCapacity { reason: String },
+    /// The request's deadline passed before the core started it, so nothing
+    /// ran. Distinct from [`Self::DeadlineExceeded`], which a core also
+    /// answers for a task it stopped part way. Surfaces as the same
+    /// query-cancelled error.
+    ExpiredBeforeExecution,
 }
 
 impl From<crate::Error> for ErrorCode {

@@ -69,17 +69,12 @@ pub enum AbortReason {
 /// nested listener request pipeline, and a boxed (type-erased) future keeps that
 /// async type-layout depth bounded rather than compounding per transport impl.
 pub trait TxnDataPlane {
-    /// Dispatch one task to the Data Plane without a per-task WAL append (the
-    /// whole transaction is written as a single WAL record by the caller).
-    ///
-    /// `wal_lsn` is the LSN of that single transaction WAL record: it is
-    /// stamped onto the dispatched `Request` so the Data Plane records the
-    /// committed write version for every key in the batch. `None` when no WAL
-    /// record was written (empty / read-only commit).
+    /// Dispatch one task to the Data Plane without a per-task WAL append.
+    /// The task carries no WAL record: the caller owns the transaction's
+    /// durability.
     fn dispatch_no_wal<'a>(
         &'a self,
         task: PhysicalTask,
-        wal_lsn: Option<crate::types::Lsn>,
     ) -> Pin<Box<dyn Future<Output = crate::Result<Response>> + Send + 'a>>;
 
     /// The source the transaction's committed writes carry into the Event

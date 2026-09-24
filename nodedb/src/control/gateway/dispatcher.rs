@@ -12,7 +12,7 @@ use std::sync::Arc;
 use nodedb_cluster::rpc_codec::TypedClusterError;
 
 use crate::Error;
-use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
 use crate::control::server::dispatch_utils::{
     dispatch_to_data_plane_with_txn, reject_data_plane_error,
 };
@@ -40,6 +40,11 @@ pub struct DispatchOutcome {
     /// read targets one collection, so one non-zero value survives — for
     /// cross-shard OCC read validation.
     pub read_version_lsn: Lsn,
+    /// The owning core refused the task with `ErrorCode::NotFound`.
+    ///
+    /// A fan-out reads it as a shard that holds no slice. A single-route
+    /// task reports it as the Data Plane's verdict on that task.
+    pub not_found: bool,
 }
 
 /// Parameters for [`dispatch_route`]. `txn_id` is session-transaction
@@ -287,6 +292,7 @@ async fn dispatch_local(
             payloads: vec![resp.payload.to_vec()],
             shard_watermarks: vec![(vshard_id, resp.watermark_lsn)],
             read_version_lsn: resp.read_version_lsn,
+            not_found: is_not_found(&resp),
         });
     }
 
@@ -308,6 +314,7 @@ async fn dispatch_local(
             // `coll_write_lsn` is surfaced via `read_version_lsn` instead.
             shard_watermarks: vec![(vshard_id, Lsn::ZERO)],
             read_version_lsn: write_version,
+            not_found: false,
         });
     }
 
@@ -330,7 +337,16 @@ async fn dispatch_local(
         payloads: vec![resp.payload.to_vec()],
         shard_watermarks: vec![(vshard_id, resp.watermark_lsn)],
         read_version_lsn: resp.read_version_lsn,
+        not_found: is_not_found(&resp),
     })
+}
+
+/// Whether the core refused the task with `ErrorCode::NotFound`.
+///
+/// `reject_data_plane_error` passes this refusal as an empty success.
+/// The flag keeps the verdict for a caller that needs it.
+fn is_not_found(resp: &Response) -> bool {
+    resp.status == Status::Error && resp.error_code.as_deref() == Some(&ErrorCode::NotFound)
 }
 
 /// Map a [`TypedClusterError`] to an internal [`Error`].

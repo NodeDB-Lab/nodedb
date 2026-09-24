@@ -4,9 +4,9 @@
 
 use std::time::Instant;
 
-use tokio::sync::{OwnedMutexGuard, mpsc};
+use tokio::sync::OwnedMutexGuard;
 
-use crate::bridge::envelope::{Admission, PhysicalPlan, Priority, Request, Response};
+use crate::bridge::envelope::{Admission, PhysicalPlan, Priority, Request};
 use crate::control::array_catalog::ddl::AuthorizedDdlTransition;
 use crate::control::server::shared::write_admission::WriteAdmissionGuard;
 use crate::control::state::SharedState;
@@ -43,7 +43,7 @@ pub(super) struct DispatchTarget {
 /// any).
 pub(super) struct DispatchOutcome {
     pub request_id: RequestId,
-    pub rx: mpsc::Receiver<Response>,
+    pub rx: crate::control::ResponseReceiver,
     pub dispatch_started: Instant,
     pub deferred_guards: DeferredGuards,
 }

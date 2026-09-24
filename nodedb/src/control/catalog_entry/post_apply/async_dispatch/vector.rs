@@ -26,13 +26,25 @@
 //! committed. Every failed stage files a `Capture` instead, because a node
 //! silently missing an index is the defect this module exists to stop.
 
+use std::sync::Arc;
+
+use tokio::sync::oneshot;
+
 use crate::bridge::envelope::PhysicalPlan;
+use crate::control::server::dispatch_utils::{MintedRecords, RecordOwner};
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use nodedb_physical::physical_plan::VectorOp;
 use nodedb_types::StoredVectorIndexParams;
 
-use super::core_fanout::{CoreFanout, dispatch_to_every_core, unacked_cores};
+use super::core_fanout::{CoreFanout, DISPATCH_TIMEOUT, FanoutAnswers, fan_out};
+
+/// The longest a parameter install waits for its cores to answer: the
+/// `SetParams` dispatch deadline, then the reshape's. Its record's window
+/// closes within this of its open.
+pub(crate) fn longest_core_wait() -> std::time::Duration {
+    DISPATCH_TIMEOUT.saturating_mul(2)
+}
 
 /// One vector index, named the way every stage below reports it.
 struct IndexTarget<'a> {
@@ -40,6 +52,30 @@ struct IndexTarget<'a> {
     tenant_id: u64,
     collection: &'a str,
     field_name: &'a str,
+}
+
+impl<'a> IndexTarget<'a> {
+    fn of(entry: &'a StoredVectorIndexParams) -> Self {
+        Self {
+            database_id: entry.database_id,
+            tenant_id: entry.tenant_id,
+            collection: &entry.collection,
+            field_name: &entry.field_name,
+        }
+    }
+}
+
+/// Where a parameter install stands when a core outlives the dispatch
+/// deadline.
+enum PutStage {
+    /// Some cores have not answered `SetParams` yet.
+    SetParams(FanoutAnswers),
+    /// Every core answered `SetParams`. `refused` took the reshape instead,
+    /// and some cores have not answered it yet.
+    Rebuild {
+        refused: Vec<usize>,
+        rebuild: FanoutAnswers,
+    },
 }
 
 /// Build the `SetParams` plan the boot seed and the CREATE handler both
@@ -94,66 +130,166 @@ fn drop_index_plan(database_id: u64, collection: &str, field_name: &str) -> Phys
 /// Install one vector index's build parameters on this node: append the redo
 /// record, then bring every core to the committed parameters.
 ///
+/// The install owns its record's outcome-floor window, so it runs in a task
+/// the caller does not own: a caller dropped mid-install leaves the task to
+/// close the window. The call returns once every core answered or the
+/// dispatch deadline passed. Cores still working then are waited for by the
+/// task.
+///
 /// The single-node DDL handlers call this directly, where no applier runs and
 /// the post-apply lane never fires.
-pub async fn put_async(entry: StoredVectorIndexParams, shared: &SharedState) {
-    let target = IndexTarget {
-        database_id: entry.database_id,
-        tenant_id: entry.tenant_id,
-        collection: &entry.collection,
-        field_name: &entry.field_name,
-    };
+pub async fn put_async(entry: StoredVectorIndexParams, shared: Arc<SharedState>) {
+    let (ready_tx, ready_rx) = oneshot::channel();
+    tokio::spawn(install_params(entry, shared, ready_tx));
+    if ready_rx.await.is_err() {
+        tracing::error!("the vector index install task ended before it reported");
+    }
+}
+
+async fn install_params(
+    entry: StoredVectorIndexParams,
+    shared: Arc<SharedState>,
+    ready: oneshot::Sender<()>,
+) {
+    let target = IndexTarget::of(&entry);
     let plan = set_params_plan(&entry);
 
     // The record makes this node's log self-sufficient: replay rebuilds the
-    // index from it in LSN order alongside the vector writes around it.
-    if let Err(error) = append_redo(shared, &target, &plan) {
+    // index from it in LSN order alongside the vector writes around it. Its
+    // outcome-floor window closes once every core gave its final answer.
+    let minted = MintedRecords::open(&shared.outcome_floor);
+    if let Err(error) = append_redo(&shared, &target, &plan, &minted) {
         report(&error, "set_params_wal_append", &target);
     }
 
-    let target_fanout = fanout(&target);
-    let refused = unacked_cores(shared, &target_fanout, &plan).await;
-    if refused.is_empty() {
-        return;
-    }
+    let set_params = fan_out(&shared, &fanout(&target), &plan).await;
+    let stage = if set_params.pending.is_empty() {
+        let refused = set_params.refused;
+        if refused.is_empty() {
+            minted.settle();
+            // The caller can be gone. The install completes either way.
+            let _ = ready.send(());
+            return;
+        }
+        // Every refused core already holds a materialized index, which only
+        // the in-place reshape reaches. A core that took `SetParams` answers
+        // this with `NotFound` and stays on the parameters it accepted.
+        let rebuild = fan_out(&shared, &fanout(&target), &rebuild_plan(&entry)).await;
+        if rebuild.pending.is_empty() {
+            close_put(&target, refused, rebuild.refused, minted);
+            let _ = ready.send(());
+            return;
+        }
+        PutStage::Rebuild { refused, rebuild }
+    } else {
+        PutStage::SetParams(set_params)
+    };
+    // Cores outlived the dispatch deadline. The caller moves on while this
+    // task waits for their final answers.
+    let _ = ready.send(());
+    finish_put(&shared, &entry, stage, minted).await;
+}
 
-    // Every refused core already holds a materialized index, which only the
-    // in-place reshape reaches. A core that took `SetParams` answers this with
-    // `NotFound` and stays on the parameters it just accepted.
-    let reshaped = unacked_cores(shared, &target_fanout, &rebuild_plan(&entry)).await;
+/// Resolve a handed-off parameter install once every core answered.
+async fn finish_put(
+    shared: &SharedState,
+    entry: &StoredVectorIndexParams,
+    stage: PutStage,
+    minted: MintedRecords,
+) {
+    let target = IndexTarget::of(entry);
+    let (refused, rebuild) = match stage {
+        PutStage::SetParams(set_params) => {
+            let refused = set_params.into_final_refusals().await;
+            if refused.is_empty() {
+                minted.settle();
+                return;
+            }
+            let rebuild = fan_out(shared, &fanout(&target), &rebuild_plan(entry)).await;
+            (refused, rebuild)
+        }
+        PutStage::Rebuild { refused, rebuild } => (refused, rebuild),
+    };
+    let reshaped = rebuild.into_final_refusals().await;
+    close_put(&target, refused, reshaped, minted);
+}
+
+/// Close a parameter install's window from both answer sets. A core that
+/// refused `SetParams` and the reshape missed the change.
+fn close_put(
+    target: &IndexTarget<'_>,
+    refused: Vec<usize>,
+    reshaped: Vec<usize>,
+    minted: MintedRecords,
+) {
     let missed: Vec<usize> = refused
         .into_iter()
         .filter(|core_id| reshaped.contains(core_id))
         .collect();
-    if !missed.is_empty() {
-        let error = crate::Error::Internal {
-            detail: format!("cores did not apply the vector index change: {missed:?}"),
-        };
-        report(&error, "set_params_dispatch", &target);
+    if missed.is_empty() {
+        minted.settle();
+        return;
     }
+    let error = crate::Error::Internal {
+        detail: format!("cores did not apply the vector index change: {missed:?}"),
+    };
+    report(&error, "set_params_dispatch", target);
+    // A core that missed the change still needs restart replay to reach the
+    // record.
+    minted.hold();
 }
 
 /// Remove one vector index from this node: append and fsync the drop record,
 /// then dispatch `DropIndex` to every core.
+///
+/// Runs in a task the caller does not own, and returns once every core
+/// answered or the dispatch deadline passed, as [`put_async`] does.
 pub async fn delete_async(
     database_id: u64,
     tenant_id: u64,
     collection: String,
     field_name: String,
-    shared: &SharedState,
+    shared: Arc<SharedState>,
 ) {
+    let (ready_tx, ready_rx) = oneshot::channel();
+    tokio::spawn(drop_index(
+        IndexName {
+            database_id,
+            tenant_id,
+            collection,
+            field_name,
+        },
+        shared,
+        ready_tx,
+    ));
+    if ready_rx.await.is_err() {
+        tracing::error!("the vector index drop task ended before it reported");
+    }
+}
+
+/// An owned index name, for the task that drops the index.
+struct IndexName {
+    database_id: u64,
+    tenant_id: u64,
+    collection: String,
+    field_name: String,
+}
+
+async fn drop_index(name: IndexName, shared: Arc<SharedState>, ready: oneshot::Sender<()>) {
     let target = IndexTarget {
-        database_id,
-        tenant_id,
-        collection: &collection,
-        field_name: &field_name,
+        database_id: name.database_id,
+        tenant_id: name.tenant_id,
+        collection: &name.collection,
+        field_name: &name.field_name,
     };
-    let plan = drop_index_plan(database_id, &collection, &field_name);
+    let plan = drop_index_plan(name.database_id, &name.collection, &name.field_name);
 
     // The vector writes this drop cancels are already fsynced in this node's
     // log, so replay rebuilds the dropped index unless the drop record is
-    // durable too. Append and fsync before touching the cores.
-    match append_redo(shared, &target, &plan) {
+    // durable too. Append and fsync before touching the cores. The record's
+    // outcome-floor window closes once every core gave its final answer.
+    let minted = MintedRecords::open(&shared.outcome_floor);
+    match append_redo(&shared, &target, &plan, &minted) {
         Ok(Some(lsn)) => {
             if let Err(error) = shared.wal.wait_durable(lsn).await {
                 report(&error, "drop_index_fsync", &target);
@@ -168,26 +304,44 @@ pub async fn delete_async(
         Err(error) => report(&error, "drop_index_wal_append", &target),
     }
 
-    if let Err(error) = dispatch_to_every_core(shared, &fanout(&target), &plan).await {
-        report(&error, "drop_index_dispatch", &target);
-    }
+    let answers = fan_out(&shared, &fanout(&target), &plan).await;
+    // Cores still working past the deadline answer later. The caller moves
+    // on while this task waits for their final answers.
+    let _ = ready.send(());
+    let refused = answers.into_final_refusals().await;
+    close_drop(&target, refused, minted);
 }
 
-/// Append `plan`'s redo record to this node's WAL, returning its LSN.
+/// Close a drop's window from the cores that did not drop the index.
+fn close_drop(target: &IndexTarget<'_>, refused: Vec<usize>, minted: MintedRecords) {
+    if refused.is_empty() {
+        minted.settle();
+        return;
+    }
+    let error = crate::Error::Internal {
+        detail: format!("cores did not apply the vector index change: {refused:?}"),
+    };
+    report(&error, "drop_index_dispatch", target);
+    // A core that kept the index still needs restart replay to reach the
+    // drop record.
+    minted.hold();
+}
+
+/// Append `plan`'s redo record to this node's WAL under `minted`'s window,
+/// returning its LSN.
 fn append_redo(
     shared: &SharedState,
     target: &IndexTarget<'_>,
     plan: &PhysicalPlan,
+    minted: &MintedRecords,
 ) -> crate::Result<Option<Lsn>> {
     let database_id = DatabaseId::new(target.database_id);
-    let vshard = VShardId::from_collection_in_database(database_id, target.collection);
-    let outcome = crate::control::server::wal_dispatch::wal_append_if_write(
-        &shared.wal,
-        TenantId::new(target.tenant_id),
-        vshard,
+    let owner = RecordOwner {
+        tenant_id: TenantId::new(target.tenant_id),
         database_id,
-        plan,
-    )?;
+        vshard_id: VShardId::from_collection_in_database(database_id, target.collection),
+    };
+    let outcome = minted.append_plan(&shared.wal, owner, plan)?;
     Ok(outcome.lsn)
 }
 

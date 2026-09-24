@@ -9,7 +9,7 @@ use crate::bridge::envelope::ErrorCode;
 /// Map a Data Plane `ErrorCode` to SQLSTATE.
 pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, String) {
     match code {
-        ErrorCode::DeadlineExceeded => (
+        ErrorCode::DeadlineExceeded | ErrorCode::ExpiredBeforeExecution => (
             "ERROR",
             sqlstate::QUERY_CANCELED,
             "query cancelled due to deadline".into(),

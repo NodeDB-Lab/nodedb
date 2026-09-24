@@ -10,6 +10,7 @@ mod catalog;
 mod crdt;
 mod data_plane;
 mod ingest;
+mod outcome_floor;
 mod quota;
 mod recovery;
 mod retention;
@@ -27,6 +28,7 @@ pub(in crate::diag) use data_plane::{
 };
 pub(in crate::diag) use ingest::IlpAcceptedLinesDropped;
 pub use ingest::IlpFlushOutcome;
+pub(in crate::diag) use outcome_floor::{WriteWindowHeld, WriteWindowLeaked};
 pub use quota::{DATABASE_SCOPE, TENANT_SCOPE};
 pub(in crate::diag) use quota::{
     QuotaRowNotInstalled, QuotaRowWriteFailed, QuotaScopePurgeIncomplete, QuotaScopeReplayAborted,

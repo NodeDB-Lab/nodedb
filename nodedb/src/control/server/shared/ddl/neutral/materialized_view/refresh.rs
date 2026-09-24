@@ -306,21 +306,32 @@ async fn dispatch_sql(
                 checked
             }
         };
-        crate::control::server::wal_dispatch::wal_append_if_write(
-            &state.wal,
-            identity.tenant_id,
-            checked.vshard_id(),
-            checked.database_id(),
-            checked.plan(),
-        )
-        .map_err(|e| err(sqlstate::IO_ERROR, format!("wal append: {e}")))?;
-        let response = crate::control::server::dispatch_utils::dispatch_authorized_to_data_plane(
-            state,
-            checked,
-            TraceId::ZERO,
-        )
-        .await
-        .map_err(|e| err(sqlstate::CONNECTION_FAILURE, format!("dispatch: {e}")))?;
+        // The record's outcome-floor window opens before the append and
+        // closes from the task's outcome inside the funnel.
+        let owner = crate::control::server::dispatch_utils::RecordOwner {
+            tenant_id: identity.tenant_id,
+            database_id: checked.database_id(),
+            vshard_id: checked.vshard_id(),
+        };
+        let minted =
+            crate::control::server::dispatch_utils::MintedRecords::open(&state.outcome_floor);
+        if let Err(e) = minted.append_plan(&state.wal, owner, checked.plan()) {
+            // Any record appended before the error never reaches a core.
+            minted
+                .cancel(&state.wal, owner, 0)
+                .await
+                .map_err(|c| err(sqlstate::IO_ERROR, format!("cancel refresh record: {c}")))?;
+            return Err(err(sqlstate::IO_ERROR, format!("wal append: {e}")));
+        }
+        let response =
+            crate::control::server::dispatch_utils::dispatch_authorized_minted_to_data_plane(
+                state,
+                checked,
+                TraceId::ZERO,
+                minted,
+            )
+            .await
+            .map_err(|e| err(sqlstate::CONNECTION_FAILURE, format!("dispatch: {e}")))?;
         require_ok_response(&response)?;
     }
     Ok(())

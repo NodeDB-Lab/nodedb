@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use crate::bridge::envelope::{PhysicalPlan, Response};
+use crate::control::server::dispatch_utils::minted::MintedRecords;
 use crate::types::{DatabaseId, Lsn, TenantId, TraceId, TxnId, VShardId};
 
 /// Who owns this write's durable redo record.
@@ -34,10 +35,27 @@ pub(crate) enum WalDurability {
     /// sync path that owns its own funnel — and supplies the LSN it minted.
     /// The funnel appends nothing and stamps these values through unchanged;
     /// the supplied LSN names the record that replays this write.
+    ///
+    /// `minted` holds the records the caller appended for this write under
+    /// their outcome-floor window. The funnel closes the window from the
+    /// write's outcome: it cancels the records on a refusal that applied
+    /// nothing, and on a Calvin route that applies the write from its own
+    /// records.
     CallerSupplied {
         wal_lsn: Option<Lsn>,
         resolved_now_ms: Option<u64>,
+        minted: Option<MintedRecords>,
     },
+}
+
+impl WalDurability {
+    /// Take the caller's minted records out, leaving `None` in their place.
+    pub(crate) fn take_minted(&mut self) -> Option<MintedRecords> {
+        match self {
+            Self::AppendHere { .. } => None,
+            Self::CallerSupplied { minted, .. } => minted.take(),
+        }
+    }
 }
 
 /// Where this write's ordering was decided.

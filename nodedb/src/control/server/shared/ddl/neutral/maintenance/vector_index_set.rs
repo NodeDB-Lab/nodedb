@@ -79,7 +79,11 @@ pub async fn handle_alter_vector_index_set(
     // Single node: no applier runs, so post-apply never fires. Run the
     // per-node install the post-apply lane runs everywhere else.
     if outcome.needs_local_apply() {
-        crate::control::catalog_entry::post_apply::install_vector_index_params(merged, state).await;
+        let shared = state
+            .self_arc()
+            .map_err(|e| ddl_err("XX000", format!("install vector index params: {e}")))?;
+        crate::control::catalog_entry::post_apply::install_vector_index_params(merged, shared)
+            .await;
     }
 
     state.audit_record(

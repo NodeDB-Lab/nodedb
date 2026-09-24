@@ -17,12 +17,12 @@
 //! only surfaces as lost data after a crash, or as a change stream that never
 //! fires. Add the step here, once, and every caller gets it.
 //!
-//! It also owns the mirror of the redo append: when it appended the record
-//! itself and the Data Plane then REFUSED the write, it cancels that record
-//! before returning the error. See
+//! It also owns the mirror of the redo append: every record of the write, the
+//! ones it appended and the ones a caller appended under their outcome-floor
+//! window, is cancelled when the Data Plane refuses the write with a verdict
+//! that proves nothing applied. See
 //! [`crate::control::server::dispatch_utils::write_abort`] for which verdicts
-//! qualify, the residual crash window it does not close, and the latency it
-//! costs a rejection.
+//! qualify, and the `minted` module for how each path closes the window.
 //!
 //! Split by concern, run in this fixed order by [`driver::submit_write`]:
 //! - [`admission`]: the write-admission gate.

@@ -176,6 +176,17 @@ async fn run_catchup_cycle(shared: &SharedState) -> CatchupResult {
             continue;
         }
 
+        // A record at or below the outcome floor has a final outcome. Sending
+        // it again would apply it below the floor, where a published
+        // watermark already claims its outcome.
+        let Some(minted) = crate::control::server::dispatch_utils::MintedRecords::resend(
+            &shared.outcome_floor,
+            Lsn::new(record.header.lsn),
+        ) else {
+            max_lsn = max_lsn.max(record.header.lsn);
+            continue;
+        };
+
         let tenant_id = TenantId::new(record.header.tenant_id);
         let database_id = DatabaseId::new(record.header.database_id);
         let vshard_id = VShardId::new(record.header.vshard_id);
@@ -213,6 +224,7 @@ async fn run_catchup_cycle(shared: &SharedState) -> CatchupResult {
                 resolved_now_ms: decoded
                     .default_timestamp_ms
                     .and_then(|ms| u64::try_from(ms).ok()),
+                minted: Some(minted),
             },
         )
         .await

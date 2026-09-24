@@ -9,6 +9,7 @@ use crate::control::server::shared::clone_write::CloneCheckedTask;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId, VShardId};
 
+use super::minted::{MintedRecords, RecordOwner, resolve_on_response};
 use super::submit_write::{
     ChangeFeedOwner, SubmitWrite, WalDurability, WriteOrdering, submit_write,
 };
@@ -34,6 +35,38 @@ pub async fn dispatch_authorized_to_data_plane(
             durability: WalDurability::CallerSupplied {
                 wal_lsn: None,
                 resolved_now_ms: None,
+                minted: None,
+            },
+        },
+    )
+    .await
+}
+
+/// Dispatch a clone-checked task whose records the caller already appended
+/// under `minted`. The request carries the highest of their LSNs, so the
+/// write is durable before it is acknowledged. The funnel closes their
+/// outcome-floor window from the task's outcome.
+pub(crate) async fn dispatch_authorized_minted_to_data_plane(
+    shared: &SharedState,
+    checked: CloneCheckedTask,
+    trace_id: TraceId,
+    minted: MintedRecords,
+) -> crate::Result<Response> {
+    let task = checked.into_authorized().into_physical_task();
+    dispatch_to_data_plane_inner(
+        shared,
+        DataPlaneDispatch {
+            tenant_id: task.tenant_id,
+            database_id: task.database_id,
+            vshard_id: task.vshard_id,
+            plan: task.plan,
+            trace_id,
+            event_source: crate::event::EventSource::User,
+            txn_id: task.txn_id,
+            durability: WalDurability::CallerSupplied {
+                wal_lsn: minted.highest(),
+                resolved_now_ms: None,
+                minted: Some(minted),
             },
         },
     )
@@ -152,6 +185,7 @@ pub(crate) async fn dispatch_to_data_plane_with_source(
             durability: WalDurability::CallerSupplied {
                 wal_lsn: None,
                 resolved_now_ms: None,
+                minted: None,
             },
         },
     )
@@ -182,6 +216,7 @@ pub(crate) async fn dispatch_trusted_internal_write_to_data_plane(
         txn_id,
         wal_lsn,
         resolved_now_ms,
+        minted,
     } = write;
     dispatch_to_data_plane_inner(
         shared,
@@ -200,6 +235,7 @@ pub(crate) async fn dispatch_trusted_internal_write_to_data_plane(
             durability: WalDurability::CallerSupplied {
                 wal_lsn,
                 resolved_now_ms,
+                minted,
             },
         },
     )
@@ -280,6 +316,7 @@ pub(crate) async fn dispatch_to_data_plane_with_txn(
             durability: WalDurability::CallerSupplied {
                 wal_lsn: None,
                 resolved_now_ms: None,
+                minted: None,
             },
         },
     )
@@ -298,8 +335,13 @@ async fn dispatch_to_data_plane_inner(
         trace_id,
         event_source,
         txn_id,
-        durability,
+        mut durability,
     } = params;
+    let owner = RecordOwner {
+        tenant_id,
+        database_id,
+        vshard_id,
+    };
     // Resolve any Exchange data-movement nodes before dispatch: a root-level
     // Gather fans the child to all cores and returns the merged response here;
     // a Broadcast join child is gathered and embedded so the plan reaching a
@@ -308,7 +350,7 @@ async fn dispatch_to_data_plane_inner(
     // and already done upstream on the pgwire/native paths.
     // Internal funnel (COPY, cursors, materialized-view refresh, constraint
     // subqueries): not session-transaction-scoped, so `None`.
-    let plan = match crate::control::server::exchange::resolve_exchange_in_plan(
+    let resolved = crate::control::server::exchange::resolve_exchange_in_plan(
         shared,
         database_id,
         tenant_id,
@@ -316,21 +358,42 @@ async fn dispatch_to_data_plane_inner(
         trace_id,
         None,
     )
-    .await?
-    {
-        crate::control::server::exchange::Resolved::Gathered(
+    .await;
+    // A plan that never reaches the funnel closes the caller's records here.
+    let plan = match resolved {
+        Ok(crate::control::server::exchange::Resolved::Plan(p)) => *p,
+        Ok(crate::control::server::exchange::Resolved::Gathered(
             resp,
             _shard_watermarks,
             _shuffle_reads,
-        ) => {
+        )) => {
+            if let Some(minted) = durability.take_minted() {
+                resolve_on_response(&shared.wal, owner, 0, &resp, minted).await?;
+            }
             return Ok(resp);
         }
-        crate::control::server::exchange::Resolved::Plan(p) => *p,
         // Internal funnel callers want a fully-collected Response, not a lazy
         // stream: materialize the stream into one merged-array Response,
         // preserving the prior gather-then-return behaviour on this path.
-        crate::control::server::exchange::Resolved::Stream(s) => {
-            return crate::control::server::exchange::gather::stream_to_response(s).await;
+        Ok(crate::control::server::exchange::Resolved::Stream(s)) => {
+            let collected = crate::control::server::exchange::gather::stream_to_response(s).await;
+            if let Some(minted) = durability.take_minted() {
+                match &collected {
+                    Ok(resp) => resolve_on_response(&shared.wal, owner, 0, resp, minted).await?,
+                    // The gather failed part way: what reached the cores is
+                    // unknown here.
+                    Err(_) => minted.hold(),
+                }
+            }
+            return collected;
+        }
+        Err(error) => {
+            // A write plan carries no exchange node, so a failed resolution
+            // dispatched none of it.
+            if let Some(minted) = durability.take_minted() {
+                minted.cancel(&shared.wal, owner, 0).await?;
+            }
+            return Err(error);
         }
     };
 
@@ -518,5 +581,167 @@ mod tests {
             state.wal.durable_through() >= stamped,
             "the minted redo must be fsync-durable before the write is acknowledged"
         );
+    }
+
+    // --- Caller records under the outcome floor ---
+
+    /// A read plan: the funnel admits it without a gate, so these tests reach
+    /// the dispatch and response paths with the caller's records attached.
+    fn point_get_plan() -> crate::bridge::envelope::PhysicalPlan {
+        crate::bridge::envelope::PhysicalPlan::Document(
+            nodedb_physical::physical_plan::DocumentOp::PointGet {
+                collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "users"),
+                document_id: "u1".into(),
+                surrogate: nodedb_types::Surrogate::ZERO,
+                pk_bytes: Vec::new(),
+                rls_filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
+                valid_at_ms: None,
+            },
+        )
+    }
+
+    fn minted_record(state: &SharedState) -> (super::MintedRecords, Lsn) {
+        let minted = super::MintedRecords::open(&state.outcome_floor);
+        let lsn = minted
+            .appender(&state.wal, crate::wal::manager::NO_APPLY_KEY)
+            .append_put(
+                TenantId::new(1),
+                VShardId::new(0),
+                DatabaseId::DEFAULT,
+                b"row",
+            )
+            .expect("append");
+        (minted, lsn)
+    }
+
+    fn write_with(minted: super::MintedRecords, lsn: Lsn) -> super::WriteDispatch {
+        super::WriteDispatch {
+            tenant_id: TenantId::new(1),
+            database_id: DatabaseId::DEFAULT,
+            vshard_id: VShardId::new(0),
+            plan: point_get_plan(),
+            trace_id: crate::types::TraceId::ZERO,
+            event_source: crate::event::EventSource::User,
+            txn_id: None,
+            wal_lsn: Some(lsn),
+            resolved_now_ms: None,
+            minted: Some(minted),
+        }
+    }
+
+    fn replayed(state: &SharedState) -> Vec<u64> {
+        state.wal.sync().expect("sync");
+        state
+            .wal
+            .replay()
+            .expect("replay")
+            .iter()
+            .map(|record| record.header.lsn)
+            .collect()
+    }
+
+    /// Answer one request with `status` and `code`.
+    async fn respond_once_with(
+        state: Arc<SharedState>,
+        mut side: CoreChannelDataSide,
+        status: Status,
+        code: Option<crate::bridge::envelope::ErrorCode>,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut handled = false;
+        while !handled && Instant::now() < deadline {
+            if let Ok(request) = side.request_rx.try_pop() {
+                side.response_tx
+                    .try_push(BridgeResponse {
+                        inner: crate::bridge::envelope::Response {
+                            request_id: request.inner.request_id,
+                            status,
+                            attempt: 1,
+                            partial: false,
+                            payload: Payload::empty(),
+                            watermark_lsn: Lsn::ZERO,
+                            error_code: code.clone().map(Box::new),
+                            read_set_valid: None,
+                            read_version_lsn: Lsn::ZERO,
+                            write_set: Vec::new(),
+                        },
+                    })
+                    .expect("fake data-plane response queue has capacity");
+                handled = true;
+            }
+            state.poll_and_route_responses();
+            tokio::task::yield_now().await;
+        }
+        assert!(handled, "fake data plane received the dispatched request");
+        state.poll_and_route_responses();
+    }
+
+    #[tokio::test]
+    async fn a_refused_dispatch_cancels_the_callers_records() {
+        let (state, _side, _directory) = fixture();
+        let (minted, lsn) = minted_record(&state);
+        state
+            .dispatcher
+            .lock()
+            .expect("dispatcher")
+            .begin_data_plane_drain();
+
+        let result =
+            super::dispatch_trusted_internal_write_to_data_plane(&state, write_with(minted, lsn))
+                .await;
+
+        assert!(result.is_err(), "a draining dispatcher refuses the request");
+        assert!(!replayed(&state).contains(&lsn.as_u64()));
+        assert!(state.outcome_floor.floor() >= lsn);
+        assert_eq!(state.outcome_floor.leaked_windows(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_that_applied_nothing_cancels_the_callers_records() {
+        let (state, side, _directory) = fixture();
+        let (minted, lsn) = minted_record(&state);
+        let responder = tokio::spawn(respond_once_with(
+            Arc::clone(&state),
+            side,
+            Status::Error,
+            Some(crate::bridge::envelope::ErrorCode::RejectedConstraint {
+                constraint: "unique".into(),
+                detail: "duplicate key".into(),
+            }),
+        ));
+
+        let response =
+            super::dispatch_trusted_internal_write_to_data_plane(&state, write_with(minted, lsn))
+                .await
+                .expect("the refusal is a response");
+        responder.await.expect("responder completes");
+
+        assert_eq!(response.status, Status::Error);
+        assert!(!replayed(&state).contains(&lsn.as_u64()));
+        assert!(state.outcome_floor.floor() >= lsn);
+    }
+
+    #[tokio::test]
+    async fn an_applied_write_settles_the_callers_records() {
+        let (state, side, _directory) = fixture();
+        let (minted, lsn) = minted_record(&state);
+        let responder = tokio::spawn(respond_once_with(
+            Arc::clone(&state),
+            side,
+            Status::Ok,
+            None,
+        ));
+
+        let response =
+            super::dispatch_trusted_internal_write_to_data_plane(&state, write_with(minted, lsn))
+                .await
+                .expect("the write applies");
+        responder.await.expect("responder completes");
+
+        assert_eq!(response.status, Status::Ok);
+        assert!(replayed(&state).contains(&lsn.as_u64()));
+        assert!(state.outcome_floor.floor() >= lsn);
+        assert_eq!(state.outcome_floor.leaked_windows(), 0);
     }
 }

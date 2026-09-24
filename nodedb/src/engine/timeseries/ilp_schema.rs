@@ -96,12 +96,16 @@ pub fn ensure_bitemporal_columns(schema: &mut ColumnarSchema) {
 /// Must be called BEFORE `ingest_batch` so the batch can map values to
 /// the expanded schema.
 pub fn evolve_schema(memtable: &mut ColumnarMemtable, lines: &[IlpLine<'_>]) {
-    let existing: std::collections::HashSet<String> = memtable
-        .schema()
-        .columns
-        .iter()
-        .map(|(n, _)| n.clone())
-        .collect();
+    for (name, col_type) in new_columns(memtable.schema(), lines) {
+        memtable.add_column(name, col_type);
+    }
+}
+
+/// The columns `evolve_schema` adds to `schema` for `lines`, in the order
+/// it adds them. The first line naming a key decides its type.
+pub fn new_columns(schema: &ColumnarSchema, lines: &[IlpLine<'_>]) -> Vec<(String, ColumnType)> {
+    let existing: std::collections::HashSet<&str> =
+        schema.columns.iter().map(|(n, _)| n.as_str()).collect();
 
     let mut new_columns: Vec<(String, ColumnType)> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -124,8 +128,5 @@ pub fn evolve_schema(memtable: &mut ColumnarMemtable, lines: &[IlpLine<'_>]) {
             }
         }
     }
-
-    for (name, col_type) in new_columns {
-        memtable.add_column(name, col_type);
-    }
+    new_columns
 }

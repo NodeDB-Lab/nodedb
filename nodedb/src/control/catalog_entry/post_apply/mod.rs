@@ -56,5 +56,6 @@ pub(crate) use async_dispatch::crdt_compact::compact_async;
 pub use async_dispatch::spawn_post_apply_async_side_effects;
 pub(crate) use async_dispatch::synonym_group::delete_async as remove_synonym_group;
 pub(crate) use async_dispatch::synonym_group::put_async as install_synonym_group;
+pub(crate) use async_dispatch::vector::longest_core_wait as vector_install_longest_core_wait;
 pub(crate) use async_dispatch::vector::put_async as install_vector_index_params;
 pub use sync::apply_post_apply_side_effects_sync;

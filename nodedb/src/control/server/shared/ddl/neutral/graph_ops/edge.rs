@@ -433,25 +433,31 @@ pub async fn set_node_labels(
     };
 
     // Single-keyed on `node_id`, so single-home: route to `from_key(node_id)`.
-    // No redb durability — a WAL record is the bitset's only backing.
-    crate::control::server::wal_dispatch::wal_append_if_write(
-        &state.wal,
+    // No redb durability — a WAL record is the bitset's only backing. The
+    // record's outcome-floor window opens before the append and closes from
+    // the dispatch's outcome.
+    let owner = crate::control::server::dispatch_utils::RecordOwner {
         tenant_id,
+        database_id: DatabaseId::DEFAULT,
         vshard_id,
-        DatabaseId::DEFAULT,
-        &plan,
-    )
-    .map_err(|e| ddl_err("XX000", e.to_string()))?;
+    };
+    let minted = crate::control::server::dispatch_utils::MintedRecords::open(&state.outcome_floor);
+    if let Err(e) = minted.append_plan(&state.wal, owner, &plan) {
+        // Any record appended before the error never reaches a core.
+        minted
+            .cancel(&state.wal, owner, 0)
+            .await
+            .map_err(|c| ddl_err("XX000", c.to_string()))?;
+        return Err(ddl_err("XX000", e.to_string()));
+    }
 
     let response =
-        crate::control::server::sync::raft_dispatch::dispatch_trusted_internal_sync_response(
+        crate::control::server::sync::raft_dispatch::dispatch_trusted_internal_minted_sync_response(
             state,
-            tenant_id,
-            DatabaseId::DEFAULT,
-            vshard_id,
+            owner,
             plan,
-            TraceId::ZERO,
             crate::event::EventSource::User,
+            minted,
         )
         .await
         .map_err(|e| ddl_err("XX000", e.to_string()))?;

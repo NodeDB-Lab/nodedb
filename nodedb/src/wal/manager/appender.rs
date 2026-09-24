@@ -9,6 +9,8 @@
 //! takes an appender, so no append can read a key another caller set and no
 //! caller has a key to clear.
 
+use std::sync::Mutex;
+
 use nodedb_wal::RecordTarget;
 use nodedb_wal::record::RecordType;
 
@@ -23,6 +25,8 @@ pub const NO_APPLY_KEY: u64 = 0;
 pub struct WalAppender<'a> {
     wal: &'a WalManager,
     apply_key: u64,
+    /// Collects the LSN of every record this appender writes, when set.
+    sink: Option<&'a Mutex<Vec<Lsn>>>,
 }
 
 impl WalManager {
@@ -33,6 +37,21 @@ impl WalManager {
         WalAppender {
             wal: self,
             apply_key,
+            sink: None,
+        }
+    }
+
+    /// An appender that also pushes the LSN of every record it writes onto
+    /// `sink`, in append order.
+    pub fn recording_appender<'a>(
+        &'a self,
+        apply_key: u64,
+        sink: &'a Mutex<Vec<Lsn>>,
+    ) -> WalAppender<'a> {
+        WalAppender {
+            wal: self,
+            apply_key,
+            sink: Some(sink),
         }
     }
 }
@@ -65,7 +84,12 @@ impl WalAppender<'_> {
                 self.apply_key,
             )
             .map_err(crate::Error::Wal)?;
-        Ok(Lsn::new(lsn))
+        drop(wal);
+        let lsn = Lsn::new(lsn);
+        if let Some(sink) = self.sink {
+            sink.lock().unwrap_or_else(|p| p.into_inner()).push(lsn);
+        }
+        Ok(lsn)
     }
 }
 
@@ -96,5 +120,23 @@ mod tests {
             .map(|record| record.apply_key())
             .collect();
         assert_eq!(keys, vec![0xAB, NO_APPLY_KEY, 0xAB]);
+    }
+
+    #[test]
+    fn a_recording_appender_collects_every_lsn_it_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = WalManager::open_for_testing(&dir.path().join("wal")).expect("open wal");
+        let (t, v, db) = (TenantId::new(1), VShardId::new(0), DatabaseId::DEFAULT);
+        let sink = Mutex::new(Vec::new());
+
+        let recording = wal.recording_appender(NO_APPLY_KEY, &sink);
+        let first = recording.append_put(t, v, db, b"a").expect("append");
+        wal.appender(NO_APPLY_KEY)
+            .append_put(t, v, db, b"unrecorded")
+            .expect("append");
+        let second = recording.append_put(t, v, db, b"b").expect("append");
+
+        let recorded = sink.lock().expect("sink").clone();
+        assert_eq!(recorded, vec![first, second]);
     }
 }

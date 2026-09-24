@@ -4,20 +4,20 @@
 //! post-apply steps a successful write still owes: the post-apply redo, the
 //! durable-at-ack barrier, DDL finalization, and the change-event publish.
 
+use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::mpsc;
-
-use crate::bridge::dispatch::WriteWindow;
-use crate::bridge::envelope::{Response, Status};
+use crate::bridge::envelope::Status;
 use crate::control::array_catalog::ddl::AuthorizedDdlTransition;
 use crate::control::server::dispatch_utils::change_events::{WriteChangeSet, publish_change_set};
 use crate::control::server::dispatch_utils::collect::{
     DispatchCollectError, collect_bounded_response,
 };
 use crate::control::server::dispatch_utils::durability_barrier::assert_durable_before_ack;
+use crate::control::server::dispatch_utils::minted::{
+    Collect, MintedRecords, OwnedResponse, OwnedWait, RecordOwner, await_response_owned,
+};
 use crate::control::server::dispatch_utils::submit_write::ambiguous_ddl::preserve_ambiguous_array_ddl;
-use crate::control::server::dispatch_utils::write_abort::{AbortTarget, abort_refused_write};
 use crate::control::server::wal_dispatch;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, Lsn, RequestId, TenantId, VShardId};
@@ -29,7 +29,7 @@ use super::wal_append::rollback_on_err;
 /// append, and dispatch phases that ran before it.
 pub(super) struct ResponsePhaseInput {
     pub request_id: RequestId,
-    pub rx: mpsc::Receiver<Response>,
+    pub rx: crate::control::ResponseReceiver,
     pub deadline: Instant,
     pub dispatch_started: Instant,
     pub tenant_id: TenantId,
@@ -41,30 +41,24 @@ pub(super) struct ResponsePhaseInput {
     /// `WalDurability::AppendHere`).
     pub apply_key: u64,
     /// The key a final refusal's abort marker carries, `0` when this write's
-    /// refusals are not final (see `AbortTarget::final_refusal_key`).
+    /// refusals are not final. A final refusal is the proposal's outcome: the
+    /// proposal ledger rebuilt at boot counts the key as applied.
     pub final_refusal_key: u64,
     pub post_apply: Option<String>,
     pub funnel_redo_engine: Option<&'static str>,
     pub change_set: Option<WriteChangeSet>,
     pub ddl_transition: AuthorizedDdlTransition,
     pub deferred_guards: super::dispatch::DeferredGuards,
-    /// The write's outcome-floor window, when the funnel minted its LSN.
-    pub window: Option<WriteWindow>,
-}
-
-/// Settle a write's outcome-floor window: its outcome is final.
-pub(super) fn settle_window(window: Option<WriteWindow>) {
-    if let Some(window) = window {
-        window.settle();
-    }
+    /// The records minted for this write, under their outcome-floor window.
+    pub minted: Option<MintedRecords>,
 }
 
 /// Collect the response(s), classify the outcome, and run every step a
 /// completed write still owes before the funnel returns.
 ///
 /// For non-streaming queries, exactly one response arrives. For streaming
-/// queries, multiple partial chunks arrive before the final. The mpsc channel
-/// is bounded (see `RequestTracker::register`); here the *total* accumulated
+/// queries, multiple partial chunks arrive before the final. The partial
+/// channel is bounded (see `RequestTracker::register`); here the *total* accumulated
 /// payload is additionally capped so a runaway scan can't pin Control-Plane
 /// RAM — any query whose combined result exceeds
 /// `tuning.network.max_query_result_bytes` is cancelled with a typed
@@ -76,7 +70,7 @@ pub(super) async fn collect_classify_and_finish(
 ) -> crate::Result<SubmitOutcome> {
     let ResponsePhaseInput {
         request_id,
-        mut rx,
+        rx,
         deadline,
         dispatch_started,
         tenant_id,
@@ -91,8 +85,13 @@ pub(super) async fn collect_classify_and_finish(
         change_set,
         ddl_transition,
         deferred_guards,
-        window,
+        minted,
     } = input;
+    let owner = RecordOwner {
+        tenant_id,
+        database_id,
+        vshard_id,
+    };
 
     let vshard_u32 = vshard_id.as_u32();
     let observe = |shared: &SharedState| {
@@ -100,20 +99,40 @@ pub(super) async fn collect_classify_and_finish(
         shared.per_vshard_metrics.observe(vshard_u32, latency_us);
     };
 
-    // The same instant the envelope carries. The Data Plane normally answers
-    // with `DeadlineExceeded` first; this bounds the wait when it is inside a
-    // stage that carries no safe point yet.
-    let response = match tokio::time::timeout_at(
-        tokio::time::Instant::from_std(deadline),
-        collect_bounded_response(&mut rx, max_result_bytes),
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(_) => {
-            // The dispatcher holds the floor below this record until the core
-            // answers, so this window can settle.
-            settle_window(window);
+    // Wait to the same instant the envelope carries. The Data Plane normally
+    // answers with `DeadlineExceeded` first; this bounds the wait when it is
+    // inside a stage that carries no safe point yet. A write's records close
+    // in a task this future does not own, so a caller dropped mid-wait still
+    // closes them. A refusal that arrives after the deadline still cancels
+    // them.
+    let outcome = match minted {
+        Some(minted) => {
+            await_response_owned(
+                OwnedWait {
+                    wal: Arc::clone(&shared.wal),
+                    owner,
+                    final_refusal_key,
+                    deadline,
+                    collect: Collect::Merged { max_result_bytes },
+                },
+                rx,
+                minted,
+            )
+            .await?
+        }
+        None => collect_unminted(shared, request_id, rx, deadline, max_result_bytes).await,
+    };
+
+    let response = match outcome {
+        OwnedResponse::Answered { response, closed } => {
+            if response.status != Status::Ok {
+                let _ = ddl_transition.rollback(shared);
+            }
+            // A failed cancel holds the window and fails the write here.
+            closed?;
+            response
+        }
+        OwnedResponse::DeadlineExceeded => {
             observe(shared);
             // Dispatch completed, but the Data Plane may have applied CREATE
             // or ALTER before this deadline. Never roll that catalog state
@@ -124,14 +143,7 @@ pub(super) async fn collect_classify_and_finish(
             }
             return Err(crate::Error::DeadlineExceeded { request_id });
         }
-    };
-
-    let response = match response {
-        Ok(r) => r,
-        Err(DispatchCollectError::OverBudget { bytes }) => {
-            // The dispatcher holds the floor until the core's final response.
-            settle_window(window);
-            shared.tracker.cancel(&request_id);
+        OwnedResponse::OverBudget { bytes } => {
             observe(shared);
             // A partial response proves dispatch began but not whether an
             // Array DDL completed; preserve CREATE/ALTER and fail-stop.
@@ -146,9 +158,7 @@ pub(super) async fn collect_classify_and_finish(
                 ),
             });
         }
-        Err(DispatchCollectError::ChannelClosed) => {
-            // The dispatcher holds the floor until the core's final response.
-            settle_window(window);
+        OwnedResponse::ChannelClosed => {
             observe(shared);
             // The producer can close after applying but before sending its
             // response. CREATE/ALTER must remain catalog-finalized here.
@@ -167,26 +177,6 @@ pub(super) async fn collect_classify_and_finish(
             });
         }
     };
-
-    if response.status != Status::Ok {
-        let _ = ddl_transition.rollback(shared);
-        abort_refused_write(
-            shared,
-            AbortTarget {
-                tenant_id,
-                database_id,
-                vshard_id,
-                wal_lsn,
-                appends_here,
-                final_refusal_key,
-            },
-            &response,
-        )
-        .await?;
-    }
-    // The core's outcome is final, and a refusal's abort marker is durable. A
-    // failed abort above returns first and leaves the window open.
-    settle_window(window);
 
     // Mint the post-apply redo record while the guards are still held, then
     // release them. A PointUpdate whose collection carries a secondary vector
@@ -272,4 +262,32 @@ pub(super) async fn collect_classify_and_finish(
 
     observe(shared);
     Ok(SubmitOutcome { response, wal_lsn })
+}
+
+/// Collect a response that carries no records, under the same deadline and
+/// byte budget a write's owned wait applies.
+async fn collect_unminted(
+    shared: &SharedState,
+    request_id: RequestId,
+    mut rx: crate::control::ResponseReceiver,
+    deadline: Instant,
+    max_result_bytes: usize,
+) -> OwnedResponse {
+    let collected = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        collect_bounded_response(&mut rx, max_result_bytes),
+    )
+    .await;
+    match collected {
+        Ok(Ok(response)) => OwnedResponse::Answered {
+            response,
+            closed: Ok(()),
+        },
+        Ok(Err(DispatchCollectError::OverBudget { bytes })) => {
+            shared.tracker.cancel(&request_id);
+            OwnedResponse::OverBudget { bytes }
+        }
+        Ok(Err(DispatchCollectError::ChannelClosed)) => OwnedResponse::ChannelClosed,
+        Err(_) => OwnedResponse::DeadlineExceeded,
+    }
 }

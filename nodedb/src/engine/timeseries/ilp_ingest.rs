@@ -13,7 +13,7 @@ use super::ilp::{FieldValue, IlpLine};
 use nodedb_types::columnar::schema::{TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
 use nodedb_types::timeseries::{IngestResult, SeriesCatalog, SeriesKey};
 
-pub use super::ilp_schema::{ensure_bitemporal_columns, evolve_schema, infer_schema};
+pub use super::ilp_schema::{ensure_bitemporal_columns, evolve_schema, infer_schema, new_columns};
 
 /// Bitemporal stamps applied per-row on ingest. `system_ms` is always
 /// engine-assigned (client-supplied values are ignored); the valid-time

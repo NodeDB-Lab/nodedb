@@ -6,6 +6,7 @@
 //! which need the raw `Response` to extract the payload themselves.
 
 use crate::bridge::envelope::{PhysicalPlan, Response, Status};
+use crate::control::server::dispatch_utils::{MintedRecords, RecordOwner};
 use crate::control::server::shared::authorization::AuthorizedTask;
 use crate::control::state::SharedState;
 use crate::control::wal_replication::{ReplicableWrite, to_replicated_entry};
@@ -24,21 +25,22 @@ struct SyncResponseDispatch {
     plan: PhysicalPlan,
     trace_id: TraceId,
     event_source: EventSource,
-    /// The LSN of the redo record the caller already appended for this
-    /// write, or `None` when the caller minted none. See
+    /// The redo records the caller already appended for this write, under
+    /// their outcome-floor window, or `None` when the caller minted none. See
     /// [`dispatch_authorized_sync_response`] for the durability contract.
-    wal_lsn: Option<Lsn>,
+    minted: Option<MintedRecords>,
 }
 
-/// `wal_lsn` is the caller's already-appended redo record, or `None`. Threaded
-/// into the write funnel so the durable-at-ack barrier fsyncs it before this
-/// returns — sync handlers ack their peer off this return value.
-pub async fn dispatch_authorized_sync_response(
+/// `minted` holds the caller's already-appended redo records, or `None`.
+/// Threaded into the write funnel so the durable-at-ack barrier fsyncs them
+/// before this returns — sync handlers ack their peer off this return value.
+/// The funnel closes their outcome-floor window from the write's outcome.
+pub(crate) async fn dispatch_authorized_sync_response(
     state: &SharedState,
     authorized: AuthorizedTask,
     trace_id: TraceId,
     event_source: EventSource,
-    wal_lsn: Option<Lsn>,
+    minted: Option<MintedRecords>,
 ) -> crate::Result<Response> {
     let task = authorized.into_physical_task();
     dispatch_sync_response_inner(
@@ -50,7 +52,32 @@ pub async fn dispatch_authorized_sync_response(
             plan: task.plan,
             trace_id,
             event_source,
-            wal_lsn,
+            minted,
+        },
+    )
+    .await
+}
+
+/// Trusted-internal sync-shaped dispatch of a write whose redo records the
+/// caller already appended under `minted`. Used by DDL paths that append
+/// their own record before dispatch.
+pub(crate) async fn dispatch_trusted_internal_minted_sync_response(
+    state: &SharedState,
+    owner: RecordOwner,
+    plan: PhysicalPlan,
+    event_source: EventSource,
+    minted: MintedRecords,
+) -> crate::Result<Response> {
+    dispatch_sync_response_inner(
+        state,
+        SyncResponseDispatch {
+            tenant_id: owner.tenant_id,
+            database_id: owner.database_id,
+            vshard_id: owner.vshard_id,
+            plan,
+            trace_id: TraceId::ZERO,
+            event_source,
+            minted: Some(minted),
         },
     )
     .await
@@ -77,7 +104,7 @@ pub(crate) async fn dispatch_trusted_internal_sync_response(
             plan,
             trace_id,
             event_source,
-            wal_lsn: None,
+            minted: None,
         },
     )
     .await
@@ -85,7 +112,9 @@ pub(crate) async fn dispatch_trusted_internal_sync_response(
 
 /// Cluster path: proposes through Raft, wraps the payload in `Status::Ok`. Gate
 /// verdict travels in the payload; non-`Ok` means a protocol error, not a gate
-/// rejection. Single-node path carries `wal_lsn` through the write funnel.
+/// rejection. The Raft entry's apply appends its own records, so the caller's
+/// records are cancelled. Single-node path carries the caller's records
+/// through the write funnel, which closes them from the write's outcome.
 async fn dispatch_sync_response_inner(
     state: &SharedState,
     params: SyncResponseDispatch,
@@ -97,18 +126,47 @@ async fn dispatch_sync_response_inner(
         plan,
         trace_id,
         event_source,
-        wal_lsn,
+        minted,
     } = params;
-    reject_unadmitted_crdt_apply(&plan)?;
-    if let Some(proposer) = state.async_raft_proposer()
-        && let Some(entry) = to_replicated_entry(
-            tenant_id,
-            database_id,
-            vshard_id,
-            &ReplicableWrite::decide_for_replication(&plan)?,
-        )?
-    {
-        let payload = propose_sync_write(state, entry, proposer).await?;
+    let owner = RecordOwner {
+        tenant_id,
+        database_id,
+        vshard_id,
+    };
+    if let Err(error) = reject_unadmitted_crdt_apply(&plan) {
+        // Nothing was dispatched.
+        if let Some(minted) = minted {
+            minted.cancel(&state.wal, owner, 0).await?;
+        }
+        return Err(error);
+    }
+    let replicated = match state.async_raft_proposer() {
+        Some(proposer) => {
+            let entry = ReplicableWrite::decide_for_replication(&plan).and_then(|replicable| {
+                to_replicated_entry(tenant_id, database_id, vshard_id, &replicable)
+            });
+            match entry {
+                Ok(entry) => entry.map(|entry| (proposer, entry)),
+                Err(error) => {
+                    if let Some(minted) = minted {
+                        minted.cancel(&state.wal, owner, 0).await?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        None => None,
+    };
+    if let Some((proposer, entry)) = replicated {
+        // The Raft entry's apply appends its own records.
+        let superseded = minted.map(|minted| {
+            minted.supersede(std::sync::Arc::clone(&state.wal), owner, "raft_proposal")
+        });
+        let proposed = propose_sync_write(state, entry, proposer).await;
+        if let Some(superseded) = superseded {
+            superseded.finish().await;
+        }
+        let payload = proposed?;
         let request_id = state.next_request_id();
         return Ok(Response {
             request_id,
@@ -136,28 +194,29 @@ async fn dispatch_sync_response_inner(
             txn_id: None,
             // Caller already appended this write's redo; funnel must not append a
             // second one — stamps this LSN and waits at the durable-at-ack barrier.
-            wal_lsn,
+            wal_lsn: minted.as_ref().and_then(MintedRecords::highest),
             // Only a TTL-bearing KV write resolves a wall-clock instant, and KV has no sync handler.
             resolved_now_ms: None,
+            minted,
         },
     )
     .await
 }
 
 /// Sync-path convenience: dispatches `plan` tagged [`EventSource::CrdtSync`],
-/// returns just the payload bytes. `wal_lsn` isn't optional in spirit — these
+/// returns the payload bytes. `minted` isn't optional in spirit — these
 /// engines rebuild only by WAL replay, so acking without it loses a write on `kill -9`.
-pub async fn dispatch_sync_payload(
+pub(crate) async fn dispatch_sync_payload(
     state: &SharedState,
     authorized: AuthorizedTask,
-    wal_lsn: Option<Lsn>,
+    minted: Option<MintedRecords>,
 ) -> crate::Result<Vec<u8>> {
     let response = dispatch_authorized_sync_response(
         state,
         authorized,
         TraceId::ZERO,
         EventSource::CrdtSync,
-        wal_lsn,
+        minted,
     )
     .await?;
     Ok(response.payload.to_vec())
@@ -180,7 +239,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::super::durability_test_support::{
-        append_buffered_record, authorized_write, fixture, respond_once,
+        append_buffered_record, authorized_write, fixture, minted_buffered_record, respond_once,
     };
     use super::dispatch_sync_payload;
 
@@ -190,7 +249,7 @@ mod tests {
     #[tokio::test]
     async fn a_supplied_lsn_is_fsync_durable_before_the_payload_returns() {
         let (state, side, _directory) = fixture();
-        let lsn = append_buffered_record(&state);
+        let (minted, lsn) = minted_buffered_record(&state);
         assert!(
             state.wal.durable_through() < lsn.as_u64(),
             "the append must only buffer, or this test proves nothing"
@@ -198,7 +257,7 @@ mod tests {
         let authorized = authorized_write(&state);
 
         let responder = tokio::spawn(respond_once(Arc::clone(&state), side));
-        dispatch_sync_payload(&state, authorized, Some(lsn))
+        dispatch_sync_payload(&state, authorized, Some(minted))
             .await
             .expect("sync dispatch succeeds");
         responder.await.expect("responder completes");

@@ -89,7 +89,7 @@ impl Gateway {
                     return self
                         .execute_with_version_set(ctx, plan, stored_vs)
                         .await
-                        .map(|(payloads, _watermarks, _read_version)| payloads);
+                        .map(|outcome| outcome.payloads);
                 }
             }
         }
@@ -122,6 +122,6 @@ impl Gateway {
         let plan = authorized_plan_for_context(ctx, checked)?;
         self.execute_with_version_set(ctx, plan, actual_vs)
             .await
-            .map(|(payloads, _watermarks, _read_version)| payloads)
+            .map(|outcome| outcome.payloads)
     }
 }

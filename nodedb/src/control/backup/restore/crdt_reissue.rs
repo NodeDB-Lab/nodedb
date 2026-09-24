@@ -29,7 +29,7 @@ const REISSUE_TIMEOUT: Duration = Duration::from_secs(120);
 ///
 /// Branches identically to a normal write (and to `reissue_timeseries_durably`):
 /// - Cluster: `to_replicated_entry` + `propose_replicated_entry`.
-/// - Single-node: `wal_append_if_write` then `sync_dispatch::dispatch_system`.
+/// - Single-node: the autocommit funnel appends the redo and installs it.
 async fn reissue_crdt_collection(
     state: &SharedState,
     tenant_id: TenantId,

@@ -19,4 +19,5 @@ pub use recording::{
     quota_scope_replay_aborted, replay_record_unapplied, retention_autowire_orphaned,
     scope_quota_not_installed, strict_row_undecodable, synonym_group_not_applied,
     vector_index_not_applied, wal_archival_failed_truncation_held, write_acked_without_durability,
+    write_window_held, write_window_leaked,
 };

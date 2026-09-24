@@ -40,6 +40,7 @@ pub mod kv;
 pub mod merge;
 pub(super) mod merge_helpers;
 pub(super) mod merge_orchestrated;
+pub(super) mod partial_refusal;
 pub mod point;
 pub(super) mod provider_scan;
 pub(super) mod provider_scan_compute;

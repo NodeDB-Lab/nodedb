@@ -27,6 +27,7 @@ pub mod owed;
 pub mod process;
 pub mod propose;
 pub mod read_result;
+mod redo_window;
 pub mod request;
 pub mod routing;
 pub mod scheduler;

@@ -66,7 +66,7 @@ async fn snapshot_round_trip_builder_to_applier() {
                     "INSERT INTO {COLL} (id, val) VALUES ('{pk}', 'v_{pk}')"
                 ))
                 .await
-                .unwrap_or_else(|e| panic!("INSERT {pk} on source: {e}"));
+                .unwrap_or_else(|e| panic!("INSERT {pk} on source: {e:?}"));
         }
     }
 

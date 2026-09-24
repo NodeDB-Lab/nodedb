@@ -42,7 +42,6 @@ impl NodeDbPgHandler {
         &self,
         task: PhysicalTask,
         user_id: Option<Arc<str>>,
-        wal_lsn: Option<crate::types::Lsn>,
     ) -> crate::Result<Response> {
         // Without this, a transaction begun before the freeze could COMMIT mid-scan and
         // break the as-of contract.
@@ -57,8 +56,8 @@ impl NodeDbPgHandler {
         }
         reject_unadmitted_crdt_apply(&task.plan)?;
         let txn_id = task.txn_id;
-        // Writes were durably recorded under one `RecordType::Transaction` record at
-        // COMMIT; per-task WAL append is skipped. `wal_lsn` stamps that record's LSN.
+        // The caller owns the transaction's durability, so the task carries no
+        // WAL record of its own.
         self.submit_to_data_plane(SubmitArgs {
             tenant_id: task.tenant_id,
             vshard_id: task.vshard_id,
@@ -69,8 +68,9 @@ impl NodeDbPgHandler {
             // No per-task TTL instant (see `flush_transaction_buffer`), so a TTL-bearing
             // KV write falls back to `epoch_system_ms` at apply time.
             durability: WalDurability::CallerSupplied {
-                wal_lsn,
+                wal_lsn: None,
                 resolved_now_ms: None,
+                minted: None,
             },
         })
         .await

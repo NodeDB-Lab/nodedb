@@ -186,7 +186,6 @@ mod tests {
         fn dispatch_no_wal<'a>(
             &'a self,
             task: PhysicalTask,
-            _wal_lsn: Option<Lsn>,
         ) -> Pin<Box<dyn Future<Output = crate::Result<Response>> + Send + 'a>> {
             let vshard = task.vshard_id;
             let payload = if let PhysicalPlan::Meta(op) = &task.plan {

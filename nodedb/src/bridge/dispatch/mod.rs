@@ -17,5 +17,5 @@ pub use dispatcher::{
     DefaultPriorityResolver, Dispatcher,
 };
 pub use drain::CorePending;
-pub use outcome_floor::{OutcomeFloor, WriteWindow};
+pub use outcome_floor::{OutcomeFloor, StuckFloor, WriteWindow};
 pub use refusal::DispatchRefusal;

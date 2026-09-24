@@ -70,6 +70,11 @@ pub(super) struct PendingTxn {
     /// as usual. A COMMIT verdict halts the scheduler, because the txn cannot
     /// apply here while its peers apply it.
     pub stage_error: Option<String>,
+    /// The `TransactionRedo` record appended for a committed txn's flush,
+    /// under its outcome-floor window. The window settles when the txn
+    /// completes, and holds when the scheduler halts or stops with the txn
+    /// still pending.
+    pub redo_records: Option<crate::control::server::dispatch_utils::MintedRecords>,
 }
 
 /// Commit-resolution state of a staged static Calvin transaction.

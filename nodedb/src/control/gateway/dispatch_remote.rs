@@ -97,6 +97,7 @@ pub(super) async fn dispatch_remote(
                 // and stamped it on this response, so carry it through. This
                 // route did not observe a version of its own to report.
                 read_version_lsn: resp.read_version_lsn,
+                not_found: false,
             });
         }
         crate::control::server::exchange::Resolved::Plan(p) => *p,
@@ -117,6 +118,7 @@ pub(super) async fn dispatch_remote(
                 // serves an in-transaction read and no read-set entry consumes
                 // this value.
                 read_version_lsn: Lsn::ZERO,
+                not_found: false,
             });
         }
     };
@@ -184,6 +186,7 @@ pub(super) async fn dispatch_remote(
                     )],
                     payloads: resp.payloads,
                     read_version_lsn: Lsn::new(resp.read_version_lsn),
+                    not_found: false,
                 })
             }
         }

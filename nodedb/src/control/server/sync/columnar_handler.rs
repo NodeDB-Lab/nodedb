@@ -18,8 +18,8 @@ use nodedb_types::value::Value;
 
 use super::session::SyncSession;
 use super::wire::*;
+use crate::control::server::dispatch_utils::RecordOwner;
 use crate::types::{DatabaseId, TenantId, VShardId};
-use crate::wal::manager::NO_APPLY_KEY;
 
 // ── PK extraction helper ─────────────────────────────────────────────────────
 
@@ -193,18 +193,29 @@ impl<'a> ColumnarDispatcher for SharedStateColumnarDispatcher<'a> {
 
         // WAL append — surrogates are persisted so followers never mint their
         // own divergent ids.
-        let appended_lsn = wal_append_columnar(
-            self.shared.wal.appender(NO_APPLY_KEY),
+        let owner = RecordOwner {
             tenant_id,
-            vshard,
             database_id,
-            ColumnarWalAppendArgs {
-                collection: &collection,
-                payload: &payload,
-                provenance: Some(&prov),
-                surrogates: &surrogates,
-            },
-        )?;
+            vshard_id: vshard,
+        };
+        // The record's outcome-floor window opens before the append and
+        // closes from the dispatch's outcome.
+        let (minted, appended_lsn) =
+            super::raft_dispatch::append_under_window(self.shared, owner, |wal| {
+                wal_append_columnar(
+                    wal,
+                    tenant_id,
+                    vshard,
+                    database_id,
+                    ColumnarWalAppendArgs {
+                        collection: &collection,
+                        payload: &payload,
+                        provenance: Some(&prov),
+                        surrogates: &surrogates,
+                    },
+                )
+            })
+            .await?;
         let wal_lsn = appended_lsn.map(|lsn| lsn.as_u64());
 
         let plan = PhysicalPlan::Columnar(ColumnarOp::Insert {
@@ -227,15 +238,14 @@ impl<'a> ColumnarDispatcher for SharedStateColumnarDispatcher<'a> {
             rls_filters: Vec::new(),
         });
 
-        let authorized = super::raft_dispatch::authorize_sync_task(
+        super::raft_dispatch::authorize_and_dispatch_minted(
             self.shared,
             self.identity,
-            tenant_id,
-            database_id,
-            vshard,
+            owner,
             plan,
-        )?;
-        super::raft_dispatch::dispatch_sync_payload(self.shared, authorized, appended_lsn).await
+            minted,
+        )
+        .await
     }
 }
 

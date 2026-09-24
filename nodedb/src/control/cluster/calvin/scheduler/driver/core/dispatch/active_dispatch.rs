@@ -135,6 +135,8 @@ impl Scheduler {
                 // Set only once the txn parks in `AwaitingVerdict`.
                 verdict_deadline: None,
                 stage_error: None,
+                // Set once a committed txn appends its redo record.
+                redo_records: None,
             },
         );
 

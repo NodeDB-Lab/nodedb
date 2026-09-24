@@ -59,7 +59,7 @@ async fn dispatch_overlay_savepoint(
         txn_id: None,
     };
     // Savepoint overlay meta-ops are not writes — no WAL record, no version.
-    match dp.dispatch_no_wal(task, None).await {
+    match dp.dispatch_no_wal(task).await {
         Ok(resp) => Some(resp.payload.to_vec()),
         Err(e) => {
             tracing::warn!(error = %e, "savepoint overlay meta-op dispatch failed");
@@ -275,7 +275,6 @@ mod tests {
         fn dispatch_no_wal<'a>(
             &'a self,
             task: PhysicalTask,
-            _wal_lsn: Option<Lsn>,
         ) -> Pin<Box<dyn Future<Output = crate::Result<Response>> + Send + 'a>> {
             let vshard = task.vshard_id;
             let payload = if let PhysicalPlan::Meta(op) = &task.plan {

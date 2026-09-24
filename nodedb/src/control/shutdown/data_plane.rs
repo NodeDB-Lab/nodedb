@@ -294,7 +294,7 @@ mod tests {
 
     /// Hand the request to the single core and register its waiter, exactly as
     /// a session would.
-    fn dispatch_one(shared: &SharedState, id: u64) -> tokio::sync::mpsc::Receiver<Response> {
+    fn dispatch_one(shared: &SharedState, id: u64) -> crate::control::ResponseReceiver {
         let rx = shared.tracker.register(RequestId::new(id));
         shared
             .dispatcher

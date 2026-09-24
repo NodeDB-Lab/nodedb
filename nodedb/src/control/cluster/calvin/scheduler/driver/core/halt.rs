@@ -192,6 +192,9 @@ impl Scheduler {
         step: HaltStep,
         error: String,
     ) {
+        // The txn stays unapplied here, so restart replay must reach its redo
+        // record.
+        self.hold_redo_records(txn_id);
         let reason = if self.node_shutting_down() {
             HaltReason::Draining
         } else {

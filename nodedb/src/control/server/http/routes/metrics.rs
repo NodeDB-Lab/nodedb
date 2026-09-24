@@ -50,6 +50,42 @@ pub async fn metrics(
     output.push_str("# TYPE nodedb_wal_next_lsn gauge\n");
     output.push_str(&format!("nodedb_wal_next_lsn {wal_lsn}\n\n"));
 
+    // Outcome floor: every engine watermark and WAL truncation stays at or
+    // below it.
+    let outcome_floor = &state.shared.outcome_floor;
+    output.push_str(
+        "# HELP nodedb_outcome_floor_lsn Highest WAL LSN at or below which every dispatched record has a final outcome.\n",
+    );
+    output.push_str("# TYPE nodedb_outcome_floor_lsn gauge\n");
+    output.push_str(&format!(
+        "nodedb_outcome_floor_lsn {}\n\n",
+        outcome_floor.floor().as_u64()
+    ));
+    output.push_str(
+        "# HELP nodedb_outcome_floor_oldest_window_seconds Age of the oldest write window holding the outcome floor.\n",
+    );
+    output.push_str("# TYPE nodedb_outcome_floor_oldest_window_seconds gauge\n");
+    output.push_str(&format!(
+        "nodedb_outcome_floor_oldest_window_seconds {}\n\n",
+        outcome_floor.oldest_open_for().as_secs_f64()
+    ));
+    output.push_str(
+        "# HELP nodedb_outcome_floor_windows_leaked_total Write windows dropped before their write's outcome was final.\n",
+    );
+    output.push_str("# TYPE nodedb_outcome_floor_windows_leaked_total counter\n");
+    output.push_str(&format!(
+        "nodedb_outcome_floor_windows_leaked_total {}\n\n",
+        outcome_floor.leaked_windows()
+    ));
+    output.push_str(
+        "# HELP nodedb_outcome_floor_windows_held Write windows held until restart; the floor stays below each.\n",
+    );
+    output.push_str("# TYPE nodedb_outcome_floor_windows_held gauge\n");
+    output.push_str(&format!(
+        "nodedb_outcome_floor_windows_held {}\n\n",
+        outcome_floor.held_windows()
+    ));
+
     // Node ID.
     output.push_str("# HELP nodedb_node_id This node's cluster ID.\n");
     output.push_str("# TYPE nodedb_node_id gauge\n");

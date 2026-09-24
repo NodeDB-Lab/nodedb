@@ -127,6 +127,9 @@ pub enum DataPlaneErrorCode {
     DispatchCapacity {
         reason: String,
     },
+    /// The request's deadline passed before the core started it; nothing
+    /// ran.
+    ExpiredBeforeExecution,
 }
 
 /// Wire mirror of `nodedb::bridge::envelope::CounterFault`.

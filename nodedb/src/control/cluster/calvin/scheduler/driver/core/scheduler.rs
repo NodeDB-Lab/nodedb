@@ -119,7 +119,7 @@ pub struct Scheduler {
     /// Fan-in receiver for executor responses.
     ///
     /// Each dispatched transaction spawns a lightweight bridge task that
-    /// awaits the per-request `mpsc::Receiver<Response>` and forwards the
+    /// awaits the per-request `ResponseReceiver` and forwards the
     /// result here as a [`CompletionItem`]. The scheduler's `select!` loop
     /// includes this channel as a first-class arm so it wakes the moment
     /// any executor response is ready — no polling, no sleep.
@@ -326,7 +326,7 @@ impl Scheduler {
         &self,
         txn_id: TxnId,
         request_id: RequestId,
-        mut response_rx: mpsc::Receiver<Response>,
+        mut response_rx: crate::control::ResponseReceiver,
     ) {
         let tx = self.completion_tx.clone();
         tokio::spawn(async move {
@@ -453,6 +453,8 @@ impl Scheduler {
                 }
             }
         }
+        // Every txn still pending stays unapplied on this replica.
+        self.hold_all_redo_records();
     }
 
     /// Allocate a fresh request ID for a dispatch.

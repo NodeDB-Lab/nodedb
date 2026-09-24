@@ -67,7 +67,14 @@ pub(crate) fn error_to_native(seq: u64, e: &crate::Error) -> NativeResponse {
             crate::control::server::pgwire::types::error_map::numeric_code_to_sqlstate(e.code()),
             e.message().to_string(),
         ),
-        other => ("XX000", format!("{other}")),
+        // Every other variant takes the protocol-neutral SQLSTATE pgwire
+        // renders for it. `XX000` is only for a variant that table leaves
+        // unclassified.
+        other => {
+            let (_severity, sqlstate, message) =
+                crate::control::server::pgwire::types::error_map::error_to_sqlstate(other);
+            (sqlstate, message)
+        }
     };
     let ndb_code = crate::error_classify::classify(e).code().0;
     NativeResponse::error_with_code(seq, code, message, ndb_code)
@@ -540,11 +547,10 @@ mod tests {
         );
     }
 
-    /// The numeric code is populated for every variant, including the ones
-    /// whose SQLSTATE falls through to `XX000` — otherwise the fix would be a
-    /// per-variant special case rather than one classification.
+    /// A variant with no native arm takes the SQLSTATE pgwire renders for it,
+    /// and keeps its numeric code.
     #[test]
-    fn errors_without_a_dedicated_sqlstate_still_carry_a_code() {
+    fn errors_without_a_native_arm_take_the_pgwire_sqlstate() {
         let response = error_to_native(
             1,
             &crate::Error::PlanError {
@@ -555,11 +561,33 @@ mod tests {
         let error = response
             .error
             .expect("error responses must carry a payload");
-        assert_eq!(error.code, "XX000");
+        assert_eq!(error.code, nodedb_types::error::sqlstate::SYNTAX_ERROR);
         assert_eq!(
             error.ndb_code,
             nodedb_types::error::ErrorCode::PLAN_ERROR.0,
-            "an unmapped SQLSTATE must not also erase the numeric classification"
+            "the numeric classification must survive the SQLSTATE rendering"
+        );
+    }
+
+    /// A constraint refusal that crossed a node boundary keeps its SQLSTATE.
+    #[test]
+    fn a_rejected_constraint_keeps_its_sqlstate() {
+        let response = error_to_native(
+            1,
+            &crate::Error::RejectedConstraint {
+                collection: "c".to_owned(),
+                constraint: "unique".to_owned(),
+                detail: "duplicate key".to_owned(),
+            },
+        );
+
+        let error = response
+            .error
+            .expect("error responses must carry a payload");
+        assert_eq!(error.code, nodedb_types::error::sqlstate::UNIQUE_VIOLATION);
+        assert_eq!(
+            error.ndb_code,
+            nodedb_types::error::ErrorCode::CONSTRAINT_VIOLATION.0
         );
     }
 }

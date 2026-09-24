@@ -3,12 +3,12 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::bridge::envelope::Response;
 use crate::types::RequestId;
 
-/// Per-request channel capacity. A streaming scan produces at most
+/// Per-request partial-response capacity. A streaming scan produces at most
 /// `ceil(rows / STREAM_CHUNK_SIZE)` partials — a few hundred for the
 /// largest realistic queries. Capacity here bounds how many chunks can
 /// sit in RAM while the Control-Plane session's TCP write buffer is
@@ -16,19 +16,83 @@ use crate::types::RequestId;
 /// observe backpressure instead of silently growing RSS.
 pub const REQUEST_CHANNEL_CAPACITY: usize = 256;
 
+/// The sending ends of one tracked request.
+struct PendingRequest {
+    partials: mpsc::Sender<Response>,
+    final_tx: oneshot::Sender<Response>,
+}
+
+/// The receiving end of one tracked request.
+///
+/// Partial responses arrive through a bounded channel. The final response
+/// has a slot of its own, so a full partial channel never drops it.
+pub struct ResponseReceiver {
+    partials: mpsc::Receiver<Response>,
+    final_rx: Option<oneshot::Receiver<Response>>,
+}
+
+impl ResponseReceiver {
+    /// The next response: every buffered partial in order, then the final
+    /// one. `None` once the final response was taken, or once the request
+    /// ended without one.
+    ///
+    /// Cancel-safe: a dropped `recv` future loses no response.
+    pub async fn recv(&mut self) -> Option<Response> {
+        if let Some(response) = self.partials.recv().await {
+            return Some(response);
+        }
+        let final_rx = self.final_rx.as_mut()?;
+        let answer = final_rx.await;
+        self.final_rx = None;
+        answer.ok()
+    }
+
+    /// The next response when one is ready, without waiting. `None` when
+    /// nothing is ready, or once the request ended.
+    pub fn try_recv(&mut self) -> Option<Response> {
+        match self.partials.try_recv() {
+            Ok(response) => return Some(response),
+            Err(mpsc::error::TryRecvError::Empty) => return None,
+            Err(mpsc::error::TryRecvError::Disconnected) => {}
+        }
+        let final_rx = self.final_rx.as_mut()?;
+        match final_rx.try_recv() {
+            Ok(response) => {
+                self.final_rx = None;
+                Some(response)
+            }
+            Err(oneshot::error::TryRecvError::Empty) => None,
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.final_rx = None;
+                None
+            }
+        }
+    }
+
+    /// A receiver fed by `partials` alone: every response, final included,
+    /// arrives on it in order.
+    #[cfg(test)]
+    pub(crate) fn from_channel(partials: mpsc::Receiver<Response>) -> Self {
+        Self {
+            partials,
+            final_rx: None,
+        }
+    }
+}
+
 /// Routes Data Plane responses back to the waiting Control Plane session.
 ///
-/// Each dispatched request registers an mpsc sender here. The background
+/// Each dispatched request registers its senders here. The background
 /// response poller forwards responses as they arrive. For streaming queries,
 /// multiple partial responses arrive before the final one.
 ///
 /// - Partial responses (`response.partial == true`): forwarded but request
 ///   stays in the map for more chunks.
-/// - Final response (`response.partial == false`): forwarded and request
-///   removed from the map.
+/// - Final response (`response.partial == false`): forwarded into the
+///   request's final slot and request removed from the map.
 #[derive(Default)]
 pub struct RequestTracker {
-    pending: Mutex<HashMap<RequestId, mpsc::Sender<Response>>>,
+    pending: Mutex<HashMap<RequestId, PendingRequest>>,
 }
 
 impl RequestTracker {
@@ -38,48 +102,58 @@ impl RequestTracker {
         }
     }
 
-    fn lock_pending(&self) -> MutexGuard<'_, HashMap<RequestId, mpsc::Sender<Response>>> {
+    fn lock_pending(&self) -> MutexGuard<'_, HashMap<RequestId, PendingRequest>> {
         match self.pending.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
     }
 
-    /// Register a pending request. Returns a bounded receiver the session awaits.
+    /// Register a pending request. Returns the receiver the session awaits.
     ///
     /// For non-streaming requests, exactly one response arrives.
     /// For streaming requests, multiple partial responses arrive before the final one.
-    /// Channel capacity applies backpressure when the session is slow.
-    pub fn register(&self, id: RequestId) -> mpsc::Receiver<Response> {
-        let (tx, rx) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
-        self.lock_pending().insert(id, tx);
-        rx
+    /// Partial capacity applies backpressure when the session is slow.
+    pub fn register(&self, id: RequestId) -> ResponseReceiver {
+        let (partials_tx, partials_rx) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
+        let (final_tx, final_rx) = oneshot::channel();
+        self.lock_pending().insert(
+            id,
+            PendingRequest {
+                partials: partials_tx,
+                final_tx,
+            },
+        );
+        ResponseReceiver {
+            partials: partials_rx,
+            final_rx: Some(final_rx),
+        }
     }
 
     /// Forward a response from the Data Plane to the waiting session.
     ///
     /// - If `response.partial` is true: sends the chunk but keeps the
     ///   request in the map for subsequent chunks.
-    /// - If `response.partial` is false: sends the final chunk and
-    ///   removes the request from the map.
+    /// - If `response.partial` is false: puts the response in the final
+    ///   slot and removes the request from the map. A full partial channel
+    ///   never refuses it.
     ///
-    /// Returns `false` if the request was cancelled, timed out, or the
-    /// session buffer is full (backpressure signal — the Data Plane should
-    /// stop producing further chunks for this request).
+    /// Returns `false` if the request was cancelled or its receiver dropped,
+    /// or if a partial found the session buffer full (backpressure signal —
+    /// the Data Plane must stop producing further chunks for this request).
     pub fn complete(&self, response: Response) -> bool {
         let is_final = !response.partial;
         let mut pending = self.lock_pending();
 
         if is_final {
-            if let Some(tx) = pending.remove(&response.request_id) {
-                tx.try_send(response).is_ok()
-            } else {
-                false
+            match pending.remove(&response.request_id) {
+                Some(request) => request.final_tx.send(response).is_ok(),
+                None => false,
             }
         } else {
             let request_id = response.request_id;
-            if let Some(tx) = pending.get(&request_id) {
-                match tx.try_send(response) {
+            if let Some(request) = pending.get(&request_id) {
+                match request.partials.try_send(response) {
                     Ok(()) => true,
                     Err(_) => {
                         // Full channel (session stalled) or closed (cancelled):
@@ -204,5 +278,41 @@ mod tests {
         assert!(rejected > 0);
         // Entry was evicted on first full-channel hit.
         assert_eq!(tracker.in_flight(), 0);
+    }
+
+    /// A session that stalls with its partial buffer full still receives
+    /// the final response, after every buffered partial.
+    #[tokio::test]
+    async fn a_full_partial_buffer_never_drops_the_final_response() {
+        let tracker = RequestTracker::new();
+        let mut rx = tracker.register(RequestId::new(11));
+        for i in 0..REQUEST_CHANNEL_CAPACITY {
+            assert!(tracker.complete(make_partial(11, &format!("chunk-{i}"))));
+        }
+
+        assert!(tracker.complete(make_response(11)));
+
+        for _ in 0..REQUEST_CHANNEL_CAPACITY {
+            let partial = rx.recv().await.expect("buffered partial");
+            assert!(partial.partial);
+        }
+        let last = rx.recv().await.expect("final response");
+        assert!(!last.partial);
+        assert!(rx.recv().await.is_none());
+    }
+
+    /// A `recv` dropped while it waits keeps the final response for the
+    /// next `recv`.
+    #[tokio::test]
+    async fn a_cancelled_recv_keeps_the_final_response() {
+        let tracker = RequestTracker::new();
+        let mut rx = tracker.register(RequestId::new(12));
+        let waited = tokio::time::timeout(std::time::Duration::from_millis(10), rx.recv()).await;
+        assert!(waited.is_err(), "nothing has arrived yet");
+
+        assert!(tracker.complete(make_response(12)));
+
+        let last = rx.recv().await.expect("final response");
+        assert_eq!(last.request_id, RequestId::new(12));
     }
 }

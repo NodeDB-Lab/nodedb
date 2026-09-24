@@ -185,3 +185,54 @@ impl CoreLoop {
         Ok(projected)
     }
 }
+
+impl CoreLoop {
+    /// Run every per-row gate over the whole projected set: the period lock
+    /// on both images and the write policy on the post-image. The apply loop
+    /// commits one row at a time, so a gate judged there refuses after the
+    /// rows ahead of it landed.
+    pub(in crate::data::executor) fn gate_bulk_update_rows(
+        &self,
+        task: &crate::data::executor::task::ExecutionTask,
+        tid: u64,
+        collection: &str,
+        rows: &[ProjectedUpdateRow],
+        rls_write_check: &nodedb_types::RlsWriteCheck,
+        resolved_sum_targets: &[nodedb_physical::physical_plan::ResolvedSumTarget],
+    ) -> Result<(), crate::bridge::envelope::ErrorCode> {
+        let database_id = task.request.database_id.as_u64();
+        let config_key = (
+            task.request.database_id,
+            TenantId::new(tid),
+            collection.to_string(),
+        );
+        let period_lock = self
+            .doc_configs
+            .get(&config_key)
+            .and_then(|config| config.enforcement.period_lock.as_ref());
+        for row in rows {
+            // A closed period refuses an edit to a row it holds, and an edit
+            // that assigns the period column into it.
+            if let Some(lock) = period_lock {
+                for image in [&row.current_bytes, &row.updated_bytes] {
+                    crate::data::executor::enforcement::period_lock::check_period_lock(
+                        &self.sparse,
+                        database_id,
+                        tid,
+                        collection,
+                        image,
+                        lock,
+                        resolved_sum_targets,
+                    )?;
+                }
+            }
+            crate::data::executor::handlers::rls_write_gate::admit_row(
+                rls_write_check,
+                &row.doc,
+                tid,
+                collection,
+            )?;
+        }
+        Ok(())
+    }
+}

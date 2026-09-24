@@ -262,6 +262,10 @@ impl Scheduler {
             );
             return;
         };
+        // The flush applied the txn's redo record.
+        if let Some(records) = pending.redo_records {
+            records.settle();
+        }
         self.release_and_mark_applied(txn_id, pending.lock_owner);
     }
 

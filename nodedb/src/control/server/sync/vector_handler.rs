@@ -15,8 +15,8 @@ use async_trait::async_trait;
 
 use nodedb_types::Surrogate;
 
+use crate::control::server::dispatch_utils::RecordOwner;
 use crate::types::{DatabaseId, TenantId, VShardId};
-use crate::wal::manager::NO_APPLY_KEY;
 
 // ── Dispatcher trait ─────────────────────────────────────────────────────────
 
@@ -106,20 +106,31 @@ impl<'a> VectorDispatcher for SharedStateVectorDispatcher<'a> {
         // Allocate WAL LSN on the Control Plane before dispatching to the
         // Data Plane. Sync path MUST write to WAL; non-sync path already does
         // this via `wal_append_if_write_with_creds` in the main dispatch.
-        let wal_lsn = wal_append_vector_put(
-            self.shared.wal.appender(NO_APPLY_KEY),
+        let owner = RecordOwner {
             tenant_id,
-            vshard,
             database_id,
-            VectorPutWalArgs {
-                collection: &params.collection,
-                vector: &params.vector,
-                dim: params.dim,
-                field_name: &params.field_name,
-                surrogate: params.surrogate,
-                provenance: Some(&prov),
-            },
-        )?;
+            vshard_id: vshard,
+        };
+        // The record's outcome-floor window opens before the append and
+        // closes from the dispatch's outcome.
+        let (minted, _) = super::raft_dispatch::append_under_window(self.shared, owner, |wal| {
+            wal_append_vector_put(
+                wal,
+                tenant_id,
+                vshard,
+                database_id,
+                VectorPutWalArgs {
+                    collection: &params.collection,
+                    vector: &params.vector,
+                    dim: params.dim,
+                    field_name: &params.field_name,
+                    surrogate: params.surrogate,
+                    provenance: Some(&prov),
+                },
+            )
+            .map(Some)
+        })
+        .await?;
 
         let plan = PhysicalPlan::Vector(VectorOp::Insert {
             collection: nodedb_types::QualifiedCollection::new(database_id, &params.collection),
@@ -131,15 +142,14 @@ impl<'a> VectorDispatcher for SharedStateVectorDispatcher<'a> {
             provenance: Some(prov),
         });
 
-        let authorized = super::raft_dispatch::authorize_sync_task(
+        super::raft_dispatch::authorize_and_dispatch_minted(
             self.shared,
             self.identity,
-            tenant_id,
-            database_id,
-            vshard,
+            owner,
             plan,
-        )?;
-        super::raft_dispatch::dispatch_sync_payload(self.shared, authorized, Some(wal_lsn)).await
+            minted,
+        )
+        .await
     }
 
     async fn dispatch_delete(
@@ -169,18 +179,29 @@ impl<'a> VectorDispatcher for SharedStateVectorDispatcher<'a> {
 
         // Allocate WAL LSN on the Control Plane before dispatching to the
         // Data Plane.
-        let wal_lsn = wal_append_vector_delete_by_surrogate(
-            self.shared.wal.appender(NO_APPLY_KEY),
+        let owner = RecordOwner {
             tenant_id,
-            vshard,
             database_id,
-            VectorDeleteWalArgs {
-                collection: &collection,
-                surrogate,
-                field_name: &field_name,
-                provenance: Some(&prov),
-            },
-        )?;
+            vshard_id: vshard,
+        };
+        // The record's outcome-floor window opens before the append and
+        // closes from the dispatch's outcome.
+        let (minted, _) = super::raft_dispatch::append_under_window(self.shared, owner, |wal| {
+            wal_append_vector_delete_by_surrogate(
+                wal,
+                tenant_id,
+                vshard,
+                database_id,
+                VectorDeleteWalArgs {
+                    collection: &collection,
+                    surrogate,
+                    field_name: &field_name,
+                    provenance: Some(&prov),
+                },
+            )
+            .map(Some)
+        })
+        .await?;
 
         let plan = PhysicalPlan::Vector(VectorOp::DeleteBySurrogate {
             collection: nodedb_types::QualifiedCollection::new(database_id, &collection),
@@ -189,15 +210,14 @@ impl<'a> VectorDispatcher for SharedStateVectorDispatcher<'a> {
             provenance: Some(prov),
         });
 
-        let authorized = super::raft_dispatch::authorize_sync_task(
+        super::raft_dispatch::authorize_and_dispatch_minted(
             self.shared,
             self.identity,
-            tenant_id,
-            database_id,
-            vshard,
+            owner,
             plan,
-        )?;
-        super::raft_dispatch::dispatch_sync_payload(self.shared, authorized, Some(wal_lsn)).await
+            minted,
+        )
+        .await
     }
 
     fn assign_surrogate(

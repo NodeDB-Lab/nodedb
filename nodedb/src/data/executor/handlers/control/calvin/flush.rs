@@ -107,7 +107,9 @@ mod tests {
     use crate::types::TenantId;
 
     use super::super::shared::CalvinExecCtx;
-    use super::super::shared::test_support::{make_task, point_insert_plan};
+    use super::super::shared::test_support::{
+        bulk_delete_plan, make_task, point_insert_plan, seed_row,
+    };
 
     #[test]
     fn calvin_flush_drops_synthetic_overlay() {
@@ -136,6 +138,38 @@ mod tests {
         assert!(
             !core.txn_overlays.contains_key(&synthetic),
             "flush must drop the synthetic overlay entry alongside commit_pending"
+        );
+    }
+
+    /// A staged plan keeps its OLLP prediction until the flush replays it.
+    /// A row that joins the predicate between stage and flush makes the
+    /// leader's flush answer `OllpRetryRequired`, although the verdict
+    /// already committed the transaction.
+    #[test]
+    fn a_staged_prediction_that_drifts_before_the_flush_answers_ollp_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        seed_row(&mut core, "orders", 1);
+
+        let task = make_task();
+        let tenant_id = TenantId::new(1);
+        let plans = vec![bulk_delete_plan("orders", Some(vec![1]))];
+        let ctx = CalvinExecCtx {
+            epoch: 1,
+            position: 0,
+            epoch_system_ms: 0,
+            is_group_leader: true,
+        };
+        let staged = core.execute_calvin_execute_static(&task, ctx, &tenant_id, &plans, &[]);
+        assert_eq!(staged.status, Status::Ok, "{:?}", staged.error_code);
+
+        seed_row(&mut core, "orders", 2);
+        let flushed = core.execute_calvin_flush(&task, 1, 0);
+
+        assert_eq!(flushed.status, Status::Error);
+        assert_eq!(
+            flushed.error_code.as_deref(),
+            Some(&crate::bridge::envelope::ErrorCode::OllpRetryRequired)
         );
     }
 }

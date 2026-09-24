@@ -409,4 +409,55 @@ mod tests {
         );
         assert_eq!(h.core.ts_max_ingested_lsn.get(&key), None);
     }
+
+    /// A `RETURNING` ingest whose tags overflow the cardinality limit is
+    /// refused before the first row lands. The refusal code claims nothing
+    /// applied, so no row and no memtable can exist afterwards.
+    #[test]
+    fn a_returning_ingest_over_the_tag_limit_writes_no_row() {
+        use nodedb_physical::physical_plan::document::{ReturningColumns, ReturningSpec};
+
+        let mut h = make_core();
+        h.core.ts_tuning.max_tag_cardinality = 2;
+        let mut task = ingest_task(
+            format!(
+                "{COLLECTION},host=h0 value=1i\n\
+                 {COLLECTION},host=h1 value=2i\n\
+                 {COLLECTION},host=h2 value=3i\n"
+            )
+            .into_bytes(),
+            Some(7),
+        );
+        if let PhysicalPlan::Timeseries(TimeseriesOp::Ingest { returning, .. }) =
+            &mut task.request.plan
+        {
+            *returning = Some(ReturningSpec {
+                columns: ReturningColumns::Star,
+            });
+        }
+        let PhysicalPlan::Timeseries(op) = task.request.plan.clone() else {
+            panic!("timeseries plan");
+        };
+
+        let response = h.core.dispatch_timeseries(&task, &op);
+        assert_eq!(response.status, Status::Error);
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(crate::bridge::envelope::ErrorCode::RejectedPrevalidation { .. })
+            ),
+            "got {:?}",
+            response.error_code
+        );
+
+        let key = (
+            DatabaseId::DEFAULT,
+            TenantId::new(TENANT),
+            COLLECTION.to_string(),
+        );
+        assert!(
+            !h.core.columnar_memtables.contains_key(&key),
+            "a refused ingest must not create the memtable"
+        );
+    }
 }

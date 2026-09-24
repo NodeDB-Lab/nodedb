@@ -5,7 +5,6 @@
 use crate::bridge::envelope::{Payload, PhysicalPlan, Response, Status};
 use std::sync::Arc;
 
-use crate::control::gateway::GatewayErrorMap;
 use crate::control::gateway::core::QueryContext as GatewayQueryContext;
 use crate::control::gateway::router::is_task_vshard_scoped;
 use crate::control::server::shared::clone_write::CloneCheckedOutcome;
@@ -73,19 +72,9 @@ pub(super) async fn dispatch_authorized_single_task(
                 database_id: ctx.database_id(),
                 txn_id,
             };
-            gateway
-                .execute(&query, checked)
-                .await
-                .map(gateway_payloads_to_response)
-                .map_err(|error| match error {
-                    // A capacity refusal keeps its type so the client sees
-                    // the retryable overload class.
-                    capacity @ crate::Error::DispatchCapacity { .. } => capacity,
-                    other => {
-                        let (_, detail) = GatewayErrorMap::to_native(&other);
-                        crate::Error::Dispatch { detail }
-                    }
-                })
+            // The typed error passes through unchanged. The native frame
+            // renders its SQLSTATE and numeric code from it.
+            gateway.execute_response(&query, checked).await
         }
         None => dispatch_without_gateway(ctx, checked).await,
     }
@@ -203,25 +192,5 @@ pub(super) async fn dispatch_without_gateway(
             .await
     } else {
         write().await
-    }
-}
-
-fn gateway_payloads_to_response(payloads: Vec<Vec<u8>>) -> Response {
-    let payload = payloads
-        .into_iter()
-        .next()
-        .map(Payload::from_vec)
-        .unwrap_or_else(Payload::empty);
-    Response {
-        request_id: RequestId::new(0),
-        status: Status::Ok,
-        attempt: 0,
-        partial: false,
-        payload,
-        watermark_lsn: Lsn::ZERO,
-        error_code: None,
-        read_set_valid: None,
-        read_version_lsn: Lsn::ZERO,
-        write_set: Vec::new(),
     }
 }

@@ -2,6 +2,7 @@
 
 mod batch;
 mod batch_crdt;
+mod batch_irreversible;
 pub(in crate::data::executor) mod index_write_values;
 pub mod overlay;
 mod overlay_gauge;

@@ -6,6 +6,7 @@ use crate::bridge::envelope::{ErrorCode, Response, WriteSetEntry};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::write_hook;
+use crate::data::executor::handlers::partial_refusal::refusal_after_rows;
 use crate::data::executor::handlers::returning_doc;
 use crate::data::executor::handlers::returning_rows;
 use crate::data::executor::handlers::rls_write_gate;
@@ -175,25 +176,48 @@ impl CoreLoop {
         // deleted. The pre-deletion image is the only image a delete has. A row
         // that is already absent is admitted: it removes nothing, so there is
         // no image for the policy to restrict.
-        if !matches!(
+        // The period lock is judged here too, on the same image: each row
+        // below commits in its own transaction, so a lock judged there
+        // refuses after the rows ahead of it were removed.
+        let gate_policy = !matches!(
             rls_write_check.decision(),
             nodedb_types::WriteGateDecision::AdmitAll
-        ) {
+        );
+        let period_lock = self
+            .doc_configs
+            .get(&config_key)
+            .and_then(|config| config.enforcement.period_lock.as_ref());
+        if gate_policy || period_lock.is_some() {
             for key in &apply_ids {
                 let stored = match self.sparse.get(database_id, tid, collection, key) {
                     Ok(Some(bytes)) => bytes,
                     Ok(None) => continue,
                     Err(e) => return self.response_error(task, e),
                 };
-                let identity = key.to_identity();
-                if let Err(e) = rls_write_gate::admit_stored_row(
-                    rls_write_check,
-                    &stored,
-                    &identity,
-                    strict_schema.as_ref(),
-                    tid,
-                    collection,
-                ) {
+                if gate_policy
+                    && let Err(e) = rls_write_gate::admit_stored_row(
+                        rls_write_check,
+                        &stored,
+                        &key.to_identity(),
+                        strict_schema.as_ref(),
+                        tid,
+                        collection,
+                    )
+                {
+                    return self.response_error(task, e);
+                }
+                if let Some(lock) = period_lock
+                    && let Err(e) =
+                        crate::data::executor::enforcement::period_lock::check_period_lock(
+                            &self.sparse,
+                            database_id,
+                            tid,
+                            collection,
+                            &stored,
+                            lock,
+                            resolved_sum_targets,
+                        )
+                {
                     return self.response_error(task, e);
                 }
             }
@@ -241,35 +265,38 @@ impl CoreLoop {
             // will not decode is a different answer: it would silently drop out
             // of RETURNING and, worse, contribute no removed index tuples, so
             // its old secondary-index entries would survive the delete.
-            let pre_delete_doc: Option<serde_json::Value> =
-                if returning.is_some() || !index_paths.is_empty() {
-                    match self
-                        .sparse
-                        .get(
-                            task.request.database_id.as_u64(),
-                            tid,
-                            collection,
-                            storage_key,
-                        )
-                        .ok()
-                        .flatten()
-                    {
-                        Some(bytes) => {
-                            let identity = storage_key.to_identity();
-                            match returning_doc::from_stored_json(
-                                &bytes,
-                                &identity,
-                                strict_schema.as_ref(),
-                            ) {
-                                Ok(doc) => Some(doc),
-                                Err(e) => return self.response_error(task, e),
+            let pre_delete_doc: Option<serde_json::Value> = if returning.is_some()
+                || !index_paths.is_empty()
+            {
+                match self
+                    .sparse
+                    .get(
+                        task.request.database_id.as_u64(),
+                        tid,
+                        collection,
+                        storage_key,
+                    )
+                    .ok()
+                    .flatten()
+                {
+                    Some(bytes) => {
+                        let identity = storage_key.to_identity();
+                        match returning_doc::from_stored_json(
+                            &bytes,
+                            &identity,
+                            strict_schema.as_ref(),
+                        ) {
+                            Ok(doc) => Some(doc),
+                            Err(e) => {
+                                return self.response_error(task, refusal_after_rows(affected, e));
                             }
                         }
-                        None => None,
                     }
-                } else {
-                    None
-                };
+                    None => None,
+                }
+            } else {
+                None
+            };
 
             // The removal and the materialized-sum deltas it owes share ONE
             // transaction, so a debited target row can never outlive a removal
@@ -279,7 +306,7 @@ impl CoreLoop {
             // index diff, and is not widened for this.
             let row_txn = match self.sparse.begin_write() {
                 Ok(txn) => txn,
-                Err(e) => return self.response_error(task, e),
+                Err(e) => return self.response_error(task, refusal_after_rows(affected, e)),
             };
             let deleted_bytes = self
                 .sparse
@@ -292,24 +319,6 @@ impl CoreLoop {
                 )
                 .ok()
                 .flatten();
-            // Period lock, the pre-deletion image — a delete has no other.
-            // Checked before `write_hook::run` and before commit: dropping
-            // `row_txn` un-committed on a refusal reverses the removal.
-            if let Some(bytes) = deleted_bytes.as_deref()
-                && let Some(config) = self.doc_configs.get(&config_key)
-                && let Some(ref pl) = config.enforcement.period_lock
-                && let Err(e) = crate::data::executor::enforcement::period_lock::check_period_lock(
-                    &self.sparse,
-                    database_id,
-                    tid,
-                    collection,
-                    bytes,
-                    pl,
-                    resolved_sum_targets,
-                )
-            {
-                return self.response_error(task, e);
-            }
             let mut target_writes = Vec::new();
             if let Some(bytes) = deleted_bytes.as_deref() {
                 match write_hook::run(
@@ -333,15 +342,18 @@ impl CoreLoop {
                     Ok(outcome) => target_writes = outcome.target_writes,
                     // Dropping `row_txn` un-committed reverses both the removal
                     // and every target it had already debited.
-                    Err(e) => return self.response_error(task, e),
+                    Err(e) => return self.response_error(task, refusal_after_rows(affected, e)),
                 }
             }
             if let Err(e) = row_txn.commit() {
                 return self.response_error(
                     task,
-                    ErrorCode::Internal {
-                        detail: format!("bulk delete commit: {e}"),
-                    },
+                    refusal_after_rows(
+                        affected,
+                        ErrorCode::Internal {
+                            detail: format!("bulk delete commit: {e}"),
+                        },
+                    ),
                 );
             }
             // One durable redo entry per debited target row, naming the TARGET
@@ -415,5 +427,108 @@ impl CoreLoop {
             response.write_set = write_set;
         }
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::envelope::Status;
+    use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
+    use crate::data::executor::doc_format;
+    use crate::engine::document::store::CollectionConfig;
+    use crate::types::{DatabaseId, TenantId};
+    use nodedb_physical::physical_plan::PeriodLockConfig;
+    use nodedb_types::{StorageKey, Surrogate};
+
+    const TID: u64 = 1;
+    const COLLECTION: &str = "journal";
+
+    fn seed(core: &mut CoreLoop, database_id: u64, surrogate: u32, row: serde_json::Value) {
+        core.sparse
+            .put(
+                database_id,
+                TID,
+                COLLECTION,
+                &StorageKey::for_surrogate(Surrogate(surrogate)),
+                &doc_format::encode_to_msgpack(&row),
+            )
+            .expect("seed row");
+    }
+
+    /// A closed period holds one matched row. The refusal code claims
+    /// nothing applied, so no matched row can be removed, including the rows
+    /// the lock does not hold.
+    #[test]
+    fn a_period_lock_on_any_matched_row_removes_no_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        let task = make_default_task();
+        let database_id = task.request.database_id.as_u64();
+        let mut config = CollectionConfig::new(COLLECTION);
+        config.enforcement.period_lock = Some(PeriodLockConfig {
+            period_column: "fiscal_period".into(),
+            ref_table: "fiscal_periods".into(),
+            ref_pk: "period_key".into(),
+            status_column: "status".into(),
+            allowed_statuses: vec!["OPEN".into()],
+        });
+        core.doc_configs.insert(
+            (
+                DatabaseId::new(database_id),
+                TenantId::new(TID),
+                COLLECTION.to_string(),
+            ),
+            config,
+        );
+        seed(&mut core, database_id, 1, serde_json::json!({"amount": 1}));
+        // No reference row resolves this period, so the lock refuses it.
+        seed(
+            &mut core,
+            database_id,
+            2,
+            serde_json::json!({"amount": 2, "fiscal_period": "2026-01"}),
+        );
+        seed(&mut core, database_id, 3, serde_json::json!({"amount": 3}));
+
+        let response = core.execute_bulk_delete(
+            &task,
+            TID,
+            BulkDeleteParams {
+                collection: COLLECTION,
+                filter_bytes: &[],
+                returning: None,
+                rls_filters: &[],
+                rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                resolved_sum_targets: &[],
+                ollp: OllpPrediction {
+                    surrogates: None,
+                    edges: None,
+                },
+                declared_primary_key: None,
+            },
+        );
+
+        assert_eq!(response.status, Status::Error);
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(ErrorCode::PeriodLocked { .. })
+            ),
+            "got {:?}",
+            response.error_code
+        );
+        for surrogate in [1, 2, 3] {
+            let stored = core
+                .sparse
+                .get(
+                    database_id,
+                    TID,
+                    COLLECTION,
+                    &StorageKey::for_surrogate(Surrogate(surrogate)),
+                )
+                .expect("read row");
+            assert!(stored.is_some(), "row {surrogate} must remain");
+        }
     }
 }

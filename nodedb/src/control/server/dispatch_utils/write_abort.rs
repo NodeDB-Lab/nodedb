@@ -22,126 +22,11 @@
 //! The match is exhaustive on purpose. A new [`ErrorCode`] must be classified by
 //! whoever adds it, not silently inherit either answer.
 //!
-//! [`abort_refused_write`] is the one place that acts on that verdict, and the
-//! write funnel is its only caller — every `AppendHere` write in every engine,
-//! including the Raft apply loop, passes through there.
+//! [`resolve_on_response`](super::minted::resolve_on_response) is the one
+//! place that acts on that verdict. Every write that mints a record for a
+//! Data-Plane dispatch resolves its records there.
 
-use crate::bridge::envelope::{ErrorCode, Response};
-use crate::control::state::SharedState;
-use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
-
-/// Identity of the forward record an abort marker would name.
-pub(crate) struct AbortTarget {
-    pub tenant_id: TenantId,
-    pub database_id: DatabaseId,
-    pub vshard_id: VShardId,
-    /// The forward write's redo LSN, if one was minted at all.
-    pub wal_lsn: Option<Lsn>,
-    /// Whether the write funnel appended the forward record. A caller that
-    /// recorded durability elsewhere owns the undo semantics of its own record.
-    pub appends_here: bool,
-    /// The idempotency key of the replicated proposal whose refusal is final,
-    /// `0` otherwise. A final refusal is the proposal's outcome: its abort
-    /// marker carries the key, and the proposal ledger rebuilt at boot counts
-    /// the proposal as applied. The cancelled forward record never counts.
-    pub final_refusal_key: u64,
-}
-
-/// Cancel a forward write record the Data Plane refused.
-///
-/// The write funnel appends the redo record before the Data Plane has decided,
-/// so a refusal arrives with the record already in the log and restart replay
-/// would re-apply the very write the client was told was rejected. This writes a
-/// `WriteAborted` marker naming that record, then waits for it to be fsynced
-/// BEFORE the error is returned: the refusal path performs no fsync of its own,
-/// so an abort left buffered is volatile while the forward record may already be
-/// durable via a concurrent writer's group commit.
-///
-/// Cost: a rejected write now pays a WAL append plus an fsync wait it did not
-/// pay before. That is a deliberate trade of refusal latency for the guarantee
-/// that a refusal, once acknowledged, stays refused.
-///
-/// **Known residual, not closed:** a crash BEFORE the abort record is durable
-/// can still resurrect the write, because the forward record's durability is not
-/// gated on the verdict. Closing that window means holding the per-key order
-/// guard across the whole Data-Plane round trip, which would serialize same-key
-/// writes on every engine's common path. What this guarantees is the ACKED case:
-/// once the client has been told the write was refused, a restart cannot make it
-/// appear.
-///
-/// An append or fsync failure here is propagated, not logged: continuing would
-/// return the refusal while leaving the forward record replayable, which is
-/// exactly the bug this exists to prevent.
-pub(crate) async fn abort_refused_write(
-    shared: &SharedState,
-    target: AbortTarget,
-    response: &Response,
-) -> crate::Result<()> {
-    if !target.appends_here {
-        return Ok(());
-    }
-    let Some(wal_lsn) = target.wal_lsn else {
-        return Ok(());
-    };
-    // A rejection is only cancellable when the verdict itself proves nothing
-    // was installed. An ambiguous failure keeps its forward record, because
-    // erasing a write that actually landed is worse than replaying one that
-    // did not.
-    let Some(code) = response.error_code.as_deref() else {
-        return Ok(());
-    };
-    if !write_definitely_not_applied(code) {
-        return Ok(());
-    }
-
-    let marker_key = if refusal_is_final(code) {
-        target.final_refusal_key
-    } else {
-        0
-    };
-    append_abort_marker(shared, &target, wal_lsn, marker_key).await
-}
-
-/// Cancel a forward write record whose request the dispatcher refused.
-///
-/// The request never reached a core, so the Data Plane applied nothing. The
-/// marker carries no proposal key: a dispatch refusal depends on this node's
-/// load at that moment, so a redelivery of the same entry can apply it.
-pub(crate) async fn abort_undispatched_write(
-    shared: &SharedState,
-    target: AbortTarget,
-) -> crate::Result<()> {
-    if !target.appends_here {
-        return Ok(());
-    }
-    let Some(wal_lsn) = target.wal_lsn else {
-        return Ok(());
-    };
-    append_abort_marker(shared, &target, wal_lsn, 0).await
-}
-
-/// Append a `WriteAborted` marker naming `wal_lsn` and wait until it is
-/// durable.
-async fn append_abort_marker(
-    shared: &SharedState,
-    target: &AbortTarget,
-    wal_lsn: Lsn,
-    marker_key: u64,
-) -> crate::Result<()> {
-    let abort_lsn = shared.wal.appender(marker_key).append_write_aborted(
-        target.tenant_id,
-        target.vshard_id,
-        target.database_id,
-        wal_lsn,
-    )?;
-    shared.wal.wait_durable(abort_lsn).await?;
-    tracing::debug!(
-        aborted_lsn = wal_lsn.as_u64(),
-        abort_lsn = abort_lsn.as_u64(),
-        "refused write cancelled in the WAL"
-    );
-    Ok(())
-}
+use crate::bridge::envelope::ErrorCode;
 
 /// Whether a replicated proposal refused with `code` is refused for good: a
 /// redelivery of the same entry against the same state refuses it again.
@@ -149,7 +34,8 @@ async fn append_abort_marker(
 /// A verdict that depends on this node's momentary load or on a transient
 /// precondition is not final: another replica can apply the same entry, and
 /// a redelivery here can too. That covers admission and capacity verdicts,
-/// concurrency retries, the staging byte budget, and `RetryableRefusal`,
+/// a task that expired before it started, concurrency retries, the staging
+/// byte budget, and `RetryableRefusal`,
 /// which a committed-redo apply answers with after it rolled a failed
 /// install back.
 pub(crate) fn refusal_is_final(code: &ErrorCode) -> bool {
@@ -160,6 +46,7 @@ pub(crate) fn refusal_is_final(code: &ErrorCode) -> bool {
                 | ErrorCode::RateExceeded { .. }
                 | ErrorCode::CollectionDraining { .. }
                 | ErrorCode::DispatchCapacity { .. }
+                | ErrorCode::ExpiredBeforeExecution
                 | ErrorCode::ConflictRetry
                 | ErrorCode::OllpRetryRequired
                 | ErrorCode::TxnOverlayMemoryExceeded { .. }
@@ -195,6 +82,8 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         | ErrorCode::CollectionDraining { .. }
         | ErrorCode::DispatchCapacity { .. }
         | ErrorCode::Unsupported { .. }
+        // The deadline passed before the core started the task.
+        | ErrorCode::ExpiredBeforeExecution
         // The target row or collection did not exist, so the write had nothing
         // to mutate.
         | ErrorCode::NotFound
@@ -274,6 +163,17 @@ mod tests {
         assert!(write_definitely_not_applied(&ErrorCode::DispatchCapacity {
             reason: "core 0 queue is full at 64 requests".into(),
         }));
+    }
+
+    /// A task that expired before its core started it ran nothing, so the
+    /// record aborts. A redelivery can still run it, so the refusal is not
+    /// final.
+    #[test]
+    fn a_task_that_never_started_aborts_the_record_but_is_not_final() {
+        assert!(write_definitely_not_applied(
+            &ErrorCode::ExpiredBeforeExecution
+        ));
+        assert!(!refusal_is_final(&ErrorCode::ExpiredBeforeExecution));
     }
 
     /// The asymmetry that keeps this safe: an ambiguous outcome must never

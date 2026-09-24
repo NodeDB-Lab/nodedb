@@ -13,9 +13,8 @@
 //! buffer is full rather than silently expanding forever.
 
 use nodedb::bridge::envelope::{Payload, Response, Status};
-use nodedb::control::request_tracker::RequestTracker;
+use nodedb::control::request_tracker::{RequestTracker, ResponseReceiver};
 use nodedb::types::{Lsn, RequestId};
-use tokio::sync::mpsc;
 
 fn partial(id: u64, data: &[u8]) -> Response {
     Response {
@@ -33,12 +32,11 @@ fn partial(id: u64, data: &[u8]) -> Response {
 }
 
 #[test]
-fn register_returns_bounded_receiver() {
-    // Compile-gate: the mpsc type must be the bounded `Receiver`, not
-    // `UnboundedReceiver`. This is the single largest guarantee — bounded
-    // type is what forces backpressure through the rest of the pipeline.
+fn register_returns_a_response_receiver() {
+    // Compile-gate: partials reach the session through the receiver's
+    // bounded channel. The next test shows the bound.
     let tracker = RequestTracker::new();
-    let _rx: mpsc::Receiver<Response> = tracker.register(RequestId::new(1));
+    let _rx: ResponseReceiver = tracker.register(RequestId::new(1));
 }
 
 #[test]

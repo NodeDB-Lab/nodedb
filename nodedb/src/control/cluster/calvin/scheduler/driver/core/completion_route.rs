@@ -56,13 +56,20 @@ impl Scheduler {
             .unwrap_or(0);
         self.metrics.record_executor_txn_duration_ms(elapsed_ms);
 
+        // A staged transaction resolves through its commit-barrier state, OLLP
+        // answer included. A flush under a commit verdict that answers
+        // `OllpRetryRequired` wrote nothing on this replica while the others
+        // applied, so it halts and holds. It never settles as a retry.
+        let commit_state = self.pending.get(&txn_id).and_then(|p| p.commit_state);
+
         // OLLP mismatch: the active executor detected predicate drift and returned
         // OllpRetryRequired without writing. The retry loop is now COORDINATOR-owned
         // (`run_dependent_with_retry`): the scheduler must NOT re-submit a stale
         // prediction. Instead it (1) releases the aborted attempt's locks and
         // (2) signals the coordinator's completion waiter via the registry so it
         // can run a FRESH reconnaissance and resubmit.
-        if response.status == crate::bridge::envelope::Status::Error
+        if commit_state.is_none()
+            && response.status == crate::bridge::envelope::Status::Error
             && response.error_code.as_deref()
                 == Some(&crate::bridge::envelope::ErrorCode::OllpRetryRequired)
         {
@@ -109,7 +116,6 @@ impl Scheduler {
         // vote; drive the vote-and-park and let the verdict resume the
         // flush-or-drop. Dependent / active txns carry no `commit_state` and apply
         // directly below.
-        let commit_state = self.pending.get(&txn_id).and_then(|p| p.commit_state);
         match commit_state {
             Some(CommitState::Staged) => {
                 // Stage failures remain participants in the barrier:
@@ -198,7 +204,7 @@ mod tests {
     use super::*;
     use crate::control::cluster::calvin::scheduler::driver::core::halt::HaltReason;
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
-        make_sequenced_txn, scheduler_with_pending, staged_pending,
+        error_response, make_sequenced_txn, scheduler_with_pending, staged_pending,
     };
     use crate::control::cluster::calvin::scheduler::metrics::apply_halt_reason;
 
@@ -258,6 +264,39 @@ mod tests {
         assert_eq!(
             marker.map(|h| (h.epoch, h.position, h.step)),
             Some((5, 1, "stage"))
+        );
+    }
+
+    /// A committed flush that answers `OllpRetryRequired` wrote nothing on
+    /// this replica. The txn stays pending and unapplied, its redo records
+    /// stay open, and the scheduler halts on the flush.
+    #[tokio::test]
+    async fn an_ollp_answer_to_a_committed_flush_halts_and_holds() {
+        let txn_id = TxnId::new(5, 1);
+        let (mut scheduler, _dir) = scheduler_with_pending(
+            txn_id,
+            CommitState::AwaitingResolve {
+                committed: true,
+                redo_lsn: None,
+            },
+        );
+
+        scheduler.handle_completion(
+            txn_id,
+            RequestId::new(9),
+            Some(error_response(
+                crate::bridge::envelope::ErrorCode::OllpRetryRequired,
+            )),
+        );
+
+        assert!(!scheduler.applied.is_applied(5, 1));
+        assert!(
+            scheduler.pending.contains_key(&txn_id),
+            "the txn must stay pending"
+        );
+        assert_eq!(
+            scheduler.apply_halt().map(|h| h.reason),
+            Some(HaltReason::FlushFailed)
         );
     }
 }

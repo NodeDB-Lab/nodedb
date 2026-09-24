@@ -10,6 +10,9 @@ use nodedb_types::columnar::StrictSchema;
 use crate::bridge::envelope::{ErrorCode, Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::write_hook;
+use crate::data::executor::handlers::partial_refusal::{
+    refusal_after_partial_apply, refusal_after_rows,
+};
 use crate::data::executor::handlers::point::update_reindex_vector::UpdateVectorReindex;
 use crate::data::executor::handlers::returning_doc;
 use crate::data::executor::handlers::transaction::stage_write::stored_row_identity;
@@ -79,6 +82,34 @@ impl CoreLoop {
             Vec::new()
         };
 
+        // A closed period refuses an edit to a row it holds, and an edit that
+        // assigns the period column into it. Both images of every row are
+        // judged before the first row commits: each row below commits on its
+        // own, so a lock judged there refuses after earlier rows landed.
+        if let Some(lock) = self
+            .doc_configs
+            .get(&config_key)
+            .and_then(|config| config.enforcement.period_lock.as_ref())
+        {
+            for row in &rows {
+                for image in [&row.old_body, &row.body] {
+                    if let Err(e) =
+                        crate::data::executor::enforcement::period_lock::check_period_lock(
+                            &self.sparse,
+                            database_id,
+                            tid,
+                            target_collection,
+                            image,
+                            lock,
+                            resolved_sum_targets,
+                        )
+                    {
+                        return Err(self.response_error(task, e));
+                    }
+                }
+            }
+        }
+
         for row in rows {
             let ResolvedUpdateRow {
                 key: storage_key,
@@ -87,43 +118,13 @@ impl CoreLoop {
                 doc,
             } = row;
 
-            // Period lock, both images — matching `execute_point_update`: a
-            // closed period must reject an edit to a row it already holds,
-            // and must reject an edit that assigns the period column into it.
-            if let Some(config) = self.doc_configs.get(&config_key)
-                && let Some(ref pl) = config.enforcement.period_lock
-            {
-                if let Err(e) = crate::data::executor::enforcement::period_lock::check_period_lock(
-                    &self.sparse,
-                    database_id,
-                    tid,
-                    target_collection,
-                    &old_body,
-                    pl,
-                    resolved_sum_targets,
-                ) {
-                    return Err(self.response_error(task, e));
-                }
-                if let Err(e) = crate::data::executor::enforcement::period_lock::check_period_lock(
-                    &self.sparse,
-                    database_id,
-                    tid,
-                    target_collection,
-                    &updated_bytes,
-                    pl,
-                    resolved_sum_targets,
-                ) {
-                    return Err(self.response_error(task, e));
-                }
-            }
-
             // The row's body and the materialized-sum delta it owes share ONE
             // transaction. `ResolvedUpdateRow` already carries BOTH images —
             // `old_body` as stored and `body` as the post-image — so the fold
             // re-reads nothing; the struct was built to carry them.
             let row_txn = match self.sparse.begin_write() {
                 Ok(txn) => txn,
-                Err(e) => return Err(self.response_error(task, e)),
+                Err(e) => return Err(self.response_error(task, refusal_after_rows(affected, e))),
             };
             let stored = self.sparse.put_in_txn(
                 &row_txn,
@@ -158,14 +159,19 @@ impl CoreLoop {
                     Ok(outcome) => outcome.target_writes,
                     // Dropping `row_txn` un-committed reverses the row and every
                     // target it had already moved.
-                    Err(e) => return Err(self.response_error(task, e)),
+                    Err(e) => {
+                        return Err(self.response_error(task, refusal_after_rows(affected, e)));
+                    }
                 };
                 if let Err(e) = row_txn.commit() {
                     return Err(self.response_error(
                         task,
-                        ErrorCode::Internal {
-                            detail: format!("update-from-join commit: {e}"),
-                        },
+                        refusal_after_rows(
+                            affected,
+                            ErrorCode::Internal {
+                                detail: format!("update-from-join commit: {e}"),
+                            },
+                        ),
                     ));
                 }
                 // One durable redo entry per moved target row, naming the TARGET
@@ -224,7 +230,10 @@ impl CoreLoop {
                         is_strict,
                         has_vectors,
                     }) {
-                        return Err(self.response_error(task, e));
+                        // The row's body already committed.
+                        return Err(
+                            self.response_error(task, refusal_after_partial_apply(e.into()))
+                        );
                     }
                     write_set.push(WriteSetEntry {
                         surrogate: storage_key.surrogate().as_u32(),
@@ -251,5 +260,120 @@ impl CoreLoop {
             write_set,
             returned_docs,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
+    use crate::data::executor::doc_format;
+    use crate::engine::document::store::CollectionConfig;
+    use crate::types::{DatabaseId, TenantId};
+    use nodedb_physical::physical_plan::PeriodLockConfig;
+    use nodedb_types::{StorageKey, Surrogate};
+
+    const TID: u64 = 1;
+    const COLLECTION: &str = "journal";
+
+    fn resolved_row(surrogate: u32, old: serde_json::Value) -> ResolvedUpdateRow {
+        let mut new = old.clone();
+        if let Some(fields) = new.as_object_mut() {
+            fields.insert("note".into(), serde_json::json!("new"));
+        }
+        ResolvedUpdateRow {
+            key: StorageKey::for_surrogate(Surrogate(surrogate)),
+            body: doc_format::encode_to_msgpack(&new),
+            old_body: doc_format::encode_to_msgpack(&old),
+            doc: new,
+        }
+    }
+
+    /// A closed period holds one resolved row. The refusal code claims
+    /// nothing applied, so no row can be rewritten, including the rows ahead
+    /// of it.
+    #[test]
+    fn a_period_lock_on_any_resolved_row_rewrites_no_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        let task = make_default_task();
+        let database_id = task.request.database_id.as_u64();
+        let mut config = CollectionConfig::new(COLLECTION);
+        config.enforcement.period_lock = Some(PeriodLockConfig {
+            period_column: "fiscal_period".into(),
+            ref_table: "fiscal_periods".into(),
+            ref_pk: "period_key".into(),
+            status_column: "status".into(),
+            allowed_statuses: vec!["OPEN".into()],
+        });
+        core.doc_configs.insert(
+            (
+                DatabaseId::new(database_id),
+                TenantId::new(TID),
+                COLLECTION.to_string(),
+            ),
+            config,
+        );
+        let old_rows = [
+            serde_json::json!({"note": "old"}),
+            // No reference row resolves this period, so the lock refuses it.
+            serde_json::json!({"note": "old", "fiscal_period": "2026-01"}),
+            serde_json::json!({"note": "old"}),
+        ];
+        for (surrogate, row) in (1u32..).zip(old_rows.iter()) {
+            core.sparse
+                .put(
+                    database_id,
+                    TID,
+                    COLLECTION,
+                    &StorageKey::for_surrogate(Surrogate(surrogate)),
+                    &doc_format::encode_to_msgpack(row),
+                )
+                .expect("seed row");
+        }
+        let rows: Vec<ResolvedUpdateRow> = (1u32..)
+            .zip(old_rows.iter())
+            .map(|(surrogate, row)| resolved_row(surrogate, row.clone()))
+            .collect();
+
+        let outcome = core.write_resolved_update_from_join_rows(
+            &task,
+            WriteResolvedRowsCtx {
+                tid: TID,
+                target_collection: COLLECTION,
+                resolved_sum_targets: &[],
+                has_vectors: false,
+                strict_schema: None,
+                declared_primary_key: None,
+                want_returning: false,
+            },
+            rows,
+        );
+
+        let Err(response) = outcome else {
+            panic!("a locked period must refuse the statement");
+        };
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(ErrorCode::PeriodLocked { .. })
+            ),
+            "got {:?}",
+            response.error_code
+        );
+        for surrogate in 1u32..=3 {
+            let stored = core
+                .sparse
+                .get(
+                    database_id,
+                    TID,
+                    COLLECTION,
+                    &StorageKey::for_surrogate(Surrogate(surrogate)),
+                )
+                .expect("read row")
+                .expect("row exists");
+            let doc = doc_format::decode_document(&stored).expect("row decodes");
+            assert_eq!(doc.get("note"), Some(&serde_json::json!("old")));
+        }
     }
 }

@@ -7,6 +7,7 @@
 //! rows, and the one that decides what every later read of the collection is
 //! shaped like.
 
+use crate::engine::timeseries::columnar_memtable::ColumnType;
 use crate::engine::timeseries::ilp;
 use crate::engine::timeseries::ilp_ingest;
 
@@ -82,5 +83,35 @@ impl CoreLoop {
              types are NOT in effect for this collection"
         );
         ilp_ingest::infer_schema(lines)
+    }
+
+    /// Names of the symbol columns `lines` resolve against once the ingest
+    /// has created or evolved the memtable. Reads live state only.
+    pub(super) fn ts_symbol_columns_for_ingest(
+        &self,
+        database_id: crate::types::DatabaseId,
+        tid: crate::types::TenantId,
+        collection: &str,
+        lines: &[ilp::IlpLine<'_>],
+    ) -> Vec<String> {
+        let key = (database_id, tid, collection.to_string());
+        let columns = match self.columnar_memtables.get(&key) {
+            Some(memtable) => {
+                let schema = memtable.schema();
+                let mut columns = schema.columns.clone();
+                columns.extend(ilp_ingest::new_columns(schema, lines));
+                columns
+            }
+            None => {
+                self.declared_ts_memtable_schema(database_id, tid, collection)
+                    .unwrap_or_else(|| ilp_ingest::infer_schema(lines))
+                    .columns
+            }
+        };
+        columns
+            .into_iter()
+            .filter(|(_, col_type)| *col_type == ColumnType::Symbol)
+            .map(|(name, _)| name)
+            .collect()
     }
 }
