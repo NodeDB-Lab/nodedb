@@ -27,6 +27,24 @@ pub(super) fn init_test_memory_governor() -> Arc<nodedb_mem::MemoryGovernor> {
     nodedb::memory::init_governor(ceiling, &budgets).expect("harness governor config is valid")
 }
 
+/// The one node that leads every group in a single-node routing table.
+///
+/// Panics when the table names no leader, or more than one: a single-node
+/// harness cannot serve a group another node leads.
+pub(super) fn single_routing_leader(routing: &nodedb_cluster::RoutingTable) -> u64 {
+    let mut leaders: Vec<u64> = routing
+        .group_members()
+        .values()
+        .map(|group| group.leader)
+        .collect();
+    leaders.sort_unstable();
+    leaders.dedup();
+    match leaders.as_slice() {
+        [leader] if *leader != 0 => *leader,
+        other => panic!("single-node harness routing must name one leader, got {other:?}"),
+    }
+}
+
 /// Bind a native (MessagePack) protocol listener on `127.0.0.1:0` and
 /// spawn its accept loop. Returns the listener's local port plus the
 /// handle to await on shutdown.

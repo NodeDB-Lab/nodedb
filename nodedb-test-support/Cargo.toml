@@ -24,6 +24,7 @@ nodedb-types = { workspace = true }
 nodedb-wal = { workspace = true }
 
 # Runtime + wire deps used by the harness itself.
+async-trait = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tokio-postgres = { workspace = true }
 tokio-tungstenite = { workspace = true }

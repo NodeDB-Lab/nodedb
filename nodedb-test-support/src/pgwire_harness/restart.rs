@@ -200,6 +200,9 @@ impl TestServer {
             s.governor = init_test_memory_governor();
         }
         let shared = shared;
+        // The same gateway install production boot runs, after every
+        // `Arc::get_mut` above.
+        nodedb::bootstrap::state_wiring::install_gateway(&shared);
         nodedb::bootstrap::credentials::replay_surrogate_wal(
             &shared,
             &wal_records,

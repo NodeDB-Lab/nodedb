@@ -13,7 +13,10 @@ use nodedb::control::state::SharedState;
 use nodedb::event::{EventPlane, EventPlaneConfig, create_event_bus};
 use nodedb::wal::WalManager;
 
-use super::support::{bind_http_listener, bind_native_listener, init_test_memory_governor};
+use super::read_gate::install_single_voter_read_gate;
+use super::support::{
+    bind_http_listener, bind_native_listener, init_test_memory_governor, single_routing_leader,
+};
 use super::types::{TestClient, TestDataDir, TestServer};
 
 /// Knobs for spawning a `TestServer`. `Default` reproduces the historical
@@ -228,6 +231,10 @@ impl TestServer {
             s.backup_kek = Some(Arc::new([0x42u8; 32]));
             s.governor = init_test_memory_governor();
             if let Some(routing) = cfg.routing {
+                // Production takes `node_id` from the cluster handle that owns
+                // the routing table. A single-node server runs as the one node
+                // that leads every group in it, so the gateway routes locally.
+                s.node_id = single_routing_leader(&routing);
                 s.cluster_routing = Some(std::sync::Arc::new(std::sync::RwLock::new(routing)));
             }
             s.jwks_registry = cfg.jwks_registry;
@@ -240,6 +247,11 @@ impl TestServer {
             );
         }
         let shared = shared;
+        // The same gateway install production boot runs, after every
+        // `Arc::get_mut` above.
+        nodedb::bootstrap::state_wiring::install_gateway(&shared);
+        // Production `start_raft` publishes the read gate for a routed node.
+        install_single_voter_read_gate(&shared);
 
         // Data Plane core. Share the SharedState's array_catalog so DDL
         // mutations made by the SQL converter are visible to the handler
