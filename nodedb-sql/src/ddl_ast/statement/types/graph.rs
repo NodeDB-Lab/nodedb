@@ -2,7 +2,7 @@
 
 //! Graph DDL/DML statements.
 
-use crate::ddl_ast::graph_types::{GraphDirection, GraphProperties};
+use crate::ddl_ast::graph_types::{GraphDirection, GraphEdgeTuple, GraphProperties};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GraphStmt {
@@ -19,6 +19,22 @@ pub enum GraphStmt {
         src: String,
         dst: String,
         label: String,
+    },
+    /// Batched edge insert: one statement carries many property-less
+    /// `(src, dst, label)` triples in one round trip.
+    ///
+    /// The batch is deliberately property-less for now: the physical
+    /// `BatchEdge` carries no property object, so per-edge `PROPERTIES`
+    /// stays on the single-edge form until `BatchEdge` grows one
+    ///
+    GraphInsertEdges {
+        collection: String,
+        edges: Vec<GraphEdgeTuple>,
+    },
+    /// Batched edge delete, the delete-side twin of [`GraphInsertEdges`].
+    GraphDeleteEdges {
+        collection: String,
+        edges: Vec<GraphEdgeTuple>,
     },
     GraphSetLabels {
         node_id: String,

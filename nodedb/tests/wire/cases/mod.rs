@@ -83,6 +83,7 @@ mod graph_ddl_create_graph_index;
 mod graph_drop_hides_edges;
 mod graph_dsl_algo;
 mod graph_dsl_argument_validation;
+mod graph_dsl_batch_edges;
 mod graph_dsl_handlers;
 mod graph_match_authorization;
 mod graph_rag_fusion;

@@ -30,7 +30,11 @@ pub fn try_parse(sql: &str) -> Option<Result<NodedbStatement, SqlError>> {
 
     let toks = tokenizer::tokenize(trimmed);
 
-    let parsed = if upper.starts_with("GRAPH INSERT EDGE ") {
+    let parsed = if upper.starts_with("GRAPH INSERT EDGES ") {
+        variants::parse_insert_edges(&toks)
+    } else if upper.starts_with("GRAPH DELETE EDGES ") {
+        variants::parse_delete_edges(&toks)
+    } else if upper.starts_with("GRAPH INSERT EDGE ") {
         variants::parse_insert_edge(&toks)
     } else if upper.starts_with("GRAPH DELETE EDGE ") {
         variants::parse_delete_edge(&toks)
@@ -114,6 +118,79 @@ mod tests {
     /// A missing required clause is a malformed graph statement, not a
     /// non-graph one. `None` here would send it to the SQL parser, which
     /// reports only that `GRAPH` is not SQL.
+    #[test]
+    fn parse_graph_insert_edges_batch() {
+        let stmt =
+            parsed("GRAPH INSERT EDGES IN 'edges' VALUES ('a','b','CALLS'), ('c','d','IMPORTS')");
+        match stmt {
+            NodedbStatement::Graph(GraphStmt::GraphInsertEdges { collection, edges }) => {
+                assert_eq!(collection, "edges");
+                assert_eq!(edges.len(), 2);
+                assert_eq!(edges[0].src, "a");
+                assert_eq!(edges[0].dst, "b");
+                assert_eq!(edges[0].label, "CALLS");
+                assert_eq!(edges[1].src, "c");
+                assert_eq!(edges[1].label, "IMPORTS");
+            }
+            other => panic!("expected GraphInsertEdges, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_graph_delete_edges_batch_accepts_bare_words() {
+        let stmt = parsed("GRAPH DELETE EDGES IN 'edges' VALUES (a, b, CALLS)");
+        match stmt {
+            NodedbStatement::Graph(GraphStmt::GraphDeleteEdges { collection, edges }) => {
+                assert_eq!(collection, "edges");
+                assert_eq!(edges.len(), 1);
+                assert_eq!(edges[0].src, "a");
+                assert_eq!(edges[0].dst, "b");
+                assert_eq!(edges[0].label, "CALLS");
+            }
+            other => panic!("expected GraphDeleteEdges, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn batch_edge_cap_is_enforced() {
+        let mut sql = String::from("GRAPH INSERT EDGES IN 'edges' VALUES ");
+        for i in 0..=variants::MAX_EDGES_PER_BATCH {
+            if i > 0 {
+                sql.push(',');
+            }
+            sql.push_str(&format!("('s{i}','d{i}','L')"));
+        }
+        let error = try_parse(&sql)
+            .expect("input is graph DSL")
+            .expect_err("a batch over the cap must not produce a statement");
+        assert!(
+            error.to_string().contains("at most 1000 edges"),
+            "the error must name the cap: {error}"
+        );
+    }
+
+    #[test]
+    fn batch_edge_rejects_malformed_triples() {
+        let error = try_parse("GRAPH INSERT EDGES IN 'edges' VALUES ('a','b')")
+            .expect("input is graph DSL")
+            .expect_err("a partial triple must not produce a statement");
+        assert!(
+            error.to_string().contains("triples"),
+            "the error must name the tuple shape: {error}"
+        );
+    }
+
+    #[test]
+    fn batch_edge_rejects_per_edge_properties() {
+        let error = try_parse("GRAPH INSERT EDGES IN 'edges' VALUES ('a','b','L') PROPERTIES '{}'")
+            .expect("input is graph DSL")
+            .expect_err("per-edge PROPERTIES is not supported in the batch form");
+        assert!(
+            error.to_string().contains("PROPERTIES"),
+            "the error must name the rejected clause: {error}"
+        );
+    }
+
     #[test]
     fn parse_graph_insert_edge_missing_collection_names_the_clause() {
         let error = try_parse("GRAPH INSERT EDGE FROM 'a' TO 'b' TYPE 'l'")

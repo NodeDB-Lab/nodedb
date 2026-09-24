@@ -131,6 +131,23 @@ fn build_static_tx_class_impl(
             homes.push(VShardId::from_key(dst_id.as_bytes()).as_u32());
             continue;
         }
+        // A batched edge write derives one participant home per edge, so a
+        // single batch task routes to every home its edges touch.
+        if let PhysicalPlan::Graph(
+            GraphOp::EdgePutBatch { edges } | GraphOp::EdgeDeleteBatch { edges },
+        ) = &task.plan
+        {
+            for edge in edges {
+                edge_pairs
+                    .entry(edge.collection.to_string())
+                    .or_default()
+                    .push((edge.src_surrogate.as_u32(), edge.dst_surrogate.as_u32()));
+                let homes = edge_homes.entry(edge.collection.to_string()).or_default();
+                homes.push(VShardId::from_key(edge.src_id.as_bytes()).as_u32());
+                homes.push(VShardId::from_key(edge.dst_id.as_bytes()).as_u32());
+            }
+            continue;
+        }
         // KV and Vector writes carry their own key representation.
         match &task.plan {
             PhysicalPlan::Kv(op) => {
