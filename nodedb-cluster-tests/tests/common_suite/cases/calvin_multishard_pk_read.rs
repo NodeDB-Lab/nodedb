@@ -116,13 +116,15 @@ async fn cross_node_pk_read_from_learner_node_after_calvin_commit() {
         .position(|n| n.node_id == learner_id)
         .expect("learner present in cluster");
 
-    // The 4th node joins `col_a`'s group as a non-voting learner: it
-    // applies the replicated log but never coordinated this transaction,
-    // so its catalog holds no binding the coordinator minted.
+    // The 4th node joins `col_a`'s group after it was mounted: it applies
+    // the replicated log but never coordinated this transaction, so its
+    // catalog holds no binding the coordinator minted. It joins as a
+    // learner, and the rebalancer can promote it to a voter at any point,
+    // so either role holds the premise. It must not lead the group.
     let status = fx.cluster.nodes[reader].group_status_line(gid_a);
     assert!(
-        status.contains("role=Learner"),
-        "node {learner_id} must join {col_a}'s group {gid_a} as a learner: {status}"
+        status.contains("role=Learner") || status.contains("role=Follower"),
+        "node {learner_id} must replicate {col_a}'s group {gid_a} without leading it: {status}"
     );
 
     // Coordinator is one of the original 3, chosen by the fixture default
