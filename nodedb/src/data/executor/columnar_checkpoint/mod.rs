@@ -63,13 +63,13 @@
 //!
 //! ## Why a generation + manifest, and not a stamp per file
 //!
-//! Identical to `kv_checkpoint`: the LSN a checkpoint is durable through gates
+//! Identical to `kv_checkpoint`: the replay stamp a checkpoint carries gates
 //! WAL replay, so it must be on disk, and recording it per file is unsound. A
 //! flush is per-collection and can partially fail, and a crash between two
 //! per-file writes leaves collection `a` stamped at LSN 900 while `b` stays at
 //! 400 — permanently. Writing every collection into a fresh `gen-{n}/` and
 //! publishing the whole set with ONE atomic manifest write removes the split by
-//! construction: every live collection advances to a single LSN together, or
+//! construction: every live collection advances to a single stamp together, or
 //! none do and the previous generation stays live. The manifest is the only
 //! thing that makes a generation visible, so a torn or abandoned write is inert
 //! garbage rather than a half-published state.

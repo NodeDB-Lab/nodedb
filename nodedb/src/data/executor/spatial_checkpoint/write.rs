@@ -46,8 +46,8 @@ impl CoreLoop {
     /// drop geometry entries while the rows they point at survive — a spatial
     /// predicate silently stops matching rows a full scan still returns.
     ///
-    /// Stamping with the core watermark mirrors `checkpoint_kv_engines`: this
-    /// runs on the core's own thread between tasks, and a geometry write raises
+    /// Stamping with the core watermark rests on this: the checkpoint runs
+    /// on the core's own thread between tasks, and a geometry write raises
     /// the watermark only after the R-tree has already been mutated.
     pub(crate) fn checkpoint_spatial_indexes(&self) -> crate::Result<CheckpointOutcome> {
         let durable_lsn = self.watermark;

@@ -17,10 +17,9 @@ use crate::types::TenantId;
 ///
 /// `EXPIRE` and `PERSIST` address a row identically and differ only in the
 /// instant they install, so they share one bundle rather than repeating the
-/// five-field address list twice. The transaction wrappers in
-/// `sub_plan_kv_ttl_sorted.rs` pass this straight through to these handlers,
-/// so a COMMIT-time replay addresses and decides the row exactly as an
-/// autocommit statement does.
+/// five-field address list twice. `stage_kv_ttl.rs` and `kv/resolve/` pass
+/// this straight through to these handlers, so a COMMIT-time replay
+/// addresses and decides the row exactly as an autocommit statement does.
 ///
 /// `Copy` because it is a plain address: a wrapper hands the same one to the
 /// handler it delegates to rather than rebuilding it field by field, which is

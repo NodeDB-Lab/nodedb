@@ -23,8 +23,8 @@ impl CoreLoop {
     /// reported checkpoint LSN to the last LSN this engine was known durable
     /// through, so a failed flush costs WAL growth instead of data.
     ///
-    /// Stamping the generation with the core watermark mirrors
-    /// `checkpoint_kv_engines`: this runs on the core's own thread between
+    /// Stamping the generation with the core watermark rests on this: it runs
+    /// on the core's own thread between
     /// tasks, so every sparse-vector write the core has admitted is already
     /// folded into the in-memory indexes exported here. Where a sparse-vector
     /// write did not itself raise the watermark, the stamp merely UNDERSTATES

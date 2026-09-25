@@ -579,7 +579,9 @@ mod tests {
     #[test]
     fn columnar_records_at_or_below_the_floor_are_not_replayed() {
         let mut h = make_core();
-        h.core.floors.replay_floors.columnar.set(Lsn::new(200));
+        h.core.floors.replay_floors.columnar.set(
+            crate::data::executor::applied_prefix::ReplayStamp::through(200),
+        );
         let record = columnar_wal_record("events_gated", 150, 7);
 
         h.core.replay_timeseries_wal(
@@ -601,7 +603,9 @@ mod tests {
     #[test]
     fn columnar_records_above_the_floor_still_replay() {
         let mut h = make_core();
-        h.core.floors.replay_floors.columnar.set(Lsn::new(100));
+        h.core.floors.replay_floors.columnar.set(
+            crate::data::executor::applied_prefix::ReplayStamp::through(100),
+        );
         let record = columnar_wal_record("events_ungated", 150, 7);
 
         h.core.replay_timeseries_wal(
@@ -632,7 +636,9 @@ mod tests {
         let mut h = make_core();
         // A floor far above the record's LSN: if the gate were applied by
         // record type instead of by kind, this would suppress it.
-        h.core.floors.replay_floors.columnar.set(Lsn::new(10_000));
+        h.core.floors.replay_floors.columnar.set(
+            crate::data::executor::applied_prefix::ReplayStamp::through(10_000),
+        );
 
         let batch = nodedb_types::timeseries::TimeseriesWalBatch {
             collection: "metrics_ungated".to_string(),

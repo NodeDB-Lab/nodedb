@@ -44,6 +44,13 @@ impl CoreLoop {
                 expected: COLUMNAR_CKPT_FORMAT_VERSION,
             });
         }
+        manifest
+            .replay
+            .validate()
+            .map_err(|source| CheckpointDecodeError::InvalidReplayStamp {
+                path: path.clone(),
+                source,
+            })?;
         Ok(Some(manifest))
     }
 }

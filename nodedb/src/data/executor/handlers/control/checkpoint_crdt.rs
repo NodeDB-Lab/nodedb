@@ -45,8 +45,8 @@ impl CoreLoop {
     /// caller clamps the reported checkpoint LSN to the last LSN the CRDT
     /// engines were known durable through.
     ///
-    /// Stamping with the core watermark mirrors `checkpoint_kv_engines`: this
-    /// runs on the core's own thread between tasks, and a delta apply raises the
+    /// Stamping with the core watermark rests on this: the checkpoint runs
+    /// on the core's own thread between tasks, and a delta apply raises the
     /// watermark only after the `LoroDoc` has already imported it.
     pub(in crate::data::executor) fn checkpoint_crdt_engines(
         &self,

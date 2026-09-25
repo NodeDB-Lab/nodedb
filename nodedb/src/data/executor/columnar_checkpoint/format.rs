@@ -5,12 +5,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::data::executor::applied_prefix::ReplayStamp;
+
 /// On-disk format version for the manifest and the collection files.
 ///
 /// A file stamped with any other version is refused rather than misparsed.
 /// Refusing costs a WAL replay; misparsing would install wrong rows AND a floor
 /// that suppresses the records which would have corrected them.
-pub(crate) const COLUMNAR_CKPT_FORMAT_VERSION: u16 = 1;
+pub(crate) const COLUMNAR_CKPT_FORMAT_VERSION: u16 = 2;
 
 /// Names the live generation. Writing this file is what publishes a checkpoint.
 #[derive(
@@ -28,17 +30,16 @@ pub(crate) struct ColumnarCheckpointManifest {
     pub format_version: u16,
     /// Which `gen-{n}/` directory holds the live collection files.
     pub generation: u64,
-    /// The LSN every collection in that generation is durable THROUGH
-    /// (inclusive).
-    ///
-    /// This is what makes a generation self-describing: WAL replay skips
-    /// columnar records at or below it and replays everything above. Without it
-    /// a restore could not know which records it had already folded in.
-    /// Columnar has no safe fallback for that ignorance: `ColumnarOp::Update` is
-    /// delete-old-PK + insert-new-row, so re-applying one duplicates the row,
-    /// and on a `bitemporal=true` collection re-applying an `Insert` appends a
-    /// second version that `AS OF` queries can see.
+    /// The LSN this core reports as the columnar engine's truncation floor when
+    /// the generation is restored. It gates no replay: [`Self::replay`] does.
     pub durable_through_lsn: u64,
+    /// The records the generation holds. WAL replay skips exactly the columnar
+    /// records [`ReplayStamp::skips`] names and replays every other one.
+    ///
+    /// A single highest-applied LSN cannot state this. LSNs are node-global and
+    /// records reach a core out of mint order, so a record below the highest
+    /// applied one can still be on its way when the generation is written.
+    pub replay: ReplayStamp,
 }
 
 /// One collection's full engine state within a generation.

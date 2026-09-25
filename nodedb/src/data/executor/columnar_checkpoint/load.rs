@@ -107,12 +107,11 @@ impl CoreLoop {
         // Claimed only once every engine is in: the floor suppresses WAL
         // records, so claiming it over a half-restored generation would turn a
         // recoverable read failure into permanent data loss.
-        self.floors
-            .replay_floors
-            .columnar
-            .set(Lsn::new(manifest.durable_through_lsn));
         self.floors.columnar_durable_lsn = Lsn::new(manifest.durable_through_lsn);
-        self.floors.columnar_published_lsn = Lsn::new(manifest.durable_through_lsn);
+        self.floors.columnar_published_lsn = Lsn::new(manifest.replay.prefix);
+        let replay_prefix = manifest.replay.prefix;
+        let applied_ranges = manifest.replay.applied_above.len();
+        self.floors.replay_floors.columnar.set(manifest.replay);
 
         info!(
             core = self.core_id,
@@ -121,6 +120,8 @@ impl CoreLoop {
             segments,
             geometry_rows,
             durable_through_lsn = manifest.durable_through_lsn,
+            replay_prefix,
+            applied_ranges,
             "columnar checkpoint restored"
         );
         Ok(())
@@ -676,17 +677,22 @@ mod tests {
         );
     }
 
-    /// The reported LSN is a deletion authority: it must be the watermark on
-    /// success, and it must come back as BOTH the restored durable LSN and the
-    /// replay floor. Getting either wrong is silent — too high gates records that
-    /// still needed replaying, too low replays records already folded in.
+    /// The reported LSN is a deletion authority: it is the watermark on success
+    /// and comes back as the restored durable LSN. Replay is gated by the
+    /// stamp instead: the outcome floor and the records applied above it, never
+    /// the highest applied LSN, since a record below that can still be on its
+    /// way. Too wide a gate drops a write; too narrow re-applies a folded one.
     #[test]
-    fn reported_lsn_becomes_the_restored_floor_and_durable_lsn() {
+    fn the_stamp_becomes_the_restored_floor_and_the_watermark_the_durable_lsn() {
         let dir = tempfile::tempdir().expect("tempdir");
         let coll = "ck_lsn";
 
         let mut core = open_core(dir.path());
         seed_collection(&mut core, coll, &[(1, "a", Surrogate(601))], &[]);
+        core.floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(890));
+        core.floors.applied_prefix.note_applied(Lsn::new(900));
         core.watermark = Lsn::new(900);
 
         let reported = core
@@ -709,12 +715,16 @@ mod tests {
             .expect("checkpoint load must succeed");
 
         assert_eq!(restored.floors.columnar_durable_lsn, Lsn::new(900));
+        assert_eq!(restored.floors.columnar_published_lsn, Lsn::new(890));
+        let floor = &restored.floors.replay_floors.columnar;
+        assert!(floor.covers(890), "the prefix is folded in");
         assert!(
-            restored.floors.replay_floors.columnar.covers(900),
-            "the stamped LSN is durable THROUGH, so its own record is folded in"
+            !floor.covers(891),
+            "a record in flight below the applied one is NOT in the restored state"
         );
+        assert!(floor.covers(900), "the applied record is folded in");
         assert!(
-            !restored.floors.replay_floors.columnar.covers(901),
+            !floor.covers(901),
             "a record above the stamp is NOT in the restored state and must replay"
         );
     }

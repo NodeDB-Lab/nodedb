@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::data::executor::applied_prefix::ReplayStamp;
+
 use super::index_format::KvCheckpointIndexes;
 
 /// On-disk format version for the manifest and the collection files.
@@ -12,7 +14,7 @@ use super::index_format::KvCheckpointIndexes;
 /// A file stamped with any other version is refused rather than misparsed.
 /// Refusing costs a WAL replay; misparsing would install wrong rows AND a floor
 /// that suppresses the records which would have corrected them.
-pub(crate) const KV_CKPT_FORMAT_VERSION: u16 = 2;
+pub(crate) const KV_CKPT_FORMAT_VERSION: u16 = 3;
 
 /// Names the live generation. Writing this file is what publishes a checkpoint.
 #[derive(
@@ -30,15 +32,16 @@ pub(crate) struct KvCheckpointManifest {
     pub format_version: u16,
     /// Which `gen-{n}/` directory holds the live collection files.
     pub generation: u64,
-    /// The LSN every collection in that generation is durable THROUGH
-    /// (inclusive).
-    ///
-    /// This is what makes a generation self-describing: WAL replay skips KV
-    /// records at or below it and replays everything above. Without it a restore
-    /// could not know which records it had already folded in, and would have to
-    /// either re-apply deltas (double-counting) or skip everything (losing every
-    /// write made after the flush).
+    /// The LSN this core reports as the KV engine's truncation floor when
+    /// the generation is restored. It gates no replay: [`Self::replay`] does.
     pub durable_through_lsn: u64,
+    /// The records the generation holds. WAL replay skips exactly the KV
+    /// records [`ReplayStamp::skips`] names and replays every other one.
+    ///
+    /// A single highest-applied LSN cannot state this. LSNs are node-global and
+    /// records reach a core out of mint order, so a record below the highest
+    /// applied one can still be on its way when the generation is written.
+    pub replay: ReplayStamp,
 }
 
 /// One checkpointed KV row.

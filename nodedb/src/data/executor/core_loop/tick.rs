@@ -103,6 +103,16 @@ impl CoreLoop {
         } else {
             task.state = TaskState::Running;
             let resp = self.execute(&task);
+            // A crash test kills the process here: one collection's logged
+            // write applied, and its response never leaves the core. A task
+            // with no WAL record never matches.
+            crate::fail_point!(&match task.wal_lsn() {
+                Some(_) => format!(
+                    "core::after_apply::{}",
+                    task.plan().collection().unwrap_or_default()
+                ),
+                None => String::new(),
+            });
             task.state = TaskState::Completed;
             // A failed rollback leaves this core's state unknown.
             self.fail_stop_on_rollback_failure(&resp);

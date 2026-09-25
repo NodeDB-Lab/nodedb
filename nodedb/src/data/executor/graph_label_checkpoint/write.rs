@@ -26,8 +26,8 @@ impl CoreLoop {
     /// is intact and live, after it the new one is. There is no window in which
     /// half a core's partitions are published.
     ///
-    /// Stamping with the core watermark mirrors `checkpoint_kv_engines`: this
-    /// runs on the core's own thread between tasks, and a label write reaches
+    /// Stamping with the core watermark rests on this: the checkpoint runs
+    /// on the core's own thread between tasks, and a label write reaches
     /// `note_write_lsn` (which raises the watermark) only after
     /// `add_node_label` / `remove_node_label` has already mutated the bitset. So
     /// every label change with `lsn <= watermark` is in the export below.

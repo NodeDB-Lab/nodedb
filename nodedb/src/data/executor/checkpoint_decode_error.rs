@@ -66,6 +66,15 @@ pub(crate) enum CheckpointDecodeError {
         expected: u16,
     },
 
+    /// A manifest's replay stamp does not have the shape replay decisions
+    /// rely on. Gating replay on it could skip a record no checkpoint holds.
+    #[error("{} carries an invalid replay stamp: {source}", path.display())]
+    InvalidReplayStamp {
+        path: PathBuf,
+        #[source]
+        source: crate::data::executor::applied_prefix::InvalidReplayStamp,
+    },
+
     /// A sparse-vector index file did not decode into an index. The decoder
     /// reports only success or failure, so there is no inner detail to carry.
     #[error("cannot decode {}", path.display())]

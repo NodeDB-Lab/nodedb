@@ -27,7 +27,7 @@
 //!
 //! ## Why a generation + manifest, and not a stamp per file
 //!
-//! The LSN a checkpoint is durable through is what lets replay skip records it
+//! The replay stamp a checkpoint carries is what lets replay skip records it
 //! already contains, so it must be recorded on disk. Recording it *per file*
 //! looks simpler but is unsound: a flush is per-collection and can partially
 //! fail, leaving collection `a` stamped at LSN 900 while `b` stays at 400. Two
@@ -41,7 +41,7 @@
 //!
 //! Writing every collection into a fresh `gen-{n}/` and publishing the whole set
 //! with ONE atomic manifest write removes the split by construction — every live
-//! collection advances to a single LSN together, or none do and the previous
+//! collection advances to a single stamp together, or none do and the previous
 //! generation stays live. The manifest is the only thing that makes a generation
 //! visible, so a torn or abandoned write is inert garbage rather than a
 //! half-published state.

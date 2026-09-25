@@ -36,8 +36,8 @@ impl CoreLoop {
     /// partial success cannot be expressed, because the LSN it would justify
     /// does not exist.
     ///
-    /// Stamping with the core watermark mirrors `checkpoint_kv_engines`: this
-    /// runs on the core's own thread between tasks, and a vector write raises
+    /// Stamping with the core watermark rests on this: the checkpoint runs
+    /// on the core's own thread between tasks, and a vector write raises
     /// the watermark only after the collection has already been mutated, so
     /// every write with `lsn <= watermark` is in the bytes written below.
     ///

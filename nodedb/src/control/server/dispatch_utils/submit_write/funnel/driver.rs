@@ -154,6 +154,13 @@ pub(crate) async fn submit_write(
     let wal_lsn = wal_append_outcome.wal_lsn;
     let resolved_now_ms = wal_append_outcome.resolved_now_ms;
 
+    // A crash test parks one collection's logged write here: its LSN is
+    // minted, no core holds it, and only this task waits, so a later write
+    // with a higher LSN applies first. The write still holds its own per-key
+    // admission guards, which no write to another key contends on.
+    #[cfg(feature = "failpoints")]
+    crate::control::fail_gate::before_dispatch(&plan, wal_lsn).await;
+
     // Build the wire request and hand it to the Data-Plane dispatcher.
     let dispatched = dispatch_to_data_plane(
         shared,

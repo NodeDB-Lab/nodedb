@@ -11,39 +11,44 @@ use super::format::{
 use super::index_export::export_collection_indexes;
 use super::manifest::storage_err;
 use super::paths::{KV_CKPT_MANIFEST, kv_ckpt_dir, kv_ckpt_filename, kv_ckpt_gen_dir};
+use crate::data::executor::applied_prefix::ReplayStamp;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::Lsn;
 
 impl CoreLoop {
     /// Flush every KV collection on this core to disk and return the LSN the KV
-    /// engine is now durable through.
+    /// engine reports as its truncation floor.
     ///
-    /// Returns `Ok(watermark)` only once a manifest naming a COMPLETE generation
-    /// has landed. Any failure returns `Err` — the caller must then clamp the
+    /// Returns `Ok` only once a manifest naming a COMPLETE generation has
+    /// landed. Any failure returns `Err` — the caller must then clamp the
     /// reported checkpoint LSN to the last LSN KV was known durable through, so
     /// a failed flush costs WAL growth instead of data.
     ///
-    /// Stamping the generation with the core watermark is exact, not
-    /// approximate: this runs on the core's own thread between tasks, and a KV
-    /// write only reaches `note_kv_write_lsn` (which raises the watermark) after
-    /// it has been applied to the table. So every KV row with `lsn <= watermark`
-    /// is already in the tables exported here. Records above the watermark
-    /// belong to other engines and are gated by their own floors.
+    /// ## What replay skips
     ///
-    /// Index DDL is the one KV record that does NOT raise the watermark
+    /// The manifest carries the core's [`ReplayStamp`],
+    /// taken on the core's own thread between tasks, so no write interleaves
+    /// with the export. The stamp names every record the exported tables hold:
+    /// every record at or below the outcome floor, and every record above it
+    /// this core applied. A record still on its way to the core is in neither,
+    /// so restart replay applies it. The tracker has no exact stamp while its
+    /// applied set is dropped; the checkpoint then fails.
+    ///
+    /// Index DDL is the one KV record that notes no applied LSN
     /// (`execute_kv_register_index` and its siblings note no write LSN, having no
-    /// row to attribute one to), so a registration made after the last row write
-    /// is exported into a generation stamped below its own LSN, and replays again
-    /// on top of the restored state. That is harmless in both directions and must
-    /// stay so: replaying a register whose registration is already restored is a
-    /// no-op (`add_index` reports the field as already indexed and skips the
-    /// backfill), and replaying a drop whose registration the export therefore
-    /// never saw is a no-op too.
+    /// row to attribute one to), so a registration made above the outcome floor
+    /// can be exported into a generation whose stamp does not name it, and it
+    /// replays again on top of the restored state. That is harmless in both
+    /// directions and must stay so: replaying a register whose registration is
+    /// already restored is a no-op (`add_index` reports the field as already
+    /// indexed and skips the backfill), and replaying a drop whose registration
+    /// the export therefore never saw is a no-op too.
     ///
-    /// Every published generation raises `kv_published_lsn`, the LSN restart
-    /// restores KV from (see `redo_apply::cover`).
+    /// Every published generation raises `kv_published_lsn` to the stamp's
+    /// prefix (see `redo_apply::cover`).
     pub(in crate::data::executor) fn checkpoint_kv_engines(&mut self) -> crate::Result<Lsn> {
         let durable_through = self.watermark;
+        let replay = self.floors.applied_prefix.stamp()?;
 
         let ckpt_dir = kv_ckpt_dir(&self.data_dir, self.core_id);
         std::fs::create_dir_all(&ckpt_dir).map_err(|e| storage_err(&ckpt_dir, "create dir", &e))?;
@@ -65,8 +70,10 @@ impl CoreLoop {
             .map_err(|e| storage_err(&gen_dir, "create generation dir", &e))?;
 
         let written = self.write_kv_generation(&gen_dir)?;
-        self.publish_kv_generation(&ckpt_dir, generation, durable_through)?;
-        self.floors.kv_published_lsn = self.floors.kv_published_lsn.max(durable_through);
+        let prefix = Lsn::new(replay.prefix);
+        let applied_ranges = replay.applied_above.len();
+        self.publish_kv_generation(&ckpt_dir, generation, durable_through, replay)?;
+        self.floors.kv_published_lsn = self.floors.kv_published_lsn.max(prefix);
 
         // The previous generation is now unreachable. Removing it reclaims disk
         // but is NOT required for correctness — the manifest alone decides what
@@ -92,6 +99,8 @@ impl CoreLoop {
             generation,
             collections = written,
             durable_through_lsn = durable_through.as_u64(),
+            replay_prefix = prefix.as_u64(),
+            applied_ranges,
             "KV checkpoint published"
         );
         Ok(durable_through)
@@ -157,7 +166,7 @@ impl CoreLoop {
     /// Publish a written generation by atomically replacing the manifest.
     ///
     /// This single write is the commit point of the whole checkpoint: before it
-    /// nothing changed; after it the entire generation is live at one LSN. It
+    /// nothing changed; after it the entire generation is live under one stamp. It
     /// also fsyncs `ckpt_dir`, the same directory holding the `gen-{n}/` entry,
     /// so that entry cannot still be pending when the manifest naming it becomes
     /// visible.
@@ -166,11 +175,13 @@ impl CoreLoop {
         ckpt_dir: &std::path::Path,
         generation: u64,
         durable_through: Lsn,
+        replay: ReplayStamp,
     ) -> crate::Result<()> {
         let manifest = KvCheckpointManifest {
             format_version: KV_CKPT_FORMAT_VERSION,
             generation,
             durable_through_lsn: durable_through.as_u64(),
+            replay,
         };
         let bytes =
             zerompk::to_msgpack_vec(&manifest).map_err(|e| crate::Error::Serialization {

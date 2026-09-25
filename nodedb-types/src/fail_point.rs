@@ -15,6 +15,10 @@
 //!     [`fail_point_err!`] can honour this — the call site supplies the
 //!     mapping into its own error type, so no crate has to know about
 //!     anyone else's.
+//!   - `WaitForFile(path)`: park the call site until `path` exists, so a test
+//!     releases it at the moment it chooses. Only an async call site can
+//!     honour this: it awaits the file with the crate's own timer and parks
+//!     only its own task. A synchronous call site refuses it.
 //!
 //! The framework is deliberately tiny — no fail-rs dep, no parsing of env
 //! vars, no list of probabilities. Tests install actions explicitly via
@@ -47,6 +51,9 @@ mod imp {
         /// Return an error from the injected call site, carrying this detail.
         /// Ignored by bare `fail_point!` — use `fail_point_err!`.
         Fail(String),
+        /// Park the call site until this file exists. Only an async call site
+        /// that looks the action up with [`lookup`] can honour it.
+        WaitForFile(std::path::PathBuf),
     }
 
     /// Environment variable read once, the first time any fail point is
@@ -54,7 +61,8 @@ mod imp {
     /// in-process `set` API cannot reach a server the test only supervises.
     ///
     /// Format: comma-separated `name=action`, where action is `panic`,
-    /// `sleep(<millis>)`, or `fail(<detail>)`. For example:
+    /// `abort`, `sleep(<millis>)`, `fail(<detail>)`, or `wait_file(<path>)`.
+    /// For example:
     /// `NODEDB_FAILPOINTS='checkpoint::after_marker_before_truncate=panic'`
     pub const FAILPOINTS_ENV: &str = "NODEDB_FAILPOINTS";
 
@@ -84,6 +92,11 @@ mod imp {
                 }
                 rest if rest.starts_with("fail(") && rest.ends_with(')') => {
                     FailAction::Fail(rest["fail(".len()..rest.len() - 1].to_string())
+                }
+                rest if rest.starts_with("wait_file(") && rest.ends_with(')') => {
+                    FailAction::WaitForFile(std::path::PathBuf::from(
+                        &rest["wait_file(".len()..rest.len() - 1],
+                    ))
                 }
                 other => panic!("{FAILPOINTS_ENV} entry {entry:?} has unknown action {other:?}"),
             };
@@ -134,6 +147,12 @@ mod imp {
                         "fail_point {name} installed Fail({detail}) but the call site cannot return an error — use fail_point_err!"
                     )
                 }
+                // Blocking the thread would stall every task that shares it.
+                FailAction::WaitForFile(path) => panic!(
+                    "fail_point {name} installed WaitForFile({}) but the call site is \
+                     synchronous — only an async call site can park",
+                    path.display()
+                ),
             }
         }
     }
@@ -157,6 +176,11 @@ mod imp {
                 std::thread::sleep(d);
                 None
             }
+            Some(FailAction::WaitForFile(path)) => panic!(
+                "fail_point {name} installed WaitForFile({}) but the call site is synchronous \
+                 — only an async call site can park",
+                path.display()
+            ),
             None => None,
         }
     }
@@ -277,6 +301,25 @@ mod tests {
             actions.get("c::fail"),
             Some(FailAction::Fail(detail)) if detail == "disk full"
         ));
+    }
+
+    #[test]
+    fn env_spec_parses_a_file_gate() {
+        let actions = super::imp::parse_env(Some("d::gate=wait_file(/tmp/release-d)"));
+        assert!(matches!(
+            actions.get("d::gate"),
+            Some(FailAction::WaitForFile(path)) if path == std::path::Path::new("/tmp/release-d")
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "only an async call site can park")]
+    fn a_file_gate_at_a_synchronous_call_site_is_loud() {
+        let _g = FailGuard::install(
+            "nodedb::test::gate_at_sync",
+            FailAction::WaitForFile(std::path::PathBuf::from("/nonexistent")),
+        );
+        eval("nodedb::test::gate_at_sync");
     }
 
     #[test]

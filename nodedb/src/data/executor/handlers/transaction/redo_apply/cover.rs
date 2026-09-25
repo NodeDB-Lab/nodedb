@@ -268,6 +268,10 @@ mod tests {
             surrogate: Surrogate::new(1),
         });
         core.advance_watermark(Lsn::new(100));
+        // The published stamp's prefix is what restart replay skips through.
+        core.floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(100));
         core.checkpoint_kv_engines().expect("publish at lsn 100");
 
         let mut task = make_default_task();
@@ -375,6 +379,10 @@ mod tests {
             .expect("seed row");
         core.columnar_engines.insert(key.clone(), engine);
         core.advance_watermark(Lsn::new(100));
+        // The published stamp's prefix is what restart replay skips through.
+        core.floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(100));
         core.checkpoint_columnar_engines()
             .expect("publish at lsn 100");
 

@@ -129,10 +129,9 @@ impl CoreLoop {
     ///
     /// Clamping matters more here than for the engines above, because columnar
     /// replay is not idempotent: `ColumnarOp::Update` is delete-old-PK +
-    /// insert-new-row. So the reported LSN both authorises truncation AND, via
-    /// the restored floor, decides which records replay. Overstating it would
-    /// not merely delete rows — it would gate the records that would have
-    /// rebuilt them.
+    /// insert-new-row, so a record whose WAL copy is gone cannot be rebuilt
+    /// from any other source. Which records replay is the generation's replay
+    /// stamp, not this LSN.
     pub(super) fn checkpoint_columnar_durable_lsn(&mut self) -> Lsn {
         match self.checkpoint_columnar_engines() {
             Ok(lsn) => {

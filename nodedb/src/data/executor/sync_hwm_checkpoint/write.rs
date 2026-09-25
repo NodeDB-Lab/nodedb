@@ -24,8 +24,8 @@ impl CoreLoop {
     /// is intact and live, after it the new one is. There is no window in which
     /// half a gate is published.
     ///
-    /// Stamping with the core watermark mirrors `checkpoint_kv_engines`: this
-    /// runs on the core's own thread between tasks, and `sync_commit` advances
+    /// Stamping with the core watermark rests on this: the checkpoint runs
+    /// on the core's own thread between tasks, and `sync_commit` advances
     /// the HWM only after the frame's `SyncSeqAdvance` record is durable, so
     /// every advance the core has admitted is already in the maps exported here.
     pub(in crate::data::executor) fn checkpoint_sync_hwm(&self) -> crate::Result<Lsn> {

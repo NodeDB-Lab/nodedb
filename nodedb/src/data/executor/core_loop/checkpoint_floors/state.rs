@@ -126,15 +126,16 @@ pub(in crate::data::executor) struct CheckpointFloors {
     /// the watermark — is what the core may report.
     pub(in crate::data::executor) vector_durable_lsn: Lsn,
 
-    /// LSN of the newest KV checkpoint generation on disk, restored at boot
-    /// from the manifest. Restart replay skips a KV record at or below it, so
-    /// a committed record applied at or below it must be published again
-    /// (`redo_apply::cover`). Never a truncation floor.
+    /// Replay-stamp prefix of the newest KV checkpoint generation on disk,
+    /// restored at boot from the manifest. Restart replay skips every KV
+    /// record at or below it, so a committed record applied at or below it
+    /// must be published again (`redo_apply::cover`). Never a truncation
+    /// floor.
     pub(in crate::data::executor) kv_published_lsn: Lsn,
 
-    /// LSN of the newest columnar checkpoint generation on disk, whichever
-    /// flush published it, restored at boot from the manifest. Same rule as
-    /// `kv_published_lsn`.
+    /// Replay-stamp prefix of the newest columnar checkpoint generation on
+    /// disk, whichever flush published it, restored at boot from the
+    /// manifest. Same rule as `kv_published_lsn`.
     pub(in crate::data::executor) columnar_published_lsn: Lsn,
 
     /// LSN of the newest vector checkpoint generation on disk, whichever
@@ -178,12 +179,14 @@ pub(in crate::data::executor) struct CheckpointFloors {
     /// watermark — is what the core may report.
     pub(in crate::data::executor) spatial_durable_lsn: Lsn,
 
-    /// Per-engine "already durable through LSN X" floors recovered from on-disk
-    /// checkpoints during boot, before WAL replay. Consulted by the replay paths
+    /// Per-engine replay stamps recovered from on-disk checkpoints during
+    /// boot, before WAL replay. Consulted by the replay paths
     /// so records already folded into a restored checkpoint are not applied a
     /// second time. Empty outside boot, and empty means "replay everything".
     pub(in crate::data::executor) replay_floors: ReplayFloors,
 
-    /// The node's outcome floor as this core last read it from a request.
+    /// The node's outcome floor as this core last read it from a request, and
+    /// the records this core applied above it: the replay stamp every KV and
+    /// columnar checkpoint carries.
     pub(in crate::data::executor) applied_prefix: AppliedPrefix,
 }

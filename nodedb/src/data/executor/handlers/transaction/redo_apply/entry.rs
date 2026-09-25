@@ -140,6 +140,8 @@ impl CoreLoop {
         // replay does not rebuild: the core fail-stops. The funnel keeps the
         // record for restart replay.
         let settled = self.settle_redo_install(task, &mut scope).and_then(|()| {
+            // Applied from here on: a checkpoint the cover writes names it.
+            self.floors.applied_prefix.note_applied(lsn);
             self.cover_applied_record(lsn, &WrittenEngines::of(&redo), &scope.arrays_written)
         });
         if let Err(error) = settled {
@@ -257,6 +259,37 @@ mod tests {
         let mut task = make_default_task();
         task.wal_lsn = lsn.map(Lsn::new);
         task
+    }
+
+    #[test]
+    fn an_installed_record_is_named_by_the_next_replay_stamp() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        core.floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(10));
+        let redo = redo_bytes(vec![kv_put("cache", b"k1", b"v1", 12)]);
+
+        let response = core.execute_apply_transaction_redo(
+            &task_at(Some(50)),
+            TID,
+            CommittedRedo {
+                redo: &redo,
+                collections: &["cache".to_string()],
+                sum_targets: &[],
+            },
+        );
+        assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
+
+        let stamp = core.floors.applied_prefix.stamp().expect("exact stamp");
+        assert!(
+            stamp.skips(50),
+            "the installed record is in every later artifact"
+        );
+        assert!(
+            !stamp.skips(49),
+            "a record below it that never applied here must still replay"
+        );
     }
 
     #[test]

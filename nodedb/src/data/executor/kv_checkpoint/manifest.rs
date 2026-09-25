@@ -43,6 +43,13 @@ impl CoreLoop {
                 expected: KV_CKPT_FORMAT_VERSION,
             });
         }
+        manifest
+            .replay
+            .validate()
+            .map_err(|source| CheckpointDecodeError::InvalidReplayStamp {
+                path: path.clone(),
+                source,
+            })?;
         Ok(Some(manifest))
     }
 }

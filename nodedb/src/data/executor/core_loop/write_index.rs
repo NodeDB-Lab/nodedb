@@ -266,6 +266,9 @@ impl CoreLoop {
     }
 
     /// Record a write version and advance the core watermark monotonically.
+    ///
+    /// Every applied write reaches here, so this is also where the core notes
+    /// the write's LSN as applied: a checkpoint's replay stamp names it.
     pub(in crate::data::executor) fn publish_write_version(
         &mut self,
         db: DatabaseId,
@@ -274,6 +277,7 @@ impl CoreLoop {
         key: Option<KeyRepr>,
         lsn: Lsn,
     ) {
+        self.floors.applied_prefix.note_applied(lsn);
         self.write_index
             .note_write_lsn(db, tenant, collection, key, lsn);
         if lsn > self.watermark {
@@ -933,6 +937,39 @@ pub(crate) mod tests {
             Some(Lsn::new(42))
         );
         assert_eq!(core.watermark, Lsn::new(42));
+    }
+
+    #[test]
+    fn an_autocommit_apply_is_named_by_the_next_replay_stamp() {
+        let (mut core, _, _, _dir) = make_core();
+        core.floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(40));
+        let resp = core.execute_kv_put(
+            &wal_task(42),
+            KvWriteParams {
+                did: DatabaseId::DEFAULT.as_u64(),
+                tid: 1,
+                collection: "kv",
+                key: b"k1".as_slice(),
+                value: b"v1".as_slice(),
+                ttl_ms: 0,
+                surrogate: Surrogate::new(3),
+                returning: None,
+                rls_filters: &[],
+            },
+        );
+        assert_eq!(resp.status, Status::Ok);
+
+        let stamp = core.floors.applied_prefix.stamp().expect("exact stamp");
+        assert!(
+            stamp.skips(42),
+            "the applied write is in every later artifact"
+        );
+        assert!(
+            !stamp.skips(41),
+            "a record between the floor and the applied write still replays"
+        );
     }
 
     #[test]

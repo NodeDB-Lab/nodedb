@@ -25,9 +25,9 @@ impl CoreLoop {
     /// Rows are reinstalled by replaying them through `KvEngine::put`, and the
     /// index registrations are reinstalled with their exported content once the
     /// rows are back — see `index_restore.rs` for why that order is the only
-    /// sound one. The manifest's LSN then becomes the replay floor:
-    /// `replay_kv_wal` skips the records already folded in and applies
-    /// everything above.
+    /// sound one. The manifest's replay stamp then becomes the replay floor:
+    /// `replay_kv_wal` skips the records the stamp names and applies every
+    /// other one.
     ///
     /// # Fail-stop on corruption
     ///
@@ -69,11 +69,10 @@ impl CoreLoop {
         // Claimed only once every row AND every registration is in: the floor
         // suppresses WAL records, so claiming it over a half-restored generation
         // would turn a recoverable read failure into permanent data loss.
-        self.floors
-            .replay_floors
-            .kv
-            .set(Lsn::new(manifest.durable_through_lsn));
-        self.floors.kv_published_lsn = Lsn::new(manifest.durable_through_lsn);
+        self.floors.kv_published_lsn = Lsn::new(manifest.replay.prefix);
+        let replay_prefix = manifest.replay.prefix;
+        let applied_ranges = manifest.replay.applied_above.len();
+        self.floors.replay_floors.kv.set(manifest.replay);
 
         info!(
             core = self.core_id,
@@ -82,6 +81,8 @@ impl CoreLoop {
             rows,
             indexes,
             durable_through_lsn = manifest.durable_through_lsn,
+            replay_prefix,
+            applied_ranges,
             "KV checkpoint restored"
         );
         Ok(())
@@ -380,15 +381,22 @@ mod tests {
         assert!(!alice_meta.has_ttl, "a persistent row must not gain a TTL");
     }
 
-    /// The manifest is the only record of the LSN a generation is durable
-    /// through, and the entire replay floor rests on it: it must survive the
-    /// round-trip exactly.
+    /// The manifest is the only record of what a generation holds, and the
+    /// entire replay floor rests on it: it must survive the round-trip exactly.
     #[test]
-    fn manifest_roundtrips_generation_and_lsn() {
+    fn manifest_roundtrips_generation_lsn_and_stamp() {
+        let replay = crate::data::executor::applied_prefix::ReplayStamp {
+            prefix: 4_200,
+            applied_above: vec![crate::data::executor::applied_prefix::stamp::LsnRange {
+                start: 4_240,
+                end: 4_242,
+            }],
+        };
         let written = KvCheckpointManifest {
             format_version: KV_CKPT_FORMAT_VERSION,
             generation: 9,
             durable_through_lsn: 4_242,
+            replay: replay.clone(),
         };
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join(KV_CKPT_MANIFEST);
@@ -404,6 +412,7 @@ mod tests {
         );
         assert_eq!(decoded.generation, 9);
         assert_eq!(decoded.format_version, KV_CKPT_FORMAT_VERSION);
+        assert_eq!(decoded.replay, replay, "the stamp must survive exactly");
     }
 
     /// Entries still sitting in the rehash source are live rows. An export that
@@ -487,5 +496,41 @@ mod tests {
         restored
             .load_kv_checkpoints()
             .expect_err("a corrupt manifest must fail the load, not silently skip it");
+    }
+
+    /// A manifest whose replay stamp has an applied range at or below its
+    /// prefix is malformed. Gating replay on it could skip a record no
+    /// generation holds, so the load fails instead.
+    #[test]
+    fn a_manifest_with_a_malformed_stamp_fails_the_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let core = open_core_at(dir.path());
+        let ckpt_dir = kv_ckpt_dir(&core.data_dir, core.core_id);
+        std::fs::create_dir_all(&ckpt_dir).expect("create ckpt dir");
+        let manifest = KvCheckpointManifest {
+            format_version: KV_CKPT_FORMAT_VERSION,
+            generation: 0,
+            durable_through_lsn: 10,
+            replay: crate::data::executor::applied_prefix::ReplayStamp {
+                prefix: 10,
+                applied_above: vec![crate::data::executor::applied_prefix::stamp::LsnRange {
+                    start: 5,
+                    end: 12,
+                }],
+            },
+        };
+        let bytes = zerompk::to_msgpack_vec(&manifest).expect("encode");
+        nodedb_wal::segment::write_checkpoint_framed(&ckpt_dir, KV_CKPT_MANIFEST, &bytes)
+            .expect("write manifest");
+        drop(core);
+
+        let mut restored = open_core_at(dir.path());
+        let error = restored
+            .load_kv_checkpoints()
+            .expect_err("a malformed stamp must fail the load");
+        assert!(
+            error.to_string().contains("replay stamp"),
+            "the error names the stamp: {error}"
+        );
     }
 }

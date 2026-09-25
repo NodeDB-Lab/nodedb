@@ -12,46 +12,47 @@ use super::manifest::storage_err;
 use super::paths::{
     COLUMNAR_CKPT_MANIFEST, columnar_ckpt_dir, columnar_ckpt_filename, columnar_ckpt_gen_dir,
 };
+use crate::data::executor::applied_prefix::ReplayStamp;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::Lsn;
 
 impl CoreLoop {
     /// Flush every columnar collection on this core to disk and return the LSN
-    /// the columnar engine is now durable through.
+    /// the columnar engine reports as its truncation floor.
     ///
-    /// Returns `Ok(watermark)` only once a manifest naming a COMPLETE generation
-    /// has landed. Any failure returns `Err` — the caller must then clamp the
+    /// Returns `Ok` only once a manifest naming a COMPLETE generation has
+    /// landed. Any failure returns `Err` — the caller must then clamp the
     /// reported checkpoint LSN to the last LSN columnar was known durable
     /// through, so a failed flush costs WAL growth instead of data.
     ///
-    /// ## Why the core watermark is an exact stamp here
+    /// ## What replay skips
     ///
-    /// This runs on the core's own thread between tasks, and every columnar
-    /// record that mutates an engine raises the watermark AFTER applying:
-    /// `execute_columnar_insert` calls `note_collection_write_lsn`, and so —
-    /// since the fix that accompanies this checkpoint — do
-    /// `execute_columnar_update` and `execute_columnar_delete`. So every
-    /// columnar record with `lsn <= watermark` is already folded into the
-    /// engines exported here, and every record above it is not.
+    /// The manifest carries the core's [`ReplayStamp`], taken on the core's own
+    /// thread between tasks, so no write interleaves with the export. The
+    /// stamp names every record the exported engines hold: every record at or
+    /// below the outcome floor, and every record above it this core applied.
+    /// A record still on its way to the core is in neither, so restart replay
+    /// applies it. The tracker has no exact stamp while its applied set is
+    /// dropped; the checkpoint then fails.
     ///
-    /// That property is load-bearing in a way it is not for KV. KV tolerates a
-    /// record being replayed over a generation stamped below it, because its
-    /// unstamped records (index DDL) replay idempotently. Columnar has no such
-    /// slack: `ColumnarOp::Update` is delete-old-PK + insert-new-row, so a
-    /// record applied before the export and replayed again after it duplicates
-    /// the row. An applied-but-unstamped columnar record is therefore silent
-    /// corruption, which is why update/delete must note their LSN rather than
-    /// this stamp being defensively lowered.
+    /// Columnar has no slack for an applied record the stamp does not name:
+    /// `ColumnarOp::Update` is delete-old-PK + insert-new-row, so a record
+    /// applied before the export and replayed again after it duplicates the
+    /// row. Every columnar record that mutates an engine therefore notes its
+    /// LSN after applying: `execute_columnar_insert`, `execute_columnar_update`
+    /// and `execute_columnar_delete` call `note_collection_write_lsn`, which
+    /// records the LSN as applied.
     ///
-    /// A record whose live execution affected ZERO rows notes no LSN and so may
-    /// fall above the stamp and replay. That is safe and stays safe: it matched
-    /// nothing against the state that the export captured, so re-executing the
-    /// same predicate against that same restored state matches nothing again.
+    /// A record whose live execution affected ZERO rows notes no LSN and so
+    /// replays. That is safe and stays safe: it matched nothing against the
+    /// state that the export captured, so re-executing the same predicate
+    /// against that same restored state matches nothing again.
     ///
-    /// Every published generation raises `columnar_published_lsn`, the LSN
-    /// restart restores columnar from (see `redo_apply::cover`).
+    /// Every published generation raises `columnar_published_lsn` to the
+    /// stamp's prefix (see `redo_apply::cover`).
     pub(in crate::data::executor) fn checkpoint_columnar_engines(&mut self) -> crate::Result<Lsn> {
         let durable_through = self.watermark;
+        let replay = self.floors.applied_prefix.stamp()?;
 
         let ckpt_dir = columnar_ckpt_dir(&self.data_dir, self.core_id);
         std::fs::create_dir_all(&ckpt_dir).map_err(|e| storage_err(&ckpt_dir, "create dir", &e))?;
@@ -73,9 +74,10 @@ impl CoreLoop {
             .map_err(|e| storage_err(&gen_dir, "create generation dir", &e))?;
 
         let written = self.write_columnar_generation(&gen_dir)?;
-        self.publish_columnar_generation(&ckpt_dir, generation, durable_through)?;
-        self.floors.columnar_published_lsn =
-            self.floors.columnar_published_lsn.max(durable_through);
+        let prefix = Lsn::new(replay.prefix);
+        let applied_ranges = replay.applied_above.len();
+        self.publish_columnar_generation(&ckpt_dir, generation, durable_through, replay)?;
+        self.floors.columnar_published_lsn = self.floors.columnar_published_lsn.max(prefix);
 
         // The previous generation is now unreachable. Removing it reclaims disk
         // but is NOT required for correctness — the manifest alone decides what
@@ -101,6 +103,8 @@ impl CoreLoop {
             generation,
             collections = written,
             durable_through_lsn = durable_through.as_u64(),
+            replay_prefix = prefix.as_u64(),
+            applied_ranges,
             "columnar checkpoint published"
         );
         Ok(durable_through)
@@ -182,7 +186,7 @@ impl CoreLoop {
     /// Publish a written generation by atomically replacing the manifest.
     ///
     /// This single write is the commit point of the whole checkpoint: before it
-    /// nothing changed; after it the entire generation is live at one LSN. It
+    /// nothing changed; after it the entire generation is live under one stamp. It
     /// also fsyncs `ckpt_dir`, the same directory holding the `gen-{n}/` entry,
     /// so that entry cannot still be pending when the manifest naming it becomes
     /// visible.
@@ -191,11 +195,13 @@ impl CoreLoop {
         ckpt_dir: &std::path::Path,
         generation: u64,
         durable_through: Lsn,
+        replay: ReplayStamp,
     ) -> crate::Result<()> {
         let manifest = ColumnarCheckpointManifest {
             format_version: COLUMNAR_CKPT_FORMAT_VERSION,
             generation,
             durable_through_lsn: durable_through.as_u64(),
+            replay,
         };
         let bytes =
             zerompk::to_msgpack_vec(&manifest).map_err(|e| crate::Error::Serialization {
