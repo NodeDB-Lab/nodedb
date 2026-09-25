@@ -17,6 +17,7 @@ use crate::control::crdt_post_image_policy::ExternalCrdtPostImagePolicy;
 use crate::control::planner::sql_plan_convert::convert::db_qualified;
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::{AuthenticatedIdentity, Permission};
+use crate::control::server::pgwire::types::error_map::error_to_sqlstate;
 use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::server::shared::authorization::{authorize_collection, authorize_task_set};
 use crate::control::server::shared::ddl::sql_parse::hex_decode;
@@ -96,7 +97,10 @@ pub async fn crdt_state(
         },
     )
     .await
-    .map_err(|e| DdlError::new("XX000", e.to_string()))?;
+    .map_err(|e| {
+        let (_, sqlstate, message) = error_to_sqlstate(&e);
+        DdlError::new(sqlstate, message)
+    })?;
 
     let columns = vec!["crdt_state".to_string()];
 
@@ -163,7 +167,10 @@ pub async fn crdt_apply(
     let surrogate = state
         .surrogate_assigner
         .assign(database_id, tenant_id, collection, document_id.as_bytes())
-        .map_err(|e| DdlError::new("XX000", e.to_string()))?;
+        .map_err(|e| {
+            let (_, sqlstate, message) = error_to_sqlstate(&e);
+            DdlError::new(sqlstate, message)
+        })?;
 
     let plan = PhysicalPlan::Crdt(CrdtOp::Apply {
         collection: nodedb_types::QualifiedCollection::new(database_id, collection),
@@ -226,7 +233,10 @@ pub async fn crdt_apply(
         },
     )
     .await
-    .map_err(|e| DdlError::new("XX000", e.to_string()))?;
+    .map_err(|e| {
+        let (_, sqlstate, message) = error_to_sqlstate(&e);
+        DdlError::new(sqlstate, message)
+    })?;
 
     let columns = vec!["result".to_string()];
     let mut row = Map::new();

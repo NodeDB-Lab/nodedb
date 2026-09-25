@@ -169,8 +169,11 @@ pub(super) fn ndjson_body_stream(
                 None => break,
                 Some(Ok(b)) => b,
                 Some(Err(e)) => {
-                    let (_status, msg) = GatewayErrorMap::to_http(&e);
-                    let line = format!("{}\n", serde_json::json!({ "error": msg }));
+                    let (status, msg) = GatewayErrorMap::to_http(&e);
+                    let line = format!(
+                        "{}\n",
+                        serde_json::json!({ "error": msg, "status": status })
+                    );
                     yield Ok(Bytes::from(line));
                     return;
                 }
@@ -182,9 +185,13 @@ pub(super) fn ndjson_body_stream(
                     // A malformed batch payload is surfaced as an in-band error
                     // line (matching the mid-stream dispatch-error path above)
                     // rather than silently dropping the batch.
+                    let classified = crate::error_classify::classify(&e);
                     let line = format!(
                         "{}\n",
-                        serde_json::json!({ "error": format!("malformed response batch: {e}") })
+                        serde_json::json!({
+                            "error": format!("malformed response batch: {}", classified.message()),
+                            "code": classified.code().0,
+                        })
                     );
                     yield Ok(Bytes::from(line));
                     return;
@@ -206,7 +213,14 @@ pub(super) fn ndjson_body_stream(
                 Err(e) => {
                     // In-band error line, matching the malformed-batch path
                     // above: the HTTP body itself never errors.
-                    let line = format!("{}\n", serde_json::json!({ "error": format!("{e}") }));
+                    let classified = crate::error_classify::classify(&e);
+                    let line = format!(
+                        "{}\n",
+                        serde_json::json!({
+                            "error": classified.message(),
+                            "code": classified.code().0,
+                        })
+                    );
                     yield Ok(Bytes::from(line));
                     return;
                 }

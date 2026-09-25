@@ -8,6 +8,7 @@ use crate::bridge::envelope::PhysicalPlan;
 use crate::control::crdt_post_image_policy::ExternalCrdtPostImagePolicy;
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::{AuthenticatedIdentity, Permission};
+use crate::control::server::pgwire::types::error_map::error_to_sqlstate;
 use crate::control::server::shared::authorization::{authorize_collection, authorize_task_set};
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
@@ -87,7 +88,10 @@ pub async fn crdt_merge(
         },
     )
     .await
-    .map_err(|e| ddl_err("XX000", e.to_string()))?;
+    .map_err(|e| {
+        let (_, sqlstate, message) = error_to_sqlstate(&e);
+        ddl_err(sqlstate, message)
+    })?;
     if source_bytes.is_empty() {
         return Err(ddl_err(
             "02000",
@@ -98,7 +102,10 @@ pub async fn crdt_merge(
     let target_surrogate = state
         .surrogate_assigner
         .assign(database_id, tenant_id, collection, target_id.as_bytes())
-        .map_err(|e| ddl_err("XX000", e.to_string()))?;
+        .map_err(|e| {
+            let (_, sqlstate, message) = error_to_sqlstate(&e);
+            ddl_err(sqlstate, message)
+        })?;
 
     let apply_plan = PhysicalPlan::Crdt(CrdtOp::Apply {
         collection: nodedb_types::QualifiedCollection::new(database_id, collection),
@@ -163,7 +170,10 @@ pub async fn crdt_merge(
         },
     )
     .await
-    .map_err(|e| ddl_err("XX000", e.to_string()))?;
+    .map_err(|e| {
+        let (_, sqlstate, message) = error_to_sqlstate(&e);
+        ddl_err(sqlstate, message)
+    })?;
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,

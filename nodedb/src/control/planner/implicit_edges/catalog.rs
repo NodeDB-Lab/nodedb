@@ -33,8 +33,14 @@ pub async fn mark_collection_edge_bearing(
     collection: &str,
 ) -> crate::Result<()> {
     let catalog = state.credentials.catalog();
-    let Some(mut coll) = catalog.get_collection(database_id, tenant_id.as_u64(), collection)?
-    else {
+    // Callers route the plan on the database-qualified collection, but the
+    // catalog keys collections by the bare name, so strip the qualifier back off
+    // here or an edge-bearing collection in a non-default database misses the
+    // read, the flag is never set, and implicit-edge UPDATE/DELETE cleanup is
+    // silently skipped, leaking stale mirrored edges. Identity for
+    // `DatabaseId::DEFAULT`.
+    let bare = crate::control::target_identity::bare_collection_name(database_id, collection);
+    let Some(mut coll) = catalog.get_collection(database_id, tenant_id.as_u64(), &bare)? else {
         // Collection row absent — don't fail the write over flag bookkeeping.
         return Ok(());
     };

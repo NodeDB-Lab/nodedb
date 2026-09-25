@@ -85,10 +85,34 @@ struct CrdtAdmissionWorkflow<'a> {
     tenant_id: TenantId,
     database_id: DatabaseId,
     vshard_id: VShardId,
+    /// The collection the doors that route this work hash together with the
+    /// database to pick a vShard. Apply admission binds the canonical,
+    /// database-qualified key so the sequencer slot, the preview dispatch and
+    /// the raft entry all ride the vShard the planner derived; the restore path
+    /// binds its caller's own form, which its plan and apply are both built from.
     collection: &'a str,
+    /// Canonical, database-qualified key the CRDT engine stores the collection
+    /// under. The plan under admission carries this form, so the preview that
+    /// fences it has to as well or the two address different documents.
+    engine_collection: &'a str,
     timeout: Duration,
     event_source: EventSource,
     policy: &'a dyn CrdtPostImagePolicy,
+}
+
+/// The canonical, database-qualified key for `collection`, whatever form the
+/// caller passed.
+///
+/// `QualifiedCollection::new` is the constructor every plan uses, so reducing
+/// the request through it is what makes the request's collection comparable
+/// with the plan's — and it is the string the CRDT engine is keyed by.
+fn engine_key(database_id: DatabaseId, collection: &str) -> String {
+    nodedb_types::QualifiedCollection::new(
+        database_id,
+        &crate::control::target_identity::bare_collection_name(database_id, collection),
+    )
+    .as_str()
+    .to_owned()
 }
 
 /// Whether an operation changes the Loro frontier and must serialize with an
@@ -130,7 +154,11 @@ pub async fn dispatch_authorized_crdt_apply_admitted_outcome(
         event_source,
         policy,
     } = request;
-    enforce_external_signing_policy(state, &authorized, collection)?;
+    let database_id = authorized.database_id();
+    // The catalog qualifies the name itself, so this lookup is the one place
+    // that needs the bare form back.
+    let bare = crate::control::target_identity::bare_collection_name(database_id, collection);
+    enforce_external_signing_policy(state, &authorized, &bare)?;
     let task = authorized.into_physical_task();
     dispatch_crdt_apply_admitted_outcome(
         state,
@@ -191,6 +219,12 @@ pub(crate) async fn dispatch_crdt_apply_admitted_outcome(
         event_source,
         policy,
     } = request;
+    // The plan carries the canonical engine key; the request may carry either
+    // form. Reducing the request to the canonical form is what lets a plan built
+    // for a non-default database match the bare name its caller typed -- and it
+    // is the string the engine is keyed by, so the preview below has to use it
+    // too or it reads a different (empty) document than the apply writes.
+    let key = engine_key(database_id, collection);
     let (document_id, delta) = match &plan {
         PhysicalPlan::Crdt(
             CrdtOp::Apply {
@@ -207,7 +241,7 @@ pub(crate) async fn dispatch_crdt_apply_admitted_outcome(
                 expected_frontier_digest: None,
                 ..
             },
-        ) if plan_collection.as_str() == collection => (document_id.clone(), delta.clone()),
+        ) if plan_collection.as_str() == key.as_str() => (document_id.clone(), delta.clone()),
         PhysicalPlan::Crdt(
             CrdtOp::Apply {
                 expected_frontier_digest: Some(_),
@@ -224,13 +258,19 @@ pub(crate) async fn dispatch_crdt_apply_admitted_outcome(
             });
         }
     };
-    let vshard_id = VShardId::from_collection_in_database(database_id, collection);
+    // Route on the canonical key, not on the caller's own form: the planner
+    // derives its task vShard from the database-qualified collection, so the
+    // sequencer slot, the preview dispatch and the raft entry have to key on
+    // that same string or admission fences a different vShard than the one the
+    // plan's own writes land on.
+    let vshard_id = VShardId::from_collection_in_database(database_id, &key);
     let workflow = CrdtAdmissionWorkflow {
         state,
         tenant_id,
         database_id,
         vshard_id,
-        collection,
+        collection: &key,
+        engine_collection: &key,
         timeout,
         event_source,
         policy,
@@ -290,7 +330,7 @@ async fn preview(
                 workflow.collection,
                 PhysicalPlan::Crdt(CrdtOp::PreviewApply {
                     collection: nodedb_types::QualifiedCollection::from_stored(
-                        workflow.collection.to_owned(),
+                        workflow.engine_collection.to_owned(),
                     ),
                     document_id: document_id.to_owned(),
                     delta: delta.to_vec(),
@@ -422,6 +462,9 @@ pub(crate) async fn dispatch_crdt_restore_admitted(
         database_id,
         vshard_id,
         collection,
+        // The restore path builds its own Apply from this same string, so the
+        // preview keeps whatever form that caller used.
+        engine_collection: collection,
         timeout,
         event_source,
         policy,
