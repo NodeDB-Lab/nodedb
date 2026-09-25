@@ -136,7 +136,11 @@ impl NodeDbPgHandler {
         }
 
         match routed {
-            Ok(InTxnRoute::Read(routed_task)) => Ok(TxnRouteOutcome::Proceed(routed_task)),
+            // The pgwire dispatch proposes a write through Raft or appends its
+            // redo record in the funnel.
+            Ok(InTxnRoute::Read(routed_task) | InTxnRoute::Autocommit(routed_task)) => {
+                Ok(TxnRouteOutcome::Proceed(routed_task))
+            }
             Ok(InTxnRoute::Buffered) => Ok(TxnRouteOutcome::Handled(HandledWrite::Opaque)),
             Ok(InTxnRoute::Staged(outcome)) => Ok(TxnRouteOutcome::Handled(HandledWrite::Dml(
                 staged_dml_outcome(outcome.kind, outcome.affected),

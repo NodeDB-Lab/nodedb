@@ -98,6 +98,24 @@ pub(super) fn funnel_minted_redo_engine(plan: &PhysicalPlan) -> Option<&'static 
     }
 }
 
+/// Refuse a write whose redo record only the funnel's `AppendHere` route
+/// mints, on a dispatch route that appends nothing.
+///
+/// The read route and the staged-write route supply no LSN and no minted
+/// records. A write that reaches one of them applies with no WAL record, so
+/// the refusal fires before the write is enqueued, never after it applied.
+pub(super) fn refuse_unlogged_write(plan: &PhysicalPlan) -> crate::Result<()> {
+    match funnel_minted_redo_engine(plan) {
+        None => Ok(()),
+        Some(engine) => Err(crate::Error::Internal {
+            detail: format!(
+                "a {engine} write reached a dispatch route that appends no WAL record; an \
+                 autocommit write must dispatch through the durable write route"
+            ),
+        }),
+    }
+}
+
 /// Called at the durable-at-ack barrier when there is no LSN to wait on.
 ///
 /// `missing_redo_engine` is [`funnel_minted_redo_engine`]'s verdict for the
@@ -186,6 +204,24 @@ mod tests {
             plan: Box::new(kv_put()),
         });
         assert_eq!(funnel_minted_redo_engine(&plan), None);
+    }
+
+    /// The read route refuses a KV write before it is enqueued, and passes a
+    /// read and a staged write.
+    #[test]
+    fn the_read_route_refuses_a_write_it_cannot_log() {
+        assert!(refuse_unlogged_write(&kv_put()).is_err());
+        let staged = PhysicalPlan::Meta(MetaOp::StageWrite {
+            plan: Box::new(kv_put()),
+        });
+        assert!(refuse_unlogged_write(&staged).is_ok());
+        let read = PhysicalPlan::Kv(KvOp::Get {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+            key: b"k".to_vec(),
+            rls_filters: Vec::new(),
+            surrogate_ceiling: None,
+        });
+        assert!(refuse_unlogged_write(&read).is_ok());
     }
 
     /// A zero-edge batch appends nothing on purpose, so it must not be held to

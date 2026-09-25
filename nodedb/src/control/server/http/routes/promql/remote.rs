@@ -182,7 +182,7 @@ pub async fn remote_write(
                 };
                 gw.execute(&gw_ctx, checked).await
             }
-            None => crate::control::server::dispatch_utils::dispatch_authorized_autocommit_write(
+            None => crate::control::server::dispatch_utils::dispatch_authorized_durable_write(
                 &state.shared,
                 checked,
                 TraceId::generate(),

@@ -57,6 +57,21 @@ pub(super) async fn dispatch_authorized_single_task(
         CloneCheckedOutcome::Handled(resp) => return Ok(resp),
         CloneCheckedOutcome::Proceed(checked) => checked,
     };
+    // A write whose RLS write policy is decided per row cannot be proposed
+    // bare: a follower has no writing identity to decide it against. It
+    // resolves to a concrete row set here, while the identity is live, the
+    // way the planned native and pgwire writes resolve.
+    if checked.txn_id().is_none()
+        && ctx.state.async_raft_proposer().is_some()
+        && let Some(resolver) = crate::control::write_resolve::resolver_for_plan(checked.plan())
+    {
+        return crate::control::write_resolve::run_authorized_write_resolve(
+            ctx.state,
+            checked.into_authorized(),
+            resolver,
+        )
+        .await;
+    }
     // A staged write and the other transaction meta-ops run on the core of
     // the task's own vShard. The gateway would route them to vShard 0.
     let gateway = ctx
@@ -182,8 +197,7 @@ pub(super) async fn dispatch_without_gateway(
                 if crate::control::crdt_admission::changes_crdt_frontier(op)
         );
     let write = || async move {
-        dispatch_utils::dispatch_authorized_autocommit_write(ctx.state, checked, TraceId::ZERO)
-            .await
+        dispatch_utils::dispatch_authorized_durable_write(ctx.state, checked, TraceId::ZERO).await
     };
     if frontier_mutation {
         ctx.state

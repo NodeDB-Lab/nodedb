@@ -115,6 +115,7 @@ mod http_streams;
 mod http_ws;
 mod http_ws_authorization;
 mod intake_throttle;
+mod kv_atomic_autocommit_wal;
 mod kv_atomic_surrogate_identity;
 mod kv_field_transfer_surrogate_identity;
 mod maintenance_does_not_starve_interactive;

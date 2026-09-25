@@ -6,6 +6,7 @@ mod change_events;
 mod collect;
 mod dispatch;
 mod durability_barrier;
+mod durable_write;
 mod error_status;
 mod minted;
 mod submit_write;
@@ -26,6 +27,10 @@ pub(crate) use dispatch::{
     dispatch_trusted_internal_write_to_data_plane,
 };
 pub use durability_barrier::writes_acked_without_durability;
+pub(crate) use durable_write::{
+    dispatch_authorized_durable_write, dispatch_authorized_task_by_class,
+    dispatch_durable_autocommit_write,
+};
 pub(crate) use error_status::reject_data_plane_error;
 pub(crate) use minted::{
     Collect, MintedRecords, OwnedResponse, OwnedWait, RecordOwner, await_response_owned,

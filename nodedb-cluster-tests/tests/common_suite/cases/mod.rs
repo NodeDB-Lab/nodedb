@@ -55,6 +55,7 @@ mod http_gateway_migration;
 mod ilp_gateway_migration;
 mod install_snapshot_crdt_constraints_cluster;
 mod install_snapshot_e2e_cluster;
+mod kv_atomic_autocommit_replicates;
 mod learner_cleanup;
 mod linearizable_read_leadership;
 mod listeners_gateway_smoke;

@@ -16,6 +16,10 @@ use super::submit_write::{
 use super::types::{AutocommitWrite, DataPlaneDispatch, WriteDispatch};
 
 /// Dispatch a clone-checked, capability-bearing external task to the Data Plane.
+///
+/// The read route: it appends no WAL record. A write whose caller owns no
+/// record for it goes through `dispatch_authorized_durable_write`, or
+/// `dispatch_authorized_task_by_class` where one call site carries both.
 pub async fn dispatch_authorized_to_data_plane(
     shared: &SharedState,
     checked: CloneCheckedTask,
@@ -289,6 +293,9 @@ pub(crate) async fn dispatch_autocommit_write(
 /// id so the Data Plane can resolve this transaction's staging overlay
 /// (read-your-own-writes) and route `StageWrite`. Used by the native endpoint,
 /// whose in-transaction tasks flow through this shared path.
+///
+/// It appends no WAL record, so it refuses a write that only the funnel's
+/// `AppendHere` route logs. A staged write is not such a write: COMMIT logs it.
 pub(crate) async fn dispatch_to_data_plane_with_txn(
     shared: &SharedState,
     tenant_id: TenantId,
@@ -298,6 +305,7 @@ pub(crate) async fn dispatch_to_data_plane_with_txn(
     trace_id: TraceId,
     txn_id: Option<crate::types::TxnId>,
 ) -> crate::Result<Response> {
+    super::durability_barrier::refuse_unlogged_write(&plan)?;
     dispatch_to_data_plane_inner(
         shared,
         DataPlaneDispatch {

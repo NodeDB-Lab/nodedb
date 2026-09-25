@@ -108,9 +108,8 @@ pub async fn weighted_pick(
     let mut weights: Vec<f64> = Vec::with_capacity(entries.len());
     let mut keys: Vec<String> = Vec::with_capacity(entries.len());
 
-    for (key_bytes, value_bytes) in &entries {
-        let key_str = String::from_utf8_lossy(key_bytes).to_string();
-        let weight = extract_weight(value_bytes, &weight_col).unwrap_or(0.0);
+    for (key_str, row) in entries {
+        let weight = row_weight(&row, &weight_col).unwrap_or(0.0);
         if weight < 0.0 {
             return Err(ddl_err(
                 "42601",
@@ -160,47 +159,59 @@ pub async fn weighted_pick(
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         );
-        let audit_value = nodedb_types::json_to_msgpack(&audit_entry).unwrap_or_default();
+        let audit_value = nodedb_types::json_to_msgpack(&audit_entry)
+            .map_err(|e| ddl_err("XX000", format!("WEIGHTED_PICK: audit entry encode: {e}")))?;
         let audit_key_bytes = audit_key.into_bytes();
-        match state.surrogate_assigner.assign(
-            crate::types::DatabaseId::DEFAULT,
-            tenant_id,
-            "_system_random_audit",
-            &audit_key_bytes,
-        ) {
-            Ok(audit_surrogate) => {
-                let audit_plan = PhysicalPlan::Kv(KvOp::Put {
-                    collection: nodedb_types::QualifiedCollection::new(
-                        DatabaseId::DEFAULT,
-                        "_system_random_audit",
-                    ),
-                    key: audit_key_bytes,
-                    value: audit_value,
-                    ttl_ms: 0,
-                    surrogate: audit_surrogate,
-                    returning: None,
-                    rls_filters: Vec::new(),
-                });
-                // Audit write failure doesn't block the pick result, but log the error.
-                if let Err(e) = crate::control::server::dispatch_utils::dispatch_to_data_plane(
-                    state,
-                    tenant_id,
+        let audit_surrogate = state
+            .surrogate_assigner
+            .assign(
+                crate::types::DatabaseId::DEFAULT,
+                tenant_id,
+                "_system_random_audit",
+                &audit_key_bytes,
+            )
+            .map_err(|e| ddl_err("XX000", format!("WEIGHTED_PICK: audit surrogate bind: {e}")))?;
+        let audit_plan = PhysicalPlan::Kv(KvOp::Put {
+            collection: nodedb_types::QualifiedCollection::new(
+                DatabaseId::DEFAULT,
+                "_system_random_audit",
+            ),
+            key: audit_key_bytes,
+            value: audit_value,
+            ttl_ms: 0,
+            surrogate: audit_surrogate,
+            returning: None,
+            rls_filters: Vec::new(),
+        });
+        // The caller asked for an audited pick, so the pick is answered only
+        // once its audit record is durable: Raft in cluster mode, else the
+        // write funnel's `AppendHere`. A pick returned without its record is
+        // an unaudited pick reported as an audited one.
+        let resp = crate::control::server::dispatch_utils::dispatch_durable_autocommit_write(
+            state,
+            crate::control::server::dispatch_utils::AutocommitWrite {
+                tenant_id,
+                database_id: DatabaseId::DEFAULT,
+                vshard_id: VShardId::from_collection_in_database(
                     DatabaseId::DEFAULT,
-                    VShardId::from_collection_in_database(
-                        DatabaseId::DEFAULT,
-                        "_system_random_audit",
-                    ),
-                    audit_plan,
-                    TraceId::ZERO,
-                )
-                .await
-                {
-                    tracing::warn!(error = %e, "WEIGHTED_PICK: audit write failed");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "WEIGHTED_PICK: audit surrogate bind failed");
-            }
+                    "_system_random_audit",
+                ),
+                plan: audit_plan,
+                trace_id: TraceId::ZERO,
+                event_source: crate::event::EventSource::User,
+                txn_id: None,
+            },
+        )
+        .await
+        .map_err(|e| ddl_err("XX000", format!("WEIGHTED_PICK: audit write: {e}")))?;
+        if resp.status != crate::bridge::envelope::Status::Ok {
+            return Err(ddl_err(
+                "XX000",
+                format!(
+                    "WEIGHTED_PICK: the audit write was refused: {:?}",
+                    resp.error_code
+                ),
+            ));
         }
     }
 
@@ -228,14 +239,15 @@ pub async fn weighted_pick(
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
-/// Scan all entries from a KV collection.
+/// Scan every row of a KV collection as `(key, row)`. A KV scan row is a
+/// document map carrying the row's `key` beside its value fields.
 async fn scan_all_entries(
     state: &SharedState,
     gate: &CollectionReadGate<'_>,
     tenant_id: crate::types::TenantId,
     vshard: VShardId,
     collection: &str,
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>, DdlError> {
+) -> Result<Vec<(String, serde_json::Value)>, DdlError> {
     let mut plan = PhysicalPlan::Kv(KvOp::Scan {
         collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, collection),
         cursor: Vec::new(),
@@ -260,39 +272,63 @@ async fn scan_all_entries(
     .await
     .map_err(|e| ddl_err("XX000", e.to_string()))?;
 
+    // A refused scan is not an empty collection: a pick from it draws from
+    // rows the scan never returned.
     if resp.status != Status::Ok {
-        return Ok(Vec::new());
+        return Err(ddl_err(
+            "XX000",
+            format!(
+                "WEIGHTED_PICK: the scan of '{collection}' was refused: {:?}",
+                resp.error_code
+            ),
+        ));
     }
 
     // KV scan returns a flat msgpack array of entry maps.
     let payload_text = crate::data::executor::response_codec::decode_payload_to_json(&resp.payload);
-    let json: serde_json::Value = sonic_rs::from_str(&payload_text).unwrap_or_default();
+    let json: serde_json::Value = sonic_rs::from_str(&payload_text).map_err(|e| {
+        ddl_err(
+            "XX000",
+            format!("WEIGHTED_PICK: the scan of '{collection}' returned undecodable rows: {e}"),
+        )
+    })?;
 
     let entries = match json {
         serde_json::Value::Array(arr) => arr,
-        _ => return Ok(Vec::new()),
+        other => {
+            return Err(ddl_err(
+                "XX000",
+                format!("WEIGHTED_PICK: the scan of '{collection}' returned {other}, not rows"),
+            ));
+        }
     };
 
     let mut all_entries = Vec::with_capacity(entries.len());
-    for entry in &entries {
-        let key_b64 = entry.get("key").and_then(|k| k.as_str()).unwrap_or("");
-        let val_b64 = entry.get("value").and_then(|v| v.as_str()).unwrap_or("");
-
-        let key_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, key_b64)
-            .unwrap_or_default();
-        let val_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, val_b64)
-            .unwrap_or_default();
-
-        all_entries.push((key_bytes, val_bytes));
+    for row in entries {
+        let key = scan_row_key(&row, collection)?;
+        all_entries.push((key, row));
     }
 
     Ok(all_entries)
 }
 
-/// Extract a numeric weight from a MessagePack-encoded value.
-fn extract_weight(value_bytes: &[u8], weight_col: &str) -> Option<f64> {
-    let doc: serde_json::Value = nodedb_types::json_from_msgpack(value_bytes).ok()?;
-    let v = doc.get(weight_col)?;
+/// The key of one KV scan row. A row without a text `key` fails the pick: a
+/// skipped row changes the row set the pick draws from.
+fn scan_row_key(row: &serde_json::Value, collection: &str) -> Result<String, DdlError> {
+    row.get("key")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            ddl_err(
+                "XX000",
+                format!("WEIGHTED_PICK: a scan row of '{collection}' has no text 'key'"),
+            )
+        })
+}
+
+/// The numeric weight column of one KV scan row.
+fn row_weight(row: &serde_json::Value, weight_col: &str) -> Option<f64> {
+    let v = row.get(weight_col)?;
     v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
 }
 

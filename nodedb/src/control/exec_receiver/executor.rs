@@ -307,7 +307,21 @@ impl LocalPlanExecutor {
                     {
                         // Replicated writes carry no read watermark → 0: it floors a
                         // session's later reads, and this RPC seam has no session.
-                        Ok((payload, _write_version)) => ExecuteResponse::ok(vec![payload], 0, 0),
+                        Ok((payload, write_version)) => {
+                            // Replicas apply with `ChangeFeedOwner::Unowned`. This
+                            // node proposed the write once, so it publishes the
+                            // change event.
+                            crate::control::server::dispatch_utils::publish_change_set_with_lsn(
+                                &self.state,
+                                tenant_id,
+                                database_id,
+                                crate::control::server::dispatch_utils::extract_write_change_set(
+                                    &plan, tenant_id,
+                                ),
+                                write_version,
+                            );
+                            ExecuteResponse::ok(vec![payload], 0, 0)
+                        }
                         // A replicated write's apply verdict is a Data-Plane
                         // verdict: carry its code, never flatten to internal.
                         Err(e) => ExecuteResponse::err(execution_error_to_typed(e)),

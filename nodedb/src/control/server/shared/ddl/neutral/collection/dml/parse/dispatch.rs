@@ -27,7 +27,8 @@ use crate::types::TraceId;
 
 use super::types::ddl_err;
 
-/// Dispatch a plan to WAL + Data Plane, returning an error response on failure.
+/// Dispatch a write plan on the durable route, returning an error response on
+/// failure. `None` means the write applied.
 pub(in crate::control::server::shared::ddl::neutral::collection) async fn dispatch_plan(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
@@ -69,18 +70,28 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn dispat
         }
     };
 
-    if let Err(error) =
-        crate::control::server::dispatch_utils::dispatch_authorized_autocommit_write(
-            state,
-            checked,
-            TraceId::ZERO,
-        )
-        .await
+    // The durable route: Raft in cluster mode, else the funnel's `AppendHere`.
+    match crate::control::server::dispatch_utils::dispatch_authorized_durable_write(
+        state,
+        checked,
+        TraceId::ZERO,
+    )
+    .await
     {
-        let (_, sqlstate, message) = error_to_sqlstate(&error);
-        return Some(Err(ddl_err(sqlstate, message)));
+        Err(error) => {
+            let (_, sqlstate, message) = error_to_sqlstate(&error);
+            Some(Err(ddl_err(sqlstate, message)))
+        }
+        // A refusal arrives as an error status inside an `Ok` response.
+        Ok(response) if response.status == crate::bridge::envelope::Status::Error => {
+            let (_, sqlstate, message) = match response.error_code.as_deref() {
+                Some(code) => error_code_to_sqlstate(code),
+                None => ("ERROR", "XX000", "unknown data plane error".to_owned()),
+            };
+            Some(Err(ddl_err(sqlstate, message)))
+        }
+        Ok(_) => None,
     }
-    None
 }
 
 /// Authorize a write target before triggers, sequences, or catalog reads run.
@@ -343,7 +354,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
         }
 
         let task = match routed {
-            Ok(InTxnRoute::Read(task)) => *task,
+            Ok(InTxnRoute::Read(task) | InTxnRoute::Autocommit(task)) => *task,
             Ok(InTxnRoute::Buffered) | Ok(InTxnRoute::Staged(_)) => {
                 drop(initial_authorized);
                 // A buffered/staged write produces its rows at COMMIT, not
@@ -389,8 +400,10 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
             ddl_err(sqlstate, message)
         })? {
             crate::control::server::shared::clone_write::CloneCheckedOutcome::Handled(resp) => resp,
+            // A write takes the durable route: Raft in cluster mode, else the
+            // funnel's `AppendHere`. A read takes the read route.
             crate::control::server::shared::clone_write::CloneCheckedOutcome::Proceed(checked) => {
-                crate::control::server::dispatch_utils::dispatch_authorized_autocommit_write(
+                crate::control::server::dispatch_utils::dispatch_authorized_task_by_class(
                     state,
                     checked,
                     TraceId::ZERO,

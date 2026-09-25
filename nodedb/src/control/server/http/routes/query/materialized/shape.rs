@@ -323,7 +323,7 @@ pub(super) async fn run_task_loop(
             None => {
                 // Single-node boot: gateway not yet initialised — dispatch locally.
                 let response =
-                    crate::control::server::dispatch_utils::dispatch_authorized_autocommit_write(
+                    crate::control::server::dispatch_utils::dispatch_authorized_durable_write(
                         &state.shared,
                         checked,
                         trace_id,

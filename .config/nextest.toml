@@ -147,7 +147,7 @@ slow-timeout = { period = "30s", terminate-after = 8 }
 # hide the cause rather than fix it. The tail this costs is bounded — roughly a
 # dozen crash/shutdown tests at about ten seconds each.
 [[profile.default.overrides]]
-filter = 'binary(wal_direct_io) | binary(ilp_client_address) | binary(crash_recovery) | binary(crash_recovery_overlays) | binary(crash_recovery_analytics) | binary(crash_resp_kv_write) | binary(crash_metadata_applier_wedge) | binary(crash_dropped_collection_reclaim) | binary(crash_mid_replay) | binary(crash_checkpoint_corruption) | binary(crash_checkpoint_truncate_window) | binary(crash_refused_write_not_resurrected) | binary(crash_replay_fail_stop) | binary(crash_core_stall) | test(/^cases::startup_failure::/) | test(/^cases::shutdown_in_flight::/) | test(/^cases::shutdown_budget::/) | test(/^cases::shutdown_abort_offender::/) | test(/^cases::shutdown_idempotent::/)'
+filter = 'binary(wal_direct_io) | binary(ilp_client_address) | binary(crash_recovery) | binary(crash_recovery_overlays) | binary(crash_recovery_analytics) | binary(crash_resp_kv_write) | binary(crash_metadata_applier_wedge) | binary(crash_dropped_collection_reclaim) | binary(crash_mid_replay) | binary(crash_checkpoint_corruption) | binary(crash_checkpoint_truncate_window) | binary(crash_refused_write_not_resurrected) | binary(crash_replay_fail_stop) | binary(crash_core_stall) | binary(crash_replay_stamp) | binary(crash_kv_atomic_autocommit) | test(/^cases::startup_failure::/) | test(/^cases::shutdown_in_flight::/) | test(/^cases::shutdown_budget::/) | test(/^cases::shutdown_abort_offender::/) | test(/^cases::shutdown_idempotent::/)'
 test-group = 'server-process'
 threads-required = 'num-test-threads'
 

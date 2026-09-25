@@ -200,6 +200,18 @@ impl CrashHarness {
         self
     }
 
+    /// Boot without the single-node Calvin stack. The node runs no Raft
+    /// proposer, so every autocommit write takes the local funnel route, and
+    /// two writes can apply out of LSN order. Writes a config file into the
+    /// data directory and points `NODEDB_CONFIG` at it. Call before `spawn`.
+    pub fn standalone(self) -> CrashHarness {
+        let config = self.data_dir_path.join("standalone.toml");
+        std::fs::write(&config, "[server]\nsingle_node_calvin = false\n")
+            .expect("write the standalone config file");
+        let path = config.to_string_lossy().into_owned();
+        self.with_env("NODEDB_CONFIG", &path)
+    }
+
     /// Set (or replace) a server env override in place, between spawns.
     /// Unlike [`CrashHarness::with_env`], this lets a crash-during-recovery
     /// test arm `NODEDB_FAILPOINTS` for exactly one boot — left armed, every

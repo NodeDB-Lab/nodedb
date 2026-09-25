@@ -106,20 +106,26 @@ pub(super) async fn dispatch_read(
     }
 }
 
-/// Dispatch a sorted-index registration or teardown.
+/// Dispatch a sorted-index registration or teardown on the durable route.
 ///
-/// These go through the autocommit write funnel rather than the read path so
-/// the funnel appends their WAL record (`kv_register_sorted_index` /
-/// `kv_drop_sorted_index`) under the write-admission guard. The manager holds
-/// the tree only in memory, so that record plus the KV checkpoint is all that
-/// carries a registration across a restart: dispatched as a read, the catalog
-/// would keep listing an index whose tree no longer exists anywhere.
+/// In cluster mode the op is proposed through Raft, so every replica of the
+/// collection's vShard builds or drops the tree from the committed entry.
+/// Otherwise the write funnel appends its WAL record
+/// (`kv_register_sorted_index` / `kv_drop_sorted_index`) under the
+/// write-admission guard. The manager holds the tree only in memory, so that
+/// record plus the KV checkpoint is all that carries a registration across a
+/// restart. Dispatched as a read, the catalog keeps listing an index whose
+/// tree no longer exists anywhere.
+///
+/// A Data-Plane verdict from the replicated route arrives as
+/// `Error::DataPlane`. It comes back here as the error-status response the
+/// local route gives, so [`refusal`] reads both the one way.
 async fn dispatch_durable(
     state: &SharedState,
     target: &SortedIndexTarget<'_>,
     plan: PhysicalPlan,
 ) -> Result<Response, DdlError> {
-    crate::control::server::dispatch_utils::dispatch_autocommit_write(
+    let dispatched = crate::control::server::dispatch_utils::dispatch_durable_autocommit_write(
         state,
         crate::control::server::dispatch_utils::AutocommitWrite {
             tenant_id: target.tenant_id,
@@ -131,8 +137,28 @@ async fn dispatch_durable(
             txn_id: None,
         },
     )
-    .await
-    .map_err(|e| ddl_err("XX000", e.to_string()))
+    .await;
+    match dispatched {
+        Ok(resp) => Ok(resp),
+        Err(crate::Error::DataPlane(code)) => Ok(verdict_response(code)),
+        Err(e) => Err(ddl_err("XX000", e.to_string())),
+    }
+}
+
+/// The error-status response the local route gives for a Data-Plane verdict.
+fn verdict_response(code: ErrorCode) -> Response {
+    Response {
+        request_id: crate::types::RequestId::new(0),
+        status: Status::Error,
+        attempt: 0,
+        partial: false,
+        payload: crate::bridge::envelope::Payload::empty(),
+        watermark_lsn: crate::types::Lsn::ZERO,
+        error_code: Some(Box::new(code)),
+        read_set_valid: None,
+        read_version_lsn: crate::types::Lsn::ZERO,
+        write_set: Vec::new(),
+    }
 }
 
 /// Decode a row-shaped sorted-index reply.

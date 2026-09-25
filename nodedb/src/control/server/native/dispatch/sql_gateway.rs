@@ -98,8 +98,9 @@ pub(super) async fn dispatch_task_via_gateway(
             // renders its SQLSTATE and numeric code from it.
             gw.execute_response(&gw_ctx, checked).await
         }
+        // A write takes the durable route, a read the read route.
         None => {
-            crate::control::server::dispatch_utils::dispatch_authorized_to_data_plane(
+            crate::control::server::dispatch_utils::dispatch_authorized_task_by_class(
                 ctx.state,
                 checked,
                 TraceId::generate(),

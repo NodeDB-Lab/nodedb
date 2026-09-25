@@ -151,11 +151,13 @@ pub(super) async fn stage_edge_write_in_txn(
     match routed {
         Ok(InTxnRoute::Staged(outcome)) => Ok(outcome.affected as u64),
         // Edge writes are stageable (`is_stageable_write`), so inside a
-        // transaction block the gate always returns `Staged`. `Read` (not in a
-        // block) and `Buffered` (non-stageable write) cannot occur for a
-        // caller that already checked `InBlock`; there is no affected count to
-        // report for either, so treat them as a no-op tag rather than panicking.
-        Ok(InTxnRoute::Read(_)) | Ok(InTxnRoute::Buffered) => Ok(0),
+        // transaction block the gate returns `Staged`. Any other route means
+        // the caller's `InBlock` check and the gate disagree. A report of zero
+        // rows drops the write silently, so the statement fails instead.
+        Ok(InTxnRoute::Read(_) | InTxnRoute::Autocommit(_) | InTxnRoute::Buffered) => Err(ddl_err(
+            "XX000",
+            "a graph edge write reached the transaction staging gate and was not staged",
+        )),
         Err(StagingGateError::Dispatch(e)) => {
             let (_, sqlstate, message) = error_to_sqlstate(&e);
             Err(ddl_err(sqlstate, message))

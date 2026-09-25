@@ -1,27 +1,22 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! A KV write still in flight when a checkpoint is written survives a crash.
+//! A write still in flight when a checkpoint is written survives a crash.
 //!
-//! LSNs are node-global and a write reaches its core out of mint order. Client
-//! row writes apply through the one Raft apply loop, which finishes each entry
-//! before it starts the next, so two of them never overtake each other. A
-//! write outside that loop can: the engine step of an index DDL committed in
-//! a transaction runs on its own session. The test uses that step as write A:
+//! LSNs are node-global, and a write reaches its core out of mint order. The
+//! server runs standalone: with no Raft proposer, every autocommit write takes
+//! the local funnel route, so two writes to different keys apply in any order.
+//! Each engine case runs the same sequence:
 //!
-//! 1. `COMMIT` of a block holding `CREATE SORTED INDEX` lands the catalog
-//!    record, then appends A, the sorted-index registration, and parks it at
-//!    the funnel gate. Its LSN is minted and no core holds it.
-//! 2. Client writes B apply through the Raft loop with higher LSNs, until a
-//!    KV checkpoint's replay stamp names one of them above its prefix. That
-//!    proves the checkpoint was written while A was minted and not applied.
+//! 1. Write A, an `INSERT` into the held collection, mints its LSN and parks at
+//!    the funnel gate. No core holds it.
+//! 2. Writes B, `INSERT`s into a second collection, apply with higher LSNs
+//!    until a checkpoint's replay stamp names one of them above its prefix.
+//!    That proves the checkpoint was written while A was minted and not
+//!    applied.
 //! 3. The test releases A. A applies, and the process aborts before A's
 //!    response leaves, so no later checkpoint holds A.
 //! 4. After restart, replay must apply A: the stamp does not name it. A stamp
-//!    holding only the highest applied LSN would skip A, and the index would
-//!    have a catalog record and no tree.
-//!
-//! The columnar engine has no write outside the Raft loop, so its in-flight
-//! case runs in-process in `wal_replay_all.rs`.
+//!    that holds only the highest applied LSN skips A, and A's row is lost.
 //!
 //! Requires `--features failpoints`.
 
@@ -44,33 +39,83 @@ const STAMP_DEADLINE: Duration = Duration::from_secs(30);
 /// How long the process may take to abort once A is released.
 const CRASH_TIMEOUT: Duration = Duration::from_secs(60);
 
-const HELD: &str = "stamp_kv_lo";
-const INDEX: &str = "stamp_kv_idx";
-const SEEDED_ROWS: u64 = 3;
+/// One engine's run of the in-flight sequence.
+struct Case {
+    /// The collection write A goes to.
+    held: &'static str,
+    /// The collection the B writes go to.
+    applied: &'static str,
+    create_held: &'static str,
+    create_applied: &'static str,
+    /// Write A.
+    insert_held: &'static str,
+    /// Reads A's row back as one column.
+    read_held: &'static str,
+    /// The value `read_held` returns once A applied.
+    held_value: &'static str,
+    /// Write B number `n`.
+    insert_applied: fn(usize) -> String,
+    /// Reads every B row as one column.
+    read_applied: &'static str,
+    /// The engine's checkpoint module, as a `RUST_LOG` target.
+    log_target: &'static str,
+    /// The log message of a published checkpoint.
+    published: &'static str,
+    /// The log message of a checkpoint restored at boot.
+    restored: &'static str,
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_kv_write_in_flight_at_a_checkpoint_survives_kill_9() {
+    run(Case {
+        held: "stamp_kv_lo",
+        applied: "stamp_kv_hi",
+        create_held: "CREATE COLLECTION stamp_kv_lo (k STRING PRIMARY KEY, v STRING) \
+                      WITH (engine='kv')",
+        create_applied: "CREATE COLLECTION stamp_kv_hi (k STRING PRIMARY KEY, v STRING) \
+                         WITH (engine='kv')",
+        insert_held: "INSERT INTO stamp_kv_lo (k, v) VALUES ('held', 'a')",
+        read_held: "SELECT v FROM stamp_kv_lo WHERE k = 'held'",
+        held_value: "a",
+        insert_applied: |n| format!("INSERT INTO stamp_kv_hi (k, v) VALUES ('k{n:03}', 'v{n}')"),
+        read_applied: "SELECT v FROM stamp_kv_hi",
+        log_target: "nodedb::data::executor::kv_checkpoint",
+        published: "KV checkpoint published",
+        restored: "KV checkpoint restored",
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_columnar_write_in_flight_at_a_checkpoint_survives_kill_9() {
+    run(Case {
+        held: "stamp_col_lo",
+        applied: "stamp_col_hi",
+        create_held: "CREATE COLLECTION stamp_col_lo COLUMNS (id TEXT, v TEXT) \
+                      WITH (engine='columnar')",
+        create_applied: "CREATE COLLECTION stamp_col_hi COLUMNS (id TEXT, v TEXT) \
+                         WITH (engine='columnar')",
+        insert_held: "INSERT INTO stamp_col_lo (id, v) VALUES ('held', 'a')",
+        read_held: "SELECT v FROM stamp_col_lo WHERE id = 'held'",
+        held_value: "a",
+        insert_applied: |n| format!("INSERT INTO stamp_col_hi (id, v) VALUES ('r{n:03}', 'v{n}')"),
+        read_applied: "SELECT v FROM stamp_col_hi",
+        log_target: "nodedb::data::executor::columnar_checkpoint",
+        published: "columnar checkpoint published",
+        restored: "columnar checkpoint restored",
+    })
+    .await;
+}
+
+async fn run(case: Case) {
     let mut h = CrashHarness::new()
+        .standalone()
         .with_env("NODEDB_CHECKPOINT_INTERVAL_SECS", CHECKPOINT_INTERVAL_SECS)
-        .with_env(
-            "RUST_LOG",
-            "warn,nodedb::data::executor::kv_checkpoint=info",
-        );
+        .with_env("RUST_LOG", &format!("warn,{}=info", case.log_target));
     h.spawn();
     h.wait_ready();
-    h.exec(&format!(
-        "CREATE COLLECTION {HELD} (k STRING PRIMARY KEY, score INT) WITH (engine='kv')"
-    ))
-    .await;
-    for i in 0..SEEDED_ROWS {
-        h.exec(&format!(
-            "INSERT INTO {HELD} (k, score) VALUES ('p{i}', {})",
-            i * 10
-        ))
-        .await;
-    }
-    h.exec("CREATE COLLECTION stamp_kv_hi (k STRING PRIMARY KEY, v STRING) WITH (engine='kv')")
-        .await;
+    h.exec(case.create_held).await;
+    h.exec(case.create_applied).await;
 
     // Boot 2 arms the gate and the abort, keyed to the held collection. Both
     // match only a request carrying a WAL LSN, so boot itself passes them.
@@ -79,28 +124,24 @@ async fn a_kv_write_in_flight_at_a_checkpoint_survives_kill_9() {
     h.set_env(
         "NODEDB_FAILPOINTS",
         &format!(
-            "funnel::before_dispatch::{HELD}=wait_file({}),core::after_apply::{HELD}=abort",
-            release.display()
+            "funnel::before_dispatch::{held}=wait_file({}),core::after_apply::{held}=abort",
+            release.display(),
+            held = case.held,
         ),
     );
     h.reopen();
 
     let conn_str = h.pgwire_conn_str();
+    let insert_held = case.insert_held;
     let held_task = tokio::spawn(async move {
         let (client, connection) = tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
             .await
             .map_err(|e| e.to_string())?;
         tokio::spawn(connection);
-        for sql in [
-            "BEGIN".to_string(),
-            format!("CREATE SORTED INDEX {INDEX} ON {HELD} (score DESC) KEY k"),
-            "COMMIT".to_string(),
-        ] {
-            client
-                .simple_query(&sql)
-                .await
-                .map_err(|e| format!("{sql}: {e}"))?;
-        }
+        client
+            .simple_query(insert_held)
+            .await
+            .map_err(|e| format!("{insert_held}: {e}"))?;
         Ok::<(), String>(())
     });
 
@@ -108,23 +149,18 @@ async fn a_kv_write_in_flight_at_a_checkpoint_survives_kill_9() {
     let deadline = Instant::now() + STAMP_DEADLINE;
     let mut applied = 0usize;
     loop {
-        h.exec(&format!(
-            "INSERT INTO stamp_kv_hi (k, v) VALUES ('k{applied:03}', 'v{applied}')"
-        ))
-        .await;
+        h.exec(&(case.insert_applied)(applied)).await;
         applied += 1;
         tokio::time::sleep(Duration::from_millis(200)).await;
         let log = boot_section(&h.server_log(), 2);
-        if applied_ranges(&log, "KV checkpoint published")
-            .iter()
-            .any(|n| *n > 0)
-        {
+        if applied_ranges(&log, case.published).iter().any(|n| *n > 0) {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "no KV checkpoint named an applied LSN above its prefix within \
-             {STAMP_DEADLINE:?}: write A never parked, or no checkpoint ran while it was.{}\n{}",
+            "no {} named an applied LSN above its prefix within {STAMP_DEADLINE:?}: write A \
+             never parked, or no checkpoint ran while it was.{}\n{}",
+            case.published,
             h.keep_data_dir_note(),
             diagnostics::log_tail_section(&h.server_log())
         );
@@ -133,14 +169,17 @@ async fn a_kv_write_in_flight_at_a_checkpoint_survives_kill_9() {
         !held_task.is_finished(),
         "write A finished before its release: the gate never parked it"
     );
-    let mut live = h.query_col_idx("SELECT v FROM stamp_kv_hi", 0).await;
+    let mut live = h.query_col_idx(case.read_applied, 0).await;
     live.sort();
 
     // Release A. It applies, and the process aborts before its response
     // leaves, so no checkpoint written after it can hold it.
     std::fs::write(&release, b"release").expect("create the release file");
     h.await_self_crash(CRASH_TIMEOUT);
-    let marker = format!("fail_point aborting process: core::after_apply::{HELD}");
+    let marker = format!(
+        "fail_point aborting process: core::after_apply::{}",
+        case.held
+    );
     assert!(
         h.server_log().contains(&marker),
         "the process exited, but not after write A applied.{}\n{}",
@@ -153,7 +192,7 @@ async fn a_kv_write_in_flight_at_a_checkpoint_survives_kill_9() {
     h.clear_env("NODEDB_FAILPOINTS");
     h.reopen();
 
-    let ranges = applied_ranges(&boot_section(&h.server_log(), 3), "KV checkpoint restored");
+    let ranges = applied_ranges(&boot_section(&h.server_log(), 3), case.restored);
     assert!(
         ranges.iter().any(|n| *n > 0),
         "the restored generation must name an applied LSN above its prefix, or this run did \
@@ -162,21 +201,20 @@ async fn a_kv_write_in_flight_at_a_checkpoint_survives_kill_9() {
         diagnostics::log_tail_section(&h.server_log())
     );
 
-    let count = h
-        .query_col_idx(&format!("SELECT SORTED_COUNT({INDEX})"), 0)
-        .await;
+    let held = h.query_col_idx(case.read_held, 0).await;
     assert_eq!(
-        count.first().and_then(|text| json_field(text, "count")),
-        Some(SEEDED_ROWS),
-        "write A applied after the checkpoint and before the crash; replay must rebuild \
-         the index tree from it, never skip it as covered by a higher applied LSN \
-         (got {count:?})"
+        held,
+        vec![case.held_value.to_string()],
+        "write A to {} applied after the checkpoint and before the crash; replay must \
+         apply it, never skip it as covered by a higher applied LSN",
+        case.held
     );
-    let mut replayed = h.query_col_idx("SELECT v FROM stamp_kv_hi", 0).await;
+    let mut replayed = h.query_col_idx(case.read_applied, 0).await;
     replayed.sort();
     assert_eq!(
         replayed, live,
-        "the replayed state must equal the live state: every B write once"
+        "the replayed state of {} must equal the live state: every B write once",
+        case.applied
     );
 }
 
@@ -205,17 +243,6 @@ fn applied_ranges(log: &str, message: &str) -> Vec<u64> {
             digits.parse().ok()
         })
         .collect()
-}
-
-/// The unsigned integer a single-cell JSON reply carries under `field`.
-fn json_field(text: &str, field: &str) -> Option<u64> {
-    let rest = text.split_once(&format!("\"{field}\":"))?.1;
-    let digits: String = rest
-        .trim_start()
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    digits.parse().ok()
 }
 
 /// `text` without terminal colour escape sequences.
@@ -247,5 +274,4 @@ fn log_fields_are_read_through_colour_codes() {
     assert!(!boot_section(booted, 2).contains("first-line"));
     assert!(boot_section(booted, 1).contains("first-line"));
     assert!(!boot_section(booted, 1).contains("second-line"));
-    assert_eq!(json_field("{\"count\":3}", "count"), Some(3));
 }

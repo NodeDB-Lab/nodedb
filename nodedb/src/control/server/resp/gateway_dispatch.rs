@@ -141,7 +141,7 @@ pub(super) async fn dispatch_kv_write(
                     detail: GatewayErrorMap::to_resp(&e),
                 })
         }
-        None => dispatch_utils::dispatch_authorized_autocommit_write(state, checked, TraceId::ZERO)
+        None => dispatch_utils::dispatch_authorized_durable_write(state, checked, TraceId::ZERO)
             .await
             .map_err(map_busy_error),
     };

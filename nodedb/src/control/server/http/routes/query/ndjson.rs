@@ -307,8 +307,9 @@ pub async fn query_ndjson(
                         };
                         gw.execute(&gw_ctx, checked).await
                     }
+                    // A write takes the durable route, a read the read route.
                     None => {
-                        crate::control::server::dispatch_utils::dispatch_authorized_to_data_plane(
+                        crate::control::server::dispatch_utils::dispatch_authorized_task_by_class(
                             &state.shared,
                             checked,
                             trace_id,

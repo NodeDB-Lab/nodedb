@@ -116,16 +116,7 @@ pub async fn rate_check(
         shape: nodedb_physical::physical_plan::KvCounterShape::Raw,
     });
 
-    match crate::control::server::dispatch_utils::dispatch_to_data_plane(
-        state,
-        tenant_id,
-        crate::types::DatabaseId::DEFAULT,
-        vshard,
-        plan,
-        TraceId::ZERO,
-    )
-    .await
-    {
+    match dispatch_counter_write(state, tenant_id, vshard, plan).await {
         Ok(resp) if resp.status == Status::Ok => {
             let payload_text =
                 crate::data::executor::response_codec::decode_payload_to_json(&resp.payload);
@@ -265,17 +256,8 @@ pub async fn rate_reset(
         rls_filters: Vec::new(),
     });
 
-    match crate::control::server::dispatch_utils::dispatch_to_data_plane(
-        state,
-        tenant_id,
-        crate::types::DatabaseId::DEFAULT,
-        vshard,
-        plan,
-        TraceId::ZERO,
-    )
-    .await
-    {
-        Ok(_) => {
+    match dispatch_counter_write(state, tenant_id, vshard, plan).await {
+        Ok(resp) if resp.status == Status::Ok => {
             let result = serde_json::json!({
                 "gate": gate_name,
                 "key": key,
@@ -283,11 +265,45 @@ pub async fn rate_reset(
             });
             Ok(vec![single_text_col("rate_reset", result.to_string())])
         }
+        // A refusal arrives as an error status inside an `Ok` response. The
+        // counter is still there, so the reset did not happen.
+        Ok(resp) => Err(ddl_err(
+            "XX000",
+            format!(
+                "RATE_RESET: the counter delete was refused: {:?}",
+                resp.error_code
+            ),
+        )),
         Err(e) => Err(ddl_err("XX000", e.to_string())),
     }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
+
+/// Apply a write to the rate-gate counter collection on the durable route:
+/// Raft in cluster mode, else the write funnel's `AppendHere`. A counter
+/// written any other way has no WAL record, so a crash resets the gate and a
+/// replica never counts the call.
+async fn dispatch_counter_write(
+    state: &SharedState,
+    tenant_id: crate::types::TenantId,
+    vshard: VShardId,
+    plan: PhysicalPlan,
+) -> crate::Result<crate::bridge::envelope::Response> {
+    crate::control::server::dispatch_utils::dispatch_durable_autocommit_write(
+        state,
+        crate::control::server::dispatch_utils::AutocommitWrite {
+            tenant_id,
+            database_id: DatabaseId::DEFAULT,
+            vshard_id: vshard,
+            plan,
+            trace_id: TraceId::ZERO,
+            event_source: crate::event::EventSource::User,
+            txn_id: None,
+        },
+    )
+    .await
+}
 
 /// Read TTL remaining for a KV key (in milliseconds).
 async fn read_ttl_ms(

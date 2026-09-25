@@ -2,13 +2,18 @@
 
 //! Protocol-neutral in-transaction write-routing gate.
 //!
-//! Decides, for a single physical task submitted while a connection is
-//! inside an explicit transaction block, whether the task is a plain read
-//! (falls through to normal dispatch), a write that gets buffered for
-//! COMMIT-time replay ("OK" now, durable apply later), or a stageable write
-//! that must be applied to the per-transaction overlay immediately (real
-//! command tag + statement-time constraint errors now, still buffered for
-//! COMMIT's durable replay).
+//! Decides, for a single physical task, whether it is:
+//!
+//! - a read, handed back for the caller's read dispatch;
+//! - a write that applies now on the durable autocommit route: outside a
+//!   transaction block, or a write a transaction cannot buffer;
+//! - a write buffered for COMMIT-time replay ("OK" now, durable apply later);
+//! - a stageable write applied to the per-transaction overlay now (real
+//!   command tag and statement-time constraint errors), still buffered for
+//!   COMMIT's durable replay.
+//!
+//! A write never comes back as a read, so no caller can send one down the
+//! read route, which appends no WAL record.
 //!
 //! This is the shared seam every protocol's dispatch loop routes through
 //! (pgwire SQL today; native and the DSL/UPSERT path in later units), so the
@@ -26,7 +31,7 @@ use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
 use crate::control::server::shared::sql::staging_predicates::{
     is_stageable_write, require_affected_count, stageable_write_shape,
 };
-use crate::control::server::shared::write_admission::plan_requires_txn_buffering;
+use crate::control::server::shared::write_admission::{plan_is_write, plan_requires_txn_buffering};
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TxnId, VShardId};
 use nodedb_physical::physical_plan::{ClusterArrayOp, CrdtOp, MetaOp};
@@ -42,10 +47,21 @@ pub use crate::control::server::shared::sql::staging_predicates::StagedTagKind;
 
 /// Outcome of routing a single task through the in-transaction staging gate.
 pub enum InTxnRoute {
-    /// Not a write (or not in a transaction block at all): the task is
-    /// handed back, possibly with `txn_id` stamped for read-your-own-writes,
-    /// for the caller's normal dispatch path.
+    /// Not a write. The task is handed back for the caller's read dispatch.
+    /// Inside a transaction block it carries the transaction id, so the Data
+    /// Plane reads this transaction's overlay (read-your-own-writes).
     Read(Box<PhysicalTask>),
+    /// A write that applies now, on the caller's durable autocommit route:
+    /// the session is outside a transaction block, or the write is one a
+    /// transaction cannot buffer (index DDL, a Calvin-routed bulk write).
+    ///
+    /// The caller must dispatch it through the write funnel with
+    /// `AppendHere`, or propose it through Raft in cluster mode
+    /// (`dispatch_utils::dispatch_authorized_durable_write`). The read route
+    /// appends no WAL record, and it refuses such a write.
+    ///
+    /// Inside a block the task carries the transaction id.
+    Autocommit(Box<PhysicalTask>),
     /// A non-stageable write: buffered for COMMIT-time replay. The caller
     /// pushes an immediate "OK" tag.
     Buffered,
@@ -81,12 +97,11 @@ pub struct DmlTxnCtx<'a> {
 /// An owned, session-less scope for callers with no BEGIN/COMMIT transaction
 /// concept over their transport (stateless HTTP, autocommit test helpers).
 ///
-/// It owns a fresh [`SessionStore`] and a private legacy session identity;
-/// because a fresh store reports [`TransactionState::Idle`] for that identity,
-/// [`route_in_tx_write`] always takes the `Read` (immediate autocommit
-/// dispatch) branch through a [`DmlTxnCtx`] borrowed from here — byte-identical
-/// to the pre-gate behavior. Keep the scope alive for the duration of the
-/// dispatch call that borrows its [`ctx`](Self::ctx).
+/// It owns a fresh [`SessionStore`] and a private legacy session identity.
+/// A fresh store reports [`TransactionState::Idle`] for that identity, so
+/// [`route_in_tx_write`] answers `Read` for a read and `Autocommit` for a
+/// write through a [`DmlTxnCtx`] borrowed from here. Keep the scope alive for
+/// the duration of the dispatch call that borrows its [`ctx`](Self::ctx).
 pub struct DetachedTxnScope {
     sessions: SessionStore,
     session_id: SessionId,
@@ -156,7 +171,11 @@ where
     Fut: Future<Output = crate::Result<Response>>,
 {
     if sessions.transaction_state(session_id) != TransactionState::InBlock {
-        return Ok(InTxnRoute::Read(Box::new(task)));
+        return Ok(if plan_is_write(&task.plan) {
+            InTxnRoute::Autocommit(Box::new(task))
+        } else {
+            InTxnRoute::Read(Box::new(task))
+        });
     }
 
     if matches!(
@@ -168,14 +187,16 @@ where
         ));
     }
 
-    let is_write = plan_requires_txn_buffering(&task.plan);
-
-    if !is_write {
-        // Not a write: an in-transaction read. Stamp the active transaction
+    if !plan_requires_txn_buffering(&task.plan) {
+        // Not buffered: it runs at the statement. Stamp the active transaction
         // id onto the task so the Data Plane can check this transaction's
         // staging overlay for read-your-own-writes on point lookups.
         task.txn_id = sessions.tx_id(session_id);
-        return Ok(InTxnRoute::Read(Box::new(task)));
+        return Ok(if plan_is_write(&task.plan) {
+            InTxnRoute::Autocommit(Box::new(task))
+        } else {
+            InTxnRoute::Read(Box::new(task))
+        });
     }
 
     // A distributed array write is a routing wrapper with no Data-Plane

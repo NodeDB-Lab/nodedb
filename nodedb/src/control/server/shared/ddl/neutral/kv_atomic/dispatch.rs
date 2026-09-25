@@ -5,9 +5,12 @@
 //! directory (`handlers` here, and the sibling `kv_sorted_index`,
 //! `weighted_pick`, `rate_gate`, `transfer` modules).
 
+use std::sync::Arc;
+
 use serde_json::{Map, Value as JsonValue};
 
 use crate::bridge::envelope::Status;
+use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::{AuthenticatedIdentity, Permission};
 use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::server::shared::session::DmlTxnCtx;
@@ -23,27 +26,25 @@ use super::super::read_gate::CollectionReadGate;
 /// and return the JSON response as a single text-column row keyed by the
 /// lower-cased function name.
 ///
-/// Outside a transaction block (or for the read half of the gate, which
-/// never applies here since every `KvOp` this module builds is a write),
-/// `route_in_tx_write` dispatches immediately -- byte-identical to the
-/// pre-staging behavior. Inside a transaction, `KvOp::Incr` / `IncrFloat` /
-/// `Cas` / `GetSet` are staged into the per-transaction overlay
-/// (`is_stageable_write`) and this function reads the computed value back
-/// from `StagedWriteOutcome::payload` (forwarded verbatim by the staging
-/// gate for `StagedTagKind::RawPayload`), so a `SELECT KV_INCR(...)` inside
-/// `BEGIN..COMMIT` returns the same value the staged overlay now holds, and
-/// a following `SELECT KV_INCR(...)` on the same key in the same
-/// transaction chains off it.
+/// Outside a transaction block the gate answers `Autocommit`, and the op takes
+/// the durable route every planned autocommit write takes: proposed through
+/// Raft in cluster mode, otherwise the write funnel with `AppendHere`. Either
+/// way a WAL record reproduces the value the op computed, and a replica
+/// applies it.
+///
+/// Inside a transaction, `KvOp::Incr` / `IncrFloat` / `Cas` / `GetSet` /
+/// `Transfer` / `TransferItem` are staged into the per-transaction overlay
+/// (`is_stageable_write`). This function reads the computed value back from
+/// `StagedWriteOutcome::payload`, so a `SELECT KV_INCR(...)` inside
+/// `BEGIN..COMMIT` returns the value the staged overlay now holds, and a
+/// following `SELECT KV_INCR(...)` on the same key chains off it.
 ///
 /// `collections` names every collection the op touches, in the caller's own
-/// words rather than read back out of the plan: these `KvOp`s carry no
-/// collection the plan-classification helpers report, and `TRANSFER_ITEM`
-/// touches two. Each is authorized here before the op is routed anywhere.
+/// words rather than read back out of the plan: `TRANSFER_ITEM` touches two.
+/// Each is authorized here before the op is routed anywhere.
 ///
-/// Reused by the sibling `transfer.rs` module for the identical
-/// in-transaction routing for `TRANSFER` / `TRANSFER_ITEM` instead of the
-/// direct `dispatch_to_data_plane` call it used before those two `KvOp`s
-/// became stageable.
+/// Reused by the sibling `transfer.rs` module for `TRANSFER` /
+/// `TRANSFER_ITEM`.
 pub(crate) async fn dispatch_and_respond(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
@@ -61,10 +62,10 @@ pub(crate) async fn dispatch_and_respond(
     let database_id = DatabaseId::DEFAULT;
 
     // Every caller here names its collections in the SQL text and reaches the
-    // Data Plane through a hand-built `KvOp`, which carries no identity and is
-    // never authorized downstream. The op reports the value it replaced or
-    // computed, so it is a read as much as a write and needs both grants — and
-    // a cross-collection move needs them on each side, hence the slice.
+    // Data Plane through a hand-built `KvOp`. The op reports the value it
+    // replaced or computed, so it is a read as much as a write and needs both
+    // grants — and a cross-collection move needs them on each side, hence the
+    // slice.
     let gate = CollectionReadGate::for_request(state, identity, database_id);
     for collection in collections {
         gate.authorize(collection)?;
@@ -72,15 +73,13 @@ pub(crate) async fn dispatch_and_respond(
     }
 
     // Row-level security is resolved by the same injection pass the
-    // planner-driven path runs, against the very same op. That is the point of
-    // routing it through here rather than restating a verdict locally: these
-    // functions build the identical `KvOp`s a planned statement builds, so a
-    // local refusal here while the planner enforced — or the reverse — would
-    // give the same operation two different answers depending on which syntax
-    // reached it. The pass compiles the write policy into the op's own gate
+    // planner-driven path runs, against the very same op. These functions
+    // build the identical `KvOp`s a planned statement builds. A local refusal
+    // here while the planner enforced, or the reverse, gives the same
+    // operation two answers that depend on the syntax that reached it. The pass compiles the write policy into the op's own gate
     // slot for the Data Plane to decide the image against, injects the read
-    // filter where the reply is a row body, and still refuses outright where
-    // the reply is a value computed from a row the policy hides.
+    // filter where the reply is a row body, and refuses outright where the
+    // reply is a value computed from a row the policy hides.
     gate.inject_rls(&mut plan)?;
 
     let task = PhysicalTask {
@@ -112,41 +111,27 @@ pub(crate) async fn dispatch_and_respond(
     .await;
 
     let payload = match routed {
-        Ok(InTxnRoute::Read(task)) => {
-            let task = *task;
-            match crate::control::server::dispatch_utils::dispatch_to_data_plane_with_txn(
-                state,
-                task.tenant_id,
-                task.database_id,
-                task.vshard_id,
-                task.plan,
-                TraceId::ZERO,
-                task.txn_id,
-            )
-            .await
-            {
-                // A refused write comes back as `Ok(Response)` carrying
-                // `Status::Error` — `submit_write` reports the dispatch itself
-                // as having succeeded and puts the verdict inside the response.
-                // Its payload is empty, so forwarding it unchecked would answer
-                // `SELECT KV_INCR(...)` with one blank column and let the caller
-                // read a refusal as a completed write. Every terminal outcome
-                // these functions can produce arrives this way — a policy
-                // refusal, a type mismatch, an overflow, an insufficient
-                // balance, a missing key — so the status is what decides,
-                // never the payload's emptiness.
-                Ok(resp) if resp.status == Status::Error => {
-                    return Err(data_plane_error(resp.error_code.map(|code| *code)));
-                }
-                Ok(resp) => resp.payload.as_ref().to_vec(),
-                Err(e) => return Err(ddl_err("XX000", e.to_string())),
-            }
-        }
-        // Every `KvOp` this module builds is stageable once in a
-        // transaction (`is_stageable_write`), so `Buffered` never occurs;
-        // handled defensively with an empty payload rather than a panic.
-        Ok(InTxnRoute::Buffered) => Vec::new(),
+        Ok(InTxnRoute::Autocommit(task)) => dispatch_autocommit(state, identity, *task).await?,
         Ok(InTxnRoute::Staged(outcome)) => outcome.payload,
+        // Every `KvOp` this module builds is a write, and a stageable one once
+        // in a transaction (`is_stageable_write`). A read route has no
+        // durable apply, and a buffered route has no value to answer with, so
+        // either one is a classification break, never an answer.
+        Ok(InTxnRoute::Read(_)) => {
+            return Err(ddl_err(
+                "XX000",
+                format!("{func_name}: the staging gate classified this write as a read"),
+            ));
+        }
+        Ok(InTxnRoute::Buffered) => {
+            return Err(ddl_err(
+                "XX000",
+                format!(
+                    "{func_name}: the staging gate buffered this write, so it has no value to \
+                     return at the statement"
+                ),
+            ));
+        }
         Err(StagingGateError::Dispatch(e)) => return Err(ddl_err("XX000", e.to_string())),
         Err(StagingGateError::Rejected { code }) => return Err(data_plane_error(code)),
     };
@@ -154,6 +139,70 @@ pub(crate) async fn dispatch_and_respond(
     let payload_text = crate::data::executor::response_codec::decode_payload_to_json(&payload);
     let col_name = func_name.to_lowercase();
     Ok(vec![single_text_col(&col_name, payload_text)])
+}
+
+/// Apply one autocommit op on the durable route and return its payload.
+///
+/// The task passes the same clone-write gate and authorization every
+/// transport runs before a write dispatches.
+async fn dispatch_autocommit(
+    state: &SharedState,
+    identity: &AuthenticatedIdentity,
+    task: PhysicalTask,
+) -> Result<Vec<u8>, DdlError> {
+    use crate::control::server::shared::clone_write::{
+        CloneCheckedOutcome, InterceptAndAuthorizeParams, intercept_and_authorize,
+    };
+
+    let emitter = ArcAuditEmitter(Arc::clone(&state.audit));
+    let outcome = intercept_and_authorize(InterceptAndAuthorizeParams {
+        state,
+        task,
+        identity,
+        tenant_id: identity.tenant_id,
+        permissions: &state.permissions,
+        roles: &state.roles,
+        emitter: &emitter,
+    })
+    .await
+    .map_err(|e| error_to_ddl(&e))?;
+    let response = match outcome {
+        CloneCheckedOutcome::Handled(resp) => resp,
+        CloneCheckedOutcome::Proceed(checked) => {
+            crate::control::server::dispatch_utils::dispatch_authorized_durable_write(
+                state,
+                checked,
+                TraceId::ZERO,
+            )
+            .await
+            .map_err(|e| error_to_ddl(&e))?
+        }
+    };
+    // A refused write comes back as `Ok(Response)` carrying `Status::Error`:
+    // the funnel reports the dispatch as successful and puts the verdict in the
+    // response. Its payload is empty, so an unchecked forward answers
+    // `SELECT KV_INCR(...)` with one blank column. Every terminal outcome these
+    // functions can produce arrives this way on the local route — a policy
+    // refusal, a type mismatch, an overflow, an insufficient balance, a
+    // missing key — so the status decides, never the payload's emptiness.
+    if response.status == Status::Error {
+        return Err(data_plane_error(response.error_code.map(|code| *code)));
+    }
+    Ok(response.payload.as_ref().to_vec())
+}
+
+/// Map a dispatch error to the client-facing error. A Data-Plane verdict
+/// arrives here as `Error::DataPlane` on the replicated route, and it renders
+/// the same way the local route's error status does.
+fn error_to_ddl(error: &crate::Error) -> DdlError {
+    match error {
+        crate::Error::DataPlane(code) => data_plane_error(Some(code.clone())),
+        other => {
+            let (_, sqlstate, message) =
+                crate::control::server::pgwire::types::error_to_sqlstate(other);
+            ddl_err(sqlstate, message)
+        }
+    }
 }
 
 /// Translate a terminal Data-Plane verdict into the client-facing error.

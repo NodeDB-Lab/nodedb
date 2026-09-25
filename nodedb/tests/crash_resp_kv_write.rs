@@ -108,7 +108,17 @@ async fn resp_kv_set_survives_kill_9() {
 /// replay must read and write decimal text the way the live write did.
 #[tokio::test(flavor = "multi_thread")]
 async fn resp_kv_counters_replay_to_the_acknowledged_values_after_kill_9() {
-    let mut h = no_incidental_checkpoint();
+    counters_replay_after_kill_9(no_incidental_checkpoint()).await;
+}
+
+/// A standalone node runs no Raft proposer, so the gateway applies each RESP
+/// write on its own cores. It must still append the write's WAL record.
+#[tokio::test(flavor = "multi_thread")]
+async fn resp_kv_counters_replay_after_kill_9_on_a_standalone_node() {
+    counters_replay_after_kill_9(no_incidental_checkpoint().standalone()).await;
+}
+
+async fn counters_replay_after_kill_9(mut h: CrashHarness) {
     let spawned_at = Instant::now();
     h.spawn();
     h.wait_ready();

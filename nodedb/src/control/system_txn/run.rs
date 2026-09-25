@@ -155,6 +155,13 @@ pub async fn run_statements_atomically(
 
         let read = match routed {
             Ok(InTxnRoute::Read(task)) => dispatch_read(state, *task).await.err(),
+            // Refused before BEGIN by `runs_in_a_system_transaction`: a write
+            // the transaction cannot buffer applies at once and survives a
+            // rollback.
+            Ok(InTxnRoute::Autocommit(_)) => Some(crate::Error::Internal {
+                detail: "a write a system transaction cannot buffer reached its staging gate"
+                    .into(),
+            }),
             Ok(InTxnRoute::Buffered | InTxnRoute::Staged(_)) => None,
             Err(error) => Some(staging_error(error)),
         };

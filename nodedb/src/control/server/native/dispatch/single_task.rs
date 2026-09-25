@@ -32,9 +32,9 @@ use super::{
 /// Routes through the same protocol-neutral in-transaction staging gate
 /// (`route_in_tx_write`) the SQL-planned dispatch loops (`sql_loop.rs`,
 /// pgwire's `execute_dml_hooks.rs`) already use. Outside a transaction block
-/// this is a no-op passthrough (`InTxnRoute::Read` with the task unchanged),
-/// so autocommit direct ops (including `KvBatchPut`) dispatch exactly as
-/// before. Inside a transaction block, a stageable write (e.g. `KvBatchPut`)
+/// the task comes back unchanged (`InTxnRoute::Read`, or `Autocommit` for a
+/// write), and the gateway gives a write its durable route. Inside a
+/// transaction block, a stageable write (e.g. `KvBatchPut`)
 /// is applied to the per-transaction overlay at statement time instead of
 /// hitting durable storage directly. Otherwise a native direct-op write
 /// inside `BEGIN...COMMIT` would commit immediately and survive `ROLLBACK`,
@@ -60,8 +60,8 @@ pub(super) async fn dispatch_single_task(
 
     // Only when metering is enabled — the default is disabled, so this is a
     // no-op on the hot path for every deployment that hasn't turned it on.
-    // Covers the plain `Read` dispatch below (autocommit writes/reads, and
-    // in-transaction reads). `Staged` meters itself inside
+    // Covers the `Read` / `Autocommit` dispatch below (reads, and writes that
+    // apply now). `Staged` meters itself inside
     // `staging_gate::stage_write` — the single choke-point every `Staged`
     // route (this file, `sql_loop.rs`, the expander's per-op staging, and
     // pgwire's `execute_dml_hooks.rs`) dispatches through, so it is metered
@@ -100,7 +100,9 @@ pub(super) async fn dispatch_single_task(
     )
     .await
     {
-        Ok(InTxnRoute::Read(routed_task)) => *routed_task,
+        // A write here reaches the gateway, which proposes it through Raft or
+        // appends its redo record in the funnel.
+        Ok(InTxnRoute::Read(routed_task) | InTxnRoute::Autocommit(routed_task)) => *routed_task,
         // A buffered write applies at COMMIT: no count and no verb yet.
         Ok(InTxnRoute::Buffered) => return NativeResponse::ok(seq),
         Ok(InTxnRoute::Staged(outcome)) => {

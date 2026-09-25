@@ -120,8 +120,8 @@ pub(super) async fn run_dispatch_loop(
         // Extracted from the same clone above, before `task` is moved into
         // the routing call below — metering needs the collection/engine
         // shape after this task's dispatch succeeds. Only covers the direct
-        // dispatch below (`InTxnRoute::Read`, i.e. autocommit writes/reads
-        // and in-transaction reads); `Buffered`/`Staged` tasks `continue`
+        // dispatch below (`InTxnRoute::Read` / `Autocommit`: reads, and
+        // writes that apply now); `Buffered`/`Staged` tasks `continue`
         // before reaching the metering call and are not billed here — a
         // `Buffered` task performs no dispatch yet (replayed at COMMIT), and
         // a `Staged` task's dispatch happens inside `route_in_tx_write`'s
@@ -145,8 +145,8 @@ pub(super) async fn run_dispatch_loop(
         // buffered for COMMIT-time replay; stageable writes are applied to
         // the per-transaction overlay immediately for a real affected count
         // and statement-time constraint errors. Outside a transaction block,
-        // `route_in_tx_write` always returns `Read(task)` unchanged, so the
-        // autocommit path is untouched.
+        // `route_in_tx_write` returns the task unchanged, as `Read` or as
+        // `Autocommit` for a write.
         // In-transaction `MERGE` and `UPDATE ... FROM` are resolved + staged at
         // STATEMENT time by the expander (read-your-own-writes for later
         // statements in the same txn); every other task falls through to the
@@ -205,7 +205,9 @@ pub(super) async fn run_dispatch_loop(
             PlanKind::ReturningRows
         );
         let task = match routed {
-            Ok(InTxnRoute::Read(routed_task)) => *routed_task,
+            // A write here reaches the gateway, which proposes it through
+            // Raft or appends its redo record in the funnel.
+            Ok(InTxnRoute::Read(routed_task) | InTxnRoute::Autocommit(routed_task)) => *routed_task,
             Ok(InTxnRoute::Buffered) => {
                 if returns_rows {
                     return resp(error_to_native(

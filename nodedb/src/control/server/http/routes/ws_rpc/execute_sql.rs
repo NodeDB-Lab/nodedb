@@ -295,8 +295,9 @@ pub async fn execute_sql(
                 gw.execute(&gw_ctx, checked).await
             }
             None => {
-                // Single-node boot: gateway not yet initialised — dispatch locally.
-                crate::control::server::dispatch_utils::dispatch_authorized_to_data_plane(
+                // Single-node boot: gateway not yet initialised — dispatch
+                // locally. A write takes the durable route, a read the read route.
+                crate::control::server::dispatch_utils::dispatch_authorized_task_by_class(
                     shared, checked, trace_id,
                 )
                 .await
