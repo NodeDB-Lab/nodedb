@@ -11,7 +11,7 @@ impl CoreLoop {
     /// Flush every timeseries memtable on this core to an L1 partition and
     /// return the LSN the timeseries engine is now durable through.
     ///
-    /// Returns `Ok(watermark)` only once every collection's partition — columns,
+    /// Returns `Ok(floor)` only once every collection's partition — columns,
     /// symbol dictionaries, sparse index, and the `partition.meta` that commits
     /// them — has landed. Any failure returns `Err`; the caller must then clamp
     /// the reported checkpoint LSN to the last LSN timeseries was known durable
@@ -31,7 +31,7 @@ impl CoreLoop {
     pub(in crate::data::executor) fn checkpoint_timeseries_memtables(
         &mut self,
     ) -> crate::Result<Lsn> {
-        let durable_through = self.watermark;
+        let durable_through = self.checkpoint_floor();
 
         // Collected first: `flush_ts_collection` takes `&mut self`, so the
         // memtable-map iterator cannot stay borrowed across the loop. Empty
@@ -265,6 +265,7 @@ mod tests {
             vec!["a".to_string(), "b".to_string()],
             "both rows must be live in the memtable before any flush"
         );
+        observe_floor(&mut before, 20);
 
         let reported = before
             .core
@@ -291,14 +292,14 @@ mod tests {
         );
     }
 
-    /// A core with no timeseries memtables reports the watermark rather than
+    /// A core with no timeseries memtables reports the floor rather than
     /// clamping — it holds no timeseries state at all, so it can never be the
     /// reason the WAL must be kept.
     #[test]
-    fn no_memtables_reports_the_watermark() {
+    fn no_memtables_reports_the_floor() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = Core::open_at(dir.path());
-        core.core.advance_watermark(Lsn::new(42));
+        observe_floor(&mut core, 42);
         assert_eq!(
             core.core
                 .checkpoint_timeseries_memtables()
@@ -307,11 +308,11 @@ mod tests {
         );
     }
 
-    /// A flush with an empty memtable must still report the watermark: every row
+    /// A flush with an empty memtable must still report the floor: every row
     /// it held is already in a partition, so clamping there would pin WAL
     /// truncation for no reason.
     #[test]
-    fn empty_memtable_reports_the_watermark() {
+    fn empty_memtable_reports_the_floor() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = Core::open_at(dir.path());
         core.ingest("a", 1.0, 1_000, 5);
@@ -319,14 +320,14 @@ mod tests {
             .checkpoint_timeseries_memtables()
             .expect("first flush");
 
-        core.core.advance_watermark(Lsn::new(900));
+        observe_floor(&mut core, 900);
         assert_eq!(
             core.core
                 .checkpoint_timeseries_memtables()
                 .expect("second flush"),
             Lsn::new(900),
             "nothing was ingested since the last flush, so the timeseries engine \
-             is durable through the current watermark"
+             is durable through the current floor"
         );
     }
 

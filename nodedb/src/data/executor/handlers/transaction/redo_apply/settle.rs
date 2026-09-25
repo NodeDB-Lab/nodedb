@@ -6,7 +6,7 @@
 //! the undo would restore in memory, a vector seal moves inserted nodes out of
 //! the growing segment, and a truncate that removes files cannot be renamed
 //! back. Once the install succeeded, this runs them in one step. The record's
-//! events wait until this step and the cover step both succeeded.
+//! events wait until this step succeeded.
 //!
 //! A failure here comes after every sub-record landed. The undo cannot
 //! reverse a partial flush, and a flush failure is an I/O failure no validate
@@ -30,21 +30,27 @@ impl CoreLoop {
         }
     }
 
-    /// Record that the install ingested rows into the timeseries collection
-    /// `key` at `lsn`.
-    pub(in crate::data::executor) fn note_redo_timeseries_written(
+    /// Record that the open redo-apply scope wrote cells to `array_id`, so
+    /// the settle runs its threshold flush.
+    pub(in crate::data::executor) fn note_redo_array_written(
         &mut self,
-        key: CollectionKey,
-        lsn: u64,
+        array_id: &nodedb_array::types::ArrayId,
     ) {
         if let Some(scope) = self.redo_apply.scope.as_mut()
-            && scope.pass == RedoApplyPass::Install
-            && !scope
-                .timeseries_written
-                .iter()
-                .any(|(seen, _)| *seen == key)
+            && !scope.arrays_written.contains(array_id)
         {
-            scope.timeseries_written.push((key, lsn));
+            scope.arrays_written.push(array_id.clone());
+        }
+    }
+
+    /// Record that the install ingested rows into the timeseries collection
+    /// `key`.
+    pub(in crate::data::executor) fn note_redo_timeseries_written(&mut self, key: CollectionKey) {
+        if let Some(scope) = self.redo_apply.scope.as_mut()
+            && scope.pass == RedoApplyPass::Install
+            && !scope.timeseries_written.contains(&key)
+        {
+            scope.timeseries_written.push(key);
         }
     }
 
@@ -69,8 +75,8 @@ impl CoreLoop {
                     )
                 })?;
         }
-        for (key, lsn) in std::mem::take(&mut scope.timeseries_written) {
-            self.settle_redo_timeseries(key, lsn)?;
+        for key in std::mem::take(&mut scope.timeseries_written) {
+            self.settle_redo_timeseries(key)?;
         }
         for array_id in &scope.arrays_written {
             self.flush_array_if_full(array_id)
@@ -108,13 +114,9 @@ impl CoreLoop {
 
     /// Settle one timeseries collection the install ingested into: charge
     /// the memory budget for its memtable, and flush it when it is over its
-    /// soft limit or when the collection stamp already names the record.
-    ///
-    /// Restart replay skips every record the collection's replay stamp
-    /// names. A record applied after a stamp's prefix passed its LSN sits
-    /// only in the memtable, so the claim is false for it until the memtable
-    /// flushes too, with a stamp that names it.
-    fn settle_redo_timeseries(&mut self, key: CollectionKey, lsn: u64) -> Result<(), ErrorCode> {
+    /// soft limit. The install noted the record before this runs, so the
+    /// flush's stamp names the whole record (`group_flush`).
+    fn settle_redo_timeseries(&mut self, key: CollectionKey) -> Result<(), ErrorCode> {
         let (database_id, tid, collection) = key;
         self.recharge_ts_memtable_budget(tid, database_id, &collection);
         self.checkpoint_coordinator.mark_dirty("timeseries", 1);
@@ -125,8 +127,7 @@ impl CoreLoop {
             .columnar_memtables
             .get(&memtable_key)
             .is_some_and(|mt| mt.memory_bytes() >= self.ts_tuning.memtable_budget_bytes);
-        let below_stamp = self.ts_rows_named(&memtable_key, lsn);
-        if !over_budget && !below_stamp {
+        if !over_budget {
             return Ok(());
         }
         let now_ms = self.ingest_now_ms();

@@ -47,11 +47,8 @@ impl CoreLoop {
     /// replays. That is safe and stays safe: it matched nothing against the
     /// state that the export captured, so re-executing the same predicate
     /// against that same restored state matches nothing again.
-    ///
-    /// Every published generation raises `columnar_published_lsn` to the
-    /// stamp's prefix (see `redo_apply::cover`).
     pub(in crate::data::executor) fn checkpoint_columnar_engines(&mut self) -> crate::Result<Lsn> {
-        let durable_through = self.watermark;
+        let durable_through = self.checkpoint_floor();
         let replay = self.floors.applied_prefix.stamp()?;
 
         let ckpt_dir = columnar_ckpt_dir(&self.data_dir, self.core_id);
@@ -76,8 +73,7 @@ impl CoreLoop {
         let written = self.write_columnar_generation(&gen_dir)?;
         let prefix = Lsn::new(replay.prefix);
         let applied_ranges = replay.applied_above.len();
-        self.publish_columnar_generation(&ckpt_dir, generation, durable_through, replay)?;
-        self.floors.columnar_published_lsn = self.floors.columnar_published_lsn.max(prefix);
+        self.publish_columnar_generation(&ckpt_dir, generation, replay)?;
 
         // The previous generation is now unreachable. Removing it reclaims disk
         // but is NOT required for correctness — the manifest alone decides what
@@ -194,13 +190,11 @@ impl CoreLoop {
         &self,
         ckpt_dir: &std::path::Path,
         generation: u64,
-        durable_through: Lsn,
         replay: ReplayStamp,
     ) -> crate::Result<()> {
         let manifest = ColumnarCheckpointManifest {
             format_version: COLUMNAR_CKPT_FORMAT_VERSION,
             generation,
-            durable_through_lsn: durable_through.as_u64(),
             replay,
         };
         let bytes =

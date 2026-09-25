@@ -35,7 +35,7 @@ impl CoreLoop {
     /// A `TenantCrdtEngine` is a set of in-memory `LoroDoc`s with no store
     /// behind them. `load_crdt_checkpoints` reads these files back at boot and
     /// WAL replay re-imports the deltas above them; there is no third source.
-    /// So a flush that failed while the core still reported its watermark would
+    /// So a flush that failed while the core still reported its floor would
     /// authorise deleting the delta records that are the only remaining copy of
     /// the state this flush did not write — the documents come back at whatever
     /// version the last SUCCESSFUL checkpoint captured, with every edit since
@@ -45,13 +45,14 @@ impl CoreLoop {
     /// caller clamps the reported checkpoint LSN to the last LSN the CRDT
     /// engines were known durable through.
     ///
-    /// Stamping with the core watermark rests on this: the checkpoint runs
-    /// on the core's own thread between tasks, and a delta apply raises the
-    /// watermark only after the `LoroDoc` has already imported it.
+    /// The reported LSN is the checkpoint floor (`checkpoint_floor`): the
+    /// checkpoint runs on the core's own thread between tasks, so every record
+    /// at or below that outcome floor that this core applied is in the export
+    /// below.
     pub(in crate::data::executor) fn checkpoint_crdt_engines(
         &self,
     ) -> crate::Result<CheckpointOutcome> {
-        let durable_lsn = self.watermark;
+        let durable_lsn = self.checkpoint_floor();
 
         let ckpt_dir = crdt_ckpt_dir(&self.data_dir, self.core_id);
         std::fs::create_dir_all(&ckpt_dir).map_err(|e| storage_err(&ckpt_dir, "create dir", &e))?;
@@ -149,10 +150,9 @@ mod tests {
     use crate::types::TenantId;
 
     /// State that has left the core between two cycles must not reload at boot.
-    /// The flush reports the core watermark either way, so the WAL records that
-    /// removed it are already deletable — under the previous flat layout the
-    /// file stayed reachable and the collection came back at every boot,
-    /// forever.
+    /// The flush reports the core's floor either way, so the WAL records that
+    /// removed it can be deleted. The previous generation's file must not stay
+    /// reachable, or the collection comes back at every boot.
     #[test]
     fn state_dropped_between_cycles_does_not_survive_the_next_one() {
         let dir = tempfile::tempdir().expect("tempdir");

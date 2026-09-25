@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use super::checkpoint_manager::{
     CheckpointCycleInputs, CheckpointManagerConfig, run_checkpoint_cycle,
 };
+use super::startup::StartupPhase;
 
 /// Spawn the checkpoint manager as a background Tokio task.
 ///
@@ -33,6 +34,26 @@ pub fn spawn_checkpoint_task(
         "checkpoint_manager::final",
     );
     tokio::spawn(async move {
+        // Boot recovery reads the WAL on disk until the gateway opens: data
+        // groups replay their Raft logs against it, and each Calvin scheduler
+        // scans it for applied markers. A replayed core reports its floor at
+        // once, so a cycle in that window can delete segments those readers
+        // still need. The first cycle waits for the gateway.
+        let started = tokio::select! {
+            ready = shared.startup.await_phase(StartupPhase::GatewayEnable) => ready.map_err(|error| {
+                warn!(%error, "checkpoint manager not started: startup did not complete");
+            }),
+            // The WAL on disk is intact, so restart replay covers what a final
+            // cycle would have made redundant.
+            _ = guard.await_signal() => {
+                info!("shutdown before startup completed: no final checkpoint");
+                Err(())
+            }
+        };
+        if started.is_err() {
+            guard.report_drained();
+            return;
+        }
         info!(
             interval_secs = config.interval.as_secs(),
             "checkpoint manager started"

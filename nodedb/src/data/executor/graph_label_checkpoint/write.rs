@@ -16,7 +16,7 @@ impl CoreLoop {
     /// Flush this core's CSR node labels to disk and return the LSN they are now
     /// durable through.
     ///
-    /// Returns `Ok(watermark)` only once the state file has landed and been
+    /// Returns `Ok(floor)` only once the state file has landed and been
     /// fsynced. Any failure returns `Err` — the caller must then clamp the
     /// reported checkpoint LSN to the last LSN the labels were known durable
     /// through, so a failed flush costs WAL growth instead of the
@@ -26,11 +26,10 @@ impl CoreLoop {
     /// is intact and live, after it the new one is. There is no window in which
     /// half a core's partitions are published.
     ///
-    /// Stamping with the core watermark rests on this: the checkpoint runs
-    /// on the core's own thread between tasks, and a label write reaches
-    /// `note_write_lsn` (which raises the watermark) only after
-    /// `add_node_label` / `remove_node_label` has already mutated the bitset. So
-    /// every label change with `lsn <= watermark` is in the export below.
+    /// The reported LSN is the checkpoint floor (`checkpoint_floor`): the
+    /// checkpoint runs on the core's own thread between tasks, so every record
+    /// at or below that outcome floor that this core applied is in the export
+    /// below.
     ///
     /// Edges are deliberately absent from the export. They are committed to the
     /// redb `EdgeStore` at apply time and the whole CSR is rebuilt from it in
@@ -38,7 +37,7 @@ impl CoreLoop {
     /// second copy of state that cannot be lost — and a stale one, since the
     /// rebuild would overwrite it on the next boot regardless.
     pub(in crate::data::executor) fn checkpoint_graph_labels(&self) -> crate::Result<Lsn> {
-        let durable_through = self.watermark;
+        let durable_through = self.checkpoint_floor();
 
         // Sorted at both levels so identical label state always encodes to
         // identical bytes.

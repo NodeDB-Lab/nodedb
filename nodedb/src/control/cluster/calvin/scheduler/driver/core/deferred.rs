@@ -202,6 +202,23 @@ impl Scheduler {
 
     /// One send attempt: register, dispatch, and cancel on refusal.
     fn send_once(&mut self, txn_id: TxnId, step: DispatchStep, request: Request) -> Attempt {
+        // A crash test holds one collection's flush here: the redo record is
+        // appended and no core holds the flush. The flush waits in the
+        // re-send queue, as at capacity, so the scheduler keeps running.
+        #[cfg(feature = "failpoints")]
+        if step == DispatchStep::Flush && crate::control::fail_gate::holds_flush(&request.plan) {
+            tracing::info!(
+                vshard_id = self.vshard_id,
+                epoch = txn_id.epoch,
+                position = txn_id.position,
+                "calvin: flush held at a fail point"
+            );
+            return Attempt::Capacity(Box::new(DeferredDispatch {
+                txn_id,
+                step,
+                request,
+            }));
+        }
         let request_id = request.request_id;
         let resp_rx = self.shared.tracker.register(request_id);
         let result = match self.shared.dispatcher.lock() {

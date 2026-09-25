@@ -24,6 +24,18 @@ impl CoreLoop {
         self.watermark = lsn;
     }
 
+    /// The LSN a checkpoint written now makes durable, and the lowest LSN
+    /// the WAL must keep above: the outcome floor this core read. Every
+    /// record at or below it has a final outcome, so a checkpoint written
+    /// between tasks holds each one this core applied, and a refused one has
+    /// a durable abort marker. A record above it can still be on its way to
+    /// this core, and restart replay must reach it. The core watermark is no
+    /// such bound: records apply out of LSN order, so it can pass a record
+    /// that has not applied yet.
+    pub(in crate::data::executor) fn checkpoint_floor(&self) -> Lsn {
+        self.floors.applied_prefix.outcome_floor()
+    }
+
     /// Merge reconstructed sync HWM state from WAL replay into this core's gate.
     ///
     /// Called by `replay_all_wal` with the maps built by

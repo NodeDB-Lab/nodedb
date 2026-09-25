@@ -136,6 +136,10 @@ mod tests {
         assert_eq!(before.sync_admit(&other_stream), SyncAdmit::Apply);
         before.sync_commit(&other_stream);
         before.advance_watermark(Lsn::new(900));
+        before
+            .floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(900));
 
         let reported = before
             .checkpoint_sync_hwm()

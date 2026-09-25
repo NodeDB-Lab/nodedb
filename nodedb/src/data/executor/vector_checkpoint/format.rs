@@ -19,7 +19,7 @@ use crate::types::replay_stamp::ReplayStamp;
 /// A manifest stamped with any other version is refused rather than misparsed.
 /// Refusing costs a WAL replay; misparsing would install indexes built from
 /// bytes this build cannot read.
-pub(crate) const VECTOR_CKPT_FORMAT_VERSION: u16 = 2;
+pub(crate) const VECTOR_CKPT_FORMAT_VERSION: u16 = 3;
 
 /// Names the live generation. Writing this file is what publishes a checkpoint.
 #[derive(
@@ -37,15 +37,10 @@ pub(crate) struct VectorCheckpointManifest {
     pub format_version: u16,
     /// Which `gen-{n}/` directory holds the live per-index files.
     pub generation: u64,
-    /// The LSN every index in that generation is durable THROUGH (inclusive).
-    ///
-    /// Recorded so a restart knows what the PREVIOUS process actually made
-    /// durable: it restores `vector_durable_lsn`, which is the point a failed
-    /// flush clamps WAL truncation to. Without it the first failed flush after
-    /// a restart would pin truncation at zero.
-    pub durable_through_lsn: u64,
     /// The records every index in the generation holds. Restart replay skips
-    /// a vector record exactly when this stamp names it.
+    /// a vector record exactly when this stamp names it. Its prefix restores
+    /// `vector_durable_lsn`, the point a failed flush after a restart clamps
+    /// WAL truncation to.
     pub replay: ReplayStamp,
 }
 
@@ -60,7 +55,6 @@ pub(crate) fn test_manifest_bytes(generation: u64) -> Vec<u8> {
     zerompk::to_msgpack_vec(&VectorCheckpointManifest {
         format_version: VECTOR_CKPT_FORMAT_VERSION,
         generation,
-        durable_through_lsn: 0,
         replay: ReplayStamp::default(),
     })
     .expect("manifest encode is infallible for this fixed struct")

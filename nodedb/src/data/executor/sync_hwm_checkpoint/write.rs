@@ -14,7 +14,7 @@ impl CoreLoop {
     /// Flush this core's sync gate to disk and return the LSN it is now durable
     /// through.
     ///
-    /// Returns `Ok(watermark)` only once the state file has landed and been
+    /// Returns `Ok(floor)` only once the state file has landed and been
     /// fsynced. Any failure returns `Err` — the caller must then clamp the
     /// reported checkpoint LSN to the last LSN the gate was known durable
     /// through, so a failed flush costs WAL growth instead of a gate that comes
@@ -24,12 +24,12 @@ impl CoreLoop {
     /// is intact and live, after it the new one is. There is no window in which
     /// half a gate is published.
     ///
-    /// Stamping with the core watermark rests on this: the checkpoint runs
-    /// on the core's own thread between tasks, and `sync_commit` advances
-    /// the HWM only after the frame's `SyncSeqAdvance` record is durable, so
-    /// every advance the core has admitted is already in the maps exported here.
+    /// The reported LSN is the checkpoint floor (`checkpoint_floor`): the
+    /// checkpoint runs on the core's own thread between tasks, so every record
+    /// at or below that outcome floor that this core applied is in the export
+    /// below.
     pub(in crate::data::executor) fn checkpoint_sync_hwm(&self) -> crate::Result<Lsn> {
-        let durable_through = self.watermark;
+        let durable_through = self.checkpoint_floor();
 
         // Sorted so identical gate state always encodes to identical bytes.
         let mut hwm: Vec<(u64, u64, u64)> = self

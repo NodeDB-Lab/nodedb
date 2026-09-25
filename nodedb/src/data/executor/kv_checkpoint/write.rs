@@ -43,11 +43,8 @@ impl CoreLoop {
     /// already restored is a no-op (`add_index` reports the field as already
     /// indexed and skips the backfill), and replaying a drop whose registration
     /// the export therefore never saw is a no-op too.
-    ///
-    /// Every published generation raises `kv_published_lsn` to the stamp's
-    /// prefix (see `redo_apply::cover`).
     pub(in crate::data::executor) fn checkpoint_kv_engines(&mut self) -> crate::Result<Lsn> {
-        let durable_through = self.watermark;
+        let durable_through = self.checkpoint_floor();
         let replay = self.floors.applied_prefix.stamp()?;
 
         let ckpt_dir = kv_ckpt_dir(&self.data_dir, self.core_id);
@@ -72,8 +69,7 @@ impl CoreLoop {
         let written = self.write_kv_generation(&gen_dir)?;
         let prefix = Lsn::new(replay.prefix);
         let applied_ranges = replay.applied_above.len();
-        self.publish_kv_generation(&ckpt_dir, generation, durable_through, replay)?;
-        self.floors.kv_published_lsn = self.floors.kv_published_lsn.max(prefix);
+        self.publish_kv_generation(&ckpt_dir, generation, replay)?;
 
         // The previous generation is now unreachable. Removing it reclaims disk
         // but is NOT required for correctness — the manifest alone decides what
@@ -174,13 +170,11 @@ impl CoreLoop {
         &self,
         ckpt_dir: &std::path::Path,
         generation: u64,
-        durable_through: Lsn,
         replay: ReplayStamp,
     ) -> crate::Result<()> {
         let manifest = KvCheckpointManifest {
             format_version: KV_CKPT_FORMAT_VERSION,
             generation,
-            durable_through_lsn: durable_through.as_u64(),
             replay,
         };
         let bytes =

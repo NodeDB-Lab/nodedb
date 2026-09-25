@@ -13,7 +13,6 @@ use super::paths::{kv_ckpt_dir, kv_ckpt_gen_dir, parse_kv_ckpt_stem};
 use crate::data::executor::checkpoint_decode_error::CheckpointDecodeError;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::snapshot::restore::database_id_from_qualified;
-use crate::types::Lsn;
 
 impl CoreLoop {
     /// Load the KV checkpoint from disk on startup, BEFORE WAL replay.
@@ -69,8 +68,8 @@ impl CoreLoop {
         // Claimed only once every row AND every registration is in: the floor
         // suppresses WAL records, so claiming it over a half-restored generation
         // would turn a recoverable read failure into permanent data loss.
-        self.floors.kv_published_lsn = Lsn::new(manifest.replay.prefix);
         let replay_prefix = manifest.replay.prefix;
+        self.floors.kv_durable_lsn = crate::types::Lsn::new(replay_prefix);
         let applied_ranges = manifest.replay.applied_above.len();
         self.floors.replay_floors.kv.set(manifest.replay);
 
@@ -80,7 +79,6 @@ impl CoreLoop {
             collections,
             rows,
             indexes,
-            durable_through_lsn = manifest.durable_through_lsn,
             replay_prefix,
             applied_ranges,
             "KV checkpoint restored"
@@ -384,7 +382,7 @@ mod tests {
     /// The manifest is the only record of what a generation holds, and the
     /// entire replay floor rests on it: it must survive the round-trip exactly.
     #[test]
-    fn manifest_roundtrips_generation_lsn_and_stamp() {
+    fn manifest_roundtrips_generation_and_stamp() {
         let replay = crate::data::executor::applied_prefix::ReplayStamp {
             prefix: 4_200,
             applied_above: vec![crate::data::executor::applied_prefix::stamp::LsnRange {
@@ -395,7 +393,6 @@ mod tests {
         let written = KvCheckpointManifest {
             format_version: KV_CKPT_FORMAT_VERSION,
             generation: 9,
-            durable_through_lsn: 4_242,
             replay: replay.clone(),
         };
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -406,10 +403,6 @@ mod tests {
 
         let read_back = nodedb_wal::segment::read_checkpoint_framed(&path).expect("read");
         let decoded: KvCheckpointManifest = zerompk::from_msgpack(&read_back).expect("decode");
-        assert_eq!(
-            decoded.durable_through_lsn, 4_242,
-            "the manifest must report exactly the LSN it was written with"
-        );
         assert_eq!(decoded.generation, 9);
         assert_eq!(decoded.format_version, KV_CKPT_FORMAT_VERSION);
         assert_eq!(decoded.replay, replay, "the stamp must survive exactly");
@@ -510,7 +503,6 @@ mod tests {
         let manifest = KvCheckpointManifest {
             format_version: KV_CKPT_FORMAT_VERSION,
             generation: 0,
-            durable_through_lsn: 10,
             replay: crate::data::executor::applied_prefix::ReplayStamp {
                 prefix: 10,
                 applied_above: vec![crate::data::executor::applied_prefix::stamp::LsnRange {

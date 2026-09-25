@@ -154,4 +154,67 @@ impl PhysicalPlan {
             PhysicalPlan::ClusterArray(op) => Some(op.array_id().name.as_str()),
         }
     }
+
+    /// Every user collection this plan names: each collection a committed
+    /// redo install writes, or else the one [`Self::collection`] reports.
+    ///
+    /// A committed-redo apply and a Calvin flush install one record that can
+    /// write several collections, so [`Self::collection`] reports none for
+    /// them. A caller that keys on a collection name uses this instead.
+    pub fn named_collections(&self) -> Vec<&str> {
+        if let PhysicalPlan::Meta(
+            MetaOp::ApplyTransactionRedo { collections, .. }
+            | MetaOp::CalvinFlush { collections, .. },
+        ) = self
+        {
+            collections.iter().map(String::as_str).collect()
+        } else {
+            self.collection().into_iter().collect()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nodedb_types::{DatabaseId, QualifiedCollection};
+
+    use crate::physical_plan::KvOp;
+
+    #[test]
+    fn a_redo_install_names_every_collection_it_writes() {
+        let collections = vec!["a".to_string(), "b".to_string()];
+        let redo = PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
+            redo: Vec::new(),
+            collections: collections.clone(),
+            sum_targets: Vec::new(),
+        });
+        let flush = PhysicalPlan::Meta(MetaOp::CalvinFlush {
+            epoch: 1,
+            position: 0,
+            redo: Vec::new(),
+            collections,
+            sum_targets: Vec::new(),
+        });
+        for plan in [redo, flush] {
+            assert_eq!(plan.collection(), None);
+            assert_eq!(plan.named_collections(), vec!["a", "b"]);
+        }
+    }
+
+    #[test]
+    fn a_single_collection_plan_names_its_collection() {
+        let get = PhysicalPlan::Kv(KvOp::Get {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "users"),
+            key: Vec::new(),
+            rls_filters: Vec::new(),
+            surrogate_ceiling: None,
+        });
+        assert_eq!(get.named_collections(), vec!["users"]);
+        assert!(
+            PhysicalPlan::Meta(MetaOp::Checkpoint)
+                .named_collections()
+                .is_empty()
+        );
+    }
 }

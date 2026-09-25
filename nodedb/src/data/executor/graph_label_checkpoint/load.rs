@@ -252,6 +252,10 @@ mod tests {
             csr.add_node_label("carol", "Bot").expect("label carol");
         }
         before.advance_watermark(Lsn::new(900));
+        before
+            .floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(900));
 
         let reported = before
             .checkpoint_graph_labels()

@@ -107,8 +107,7 @@ impl CoreLoop {
         // Claimed only once every engine is in: the floor suppresses WAL
         // records, so claiming it over a half-restored generation would turn a
         // recoverable read failure into permanent data loss.
-        self.floors.columnar_durable_lsn = Lsn::new(manifest.durable_through_lsn);
-        self.floors.columnar_published_lsn = Lsn::new(manifest.replay.prefix);
+        self.floors.columnar_durable_lsn = Lsn::new(manifest.replay.prefix);
         let replay_prefix = manifest.replay.prefix;
         let applied_ranges = manifest.replay.applied_above.len();
         self.floors.replay_floors.columnar.set(manifest.replay);
@@ -119,7 +118,6 @@ impl CoreLoop {
             collections,
             segments,
             geometry_rows,
-            durable_through_lsn = manifest.durable_through_lsn,
             replay_prefix,
             applied_ranges,
             "columnar checkpoint restored"
@@ -683,7 +681,7 @@ mod tests {
     /// the highest applied LSN, since a record below that can still be on its
     /// way. Too wide a gate drops a write; too narrow re-applies a folded one.
     #[test]
-    fn the_stamp_becomes_the_restored_floor_and_the_watermark_the_durable_lsn() {
+    fn the_stamp_becomes_the_restored_floor_and_its_prefix_the_durable_lsn() {
         let dir = tempfile::tempdir().expect("tempdir");
         let coll = "ck_lsn";
 
@@ -700,8 +698,9 @@ mod tests {
             .expect("checkpoint must publish");
         assert_eq!(
             reported,
-            Lsn::new(900),
-            "a successful flush reports the watermark"
+            Lsn::new(890),
+            "a successful flush reports the outcome floor, never the watermark: the \
+             record at 891 can still be on its way"
         );
         drop(core);
 
@@ -714,8 +713,7 @@ mod tests {
             .load_columnar_checkpoints()
             .expect("checkpoint load must succeed");
 
-        assert_eq!(restored.floors.columnar_durable_lsn, Lsn::new(900));
-        assert_eq!(restored.floors.columnar_published_lsn, Lsn::new(890));
+        assert_eq!(restored.floors.columnar_durable_lsn, Lsn::new(890));
         let floor = &restored.floors.replay_floors.columnar;
         assert!(floor.covers(890), "the prefix is folded in");
         assert!(
@@ -816,6 +814,9 @@ mod tests {
             &[(1, "a", Surrogate(901)), (2, "b", Surrogate(902))],
         );
         core.watermark = Lsn::new(100);
+        core.floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(100));
         core.checkpoint_columnar_engines()
             .expect("first checkpoint must publish");
 
@@ -826,6 +827,9 @@ mod tests {
             .delete(&Value::Integer(1))
             .expect("delete");
         core.watermark = Lsn::new(200);
+        core.floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(200));
         core.checkpoint_columnar_engines()
             .expect("second checkpoint must publish");
         drop(core);

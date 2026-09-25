@@ -113,15 +113,15 @@ impl CoreLoop {
                 self.floors.applied_prefix.note_applied(lsn);
             }
             // A crash test kills the process here: one collection's logged
-            // write applied, and its response never leaves the core. A task
-            // with no WAL record never matches.
-            crate::fail_point!(&match task.wal_lsn() {
-                Some(_) => format!(
-                    "core::after_apply::{}",
-                    task.plan().collection().unwrap_or_default()
-                ),
-                None => String::new(),
-            });
+            // write applied, and its response never leaves the core. A
+            // committed redo matches each collection it writes. A task with
+            // no WAL record never matches.
+            #[cfg(feature = "failpoints")]
+            if task.wal_lsn().is_some() {
+                for collection in task.plan().named_collections() {
+                    crate::fail_point!(&format!("core::after_apply::{collection}"));
+                }
+            }
             task.state = TaskState::Completed;
             // A failed rollback leaves this core's state unknown.
             self.fail_stop_on_rollback_failure(&resp);

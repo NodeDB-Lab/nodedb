@@ -10,7 +10,6 @@
 use super::format::{VECTOR_CKPT_FORMAT_VERSION, VectorCheckpointManifest};
 use super::manifest::{read_vector_manifest_at, storage_err};
 use super::paths::VECTOR_CKPT_MANIFEST;
-use crate::types::Lsn;
 use crate::types::replay_stamp::ReplayStamp;
 
 /// The generation number the next publish under `ckpt_dir` must use.
@@ -32,13 +31,11 @@ pub(crate) fn next_generation(ckpt_dir: &std::path::Path) -> crate::Result<u64> 
 pub(crate) fn publish_vector_generation(
     ckpt_dir: &std::path::Path,
     generation: u64,
-    durable_through: Lsn,
     replay: ReplayStamp,
 ) -> crate::Result<()> {
     let manifest = VectorCheckpointManifest {
         format_version: VECTOR_CKPT_FORMAT_VERSION,
         generation,
-        durable_through_lsn: durable_through.as_u64(),
         replay,
     };
     let bytes = zerompk::to_msgpack_vec(&manifest).map_err(|e| crate::Error::Serialization {

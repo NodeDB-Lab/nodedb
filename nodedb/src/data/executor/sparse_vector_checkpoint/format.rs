@@ -18,7 +18,7 @@ use crate::types::replay_stamp::ReplayStamp;
 /// A manifest stamped with any other version is refused rather than misparsed.
 /// Refusing costs a WAL replay; misparsing would install indexes built from
 /// bytes this build cannot read.
-pub(crate) const SPARSE_VECTOR_CKPT_FORMAT_VERSION: u16 = 2;
+pub(crate) const SPARSE_VECTOR_CKPT_FORMAT_VERSION: u16 = 3;
 
 /// Names the live generation. Writing this file is what publishes a checkpoint.
 #[derive(
@@ -37,16 +37,10 @@ pub(crate) struct SparseVectorCheckpointManifest {
     pub format_version: u16,
     /// Which `gen-{n}/` directory holds the live per-index files.
     pub generation: u64,
-    /// The LSN every index in that generation is durable THROUGH (inclusive).
-    ///
-    /// This is the value `execute_checkpoint` folds into the minimum it reports
-    /// to the checkpoint manager, and the value a restart restores
-    /// `sparse_vector_durable_lsn` from — without it, the first flush after a
-    /// restart would have no last-known-durable point to clamp to and would
-    /// pin truncation at zero.
-    pub durable_through_lsn: u64,
     /// The records every index in the generation holds. Restart replay skips
-    /// a sparse-vector record exactly when this stamp names it.
+    /// a sparse-vector record exactly when this stamp names it. Its prefix
+    /// restores `sparse_vector_durable_lsn`, the point a failed flush after a
+    /// restart clamps WAL truncation to.
     pub replay: ReplayStamp,
 }
 
@@ -61,7 +55,6 @@ pub(crate) fn test_manifest_bytes(generation: u64) -> Vec<u8> {
     zerompk::to_msgpack_vec(&SparseVectorCheckpointManifest {
         format_version: SPARSE_VECTOR_CKPT_FORMAT_VERSION,
         generation,
-        durable_through_lsn: 0,
         replay: ReplayStamp::default(),
     })
     .expect("manifest encode is infallible for this fixed struct")

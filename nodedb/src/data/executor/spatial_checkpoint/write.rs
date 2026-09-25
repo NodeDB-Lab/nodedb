@@ -46,11 +46,12 @@ impl CoreLoop {
     /// drop geometry entries while the rows they point at survive — a spatial
     /// predicate silently stops matching rows a full scan still returns.
     ///
-    /// Stamping with the core watermark rests on this: the checkpoint runs
-    /// on the core's own thread between tasks, and a geometry write raises
-    /// the watermark only after the R-tree has already been mutated.
+    /// The reported LSN is the checkpoint floor (`checkpoint_floor`): the
+    /// checkpoint runs on the core's own thread between tasks, so every record
+    /// at or below that outcome floor that this core applied is in the export
+    /// below.
     pub(crate) fn checkpoint_spatial_indexes(&self) -> crate::Result<CheckpointOutcome> {
-        let durable_lsn = self.watermark;
+        let durable_lsn = self.checkpoint_floor();
 
         let ckpt_dir = spatial_ckpt_dir(&self.data_dir, self.core_id);
         std::fs::create_dir_all(&ckpt_dir).map_err(|e| storage_err(&ckpt_dir, "create dir", &e))?;
@@ -274,7 +275,7 @@ mod tests {
 
     /// An index that has disappeared from the map — dropped, or evicted with
     /// its collection — must not restore the previous generation's geometry.
-    /// The flush still reports the watermark, so the WAL records that built
+    /// The flush still reports its floor, so the WAL records that built
     /// those entries are already deletable; leaving the old file reachable
     /// would resurrect geometry for rows that no longer exist.
     #[test]

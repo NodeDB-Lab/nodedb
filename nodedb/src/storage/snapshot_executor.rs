@@ -7,7 +7,7 @@
 //! 1. Validate the restore plan via `dry_run_restore()`.
 //! 2. For each core, load its `CoreSnapshot` from the object store.
 //! 3. Apply the snapshot to the core's engines (redb, HNSW, CRDT).
-//! 4. Replay WAL records from `snapshot_lsn` to `target_lsn`.
+//! 4. Replay WAL records above the lowest core floor to `target_lsn`.
 //!
 //! ## Offline restore
 //!
@@ -83,8 +83,7 @@ pub async fn execute_restore(
     for core_id in 0..manifest.num_cores {
         let core_snap =
             load_core_snapshot(snapshot_store, prefix, core_id, Some(encryption_key)).await?;
-        let (docs, vectors) =
-            restore_core_state(data_dir, core_id, &core_snap, manifest.meta.end_lsn)?;
+        let (docs, vectors) = restore_core_state(data_dir, core_id, &core_snap)?;
         total_docs += docs;
         total_vectors += vectors;
 
@@ -97,19 +96,21 @@ pub async fn execute_restore(
         );
     }
 
+    // The lowest core floor: every core needs the WAL above its own floor.
+    let replay_from = manifest.meta.begin_lsn.as_u64();
     let wal_to_replay: Vec<_> = wal_records
         .iter()
-        .filter(|r| r.header.lsn > snapshot_lsn)
+        .filter(|r| r.header.lsn > replay_from)
         .collect();
 
     let wal_count = wal_to_replay.len() as u64;
     if wal_count > 0 {
         info!(
             records = wal_count,
-            from_lsn = snapshot_lsn + 1,
+            from_lsn = replay_from + 1,
             "replaying WAL records after snapshot"
         );
-        write_restore_marker(restore_store, snapshot_lsn).await?;
+        write_restore_marker(restore_store, replay_from).await?;
     }
 
     let result = RestoreResult {
@@ -141,7 +142,6 @@ fn restore_core_state(
     data_dir: &Path,
     core_id: usize,
     snap: &CoreSnapshot,
-    snapshot_lsn: Lsn,
 ) -> crate::Result<(u64, u64)> {
     let sparse_path = data_dir.join(format!("sparse/core-{core_id}.redb"));
     if let Some(parent) = sparse_path.parent() {
@@ -159,8 +159,11 @@ fn restore_core_state(
     let edge_store = crate::engine::graph::edge_store::store::EdgeStore::open(&graph_path)?;
     restore_edge_data(&edge_store, &snap.edges)?;
 
-    let vectors = restore_vector_checkpoints(data_dir, core_id, &snap.hnsw_indexes, snapshot_lsn)?;
-    restore_crdt_checkpoints(data_dir, core_id, &snap.crdt_snapshots, snapshot_lsn)?;
+    // The core's own floor, not the snapshot's: a record above it can be
+    // missing from this core's state, and replay must reach it.
+    let core_floor = Lsn::new(snap.watermark);
+    let vectors = restore_vector_checkpoints(data_dir, core_id, &snap.hnsw_indexes, core_floor)?;
+    restore_crdt_checkpoints(data_dir, core_id, &snap.crdt_snapshots, core_floor)?;
 
     Ok((snap.sparse_documents.len() as u64, vectors))
 }
@@ -250,7 +253,6 @@ fn restore_vector_checkpoints(
     crate::data::executor::vector_checkpoint::publish_vector_generation(
         &ckpt_dir,
         generation,
-        snapshot_lsn,
         crate::types::replay_stamp::ReplayStamp::through(snapshot_lsn.as_u64()),
     )?;
 

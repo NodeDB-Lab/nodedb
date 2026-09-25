@@ -65,6 +65,9 @@ async fn acknowledged_rows_survive_a_crash_between_checkpoint_marker_and_truncat
     // The next checkpoint cycle writes its marker and dies on the spot.
     h.await_self_crash(CRASH_TIMEOUT);
 
+    // Boot 2 runs disarmed, so its checkpoint cycles run to completion and the
+    // read below cannot race an abort.
+    h.clear_env("NODEDB_FAILPOINTS");
     h.reopen();
 
     let recovered = h
@@ -80,17 +83,19 @@ async fn acknowledged_rows_survive_a_crash_between_checkpoint_marker_and_truncat
          — recovery treated the marker as proof of a truncation that never ran (got {recovered:?})"
     );
 
-    // A freshly-replayed core reports checkpoint LSN 0 until its own new
-    // write, or every checkpoint cycle logs "skipping" and the window under
-    // test never reopens. Key is outside `row%` so it's not a canary.
-    h.exec("INSERT INTO ckpt_window (k, v) VALUES ('trigger', 'post-restart')")
-        .await;
-
-    // The fail point is still armed, so it aborts again — proving the second
-    // cycle actually reached the same window.
-    h.await_self_crash(CRASH_TIMEOUT);
+    // Boot 3 is armed again. A replayed core reports its floor at once, so
+    // its first cycle reaches the same window with no new write. The cycle
+    // waits for the gateway, so the boot reports ready first.
+    h.kill_9();
+    h.set_env(
+        "NODEDB_FAILPOINTS",
+        "checkpoint::after_marker_before_truncate=abort",
+    );
     h.reopen();
+    h.await_self_crash(CRASH_TIMEOUT);
 
+    h.clear_env("NODEDB_FAILPOINTS");
+    h.reopen();
     let after = h
         .query_col(
             "SELECT v FROM ckpt_window WHERE k LIKE 'row%' ORDER BY k",

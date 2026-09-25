@@ -101,7 +101,9 @@ pub struct TenantKvPair {
     zerompk::FromMessagePack,
 )]
 pub struct CoreSnapshot {
-    /// Core/vShard watermark LSN.
+    /// The core's checkpoint floor when the snapshot was taken: every record
+    /// at or below it that the core applied is in the snapshot. A record
+    /// above it can be missing, so restore replays the WAL above it.
     pub watermark: u64,
 
     /// All documents from SparseEngine.

@@ -73,7 +73,7 @@ impl CoreLoop {
             let sample_count = batch.samples.len();
             if self.recording_redo_undo() {
                 // The install settles the budget once the whole record landed.
-                self.note_redo_timeseries_written(key, record_lsn);
+                self.note_redo_timeseries_written(key);
             } else {
                 // Re-charge the engine memory budget to the memtable's
                 // resident footprint after replaying these samples. The
@@ -153,7 +153,7 @@ impl CoreLoop {
             return 0;
         }
         if installing {
-            self.note_redo_timeseries_written((db_id, tid, collection.to_string()), record_lsn);
+            self.note_redo_timeseries_written((db_id, tid, collection.to_string()));
         }
         if format == "ilp-msgpack" {
             return zerompk::from_msgpack::<Vec<String>>(payload).map_or(0, |rows| rows.len());

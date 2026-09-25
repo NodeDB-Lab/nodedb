@@ -35,11 +35,12 @@
 //!
 //! ## What LSN is durable after a flush
 //!
-//! The core watermark. A timeseries row reaches the memtable before its ingest
-//! returns, and only then does `note_collection_write_lsn` raise the watermark,
-//! so on this core's own thread — where the checkpoint runs, between tasks —
-//! every row with `lsn <= watermark` is in a memtable. Flushing every non-empty
-//! memtable therefore puts all of them in a partition.
+//! The checkpoint floor (`checkpoint_floor`): the outcome floor this core
+//! read. Every record at or below it has a final outcome, so on this core's
+//! own thread — where the checkpoint runs, between tasks — each one this core
+//! applied is in a memtable or a partition. Flushing every non-empty memtable
+//! therefore puts all of them in a partition. A record above the floor can
+//! still be on its way, so the WAL keeps it.
 //!
 //! ## What restart replay skips
 //!

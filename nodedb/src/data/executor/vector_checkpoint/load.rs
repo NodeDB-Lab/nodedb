@@ -67,8 +67,7 @@ impl CoreLoop {
         // Claimed only once every index is in: this LSN is what a failed flush
         // clamps truncation to, so claiming it over a half-restored generation
         // would authorise deleting the records that would have completed it.
-        self.floors.vector_durable_lsn = Lsn::new(manifest.durable_through_lsn);
-        self.floors.vector_published_lsn = Lsn::new(manifest.replay.prefix);
+        self.floors.vector_durable_lsn = Lsn::new(manifest.replay.prefix);
         let replay_prefix = manifest.replay.prefix;
         let applied_ranges = manifest.replay.applied_above.len();
         self.floors.replay_floors.vector.set(manifest.replay);
@@ -78,7 +77,6 @@ impl CoreLoop {
             generation = manifest.generation,
             loaded,
             vectors,
-            durable_through_lsn = manifest.durable_through_lsn,
             replay_prefix,
             applied_ranges,
             "vector checkpoint restored"
@@ -184,7 +182,6 @@ mod tests {
         let bytes = zerompk::to_msgpack_vec(&VectorCheckpointManifest {
             format_version: VECTOR_CKPT_FORMAT_VERSION + 1,
             generation: 0,
-            durable_through_lsn: 5,
             replay: crate::types::replay_stamp::ReplayStamp::default(),
         })
         .expect("encode");

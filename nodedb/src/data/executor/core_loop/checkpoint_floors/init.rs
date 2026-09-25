@@ -42,11 +42,6 @@ impl CheckpointFloors {
             // holds none — so both stay at zero until this process's own flush
             // succeeds. Vector restores its LSN from its manifest at load.
             vector_durable_lsn: Lsn::ZERO,
-            // No generation is published until one is loaded or written.
-            vector_published_lsn: Lsn::ZERO,
-            sparse_vector_published_lsn: Lsn::ZERO,
-            kv_published_lsn: Lsn::ZERO,
-            columnar_published_lsn: Lsn::ZERO,
             crdt_durable_lsn: Lsn::ZERO,
             spatial_durable_lsn: Lsn::ZERO,
             replay_floors: ReplayFloors::default(),

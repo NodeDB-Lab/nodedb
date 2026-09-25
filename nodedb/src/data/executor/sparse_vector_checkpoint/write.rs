@@ -19,7 +19,7 @@ impl CoreLoop {
     /// Flush every sparse-vector index on this core to disk and return the LSN
     /// the sparse-vector engine is now durable through.
     ///
-    /// Returns `Ok(watermark)` only once a manifest naming a COMPLETE generation
+    /// Returns `Ok(floor)` only once a manifest naming a COMPLETE generation
     /// has landed. Any failure returns `Err` — the caller must then clamp the
     /// reported checkpoint LSN to the last LSN this engine was known durable
     /// through, so a failed flush costs WAL growth instead of data.
@@ -31,7 +31,7 @@ impl CoreLoop {
     pub(in crate::data::executor) fn checkpoint_sparse_vector_indexes(
         &mut self,
     ) -> crate::Result<Lsn> {
-        let durable_through = self.watermark;
+        let durable_through = self.checkpoint_floor();
         let replay = self.floors.applied_prefix.stamp()?;
         let prefix = replay.prefix;
         let applied_ranges = replay.applied_above.len();
@@ -56,11 +56,7 @@ impl CoreLoop {
             .map_err(|e| storage_err(&gen_dir, "create generation dir", &e))?;
 
         let written = self.write_sparse_vector_generation(&gen_dir)?;
-        self.publish_sparse_vector_generation(&ckpt_dir, generation, durable_through, replay)?;
-        self.floors.sparse_vector_published_lsn = self
-            .floors
-            .sparse_vector_published_lsn
-            .max(Lsn::new(prefix));
+        self.publish_sparse_vector_generation(&ckpt_dir, generation, replay)?;
 
         // The previous generation is now unreachable. Removing it reclaims disk
         // but is NOT required for correctness — the manifest alone decides what
@@ -134,13 +130,11 @@ impl CoreLoop {
         &self,
         ckpt_dir: &std::path::Path,
         generation: u64,
-        durable_through: Lsn,
         replay: ReplayStamp,
     ) -> crate::Result<()> {
         let manifest = SparseVectorCheckpointManifest {
             format_version: SPARSE_VECTOR_CKPT_FORMAT_VERSION,
             generation,
-            durable_through_lsn: durable_through.as_u64(),
             replay,
         };
         let bytes =

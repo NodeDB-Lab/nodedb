@@ -71,7 +71,7 @@ impl CoreLoop {
         }
 
         Ok(CoreSnapshot {
-            watermark: self.watermark.as_u64(),
+            watermark: self.checkpoint_floor().as_u64(),
             sparse_documents,
             sparse_indexes,
             edges,

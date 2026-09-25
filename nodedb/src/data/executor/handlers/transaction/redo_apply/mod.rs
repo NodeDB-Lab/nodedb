@@ -4,7 +4,6 @@
 //! the core that owns its vShard, through the WAL replay arms.
 //!
 //! - [`entry`]: the `MetaOp::ApplyTransactionRedo` handler.
-//! - [`cover`]: republishing an engine artifact a record applied below.
 //! - [`validate`]: commit-boundary checks that run before any write.
 //! - [`passes`]: the validate and install passes over the replay arms.
 //! - [`settle`]: the work an install defers until every sub-record landed.
@@ -20,7 +19,6 @@
 
 #[cfg(test)]
 mod calvin_fold_tests;
-mod cover;
 mod document;
 mod entry;
 mod events;

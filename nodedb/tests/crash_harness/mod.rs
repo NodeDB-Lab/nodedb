@@ -19,6 +19,10 @@ use std::time::{Duration, Instant};
 pub mod diagnostics;
 // `wait_ready` and its bind-collision respawn.
 mod boot;
+// Boot sections and numeric fields read back from the server log.
+pub mod log_fields;
+// WAL segment names and checkpoint truncation lines.
+pub mod wal_truncation;
 // The ILP client helper lives in `nodedb-test-support` and is imported
 // directly by tests that need it, not re-exported here.
 mod pgwire;
@@ -260,6 +264,15 @@ impl CrashHarness {
             .collect();
         names.sort();
         names
+    }
+
+    /// The WAL segment the server appends to now. Segment names carry their
+    /// zero-padded first LSN, so the last name is the active segment.
+    pub fn active_wal_segment(&self) -> String {
+        self.wal_segments()
+            .last()
+            .cloned()
+            .unwrap_or_else(|| panic!("no WAL segment on disk after an acknowledged write"))
     }
 
     /// Path the server's stdout/stderr is appended to across every spawn.

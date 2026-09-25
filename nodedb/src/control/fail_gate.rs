@@ -34,14 +34,30 @@ pub(crate) async fn wait(name: &str) {
 /// The write funnel's gate: after a logged write's WAL record is appended and
 /// before any core holds the request. Named per collection,
 /// `funnel::before_dispatch::<collection>`, and only a write carrying a WAL
-/// LSN reaches it.
+/// LSN reaches it. A committed redo parks on the gate of each collection it
+/// writes.
 pub(crate) async fn before_dispatch(plan: &PhysicalPlan, wal_lsn: Option<Lsn>) {
     if wal_lsn.is_none() {
         return;
     }
-    let name = format!(
-        "funnel::before_dispatch::{}",
-        plan.collection().unwrap_or_default()
-    );
-    wait(&name).await;
+    for collection in plan.named_collections() {
+        wait(&format!("funnel::before_dispatch::{collection}")).await;
+    }
+}
+
+/// The Calvin scheduler's flush gate: after a committed transaction's redo
+/// record is appended and before its flush reaches a core. Named per
+/// collection, `calvin::before_flush::<collection>`.
+///
+/// The scheduler cannot park on a timer, so the gate answers without waiting:
+/// `true` while the file armed for one of the flush's collections is absent.
+/// The scheduler then keeps the flush in its re-send queue and asks again on
+/// its next pass.
+pub(crate) fn holds_flush(plan: &PhysicalPlan) -> bool {
+    plan.named_collections().iter().any(|collection| {
+        matches!(
+            lookup(&format!("calvin::before_flush::{collection}")),
+            Some(FailAction::WaitForFile(path)) if !path.exists()
+        )
+    })
 }

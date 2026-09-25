@@ -169,10 +169,12 @@ impl CrashHarness {
     /// peeking at server-internal state. The probe write lands in
     /// `__crash_harness_calvin_probe`, a throwaway collection scoped to
     /// this call and never referenced by any caller's own assertions, so it
-    /// cannot perturb a row count a test checks elsewhere.
+    /// cannot perturb a row count a test checks elsewhere. The probe is
+    /// idempotent, so a test can call it again after a restart on the same
+    /// data directory.
     pub async fn wait_for_calvin_ready(&self, timeout: Duration) {
         self.exec(
-            "CREATE COLLECTION __crash_harness_calvin_probe \
+            "CREATE COLLECTION IF NOT EXISTS __crash_harness_calvin_probe \
              COLUMNS (id TEXT, ts BIGINT TIME_KEY, v FLOAT) \
              WITH (engine='timeseries')",
         )

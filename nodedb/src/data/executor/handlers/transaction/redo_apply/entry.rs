@@ -43,7 +43,6 @@ use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
 use crate::wal::RedoRecord;
 
-use super::cover::WrittenEngines;
 use super::passes::{RedoTarget, final_refusal};
 use super::state::{RedoApplyPass, RedoApplyScope};
 use super::sub_ops::{document_ops, kv_ops, label_ops};
@@ -68,7 +67,7 @@ impl CoreLoop {
     }
 
     /// Install one committed redo record at the LSN the request carries:
-    /// validate every sub-record, install with undo, then settle and cover.
+    /// validate every sub-record, install with undo, then settle.
     /// Every committed transaction installs here, whichever path committed it,
     /// and restart replay drives the same arms over the same record.
     pub(in crate::data::executor) fn install_committed_redo(
@@ -134,17 +133,18 @@ impl CoreLoop {
             Ok(scope) => scope,
             Err(refusal) => return self.response_error(task, refusal.into_code()),
         };
-        // The install applied the record: a flush the settle runs, and a
-        // checkpoint the cover writes, name it.
+        // The install applied the record: every flush the settle runs, and
+        // every later checkpoint, names it. No artifact written before this
+        // point names it: its stamp prefix is an outcome floor the record was
+        // above, since the record's dispatcher window held the floor below it
+        // until this apply answers, and its applied ranges name only records
+        // applied before. So restart replay applies it, and nothing written
+        // earlier needs publishing again.
         self.floors.applied_prefix.note_applied(lsn);
-        // Settle, then publish again every artifact whose stamp prefix covers
-        // the record, so restart replay does not skip it. Neither step can be
-        // rolled back once it started, so a failure leaves live state restart
-        // replay does not rebuild: the core fail-stops. The funnel keeps the
-        // record for restart replay.
-        let settled = self.settle_redo_install(task, &mut scope).and_then(|()| {
-            self.cover_applied_record(lsn, &WrittenEngines::of(&redo), &scope.arrays_written)
-        });
+        // The settle cannot be rolled back once it started, so a failure
+        // leaves live state restart replay does not rebuild: the core
+        // fail-stops. The funnel keeps the record for restart replay.
+        let settled = self.settle_redo_install(task, &mut scope);
         if let Err(error) = settled {
             self.fail_stop_core(
                 FailStopCause::PostInstallFailed,
@@ -156,7 +156,7 @@ impl CoreLoop {
             return self.response_error(task, error);
         }
         // Write versions and the watermark move only once the record is
-        // settled and covered.
+        // settled.
         for version in std::mem::take(&mut scope.write_versions) {
             self.publish_write_version(
                 version.db,
@@ -166,7 +166,7 @@ impl CoreLoop {
                 version.lsn,
             );
         }
-        // Events leave only once the record is settled and covered. Every
+        // Events leave only once the record is settled. Every
         // one names the record's LSN: the install held the watermark back.
         for mut event in std::mem::take(&mut scope.pending_events) {
             event.lsn = lsn;
@@ -379,82 +379,158 @@ mod tests {
         }
     }
 
-    /// Restart replay skips a timeseries record the collection stamp names.
-    /// A committed redo applied online after a flush whose stamp prefix
-    /// passed its LSN must still install, and must flush so the stamp's
-    /// claim holds for it on the next restart.
+    /// A committed KV record applied after a checkpoint that named a higher
+    /// LSN is not named by that checkpoint: nothing publishes it again, and a
+    /// restart replays it over the restored generation.
     #[test]
-    fn an_online_redo_apply_below_a_flushed_partition_stamp_still_installs() {
+    fn a_kv_redo_applied_after_a_checkpoint_replays_after_a_restart() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let redo_record = |lsn: u64, redo: &[u8]| {
+            WalRecord::new(WalRecordArgs {
+                record_type: RecordType::TransactionRedo as u32,
+                lsn,
+                tenant_id: TID,
+                vshard_id: 0,
+                database_id: 0,
+                payload: redo.to_vec(),
+                encryption_key: None,
+                preamble_bytes: None,
+            })
+            .expect("wal record")
+        };
+        let later = redo_bytes(vec![kv_put("cache", b"k2", b"v2", 22)]);
+        let earlier = redo_bytes(vec![kv_put("cache", b"k1", b"v1", 21)]);
+        let collections = vec!["cache".to_string()];
+        let install = |core: &mut CoreLoop, lsn: u64, redo: &[u8]| {
+            let response = core.execute_apply_transaction_redo(
+                &task_at(Some(lsn)),
+                TID,
+                CommittedRedo {
+                    redo,
+                    collections: &collections,
+                    sum_targets: &[],
+                },
+            );
+            assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
+        };
+
+        {
+            let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+            core.floors
+                .applied_prefix
+                .observe_outcome_floor(Lsn::new(10));
+            install(&mut core, 100, &later);
+            core.checkpoint_kv_engines().expect("checkpoint");
+            install(&mut core, 50, &earlier);
+        }
+
         let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        core.load_kv_checkpoints().expect("load");
+        assert!(
+            !core.floors.replay_floors.kv.covers(50),
+            "the checkpoint written before lsn 50 applied does not name it"
+        );
+        core.floors
+            .applied_prefix
+            .seed_replayed_through(Lsn::new(100));
+        core.replay_transaction_redo_wal(
+            &[redo_record(50, &earlier), redo_record(100, &later)],
+            1,
+            &nodedb_wal::TombstoneSet::new(),
+        )
+        .expect("replay");
+        let now_ms = crate::engine::kv::current_ms();
+        for (key, value) in [(&b"k1"[..], &b"v1"[..]), (&b"k2"[..], &b"v2"[..])] {
+            assert_eq!(
+                core.kv_engine.get(0, TID, "cache", key, now_ms).as_deref(),
+                Some(value),
+                "{key:?} is present after the restart"
+            );
+        }
+    }
+
+    /// A committed redo record applied after a flush that named a higher LSN
+    /// is not named by that flush's stamp: its dispatcher window held the
+    /// outcome floor below it. The flush needs no republish, and a restart
+    /// replays the record once, beside the flushed one it does not repeat.
+    #[test]
+    fn a_redo_applied_below_a_flushed_record_replays_once_after_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
         let tenant = TenantId::new(TID);
         let key = (
             crate::types::DatabaseId::DEFAULT,
             tenant,
             "metrics".to_string(),
         );
-
-        // A write at LSN 100 lands, the outcome floor passes it, and a flush
-        // stamps through LSN 100.
-        let earlier = RedoRecord {
-            version: 1,
-            ops: vec![metric_samples_sub("metrics", 1_700_000_000_000, 1.0)],
-            calvin_stamp: None,
+        let redo_record = |lsn: u64, redo: &[u8]| {
+            WalRecord::new(WalRecordArgs {
+                record_type: RecordType::TransactionRedo as u32,
+                lsn,
+                tenant_id: TID,
+                vshard_id: 0,
+                database_id: 0,
+                payload: redo.to_vec(),
+                encryption_key: None,
+                preamble_bytes: None,
+            })
+            .expect("wal record")
         };
-        let record = WalRecord::new(WalRecordArgs {
-            record_type: RecordType::TransactionRedo as u32,
-            lsn: 100,
-            tenant_id: TID,
-            vshard_id: 0,
-            database_id: 0,
-            payload: earlier.to_bytes().expect("encode redo"),
-            encryption_key: None,
-            preamble_bytes: None,
-        })
-        .expect("wal record");
+        let rows = |core: &CoreLoop| {
+            core.columnar_memtables
+                .get(&key)
+                .map_or(0, |m| m.row_count())
+                + core
+                    .ts_registries
+                    .get(&key)
+                    .map_or(0, |registry| registry.total_row_count())
+        };
+        let later = redo_bytes(vec![metric_samples_sub("metrics", 1_700_000_000_000, 1.0)]);
+        let earlier = redo_bytes(vec![metric_samples_sub("metrics", 1_700_000_000_001, 2.0)]);
+        let collections = vec!["metrics".to_string()];
+        let install = |core: &mut CoreLoop, lsn: u64, redo: &[u8]| {
+            let response = core.execute_apply_transaction_redo(
+                &task_at(Some(lsn)),
+                TID,
+                CommittedRedo {
+                    redo,
+                    collections: &collections,
+                    sum_targets: &[],
+                },
+            );
+            assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
+        };
+
+        {
+            let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+            core.floors
+                .applied_prefix
+                .observe_outcome_floor(crate::types::Lsn::new(10));
+            // The record at 100 applies first and flushes.
+            install(&mut core, 100, &later);
+            core.flush_ts_collection(tenant, crate::types::DatabaseId::DEFAULT, "metrics", 0)
+                .expect("flush");
+            let stamp = &core.ts_replay_stamps.get(&key).expect("stamp").rows;
+            assert!(stamp.skips(100) && !stamp.skips(50), "{stamp:?}");
+            // The record at 50 applies afterwards and stays in the memtable.
+            install(&mut core, 50, &earlier);
+            assert_eq!(rows(&core), 2);
+        }
+
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        core.load_ts_registries().expect("load");
+        core.floors
+            .applied_prefix
+            .seed_replayed_through(crate::types::Lsn::new(100));
         core.replay_transaction_redo_wal(
-            std::slice::from_ref(&record),
+            &[redo_record(50, &earlier), redo_record(100, &later)],
             1,
             &nodedb_wal::TombstoneSet::new(),
         )
-        .expect("seed replay");
-        core.floors
-            .applied_prefix
-            .observe_outcome_floor(crate::types::Lsn::new(100));
-        core.flush_ts_collection(tenant, crate::types::DatabaseId::DEFAULT, "metrics", 0)
-            .expect("flush the seeded partition");
-
-        // A committed redo minted at LSN 50 applies afterwards.
-        let redo = redo_bytes(vec![metric_samples_sub("metrics", 1_700_000_000_001, 2.0)]);
-        let collections = vec!["metrics".to_string()];
-        let response = core.execute_apply_transaction_redo(
-            &task_at(Some(50)),
-            TID,
-            CommittedRedo {
-                redo: &redo,
-                collections: &collections,
-                sum_targets: &[],
-            },
-        );
-        assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
-
-        let memtable_rows = core
-            .columnar_memtables
-            .get(&key)
-            .map_or(0, |m| m.row_count());
-        let flushed_rows = core
-            .ts_registries
-            .get(&key)
-            .map_or(0, |registry| registry.total_row_count());
+        .expect("replay");
         assert_eq!(
-            memtable_rows + flushed_rows,
+            rows(&core),
             2,
-            "the online apply installs its sample despite the higher partition stamp"
-        );
-        assert_eq!(
-            memtable_rows, 0,
-            "the sample applied below the stamp is flushed, so a restart that skips its \
-             record still finds it on disk"
+            "the record at 50 replays once; the flushed record at 100 does not repeat"
         );
     }
 

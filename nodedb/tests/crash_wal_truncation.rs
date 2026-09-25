@@ -44,18 +44,6 @@ fn filler_value() -> String {
     "x".repeat(FILLER_VALUE_BYTES)
 }
 
-/// The segment the write that just returned landed in. Names are
-/// zero-padded `wal-<20-digit first LSN>.seg`, so `last()` is the active
-/// segment. Snapshotting before the filler write means the segment cannot
-/// yet be truncated, so its later disappearance is unambiguous.
-fn active_segment(h: &CrashHarness) -> String {
-    let segments = h.wal_segments();
-    segments
-        .last()
-        .unwrap_or_else(|| panic!("no WAL segments on disk after an acknowledged write"))
-        .clone()
-}
-
 /// Block until `segment` has been unlinked, panicking if it never is. The
 /// only thing distinguishing "checkpoint restored the row" from "WAL record
 /// was still there all along".
@@ -92,7 +80,7 @@ async fn kv_row_survives_wal_segment_truncation() {
 
     // The segment holding the canary's WAL record, captured while it is still
     // the active one and therefore provably not yet truncated.
-    let canary_segment = active_segment(&h);
+    let canary_segment = h.active_wal_segment();
 
     // Live sanity BEFORE anything else: the row reads back now, so a failure
     // after the restart is attributable to recovery and not to test setup.
@@ -115,7 +103,7 @@ async fn kv_row_survives_wal_segment_truncation() {
         .await;
     }
     assert_ne!(
-        active_segment(&h),
+        h.active_wal_segment(),
         canary_segment,
         "filler writes did not rotate the WAL — the canary's segment is still active and \
          truncation would skip it, making this test vacuous"
@@ -157,7 +145,7 @@ async fn columnar_row_survives_wal_segment_truncation() {
     h.exec("INSERT INTO trunc_columnar (id, region, payload) VALUES ('canary', 'us', 'small')")
         .await;
 
-    let canary_segment = active_segment(&h);
+    let canary_segment = h.active_wal_segment();
 
     let live = h
         .query_col(
@@ -179,7 +167,7 @@ async fn columnar_row_survives_wal_segment_truncation() {
         .await;
     }
     assert_ne!(
-        active_segment(&h),
+        h.active_wal_segment(),
         canary_segment,
         "filler writes did not rotate the WAL — the canary's segment is still active and \
          truncation would skip it, making this test vacuous"

@@ -4,8 +4,8 @@
 //!
 //! A core's state is unknown when a rollback fails part way, or when a
 //! committed record installed and the work after its install failed: a
-//! memtable flush that drained rows, or the republish of an artifact that
-//! must hold the record. Restart replay rebuilds the state from the WAL.
+//! memtable flush that drained rows, a vector seal, or a truncate's removal.
+//! Restart replay rebuilds the state from the WAL.
 //! Until then the core must not serve the state it holds.
 //!
 //! The first cause wins. It logs one ERROR, files one recorder report,
@@ -29,8 +29,8 @@ use super::CoreLoop;
 pub(in crate::data::executor) enum FailStopCause {
     /// A rollback of an undo log failed part way.
     RollbackFailed,
-    /// A committed record installed, and a flush or artifact republish owed
-    /// after its install failed. Neither can be rolled back.
+    /// A committed record installed, and the settle owed after its install
+    /// failed. It cannot be rolled back.
     PostInstallFailed,
 }
 

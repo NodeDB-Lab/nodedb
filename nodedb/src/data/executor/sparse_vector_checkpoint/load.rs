@@ -71,10 +71,9 @@ impl CoreLoop {
         // Claimed only once every index is in: this LSN is what a failed flush
         // clamps truncation to, so claiming it over a half-restored generation
         // would authorise deleting the records that would have completed it.
-        self.floors.sparse_vector_durable_lsn = Lsn::new(manifest.durable_through_lsn);
+        self.floors.sparse_vector_durable_lsn = Lsn::new(manifest.replay.prefix);
         let replay_prefix = manifest.replay.prefix;
         let applied_ranges = manifest.replay.applied_above.len();
-        self.floors.sparse_vector_published_lsn = Lsn::new(replay_prefix);
         self.floors.replay_floors.sparse_vector.set(manifest.replay);
 
         info!(
@@ -82,7 +81,6 @@ impl CoreLoop {
             generation = manifest.generation,
             indexes,
             docs,
-            durable_through_lsn = manifest.durable_through_lsn,
             replay_prefix,
             applied_ranges,
             "sparse vector checkpoint restored"
@@ -209,12 +207,11 @@ mod tests {
     /// through, and both the reported checkpoint LSN and the post-restart clamp
     /// rest on it: it must survive the round-trip exactly.
     #[test]
-    fn manifest_roundtrips_generation_and_lsn() {
+    fn manifest_roundtrips_generation_and_stamp() {
         let written = SparseVectorCheckpointManifest {
             format_version: SPARSE_VECTOR_CKPT_FORMAT_VERSION,
             generation: 4,
-            durable_through_lsn: 8_128,
-            replay: crate::types::replay_stamp::ReplayStamp::default(),
+            replay: crate::types::replay_stamp::ReplayStamp::through(8_128),
         };
         let tmp = tempfile::tempdir().expect("tempdir");
         let bytes = zerompk::to_msgpack_vec(&written).expect("encode");
@@ -229,8 +226,9 @@ mod tests {
             .expect("manifest must read")
             .expect("manifest file exists, so this must be Some");
         assert_eq!(
-            decoded.durable_through_lsn, 8_128,
-            "the manifest must report exactly the LSN it was written with"
+            decoded.replay,
+            crate::types::replay_stamp::ReplayStamp::through(8_128),
+            "the manifest must report exactly the stamp it was written with"
         );
         assert_eq!(decoded.generation, 4);
     }
@@ -246,7 +244,6 @@ mod tests {
         let written = SparseVectorCheckpointManifest {
             format_version: SPARSE_VECTOR_CKPT_FORMAT_VERSION + 1,
             generation: 1,
-            durable_through_lsn: 5,
             replay: crate::types::replay_stamp::ReplayStamp::default(),
         };
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -351,6 +348,10 @@ mod tests {
             index_with(&[("doc-c", &[(3, 1.0)])]),
         );
         before.advance_watermark(Lsn::new(1_234));
+        before
+            .floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(1_234));
 
         let reported = before
             .checkpoint_sparse_vector_indexes()

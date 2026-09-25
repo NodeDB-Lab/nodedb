@@ -334,19 +334,20 @@ impl CoreLoop {
     /// > recoverable WITHOUT the WAL — either flushed by this checkpoint, or
     /// > held in a durable store that is not the WAL.
     ///
-    /// Reporting the watermark unconditionally violated that rule for any engine
-    /// whose flush was partial or absent, and deleted the only copy of its
-    /// state. The LSN is therefore computed as `min(watermark, every engine's
-    /// reported durable LSN)`: a flush that fails clamps the LSN instead of
-    /// silently widening the deletion.
+    /// The ceiling is the checkpoint floor (`checkpoint_floor`), never the core
+    /// watermark. Records apply out of LSN order, so the watermark can pass a
+    /// record still on its way to this core; truncating below it would delete
+    /// that record's only copy. The LSN is `min(floor, every engine's reported
+    /// durable LSN)`: a flush that fails clamps the LSN instead of widening the
+    /// deletion.
     pub(in crate::data::executor) fn execute_checkpoint(
         &mut self,
         task: &ExecutionTask,
     ) -> Response {
         // Every engine on this core whose flush can fail contributes the LSN it
-        // is durable through. The watermark is the ceiling — no engine can be
-        // durable past writes this core has not seen — and every contribution
-        // can only pull it DOWN.
+        // is durable through. The checkpoint floor is the ceiling — a record
+        // above it can still be on its way to this core — and every
+        // contribution can only pull it DOWN.
         //
         // No engine is left contributing nothing on the grounds that its flush
         // reports no LSN; that gap is closed. The only state on this core with
@@ -456,13 +457,13 @@ impl CoreLoop {
             tracing::warn!(error = %e, "CSR compaction rejected by memory governor during snapshot; skipping");
         }
 
-        // 8. Clamp the watermark down to every engine's durable LSN. `min` and
+        // 8. Clamp the floor down to every engine's durable LSN. `min` and
         //    not `max`: the reported LSN authorises deletion, so where the
         //    engines disagree the WAL must keep whatever the least-durable one
         //    still needs.
         let checkpoint_lsn = durable_lsns
             .iter()
-            .fold(self.watermark, |acc, lsn| acc.min(*lsn))
+            .fold(self.checkpoint_floor(), |acc, lsn| acc.min(*lsn))
             .as_u64();
 
         // The checkpoint coordinator is deliberately NOT told about this LSN.

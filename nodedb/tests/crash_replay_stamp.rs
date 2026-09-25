@@ -23,6 +23,11 @@
 //! boot 2's checkpoints after A is minted, so the checkpoint that names B also
 //! writes the held collection.
 //!
+//! The WAL-truncation case seals segments below A in boot 1, and the segment
+//! that holds A's record while A is parked. Truncation must remove segments
+//! below A and keep A's segment, and must remove it once A settled after the
+//! restart.
+//!
 //! Requires `--features failpoints`.
 
 #![cfg(feature = "failpoints")]
@@ -31,19 +36,33 @@ mod crash_harness;
 
 use std::time::{Duration, Instant};
 
+use crash_harness::log_fields::{boot_section, log_field, same_value};
+use crash_harness::wal_truncation::{WAL_TRUNCATED, segment_first_lsn, truncation_finished_from};
 use crash_harness::{CrashHarness, diagnostics};
 
 /// Boot 1 writes no checkpoint, so a seeded write stays in memory until the
 /// kill.
 const QUIET_CHECKPOINT_INTERVAL_SECS: &str = "3600";
 
-/// How long the test waits for a checkpoint whose stamp names a B: thirty
-/// checkpoint cycles at one per second. A is parked until the test releases
-/// it, so this bounds only the wait for the checkpoint manager.
-const STAMP_DEADLINE: Duration = Duration::from_secs(30);
+/// How long the test waits for a checkpoint whose stamp names a B, for
+/// truncation runs, or for a segment to go: thirty checkpoint cycles at one
+/// per second. A is parked until the test releases it, so this bounds only the
+/// wait for the checkpoint manager.
+const CHECKPOINT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// How long the process may take to abort once A is released.
 const CRASH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The smallest WAL segment target the config accepts, in whole MiB.
+const WAL_SEGMENT_TARGET_MB: &str = "1";
+
+/// One filler value. Five of them hold 2.5 MiB, which seals the segment that
+/// holds A's record under a 1 MiB target.
+const FILLER_VALUE_BYTES: usize = 512 * 1024;
+const FILLER_ROWS: usize = 5;
+
+/// The collection the filler goes to. The test never reads it back.
+const FILLER: &str = "stamp_trunc_fill";
 
 /// One engine's run of the in-flight sequence.
 struct Case {
@@ -79,6 +98,8 @@ struct Case {
     /// The boot-3 log message that proves this run reproduced the in-flight
     /// write, and the numeric field that must be above zero on it.
     restored: (&'static str, &'static str),
+    /// Seal A's segment and wait for truncation runs while A is parked.
+    wal_truncation: bool,
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -100,6 +121,7 @@ async fn a_kv_write_in_flight_at_a_checkpoint_survives_kill_9() {
         log_directives: "nodedb::data::executor::kv_checkpoint=info",
         published: "KV checkpoint published",
         restored: ("KV checkpoint restored", "applied_ranges"),
+        wal_truncation: false,
     })
     .await;
 }
@@ -123,6 +145,7 @@ async fn a_columnar_write_in_flight_at_a_checkpoint_survives_kill_9() {
         log_directives: "nodedb::data::executor::columnar_checkpoint=info",
         published: "columnar checkpoint published",
         restored: ("columnar checkpoint restored", "applied_ranges"),
+        wal_truncation: false,
     })
     .await;
 }
@@ -152,6 +175,7 @@ async fn an_array_write_in_flight_at_a_checkpoint_survives_kill_9() {
                          nodedb::data::executor::wal_replay::array=info",
         published: "array checkpoint flushed",
         restored: ("WAL array replay complete", "in_flight"),
+        wal_truncation: false,
     })
     .await;
 }
@@ -189,6 +213,36 @@ async fn a_timeseries_write_in_flight_at_a_checkpoint_survives_kill_9() {
                          nodedb::data::executor::handlers::timeseries_wal=info",
         published: "timeseries columnar flush complete",
         restored: ("WAL timeseries replay complete", "in_flight"),
+        wal_truncation: false,
+    })
+    .await;
+}
+
+/// A checkpoint that runs while A is parked reports a floor below A. So a
+/// truncation run keeps the segment that holds A's record, even after filler
+/// writes above A seal it. A floor taken from the highest applied LSN lets the
+/// run remove that segment, and A's row is lost with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kv_write_in_flight_at_a_wal_truncation_survives_kill_9() {
+    run(Case {
+        held: "stamp_trunc_lo",
+        applied: "stamp_trunc_hi",
+        create_held: "CREATE COLLECTION stamp_trunc_lo (k STRING PRIMARY KEY, v STRING) \
+                      WITH (engine='kv')",
+        create_applied: "CREATE COLLECTION stamp_trunc_hi (k STRING PRIMARY KEY, v STRING) \
+                         WITH (engine='kv')",
+        seed_held: None,
+        insert_held: "INSERT INTO stamp_trunc_lo (k, v) VALUES ('held', 'a')",
+        read_held: "SELECT v FROM stamp_trunc_lo WHERE k = 'held'",
+        held_value: "a",
+        insert_applied: |n| format!("INSERT INTO stamp_trunc_hi (k, v) VALUES ('k{n:03}', 'v{n}')"),
+        read_applied: "SELECT v FROM stamp_trunc_hi",
+        checkpoint_interval_secs: "1",
+        log_directives: "nodedb::data::executor::kv_checkpoint=info,\
+                         nodedb::control::checkpoint_manager=debug",
+        published: "KV checkpoint published",
+        restored: ("KV checkpoint restored", "applied_ranges"),
+        wal_truncation: true,
     })
     .await;
 }
@@ -201,10 +255,21 @@ async fn run(case: Case) {
             QUIET_CHECKPOINT_INTERVAL_SECS,
         )
         .with_env("RUST_LOG", &format!("warn,{}", case.log_directives));
+    if case.wal_truncation {
+        h.set_env("NODEDB_WAL_SEGMENT_TARGET_MB", WAL_SEGMENT_TARGET_MB);
+    }
     h.spawn();
     h.wait_ready();
     h.exec(case.create_held).await;
     h.exec(case.create_applied).await;
+    if case.wal_truncation {
+        h.exec(&format!(
+            "CREATE COLLECTION {FILLER} (k STRING PRIMARY KEY, v STRING) WITH (engine='kv')"
+        ))
+        .await;
+        // Sealed segments below A, so the floor A holds lets truncation run.
+        write_filler(&h, "below").await;
+    }
     if let Some(seed) = case.seed_held {
         h.exec(seed).await;
     }
@@ -242,7 +307,7 @@ async fn run(case: Case) {
     });
 
     // Apply B writes until a checkpoint names one of them above its prefix.
-    let deadline = Instant::now() + STAMP_DEADLINE;
+    let deadline = Instant::now() + CHECKPOINT_DEADLINE;
     let mut applied = 0usize;
     loop {
         h.exec(&(case.insert_applied)(applied)).await;
@@ -257,13 +322,18 @@ async fn run(case: Case) {
         }
         assert!(
             Instant::now() < deadline,
-            "no {} named an applied LSN above its prefix within {STAMP_DEADLINE:?}: write A \
-             never parked, or no checkpoint ran while it was.{}\n{}",
+            "no {} named an applied LSN above its prefix within {CHECKPOINT_DEADLINE:?}: \
+             write A never parked, or no checkpoint ran while it was.{}\n{}",
             case.published,
             h.keep_data_dir_note(),
             diagnostics::log_tail_section(&h.server_log())
         );
     }
+    let held_segment = if case.wal_truncation {
+        Some(truncate_while_held(&h).await)
+    } else {
+        None
+    };
     assert!(
         !held_task.is_finished(),
         "write A finished before its release: the gate never parked it"
@@ -301,6 +371,18 @@ async fn run(case: Case) {
         diagnostics::log_tail_section(&h.server_log())
     );
 
+    assert_restored(&h, &case, &live).await;
+
+    if let Some(segment) = held_segment {
+        truncation_advances_once_settled(&mut h, &segment).await;
+        h.kill_9();
+        h.reopen();
+        assert_restored(&h, &case, &live).await;
+    }
+}
+
+/// A's row is back, and every B write is present once.
+async fn assert_restored(h: &CrashHarness, case: &Case, live: &[String]) {
     let held = h.query_col_idx(case.read_held, 0).await;
     assert!(
         held.len() == 1 && same_value(&held[0], case.held_value),
@@ -319,76 +401,79 @@ async fn run(case: Case) {
     );
 }
 
-/// The server output of boot `n`, from its harness marker to the next one.
-fn boot_section(log: &str, n: u32) -> String {
-    let marker = format!("=== crash harness boot {n} (pid");
-    let Some(start) = log.find(&marker) else {
-        return String::new();
-    };
-    let rest = &log[start..];
-    let next = format!("=== crash harness boot {} (pid", n + 1);
-    match rest.find(&next) {
-        Some(end) => rest[..end].to_string(),
-        None => rest.to_string(),
+/// Filler rows that seal the active WAL segment.
+async fn write_filler(h: &CrashHarness, tag: &str) {
+    let filler = "x".repeat(FILLER_VALUE_BYTES);
+    for i in 0..FILLER_ROWS {
+        h.exec(&format!(
+            "INSERT INTO {FILLER} (k, v) VALUES ('{tag}{i}', '{filler}')"
+        ))
+        .await;
     }
 }
 
-/// Whether two read values are equal: by value when both are numbers, by
-/// text otherwise.
-fn same_value(read: &str, expected: &str) -> bool {
-    match (read.parse::<f64>(), expected.parse::<f64>()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => read == expected,
-    }
-}
-
-/// The numeric `field` of every log line carrying `message`.
-fn log_field(log: &str, message: &str, field: &str) -> Vec<u64> {
-    let key = format!("{field}=");
-    strip_ansi(log)
-        .lines()
-        .filter(|line| line.contains(message))
-        .filter_map(|line| {
-            let rest = line.split_once(key.as_str())?.1;
-            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-            digits.parse().ok()
-        })
-        .collect()
-}
-
-/// `text` without terminal colour escape sequences.
-fn strip_ansi(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            for next in chars.by_ref() {
-                if next == 'm' {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-#[test]
-fn log_fields_are_read_through_colour_codes() {
-    let log = "INFO KV checkpoint published \u{1b}[3mapplied_ranges\u{1b}[0m\u{1b}[2m=\u{1b}[0m2\n\
-               INFO KV checkpoint published applied_ranges=0\n";
-    assert_eq!(
-        log_field(log, "KV checkpoint published", "applied_ranges"),
-        vec![2, 0]
+/// Seal the segment that holds A's record, then wait while A is parked for a
+/// checkpoint that ran after the seal and a truncation that removed segments.
+/// Returns the name of A's segment.
+///
+/// A parked after its append and before any B write, and the B writes are too
+/// small to fill a segment. So the active segment now holds A's record.
+async fn truncate_while_held(h: &CrashHarness) -> String {
+    let held_segment = h.active_wal_segment();
+    write_filler(h, "above").await;
+    let active = h.active_wal_segment();
+    assert_ne!(
+        active, held_segment,
+        "the filler did not seal A's segment. Truncation never removes the active \
+         segment, so this run proves nothing"
     );
-    assert!(same_value("8.0", "8"));
-    assert!(!same_value("8.5", "8"));
-    assert!(same_value("a", "a"));
-    let booted = "=== crash harness boot 1 (pid 1) ===\nfirst-line\n\
-                  === crash harness boot 2 (pid 2) ===\nsecond-line\n";
-    assert!(boot_section(booted, 2).contains("second-line"));
-    assert!(!boot_section(booted, 2).contains("first-line"));
-    assert!(boot_section(booted, 1).contains("first-line"));
-    assert!(!boot_section(booted, 1).contains("second-line"));
+
+    // Every record in the active segment is above A. A marker at or above its
+    // first LSN comes from a checkpoint that ran after the seal.
+    let sealed_at = segment_first_lsn(&active);
+    let deadline = Instant::now() + CHECKPOINT_DEADLINE;
+    loop {
+        let log = boot_section(&h.server_log(), 2);
+        let ran_after_seal = truncation_finished_from(&log, sealed_at);
+        let truncated = !log_field(&log, WAL_TRUNCATED, "segments_deleted").is_empty();
+        if ran_after_seal && truncated {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "within {CHECKPOINT_DEADLINE:?} no checkpoint finished truncation after the filler \
+             sealed A's segment ({ran_after_seal}), or no truncation removed a segment below A \
+             ({truncated}).{}\n{}",
+            h.keep_data_dir_note(),
+            diagnostics::log_tail_section(&h.server_log())
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let segments = h.wal_segments();
+    assert!(
+        segments.contains(&held_segment),
+        "a truncation removed {held_segment} while write A in it was in flight: \
+         truncation must stay below the lowest checkpoint floor. Segments: {segments:?}"
+    );
+    held_segment
+}
+
+/// After the restart A is applied, so truncation must remove A's segment.
+/// A new write lets the Event Plane persist a watermark above it too.
+async fn truncation_advances_once_settled(h: &mut CrashHarness, segment: &str) {
+    h.exec(&format!(
+        "INSERT INTO {FILLER} (k, v) VALUES ('settled', 's')"
+    ))
+    .await;
+    let deadline = Instant::now() + CHECKPOINT_DEADLINE;
+    while h.wal_segments().iter().any(|name| name == segment) {
+        assert!(
+            Instant::now() < deadline,
+            "truncation never removed {segment} after write A settled: the floor held \
+             below a record that has its outcome.{}\n{}",
+            h.keep_data_dir_note(),
+            diagnostics::log_tail_section(&h.server_log())
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }

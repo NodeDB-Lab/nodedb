@@ -44,8 +44,10 @@
 //! task runs, so every record whose cells the memtable holds is named. A
 //! record the stamp does not name was not applied yet, and replay applies it.
 //!
-//! The flush also reports the core watermark as this engine's durable point,
-//! the LSN the checkpoint manager may truncate below.
+//! The flush also reports the checkpoint floor (`checkpoint_floor`) as this
+//! engine's durable point, the LSN the checkpoint manager may truncate below.
+//! It is the stamp's prefix: a record above it can be absent from the
+//! applied ranges, so the WAL keeps it.
 //!
 //! An array whose memtable is empty flushes nothing and leaves its manifest's
 //! stamp where it stands. That is not a gap: an empty memtable means every
@@ -75,7 +77,7 @@ impl CoreLoop {
     /// Flush every array open on this core to disk and return the LSN the array
     /// engine is now durable through.
     ///
-    /// Returns `Ok(watermark)` only once every array's segment AND manifest have
+    /// Returns `Ok(floor)` only once every array's segment AND manifest have
     /// landed. Any failure returns `Err` — the caller must then clamp the
     /// reported checkpoint LSN to the last LSN the arrays were known durable
     /// through, so a failed flush costs WAL growth instead of the cells it could
@@ -92,7 +94,7 @@ impl CoreLoop {
     /// here to lose. Its segments are on disk and its store is opened lazily by
     /// the first read (`ensure_array_open`) or by replay.
     pub(in crate::data::executor) fn checkpoint_array_engines(&mut self) -> crate::Result<Lsn> {
-        let durable_through = self.watermark;
+        let durable_through = self.checkpoint_floor();
         let stamp = self.floors.applied_prefix.stamp()?;
 
         // Collected first: `flush` takes `&mut self.array_engine`, so the id
@@ -106,7 +108,7 @@ impl CoreLoop {
         let mut first_error: Option<crate::Error> = None;
         for id in &ids {
             // `Ok(None)` = empty memtable, nothing to write; see the module docs
-            // for why the watermark is still durable for that array.
+            // for why the floor is still durable for that array.
             match self.array_engine.flush(id, stamp.clone()) {
                 Ok(Some(_)) => flushed += 1,
                 Ok(None) => {}
@@ -298,6 +300,17 @@ mod tests {
             self.put_at(id, x, y, v, 1, wal_lsn);
         }
 
+        /// Every record through `lsn` has a final outcome: the watermark and
+        /// the outcome floor both reach it, as a live core's do once those
+        /// writes answered.
+        fn settle_through(&mut self, lsn: u64) {
+            self.core.advance_watermark(Lsn::new(lsn));
+            self.core
+                .floors
+                .applied_prefix
+                .observe_outcome_floor(Lsn::new(lsn));
+        }
+
         /// `put` with an explicit system time, for bitemporal versions.
         fn put_at(&mut self, id: &ArrayId, x: i64, y: i64, v: i64, sys_ms: i64, wal_lsn: u64) {
             let cells = vec![cell(x, y, v, sys_ms)];
@@ -402,7 +415,7 @@ mod tests {
             vec![(1, 2, 30), (9, 9, 40)],
             "both cells must be live in the memtable before any flush"
         );
-        before.core.advance_watermark(Lsn::new(20));
+        before.settle_through(20);
 
         let reported = before
             .core
@@ -429,37 +442,37 @@ mod tests {
         );
     }
 
-    /// A flush with an empty memtable must still report the watermark: every
+    /// A flush with an empty memtable must still report the floor: every
     /// cell it holds is already in a segment, so clamping there would pin WAL
     /// truncation for no reason.
     #[test]
-    fn empty_memtable_reports_the_watermark() {
+    fn empty_memtable_reports_the_floor() {
         let dir = tempfile::tempdir().expect("tempdir");
         let id = aid();
 
         let mut core = Core::open_at(dir.path());
         core.open_array(&id);
         core.put(&id, 1, 1, 7, 5);
-        core.core.advance_watermark(Lsn::new(5));
+        core.settle_through(5);
         core.core.checkpoint_array_engines().expect("first flush");
 
-        core.core.advance_watermark(Lsn::new(900));
+        core.settle_through(900);
         assert_eq!(
             core.core.checkpoint_array_engines().expect("second flush"),
             Lsn::new(900),
             "nothing was written since the last flush, so the array engine is \
-             durable through the current watermark"
+             durable through the current floor"
         );
     }
 
-    /// A core with no arrays open reports the watermark rather than clamping —
+    /// A core with no arrays open reports the floor rather than clamping —
     /// it holds no array state at all, so it can never be the reason the WAL
     /// must be kept.
     #[test]
-    fn no_arrays_reports_the_watermark() {
+    fn no_arrays_reports_the_floor() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = Core::open_at(dir.path());
-        core.core.advance_watermark(Lsn::new(42));
+        core.settle_through(42);
         assert_eq!(
             core.core.checkpoint_array_engines().expect("flush"),
             Lsn::new(42)
@@ -477,7 +490,7 @@ mod tests {
         let mut core = Core::open_at(dir.path());
         core.open_array(&id);
         core.put(&id, 1, 2, 30, 10);
-        core.core.advance_watermark(Lsn::new(10));
+        core.settle_through(10);
         core.core.checkpoint_array_engines().expect("flush");
         core.put(&id, 3, 3, 50, 11);
 
@@ -488,15 +501,14 @@ mod tests {
         );
     }
 
-    /// A committed record applied at an LSN the array's manifest stamp
-    /// already names is flushed into a segment: restart replay skips it, so
-    /// the segment is its only copy.
+    /// A committed record applied after a flush that named a higher LSN is
+    /// not named by that flush's manifest stamp. The flush needs no republish:
+    /// restart replay applies the record, and skips the flushed one.
     #[test]
-    fn a_committed_record_the_manifest_stamp_names_is_flushed() {
+    fn a_committed_record_applied_after_a_flush_replays_after_a_restart() {
         use crate::data::executor::handlers::transaction::redo_apply::CommittedRedo;
         use crate::engine::array::wal::{ArrayPutPayload, encode_put_with_version};
         use crate::wal::{RedoRecord, RedoSubRecord};
-        use nodedb_wal::record::RecordType;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let id = aid();
@@ -505,17 +517,10 @@ mod tests {
         before.open_array(&id);
         before.put(&id, 1, 2, 30, 100);
         before.core.advance_watermark(Lsn::new(100));
-        // The outcome floor passed lsn 50 while that record was still on its
-        // way to this core, so the flush's stamp prefix names it.
-        before
-            .core
-            .floors
-            .applied_prefix
-            .observe_outcome_floor(Lsn::new(100));
         before
             .core
             .checkpoint_array_engines()
-            .expect("flush stamped through lsn 100");
+            .expect("flush naming lsn 100");
 
         let payload = encode_put_with_version(&ArrayPutPayload {
             array_id: id.clone(),
@@ -552,15 +557,56 @@ mod tests {
             },
         );
         assert_eq!(response.status, Status::Ok, "apply: {response:?}");
+        assert!(
+            !before
+                .core
+                .array_engine
+                .store(&id)
+                .expect("open")
+                .manifest()
+                .replay
+                .skips(50),
+            "the flush written before the record applied does not name it"
+        );
+        let live = before.slice_all(&id);
         drop(before);
 
+        let redo_record = WalRecord::new(WalRecordArgs {
+            record_type: RecordType::TransactionRedo as u32,
+            lsn: 50,
+            tenant_id: TID,
+            vshard_id: 0,
+            database_id: DatabaseId::DEFAULT.as_u64(),
+            payload: redo,
+            encryption_key: None,
+            preamble_bytes: None,
+        })
+        .expect("wal record");
         let mut after = Core::open_at(dir.path());
         after.open_array(&id);
+        after
+            .core
+            .floors
+            .applied_prefix
+            .seed_replayed_through(Lsn::new(100));
+        after
+            .core
+            .replay_transaction_redo_wal(
+                &[redo_record, put_record(&id, 1, 2, 30, 1, 100)],
+                1,
+                &TombstoneSet::new(),
+            )
+            .expect("replay");
+        assert_eq!(after.slice_all(&id), live);
+        assert_eq!(live, vec![(1, 2, 30), (9, 9, 40)]);
+        after
+            .core
+            .checkpoint_array_engines()
+            .expect("flush the replayed cell");
         assert_eq!(
-            after.slice_all(&id),
-            vec![(1, 2, 30), (9, 9, 40)],
-            "the cell committed at lsn 50 survives a restart that skips every \
-             record the stamp names"
+            segment_tiles(&after, &id),
+            2,
+            "the replayed segment holds the lsn-50 cell alone; lsn 100 is not repeated"
         );
     }
 

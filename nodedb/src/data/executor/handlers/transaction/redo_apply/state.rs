@@ -129,9 +129,9 @@ pub(in crate::data::executor) struct RedoApplyScope {
     pub(in crate::data::executor) arrays_written: Vec<nodedb_array::types::ArrayId>,
     /// Columnar collections the install wrote, flushed once it succeeded.
     pub(in crate::data::executor) columnar_written: Vec<CollectionKey>,
-    /// Timeseries collections the install ingested into, with the record's
-    /// LSN, settled once it succeeded.
-    pub(in crate::data::executor) timeseries_written: Vec<(CollectionKey, u64)>,
+    /// Timeseries collections the install ingested into, settled once it
+    /// succeeded.
+    pub(in crate::data::executor) timeseries_written: Vec<CollectionKey>,
     /// Events the install's writes raised, sent once it succeeded.
     pub(in crate::data::executor) pending_events: Vec<crate::event::WriteEvent>,
     /// Write versions the install's writes produced, published once the
