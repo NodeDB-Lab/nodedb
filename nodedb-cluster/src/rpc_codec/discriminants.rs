@@ -134,6 +134,24 @@ pub const RPC_RELEASE_RESERVATION_RESP: u8 = 44;
 pub const RPC_PRE_VOTE_REQ: u8 = 45;
 pub const RPC_PRE_VOTE_RESP: u8 = 46;
 
+/// Routed read index. A node that does not lead a Raft group sends a
+/// `RPC_READ_INDEX_REQ` to the group leader; the leader confirms its
+/// leadership against a quorum and replies with exactly one
+/// `RPC_READ_INDEX_RESP` carrying its read index, a leader hint, or a
+/// timeout. One-shot request/response — no streaming.
+pub const RPC_READ_INDEX_REQ: u8 = 47;
+pub const RPC_READ_INDEX_RESP: u8 = 48;
+/// Authorization lease renewal: a node reports its authorization coverage to
+/// the metadata group leader in `RPC_AUTH_LEASE_RENEW_REQ` and receives one
+/// `RPC_AUTH_LEASE_RENEW_RESP` granting or withholding its lease.
+pub const RPC_AUTH_LEASE_RENEW_REQ: u8 = 49;
+pub const RPC_AUTH_LEASE_RENEW_RESP: u8 = 50;
+/// Authorization barrier: a writer holds its acknowledgement until the
+/// metadata group leader answers `RPC_AUTH_BARRIER_REQ` with one
+/// `RPC_AUTH_BARRIER_RESP`.
+pub const RPC_AUTH_BARRIER_REQ: u8 = 51;
+pub const RPC_AUTH_BARRIER_RESP: u8 = 52;
+
 // VShardMessageType discriminants for distributed array ops (u16, range 80-89).
 // These mirror `crate::wire::VShardMessageType` repr values and are declared
 // here so external code can reference them without importing the full enum.

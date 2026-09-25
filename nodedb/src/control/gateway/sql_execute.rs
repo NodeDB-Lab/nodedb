@@ -54,11 +54,10 @@ impl Gateway {
             // Read before reverify runs, not derived per-name inside it: both
             // pseudo-entries share one live tenant snapshot the same way the
             // real collection entries share one catalog snapshot.
-            let permission_tree_version = shared
-                .permission_cache
-                .read()
-                .await
-                .tenant_version(tenant_id);
+            let permission_tree_version =
+                crate::control::security::auth_fence::permission_view(&shared, ctx.tenant_id)
+                    .await?
+                    .tenant_version(tenant_id);
             let rls_version = shared.rls.tenant_version(tenant_id);
             let ptree_key = permission_tree_version_key(tenant_id);
             let rls_key = rls_version_key(tenant_id);

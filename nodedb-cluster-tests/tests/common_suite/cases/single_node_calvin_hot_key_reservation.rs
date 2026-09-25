@@ -55,7 +55,8 @@ fn other_vshard_collection(exclude_vshard: u32) -> String {
 fn reservation_count(node: &TestClusterNode, vshard: u32, key: &LockKey) -> usize {
     let managers = node
         .shared
-        .calvin_lock_managers
+        .calvin
+        .lock_managers
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let Some(lm) = managers.get(&vshard) else {
@@ -112,6 +113,7 @@ async fn hot_key_read_reservation_installs_self_upgrades_and_releases() {
     {
         let mut table = node
             .shared
+            .calvin
             .hot_key_table
             .lock()
             .unwrap_or_else(|p| p.into_inner());

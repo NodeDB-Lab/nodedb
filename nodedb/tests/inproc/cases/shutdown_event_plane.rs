@@ -36,6 +36,7 @@ fn make_write_event(seq: u64, lsn_val: u64) -> WriteEvent {
         op: WriteOp::Insert,
         row_id: RowId::row(nodedb_types::RowIdentity::from_user_key("row-1")),
         lsn: Lsn::new(lsn_val),
+        record: None,
         database_id: DatabaseId::DEFAULT,
         tenant_id: TenantId::new(1),
         vshard_id: VShardId::new(0),
@@ -81,6 +82,7 @@ async fn event_plane_watermarks_persisted_through_shutdown() {
         )
         .expect("shared_state");
         let cdc_router = Arc::clone(&shared.cdc_router);
+        let outcome_floor = Arc::clone(&shared.outcome_floor);
         let shutdown = Arc::new(ShutdownWatch::new());
         let (shutdown_bus, mut shutdown_handle) = ShutdownBus::new(Arc::clone(&shutdown));
 
@@ -98,8 +100,13 @@ async fn event_plane_watermarks_persisted_through_shutdown() {
             shutdown_bus: shutdown_bus.clone(),
         });
 
-        // Emit 100 events with increasing LSNs.
+        // Emit 100 events with increasing LSNs. Each write's outcome is final
+        // before its event leaves, as on the write path, so the watermark (the
+        // consumer's safe prefix) can reach the last LSN.
         for i in 1u64..=100 {
+            let window = outcome_floor.open_write();
+            window.note_minted(Lsn::new(i * 10));
+            window.settle();
             producers[0].emit(make_write_event(i, i * 10));
         }
 

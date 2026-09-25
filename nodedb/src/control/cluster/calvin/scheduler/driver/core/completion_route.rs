@@ -184,7 +184,8 @@ impl Scheduler {
         // no read-set was checked.
         if response.read_set_valid == Some(false) {
             self.shared
-                .calvin_counters
+                .calvin
+                .counters
                 .read_set_validation_failures
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }

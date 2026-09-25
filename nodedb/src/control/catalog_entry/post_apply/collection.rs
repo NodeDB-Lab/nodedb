@@ -6,8 +6,10 @@ use std::sync::Arc;
 
 use tracing::debug;
 
+use crate::control::security::auth_fence::TreeDefChange;
 use crate::control::security::catalog::{StoredCollection, StoredOwner};
 use crate::control::state::SharedState;
+use crate::types::DatabaseId;
 
 /// Synchronous half of `PutCollection` post-apply: install the owner
 /// record into the in-memory `PermissionStore`. Called inline by the
@@ -40,6 +42,50 @@ pub fn put_owner_sync(stored: &StoredCollection, shared: Arc<SharedState>) {
             "post_apply: RLS policies could not be re-read for recompilation"
         );
     }
+}
+
+/// Queue the tree-definition change a committed collection descriptor makes.
+/// Every node runs this, so each node's permission cache learns the tree
+/// defined through any node. Planning and lease coverage move the queue into
+/// the cache.
+pub fn queue_tree_def_sync(stored: &StoredCollection, shared: &SharedState) {
+    match TreeDefChange::from_collection(stored) {
+        Ok(Some(change)) => {
+            change.note_committed(shared.authorization_fence.sources());
+            shared.authorization_fence.tree_defs().push(change);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            // The DDL commits the serialization of a parsed definition, so
+            // this JSON always parses. The prior definition stays in place:
+            // removing it would drop the filter and expose rows.
+            tracing::error!(
+                collection = %stored.name,
+                tenant = stored.tenant_id,
+                error = %e,
+                "post_apply: PERMISSION_TREE of a committed collection could not be read"
+            );
+        }
+    }
+}
+
+/// Queue the removal of a collection's tree definition, for a collection
+/// that was dropped or purged.
+pub fn queue_tree_def_removal_sync(
+    database_id: u64,
+    tenant_id: u64,
+    name: &str,
+    shared: &SharedState,
+) {
+    if database_id != DatabaseId::DEFAULT.as_u64() {
+        return;
+    }
+    let change = TreeDefChange::Unregister {
+        tenant_id,
+        collection: name.to_owned(),
+    };
+    change.note_committed(shared.authorization_fence.sources());
+    shared.authorization_fence.tree_defs().push(change);
 }
 
 /// Register-dispatch half: dispatch a `Register` request to this node's

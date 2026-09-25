@@ -5,7 +5,7 @@
 //!
 //! Not currently wired into the Normal-mode consumer loop — per-event
 //! dispatch (`dispatch_triggers` in `single.rs`) is the sole production path
-//! for AFTER-ROW trigger firing (see `event::consumer::process_normal_batch`).
+//! for AFTER-ROW trigger firing (see `event::consumer::pipeline::deliver_events`).
 //! This batch path (and its `TriggerBatchCollector`) remains available for a
 //! future WHEN-clause-batched throughput optimization; for `BatchSafe`
 //! triggers it could dispatch a single bulk DML, but for now it still fires

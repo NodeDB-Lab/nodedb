@@ -52,6 +52,9 @@ impl CoreLoop {
                 op: write.op,
                 row_id: RowId::row(write.identity),
                 lsn: self.watermark,
+                // A deferred trigger event repeats a write whose own event
+                // already carries the record; catch-up never rebuilds it.
+                record: None,
                 database_id,
                 tenant_id,
                 vshard_id,

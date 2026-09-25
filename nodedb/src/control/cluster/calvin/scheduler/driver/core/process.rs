@@ -299,7 +299,9 @@ impl Scheduler {
         // once ALL of its positions for this vShard have terminally completed,
         // so any advertised watermark reflects a FULLY-applied epoch — the value
         // `BEGIN` needs for a torn-free cross-shard snapshot anchor.
-        if let Some(watermark) = self.applied.mark_applied(txn_id.epoch, txn_id.position) {
+        let folded = self.applied.mark_applied(txn_id.epoch, txn_id.position);
+        self.applied_mirror.mark(txn_id.epoch, txn_id.position);
+        if let Some(watermark) = folded {
             self.publish_watermark(watermark);
         }
     }
@@ -406,7 +408,7 @@ mod tests {
             build_test_scheduler_with_data_side(test_coll_vshard(), registry);
         let shared = Arc::clone(&scheduler.shared);
         fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
-        let watermark_before = shared.last_applied_calvin_epoch.load(Ordering::Acquire);
+        let watermark_before = shared.calvin.last_applied_epoch.load(Ordering::Acquire);
 
         scheduler.process_scheduler_input(SchedulerInput::Txn(make_validate_only_txn(3, 0)));
 
@@ -415,7 +417,7 @@ mod tests {
             "a capacity refusal must not mark the position applied"
         );
         assert_eq!(
-            shared.last_applied_calvin_epoch.load(Ordering::Acquire),
+            shared.calvin.last_applied_epoch.load(Ordering::Acquire),
             watermark_before,
             "a capacity refusal must not publish a watermark for the txn's epoch"
         );

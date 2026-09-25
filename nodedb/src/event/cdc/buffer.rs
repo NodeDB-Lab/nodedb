@@ -24,6 +24,9 @@ pub struct StreamBuffer {
     retention: RetentionConfig,
     total_pushed: std::sync::atomic::AtomicU64,
     total_evicted: std::sync::atomic::AtomicU64,
+    /// Set when the retained events changed since the CDC ledger last
+    /// persisted them: an event was inserted, evicted or compacted away.
+    changed: std::sync::atomic::AtomicBool,
 }
 
 impl StreamBuffer {
@@ -37,6 +40,7 @@ impl StreamBuffer {
             retention,
             total_pushed: std::sync::atomic::AtomicU64::new(0),
             total_evicted: std::sync::atomic::AtomicU64::new(0),
+            changed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -91,6 +95,8 @@ impl StreamBuffer {
             .position(|current| current.position() > position)
             .unwrap_or(events.len());
         events.insert(insertion_index, event);
+        self.changed
+            .store(true, std::sync::atomic::Ordering::Release);
 
         // Evict after ordered insertion. Hydrating an older committed event
         // must not displace a newer one merely because it arrived later.
@@ -224,6 +230,8 @@ impl StreamBuffer {
         *events = kept;
         let removed = (before - events.len()) as u32;
         if removed > 0 {
+            self.changed
+                .store(true, std::sync::atomic::Ordering::Release);
             self.total_evicted
                 .fetch_add(removed as u64, std::sync::atomic::Ordering::Relaxed);
         }
@@ -270,6 +278,31 @@ impl StreamBuffer {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Clear the changed flag, and return whether it was set. The CDC ledger
+    /// calls this before it reads [`Self::snapshot`], so a change made after
+    /// the read sets the flag again.
+    pub fn take_changed(&self) -> bool {
+        self.changed
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    /// Mark the retained events changed again, after a flush that took the
+    /// flag did not persist them.
+    pub fn mark_changed(&self) {
+        self.changed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Every retained event, oldest first.
+    pub fn snapshot(&self) -> Vec<Arc<CdcEvent>> {
+        self.events
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .cloned()
+            .collect()
     }
 }
 

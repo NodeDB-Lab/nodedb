@@ -108,12 +108,14 @@ impl Scheduler {
 
         if committed {
             self.shared
-                .calvin_counters
+                .calvin
+                .counters
                 .commits_flushed
                 .fetch_add(1, Ordering::Relaxed);
         } else {
             self.shared
-                .calvin_counters
+                .calvin
+                .counters
                 .commits_dropped
                 .fetch_add(1, Ordering::Relaxed);
         }

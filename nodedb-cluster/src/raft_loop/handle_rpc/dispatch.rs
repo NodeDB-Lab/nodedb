@@ -41,6 +41,11 @@ impl<A: CommitApplier, P: PlanExecutor> RaftRpcHandler for RaftLoop<A, P> {
             RaftRpc::MetadataProposeRequest(req) => self.handle_metadata_propose_rpc(req),
             // Data-group proposal forwarding.
             RaftRpc::DataProposeRequest(req) => self.handle_data_propose_rpc(req),
+            // Read index for a node that does not lead the group.
+            RaftRpc::ReadIndexRequest(req) => self.handle_read_index_rpc(req).await,
+            // Authorization lease renewal and barrier, answered by the host hook.
+            RaftRpc::AuthLeaseRenewRequest(req) => self.handle_auth_lease_renew_rpc(req).await,
+            RaftRpc::AuthBarrierRequest(req) => self.handle_auth_barrier_rpc(req).await,
             // VShardEnvelope — dispatch to registered handler (Event Plane, etc.).
             RaftRpc::VShardEnvelope(bytes) => self.handle_vshard_envelope_rpc(bytes).await,
             other => Err(ClusterError::Transport {

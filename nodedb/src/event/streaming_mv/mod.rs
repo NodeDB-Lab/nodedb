@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+pub mod applied;
 pub mod persist;
 pub mod processor;
 pub mod query;

@@ -60,6 +60,12 @@ impl WatermarkStore {
         Ok(Self { db, path })
     }
 
+    /// The directory holding this store: `{data_dir}/event_plane`. The Event
+    /// Plane's other durable stores live beside it.
+    pub fn dir(&self) -> &Path {
+        self.path.parent().unwrap_or(Path::new("."))
+    }
+
     /// Load the last-processed LSN for a given core. Returns `Lsn::ZERO` if
     /// no watermark has been persisted yet (first startup).
     pub fn load(&self, core_id: usize) -> crate::Result<Lsn> {

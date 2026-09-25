@@ -16,7 +16,6 @@ use crate::control::security::rls::RlsPolicyStore;
 use crate::control::security::role::RoleStore;
 use crate::control::security::tenant::TenantIsolation;
 use crate::control::server::sync::dlq::SyncDlq;
-use crate::control::state::calvin_counters::CalvinCounters;
 use crate::wal::WalManager;
 
 /// Atomically installed Raft proposal handles.
@@ -405,6 +404,9 @@ pub struct SharedState {
     /// them. Set by the Event Plane, which knows how many consumers it spawned;
     /// absent on a node that runs none.
     pub action_requeue: OnceLock<Arc<crate::event::action::ActionRequeueInbox>>,
+    /// Durable ledgers of the Event Plane's non-idempotent sinks. Set by the
+    /// Event Plane before its consumers start.
+    pub sink_ledgers: OnceLock<Arc<crate::event::sink_ledger::SinkLedgers>>,
     /// Test-only drop guard: owns the auto-cleaning temp directory the test
     /// constructor roots its CDC-offset / job-history / MV-persistence stores
     /// under, so they're removed on drop instead of leaking `/tmp/nodedb-test-*`
@@ -424,77 +426,9 @@ pub struct SharedState {
         crate::control::server::shared::ddl::neutral::maintenance::auto_analyze::DmlCounter,
     /// Highest WAL LSN confirmed delivered to Data Plane for timeseries catch-up.
     pub wal_catchup_lsn: AtomicU64,
-    /// Last globally-applied Calvin epoch, advanced by the per-vShard
-    /// deterministic schedulers as they apply epochs. Read at `BEGIN` to anchor
-    /// a session's cross-shard snapshot version (`tx_snapshot_epoch`). `Arc` so
-    /// schedulers (holding `Arc<SharedState>`) advance the same counter the
-    /// session reads. 0 in single-node / no-Calvin deployments.
-    pub last_applied_calvin_epoch: Arc<AtomicU64>,
-    /// Node-global Calvin observability counters (write versions recorded,
-    /// read-set validation failures, commits flushed/dropped).
-    pub calvin_counters: CalvinCounters,
-    /// Local, in-process sidecar carrying the applied Data-Plane [`Response`]
-    /// (affected-count and any RETURNING rows) of a completed Calvin
-    /// transaction, keyed by its sequencer-assigned `TxnId`.
-    ///
-    /// RETURNING rows are a QUERY RESULT, not replicated state, so they MUST NOT
-    /// ride the sequencer Raft log. The per-vShard scheduler deposits the applied
-    /// `Response` here BEFORE proposing the replicated `CompletionAck`; the
-    /// coordinator's completion path (static: `submit_and_await_calvin`;
-    /// dependent: `dispatch_dependent_edge_recon`) drains it once completion
-    /// fires. Every primary-write participant deposits (not RETURNING-only) — a
-    /// multi-collection cross-shard COMMIT can have several plain-write
-    /// participants, and those coalesce without conflict. Cross-node, the rows
-    /// travel via the non-Raft routed-submit RPC response instead.
-    ///
-    /// Value is [`CalvinApplyResult`](super::CalvinApplyResult): `Single` for a
-    /// deposited (possibly coalesced) participant, or `Conflict` only when two
-    /// RETURNING-bearing participants deposit for the same `TxnId` — a
-    /// cross-shard RETURNING union, drained as a loud error, never a silent
-    /// partial. [`Response`](crate::bridge::envelope::Response) is Control-Plane
-    /// `Send + Sync`; it never touches Raft.
-    pub calvin_apply_results: Arc<
-        Mutex<std::collections::HashMap<nodedb_cluster::calvin::TxnId, super::CalvinApplyResult>>,
-    >,
-    /// Per-vShard deterministic lock managers, lifted out of each Calvin
-    /// `Scheduler` so the Control-Plane write-admission gate shares the SAME
-    /// `Arc<Mutex<LockManager>>` the scheduler holds — a fast-path point write and
-    /// a Calvin txn's lock validation contend on one OS mutex, no TOCTOU gap.
-    /// Keyed by vShard id; empty in single-node / no-Calvin deployments.
-    pub calvin_lock_managers: Arc<
-        Mutex<
-            std::collections::BTreeMap<
-                u32,
-                Arc<Mutex<crate::control::cluster::calvin::scheduler::lock_manager::LockManager>>,
-            >,
-        >,
-    >,
-    /// Global hot-key detector for Calvin read reservations (CP-local heuristic).
-    pub hot_key_table: std::sync::Arc<
-        std::sync::Mutex<crate::control::cluster::calvin::scheduler::lock::HotKeyTable>,
-    >,
-    /// Per-vShard promotion channels, parallel to `calvin_lock_managers`. When a
-    /// fast-path write guard releases an uncontended key on drop, `LockManager`
-    /// may promote a scheduler txn queued behind it; the guard (Control-Plane,
-    /// not in the scheduler task) forwards the promoted `TxnId`s here for the
-    /// scheduler to dispatch. Unbounded (low-volume, sent from a non-blocking
-    /// `Drop`). Keyed by vShard id; empty in single-node / no-Calvin deployments.
-    pub calvin_promotion_senders: Arc<
-        Mutex<
-            std::collections::BTreeMap<
-                u32,
-                tokio::sync::mpsc::UnboundedSender<
-                    Vec<crate::control::cluster::calvin::scheduler::lock_manager::TxnId>,
-                >,
-            >,
-        >,
-    >,
-    /// Monotonic `position` source for autocommit fast-path lock holders. Paired
-    /// with [`TxnId::AUTOCOMMIT_EPOCH`] to mint holder identities that never
-    /// collide with a real Calvin `(epoch, position)` schedule position.
-    ///
-    /// [`TxnId::AUTOCOMMIT_EPOCH`]: crate::control::cluster::calvin::scheduler::lock_manager::TxnId::AUTOCOMMIT_EPOCH
-    pub autocommit_lock_seq: std::sync::atomic::AtomicU32,
+    /// In-process Calvin state: applied epoch, counters, apply results, lock
+    /// managers and their promotion channels.
+    pub calvin: super::calvin_local::CalvinLocalState,
     /// Single-node per-key write-ordering lock. When NO Calvin scheduler is
     /// registered for a write's vShard there is no lock table to fence against,
     /// yet concurrent same-key autocommit writes must still serialize so
@@ -509,6 +443,8 @@ pub struct SharedState {
     /// Permission tree cache: in-memory resource hierarchy + permission grants.
     pub permission_cache:
         Arc<tokio::sync::RwLock<crate::control::security::permission_tree::PermissionCache>>,
+    /// Brings authorization state to date before a statement is planned.
+    pub authorization_fence: Arc<crate::control::security::auth_fence::AuthorizationFence>,
     /// Gateway plan-cache invalidator; called after every DDL commit. None until `Gateway::new`.
     pub gateway_invalidator:
         std::sync::OnceLock<Arc<crate::control::gateway::PlanCacheInvalidator>>,

@@ -32,7 +32,7 @@ pub(super) struct PendingTxn {
     /// Whether this vShard's slice carries a primary user data write (a non-edge
     /// Document/KV/Vector/Timeseries/Columnar/Array write). Only the primary-write
     /// participant deposits its applied `Response` (affected-count and any
-    /// RETURNING rows) into `SharedState::calvin_apply_results`. The implicit-edge
+    /// RETURNING rows) into `CalvinLocalState::apply_results`. The implicit-edge
     /// cleanup participants that dual-home alongside it carry no primary write and
     /// so never clobber the entry the coordinator drains.
     pub has_primary_write: bool,

@@ -7,6 +7,9 @@ use nodedb_raft::message::{
     PreVoteRequest, PreVoteResponse, RequestVoteRequest, RequestVoteResponse, TimeoutNowRequest,
 };
 
+use super::auth_lease::{
+    AuthBarrierRequest, AuthBarrierResponse, AuthLeaseRenewRequest, AuthLeaseRenewResponse,
+};
 use super::calvin_submit::{
     SubmitCalvinInboxRequest, SubmitCalvinInboxResponse, SubmitCalvinTxnRequest,
     SubmitCalvinTxnResponse,
@@ -19,6 +22,7 @@ use super::discriminants::*;
 use super::execute::{ExecuteRequest, ExecuteResponse, ExecuteStreamChunk, ExecuteStreamEnd};
 use super::header::HEADER_SIZE;
 use super::metadata::{MetadataProposeRequest, MetadataProposeResponse};
+use super::read_index::{ReadIndexRequest, ReadIndexResponse};
 use super::reservation::{
     ReleaseReservationRequest, ReleaseReservationResponse, ReserveReadRequest, ReserveReadResponse,
 };
@@ -29,8 +33,8 @@ use super::shuffle::{
 };
 use super::surrogate::{AssignSurrogateRequest, AssignSurrogateResponse};
 use super::{
-    calvin_submit, cluster_mgmt, data_propose, execute, metadata, raft_msgs, reservation, shuffle,
-    surrogate, vshard,
+    auth_lease, calvin_submit, cluster_mgmt, data_propose, execute, metadata, raft_msgs,
+    read_index, reservation, shuffle, surrogate, vshard,
 };
 use crate::error::{ClusterError, Result};
 use crate::wire_version::{unwrap_bytes_versioned, wrap_bytes_versioned};
@@ -143,6 +147,16 @@ pub enum RaftRpc {
     // Data-group proposal forwarding (groups 1+)
     DataProposeRequest(DataProposeRequest),
     DataProposeResponse(DataProposeResponse),
+    // Routed read index. A node that does not lead a group asks the leader
+    // for a read index confirmed against a quorum.
+    ReadIndexRequest(ReadIndexRequest),
+    ReadIndexResponse(ReadIndexResponse),
+    // Authorization lease renewal and the writer-side barrier, both answered
+    // by the metadata group leader.
+    AuthLeaseRenewRequest(AuthLeaseRenewRequest),
+    AuthLeaseRenewResponse(AuthLeaseRenewResponse),
+    AuthBarrierRequest(AuthBarrierRequest),
+    AuthBarrierResponse(AuthBarrierResponse),
 }
 
 /// Encode a [`RaftRpc`] into a framed binary message stamped with `epoch`.
@@ -212,6 +226,12 @@ pub fn encode(rpc: &RaftRpc, epoch: &crate::cluster_epoch::ClusterEpochState) ->
         }
         RaftRpc::DataProposeRequest(m) => data_propose::encode_data_propose_req(m, &mut out),
         RaftRpc::DataProposeResponse(m) => data_propose::encode_data_propose_resp(m, &mut out),
+        RaftRpc::ReadIndexRequest(m) => read_index::encode_read_index_req(m, &mut out),
+        RaftRpc::ReadIndexResponse(m) => read_index::encode_read_index_resp(m, &mut out),
+        RaftRpc::AuthLeaseRenewRequest(m) => auth_lease::encode_renew_req(m, &mut out),
+        RaftRpc::AuthLeaseRenewResponse(m) => auth_lease::encode_renew_resp(m, &mut out),
+        RaftRpc::AuthBarrierRequest(m) => auth_lease::encode_barrier_req(m, &mut out),
+        RaftRpc::AuthBarrierResponse(m) => auth_lease::encode_barrier_resp(m, &mut out),
     }?;
     super::header::stamp_epoch(&mut out, epoch)?;
     Ok(out)
@@ -307,6 +327,12 @@ pub fn decode(data: &[u8], epoch: &crate::cluster_epoch::ClusterEpochState) -> R
         RPC_RELEASE_RESERVATION_RESP => reservation::decode_release_reservation_resp(payload),
         RPC_DATA_PROPOSE_REQ => data_propose::decode_data_propose_req(payload),
         RPC_DATA_PROPOSE_RESP => data_propose::decode_data_propose_resp(payload),
+        RPC_READ_INDEX_REQ => read_index::decode_read_index_req(payload),
+        RPC_READ_INDEX_RESP => read_index::decode_read_index_resp(payload),
+        RPC_AUTH_LEASE_RENEW_REQ => auth_lease::decode_renew_req(payload),
+        RPC_AUTH_LEASE_RENEW_RESP => auth_lease::decode_renew_resp(payload),
+        RPC_AUTH_BARRIER_REQ => auth_lease::decode_barrier_req(payload),
+        RPC_AUTH_BARRIER_RESP => auth_lease::decode_barrier_resp(payload),
         _ => Err(ClusterError::Codec {
             detail: format!("unknown rpc_type: {rpc_type}"),
         }),

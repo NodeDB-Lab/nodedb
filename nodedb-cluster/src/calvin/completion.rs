@@ -194,6 +194,8 @@ pub struct CalvinCompletionRegistry {
     /// the signal into a `SequencerEntry::Verdict` proposal. `pub(crate)`: also
     /// used by `note_vote` in `completion_verdict.rs`.
     pub(crate) verdict_tx: mpsc::Sender<(TxnId, VerdictOutcome)>,
+    /// Completion acks this node applied, with their Raft index.
+    pub applied_acks: super::applied_acks::AppliedAckLog,
 }
 
 impl CalvinCompletionRegistry {
@@ -204,6 +206,7 @@ impl CalvinCompletionRegistry {
         Arc::new(Self {
             inner: Mutex::new(Inner::default()),
             verdict_tx,
+            applied_acks: super::applied_acks::AppliedAckLog::default(),
         })
     }
 

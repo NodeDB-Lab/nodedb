@@ -254,6 +254,7 @@ pub async fn record_read_set(
     let now = std::time::Instant::now();
     let hot = {
         let table = state
+            .calvin
             .hot_key_table
             .lock()
             .unwrap_or_else(|p| p.into_inner());

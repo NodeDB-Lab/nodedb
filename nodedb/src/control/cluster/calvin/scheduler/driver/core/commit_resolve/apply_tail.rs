@@ -184,7 +184,8 @@ impl Scheduler {
             let key = nodedb_cluster::calvin::TxnId::new(txn_id.epoch, txn_id.position);
             let mut results = self
                 .shared
-                .calvin_apply_results
+                .calvin
+                .apply_results
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
             match results.entry(key) {

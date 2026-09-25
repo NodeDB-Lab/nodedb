@@ -15,6 +15,8 @@
 //!   peer, propose `AddLearner` on every group, wait for commit,
 //!   broadcast topology, persist catalog, build the wire response.
 
+mod auth_lease;
+pub mod auth_lease_hook;
 mod builder;
 pub mod handle_rpc;
 pub mod hooks;
@@ -26,8 +28,10 @@ pub mod loop_core;
 mod membership_convergence;
 mod placement_reconcile;
 pub mod proposals;
+mod read_index;
 pub mod tick;
 
+pub use auth_lease_hook::AuthLeaseService;
 pub use hooks::{
     AssignRemoteSurrogate, CalvinSubmit, CalvinSubmitInbox, ReleaseReservation, ReserveRead,
     ShuffleAggregator, ShuffleConsumer, ShuffleProducer, ShuffleReceiver, SnapshotApplier,

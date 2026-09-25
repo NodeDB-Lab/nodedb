@@ -20,6 +20,10 @@ use crate::types::DatabaseId;
 
 /// redb table: "v2:{database_id}:{tenant_id}:{mv_name}" → MessagePack-serialized MvSnapshot.
 const MV_STATE: TableDefinition<&str, &[u8]> = TableDefinition::new("mv_state");
+/// redb table: the one row `APPLIED_ROW` → MessagePack list of applied
+/// event keys, written in the same transaction as the view states.
+const MV_APPLIED: TableDefinition<&str, &[u8]> = TableDefinition::new("mv_applied");
+const APPLIED_ROW: &str = "applied";
 
 /// Serialized MV state: Vec of (group_key, per-aggregate GroupState list).
 pub type MvSnapshot = Vec<(String, Vec<GroupState>)>;
@@ -34,6 +38,9 @@ fn state_key(database_id: DatabaseId, tenant_id: u64, mv_name: &str) -> String {
 /// Manages persistence of streaming MV state.
 pub struct MvPersistence {
     db: Database,
+    /// Generation of the applied keys last persisted. `u64::MAX` before the
+    /// first flush.
+    flushed_generation: std::sync::atomic::AtomicU64,
 }
 
 impl MvPersistence {
@@ -62,13 +69,21 @@ impl MvPersistence {
                     engine: "event_plane".into(),
                     detail: format!("open_table: {e}"),
                 })?;
+            txn.open_table(MV_APPLIED)
+                .map_err(|e| crate::Error::Storage {
+                    engine: "event_plane".into(),
+                    detail: format!("open_table: {e}"),
+                })?;
             txn.commit().map_err(|e| crate::Error::Storage {
                 engine: "event_plane".into(),
                 detail: format!("commit: {e}"),
             })?;
         }
 
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            flushed_generation: std::sync::atomic::AtomicU64::new(u64::MAX),
+        })
     }
 
     /// Persist a single MV's state snapshot.
@@ -178,33 +193,95 @@ impl MvPersistence {
         Ok(())
     }
 
-    /// Flush all MV states from the registry to redb.
-    pub fn flush_all(&self, registry: &MvRegistry) {
-        for mv_def in registry.list_all() {
-            if let Some(state) =
-                registry.get_state(mv_def.database_id, mv_def.tenant_id, &mv_def.name)
-            {
-                let snapshot = state.snapshot();
-                if !snapshot.is_empty()
-                    && let Err(e) = self.save(
-                        mv_def.database_id,
-                        mv_def.tenant_id,
-                        &mv_def.name,
-                        &snapshot,
-                    )
-                {
-                    warn!(
-                        mv = %mv_def.name,
-                        error = %e,
-                        "failed to persist MV state"
-                    );
-                }
+    /// Persist every view's state and the applied event keys in one redb
+    /// transaction, holding off every apply meanwhile, so the persisted views
+    /// and keys agree. Nothing is written when no event applied since the
+    /// last flush.
+    pub fn flush_all(&self, registry: &MvRegistry) -> crate::Result<()> {
+        use std::sync::atomic::Ordering;
+        let storage = |e: &dyn std::fmt::Display| crate::Error::Storage {
+            engine: "event_plane".into(),
+            detail: format!("mv flush: {e}"),
+        };
+        registry.applied().with_consistent(|keys, generation| {
+            if self.flushed_generation.load(Ordering::Acquire) == generation {
+                return Ok(());
             }
-        }
+            let applied: Vec<Vec<u8>> = keys.iter().map(|key| key.to_bytes()).collect();
+            let applied_bytes =
+                zerompk::to_msgpack_vec(&applied).map_err(|e| crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("mv applied keys: {e}"),
+                })?;
+            let txn = self.db.begin_write().map_err(|e| storage(&e))?;
+            {
+                let mut states = txn.open_table(MV_STATE).map_err(|e| storage(&e))?;
+                for mv_def in registry.list_all() {
+                    let Some(state) =
+                        registry.get_state(mv_def.database_id, mv_def.tenant_id, &mv_def.name)
+                    else {
+                        continue;
+                    };
+                    let snapshot = state.snapshot();
+                    if snapshot.is_empty() {
+                        continue;
+                    }
+                    let bytes = zerompk::to_msgpack_vec(&snapshot).map_err(|e| {
+                        crate::Error::Serialization {
+                            format: "msgpack".into(),
+                            detail: format!("mv_state: {e}"),
+                        }
+                    })?;
+                    let key = state_key(mv_def.database_id, mv_def.tenant_id, &mv_def.name);
+                    states
+                        .insert(key.as_str(), bytes.as_slice())
+                        .map_err(|e| storage(&e))?;
+                }
+                let mut applied_table = txn.open_table(MV_APPLIED).map_err(|e| storage(&e))?;
+                applied_table
+                    .insert(APPLIED_ROW, applied_bytes.as_slice())
+                    .map_err(|e| storage(&e))?;
+            }
+            txn.commit().map_err(|e| storage(&e))?;
+            self.flushed_generation.store(generation, Ordering::Release);
+            Ok(())
+        })
     }
 
-    /// Restore all MV states from redb into the registry.
-    pub fn restore_all(&self, registry: &MvRegistry) {
+    /// The applied event keys persisted with the view states.
+    fn load_applied(&self) -> crate::Result<Vec<crate::event::sink_ledger::SinkEventKey>> {
+        let storage = |e: &dyn std::fmt::Display| crate::Error::Storage {
+            engine: "event_plane".into(),
+            detail: format!("mv applied keys: {e}"),
+        };
+        let txn = self.db.begin_read().map_err(|e| storage(&e))?;
+        let table = txn.open_table(MV_APPLIED).map_err(|e| storage(&e))?;
+        let Some(guard) = table.get(APPLIED_ROW).map_err(|e| storage(&e))? else {
+            return Ok(Vec::new());
+        };
+        let applied: Vec<Vec<u8>> =
+            zerompk::from_msgpack(guard.value()).map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("mv applied keys: {e}"),
+            })?;
+        applied
+            .iter()
+            .map(|bytes| {
+                crate::event::sink_ledger::SinkEventKey::from_bytes(bytes).ok_or_else(|| {
+                    crate::Error::Serialization {
+                        format: "mv applied key".into(),
+                        detail: "a persisted key did not decode".into(),
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Restore all MV states and their applied event keys from redb into the
+    /// registry. A view whose state cannot be read, or keys that cannot be
+    /// read, fail the restore: applying events on top of a partial restore
+    /// would count some of them twice.
+    pub fn restore_all(&self, registry: &MvRegistry) -> crate::Result<()> {
         let mut restored = 0u32;
         for mv_def in registry.list_all() {
             match self.load(mv_def.database_id, mv_def.tenant_id, &mv_def.name) {
@@ -217,14 +294,14 @@ impl MvPersistence {
                     }
                 }
                 Ok(_) => {}
-                Err(e) => {
-                    warn!(mv = %mv_def.name, error = %e, "failed to restore MV state");
-                }
+                Err(e) => return Err(e),
             }
         }
         if restored > 0 {
             info!(restored, "restored streaming MV states from redb");
         }
+        registry.applied().restore(self.load_applied()?);
+        Ok(())
     }
 }
 
@@ -254,6 +331,7 @@ pub fn spawn_persist_task(
                             }
                         }
                         if total_finalized > 0 {
+                            registry.applied().touch();
                             debug!(
                                 finalized = total_finalized,
                                 cutoff_ms = cutoff,
@@ -263,12 +341,16 @@ pub fn spawn_persist_task(
                     }
 
                     // Persist state to redb.
-                    persistence.flush_all(&registry);
-                    trace!("MV state flushed to redb");
+                    match persistence.flush_all(&registry) {
+                        Ok(()) => trace!("MV state flushed to redb"),
+                        Err(e) => warn!(error = %e, "failed to persist MV state"),
+                    }
                 }
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
-                        persistence.flush_all(&registry);
+                        if let Err(e) = persistence.flush_all(&registry) {
+                            warn!(error = %e, "failed to persist MV state on shutdown");
+                        }
                         debug!("MV persistence task: final flush on shutdown");
                         return;
                     }

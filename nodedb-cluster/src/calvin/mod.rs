@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+pub mod applied_acks;
 pub mod completion;
 mod completion_verdict;
 pub mod sequencer;
 pub mod types;
 
+pub use applied_acks::{AppliedAckLog, AppliedCompletionAck};
 pub use completion::{
     AttemptOutcome, CalvinCompletionRegistry, ParticipantProgress, ParticipantVote, TxnId,
     VerdictOutcome,

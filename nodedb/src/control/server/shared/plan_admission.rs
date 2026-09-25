@@ -95,7 +95,8 @@ async fn plan_authorize_and_admit_once(
     // Re-read per attempt: a retry must plan against the catalog and permission
     // state as they are NOW, not as they were when the drained attempt started.
     let (mut tasks, output_schema, versions) = {
-        let permission_cache = state.permission_cache.read().await;
+        let permission_cache =
+            crate::control::security::auth_fence::permission_view(state, tenant_id).await?;
         let security = PlanSecurityContext {
             identity,
             auth: auth_ctx,

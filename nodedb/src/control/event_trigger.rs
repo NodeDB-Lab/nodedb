@@ -413,6 +413,7 @@ mod tests {
                 "doc'; DELETE FROM audit; --",
             )),
             lsn: Lsn::new(1),
+            record: None,
             database_id: DatabaseId::DEFAULT,
             tenant_id: TenantId::new(1),
             vshard_id: VShardId::new(0),

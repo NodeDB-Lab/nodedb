@@ -205,10 +205,15 @@ impl NodeDbPgHandler {
         // bumped on every mutation; a cache hit re-validates the stamped
         // versions against these live values so a revoked grant or dropped
         // policy evicts the entry instead of replaying a frozen filter.
-        let current_permission_tree_version = {
-            let perm_cache = self.state.permission_cache.read().await;
-            perm_cache.tenant_version(tenant_id.as_u64())
-        };
+        //
+        // The checked read refuses unless this node holds every
+        // authorization change acknowledged before this statement. The plain
+        // reads below see that state or newer.
+        let current_permission_tree_version =
+            crate::control::security::auth_fence::permission_view(&self.state, tenant_id)
+                .await
+                .map_err(StatementSetupError::from)?
+                .tenant_version(tenant_id.as_u64());
         let current_rls_version = self.state.rls.tenant_version(tenant_id.as_u64());
 
         let cached_tasks = if bypass_cache {

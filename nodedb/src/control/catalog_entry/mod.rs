@@ -31,6 +31,7 @@
 //! compile error everywhere a caller needs to handle it.
 
 pub mod apply;
+pub mod authorization;
 pub mod codec;
 pub mod descriptor_stamp;
 pub mod descriptor_validate;

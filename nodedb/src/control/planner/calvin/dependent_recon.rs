@@ -400,6 +400,20 @@ async fn dispatch_dependent_edge_recon_inner(
         }
     };
 
+    // A write to a permission-tree source is acknowledged only once it binds
+    // every node. Tree sources live in the default database.
+    let sources = state.authorization_fence.sources();
+    let binds_authorization = database_id == crate::types::DatabaseId::DEFAULT
+        && tasks.iter().any(|task| {
+            task.plan
+                .named_collections()
+                .iter()
+                .any(|collection| sources.is_source_collection(collection))
+        });
+    if binds_authorization {
+        crate::control::security::auth_lease::calvin_write_barrier(state).await?;
+    }
+
     // Completion fired: the scheduler deposited the applied Response (with any
     // RETURNING rows) into the sidecar before proposing the ack that woke the
     // retry loop, so the entry is present now if this write carried RETURNING.
@@ -407,7 +421,8 @@ async fn dispatch_dependent_edge_recon_inner(
     // `Conflict` (>1 RETURNING participant) fails loudly rather than returning a
     // partial cross-shard union.
     let drained = state
-        .calvin_apply_results
+        .calvin
+        .apply_results
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .remove(&completed_txn);

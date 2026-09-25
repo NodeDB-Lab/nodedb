@@ -58,6 +58,7 @@ fn write_event(seq: u64) -> WriteEvent {
         op: WriteOp::Insert,
         row_id: RowId::row(nodedb_types::RowIdentity::from_user_key(format!("r-{seq}"))),
         lsn: Lsn::new(seq * 10),
+        record: None,
         database_id: DatabaseId::new(7),
         tenant_id: TenantId::new(1),
         vshard_id: VShardId::new(0),

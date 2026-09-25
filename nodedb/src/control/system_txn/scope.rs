@@ -30,7 +30,8 @@ impl SystemTxnScope {
             crate::types::Lsn::new(next.as_u64().saturating_sub(1))
         };
         let snapshot_epoch = state
-            .last_applied_calvin_epoch
+            .calvin
+            .last_applied_epoch
             .load(std::sync::atomic::Ordering::Acquire);
 
         // Deliberately no `ddl_buffer::activate()`, unlike the client BEGIN

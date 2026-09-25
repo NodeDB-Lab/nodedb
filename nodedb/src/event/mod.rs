@@ -17,7 +17,10 @@ pub mod graph_cdc;
 pub mod kafka;
 pub mod metrics;
 pub mod plane;
+pub mod progress;
+pub mod record_numbering;
 pub mod scheduler;
+pub mod sink_ledger;
 pub mod slab_budget;
 pub mod streaming_mv;
 #[cfg(test)]

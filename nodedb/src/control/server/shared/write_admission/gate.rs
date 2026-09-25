@@ -22,12 +22,12 @@
 //!   Calvin-scheduled apply that already holds its locks.
 //!
 //! The fence holds because the fast path and the scheduler share the SAME
-//! `Arc<Mutex<LockManager>>` (via [`SharedState::calvin_lock_managers`]): a
+//! `Arc<Mutex<LockManager>>` (via [`CalvinLocalState::lock_managers`]): a
 //! commit's lock validation calls `acquire` on the same key, is `Blocked`, and
 //! waits; whoever takes the OS mutex first wins, with no time-of-check /
 //! time-of-use gap.
 //!
-//! [`SharedState::calvin_lock_managers`]: crate::control::state::SharedState::calvin_lock_managers
+//! [`CalvinLocalState::lock_managers`]: crate::control::state::CalvinLocalState::lock_managers
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -213,7 +213,8 @@ pub fn admit(shared: &SharedState, target: &WriteTarget<'_>) -> WriteAdmission {
     // no single static point key here, so it stays unordered on the fast path
     // (widening that coverage is a later unit).
     let Some(lock_manager) = shared
-        .calvin_lock_managers
+        .calvin
+        .lock_managers
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .get(&vshard.as_u32())
@@ -242,7 +243,10 @@ pub fn admit(shared: &SharedState, target: &WriteTarget<'_>) -> WriteAdmission {
     // could promote to an unowned (never-released) lock.
     let txn = TxnId::new(
         TxnId::AUTOCOMMIT_EPOCH,
-        shared.autocommit_lock_seq.fetch_add(1, Ordering::Relaxed),
+        shared
+            .calvin
+            .autocommit_lock_seq
+            .fetch_add(1, Ordering::Relaxed),
     );
     let acquired = {
         let mut lm = lock_manager.lock().unwrap_or_else(|p| p.into_inner());
@@ -255,7 +259,8 @@ pub fn admit(shared: &SharedState, target: &WriteTarget<'_>) -> WriteAdmission {
         // lock manager without a promotion sender should not happen, since both
         // are inserted together per vShard.
         let promotion_sender = shared
-            .calvin_promotion_senders
+            .calvin
+            .promotion_senders
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get(&vshard.as_u32())

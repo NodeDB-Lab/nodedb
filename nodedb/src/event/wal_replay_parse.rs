@@ -19,7 +19,7 @@ use nodedb_types::RowIdentity;
 use nodedb_types::sync::wire::SyncProvenance;
 use tracing::warn;
 
-use crate::event::types::{EventSource, RowId, WriteEvent, WriteOp};
+use crate::event::types::{EventSource, RecordPosition, RowId, WriteEvent, WriteOp};
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 
 /// `(op, new_value, old_value)` for a node-label CDC event — the op tag plus
@@ -109,6 +109,7 @@ pub(super) fn parse_put_record(
             op: WriteOp::Insert,
             row_id: RowId::row(RowIdentity::from_user_key(key_str.into_owned())),
             lsn,
+            record: Some(RecordPosition::first(lsn)),
             database_id,
             tenant_id,
             vshard_id,
@@ -134,6 +135,7 @@ pub(super) fn parse_put_record(
             },
             row_id: RowId::Batch,
             lsn,
+            record: Some(RecordPosition::first(lsn)),
             database_id,
             tenant_id,
             vshard_id,
@@ -164,6 +166,7 @@ pub(super) fn parse_put_record(
             op: WriteOp::Insert,
             row_id: RowId::row(RowIdentity::from_user_key(document_id)),
             lsn,
+            record: Some(RecordPosition::first(lsn)),
             database_id,
             tenant_id,
             vshard_id,
@@ -190,6 +193,7 @@ pub(super) fn parse_put_record(
             op: WriteOp::Insert,
             row_id: RowId::row(RowIdentity::from_user_key(document_id)),
             lsn,
+            record: Some(RecordPosition::first(lsn)),
             database_id,
             tenant_id,
             vshard_id,
@@ -219,6 +223,7 @@ pub(super) fn parse_put_record(
             op: WriteOp::Insert,
             row_id: RowId::row(RowIdentity::from_user_key(document_id)),
             lsn,
+            record: Some(RecordPosition::first(lsn)),
             database_id,
             tenant_id,
             vshard_id,
@@ -251,6 +256,7 @@ pub(super) fn parse_put_record(
             op: WriteOp::Insert,
             row_id: RowId::edge(src_id, label, dst_id),
             lsn,
+            record: Some(RecordPosition::first(lsn)),
             database_id,
             tenant_id,
             vshard_id,
@@ -316,6 +322,7 @@ pub(super) fn parse_graph_node_label_record(
         op,
         row_id: RowId::row(RowIdentity::from_user_key(node_id)),
         lsn,
+        record: Some(RecordPosition::first(lsn)),
         database_id,
         tenant_id,
         vshard_id,
@@ -352,6 +359,7 @@ pub(super) fn parse_delete_record(
             },
             row_id: RowId::Batch,
             lsn,
+            record: Some(RecordPosition::first(lsn)),
             database_id,
             tenant_id,
             vshard_id,
@@ -378,6 +386,7 @@ pub(super) fn parse_delete_record(
             op: WriteOp::Delete,
             row_id: RowId::row(RowIdentity::from_user_key(document_id)),
             lsn,
+            record: Some(RecordPosition::first(lsn)),
             database_id,
             tenant_id,
             vshard_id,
@@ -402,6 +411,7 @@ pub(super) fn parse_delete_record(
             op: WriteOp::Delete,
             row_id: RowId::row(RowIdentity::from_user_key(document_id)),
             lsn,
+            record: Some(RecordPosition::first(lsn)),
             database_id,
             tenant_id,
             vshard_id,
@@ -424,6 +434,7 @@ pub(super) fn parse_delete_record(
             op: WriteOp::Delete,
             row_id: RowId::row(RowIdentity::from_user_key(document_id)),
             lsn,
+            record: Some(RecordPosition::first(lsn)),
             database_id,
             tenant_id,
             vshard_id,
@@ -452,6 +463,7 @@ pub(super) fn parse_delete_record(
             op: WriteOp::Delete,
             row_id: RowId::edge(src_id, label, dst_id),
             lsn,
+            record: Some(RecordPosition::first(lsn)),
             database_id,
             tenant_id,
             vshard_id,

@@ -363,6 +363,12 @@ pub enum Error {
     #[error("metadata raft group has no elected leader yet; retry needed")]
     MetadataLeaderUnavailable,
 
+    /// A statement cannot be planned yet: this node's roles, grants, policies
+    /// or permission trees may be behind a change already acknowledged, and
+    /// did not catch up before the deadline. Nothing ran; the client retries.
+    #[error("authorization state is not current on this node: {detail}; retry")]
+    AuthorizationStateBehind { detail: String },
+
     #[error("execution limit exceeded: {detail}")]
     ExecutionLimitExceeded { detail: String },
 

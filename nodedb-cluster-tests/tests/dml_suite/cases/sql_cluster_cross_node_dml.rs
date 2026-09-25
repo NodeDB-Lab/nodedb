@@ -45,6 +45,10 @@ mod graph_traverse_reverse_cross_node;
 mod join_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/native_implicit_edge_delete_cross_node.rs"]
 mod native_implicit_edge_delete_cross_node;
+#[path = "../../sql_cluster_cross_node_dml_tests/permission_tree_cross_node.rs"]
+mod permission_tree_cross_node;
+#[path = "../../sql_cluster_cross_node_dml_tests/permission_tree_lease_partition.rs"]
+mod permission_tree_lease_partition;
 #[path = "../../sql_cluster_cross_node_dml_tests/schema_objects.rs"]
 mod schema_objects;
 #[path = "../../sql_cluster_cross_node_dml_tests/select_remote_stream_cross_node.rs"]

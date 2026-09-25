@@ -76,6 +76,20 @@ pub async fn submit_and_await_calvin_with_timeout(
         .get()
         .ok_or(Error::SequencerUnavailable)?;
 
+    // A write to a permission-tree source is acknowledged only once it binds
+    // every node. Tree sources live in the default database.
+    let binds_authorization = tx_class.database_id == crate::types::DatabaseId::DEFAULT
+        && tx_class
+            .write_set
+            .participating_vshards_in_database(tx_class.database_id)
+            .iter()
+            .any(|vshard| {
+                state
+                    .authorization_fence
+                    .sources()
+                    .is_source_vshard(vshard.as_u32())
+            });
+
     let inbox_seq = inbox.submit(tx_class).map_err(|e| Error::BadRequest {
         detail: format!("Calvin sequencer rejected transaction: {e}"),
     })?;
@@ -141,6 +155,9 @@ pub async fn submit_and_await_calvin_with_timeout(
             detail: "OLLP mismatch outcome on non-dependent Calvin path".to_owned(),
         });
     }
+    if binds_authorization {
+        crate::control::security::auth_lease::calvin_write_barrier(state).await?;
+    }
 
     // Completion fired: the scheduler deposited the applied Response (with any
     // RETURNING rows) into the sidecar BEFORE proposing the ack that woke this
@@ -150,7 +167,8 @@ pub async fn submit_and_await_calvin_with_timeout(
     // `Conflict` (>1 RETURNING participant) fails loudly rather than returning a
     // partial cross-shard union.
     let drained = state
-        .calvin_apply_results
+        .calvin
+        .apply_results
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .remove(&TxnId::new(epoch, position));

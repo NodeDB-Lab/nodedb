@@ -42,6 +42,16 @@ pub(crate) async fn submit_write(
         database_id,
         vshard_id,
     };
+    // On a single node no lease exists, so a write to a permission-tree source
+    // is acknowledged only once the local permission cache holds it. In a
+    // cluster the lease barrier on the Raft proposal path covers it instead.
+    let binds_authorization = shared.authorization_fence.timing().is_none()
+        && plan.named_collections().iter().any(|collection| {
+            shared
+                .authorization_fence
+                .sources()
+                .is_source_collection(collection)
+        });
     // Records the caller appended for this write, under their outcome-floor
     // window. Every path below closes the window.
     let caller_minted = durability.take_minted();
@@ -206,7 +216,7 @@ pub(crate) async fn submit_write(
     // Collect response(s), classify the outcome, and run the post-apply steps
     // a successful write still owes.
     let max_result_bytes = shared.tuning.network.max_query_result_bytes as usize;
-    collect_classify_and_finish(
+    let outcome = collect_classify_and_finish(
         shared,
         max_result_bytes,
         ResponsePhaseInput {
@@ -229,5 +239,14 @@ pub(crate) async fn submit_write(
             minted,
         },
     )
-    .await
+    .await?;
+    if binds_authorization {
+        crate::control::security::auth_lease::await_local_coverage(
+            shared,
+            std::time::Instant::now()
+                + std::time::Duration::from_secs(shared.tuning.network.default_deadline_secs),
+        )
+        .await?;
+    }
+    Ok(outcome)
 }

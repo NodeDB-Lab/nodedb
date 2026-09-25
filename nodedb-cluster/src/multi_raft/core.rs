@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! `MultiRaft` struct, constructors, group lifecycle, tick, observability.
+//! `MultiRaft` struct, constructors, group lifecycle and tick.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,40 +15,6 @@ use nodedb_raft::{RaftNode, Ready};
 use crate::error::{ClusterError, Result};
 use crate::raft_storage::RedbLogStorage;
 use crate::routing::RoutingTable;
-
-/// Snapshot of a single Raft group's state for observability.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct GroupStatus {
-    pub group_id: u64,
-    /// Role as a human-readable string ("Leader", "Follower", "Candidate", "Learner").
-    pub role: String,
-    pub leader_id: u64,
-    pub term: u64,
-    pub commit_index: u64,
-    pub last_applied: u64,
-    pub last_log_index: u64,
-    /// Highest log index covered by the latest compacted snapshot.
-    /// Advances when the group's log is compacted past the start (gated
-    /// by `RaftConfig::log_compaction_threshold`). A non-zero value
-    /// means entries at or below it are no longer in the log and a
-    /// lagging peer below this index can only be caught up via
-    /// `InstallSnapshot`, never `AppendEntries`.
-    pub snapshot_index: u64,
-    pub member_count: usize,
-    pub learner_count: usize,
-    pub vshard_count: usize,
-}
-
-/// Membership snapshot for a hosted Raft group.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroupMembership {
-    pub group_id: u64,
-    pub leader_id: u64,
-    /// Voting members, including this node when it is a voter.
-    pub voters: Vec<u64>,
-    /// Non-voting learners, including this node when it is a learner.
-    pub learners: Vec<u64>,
-}
 
 /// Multi-Raft coordinator managing multiple Raft groups on a single node.
 ///
@@ -155,6 +121,17 @@ impl MultiRaft {
     pub fn with_heartbeat_interval(mut self, interval: Duration) -> Self {
         self.heartbeat_interval = interval;
         self
+    }
+
+    /// The shortest election timeout a group on this node waits before it
+    /// campaigns.
+    pub fn election_timeout_min(&self) -> Duration {
+        self.election_timeout_min
+    }
+
+    /// How often a leader on this node sends heartbeats.
+    pub fn heartbeat_interval(&self) -> Duration {
+        self.heartbeat_interval
     }
 
     /// Configure the auto-compaction threshold for every group created on
@@ -299,206 +276,9 @@ impl MultiRaft {
         ids
     }
 
-    /// Snapshot the actual Raft membership rather than the vShard routing view.
-    pub fn group_membership(&self, group_id: u64) -> Option<GroupMembership> {
-        let node = self.groups.get(&group_id)?;
-        let mut voters = node.voters().to_vec();
-        let mut learners = node.learners().to_vec();
-        match node.role() {
-            nodedb_raft::NodeRole::Learner => learners.push(self.node_id),
-            nodedb_raft::NodeRole::Observer => {}
-            _ => voters.push(self.node_id),
-        }
-        voters.sort_unstable();
-        voters.dedup();
-        learners.sort_unstable();
-        learners.dedup();
-        Some(GroupMembership {
-            group_id,
-            leader_id: node.leader_id(),
-            voters,
-            learners,
-        })
-    }
-
     /// Mutable access to the underlying Raft groups (for testing / bootstrap).
     pub fn groups_mut(&mut self) -> &mut HashMap<u64, RaftNode<RedbLogStorage>> {
         &mut self.groups
-    }
-
-    /// Snapshot of all Raft group states for observability.
-    pub fn group_statuses(&self) -> Vec<GroupStatus> {
-        let mut statuses = Vec::with_capacity(self.groups.len());
-        for (&group_id, node) in &self.groups {
-            let vshard_count = self
-                .routing
-                .read()
-                .unwrap_or_else(|p| p.into_inner())
-                .vshards_for_group(group_id)
-                .len();
-            let self_is_voter = !matches!(
-                node.role(),
-                nodedb_raft::NodeRole::Learner | nodedb_raft::NodeRole::Observer
-            );
-
-            statuses.push(GroupStatus {
-                group_id,
-                role: format!("{:?}", node.role()),
-                leader_id: node.leader_id(),
-                term: node.current_term(),
-                commit_index: node.commit_index(),
-                last_applied: node.last_applied(),
-                last_log_index: node.last_log_index(),
-                snapshot_index: node.log_snapshot_index(),
-                member_count: node.voters().len() + usize::from(self_is_voter),
-                learner_count: node.learners().len()
-                    + usize::from(node.role() == nodedb_raft::NodeRole::Learner),
-                vshard_count,
-            });
-        }
-        statuses.sort_by_key(|s| s.group_id);
-        statuses
-    }
-
-    /// Get the leader for a given vShard (from local group state).
-    pub fn leader_for_vshard(&self, vshard_id: u32) -> Result<Option<u64>> {
-        let group_id = self
-            .routing
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .group_for_vshard(vshard_id)?;
-        let node = self
-            .groups
-            .get(&group_id)
-            .ok_or(ClusterError::GroupNotFound { group_id })?;
-        let lid = node.leader_id();
-        Ok(if lid == 0 { None } else { Some(lid) })
-    }
-
-    /// Whether THIS node is currently the leader of the data-group that owns
-    /// `vshard_id`.
-    ///
-    /// Maps the vshard to its Raft group via the routing table and reuses the
-    /// existing local leader-role check — no new election. Returns `false` when
-    /// the vshard has no group mapping or this node is a follower/learner for
-    /// the owning group. Used by the Calvin scheduler to stamp the per-node,
-    /// non-replicated `is_group_leader` dispatch flag so the OLLP optimistic-lock
-    /// verification runs only on the leader while every replica applies the same
-    /// predicted write-set (determinism).
-    pub fn vshard_role_is_leader(&self, vshard_id: u32) -> bool {
-        match self
-            .routing
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .group_for_vshard(vshard_id)
-        {
-            Ok(group_id) => self.is_group_leader(group_id),
-            Err(_) => false,
-        }
-    }
-
-    /// Propose a command to the Raft group that owns the given vShard.
-    ///
-    /// Returns `(group_id, log_index)` on success.
-    pub fn propose(&mut self, vshard_id: u32, data: Vec<u8>) -> Result<(u64, u64)> {
-        let group_id = self
-            .routing
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .group_for_vshard(vshard_id)?;
-        let node = self
-            .groups
-            .get_mut(&group_id)
-            .ok_or(ClusterError::GroupNotFound { group_id })?;
-        let log_index = node.propose(data)?;
-        Ok((group_id, log_index))
-    }
-
-    /// Returns `true` if this node is currently the leader of `group_id`.
-    ///
-    /// Returns `false` when the group does not exist on this node or when the
-    /// node is a follower, candidate, or learner in the group.
-    pub fn is_group_leader(&self, group_id: u64) -> bool {
-        use nodedb_raft::state::NodeRole;
-        self.groups
-            .get(&group_id)
-            .map(|n| n.role() == NodeRole::Leader)
-            .unwrap_or(false)
-    }
-
-    /// Propose a command directly to a specific Raft group (e.g. the
-    /// metadata group, which has no vShard mapping).
-    ///
-    /// Returns the committed log index on success.
-    pub fn propose_to_group(&mut self, group_id: u64, data: Vec<u8>) -> Result<u64> {
-        let node = self
-            .groups
-            .get_mut(&group_id)
-            .ok_or(ClusterError::GroupNotFound { group_id })?;
-        Ok(node.propose(data)?)
-    }
-
-    /// Read committed log entries for a Raft group in the inclusive index
-    /// range `[lo, hi]`.
-    ///
-    /// `hi` is clamped to the group's `commit_index` so callers that pass
-    /// `u64::MAX` never read uncommitted entries.
-    ///
-    /// Used by the Calvin scheduler's rebuild path to replay sequenced
-    /// transactions from the sequencer Raft log after a restart.
-    ///
-    /// Returns `Err(ClusterError::Raft(RaftError::LogCompacted))` if `lo`
-    /// has been compacted into a snapshot (caller must install a snapshot
-    /// instead of replaying from log).
-    pub fn read_committed_entries(
-        &self,
-        group_id: u64,
-        lo: u64,
-        hi: u64,
-    ) -> Result<Vec<nodedb_raft::message::LogEntry>> {
-        let node = self
-            .groups
-            .get(&group_id)
-            .ok_or(ClusterError::GroupNotFound { group_id })?;
-        let entries = node.log_entries_range(lo, hi)?;
-        Ok(entries.to_vec())
-    }
-
-    /// The lowest committed index still available in `group_id`'s retained log
-    /// (`snapshot_index + 1`), or `None` when the group is absent on this node.
-    ///
-    /// Used to arm a Calvin scheduler catch-up from the earliest replayable
-    /// sequencer index so its drain reads exactly the retained log and never
-    /// faults on a compacted range.
-    pub fn first_available_index(&self, group_id: u64) -> Option<u64> {
-        self.groups
-            .get(&group_id)
-            .map(|n| n.first_available_index())
-    }
-
-    /// Auto-compact a group's log if its configured threshold has been
-    /// reached, given the DATA-PLANE applied watermark `applied_index`.
-    ///
-    /// `applied_index` MUST be the index the data-plane state machine has
-    /// durably applied to (NOT raft's commit index). Compacting past an
-    /// unapplied index would let the `SnapshotBuilder` serialize
-    /// incomplete state and corrupt a lagging follower's snapshot.
-    ///
-    /// No-op (returns `Ok(false)`) when the group is absent on this node,
-    /// the threshold is `None`, or the retained-entry count is below the
-    /// threshold. Returns `Ok(true)` when a compaction was performed.
-    pub fn maybe_compact_group(&mut self, group_id: u64, applied_index: u64) -> Result<bool> {
-        // Defer compaction while a snapshot transfer for this group is in
-        // flight: advancing the snapshot boundary mid-transfer would corrupt
-        // the catching-up peer. The apply loop retries on the next applied
-        // entry, so the watermark still advances once the transfer completes.
-        if self.in_flight_snapshots.is_active(group_id) {
-            return Ok(false);
-        }
-        let Some(node) = self.groups.get_mut(&group_id) else {
-            return Ok(false);
-        };
-        Ok(node.maybe_compact_log(applied_index)?)
     }
 }
 
@@ -508,6 +288,7 @@ pub use nodedb_raft::LogEntry;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::multi_raft::status::GroupMembership;
     use std::time::Instant;
 
     #[test]

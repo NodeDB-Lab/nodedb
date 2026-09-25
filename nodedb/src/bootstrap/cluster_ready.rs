@@ -159,6 +159,17 @@ pub async fn await_cluster_ready(
         ));
     }
 
+    // Grants and hierarchy edges live in collections the data groups just
+    // finished replaying. Load them before the gateway opens, so no statement
+    // plans against an empty permission cache.
+    if let Err(error) = crate::bootstrap::permission_tree_load::load_permission_trees(shared).await
+    {
+        data_groups_gate.fail(format!("permission tree load failed: {error}"));
+        return Err(anyhow::anyhow!(
+            "permission tree load failed during startup: {error}"
+        ));
+    }
+
     data_groups_gate.fire();
     transport_gate.fire();
 
@@ -192,6 +203,25 @@ pub async fn await_cluster_ready(
     }
     warm_peers_gate.fire();
     health_loop_gate.fire();
+
+    // In a cluster, a node plans permission-checked statements only under
+    // an authorization lease. The renewal loop runs from Raft start, and
+    // every input of a grant is live by now: the Raft groups, the replayed
+    // data groups, the permission cache and the Event Plane. The gateway
+    // opens once the first lease is granted, so the first statements are
+    // not refused.
+    if let Some(timing) = shared.authorization_fence.timing()
+        && let Err(error) = shared
+            .authorization_fence
+            .holder()
+            .await_valid(RAFT_READY_STALL_TIMEOUT, timing.renew_every)
+            .await
+    {
+        gateway_enable_gate.fail(format!("authorization lease not granted: {error}"));
+        return Err(anyhow::anyhow!(
+            "authorization lease not granted during startup: {error}"
+        ));
+    }
     gateway_enable_gate.fire();
 
     Ok(())

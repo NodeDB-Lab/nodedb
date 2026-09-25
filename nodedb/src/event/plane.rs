@@ -89,6 +89,24 @@ impl EventPlane {
             super::action::ActionRequeueInbox::for_cores(num_cores),
         ));
         let _ = shared_state.trigger_dlq.set(Arc::clone(&trigger_dlq));
+        // Coverage waits for the permission step up to these counters.
+        if !shared_state
+            .authorization_fence
+            .install_emit_progress(consumers_rx.iter().map(|rx| rx.progress()).collect())
+        {
+            tracing::warn!("event emit counters already installed; the Event Plane started twice");
+        }
+
+        // Every sink's durable state loads before a consumer delivers an
+        // event: the streaming views with their applied keys, and the audit
+        // and CRDT ledgers. Without it a replayed event would reach a sink a
+        // second time, so the node stops instead.
+        if let Err(error) =
+            super::sink_ledger::load_sink_state(&shared_state, &wal, &watermark_store, num_cores)
+        {
+            tracing::error!(%error, "event plane sink state could not be loaded; stopping");
+            drop(shutdown_bus.initiate());
+        }
 
         let slab_budget = Arc::new(super::slab_budget::SlabBudget::for_cores(num_cores));
         let mut slab_accounts: Vec<Arc<super::slab_budget::ConsumerSlabAccount>> = Vec::new();
@@ -213,11 +231,6 @@ impl EventPlane {
             crate::control::shutdown::ShutdownPhase::DrainingEventPlane,
             crate::control::shutdown::LoopHandle::Async(compaction_handle),
         );
-
-        // Restore streaming MV state from redb (from last shutdown).
-        shared_state
-            .mv_persistence
-            .restore_all(&shared_state.mv_registry);
 
         // Spawn MV state persistence task (flush to redb every 30s).
         let mv_persist_handle = super::streaming_mv::persist::spawn_persist_task(
@@ -423,6 +436,7 @@ mod tests {
             op: WriteOp::Insert,
             row_id: RowId::row(nodedb_types::RowIdentity::from_user_key("row-1")),
             lsn: Lsn::new(seq * 10),
+            record: None,
             database_id: DatabaseId::new(7),
             tenant_id: TenantId::new(1),
             vshard_id: VShardId::new(0),

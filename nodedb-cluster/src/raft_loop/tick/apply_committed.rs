@@ -72,12 +72,20 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             let mut mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
             if let Err(e) = mr.advance_applied(group_id, last_applied) {
                 warn!(group_id, error = %e, "failed to advance applied index");
-            } else if group_id == crate::metadata_group::METADATA_GROUP_ID {
+            } else if group_id == crate::metadata_group::METADATA_GROUP_ID
+                || group_id == crate::calvin::SEQUENCER_GROUP_ID
+            {
                 // Metadata group: the metadata applier
                 // applied entries synchronously to redb
                 // before returning, so the apply
                 // watermark is data-visible at this
                 // point. Bump the watcher.
+                //
+                // Sequencer group: the host applies each
+                // entry to the sequencer state machine
+                // inline, before returning. The watcher
+                // is the sequencer's applied index that
+                // authorization lease coverage reports.
                 //
                 // Data groups are NOT bumped here — for
                 // them `applier.apply_committed` only

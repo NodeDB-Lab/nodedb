@@ -150,7 +150,10 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
     // un-injected copies.
     let (mut tasks, output_schema, versions) = {
         let scope = RequestAuthScope::for_database(identity, state.auth_stores(), database_id);
-        let permission_cache = state.permission_cache.read().await;
+        let permission_cache =
+            crate::control::security::auth_fence::permission_view(state, tenant_id)
+                .await
+                .map_err(|error| DdlError::from_error(&error))?;
         let sec = PlanSecurityContext {
             identity,
             auth: scope.auth(),

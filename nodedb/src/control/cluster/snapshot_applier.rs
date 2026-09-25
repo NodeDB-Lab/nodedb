@@ -168,6 +168,10 @@ impl nodedb_cluster::SnapshotApplier for DataPlaneSnapshotApplier {
             }
         }
 
+        // The install emitted no per-row events, so the permission cache
+        // reloads before this node reports coverage of the group again.
+        self.shared.authorization_fence.note_snapshot_installed();
+
         Ok(())
     }
 }

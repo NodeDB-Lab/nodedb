@@ -84,6 +84,34 @@ pub(super) fn build_raft_loop(
         replication_factor,
     } = setup;
 
+    // The authorization lease runs on the Raft timing of this node.
+    let lease_timing = crate::control::security::auth_lease::LeaseTiming::from_raft(
+        multi_raft.election_timeout_min(),
+        multi_raft.heartbeat_interval(),
+    )?;
+    if !shared.authorization_fence.install_timing(lease_timing) {
+        tracing::warn!(
+            "authorization lease timing already set — start_raft appears to have run twice"
+        );
+    }
+    let lease_service = Arc::new(
+        crate::control::security::auth_lease::LeaderLeaseService::new(
+            Arc::downgrade(shared),
+            lease_timing,
+        ),
+    );
+    if !shared
+        .authorization_fence
+        .install_leader(Arc::clone(&lease_service))
+    {
+        tracing::warn!(
+            "authorization lease service already set — start_raft appears to have run twice"
+        );
+    }
+    // Authorization coverage of the sequencer group settles each completion
+    // ack against this node's schedulers.
+    calvin_completion_registry.applied_acks.enable();
+
     let raft_loop = Arc::new(
         nodedb_cluster::RaftLoop::new(
             multi_raft,
@@ -109,6 +137,7 @@ pub(super) fn build_raft_loop(
         .with_calvin_submit_inbox(hooks.calvin_submit_inbox)
         .with_reserve_read(hooks.reserve_read)
         .with_release_reservation(hooks.release_reservation)
+        .with_auth_lease(lease_service)
         .with_data_dir(data_dir.to_path_buf())
         .with_snapshot_chunk_bytes(snapshot_chunk_bytes)
         .with_orphan_partial_max_age_secs(orphan_partial_max_age_secs)

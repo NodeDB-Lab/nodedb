@@ -101,7 +101,13 @@ pub(super) async fn handle_explain(ctx: &DispatchCtx<'_>, seq: u64, sql: &str) -
         };
     }
 
-    let perm_cache = ctx.state.permission_cache.read().await;
+    let perm_cache =
+        match crate::control::security::auth_fence::permission_view(ctx.state, ctx.tenant_id())
+            .await
+        {
+            Ok(view) => view,
+            Err(e) => return error_to_native(seq, &e),
+        };
     let sec = crate::control::planner::context::PlanSecurityContext {
         identity: ctx.identity,
         auth: ctx.auth_context(),

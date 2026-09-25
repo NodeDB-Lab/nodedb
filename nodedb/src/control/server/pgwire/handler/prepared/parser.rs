@@ -209,7 +209,12 @@ impl NodeDbQueryParser {
             self.state.auth_stores(),
             database_id,
         );
-        let permission_cache = self.state.permission_cache.read().await;
+        // Parse plans against the same authorization state as every other
+        // planning path. A refusal is an error, not "not plannable".
+        let permission_cache =
+            crate::control::security::auth_fence::permission_view(&self.state, identity.tenant_id)
+                .await
+                .map_err(|e| crate::control::server::pgwire::types::error_map::error_to_pg(&e))?;
         let security = crate::control::planner::context::PlanSecurityContext {
             identity,
             auth: scope.auth(),

@@ -268,8 +268,15 @@ impl SequencerStateMachine {
                 position,
                 vshard_id,
             } => {
+                let txn = crate::calvin::TxnId::new(epoch, position);
+                self.completion_registry.note_completion_ack(txn, vshard_id);
                 self.completion_registry
-                    .note_completion_ack(crate::calvin::TxnId::new(epoch, position), vshard_id);
+                    .applied_acks
+                    .record(crate::calvin::AppliedCompletionAck {
+                        index,
+                        txn,
+                        vshard_id,
+                    });
             }
             // Broadcast the OLLP predicate-mismatch signal to ALL replicas so the
             // coordinator's registry fires wherever it lives (including remote nodes).

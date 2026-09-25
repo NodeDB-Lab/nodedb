@@ -60,6 +60,8 @@ pub struct NexarTransport {
     /// inside the cluster transport and never crosses the SPSC bridge
     /// into the Data Plane.
     pub(super) agreed_versions: RwLock<HashMap<usize, crate::wire_version::WireVersion>>,
+    /// Peers this node refuses to send to. See [`super::sever`].
+    pub(super) severed: RwLock<std::collections::HashSet<u64>>,
 }
 
 fn default_identity_store(creds: &TransportCredentials) -> Arc<dyn PeerIdentityStore> {
@@ -226,6 +228,7 @@ impl NexarTransport {
             local_spki_pin,
             bootstrap_peer_spki,
             agreed_versions: RwLock::new(HashMap::new()),
+            severed: RwLock::new(std::collections::HashSet::new()),
         })
     }
 

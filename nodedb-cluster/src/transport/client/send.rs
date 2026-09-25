@@ -159,6 +159,7 @@ impl NexarTransport {
         rpc: RaftRpc,
         read_timeout: Duration,
     ) -> Result<RaftRpc> {
+        self.check_not_severed(target)?;
         // Encode the inner RPC once (codec errors are not retryable).
         // Each retry wraps it in a fresh envelope so the seq advances
         // per attempt — a retry is a new frame, not a replayed frame.

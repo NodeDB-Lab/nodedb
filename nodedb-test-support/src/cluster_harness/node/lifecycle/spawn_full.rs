@@ -441,6 +441,18 @@ impl TestClusterNode {
             let _ = connection.await;
         });
 
+        // The node plans permission-checked statements only under an
+        // authorization lease, as a production node opens its gateway only
+        // once it holds one.
+        if let Some(timing) = shared.authorization_fence.timing() {
+            shared
+                .authorization_fence
+                .holder()
+                .await_valid(Duration::from_secs(15), timing.renew_every)
+                .await
+                .map_err(|e| format!("node {node_id}: {e}"))?;
+        }
+
         Ok(Self {
             node_id,
             listen_addr,

@@ -274,6 +274,13 @@ pub async fn metrics(
     // Auth observability: method-specific counters, duration histograms, anomaly detection.
     output.push_str(&state.shared.auth_metrics.to_prometheus());
 
+    // Authorization lease validity. A node without a valid lease refuses
+    // permission-checked statements.
+    crate::control::security::auth_lease::status::render_prometheus(
+        &state.shared.authorization_fence,
+        &mut output,
+    );
+
     // Metering capacity: dropped-entry counters, so a refused (i.e. never
     // billed) usage record is observable without reading server logs.
     crate::control::security::metering::metrics::render_prometheus(

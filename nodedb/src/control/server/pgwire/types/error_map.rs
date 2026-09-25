@@ -132,6 +132,10 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::DeadlineExceeded { .. } => {
             ("ERROR", sqlstate::QUERY_CANCELED, err.to_string())
         }
+        // Nothing ran, and a retry plans against caught-up state.
+        crate::Error::AuthorizationStateBehind { .. } => {
+            ("ERROR", sqlstate::STALE_READ_NOT_LEADER, err.to_string())
+        }
         crate::Error::ConflictRetry { .. } => {
             ("ERROR", sqlstate::SERIALIZATION_FAILURE, err.to_string())
         }

@@ -19,6 +19,7 @@ use super::read_set::{ReadSetEntry, lock_key_of_read};
 pub(super) fn record_read_set_aborts(state: &SharedState, read_set: &[ReadSetEntry]) {
     let now = std::time::Instant::now();
     let mut table = state
+        .calvin
         .hot_key_table
         .lock()
         .unwrap_or_else(|p| p.into_inner());

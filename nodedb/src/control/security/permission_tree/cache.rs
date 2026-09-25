@@ -2,14 +2,18 @@
 
 //! In-memory permission cache: parent hierarchy + grant lookups.
 //!
-//! Loaded from the resource graph and permission collection on startup.
-//! Maintained via CDC events for real-time invalidation.
-//! Lives entirely in the Control Plane (Send + Sync).
+//! Loaded from the governed collections and permission tables by a reload,
+//! and kept current by the Event Plane's permission step. `progress` records
+//! how far the cache reflects each core's writes. Lives entirely in the
+//! Control Plane (Send + Sync).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use tracing::{debug, info};
 
+use super::sources::SourceIndex;
+use super::sync_state::ApplyProgress;
 use super::types::{PermissionGrant, PermissionTreeDef};
 
 /// Per-tenant permission state: resource hierarchy + permission grants.
@@ -37,7 +41,7 @@ struct TenantPermissions {
 /// Central permission cache shared across all sessions.
 ///
 /// Thread-safe: wrapped in `Arc<tokio::sync::RwLock<_>>` by SharedState.
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct PermissionCache {
     /// Per-tenant permission state.
     tenants: HashMap<u64, TenantPermissions>,
@@ -45,15 +49,111 @@ pub struct PermissionCache {
     /// Per-collection permission tree definitions.
     /// Key: `(tenant_id, collection_name)`.
     tree_defs: HashMap<(u64, String), PermissionTreeDef>,
+
+    /// How far the cache reflects each core's writes.
+    progress: ApplyProgress,
+
+    /// The source collections of `tree_defs`, readable without this cache's
+    /// lock. Rebuilt on every tree-definition change.
+    sources: Arc<SourceIndex>,
+}
+
+impl Default for PermissionCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One collection a reload scans, and what its rows carry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TreeSource {
+    pub tenant_id: u64,
+    pub collection: String,
+    pub kind: TreeSourceKind,
+}
+
+/// What a source collection's rows carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TreeSourceKind {
+    /// A governed collection: each row's `id` and `parent_id` form an edge.
+    Hierarchy,
+    /// A permission table: each row is a grant.
+    Grants,
 }
 
 impl PermissionCache {
+    /// An empty cache. It needs a reload before planning may use it.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            tenants: HashMap::new(),
+            tree_defs: HashMap::new(),
+            progress: ApplyProgress::new(),
+            sources: Arc::new(SourceIndex::default()),
+        }
     }
 
-    /// Register a permission tree definition for a collection.
+    /// The lock-free index of this cache's source collections.
+    pub fn sources(&self) -> Arc<SourceIndex> {
+        Arc::clone(&self.sources)
+    }
+
+    /// How far the cache reflects each core's writes.
+    pub fn progress(&self) -> &ApplyProgress {
+        &self.progress
+    }
+
+    /// Mutable access to the apply progress, for the permission step and a
+    /// reload.
+    pub fn progress_mut(&mut self) -> &mut ApplyProgress {
+        &mut self.progress
+    }
+
+    /// Every collection a reload scans, deduplicated.
+    pub fn tree_sources(&self) -> Vec<TreeSource> {
+        let mut sources: HashSet<TreeSource> = HashSet::new();
+        for ((tenant_id, collection), def) in &self.tree_defs {
+            sources.insert(TreeSource {
+                tenant_id: *tenant_id,
+                collection: collection.clone(),
+                kind: TreeSourceKind::Hierarchy,
+            });
+            sources.insert(TreeSource {
+                tenant_id: *tenant_id,
+                collection: def.permission_table.clone(),
+                kind: TreeSourceKind::Grants,
+            });
+        }
+        sources.into_iter().collect()
+    }
+
+    /// Replace a tenant's hierarchy and grants with a reload's result, and
+    /// bump its version so a cached plan built from the old state goes stale.
+    pub fn replace_tenant_state(
+        &mut self,
+        tenant_id: u64,
+        edges: &[(String, String)],
+        grants: &[PermissionGrant],
+    ) {
+        let version = self.tenant_version(tenant_id);
+        self.tenants.insert(
+            tenant_id,
+            TenantPermissions {
+                version,
+                ..TenantPermissions::default()
+            },
+        );
+        self.load_edges(tenant_id, edges);
+        self.load_grants(tenant_id, grants);
+        self.bump_tenant_version(tenant_id);
+    }
+
+    /// Register a permission tree definition for a collection. Registering
+    /// the definition already held changes nothing, so the DDL node and the
+    /// metadata applier can both apply one change.
     pub fn register_tree_def(&mut self, tenant_id: u64, collection: &str, def: PermissionTreeDef) {
+        if self.get_tree_def(tenant_id, collection) == Some(&def) {
+            return;
+        }
         info!(
             tenant_id,
             collection,
@@ -62,11 +162,25 @@ impl PermissionCache {
         );
         self.tree_defs
             .insert((tenant_id, collection.to_owned()), def);
+        self.sources.rebuild(&self.tree_defs);
+        // The new sources may already hold rows no reload has read.
+        self.progress.mark_reload_needed();
+        self.bump_tenant_version(tenant_id);
     }
 
-    /// Remove a permission tree definition for a collection.
+    /// Remove a permission tree definition for a collection. Removing an
+    /// absent definition changes nothing.
     pub fn unregister_tree_def(&mut self, tenant_id: u64, collection: &str) {
-        self.tree_defs.remove(&(tenant_id, collection.to_owned()));
+        if self
+            .tree_defs
+            .remove(&(tenant_id, collection.to_owned()))
+            .is_none()
+        {
+            return;
+        }
+        self.sources.rebuild(&self.tree_defs);
+        self.progress.mark_reload_needed();
+        self.bump_tenant_version(tenant_id);
         info!(tenant_id, collection, "permission_tree: unregistered");
     }
 
@@ -386,7 +500,66 @@ mod tests {
         assert!(cache.get_tree_def(1, "other").is_none());
         assert!(cache.get_tree_def(2, "documents").is_none());
 
+        // The DDL node and the metadata applier both apply one change.
+        let version = cache.tenant_version(1);
+        cache.register_tree_def(1, "documents", def);
+        assert_eq!(cache.tenant_version(1), version);
+
         cache.unregister_tree_def(1, "documents");
         assert!(cache.get_tree_def(1, "documents").is_none());
+        let version = cache.tenant_version(1);
+        cache.unregister_tree_def(1, "documents");
+        assert_eq!(cache.tenant_version(1), version);
+    }
+
+    #[test]
+    fn a_reload_replaces_the_tenant_state_and_bumps_its_version() {
+        let mut cache = PermissionCache::new();
+        cache.put_edge(1, "doc-1", "folder-1");
+        cache.put_grant(
+            1,
+            &PermissionGrant {
+                resource_id: "doc-1".into(),
+                grantee: "user-1".into(),
+                level: "viewer".into(),
+                inherited: false,
+            },
+        );
+        let before = cache.bump_tenant_version(1);
+
+        cache.replace_tenant_state(1, &[("doc-2".into(), "folder-2".into())], &[]);
+
+        assert_eq!(cache.get_parent(1, "doc-1"), None);
+        assert_eq!(cache.get_parent(1, "doc-2"), Some("folder-2"));
+        assert!(cache.get_grant(1, "doc-1", "user-1").is_none());
+        assert!(cache.tenant_version(1) > before);
+    }
+
+    #[test]
+    fn tree_sources_name_the_governed_collection_and_the_permission_table() {
+        let mut cache = PermissionCache::new();
+        let def: PermissionTreeDef = sonic_rs::from_str(
+            r#"{"resource_column":"id","graph_index":"tree","permission_table":"grants"}"#,
+        )
+        .expect("tree def");
+        cache.register_tree_def(1, "docs", def);
+        let mut sources = cache.tree_sources();
+        sources.sort_by(|a, b| a.collection.cmp(&b.collection));
+        assert_eq!(
+            sources,
+            vec![
+                TreeSource {
+                    tenant_id: 1,
+                    collection: "docs".into(),
+                    kind: TreeSourceKind::Hierarchy,
+                },
+                TreeSource {
+                    tenant_id: 1,
+                    collection: "grants".into(),
+                    kind: TreeSourceKind::Grants,
+                },
+            ]
+        );
+        assert!(cache.progress().needs_reload_for(&[]));
     }
 }

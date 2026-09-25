@@ -343,13 +343,18 @@ pub(super) fn finalize_pending(
         log_index = handle.log_index(),
         "finalizing pending DDL"
     );
-    propose_and_await(
+    let bears_authorization =
+        super::ddl_authorization::objects_bear_authorization(handle.objects())?;
+    let log_index = propose_and_await(
         state,
         raft_handle.as_ref(),
         &MetadataEntry::DdlPendingFinalize {
             token: handle.token(),
         },
     )?;
+    if bears_authorization {
+        super::ddl_authorization::barrier_at(state, log_index)?;
+    }
     Ok(())
 }
 
@@ -379,7 +384,12 @@ pub(super) fn compensate_finalized(
         };
         entries.push(MetadataEntry::CatalogDdl { payload });
     }
-    propose_and_await(state, handle.as_ref(), &MetadataEntry::Batch { entries })?;
+    let log_index = propose_and_await(state, handle.as_ref(), &MetadataEntry::Batch { entries })?;
+    // The compensation restores prior authorization state, which binds every
+    // node like any other authorization change.
+    if super::ddl_authorization::objects_bear_authorization(objects)? {
+        super::ddl_authorization::barrier_at(state, log_index)?;
+    }
     Ok(())
 }
 

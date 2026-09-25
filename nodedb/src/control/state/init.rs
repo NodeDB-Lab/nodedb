@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! SharedState constructors: new (test) and new_with_credentials (test+catalog).
+//! The shared test constructor of `SharedState`. The public test
+//! constructors built on it live in [`super::init_variants`].
 
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -33,134 +34,12 @@ impl SharedState {
         COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Create shared state with a pre-built credential store (for tests that need catalog).
-    ///
-    /// `is_cluster` is the static, deployment-time surrogate-registry mode
-    /// choice — same predicate as `SharedState::open`'s `is_cluster`
-    /// (whether this node's caller is about to wire it into a real Raft
-    /// cluster), not a property of the credential store. Almost every
-    /// caller is a single-process fixture and passes `false`; the cluster
-    /// test harness passes `true`.
-    pub fn new_with_credentials(
+    /// Construct the test state every constructor in [`super::init_variants`]
+    /// builds on.
+    pub(super) fn new_inner(
         dispatcher: Dispatcher,
         wal: Arc<WalManager>,
-        credentials: Arc<CredentialStore>,
-        is_cluster: bool,
     ) -> crate::Result<Arc<Self>> {
-        let wal_for_assigner = Arc::clone(&wal);
-        let mut state = Self::new_inner(dispatcher, wal)?;
-        if let Some(s) = Arc::get_mut(&mut state) {
-            // Rebuild the surrogate assigner against the supplied
-            // credential store. `new_inner` constructs the assigner
-            // from a fresh in-memory `CredentialStore` with its own
-            // in-memory catalog; the supplied store carries the durable
-            // catalog whose surrogate watermark this fixture must resume.
-            let registry = Arc::clone(&s.surrogate_registry);
-            // Seed the registry's high-watermark AND applied-reserve cursor
-            // from the catalog so restarts in a re-opened test fixture pick up
-            // where the previous session left off — and so cluster-mode
-            // metadata-log replay skips already-applied reservations rather
-            // than double-counting `G`.
-            let catalog = credentials.catalog();
-            // The catalog-derived floor mirrors the production bootstrap: the
-            // singleton is flushed lazily, so the highest surrogate any live
-            // binding refers to is the value the allocator can never start
-            // below. Mode selection mirrors `init_prod/bootstrap.rs::run`:
-            // `is_cluster` (never seed-list length) picks `Cluster` vs
-            // `Local`, seeding the applied-reserve cursor only in the
-            // former.
-            if let Ok(hwm) = catalog.get_surrogate_hwm()
-                && let Ok(bound_floor) = catalog.max_bound_surrogate()
-                && let Ok(mut reg) = registry.write()
-            {
-                let floor = hwm.max(bound_floor.as_u32());
-                *reg = if is_cluster {
-                    let reserve_index = catalog.get_surrogate_reserve_index().unwrap_or(0);
-                    crate::control::surrogate::SurrogateRegistry::from_persisted_cluster(
-                        floor,
-                        reserve_index,
-                    )
-                } else {
-                    crate::control::surrogate::SurrogateRegistry::from_persisted_hwm(floor)
-                };
-            }
-            let wal_appender: Arc<dyn crate::control::surrogate::SurrogateWalAppender> = Arc::new(
-                crate::control::surrogate::WalSurrogateAppender::new(wal_for_assigner),
-            );
-            s.surrogate_assigner = Arc::new(crate::control::surrogate::SurrogateAssigner::new(
-                Arc::clone(&registry),
-                Arc::clone(&credentials),
-                wal_appender,
-            ));
-            // Catalog-backed security stores, rebuilt for the same reason the
-            // surrogate watermark above is: this constructor's whole purpose
-            // is to resume a durable catalog, and a memory-only store here
-            // silently drops every auth-user status and scope grant the
-            // previous session persisted — so a restart fixture would report
-            // a clean slate rather than what was actually saved.
-            s.auth_users =
-                crate::control::security::jit::auth_user::AuthUserStore::open(catalog.clone())?;
-            s.scope_grants =
-                crate::control::security::scope::grant::ScopeGrantStore::open(catalog)?;
-            // Same reasoning as the grants above: a quota definition is a
-            // durable catalog object, and a memory-only manager here would
-            // report every cap as absent after a restart.
-            s.quota_manager = QuotaManager::open(
-                s.metering_config.max_tracked_quota_grantees,
-                credentials.catalog(),
-            )?;
-            s.credentials = credentials;
-            s.ep_topic_registry
-                .load_from_catalog(s.credentials.catalog())?;
-            crate::event::topic::hydrate_topic_buffers(s)?;
-        }
-        Ok(state)
-    }
-
-    /// Create shared state with in-memory credential store (for tests).
-    pub fn new(dispatcher: Dispatcher, wal: Arc<WalManager>) -> crate::Result<Arc<Self>> {
-        Self::new_inner(dispatcher, wal)
-    }
-
-    /// Create shared state whose risk scorer is built from `risk_config`
-    /// instead of the disabled default (for tests that exercise the risk
-    /// gate). Production wires the same configuration from `[auth.risk]`.
-    pub fn new_with_risk_config(
-        dispatcher: Dispatcher,
-        wal: Arc<WalManager>,
-        risk_config: crate::control::security::risk::RiskConfig,
-    ) -> crate::Result<Arc<Self>> {
-        let mut state = Self::new_inner(dispatcher, wal)?;
-        let s = Arc::get_mut(&mut state).ok_or_else(|| crate::Error::Internal {
-            detail: "shared state was already shared before the risk scorer could be installed"
-                .into(),
-        })?;
-        s.risk_scorer = crate::control::security::risk::RiskScorer::new(risk_config);
-        Ok(state)
-    }
-
-    /// Create shared state whose TLS policy is built from `tls_policy_config`
-    /// instead of the disabled default (for tests that exercise transport
-    /// enforcement). Production wires the same configuration from
-    /// `[auth.tls_policy]`, through the same fallible parse: an unparseable
-    /// `min_tls_version` is an error here exactly as it is at startup.
-    pub fn new_with_tls_policy_config(
-        dispatcher: Dispatcher,
-        wal: Arc<WalManager>,
-        tls_policy_config: crate::control::security::tls_policy::TlsPolicyConfig,
-    ) -> crate::Result<Arc<Self>> {
-        let policy =
-            crate::control::security::tls_policy::TlsPolicy::from_config(&tls_policy_config)?;
-        let mut state = Self::new_inner(dispatcher, wal)?;
-        let s = Arc::get_mut(&mut state).ok_or_else(|| crate::Error::Internal {
-            detail: "shared state was already shared before the TLS policy could be installed"
-                .into(),
-        })?;
-        s.tls_policy = policy;
-        Ok(state)
-    }
-
-    fn new_inner(dispatcher: Dispatcher, wal: Arc<WalManager>) -> crate::Result<Arc<Self>> {
         let shutdown = Arc::new(crate::control::shutdown::ShutdownWatch::new());
         let loop_registry = Arc::new(crate::control::shutdown::LoopRegistry::new());
         // Test helpers get a pre-fired gate so listeners start accepting
@@ -183,6 +62,12 @@ impl SharedState {
             Arc::clone(&test_credentials),
             Arc::new(crate::control::surrogate::NoopWalAppender),
         ));
+        let permission_cache = crate::control::security::permission_tree::PermissionCache::new();
+        let authorization_fence = Arc::new(
+            crate::control::security::auth_fence::AuthorizationFence::new(
+                permission_cache.sources(),
+            ),
+        );
         let shared_audit = Arc::new(Mutex::new(AuditLog::new(10_000)));
         let test_session_registry =
             Arc::new(crate::control::security::sessions::SessionRegistry::new());
@@ -458,6 +343,7 @@ impl SharedState {
             data_dir: std::path::PathBuf::new(),
             trigger_dlq: std::sync::OnceLock::new(),
             action_requeue: std::sync::OnceLock::new(),
+            sink_ledgers: std::sync::OnceLock::new(),
             schema_version: crate::control::server::shared::session::plan_cache::SchemaVersion::new(
             ),
             materialized_sum_index:
@@ -466,31 +352,17 @@ impl SharedState {
             dml_counter:
                 crate::control::server::shared::ddl::neutral::maintenance::auto_analyze::DmlCounter::new(),
             wal_catchup_lsn: AtomicU64::new(0),
-            last_applied_calvin_epoch: Arc::new(AtomicU64::new(0)),
-            calvin_counters: crate::control::state::CalvinCounters {
-                write_versions_recorded: Arc::new(AtomicU64::new(0)),
-                read_set_validation_failures: Arc::new(AtomicU64::new(0)),
-                commits_flushed: Arc::new(AtomicU64::new(0)),
-                commits_dropped: Arc::new(AtomicU64::new(0)),
-            },
-            calvin_apply_results: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            calvin_lock_managers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
-            hot_key_table: Arc::new(Mutex::new(
-                crate::control::cluster::calvin::scheduler::lock::HotKeyTable::new(),
-            )),
-            calvin_promotion_senders: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            calvin: super::calvin_local::CalvinLocalState::new(),
             write_order_locks: Arc::new(
                 crate::control::server::shared::write_admission::KeyedWriteOrderLock::new(),
             ),
-            autocommit_lock_seq: std::sync::atomic::AtomicU32::new(0),
             presence: Arc::new(tokio::sync::RwLock::new(
                 crate::control::server::sync::presence::PresenceManager::new(
                     crate::control::server::sync::presence::PresenceConfig::default(),
                 ),
             )),
-            permission_cache: Arc::new(tokio::sync::RwLock::new(
-                crate::control::security::permission_tree::PermissionCache::new(),
-            )),
+            permission_cache: Arc::new(tokio::sync::RwLock::new(permission_cache)),
+            authorization_fence,
             gateway_invalidator: std::sync::OnceLock::new(),
             gateway: std::sync::OnceLock::new(),
             backup_kek: None,
@@ -523,20 +395,5 @@ impl SharedState {
         });
         Self::wire_session_handle_audit(&state);
         Ok(state)
-    }
-
-    /// Point the session-handle store's audit hook at this state's
-    /// `AuditLog`, so `SessionHandleFingerprintMismatch` and
-    /// `SessionHandleResolveMissSpike` are hash-chained with
-    /// the rest of the auth-plane event stream. Captures the audit Arc
-    /// directly — a `Weak<Self>` would block the cluster wire-up phase's
-    /// `Arc::get_mut` on `SharedState`.
-    pub(super) fn wire_session_handle_audit(state: &Arc<Self>) {
-        let audit = Arc::clone(&state.audit);
-        state.session_handles.set_audit_hook(move |event| {
-            if let Ok(mut log) = audit.lock() {
-                let _ = log.record(event, None, "session_handle", "");
-            }
-        });
     }
 }

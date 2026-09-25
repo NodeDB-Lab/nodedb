@@ -6,8 +6,10 @@
 //!
 //! Split across files:
 //! - [`core`]: struct, constructors, group lifecycle (`add_group`,
-//!   `add_group_as_learner`), tick pipeline, routing accessors,
-//!   observability (`group_statuses`).
+//!   `add_group_as_learner`), tick pipeline, routing accessors.
+//! - [`status`]: observability snapshots (`group_statuses`,
+//!   `group_membership`).
+//! - [`proposals`]: leadership checks, proposals and log access.
 //! - [`rpc_dispatch`]: inbound RPC routing to the correct group and the
 //!   corresponding response handlers.
 //! - [`conf_change`]: `propose_conf_change` / `apply_conf_change` with
@@ -19,7 +21,10 @@
 pub mod conf_change;
 pub mod core;
 pub mod membership;
+pub mod proposals;
 pub mod read_index;
 pub mod rpc_dispatch;
+pub mod status;
 
-pub use core::{GroupStatus, MultiRaft, MultiRaftReady};
+pub use core::{MultiRaft, MultiRaftReady};
+pub use status::{GroupMembership, GroupStatus};

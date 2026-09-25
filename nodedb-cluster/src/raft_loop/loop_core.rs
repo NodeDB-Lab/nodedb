@@ -231,6 +231,11 @@ pub struct RaftLoop<A: CommitApplier, P: PlanExecutor = NoopPlanExecutor> {
     /// configured" error.
     pub(super) release_reservation: Option<Arc<dyn ReleaseReservation>>,
 
+    /// Optional authorization lease service. When set (by the `nodedb`
+    /// binary via `with_auth_lease`), lease renewals and authorization
+    /// barriers are answered through it.
+    pub(super) auth_lease: Option<Arc<dyn super::auth_lease_hook::AuthLeaseService>>,
+
     /// Optional per-group snapshot builder for the SEND path.
     ///
     /// When set (by the `nodedb` binary via `with_snapshot_builder`), the
@@ -334,6 +339,7 @@ impl<A: CommitApplier> RaftLoop<A> {
             calvin_submit_inbox: None,
             reserve_read: None,
             release_reservation: None,
+            auth_lease: None,
             snapshot_builder: None,
             snapshot_applier: None,
             partial_snapshots: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

@@ -9,6 +9,7 @@
 //!   - All wire types re-exported from their sub-modules.
 
 pub mod auth_envelope;
+pub mod auth_lease;
 pub mod calvin_submit;
 pub mod cluster_mgmt;
 pub mod data_plane_error;
@@ -21,6 +22,7 @@ pub mod metadata;
 pub mod peer_seq;
 pub mod raft_msgs;
 pub mod raft_rpc;
+pub mod read_index;
 pub mod reservation;
 pub mod shuffle;
 pub mod surrogate;
@@ -28,6 +30,10 @@ pub mod vshard;
 
 pub use auth_envelope::{
     ENVELOPE_OVERHEAD, ENVELOPE_VERSION, EnvelopeFields, parse_envelope, write_envelope,
+};
+pub use auth_lease::{
+    AuthBarrierOutcome, AuthBarrierRequest, AuthBarrierResponse, AuthLeaseRenewOutcome,
+    AuthLeaseRenewRequest, AuthLeaseRenewResponse, GroupCoverage,
 };
 pub use calvin_submit::{
     SubmitCalvinInboxRequest, SubmitCalvinInboxResponse, SubmitCalvinTxnRequest,
@@ -48,6 +54,7 @@ pub use mac::{MAC_LEN, MacKey};
 pub use metadata::{MetadataProposeRequest, MetadataProposeResponse};
 pub use peer_seq::{PeerSeqSender, PeerSeqWindow, REPLAY_WINDOW};
 pub use raft_rpc::{RaftRpc, decode, encode, frame_size};
+pub use read_index::{ReadIndexOutcome, ReadIndexRequest, ReadIndexResponse};
 pub use reservation::{
     ReleaseReservationRequest, ReleaseReservationResponse, ReserveReadRequest, ReserveReadResponse,
 };

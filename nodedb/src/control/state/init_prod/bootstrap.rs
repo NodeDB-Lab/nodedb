@@ -266,18 +266,15 @@ pub(super) fn run(
     ));
 
     // Pre-load permission tree definitions before wrapping in RwLock
-    // (avoids blocking_write() which panics inside async runtimes).
+    // (avoids blocking_write() which panics inside async runtimes). The
+    // edges and grants load at boot once the data groups replayed.
     let mut permission_cache = PermissionCache::new();
     let catalog = credentials.catalog();
-    if let Ok(collections) = catalog.load_all_collections(DatabaseId::DEFAULT) {
-        for coll in &collections {
-            if let Some(ref def_json) = coll.permission_tree_def
-                && let Ok(def) = sonic_rs::from_str::<
-                    crate::control::security::permission_tree::PermissionTreeDef,
-                >(def_json)
-            {
-                permission_cache.register_tree_def(coll.tenant_id, &coll.name, def);
-            }
+    for coll in &catalog.load_all_collections(DatabaseId::DEFAULT)? {
+        if let Some(change) =
+            crate::control::security::auth_fence::TreeDefChange::from_collection(coll)?
+        {
+            change.apply(&mut permission_cache);
         }
     }
 

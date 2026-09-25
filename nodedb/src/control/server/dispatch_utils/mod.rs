@@ -8,6 +8,7 @@ mod dispatch;
 mod durability_barrier;
 mod durable_write;
 mod error_status;
+mod local_read;
 mod minted;
 mod submit_write;
 mod types;
@@ -32,6 +33,7 @@ pub(crate) use durable_write::{
     dispatch_durable_autocommit_write,
 };
 pub(crate) use error_status::reject_data_plane_error;
+pub(crate) use local_read::{LocalRead, dispatch_local_read};
 pub(crate) use minted::{
     Collect, MintedRecords, OwnedResponse, OwnedWait, RecordOwner, await_response_owned,
 };

@@ -15,6 +15,8 @@ pub struct MvRegistry {
     defs: RwLock<HashMap<(DatabaseId, u64, String), StreamingMvDef>>,
     /// (database_id, tenant_id, mv_name) → live aggregate state.
     states: RwLock<HashMap<(DatabaseId, u64, String), std::sync::Arc<MvState>>>,
+    /// Keys of the events every view applied.
+    applied: super::applied::MvAppliedKeys,
 }
 
 impl MvRegistry {
@@ -22,7 +24,13 @@ impl MvRegistry {
         Self {
             defs: RwLock::new(HashMap::new()),
             states: RwLock::new(HashMap::new()),
+            applied: super::applied::MvAppliedKeys::default(),
         }
+    }
+
+    /// Keys of the events every view applied.
+    pub fn applied(&self) -> &super::applied::MvAppliedKeys {
+        &self.applied
     }
 
     /// Register a streaming MV and create its state.

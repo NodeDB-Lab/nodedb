@@ -7,7 +7,7 @@
 //!
 //! The staged buffer + verdict-driven flush/drop live on the `!Send` Data-Plane
 //! core, so this asserts the flush FIRED via the node-global
-//! `calvin_counters.commits_flushed` counter (incremented once per staged apply the
+//! `calvin.counters.commits_flushed` counter (incremented once per staged apply the
 //! per-vShard scheduler resolved to commit) plus the functional proof that the
 //! flushed write is visible.
 
@@ -38,7 +38,8 @@ fn sequencer_leader(node: &TestClusterNode) -> u64 {
 /// flushing their commit-pending buffer to base.
 fn commits_flushed(node: &TestClusterNode) -> u64 {
     node.shared
-        .calvin_counters
+        .calvin
+        .counters
         .commits_flushed
         .load(Ordering::Relaxed)
 }

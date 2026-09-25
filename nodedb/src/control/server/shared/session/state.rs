@@ -153,7 +153,7 @@ pub struct ConnSession {
     /// Concurrent writes after this point are invisible to the transaction.
     pub tx_snapshot_lsn: Option<Lsn>,
     /// Snapshot epoch captured at BEGIN: the last globally-applied Calvin epoch,
-    /// read from `SharedState::last_applied_calvin_epoch`. The cross-shard-valid
+    /// read from `CalvinLocalState::last_applied_epoch`. The cross-shard-valid
     /// version anchor for the transaction (0 in single-node / no-Calvin). `None`
     /// outside a transaction block.
     pub tx_snapshot_epoch: Option<u64>,

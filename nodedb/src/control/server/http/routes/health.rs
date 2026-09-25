@@ -168,6 +168,15 @@ pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
     // A held window keeps the outcome floor below it by design, so it never
     // degrades readiness. The count shows how many restart replay will reach.
     body["held_windows"] = json!(state.shared.outcome_floor.held_windows());
+    // A node that lost its authorization lease refuses permission-checked
+    // statements until it renews, and serves everything else. Checked once
+    // the startup gate is green: boot holds the gateway until the first lease.
+    if status == StatusCode::OK
+        && let Some(body) = lease_invalid_body(&state)
+    {
+        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body));
+    }
+    body["authorization_lease"] = json!(lease_label(&state));
     // Checked only once the startup gate is otherwise green, so a node still
     // advancing through phases keeps reporting the phase it is stuck in.
     if status == StatusCode::OK
@@ -181,6 +190,35 @@ pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
         return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body));
     }
     (status, axum::Json(body))
+}
+
+/// The lease state `/healthz` reports: `valid`, `invalid`, or `not_required`
+/// on a single node without a cluster.
+fn lease_label(state: &AppState) -> &'static str {
+    use crate::control::security::auth_lease::{LeaseStatus, lease_status};
+    match lease_status(&state.shared.authorization_fence, std::time::Instant::now()) {
+        LeaseStatus::NotRequired => "not_required",
+        LeaseStatus::Valid { .. } => "valid",
+        LeaseStatus::Invalid { .. } => "invalid",
+    }
+}
+
+/// The degraded body for a node that holds no valid authorization lease, or
+/// `None` when it holds one or needs none.
+fn lease_invalid_body(state: &AppState) -> Option<serde_json::Value> {
+    use crate::control::security::auth_lease::{LeaseStatus, lease_status};
+    match lease_status(&state.shared.authorization_fence, std::time::Instant::now()) {
+        LeaseStatus::NotRequired | LeaseStatus::Valid { .. } => None,
+        LeaseStatus::Invalid { expired_for } => Some(json!({
+            "status": "degraded",
+            "reason": "authorization_lease_invalid",
+            "detail": "this node holds no valid authorization lease; it refuses \
+                       permission-checked statements until it renews",
+            "node_id": state.shared.node_id,
+            "lease_expired_ms_ago": expired_for
+                .map(|expired| u64::try_from(expired.as_millis()).unwrap_or(u64::MAX)),
+        })),
+    }
 }
 
 /// The degraded body for an outcome floor held past `bound` by a window that
@@ -403,6 +441,34 @@ mod tests {
         assert_eq!(body["position"], 3);
         assert_eq!(body["halt_reason"], "flush_failed");
         assert_eq!(body["step"], "flush");
+    }
+
+    #[tokio::test]
+    async fn a_node_without_a_valid_lease_reports_degraded_with_the_reason() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = app_state(&dir);
+        assert!(
+            lease_invalid_body(&state).is_none(),
+            "a node without lease timing needs no lease"
+        );
+        let timing = crate::control::security::auth_lease::LeaseTiming::from_raft(
+            std::time::Duration::from_millis(1000),
+            std::time::Duration::from_millis(100),
+        )
+        .expect("timing");
+        assert!(state.shared.authorization_fence.install_timing(timing));
+
+        let body = lease_invalid_body(&state).expect("no lease was granted");
+        assert_eq!(body["status"], "degraded");
+        assert_eq!(body["reason"], "authorization_lease_invalid");
+        assert!(body["lease_expired_ms_ago"].is_null());
+
+        state
+            .shared
+            .authorization_fence
+            .holder()
+            .install(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        assert!(lease_invalid_body(&state).is_none());
     }
 
     #[tokio::test]

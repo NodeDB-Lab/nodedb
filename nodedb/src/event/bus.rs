@@ -20,6 +20,8 @@ use nodedb_bridge::backpressure::{BackpressureConfig, BackpressureController, Pr
 use nodedb_bridge::buffer::{Consumer, Producer, RingBuffer};
 use nodedb_bridge::error::BridgeError;
 
+use super::progress::CoreEmitProgress;
+use super::record_numbering::RecordNumbering;
 use super::types::WriteEvent;
 
 /// Default ring buffer capacity per core (must be power of two).
@@ -45,6 +47,10 @@ pub struct EventProducer {
     inner: Producer<WriteEvent>,
     core_id: usize,
     backpressure: Arc<BackpressureController>,
+    /// The highest sequence this core has emitted, read by the Control Plane.
+    progress: Arc<CoreEmitProgress>,
+    /// Numbers each record's events per row, as WAL catch-up does.
+    numbering: RecordNumbering,
     /// Latched once the consumer half is dropped, so we log the
     /// disconnect exactly once per producer instead of spamming
     /// a warning for every dropped event.
@@ -61,7 +67,18 @@ impl EventProducer {
     /// Updates backpressure state after each emit. When Suspended (>95%),
     /// events are dropped more aggressively (the Event Plane will enter
     /// WAL Catchup Mode to recover).
-    pub fn emit(&mut self, event: WriteEvent) -> bool {
+    pub fn emit(&mut self, mut event: WriteEvent) -> bool {
+        self.numbering.stamp(&mut event);
+        let sequence = event.sequence;
+        let pushed = self.push(event);
+        // After the push: a reader that sees `sequence` finds the event on
+        // the ring, or knows it was dropped.
+        self.progress.note_emitted(sequence);
+        pushed
+    }
+
+    /// Update the backpressure state, then push `event` onto the ring.
+    fn push(&mut self, event: WriteEvent) -> bool {
         let util = self.inner.utilization();
 
         // Update backpressure state.
@@ -155,6 +172,7 @@ pub struct EventConsumerRx {
     inner: Consumer<WriteEvent>,
     core_id: usize,
     backpressure: Arc<BackpressureController>,
+    progress: Arc<CoreEmitProgress>,
 }
 
 impl EventConsumerRx {
@@ -170,6 +188,11 @@ impl EventConsumerRx {
     /// Current backpressure state (read from the shared controller).
     pub fn pressure_state(&self) -> PressureState {
         self.backpressure.state()
+    }
+
+    /// The emitted-event counter of this ring's core.
+    pub fn progress(&self) -> Arc<CoreEmitProgress> {
+        Arc::clone(&self.progress)
     }
 }
 
@@ -192,11 +215,14 @@ pub fn create_event_bus_with_capacity(
     for core_id in 0..num_cores {
         let (producer, consumer) = RingBuffer::channel::<WriteEvent>(capacity);
         let backpressure = Arc::new(BackpressureController::new(BackpressureConfig::default()));
+        let progress = Arc::new(CoreEmitProgress::new());
 
         producers.push(EventProducer {
             inner: producer,
             core_id,
             backpressure: Arc::clone(&backpressure),
+            progress: Arc::clone(&progress),
+            numbering: RecordNumbering::new(),
             disconnect_logged: AtomicBool::new(false),
         });
 
@@ -204,6 +230,7 @@ pub fn create_event_bus_with_capacity(
             inner: consumer,
             core_id,
             backpressure,
+            progress,
         });
     }
 
@@ -224,6 +251,7 @@ mod tests {
             op: WriteOp::Insert,
             row_id: RowId::row(nodedb_types::RowIdentity::from_user_key("row-1")),
             lsn: Lsn::new(seq),
+            record: None,
             database_id: DatabaseId::new(7),
             tenant_id: TenantId::new(1),
             vshard_id: VShardId::new(0),
@@ -285,6 +313,18 @@ mod tests {
 
         // Next emit should fail (buffer full).
         assert!(!producer.emit(make_event(99)));
+    }
+
+    /// A dropped event still counts as emitted, so a barrier waits for it.
+    #[test]
+    fn a_dropped_event_counts_as_emitted() {
+        let (mut producers, consumers) = create_event_bus_with_capacity(1, 4);
+        let producer = &mut producers[0];
+        for i in 1..=4 {
+            assert!(producer.emit(make_event(i)));
+        }
+        assert!(!producer.emit(make_event(5)));
+        assert_eq!(consumers[0].progress().emitted(), 5);
     }
 
     #[test]

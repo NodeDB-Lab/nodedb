@@ -130,6 +130,12 @@ pub struct WriteEvent {
     /// WAL LSN for this write. Enables replay from WAL on Event Plane restart.
     pub lsn: Lsn,
 
+    /// The WAL record this event reproduces, when the write has one. WAL
+    /// catch-up rebuilds the events of such a record, so the Event Plane names
+    /// an event by its record position and row to deliver it once. `None` for
+    /// a write the WAL does not carry: only its ring copy ever arrives.
+    pub record: Option<RecordPosition>,
+
     /// Database context. Producers will propagate the selected database in the
     /// next CDC scoping slice; existing construction sites use `DEFAULT`.
     pub database_id: DatabaseId,
@@ -176,6 +182,27 @@ pub struct WriteEvent {
     /// Populated from `Request.statement_digest` (which reuses the plan digest
     /// already computed by nodedb-sql). `None` for non-user writes.
     pub statement_digest: Option<Arc<str>>,
+}
+
+/// Where an event sits in the WAL record it reproduces.
+///
+/// A record can write one row more than once (a transaction's redo). The
+/// ring and WAL catch-up both number those events per row, in record order,
+/// so each names the same event the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RecordPosition {
+    /// LSN of the WAL record.
+    pub lsn: Lsn,
+    /// How many earlier events of the same record name the same row and the
+    /// same kind of write (a delete, or an insert or update).
+    pub occurrence: u32,
+}
+
+impl RecordPosition {
+    /// The first event of record `lsn` on its row.
+    pub fn first(lsn: Lsn) -> Self {
+        Self { lsn, occurrence: 0 }
+    }
 }
 
 /// The type of write operation that generated this event.
@@ -328,6 +355,7 @@ mod tests {
             op: WriteOp::Insert,
             row_id: RowId::row(RowIdentity::from_user_key("order-1")),
             lsn: Lsn::new(100),
+            record: None,
             database_id: DatabaseId::DEFAULT,
             tenant_id: TenantId::new(1),
             vshard_id: VShardId::new(0),

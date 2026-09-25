@@ -3,42 +3,28 @@
 //! Regression coverage: a revoked permission-tree grant must not keep being
 //! served from a stale session plan cache entry on the same connection.
 //!
-//! Unlike an RLS policy write (synchronous — the policy store bumps its
-//! tenant version inside the DDL handler), a permission-tree grant has no
-//! synchronous SQL surface. It lands as a plain `INSERT`/`DELETE` on the
-//! collection named `permission_table` in the tree definition, and the
-//! in-memory `PermissionCache` is updated asynchronously off `WriteEvent`s
-//! consumed by the Event Plane (`control/security/permission_tree/event_handler.rs`).
-//! That asynchrony is why this test polls: the grant/revoke DML returns as
-//! soon as it is WAL/Raft-durable, before CDC has necessarily applied it to
-//! the cache.
+//! A permission-tree grant has no dedicated SQL surface. It lands as a plain
+//! `INSERT`/`DELETE` on the collection named `permission_table` in the tree
+//! definition. The Event Plane applies it to the in-memory `PermissionCache`,
+//! and the write is acknowledged only once the cache holds it. So the
+//! statement right after an acknowledged grant or revoke plans against it,
+//! with no polling.
 //!
-//! The poll uses a FRESH, differently-worded `SELECT` every iteration (a
-//! trivially-true extra predicate makes the SQL text unique) so it always
-//! misses the session plan cache and reads the live `PermissionCache` on
-//! every attempt — this establishes ground truth for "has CDC applied the
-//! write yet" without touching the cache path under test. The actual
-//! assertion then reuses one FIXED statement text, issued repeatedly on one
-//! connection, so a cache hit is the only way it can be served: that is what
-//! exercises `DescriptorVersionSet::permission_tree_version` re-validation
-//! in `PlanCache::get`.
+//! The ground-truth read uses SQL text unique to it (a trivially-true extra
+//! predicate), so it always misses the session plan cache. The actual
+//! assertion reuses one FIXED statement text on one connection, so a cache
+//! hit is the only way it can be served: that is what exercises
+//! `DescriptorVersionSet::permission_tree_version` re-validation in
+//! `PlanCache::get`.
 //!
 //! The probing identity is a non-superuser: a superuser produces no
 //! `PermCtx` at all (`inject_permission_tree` returns early for one), so a
 //! superuser-issued read cannot exercise this path no matter what the cache
 //! does (`control/planner/rls_injection/permission_tree/plan.rs`).
 
-use std::time::Duration;
-
 use crate::harness::TestServer;
 
 const PASSWORD: &str = "perm-tree-cache-probe-19";
-
-/// How long to wait for asynchronous CDC application to the permission
-/// cache, and separately for the session-cache eviction it drives. Generous
-/// — every poll returns as soon as its condition holds, so a high ceiling
-/// costs nothing on the passing path.
-const CDC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Run `sql` on `client` and return the first column of each row.
 async fn select_ids(client: &tokio_postgres::Client, sql: &str) -> Vec<String> {
@@ -55,37 +41,16 @@ async fn select_ids(client: &tokio_postgres::Client, sql: &str) -> Vec<String> {
     rows
 }
 
-/// Poll with SQL text unique to each attempt (an always-true extra predicate)
-/// until the live permission-tree state yields exactly `expected`, or panic
-/// once `timeout` elapses. Never reuses one statement text across attempts,
-/// so this always replans from the current `PermissionCache` and never
-/// depends on — or pollutes — the session plan cache the real assertion
-/// below exercises.
-async fn wait_for_live_visibility(
-    probe: &tokio_postgres::Client,
-    tag: &str,
-    expected: &[&str],
-    timeout: Duration,
-) {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut attempt: u64 = 0;
-    loop {
-        attempt += 1;
-        let sql = format!(
-            "SELECT id FROM perm_tree_docs WHERE '{tag}-{attempt}' = '{tag}-{attempt}' \
-             ORDER BY id"
-        );
-        let got = select_ids(probe, &sql).await;
-        if got == expected {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for live permission-tree state to reach {expected:?}, \
-             last observed {got:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+/// Read with SQL text unique to `tag` (an always-true extra predicate), so
+/// the read plans from the current `PermissionCache` and never touches the
+/// session plan cache the real assertion below exercises.
+async fn assert_live_visibility(probe: &tokio_postgres::Client, tag: &str, expected: &[&str]) {
+    let sql = format!("SELECT id FROM perm_tree_docs WHERE '{tag}' = '{tag}' ORDER BY id");
+    assert_eq!(
+        select_ids(probe, &sql).await,
+        expected,
+        "live permission-tree state after the acknowledged write"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -171,9 +136,8 @@ async fn revoked_permission_tree_grant_is_not_served_from_stale_session_plan_cac
         .await
         .unwrap_or_else(|e| panic!("connect as perm_tree_probe: {e}"));
 
-    // Ground truth: wait for CDC to apply the grant, via SQL text that can
-    // never hit the session plan cache.
-    wait_for_live_visibility(&probe, "grant-landed", &["d1"], CDC_TIMEOUT).await;
+    // Ground truth, via SQL text that can never hit the session plan cache.
+    assert_live_visibility(&probe, "grant-landed", &["d1"]).await;
 
     let select = "SELECT id FROM perm_tree_docs ORDER BY id";
 
@@ -197,9 +161,8 @@ async fn revoked_permission_tree_grant_is_not_served_from_stale_session_plan_cac
         .await
         .unwrap();
 
-    // Ground truth again: wait for CDC to apply the revoke, independent of
-    // the cached statement below.
-    wait_for_live_visibility(&probe, "revoke-landed", &[], CDC_TIMEOUT).await;
+    // Ground truth again, independent of the cached statement below.
+    assert_live_visibility(&probe, "revoke-landed", &[]).await;
 
     // SAME probe connection, SAME statement text, issued exactly once: must
     // reflect the revoke rather than replaying the plan cached before it.
@@ -214,8 +177,7 @@ async fn revoked_permission_tree_grant_is_not_served_from_stale_session_plan_cac
     );
 
     // And once more, on the same connection, to confirm the revoke keeps
-    // applying rather than only taking effect for the one query issued
-    // immediately after CDC caught up.
+    // applying.
     let after_again = select_ids(&probe, select).await;
     assert_eq!(after_again, after);
 

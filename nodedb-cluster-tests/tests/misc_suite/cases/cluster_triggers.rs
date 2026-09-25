@@ -183,6 +183,7 @@ fn event_source_preserved_through_write_event() {
         op: WriteOp::Insert,
         row_id: RowId::row(nodedb_types::RowIdentity::from_user_key("doc-1")),
         lsn: Lsn::new(100),
+        record: None,
         tenant_id: TenantId::new(1),
         vshard_id: VShardId::new(0),
         source: EventSource::User,

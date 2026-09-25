@@ -23,12 +23,18 @@ use crate::event::types::WriteEvent;
 use crate::event::watermark_tracker::WatermarkTracker;
 use crate::types::DatabaseId;
 
+/// A buffer's identity: `(database_id, tenant_id, stream_name)`.
+pub type BufferKey = (DatabaseId, u64, String);
+
 /// Manages per-stream buffers and routes events to matching streams.
 pub struct CdcRouter {
     /// Stream registry (shared with DDL handlers).
     registry: Arc<StreamRegistry>,
     /// Per-stream retention buffers, keyed by `(database_id, tenant_id, stream_name)`.
-    buffers: std::sync::RwLock<HashMap<(DatabaseId, u64, String), Arc<StreamBuffer>>>,
+    buffers: std::sync::RwLock<HashMap<BufferKey, Arc<StreamBuffer>>>,
+    /// Buffers removed since the CDC ledger last persisted: their persisted
+    /// events are deleted by the next flush.
+    removed: std::sync::Mutex<Vec<BufferKey>>,
     /// Per-stream drop rate tracker — emits `warn!` when threshold is crossed.
     lag_warner: CdcLagWarner,
     /// System metrics for per-stream Prometheus counters. `None` in unit tests
@@ -41,6 +47,7 @@ impl CdcRouter {
         Self {
             registry,
             buffers: std::sync::RwLock::new(HashMap::new()),
+            removed: std::sync::Mutex::new(Vec::new()),
             lag_warner: CdcLagWarner::new(DEFAULT_THRESHOLD),
             metrics: None,
         }
@@ -276,8 +283,44 @@ impl CdcRouter {
     pub fn remove_buffer(&self, database_id: DatabaseId, tenant_id: u64, stream_name: &str) {
         let key = (database_id, tenant_id, stream_name.to_string());
         let mut buffers = self.buffers.write().unwrap_or_else(|p| p.into_inner());
-        buffers.remove(&key);
+        if buffers.remove(&key).is_some() {
+            self.removed
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(key);
+        }
         self.lag_warner.remove_stream(tenant_id, stream_name);
+    }
+
+    /// The change streams this router routes to.
+    pub fn registry(&self) -> &StreamRegistry {
+        &self.registry
+    }
+
+    /// The buffer of every registered change stream. Topic buffers are left
+    /// out: a durable topic hydrates its own buffer.
+    pub fn stream_buffers(&self) -> Vec<(BufferKey, Arc<StreamBuffer>)> {
+        let buffers = self.buffers.read().unwrap_or_else(|p| p.into_inner());
+        buffers
+            .iter()
+            .filter(|((database_id, tenant_id, name), _)| {
+                self.registry.get(*database_id, *tenant_id, name).is_some()
+            })
+            .map(|(key, buffer)| (key.clone(), Arc::clone(buffer)))
+            .collect()
+    }
+
+    /// Take the keys of the buffers removed since the last call.
+    pub fn take_removed(&self) -> Vec<BufferKey> {
+        std::mem::take(&mut *self.removed.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
+    /// Return removed buffer keys a flush took but did not persist.
+    pub fn requeue_removed(&self, keys: Vec<BufferKey>) {
+        self.removed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .extend(keys);
     }
 
     /// Snapshot of all buffer stats (for SHOW CHANGE STREAMS).
@@ -340,6 +383,7 @@ mod tests {
                 "row-{seq}"
             ))),
             lsn: Lsn::new(seq * 10),
+            record: None,
             database_id: DatabaseId::new(7),
             tenant_id: TenantId::new(1),
             vshard_id: VShardId::new(0),

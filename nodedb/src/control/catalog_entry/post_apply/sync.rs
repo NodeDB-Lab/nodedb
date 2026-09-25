@@ -45,6 +45,7 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
             // Owner record install is sync; Data Plane register is
             // the async part, handled by `spawn_post_apply_async_side_effects`.
             collection::put_owner_sync(stored, Arc::clone(shared));
+            collection::queue_tree_def_sync(stored, shared);
         }
         CatalogEntry::PutCollectionIfAbsent(stored) => {
             // Install owner from the CANONICAL catalog collection, not the
@@ -60,15 +61,18 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
                 .get_collection(stored.database_id, stored.tenant_id, &stored.name)
                 .ok()
                 .flatten();
-            match canonical {
-                Some(canonical) => collection::put_owner_sync(&canonical, Arc::clone(shared)),
-                None => collection::put_owner_sync(stored, Arc::clone(shared)),
-            }
+            let canonical = canonical.as_ref().unwrap_or(&**stored);
+            collection::put_owner_sync(canonical, Arc::clone(shared));
+            collection::queue_tree_def_sync(canonical, shared);
         }
         CatalogEntry::DeactivateCollection {
-            tenant_id, name, ..
+            database_id,
+            tenant_id,
+            name,
+            ..
         } => {
             collection::deactivate(*tenant_id, name.clone(), Arc::clone(shared));
+            collection::queue_tree_def_removal_sync(*database_id, *tenant_id, name, shared);
         }
         CatalogEntry::PurgeCollection {
             database_id,
@@ -76,6 +80,7 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
             name,
         } => {
             collection::purge_sync(*database_id, *tenant_id, name.clone(), Arc::clone(shared));
+            collection::queue_tree_def_removal_sync(*database_id, *tenant_id, name, shared);
         }
         CatalogEntry::PutSequence(stored) => {
             sequence::put((**stored).clone(), Arc::clone(shared));

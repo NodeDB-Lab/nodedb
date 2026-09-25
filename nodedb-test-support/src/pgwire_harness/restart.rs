@@ -322,6 +322,12 @@ impl TestServer {
             shutdown_bus: shutdown_bus.clone(),
         });
 
+        // Load grants and hierarchy edges before the listener opens, as the
+        // production boot does once the data groups replayed.
+        nodedb::bootstrap::permission_tree_load::load_permission_trees(&shared)
+            .await
+            .expect("permission tree load on restart");
+
         let pg_listener = PgListener::bind("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();

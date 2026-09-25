@@ -82,6 +82,7 @@ fn convert_records_to_events(
 ) -> crate::Result<Vec<WriteEvent>> {
     let mut events = Vec::new();
     let mut sequence = base_sequence;
+    let mut numbering = crate::event::record_numbering::RecordNumbering::new();
 
     // Collection tombstones shadow any prior write in the same stream.
     // Extract once, then drop events whose `(tenant, collection, lsn)`
@@ -102,7 +103,12 @@ fn convert_records_to_events(
         // A single WAL record may expand to multiple WriteEvents: a
         // `TransactionRedo` (Calvin cross-shard commit) decomposes into one event
         // per write sub-op. Raw Put/Delete records still yield at most one.
-        for event in record_to_events(record, &mut sequence) {
+        // Numbered before the tombstone filter, as the producer numbered them.
+        let mut record_events = record_to_events(record, &mut sequence);
+        for event in &mut record_events {
+            numbering.stamp(event);
+        }
+        for event in record_events {
             if tombstones.is_tombstoned(
                 record.header.database_id,
                 event.tenant_id.as_u64(),

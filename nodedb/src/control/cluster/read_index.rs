@@ -12,7 +12,7 @@
 //! table to decide the read belonged here, so it builds the redirect from
 //! what it knows rather than having a second, staler answer passed back.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -43,16 +43,50 @@ pub trait RaftReadGate: Send + Sync {
     /// Whether this node's replica of `group_id` is within `max_staleness` of
     /// the leader. Local state only — no quorum round, so this does not block.
     fn within_staleness_bound(&self, group_id: u64, max_staleness: Duration) -> bool;
+
+    /// A read index for `group_id` on any node: confirmed here when this node
+    /// leads the group, asked of the leader otherwise.
+    ///
+    /// Once this node has applied the group through the returned index, its
+    /// state holds every entry committed before the call. A gate whose node
+    /// always leads its groups answers with [`Self::confirm_leader`].
+    async fn read_index(&self, group_id: u64, timeout: Duration) -> Result<u64, ReadIndexRefusal> {
+        self.confirm_leader(group_id, timeout).await
+    }
 }
 
+/// The Raft loop type the production gate forwards read-index requests
+/// through.
+type GateRaftLoop = nodedb_cluster::RaftLoop<
+    crate::control::cluster::spsc_applier::SpscCommitApplier,
+    crate::control::LocalPlanExecutor,
+>;
+
 /// Production implementation, backed by the Raft loop's coordinator.
+///
+/// Holds the loop weakly: the loop keeps `SharedState` alive, and the gate
+/// lives on `SharedState`, so a strong reference would pin both.
 pub struct MultiRaftReadGate {
     multi_raft: Arc<Mutex<MultiRaft>>,
+    raft_loop: Weak<GateRaftLoop>,
 }
 
 impl MultiRaftReadGate {
-    pub fn new(multi_raft: Arc<Mutex<MultiRaft>>) -> Self {
-        Self { multi_raft }
+    pub fn new(multi_raft: Arc<Mutex<MultiRaft>>, raft_loop: Weak<GateRaftLoop>) -> Self {
+        Self {
+            multi_raft,
+            raft_loop,
+        }
+    }
+}
+
+/// The refusal a read-index error means to the caller.
+fn refusal_of(error: ClusterError) -> ReadIndexRefusal {
+    match error {
+        ClusterError::ReadIndexTimeout { waited_ms, .. } => ReadIndexRefusal::Timeout { waited_ms },
+        // Not hosted here, not leading, leadership lost mid-probe, or the
+        // leader unreachable: the caller asks again later.
+        _ => ReadIndexRefusal::NotLeader,
     }
 }
 
@@ -63,16 +97,20 @@ impl RaftReadGate for MultiRaftReadGate {
         group_id: u64,
         timeout: Duration,
     ) -> Result<u64, ReadIndexRefusal> {
-        match nodedb_cluster::confirm_read_index(&self.multi_raft, group_id, timeout).await {
-            Ok(index) => Ok(index),
-            Err(ClusterError::ReadIndexTimeout { waited_ms, .. }) => {
-                Err(ReadIndexRefusal::Timeout { waited_ms })
-            }
-            // Every other path out of the confirmation — not hosted here, not
-            // leading, leadership lost mid-probe — means the same thing to the
-            // caller: ask the leader instead.
-            Err(_) => Err(ReadIndexRefusal::NotLeader),
-        }
+        nodedb_cluster::confirm_read_index(&self.multi_raft, group_id, timeout)
+            .await
+            .map_err(refusal_of)
+    }
+
+    async fn read_index(&self, group_id: u64, timeout: Duration) -> Result<u64, ReadIndexRefusal> {
+        let Some(raft_loop) = self.raft_loop.upgrade() else {
+            // The loop is gone: the node is shutting down.
+            return Err(ReadIndexRefusal::NotLeader);
+        };
+        raft_loop
+            .read_index_via_leader(group_id, timeout)
+            .await
+            .map_err(refusal_of)
     }
 
     fn within_staleness_bound(&self, group_id: u64, max_staleness: Duration) -> bool {

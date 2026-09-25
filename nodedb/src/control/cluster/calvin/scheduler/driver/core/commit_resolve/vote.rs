@@ -70,7 +70,8 @@ impl Scheduler {
             // participant error never validated a read-set, so it must not count
             // here.
             self.shared
-                .calvin_counters
+                .calvin
+                .counters
                 .read_set_validation_failures
                 .fetch_add(1, Ordering::Relaxed);
         }

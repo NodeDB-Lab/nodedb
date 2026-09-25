@@ -8,10 +8,7 @@ use std::sync::{Arc, Mutex};
 use nodedb_types::config::TuningConfig;
 
 use crate::control::request_tracker::RequestTracker;
-use crate::control::security::metering::config::MeteringConfig;
-use crate::control::security::metering::quota::QuotaManager;
 use crate::control::security::metering::store::UsageStore;
-use crate::control::security::ratelimit::config::RateLimitConfig;
 use crate::control::security::ratelimit::limiter::RateLimiter;
 use crate::control::security::tenant::{TenantIsolation, TenantQuota};
 use crate::control::server::sync::dlq::{DlqConfig, SyncDlq};
@@ -77,95 +74,18 @@ impl SharedState {
             bus_consumer_handle,
         } = super::bootstrap::run(&wal, catalog_path, auth_config, is_cluster)?;
 
-        // `auth_config.metering` is `None` unless the operator configured a
-        // `[metering]` section; fall back to `MeteringConfig::default()` so
-        // the effective bounds always match a real `MeteringConfig` value
-        // (same source `init.rs`'s test constructor pins to) instead of the
-        // separately-hardcoded `UsageStore`/`QuotaManager` `Default` impls.
-        let metering_defaults = MeteringConfig::default();
-        let metering_config = auth_config.metering.as_ref().unwrap_or(&metering_defaults);
-
-        // `auth_config.rate_limit` is `None` unless the operator configured a
-        // `[auth.rate_limit]` section; fall back to `RateLimitConfig::default()`
-        // (same source `init.rs`'s test constructor pins to) so the limiter's
-        // effective config always matches a real `RateLimitConfig` value
-        // instead of the separately-hardcoded `RateLimiter::default()` impl.
-        let rate_limit_defaults = RateLimitConfig::default();
-        let rate_limit_config = auth_config
-            .rate_limit
-            .as_ref()
-            .unwrap_or(&rate_limit_defaults);
-
-        // `auth_config.siem` is `None` unless the operator configured an
-        // `[auth.siem]` section; the default leaves `destinations` empty and
-        // `webhook_url` blank, so `is_configured()` is false and the export
-        // path stays dormant. When it *is* configured the exporter shares the
-        // process-wide HTTP client rather than building its own pool.
-        let siem_config = auth_config.siem.clone().unwrap_or_default();
-        let http_client = Arc::new(reqwest::Client::new());
-        let siem = crate::control::security::siem::SiemExporter::with_client(
-            siem_config,
-            Arc::clone(&http_client),
-        );
-
-        // `auth_config.risk` is `None` unless the operator configured an
-        // `[auth.risk]` section, and `RiskConfig::default()` has
-        // `enabled = false`, so scoring stays dormant either way. When it is
-        // configured the operator's weights and thresholds reach the scorer
-        // here — the one place they can, since `RiskScorer` reads its config
-        // only at construction.
-        let risk_scorer = crate::control::security::risk::RiskScorer::new(
-            auth_config.risk.clone().unwrap_or_default(),
-        );
-
-        // `auth_config.escalation` is `None` unless the operator configured an
-        // `[auth.escalation]` section, and `EscalationConfig::default()` has
-        // `enabled = false`, so no account is auto-suspended either way. When
-        // it is configured the operator's thresholds reach the engine here —
-        // the one place they can, since `EscalationEngine` reads its config
-        // only at construction.
-        let escalation = crate::control::security::escalation::EscalationEngine::new(
-            auth_config.escalation.clone().unwrap_or_default(),
-        );
-
-        // `auth_config.tls_policy` is `None` unless the operator configured an
-        // `[auth.tls_policy]` section, and `TlsPolicyConfig::default()` has
-        // `enabled = false`, so no connection is refused on transport grounds
-        // either way. When it *is* configured the operator's minimum version
-        // is parsed here — the one place it can be — and an unparseable value
-        // fails startup rather than being silently replaced by a default that
-        // enforces something else.
-        let tls_policy = crate::control::security::tls_policy::TlsPolicy::from_config(
-            &auth_config.tls_policy.clone().unwrap_or_default(),
-        )?;
-
-        // Auth users are catalog-backed in production: an escalation verdict
-        // written to a record has to still be there after a restart, and a
-        // memory-only store would drop it.
-        let auth_users = crate::control::security::jit::auth_user::AuthUserStore::open(
-            credentials.catalog().clone(),
-        )?;
-        // Restore the suspend → ban ladder from the persisted records before
-        // any request is served.
-        for user in auth_users.list(false) {
-            escalation.hydrate_suspensions(&user.id, user.escalation_suspensions);
-        }
-
-        // Scope grants are catalog-backed for the same reason: a grant — and
-        // the `WHEN` / `REQUIRE` conditions restricting it — has to survive a
-        // restart, and a memory-only store silently drops every grant the
-        // operator issued.
-        let scope_grants =
-            crate::control::security::scope::grant::ScopeGrantStore::open(credentials.catalog())?;
-
-        // Quota definitions are catalog objects for the same reason grants
-        // are: a cap that lived only in memory would be lifted by every
-        // restart, and a rolling deploy would quietly forgive every ceiling
-        // the operator set.
-        let quota_manager = QuotaManager::open(
-            metering_config.max_tracked_quota_grantees,
-            credentials.catalog(),
-        )?;
+        let super::auth_parts::AuthParts {
+            metering_config,
+            rate_limit_config,
+            http_client,
+            siem,
+            risk_scorer,
+            escalation,
+            tls_policy,
+            auth_users,
+            scope_grants,
+            quota_manager,
+        } = super::auth_parts::build(auth_config, &credentials)?;
 
         let state = Arc::new(Self {
             outcome_floor: dispatcher.outcome_floor(),
@@ -417,6 +337,7 @@ impl SharedState {
             data_dir: std::path::PathBuf::new(),
             trigger_dlq: std::sync::OnceLock::new(),
             action_requeue: std::sync::OnceLock::new(),
+            sink_ledgers: std::sync::OnceLock::new(),
             // Production stores live under real on-disk paths, not a temp dir.
             _test_state_dir: None,
             schema_version: crate::control::server::shared::session::plan_cache::SchemaVersion::new(
@@ -427,28 +348,20 @@ impl SharedState {
             dml_counter:
                 crate::control::server::shared::ddl::neutral::maintenance::auto_analyze::DmlCounter::new(),
             wal_catchup_lsn: AtomicU64::new(0),
-            last_applied_calvin_epoch: Arc::new(AtomicU64::new(0)),
-            calvin_apply_results: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            calvin_lock_managers: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
-            hot_key_table: Arc::new(Mutex::new(
-                crate::control::cluster::calvin::scheduler::lock::HotKeyTable::new(),
-            )),
-            calvin_promotion_senders: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            calvin: crate::control::state::calvin_local::CalvinLocalState::new(),
             write_order_locks: Arc::new(
                 crate::control::server::shared::write_admission::KeyedWriteOrderLock::new(),
             ),
-            autocommit_lock_seq: std::sync::atomic::AtomicU32::new(0),
-            calvin_counters: crate::control::state::CalvinCounters {
-                write_versions_recorded: Arc::new(AtomicU64::new(0)),
-                read_set_validation_failures: Arc::new(AtomicU64::new(0)),
-                commits_flushed: Arc::new(AtomicU64::new(0)),
-                commits_dropped: Arc::new(AtomicU64::new(0)),
-            },
             presence: Arc::new(tokio::sync::RwLock::new(
                 crate::control::server::sync::presence::PresenceManager::new(
                     crate::control::server::sync::presence::PresenceConfig::default(),
                 ),
             )),
+            authorization_fence: Arc::new(
+                crate::control::security::auth_fence::AuthorizationFence::new(
+                    permission_cache.sources(),
+                ),
+            ),
             permission_cache: Arc::new(tokio::sync::RwLock::new(permission_cache)),
             gateway_invalidator: std::sync::OnceLock::new(),
             gateway: std::sync::OnceLock::new(),
@@ -491,6 +404,7 @@ impl SharedState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::security::ratelimit::config::RateLimitConfig;
     use crate::control::security::ratelimit::limiter::LoginRateLimitOutcome;
 
     /// Build a `SharedState` via the production `open()` path with a

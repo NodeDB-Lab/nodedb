@@ -147,11 +147,15 @@ pub(super) fn wire_proposers(
     // Weak for the same cycle-breaking reason as `raft_proposer` above.
     let raft_loop_async = Arc::downgrade(raft_loop);
     let tracker_for_proposer = tracker.clone();
+    // Held weakly for the same cycle-breaking reason as `raft_proposer` above:
+    // the proposer lives on `SharedState`.
+    let state_for_proposer = Arc::downgrade(shared);
     let deadline_secs = shared.tuning.network.default_deadline_secs;
     let async_proposer: Arc<crate::control::wal_replication::AsyncRaftProposer> =
         Arc::new(move |vshard_id, idempotency_key, data| {
             let rl_weak = raft_loop_async.clone();
             let tk = tracker_for_proposer.clone();
+            let state_weak = state_for_proposer.clone();
             Box::pin(async move {
                 let rl = rl_weak.upgrade().ok_or_else(|| crate::Error::Internal {
                     detail: "raft propose (async): cluster not running".into(),
@@ -171,42 +175,63 @@ pub(super) fn wire_proposers(
                 // `RetryableLeaderChange` instead of leaking a
                 // not-our-payload back to the caller.
                 let rx = tk.register(group_id, log_index, idempotency_key);
-                tokio::time::timeout(std::time::Duration::from_secs(deadline_secs), rx)
-                    .await
-                    .map_err(|_| crate::Error::Dispatch {
-                        detail: format!(
-                            "raft commit timeout for group {group_id} index {log_index}"
-                        ),
-                    })?
-                    .map_err(|_| crate::Error::Dispatch {
-                        detail: "propose waiter channel closed".into(),
-                    })?
-                    // Preserve `RetryableLeaderChange` so the gateway
-                    // retry loop can re-propose against the new leader
-                    // — wrapping it in `Dispatch` would hide the
-                    // retryable signal and surface as silent INSERT
-                    // success. Only machinery failures stay wrapped for
-                    // diagnostics; a classified apply verdict keeps its
-                    // client-visible classification.
-                    .map_err(|e| {
-                        if crate::error_classify::is_unclassified_failure(&e) {
-                            crate::Error::Dispatch {
-                                detail: format!("apply error: {e}"),
+                let applied =
+                    tokio::time::timeout(std::time::Duration::from_secs(deadline_secs), rx)
+                        .await
+                        .map_err(|_| crate::Error::Dispatch {
+                            detail: format!(
+                                "raft commit timeout for group {group_id} index {log_index}"
+                            ),
+                        })?
+                        .map_err(|_| crate::Error::Dispatch {
+                            detail: "propose waiter channel closed".into(),
+                        })?
+                        // Preserve `RetryableLeaderChange` so the gateway
+                        // retry loop can re-propose against the new leader
+                        // — wrapping it in `Dispatch` would hide the
+                        // retryable signal and surface as silent INSERT
+                        // success. Only machinery failures stay wrapped for
+                        // diagnostics; a classified apply verdict keeps its
+                        // client-visible classification.
+                        .map_err(|e| {
+                            if crate::error_classify::is_unclassified_failure(&e) {
+                                crate::Error::Dispatch {
+                                    detail: format!("apply error: {e}"),
+                                }
+                            } else {
+                                e
                             }
-                        } else {
-                            e
-                        }
-                    })
-                    // Carry out the write-version the APPLY side stamped, not
-                    // `log_index`. The tracker resolves on the node that applied
-                    // the entry locally, so `write_version` is this replica's own
-                    // post-write `coll_write_lsn` — a WAL LSN, the same domain
-                    // every other feed of that map records in, and the only
-                    // domain the shard-local OCC read validator compares in. The
-                    // raft log index is a per-group counter on a different scale
-                    // entirely; publishing it here made reads validate a WAL LSN
-                    // against a log index.
-                    .map(|applied| (applied.payload, applied.write_version))
+                        })
+                        // Carry out the write-version the APPLY side stamped, not
+                        // `log_index`. The tracker resolves on the node that applied
+                        // the entry locally, so `write_version` is this replica's own
+                        // post-write `coll_write_lsn` — a WAL LSN, the same domain
+                        // every other feed of that map records in, and the only
+                        // domain the shard-local OCC read validator compares in. The
+                        // raft log index is a per-group counter on a different scale
+                        // entirely; publishing it here made reads validate a WAL LSN
+                        // against a log index.
+                        .map(|applied| (applied.payload, applied.write_version));
+                let applied = applied?;
+                // A write to a vShard homing a permission-tree source is
+                // acknowledged only once every lease holder covers it, or its
+                // lease expired.
+                if let Some(state) = state_weak.upgrade()
+                    && state
+                        .authorization_fence
+                        .sources()
+                        .is_source_vshard(vshard_id)
+                {
+                    crate::control::security::auth_lease::authorization_barrier(
+                        &state,
+                        vec![nodedb_cluster::GroupCoverage {
+                            group_id,
+                            through: log_index,
+                        }],
+                    )
+                    .await?;
+                }
+                Ok(applied)
             })
         });
     crate::control::vshard_admission::install_async_raft_proposer(shared, async_proposer)?;

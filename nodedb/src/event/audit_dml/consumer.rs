@@ -2,7 +2,7 @@
 
 //! Event Plane DML audit consumer.
 //!
-//! Called once per `WriteEvent` inside `process_normal_batch`. Records a
+//! Called once per delivered `WriteEvent` by `consumer::pipeline`. Records a
 //! `DmlAudit` entry in the Control Plane audit log when:
 //!
 //! 1. The event source is `User` (not Trigger / RaftFollower / CrdtSync /
@@ -33,7 +33,15 @@ use crate::event::types::{EventSource, WriteEvent, WriteOp};
 /// Silently skips on any miss (unknown collection → unknown database →
 /// mode is `None`) — the fail-open default keeps DML unblocked when the
 /// cache is cold at startup.
-pub fn audit_dml_event(event: &WriteEvent, state: &Arc<SharedState>) {
+///
+/// `key` names the event across a restart. An event the durable audit log
+/// already records under its key is not audited again, and a new row carries
+/// the key in its detail.
+pub fn audit_dml_event(
+    event: &WriteEvent,
+    state: &Arc<SharedState>,
+    key: Option<&crate::event::sink_ledger::SinkEventKey>,
+) {
     // Only User-sourced writes are subject to DML auditing.
     match event.source {
         EventSource::User => {}
@@ -65,14 +73,26 @@ pub fn audit_dml_event(event: &WriteEvent, state: &Arc<SharedState>) {
         AuditDmlMode::Writes | AuditDmlMode::All => {}
     }
 
-    // Build a compact detail string: op collection:row_id
-    let detail = format!(
+    if let Some(key) = key
+        && state
+            .sink_ledgers
+            .get()
+            .is_some_and(|ledgers| ledgers.audited.contains(key))
+    {
+        return;
+    }
+
+    // Build a compact detail string: op collection:row_id, then the key.
+    let mut detail = format!(
         "{} {}:{} lsn={}",
         event.op,
         event.collection,
         event.row_id,
         event.lsn.as_u64(),
     );
+    if let Some(key) = key {
+        detail.push_str(&crate::event::sink_ledger::audit::detail_suffix(key));
+    }
 
     let source = event.user_id.as_deref().unwrap_or("unknown").to_string();
 
@@ -101,6 +121,7 @@ mod tests {
             op,
             row_id: RowId::row(nodedb_types::RowIdentity::from_user_key("o-1")),
             lsn: Lsn::new(100),
+            record: None,
             database_id: DatabaseId::new(42),
             tenant_id: TenantId::new(1),
             vshard_id: VShardId::new(0),

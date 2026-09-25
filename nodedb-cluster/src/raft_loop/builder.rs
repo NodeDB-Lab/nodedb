@@ -54,6 +54,7 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             calvin_submit_inbox: self.calvin_submit_inbox,
             reserve_read: self.reserve_read,
             release_reservation: self.release_reservation,
+            auth_lease: self.auth_lease,
             snapshot_builder: self.snapshot_builder,
             snapshot_applier: self.snapshot_applier,
             partial_snapshots: self.partial_snapshots,
@@ -149,6 +150,17 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
         assigner: Arc<dyn AssignRemoteSurrogate>,
     ) -> Self {
         self.assign_remote_surrogate = Some(assigner);
+        self
+    }
+
+    /// Attach the authorization lease service (builder chain). Lease
+    /// renewals and authorization barriers reaching this node are answered
+    /// through it.
+    pub fn with_auth_lease(
+        mut self,
+        service: Arc<dyn super::auth_lease_hook::AuthLeaseService>,
+    ) -> Self {
+        self.auth_lease = Some(service);
         self
     }
 

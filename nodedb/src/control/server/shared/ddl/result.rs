@@ -77,6 +77,15 @@ impl DdlError {
         }
     }
 
+    /// Build a `DdlError` from an internal error: the SQLSTATE and message
+    /// the pgwire table gives it, with its classified code and details.
+    pub fn from_error(error: &crate::Error) -> Self {
+        let (_, sqlstate, message) =
+            crate::control::server::pgwire::types::error_to_sqlstate(error);
+        let public = crate::error_classify::classify(error);
+        Self::from_public(sqlstate, message, &public)
+    }
+
     /// Build a `DdlError` with an explicit code, bypassing derivation.
     /// Used by the named constructors below for ambiguous SQLSTATEs.
     fn with_code(sqlstate: &'static str, code: ErrorCode, message: impl Into<String>) -> Self {

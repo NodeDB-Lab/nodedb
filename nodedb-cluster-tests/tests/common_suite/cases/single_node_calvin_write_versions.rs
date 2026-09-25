@@ -6,7 +6,7 @@
 //!
 //! The version index itself lives on the `!Send` Data-Plane core and its
 //! readers are test-only, so this asserts the recording FIRED via the
-//! node-global `calvin_counters.write_versions_recorded` counter, which the per-vShard
+//! node-global `calvin.counters.write_versions_recorded` counter, which the per-vShard
 //! scheduler increments once per committed Calvin apply for which it dispatched
 //! a write-version record op (at the CalvinApplied WAL LSN). The counter is the
 //! standalone-observable proof that a cross-shard-committed write now advances
@@ -40,7 +40,8 @@ fn sequencer_leader(node: &TestClusterNode) -> u64 {
 /// the per-core write-version index.
 fn write_versions_recorded(node: &TestClusterNode) -> u64 {
     node.shared
-        .calvin_counters
+        .calvin
+        .counters
         .write_versions_recorded
         .load(Ordering::Relaxed)
 }

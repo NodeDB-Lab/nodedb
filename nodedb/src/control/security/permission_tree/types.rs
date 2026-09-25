@@ -25,7 +25,7 @@ pub const DEFAULT_DELETE_LEVEL: &str = "owner";
 ///
 /// Stored as JSON in `StoredCollection.permission_tree_def`.
 /// Binds the collection to a resource hierarchy graph and a permission table.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionTreeDef {
     /// Column in this collection that serves as the resource identifier.
     /// Used to look up the resource in the permission graph.

@@ -57,7 +57,10 @@ impl NodeDbPgHandler {
         // rejected cursor declaration consumes no descriptor lease. The scope
         // remains live while every cursor-materialization task is dispatched.
         let (tasks, _lease_scope) = retry_on_schema_change(move || async move {
-            let perm_cache = self.state.permission_cache.read().await;
+            let perm_cache =
+                crate::control::security::auth_fence::permission_view(&self.state, tenant_id)
+                    .await
+                    .map_err(StatementSetupError::from)?;
             let sec = crate::control::planner::context::PlanSecurityContext {
                 identity,
                 auth: auth_ctx,

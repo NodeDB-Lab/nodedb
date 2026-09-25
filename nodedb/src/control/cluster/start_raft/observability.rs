@@ -100,12 +100,34 @@ pub(super) fn finish_observability(
 
     // Publish the leadership confirmer so a linearizable read served on this
     // node proves against a quorum that it is still the leader. Holds the
-    // same coordinator mutex the loop ticks, not the loop itself.
-    let gate: Arc<dyn crate::control::cluster::read_index::RaftReadGate> = Arc::new(
-        crate::control::cluster::read_index::MultiRaftReadGate::new(raft_loop.multi_raft_handle()),
-    );
+    // same coordinator mutex the loop ticks, and the loop only weakly, to ask
+    // a group leader for a read index from a follower.
+    let gate: Arc<dyn crate::control::cluster::read_index::RaftReadGate> =
+        Arc::new(crate::control::cluster::read_index::MultiRaftReadGate::new(
+            raft_loop.multi_raft_handle(),
+            Arc::downgrade(&raft_loop),
+        ));
     if shared.raft_read_gate.set(gate).is_err() {
         tracing::warn!("raft_read_gate already set — start_raft appears to have run twice");
+    }
+
+    // Renew this node's authorization lease with the metadata leader. Its
+    // confirmed coverage needs the read gate above.
+    if let Some(timing) = shared.authorization_fence.timing() {
+        let renew_state = Arc::clone(shared);
+        crate::control::shutdown::spawn_loop(
+            &shared.loop_registry,
+            &shared.shutdown,
+            "auth_lease_renew",
+            crate::control::shutdown::ShutdownPhase::DrainingControlPlane,
+            move |shutdown| {
+                crate::control::security::auth_lease::renew_loop::run_renew_loop(
+                    renew_state,
+                    timing,
+                    shutdown,
+                )
+            },
+        );
     }
 
     // Publish this node's cluster-epoch state so the routing gate can tell

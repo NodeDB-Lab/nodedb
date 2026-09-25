@@ -185,6 +185,7 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::MetadataLeaderUnavailable => NodeDbError::dispatch(
             "metadata raft group has no elected leader yet; retry exhausted".to_string(),
         ),
+        Error::AuthorizationStateBehind { .. } => NodeDbError::cluster(e.to_string()),
         Error::ExecutionLimitExceeded { detail } => NodeDbError::bad_request(detail),
         Error::LimitExceeded {
             limit_name,

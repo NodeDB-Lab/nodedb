@@ -2,6 +2,7 @@
 
 //! SharedState::open — production constructor loading from disk.
 
+mod auth_parts;
 mod bootstrap;
 mod handles;
 mod open;

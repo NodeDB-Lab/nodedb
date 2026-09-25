@@ -76,7 +76,7 @@ pub struct Scheduler {
         Arc<Mutex<SequencerStateMachine>>,
     /// Deterministic lock manager for this vshard. Shared (via `Arc<Mutex<_>>`)
     /// with the Control-Plane write-admission gate through
-    /// `SharedState.calvin_lock_managers`, so a fast-path point write contends
+    /// `SharedState.calvin.lock_managers`, so a fast-path point write contends
     /// on the SAME lock table this scheduler validates against. The scheduler
     /// still runs single-threaded per vShard, so the mutex is uncontended except
     /// for the brief probe the gate takes.
@@ -112,6 +112,9 @@ pub struct Scheduler {
     /// deterministic threshold below which an orphaned shared reservation is
     /// released. Purely a function of replicated input order — no wall clock.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) max_input_epoch: u64,
+    /// Shared mirror of `applied`, read by authorization coverage.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) applied_mirror:
+        Arc<crate::control::cluster::calvin::scheduler::AppliedMirror>,
     /// Scheduler configuration.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) config: SchedulerConfig,
     /// Metrics.
@@ -190,11 +193,11 @@ pub struct SchedulerParams {
     pub read_result_rx: mpsc::Receiver<ReadResultEvent>,
     /// The shared lock table for this vShard. Constructed by
     /// `reconcile_vshard_schedulers` and registered in
-    /// `SharedState.calvin_lock_managers` under the SAME `Arc` passed here.
+    /// `SharedState.calvin.lock_managers` under the SAME `Arc` passed here.
     pub lock_manager: Arc<Mutex<LockManager>>,
     /// Receiver for gate-side lock promotions. Constructed by
     /// `reconcile_vshard_schedulers`; its `UnboundedSender` is registered in
-    /// `SharedState.calvin_promotion_senders` for this same vShard so a fast-path
+    /// `SharedState.calvin.promotion_senders` for this same vShard so a fast-path
     /// guard drop can hand promoted waiters back to this scheduler.
     pub promotion_rx: mpsc::UnboundedReceiver<Vec<TxnId>>,
     /// Shared completion registry for verdict probes on the commit barrier.
@@ -232,6 +235,12 @@ impl Scheduler {
         let completion_cap = config.channel_capacity;
         let (completion_tx, completion_rx) = mpsc::channel(completion_cap);
 
+        let applied_mirror = shared.authorization_fence.calvin_mirrors().register(
+            vshard_id,
+            fully_applied_epoch,
+            &applied_tail,
+        );
+
         let capacity_freed = shared
             .dispatcher
             .lock()
@@ -252,6 +261,7 @@ impl Scheduler {
             dependent_barrier: BTreeMap::new(),
             read_result_rx,
             applied: AppliedGate::new(fully_applied_epoch, applied_tail),
+            applied_mirror,
             rebuild_target_epoch,
             max_input_epoch: 0,
             config,
@@ -301,7 +311,7 @@ impl Scheduler {
     /// Publish an advanced fully-applied watermark to the metrics gauge and the
     /// shared cross-shard snapshot anchor.
     ///
-    /// `BEGIN` reads `SharedState::last_applied_calvin_epoch` to anchor a
+    /// `BEGIN` reads `CalvinLocalState::last_applied_epoch` to anchor a
     /// session's cross-shard snapshot version, so it MUST reflect the
     /// FULLY-applied epoch — never an epoch that has only some of its positions
     /// committed, which would let a session anchor on a torn epoch. `fetch_max`
@@ -311,8 +321,10 @@ impl Scheduler {
         watermark: u64,
     ) {
         self.metrics.update_last_applied_epoch(watermark);
+        self.applied_mirror.fold(watermark);
         self.shared
-            .last_applied_calvin_epoch
+            .calvin
+            .last_applied_epoch
             .fetch_max(watermark, std::sync::atomic::Ordering::Release);
     }
 

@@ -4,7 +4,7 @@
 //!
 //! Not currently wired into the Normal-mode consumer loop — per-event
 //! dispatch is the sole production path for AFTER-ROW trigger firing (see
-//! `event::consumer::process_normal_batch`). This collector batches
+//! `event::consumer::pipeline::deliver_events`). This collector batches
 //! consecutive WriteEvents targeting the same collection before dispatching
 //! triggers, yielding batches of up to `batch_size` rows, and remains
 //! available for a future WHEN-clause-batched throughput optimization

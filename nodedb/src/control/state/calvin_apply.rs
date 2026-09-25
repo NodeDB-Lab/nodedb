@@ -5,7 +5,7 @@
 use crate::bridge::envelope::Response;
 
 /// The applied Data-Plane result for one completed Calvin transaction, carried
-/// via [`SharedState::calvin_apply_results`] from the per-vShard scheduler to
+/// via [`CalvinLocalState::apply_results`] from the per-vShard scheduler to
 /// the coordinator's completion path.
 ///
 /// A cross-shard COMMIT may legitimately have MANY primary-write participants —
@@ -21,7 +21,7 @@ use crate::bridge::envelope::Response;
 /// unsupported. The coordinator then fails the statement loudly rather than
 /// returning one shard's partial rows.
 ///
-/// [`SharedState::calvin_apply_results`]: crate::control::state::SharedState::calvin_apply_results
+/// [`CalvinLocalState::apply_results`]: crate::control::state::CalvinLocalState::apply_results
 pub enum CalvinApplyResult {
     /// A participant's applied response. `has_returning` is true iff this
     /// participant's slice carried RETURNING rows (a plain affected-count
