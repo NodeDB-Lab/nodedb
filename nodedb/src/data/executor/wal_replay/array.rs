@@ -2,18 +2,21 @@
 
 //! Array engine WAL replay: rebuilds tile state after crash.
 //!
-//! ## The durable watermark
+//! ## The replay stamp
 //!
-//! Each array's manifest carries a `durable_lsn` — the highest LSN whose cells
-//! are already inside a flushed, on-disk segment (`Manifest::add_segment`
-//! raises it). Replay skips every record at or below it, which is what makes
-//! replaying the same retained tail twice a no-op and, more importantly, what
-//! stops a cell version that a bitemporal audit purge physically removed from a
-//! segment being re-materialised out of a still-retained `ArrayPut`. Without
-//! the gate the purge is silently undone on the next boot.
+//! Each array's manifest carries the `ReplayStamp` of its newest flush: the
+//! records whose cells are already inside a flushed, on-disk segment. Replay
+//! skips exactly the records that stamp names (`array_replay_skips`). A
+//! record in flight when the flush ran is not named, even when a higher LSN
+//! is, so it replays once.
 //!
-//! Records ABOVE the watermark are the tail the segments have not absorbed and
-//! must be re-applied into the memtable.
+//! Re-applying a named record would write its tile version into a second
+//! segment on the next flush. After a bitemporal audit purge it would also
+//! re-materialise the cell version the purge removed from a segment.
+//!
+//! Replay never flushes. Its records land in the memtable, and the first
+//! live threshold flush or checkpoint flush after replay writes them with a
+//! stamp that names them.
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
@@ -92,17 +95,37 @@ impl CoreLoop {
         self.record_redo_capture(captured)
     }
 
-    /// The LSN this array's flushed segments are already durable through.
-    ///
-    /// `0` when the store is not open, which gates nothing — the safe
-    /// direction, matching every other engine's unset replay floor.
-    pub(in crate::data::executor) fn array_durable_lsn(
+    /// Whether restart replay skips the record at `record_lsn` for
+    /// `array_id`: the stamp in the array's manifest names it. A
+    /// committed-redo apply never skips (`replay_watermark_skips`).
+    pub(in crate::data::executor) fn array_replay_skips(
         &self,
         array_id: &nodedb_array::types::ArrayId,
-    ) -> u64 {
+        record_lsn: u64,
+    ) -> bool {
+        self.replay_watermark_skips(self.array_stamp_names(array_id, record_lsn))
+    }
+
+    /// Whether the stamp in `array_id`'s manifest names the record at
+    /// `record_lsn`. An array whose store is not open names nothing, which
+    /// replays the record: the safe direction.
+    pub(in crate::data::executor) fn array_stamp_names(
+        &self,
+        array_id: &nodedb_array::types::ArrayId,
+        record_lsn: u64,
+    ) -> bool {
         self.array_engine
             .store(array_id)
-            .map_or(0, |store| store.manifest().durable_lsn)
+            .is_ok_and(|store| store.manifest().replay.skips(record_lsn))
+    }
+
+    /// Whether `array_id`'s manifest stamp names an LSN above `record_lsn`.
+    /// A replayed record it holds was in flight when the flush that wrote the
+    /// stamp ran.
+    fn array_stamp_passes(&self, array_id: &nodedb_array::types::ArrayId, record_lsn: u64) -> bool {
+        self.array_engine
+            .store(array_id)
+            .is_ok_and(|store| store.manifest().replay.highest() > record_lsn)
     }
 
     pub fn replay_array_wal(
@@ -117,6 +140,8 @@ impl CoreLoop {
         let mut puts = 0usize;
         let mut deletes = 0usize;
         let mut skipped = 0usize;
+        // Records replayed below the highest LSN their array's stamp names.
+        let mut in_flight = 0usize;
 
         for record in records {
             let logical_type = record.logical_record_type();
@@ -189,17 +214,14 @@ impl CoreLoop {
                         continue;
                     }
                 }
-                if self
-                    .replay_watermark_skips(record_lsn <= self.array_durable_lsn(&payload.array_id))
-                {
+                if self.array_replay_skips(&payload.array_id, record_lsn) {
                     skipped += 1;
                     continue;
                 }
                 if self.claim_for_validation() {
                     continue;
                 }
-                let installing = self.recording_redo_undo();
-                if installing
+                if self.recording_redo_undo()
                     && !self.record_array_tiles_undo(
                         &payload.array_id,
                         payload
@@ -214,18 +236,10 @@ impl CoreLoop {
                 }
                 let cell_count = payload.cells.len();
                 let prov = payload.provenance.clone();
-                // An install flushes once the whole record landed, so a
-                // rollback finds its cells in the memtable.
-                let stamped = if installing {
-                    self.array_engine.put_cells_unflushed(
-                        &payload.array_id,
-                        payload.cells,
-                        record_lsn,
-                    )
-                } else {
+                let passed = self.array_stamp_passes(&payload.array_id, record_lsn);
+                let stamped =
                     self.array_engine
-                        .put_cells(&payload.array_id, payload.cells, record_lsn)
-                };
+                        .put_cells(&payload.array_id, payload.cells, record_lsn);
                 if let Err(e) = stamped {
                     self.replay_record_unapplied(
                         "array",
@@ -237,6 +251,7 @@ impl CoreLoop {
                     continue;
                 }
                 puts += cell_count;
+                in_flight += usize::from(passed);
                 self.note_redo_array_written(&payload.array_id);
                 // Rebuild the per-core HWM frontier from the WAL record's
                 // provenance. No fence check here — replay records are already
@@ -295,16 +310,14 @@ impl CoreLoop {
                     continue;
                 }
             }
-            if self.replay_watermark_skips(record_lsn <= self.array_durable_lsn(&payload.array_id))
-            {
+            if self.array_replay_skips(&payload.array_id, record_lsn) {
                 skipped += 1;
                 continue;
             }
             if self.claim_for_validation() {
                 continue;
             }
-            let installing = self.recording_redo_undo();
-            if installing
+            if self.recording_redo_undo()
                 && !self.record_array_tiles_undo(
                     &payload.array_id,
                     payload
@@ -319,16 +332,10 @@ impl CoreLoop {
             }
             let cell_count = payload.cells.len();
             let prov = payload.provenance.clone();
-            let stamped = if installing {
-                self.array_engine.delete_cells_unflushed(
-                    &payload.array_id,
-                    payload.cells,
-                    record_lsn,
-                )
-            } else {
+            let passed = self.array_stamp_passes(&payload.array_id, record_lsn);
+            let stamped =
                 self.array_engine
-                    .delete_cells(&payload.array_id, payload.cells, record_lsn)
-            };
+                    .delete_cells(&payload.array_id, payload.cells, record_lsn);
             if let Err(e) = stamped {
                 self.replay_record_unapplied(
                     "array",
@@ -340,6 +347,7 @@ impl CoreLoop {
                 continue;
             }
             deletes += cell_count;
+            in_flight += usize::from(passed);
             self.note_redo_array_written(&payload.array_id);
             if let Some(p) = &prov {
                 self.sync_commit(p);
@@ -352,6 +360,7 @@ impl CoreLoop {
                 puts,
                 deletes,
                 skipped,
+                in_flight,
                 "WAL array replay complete"
             );
         }

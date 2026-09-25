@@ -50,12 +50,6 @@ impl CoreLoop {
                     let s = surrogates.get(i).copied().unwrap_or(Surrogate::ZERO);
                     collection_ref.insert_with_surrogate(vector.clone(), s);
                 }
-                // Advance the checkpoint watermark so a later vector checkpoint
-                // records these writes as absorbed; startup replay then skips the
-                // straddling WAL records instead of appending duplicate nodes.
-                if let Some(lsn) = task.wal_lsn() {
-                    collection_ref.note_checkpoint_lsn(lsn.as_u64());
-                }
                 let seal_key = CoreLoop::vector_build_key(&index_key);
                 if !defer_seal
                     && collection_ref.needs_seal()

@@ -27,6 +27,19 @@ impl CoreLoop {
         if is_write && let Some(r) = self.check_engine_pressure(task, nodedb_mem::EngineId::Array) {
             return r;
         }
+        // A write, flush or compaction addresses an array this core may not
+        // have opened since it booted: restart replay opens only the arrays
+        // its WAL tail writes, and a read opens its own array. Opened from the
+        // catalog here, like a read, or the engine refuses the array as
+        // unknown.
+        if let ArrayOp::Put { array_id, .. }
+        | ArrayOp::Delete { array_id, .. }
+        | ArrayOp::Flush { array_id, .. }
+        | ArrayOp::Compact { array_id, .. } = op
+            && let Err(resp) = self.ensure_array_open(task, array_id)
+        {
+            return resp;
+        }
         match op {
             ArrayOp::OpenArray {
                 array_id,
@@ -138,12 +151,39 @@ impl CoreLoop {
         }
     }
 
+    /// [`Self::ensure_array_open`] when the catalog holds `array_id`. An array
+    /// with no catalog entry was dropped, and there is nothing to open.
+    pub(in crate::data::executor) fn open_array_if_cataloged(
+        &mut self,
+        task: &ExecutionTask,
+        array_id: &ArrayId,
+    ) -> Result<(), Response> {
+        let cataloged = self
+            .array_catalog
+            .read()
+            .map_err(|_| {
+                self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: "array catalog lock poisoned".to_string(),
+                    },
+                )
+            })?
+            .lookup_by_id(array_id)
+            .is_some();
+        if cataloged {
+            self.ensure_array_open(task, array_id)?;
+        }
+        Ok(())
+    }
+
     /// Idempotently open the array on this core, looking the schema up
-    /// from the shared `ArrayCatalogHandle`. Read handlers (Slice /
-    /// Project / Aggregate / Elementwise) call this at entry so that a
-    /// SQL read against a per-core engine that has not yet seen an
-    /// explicit `OpenArray` dispatch (e.g. the very first read after a
-    /// restart) auto-opens via the catalog instead of erroring.
+    /// from the shared `ArrayCatalogHandle`. Every read handler (Slice /
+    /// Project / Aggregate / Elementwise), and `dispatch_array` for every
+    /// write, flush and compaction, calls this at entry, so an op against a
+    /// per-core engine that has not yet seen an explicit `OpenArray` dispatch
+    /// (the first op after a restart) auto-opens via the catalog instead of
+    /// erroring.
     pub(in crate::data::executor) fn ensure_array_open(
         &mut self,
         task: &ExecutionTask,

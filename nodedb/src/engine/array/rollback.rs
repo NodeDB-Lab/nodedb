@@ -5,9 +5,8 @@
 //! Every cell write lands in the memtable tile its coordinate and system
 //! time map to. [`ArrayEngine::snapshot_tiles`] copies those tiles before the
 //! write, and [`ArrayEngine::restore_tiles`] puts them back. The write must
-//! not flush in between: [`ArrayEngine::put_cells_unflushed`] and
-//! [`ArrayEngine::delete_cells_unflushed`] stamp the memtable without the
-//! threshold flush, and [`ArrayEngine::flush_if_full`] runs it afterwards.
+//! not flush in between. `put_cells` and `delete_cells` never flush, so the
+//! caller holds the flush until the whole record landed.
 
 use nodedb_array::tile::tile_id_for_cell;
 use nodedb_array::types::coord::value::CoordValue;
@@ -15,8 +14,6 @@ use nodedb_array::types::{ArrayId, TileId};
 
 use super::engine::{ArrayEngine, ArrayEngineResult};
 use super::memtable::TileBuffer;
-use super::wal::{ArrayDeleteCell, ArrayPutCell};
-use super::write::{stamp_delete_cells, stamp_put_cells};
 
 /// The memtable tiles a write touches, as they were before it.
 #[derive(Debug)]
@@ -56,37 +53,5 @@ impl ArrayEngine {
             store.memtable.restore_tile(tile, buffer);
         }
         Ok(())
-    }
-
-    /// Stamp `cells` into the memtable without the threshold flush.
-    pub fn put_cells_unflushed(
-        &mut self,
-        id: &ArrayId,
-        cells: Vec<ArrayPutCell>,
-        wal_lsn: u64,
-    ) -> ArrayEngineResult<()> {
-        if cells.is_empty() {
-            return Ok(());
-        }
-        stamp_put_cells(self.store_mut(id)?, cells, wal_lsn)
-    }
-
-    /// Stamp tombstones for `cells` into the memtable without the threshold
-    /// flush.
-    pub fn delete_cells_unflushed(
-        &mut self,
-        id: &ArrayId,
-        cells: Vec<ArrayDeleteCell>,
-        wal_lsn: u64,
-    ) -> ArrayEngineResult<()> {
-        if cells.is_empty() {
-            return Ok(());
-        }
-        stamp_delete_cells(self.store_mut(id)?, cells, wal_lsn)
-    }
-
-    /// Run the threshold flush the unflushed writes skipped.
-    pub fn flush_if_full(&mut self, id: &ArrayId) -> ArrayEngineResult<()> {
-        self.maybe_flush(id)
     }
 }

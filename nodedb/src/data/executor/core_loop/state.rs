@@ -270,11 +270,18 @@ pub struct CoreLoop {
     pub(in crate::data::executor) columnar_flushed_surrogates:
         HashMap<(DatabaseId, TenantId, String), FlushedSurrogateTable>,
 
-    /// Per-collection max WAL LSN that has been ingested into the memtable.
-    /// Used by the WAL catch-up deduplication: if a catch-up record's LSN
-    /// is <= this value, the Data Plane skips it (already ingested).
-    /// Key: (DatabaseId, TenantId, collection).
-    pub(in crate::data::executor) ts_max_ingested_lsn: HashMap<(DatabaseId, TenantId, String), u64>,
+    /// Per-collection replay stamps: the records whose rows a partition
+    /// holds or a truncate removed, and the truncates that took effect. See
+    /// `timeseries_checkpoint::stamp`. Key: (DatabaseId, TenantId, collection).
+    pub(in crate::data::executor) ts_replay_stamps: HashMap<
+        (DatabaseId, TenantId, String),
+        crate::data::executor::timeseries_checkpoint::stamp::TsReplayStamp,
+    >,
+
+    /// While restart replay runs the timeseries pass: the LSN through which it
+    /// has passed every record. A flush or truncate then stamps through it
+    /// instead of the core stamp. `None` outside that pass.
+    pub(in crate::data::executor) ts_replay_cursor: Option<u64>,
 
     /// Last time any timeseries ingest was processed on this core.
     /// Used by idle flush: if no ingest for 5 seconds, `maybe_run_maintenance`
@@ -309,13 +316,6 @@ pub struct CoreLoop {
     /// Aside partition directories of committed timeseries truncates whose
     /// removal failed at batch finalize; the maintenance tick retries them.
     pub(in crate::data::executor) ts_truncate_backlog: Vec<std::path::PathBuf>,
-
-    /// WAL LSN of the last truncate applied to each timeseries collection.
-    /// An ingest carrying a `wal_lsn` at or below it was written before the
-    /// truncate (a WAL catch-up redelivery) and is refused, so a row the
-    /// truncate removed can never come back through the catch-up path.
-    /// Key: (DatabaseId, TenantId, collection).
-    pub(in crate::data::executor) ts_truncate_floors: HashMap<(DatabaseId, TenantId, String), u64>,
 
     /// Continuous aggregate manager for this core. Fires on memtable flush.
     pub(in crate::data::executor) continuous_agg_mgr:

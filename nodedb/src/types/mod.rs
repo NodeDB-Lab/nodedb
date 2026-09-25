@@ -3,6 +3,7 @@
 pub mod consistency;
 pub mod id;
 pub mod lsn;
+pub mod replay_stamp;
 pub mod snapshot;
 
 pub use consistency::ReadConsistency;

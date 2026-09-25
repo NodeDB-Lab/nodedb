@@ -19,6 +19,7 @@ use nodedb_types::TenantId;
 
 use super::engine::ArrayEngine;
 use super::wal::ArrayPutCell;
+use crate::types::replay_stamp::ReplayStamp;
 
 pub(super) fn schema() -> Arc<ArraySchema> {
     Arc::new(
@@ -58,4 +59,12 @@ pub(super) fn put_one(e: &mut ArrayEngine, x: i64, y: i64, v: i64, lsn: u64) {
         lsn,
     )
     .unwrap();
+}
+
+/// Flush `id` once its memtable reached the threshold, stamped through
+/// `lsn`: what the executor does after every write it applies.
+pub(super) fn flush_if_full(e: &mut ArrayEngine, id: &ArrayId, lsn: u64) {
+    if e.needs_flush(id).unwrap() {
+        e.flush(id, ReplayStamp::through(lsn)).unwrap();
+    }
 }

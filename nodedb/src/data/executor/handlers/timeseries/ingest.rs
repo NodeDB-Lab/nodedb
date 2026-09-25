@@ -206,16 +206,8 @@ impl CoreLoop {
             );
         }
 
-        if mode == TimeseriesApplyMode::RedoInstall
-            && let Err(error) = self.prepare_redo_ts_ingest(
-                task.request.database_id,
-                tid,
-                collection,
-                &lines,
-                now_ms,
-            )
-        {
-            return self.response_error(task, error);
+        if mode == TimeseriesApplyMode::RedoInstall {
+            self.record_redo_ts_pre_image(task.request.database_id, tid, collection);
         }
 
         let bitemporal =
@@ -250,32 +242,21 @@ impl CoreLoop {
 
         // The WAL has already committed this record, so the admission gate
         // resolves every possible mid-record stop before the first row lands.
+        // A replayed or installed sub-record never flushes here: the replay
+        // arm flushed before the record's first sub-record (`group_flush`),
+        // and a flush between two sub-records would split the record.
         let soft_limit = self.ts_tuning.memtable_budget_bytes;
-        if self.ts_ingest_needs_flush(&key, &lines) {
-            // A redo install flushed before it took its pre-image. A flush
-            // now would drain rows that pre-image holds, so the install
-            // fails and rolls back instead.
-            if mode == TimeseriesApplyMode::RedoInstall {
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!(
-                            "'{collection}' still needs a flush after the flush that preceded \
-                             its committed-redo install"
-                        ),
-                    },
-                );
-            }
-            if let Err(e) =
+        if mode == TimeseriesApplyMode::Immediate
+            && self.ts_ingest_needs_flush(&key, &lines)
+            && let Err(e) =
                 self.flush_ts_collection(tid, task.request.database_id, collection, now_ms)
-            {
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!("pre-ingest ts flush failed: {e}"),
-                    },
-                );
-            }
+        {
+            return self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: format!("pre-ingest ts flush failed: {e}"),
+                },
+            );
         }
 
         let Some(mt) = self.columnar_memtables.get_mut(&key) else {
@@ -305,6 +286,15 @@ impl CoreLoop {
         });
         let accepted = outcome.accepted;
         let rejected = outcome.rejected;
+        // The record's rows landed, whatever the response below says. A
+        // flush from here on names the record; the pre-ingest flush above ran
+        // before it and does not. A committed-redo install is noted by the
+        // apply once the whole record installed.
+        if mode != TimeseriesApplyMode::RedoInstall
+            && let Some(lsn) = wal_lsn
+        {
+            self.note_ts_record_applied(lsn);
+        }
 
         if rejected > 0 {
             tracing::warn!(
@@ -358,13 +348,6 @@ impl CoreLoop {
             None => Vec::new(),
         };
 
-        if accepted > 0
-            && let Some(lsn) = wal_lsn
-        {
-            let entry = self.ts_max_ingested_lsn.entry(key.clone()).or_insert(0);
-            *entry = (*entry).max(lsn);
-        }
-
         let Some(mt) = self.columnar_memtables.get(&key) else {
             return self.response_error(
                 task,
@@ -374,8 +357,9 @@ impl CoreLoop {
             );
         };
         let needs_flush = mt.memory_bytes() >= soft_limit;
-        if mode == TimeseriesApplyMode::Immediate {
-            if needs_flush
+        if mode != TimeseriesApplyMode::RedoInstall {
+            if mode == TimeseriesApplyMode::Immediate
+                && needs_flush
                 && let Err(e) =
                     self.flush_ts_collection(tid, task.request.database_id, collection, now_ms)
             {
@@ -388,7 +372,7 @@ impl CoreLoop {
             }
 
             if accepted > 0 {
-                // no-determinism: Instant::now runs only for the operational idle/checkpoint timer in Immediate mode and is skipped in Calvin staged apply.
+                // no-determinism: Instant::now runs only for the operational idle/checkpoint timer, outside a committed-redo install.
                 self.last_ts_ingest = Some(std::time::Instant::now());
             }
 

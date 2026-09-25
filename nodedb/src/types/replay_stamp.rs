@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
     zerompk::ToMessagePack,
     zerompk::FromMessagePack,
 )]
-pub(crate) struct LsnRange {
+pub struct LsnRange {
     pub start: u64,
     pub end: u64,
 }
@@ -53,7 +53,7 @@ pub(crate) struct LsnRange {
     zerompk::ToMessagePack,
     zerompk::FromMessagePack,
 )]
-pub(crate) struct ReplayStamp {
+pub struct ReplayStamp {
     /// The outcome floor when the artifact was written.
     pub prefix: u64,
     /// The LSNs above `prefix` applied before the artifact was written, as
@@ -63,7 +63,7 @@ pub(crate) struct ReplayStamp {
 
 /// Why a decoded [`ReplayStamp`] cannot describe an artifact.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum InvalidReplayStamp {
+pub enum InvalidReplayStamp {
     /// A range ends before it starts.
     #[error("applied range [{start}, {end}] ends before it starts")]
     Inverted { start: u64, end: u64 },
@@ -77,10 +77,24 @@ pub(crate) enum InvalidReplayStamp {
 
 impl ReplayStamp {
     /// A stamp holding every record at or below `prefix` and nothing above.
-    pub(crate) fn through(prefix: u64) -> Self {
+    pub fn through(prefix: u64) -> Self {
         Self {
             prefix,
             applied_above: Vec::new(),
+        }
+    }
+
+    /// A stamp naming the record at `lsn` and nothing else above LSN 0.
+    pub fn naming(lsn: u64) -> Self {
+        if lsn == 0 {
+            return Self::through(0);
+        }
+        Self {
+            prefix: 0,
+            applied_above: vec![LsnRange {
+                start: lsn,
+                end: lsn,
+            }],
         }
     }
 
@@ -88,7 +102,7 @@ impl ReplayStamp {
     /// already holds it, or it has a final outcome that is not an apply.
     ///
     /// Every other record replays.
-    pub(crate) fn skips(&self, record_lsn: u64) -> bool {
+    pub fn skips(&self, record_lsn: u64) -> bool {
         if record_lsn <= self.prefix {
             return true;
         }
@@ -102,8 +116,56 @@ impl ReplayStamp {
                 .is_some_and(|range| record_lsn <= range.end)
     }
 
+    /// The highest LSN the stamp names: the end of its last applied range, or
+    /// its prefix when it names nothing above the prefix.
+    pub fn highest(&self) -> u64 {
+        self.applied_above
+            .last()
+            .map_or(self.prefix, |range| range.end.max(self.prefix))
+    }
+
+    /// A stamp naming every record `self` or `other` names.
+    ///
+    /// Two artifacts of one collection written at different times each name
+    /// the records they hold. The union is what the collection holds across
+    /// both.
+    pub fn union(&self, other: &ReplayStamp) -> ReplayStamp {
+        let mut prefix = self.prefix.max(other.prefix);
+        let mut ranges: Vec<LsnRange> = self
+            .applied_above
+            .iter()
+            .chain(&other.applied_above)
+            .filter(|range| range.end > prefix)
+            .map(|range| LsnRange {
+                start: range.start.max(prefix.saturating_add(1)),
+                end: range.end,
+            })
+            .collect();
+        ranges.sort_unstable_by_key(|range| range.start);
+        let mut merged: Vec<LsnRange> = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            match merged.last_mut() {
+                Some(last) if range.start <= last.end.saturating_add(1) => {
+                    last.end = last.end.max(range.end);
+                }
+                _ => merged.push(range),
+            }
+        }
+        // A range that starts right above the prefix extends it.
+        if merged
+            .first()
+            .is_some_and(|first| first.start == prefix.saturating_add(1))
+        {
+            prefix = merged.remove(0).end;
+        }
+        ReplayStamp {
+            prefix,
+            applied_above: merged,
+        }
+    }
+
     /// Check the shape [`Self::skips`] relies on.
-    pub(crate) fn validate(&self) -> Result<(), InvalidReplayStamp> {
+    pub fn validate(&self) -> Result<(), InvalidReplayStamp> {
         let mut previous_end: Option<u64> = None;
         for range in &self.applied_above {
             if range.end < range.start {
@@ -173,6 +235,42 @@ mod tests {
         assert!(stamp.skips(100));
         assert!(!stamp.skips(101));
         assert!(!ReplayStamp::default().skips(1));
+    }
+
+    #[test]
+    fn the_highest_named_lsn_is_the_last_range_end_or_the_prefix() {
+        assert_eq!(stamp(10, &[(12, 13), (20, 21)]).highest(), 21);
+        assert_eq!(ReplayStamp::through(7).highest(), 7);
+    }
+
+    #[test]
+    fn a_union_names_what_either_stamp_names_and_nothing_else() {
+        let a = stamp(10, &[(14, 15), (30, 30)]);
+        let b = stamp(12, &[(16, 18), (25, 26), (40, 41)]);
+        let u = a.union(&b);
+        assert_eq!(u, stamp(12, &[(14, 18), (25, 26), (30, 30), (40, 41)]));
+        assert!(u.validate().is_ok());
+        for lsn in 0..=45 {
+            assert_eq!(u.skips(lsn), a.skips(lsn) || b.skips(lsn), "lsn {lsn}");
+        }
+    }
+
+    #[test]
+    fn a_naming_stamp_names_its_one_record() {
+        let stamp = ReplayStamp::naming(9);
+        assert!(stamp.validate().is_ok());
+        assert!(stamp.skips(9));
+        assert!(!stamp.skips(8) && !stamp.skips(10));
+    }
+
+    #[test]
+    fn a_union_folds_ranges_that_reach_the_prefix_into_it() {
+        let u = stamp(10, &[(11, 12), (20, 20)]).union(&stamp(5, &[(8, 14)]));
+        assert_eq!(u, stamp(14, &[(20, 20)]));
+        assert_eq!(
+            ReplayStamp::through(9).union(&ReplayStamp::default()),
+            ReplayStamp::through(9)
+        );
     }
 
     #[test]

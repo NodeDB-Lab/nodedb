@@ -202,7 +202,6 @@ impl CoreLoop {
             memtable_memory_bytes_before,
             last_value_cache_before,
             series_catalog_before,
-            max_ingested_lsn_before,
             last_ts_ingest_before,
             reservation_bytes_before,
         } = token;
@@ -271,14 +270,6 @@ impl CoreLoop {
             }
             None => {
                 self.ts_series_catalogs.remove(&collection_key);
-            }
-        }
-        match max_ingested_lsn_before {
-            Some(lsn) => {
-                self.ts_max_ingested_lsn.insert(collection_key, lsn);
-            }
-            None => {
-                self.ts_max_ingested_lsn.remove(&collection_key);
             }
         }
         self.last_ts_ingest = last_ts_ingest_before;
@@ -350,7 +341,6 @@ mod tests {
         let mut cache = LastValueCache::new();
         cache.update(1, 10, 1.0);
         core.ts_last_value_caches.insert(key.clone(), cache.clone());
-        core.ts_max_ingested_lsn.insert(key.clone(), 7);
         let mut catalog = nodedb_types::timeseries::SeriesCatalog::new();
         catalog.resolve(&nodedb_types::timeseries::SeriesKey::new(
             "cpu",
@@ -367,7 +357,6 @@ mod tests {
             memtable_memory_bytes_before: Some(memory_bytes),
             last_value_cache_before: Some(cache),
             series_catalog_before: Some(catalog.clone()),
-            max_ingested_lsn_before: Some(7),
             last_ts_ingest_before: Some(prior_timer),
             reservation_bytes_before: None,
         };
@@ -388,7 +377,6 @@ mod tests {
             .get_mut(&key)
             .expect("cache")
             .update(1, 20, 2.0);
-        core.ts_max_ingested_lsn.insert(key.clone(), 99);
         core.ts_series_catalogs
             .get_mut(&key)
             .expect("catalog")
@@ -423,7 +411,6 @@ mod tests {
                 .map(|entry| (entry.ts, entry.value)),
             Some((10, 1.0))
         );
-        assert_eq!(core.ts_max_ingested_lsn.get(&key), Some(&7));
         assert_eq!(core.last_ts_ingest, Some(prior_timer));
     }
 
@@ -443,7 +430,6 @@ mod tests {
             memtable_memory_bytes_before: None,
             last_value_cache_before: None,
             series_catalog_before: None,
-            max_ingested_lsn_before: None,
             last_ts_ingest_before: None,
             reservation_bytes_before: None,
         };
@@ -453,14 +439,12 @@ mod tests {
             .insert(key.clone(), nodedb_types::timeseries::SeriesCatalog::new());
         core.ts_last_value_caches
             .insert(key.clone(), LastValueCache::new());
-        core.ts_max_ingested_lsn.insert(key.clone(), 1);
         core.last_ts_ingest = Some(std::time::Instant::now());
 
         core.apply_undo_timeseries(0, UndoEntry::TimeseriesIngest(token))
             .expect("undo");
         assert!(!core.columnar_memtables.contains_key(&key));
         assert!(!core.ts_last_value_caches.contains_key(&key));
-        assert!(!core.ts_max_ingested_lsn.contains_key(&key));
         assert!(
             !core.ts_series_catalogs.contains_key(&key),
             "the catalog the ingest created is gone"
@@ -597,7 +581,6 @@ mod tests {
             TenantId::new(TID),
             "metrics".to_string(),
         );
-        assert_eq!(core.ts_max_ingested_lsn.get(&key), Some(&lsn));
 
         core.flush_ts_collection(
             TenantId::new(TID),
@@ -606,6 +589,11 @@ mod tests {
             0,
         )
         .expect("flush committed transaction rows");
+        let stamp = &core.ts_replay_stamps.get(&key).expect("stamp").rows;
+        assert!(
+            stamp.skips(lsn),
+            "the partition's stamp names the transaction record: {stamp:?}"
+        );
         let max_flushed_lsn = core
             .ts_registries
             .get(&key)

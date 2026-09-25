@@ -50,6 +50,13 @@ pub(crate) fn read_sparse_vector_manifest_at(
             expected: SPARSE_VECTOR_CKPT_FORMAT_VERSION,
         });
     }
+    manifest
+        .replay
+        .validate()
+        .map_err(|source| CheckpointDecodeError::InvalidReplayStamp {
+            path: path.clone(),
+            source,
+        })?;
     Ok(Some(manifest))
 }
 

@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::timeseries_checkpoint::stamp::write_ts_stamp;
 use crate::engine::timeseries::columnar_segment::ColumnarSegmentWriter;
 use crate::engine::timeseries::partition_registry::PartitionRegistry;
 use crate::types::{DatabaseId, TenantId};
@@ -27,17 +28,28 @@ impl CoreLoop {
     ///
     /// These rows have no durable copy but the WAL, and the coordinated
     /// checkpoint calls this flush and then reports the LSN that authorises
-    /// deleting it. Draining first — as this did while its only callers were the
-    /// ingest-path thresholds and the idle timer — meant an encode or write
-    /// failure took the rows out of memory without putting them anywhere: the
-    /// scan stopped returning them for the rest of the process's life, and only
-    /// a restart's WAL replay brought them back. The partition is therefore
+    /// deleting it. An encode or write failure must not take the rows out of
+    /// memory without putting them anywhere. The partition is therefore
     /// written from a BORROW (`ColumnarMemtable::flush_view`) and the drain
     /// happens only once `write_partition` has returned `Ok` — its
-    /// `partition.meta` write being the commit point. Every failure path now
+    /// `partition.meta` write being the commit point. Every failure path
     /// leaves the memtable exactly as it was, so a failed flush costs a retry
     /// while the caller's clamped checkpoint LSN keeps the WAL records behind
     /// it.
+    ///
+    /// ## What the partition's stamp names
+    ///
+    /// The partition carries the collection's replay stamp as of this flush
+    /// (`timeseries_checkpoint::stamp`): the collection stamp plus every
+    /// record this core applied. Every row in the view belongs to one of
+    /// those records, and every one of those records has its rows here or in
+    /// an earlier partition. Restart replay skips exactly the named records.
+    ///
+    /// The ingest path resolves everything that could stop it mid-record
+    /// before the first row of a record goes in (its record-boundary admission
+    /// gate), and notes a record applied only once its rows all landed. A
+    /// flush from between two rows of a record would break the stamp in
+    /// either direction, so no caller may introduce one.
     pub(in crate::data::executor) fn flush_ts_collection(
         &mut self,
         tid: TenantId,
@@ -63,28 +75,20 @@ impl CoreLoop {
         let writer = ColumnarSegmentWriter::new(&segment_dir);
         let view = mt.flush_view();
 
-        // Use the max ingested WAL LSN for this collection so the partition
-        // records which WAL records have been flushed. Read before the write and
-        // never advanced by it.
-        //
-        // This is a collection-wide SCALAR, so the only state it can express is
-        // "every record at or below N is WHOLLY on disk" — and boot replay reads
-        // it exactly that way, skipping every record at or below the highest
-        // stamp it finds. "All of <= L-1 plus part of L" has no representation
-        // here, which is why the ingest path resolves everything that could stop
-        // it mid-record BEFORE the first row of a record goes in (its
-        // record-boundary admission gate) and stamps a record's LSN only once
-        // the record is fully ingested. Those two together are what make the
-        // claim this stamp rests on true by construction: every row in the view
-        // belongs to a record at or below it.
-        //
-        // A flush fired from between two rows of a record would break it in
-        // whichever direction it stamped — the predecessor's LSN duplicates the
-        // record on replay, the record's own LSN loses the rows not yet
-        // flushed — so no caller may introduce one.
-        let flush_wal_lsn = self.ts_max_ingested_lsn.get(&key).copied().unwrap_or(0);
+        let stamp = self.ts_flush_stamp(&key)?;
+        // Informational: `PartitionMeta` is shared with Lite, and replay reads
+        // the stamp file, never this LSN.
+        let flush_wal_lsn = stamp.rows.highest();
         let partition_name =
             unique_partition_name(&segment_dir, view.min_ts, view.max_ts, flush_wal_lsn)?;
+        // The stamp lands before `partition.meta`, the partition's commit
+        // point, so a committed partition always carries it.
+        let partition_dir = segment_dir.join(&partition_name);
+        std::fs::create_dir_all(&partition_dir).map_err(|e| crate::Error::Storage {
+            engine: "timeseries".into(),
+            detail: format!("create partition dir {}: {e}", partition_dir.display()),
+        })?;
+        write_ts_stamp(&partition_dir, &stamp)?;
         let ts_kek = self.segment_keks.ts_segment_kek.as_ref();
         let meta = writer
             .write_partition(&partition_name, &view, 0, flush_wal_lsn, ts_kek)
@@ -104,6 +108,9 @@ impl CoreLoop {
             });
         };
         let drain = mt.drain();
+        let replay_prefix = stamp.rows.prefix;
+        let applied_ranges = stamp.rows.applied_above.len();
+        self.ts_replay_stamps.insert(key.clone(), stamp);
 
         // The memtable is empty, so drop its memory reservation. The
         // reservation tracks the full resident footprint, kept current by
@@ -114,6 +121,8 @@ impl CoreLoop {
         tracing::info!(
             collection,
             rows = meta.row_count,
+            replay_prefix,
+            applied_ranges,
             "timeseries columnar flush complete"
         );
 

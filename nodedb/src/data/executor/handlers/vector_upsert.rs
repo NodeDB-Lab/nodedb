@@ -289,7 +289,6 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
         if let Err(e) = self.write_vector_direct_row(VectorDirectRowWrite {
-            task,
             index_key: &index_key,
             tid,
             collection,

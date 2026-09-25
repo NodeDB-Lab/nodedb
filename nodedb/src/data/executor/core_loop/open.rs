@@ -140,13 +140,13 @@ impl CoreLoop {
             columnar_engines: HashMap::new(),
             columnar_flushed_segments: HashMap::new(),
             columnar_flushed_surrogates: HashMap::new(),
-            ts_max_ingested_lsn: HashMap::new(),
+            ts_replay_stamps: HashMap::new(),
+            ts_replay_cursor: None,
             last_ts_ingest: None,
             ts_last_value_caches: HashMap::new(),
             ts_series_catalogs: HashMap::new(),
             ts_registries: HashMap::new(),
             ts_truncate_backlog: Vec::new(),
-            ts_truncate_floors: HashMap::new(),
             continuous_agg_mgr:
                 crate::engine::timeseries::continuous_agg::ContinuousAggregateManager::new(),
             checkpoint_coordinator: crate::storage::checkpoint::CheckpointCoordinator::new(

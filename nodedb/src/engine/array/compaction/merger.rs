@@ -399,7 +399,7 @@ impl MergedTile {
 #[cfg(test)]
 mod tests {
     use crate::engine::array::engine::{ArrayEngine, ArrayEngineConfig};
-    use crate::engine::array::test_support::{aid, put_one, schema};
+    use crate::engine::array::test_support::{aid, flush_if_full, put_one, schema};
     use crate::engine::array::wal::ArrayPutCell;
     use nodedb_array::types::cell_value::value::CellValue;
     use nodedb_array::types::coord::value::CoordValue;
@@ -419,6 +419,7 @@ mod tests {
             lsn,
         )
         .unwrap();
+        flush_if_full(e, &aid(), lsn);
     }
 
     #[test]
@@ -456,9 +457,11 @@ mod tests {
         cfg.flush_cell_threshold = 1;
         let mut e = ArrayEngine::new(cfg).unwrap();
         e.open_array(aid(), schema(), 0x1).unwrap();
-        // Four auto-flushes → four L0 segments → the picker fires.
+        // Four threshold flushes → four L0 segments → the picker fires.
         for i in 0..4 {
-            put_one(&mut e, i, 0, i, (i as u64) + 1);
+            let lsn = (i as u64) + 1;
+            put_one(&mut e, i, 0, i, lsn);
+            flush_if_full(&mut e, &aid(), lsn);
         }
         assert!(e.maybe_compact(&aid(), None, 0).unwrap());
 
@@ -472,6 +475,7 @@ mod tests {
 
         // The next flush must not be able to claim that name.
         put_one(&mut e, 5, 0, 5, 5);
+        flush_if_full(&mut e, &aid(), 5);
 
         let m = e.store(&aid()).unwrap().manifest();
         let ids: Vec<&str> = m.segments.iter().map(|s| s.id.as_str()).collect();
@@ -505,7 +509,8 @@ mod tests {
 
         // Segment 1: live cell at (1,0)
         put_one(&mut e, 1, 0, 10, 1);
-        e.flush(&aid(), 2).unwrap();
+        e.flush(&aid(), crate::types::replay_stamp::ReplayStamp::through(2))
+            .unwrap();
 
         // Segment 2: tombstone at (2,0) system=200
         e.delete_cells(
@@ -518,7 +523,8 @@ mod tests {
             3,
         )
         .unwrap();
-        e.flush(&aid(), 4).unwrap();
+        e.flush(&aid(), crate::types::replay_stamp::ReplayStamp::through(4))
+            .unwrap();
 
         // Segment 3: GDPR erasure at (3,0) system=300
         e.gdpr_erase_cell(
@@ -528,11 +534,13 @@ mod tests {
             5,
         )
         .unwrap();
-        e.flush(&aid(), 6).unwrap();
+        e.flush(&aid(), crate::types::replay_stamp::ReplayStamp::through(6))
+            .unwrap();
 
         // Segment 4: another live cell to reach the L0_TRIGGER threshold.
         put_one(&mut e, 4, 0, 40, 7);
-        e.flush(&aid(), 8).unwrap();
+        e.flush(&aid(), crate::types::replay_stamp::ReplayStamp::through(8))
+            .unwrap();
 
         loop {
             if !e.maybe_compact(&aid(), None, 0).unwrap() {

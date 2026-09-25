@@ -87,20 +87,15 @@ pub(super) fn load_boot_checkpoints(core: &mut CoreLoop) -> crate::Result<()> {
     core.load_graph_label_checkpoint()?;
     // Timeseries needs no checkpoint loader either — its checkpoint IS
     // the on-disk L1 partitions its flush writes. What it does need is
-    // its partition REGISTRIES rebuilt from them, because that is where
-    // replay's per-collection dedup gate lives: a `TimeseriesBatch` at
-    // or below a partition's `last_flushed_wal_lsn` is already in that
-    // partition and must not replay. The registries were previously
-    // built lazily by the first scan of a collection, which happens long
-    // after `replay_all_wal` — so replay saw no partitions, gated
-    // nothing, and re-appended every retained record on top of the
-    // partition that already held it. A timeseries ingest is an append,
-    // so nothing masked the duplicate rows. A committed `partition.meta`
-    // that will not decode is fail-stop: it is corruption of state this
-    // core is about to claim is durable, and skipping it quietly would
-    // under-restore the collection while leaving its records un-gated. An
-    // UNCOMMITTED partition directory (no `partition.meta` at all — the
-    // remains of an interrupted flush) is still a legitimate, silent skip.
+    // its partition registries and replay stamps rebuilt from them, because
+    // replay's per-collection skip gate reads the stamps: a
+    // `TimeseriesBatch` the stamp names is already in a partition, or a
+    // truncate removed it, and must not replay. A timeseries ingest is an
+    // append, so nothing masks a duplicate. A committed `partition.meta` or
+    // stamp that will not decode is fail-stop: it is corruption of state
+    // this core is about to claim is durable. An UNCOMMITTED partition
+    // directory (no `partition.meta` at all — the remains of an interrupted
+    // flush) is a legitimate, silent skip.
     core.load_ts_registries()?;
     Ok(())
 }

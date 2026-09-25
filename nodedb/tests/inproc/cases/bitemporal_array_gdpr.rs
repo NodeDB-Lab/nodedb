@@ -81,6 +81,19 @@ fn put_cell(e: &mut ArrayEngine, x: i64, v: i64, sys: i64, lsn: u64) {
         lsn,
     )
     .unwrap();
+    flush_if_full(e, lsn);
+}
+
+/// The threshold flush the executor runs after every write it applies,
+/// stamped through the write's LSN.
+fn flush_if_full(e: &mut ArrayEngine, lsn: u64) {
+    if e.needs_flush(&aid()).unwrap() {
+        e.flush(
+            &aid(),
+            nodedb::types::replay_stamp::ReplayStamp::through(lsn),
+        )
+        .unwrap();
+    }
 }
 
 fn tombstone_cell(e: &mut ArrayEngine, x: i64, sys: i64, lsn: u64) {
@@ -94,11 +107,13 @@ fn tombstone_cell(e: &mut ArrayEngine, x: i64, sys: i64, lsn: u64) {
         lsn,
     )
     .unwrap();
+    flush_if_full(e, lsn);
 }
 
 fn erase_cell(e: &mut ArrayEngine, x: i64, sys: i64, lsn: u64) {
     e.gdpr_erase_cell(&aid(), vec![CoordValue::Int64(x)], sys, lsn)
         .unwrap();
+    flush_if_full(e, lsn);
 }
 
 fn coord_x(x: i64) -> Vec<CoordValue> {
@@ -182,17 +197,17 @@ fn gdpr_erasure_persists_through_flush_and_blocks_reads() {
     use nodedb_array::tile::sparse_tile::RowKind;
 
     let dir = TempDir::new().unwrap();
-    // flush_cell_threshold=1 forces an auto-flush after each write.
+    // flush_cell_threshold=1 makes `flush_if_full` flush after each write.
     let mut e = open_engine_with_threshold(&dir, 1);
 
     // Live cell at x=0, sys=100.
     put_cell(&mut e, 0, 111, 100, 1);
-    // Auto-flush creates segment 1.
+    // The threshold flush creates segment 1.
 
     // Live cell at x=5, sys=200 — creates segment 2.
     put_cell(&mut e, 5, 222, 200, 2);
 
-    // GDPR erase x=0 at sys=300 — auto-flush creates segment 3.
+    // GDPR erase x=0 at sys=300 — the threshold flush creates segment 3.
     erase_cell(&mut e, 0, 300, 3);
 
     // Write a 4th entry to push us over the L0 compaction trigger.
@@ -273,13 +288,14 @@ fn gdpr_erasure_physically_dropped_outside_retention_horizon() {
     let mut e = ArrayEngine::new(cfg).unwrap();
     e.open_array(aid(), schema(), SCHEMA_HASH).unwrap();
 
-    // Write two live cells; auto-flush at threshold=1 creates one segment each.
+    // Write two live cells; the threshold flush at 1 creates one segment each.
     put_cell(&mut e, 0, 111, 100, 1);
     put_cell(&mut e, 5, 222, 200, 2);
 
     // GDPR-erase x=0 at sys=300, then manually flush the erasure tile.
     erase_cell(&mut e, 0, 300, 3);
-    e.flush(&aid(), 4).unwrap();
+    e.flush(&aid(), nodedb::types::replay_stamp::ReplayStamp::through(4))
+        .unwrap();
 
     let seg_count_before = e.store(&aid()).unwrap().manifest().segments.len();
     assert!(

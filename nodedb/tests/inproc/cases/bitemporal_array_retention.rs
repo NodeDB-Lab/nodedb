@@ -55,6 +55,19 @@ fn put_cell(e: &mut ArrayEngine, x: i64, v: i64, sys_ms: i64, lsn: u64) {
         lsn,
     )
     .unwrap();
+    flush_if_full(e, lsn);
+}
+
+/// The threshold flush the executor runs after every write it applies,
+/// stamped through the write's LSN.
+fn flush_if_full(e: &mut ArrayEngine, lsn: u64) {
+    if e.needs_flush(&aid()).unwrap() {
+        e.flush(
+            &aid(),
+            nodedb::types::replay_stamp::ReplayStamp::through(lsn),
+        )
+        .unwrap();
+    }
 }
 
 fn delete_cell(e: &mut ArrayEngine, x: i64, sys_ms: i64, lsn: u64) {
@@ -68,11 +81,13 @@ fn delete_cell(e: &mut ArrayEngine, x: i64, sys_ms: i64, lsn: u64) {
         lsn,
     )
     .unwrap();
+    flush_if_full(e, lsn);
 }
 
 fn gdpr_erase(e: &mut ArrayEngine, x: i64, sys_ms: i64, lsn: u64) {
     e.gdpr_erase_cell(&aid(), vec![CoordValue::Int64(x)], sys_ms, lsn)
         .unwrap();
+    flush_if_full(e, lsn);
 }
 
 fn compact_all(e: &mut ArrayEngine, audit_retain_ms: Option<i64>, now_ms: i64) {

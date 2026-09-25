@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! The admission test every ILP ingest runs before its rows land, and the
-//! preparation a committed-redo install adds to it.
+//! pre-image a committed-redo install records.
 //!
-//! An install flushes the rows the memtable already holds when it has no
-//! room for the new ones, and only then records its pre-image. The undo
-//! therefore restores a memtable that holds nothing the flush moved to disk.
+//! An install never flushes per sub-record: the replay arm flushed the
+//! memtable before the record's first sub-record when it could not take the
+//! whole record (`group_flush`). The pre-image is recorded after that flush,
+//! so the undo restores a memtable that holds nothing the flush moved to disk.
 
-use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::engine::timeseries::ilp;
@@ -40,25 +40,16 @@ impl CoreLoop {
         })
     }
 
-    /// Prepare the install of `lines` into `collection`: flush the memtable
-    /// when it has no room, then record the pre-image the undo restores.
-    pub(super) fn prepare_redo_ts_ingest(
+    /// Record the pre-image the undo of one installed sub-record into
+    /// `collection` restores.
+    pub(super) fn record_redo_ts_pre_image(
         &mut self,
         database_id: DatabaseId,
         tid: TenantId,
         collection: &str,
-        lines: &[ilp::IlpLine<'_>],
-        now_ms: i64,
-    ) -> Result<(), ErrorCode> {
+    ) {
         let key = (database_id, tid, collection.to_string());
-        if self.ts_ingest_needs_flush(&key, lines) {
-            self.flush_ts_collection(tid, database_id, collection, now_ms)
-                .map_err(|e| ErrorCode::Internal {
-                    detail: format!("pre-install ts flush of '{collection}' failed: {e}"),
-                })?;
-        }
         let undo = self.capture_timeseries_ingest_undo(&key);
         self.record_redo_undo([UndoEntry::TimeseriesIngest(undo)]);
-        Ok(())
     }
 }

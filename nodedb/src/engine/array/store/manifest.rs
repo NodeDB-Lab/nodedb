@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use nodedb_array::types::TileId;
 
+use crate::types::replay_stamp::{InvalidReplayStamp, ReplayStamp};
+
 const MANIFEST_FILENAME: &str = "manifest.ndam";
 
 #[derive(
@@ -32,9 +34,8 @@ pub struct SegmentRef {
     pub min_tile: TileId,
     pub max_tile: TileId,
     pub tile_count: u32,
-    /// LSN watermark recorded by the `ArrayFlush` record that produced
-    /// this segment. Recovery uses it to skip already-durable WAL
-    /// records.
+    /// The highest LSN the stamp of the flush that wrote this segment named.
+    /// Informational: replay decides a record by the manifest's stamp.
     pub flush_lsn: u64,
 }
 
@@ -44,10 +45,16 @@ pub struct SegmentRef {
 pub struct Manifest {
     pub schema_hash: u64,
     pub segments: Vec<SegmentRef>,
-    /// Highest WAL LSN reflected in any segment in this manifest.
-    /// Recovery replays WAL records strictly greater than this LSN
-    /// into the live memtable.
-    pub durable_lsn: u64,
+    /// The records the segments this manifest names hold: the replay stamp
+    /// of the flush that last published it. Restart replay skips an array
+    /// record exactly when this stamp names it.
+    ///
+    /// A newer flush's stamp names every record an older one named, because
+    /// the core's applied set only grows and its outcome floor only rises. So
+    /// the newest stamp replaces the older one rather than merging with it.
+    /// Compaction and purge rewrite segments without changing which records
+    /// they hold, so they leave the stamp alone.
+    pub replay: ReplayStamp,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -58,6 +65,11 @@ pub enum ManifestError {
     Decode { detail: String },
     #[error("manifest encode failed: {detail}")]
     Encode { detail: String },
+    #[error("manifest carries an invalid replay stamp: {source}")]
+    InvalidReplayStamp {
+        #[source]
+        source: InvalidReplayStamp,
+    },
 }
 
 impl Manifest {
@@ -65,7 +77,7 @@ impl Manifest {
         Self {
             schema_hash,
             segments: Vec::new(),
-            durable_lsn: 0,
+            replay: ReplayStamp::default(),
         }
     }
 
@@ -80,6 +92,11 @@ impl Manifest {
                     zerompk::from_msgpack(&bytes).map_err(|e| ManifestError::Decode {
                         detail: format!("{path:?}: {e}"),
                     })?;
+                // `skips` relies on the stamp's shape; a stamp that breaks it
+                // could skip a record no segment holds.
+                m.replay
+                    .validate()
+                    .map_err(|source| ManifestError::InvalidReplayStamp { source })?;
                 Ok(m)
             }
             Err(nodedb_wal::WalError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -114,7 +131,6 @@ impl Manifest {
     }
 
     pub fn append(&mut self, seg: SegmentRef) {
-        self.durable_lsn = self.durable_lsn.max(seg.flush_lsn);
         self.segments.push(seg);
     }
 
@@ -122,10 +138,7 @@ impl Manifest {
     /// compaction merger after it has produced a replacement segment.
     pub fn replace(&mut self, removed: &[String], added: Vec<SegmentRef>) {
         self.segments.retain(|s| !removed.contains(&s.id));
-        for seg in added {
-            self.durable_lsn = self.durable_lsn.max(seg.flush_lsn);
-            self.segments.push(seg);
-        }
+        self.segments.extend(added);
     }
 
     pub fn segments_at_level(&self, level: u8) -> impl Iterator<Item = &SegmentRef> {
@@ -163,7 +176,7 @@ mod tests {
         let loaded = Manifest::load_or_new(dir.path(), 0xCAFE).unwrap();
         assert_eq!(loaded.schema_hash, 0xCAFE);
         assert_eq!(loaded.segments.len(), 1);
-        assert_eq!(loaded.durable_lsn, 5);
+        assert_eq!(loaded.replay, ReplayStamp::default());
     }
 
     #[test]
@@ -171,17 +184,31 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let m = Manifest::load_or_new(dir.path(), 0x1).unwrap();
         assert!(m.segments.is_empty());
-        assert_eq!(m.durable_lsn, 0);
+        assert_eq!(m.replay, ReplayStamp::default());
     }
 
     #[test]
-    fn replace_swaps_segments_and_keeps_max_lsn() {
+    fn replace_swaps_segments_and_keeps_the_stamp() {
         let mut m = Manifest::new(0x1);
+        m.replay = ReplayStamp::through(2);
         m.append(seg("a", 0, 1));
         m.append(seg("b", 0, 2));
         m.replace(&["a".into(), "b".into()], vec![seg("c", 1, 2)]);
         assert_eq!(m.segments.len(), 1);
         assert_eq!(m.segments[0].id, "c");
-        assert_eq!(m.durable_lsn, 2);
+        assert_eq!(m.replay, ReplayStamp::through(2));
+    }
+
+    #[test]
+    fn the_stamp_round_trips_through_persist() {
+        let dir = TempDir::new().unwrap();
+        let mut m = Manifest::new(0xCAFE);
+        m.replay = ReplayStamp {
+            prefix: 5,
+            applied_above: vec![crate::types::replay_stamp::LsnRange { start: 9, end: 9 }],
+        };
+        m.persist(dir.path()).unwrap();
+        let loaded = Manifest::load_or_new(dir.path(), 0xCAFE).unwrap();
+        assert_eq!(loaded.replay, m.replay);
     }
 }

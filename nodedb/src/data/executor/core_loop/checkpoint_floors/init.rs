@@ -37,14 +37,14 @@ impl CheckpointFloors {
             // through, so this stays at zero until this process's own flush
             // succeeds.
             ts_durable_lsn: Lsn::ZERO,
-            // Vector, CRDT and spatial checkpoint files carry no core-level LSN
-            // to restore — a vector file holds its collection's replay gate, a
-            // Loro snapshot holds CRDT versions, and an R-tree file holds
-            // neither — so all three stay at zero until this process's own flush
-            // succeeds, and clamp truncation to zero until it does.
+            // CRDT and spatial checkpoint files carry no core-level LSN to
+            // restore — a Loro snapshot holds CRDT versions, and an R-tree file
+            // holds none — so both stay at zero until this process's own flush
+            // succeeds. Vector restores its LSN from its manifest at load.
             vector_durable_lsn: Lsn::ZERO,
             // No generation is published until one is loaded or written.
             vector_published_lsn: Lsn::ZERO,
+            sparse_vector_published_lsn: Lsn::ZERO,
             kv_published_lsn: Lsn::ZERO,
             columnar_published_lsn: Lsn::ZERO,
             crdt_durable_lsn: Lsn::ZERO,

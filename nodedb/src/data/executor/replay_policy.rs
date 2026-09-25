@@ -62,6 +62,15 @@ impl CoreLoop {
         self.redo_apply.scope.is_some()
     }
 
+    /// Whether the validate pass of a committed-redo apply is driving the
+    /// replay arms. That pass writes nothing.
+    pub(in crate::data::executor) fn validating_committed_redo(&self) -> bool {
+        self.redo_apply
+            .scope
+            .as_ref()
+            .is_some_and(|scope| scope.pass == RedoApplyPass::Validate)
+    }
+
     /// Whether the arm must skip the write it reached because the apply is
     /// validating. Claims the sub-record when it is. Call once per
     /// sub-record, after its decode, routing and checks.
@@ -126,6 +135,19 @@ impl CoreLoop {
     /// own watermark test. Always `false` during a committed-redo apply.
     pub(in crate::data::executor) fn replay_watermark_skips(&self, covered: bool) -> bool {
         covered && !self.applying_committed_redo()
+    }
+
+    /// Whether restart replay skips a vector-index record (HNSW, multi-vector,
+    /// direct row): the restored vector checkpoint holds it. Every vector
+    /// skip site asks here, and the answer is `ReplayStamp::skips`.
+    pub(in crate::data::executor) fn vector_replay_skips(&self, record_lsn: u64) -> bool {
+        self.replay_watermark_skips(self.floors.replay_floors.vector.covers(record_lsn))
+    }
+
+    /// Whether restart replay skips a sparse-vector record: the restored
+    /// sparse-vector checkpoint holds it.
+    pub(in crate::data::executor) fn sparse_vector_replay_skips(&self, record_lsn: u64) -> bool {
+        self.replay_watermark_skips(self.floors.replay_floors.sparse_vector.covers(record_lsn))
     }
 
     /// A committed record cannot be applied. Restart replay stops recovery

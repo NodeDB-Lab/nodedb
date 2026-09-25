@@ -6,6 +6,7 @@ mod admission;
 pub mod aggregate;
 pub mod encode;
 pub mod flush;
+mod group_flush;
 pub mod ingest;
 mod ingest_dispatch;
 pub mod ingest_formats;

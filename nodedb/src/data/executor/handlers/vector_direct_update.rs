@@ -200,8 +200,8 @@ impl CoreLoop {
 
         let mut written: Vec<(StorageKey, Vec<u8>)> = Vec::with_capacity(planned.len());
         for row in planned {
-            if let Err(e) = self
-                .apply_vector_direct_update_row(task, &index_key, tid, collection, &row, new_vector)
+            if let Err(e) =
+                self.apply_vector_direct_update_row(&index_key, tid, collection, &row, new_vector)
             {
                 return self.response_error(task, e);
             }
@@ -241,7 +241,6 @@ impl CoreLoop {
     /// only the bitmap entries and sidecar move.
     pub(in crate::data::executor) fn apply_vector_direct_update_row(
         &mut self,
-        task: &ExecutionTask,
         index_key: &VectorIndexKey,
         tid: u64,
         collection: &str,
@@ -252,7 +251,6 @@ impl CoreLoop {
         if let Some(vector) = new_vector {
             self.remove_vector_direct_row(index_key, tid, collection, row.surrogate)?;
             return self.write_vector_direct_row(VectorDirectRowWrite {
-                task,
                 index_key,
                 tid,
                 collection,
@@ -276,9 +274,6 @@ impl CoreLoop {
         };
         coll.payload.delete_row(node_id, &old);
         coll.payload.insert_row(node_id, &row.fields);
-        if let Some(lsn) = task.wal_lsn() {
-            coll.note_checkpoint_lsn(lsn.as_u64());
-        }
         let key = StorageKey::for_surrogate(row.surrogate);
         if let Err(e) = self
             .sparse

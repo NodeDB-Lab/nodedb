@@ -76,19 +76,16 @@ impl CoreLoop {
                         .get(&index_key)
                         .cloned()
                         .unwrap_or_default();
-                    let skip = {
-                        let coll = self
-                            .vector_collections
-                            .entry(index_key.clone())
-                            .or_insert_with(|| {
-                                nodedb_vector::VectorCollection::new(*dim as usize, params)
-                            });
-                        // Skip a straddling-segment record the restored
-                        // checkpoint already absorbed (replay only; a
-                        // live write always carries a higher, unseen
-                        // LSN).
-                        wal_lsn != 0 && wal_lsn <= coll.checkpoint_wal_lsn()
-                    };
+                    // Skip a record the restored vector checkpoint holds. Its
+                    // stamp names only records applied before the checkpoint,
+                    // all of them replayed before the core serves a request,
+                    // so a live write is never named.
+                    let skip = wal_lsn != 0 && self.vector_replay_skips(wal_lsn);
+                    self.vector_collections
+                        .entry(index_key.clone())
+                        .or_insert_with(|| {
+                            nodedb_vector::VectorCollection::new(*dim as usize, params)
+                        });
                     if skip {
                         continue;
                     }
@@ -100,7 +97,6 @@ impl CoreLoop {
                         field_name,
                         storage_key,
                         floats,
-                        wal_lsn,
                     }) {
                         inserts.push(delta);
                     }
@@ -160,17 +156,11 @@ impl CoreLoop {
                         Self::vector_index_key(database_id, tid, collection, field_name);
                     self.check_vector_width(&store_key, field_name, floats.len())?;
                     let dim = floats.len();
-                    let skip = {
-                        let coll = self
-                            .vector_collections
-                            .entry(store_key.clone())
-                            .or_insert_with(|| nodedb_vector::VectorCollection::new(dim, params));
-                        // Skip a straddling-segment record the restored
-                        // checkpoint already absorbed (replay only; a
-                        // live write always carries a higher, unseen
-                        // LSN).
-                        wal_lsn != 0 && wal_lsn <= coll.checkpoint_wal_lsn()
-                    };
+                    // Same stamp gate as the strict arm above.
+                    let skip = wal_lsn != 0 && self.vector_replay_skips(wal_lsn);
+                    self.vector_collections
+                        .entry(store_key.clone())
+                        .or_insert_with(|| nodedb_vector::VectorCollection::new(dim, params));
                     if skip {
                         continue;
                     }
@@ -182,7 +172,6 @@ impl CoreLoop {
                         field_name,
                         storage_key,
                         floats,
-                        wal_lsn,
                     }) {
                         inserts.push(delta);
                     }
@@ -254,7 +243,6 @@ impl CoreLoop {
             field_name,
             storage_key,
             floats,
-            wal_lsn,
         } = params;
         let _ = self.remove_document_vector_index_field(
             database_id,
@@ -265,7 +253,6 @@ impl CoreLoop {
         );
         let coll = self.vector_collections.get_mut(&index_key)?;
         let vector_id = coll.insert_with_surrogate(floats, storage_key.surrogate());
-        coll.note_checkpoint_lsn(wal_lsn);
         self.vector_doc_map.insert(
             (
                 index_key.0,
@@ -571,5 +558,43 @@ mod tests {
                 "malformed embedding '{bad}' must not be indexed"
             );
         }
+    }
+
+    /// A document put the restored vector checkpoint's stamp names is not
+    /// indexed again on replay; one it does not name is indexed.
+    #[test]
+    fn a_put_the_vector_stamp_names_is_not_indexed_again() {
+        let mut harness = make_core();
+        let core = &mut harness.core;
+        let (db_id, tid, collection) = (0u64, 1u64, "docs");
+        register_bare_field(core, db_id, tid, collection);
+        core.floors
+            .replay_floors
+            .vector
+            .set(crate::types::replay_stamp::ReplayStamp {
+                prefix: 5,
+                applied_above: vec![crate::types::replay_stamp::LsnRange { start: 10, end: 10 }],
+            });
+
+        for (surrogate, wal_lsn) in [(1, 10), (2, 7)] {
+            let storage_key = crate::engine::document::store::StorageKey::for_surrogate(
+                Surrogate::new(surrogate),
+            );
+            let doc = doc_with_vectors(&[("embedding", &[1.0, 0.0, 0.0])]);
+            core.apply_point_put_vector_indexes(VectorIndexPutParams {
+                database_id: db_id,
+                tid,
+                collection,
+                storage_key,
+                value: &doc,
+                wal_lsn,
+            })
+            .expect("vector indexing must accept this fixture");
+        }
+        assert_eq!(
+            physical_len(core, db_id, tid, collection, "embedding"),
+            1,
+            "the put at lsn 10 is held by the checkpoint; the in-flight put at lsn 7 is indexed"
+        );
     }
 }

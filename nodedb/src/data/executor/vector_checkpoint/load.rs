@@ -68,7 +68,10 @@ impl CoreLoop {
         // clamps truncation to, so claiming it over a half-restored generation
         // would authorise deleting the records that would have completed it.
         self.floors.vector_durable_lsn = Lsn::new(manifest.durable_through_lsn);
-        self.floors.vector_published_lsn = Lsn::new(manifest.durable_through_lsn);
+        self.floors.vector_published_lsn = Lsn::new(manifest.replay.prefix);
+        let replay_prefix = manifest.replay.prefix;
+        let applied_ranges = manifest.replay.applied_above.len();
+        self.floors.replay_floors.vector.set(manifest.replay);
 
         info!(
             core = self.core_id,
@@ -76,6 +79,8 @@ impl CoreLoop {
             loaded,
             vectors,
             durable_through_lsn = manifest.durable_through_lsn,
+            replay_prefix,
+            applied_ranges,
             "vector checkpoint restored"
         );
         Ok(())
@@ -180,6 +185,7 @@ mod tests {
             format_version: VECTOR_CKPT_FORMAT_VERSION + 1,
             generation: 0,
             durable_through_lsn: 5,
+            replay: crate::types::replay_stamp::ReplayStamp::default(),
         })
         .expect("encode");
         nodedb_wal::segment::write_checkpoint_framed(&ckpt_dir, VECTOR_CKPT_MANIFEST, &bytes)
@@ -213,5 +219,71 @@ mod tests {
         restored
             .load_vector_checkpoints()
             .expect_err("a corrupt index file must fail the load, not skip it");
+    }
+
+    /// A bare `VectorPut` record (collection, vector, dim) at `lsn`.
+    fn vector_put(lsn: u64, vector: Vec<f32>) -> nodedb_wal::WalRecord {
+        let dim = vector.len();
+        nodedb_wal::WalRecord::new(nodedb_wal::record::WalRecordArgs {
+            record_type: nodedb_wal::record::RecordType::VectorPut as u32,
+            lsn,
+            tenant_id: 1,
+            vshard_id: 0,
+            database_id: 0,
+            payload: zerompk::to_msgpack_vec(&("emb", vector, dim)).expect("encode put"),
+            encryption_key: None,
+            preamble_bytes: None,
+        })
+        .expect("build record")
+    }
+
+    /// Record B at LSN 30 applies and the checkpoint is written while record A
+    /// at LSN 20 is still on its way. A applies after the checkpoint, and the
+    /// core stops before another one. Replay applies A once and skips B, so
+    /// the replayed index equals the live one.
+    #[test]
+    fn a_vector_write_in_flight_at_a_checkpoint_replays_once() {
+        use crate::engine::vector::hnsw::HnswParams;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = CoreLoop::vector_index_key(0, 1, "emb", "");
+        let live = {
+            let mut core = open_core_at(dir.path());
+            core.floors
+                .applied_prefix
+                .observe_outcome_floor(Lsn::new(10));
+            let mut collection = VectorCollection::new(3, HnswParams::default());
+            collection.insert(vec![0.0, 0.0, 1.0]);
+            core.vector_collections.insert(key.clone(), collection);
+            core.floors.applied_prefix.note_applied(Lsn::new(30));
+            core.checkpoint_vector_indexes().expect("checkpoint");
+            if let Some(collection) = core.vector_collections.get_mut(&key) {
+                collection.insert(vec![1.0, 0.0, 0.0]);
+            }
+            core.floors.applied_prefix.note_applied(Lsn::new(20));
+            core.vector_collections.get(&key).map(|c| c.len())
+        };
+        assert_eq!(live, Some(2));
+
+        let mut restored = open_core_at(dir.path());
+        restored.load_vector_checkpoints().expect("load");
+        assert_eq!(
+            restored.vector_collections.get(&key).map(|c| c.len()),
+            Some(1),
+            "the checkpoint holds B and not A"
+        );
+        restored.replay_vector_wal(
+            &[
+                vector_put(20, vec![1.0, 0.0, 0.0]),
+                vector_put(30, vec![0.0, 0.0, 1.0]),
+            ],
+            1,
+            &nodedb_wal::TombstoneSet::new(),
+        );
+        assert_eq!(
+            restored.vector_collections.get(&key).map(|c| c.len()),
+            live,
+            "replay applies A once and never applies B again"
+        );
     }
 }

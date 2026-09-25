@@ -747,17 +747,13 @@ mod tests {
         );
     }
 
-    /// The raw engine op `VectorCollection::insert` is still append-only (it
-    /// never dedups), but cross-boot (checkpoint) idempotency holds: the replay
-    /// gate (`checkpoint_wal_lsn`) is frozen during a replay pass —
-    /// `note_checkpoint_lsn` only advances the running `applied_wal_lsn` max,
-    /// so sibling sub-records sharing one `TransactionRedo` LSN all apply
-    /// instead of the first one gating the rest. The gate only moves at a
-    /// checkpoint save (folding `applied_wal_lsn` in) and load (exposing it),
-    /// which is what a real reboot does. This test reproduces that: replay
-    /// once, round-trip the collection through a checkpoint to install the
-    /// persisted watermark as the gate, then replay again and assert the
-    /// record is skipped, leaving ONE copy, not two.
+    /// The raw engine op `VectorCollection::insert` is append-only (it never
+    /// dedups), so cross-boot idempotency rests on the restored checkpoint's
+    /// stamp: a record it names is skipped. The stamp is set only at load, so
+    /// sibling sub-records sharing one `TransactionRedo` LSN all apply within
+    /// one replay pass. This test replays once, installs a stamp naming the
+    /// record as a restored checkpoint does, then replays again and asserts
+    /// the record is skipped, leaving one copy, not two.
     #[test]
     fn redo_vector_insert_idempotent_on_double_replay() {
         let mut h = make_core();
@@ -768,28 +764,11 @@ mod tests {
             .replay_transaction_redo_wal(std::slice::from_ref(&record), 1, &tomb)
             .expect("redo replay must succeed");
 
-        // Simulate a checkpoint capture + reboot: saving folds the applied
-        // watermark into the persisted gate, and restoring exposes it — so the
-        // straddling record is now gated on the second replay.
+        // A checkpoint written after that replay names the record.
         let key = CoreLoop::vector_index_key(0, 7, "emb", "");
-        let bytes = h
-            .core
-            .vector_collections
-            .get(&key)
-            .expect("collection present after first replay")
-            .checkpoint_to_bytes(None)
-            .unwrap();
-        let memory = nodedb_mem::ScopedMemory::new(
-            h.core.governor.clone(),
-            nodedb_types::DatabaseId::new(0),
-            crate::types::TenantId::new(7),
-            nodedb_mem::EngineId::Vector,
+        h.core.floors.replay_floors.vector.set(
+            crate::data::executor::applied_prefix::ReplayStamp::through(record.header.lsn),
         );
-        let restored = crate::engine::vector::collection::VectorCollection::from_checkpoint(
-            &bytes, None, memory,
-        )
-        .expect("decode checkpoint");
-        h.core.vector_collections.insert(key.clone(), restored);
 
         h.core
             .replay_transaction_redo_wal(std::slice::from_ref(&record), 1, &tomb)
@@ -799,8 +778,7 @@ mod tests {
         assert_eq!(
             len,
             Some(1),
-            "checkpoint-LSN gate makes replay idempotent: a record at or below the \
-             collection's recorded watermark is skipped on re-replay"
+            "a record the restored checkpoint's stamp names is skipped on re-replay"
         );
     }
 

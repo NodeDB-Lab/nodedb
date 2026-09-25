@@ -38,10 +38,10 @@
 //! state and must still replay. Without the gate the checkpoint would duplicate
 //! rows; without the replay above it the checkpoint would lose them.
 //!
-//! Note the gate is NOT the `last_flushed_wal_lsn` watermark of the timeseries
-//! profile: that field exists only on `nodedb_types::timeseries::PartitionMeta`,
-//! used by the separate `ts_registries` / bucketed-partition machinery, which
-//! this op pair never targets.
+//! Note the gate is NOT the timeseries collection stamp
+//! (`timeseries_checkpoint::stamp`): that stamp covers the separate
+//! `ts_registries` / bucketed-partition machinery, which this op pair never
+//! targets.
 
 use super::core_loop::CoreLoop;
 use crate::bridge::envelope::{PhysicalPlan, Status};

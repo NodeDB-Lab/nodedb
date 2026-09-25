@@ -45,11 +45,7 @@ impl CoreLoop {
             return false;
         }
         let index_key = CoreLoop::vector_index_key(database_id, tenant_id, &collection, &field);
-        if self.replay_watermark_skips(
-            self.vector_collections
-                .get(&index_key)
-                .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
-        ) {
+        if self.vector_replay_skips(record_lsn) {
             return false;
         }
         let surrogates: Vec<nodedb_types::Surrogate> = mutations
@@ -122,9 +118,6 @@ impl CoreLoop {
         };
         if !touched.is_empty() {
             self.finish_vector_direct_write(&task, &index_key, tenant_id, &collection, &touched);
-        }
-        if let Some(coll) = self.vector_collections.get_mut(&index_key) {
-            coll.note_checkpoint_lsn(record_lsn);
         }
         true
     }

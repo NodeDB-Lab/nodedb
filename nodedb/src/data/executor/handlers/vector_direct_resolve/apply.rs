@@ -248,7 +248,6 @@ impl CoreLoop {
                         old_sidecar: old_payload.clone(),
                     };
                     self.apply_vector_direct_update_row(
-                        task,
                         &index_key,
                         tid,
                         collection,
@@ -272,7 +271,6 @@ impl CoreLoop {
                         self.remove_vector_direct_row(&index_key, tid, collection, *surrogate)?;
                     }
                     self.write_vector_direct_row(VectorDirectRowWrite {
-                        task,
                         index_key: &index_key,
                         tid,
                         collection,

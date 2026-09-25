@@ -46,6 +46,13 @@ pub(crate) fn read_vector_manifest_at(
             expected: VECTOR_CKPT_FORMAT_VERSION,
         });
     }
+    manifest
+        .replay
+        .validate()
+        .map_err(|source| CheckpointDecodeError::InvalidReplayStamp {
+            path: path.clone(),
+            source,
+        })?;
     Ok(Some(manifest))
 }
 

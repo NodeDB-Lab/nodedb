@@ -5,23 +5,20 @@
 //! insert/delete, and multi-vector (ColBERT-style) insert/delete.
 //!
 //! Runs during startup after `replay_vector_wal` (so `VectorParams` are
-//! already registered) and after the vector / sparse checkpoints are loaded
-//! (so the per-collection checkpoint watermark gates re-application).
+//! already registered) and after the vector and sparse checkpoints are loaded
+//! (so their replay stamps gate re-application).
 //!
-//! ## Watermark discipline
+//! ## Stamp discipline
 //!
-//! Direct-upsert and multi-vector writes append HNSW nodes, which are **not**
+//! Direct-upsert and multi-vector writes append HNSW nodes, which are not
 //! idempotent under double replay (`insert_with_surrogate` /
-//! `insert_multi_vector` never dedup). They are therefore gated by the
-//! per-collection `checkpoint_wal_lsn`: a restored checkpoint already contains
-//! every write at or below its watermark, so records at/below it are skipped;
-//! records above it are the WAL tail the checkpoint has not absorbed and are
-//! applied, after which the watermark is advanced.
+//! `insert_multi_vector` never dedup). A record the restored vector
+//! checkpoint's stamp names is skipped (`vector_replay_skips`). Every other
+//! record replays, including a lower-LSN record that was still in flight when
+//! the checkpoint was written.
 //!
-//! Sparse insert/delete need no watermark: the sparse index upserts by
-//! `doc_id` (a re-inserted document replaces its own postings) and delete of
-//! an absent document is a no-op, so full re-application over a restored
-//! checkpoint reproduces the exact same state.
+//! Sparse insert and delete are gated the same way by the sparse-vector
+//! checkpoint's stamp (`sparse_vector_replay_skips`).
 
 use nodedb_physical::physical_plan::VectorOp;
 use nodedb_wal::record::RecordType;
@@ -202,13 +199,9 @@ impl CoreLoop {
             return false;
         }
         let index_key = CoreLoop::vector_index_key(database_id, tenant_id, &collection, &field);
-        // Watermark gate: a restored checkpoint already holds every write at or
-        // below its watermark; re-applying would append a duplicate HNSW node.
-        if self.replay_watermark_skips(
-            self.vector_collections
-                .get(&index_key)
-                .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
-        ) {
+        // The restored checkpoint holds this write; re-applying it appends a
+        // duplicate HNSW node.
+        if self.vector_replay_skips(record_lsn) {
             return false;
         }
         let surrogate = nodedb_types::Surrogate::new(surrogate_u32);
@@ -282,12 +275,6 @@ impl CoreLoop {
             );
             return false;
         }
-        // Advance the (possibly freshly created) collection's watermark so the
-        // next checkpoint records this replayed write and a later restart does
-        // not re-apply it.
-        if let Some(coll) = self.vector_collections.get_mut(&index_key) {
-            coll.note_checkpoint_lsn(record_lsn);
-        }
         true
     }
 
@@ -317,11 +304,7 @@ impl CoreLoop {
         }
         let index_key =
             CoreLoop::vector_index_key(database_id, tenant_id, &collection, &field_name);
-        if self.replay_watermark_skips(
-            self.vector_collections
-                .get(&index_key)
-                .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
-        ) {
+        if self.vector_replay_skips(record_lsn) {
             return false;
         }
         let document_surrogate = nodedb_types::Surrogate::new(doc_surrogate_u32);
@@ -378,9 +361,6 @@ impl CoreLoop {
             );
             return false;
         }
-        if let Some(coll) = self.vector_collections.get_mut(&index_key) {
-            coll.note_checkpoint_lsn(record_lsn);
-        }
         true
     }
 
@@ -412,11 +392,7 @@ impl CoreLoop {
         }
         let index_key =
             CoreLoop::vector_index_key(database_id, tenant_id, &collection, &field_name);
-        if self.replay_watermark_skips(
-            self.vector_collections
-                .get(&index_key)
-                .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
-        ) {
+        if self.vector_replay_skips(record_lsn) {
             return false;
         }
         let document_surrogate = nodedb_types::Surrogate::new(doc_surrogate_u32);
@@ -459,9 +435,6 @@ impl CoreLoop {
             &field_name,
             document_surrogate,
         );
-        if let Some(coll) = self.vector_collections.get_mut(&index_key) {
-            coll.note_checkpoint_lsn(record_lsn);
-        }
         true
     }
 }
@@ -582,11 +555,10 @@ mod tests {
         );
     }
 
-    /// A `DirectUpsert` record at or below the collection's restored checkpoint
-    /// watermark must NOT be re-applied (no duplicate HNSW node); one above it
-    /// must replay.
+    /// A `DirectUpsert` record the restored checkpoint's stamp names is not
+    /// re-applied (no duplicate HNSW node); one it does not name replays.
     #[test]
-    fn direct_upsert_watermark_gates_replay() {
+    fn direct_upsert_stamp_gates_replay() {
         // Record LSNs are 1 (below/at) and 2 (above) after two appends.
         let records = append_via_autocommit(&[
             direct_upsert_plan(1, vec![1.0, 2.0, 3.0]),
@@ -595,25 +567,14 @@ mod tests {
         assert_eq!(records.len(), 2);
 
         let mut h = make_core();
-        // Simulate a restored checkpoint holding the first write, watermarked at
-        // its LSN (1). The second write (LSN 2) is the un-absorbed WAL tail.
+        // A restored checkpoint holding the first write, whose stamp names its
+        // LSN. The second write is the WAL tail the checkpoint does not hold.
         let mut coll = VectorCollection::new(3, HnswParams::default());
         coll.insert_with_surrogate(vec![1.0, 2.0, 3.0], Surrogate::new(1));
-        coll.note_checkpoint_lsn(records[0].header.lsn);
-        // Round-trip through a checkpoint so the persisted watermark becomes the
-        // replay gate (`checkpoint_wal_lsn`): a live `note_checkpoint_lsn` only
-        // feeds the applied watermark, which save folds into the gate and load
-        // restores — the faithful shape of a restored checkpoint.
-        let bytes = coll.checkpoint_to_bytes(None).unwrap();
-        let memory = nodedb_mem::ScopedMemory::new(
-            h.core.governor.clone(),
-            DatabaseId::DEFAULT,
-            TenantId::new(TID),
-            nodedb_mem::EngineId::Vector,
-        );
-        let coll =
-            VectorCollection::from_checkpoint(&bytes, None, memory).expect("decode checkpoint");
         h.core.vector_collections.insert(du_index_key(), coll);
+        h.core.floors.replay_floors.vector.set(
+            crate::data::executor::applied_prefix::ReplayStamp::through(records[0].header.lsn),
+        );
 
         h.core
             .replay_vector_extended_wal(&records, 1, &nodedb_wal::TombstoneSet::new());
@@ -626,7 +587,7 @@ mod tests {
         assert_eq!(
             coll.len(),
             2,
-            "record at/below watermark skipped, record above replayed (no duplicate)"
+            "the record the stamp names is skipped and the other replays (no duplicate)"
         );
     }
 
@@ -658,6 +619,29 @@ mod tests {
             .get(&sparse_key("sv"))
             .expect("sparse index rebuilt from WAL");
         assert_eq!(idx.doc_count(), 1, "the sparse document must be recovered");
+    }
+
+    /// A sparse insert the restored sparse-vector checkpoint's stamp names is
+    /// not replayed.
+    #[test]
+    fn a_sparse_insert_the_stamp_names_is_skipped() {
+        let plan = PhysicalPlan::Vector(VectorOp::SparseInsert {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "sc"),
+            field_name: "sv".into(),
+            doc_id: "d1".into(),
+            entries: vec![(10, 0.5)],
+        });
+        let records = append_via_autocommit(&[plan]);
+        let mut h = make_core();
+        h.core.floors.replay_floors.sparse_vector.set(
+            crate::data::executor::applied_prefix::ReplayStamp::through(records[0].header.lsn),
+        );
+        h.core
+            .replay_vector_extended_wal(&records, 1, &nodedb_wal::TombstoneSet::new());
+        assert!(
+            !h.core.sparse_vector_indexes.contains_key(&sparse_key("sv")),
+            "the checkpoint holds the insert, so replay does not apply it again"
+        );
     }
 
     #[test]

@@ -2,16 +2,29 @@
 
 //! `TimeseriesOp::Truncate`: remove every row of a timeseries collection.
 //!
-//! In-memory state (memtable, its reservation, partition registry, ingest
-//! watermark, last-value cache, series catalog) is moved out whole. The
-//! partition directory is renamed to an aside name in one atomic step
+//! In-memory state (memtable, its reservation, partition registry,
+//! last-value cache, series catalog) is moved out whole. The partition
+//! directory is renamed to an aside name in one atomic step
 //! (`truncating_dir_name`), so a scan can never observe half a directory.
 //! Autocommit removes the aside directory at once; inside a transaction
 //! batch it stays until the batch finalizes (`finalize_timeseries_truncates`)
 //! or the undo renames it back (`apply_undo_timeseries_truncate`). A crash
 //! between rename and removal leaves an aside directory that boot removes
-//! (`remove_truncating_leftovers`): the truncate's WAL record precedes the
-//! rename, so replay re-applies it either way.
+//! (`remove_truncating_leftovers`).
+//!
+//! ## The stamp a truncate leaves
+//!
+//! After the rename the truncate creates a fresh collection directory holding
+//! only the collection's replay stamp (`timeseries_checkpoint::stamp`). Its
+//! rows name every record the truncate removed: the collection stamp plus
+//! every record this core applied. Its truncates name this truncate. Restart
+//! replay then never re-applies the truncate, and a record below its LSN that
+//! applied after it replays and survives.
+//!
+//! The stamp is written after the rename. A crash between the two leaves no
+//! stamp naming the truncate, so replay re-applies it; no later write applied
+//! in between, because this core ran nothing else. A stamp that cannot be
+//! written puts the directory back and fails the truncate.
 
 use std::path::{Path, PathBuf};
 
@@ -21,6 +34,10 @@ use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::undo::{TimeseriesTruncateUndo, UndoEntry};
 use crate::data::executor::task::ExecutionTask;
+use crate::data::executor::timeseries_checkpoint::stamp::{
+    TsCollectionKey, TsReplayStamp, write_ts_stamp,
+};
+use crate::types::replay_stamp::ReplayStamp;
 
 /// Suffix marking a partition directory renamed aside by a truncate.
 pub(in crate::data::executor) const TRUNCATING_MARKER: &str = ".truncating-";
@@ -85,23 +102,28 @@ impl CoreLoop {
             if let Err(e) = rename_aside(&original, &moved) {
                 return self.response_error(task, e);
             }
-            Some((original, moved))
+            Some(moved)
         } else {
             None
+        };
+        let stamp = match self.write_truncate_stamp(&key, &original, task.wal_lsn()) {
+            Ok(stamp) => stamp,
+            Err(e) => {
+                if let Err(restore) = restore_after_failed_stamp(&original, moved_dir.as_ref()) {
+                    return self.response_error(task, restore);
+                }
+                return self.response_error(task, e);
+            }
         };
 
         let memtable = self.columnar_memtables.remove(&key);
         let memtable_mem = self.columnar_memtable_mem.remove(&key);
         let registry = self.ts_registries.remove(&key);
-        let max_ingested_lsn = self.ts_max_ingested_lsn.remove(&key);
         let last_value_cache = self.ts_last_value_caches.remove(&key);
         let series_catalog = self.ts_series_catalogs.remove(&key);
         let truncated = memtable.as_ref().map(|m| m.row_count()).unwrap_or(0)
             + registry.as_ref().map(|r| r.total_row_count()).unwrap_or(0);
-        let truncate_floor_before = match task.wal_lsn() {
-            Some(lsn) => self.ts_truncate_floors.insert(key.clone(), lsn.as_u64()),
-            None => self.ts_truncate_floors.get(&key).copied(),
-        };
+        let replay_stamp = self.ts_replay_stamps.insert(key.clone(), stamp);
 
         self.continuous_agg_mgr
             .reset_for_source(db.as_u64(), collection);
@@ -110,18 +132,18 @@ impl CoreLoop {
             Some(log) => log.push(UndoEntry::TimeseriesTruncate(Box::new(
                 TimeseriesTruncateUndo {
                     collection_key: key,
+                    original_dir: original,
                     moved_dir,
                     memtable,
                     memtable_mem,
                     registry,
-                    max_ingested_lsn,
                     last_value_cache,
                     series_catalog,
-                    truncate_floor: truncate_floor_before,
+                    replay_stamp,
                 },
             ))),
             None => {
-                if let Some((_, moved)) = &moved_dir
+                if let Some(moved) = &moved_dir
                     && let Err(e) = remove_dir_tree(moved)
                 {
                     return self.response_error(task, e);
@@ -150,7 +172,7 @@ impl CoreLoop {
             let UndoEntry::TimeseriesTruncate(undo) = entry else {
                 continue;
             };
-            let Some((_, moved)) = &undo.moved_dir else {
+            let Some(moved) = &undo.moved_dir else {
                 continue;
             };
             if let Err(e) = remove_dir_tree(moved) {
@@ -163,6 +185,27 @@ impl CoreLoop {
                 self.ts_truncate_backlog.push(moved.clone());
             }
         }
+    }
+
+    /// Create `original` afresh and write into it the replay stamp this
+    /// truncate leaves: every record this core applied, and the truncate at
+    /// `lsn`. Returns the stamp.
+    fn write_truncate_stamp(
+        &self,
+        key: &TsCollectionKey,
+        original: &Path,
+        lsn: Option<crate::types::Lsn>,
+    ) -> crate::Result<TsReplayStamp> {
+        let mut stamp = self.ts_flush_stamp(key)?;
+        if let Some(lsn) = lsn {
+            stamp.truncates = stamp.truncates.union(&ReplayStamp::naming(lsn.as_u64()));
+        }
+        std::fs::create_dir_all(original).map_err(|e| crate::Error::Storage {
+            engine: "timeseries".into(),
+            detail: format!("create collection directory {}: {e}", original.display()),
+        })?;
+        write_ts_stamp(original, &stamp)?;
+        Ok(stamp)
     }
 
     /// Retry every aside directory removal a batch finalize deferred.
@@ -182,6 +225,23 @@ impl CoreLoop {
         }
         self.ts_truncate_backlog.len()
     }
+}
+
+/// Put the collection back as it was before a truncate whose stamp could not
+/// be written: remove the fresh directory, then rename the aside one back.
+fn restore_after_failed_stamp(original: &Path, moved: Option<&PathBuf>) -> crate::Result<()> {
+    remove_dir_tree(original)?;
+    if let Some(moved) = moved {
+        std::fs::rename(moved, original).map_err(|e| crate::Error::Storage {
+            engine: "timeseries".into(),
+            detail: format!(
+                "rename partition directory {} back to {}: {e}",
+                moved.display(),
+                original.display()
+            ),
+        })?;
+    }
+    Ok(())
 }
 
 /// Rename `original` to `moved`. An aside directory already at `moved` is a
@@ -235,6 +295,7 @@ mod tests {
     use super::*;
     use crate::bridge::envelope::{PhysicalPlan, Status};
     use crate::data::executor::core_loop::tests::make_core_with_dir;
+    use crate::data::executor::timeseries_checkpoint::stamp::TS_STAMP_FILE;
     use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
     use nodedb_physical::physical_plan::TimeseriesOp;
 
@@ -298,6 +359,16 @@ mod tests {
             .unwrap_or(0)
     }
 
+    /// The entries of `dir`, by name, sorted.
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     fn decode_truncated(resp: &crate::bridge::envelope::Response) -> u64 {
         let v = nodedb_types::value_from_msgpack(resp.payload.as_bytes()).expect("payload");
         v.as_object()
@@ -307,7 +378,8 @@ mod tests {
     }
 
     /// Autocommit: memtable rows and a flushed partition both go, the
-    /// directory is removed, and the count covers both.
+    /// directory is replaced by one holding only the truncate's stamp, and
+    /// the count covers both.
     #[test]
     fn autocommit_truncate_removes_memtable_partitions_and_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -336,7 +408,20 @@ mod tests {
         assert_eq!(decode_truncated(&resp), 3);
         assert_eq!(memtable_rows(&core), 0);
         assert_eq!(partition_rows(&core), 0);
-        assert!(!ts_dir.exists(), "the partition directory is gone");
+        assert_eq!(
+            entries(&ts_dir),
+            vec![TS_STAMP_FILE.to_string()],
+            "the partitions are gone; the fresh directory holds the stamp"
+        );
+        let stamp = core.ts_replay_stamps.get(&key()).expect("stamp");
+        assert!(stamp.rows.skips(1) && stamp.rows.skips(2), "{stamp:?}");
+        assert!(stamp.truncates.skips(3) && !stamp.truncates.skips(2));
+        assert_eq!(
+            crate::data::executor::timeseries_checkpoint::stamp::read_ts_stamp(&ts_dir)
+                .expect("read")
+                .as_ref(),
+            Some(stamp)
+        );
         assert!(
             !core.columnar_memtable_mem.contains_key(&key()),
             "the memtable reservation is released"
@@ -351,11 +436,11 @@ mod tests {
         assert_eq!(memtable_rows(&core), 1);
     }
 
-    /// A catch-up redelivery of a record written before the truncate is
-    /// refused: the truncate's LSN floors every later ingest carrying an
-    /// older LSN.
+    /// A catch-up redelivery of a record the truncate removed is refused: the
+    /// truncate's stamp names it. A record below the truncate's LSN that was
+    /// still on its way when the truncate applied is not named, and applies.
     #[test]
-    fn ingest_below_the_truncate_lsn_is_refused_after_the_truncate() {
+    fn only_a_record_the_truncate_removed_is_refused_after_it() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
         assert_eq!(
@@ -366,19 +451,28 @@ mod tests {
         assert_eq!(resp.status, Status::Ok);
 
         assert_eq!(
-            ingest(&mut core, "metrics,host=a value=1i\n", 4),
+            ingest(&mut core, "metrics,host=a value=1i\n", 1),
             Status::Ok
         );
         assert_eq!(
             memtable_rows(&core),
             0,
-            "a pre-truncate record writes nothing"
+            "the redelivered record the truncate removed writes nothing"
+        );
+        assert_eq!(
+            ingest(&mut core, "metrics,host=a value=1i\n", 4),
+            Status::Ok
+        );
+        assert_eq!(
+            memtable_rows(&core),
+            1,
+            "a record in flight at the truncate applies after it"
         );
         assert_eq!(
             ingest(&mut core, "metrics,host=a value=1i\n", 6),
             Status::Ok
         );
-        assert_eq!(memtable_rows(&core), 1, "a post-truncate record is stored");
+        assert_eq!(memtable_rows(&core), 2, "a post-truncate record is stored");
     }
 
     /// Inside a batch the directory is renamed aside and every in-memory
@@ -398,25 +492,34 @@ mod tests {
             Status::Ok
         );
         let ts_dir = super::super::paths::ts_collection_dir(dir.path(), 0, TENANT, COLLECTION);
+        let stamp_before = core.ts_replay_stamps.get(&key()).cloned();
 
         let mut undo = Vec::new();
         let resp = core.execute_timeseries_truncate(&task_at(3), COLLECTION, Some(&mut undo));
         assert_eq!(resp.status, Status::Ok);
         assert_eq!(decode_truncated(&resp), 2);
-        assert!(!ts_dir.exists(), "the live directory is renamed aside");
+        assert_eq!(
+            entries(&ts_dir),
+            vec![TS_STAMP_FILE.to_string()],
+            "the live directory is renamed aside and replaced by the stamp"
+        );
         let aside = ts_dir.with_file_name(truncating_dir_name(COLLECTION, 3));
         assert!(aside.exists());
         assert_eq!(memtable_rows(&core), 0);
         assert_eq!(partition_rows(&core), 0);
 
         core.rollback_undo_log(0, TENANT, undo).expect("rollback");
-        assert!(ts_dir.exists(), "the directory is renamed back");
+        assert!(
+            entries(&ts_dir).iter().any(|name| name.starts_with("ts-")),
+            "the directory is renamed back"
+        );
         assert!(!aside.exists());
         assert_eq!(memtable_rows(&core), 1);
         assert_eq!(partition_rows(&core), 1);
-        assert!(
-            !core.ts_truncate_floors.contains_key(&key()),
-            "the floor is rewound"
+        assert_eq!(
+            core.ts_replay_stamps.get(&key()).cloned(),
+            stamp_before,
+            "the stamp is rewound"
         );
         assert!(core.columnar_memtable_mem.contains_key(&key()));
     }

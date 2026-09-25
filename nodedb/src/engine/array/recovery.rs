@@ -4,10 +4,9 @@
 //!
 //! Recovery is driven by the engine on `open`: the caller streams
 //! decoded WAL records (filtered to array record types) into
-//! [`Recovery::apply_record`]. Records with LSN <= the manifest's
-//! `durable_lsn` are skipped — the segment they belong to is already on
-//! disk. Records with LSN greater than the durable watermark are
-//! re-applied to the live memtable.
+//! [`Recovery::apply_record`]. A record the manifest's replay stamp names is
+//! skipped — a segment already holds it. Every other record is re-applied
+//! to the live memtable.
 //!
 //! The recovery layer is intentionally pure with respect to WAL I/O: it
 //! takes already-decoded payloads. The engine open path reads the
@@ -48,9 +47,9 @@ pub enum RecoveryRecord {
         lsn: u64,
         payload: ArrayDeletePayload,
     },
-    /// Flush watermarks update the durable_lsn on the matching store.
-    /// The segment itself is already mmap'd at startup time; this
-    /// record simply tells us "WAL records up to this LSN are durable".
+    /// A flush record. The segment it wrote is already mmap'd at startup,
+    /// and the manifest's stamp already names the records that segment
+    /// holds, so the record changes nothing here.
     Flush {
         lsn: u64,
         array: nodedb_array::types::ArrayId,
@@ -71,10 +70,9 @@ impl<'a> Recovery<'a> {
     }
 
     pub fn apply_record(&mut self, rec: RecoveryRecord) -> Result<(), RecoveryError> {
-        let durable = self.store.manifest().durable_lsn;
         match rec {
             RecoveryRecord::Put { lsn, payload } => {
-                if lsn <= durable {
+                if self.store.manifest().replay.skips(lsn) {
                     self.stats.puts_skipped += 1;
                     return Ok(());
                 }
@@ -96,7 +94,7 @@ impl<'a> Recovery<'a> {
                 self.stats.puts_applied += 1;
             }
             RecoveryRecord::Delete { lsn, payload } => {
-                if lsn <= durable {
+                if self.store.manifest().replay.skips(lsn) {
                     self.stats.deletes_skipped += 1;
                     return Ok(());
                 }
@@ -111,10 +109,7 @@ impl<'a> Recovery<'a> {
                 stamp_delete_cells(self.store, payload.cells, lsn)?;
                 self.stats.deletes_applied += 1;
             }
-            RecoveryRecord::Flush { lsn, .. } => {
-                let m = self.store.manifest_mut();
-                m.durable_lsn = m.durable_lsn.max(lsn);
-            }
+            RecoveryRecord::Flush { .. } => {}
         }
         Ok(())
     }

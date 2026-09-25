@@ -42,15 +42,13 @@
 //!
 //! ## Which engines need one
 //!
-//! Only those whose WAL records are DELTAS against current state. A floor is not
-//! a general "I restored a checkpoint" marker, and adding one where replay is
-//! already idempotent gates records for no reason.
+//! An engine whose WAL records are deltas or appends against current state
+//! needs one. The sparse-vector engine carries one as well: its checkpoint
+//! names the records it holds, and deciding every record by that stamp keeps
+//! replay in the order the live core applied them.
 //!
-//! Six checkpointed engines deliberately have no field here:
+//! Checkpointed engines with no field here:
 //!
-//! * Sparse vector — `SparseVectorPut` is an upsert keyed by `doc_id` and
-//!   `SparseVectorDelete` is a no-op against an absent document, so a record
-//!   re-applied over the restored index reproduces it.
 //! * The sync idempotency gate — `SyncSeqAdvance` advances both its maps by
 //!   max-wins, so re-folding a record already contained in the restored state
 //!   cannot change it. What that restore needs instead is for replay to MERGE
@@ -62,10 +60,12 @@
 //!   precisely because ids are not stable across restarts, and replay uses the
 //!   same `add_node_label` / `remove_node_label` entry points as the live
 //!   handler.
-//! * The array engine — it carries its own per-array floor rather than one
-//!   here: each array's manifest records the `durable_lsn` its flushed segments
-//!   reach, and `replay_array_wal` gates on that. A shared engine-wide field
-//!   would be wrong for it, since arrays flush independently of one another.
+//! * The array and timeseries engines. Each carries its own stamp per
+//!   artifact rather than one here: an array manifest carries the stamp of
+//!   the flush that last published it, and a timeseries partition carries the
+//!   stamp of the flush that wrote it. Arrays and timeseries collections flush
+//!   independently of one another, so an engine-wide field is wrong for both.
+//!   Both still decide a record through `ReplayStamp::skips`.
 //! * Full-text search — `FtsIndex` rewrites the surrogate's posting, length and
 //!   stats entries wholesale, deriving the corpus-counter deltas from the prior
 //!   doc-length row read in the same write transaction, so a re-applied record
@@ -143,6 +143,24 @@ pub(in crate::data::executor) struct ReplayFloors {
     /// and a record class that tolerates gating does not need an exemption
     /// from it.
     pub(in crate::data::executor) columnar: ReplayFloor,
+
+    /// Vector engine floor (HNSW, multi-vector and direct-row indexes),
+    /// populated by `CoreLoop::load_vector_checkpoints`.
+    ///
+    /// An HNSW insert appends a node and never dedups, so a record the
+    /// restored generation holds must not replay. The generation is published
+    /// whole under one manifest, so one engine-wide stamp describes every
+    /// index in it, including an index emptied or dropped since.
+    pub(in crate::data::executor) vector: ReplayFloor,
+
+    /// Sparse-vector engine floor, populated by
+    /// `CoreLoop::load_sparse_vector_checkpoints`.
+    ///
+    /// A sparse put upserts by `doc_id`, so re-applying a record the restored
+    /// generation holds lands on the same postings. The stamp still decides
+    /// every record, so replay applies exactly the records the live core
+    /// applied after the generation was written, in LSN order.
+    pub(in crate::data::executor) sparse_vector: ReplayFloor,
 }
 
 /// What an engine's restored checkpoint holds.
@@ -167,7 +185,8 @@ impl ReplayFloor {
 
     /// Whether a record at `record_lsn` is already folded into the restored
     /// checkpoint, or has a final outcome that is not an apply, and must
-    /// therefore NOT be replayed. Every KV and columnar skip site asks here.
+    /// therefore NOT be replayed. Every KV, columnar, vector and sparse-vector
+    /// skip site asks here.
     pub(in crate::data::executor) fn covers(&self, record_lsn: u64) -> bool {
         self.stamp
             .as_ref()

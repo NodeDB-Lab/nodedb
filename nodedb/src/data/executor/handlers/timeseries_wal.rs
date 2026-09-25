@@ -3,10 +3,14 @@
 //! WAL replay for timeseries records.
 //!
 //! On startup, replays `TimeseriesBatch` records into the per-core
-//! columnar memtable. Only replays records with LSN > `last_flushed_wal_lsn`
-//! per partition (not max_ts — safe with out-of-order data). A
-//! committed-redo apply runs the same arm without that skip
-//! (`replay_policy`).
+//! columnar memtable. A record the collection's replay stamp names is in a
+//! partition already, or a truncate removed it, and is skipped
+//! (`timeseries_checkpoint::stamp`). A committed-redo apply runs the same arm
+//! without that skip (`replay_policy`).
+//!
+//! Restart replay walks the records in LSN order and sets the replay cursor
+//! to the last LSN it passed. A flush or truncate during the pass stamps
+//! through the cursor, never past a record replay has not reached.
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::DatabaseId;
@@ -19,9 +23,9 @@ impl CoreLoop {
     ///
     /// Called once during startup, after `open()` but before the event loop.
     /// Processes `TimeseriesBatch` records and the columnar-family truncate
-    /// records, ignoring records for other vShards. Uses LSN-based skip: only
-    /// replays records with LSN > last flushed LSN, and never a record a
-    /// later truncate of its collection already removed.
+    /// records, ignoring records for other vShards. Skips every record its
+    /// collection's replay stamp names, and never replays a record a later
+    /// truncate of its collection already removed.
     pub fn replay_timeseries_wal(
         &mut self,
         records: &[nodedb_wal::WalRecord],
@@ -31,11 +35,19 @@ impl CoreLoop {
         use crate::data::executor::wal_replay_columnar_truncate::TruncateFloors;
         use nodedb_wal::record::RecordType;
 
-        let truncate_floors = TruncateFloors::collect(records, num_cores, self.core_id);
+        let mut truncate_floors =
+            TruncateFloors::collect(records, num_cores, self.core_id, &self.ts_replay_stamps);
         let mut replayed = 0usize;
         let mut skipped = 0usize;
+        // Records replayed below the highest LSN their collection's stamp
+        // names: in flight when that stamp was written.
+        let mut in_flight = 0usize;
+        let restart = !self.applying_committed_redo();
+        // The record whose sub-records the arm is applying. A record installs
+        // into a collection as one unit (`group_flush`).
+        let mut current = None;
 
-        for record in records {
+        for (index, record) in records.iter().enumerate() {
             let logical_type = record.logical_record_type();
             let record_type = RecordType::from_raw(logical_type);
 
@@ -59,8 +71,14 @@ impl CoreLoop {
                 skipped += 1;
                 continue;
             }
+            // Every record below this one is passed.
+            if restart {
+                self.ts_replay_cursor = Some(record.header.lsn.saturating_sub(1));
+            }
+            self.begin_ts_record(records, index, num_cores, &mut current);
 
             if is_truncate {
+                truncate_floors.pass(record);
                 if self.replay_truncate_record(record, tombstones) {
                     replayed += 1;
                 } else {
@@ -174,19 +192,11 @@ impl CoreLoop {
                 continue;
             }
 
-            // Check if this record was already flushed (LSN-based skip). A
-            // restart watermark only: see `replay_policy`.
-            if let Some(registry) = self.ts_registries.get(&key) {
-                // Find the max flushed LSN across all partitions.
-                let max_flushed_lsn = registry
-                    .iter()
-                    .map(|(_, e)| e.meta.last_flushed_wal_lsn)
-                    .max()
-                    .unwrap_or(0);
-                if self.replay_watermark_skips(record_lsn <= max_flushed_lsn) {
-                    skipped += 1;
-                    continue;
-                }
+            // A partition holds this record, or a truncate removed it. A
+            // restart gate only: see `replay_policy`.
+            if self.ts_replay_skips(&key, record_lsn) {
+                skipped += 1;
+                continue;
             }
 
             if redo_apply && kind.as_deref() == Some("columnar") {
@@ -196,6 +206,10 @@ impl CoreLoop {
             if self.claim_for_validation() {
                 continue;
             }
+            let passed = self
+                .ts_replay_stamps
+                .get(&key)
+                .is_some_and(|stamp| stamp.rows.highest() > record_lsn);
 
             let accepted = match kind.as_deref() {
                 // The columnar floor is consulted HERE and not above the `kind`
@@ -256,24 +270,21 @@ impl CoreLoop {
                 continue;
             }
 
-            // Track the max WAL LSN ingested per collection for flush metadata,
-            // AFTER the record has been applied — never before.
-            //
-            // `flush_ts_collection` stamps the partition it writes with this
-            // scalar, and the stamp claims "every record at or below N is
-            // WHOLLY on disk". Replaying a record can itself fire the
-            // record-boundary flush in the ingest handler (a full tag
-            // dictionary is resolved by flushing first, then taking the record
-            // whole). Advancing the scalar to the in-flight record before that
-            // dispatch stamped the partition with a record it holds NONE of, so
-            // a crash there lost the record outright: the next replay skipped it
-            // against a stamp no partition had earned. Advancing after the
-            // apply keeps the stamp at the last record the memtable fully
-            // absorbed, which is exactly what the flush can honestly claim.
-            let entry = self.ts_max_ingested_lsn.entry(key).or_insert(0);
-            *entry = (*entry).max(record_lsn);
+            // Every row of the record landed; a flush from here on names it.
+            // A committed-redo apply notes its record once the whole record
+            // installed.
+            if restart {
+                self.note_ts_record_applied(record_lsn);
+            }
 
             replayed += accepted;
+            in_flight += usize::from(passed);
+        }
+        if let Some(record) = current {
+            self.end_ts_record(record);
+        }
+        if restart {
+            self.ts_replay_cursor = None;
         }
 
         if replayed > 0 {
@@ -281,6 +292,7 @@ impl CoreLoop {
                 core = self.core_id,
                 replayed,
                 skipped,
+                in_flight,
                 collections = self.columnar_memtables.len(),
                 "WAL timeseries replay complete"
             );
@@ -384,8 +396,7 @@ mod tests {
     /// must name the previous record. Stamping it with the in-flight record
     /// makes boot replay skip a record no partition holds: the rows are gone.
     ///
-    /// This fails if the `ts_max_ingested_lsn` advance moves back ahead of the
-    /// apply.
+    /// This fails if the replay cursor passes a record before its rows land.
     #[test]
     fn a_replay_flush_is_stamped_with_the_last_fully_applied_record() {
         let mut h = make_core();
@@ -421,12 +432,12 @@ mod tests {
             "the partition holds record 10 and none of record 11, so it may \
              claim only record 10"
         );
-        assert_eq!(
-            h.core.ts_max_ingested_lsn.get(&key).copied(),
-            Some(11),
-            "record 11 is applied by the end of replay, so the collection's \
-             max ingested LSN must have reached it"
+        let stamp = &h.core.ts_replay_stamps.get(&key).expect("stamp").rows;
+        assert!(
+            stamp.skips(10) && !stamp.skips(11),
+            "the stamp names record 10 only: {stamp:?}"
         );
+        assert_eq!(h.core.ts_replay_cursor, None, "the pass clears its cursor");
     }
 
     /// A `TimeseriesBatch`-typed WAL record carrying a map-shaped
@@ -733,15 +744,22 @@ mod tests {
             TenantId::new(7),
             "metrics_big".to_string(),
         );
-        let mt = h
+        let memtable_rows = h
             .core
             .columnar_memtables
             .get(&key)
-            .expect("memtable created by replay");
+            .expect("memtable created by replay")
+            .row_count();
+        let partition_rows = h
+            .core
+            .ts_registries
+            .get(&key)
+            .map_or(0, |registry| registry.total_row_count());
         assert_eq!(
-            mt.row_count(),
+            memtable_rows + partition_rows,
             N as u64,
-            "every sample of an over-limit replayed batch must be retained"
+            "every sample of an over-limit replayed batch must be retained; the \
+             record lands whole, then flushes whole once it settled"
         );
     }
 

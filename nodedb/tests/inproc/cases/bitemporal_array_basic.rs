@@ -233,7 +233,8 @@ fn tombstone_appended_not_in_place_visible_after_flush() {
     }
 
     // Force flush so both tiles land in a segment file.
-    e.flush(&aid(), 3).unwrap();
+    e.flush(&aid(), nodedb::types::replay_stamp::ReplayStamp::through(3))
+        .unwrap();
 
     // After flush, confirm the manifest contains a segment spanning sys=200.
     let store = e.store(&aid()).unwrap();

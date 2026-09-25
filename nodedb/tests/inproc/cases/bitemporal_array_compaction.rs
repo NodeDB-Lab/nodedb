@@ -51,6 +51,19 @@ fn put_cell(e: &mut ArrayEngine, x: i64, v: i64, sys_ms: i64, lsn: u64) {
         lsn,
     )
     .unwrap();
+    flush_if_full(e, lsn);
+}
+
+/// The threshold flush the executor runs after every write it applies,
+/// stamped through the write's LSN.
+fn flush_if_full(e: &mut ArrayEngine, lsn: u64) {
+    if e.needs_flush(&aid()).unwrap() {
+        e.flush(
+            &aid(),
+            nodedb::types::replay_stamp::ReplayStamp::through(lsn),
+        )
+        .unwrap();
+    }
 }
 
 #[test]
@@ -131,7 +144,8 @@ fn truncated_before_horizon_flag_set_when_cutoff_predates_all_data() {
     let mut e = ArrayEngine::new(cfg).unwrap();
     e.open_array(aid(), schema(), 0xCAFE).unwrap();
     put_cell(&mut e, 0, 99, 500, 1);
-    e.flush(&aid(), 2).unwrap();
+    e.flush(&aid(), nodedb::types::replay_stamp::ReplayStamp::through(2))
+        .unwrap();
 
     let store = e.store(&aid()).unwrap();
     let (rows, truncated) = store.scan_tiles_at(50, None).unwrap();
@@ -333,6 +347,7 @@ fn valid_time_filter_works_after_flush() {
         1,
     )
     .unwrap();
+    flush_if_full(&mut e, 1);
 
     e.put_cells(
         &aid(),
@@ -347,6 +362,7 @@ fn valid_time_filter_works_after_flush() {
         2,
     )
     .unwrap();
+    flush_if_full(&mut e, 2);
 
     assert!(
         e.store(&aid()).unwrap().manifest().segments.len() >= 2,

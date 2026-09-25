@@ -6,7 +6,7 @@
 //! ride the buffered-plan path rather than a per-surrogate overlay post-image,
 //! and their redo replay re-runs the engine's native cell batch
 //! (`replay_array_wal`, dispatched from the redo reconstitute path, which
-//! respects the array's `ArrayFlush` watermark). This module reads the
+//! respects the array manifest's replay stamp). This module reads the
 //! [`ArrayOp`] plan node directly and emits the SAME `RecordType::ArrayPut` /
 //! `RecordType::ArrayDelete` sub-record the autocommit array path produces,
 //! reusing its version-tagged encoders (`engine::array::wal`):

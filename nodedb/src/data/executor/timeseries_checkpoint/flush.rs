@@ -172,8 +172,8 @@ mod tests {
 
         /// Ingest one ILP line through the real dispatch path, exactly as the
         /// Control Plane does. `wal_lsn` is threaded BOTH on the op (the
-        /// partition's flush stamp, which replay's dedup gate reads) and on the
-        /// request (what `note_collection_write_lsn` raises the watermark from).
+        /// record the partition's replay stamp names) and on the request (what
+        /// `note_collection_write_lsn` raises the watermark from).
         fn ingest(&mut self, host: &str, value: f64, ts_ms: i64, wal_lsn: u64) {
             let line = format!("{COLL},host={host} value={value} {}\n", ts_ms * 1_000_000);
             let r = self.send(
@@ -287,8 +287,7 @@ mod tests {
         assert_eq!(
             after.scan_hosts(),
             vec!["a".to_string(), "b".to_string()],
-            "every checkpointed row must come back from its on-disk partition — \
-             pre-fix the checkpoint flushed nothing and both rows were gone"
+            "every checkpointed row must come back from its on-disk partition"
         );
     }
 
@@ -383,6 +382,215 @@ mod tests {
             1,
             "the row must still be live in the memtable after the failed flush — \
              draining before the write would have discarded it outright"
+        );
+    }
+
+    /// The ILP line `ingest` writes for one row.
+    fn ilp_line(host: &str, value: f64, ts_ms: i64) -> String {
+        format!("{COLL},host={host} value={value} {}\n", ts_ms * 1_000_000)
+    }
+
+    /// The `TimeseriesBatch` WAL record a live ingest of one row appends.
+    fn ingest_record(host: &str, value: f64, ts_ms: i64, lsn: u64) -> nodedb_wal::WalRecord {
+        let payload = zerompk::to_msgpack_vec(&(
+            "timeseries".to_string(),
+            COLL.to_string(),
+            ilp_line(host, value, ts_ms).into_bytes(),
+            Option::<nodedb_types::sync::wire::SyncProvenance>::None,
+            "ilp".to_string(),
+        ))
+        .expect("encode timeseries tuple");
+        wal_record(
+            nodedb_wal::record::RecordType::TimeseriesBatch,
+            lsn,
+            payload,
+        )
+    }
+
+    /// The `TimeseriesTruncate` WAL record a live truncate appends.
+    fn truncate_record(lsn: u64) -> nodedb_wal::WalRecord {
+        let payload = zerompk::to_msgpack_vec(&nodedb_types::columnar::ColumnarTruncateWalRecord {
+            collection: COLL.to_string(),
+        })
+        .expect("encode truncate");
+        wal_record(
+            nodedb_wal::record::RecordType::TimeseriesTruncate,
+            lsn,
+            payload,
+        )
+    }
+
+    fn wal_record(
+        record_type: nodedb_wal::record::RecordType,
+        lsn: u64,
+        payload: Vec<u8>,
+    ) -> nodedb_wal::WalRecord {
+        nodedb_wal::WalRecord::new(nodedb_wal::record::WalRecordArgs {
+            record_type: record_type as u32,
+            lsn,
+            tenant_id: TID,
+            vshard_id: 0,
+            database_id: DatabaseId::DEFAULT.as_u64(),
+            payload,
+            encryption_key: None,
+            preamble_bytes: None,
+        })
+        .expect("wal record")
+    }
+
+    /// Restart the way boot does: load the registries and stamps, raise the
+    /// floor to the WAL end, then replay `records`.
+    fn restart_and_replay(dir: &std::path::Path, records: &[nodedb_wal::WalRecord]) -> Core {
+        let mut core = Core::open_at(dir);
+        core.core.load_ts_registries().expect("load");
+        let wal_end = records.iter().map(|r| r.header.lsn).max().unwrap_or(0);
+        core.core
+            .floors
+            .applied_prefix
+            .seed_replayed_through(Lsn::new(wal_end));
+        core.core
+            .replay_timeseries_wal(records, 1, &nodedb_wal::TombstoneSet::new());
+        core
+    }
+
+    fn observe_floor(core: &mut Core, lsn: u64) {
+        core.core
+            .floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(lsn));
+    }
+
+    fn truncate(core: &mut Core, lsn: u64) {
+        let r = core.send(
+            PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLL),
+                restart_identity: false,
+            }),
+            Some(lsn),
+        );
+        assert_eq!(r.status, Status::Ok, "ts truncate: {r:?}");
+    }
+
+    /// Floor 10. B at lsn 30 applies, a checkpoint flushes it, then A at lsn
+    /// 20 applies. A restart replays A once and never re-applies B, and the
+    /// collection scans as it did live — across a second restart too.
+    #[test]
+    fn a_timeseries_write_in_flight_at_a_checkpoint_replays_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let records = [
+            ingest_record("a", 1.0, 1_000, 20),
+            ingest_record("b", 2.0, 2_000, 30),
+        ];
+
+        let mut before = Core::open_at(dir.path());
+        observe_floor(&mut before, 10);
+        before.ingest("b", 2.0, 2_000, 30);
+        before
+            .core
+            .checkpoint_timeseries_memtables()
+            .expect("flush B");
+        before.ingest("a", 1.0, 1_000, 20);
+        let live = before.scan_hosts();
+        assert_eq!(live, vec!["a".to_string(), "b".to_string()]);
+        drop(before);
+
+        let mut after = restart_and_replay(dir.path(), &records);
+        assert_eq!(
+            after.scan_hosts(),
+            live,
+            "replay equals live: A once, B once"
+        );
+        after
+            .core
+            .checkpoint_timeseries_memtables()
+            .expect("flush A");
+        drop(after);
+
+        let mut again = restart_and_replay(dir.path(), &records);
+        assert_eq!(
+            again.scan_hosts(),
+            live,
+            "every record is named now: a second restart applies nothing"
+        );
+    }
+
+    /// A live ingest below the highest flushed LSN is a record that was still
+    /// on its way when the flush ran: it applies. A redelivery of a flushed
+    /// record is named by the stamp and writes nothing.
+    #[test]
+    fn a_live_ingest_below_the_highest_flushed_lsn_applies() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = Core::open_at(dir.path());
+        observe_floor(&mut core, 10);
+        core.ingest("b", 2.0, 2_000, 30);
+        core.core
+            .checkpoint_timeseries_memtables()
+            .expect("flush B");
+
+        core.ingest("a", 1.0, 1_000, 20);
+        assert_eq!(core.scan_hosts(), vec!["a".to_string(), "b".to_string()]);
+        core.ingest("b", 2.0, 2_000, 30);
+        assert_eq!(
+            core.scan_hosts(),
+            vec!["a".to_string(), "b".to_string()],
+            "the redelivered flushed record writes nothing"
+        );
+    }
+
+    /// Restart replay asks the collection stamp, record by record.
+    #[test]
+    fn the_collection_stamp_gates_replay_record_by_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = Core::open_at(dir.path());
+        let key = (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_string());
+        core.core.ts_replay_stamps.insert(
+            key,
+            super::super::stamp::TsReplayStamp {
+                rows: crate::types::replay_stamp::ReplayStamp::through(5)
+                    .union(&crate::types::replay_stamp::ReplayStamp::naming(10)),
+                truncates: crate::types::replay_stamp::ReplayStamp::default(),
+            },
+        );
+        let records = [
+            ingest_record("h05", 1.0, 1_000, 5),
+            ingest_record("h07", 1.0, 2_000, 7),
+            ingest_record("h10", 1.0, 3_000, 10),
+            ingest_record("h11", 1.0, 4_000, 11),
+        ];
+        core.core
+            .replay_timeseries_wal(&records, 1, &nodedb_wal::TombstoneSet::new());
+        assert_eq!(
+            core.scan_hosts(),
+            vec!["h07".to_string(), "h11".to_string()]
+        );
+    }
+
+    /// X at lsn 10 applies, a truncate at lsn 20 removes it, then A at lsn 15
+    /// applies. A restart must not re-apply the truncate over A, and must not
+    /// bring X back.
+    #[test]
+    fn a_write_in_flight_at_a_truncate_survives_replay() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let records = [
+            ingest_record("x", 1.0, 1_000, 10),
+            ingest_record("a", 2.0, 2_000, 15),
+            truncate_record(20),
+        ];
+
+        let mut before = Core::open_at(dir.path());
+        before.ingest("x", 1.0, 1_000, 10);
+        truncate(&mut before, 20);
+        before.ingest("a", 2.0, 2_000, 15);
+        let live = before.scan_hosts();
+        assert_eq!(live, vec!["a".to_string()]);
+        drop(before);
+
+        let mut after = restart_and_replay(dir.path(), &records);
+        assert_eq!(
+            after.scan_hosts(),
+            live,
+            "the truncate took effect before the crash: replay skips it and \
+             everything it removed, and applies the write that followed it"
         );
     }
 }

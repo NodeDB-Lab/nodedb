@@ -9,6 +9,7 @@
 use std::path::Path;
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::timeseries_checkpoint::stamp::{TS_STAMP_FILE, write_ts_stamp};
 use crate::types::TsFlushedCollectionBlob;
 
 /// The partition commit marker. A partition directory without it is treated as
@@ -210,11 +211,21 @@ impl CoreLoop {
                 // Segment files first; `partition.meta` is the commit point and
                 // must not become visible before the columns it describes.
                 for (filename, bytes) in &part_blob.files {
-                    if filename.as_str() == PARTITION_META {
+                    if filename.as_str() == PARTITION_META || filename.as_str() == TS_STAMP_FILE {
                         continue;
                     }
                     durable_write_into(&staging_dir, filename, bytes)?;
                 }
+                // A stamp names records of the core that wrote it, so the
+                // snapshot's never applies here. The restored rows come from
+                // no local record: the partition carries the collection's
+                // local stamp, which names nothing new.
+                let local_stamp = self
+                    .ts_replay_stamps
+                    .get(&reg_key)
+                    .cloned()
+                    .unwrap_or_default();
+                write_ts_stamp(&staging_dir, &local_stamp)?;
                 if let Some((_, bytes)) = part_blob
                     .files
                     .iter()
@@ -472,8 +483,13 @@ mod tests {
 
         assert_eq!(
             names(&partition_dir),
-            vec![PARTITION_META.to_string(), "value.col".to_string()],
-            "the swapped-in partition must hold exactly the snapshot's files"
+            vec![
+                PARTITION_META.to_string(),
+                TS_STAMP_FILE.to_string(),
+                "value.col".to_string()
+            ],
+            "the swapped-in partition must hold exactly the snapshot's files and \
+             the local stamp"
         );
         assert_eq!(
             std::fs::read(partition_dir.join("value.col")).expect("read col"),
@@ -504,7 +520,11 @@ mod tests {
         let partition_dir = ts_dir(root.path()).join("ts-5_6");
         assert_eq!(
             names(&partition_dir),
-            vec![PARTITION_META.to_string(), "value.col".to_string()]
+            vec![
+                PARTITION_META.to_string(),
+                TS_STAMP_FILE.to_string(),
+                "value.col".to_string()
+            ]
         );
         // No staging file may be left inside the published dir.
         assert!(

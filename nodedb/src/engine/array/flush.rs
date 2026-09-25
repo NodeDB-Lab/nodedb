@@ -11,25 +11,31 @@ use nodedb_array::types::{ArrayId, TileId};
 use super::engine::{ArrayEngine, ArrayEngineError, ArrayEngineResult};
 use super::memtable::{Memtable, TileBuffer};
 use super::store::SegmentRef;
+use crate::types::replay_stamp::ReplayStamp;
 
 impl ArrayEngine {
-    /// Flush the array's memtable to a new on-disk segment using a
-    /// caller-supplied LSN as the segment's flush watermark. A no-op if
-    /// the memtable is empty.
+    /// Flush the array's memtable to a new on-disk segment and publish the
+    /// manifest naming it with `stamp`. A no-op if the memtable is empty.
+    ///
+    /// `stamp` must name every record whose cells the memtable holds, and no
+    /// record it does not: restart replay skips exactly the records it names.
+    /// A core passes its applied-prefix stamp, taken after it noted every
+    /// record it applied to this array.
     ///
     /// The memtable is cleared LAST, once the segment and the manifest naming
-    /// it are both on disk. Draining it up front — as this did while the only
-    /// caller was an explicit `NDARRAY_FLUSH` — means an encode or write failure
-    /// takes the cells out of memory without putting them anywhere: reads stop
-    /// returning them for the rest of the process's life, and only a restart's
-    /// WAL replay brings them back. Now every failure path leaves the memtable
-    /// exactly as it was, so a failed flush costs nothing but the retry, and the
-    /// caller's clamped checkpoint LSN keeps the WAL records that back it.
-    pub fn flush(&mut self, id: &ArrayId, wal_lsn: u64) -> ArrayEngineResult<Option<SegmentRef>> {
+    /// it are both on disk. Every failure path leaves the memtable exactly as
+    /// it was: reads keep returning the cells, and a failed flush costs only
+    /// the retry. The caller's clamped checkpoint LSN keeps the WAL records
+    /// that back the cells.
+    pub fn flush(
+        &mut self,
+        id: &ArrayId,
+        stamp: ReplayStamp,
+    ) -> ArrayEngineResult<Option<SegmentRef>> {
         let Some(prepared) = self.prepare_flush(id)? else {
             return Ok(None);
         };
-        let seg_ref = self.install_flushed_segment(id, prepared, wal_lsn)?;
+        let seg_ref = self.install_flushed_segment(id, prepared, stamp)?;
         self.store_mut(id)?.memtable = Memtable::new();
         Ok(Some(seg_ref))
     }
@@ -61,7 +67,7 @@ impl ArrayEngine {
         &mut self,
         id: &ArrayId,
         prepared: PreparedFlush,
-        flush_lsn: u64,
+        stamp: ReplayStamp,
     ) -> ArrayEngineResult<SegmentRef> {
         let store = self.store_mut(id)?;
         let root = store.root().to_path_buf();
@@ -86,10 +92,21 @@ impl ArrayEngine {
             min_tile: prepared.min_tile.unwrap_or_else(|| TileId::snapshot(0)),
             max_tile: prepared.max_tile.unwrap_or_else(|| TileId::snapshot(0)),
             tile_count: prepared.tile_count,
-            flush_lsn,
+            flush_lsn: stamp.highest(),
         };
+        // The segment and the stamp naming its records publish together: the
+        // manifest write below is the commit point for both.
         store.install_segment(seg_ref.clone())?;
-        store.persist_manifest()?;
+        let previous = std::mem::replace(&mut store.manifest_mut().replay, stamp);
+        if let Err(e) = store.persist_manifest() {
+            // The manifest on disk names neither the segment nor the stamp,
+            // and the memtable still holds the cells. Withdraw both from
+            // memory too, so reads do not see the cells twice and a later
+            // publish does not claim records this one never made durable.
+            store.manifest_mut().replay = previous;
+            store.replace_segments(std::slice::from_ref(&seg_ref.id), Vec::new())?;
+            return Err(e.into());
+        }
         Ok(seg_ref)
     }
 }
@@ -141,6 +158,7 @@ fn build_segment_from_memtable<'a>(
 mod tests {
     use crate::engine::array::engine::{ArrayEngine, ArrayEngineConfig};
     use crate::engine::array::test_support::{aid, put_one, schema};
+    use crate::types::replay_stamp::ReplayStamp;
     use tempfile::TempDir;
 
     #[test]
@@ -149,7 +167,10 @@ mod tests {
         let mut e = ArrayEngine::new(ArrayEngineConfig::new(dir.path().to_path_buf())).unwrap();
         e.open_array(aid(), schema(), 0xCAFE).unwrap();
         put_one(&mut e, 1, 2, 10, 1);
-        let seg = e.flush(&aid(), 7).unwrap().expect("non-empty flush");
+        let seg = e
+            .flush(&aid(), ReplayStamp::through(7))
+            .unwrap()
+            .expect("non-empty flush");
         assert_eq!(seg.level, 0);
         assert_eq!(seg.tile_count, 1);
         assert_eq!(seg.flush_lsn, 7);
@@ -161,7 +182,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut e = ArrayEngine::new(ArrayEngineConfig::new(dir.path().to_path_buf())).unwrap();
         e.open_array(aid(), schema(), 0x1).unwrap();
-        assert!(e.flush(&aid(), 1).unwrap().is_none());
+        assert!(e.flush(&aid(), ReplayStamp::through(1)).unwrap().is_none());
     }
 
     /// A flush that cannot write its segment must leave the memtable untouched.
@@ -181,7 +202,7 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
 
         assert!(
-            e.flush(&aid(), 7).is_err(),
+            e.flush(&aid(), ReplayStamp::through(7)).is_err(),
             "a flush that cannot write its segment must report the failure, not \
              swallow it — the caller clamps its checkpoint LSN on this Err"
         );
@@ -193,11 +214,36 @@ mod tests {
 
         // And the retry, once the directory is back, still publishes it.
         std::fs::create_dir_all(&root).unwrap();
-        let seg = e.flush(&aid(), 7).unwrap().expect("retry must flush");
+        let seg = e
+            .flush(&aid(), ReplayStamp::through(7))
+            .unwrap()
+            .expect("retry must flush");
         assert_eq!(seg.tile_count, 1);
         assert!(
             e.store(&aid()).unwrap().memtable.is_empty(),
             "a SUCCESSFUL flush must clear the memtable — the cells are durable now"
         );
+    }
+
+    /// A flush publishes the caller's stamp in the manifest, and a reopened
+    /// store reads it back: it is what restart replay decides records by.
+    #[test]
+    fn a_flush_publishes_its_stamp_in_the_manifest() {
+        let dir = TempDir::new().unwrap();
+        let stamp = ReplayStamp {
+            prefix: 5,
+            applied_above: vec![crate::types::replay_stamp::LsnRange { start: 9, end: 9 }],
+        };
+        {
+            let mut e = ArrayEngine::new(ArrayEngineConfig::new(dir.path().to_path_buf())).unwrap();
+            e.open_array(aid(), schema(), 0xCAFE).unwrap();
+            put_one(&mut e, 1, 2, 10, 9);
+            let seg = e.flush(&aid(), stamp.clone()).unwrap().expect("flush");
+            assert_eq!(seg.flush_lsn, 9);
+            assert_eq!(e.store(&aid()).unwrap().manifest().replay, stamp);
+        }
+        let mut e = ArrayEngine::new(ArrayEngineConfig::new(dir.path().to_path_buf())).unwrap();
+        e.open_array(aid(), schema(), 0xCAFE).unwrap();
+        assert_eq!(e.store(&aid()).unwrap().manifest().replay, stamp);
     }
 }

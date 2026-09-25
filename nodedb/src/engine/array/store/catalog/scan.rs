@@ -298,6 +298,8 @@ mod tests {
             e.set_kek(kek.clone());
             e.open_array(aid(), engine_schema(), 0xBEEF).unwrap();
             put_one(&mut e, 1, 1, 7, 1);
+            e.flush(&aid(), crate::types::replay_stamp::ReplayStamp::through(1))
+                .unwrap();
             assert_eq!(e.store(&aid()).unwrap().manifest().segments.len(), 1);
         }
 
@@ -362,7 +364,8 @@ mod tests {
         );
 
         // Flushed to a segment: still found.
-        e.flush(&aid(), 2).unwrap();
+        e.flush(&aid(), crate::types::replay_stamp::ReplayStamp::through(2))
+            .unwrap();
         assert!(
             e.store(&aid())
                 .unwrap()

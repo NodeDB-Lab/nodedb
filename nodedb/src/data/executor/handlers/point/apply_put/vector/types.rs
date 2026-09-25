@@ -44,5 +44,4 @@ pub(super) struct VectorFieldInsert<'a> {
     pub(super) field_name: &'a str,
     pub(super) storage_key: crate::engine::document::store::StorageKey,
     pub(super) floats: Vec<f32>,
-    pub(super) wal_lsn: u64,
 }

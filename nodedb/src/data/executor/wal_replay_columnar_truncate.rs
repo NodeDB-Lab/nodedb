@@ -7,9 +7,15 @@
 //!
 //! Both records route through the live handlers, so replay leaves the
 //! engines exactly as the live truncate did. A `TimeseriesBatch` record
-//! at or below a collection's truncate LSN describes a row the truncate
-//! removed; `replay_timeseries_wal` skips it through [`TruncateFloors`]
-//! rather than ingesting it only to wipe it again at the truncate's LSN.
+//! below a collection's truncate LSN describes a row the truncate removed;
+//! `replay_timeseries_wal` skips it through [`TruncateFloors`] rather than
+//! ingesting it only to wipe it again at the truncate's LSN.
+//!
+//! A timeseries truncate that took effect before the crash is named by its
+//! collection's replay stamp. Replay never re-applies it: it would remove
+//! rows written after it. It imposes no floor either. The stamp names every
+//! record it removed, and a record it does not name applied after the
+//! truncate and survives it.
 
 use std::collections::HashMap;
 
@@ -18,33 +24,55 @@ use nodedb_wal::WalRecord;
 use nodedb_wal::record::RecordType;
 
 use super::core_loop::CoreLoop;
+use super::timeseries_checkpoint::stamp::TsReplayStamp;
 use crate::bridge::envelope::{PhysicalPlan, Status};
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use nodedb_physical::physical_plan::{ColumnarOp, TimeseriesOp};
 
-/// Highest truncate LSN per collection on one core, read off the WAL before
-/// the engine pass replays it.
+/// The key of one columnar-family collection on a core.
+type CollectionKey = (DatabaseId, TenantId, String);
+
+/// The truncates a replay pass must honour, read off the WAL before the
+/// engine pass replays it.
 #[derive(Debug, Default)]
 pub(in crate::data::executor) struct TruncateFloors {
-    floors: HashMap<(DatabaseId, TenantId, String), u64>,
+    /// Highest LSN of a truncate that has not taken effect, per collection.
+    /// Its replay removes every earlier record of the collection.
+    floors: HashMap<CollectionKey, u64>,
+    /// Timeseries truncates the collection stamp names and the pass has not
+    /// reached yet. A sub-record at such an LSN precedes the truncate in its
+    /// redo group, so the truncate removed its rows.
+    named_ahead: HashMap<CollectionKey, Vec<u64>>,
+}
+
+/// The collection a truncate record names, or `None` for any other record.
+fn truncate_key(record: &WalRecord) -> Option<CollectionKey> {
+    let is_truncate = matches!(
+        RecordType::from_raw(record.logical_record_type()),
+        Some(RecordType::ColumnarTruncate) | Some(RecordType::TimeseriesTruncate)
+    );
+    if !is_truncate {
+        return None;
+    }
+    let payload = zerompk::from_msgpack::<ColumnarTruncateWalRecord>(&record.payload).ok()?;
+    Some((
+        DatabaseId::new(record.header.database_id),
+        TenantId::new(record.header.tenant_id),
+        payload.collection,
+    ))
 }
 
 impl TruncateFloors {
-    /// Collect the truncate records that route to `core_id`.
+    /// Collect the truncate records that route to `core_id`. `stamps` holds
+    /// the timeseries collection stamps restored from disk.
     pub(in crate::data::executor) fn collect(
         records: &[WalRecord],
         num_cores: usize,
         core_id: usize,
+        stamps: &HashMap<CollectionKey, TsReplayStamp>,
     ) -> Self {
-        let mut floors = HashMap::new();
+        let mut this = Self::default();
         for record in records {
-            let is_truncate = matches!(
-                RecordType::from_raw(record.logical_record_type()),
-                Some(RecordType::ColumnarTruncate) | Some(RecordType::TimeseriesTruncate)
-            );
-            if !is_truncate {
-                continue;
-            }
             let target_core = if num_cores > 0 {
                 record.header.vshard_id as usize % num_cores
             } else {
@@ -53,35 +81,50 @@ impl TruncateFloors {
             if target_core != core_id {
                 continue;
             }
-            let Ok(payload) = zerompk::from_msgpack::<ColumnarTruncateWalRecord>(&record.payload)
-            else {
+            let Some(key) = truncate_key(record) else {
                 continue;
             };
-            let key = (
-                DatabaseId::new(record.header.database_id),
-                TenantId::new(record.header.tenant_id),
-                payload.collection,
-            );
-            let floor = floors.entry(key).or_insert(0u64);
-            *floor = (*floor).max(record.header.lsn);
+            let lsn = record.header.lsn;
+            let took_effect = stamps
+                .get(&key)
+                .is_some_and(|stamp| stamp.truncates.skips(lsn));
+            if took_effect {
+                this.named_ahead.entry(key).or_default().push(lsn);
+            } else {
+                let floor = this.floors.entry(key).or_insert(0u64);
+                *floor = (*floor).max(lsn);
+            }
         }
-        Self { floors }
+        this
     }
 
-    /// Whether a record at `lsn` for `key` precedes a truncate of that
-    /// collection and is therefore already removed.
+    /// The pass reached the truncate `record`: sub-records after it in its
+    /// redo group apply.
+    pub(in crate::data::executor) fn pass(&mut self, record: &WalRecord) {
+        let Some(key) = truncate_key(record) else {
+            return;
+        };
+        if let Some(ahead) = self.named_ahead.get_mut(&key) {
+            ahead.retain(|lsn| *lsn != record.header.lsn);
+        }
+    }
+
+    /// Whether a record at `lsn` for `key` is removed by a truncate of that
+    /// collection.
     ///
-    /// Strictly below: a record at the truncate's own LSN is a sibling
-    /// sub-record of the same transaction redo group. Replay applies a group's
-    /// sub-records in the order the transaction wrote them, so a row staged
-    /// before the truncate is removed by the truncate's own replay, and a row
-    /// staged after it must apply.
-    pub(in crate::data::executor) fn covers(
-        &self,
-        key: &(DatabaseId, TenantId, String),
-        lsn: u64,
-    ) -> bool {
+    /// Strictly below a truncate that has not taken effect: a record at the
+    /// truncate's own LSN is a sibling sub-record of the same transaction
+    /// redo group. Replay applies a group's sub-records in the order the
+    /// transaction wrote them, so a row staged before the truncate is removed
+    /// by the truncate's own replay, and a row staged after it must apply. A
+    /// truncate that took effect is not replayed, so a sibling ahead of it is
+    /// skipped here instead.
+    pub(in crate::data::executor) fn covers(&self, key: &CollectionKey, lsn: u64) -> bool {
         self.floors.get(key).is_some_and(|floor| lsn < *floor)
+            || self
+                .named_ahead
+                .get(key)
+                .is_some_and(|ahead| ahead.contains(&lsn))
     }
 
     /// Same as [`Self::covers`], keyed by the collection's parts. The key
@@ -94,7 +137,7 @@ impl TruncateFloors {
         collection: &str,
         lsn: u64,
     ) -> bool {
-        if self.floors.is_empty() {
+        if self.floors.is_empty() && self.named_ahead.is_empty() {
             return false;
         }
         self.covers(&(database_id, tenant_id, collection.to_string()), lsn)
@@ -206,9 +249,8 @@ impl CoreLoop {
     }
 
     /// Replay one `TimeseriesTruncate` record through the live handler.
-    /// Gated by the partitions on disk: a partition flushed at or above this
-    /// LSN was written after the truncate, so the truncate already happened
-    /// and re-applying it would remove rows written after it.
+    /// Gated by the collection's replay stamp: a truncate it names already
+    /// took effect, and re-applying it would remove rows written after it.
     pub(in crate::data::executor) fn replay_timeseries_truncate(
         &mut self,
         payload: &[u8],
@@ -239,12 +281,7 @@ impl CoreLoop {
         }
         let tid = TenantId::new(tenant_id);
         let key = (database_id, tid, record.collection.clone());
-        let flushed_after_truncate = self.ts_registries.get(&key).is_some_and(|registry| {
-            registry
-                .iter()
-                .any(|(_, e)| e.meta.last_flushed_wal_lsn >= record_lsn)
-        });
-        if self.replay_watermark_skips(flushed_after_truncate) {
+        if self.replay_watermark_skips(self.ts_truncate_named(&key, record_lsn)) {
             return false;
         }
         if self.claim_for_validation() {
@@ -314,7 +351,7 @@ mod tests {
     #[test]
     fn a_row_at_the_truncates_own_lsn_is_not_covered() {
         let records = vec![truncate_record(RecordType::ColumnarTruncate, 9, 0, "c")];
-        let floors = TruncateFloors::collect(&records, 1, 0);
+        let floors = TruncateFloors::collect(&records, 1, 0, &HashMap::new());
         let c = (DatabaseId::DEFAULT, TenantId::new(1), "c".to_string());
         assert!(floors.covers(&c, 8));
         assert!(
@@ -332,7 +369,7 @@ mod tests {
             // Routes to another core.
             truncate_record(RecordType::TimeseriesTruncate, 50, 1, "ts"),
         ];
-        let floors = TruncateFloors::collect(&records, 2, 0);
+        let floors = TruncateFloors::collect(&records, 2, 0, &HashMap::new());
         let c = (DatabaseId::DEFAULT, TenantId::new(1), "c".to_string());
         let ts = (DatabaseId::DEFAULT, TenantId::new(1), "ts".to_string());
         assert!(floors.covers(&c, 8));
@@ -344,5 +381,44 @@ mod tests {
         );
         assert!(floors.covers_collection(DatabaseId::DEFAULT, TenantId::new(1), "c", 1));
         assert!(!floors.covers_collection(DatabaseId::DEFAULT, TenantId::new(1), "other", 1));
+    }
+
+    /// A truncate the collection stamp names took effect before the crash.
+    /// It sets no floor, so a record below it that applied after it
+    /// replays. A sibling sub-record at its own LSN is skipped until the pass
+    /// reaches the truncate, and applies after it.
+    #[test]
+    fn a_named_truncate_sets_no_floor_and_skips_only_the_siblings_ahead_of_it() {
+        let ts = (DatabaseId::DEFAULT, TenantId::new(1), "ts".to_string());
+        let stamps = HashMap::from([(
+            ts.clone(),
+            TsReplayStamp {
+                rows: crate::types::replay_stamp::ReplayStamp::default(),
+                truncates: crate::types::replay_stamp::ReplayStamp::naming(20),
+            },
+        )]);
+        let truncate = truncate_record(RecordType::TimeseriesTruncate, 20, 0, "ts");
+        let mut floors = TruncateFloors::collect(std::slice::from_ref(&truncate), 1, 0, &stamps);
+
+        assert!(
+            !floors.covers(&ts, 15),
+            "a record in flight at the truncate replays"
+        );
+        assert!(
+            floors.covers(&ts, 20),
+            "a sibling ahead of the truncate is skipped"
+        );
+        floors.pass(&truncate);
+        assert!(
+            !floors.covers(&ts, 20),
+            "a sibling after the truncate applies"
+        );
+
+        let unnamed =
+            TruncateFloors::collect(std::slice::from_ref(&truncate), 1, 0, &HashMap::new());
+        assert!(
+            unnamed.covers(&ts, 15),
+            "a truncate that did not take effect floors"
+        );
     }
 }

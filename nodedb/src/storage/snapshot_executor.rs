@@ -246,10 +246,12 @@ fn restore_vector_checkpoints(
         .map_err(crate::Error::Wal)?;
         total_vectors += 1;
     }
+    // The snapshot holds every record through its LSN.
     crate::data::executor::vector_checkpoint::publish_vector_generation(
         &ckpt_dir,
         generation,
         snapshot_lsn,
+        crate::types::replay_stamp::ReplayStamp::through(snapshot_lsn.as_u64()),
     )?;
 
     info!(

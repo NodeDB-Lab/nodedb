@@ -7,13 +7,12 @@
 //! caller must flush first — never partway through.
 //!
 //! That ordering is what makes the partition stamp honest.
-//! `flush_ts_collection` labels the partition it writes with the collection's
-//! max ingested WAL LSN, and boot replay skips every record at or below the
-//! highest stamp it finds. A flush that fires between two rows of record L
-//! writes a partition holding SOME of L but stamped L-1 (L is recorded only
-//! once the record is fully ingested), so replay does not skip L and appends
-//! every one of its rows a second time — on an append-only engine nothing
-//! masks that.
+//! `flush_ts_collection` labels the partition it writes with the records it
+//! holds (`timeseries_checkpoint::stamp`), and boot replay skips exactly those.
+//! A record is noted only once all of its rows landed. A flush that fires
+//! between two rows of record L writes a partition holding SOME of L whose
+//! stamp does not name L, so replay appends every one of L's rows a second
+//! time — on an append-only engine nothing masks that.
 
 use std::collections::HashSet;
 

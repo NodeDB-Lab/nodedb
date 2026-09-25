@@ -3,9 +3,9 @@
 //! Rebuilding `ts_registries` from the partition directories on disk.
 //!
 //! The partitions ARE the timeseries checkpoint, so this is its loader: it makes
-//! the flushed rows reachable again, and it installs the per-collection
-//! `last_flushed_wal_lsn` gate that stops `replay_timeseries_wal` re-appending
-//! records those partitions already contain.
+//! the flushed rows reachable again, and it installs the per-collection replay
+//! stamp (`stamp.rs`) that stops `replay_timeseries_wal` re-appending records
+//! those partitions already contain.
 //!
 //! A partition directory is committed by its `partition.meta`, which
 //! `ColumnarSegmentWriter::write_partition` writes last and atomically. A
@@ -14,7 +14,8 @@
 //! `PartitionRegistry::cleanup_orphans` would remove it. A meta that is present
 //! but cannot be read or decoded is NOT ignored: that is corruption of a
 //! committed partition, and silently dropping it would under-restore the
-//! collection while the LSN gate it carries says its records need no replay.
+//! collection while its stamp says its records need no replay. The same holds
+//! for a stamp file that is present but does not decode.
 
 use tracing::info;
 
@@ -25,21 +26,16 @@ use crate::types::{DatabaseId, TenantId};
 impl CoreLoop {
     /// Rebuild every timeseries collection's partition registry from disk.
     ///
-    /// Called once at boot, BEFORE `replay_all_wal`. Until it existed
-    /// `ts_registries` was populated only lazily — by the first SCAN of a
-    /// collection, via [`Self::ensure_ts_registry`] — which happens long after
-    /// replay. Replay's dedup gate reads those registries, so at replay time it
-    /// found no partitions, gated nothing, and re-appended every retained
-    /// `TimeseriesBatch` on top of the partition that already held it. A
-    /// timeseries ingest is an append and the scan reads partitions and memtable
-    /// together, so nothing masked the duplicate rows.
+    /// Called once at boot, BEFORE `replay_all_wal`. Replay's skip gate reads
+    /// the collection stamps this loads. Loaded lazily instead, at the first
+    /// scan, they would be absent at replay: every retained `TimeseriesBatch`
+    /// would append again on top of the partition that holds it, and the scan
+    /// reads partitions and memtable together, so nothing masks the duplicate.
     ///
     /// A collection whose registry cannot be rebuilt is fail-stop: a
-    /// `partition.meta` that exists but will not decode is corruption of a
-    /// committed partition this core is about to claim is durable, and the WAL
-    /// below its `last_flushed_wal_lsn` gate may already be gone. Skipping it
-    /// quietly would under-restore the collection while replay still trusts
-    /// the gate it never installed.
+    /// `partition.meta` or stamp that exists but will not decode is corruption
+    /// of committed state this core is about to claim is durable, and the WAL
+    /// behind it may already be gone.
     pub fn load_ts_registries(&mut self) -> crate::Result<()> {
         let ts_root = self.data_dir.join("ts");
         if !ts_root.exists() {
@@ -72,7 +68,8 @@ impl CoreLoop {
         Ok(())
     }
 
-    /// Ensure the partition registry is loaded for one timeseries collection.
+    /// Ensure the partition registry and the replay stamp are loaded for one
+    /// timeseries collection.
     ///
     /// A no-op once the collection's registry is present, so the boot load above
     /// and the lazy first-scan path can both call it.
@@ -97,6 +94,12 @@ impl CoreLoop {
         }
 
         let registry = read_registry(&ts_dir, self.segment_keks.ts_segment_kek.as_ref())?;
+        let stamp = super::stamp::read_collection_ts_stamp(&ts_dir, &registry)?;
+        let merged = match self.ts_replay_stamps.get(&key) {
+            Some(held) => held.union(&stamp),
+            None => stamp,
+        };
+        self.ts_replay_stamps.insert(key.clone(), merged);
         if registry.partition_count() > 0 {
             info!(
                 collection,

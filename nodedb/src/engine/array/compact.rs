@@ -66,7 +66,13 @@ mod tests {
         let mut e = ArrayEngine::new(cfg).unwrap();
         e.open_array(aid(), schema(), 0x1).unwrap();
         for i in 0..4 {
-            put_one(&mut e, i, 0, i, (i as u64) + 1);
+            let lsn = (i as u64) + 1;
+            put_one(&mut e, i, 0, i, lsn);
+            e.flush(
+                &aid(),
+                crate::types::replay_stamp::ReplayStamp::through(lsn),
+            )
+            .unwrap();
         }
         assert_eq!(e.store(&aid()).unwrap().manifest().segments.len(), 4);
         let merged = e.maybe_compact(&aid(), None, 0).unwrap();

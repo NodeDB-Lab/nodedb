@@ -103,6 +103,15 @@ impl CoreLoop {
         } else {
             task.state = TaskState::Running;
             let resp = self.execute(&task);
+            // Every engine's next checkpoint, flush or manifest stamps what
+            // this core applied, so a record applied here is noted whichever
+            // engine applied it. A refused record carries a durable abort
+            // marker instead, and a stamp never names it.
+            if resp.status == Status::Ok
+                && let Some(lsn) = task.wal_lsn()
+            {
+                self.floors.applied_prefix.note_applied(lsn);
+            }
             // A crash test kills the process here: one collection's logged
             // write applied, and its response never leaves the core. A task
             // with no WAL record never matches.

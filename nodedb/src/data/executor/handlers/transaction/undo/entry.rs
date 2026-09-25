@@ -27,7 +27,6 @@ pub(in crate::data::executor) struct TimeseriesIngestUndo {
     /// The collection's series catalog. Ingest registers each new series in
     /// it.
     pub series_catalog_before: Option<nodedb_types::timeseries::SeriesCatalog>,
-    pub max_ingested_lsn_before: Option<u64>,
     pub last_ts_ingest_before: Option<std::time::Instant>,
     pub reservation_bytes_before: Option<usize>,
 }
@@ -64,16 +63,18 @@ pub(in crate::data::executor) type SpatialDocMapEntry = (
 /// renames it back and a commit removes it (`finalize_timeseries_truncates`).
 pub(in crate::data::executor) struct TimeseriesTruncateUndo {
     pub collection_key: (nodedb_types::DatabaseId, TenantId, String),
-    /// `(original, moved)` when the collection had a partition directory.
-    pub moved_dir: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    /// The collection's live directory. The truncate leaves a fresh one
+    /// holding only its replay stamp; the rollback removes it.
+    pub original_dir: std::path::PathBuf,
+    /// The aside name of the directory the collection had, if it had one.
+    pub moved_dir: Option<std::path::PathBuf>,
     pub memtable: Option<crate::engine::timeseries::columnar_memtable::ColumnarMemtable>,
     pub memtable_mem: Option<nodedb_mem::ReservationToken>,
     pub registry: Option<crate::engine::timeseries::partition_registry::PartitionRegistry>,
-    pub max_ingested_lsn: Option<u64>,
     pub last_value_cache: Option<LastValueCache>,
     pub series_catalog: Option<nodedb_types::timeseries::SeriesCatalog>,
-    /// `ts_truncate_floors[key]` before this truncate raised it.
-    pub truncate_floor: Option<u64>,
+    /// The collection's replay stamp before this truncate raised it.
+    pub replay_stamp: Option<crate::data::executor::timeseries_checkpoint::stamp::TsReplayStamp>,
 }
 
 /// Tracks a write operation for rollback purposes.

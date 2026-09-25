@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! WAL replay for sparse-vector inserts and deletes. Both upsert or remove by
-//! `doc_id`, so full re-application over a restored checkpoint reproduces the
-//! same state and no watermark gates them.
+//! WAL replay for sparse-vector inserts and deletes.
+//!
+//! Both upsert or remove by `doc_id`. A record the restored sparse-vector
+//! checkpoint's stamp names is skipped, and every other record replays in LSN
+//! order on top of the checkpoint, the order the live core applied it in.
 
 use nodedb_physical::physical_plan::VectorOp;
 
@@ -37,8 +39,8 @@ impl CoreLoop {
         }]);
     }
 
-    /// Replay one `SparseVectorPut` record. Idempotent upsert-by-`doc_id`, so
-    /// no watermark gate is required.
+    /// Replay one `SparseVectorPut` record, unless the restored checkpoint
+    /// holds it.
     pub(in crate::data::executor) fn replay_sparse_put(
         &mut self,
         payload: &[u8],
@@ -60,6 +62,9 @@ impl CoreLoop {
             return false;
         };
         if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
+            return false;
+        }
+        if self.sparse_vector_replay_skips(record_lsn) {
             return false;
         }
         if self.applying_committed_redo()
@@ -112,8 +117,8 @@ impl CoreLoop {
         true
     }
 
-    /// Replay one `SparseVectorDelete` record. Idempotent (an absent document
-    /// is a no-op), so no watermark gate is required.
+    /// Replay one `SparseVectorDelete` record, unless the restored checkpoint
+    /// holds it.
     pub(in crate::data::executor) fn replay_sparse_delete(
         &mut self,
         payload: &[u8],
@@ -135,6 +140,9 @@ impl CoreLoop {
             return false;
         };
         if tombstones.is_tombstoned(tenant_id, &collection, record_lsn) {
+            return false;
+        }
+        if self.sparse_vector_replay_skips(record_lsn) {
             return false;
         }
         if self.claim_for_validation() {

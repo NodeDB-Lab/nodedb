@@ -149,8 +149,7 @@ fn genomics_variant_reclassification_bitemporal() {
         let cells: Vec<ArrayPutCell> = (0_i64..100)
             .map(|s| variant_cell(s, 1 /* pathogenic */, day_1_ms, day_1_ms))
             .collect();
-        // Write in batches of 20 to avoid any single call with 100 cells
-        // (stays under any auto-flush threshold for the test engine config).
+        // Write in batches of 20, one WAL LSN per batch.
         for (i, chunk) in cells.chunks(20).enumerate() {
             let lsn = (i as u64) + 1;
             e.put_cells(&aid(), chunk.to_vec(), lsn).unwrap();

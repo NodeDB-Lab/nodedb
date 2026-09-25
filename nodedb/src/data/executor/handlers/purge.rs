@@ -125,12 +125,10 @@ impl CoreLoop {
             self.columnar_memtable_mem
                 .retain(|(_, t, _), _| *t != tid_key);
             self.ts_registries.retain(|(_, t, _), _| *t != tid_key);
-            self.ts_max_ingested_lsn
-                .retain(|(_, t, _), _| *t != tid_key);
+            self.ts_replay_stamps.retain(|(_, t, _), _| *t != tid_key);
             self.ts_last_value_caches
                 .retain(|(_, t, _), _| *t != tid_key);
             self.ts_series_catalogs.retain(|(_, t, _), _| *t != tid_key);
-            self.ts_truncate_floors.retain(|(_, t, _), _| *t != tid_key);
             before - self.columnar_memtables.len()
         };
 

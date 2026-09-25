@@ -135,13 +135,6 @@ impl CoreLoop {
 
         // Insert all vectors with shared surrogate.
         let ids = coll.insert_multi_vector(&vector_slices, document_surrogate);
-        // Advance the checkpoint watermark to this write's WAL LSN so a later
-        // checkpoint records these nodes as absorbed; startup replay then skips
-        // the straddling WAL record instead of appending duplicate HNSW nodes.
-        // `None` (unassigned LSN) leaves the watermark untouched.
-        if let Some(lsn) = task.wal_lsn() {
-            coll.note_checkpoint_lsn(lsn.as_u64());
-        }
 
         // Auto-seal if needed.
         let seal_key = CoreLoop::vector_build_key(&index_key);
@@ -193,12 +186,6 @@ impl CoreLoop {
         };
 
         let deleted = coll.delete_multi_vector(document_surrogate);
-        // Advance the watermark to this delete's WAL LSN (single per-collection
-        // value covering inserts and deletes), so a checkpoint records the
-        // removal as absorbed and replay does not re-run it below the mark.
-        if let Some(lsn) = task.wal_lsn() {
-            coll.note_checkpoint_lsn(lsn.as_u64());
-        }
         if deleted > 0 {
             self.checkpoint_coordinator.mark_dirty("vector", deleted);
             // Record this write's version keyed by the shared document

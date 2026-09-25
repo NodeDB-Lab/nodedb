@@ -85,6 +85,13 @@ impl ArrayEngine {
         &self.cfg
     }
 
+    /// Set the memtable cell count at which [`Self::needs_flush`] reports an
+    /// array full.
+    #[cfg(test)]
+    pub(crate) fn set_flush_cell_threshold(&mut self, cells: usize) {
+        self.cfg.flush_cell_threshold = cells;
+    }
+
     /// Open or attach to an array.
     ///
     /// Idempotent: if the array is already open with the same
@@ -364,12 +371,16 @@ mod tests {
             let mut e = ArrayEngine::new(ArrayEngineConfig::new(dir.path().to_path_buf())).unwrap();
             e.open_array(aid.clone(), schema(), 0xBEEF).unwrap();
             put_one(&mut e, 1, 1, 7, 1);
-            e.flush(&aid, 2).unwrap();
+            e.flush(&aid, crate::types::replay_stamp::ReplayStamp::through(2))
+                .unwrap();
         }
         let mut e = ArrayEngine::new(ArrayEngineConfig::new(dir.path().to_path_buf())).unwrap();
         e.open_array(aid.clone(), schema(), 0xBEEF).unwrap();
         let m = e.store(&aid).unwrap().manifest();
         assert_eq!(m.segments.len(), 1);
-        assert!(m.durable_lsn > 0);
+        assert_eq!(
+            m.replay,
+            crate::types::replay_stamp::ReplayStamp::through(2)
+        );
     }
 }

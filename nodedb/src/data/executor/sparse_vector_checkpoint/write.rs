@@ -13,6 +13,7 @@ use super::paths::{
 };
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::Lsn;
+use crate::types::replay_stamp::ReplayStamp;
 
 impl CoreLoop {
     /// Flush every sparse-vector index on this core to disk and return the LSN
@@ -23,15 +24,17 @@ impl CoreLoop {
     /// reported checkpoint LSN to the last LSN this engine was known durable
     /// through, so a failed flush costs WAL growth instead of data.
     ///
-    /// Stamping the generation with the core watermark rests on this: it runs
-    /// on the core's own thread between
-    /// tasks, so every sparse-vector write the core has admitted is already
-    /// folded into the in-memory indexes exported here. Where a sparse-vector
-    /// write did not itself raise the watermark, the stamp merely UNDERSTATES
-    /// this engine's durability, and understating is the safe direction — the
-    /// record replays idempotently on top of the restored index.
-    pub(in crate::data::executor) fn checkpoint_sparse_vector_indexes(&self) -> crate::Result<Lsn> {
+    /// The manifest carries the core's replay stamp: it runs on the core's own
+    /// thread between tasks, so every record the stamp names is already folded
+    /// into the in-memory indexes exported here. Restart replay skips exactly
+    /// those records.
+    pub(in crate::data::executor) fn checkpoint_sparse_vector_indexes(
+        &mut self,
+    ) -> crate::Result<Lsn> {
         let durable_through = self.watermark;
+        let replay = self.floors.applied_prefix.stamp()?;
+        let prefix = replay.prefix;
+        let applied_ranges = replay.applied_above.len();
 
         let ckpt_dir = sparse_vector_ckpt_dir(&self.data_dir, self.core_id);
         std::fs::create_dir_all(&ckpt_dir).map_err(|e| storage_err(&ckpt_dir, "create dir", &e))?;
@@ -53,7 +56,11 @@ impl CoreLoop {
             .map_err(|e| storage_err(&gen_dir, "create generation dir", &e))?;
 
         let written = self.write_sparse_vector_generation(&gen_dir)?;
-        self.publish_sparse_vector_generation(&ckpt_dir, generation, durable_through)?;
+        self.publish_sparse_vector_generation(&ckpt_dir, generation, durable_through, replay)?;
+        self.floors.sparse_vector_published_lsn = self
+            .floors
+            .sparse_vector_published_lsn
+            .max(Lsn::new(prefix));
 
         // The previous generation is now unreachable. Removing it reclaims disk
         // but is NOT required for correctness — the manifest alone decides what
@@ -79,6 +86,8 @@ impl CoreLoop {
             generation,
             indexes = written,
             durable_through_lsn = durable_through.as_u64(),
+            replay_prefix = prefix,
+            applied_ranges,
             "sparse vector checkpoint published"
         );
         Ok(durable_through)
@@ -126,11 +135,13 @@ impl CoreLoop {
         ckpt_dir: &std::path::Path,
         generation: u64,
         durable_through: Lsn,
+        replay: ReplayStamp,
     ) -> crate::Result<()> {
         let manifest = SparseVectorCheckpointManifest {
             format_version: SPARSE_VECTOR_CKPT_FORMAT_VERSION,
             generation,
             durable_through_lsn: durable_through.as_u64(),
+            replay,
         };
         let bytes =
             zerompk::to_msgpack_vec(&manifest).map_err(|e| crate::Error::Serialization {

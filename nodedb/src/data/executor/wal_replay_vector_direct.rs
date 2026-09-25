@@ -46,11 +46,7 @@ impl CoreLoop {
             return false;
         }
         let index_key = CoreLoop::vector_index_key(database_id, tenant_id, &collection, &field);
-        if self.replay_watermark_skips(
-            self.vector_collections
-                .get(&index_key)
-                .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
-        ) {
+        if self.vector_replay_skips(record_lsn) {
             return false;
         }
         if !self.redo_vector_targets_prelude(
@@ -103,9 +99,6 @@ impl CoreLoop {
             );
             return false;
         }
-        if let Some(coll) = self.vector_collections.get_mut(&index_key) {
-            coll.note_checkpoint_lsn(record_lsn);
-        }
         true
     }
 
@@ -135,11 +128,7 @@ impl CoreLoop {
             return false;
         }
         let index_key = CoreLoop::vector_index_key(database_id, tenant_id, &collection, &field);
-        if self.replay_watermark_skips(
-            self.vector_collections
-                .get(&index_key)
-                .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
-        ) {
+        if self.vector_replay_skips(record_lsn) {
             return false;
         }
         if self.claim_for_validation() {
@@ -175,9 +164,6 @@ impl CoreLoop {
                 &format!("vector direct truncate on '{collection}' failed"),
             );
             return false;
-        }
-        if let Some(coll) = self.vector_collections.get_mut(&index_key) {
-            coll.note_checkpoint_lsn(record_lsn);
         }
         true
     }
@@ -216,11 +202,7 @@ impl CoreLoop {
             return false;
         }
         let index_key = CoreLoop::vector_index_key(database_id, tenant_id, &collection, &field);
-        if self.replay_watermark_skips(
-            self.vector_collections
-                .get(&index_key)
-                .is_some_and(|existing| record_lsn <= existing.checkpoint_wal_lsn()),
-        ) {
+        if self.vector_replay_skips(record_lsn) {
             return false;
         }
         if !self.redo_vector_targets_prelude(
@@ -282,9 +264,6 @@ impl CoreLoop {
                 &format!("vector direct update on '{collection}' failed"),
             );
             return false;
-        }
-        if let Some(coll) = self.vector_collections.get_mut(&index_key) {
-            coll.note_checkpoint_lsn(record_lsn);
         }
         true
     }

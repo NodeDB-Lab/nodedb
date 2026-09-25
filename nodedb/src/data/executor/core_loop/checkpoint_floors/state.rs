@@ -109,12 +109,9 @@ pub(in crate::data::executor) struct CheckpointFloors {
     /// the WAL (i.e. in `{data_dir}/vector-ckpt/`), advanced only by a fully
     /// successful `checkpoint_vector_indexes`.
     ///
-    /// Not restored at boot: `load_vector_checkpoints` restores the INDEXES, but
-    /// each file carries only its own collection's `checkpoint_wal_lsn`, which
-    /// is a per-collection replay gate and says nothing about what this CORE is
-    /// durable through. So this starts at zero and is first advanced by this
-    /// process's own successful flush; clamping to zero until then costs WAL
-    /// growth, never data.
+    /// Restored at boot from the live generation's manifest
+    /// (`load_vector_checkpoints`), and otherwise advanced by this process's
+    /// own successful flush.
     ///
     /// Scoped to what the rebuild cannot reach.
     /// `rebuild_vector_indexes_from_store` re-indexes every document of a
@@ -138,13 +135,16 @@ pub(in crate::data::executor) struct CheckpointFloors {
     /// manifest. Same rule as `kv_published_lsn`.
     pub(in crate::data::executor) columnar_published_lsn: Lsn,
 
-    /// LSN of the newest vector checkpoint generation on disk, whichever
-    /// flush published it, restored at boot from the manifest. Restart
-    /// replay skips a vector record at or below the LSN its collection was
-    /// published with, so a committed record applied at or below this one
-    /// must be published again (`redo_apply::cover`). Never a truncation
-    /// floor: that is `vector_durable_lsn`.
+    /// Replay-stamp prefix of the newest vector checkpoint generation on
+    /// disk, whichever flush published it, restored at boot from the
+    /// manifest. Same rule as `kv_published_lsn`. Never a truncation floor:
+    /// that is `vector_durable_lsn`.
     pub(in crate::data::executor) vector_published_lsn: Lsn,
+
+    /// Replay-stamp prefix of the newest sparse-vector checkpoint generation
+    /// on disk, restored at boot from the manifest. Same rule as
+    /// `kv_published_lsn`.
+    pub(in crate::data::executor) sparse_vector_published_lsn: Lsn,
 
     /// Highest LSN the CRDT engines are known to be durable through OUTSIDE the
     /// WAL (i.e. in `{data_dir}/crdt-ckpt/`), advanced only by a fully
@@ -186,7 +186,8 @@ pub(in crate::data::executor) struct CheckpointFloors {
     pub(in crate::data::executor) replay_floors: ReplayFloors,
 
     /// The node's outcome floor as this core last read it from a request, and
-    /// the records this core applied above it: the replay stamp every KV and
-    /// columnar checkpoint carries.
+    /// the records this core applied above it: the replay stamp every KV,
+    /// columnar, vector and sparse-vector checkpoint, array manifest and
+    /// timeseries partition carries.
     pub(in crate::data::executor) applied_prefix: AppliedPrefix,
 }

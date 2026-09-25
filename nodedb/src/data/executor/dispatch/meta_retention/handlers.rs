@@ -86,100 +86,6 @@ impl CoreLoop {
         }
     }
 
-    /// `MetaOp::EnforceTimeseriesRetention`: drop partitions older than
-    /// `max_age_ms`. Bitemporal collections use `max_system_ts` as the
-    /// retention axis; non-bitemporal partitions fall through to `max_ts`.
-    pub(in crate::data::executor::dispatch) fn meta_enforce_timeseries_retention(
-        &mut self,
-        task: &ExecutionTask,
-        collection: &str,
-        max_age_ms: i64,
-    ) -> Response {
-        let now_ms = now_ms();
-        let cutoff = now_ms - max_age_ms;
-        let mut deleted = 0usize;
-        let ts_base = crate::data::executor::handlers::timeseries::paths::ts_collection_dir(
-            &self.data_dir,
-            task.request.database_id.as_u64(),
-            task.request.tenant_id.as_u64(),
-            collection,
-        );
-
-        let bitemporal = self.is_bitemporal(
-            task.request.database_id.as_u64(),
-            task.request.tenant_id.as_u64(),
-            collection,
-        );
-
-        let ts_key = (
-            task.request.database_id,
-            task.request.tenant_id,
-            collection.to_string(),
-        );
-        if let Some(registry) = self.ts_registries.get_mut(&ts_key) {
-            let expired: Vec<(i64, String)> = registry
-                .iter()
-                .filter(|(_, e)| {
-                    let axis_ts = if bitemporal && e.meta.max_system_ts > 0 {
-                        e.meta.max_system_ts
-                    } else {
-                        e.meta.max_ts
-                    };
-                    axis_ts < cutoff
-                        && e.meta.state != nodedb_types::timeseries::PartitionState::Deleted
-                })
-                .map(|(&start, e)| (start, e.dir_name.clone()))
-                .collect();
-
-            for (start_ts, dir_name) in expired {
-                let partition_path = ts_base.join(&dir_name);
-                if partition_path.exists()
-                    && let Err(e) = std::fs::remove_dir_all(&partition_path)
-                {
-                    tracing::warn!(
-                        path = %partition_path.display(),
-                        error = %e,
-                        "failed to delete expired partition"
-                    );
-                    continue;
-                }
-                registry.mark_deleted(start_ts);
-                deleted += 1;
-            }
-
-            if deleted > 0 {
-                tracing::info!(
-                    collection,
-                    deleted,
-                    max_age_ms,
-                    "retention enforcement complete"
-                );
-            }
-        }
-
-        if let Some(lvc) = self.ts_last_value_caches.get_mut(&ts_key) {
-            let evicted = lvc.evict_older_than(cutoff);
-            if !evicted.is_empty() {
-                tracing::debug!(
-                    collection,
-                    evicted = evicted.len(),
-                    "evicted stale LVC entries"
-                );
-                // Drop the same series from the catalog. Leaving them behind
-                // would let it accumulate every series the collection ever saw
-                // while the cache it exists to serve has already released them.
-                if let Some(catalog) = self.ts_series_catalogs.get_mut(&ts_key) {
-                    for id in evicted {
-                        catalog.forget(id);
-                    }
-                }
-            }
-        }
-
-        let payload = (deleted as u64).to_le_bytes().to_vec();
-        self.response_with_payload(task, payload)
-    }
-
     /// `MetaOp::ApplyContinuousAggRetention`.
     pub(in crate::data::executor::dispatch) fn meta_apply_continuous_agg_retention(
         &mut self,
@@ -400,6 +306,15 @@ impl CoreLoop {
         cutoff_system_ms: i64,
     ) -> Response {
         let tenant = TenantId::new(tenant_id);
+        // An array no op has touched since boot is not open on this core, and
+        // the engine purges nothing from an array it has not opened. Opened
+        // from the catalog first; a dropped array has no entry and purges
+        // nothing.
+        let id =
+            nodedb_array::types::ArrayId::in_database(tenant, task.request.database_id, array_id);
+        if let Err(resp) = self.open_array_if_cataloged(task, &id) {
+            return resp;
+        }
         match self.array_engine.temporal_purge(
             tenant,
             task.request.database_id,
@@ -480,7 +395,7 @@ impl CoreLoop {
     }
 }
 
-fn now_ms() -> i64 {
+pub(super) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_else(|e| {

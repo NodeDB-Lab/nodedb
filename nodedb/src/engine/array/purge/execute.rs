@@ -344,7 +344,11 @@ mod tests {
         e.open_array(test_aid(), schema.clone(), 0x1).unwrap();
         put_cell(&mut e, 1, 10, 100, 1);
         put_cell(&mut e, 1, 60, 600, 2);
-        e.flush(&test_aid(), 3).unwrap();
+        e.flush(
+            &test_aid(),
+            crate::types::replay_stamp::ReplayStamp::through(3),
+        )
+        .unwrap();
 
         let horizon = 500;
         let dropped = run_purge(&mut e, horizon);
@@ -367,7 +371,11 @@ mod tests {
         put_cell(&mut e, 2, 20, 100, 1);
         e.gdpr_erase_cell(&test_aid(), vec![CoordValue::Int64(2)], 200, 2)
             .unwrap();
-        e.flush(&test_aid(), 3).unwrap();
+        e.flush(
+            &test_aid(),
+            crate::types::replay_stamp::ReplayStamp::through(3),
+        )
+        .unwrap();
 
         let dropped = run_purge(&mut e, 500);
 
@@ -391,7 +399,11 @@ mod tests {
         e.open_array(test_aid(), schema.clone(), 0x1).unwrap();
         put_cell(&mut e, 3, 30, 100, 1);
         put_cell(&mut e, 3, 35, 700, 2);
-        e.flush(&test_aid(), 3).unwrap();
+        e.flush(
+            &test_aid(),
+            crate::types::replay_stamp::ReplayStamp::through(3),
+        )
+        .unwrap();
 
         let horizon = 500;
         let d1 = run_purge(&mut e, horizon);

@@ -247,8 +247,9 @@ mod tests {
         })
     }
 
-    /// A flushed partition must carry the last record's LSN, or boot replay's
-    /// dedup gate never fires and records replay on top of rows already on disk.
+    /// A flushed partition's stamp must name the record it holds, or boot
+    /// replay's skip gate never fires and the record replays on top of rows
+    /// already on disk.
     #[test]
     fn autocommit_ingest_stamps_the_envelope_lsn_on_the_partition_it_flushes() {
         let mut h = make_core();
@@ -269,17 +270,26 @@ mod tests {
             TenantId::new(TENANT),
             COLLECTION.to_string(),
         );
-        let registry = h.core.ts_registries.get(&key).expect("registry");
-        let stamps: Vec<u64> = registry
-            .iter()
-            .map(|(_, entry)| entry.meta.last_flushed_wal_lsn)
-            .collect();
-        assert_eq!(
-            stamps,
-            vec![42],
-            "the flushed partition must carry the record's WAL LSN, or replay's \
-             dedup gate never fires for it"
+        let stamp = &h.core.ts_replay_stamps.get(&key).expect("stamp").rows;
+        assert!(
+            stamp.skips(42) && !stamp.skips(41),
+            "the flushed partition's stamp must name the record's WAL LSN and \
+             nothing else: {stamp:?}"
         );
+        let registry = h.core.ts_registries.get(&key).expect("registry");
+        let dirs: Vec<String> = registry.iter().map(|(_, e)| e.dir_name.clone()).collect();
+        assert_eq!(dirs.len(), 1);
+        let dir = crate::data::executor::handlers::timeseries::paths::ts_collection_dir(
+            &h.core.data_dir,
+            DatabaseId::DEFAULT.as_u64(),
+            TENANT,
+            COLLECTION,
+        )
+        .join(&dirs[0]);
+        let on_disk = crate::data::executor::timeseries_checkpoint::stamp::read_ts_stamp(&dir)
+            .expect("read")
+            .expect("the partition carries its stamp");
+        assert_eq!(&on_disk.rows, stamp);
     }
 
     /// A read policy governs a raw timeseries scan: only the rows it admits
@@ -390,7 +400,7 @@ mod tests {
     }
 
     /// Nothing minted an LSN, so nothing may be claimed as flushed: a stamp
-    /// invented here would gate away records that are genuinely un-flushed.
+    /// naming a record here would gate away records that are un-flushed.
     #[test]
     fn an_ingest_with_no_lsn_anywhere_stamps_nothing() {
         let mut h = make_core();
@@ -407,7 +417,13 @@ mod tests {
             TenantId::new(TENANT),
             COLLECTION.to_string(),
         );
-        assert_eq!(h.core.ts_max_ingested_lsn.get(&key), None);
+        h.core
+            .flush_ts_collection(TenantId::new(TENANT), DatabaseId::DEFAULT, COLLECTION, 0)
+            .expect("flush");
+        assert_eq!(
+            h.core.ts_replay_stamps.get(&key).map(|s| s.rows.clone()),
+            Some(crate::types::replay_stamp::ReplayStamp::default())
+        );
     }
 
     /// A `RETURNING` ingest whose tags overflow the cardinality limit is

@@ -35,7 +35,6 @@ pub(in crate::data::executor) struct VectorDirectIndexSpec<'a> {
 
 /// One row to store, for [`CoreLoop::write_vector_direct_row`].
 pub(in crate::data::executor) struct VectorDirectRowWrite<'a> {
-    pub task: &'a ExecutionTask,
     pub index_key: &'a VectorIndexKey,
     pub tid: u64,
     pub collection: &'a str,
@@ -239,7 +238,6 @@ impl CoreLoop {
         row: VectorDirectRowWrite<'_>,
     ) -> Result<(), ErrorCode> {
         let VectorDirectRowWrite {
-            task,
             index_key,
             tid,
             collection,
@@ -255,12 +253,6 @@ impl CoreLoop {
             });
         };
         let node_id = coll.insert_with_surrogate(vector.to_vec(), surrogate);
-        // Advance the checkpoint watermark so a later vector checkpoint records
-        // this write as absorbed; startup replay then skips the straddling WAL
-        // record instead of appending a duplicate node.
-        if let Some(lsn) = task.wal_lsn() {
-            coll.note_checkpoint_lsn(lsn.as_u64());
-        }
         coll.payload.insert_row(node_id, fields);
 
         let key = StorageKey::for_surrogate(surrogate);

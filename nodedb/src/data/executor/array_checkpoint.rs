@@ -6,15 +6,13 @@
 //!
 //! `ArrayStore::memtable` is a plain in-memory `Memtable` (see
 //! `engine::array::memtable`). Every `INSERT INTO ARRAY` / `DELETE FROM ARRAY`
-//! lands there and advances the core watermark
-//! (`dispatch::array::mutate` calls `note_write_lsn` with the Control Plane's
-//! `wal_lsn`), so the periodic checkpoint reported those writes as durable and
-//! the manager truncated the `ArrayPut` / `ArrayDelete` records that were their
-//! only copy. The memtable is drained to a segment only by an explicit
-//! `NDARRAY_FLUSH` or by the `flush_cell_threshold` auto-flush — neither of
-//! which is ordered against the truncation the checkpoint authorises. A restart
-//! after truncation returned an array missing every cell written since the last
-//! time a user happened to run `NDARRAY_FLUSH`.
+//! lands there and advances the core watermark (`dispatch::array::mutate`
+//! calls `note_write_lsn` with the Control Plane's `wal_lsn`). The periodic
+//! checkpoint reports those writes as durable, and the manager then removes
+//! the `ArrayPut` / `ArrayDelete` records below that LSN. The checkpoint must
+//! therefore flush every memtable first. An explicit `NDARRAY_FLUSH` and the
+//! `flush_cell_threshold` flush in `dispatch::array::mutate` are not ordered
+//! against that removal, so they cannot stand in for it.
 //!
 //! ## Why this reuses `ArrayEngine::flush` rather than writing a checkpoint blob
 //!
@@ -36,38 +34,36 @@
 //! the engine already knows how to write and read back — and a worse one: it
 //! would bypass the tile compression, the per-tile MBR statistics the query
 //! planner prunes on, and the compaction path that later merges those segments.
-//! The bug was never a missing format; it was that the existing flush was
-//! reachable only by an explicit user command. Calling it here is the fix.
+//! The checkpoint calls the existing flush instead.
 //!
-//! ## What LSN is durable after a flush
+//! ## What a flush stamps
 //!
-//! Segments carry a `flush_lsn` and the manifest a `durable_lsn = max(flush_lsn)`
-//! — "every WAL record at or below this is already in a segment". Stamping the
-//! flush with the core watermark makes that claim true: this runs on the core's
-//! own thread between tasks, and an array write reaches `note_write_lsn` (which
-//! raises the watermark) only after `put_cells` / `delete_cells` has already
-//! stamped the memtable, so every cell with `lsn <= watermark` is in the drain.
+//! Every flush publishes the core's replay stamp in the array's manifest: the
+//! records this core applied, by prefix and ranges. This runs on the core's
+//! own thread between tasks, and an applied write is noted before the next
+//! task runs, so every record whose cells the memtable holds is named. A
+//! record the stamp does not name was not applied yet, and replay applies it.
+//!
+//! The flush also reports the core watermark as this engine's durable point,
+//! the LSN the checkpoint manager may truncate below.
 //!
 //! An array whose memtable is empty flushes nothing and leaves its manifest's
-//! `durable_lsn` where it stands. That is not a gap: an empty memtable means
-//! every cell ever applied to this array is already in a segment, so the
-//! watermark is durable for it either way. The stamp is left alone rather than
-//! advanced with an empty write because doing so would rewrite every array's
-//! manifest on every cycle to record a claim nothing reads back.
+//! stamp where it stands. That is not a gap: an empty memtable means every
+//! cell ever applied to this array is already in a segment, and the stamp of
+//! the flush that wrote it named the record.
 //!
-//! ## Why the floor is the manifest, not `replay_floors.rs`
+//! ## Why the stamp is the manifest's, not `replay_floors.rs`
 //!
-//! Arrays flush independently of one another, so the "already durable through"
-//! watermark is per-array and already recorded: it is the `durable_lsn` this
-//! flush stamps into each array's manifest. `replay_array_wal` skips every
-//! record at or below it.
+//! Arrays flush independently of one another, so each array's manifest
+//! carries the stamp of its own last flush. `replay_array_wal` skips a record
+//! exactly when that stamp names it (`array_replay_skips`).
 //!
-//! Re-applying such a record would usually be merely redundant — the writes are
-//! absolute and keyed by `(tile, coord)` with `system_from_ms` taken from the
-//! WAL payload, so it writes the identical version back. It is not redundant
-//! after a bitemporal audit purge: the purge physically removes a superseded
-//! tile-version from the flushed segment, and a still-retained `ArrayPut` below
-//! the watermark would re-materialise exactly the version the purge erased.
+//! Re-applying a named record is not merely redundant. Its cells would land in
+//! the memtable while a segment already holds the same tile version, and the
+//! next flush would write that version into a second segment. After a
+//! bitemporal audit purge it is worse: the purge physically removes a
+//! superseded tile-version from the flushed segment, and a still-retained
+//! `ArrayPut` would re-materialise exactly the version the purge erased.
 
 use nodedb_array::types::ArrayId;
 use tracing::{info, warn};
@@ -97,6 +93,7 @@ impl CoreLoop {
     /// the first read (`ensure_array_open`) or by replay.
     pub(in crate::data::executor) fn checkpoint_array_engines(&mut self) -> crate::Result<Lsn> {
         let durable_through = self.watermark;
+        let stamp = self.floors.applied_prefix.stamp()?;
 
         // Collected first: `flush` takes `&mut self.array_engine`, so the id
         // iterator cannot stay borrowed across the loop.
@@ -110,7 +107,7 @@ impl CoreLoop {
         for id in &ids {
             // `Ok(None)` = empty memtable, nothing to write; see the module docs
             // for why the watermark is still durable for that array.
-            match self.array_engine.flush(id, durable_through.as_u64()) {
+            match self.array_engine.flush(id, stamp.clone()) {
                 Ok(Some(_)) => flushed += 1,
                 Ok(None) => {}
                 Err(e) => {
@@ -146,9 +143,52 @@ impl CoreLoop {
             arrays = ids.len(),
             flushed,
             durable_through_lsn = durable_through.as_u64(),
+            replay_prefix = stamp.prefix,
+            applied_ranges = stamp.applied_above.len(),
             "array checkpoint flushed"
         );
         Ok(durable_through)
+    }
+
+    /// Flush `array_id` once its memtable reached the engine's cell
+    /// threshold. [`Self::flush_array`] states what the flush stamps.
+    pub(in crate::data::executor) fn flush_array_if_full(
+        &mut self,
+        array_id: &ArrayId,
+    ) -> crate::Result<()> {
+        let full = self
+            .array_engine
+            .needs_flush(array_id)
+            .map_err(|e| array_flush_error(array_id, e))?;
+        if full {
+            self.flush_array(array_id)?;
+        }
+        Ok(())
+    }
+
+    /// Flush `array_id`, stamped with what this core applied.
+    ///
+    /// The caller noted every record it applied to the array before calling,
+    /// so the stamp names each record whose cells the flush writes.
+    pub(in crate::data::executor) fn flush_array(
+        &mut self,
+        array_id: &ArrayId,
+    ) -> crate::Result<()> {
+        let stamp = self.floors.applied_prefix.stamp()?;
+        self.array_engine
+            .flush(array_id, stamp)
+            .map_err(|e| array_flush_error(array_id, e))?;
+        Ok(())
+    }
+}
+
+fn array_flush_error(
+    array_id: &ArrayId,
+    e: crate::engine::array::engine::ArrayEngineError,
+) -> crate::Error {
+    crate::Error::Storage {
+        engine: "array".to_string(),
+        detail: format!("flush of array '{}': {e}", array_id.name),
     }
 }
 
@@ -172,7 +212,10 @@ mod tests {
     use crate::bridge::dispatch::{BridgeRequest, BridgeResponse};
     use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Response, Status};
     use crate::engine::array::wal::ArrayPutCell;
+    use crate::types::replay_stamp::{LsnRange, ReplayStamp};
     use crate::types::*;
+    use nodedb_wal::record::{RecordType, WalRecordArgs};
+    use nodedb_wal::{TombstoneSet, WalRecord};
 
     const TID: u64 = 1;
 
@@ -252,14 +295,12 @@ mod tests {
         }
 
         fn put(&mut self, id: &ArrayId, x: i64, y: i64, v: i64, wal_lsn: u64) {
-            let cells = vec![ArrayPutCell {
-                coord: vec![CoordValue::Int64(x), CoordValue::Int64(y)],
-                attrs: vec![CellValue::Int64(v)],
-                surrogate: nodedb_types::Surrogate::ZERO,
-                system_from_ms: 1,
-                valid_from_ms: 0,
-                valid_until_ms: i64::MAX,
-            }];
+            self.put_at(id, x, y, v, 1, wal_lsn);
+        }
+
+        /// `put` with an explicit system time, for bitemporal versions.
+        fn put_at(&mut self, id: &ArrayId, x: i64, y: i64, v: i64, sys_ms: i64, wal_lsn: u64) {
+            let cells = vec![cell(x, y, v, sys_ms)];
             let r = self.send(ArrayOp::Put {
                 array_id: id.clone(),
                 cells_msgpack: zerompk::to_msgpack_vec(&cells).expect("encode cells"),
@@ -384,8 +425,7 @@ mod tests {
         assert_eq!(
             after.slice_all(&id),
             vec![(1, 2, 30), (9, 9, 40)],
-            "every checkpointed cell must come back from its on-disk segment — \
-             pre-fix the checkpoint flushed nothing and both cells were gone"
+            "every checkpointed cell must come back from its on-disk segment"
         );
     }
 
@@ -448,11 +488,11 @@ mod tests {
         );
     }
 
-    /// A committed record applied at an LSN the array's durable watermark
-    /// already covers is flushed into a segment: restart replay skips it, so
+    /// A committed record applied at an LSN the array's manifest stamp
+    /// already names is flushed into a segment: restart replay skips it, so
     /// the segment is its only copy.
     #[test]
-    fn a_committed_record_applied_below_the_durable_lsn_is_flushed() {
+    fn a_committed_record_the_manifest_stamp_names_is_flushed() {
         use crate::data::executor::handlers::transaction::redo_apply::CommittedRedo;
         use crate::engine::array::wal::{ArrayPutPayload, encode_put_with_version};
         use crate::wal::{RedoRecord, RedoSubRecord};
@@ -465,10 +505,17 @@ mod tests {
         before.open_array(&id);
         before.put(&id, 1, 2, 30, 100);
         before.core.advance_watermark(Lsn::new(100));
+        // The outcome floor passed lsn 50 while that record was still on its
+        // way to this core, so the flush's stamp prefix names it.
+        before
+            .core
+            .floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(100));
         before
             .core
             .checkpoint_array_engines()
-            .expect("flush at lsn 100");
+            .expect("flush stamped through lsn 100");
 
         let payload = encode_put_with_version(&ArrayPutPayload {
             array_id: id.clone(),
@@ -512,8 +559,269 @@ mod tests {
         assert_eq!(
             after.slice_all(&id),
             vec![(1, 2, 30), (9, 9, 40)],
-            "the cell committed at lsn 50 survives a restart that replays nothing \
-             at or below lsn 100"
+            "the cell committed at lsn 50 survives a restart that skips every \
+             record the stamp names"
+        );
+    }
+
+    fn cell(x: i64, y: i64, v: i64, sys_ms: i64) -> ArrayPutCell {
+        ArrayPutCell {
+            coord: vec![CoordValue::Int64(x), CoordValue::Int64(y)],
+            attrs: vec![CellValue::Int64(v)],
+            surrogate: nodedb_types::Surrogate::ZERO,
+            system_from_ms: sys_ms,
+            valid_from_ms: 0,
+            valid_until_ms: i64::MAX,
+        }
+    }
+
+    /// The `ArrayPut` WAL record a live put of one cell appends.
+    fn put_record(id: &ArrayId, x: i64, y: i64, v: i64, sys_ms: i64, lsn: u64) -> WalRecord {
+        use crate::engine::array::wal::{ArrayPutPayload, encode_put_with_version};
+        let payload = encode_put_with_version(&ArrayPutPayload {
+            array_id: id.clone(),
+            cells: vec![cell(x, y, v, sys_ms)],
+            provenance: None,
+        })
+        .expect("encode put");
+        WalRecord::new(WalRecordArgs {
+            record_type: RecordType::ArrayPut as u32,
+            lsn,
+            tenant_id: TID,
+            vshard_id: 0,
+            database_id: DatabaseId::DEFAULT.as_u64(),
+            payload,
+            encryption_key: None,
+            preamble_bytes: None,
+        })
+        .expect("wal record")
+    }
+
+    /// Restart the way `replay_all_wal` does: raise the floor to the WAL end,
+    /// then replay `records` into the array.
+    fn restart_and_replay(dir: &std::path::Path, id: &ArrayId, records: &[WalRecord]) -> Core {
+        let mut core = Core::open_at(dir);
+        core.open_array(id);
+        let wal_end = records.iter().map(|r| r.header.lsn).max().unwrap_or(0);
+        core.core
+            .floors
+            .applied_prefix
+            .seed_replayed_through(Lsn::new(wal_end));
+        core.core.replay_array_wal(records, 1, &TombstoneSet::new());
+        core
+    }
+
+    /// Tiles over every segment the array's manifest names.
+    fn segment_tiles(core: &Core, id: &ArrayId) -> u32 {
+        core.core
+            .array_engine
+            .store(id)
+            .expect("array open")
+            .manifest()
+            .segments
+            .iter()
+            .map(|s| s.tile_count)
+            .sum()
+    }
+
+    /// The replay gate asks the stamp in the array's manifest, record by
+    /// record. A record below the highest named LSN that the stamp does not
+    /// name replays.
+    #[test]
+    fn array_replay_skips_exactly_the_records_the_stamp_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = aid();
+        let mut core = Core::open_at(dir.path());
+        core.open_array(&id);
+        core.core
+            .floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(5));
+        core.put(&id, 1, 1, 10, 10);
+        core.core.checkpoint_array_engines().expect("flush");
+
+        assert_eq!(
+            core.core
+                .array_engine
+                .store(&id)
+                .expect("open")
+                .manifest()
+                .replay,
+            ReplayStamp {
+                prefix: 5,
+                applied_above: vec![LsnRange { start: 10, end: 10 }],
+            }
+        );
+        for (lsn, skips) in [(3, true), (5, true), (7, false), (10, true), (11, false)] {
+            assert_eq!(
+                core.core.array_replay_skips(&id, lsn),
+                skips,
+                "record at lsn {lsn}"
+            );
+        }
+    }
+
+    /// A threshold flush stamps the record whose write filled the memtable.
+    #[test]
+    fn a_threshold_flush_stamps_the_write_that_filled_the_memtable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = aid();
+        let mut core = Core::open_at(dir.path());
+        core.core.array_engine.set_flush_cell_threshold(1);
+        core.open_array(&id);
+        core.put(&id, 1, 1, 10, 40);
+
+        let manifest = core.core.array_engine.store(&id).expect("open").manifest();
+        assert_eq!(manifest.segments.len(), 1, "the put filled the memtable");
+        assert!(
+            manifest.replay.skips(40),
+            "the threshold flush names the record it wrote: {:?}",
+            manifest.replay
+        );
+    }
+
+    /// Floor 10. B at lsn 30 applies, a checkpoint flushes it, then A at lsn
+    /// 20 applies. A restart replays A once and never re-applies B, and the
+    /// array reads as it did live.
+    #[test]
+    fn an_array_write_in_flight_at_a_checkpoint_replays_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = aid();
+        let records = [
+            put_record(&id, 1, 1, 20, 1, 20),
+            put_record(&id, 9, 9, 30, 1, 30),
+        ];
+
+        let mut before = Core::open_at(dir.path());
+        before.open_array(&id);
+        before
+            .core
+            .floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(10));
+        before.put(&id, 9, 9, 30, 30);
+        before.core.checkpoint_array_engines().expect("flush B");
+        before.put(&id, 1, 1, 20, 20);
+        let live = before.slice_all(&id);
+        assert_eq!(live, vec![(1, 1, 20), (9, 9, 30)]);
+        drop(before);
+
+        let mut after = restart_and_replay(dir.path(), &id, &records);
+        assert_eq!(after.slice_all(&id), live, "replay equals live");
+        after.core.checkpoint_array_engines().expect("flush A");
+        assert_eq!(
+            segment_tiles(&after, &id),
+            2,
+            "B's tile is in the first segment only; the second holds A alone"
+        );
+        drop(after);
+
+        // Every record is named now: a second restart applies nothing.
+        let mut again = restart_and_replay(dir.path(), &id, &records);
+        assert_eq!(again.slice_all(&id), live);
+        assert_eq!(segment_tiles(&again, &id), 2);
+        again.core.checkpoint_array_engines().expect("empty flush");
+        assert_eq!(
+            segment_tiles(&again, &id),
+            2,
+            "nothing replayed into memory"
+        );
+    }
+
+    /// An audit purge removes a superseded tile version from a segment. The
+    /// records that wrote it are named by the stamp, so replay does not bring
+    /// the version back.
+    #[test]
+    fn replay_does_not_rematerialise_a_purged_version() {
+        use nodedb_array::query::ceiling::CeilingResult;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = aid();
+        let records = [
+            put_record(&id, 0, 0, 100, 100, 1),
+            put_record(&id, 0, 0, 200, 200, 2),
+            put_record(&id, 0, 0, 300, 300, 3),
+        ];
+        let ceiling = |core: &Core, sys: i64| {
+            core.core
+                .array_engine
+                .store(&id)
+                .expect("open")
+                .ceiling_for_coord(&[CoordValue::Int64(0), CoordValue::Int64(0)], sys, None)
+                .expect("ceiling")
+        };
+
+        let mut before = Core::open_at(dir.path());
+        before.open_array(&id);
+        for (v, lsn) in [(100, 1), (200, 2), (300, 3)] {
+            before.put_at(&id, 0, 0, v, v, lsn);
+            before
+                .core
+                .checkpoint_array_engines()
+                .expect("flush one version");
+        }
+        let dropped = before
+            .core
+            .array_engine
+            .temporal_purge(TenantId::new(TID), DatabaseId::DEFAULT, &id.name, 250)
+            .expect("purge");
+        assert!(dropped >= 1, "the purge dropped the superseded versions");
+        assert!(matches!(ceiling(&before, 249), CeilingResult::NotFound));
+        drop(before);
+
+        let after = restart_and_replay(dir.path(), &id, &records);
+        assert!(
+            matches!(ceiling(&after, 249), CeilingResult::NotFound),
+            "a purged version came back from replay: {:?}",
+            ceiling(&after, 249)
+        );
+        assert!(matches!(ceiling(&after, i64::MAX), CeilingResult::Live(_)));
+    }
+
+    /// A restart opens only the arrays its WAL tail writes. The catalog still
+    /// holds every array, as the Control Plane seeds it from `_system.arrays`
+    /// at boot, so the first write to an array nothing reopened opens it from
+    /// the catalog instead of failing as unknown.
+    #[test]
+    fn the_first_write_after_a_restart_opens_its_array_from_the_catalog() {
+        use crate::control::array_catalog::ArrayCatalogEntry;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = aid();
+
+        let mut before = Core::open_at(dir.path());
+        before.open_array(&id);
+        before.put(&id, 1, 2, 30, 10);
+        before.core.checkpoint_array_engines().expect("flush");
+        drop(before);
+
+        let mut after = Core::open_at(dir.path());
+        after
+            .core
+            .array_catalog
+            .write()
+            .expect("catalog lock")
+            .register(ArrayCatalogEntry {
+                array_id: id.clone(),
+                name: id.name.clone(),
+                schema_msgpack: zerompk::to_msgpack_vec(&schema()).expect("encode schema"),
+                schema_hash: SCHEMA_HASH,
+                created_at_ms: 0,
+                prefix_bits: 8,
+                audit_retain_ms: None,
+                minimum_audit_retain_ms: None,
+            })
+            .expect("seed the catalog");
+        assert!(
+            after.core.array_engine.store(&id).is_err(),
+            "nothing opened the array on this core yet"
+        );
+
+        after.put(&id, 3, 3, 50, 20);
+        assert_eq!(
+            after.slice_all(&id),
+            vec![(1, 2, 30), (3, 3, 50)],
+            "the write lands beside the cells the array held before the restart"
         );
     }
 }

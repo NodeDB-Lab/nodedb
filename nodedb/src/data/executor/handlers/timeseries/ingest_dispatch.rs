@@ -14,12 +14,20 @@ use crate::data::executor::task::ExecutionTask;
 /// Side-effect policy for a timeseries ingest.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::data::executor) enum TimeseriesApplyMode {
+    /// A live write: one record, one sub-record. The memtable flushes before
+    /// the rows land when it cannot take them whole, and after they land
+    /// when it is over its budget.
     Immediate,
-    /// The install pass of a committed redo record. The memtable flushes the
-    /// rows it already holds when it has no room, then the ingest records
-    /// the pre-image its undo restores. No flush, budget recharge or timer
-    /// update runs after the rows land: the apply settles those once the
-    /// whole record installed (`settle_redo_timeseries`).
+    /// Restart replay of one sub-record. The replay arm flushed before the
+    /// record's first sub-record when the memtable could not take the whole
+    /// record, and settles it once the last sub-record landed
+    /// (`group_flush`). No flush runs here: it would split the record.
+    Replay,
+    /// The install pass of a committed redo record. The replay arm flushed
+    /// before the record's first sub-record, as in `Replay`; the ingest
+    /// records the pre-image its undo restores. No flush, budget recharge or
+    /// timer update runs after the rows land: the apply settles those once
+    /// the whole record installed (`settle_redo_timeseries`).
     RedoInstall,
 }
 
@@ -113,37 +121,17 @@ impl CoreLoop {
         }
 
         let key = (task.request.database_id, tid, collection.to_string());
-        let already_flushed = if let Some(lsn) = wal_lsn
-            && let Some(registry) = self.ts_registries.get(&key)
-        {
-            let max_flushed = registry
-                .iter()
-                .map(|(_, e)| e.meta.last_flushed_wal_lsn)
-                .max()
-                .unwrap_or(0);
-            max_flushed > 0 && lsn <= max_flushed
-        } else {
-            false
-        };
-        // A record written before a later truncate describes rows the
-        // truncate removed: the same "nothing to write" answer as a record
-        // already on disk. Strictly before: a record at the truncate's own LSN
-        // is a sibling sub-record of the same transaction redo group, applied
-        // in the order the transaction wrote it.
-        let already_flushed = already_flushed
-            || wal_lsn.is_some_and(|lsn| {
-                self.ts_truncate_floors
-                    .get(&key)
-                    .is_some_and(|floor| lsn < *floor)
-            });
-        // Both tests are restart-replay watermarks. A committed-redo apply
-        // installs its record once, whatever a live flush or truncate stamped
-        // since the record's LSN was minted.
-        let already_flushed = self.replay_watermark_skips(already_flushed);
+        // A record the collection's replay stamp names is already in a
+        // partition, or a truncate removed its rows: nothing to write. Every
+        // other record applies, including one below the highest named LSN,
+        // which was still on its way when that flush or truncate ran. A
+        // committed-redo apply installs its record once, whatever the stamp
+        // names (`replay_watermark_skips`).
+        let already_flushed = wal_lsn.is_some_and(|lsn| self.ts_replay_skips(&key, lsn));
 
         if already_flushed {
             if let Some(prov) = provenance
-                && mode == TimeseriesApplyMode::Immediate
+                && mode != TimeseriesApplyMode::RedoInstall
             {
                 self.sync_commit(prov);
                 let applied_seq = self.sync_hwm_value(prov.producer_id, prov.stream_id);

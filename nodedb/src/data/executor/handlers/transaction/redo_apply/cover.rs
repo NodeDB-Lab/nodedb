@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Keep every published engine watermark true after a committed record
-//! applies below it.
+//! Keep every published replay stamp true after a committed record applies
+//! below its prefix.
 //!
-//! Restart replay skips a record at or below an engine's published
-//! watermark: the vector checkpoint's per-collection LSN, the KV and
-//! columnar checkpoint floors, an array manifest's durable LSN. The watermark
-//! claims that the published artifact holds every record at or below it.
+//! Restart replay skips a record at or below the prefix of an engine's
+//! published replay stamp: the vector, KV and columnar checkpoint manifests,
+//! an array manifest. The prefix claims that the published artifact holds
+//! every record at or below it.
 //! Records apply in the order Raft
 //! commits them, not in LSN order, so a record can apply after an artifact
 //! was published at a higher LSN. That record lives only in memory, and the
@@ -28,6 +28,8 @@ use super::sub_ops::kv_ops;
 pub(super) struct WrittenEngines {
     /// A vector index the vector checkpoint publishes.
     pub vectors: bool,
+    /// A sparse-vector index the sparse-vector checkpoint publishes.
+    pub sparse_vectors: bool,
     /// A KV collection the KV checkpoint publishes.
     pub kv: bool,
     /// A columnar collection the columnar checkpoint publishes.
@@ -38,6 +40,7 @@ impl WrittenEngines {
     pub(super) fn of(redo: &RedoRecord) -> Self {
         Self {
             vectors: redo.ops.iter().any(writes_vector_index),
+            sparse_vectors: redo.ops.iter().any(writes_sparse_vector_index),
             kv: !kv_ops(&redo.ops).is_empty()
                 || redo
                     .ops
@@ -62,6 +65,13 @@ fn writes_vector_index(op: &RedoSubRecord) -> bool {
                 | RecordType::MultiVectorPut
                 | RecordType::MultiVectorDelete
         )
+    )
+}
+
+fn writes_sparse_vector_index(op: &RedoSubRecord) -> bool {
+    matches!(
+        RecordType::from_raw(op.record_type),
+        Some(RecordType::SparseVectorPut | RecordType::SparseVectorDelete)
     )
 }
 
@@ -105,8 +115,8 @@ impl CoreLoop {
         }
     }
 
-    /// Publish again every artifact whose watermark covers `lsn` but not the
-    /// record just applied at it.
+    /// Publish again every artifact whose stamp names `lsn` but does not hold
+    /// the record just applied at it.
     pub(super) fn cover_applied_record(
         &mut self,
         lsn: Lsn,
@@ -117,6 +127,12 @@ impl CoreLoop {
             let published = self.floors.vector_published_lsn;
             self.checkpoint_vector_indexes()
                 .map_err(|error| republish_error("vector checkpoint", lsn, published, &error))?;
+        }
+        if engines.sparse_vectors && lsn <= self.floors.sparse_vector_published_lsn {
+            let published = self.floors.sparse_vector_published_lsn;
+            self.checkpoint_sparse_vector_indexes().map_err(|error| {
+                republish_error("sparse-vector checkpoint", lsn, published, &error)
+            })?;
         }
         if engines.kv && lsn <= self.floors.kv_published_lsn {
             let published = self.floors.kv_published_lsn;
@@ -129,16 +145,14 @@ impl CoreLoop {
                 .map_err(|error| republish_error("columnar checkpoint", lsn, published, &error))?;
         }
         for array_id in arrays {
-            let durable = self.array_durable_lsn(array_id);
-            if lsn.as_u64() > durable {
+            if !self.array_stamp_names(array_id, lsn.as_u64()) {
                 continue;
             }
-            self.array_engine
-                .flush(array_id, durable)
+            self.flush_array(array_id)
                 .map_err(|error| ErrorCode::Internal {
                     detail: format!(
-                        "a record applied at lsn {} below array '{}' durable lsn {durable} \
-                         could not be flushed: {error}",
+                        "a record applied at lsn {} that array '{}' manifest stamp names \
+                     could not be flushed: {error}",
                         lsn.as_u64(),
                         array_id.name
                     ),
@@ -197,9 +211,12 @@ mod tests {
         let key = CoreLoop::vector_index_key(DatabaseId::DEFAULT.as_u64(), TID, "docs", "");
         let mut collection = VectorCollection::new(2, HnswParams::default());
         collection.insert_with_surrogate(vec![0.1, 0.9], Surrogate::new(1));
-        collection.note_checkpoint_lsn(100);
         core.vector_collections.insert(key.clone(), collection);
         core.advance_watermark(Lsn::new(100));
+        // The published stamp's prefix is what restart replay skips through.
+        core.floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(100));
         core.checkpoint_vector_indexes()
             .expect("publish at lsn 100");
 
@@ -225,8 +242,8 @@ mod tests {
         assert_eq!(response.status, Status::Ok, "apply: {response:?}");
         drop(core);
 
-        // Restart replay skips lsn 50 against the restored collection, so the
-        // published generation is the only copy of the second vector.
+        // Restart replay skips lsn 50, which the restored stamp's prefix names,
+        // so the published generation is the only copy of the second vector.
         let dir_path = dir.path().to_path_buf();
         let (mut restored, _tx2, _rx2) = make_core_with_dir(&dir_path);
         restored.load_vector_checkpoints().expect("load");

@@ -134,14 +134,15 @@ impl CoreLoop {
             Ok(scope) => scope,
             Err(refusal) => return self.response_error(task, refusal.into_code()),
         };
-        // Settle, then publish again every artifact whose watermark covers
+        // The install applied the record: a flush the settle runs, and a
+        // checkpoint the cover writes, name it.
+        self.floors.applied_prefix.note_applied(lsn);
+        // Settle, then publish again every artifact whose stamp prefix covers
         // the record, so restart replay does not skip it. Neither step can be
         // rolled back once it started, so a failure leaves live state restart
         // replay does not rebuild: the core fail-stops. The funnel keeps the
         // record for restart replay.
         let settled = self.settle_redo_install(task, &mut scope).and_then(|()| {
-            // Applied from here on: a checkpoint the cover writes names it.
-            self.floors.applied_prefix.note_applied(lsn);
             self.cover_applied_record(lsn, &WrittenEngines::of(&redo), &scope.arrays_written)
         });
         if let Err(error) = settled {
@@ -378,10 +379,10 @@ mod tests {
         }
     }
 
-    /// Restart replay skips a timeseries record at or below the highest
-    /// flushed partition stamp. A committed redo applied online after a live
-    /// flush stamped past its LSN must still install, and must flush so the
-    /// stamp's claim holds for it on the next restart.
+    /// Restart replay skips a timeseries record the collection stamp names.
+    /// A committed redo applied online after a flush whose stamp prefix
+    /// passed its LSN must still install, and must flush so the stamp's
+    /// claim holds for it on the next restart.
     #[test]
     fn an_online_redo_apply_below_a_flushed_partition_stamp_still_installs() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -393,7 +394,8 @@ mod tests {
             "metrics".to_string(),
         );
 
-        // A write at LSN 100 lands and flushes: the partition stamps LSN 100.
+        // A write at LSN 100 lands, the outcome floor passes it, and a flush
+        // stamps through LSN 100.
         let earlier = RedoRecord {
             version: 1,
             ops: vec![metric_samples_sub("metrics", 1_700_000_000_000, 1.0)],
@@ -416,6 +418,9 @@ mod tests {
             &nodedb_wal::TombstoneSet::new(),
         )
         .expect("seed replay");
+        core.floors
+            .applied_prefix
+            .observe_outcome_floor(crate::types::Lsn::new(100));
         core.flush_ts_collection(tenant, crate::types::DatabaseId::DEFAULT, "metrics", 0)
             .expect("flush the seeded partition");
 

@@ -342,6 +342,15 @@ mod tests {
                 lsn,
             )
             .unwrap();
+        // The threshold flush the executor runs after every write.
+        if engine.needs_flush(&test_aid()).unwrap() {
+            engine
+                .flush(
+                    &test_aid(),
+                    crate::types::replay_stamp::ReplayStamp::through(lsn),
+                )
+                .unwrap();
+        }
     }
 
     #[test]

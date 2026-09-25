@@ -327,6 +327,13 @@ impl CoreLoop {
                     if !dir_entry.file_type()?.is_file() {
                         continue;
                     }
+                    // A replay stamp names this core's WAL records; a restore
+                    // elsewhere writes its own.
+                    if name_str
+                        == crate::data::executor::timeseries_checkpoint::stamp::TS_STAMP_FILE
+                    {
+                        continue;
+                    }
                     let bytes = std::fs::read(dir_entry.path())?;
                     files.push((name_str.to_string(), bytes));
                 }

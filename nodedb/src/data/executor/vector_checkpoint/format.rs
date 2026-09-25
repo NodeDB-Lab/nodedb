@@ -12,12 +12,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::replay_stamp::ReplayStamp;
+
 /// On-disk format version for the manifest and the generation it names.
 ///
 /// A manifest stamped with any other version is refused rather than misparsed.
 /// Refusing costs a WAL replay; misparsing would install indexes built from
 /// bytes this build cannot read.
-pub(crate) const VECTOR_CKPT_FORMAT_VERSION: u16 = 1;
+pub(crate) const VECTOR_CKPT_FORMAT_VERSION: u16 = 2;
 
 /// Names the live generation. Writing this file is what publishes a checkpoint.
 #[derive(
@@ -42,6 +44,9 @@ pub(crate) struct VectorCheckpointManifest {
     /// flush clamps WAL truncation to. Without it the first failed flush after
     /// a restart would pin truncation at zero.
     pub durable_through_lsn: u64,
+    /// The records every index in the generation holds. Restart replay skips
+    /// a vector record exactly when this stamp names it.
+    pub replay: ReplayStamp,
 }
 
 /// Encode a manifest publishing `generation`, for tests that need a live
@@ -56,6 +61,7 @@ pub(crate) fn test_manifest_bytes(generation: u64) -> Vec<u8> {
         format_version: VECTOR_CKPT_FORMAT_VERSION,
         generation,
         durable_through_lsn: 0,
+        replay: ReplayStamp::default(),
     })
     .expect("manifest encode is infallible for this fixed struct")
 }

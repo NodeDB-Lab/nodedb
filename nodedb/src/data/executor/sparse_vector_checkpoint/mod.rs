@@ -40,17 +40,13 @@
 //! expressible, so a torn or abandoned write is inert garbage rather than a
 //! generation whose LSN overstates what is on disk.
 //!
-//! ## Why no replay floor
+//! ## Replay floor
 //!
-//! Unlike KV — whose `kv_incr` / `kv_cas` records are deltas that double-count
-//! if replayed over a checkpoint that already folded them in — every
-//! sparse-vector record is idempotent: `SparseVectorPut` is an upsert keyed by
-//! `doc_id` and `SparseVectorDelete` is a no-op against an absent document (see
-//! `wal_replay_vector_extended.rs`, whose replay arms document exactly this and
-//! take no watermark gate). Replaying records at or below the restored
-//! generation's LSN therefore reproduces the same state rather than corrupting
-//! it, so this engine needs no entry in `ReplayFloors`; restoring before replay
-//! is the whole requirement.
+//! The manifest carries the core's replay stamp, and a restart installs it as
+//! the sparse-vector replay floor. A record the stamp names is skipped. Every
+//! other record replays in LSN order on top of the restored generation,
+//! including a lower-LSN record still in flight when the generation was
+//! written, so the replayed indexes equal the live ones.
 
 mod format;
 mod load;

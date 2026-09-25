@@ -29,12 +29,14 @@
 //! restores as "no vectors" instead of as last cycle's contents, and a torn or
 //! abandoned write is inert garbage rather than a half-published state.
 //!
-//! ## Why no replay floor
+//! ## Replay floor
 //!
-//! Vector WAL records are idempotent against a restored index — `VectorOp::Insert`
-//! upserts by surrogate and a delete of an absent vector is a no-op — so replay
-//! above and below the generation's stamp both reproduce the same index. The
-//! stamp is carried anyway, because it is what a failed flush clamps WAL
+//! The manifest carries the core's replay stamp: every record the generation
+//! holds. A restart installs it as the vector replay floor. An HNSW insert
+//! appends a node and never dedups, so a record the stamp names must not
+//! replay. Every other record replays in LSN order, including a lower-LSN
+//! record still in flight when the generation was written. The manifest also
+//! carries `durable_through_lsn`, the point a failed flush clamps WAL
 //! truncation to after a restart.
 
 mod build_completions;

@@ -8,10 +8,9 @@
 //!   single array. Batched so the recovery path can rebuild a memtable
 //!   without one syscall per cell.
 //! * [`ArrayDeletePayload`] — a batch of point deletes for a single array.
-//! * [`ArrayFlushPayload`] — emitted *after* the engine has fsync'd a new
-//!   segment file. Replay treats it as a watermark: any earlier
-//!   `ArrayPut`/`ArrayDelete` whose LSN <= this record's LSN is already
-//!   captured in the segment and must not be reapplied.
+//! * [`ArrayFlushPayload`] — an explicit flush request. Replay applies
+//!   nothing for it: the manifest's replay stamp, not this record, decides
+//!   which `ArrayPut`/`ArrayDelete` records a segment already holds.
 //!
 //! All three are zerompk-encoded — JSON is reserved for the API
 //! boundary, never used between planes. LSNs are allocated by the

@@ -120,7 +120,7 @@ impl CoreLoop {
         let mode = if installing {
             TimeseriesApplyMode::RedoInstall
         } else {
-            TimeseriesApplyMode::Immediate
+            TimeseriesApplyMode::Replay
         };
         let response = self.execute_timeseries_ingest(TimeseriesIngestExec {
             task: &task,

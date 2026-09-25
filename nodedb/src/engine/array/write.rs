@@ -14,6 +14,10 @@ impl ArrayEngine {
     /// Stamps the memtable with a caller-supplied LSN. The Control Plane
     /// allocates the LSN at WAL-append time and the Data Plane just
     /// stamps; this is the only write path for the engine.
+    ///
+    /// Never flushes. A flush must stamp the records its segment holds, and
+    /// only the caller knows them: it checks [`Self::needs_flush`] and
+    /// flushes with its core's replay stamp.
     pub fn put_cells(
         &mut self,
         id: &ArrayId,
@@ -23,9 +27,7 @@ impl ArrayEngine {
         if cells.is_empty() {
             return Ok(());
         }
-        stamp_put_cells(self.store_mut(id)?, cells, wal_lsn)?;
-        self.maybe_flush(id)?;
-        Ok(())
+        stamp_put_cells(self.store_mut(id)?, cells, wal_lsn)
     }
 
     /// Stamps memtable tombstones (or GDPR erasure markers) with a
@@ -40,9 +42,7 @@ impl ArrayEngine {
         if cells.is_empty() {
             return Ok(());
         }
-        stamp_delete_cells(self.store_mut(id)?, cells, wal_lsn)?;
-        self.maybe_flush(id)?;
-        Ok(())
+        stamp_delete_cells(self.store_mut(id)?, cells, wal_lsn)
     }
 
     /// GDPR-erase a single cell at `(array, coord, system_from_ms)`.
@@ -74,16 +74,10 @@ impl ArrayEngine {
         )
     }
 
-    pub(super) fn maybe_flush(&mut self, id: &ArrayId) -> ArrayEngineResult<()> {
-        let stats = self.store(id)?.memtable.stats();
-        if stats.cell_count >= self.cfg.flush_cell_threshold {
-            // Auto-flush in the threshold path uses an LSN of 0 — the
-            // caller's WAL-side flush record (if any) carries the real
-            // watermark; auto-flushes are always followed by another
-            // explicit Flush from the Control Plane in production.
-            self.flush(id, 0)?;
-        }
-        Ok(())
+    /// Whether the array's memtable holds at least `flush_cell_threshold`
+    /// live cells.
+    pub fn needs_flush(&self, id: &ArrayId) -> ArrayEngineResult<bool> {
+        Ok(self.store(id)?.memtable.stats().cell_count >= self.cfg.flush_cell_threshold)
     }
 }
 
@@ -142,17 +136,20 @@ mod tests {
     use nodedb_array::types::coord::value::CoordValue;
     use tempfile::TempDir;
 
+    /// A put reports the threshold and leaves the flush to its caller, which
+    /// alone knows the stamp the segment must carry.
     #[test]
-    fn auto_flush_triggers_at_threshold() {
+    fn a_put_reports_the_threshold_and_never_flushes() {
         let dir = TempDir::new().unwrap();
         let mut cfg = ArrayEngineConfig::new(dir.path().to_path_buf());
         cfg.flush_cell_threshold = 2;
         let mut e = ArrayEngine::new(cfg).unwrap();
         e.open_array(aid(), schema(), 0x1).unwrap();
-        for i in 0..2 {
-            put_one(&mut e, i, i, i, (i as u64) + 1);
-        }
-        assert!(!e.store(&aid()).unwrap().manifest().segments.is_empty());
+        put_one(&mut e, 0, 0, 0, 1);
+        assert!(!e.needs_flush(&aid()).unwrap());
+        put_one(&mut e, 1, 1, 1, 2);
+        assert!(e.needs_flush(&aid()).unwrap());
+        assert!(e.store(&aid()).unwrap().manifest().segments.is_empty());
     }
 
     #[test]
@@ -170,7 +167,10 @@ mod tests {
             valid_until_ms: i64::MAX,
         }];
         e.put_cells(&aid(), cells, 42).unwrap();
-        let seg = e.flush(&aid(), 43).unwrap().unwrap();
+        let seg = e
+            .flush(&aid(), crate::types::replay_stamp::ReplayStamp::through(43))
+            .unwrap()
+            .unwrap();
         assert_eq!(seg.flush_lsn, 43);
 
         let pred = MbrQueryPredicate::default();

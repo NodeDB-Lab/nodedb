@@ -222,8 +222,16 @@ fn follower_replay_yields_identical_state() {
     }
 
     // Flush both so the segment-scan path is also exercised.
-    e1.flush(&aid(), 10).unwrap();
-    e2.flush(&aid(), 10).unwrap();
+    e1.flush(
+        &aid(),
+        nodedb::types::replay_stamp::ReplayStamp::through(10),
+    )
+    .unwrap();
+    e2.flush(
+        &aid(),
+        nodedb::types::replay_stamp::ReplayStamp::through(10),
+    )
+    .unwrap();
 
     let s1 = e1.store(&aid()).unwrap();
     let s2 = e2.store(&aid()).unwrap();

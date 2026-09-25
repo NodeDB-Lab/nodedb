@@ -10,6 +10,7 @@ use super::paths::{vector_ckpt_dir, vector_ckpt_gen_dir};
 use super::publish::publish_vector_generation;
 use crate::data::executor::checkpoint_outcome::CheckpointOutcome;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::types::Lsn;
 
 impl CoreLoop {
     /// Flush every vector index to disk and report the LSN they are now durable
@@ -41,13 +42,17 @@ impl CoreLoop {
     /// the watermark only after the collection has already been mutated, so
     /// every write with `lsn <= watermark` is in the bytes written below.
     ///
-    /// Every published generation raises `vector_published_lsn`, whichever
-    /// caller published it: restart restores from the newest generation, so
-    /// a committed record applied at or below it must reach a newer one
-    /// (`redo_apply::cover`). `vector_durable_lsn` stays the caller's to
-    /// raise.
+    /// The manifest carries the core's replay stamp: the records every index
+    /// in the generation holds. Restart replay skips exactly those.
+    ///
+    /// Every published generation raises `vector_published_lsn` to the
+    /// stamp's prefix, whichever caller published it: restart restores from
+    /// the newest generation, so a committed record applied at or below it
+    /// must reach a newer one (`redo_apply::cover`). `vector_durable_lsn`
+    /// stays the caller's to raise.
     pub(crate) fn checkpoint_vector_indexes(&mut self) -> crate::Result<CheckpointOutcome> {
         let durable_lsn = self.watermark;
+        let replay = self.floors.applied_prefix.stamp()?;
 
         let ckpt_dir = vector_ckpt_dir(&self.data_dir, self.core_id);
         std::fs::create_dir_all(&ckpt_dir).map_err(|e| storage_err(&ckpt_dir, "create dir", &e))?;
@@ -69,8 +74,10 @@ impl CoreLoop {
             .map_err(|e| storage_err(&gen_dir, "create generation dir", &e))?;
 
         let files_written = self.write_vector_generation(&gen_dir)?;
-        publish_vector_generation(&ckpt_dir, generation, durable_lsn)?;
-        self.floors.vector_published_lsn = self.floors.vector_published_lsn.max(durable_lsn);
+        let prefix = Lsn::new(replay.prefix);
+        let applied_ranges = replay.applied_above.len();
+        publish_vector_generation(&ckpt_dir, generation, durable_lsn, replay)?;
+        self.floors.vector_published_lsn = self.floors.vector_published_lsn.max(prefix);
 
         // The previous generation is now unreachable. Removing it reclaims disk
         // but is NOT required for correctness — the manifest alone decides what
@@ -97,6 +104,8 @@ impl CoreLoop {
             files_written,
             total = self.vector_collections.len(),
             durable_through_lsn = durable_lsn.as_u64(),
+            replay_prefix = prefix.as_u64(),
+            applied_ranges,
             "vector checkpoint published"
         );
         Ok(CheckpointOutcome {

@@ -51,8 +51,8 @@ fn aid() -> ArrayId {
     ArrayId::new(TENANT, ARRAY_NAME)
 }
 
-/// Open an engine with `flush_cell_threshold = 1` so every `put_cells`
-/// call lands in a fresh segment. This makes it easy to produce multiple
+/// Open an engine with `flush_cell_threshold = 1` so every `put` lands in
+/// a fresh segment through `flush_if_full`. This makes it easy to produce multiple
 /// system-time versions of the same coordinate in separate segments,
 /// which exercises the cross-segment retention logic in `plan.rs`.
 fn open_engine(dir: &TempDir) -> ArrayEngine {
@@ -77,11 +77,25 @@ fn put(e: &mut ArrayEngine, x: i64, v: i64, sys_ms: i64, lsn: u64) {
         lsn,
     )
     .unwrap();
+    flush_if_full(e, lsn);
+}
+
+/// The threshold flush the executor runs after every write it applies,
+/// stamped through the write's LSN.
+fn flush_if_full(e: &mut ArrayEngine, lsn: u64) {
+    if e.needs_flush(&aid()).unwrap() {
+        e.flush(
+            &aid(),
+            nodedb::types::replay_stamp::ReplayStamp::through(lsn),
+        )
+        .unwrap();
+    }
 }
 
 fn erase(e: &mut ArrayEngine, x: i64, sys_ms: i64, lsn: u64) {
     e.gdpr_erase_cell(&aid(), vec![CoordValue::Int64(x)], sys_ms, lsn)
         .unwrap();
+    flush_if_full(e, lsn);
 }
 
 fn ceiling(e: &ArrayEngine, x: i64, sys: i64) -> CeilingResult {
@@ -241,7 +255,8 @@ fn temporal_purge_drops_gdpr_erased_cells_outright() {
 
     put(&mut e, 0, 42, 100, 1); // Live(x=0) at T=100
     erase(&mut e, 0, 200, 2); // GdprErased(x=0) at T=200
-    e.flush(&aid(), 3).unwrap(); // ensure erasure tile-version lands in a segment
+    e.flush(&aid(), nodedb::types::replay_stamp::ReplayStamp::through(3))
+        .unwrap(); // ensure erasure tile-version lands in a segment
 
     let dropped = e.temporal_purge(TENANT, DATABASE, ARRAY_NAME, 250).unwrap();
     // Both tile-versions are outside horizon=250 and are candidates for
