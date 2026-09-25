@@ -292,3 +292,80 @@ async fn crdt_delete_returning_projects_deleted_row() {
         "DELETE ... RETURNING must still remove the row; got {remaining:?}"
     );
 }
+
+/// The CRDT gate is read from a catalog keyed by the BARE collection name, so a
+/// non-default database must refuse a predicate UPDATE exactly as `default`
+/// does — mirrors `predicate_update_on_crdt_rejected`.
+#[tokio::test]
+async fn predicate_update_on_crdt_rejected_in_non_default_database() {
+    let (srv, _db) = TestServer::with_database("crdt_pred_upd_scope").await;
+    srv.exec(
+        "CREATE TABLE crdt_notes_nd (id TEXT PRIMARY KEY, title TEXT, body TEXT) \
+         WITH (crdt='true')",
+    )
+    .await
+    .unwrap();
+
+    srv.exec("INSERT INTO crdt_notes_nd (id, title, body) VALUES ('a', 't1', 'b1')")
+        .await
+        .unwrap();
+
+    srv.expect_error(
+        "UPDATE crdt_notes_nd SET title='x' WHERE title='t1'",
+        "predicate (non-primary-key) UPDATE on CRDT collection",
+    )
+    .await;
+}
+
+/// The DELETE side of the same gate — mirrors
+/// `predicate_delete_on_crdt_rejected`.
+#[tokio::test]
+async fn predicate_delete_on_crdt_rejected_in_non_default_database() {
+    let (srv, _db) = TestServer::with_database("crdt_pred_del_scope").await;
+    srv.exec(
+        "CREATE TABLE crdt_notes_nd (id TEXT PRIMARY KEY, title TEXT, body TEXT) \
+         WITH (crdt='true')",
+    )
+    .await
+    .unwrap();
+
+    srv.exec("INSERT INTO crdt_notes_nd (id, title, body) VALUES ('a', 't1', 'b1')")
+        .await
+        .unwrap();
+
+    srv.expect_error(
+        "DELETE FROM crdt_notes_nd WHERE title='t1'",
+        "predicate (non-primary-key) DELETE on CRDT collection",
+    )
+    .await;
+}
+
+/// An explicit `ON CONFLICT DO UPDATE SET` on a CRDT collection is refused —
+/// CRDT convergence IS the LWW full replace, so the caller's merge clause has
+/// nowhere to run. The refusal rides the same catalog gate, so a non-default
+/// database must refuse it too.
+///
+/// `INSERT ... ON CONFLICT DO UPDATE SET` is the form that reaches the upsert
+/// converter with the clause attached; the `UPSERT INTO` form is consumed and
+/// rebuilt by the protocol-neutral collection DML parser before planning.
+#[tokio::test]
+async fn upsert_on_conflict_do_update_on_crdt_rejected_in_non_default_database() {
+    let (srv, _db) = TestServer::with_database("crdt_upsert_scope").await;
+    srv.exec(
+        "CREATE TABLE crdt_notes_nd (id TEXT PRIMARY KEY, title TEXT, body TEXT) \
+         WITH (crdt='true')",
+    )
+    .await
+    .unwrap();
+
+    srv.exec("INSERT INTO crdt_notes_nd (id, title, body) VALUES ('a', 't1', 'b1')")
+        .await
+        .unwrap();
+
+    srv.expect_error(
+        "INSERT INTO crdt_notes_nd (id, title, body) VALUES ('a', 't9', 'b9') \
+         ON CONFLICT (id) DO UPDATE SET title = 't9'",
+        "UPSERT with ON CONFLICT DO UPDATE on CRDT collection",
+    )
+    .await;
+}

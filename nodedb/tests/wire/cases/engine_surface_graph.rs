@@ -118,3 +118,24 @@ async fn engine_graph_flag_rejected_in_with_clause() {
         "expected graph-rejection error, got: {err}"
     );
 }
+
+/// The edge-bearing gate is read from a catalog keyed by the BARE collection
+/// name, so a non-default database must still refuse an expression update to a
+/// reserved edge field — the mirrored edge could not be reconciled against it.
+#[tokio::test]
+async fn edge_field_expression_update_rejected_in_non_default_database() {
+    let (srv, _db) = TestServer::with_database("graph_edge_scope").await;
+    srv.exec("CREATE COLLECTION graph_edges_nd WITH (engine='document_schemaless')")
+        .await
+        .unwrap();
+
+    srv.exec("INSERT INTO graph_edges_nd { id: 'e1', _from: 'alice', _to: 'bob', _type: 'knows' }")
+        .await
+        .unwrap();
+
+    srv.expect_error(
+        "UPDATE graph_edges_nd SET _from = _to WHERE id = 'e1'",
+        "expression updates to reserved edge fields",
+    )
+    .await;
+}

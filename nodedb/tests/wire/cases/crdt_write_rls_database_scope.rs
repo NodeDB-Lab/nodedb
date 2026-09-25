@@ -209,3 +209,72 @@ async fn crdt_merge_in_default_database_is_still_rls_enforced() {
          document's stored state untouched"
     );
 }
+
+/// `SELECT crdt_apply(...)` must report an RLS write denial as `42501`, the
+/// code `CRDT MERGE` already reports, rather than flattening every admission
+/// failure to `XX000`. A client cannot act on a denial it cannot recognise.
+///
+/// Runs in `default` on purpose: the flatten is database-independent, and the
+/// engine key there is the bare collection name a wire test can construct.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn crdt_apply_in_default_database_reports_rls_denial_as_42501() {
+    const COLL: &str = "crdt_rls_apply_notes";
+    const DOC: &str = "doc1";
+
+    let server = TestServer::start().await;
+    let user = "crdt_rls_apply_default_user";
+
+    query_ok(
+        &server,
+        &format!("CREATE TABLE {COLL} (id TEXT PRIMARY KEY, title TEXT) WITH (crdt='true')"),
+    )
+    .await;
+    create_scoped_user(&server, user, "default").await;
+
+    // A predicate no real row ever satisfies: `id` is the primary key, so it
+    // holds the document's own id, never this sentinel. Every CRDT write on
+    // this collection is therefore denied.
+    query_ok(
+        &server,
+        &format!(
+            "CREATE RLS POLICY {COLL}_block ON {COLL} FOR WRITE \
+             USING (id = 'sentinel_id_no_row_ever_has')"
+        ),
+    )
+    .await;
+
+    // A REAL Loro delta, shaped exactly as `CrdtState` models the document:
+    // collection = root map, row = `insert_container`, fields on the row map.
+    // A placeholder payload is refused by the preview for an unrelated reason,
+    // so the denial below must come from a genuine apply.
+    let delta_hex = {
+        let doc = loro::LoroDoc::new();
+        let coll = doc.get_map(COLL);
+        let row = coll
+            .insert_container(DOC, loro::LoroMap::new())
+            .expect("row container");
+        row.insert("title", "t1").expect("field");
+        doc.commit();
+        let delta = doc
+            .export(loro::ExportMode::Snapshot)
+            .expect("export loro snapshot");
+        hex::encode(delta)
+    };
+
+    let result = try_exec_as(
+        &server,
+        user,
+        "default",
+        &format!("SELECT crdt_apply('{COLL}', '{DOC}', '{delta_hex}')"),
+    )
+    .await;
+
+    let sqlstate = result.expect_err(
+        "a write policy on a CRDT collection must reject a crdt_apply whose \
+         post-image its predicate forbids",
+    );
+    assert_eq!(
+        sqlstate, "42501",
+        "expected the RLS denial's SQLSTATE, got: {sqlstate}"
+    );
+}

@@ -36,8 +36,14 @@ pub(in crate::control::planner::sql_plan_convert::dml) fn document_collection_is
         return Ok(false);
     };
     let catalog = credentials.catalog();
+    // Callers route the plan on the database-qualified collection, but the
+    // catalog keys collections by the bare name, so strip the qualifier back off
+    // here or a CRDT collection in a non-default database reads as non-CRDT and
+    // its predicate write silently bypasses CRDT convergence. Identity for
+    // `DatabaseId::DEFAULT`.
+    let bare = crate::control::target_identity::bare_collection_name(ctx.database_id, collection);
     Ok(catalog
-        .get_collection(ctx.database_id, ctx.tenant_id.as_u64(), collection)?
+        .get_collection(ctx.database_id, ctx.tenant_id.as_u64(), &bare)?
         .map(|c| c.crdt)
         .unwrap_or(false))
 }

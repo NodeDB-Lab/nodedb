@@ -26,8 +26,14 @@ pub(super) fn document_collection_is_edge_bearing(
         return Ok(false);
     };
     let catalog = credentials.catalog();
+    // Callers route the plan on the database-qualified collection, but the
+    // catalog keys collections by the bare name, so strip the qualifier back off
+    // here or an edge-bearing collection in a non-default database reads as
+    // non-edge-bearing and its PK-equality UPDATE/DELETE skips the mirrored-edge
+    // cleanup, leaking stale edges. Identity for `DatabaseId::DEFAULT`.
+    let bare = crate::control::target_identity::bare_collection_name(ctx.database_id, collection);
     Ok(catalog
-        .get_collection(ctx.database_id, ctx.tenant_id.as_u64(), collection)?
+        .get_collection(ctx.database_id, ctx.tenant_id.as_u64(), &bare)?
         .map(|c| c.has_implicit_edges)
         .unwrap_or(false))
 }
