@@ -38,9 +38,14 @@ pub(in super::super::super) fn declared_primary_key_name(
     let Some(credentials) = ctx.credentials.as_ref() else {
         return Ok(None);
     };
+    // Callers route the plan on the database-qualified collection, but the
+    // catalog keys collections by the bare name, so strip the qualifier back off
+    // here or a declared PRIMARY KEY reads as undeclared in a non-default
+    // database and its NOT NULL goes unenforced. Identity for `DEFAULT`.
+    let bare = crate::control::target_identity::bare_collection_name(ctx.database_id, collection);
     credentials
         .catalog()
-        .declared_primary_key(ctx.database_id, ctx.tenant_id.as_u64(), collection)
+        .declared_primary_key(ctx.database_id, ctx.tenant_id.as_u64(), &bare)
 }
 
 /// Resolve a row's document id and surrogate, refusing a NULL or omitted

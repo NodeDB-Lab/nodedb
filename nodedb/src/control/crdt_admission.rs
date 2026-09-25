@@ -85,8 +85,11 @@ struct CrdtAdmissionWorkflow<'a> {
     tenant_id: TenantId,
     database_id: DatabaseId,
     vshard_id: VShardId,
-    /// Bare collection name. Both doors that route this work hash it together
-    /// with the database, so it must not carry the qualified prefix here.
+    /// The collection the doors that route this work hash together with the
+    /// database to pick a vShard. Apply admission binds the canonical,
+    /// database-qualified key so the sequencer slot, the preview dispatch and
+    /// the raft entry all ride the vShard the planner derived; the restore path
+    /// binds its caller's own form, which its plan and apply are both built from.
     collection: &'a str,
     /// Canonical, database-qualified key the CRDT engine stores the collection
     /// under. The plan under admission carries this form, so the preview that
@@ -221,10 +224,6 @@ pub(crate) async fn dispatch_crdt_apply_admitted_outcome(
     // for a non-default database match the bare name its caller typed -- and it
     // is the string the engine is keyed by, so the preview below has to use it
     // too or it reads a different (empty) document than the apply writes.
-    //
-    // Routing is deliberately left on the caller's own form: each entry point
-    // derives its task vShard from the string it passes here, so re-deriving it
-    // would move work between cores on a path this change is not about.
     let key = engine_key(database_id, collection);
     let (document_id, delta) = match &plan {
         PhysicalPlan::Crdt(
@@ -259,13 +258,18 @@ pub(crate) async fn dispatch_crdt_apply_admitted_outcome(
             });
         }
     };
-    let vshard_id = VShardId::from_collection_in_database(database_id, collection);
+    // Route on the canonical key, not on the caller's own form: the planner
+    // derives its task vShard from the database-qualified collection, so the
+    // sequencer slot, the preview dispatch and the raft entry have to key on
+    // that same string or admission fences a different vShard than the one the
+    // plan's own writes land on.
+    let vshard_id = VShardId::from_collection_in_database(database_id, &key);
     let workflow = CrdtAdmissionWorkflow {
         state,
         tenant_id,
         database_id,
         vshard_id,
-        collection,
+        collection: &key,
         engine_collection: &key,
         timeout,
         event_source,

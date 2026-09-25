@@ -70,8 +70,14 @@ pub(in crate::control::planner::sql_plan_convert::dml) fn document_collection_wr
         return Ok(WriteGates::default());
     };
     let catalog = credentials.catalog();
+    // The caller routes the plan on the database-qualified collection, but the
+    // catalog keys collections by the bare name, so strip the qualifier back off
+    // here or an INSERT into a non-default database misses its row and silently
+    // declares neither gate — losing CRDT convergence, and the BALANCED boundary
+    // with it. Identity for `DatabaseId::DEFAULT`.
+    let bare = crate::control::target_identity::bare_collection_name(ctx.database_id, collection);
     Ok(catalog
-        .get_collection(ctx.database_id, ctx.tenant_id.as_u64(), collection)?
+        .get_collection(ctx.database_id, ctx.tenant_id.as_u64(), &bare)?
         .map(|c| WriteGates {
             crdt: c.crdt,
             balanced: c.balanced.is_some(),
