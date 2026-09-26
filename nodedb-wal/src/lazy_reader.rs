@@ -121,7 +121,7 @@ impl LazyWalReader {
         Ok(None)
     }
 
-    /// Read the next record header (54 bytes) without reading the payload.
+    /// Read the next record header without reading the payload.
     ///
     /// Returns `None` at EOF or first corruption. After this call, use
     /// either `read_payload()` to get the payload or `skip_payload()` to
@@ -461,6 +461,7 @@ mod tests {
             payload_len: (MAX_WAL_PAYLOAD_SIZE + 1) as u32,
             database_id: 0,
             apply_key: 0,
+            event_source: crate::record::NO_EVENT_SOURCE,
             crc32c: 0,
         };
         std::fs::write(&path, header.to_bytes()).unwrap();

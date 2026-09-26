@@ -289,6 +289,7 @@ mod tests {
         let mut wal = WalManager::open_encrypted(&wal_dir, false, &key_a).unwrap();
         let stable_root = wal.crdt_signing_root().unwrap().unwrap();
         wal.appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(
                 TenantId::new(1),
                 VShardId::new(0),
@@ -302,6 +303,7 @@ mod tests {
         let mut wal = WalManager::open_encrypted_rotating(&wal_dir, false, &key_b, &key_a).unwrap();
         assert_eq!(wal.crdt_signing_root().unwrap(), Some(stable_root));
         wal.appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(
                 TenantId::new(1),
                 VShardId::new(0),
@@ -344,6 +346,7 @@ mod tests {
             .unwrap();
         let root = wal.crdt_signing_root().unwrap();
         wal.appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(
                 TenantId::new(1),
                 VShardId::new(0),
@@ -358,6 +361,7 @@ mod tests {
         .unwrap();
         assert_eq!(wal.crdt_signing_root().unwrap(), root);
         wal.appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(
                 TenantId::new(1),
                 VShardId::new(0),

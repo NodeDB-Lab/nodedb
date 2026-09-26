@@ -260,6 +260,7 @@ impl WalWriter {
                 tenant_id,
                 vshard_id,
                 database_id,
+                event_source: crate::record::NO_EVENT_SOURCE,
             },
             payload,
             0,
@@ -267,7 +268,8 @@ impl WalWriter {
     }
 
     /// [`Self::append`] for a record appended by the apply of the replicated
-    /// proposal `apply_key` (see [`WalRecord::new_keyed`]).
+    /// proposal `apply_key`, carrying the event source in `target` (see
+    /// [`WalRecord::new_stamped`]).
     pub fn append_keyed(
         &mut self,
         target: RecordTarget,
@@ -279,6 +281,7 @@ impl WalWriter {
             tenant_id,
             vshard_id,
             database_id,
+            event_source,
         } = target;
         if self.sealed {
             return Err(WalError::Sealed);
@@ -287,7 +290,7 @@ impl WalWriter {
 
         let lsn = self.next_lsn.load(Ordering::Relaxed);
         let preamble_bytes = self.segment_preamble.as_ref().map(|p| p.to_bytes());
-        let record = WalRecord::new_keyed(
+        let record = WalRecord::new_stamped(
             WalRecordArgs {
                 record_type,
                 lsn,
@@ -298,7 +301,10 @@ impl WalWriter {
                 encryption_key: self.encryption_ring.as_ref().map(|r| r.current()),
                 preamble_bytes: preamble_bytes.as_ref(),
             },
-            apply_key,
+            crate::record::RecordStamp {
+                apply_key,
+                event_source,
+            },
         )?;
 
         let header_bytes = record.header.to_bytes();

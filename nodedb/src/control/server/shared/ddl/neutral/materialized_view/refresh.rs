@@ -315,7 +315,13 @@ async fn dispatch_sql(
         };
         let minted =
             crate::control::server::dispatch_utils::MintedRecords::open(&state.outcome_floor);
-        if let Err(e) = minted.append_plan(&state.wal, owner, checked.plan()) {
+        if let Err(e) = minted.append_plan(
+            &state.wal,
+            owner,
+            checked.plan(),
+            // The refresh is dispatched as a client write.
+            crate::event::EventSource::User,
+        ) {
             // Any record appended before the error never reaches a core.
             minted
                 .cancel(&state.wal, owner, 0)

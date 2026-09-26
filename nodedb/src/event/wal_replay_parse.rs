@@ -8,10 +8,9 @@
 //! (document with/without surrogate/provenance, KV point / batch); the parser
 //! tries them in most-specific-first order and returns the first that decodes.
 //!
-//! A `TransactionRedo` sub-op payload is byte-identical to the corresponding raw
-//! per-op WAL record payload, so `wal_replay` reconstitutes each sub-op as a
-//! standalone `WalRecord` and routes it back through the same dispatch — reusing
-//! these parsers verbatim, with no redo-specific decode path.
+//! A `TransactionRedo` sub-op payload is byte-identical to its raw per-op
+//! record, so `wal_replay` parses each sub-op with these same parsers. Every
+//! event takes its identity and event source from the [`ReplayScope`].
 
 use std::sync::Arc;
 
@@ -19,8 +18,8 @@ use nodedb_types::RowIdentity;
 use nodedb_types::sync::wire::SyncProvenance;
 use tracing::warn;
 
-use crate::event::types::{EventSource, RecordPosition, RowId, WriteEvent, WriteOp};
-use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
+use crate::event::types::{RecordPosition, RowId, WriteEvent, WriteOp};
+use crate::event::wal_replay_scope::ReplayScope;
 
 /// `(op, new_value, old_value)` for a node-label CDC event — the op tag plus
 /// the label-delta payload placed on whichever side its `WriteOp` implies.
@@ -85,12 +84,16 @@ fn decode_kv_batch_put_event_fields(payload: &[u8]) -> Option<(String, Vec<(Vec<
 /// graph edge put — distinguished by the MessagePack structure.
 pub(super) fn parse_put_record(
     payload: &[u8],
-    database_id: DatabaseId,
-    tenant_id: TenantId,
-    vshard_id: VShardId,
-    lsn: Lsn,
+    scope: &ReplayScope,
     sequence: &mut u64,
 ) -> Option<WriteEvent> {
+    let ReplayScope {
+        database_id,
+        tenant_id,
+        vshard_id,
+        lsn,
+        sources,
+    } = *scope;
     // Try KV put first. Three arities decode: the current
     // `("kv_put", collection, key, value, ttl_ms, expire_at_ms, surrogate)` and
     // the two that predate the carried surrogate. The event stream keys on the
@@ -115,7 +118,7 @@ pub(super) fn parse_put_record(
             database_id,
             tenant_id,
             vshard_id,
-            source: EventSource::User,
+            source: sources.other,
             new_value: Some(Arc::from(row.as_slice())),
             old_value: None,
             system_time_ms,
@@ -141,7 +144,7 @@ pub(super) fn parse_put_record(
             database_id,
             tenant_id,
             vshard_id,
-            source: EventSource::User,
+            source: sources.other,
             new_value: None,
             old_value: None,
             system_time_ms: None,
@@ -172,7 +175,7 @@ pub(super) fn parse_put_record(
             database_id,
             tenant_id,
             vshard_id,
-            source: EventSource::User,
+            source: sources.document,
             new_value: Some(Arc::from(value.as_slice())),
             old_value: None,
             system_time_ms,
@@ -199,7 +202,7 @@ pub(super) fn parse_put_record(
             database_id,
             tenant_id,
             vshard_id,
-            source: EventSource::User,
+            source: sources.document,
             new_value: Some(Arc::from(value.as_slice())),
             old_value: None,
             system_time_ms,
@@ -229,7 +232,7 @@ pub(super) fn parse_put_record(
             database_id,
             tenant_id,
             vshard_id,
-            source: EventSource::User,
+            source: sources.document,
             new_value: Some(Arc::from(value.as_slice())),
             old_value: None,
             system_time_ms,
@@ -262,7 +265,7 @@ pub(super) fn parse_put_record(
             database_id,
             tenant_id,
             vshard_id,
-            source: EventSource::User,
+            source: sources.other,
             new_value: Some(Arc::from(properties.as_slice())),
             old_value: None,
             system_time_ms,
@@ -294,12 +297,16 @@ pub(super) fn parse_put_record(
 pub(super) fn parse_graph_node_label_record(
     payload: &[u8],
     is_set: bool,
-    database_id: DatabaseId,
-    tenant_id: TenantId,
-    vshard_id: VShardId,
-    lsn: Lsn,
+    scope: &ReplayScope,
     sequence: &mut u64,
 ) -> Option<WriteEvent> {
+    let ReplayScope {
+        database_id,
+        tenant_id,
+        vshard_id,
+        lsn,
+        sources,
+    } = *scope;
     let (node_id, labels) = match zerompk::from_msgpack::<(String, Vec<String>)>(payload) {
         Ok(decoded) => decoded,
         Err(_) => {
@@ -328,7 +335,7 @@ pub(super) fn parse_graph_node_label_record(
         database_id,
         tenant_id,
         vshard_id,
-        source: EventSource::User,
+        source: sources.other,
         new_value,
         old_value,
         system_time_ms: None,
@@ -341,12 +348,16 @@ pub(super) fn parse_graph_node_label_record(
 /// Parse a `RecordType::Delete` payload. May be a document delete or KV delete.
 pub(super) fn parse_delete_record(
     payload: &[u8],
-    database_id: DatabaseId,
-    tenant_id: TenantId,
-    vshard_id: VShardId,
-    lsn: Lsn,
+    scope: &ReplayScope,
     sequence: &mut u64,
 ) -> Option<WriteEvent> {
+    let ReplayScope {
+        database_id,
+        tenant_id,
+        vshard_id,
+        lsn,
+        sources,
+    } = *scope;
     // Try KV delete: ("kv_delete", collection, keys)
     if let Ok((disc, collection, keys)) =
         zerompk::from_msgpack::<(&str, String, Vec<Vec<u8>>)>(payload)
@@ -365,7 +376,7 @@ pub(super) fn parse_delete_record(
             database_id,
             tenant_id,
             vshard_id,
-            source: EventSource::User,
+            source: sources.other,
             new_value: None,
             old_value: None,
             system_time_ms: None,
@@ -392,7 +403,7 @@ pub(super) fn parse_delete_record(
             database_id,
             tenant_id,
             vshard_id,
-            source: EventSource::User,
+            source: sources.document,
             new_value: None,
             old_value: None,
             system_time_ms: None,
@@ -417,7 +428,7 @@ pub(super) fn parse_delete_record(
             database_id,
             tenant_id,
             vshard_id,
-            source: EventSource::User,
+            source: sources.document,
             new_value: None,
             old_value: None,
             system_time_ms: None,
@@ -440,7 +451,7 @@ pub(super) fn parse_delete_record(
             database_id,
             tenant_id,
             vshard_id,
-            source: EventSource::User,
+            source: sources.document,
             new_value: None,
             old_value: None,
             system_time_ms: None,
@@ -469,7 +480,7 @@ pub(super) fn parse_delete_record(
             database_id,
             tenant_id,
             vshard_id,
-            source: EventSource::User,
+            source: sources.other,
             new_value: None,
             old_value: None,
             system_time_ms: None,

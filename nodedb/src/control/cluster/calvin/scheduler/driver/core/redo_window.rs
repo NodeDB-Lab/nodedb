@@ -54,6 +54,7 @@ mod tests {
         let records = MintedRecords::open(&scheduler.shared.outcome_floor);
         let lsn = records
             .appender(&scheduler.shared.wal, crate::wal::manager::NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(
                 TenantId::new(1),
                 VShardId::new(0),

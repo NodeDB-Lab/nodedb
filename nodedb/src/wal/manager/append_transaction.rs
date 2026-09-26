@@ -32,7 +32,7 @@ impl WalAppender<'_> {
         record: &crate::wal::RedoRecord,
     ) -> crate::Result<Lsn> {
         let payload = record.to_bytes()?;
-        self.append_record(RecordType::TransactionRedo, tid, vs, db, &payload)
+        self.append_row_record(RecordType::TransactionRedo, tid, vs, db, &payload)
     }
 
     /// Append a `TransactionRedo` record whose payload is an already-encoded
@@ -45,7 +45,7 @@ impl WalAppender<'_> {
         db: DatabaseId,
         payload: &[u8],
     ) -> crate::Result<Lsn> {
-        self.append_record(RecordType::TransactionRedo, tid, vs, db, payload)
+        self.append_row_record(RecordType::TransactionRedo, tid, vs, db, payload)
     }
 
     pub fn append_crdt_delta(

@@ -90,6 +90,7 @@ mod event_streaming_mv;
 mod event_topics;
 mod event_trigger;
 mod event_trigger_descriptor_fence;
+mod event_wal_replay_source;
 mod fts_compaction_budget;
 mod gateway_local_descriptor_fence;
 mod graph_collection_isolation;

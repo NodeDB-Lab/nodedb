@@ -13,7 +13,7 @@ impl WalAppender<'_> {
         db: DatabaseId,
         p: &[u8],
     ) -> crate::Result<Lsn> {
-        self.append_record(RecordType::Put, tid, vs, db, p)
+        self.append_row_record(RecordType::Put, tid, vs, db, p)
     }
 
     pub fn append_delete(
@@ -23,7 +23,7 @@ impl WalAppender<'_> {
         db: DatabaseId,
         p: &[u8],
     ) -> crate::Result<Lsn> {
-        self.append_record(RecordType::Delete, tid, vs, db, p)
+        self.append_row_record(RecordType::Delete, tid, vs, db, p)
     }
 }
 
@@ -72,7 +72,9 @@ mod tests {
         let v = VShardId::new(0);
         let db = DatabaseId::DEFAULT;
 
-        let appender = wal.appender(NO_APPLY_KEY);
+        let appender = wal
+            .appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User);
         let lsn1 = appender.append_put(t, v, db, b"key1=value1").unwrap();
         let lsn2 = appender.append_put(t, v, db, b"key2=value2").unwrap();
         let lsn3 = appender.append_delete(t, v, db, b"key1").unwrap();
@@ -111,7 +113,9 @@ mod tests {
             calvin_stamp: None,
         };
 
-        let appender = wal.appender(NO_APPLY_KEY);
+        let appender = wal
+            .appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User);
         let lsn1 = appender.append_transaction_redo(t, v, db, &record).unwrap();
         let lsn2 = appender.append_transaction_redo(t, v, db, &record).unwrap();
         let lsn3 = appender.append_transaction_redo(t, v, db, &record).unwrap();

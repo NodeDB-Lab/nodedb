@@ -106,6 +106,7 @@ impl Scheduler {
             let records = MintedRecords::open(&self.shared.outcome_floor);
             let appended = records
                 .appender(&self.shared.wal, crate::wal::manager::NO_APPLY_KEY)
+                .with_event_source(super::request::CALVIN_EVENT_SOURCE)
                 .append_transaction_redo(
                     tenant_id,
                     VShardId::new(self.vshard_id),

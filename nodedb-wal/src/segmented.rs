@@ -197,6 +197,7 @@ impl SegmentedWal {
                 tenant_id,
                 vshard_id,
                 database_id,
+                event_source: crate::record::NO_EVENT_SOURCE,
             },
             payload,
             0,
@@ -204,7 +205,8 @@ impl SegmentedWal {
     }
 
     /// [`Self::append`] for a record appended by the apply of the replicated
-    /// proposal `apply_key` (see [`crate::WalRecord::new_keyed`]).
+    /// proposal `apply_key`, carrying the event source in `target` (see
+    /// [`crate::WalRecord::new_stamped`]).
     pub fn append_keyed(
         &mut self,
         target: RecordTarget,

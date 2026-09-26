@@ -480,6 +480,7 @@ mod tests {
             payload_len: 1,
             database_id: 0,
             apply_key: 0,
+            event_source: crate::record::NO_EVENT_SOURCE,
             crc32c: 0,
         };
         std::fs::write(&path, header.to_bytes()).unwrap();
@@ -502,6 +503,7 @@ mod tests {
             payload_len: (crate::record::MAX_WAL_PAYLOAD_SIZE + 1) as u32,
             database_id: 0,
             apply_key: 0,
+            event_source: crate::record::NO_EVENT_SOURCE,
             crc32c: 0,
         };
         std::fs::write(&path, header.to_bytes()).unwrap();

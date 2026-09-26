@@ -309,6 +309,7 @@ mod tests {
             }),
         };
         wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_transaction_redo(
                 TenantId::new(0),
                 VShardId::new(vshard),
@@ -328,6 +329,7 @@ mod tests {
             calvin_stamp: None,
         };
         wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_transaction_redo(
                 TenantId::new(0),
                 VShardId::new(vshard),

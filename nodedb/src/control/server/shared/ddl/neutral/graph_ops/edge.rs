@@ -442,7 +442,13 @@ pub async fn set_node_labels(
         vshard_id,
     };
     let minted = crate::control::server::dispatch_utils::MintedRecords::open(&state.outcome_floor);
-    if let Err(e) = minted.append_plan(&state.wal, owner, &plan) {
+    if let Err(e) = minted.append_plan(
+        &state.wal,
+        owner,
+        &plan,
+        // The same source the edge write is dispatched with below.
+        crate::event::EventSource::User,
+    ) {
         // Any record appended before the error never reaches a core.
         minted
             .cancel(&state.wal, owner, 0)

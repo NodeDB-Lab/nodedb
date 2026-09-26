@@ -539,6 +539,7 @@ mod tests {
             .expect("put payload");
             let lsn = wal
                 .appender(NO_APPLY_KEY)
+                .with_event_source(crate::event::EventSource::User)
                 .append_put(
                     TenantId::new(TENANT),
                     VShardId::new(0),
@@ -679,6 +680,7 @@ mod tests {
             let lsn = node
                 .wal
                 .appender(NO_APPLY_KEY)
+                .with_event_source(crate::event::EventSource::User)
                 .append_put(
                     TenantId::new(TENANT),
                     VShardId::new(0),

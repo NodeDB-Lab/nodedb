@@ -190,7 +190,13 @@ async fn vector(
         vshard_id: vshard,
     };
     let minted = MintedRecords::open(&state.outcome_floor);
-    let appended = match minted.append_plan(&state.wal, owner, &plan) {
+    let appended = match minted.append_plan(
+        &state.wal,
+        owner,
+        &plan,
+        // The drop is dispatched as a client statement.
+        crate::event::EventSource::User,
+    ) {
         Ok(appended) => appended,
         Err(e) => {
             // Any record appended before the error never reaches a core.

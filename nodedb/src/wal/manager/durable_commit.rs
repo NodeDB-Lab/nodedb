@@ -124,6 +124,7 @@ mod tests {
         let wal = open_wal(dir.path());
         let lsn = wal
             .appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(
                 TenantId::new(1),
                 VShardId::new(0),
@@ -141,6 +142,7 @@ mod tests {
         let wal = open_wal(dir.path());
         let lsn = wal
             .appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(
                 TenantId::new(1),
                 VShardId::new(0),
@@ -161,6 +163,7 @@ mod tests {
         for _ in 0..16 {
             lsns.push(
                 wal.appender(NO_APPLY_KEY)
+                    .with_event_source(crate::event::EventSource::User)
                     .append_put(
                         TenantId::new(1),
                         VShardId::new(0),

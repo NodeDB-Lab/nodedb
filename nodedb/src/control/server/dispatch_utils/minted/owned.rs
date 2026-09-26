@@ -157,6 +157,7 @@ mod tests {
         let minted = MintedRecords::open(floor);
         let lsn = minted
             .appender(wal, NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(
                 TenantId::new(1),
                 VShardId::new(0),

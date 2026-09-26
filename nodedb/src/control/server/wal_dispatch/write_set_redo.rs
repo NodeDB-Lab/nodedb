@@ -262,7 +262,8 @@ mod tests {
         }];
 
         let lsn = append_write_set_redo(
-            wal.appender(NO_APPLY_KEY),
+            wal.appender(NO_APPLY_KEY)
+                .with_event_source(crate::event::EventSource::User),
             TenantId::new(1),
             VShardId::new(0),
             DatabaseId::DEFAULT,
@@ -304,7 +305,8 @@ mod tests {
         }];
 
         append_write_set_redo(
-            wal.appender(NO_APPLY_KEY),
+            wal.appender(NO_APPLY_KEY)
+                .with_event_source(crate::event::EventSource::User),
             TenantId::new(1),
             VShardId::new(0),
             DatabaseId::DEFAULT,
@@ -338,7 +340,8 @@ mod tests {
         }];
 
         append_write_set_redo(
-            wal.appender(NO_APPLY_KEY),
+            wal.appender(NO_APPLY_KEY)
+                .with_event_source(crate::event::EventSource::User),
             TenantId::new(1),
             VShardId::new(0),
             DatabaseId::DEFAULT,
@@ -365,7 +368,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let wal = open_wal(dir.path());
         let lsn = append_write_set_redo(
-            wal.appender(NO_APPLY_KEY),
+            wal.appender(NO_APPLY_KEY)
+                .with_event_source(crate::event::EventSource::User),
             TenantId::new(1),
             VShardId::new(0),
             DatabaseId::DEFAULT,

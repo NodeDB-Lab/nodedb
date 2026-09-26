@@ -345,7 +345,14 @@ fn append_redo(
         database_id,
         vshard_id: VShardId::from_collection_in_database(database_id, target.collection),
     };
-    let outcome = minted.append_plan(&shared.wal, owner, plan)?;
+    let outcome = minted.append_plan(
+        &shared.wal,
+        owner,
+        plan,
+        // A vector index change writes no row; its records carry no row
+        // image, and the source names the committed DDL that ran it.
+        crate::event::EventSource::User,
+    )?;
     Ok(outcome.lsn)
 }
 

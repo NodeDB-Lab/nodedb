@@ -284,6 +284,52 @@ impl EventSource {
         }
     }
 
+    /// The source a committed transaction's document rows carry, for a
+    /// record whose writes ran with `self`.
+    ///
+    /// A client transaction's rows fire DEFERRED-mode triggers, so they carry
+    /// `Deferred`. Every other source keeps its own: a trigger's transaction
+    /// does not re-fire triggers, and a restored row fired its triggers when
+    /// it was first written. The live apply and WAL replay both use this.
+    pub const fn committed_row_source(self) -> Self {
+        match self {
+            Self::User => Self::Deferred,
+            Self::Trigger => Self::Trigger,
+            Self::RaftFollower => Self::RaftFollower,
+            Self::CrdtSync => Self::CrdtSync,
+            Self::Deferred => Self::Deferred,
+            Self::Restore => Self::Restore,
+        }
+    }
+
+    /// The source's code in a WAL record header. Code `0` is
+    /// `nodedb_wal::NO_EVENT_SOURCE`, a record with no row write, so no source
+    /// maps to it.
+    pub const fn wal_code(self) -> u8 {
+        match self {
+            Self::User => 1,
+            Self::Trigger => 2,
+            Self::RaftFollower => 3,
+            Self::CrdtSync => 4,
+            Self::Deferred => 5,
+            Self::Restore => 6,
+        }
+    }
+
+    /// The source a WAL record header code names. `None` for
+    /// `nodedb_wal::NO_EVENT_SOURCE` and for a code no source uses.
+    pub const fn from_wal_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::User),
+            2 => Some(Self::Trigger),
+            3 => Some(Self::RaftFollower),
+            4 => Some(Self::CrdtSync),
+            5 => Some(Self::Deferred),
+            6 => Some(Self::Restore),
+            _ => None,
+        }
+    }
+
     /// The source named `name`, as [`Self::as_str`] spells it.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
@@ -395,6 +441,42 @@ mod tests {
             assert_eq!(decoded, source);
         }
         assert_eq!(EventSource::from_name("unknown"), None);
+    }
+
+    #[test]
+    fn every_event_source_round_trips_through_its_wal_code() {
+        for source in [
+            EventSource::User,
+            EventSource::Trigger,
+            EventSource::RaftFollower,
+            EventSource::CrdtSync,
+            EventSource::Deferred,
+            EventSource::Restore,
+        ] {
+            assert_ne!(source.wal_code(), nodedb_wal::NO_EVENT_SOURCE);
+            assert_eq!(EventSource::from_wal_code(source.wal_code()), Some(source));
+        }
+        assert_eq!(
+            EventSource::from_wal_code(nodedb_wal::NO_EVENT_SOURCE),
+            None
+        );
+    }
+
+    #[test]
+    fn only_a_client_transaction_fires_deferred_triggers() {
+        assert_eq!(
+            EventSource::User.committed_row_source(),
+            EventSource::Deferred
+        );
+        for source in [
+            EventSource::Trigger,
+            EventSource::RaftFollower,
+            EventSource::CrdtSync,
+            EventSource::Deferred,
+            EventSource::Restore,
+        ] {
+            assert_eq!(source.committed_row_source(), source);
+        }
     }
 
     #[test]

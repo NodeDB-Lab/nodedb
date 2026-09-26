@@ -178,7 +178,8 @@ mod tests {
         ];
 
         let lsn = wal_append_graph_edge_put_batch(
-            wal.appender(NO_APPLY_KEY),
+            wal.appender(NO_APPLY_KEY)
+                .with_event_source(crate::event::EventSource::User),
             TenantId::new(7),
             VShardId::new(0),
             DatabaseId::DEFAULT,
@@ -224,7 +225,8 @@ mod tests {
         ];
 
         let lsn = wal_append_graph_edge_delete_batch(
-            wal.appender(NO_APPLY_KEY),
+            wal.appender(NO_APPLY_KEY)
+                .with_event_source(crate::event::EventSource::User),
             TenantId::new(7),
             VShardId::new(0),
             DatabaseId::DEFAULT,
@@ -264,7 +266,8 @@ mod tests {
         let wal = open_wal(dir.path());
 
         let lsn = wal_append_graph_edge_put_batch(
-            wal.appender(NO_APPLY_KEY),
+            wal.appender(NO_APPLY_KEY)
+                .with_event_source(crate::event::EventSource::User),
             TenantId::new(7),
             VShardId::new(0),
             DatabaseId::DEFAULT,
@@ -281,7 +284,8 @@ mod tests {
         let wal = open_wal(dir.path());
 
         let lsn = wal_append_graph_edge_delete_batch(
-            wal.appender(NO_APPLY_KEY),
+            wal.appender(NO_APPLY_KEY)
+                .with_event_source(crate::event::EventSource::User),
             TenantId::new(7),
             VShardId::new(0),
             DatabaseId::DEFAULT,

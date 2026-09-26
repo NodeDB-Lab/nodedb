@@ -74,7 +74,12 @@ pub async fn reissue_plan_durably(
         vshard_id: vshard,
     };
     let minted = MintedRecords::open(&state.outcome_floor);
-    if let Err(error) = minted.append_plan(&state.wal, owner, &plan) {
+    if let Err(error) = minted.append_plan(
+        &state.wal,
+        owner,
+        &plan,
+        sync_dispatch::SystemReason::BackupRestore.event_source(),
+    ) {
         // Any record appended before the error never reaches a core.
         minted.cancel(&state.wal, owner, 0).await?;
         return Err(error);

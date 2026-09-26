@@ -71,6 +71,7 @@ mod tests {
         {
             let wal = WalManager::open_for_testing(&path).unwrap();
             wal.appender(NO_APPLY_KEY)
+                .with_event_source(crate::event::EventSource::User)
                 .append_put(
                     TenantId::new(1),
                     VShardId::new(0),
@@ -79,6 +80,7 @@ mod tests {
                 )
                 .unwrap();
             wal.appender(NO_APPLY_KEY)
+                .with_event_source(crate::event::EventSource::User)
                 .append_put(
                     TenantId::new(1),
                     VShardId::new(0),
@@ -94,6 +96,7 @@ mod tests {
 
         let lsn = wal
             .appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(
                 TenantId::new(1),
                 VShardId::new(0),
@@ -117,6 +120,7 @@ mod tests {
 
         for i in 0..10u32 {
             wal.appender(NO_APPLY_KEY)
+                .with_event_source(crate::event::EventSource::User)
                 .append_put(t, v, db, format!("val-{i}").as_bytes())
                 .unwrap();
         }
@@ -136,6 +140,7 @@ mod tests {
 
         let wal = WalManager::open_for_testing(&path).unwrap();
         wal.appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(
                 TenantId::new(1),
                 VShardId::new(0),

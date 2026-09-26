@@ -66,7 +66,7 @@ impl WalAppender<'_> {
         db: DatabaseId,
         p: &[u8],
     ) -> crate::Result<Lsn> {
-        self.append_record(RecordType::GraphNodeLabelSet, tid, vs, db, p)
+        self.append_row_record(RecordType::GraphNodeLabelSet, tid, vs, db, p)
     }
 
     /// Append a `GraphNodeLabelRemove` record. Payload is produced by
@@ -78,7 +78,7 @@ impl WalAppender<'_> {
         db: DatabaseId,
         p: &[u8],
     ) -> crate::Result<Lsn> {
-        self.append_record(RecordType::GraphNodeLabelRemove, tid, vs, db, p)
+        self.append_row_record(RecordType::GraphNodeLabelRemove, tid, vs, db, p)
     }
 
     /// Append a `WriteAborted` record naming `aborted_lsn`, the LSN of a

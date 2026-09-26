@@ -113,15 +113,18 @@ impl MintedRecords {
         wal.recording_appender(apply_key, self)
     }
 
-    /// Append `plan`'s redo records under this window.
+    /// Append `plan`'s redo records under this window. Row-write records
+    /// carry `event_source`, the source the write is dispatched with.
     pub(crate) fn append_plan(
         &self,
         wal: &Arc<WalManager>,
         owner: RecordOwner,
         plan: &PhysicalPlan,
+        event_source: crate::event::EventSource,
     ) -> crate::Result<WalAppendOutcome> {
         wal_append(WalAppendRequest {
             wal: self.appender(wal, NO_APPLY_KEY),
+            event_source,
             tenant_id: owner.tenant_id,
             vshard_id: owner.vshard_id,
             database_id: owner.database_id,
@@ -374,6 +377,7 @@ mod tests {
     fn append(wal: &Arc<WalManager>, minted: &MintedRecords, body: &[u8]) -> Lsn {
         minted
             .appender(wal, NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(
                 TenantId::new(1),
                 VShardId::new(0),
@@ -427,6 +431,7 @@ mod tests {
         let floor = OutcomeFloor::new();
         let lsn = wal
             .appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(
                 TenantId::new(1),
                 VShardId::new(0),
@@ -528,6 +533,7 @@ mod tests {
         let floor = OutcomeFloor::new();
         let lsn = wal
             .appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(
                 TenantId::new(1),
                 VShardId::new(0),

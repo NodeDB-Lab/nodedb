@@ -414,6 +414,7 @@ mod tests {
         )
         .expect("wal append seed put");
         wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(
                 TenantId::new(TID),
                 VShardId::new(0),

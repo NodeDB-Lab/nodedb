@@ -189,9 +189,11 @@ mod tests {
         let wal = open_wal(&dir);
         let (tid, vs, db) = (TenantId::new(1), VShardId::new(0), DatabaseId::DEFAULT);
         wal.appender(0xAB)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(tid, vs, db, b"keyed")
             .expect("append keyed put");
         wal.appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(tid, vs, db, b"unkeyed")
             .expect("append unkeyed put");
         wal.sync().expect("sync wal");
@@ -211,6 +213,7 @@ mod tests {
         let (tid, vs, db) = (TenantId::new(1), VShardId::new(0), DatabaseId::DEFAULT);
         let forward = wal
             .appender(0xAB)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(tid, vs, db, b"refused")
             .expect("append keyed put");
         wal.appender(NO_APPLY_KEY)
@@ -218,6 +221,7 @@ mod tests {
             .expect("append unkeyed abort");
         let final_forward = wal
             .appender(0xCD)
+            .with_event_source(crate::event::EventSource::User)
             .append_put(tid, vs, db, b"refused for good")
             .expect("append keyed put");
         wal.appender(0xCD)

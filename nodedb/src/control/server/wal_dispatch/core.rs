@@ -41,6 +41,10 @@ pub struct WalAppendOutcome {
 pub struct WalAppendRequest<'a> {
     /// The appender, which names the apply key every appended record carries.
     pub wal: WalAppender<'a>,
+    /// The event source the write runs with. Every row-write record it
+    /// appends carries it, so WAL replay rebuilds the event the live write
+    /// emits.
+    pub event_source: crate::event::EventSource,
     pub tenant_id: TenantId,
     pub vshard_id: VShardId,
     pub database_id: DatabaseId,
@@ -58,12 +62,13 @@ pub struct WalAppendRequest<'a> {
     pub now_override: Option<u64>,
 }
 
-/// Append a write operation to the WAL for single-node durability.
+/// Append a client autocommit write to the WAL for single-node durability.
 ///
 /// Serializes the write as MessagePack and appends to the appropriate
 /// WAL record type. Read operations are no-ops (return Ok immediately).
-/// The records carry no apply key: no replicated proposal owns them. A
-/// proposal's apply goes through [`wal_append`] with a keyed appender.
+/// The records carry no apply key: no replicated proposal owns them. Row-write
+/// records carry `EventSource::User`. Any other write goes through
+/// [`wal_append`] and names its own source.
 ///
 /// Returns the WAL LSN allocated for writes it appended (`Some`), or `None`
 /// for reads / control ops that need no WAL record. The caller stamps the
@@ -93,6 +98,8 @@ pub fn wal_append_if_write_with_creds(
 ) -> crate::Result<WalAppendOutcome> {
     wal_append(WalAppendRequest {
         wal: wal.appender(NO_APPLY_KEY),
+        // This entry point appends a client autocommit write.
+        event_source: crate::event::EventSource::User,
         tenant_id,
         vshard_id,
         database_id,
@@ -110,6 +117,7 @@ pub fn wal_append_if_write_with_creds(
 pub fn wal_append(req: WalAppendRequest<'_>) -> crate::Result<WalAppendOutcome> {
     let WalAppendRequest {
         wal,
+        event_source,
         tenant_id,
         vshard_id,
         database_id,
@@ -117,6 +125,7 @@ pub fn wal_append(req: WalAppendRequest<'_>) -> crate::Result<WalAppendOutcome> 
         credentials,
         now_override,
     } = req;
+    let wal = wal.with_event_source(event_source);
     let mut resolved_now_ms: Option<u64> = None;
     // Every engine routes through one exhaustive per-engine match (no `_`
     // catch-all anywhere, enforced by `deny(wildcard_enum_match_arm)`), so a

@@ -40,6 +40,9 @@ pub(super) struct ResponsePhaseInput {
     /// The idempotency key every record this write appends carries (see
     /// `WalDurability::AppendHere`).
     pub apply_key: u64,
+    /// The event source the write runs with. Its post-apply redo records
+    /// carry it.
+    pub event_source: crate::event::EventSource,
     /// The key a final refusal's abort marker carries, `0` when this write's
     /// refusals are not final. A final refusal is the proposal's outcome: the
     /// proposal ledger rebuilt at boot counts the key as applied.
@@ -93,6 +96,7 @@ pub(super) async fn collect_classify_and_finish(
         wal_lsn,
         appends_here,
         apply_key,
+        event_source,
         final_refusal_key,
         post_apply,
         funnel_redo_engine,
@@ -206,7 +210,10 @@ pub(super) async fn collect_classify_and_finish(
             shared,
             &ddl_transition,
             wal_dispatch::append_write_set_redo(
-                shared.wal.appender(apply_key),
+                shared
+                    .wal
+                    .appender(apply_key)
+                    .with_event_source(event_source),
                 tenant_id,
                 vshard_id,
                 database_id,

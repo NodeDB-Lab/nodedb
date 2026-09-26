@@ -28,13 +28,14 @@
 //! and are not yet emitted as WriteEvents.
 
 use nodedb_wal::WalRecord;
-use nodedb_wal::record::{RecordType, WalRecordArgs};
-use tracing::{trace, warn};
+use nodedb_wal::record::RecordType;
+use tracing::{error, trace, warn};
 
-use crate::event::types::WriteEvent;
+use crate::event::types::{EventSource, WriteEvent};
 use crate::event::wal_replay_parse::{
     parse_delete_record, parse_graph_node_label_record, parse_put_record,
 };
+use crate::event::wal_replay_scope::{ReplayScope, RowSources};
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::WalManager;
 
@@ -139,70 +140,41 @@ fn convert_records_to_events(
 /// CDC, and change streams fire on restart exactly as they did on the forward
 /// path.
 fn record_to_events(record: &WalRecord, sequence: &mut u64) -> Vec<WriteEvent> {
-    let logical_type = record.logical_record_type();
-    let Some(record_type) = RecordType::from_raw(logical_type) else {
+    let Some(record_type) = RecordType::from_raw(record.logical_record_type()) else {
         return Vec::new();
     };
+    match row_kind(record_type) {
+        Some(kind) => row_record_events(record, kind, sequence),
+        None => Vec::new(),
+    }
+}
 
-    let tenant_id = TenantId::new(record.header.tenant_id);
-    // `database_id` is part of the WAL envelope. A zero value is the named
-    // pre-database-header compatibility encoding and maps to the built-in
-    // default database; current WAL writers always stamp the request database.
-    let database_id = DatabaseId::new(record.header.database_id);
-    let vshard_id = VShardId::new(record.header.vshard_id);
-    let lsn = Lsn::new(record.header.lsn);
-
+/// The row-write kind of a record type. `None` for a type that carries no
+/// row write the forward path emits an event for.
+fn row_kind(record_type: RecordType) -> Option<RowRecord> {
     match record_type {
-        RecordType::Put => {
-            parse_put_record(&record.payload, database_id, tenant_id, vshard_id, lsn, sequence)
-                .into_iter()
-                .collect()
-        }
-        RecordType::Delete => {
-            parse_delete_record(&record.payload, database_id, tenant_id, vshard_id, lsn, sequence)
-                .into_iter()
-                .collect()
-        }
-        // A Calvin cross-shard commit is durable as a `TransactionRedo` whose
-        // sub-ops carry each engine's own per-op payload. Decompose it into the
-        // same WriteEvents the forward path emitted, so the effect (triggers/CDC)
-        // is not lost on replay. Every emitted event's `lsn` is this redo record's
-        // WAL LSN — the Event-Plane watermark keys on it to dedup against the
-        // forward-path event (both share this LSN in the same space).
-        RecordType::TransactionRedo => decompose_redo_to_events(record, sequence),
+        RecordType::Put => Some(RowRecord::Put),
+        RecordType::Delete => Some(RowRecord::Delete),
+        // A Calvin cross-shard or single-shard commit is durable as a
+        // `TransactionRedo` whose sub-ops carry each engine's own per-op
+        // payload. Decompose it into the same WriteEvents the forward path
+        // emitted, so the effect (triggers/CDC) is not lost on replay. Every
+        // emitted event's `lsn` is this redo record's WAL LSN — the Event-Plane
+        // watermark keys on it to dedup against the forward-path event.
+        RecordType::TransactionRedo => Some(RowRecord::Redo),
         // Graph node-label mutations carry no natural collection (they are
         // tenant-wide), so they surface on the nameable `__graph_node_labels__`
         // CDC stream. The forward-path emit (Data Plane `SetNodeLabels` /
         // `RemoveNodeLabels`) produces the same `(collection, row_id, op, value)`
         // shape, so replayed events dedup against forward events on LSN.
-        RecordType::GraphNodeLabelSet => parse_graph_node_label_record(
-            &record.payload,
-            true,
-            database_id,
-            tenant_id,
-            vshard_id,
-            lsn,
-            sequence,
-        )
-        .into_iter()
-        .collect(),
-        RecordType::GraphNodeLabelRemove => parse_graph_node_label_record(
-            &record.payload,
-            false,
-            database_id,
-            tenant_id,
-            vshard_id,
-            lsn,
-            sequence,
-        )
-        .into_iter()
-        .collect(),
+        RecordType::GraphNodeLabelSet => Some(RowRecord::LabelSet),
+        RecordType::GraphNodeLabelRemove => Some(RowRecord::LabelRemove),
         // `CalvinApplied` is a payload-free applied-marker: it records that a
         // sequencer `(epoch, position)` was applied, but carries no writes. Its
         // base writes, if any, ride a separate `TransactionRedo`; a pure-read or
         // CRDT-only commit has no base WriteEvents at all (CRDT effects ride
         // `CrdtDelta` records). Nothing to emit.
-        RecordType::CalvinApplied => Vec::new(),
+        RecordType::CalvinApplied => None,
         // The records below carry NO forward-path Data-Plane WriteEvent, so
         // there is nothing for replay to reconstruct. `record_to_events`
         // reconstructs exactly the forward WriteEvent stream the Data Plane
@@ -283,31 +255,103 @@ fn record_to_events(record: &WalRecord, sequence: &mut u64) -> Vec<WriteEvent> {
         // `WalManager::replay_from`). The marker itself is not a row write.
         | RecordType::WriteAborted
         // ProposalApplied marks a Raft proposal as applied; it writes no row.
-        | RecordType::ProposalApplied => Vec::new(),
+        | RecordType::ProposalApplied => None,
     }
+}
+
+/// A record type that carries row writes.
+#[derive(Debug, Clone, Copy)]
+enum RowRecord {
+    Put,
+    Delete,
+    Redo,
+    LabelSet,
+    LabelRemove,
+}
+
+/// The events of one row-write record.
+///
+/// Every row write stores the source its write ran with. A record without one
+/// cannot say whether its triggers may fire, so it rebuilds no event.
+fn row_record_events(record: &WalRecord, kind: RowRecord, sequence: &mut u64) -> Vec<WriteEvent> {
+    let Some(source) = EventSource::from_wal_code(record.event_source()) else {
+        error!(
+            lsn = record.header.lsn,
+            record_type = record.logical_record_type(),
+            code = record.event_source(),
+            "WAL replay: a row-write record carries no event source; no event rebuilt"
+        );
+        return Vec::new();
+    };
+    let sources = match kind {
+        RowRecord::Redo => RowSources::committed_redo(source),
+        RowRecord::Put | RowRecord::Delete | RowRecord::LabelSet | RowRecord::LabelRemove => {
+            RowSources::uniform(source)
+        }
+    };
+    let scope = ReplayScope {
+        tenant_id: TenantId::new(record.header.tenant_id),
+        // `database_id` is part of the WAL envelope. Every WAL writer stamps
+        // the request database.
+        database_id: DatabaseId::new(record.header.database_id),
+        vshard_id: VShardId::new(record.header.vshard_id),
+        lsn: Lsn::new(record.header.lsn),
+        sources,
+    };
+    match kind {
+        RowRecord::Redo => decompose_redo_to_events(&record.payload, &scope, sequence),
+        RowRecord::Put | RowRecord::Delete | RowRecord::LabelSet | RowRecord::LabelRemove => {
+            single_row_events(kind, &record.payload, &scope, sequence)
+        }
+    }
+}
+
+/// The event of one single-row payload of `kind`. A redo payload carries no
+/// single row.
+fn single_row_events(
+    kind: RowRecord,
+    payload: &[u8],
+    scope: &ReplayScope,
+    sequence: &mut u64,
+) -> Vec<WriteEvent> {
+    let event = match kind {
+        RowRecord::Put => parse_put_record(payload, scope, sequence),
+        RowRecord::Delete => parse_delete_record(payload, scope, sequence),
+        RowRecord::LabelSet => parse_graph_node_label_record(payload, true, scope, sequence),
+        RowRecord::LabelRemove => parse_graph_node_label_record(payload, false, scope, sequence),
+        RowRecord::Redo => {
+            warn!(
+                lsn = scope.lsn.as_u64(),
+                "WAL replay: a redo sub-record is itself a redo; skipped"
+            );
+            None
+        }
+    };
+    event.into_iter().collect()
 }
 
 /// Decompose a `TransactionRedo` record into per-sub-op WriteEvents.
 ///
 /// Each `RedoSubRecord` carries its engine's own `record_type` and a payload in
 /// that engine's exact per-op WAL shape (the same encoders the autocommit path
-/// uses). We reconstitute each sub-op as a standalone `WalRecord` — stamped with
-/// the enclosing redo record's header identity, crucially its LSN — and feed it
-/// back through [`record_to_events`]. That reuses the raw Put/Delete parsers
-/// verbatim and inherits every current and future event mapping: a sub-op type
-/// with no Event-Plane mapping (VectorPut, SpatialPut, …) yields no event and
-/// does not touch `sequence`, exactly as its raw counterpart does. Because the
-/// reconstituted record carries `record.header.lsn`, every emitted event sets
-/// `lsn = record.header.lsn`, satisfying the watermark-dedup requirement.
+/// uses). Each sub-op goes through the same single-row parsers as its raw
+/// counterpart, under the enclosing record's `scope`: its LSN (the
+/// watermark-dedup key), its tenant, vShard and database, and the row sources
+/// of a committed redo. A sub-op type with no Event-Plane mapping (VectorPut,
+/// SpatialPut, …) yields no event and does not touch `sequence`.
 ///
 /// A malformed redo payload is logged and skipped (never a panic), mirroring the
 /// decode-failure handling in the Data-Plane redo replay path.
-fn decompose_redo_to_events(record: &WalRecord, sequence: &mut u64) -> Vec<WriteEvent> {
-    let redo = match crate::wal::RedoRecord::from_bytes(&record.payload) {
+fn decompose_redo_to_events(
+    payload: &[u8],
+    scope: &ReplayScope,
+    sequence: &mut u64,
+) -> Vec<WriteEvent> {
+    let redo = match crate::wal::RedoRecord::from_bytes(payload) {
         Ok(redo) => redo,
         Err(e) => {
             warn!(
-                lsn = record.header.lsn,
+                lsn = scope.lsn.as_u64(),
                 error = %e,
                 "WAL replay: skipping malformed TransactionRedo payload"
             );
@@ -317,32 +361,12 @@ fn decompose_redo_to_events(record: &WalRecord, sequence: &mut u64) -> Vec<Write
 
     let mut events = Vec::new();
     for sub in redo.ops {
-        let sub_record = match WalRecord::new(WalRecordArgs {
-            record_type: sub.record_type,
-            // Every sub-op inherits the enclosing redo record's LSN — the
-            // watermark-dedup key — and tenant/vshard identity.
-            lsn: record.header.lsn,
-            tenant_id: record.header.tenant_id,
-            vshard_id: record.header.vshard_id,
-            database_id: record.header.database_id,
-            payload: sub.payload,
-            // The enclosing record was already decrypted when read into memory,
-            // so sub-payloads are cleartext and never touch disk again.
-            encryption_key: None,
-            preamble_bytes: None,
-        }) {
-            Ok(wr) => wr,
-            Err(e) => {
-                warn!(
-                    lsn = record.header.lsn,
-                    sub_record_type = sub.record_type,
-                    error = %e,
-                    "WAL replay: skipping redo sub-record that failed to reconstitute"
-                );
-                continue;
-            }
+        let Some(record_type) = RecordType::from_raw(sub.record_type) else {
+            continue;
         };
-        events.extend(record_to_events(&sub_record, sequence));
+        if let Some(kind) = row_kind(record_type) {
+            events.extend(single_row_events(kind, &sub.payload, scope, sequence));
+        }
     }
     events
 }
@@ -875,6 +899,7 @@ mod tests {
         assert_eq!(seq, 0, "index sub-op consumes no sequence on decompose");
     }
 
+    /// A record a client write appended.
     fn make_record(
         rt: RecordType,
         payload: &[u8],
@@ -882,16 +907,122 @@ mod tests {
         vshard_id: u32,
         lsn: u64,
     ) -> WalRecord {
-        WalRecord::new(nodedb_wal::WalRecordArgs {
-            record_type: rt as u32,
-            lsn,
-            tenant_id,
-            vshard_id,
-            database_id: 0,
-            payload: payload.to_vec(),
-            encryption_key: None,
-            preamble_bytes: None,
-        })
+        stamped_record(
+            rt,
+            payload,
+            (tenant_id, vshard_id, lsn),
+            Some(EventSource::User),
+        )
+    }
+
+    /// A tenant-1 record at `lsn`, appended with `source`.
+    fn make_sourced_record(
+        rt: RecordType,
+        payload: &[u8],
+        lsn: u64,
+        source: Option<EventSource>,
+    ) -> WalRecord {
+        stamped_record(rt, payload, (1, 0, lsn), source)
+    }
+
+    /// A record at `(tenant, vshard, lsn)` appended with `source`. `None`
+    /// stores no event source.
+    fn stamped_record(
+        rt: RecordType,
+        payload: &[u8],
+        (tenant_id, vshard_id, lsn): (u64, u32, u64),
+        source: Option<EventSource>,
+    ) -> WalRecord {
+        WalRecord::new_stamped(
+            nodedb_wal::WalRecordArgs {
+                record_type: rt as u32,
+                lsn,
+                tenant_id,
+                vshard_id,
+                database_id: 0,
+                payload: payload.to_vec(),
+                encryption_key: None,
+                preamble_bytes: None,
+            },
+            nodedb_wal::RecordStamp {
+                apply_key: 0,
+                event_source: source.map_or(nodedb_wal::NO_EVENT_SOURCE, EventSource::wal_code),
+            },
+        )
         .unwrap()
+    }
+
+    #[test]
+    fn a_replayed_row_carries_the_source_its_record_stored() {
+        let payload = zerompk::to_msgpack_vec(&("orders", "order-1", b"value")).unwrap();
+        for source in [
+            EventSource::Restore,
+            EventSource::Trigger,
+            EventSource::CrdtSync,
+            EventSource::Deferred,
+            EventSource::User,
+        ] {
+            let record = make_sourced_record(RecordType::Put, &payload, 300, Some(source));
+            let mut seq = 0u64;
+            assert_eq!(one_event(&record, &mut seq).source, source);
+        }
+    }
+
+    #[test]
+    fn a_row_record_without_a_source_rebuilds_no_event() {
+        let payload = zerompk::to_msgpack_vec(&("orders", "order-1", b"value")).unwrap();
+        let record = make_sourced_record(RecordType::Put, &payload, 301, None);
+        let mut seq = 0u64;
+        assert!(record_to_events(&record, &mut seq).is_empty());
+        assert_eq!(seq, 0);
+    }
+
+    /// A committed redo's document rows follow `committed_row_source`, and its
+    /// KV rows keep the record's source, as the live apply emits them.
+    #[test]
+    fn a_redo_replays_rows_with_the_live_apply_sources() {
+        use crate::wal::{RedoRecord, RedoSubRecord};
+
+        let doc = zerompk::to_msgpack_vec(&("orders", "order-9", b"doc")).unwrap();
+        let kv = zerompk::to_msgpack_vec(&("kv_put", "cache", b"k9", b"v9", 0u64)).unwrap();
+        let redo = RedoRecord {
+            version: 1,
+            ops: vec![
+                RedoSubRecord {
+                    record_type: RecordType::Put as u32,
+                    payload: doc,
+                },
+                RedoSubRecord {
+                    record_type: RecordType::Put as u32,
+                    payload: kv,
+                },
+            ],
+            calvin_stamp: None,
+        };
+        let bytes = redo.to_bytes().unwrap();
+        for (source, document, other) in [
+            (EventSource::User, EventSource::Deferred, EventSource::User),
+            (
+                EventSource::Restore,
+                EventSource::Restore,
+                EventSource::Restore,
+            ),
+            (
+                EventSource::Trigger,
+                EventSource::Trigger,
+                EventSource::Trigger,
+            ),
+        ] {
+            let record =
+                make_sourced_record(RecordType::TransactionRedo, &bytes, 400, Some(source));
+            let mut seq = 0u64;
+            let events = record_to_events(&record, &mut seq);
+            assert_eq!(events.len(), 2);
+            assert_eq!(
+                events[0].source, document,
+                "document row of a {source} redo"
+            );
+            assert_eq!(events[1].source, other, "KV row of a {source} redo");
+        }
     }
 }

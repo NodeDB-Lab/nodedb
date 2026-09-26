@@ -202,17 +202,23 @@ pub(crate) async fn enqueue_write(
 
     // Array DDL authorization + durability, under the admission guard,
     // immediately before the enqueue below.
-    let wal_append_outcome =
-        match authorize_and_append(shared, owner, plan, durability, minted.as_ref()) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                // No record of this write reaches a core.
-                if let Some(minted) = minted {
-                    minted.cancel(&shared.wal, owner, 0).await?;
-                }
-                return Err(error);
+    let wal_append_outcome = match authorize_and_append(
+        shared,
+        owner,
+        plan,
+        durability,
+        minted.as_ref(),
+        event_source,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // No record of this write reaches a core.
+            if let Some(minted) = minted {
+                minted.cancel(&shared.wal, owner, 0).await?;
             }
-        };
+            return Err(error);
+        }
+    };
     let commit_hlc = local_stamp
         .as_ref()
         .map(|stamp| stamp.hlc())
@@ -297,6 +303,7 @@ pub(crate) async fn enqueue_write(
             appends_here,
             final_refusal_key,
             apply_key,
+            event_source,
             post_apply,
             funnel_redo_engine,
             change_set,

@@ -399,6 +399,7 @@ mod tests {
             let wal = WalManager::open_for_testing(&dir.path().join("wal")).expect("open wal");
             for payload in payloads {
                 wal.appender(crate::wal::manager::NO_APPLY_KEY)
+                    .with_event_source(crate::event::EventSource::User)
                     .append_put(
                         TenantId::new(TID),
                         VShardId::new(0),

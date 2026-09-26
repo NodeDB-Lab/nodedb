@@ -3,7 +3,8 @@
 //! `WalRecord` — header + payload with encryption + checksum helpers.
 
 use super::header::{
-    ENCRYPTED_FLAG, HEADER_SIZE, MAX_WAL_PAYLOAD_SIZE, RecordHeader, WAL_FORMAT_VERSION, WAL_MAGIC,
+    ENCRYPTED_FLAG, HEADER_SIZE, MAX_WAL_PAYLOAD_SIZE, NO_EVENT_SOURCE, RecordHeader,
+    WAL_FORMAT_VERSION, WAL_MAGIC,
 };
 use crate::error::{Result, WalError};
 use crate::preamble::PREAMBLE_SIZE;
@@ -15,14 +16,35 @@ pub struct WalRecord {
     pub payload: Vec<u8>,
 }
 
-/// The header fields of a record its caller decides: its type and scope.
-/// The writer assigns the LSN.
+/// The header fields of a record its caller decides: its type, scope and
+/// event source. The writer assigns the LSN.
 #[derive(Debug, Clone, Copy)]
 pub struct RecordTarget {
     pub record_type: u32,
     pub tenant_id: u64,
     pub vshard_id: u32,
     pub database_id: u64,
+    /// The event source code of the row write the record carries.
+    /// [`NO_EVENT_SOURCE`] for a record that carries no row write.
+    pub event_source: u8,
+}
+
+/// The header fields that tie a record to the write that appended it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordStamp {
+    /// The idempotency key of the replicated proposal whose apply appended
+    /// the record. `0` when no proposal apply appended it.
+    pub apply_key: u64,
+    /// The event source code of the row write the record carries.
+    pub event_source: u8,
+}
+
+impl RecordStamp {
+    /// No proposal key and no row write.
+    pub const NONE: Self = Self {
+        apply_key: 0,
+        event_source: NO_EVENT_SOURCE,
+    };
 }
 
 /// Parameters for [`WalRecord::new`].
@@ -53,13 +75,17 @@ impl WalRecord {
     /// zero-filled). Pre-existing records with zeros decode to `DatabaseId(0)`
     /// (the default database), preserving backward compatibility.
     pub fn new(args: WalRecordArgs<'_>) -> Result<Self> {
-        Self::new_keyed(args, 0)
+        Self::new_stamped(args, RecordStamp::NONE)
     }
 
-    /// [`Self::new`] for a record appended by the apply of the replicated
-    /// proposal `apply_key`. The key rides the header, inside the CRC and the
-    /// encryption AAD, so the record and the key are durable together.
-    pub fn new_keyed(args: WalRecordArgs<'_>, apply_key: u64) -> Result<Self> {
+    /// [`Self::new`] with the proposal key and event source of `stamp`. Both
+    /// ride the header, inside the CRC and the encryption AAD, so the record
+    /// and its stamp are durable together.
+    pub fn new_stamped(args: WalRecordArgs<'_>, stamp: RecordStamp) -> Result<Self> {
+        let RecordStamp {
+            apply_key,
+            event_source,
+        } = stamp;
         let WalRecordArgs {
             record_type,
             lsn,
@@ -88,6 +114,7 @@ impl WalRecord {
                 payload_len: 0,
                 database_id,
                 apply_key,
+                event_source,
                 crc32c: 0,
             };
             let header_bytes = temp_header.to_bytes();
@@ -116,6 +143,7 @@ impl WalRecord {
             payload_len: final_payload.len() as u32,
             database_id,
             apply_key,
+            event_source,
             crc32c: 0,
         };
 
@@ -131,6 +159,12 @@ impl WalRecord {
     /// `0` when no proposal apply appended it.
     pub fn apply_key(&self) -> u64 {
         self.header.apply_key
+    }
+
+    /// The event source code of the row write this record carries.
+    /// [`NO_EVENT_SOURCE`] for a record that carries no row write.
+    pub fn event_source(&self) -> u8 {
+        self.header.event_source
     }
 
     /// Decrypt the payload if the record is encrypted.
@@ -362,5 +396,35 @@ mod tests {
         assert_eq!(record.logical_record_type(), RecordType::LsnMsAnchor as u32);
         let decoded = LsnMsAnchorPayload::from_bytes(&record.payload).unwrap();
         assert_eq!(decoded, anchor);
+    }
+
+    #[test]
+    fn a_stamped_record_keeps_its_event_source_and_checksum() {
+        for code in [NO_EVENT_SOURCE, 1, 2, 3, 4, 5, 6, u8::MAX] {
+            let record = WalRecord::new_stamped(
+                WalRecordArgs {
+                    record_type: 1,
+                    lsn: 9,
+                    tenant_id: 1,
+                    vshard_id: 0,
+                    database_id: 0,
+                    payload: b"row".to_vec(),
+                    encryption_key: None,
+                    preamble_bytes: None,
+                },
+                RecordStamp {
+                    apply_key: 7,
+                    event_source: code,
+                },
+            )
+            .expect("record");
+            assert_eq!(record.event_source(), code);
+            assert_eq!(record.apply_key(), 7);
+            record
+                .verify_checksum()
+                .expect("checksum covers the source");
+            let decoded = RecordHeader::from_bytes(&record.header.to_bytes());
+            assert_eq!(decoded.event_source, code);
+        }
     }
 }

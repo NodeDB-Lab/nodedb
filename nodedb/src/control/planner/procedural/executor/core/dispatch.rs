@@ -181,15 +181,17 @@ impl<'a> StatementExecutor<'a> {
                     vshard_id: task.vshard_id,
                 };
                 let minted = MintedRecords::open(&self.state.outcome_floor);
-                let outcome = match minted.append_plan(&self.state.wal, owner, &task.plan) {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        // Any record appended before the error never reaches
-                        // a core.
-                        minted.cancel(&self.state.wal, owner, 0).await?;
-                        return Err(error);
-                    }
-                };
+                let outcome =
+                    match minted.append_plan(&self.state.wal, owner, &task.plan, self.event_source)
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            // Any record appended before the error never reaches
+                            // a core.
+                            minted.cancel(&self.state.wal, owner, 0).await?;
+                            return Err(error);
+                        }
+                    };
 
                 crate::control::server::dispatch_utils::dispatch_trusted_internal_write_to_data_plane(
                     self.state,

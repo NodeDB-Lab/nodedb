@@ -59,9 +59,9 @@ pub use preamble::{
 };
 pub use reader::{StopReason, WalReader};
 pub use record::{
-    CalvinAppliedPayload, FtsDeletePayload, FtsIndexPayload, RecordHeader, RecordTarget,
-    RecordType, SpatialDeletePayload, SpatialPutPayload, WalRecord, WalRecordArgs,
-    WriteAbortedPayload,
+    CalvinAppliedPayload, FtsDeletePayload, FtsIndexPayload, NO_EVENT_SOURCE, RecordHeader,
+    RecordStamp, RecordTarget, RecordType, SpatialDeletePayload, SpatialPutPayload, WalRecord,
+    WalRecordArgs, WriteAbortedPayload,
 };
 pub use recovery::{RecoveryInfo, recover};
 pub use replay::{

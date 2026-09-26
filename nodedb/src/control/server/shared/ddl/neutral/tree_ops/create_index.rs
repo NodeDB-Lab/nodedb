@@ -292,7 +292,13 @@ async fn append_edge_batch(
 ) -> crate::Result<crate::control::server::dispatch_utils::MintedRecords> {
     let owner = edge_batch_owner(tenant_id, shard);
     let minted = crate::control::server::dispatch_utils::MintedRecords::open(&state.outcome_floor);
-    match minted.append_plan(&state.wal, owner, plan) {
+    match minted.append_plan(
+        &state.wal,
+        owner,
+        plan,
+        // The same source the index write is dispatched with.
+        crate::event::EventSource::User,
+    ) {
         Ok(_) => Ok(minted),
         Err(e) => {
             // Any record appended before the error never reaches a core.

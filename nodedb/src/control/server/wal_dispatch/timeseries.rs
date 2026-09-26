@@ -464,6 +464,7 @@ mod tests {
 
         let outcome = super::super::wal_append(super::super::WalAppendRequest {
             wal: wal.appender(NO_APPLY_KEY),
+            event_source: crate::event::EventSource::User,
             tenant_id: TenantId::new(1),
             vshard_id: VShardId::new(0),
             database_id: DatabaseId::DEFAULT,
@@ -519,6 +520,7 @@ mod tests {
         let append = |apply_key: u64| {
             super::super::wal_append(super::super::WalAppendRequest {
                 wal: wal.appender(apply_key),
+                event_source: crate::event::EventSource::User,
                 tenant_id: TenantId::new(1),
                 vshard_id: VShardId::new(0),
                 database_id: DatabaseId::DEFAULT,

@@ -69,6 +69,7 @@ pub(super) fn authorize_and_append(
     mut plan: PhysicalPlan,
     durability: WalDurability,
     minted: Option<&MintedRecords>,
+    event_source: crate::event::EventSource,
 ) -> crate::Result<WalAppendOutcome> {
     let RecordOwner {
         tenant_id,
@@ -96,6 +97,7 @@ pub(super) fn authorize_and_append(
                         Some(minted) => minted.appender(&shared.wal, apply_key),
                         None => shared.wal.appender(apply_key),
                     },
+                    event_source,
                     tenant_id,
                     vshard_id,
                     database_id,
