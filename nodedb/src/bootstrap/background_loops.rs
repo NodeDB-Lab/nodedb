@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use tracing::info;
 
+use super::poll_pacer::{PollPace, PollPacer};
 use crate::ServerConfig;
 use crate::control::state::SharedState;
 use crate::event::bus::EventConsumerRx;
@@ -396,7 +397,7 @@ pub fn spawn_response_poller(
         "response_poller",
         crate::control::shutdown::ShutdownPhase::DrainingDataPlane,
         move |_shutdown| async move {
-            let mut idle_iters: u32 = 0;
+            let mut pacer = PollPacer::new();
             loop {
                 if shared_poller.data_plane_drain.is_complete() {
                     // One last pass so a response the drain's own final poll
@@ -404,19 +405,12 @@ pub fn spawn_response_poller(
                     shared_poller.poll_and_route_responses();
                     break;
                 }
+                let started = std::time::Instant::now();
                 let routed = shared_poller.poll_and_route_responses();
-                if routed > 0 {
-                    idle_iters = 0;
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-                idle_iters = idle_iters.saturating_add(1);
-                if idle_iters <= 256 {
-                    tokio::task::yield_now().await;
-                } else if idle_iters <= 1024 {
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                } else {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                let cost = started.elapsed();
+                match pacer.step(routed, cost) {
+                    PollPace::Fast => tokio::task::yield_now().await,
+                    PollPace::Tick(wait) => tokio::time::sleep(wait).await,
                 }
             }
             drain_guard.report_drained();
