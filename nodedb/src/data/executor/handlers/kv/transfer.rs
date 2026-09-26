@@ -192,21 +192,19 @@ impl CoreLoop {
         }
 
         // Emit CDC events.
-        let src_str = String::from_utf8_lossy(source_key);
-        let dst_str = String::from_utf8_lossy(dest_key);
-        self.emit_write_event(
+        self.emit_kv_write_event(
             task,
             collection,
             crate::event::WriteOp::Update,
-            crate::engine::document::store::RowIdentity::from_user_key(src_str.as_ref()),
+            source_key,
             Some(&new_source),
             Some(&source_bytes),
         );
-        self.emit_write_event(
+        self.emit_kv_write_event(
             task,
             collection,
             crate::event::WriteOp::Update,
-            crate::engine::document::store::RowIdentity::from_user_key(dst_str.as_ref()),
+            dest_key,
             Some(&new_dest),
             if dest_bytes.is_empty() {
                 None
@@ -215,6 +213,8 @@ impl CoreLoop {
             },
         );
 
+        let src_str = String::from_utf8_lossy(source_key);
+        let dst_str = String::from_utf8_lossy(dest_key);
         match response_codec::encode_json_as_msgpack(&serde_json::json!({
             "source_key": src_str,
             "dest_key": dst_str,
@@ -311,19 +311,19 @@ impl CoreLoop {
         // Emit CDC events.
         let item_str = String::from_utf8_lossy(item_key);
         let dest_str = String::from_utf8_lossy(dest_key);
-        self.emit_write_event(
+        self.emit_kv_write_event(
             task,
             source_collection,
             crate::event::WriteOp::Delete,
-            crate::engine::document::store::RowIdentity::from_user_key(item_str.as_ref()),
+            item_key,
             None,
             Some(&item_data),
         );
-        self.emit_write_event(
+        self.emit_kv_write_event(
             task,
             dest_collection,
             crate::event::WriteOp::Insert,
-            crate::engine::document::store::RowIdentity::from_user_key(dest_str.as_ref()),
+            dest_key,
             Some(&item_data),
             None,
         );

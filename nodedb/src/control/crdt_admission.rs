@@ -515,7 +515,10 @@ async fn apply_fenced(
         )?
         .ok_or(crate::Error::CrdtAdmissionInvalidPlan {
             reason: "admitted CRDT Apply has no replicated form",
-        })?;
+        })?
+        // Every replica gives the write the source this node dispatches it
+        // with.
+        .with_event_source(workflow.event_source);
         let outcome = tokio::time::timeout(
             workflow.timeout,
             crate::control::wal_replication::propose_replicated_entry(workflow.state, raw, entry),

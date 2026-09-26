@@ -26,6 +26,8 @@ const REISSUE_TIMEOUT: Duration = Duration::from_secs(120);
 /// - Cluster: `to_replicated_entry` + `propose_replicated_entry`.
 /// - Single-node: append the redo under an outcome-floor window, then
 ///   `sync_dispatch::dispatch_system`, which closes the window.
+///
+/// Both branches give the write's events [`crate::event::EventSource::Restore`].
 pub async fn reissue_plan_durably(
     state: &SharedState,
     tenant_id: TenantId,
@@ -47,7 +49,10 @@ pub async fn reissue_plan_durably(
                 "restore reissue: the plan restored into '{collection}' did not map to a \
                  replicated write"
             ),
-        })?;
+        })?
+        // Every replica applies the write as restored: AFTER triggers do not
+        // fire again for it.
+        .with_event_source(crate::event::EventSource::Restore);
         let (_, write_version) =
             crate::control::wal_replication::propose_replicated_entry(state, proposer, entry)
                 .await?;

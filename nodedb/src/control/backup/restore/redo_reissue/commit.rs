@@ -79,7 +79,9 @@ fn batch_payload(collection: &str, batch: Vec<RowUnit>) -> TransactionRedoPayloa
         // The backup holds every target row with its total already folded in.
         sum_targets: Vec::new(),
         identities,
-        event_source: EventSource::User,
+        // Every replica applies the rows as restored: AFTER triggers fired
+        // when the rows were first written, and do not fire again.
+        event_source: EventSource::Restore,
         origin: RedoOrigin::Restore,
     }
 }
@@ -202,5 +204,28 @@ mod tests {
         assert_eq!(payload.identities.len(), 1);
         assert!(payload.sum_targets.is_empty());
         assert_eq!(payload.origin, RedoOrigin::Restore);
+    }
+
+    #[test]
+    fn a_restored_record_carries_the_restore_source_to_every_replica() {
+        let payload = batch_payload("c", vec![unit(1, 1, "a")]);
+        assert_eq!(payload.event_source, EventSource::Restore);
+        let entry = transaction_redo_entry(
+            TenantId::new(1),
+            crate::types::DatabaseId::DEFAULT,
+            VShardId::new(0),
+            &payload,
+        );
+        assert_eq!(
+            crate::event::EventSource::from(entry.event_source),
+            EventSource::Restore
+        );
+        match entry.write {
+            crate::control::wal_replication::ReplicatedWrite::TransactionRedo {
+                event_source,
+                ..
+            } => assert_eq!(EventSource::from(event_source), EventSource::Restore),
+            other => panic!("expected a transaction redo, got {other:?}"),
+        }
     }
 }

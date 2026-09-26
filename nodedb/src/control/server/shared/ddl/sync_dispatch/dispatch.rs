@@ -25,9 +25,8 @@ pub(crate) async fn dispatch_system(
     task: SystemTask<'_>,
     timeout: Duration,
 ) -> crate::Result<Vec<u8>> {
-    let resp =
-        dispatch_system_response_with_source(state, task, timeout, crate::event::EventSource::User)
-            .await?;
+    let event_source = task.reason.event_source();
+    let resp = dispatch_system_response_with_source(state, task, timeout, event_source).await?;
 
     if resp.status != Status::Ok {
         // DDL/DSL callers receive the flattened message form. Callers that need

@@ -66,6 +66,7 @@ fn topic_buffer_publish_and_consume() {
             field_diffs: None,
             system_time_ms: None,
             valid_time_ms: None,
+            source: nodedb::event::EventSource::User,
         });
     }
 
@@ -106,6 +107,7 @@ fn topic_retention_eviction() {
             field_diffs: None,
             system_time_ms: None,
             valid_time_ms: None,
+            source: nodedb::event::EventSource::User,
         });
     }
 

@@ -35,9 +35,11 @@ use super::identity::trigger_identity;
 
 /// Dispatch a `WriteEvent` to matching AFTER triggers.
 ///
-/// Skips events not from `EventSource::User` / `Deferred` (cascade
-/// prevention). Trigger failures never propagate to the caller — they are
-/// queued for retry and, once out of attempts, routed to the DLQ.
+/// Fires only for `EventSource::User` / `Deferred`. Trigger and replicated
+/// writes are skipped to prevent cascades. Restored rows are skipped because
+/// their triggers fired at original write time. Trigger failures never
+/// propagate to the caller. They are queued for retry and, once out of
+/// attempts, routed to the DLQ.
 pub async fn dispatch_triggers(
     event: &WriteEvent,
     state: &Arc<SharedState>,
@@ -46,7 +48,10 @@ pub async fn dispatch_triggers(
     let mode_filter = match event.source {
         EventSource::User => Some(TriggerExecutionMode::Async),
         EventSource::Deferred => Some(TriggerExecutionMode::Deferred),
-        _ => {
+        EventSource::Trigger
+        | EventSource::RaftFollower
+        | EventSource::CrdtSync
+        | EventSource::Restore => {
             trace!(
                 source = %event.source,
                 collection = %event.collection,
@@ -55,9 +60,6 @@ pub async fn dispatch_triggers(
             return;
         }
     };
-
-    let new_fields = row_fields(event.new_value.as_deref(), event.row_id.as_str());
-    let old_fields = row_fields(event.old_value.as_deref(), event.row_id.as_str());
 
     let identity = trigger_identity(event.tenant_id);
     let op_str = event.op.to_string();
@@ -84,7 +86,26 @@ pub async fn dispatch_triggers(
         WriteOp::BulkInsert { .. } | WriteOp::BulkDelete { .. }
     );
 
-    if !is_bulk {
+    // A row image that does not decode refuses the ROW pass: firing with a
+    // missing NEW or OLD row would skip every trigger without a trace.
+    let fields = if is_bulk {
+        None
+    } else {
+        match event_row_fields(event) {
+            Ok(fields) => Some(fields),
+            Err(error) => {
+                record_row_failures(
+                    &source,
+                    FireReport::from_precondition(error),
+                    None,
+                    None,
+                    queue,
+                );
+                None
+            }
+        }
+    };
+    if let Some((new_fields, old_fields)) = fields {
         let report = fire_for_operation(FireForOperationParams {
             operation: &op_str,
             state,
@@ -138,18 +159,35 @@ pub async fn dispatch_triggers(
     record_statement_failures(&source, report, queue);
 }
 
-/// Decode one side of an event payload into trigger row bindings.
-fn row_fields(
-    payload: Option<&[u8]>,
-    row_id: &str,
-) -> Option<std::collections::HashMap<String, nodedb_types::Value>> {
-    let map = deserialize_event_payload(payload?)?;
+/// The NEW and OLD row fields of `event`, with the row identity injected.
+///
+/// Every engine emits its row images as the decoded row map a read returns.
+/// A KV row is the `{key, value}` row the Data Plane shapes at emission.
+fn event_row_fields(event: &WriteEvent) -> crate::Result<(RowFields, RowFields)> {
+    let row_id = event.row_id.as_str();
+    Ok((
+        row_fields(event.new_value.as_deref(), row_id)?,
+        row_fields(event.old_value.as_deref(), row_id)?,
+    ))
+}
+
+type RowFields = Option<std::collections::HashMap<String, nodedb_types::Value>>;
+
+/// One row image as fields. `None` when the event carries no image. An image
+/// that is not a row map is an error.
+fn row_fields(payload: Option<&[u8]>, row_id: &str) -> crate::Result<RowFields> {
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    let map = deserialize_event_payload(payload).ok_or_else(|| crate::Error::Internal {
+        detail: format!("trigger dispatch: the row image of '{row_id}' is not a row map"),
+    })?;
     let mut fields: std::collections::HashMap<String, nodedb_types::Value> = map
         .into_iter()
         .map(|(k, v)| (k, nodedb_types::Value::from(v)))
         .collect();
     inject_row_identity(&mut fields, row_id);
-    Some(fields)
+    Ok(Some(fields))
 }
 
 /// The statement-level DML event a write op represents, if any.
@@ -306,5 +344,27 @@ mod tests {
     fn deserialize_non_object_returns_none() {
         let bytes = serde_json::to_vec(&serde_json::json!([1, 2, 3])).unwrap();
         assert!(deserialize_event_payload(&bytes).is_none());
+    }
+
+    #[test]
+    fn a_shaped_kv_row_binds_its_key_and_value() {
+        let row = nodedb_query::msgpack_scan::kv_row_msgpack("a", b"x");
+        let fields = super::row_fields(Some(&row), "a")
+            .expect("a KV row decodes")
+            .expect("an image is present");
+        assert_eq!(
+            fields.get("key"),
+            Some(&nodedb_types::Value::String("a".into()))
+        );
+        assert_eq!(
+            fields.get("value"),
+            Some(&nodedb_types::Value::String("x".into()))
+        );
+    }
+
+    #[test]
+    fn a_document_image_that_is_not_a_map_is_an_error() {
+        assert!(super::row_fields(Some(b"x"), "a").is_err());
+        assert!(super::row_fields(None, "a").expect("no image").is_none());
     }
 }

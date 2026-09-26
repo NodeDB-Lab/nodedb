@@ -670,6 +670,7 @@ mod tests {
                 field_diffs: None,
                 system_time_ms: None,
                 valid_time_ms: None,
+                source: crate::event::EventSource::User,
             });
         }
         let params = ConsumeParams {
@@ -781,6 +782,7 @@ mod tests {
                 field_diffs: None,
                 system_time_ms: None,
                 valid_time_ms: None,
+                source: crate::event::EventSource::User,
             });
         state
             .cdc_router
@@ -802,6 +804,7 @@ mod tests {
                 field_diffs: None,
                 system_time_ms: None,
                 valid_time_ms: None,
+                source: crate::event::EventSource::User,
             });
 
         let params = ConsumeParams {

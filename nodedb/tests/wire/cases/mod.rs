@@ -172,6 +172,7 @@ mod sql_backup_restore_durable_marks;
 mod sql_backup_restore_local_marks;
 mod sql_backup_restore_staleness;
 mod sql_backup_restore_timeseries;
+mod sql_backup_restore_triggers;
 mod sql_backup_restore_vector_params;
 mod sql_backup_restore_vector_restart;
 mod sql_backup_restore_wire;

@@ -98,8 +98,10 @@ pub(super) fn parse_put_record(
     if let Some((collection, key, value)) = decode_kv_put_event_fields(payload) {
         *sequence += 1;
         let key_str = String::from_utf8_lossy(&key);
+        // The same `{key, value}` row image the live KV write event carries.
+        let row = nodedb_query::msgpack_scan::kv_row_msgpack(&key_str, &value);
         let (system_time_ms, valid_time_ms) =
-            crate::event::bitemporal_extract::extract_stamps(Some(&value));
+            crate::event::bitemporal_extract::extract_stamps(Some(&row));
         // AUDIT_DML rows replayed from WAL after a crash carry user_id = None and
         // statement_digest = None; pre-crash audit rows are durable in the catalog.
         // Widening the WAL record format to carry these fields is tracked separately.
@@ -114,7 +116,7 @@ pub(super) fn parse_put_record(
             tenant_id,
             vshard_id,
             source: EventSource::User,
-            new_value: Some(Arc::from(value.as_slice())),
+            new_value: Some(Arc::from(row.as_slice())),
             old_value: None,
             system_time_ms,
             valid_time_ms,

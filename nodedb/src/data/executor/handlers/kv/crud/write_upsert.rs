@@ -90,19 +90,11 @@ impl CoreLoop {
         // every downstream consumer's perspective; a fresh key with no
         // prior value is an Insert. The pre-write `existing_bytes` probe
         // above is the source of truth.
-        let key_str = String::from_utf8_lossy(key);
         let (op, old_slice): (_, Option<&[u8]>) = match existing_bytes.as_deref() {
             Some(o) => (crate::event::WriteOp::Update, Some(o)),
             None => (crate::event::WriteOp::Insert, None),
         };
-        self.emit_write_event(
-            task,
-            collection,
-            op,
-            crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
-            Some(&stored_bytes),
-            old_slice,
-        );
+        self.emit_kv_write_event(task, collection, op, key, Some(&stored_bytes), old_slice);
 
         if let Some(spec) = returning {
             // The MERGED body, not the caller's: on a conflict the submitted

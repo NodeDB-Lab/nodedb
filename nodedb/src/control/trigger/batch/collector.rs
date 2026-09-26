@@ -310,9 +310,16 @@ pub fn push_write_event(
 ) -> Option<TriggerBatch> {
     use crate::event::types::{EventSource, WriteOp};
 
-    // Only User-originated events fire triggers.
-    if !matches!(event.source, EventSource::User) {
-        return None;
+    // Only User-originated events fire batched AFTER triggers. Deferred
+    // events fire through the deferred dispatcher. A restored row fired its
+    // triggers when it was first written.
+    match event.source {
+        EventSource::User => {}
+        EventSource::Trigger
+        | EventSource::RaftFollower
+        | EventSource::CrdtSync
+        | EventSource::Deferred
+        | EventSource::Restore => return None,
     }
 
     let op_str = match event.op {

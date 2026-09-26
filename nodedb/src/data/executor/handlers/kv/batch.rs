@@ -110,6 +110,23 @@ impl CoreLoop {
         debug!(core = self.core_id, %collection, count = entries.len(), "kv batch put");
         // See `CoreLoop::kv_ttl_now_ms` for the precedence this resolves.
         let now_ms: u64 = self.kv_ttl_now_ms(task);
+        // Each entry's pre-image, in `entries` order, for its write event. A
+        // key the batch names twice sees the batch's own earlier value.
+        let priors: Vec<Option<Vec<u8>>> = {
+            let mut written: std::collections::HashMap<&[u8], &[u8]> =
+                std::collections::HashMap::with_capacity(entries.len());
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    let prior = match written.get(key.as_slice()) {
+                        Some(earlier) => Some(earlier.to_vec()),
+                        None => self.kv_engine.get(did, tid, collection, key, now_ms),
+                    };
+                    written.insert(key.as_slice(), value.as_slice());
+                    prior
+                })
+                .collect()
+        };
         let new_count = self.kv_engine.batch_put(KvBatchPutParams {
             database_id: did,
             tenant_id: tid,
@@ -119,6 +136,16 @@ impl CoreLoop {
             now_ms,
             surrogates,
         });
+        // One write event per entry: a batch INSERT fires the same row
+        // triggers as the single-row form.
+        for ((key, value), prior) in entries.iter().zip(&priors) {
+            let op = if prior.is_some() {
+                crate::event::WriteOp::Update
+            } else {
+                crate::event::WriteOp::Insert
+            };
+            self.emit_kv_write_event(task, collection, op, key, Some(value), prior.as_deref());
+        }
         // One WAL record covers the whole batch; record every written key's
         // version against that single LSN.
         if task.wal_lsn().is_some() {

@@ -111,6 +111,7 @@ pub(crate) async fn dispatch_write_replicated(
     if let Some(proposer) = state.async_raft_proposer() {
         let entry = ReplicableWrite::decide_for_replication(&plan).and_then(|replicable| {
             to_replicated_entry(tenant_id, database_id, vshard_id, &replicable)
+                .map(|entry| entry.map(|entry| entry.with_event_source(event_source)))
         });
         let entry = match entry {
             Ok(entry) => entry,

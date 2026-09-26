@@ -93,12 +93,16 @@ impl DeltaPackager {
         ledger: Option<&CrdtLedger>,
         delivery: &CrdtSyncDelivery,
     ) -> bool {
-        // Only package User-originated writes.
-        // CrdtSync events are inbound FROM Lite — don't echo back.
-        // Trigger/RaftFollower events are derivative — the original User
-        // event already covers the data change.
-        if event.source != EventSource::User {
-            return false;
+        // User writes and restored rows change the base data Lite peers hold,
+        // so both are packaged. CrdtSync events came FROM Lite and are not
+        // echoed back. Trigger, RaftFollower and Deferred events are derived
+        // from a User event that already carries the data change.
+        match event.source {
+            EventSource::User | EventSource::Restore => {}
+            EventSource::Trigger
+            | EventSource::RaftFollower
+            | EventSource::CrdtSync
+            | EventSource::Deferred => return false,
         }
 
         // Check if any connected Lite session cares about this collection.
@@ -224,6 +228,17 @@ mod tests {
 
         let trigger_event = make_event(EventSource::Trigger, WriteOp::Insert);
         assert!(!packager.package_and_enqueue(&trigger_event, None, None, &delivery));
+    }
+
+    #[test]
+    fn a_restored_row_passes_the_source_gate() {
+        let packager = DeltaPackager::new();
+        let delivery = CrdtSyncDelivery::new();
+        // No session subscribes, so the event stops at the subscriber check.
+        // The skip counter moves only for an event past the source gate.
+        let restored = make_event(EventSource::Restore, WriteOp::Insert);
+        assert!(!packager.package_and_enqueue(&restored, None, None, &delivery));
+        assert_eq!(packager.deltas_skipped.load(Ordering::Relaxed), 1);
     }
 
     #[test]

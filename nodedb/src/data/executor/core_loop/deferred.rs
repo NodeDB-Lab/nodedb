@@ -3,14 +3,36 @@
 //! Deferred trigger events of a committed transaction.
 //!
 //! The redo install collects the document writes of a committed record and,
-//! once the record settled, emits them as WriteEvents with
-//! `EventSource::Deferred` so the Event Plane fires DEFERRED-mode triggers.
+//! once the record settled, emits them as WriteEvents. A client transaction's
+//! rows carry `EventSource::Deferred`, so the Event Plane fires DEFERRED-mode
+//! triggers. Rows of any other source keep that source, so a trigger's own
+//! transaction and a restore fire no DEFERRED trigger (see
+//! [`committed_row_source`]).
 
 use std::sync::Arc;
 
 use super::CoreLoop;
 use crate::engine::document::store::RowIdentity;
 use crate::event::types::{EventSource, RowId, WriteEvent, WriteOp};
+
+/// The source a committed record's document-row events carry.
+///
+/// A client transaction's rows fire DEFERRED-mode triggers, so they carry
+/// `Deferred`. Every other source keeps its own: a trigger's transaction
+/// does not re-fire triggers, and a restored row fired its triggers when it
+/// was first written.
+pub(in crate::data::executor) const fn committed_row_source(
+    record_source: EventSource,
+) -> EventSource {
+    match record_source {
+        EventSource::User => EventSource::Deferred,
+        EventSource::Trigger => EventSource::Trigger,
+        EventSource::RaftFollower => EventSource::RaftFollower,
+        EventSource::CrdtSync => EventSource::CrdtSync,
+        EventSource::Deferred => EventSource::Deferred,
+        EventSource::Restore => EventSource::Restore,
+    }
+}
 
 /// A write that occurred during a transaction, pending deferred trigger emission.
 pub(in crate::data::executor) struct DeferredWrite {
@@ -22,19 +44,20 @@ pub(in crate::data::executor) struct DeferredWrite {
 }
 
 impl CoreLoop {
-    /// Emit deferred trigger events for a committed transaction.
+    /// Emit the document-row events of a committed transaction.
     ///
-    /// Called after a committed redo record installed and settled.
-    /// Each write in the transaction is emitted as a WriteEvent with
-    /// `EventSource::Deferred`, which the Event Plane consumer routes
-    /// to DEFERRED-mode triggers.
+    /// Called after a committed redo record installed and settled. Each
+    /// write is emitted as a WriteEvent whose source is
+    /// [`committed_row_source`] of the record's `record_source`.
     pub(in crate::data::executor) fn emit_deferred_events(
         &mut self,
         writes: Vec<DeferredWrite>,
+        record_source: EventSource,
         database_id: crate::types::DatabaseId,
         tenant_id: crate::types::TenantId,
         vshard_id: crate::types::VShardId,
     ) {
+        let source = committed_row_source(record_source);
         let producer = match self.event_producer.as_mut() {
             Some(p) => p,
             None => return,
@@ -58,7 +81,7 @@ impl CoreLoop {
                 database_id,
                 tenant_id,
                 vshard_id,
-                source: EventSource::Deferred,
+                source,
                 new_value: write.new_value.map(|v| Arc::from(v.as_slice())),
                 old_value: write.old_value.map(|v| Arc::from(v.as_slice())),
                 system_time_ms,
@@ -69,5 +92,38 @@ impl CoreLoop {
 
             producer.emit(event);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_client_transaction_fires_deferred_triggers() {
+        assert_eq!(
+            committed_row_source(EventSource::User),
+            EventSource::Deferred
+        );
+        assert_eq!(
+            committed_row_source(EventSource::Restore),
+            EventSource::Restore
+        );
+        assert_eq!(
+            committed_row_source(EventSource::Trigger),
+            EventSource::Trigger
+        );
+        assert_eq!(
+            committed_row_source(EventSource::RaftFollower),
+            EventSource::RaftFollower
+        );
+        assert_eq!(
+            committed_row_source(EventSource::CrdtSync),
+            EventSource::CrdtSync
+        );
+        assert_eq!(
+            committed_row_source(EventSource::Deferred),
+            EventSource::Deferred
+        );
     }
 }

@@ -37,8 +37,16 @@ pub async fn process_write_event(
     // An action's own writes come back through the Event Plane. Firing event
     // definitions on them lets an action that writes to the collection it
     // watches re-trigger itself without bound, so only the same sources that
-    // fire triggers fire event definitions.
-    if !matches!(event.source, EventSource::User | EventSource::Deferred) {
+    // fire triggers fire event definitions. A restored row fired its event
+    // definitions when it was first written.
+    let fires = match event.source {
+        EventSource::User | EventSource::Deferred => true,
+        EventSource::Trigger
+        | EventSource::RaftFollower
+        | EventSource::CrdtSync
+        | EventSource::Restore => false,
+    };
+    if !fires {
         trace!(
             source = %event.source,
             collection = %event.collection,

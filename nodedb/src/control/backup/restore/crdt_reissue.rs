@@ -53,7 +53,8 @@ async fn reissue_crdt_collection(
         )?
         .ok_or_else(|| Error::Internal {
             detail: "restore reissue: crdt import did not map to a replicated write".into(),
-        })?;
+        })?
+        .with_event_source(EventSource::Restore);
         crate::control::wal_replication::propose_replicated_entry(state, proposer, entry).await?;
         return Ok(());
     }
@@ -74,7 +75,7 @@ async fn reissue_crdt_collection(
                         vshard_id: vshard,
                         plan,
                         trace_id: crate::types::TraceId::ZERO,
-                        event_source: EventSource::CrdtSync,
+                        event_source: EventSource::Restore,
                         txn_id: None,
                     },
                 ),

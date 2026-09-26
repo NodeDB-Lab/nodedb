@@ -54,5 +54,6 @@ pub fn make_cdc_event(
         field_diffs: None,
         system_time_ms: None,
         valid_time_ms: None,
+        source: nodedb::event::EventSource::User,
     }
 }

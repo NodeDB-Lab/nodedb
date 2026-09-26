@@ -91,6 +91,8 @@ pub(in crate::data::executor) struct AppliedDocWrite {
     pub op: WriteOp,
     /// The row as stored before this write, when the write read it.
     pub old_value: Option<Vec<u8>>,
+    /// The MessagePack body this write installed. `None` for a delete.
+    pub new_body: Option<Vec<u8>>,
     /// Every `(field, value)` index entry the write added, removed, or
     /// versioned.
     pub index_tuples: Vec<(String, String)>,
@@ -236,6 +238,7 @@ pub(in crate::data::executor) fn target_doc_write(target: &TargetWrite) -> Appli
             WriteOp::Insert
         },
         old_value: outcome.prior_value.clone(),
+        new_body: Some(target.body.clone()),
         index_tuples,
     }
 }

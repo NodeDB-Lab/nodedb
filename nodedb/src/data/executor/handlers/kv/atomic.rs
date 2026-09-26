@@ -114,12 +114,11 @@ impl CoreLoop {
                 }
                 // The event carries the bytes the engine stored: the whole row
                 // for a typed row, the decimal text for a raw body.
-                let key_str = String::from_utf8_lossy(key);
-                self.emit_write_event(
+                self.emit_kv_write_event(
                     task,
                     collection,
                     crate::event::WriteOp::Update,
-                    crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
+                    key,
                     Some(written.as_slice()),
                     None,
                 );
@@ -186,12 +185,11 @@ impl CoreLoop {
                 }
                 // The event carries the bytes the engine stored: the whole row
                 // for a typed row, the decimal text for a raw body.
-                let key_str = String::from_utf8_lossy(key);
-                self.emit_write_event(
+                self.emit_kv_write_event(
                     task,
                     collection,
                     crate::event::WriteOp::Update,
-                    crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
+                    key,
                     Some(written.as_slice()),
                     None,
                 );
@@ -261,12 +259,11 @@ impl CoreLoop {
             if let Some(ref m) = self.metrics {
                 m.record_kv_put();
             }
-            let key_str = String::from_utf8_lossy(key);
-            self.emit_write_event(
+            self.emit_kv_write_event(
                 task,
                 collection,
                 crate::event::WriteOp::Update,
-                crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
+                key,
                 Some(written.as_slice()),
                 None,
             );
@@ -343,12 +340,11 @@ impl CoreLoop {
         if let Some(ref m) = self.metrics {
             m.record_kv_put();
         }
-        let key_str = String::from_utf8_lossy(key);
-        self.emit_write_event(
+        self.emit_kv_write_event(
             task,
             collection,
             crate::event::WriteOp::Update,
-            crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
+            key,
             Some(written.as_slice()),
             old.as_deref(),
         );
@@ -500,6 +496,11 @@ mod tests {
         nodedb_types::value_to_msgpack(&Value::Object(map)).expect("encode row")
     }
 
+    /// The `{key, value}` row a KV write event carries for `stored`.
+    fn kv_row(key: &str, stored: &[u8]) -> Vec<u8> {
+        nodedb_query::msgpack_scan::kv_row_msgpack(key, stored)
+    }
+
     fn columns(bytes: &[u8]) -> HashMap<String, Value> {
         match nodedb_types::value_from_msgpack(bytes).expect("decode row") {
             Value::Object(map) => map,
@@ -547,10 +548,11 @@ mod tests {
         let new_value = event.new_value.expect("the event carries the new row");
         assert_eq!(
             new_value.as_ref(),
-            stored(&h.core, b"player").as_slice(),
-            "the event carries exactly the bytes the engine stored"
+            kv_row("player", &stored(&h.core, b"player")).as_slice(),
+            "the event carries the stored row, shaped as the KV read row"
         );
         let row = columns(&new_value);
+        assert_eq!(row.get("key"), Some(&Value::String("player".into())));
         assert_eq!(row.get("n"), Some(&Value::Integer(8)));
         assert_eq!(row.get("label"), Some(&Value::String("gold".into())));
     }
@@ -576,7 +578,10 @@ mod tests {
 
         let event = h.events.try_recv().expect("INCR_FLOAT emits a write event");
         let new_value = event.new_value.expect("the event carries the new row");
-        assert_eq!(new_value.as_ref(), stored(&h.core, b"player").as_slice());
+        assert_eq!(
+            new_value.as_ref(),
+            kv_row("player", &stored(&h.core, b"player")).as_slice()
+        );
         let row = columns(&new_value);
         assert_eq!(row.get("score"), Some(&Value::Float(2.5)));
         assert_eq!(row.get("label"), Some(&Value::String("gold".into())));
@@ -595,7 +600,12 @@ mod tests {
         assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
 
         let event = h.events.try_recv().expect("INCR emits a write event");
-        assert_eq!(event.new_value.as_deref(), Some(b"42".as_slice()));
+        assert_eq!(
+            event.new_value.as_deref(),
+            Some(kv_row("hits", b"42").as_slice())
+        );
+        let row = columns(event.new_value.as_deref().expect("the new row"));
+        assert_eq!(row.get("value"), Some(&Value::String("42".into())));
         assert_eq!(stored(&h.core, b"hits"), b"42".to_vec());
     }
 
@@ -622,5 +632,66 @@ mod tests {
             "a refused INCR emits no event"
         );
         assert_eq!(stored(&h.core, b"name"), b"abc".to_vec());
+    }
+
+    #[test]
+    fn a_put_emits_the_key_value_row_as_its_new_image() {
+        let mut h = make_core();
+        let t = task();
+        let resp = h.core.execute_kv_put(
+            &t,
+            crate::data::executor::handlers::kv::crud::KvWriteParams {
+                did: did(),
+                tid: TID,
+                collection: COLLECTION,
+                key: b"k",
+                value: b"x",
+                ttl_ms: 0,
+                surrogate: Surrogate::new(1),
+                returning: None,
+                rls_filters: &[],
+            },
+        );
+        assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
+
+        let event = h.events.try_recv().expect("a put emits a write event");
+        assert_eq!(event.op, WriteOp::Insert);
+        let row = columns(event.new_value.as_deref().expect("the new row"));
+        assert_eq!(row.get("key"), Some(&Value::String("k".into())));
+        assert_eq!(row.get("value"), Some(&Value::String("x".into())));
+        assert!(event.old_value.is_none(), "a fresh key has no old row");
+    }
+
+    #[test]
+    fn a_delete_emits_the_removed_row_as_its_old_image() {
+        let mut h = make_core();
+        seed(&mut h.core, b"k", b"x");
+        let t = task();
+        let check = RlsWriteCheck::already_decided_elsewhere();
+        let keys = vec![b"k".to_vec(), b"absent".to_vec()];
+        let resp = h.core.execute_kv_delete(
+            &t,
+            crate::data::executor::handlers::kv::crud::KvDeleteParams {
+                did: did(),
+                tid: TID,
+                collection: COLLECTION,
+                keys: &keys,
+                rls_write_check: &check,
+                returning: None,
+                rls_filters: &[],
+            },
+        );
+        assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
+
+        let event = h.events.try_recv().expect("a delete emits a write event");
+        assert_eq!(event.op, WriteOp::Delete);
+        assert!(event.new_value.is_none());
+        let row = columns(event.old_value.as_deref().expect("the removed row"));
+        assert_eq!(row.get("key"), Some(&Value::String("k".into())));
+        assert_eq!(row.get("value"), Some(&Value::String("x".into())));
+        assert!(
+            h.events.try_recv().is_none(),
+            "an absent key removes no row and emits no event"
+        );
     }
 }

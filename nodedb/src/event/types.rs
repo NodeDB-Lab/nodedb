@@ -247,7 +247,11 @@ impl std::fmt::Display for WriteOp {
 
 /// Source of a write event. The Event Plane uses this to decide whether
 /// to fire AFTER triggers and other side effects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serde names match [`EventSource::as_str`]. CDC events carry the source
+/// under those names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EventSource {
     /// User-originated DML. AFTER triggers should fire.
     User,
@@ -260,17 +264,43 @@ pub enum EventSource {
     /// Deferred trigger write. The Event Plane fires DEFERRED-mode triggers
     /// for these events (post-commit from transaction batch).
     Deferred,
+    /// A row a RESTORE re-issued from a backup. AFTER triggers do not fire:
+    /// they fired when the row was first written. CDC streams deliver the
+    /// event tagged `restore`. Consumers that keep derived state in step
+    /// with the base data process it.
+    Restore,
+}
+
+impl EventSource {
+    /// The source's stable name, as CDC events and logs show it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Trigger => "trigger",
+            Self::RaftFollower => "raft_follower",
+            Self::CrdtSync => "crdt_sync",
+            Self::Deferred => "deferred",
+            Self::Restore => "restore",
+        }
+    }
+
+    /// The source named `name`, as [`Self::as_str`] spells it.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "user" => Some(Self::User),
+            "trigger" => Some(Self::Trigger),
+            "raft_follower" => Some(Self::RaftFollower),
+            "crdt_sync" => Some(Self::CrdtSync),
+            "deferred" => Some(Self::Deferred),
+            "restore" => Some(Self::Restore),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for EventSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::User => write!(f, "user"),
-            Self::Trigger => write!(f, "trigger"),
-            Self::RaftFollower => write!(f, "raft_follower"),
-            Self::CrdtSync => write!(f, "crdt_sync"),
-            Self::Deferred => write!(f, "deferred"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -345,6 +375,26 @@ mod tests {
     fn event_source_display() {
         assert_eq!(EventSource::User.to_string(), "user");
         assert_eq!(EventSource::RaftFollower.to_string(), "raft_follower");
+        assert_eq!(EventSource::Restore.to_string(), "restore");
+    }
+
+    #[test]
+    fn every_event_source_name_round_trips_through_serde_and_from_name() {
+        for source in [
+            EventSource::User,
+            EventSource::Trigger,
+            EventSource::RaftFollower,
+            EventSource::CrdtSync,
+            EventSource::Deferred,
+            EventSource::Restore,
+        ] {
+            assert_eq!(EventSource::from_name(source.as_str()), Some(source));
+            let json = sonic_rs::to_string(&source).expect("encode source");
+            assert_eq!(json, format!("\"{}\"", source.as_str()));
+            let decoded: EventSource = sonic_rs::from_str(&json).expect("decode source");
+            assert_eq!(decoded, source);
+        }
+        assert_eq!(EventSource::from_name("unknown"), None);
     }
 
     #[test]

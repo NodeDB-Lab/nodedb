@@ -39,6 +39,9 @@ impl LegacyReplicatedEntry {
             write: self.write,
             write_hlc: 0,
             metadata_floor: 0,
+            // The old shape carries no source. Its replicas applied it as a
+            // client write.
+            event_source: super::types::ReplicatedEventSource::User,
         }
     }
 }

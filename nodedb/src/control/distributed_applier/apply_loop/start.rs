@@ -21,7 +21,7 @@ use super::group_watch::GroupWatch;
 use super::lane::QueuedEntry;
 use super::proposal_gate::{EntryOutcome, ProposalGate};
 use super::transaction_redo::prepare_transaction_redo_entry;
-use super::write_dispatch::prepare_generic_entry;
+use super::write_dispatch::{EntryScope, prepare_generic_entry};
 
 /// How a prepared entry continues.
 pub(super) enum Prepared<'a> {
@@ -86,6 +86,15 @@ pub(super) fn prepare_entry<'a>(
     let database_id = decoded
         .as_ref()
         .map_or(DatabaseId::DEFAULT, |e| DatabaseId::new(e.database_id));
+    // The source the proposer stamped. An entry that does not decode applies
+    // nothing, so its source is never read.
+    let event_source = decoded
+        .as_ref()
+        .map_or(crate::event::EventSource::User, |e| e.event_source.into());
+    let scope = EntryScope {
+        database_id,
+        event_source,
+    };
 
     // A second committed copy of a proposal this node already applied (a
     // re-proposal after a leader change whose first copy also committed)
@@ -101,7 +110,7 @@ pub(super) fn prepare_entry<'a>(
         commit_hlc,
     };
     let Some(replicated) = decoded else {
-        return prepare_generic_entry(ctx, pos, entry, database_id, false);
+        return prepare_generic_entry(ctx, pos, entry, scope, false);
     };
     let tenant_id = TenantId::new(replicated.tenant_id);
     let entry_database = DatabaseId::new(replicated.database_id);
@@ -166,7 +175,7 @@ pub(super) fn prepare_entry<'a>(
             })
         }
         ReplicatedWrite::ArrayCellPut { .. } | ReplicatedWrite::ArrayCellDelete { .. } => {
-            prepare_generic_entry(ctx, pos, entry, database_id, true)
+            prepare_generic_entry(ctx, pos, entry, scope, true)
         }
         ReplicatedWrite::TransactionRedo { .. } => {
             prepare_transaction_redo_entry(ctx, pos, &replicated)
@@ -202,6 +211,6 @@ pub(super) fn prepare_entry<'a>(
             // so a re-delivery could not usefully replay it.
             Prepared::Concluded(EntryOutcome::Skipped)
         }
-        _ => prepare_generic_entry(ctx, pos, entry, database_id, false),
+        _ => prepare_generic_entry(ctx, pos, entry, scope, false),
     }
 }

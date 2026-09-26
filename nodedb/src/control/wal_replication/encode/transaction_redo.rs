@@ -40,4 +40,5 @@ pub fn transaction_redo_entry(
             origin: payload.origin,
         },
     )
+    .with_event_source(payload.event_source)
 }

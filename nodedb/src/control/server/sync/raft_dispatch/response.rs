@@ -144,6 +144,7 @@ async fn dispatch_sync_response_inner(
         Some(proposer) => {
             let entry = ReplicableWrite::decide_for_replication(&plan).and_then(|replicable| {
                 to_replicated_entry(tenant_id, database_id, vshard_id, &replicable)
+                    .map(|entry| entry.map(|entry| entry.with_event_source(event_source)))
             });
             match entry {
                 Ok(entry) => entry.map(|entry| (proposer, entry)),

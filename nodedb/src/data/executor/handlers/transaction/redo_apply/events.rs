@@ -5,8 +5,10 @@
 //! The transaction batch emitted three kinds of events, and the apply emits
 //! the same set:
 //!
-//! * one `Deferred` event per document row written (source rows and
-//!   materialized-sum targets), carrying the pre-image, for DEFERRED triggers;
+//! * one event per document row written (source rows and materialized-sum
+//!   targets), carrying the pre-image. A client transaction's rows carry
+//!   `Deferred`, for DEFERRED triggers. Rows of other sources keep their
+//!   source;
 //! * one event per KV key written, from the KV write handlers;
 //! * one event per graph node-label delta, on the label stream.
 //!
@@ -17,7 +19,6 @@
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::deferred::DeferredWrite;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::RowIdentity;
 use crate::event::WriteOp;
 
 use super::state::AppliedDocWrite;
@@ -96,7 +97,6 @@ impl CoreLoop {
         }
 
         for image in kv_images {
-            let identity = RowIdentity::from_user_key(String::from_utf8_lossy(&image.key).as_ref());
             match image.new_value {
                 Some(new_value) => {
                     let op = if image.prior.is_some() {
@@ -104,24 +104,24 @@ impl CoreLoop {
                     } else {
                         WriteOp::Insert
                     };
-                    self.emit_write_event(
+                    self.emit_kv_write_event(
                         task,
                         &image.collection,
                         op,
-                        identity,
+                        &image.key,
                         Some(new_value.as_slice()),
                         image.prior.as_deref(),
                     );
                 }
                 // A delete of an absent key removed nothing.
                 None if image.prior.is_some() => {
-                    self.emit_write_event(
+                    self.emit_kv_write_event(
                         task,
                         &image.collection,
                         WriteOp::Delete,
-                        identity,
+                        &image.key,
                         None,
-                        None,
+                        image.prior.as_deref(),
                     );
                 }
                 None => {}
@@ -137,19 +137,34 @@ impl CoreLoop {
             self.emit_graph_label_event(task, &label.node_id, &label.labels, op);
         }
 
+        // Each row carries its post-image and pre-image as the Event Plane
+        // reads them, the same as an autocommit write's event: an AFTER INSERT
+        // or UPDATE trigger binds NEW, and CDC and views read the new row.
+        let database_id = task.request.database_id.as_u64();
+        let tid = task.request.tenant_id.as_u64();
         let deferred: Vec<DeferredWrite> = doc_writes
             .into_iter()
-            .map(|write| DeferredWrite {
-                collection: write.collection,
-                op: write.op,
-                identity: write.identity,
-                new_value: None,
-                old_value: write.old_value,
+            .map(|write| {
+                let id = write.identity.as_str();
+                let new_value = write.new_body.as_deref().map(|body| {
+                    self.body_event_image(database_id, tid, &write.collection, id, body)
+                });
+                let old_value = write.old_value.as_deref().map(|stored| {
+                    self.stored_event_image(database_id, tid, &write.collection, id, stored)
+                });
+                DeferredWrite {
+                    new_value,
+                    old_value,
+                    collection: write.collection,
+                    op: write.op,
+                    identity: write.identity,
+                }
             })
             .collect();
         if !deferred.is_empty() {
             self.emit_deferred_events(
                 deferred,
+                task.request.event_source,
                 task.request.database_id,
                 task.request.tenant_id,
                 task.request.vshard_id,

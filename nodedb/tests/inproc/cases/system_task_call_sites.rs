@@ -30,12 +30,13 @@ const ALLOWED: &[&str] = &[
     "engine/timeseries/retention_policy/autowire.rs",
     "engine/timeseries/retention_policy/enforcement.rs",
     "engine/bitemporal/enforcement.rs",
-    // Backup capture and restore reissue.
+    // Backup capture and restore reissue. The COPY handler authorizes the
+    // statement once, against the tenant's BACKUP permission. The rows it then
+    // captures or re-issues are the whole tenant, not one user's view: a
+    // per-collection grant or an RLS write policy must not drop a restored
+    // row. `durable.rs` is the single-node re-issue of every non-redo engine.
     "control/backup/orchestrator.rs",
-    "control/backup/restore/orchestrate/restore.rs",
-    "control/backup/restore/columnar_reissue.rs",
-    "control/backup/restore/timeseries_reissue.rs",
-    "control/backup/restore/vector_reissue.rs",
+    "control/backup/restore/durable.rs",
     // Cluster snapshot transfer.
     "control/cluster/snapshot_builder.rs",
     "control/cluster/snapshot_applier.rs",

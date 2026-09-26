@@ -4,6 +4,7 @@
 //! [`super::ReplicatedWrite`] on the Raft log, plus its (de)serialization.
 
 use super::replicated_write::ReplicatedWrite;
+use super::transaction_redo_wire::ReplicatedEventSource;
 
 /// Metadata carried alongside the write for routing on the receiving node.
 #[derive(
@@ -55,6 +56,9 @@ pub struct ReplicatedEntry {
     /// pending purge has reclaimed its storage, and the collection the write
     /// targets is registered. `0` for an entry proposed without one.
     pub metadata_floor: u64,
+    /// The source every replica stamps on the write's events. It decides
+    /// whether AFTER triggers fire, on every replica alike.
+    pub event_source: ReplicatedEventSource,
 }
 
 impl ReplicatedEntry {
@@ -75,7 +79,14 @@ impl ReplicatedEntry {
             write,
             write_hlc: 0,
             metadata_floor: 0,
+            event_source: ReplicatedEventSource::User,
         }
+    }
+
+    /// Stamp the source every replica gives the write's events.
+    pub fn with_event_source(mut self, source: crate::event::EventSource) -> Self {
+        self.event_source = ReplicatedEventSource::from(source);
+        self
     }
 
     /// Serialize to bytes for Raft log entry data.
@@ -85,7 +96,7 @@ impl ReplicatedEntry {
 
     /// Deserialize from Raft log entry data bytes.
     ///
-    /// Tries the current 7-field shape first. If that fails specifically
+    /// Tries the current 8-field shape first. If that fails specifically
     /// because the encoded array is the pre-`database_id` 4-element shape
     /// (an entry proposed by an old leader still mid-upgrade), falls back to
     /// [`super::legacy_entry::LegacyReplicatedEntry`] and defaults
@@ -182,6 +193,22 @@ mod tests {
             }
             other => panic!("expected PointPut, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_event_source_roundtrips_and_defaults_to_user() {
+        let write = ReplicatedWrite::CutBarrier { hlc: 7 };
+        let plain = ReplicatedEntry::new(1, 0, 3, write.clone());
+        assert_eq!(plain.event_source, ReplicatedEventSource::User);
+
+        let restored = ReplicatedEntry::new(1, 0, 3, write)
+            .with_event_source(crate::event::EventSource::Restore);
+        let decoded = ReplicatedEntry::from_bytes(&restored.to_bytes()).expect("decode");
+        assert_eq!(decoded.event_source, ReplicatedEventSource::Restore);
+        assert_eq!(
+            crate::event::EventSource::from(decoded.event_source),
+            crate::event::EventSource::Restore
+        );
     }
 
     #[test]

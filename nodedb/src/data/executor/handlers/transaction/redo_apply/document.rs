@@ -187,6 +187,9 @@ impl CoreLoop {
                 WriteOp::Insert
             },
             old_value: outcome.prior_value.clone(),
+            // The submitted body, before any hash-chain wrapping: the image a
+            // client wrote, as the materialized-sum fold reads it too.
+            new_body: Some(value.to_vec()),
             index_tuples,
         });
         if self.recording_redo_undo() {
@@ -284,6 +287,7 @@ impl CoreLoop {
             identity: RowIdentity::from_user_key(row.document_id),
             op: WriteOp::Delete,
             old_value: Some(old_value),
+            new_body: None,
             index_tuples,
         });
         self.record_committed_targets(target_writes);

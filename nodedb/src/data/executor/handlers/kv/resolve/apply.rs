@@ -116,12 +116,11 @@ impl CoreLoop {
                     Some(_) => crate::event::WriteOp::Update,
                     None => crate::event::WriteOp::Insert,
                 };
-                let key_str = String::from_utf8_lossy(key);
-                self.emit_write_event(
+                self.emit_kv_write_event(
                     task,
                     collection.as_str(),
                     op,
-                    crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
+                    key,
                     Some(value),
                     precondition.as_deref(),
                 );
@@ -137,12 +136,11 @@ impl CoreLoop {
                 if let Some(ref m) = self.metrics {
                     m.record_kv_delete();
                 }
-                let key_str = String::from_utf8_lossy(key);
-                self.emit_write_event(
+                self.emit_kv_write_event(
                     task,
                     collection.as_str(),
                     crate::event::WriteOp::Delete,
-                    crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
+                    key,
                     None,
                     precondition.as_deref(),
                 );

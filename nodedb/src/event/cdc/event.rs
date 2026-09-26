@@ -36,6 +36,9 @@ pub struct CdcEvent {
     pub database_id: DatabaseId,
     /// Tenant ID.
     pub tenant_id: u64,
+    /// Where the write came from, such as `user` or `restore`. A consumer
+    /// tells a restored row from a client write by it.
+    pub source: crate::event::EventSource,
     /// New row value (for INSERT and UPDATE). JSON bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_value: Option<serde_json::Value>,
@@ -93,7 +96,7 @@ impl Serialize for CdcEvent {
     where
         S: serde::Serializer,
     {
-        let field_count = 11
+        let field_count = 12
             + usize::from(self.new_value.is_some())
             + usize::from(self.old_value.is_some())
             + usize::from(self.field_diffs.is_some())
@@ -110,6 +113,7 @@ impl Serialize for CdcEvent {
         state.serialize_field("offset", &self.offset_token())?;
         state.serialize_field("database_id", &self.database_id)?;
         state.serialize_field("tenant_id", &self.tenant_id)?;
+        state.serialize_field("source", &self.source)?;
         state.serialize_field("schema_version", &self.schema_version)?;
         if let Some(value) = &self.new_value {
             state.serialize_field("new_value", value)?;
@@ -134,7 +138,7 @@ impl Serialize for CdcEvent {
 
 impl zerompk::ToMessagePack for CdcEvent {
     fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
-        let field_count = 10
+        let field_count = 11
             + usize::from(self.new_value.is_some())
             + usize::from(self.old_value.is_some())
             + usize::from(self.field_diffs.is_some())
@@ -159,6 +163,8 @@ impl zerompk::ToMessagePack for CdcEvent {
         writer.write_u64(self.tenant_id)?;
         writer.write_string("database_id")?;
         writer.write_u64(self.database_id.as_u64())?;
+        writer.write_string("source")?;
+        writer.write_string(self.source.as_str())?;
         writer.write_string("schema_version")?;
         writer.write_u64(self.schema_version)?;
         if let Some(ref v) = self.new_value {
@@ -197,6 +203,7 @@ impl<'a> zerompk::FromMessagePack<'a> for CdcEvent {
         let mut lsn: u64 = 0;
         let mut tenant_id: u64 = 0;
         let mut database_id = DatabaseId::DEFAULT;
+        let mut source: Option<crate::event::EventSource> = None;
         let mut schema_version: u64 = 0;
         let mut new_value: Option<serde_json::Value> = None;
         let mut old_value: Option<serde_json::Value> = None;
@@ -215,6 +222,13 @@ impl<'a> zerompk::FromMessagePack<'a> for CdcEvent {
                 "lsn" => lsn = reader.read_u64()?,
                 "tenant_id" => tenant_id = reader.read_u64()?,
                 "database_id" => database_id = DatabaseId::new(reader.read_u64()?),
+                "source" => {
+                    let name = reader.read_string()?;
+                    source = Some(
+                        crate::event::EventSource::from_name(&name)
+                            .ok_or(zerompk::Error::InvalidMarker(0))?,
+                    );
+                }
                 "schema_version" => schema_version = reader.read_u64()?,
                 "new_value" => new_value = Some(JsonValue::read(reader)?.0),
                 "old_value" => old_value = Some(JsonValue::read(reader)?.0),
@@ -228,6 +242,9 @@ impl<'a> zerompk::FromMessagePack<'a> for CdcEvent {
                 }
             }
         }
+        // Every encoder writes the source, so an event without one is not
+        // a CDC event.
+        let source = source.ok_or(zerompk::Error::InvalidMarker(0))?;
         Ok(CdcEvent {
             sequence,
             partition,
@@ -237,6 +254,7 @@ impl<'a> zerompk::FromMessagePack<'a> for CdcEvent {
             event_time,
             lsn,
             tenant_id,
+            source,
             database_id,
             schema_version,
             new_value,
@@ -263,6 +281,7 @@ mod tests {
             event_time: 1700000000000,
             lsn: 100,
             tenant_id: 1,
+            source: crate::event::EventSource::User,
             database_id: DatabaseId::DEFAULT,
             new_value: Some(serde_json::json!({"id": 1, "total": 99.99})),
             old_value: None,
@@ -293,6 +312,7 @@ mod tests {
             event_time: 1700000001000,
             lsn: 200,
             tenant_id: 1,
+            source: crate::event::EventSource::User,
             database_id: DatabaseId::DEFAULT,
             new_value: Some(serde_json::json!({"name": "Alice"})),
             old_value: Some(serde_json::json!({"name": "Bob"})),
@@ -323,6 +343,7 @@ mod tests {
             event_time: 1700000002000,
             lsn: 300,
             tenant_id: 1,
+            source: crate::event::EventSource::User,
             database_id: DatabaseId::DEFAULT,
             new_value: Some(serde_json::json!({"name": "Carol"})),
             old_value: None,
@@ -341,5 +362,35 @@ mod tests {
         let parsed_mp: CdcEvent = zerompk::from_msgpack(&mp).unwrap();
         assert_eq!(parsed_mp.system_time_ms, Some(1_700_000_000_000));
         assert_eq!(parsed_mp.valid_time_ms, Some(1_500_000_000_000));
+    }
+
+    #[test]
+    fn a_restored_row_is_tagged_restore_in_json_and_msgpack() {
+        let event = CdcEvent {
+            sequence: 4,
+            partition: 0,
+            collection: "users".into(),
+            op: "INSERT".into(),
+            row_id: "u-2".into(),
+            event_time: 1700000003000,
+            lsn: 400,
+            tenant_id: 1,
+            source: crate::event::EventSource::Restore,
+            database_id: DatabaseId::DEFAULT,
+            new_value: Some(serde_json::json!({"name": "Dana"})),
+            old_value: None,
+            schema_version: 0,
+            field_diffs: None,
+            system_time_ms: None,
+            valid_time_ms: None,
+        };
+
+        let json: serde_json::Value = sonic_rs::from_slice(&event.to_json_bytes()).unwrap();
+        assert_eq!(json["source"], "restore");
+        let parsed_json: CdcEvent = serde_json::from_slice(&event.to_json_bytes()).unwrap();
+        assert_eq!(parsed_json.source, crate::event::EventSource::Restore);
+
+        let parsed_mp: CdcEvent = zerompk::from_msgpack(&event.to_msgpack_bytes()).unwrap();
+        assert_eq!(parsed_mp.source, crate::event::EventSource::Restore);
     }
 }

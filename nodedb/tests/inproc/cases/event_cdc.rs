@@ -153,6 +153,7 @@ fn log_compaction_keeps_latest_per_key() {
         field_diffs: None,
         system_time_ms: None,
         valid_time_ms: None,
+        source: nodedb::event::EventSource::User,
     });
     buf.push(CdcEvent {
         sequence: 2,
@@ -170,6 +171,7 @@ fn log_compaction_keeps_latest_per_key() {
         field_diffs: None,
         system_time_ms: None,
         valid_time_ms: None,
+        source: nodedb::event::EventSource::User,
     });
 
     // Before compaction: both events present.

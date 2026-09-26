@@ -392,6 +392,11 @@ mod tests {
         let event = one_event(&record, &mut seq);
         assert_eq!(event.collection.as_ref(), "cache");
         assert_eq!(event.op, WriteOp::Insert);
+        // The same `{key, value}` row image a live KV write event carries.
+        assert_eq!(
+            event.new_value.as_deref(),
+            Some(nodedb_query::msgpack_scan::kv_row_msgpack("key1", b"val1").as_slice())
+        );
     }
 
     #[test]

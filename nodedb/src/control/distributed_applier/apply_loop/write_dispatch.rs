@@ -31,6 +31,16 @@ use super::helpers::{committed_response_result, deterministic_crdt_fence_noop};
 use super::proposal_gate::{EntryOutcome, ledger_outcome};
 use super::start::Prepared;
 
+/// What a generic entry's apply takes from its decoded envelope.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct EntryScope {
+    /// Database scope of the entry.
+    pub database_id: DatabaseId,
+    /// The source the proposer stamped. Every replica gives the write's
+    /// events this source.
+    pub event_source: crate::event::EventSource,
+}
+
 /// Prepare a generic entry. `exclusive` marks a Raft-native array cell write:
 /// its apply awaits the array-open bootstrap and its own write, so it runs
 /// with nothing else of its group in flight. Every other entry leaves as its
@@ -39,22 +49,14 @@ pub(super) fn prepare_generic_entry<'a>(
     ctx: ApplyContext<'a>,
     pos: AppliedPosition,
     entry: LogEntry,
-    database_id: DatabaseId,
+    scope: EntryScope,
     exclusive: bool,
 ) -> Prepared<'a> {
     if !exclusive {
-        return Prepared::Enqueue(Box::pin(enqueue_generic_entry(
-            ctx,
-            pos,
-            entry,
-            database_id,
-        )));
+        return Prepared::Enqueue(Box::pin(enqueue_generic_entry(ctx, pos, entry, scope)));
     }
     Prepared::Exclusive(Box::pin(async move {
-        let outcome = match enqueue_generic_entry(ctx, pos, entry, database_id)
-            .await
-            .started
-        {
+        let outcome = match enqueue_generic_entry(ctx, pos, entry, scope).await.started {
             Started::Running(apply) => return apply.await,
             Started::Concluded(outcome) => outcome,
         };
@@ -73,8 +75,12 @@ async fn enqueue_generic_entry<'a>(
     ctx: ApplyContext<'a>,
     pos: AppliedPosition,
     entry: LogEntry,
-    database_id: DatabaseId,
+    scope: EntryScope,
 ) -> StartedEntry<'a> {
+    let EntryScope {
+        database_id,
+        event_source,
+    } = scope;
     let ApplyContext { state, tracker, .. } = ctx;
     let AppliedPosition {
         group_id,
@@ -186,13 +192,12 @@ async fn enqueue_generic_entry<'a>(
             vshard_id,
             plan,
             trace_id: TraceId::generate(),
-            // Cluster mode has exactly ONE write-apply path — this loop;
-            // the proposing node does not execute locally before commit
-            // either. Tagging these `RaftFollower` would mean AFTER
-            // triggers, DML audit, and CRDT packaging never fire anywhere
-            // in cluster mode, so the committed write keeps the `User`
-            // source its proposer had.
-            event_source: crate::event::EventSource::User,
+            // Cluster mode has exactly ONE write-apply path: this loop. The
+            // proposing node does not execute locally before commit either.
+            // So the committed write keeps the source its proposer stamped
+            // on the entry. A client write stays `User`, and a restored row
+            // stays `Restore`, on every replica.
+            event_source,
             txn_id: None,
             // Auth ran on the proposing node before the entry was
             // proposed; the committed entry carries no session user.

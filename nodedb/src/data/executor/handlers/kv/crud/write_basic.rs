@@ -59,19 +59,11 @@ impl CoreLoop {
         // replaced an existing row and the Event Plane must see an Update
         // event with both sides populated. Otherwise it was a fresh
         // Insert.
-        let key_str = String::from_utf8_lossy(key);
         let (op, old_slice): (_, Option<&[u8]>) = match old.as_deref() {
             Some(o) => (crate::event::WriteOp::Update, Some(o)),
             None => (crate::event::WriteOp::Insert, None),
         };
-        self.emit_write_event(
-            task,
-            collection,
-            op,
-            crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
-            Some(value),
-            old_slice,
-        );
+        self.emit_kv_write_event(task, collection, op, key, Some(value), old_slice);
 
         self.note_kv_write_lsn(task, did, tid, collection, key);
         if let Some(spec) = returning {
@@ -153,12 +145,11 @@ impl CoreLoop {
             m.record_kv_put();
         }
 
-        let key_str = String::from_utf8_lossy(key);
-        self.emit_write_event(
+        self.emit_kv_write_event(
             task,
             collection,
             crate::event::WriteOp::Insert,
-            crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
+            key,
             Some(value),
             None,
         );
@@ -234,12 +225,11 @@ impl CoreLoop {
             m.record_kv_put();
         }
 
-        let key_str = String::from_utf8_lossy(key);
-        self.emit_write_event(
+        self.emit_kv_write_event(
             task,
             collection,
             crate::event::WriteOp::Insert,
-            crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
+            key,
             Some(value),
             None,
         );

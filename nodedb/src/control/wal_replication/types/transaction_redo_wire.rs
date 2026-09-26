@@ -27,10 +27,11 @@ pub struct ReplicatedIdentity {
     pub surrogate: u32,
 }
 
-/// The source a committed transaction's writes carry into the Event Plane.
+/// The source a committed entry's writes carry into the Event Plane.
 ///
 /// Every replica stamps the same source, so a transaction a trigger issued
-/// does not re-fire that trigger on any replica.
+/// does not re-fire that trigger on any replica, and a restored row fires no
+/// AFTER trigger on any replica.
 #[derive(
     Debug,
     Clone,
@@ -48,6 +49,7 @@ pub enum ReplicatedEventSource {
     RaftFollower,
     CrdtSync,
     Deferred,
+    Restore,
 }
 
 impl From<EventSource> for ReplicatedEventSource {
@@ -58,6 +60,7 @@ impl From<EventSource> for ReplicatedEventSource {
             EventSource::RaftFollower => Self::RaftFollower,
             EventSource::CrdtSync => Self::CrdtSync,
             EventSource::Deferred => Self::Deferred,
+            EventSource::Restore => Self::Restore,
         }
     }
 }
@@ -70,6 +73,7 @@ impl From<ReplicatedEventSource> for EventSource {
             ReplicatedEventSource::RaftFollower => Self::RaftFollower,
             ReplicatedEventSource::CrdtSync => Self::CrdtSync,
             ReplicatedEventSource::Deferred => Self::Deferred,
+            ReplicatedEventSource::Restore => Self::Restore,
         }
     }
 }

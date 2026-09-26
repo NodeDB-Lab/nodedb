@@ -14,10 +14,10 @@ use crate::engine::kv::current_ms;
 
 impl CoreLoop {
     /// `rls_write_check` is the compiled RLS write policy. The row a delete
-    /// removes is the image the policy decides, and a delete otherwise reads
-    /// nothing at all — so a non-empty check, or a `RETURNING` clause, is what
-    /// makes the pre-image be read in the first place, and one rejected key
-    /// fails the whole statement before any key is removed.
+    /// removes is the image the policy decides, and one rejected key fails
+    /// the whole statement before any key is removed. Every removed row's
+    /// pre-image is read: the policy decides it, `RETURNING` projects it, and
+    /// the delete event carries it as the OLD row.
     pub(in crate::data::executor) fn execute_kv_delete(
         &mut self,
         task: &ExecutionTask,
@@ -40,27 +40,27 @@ impl CoreLoop {
             nodedb_types::WriteGateDecision::AdmitAll
         );
         // Pre-images of the keys that exist, in `keys` order: the rows the
-        // write gate decides and the rows `RETURNING` projects. An absent key
-        // removes no row, so it has no image and counts as not-deleted.
+        // write gate decides, the rows `RETURNING` projects, and the OLD rows
+        // the delete events carry. An absent key removes no row, so it has no
+        // image, counts as not-deleted, and emits no event. A key named twice
+        // removes one row.
         let mut pre_images: Vec<(&[u8], Vec<u8>)> = Vec::with_capacity(keys.len());
-        if gated || returning.is_some() {
-            for key in keys {
-                let Some(body) = self.kv_engine.get(did, tid, collection, key, now_ms) else {
-                    continue;
-                };
-                if gated
-                    && let Err(e) = super::super::rls::admit_kv_row(
-                        rls_write_check,
-                        &body,
-                        key,
-                        tid,
-                        collection,
-                    )
-                {
-                    return self.response_error(task, e);
-                }
-                pre_images.push((key.as_slice(), body));
+        let mut seen: std::collections::HashSet<&[u8]> =
+            std::collections::HashSet::with_capacity(keys.len());
+        for key in keys {
+            if !seen.insert(key.as_slice()) {
+                continue;
             }
+            let Some(body) = self.kv_engine.get(did, tid, collection, key, now_ms) else {
+                continue;
+            };
+            if gated
+                && let Err(e) =
+                    super::super::rls::admit_kv_row(rls_write_check, &body, key, tid, collection)
+            {
+                return self.response_error(task, e);
+            }
+            pre_images.push((key.as_slice(), body));
         }
 
         let count = self.kv_engine.delete(did, tid, collection, keys, now_ms);
@@ -68,19 +68,16 @@ impl CoreLoop {
             m.record_kv_delete();
         }
 
-        // Emit delete events to Event Plane (one per deleted key).
-        if count > 0 {
-            for key in keys {
-                let key_str = String::from_utf8_lossy(key);
-                self.emit_write_event(
-                    task,
-                    collection,
-                    crate::event::WriteOp::Delete,
-                    crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
-                    None,
-                    None,
-                );
-            }
+        // One delete event per removed row, carrying the row it removed.
+        for (key, body) in &pre_images {
+            self.emit_kv_write_event(
+                task,
+                collection,
+                crate::event::WriteOp::Delete,
+                key,
+                None,
+                Some(body.as_slice()),
+            );
         }
 
         if let Some(spec) = returning {

@@ -45,10 +45,13 @@ pub fn audit_dml_event(
     // Only User-sourced writes are subject to DML auditing.
     match event.source {
         EventSource::User => {}
+        // A restored row is not client DML. The RESTORE statement itself is
+        // the audited action.
         EventSource::Trigger
         | EventSource::RaftFollower
         | EventSource::CrdtSync
-        | EventSource::Deferred => return,
+        | EventSource::Deferred
+        | EventSource::Restore => return,
     }
 
     // Only data-modifying ops (not Heartbeat).
@@ -152,7 +155,8 @@ mod tests {
             EventSource::Trigger
             | EventSource::RaftFollower
             | EventSource::CrdtSync
-            | EventSource::Deferred => {}
+            | EventSource::Deferred
+            | EventSource::Restore => {}
         }
     }
 

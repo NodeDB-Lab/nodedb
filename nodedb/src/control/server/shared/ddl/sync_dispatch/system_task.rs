@@ -63,6 +63,24 @@ impl SystemReason {
             Self::AdmittedContinuation => "admitted_continuation",
         }
     }
+
+    /// The source the task's write events carry into the Event Plane.
+    ///
+    /// A restore re-issues rows whose AFTER triggers fired when they were
+    /// first written, so its writes carry `Restore`. Every other reason
+    /// carries `User`.
+    pub(crate) fn event_source(self) -> crate::event::EventSource {
+        match self {
+            Self::BackupRestore => crate::event::EventSource::Restore,
+            Self::RetentionEnforcement
+            | Self::ClusterSnapshot
+            | Self::DdlApply
+            | Self::CatalogMaintenance
+            | Self::TenantLifecycle
+            | Self::EventPlane
+            | Self::AdmittedContinuation => crate::event::EventSource::User,
+        }
+    }
 }
 
 /// A Data-Plane dispatch with no user identity behind it.
@@ -105,5 +123,29 @@ impl<'a> SystemTask<'a> {
     pub(crate) fn with_minted(mut self, minted: MintedRecords) -> Self {
         self.minted = Some(minted);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_restore_carries_the_restore_source() {
+        assert_eq!(
+            SystemReason::BackupRestore.event_source(),
+            crate::event::EventSource::Restore
+        );
+        for reason in [
+            SystemReason::RetentionEnforcement,
+            SystemReason::ClusterSnapshot,
+            SystemReason::DdlApply,
+            SystemReason::CatalogMaintenance,
+            SystemReason::TenantLifecycle,
+            SystemReason::EventPlane,
+            SystemReason::AdmittedContinuation,
+        ] {
+            assert_eq!(reason.event_source(), crate::event::EventSource::User);
+        }
     }
 }

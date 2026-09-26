@@ -128,6 +128,7 @@ impl CdcRouter {
             field_diffs,
             system_time_ms: event.system_time_ms,
             valid_time_ms: event.valid_time_ms,
+            source: event.source,
         });
 
         // RECOMPUTE correction (only built if any stream actually needs it).
@@ -192,6 +193,7 @@ impl CdcRouter {
                             field_diffs: None,
                             system_time_ms: event.system_time_ms,
                             valid_time_ms: event.valid_time_ms,
+                            source: event.source,
                         })
                     })
                     .clone();

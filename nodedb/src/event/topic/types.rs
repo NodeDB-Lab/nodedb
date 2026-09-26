@@ -96,6 +96,7 @@ impl TopicMessage {
             field_diffs: None,
             system_time_ms: None,
             valid_time_ms: None,
+            source: crate::event::EventSource::User,
         }
     }
 }

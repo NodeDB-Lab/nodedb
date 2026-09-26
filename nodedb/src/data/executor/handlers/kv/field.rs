@@ -200,6 +200,19 @@ impl CoreLoop {
             now_ms,
             surrogate,
         });
+        let op = if current.is_some() {
+            crate::event::WriteOp::Update
+        } else {
+            crate::event::WriteOp::Insert
+        };
+        self.emit_kv_write_event(
+            task,
+            collection,
+            op,
+            key,
+            Some(computed.new_value.as_slice()),
+            current.as_deref(),
+        );
         self.note_kv_write_lsn(task, did, tid, collection, key);
         if let Some(spec) = returning {
             // `computed.new_value` IS the stored body: the merge is persisted

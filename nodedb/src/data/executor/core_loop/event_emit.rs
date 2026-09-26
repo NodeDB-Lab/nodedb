@@ -46,6 +46,65 @@ impl CoreLoop {
         }
     }
 
+    /// Emit a KV write event. Both row images are shaped into the
+    /// `{key, value}` row every KV read returns (`msgpack_scan::kv_row_msgpack`),
+    /// so the Event Plane decodes a KV row the same way as any other row.
+    /// `new_stored` and `old_stored` are the bodies as the engine stores them.
+    pub(in crate::data::executor) fn emit_kv_write_event(
+        &mut self,
+        task: &super::super::task::ExecutionTask,
+        collection: &str,
+        op: crate::event::WriteOp,
+        key: &[u8],
+        new_stored: Option<&[u8]>,
+        old_stored: Option<&[u8]>,
+    ) {
+        let key_str = String::from_utf8_lossy(key);
+        let new_row = new_stored.map(|body| msgpack_scan::kv_row_msgpack(&key_str, body));
+        let old_row = old_stored.map(|body| msgpack_scan::kv_row_msgpack(&key_str, body));
+        self.emit_write_event(
+            task,
+            collection,
+            op,
+            crate::engine::document::store::RowIdentity::from_user_key(key_str.as_ref()),
+            new_row.as_deref(),
+            old_row.as_deref(),
+        );
+    }
+
+    /// A stored document row as the Event Plane reads it. A strict Binary
+    /// Tuple becomes MessagePack. A schemaless body gains its `id`.
+    pub(in crate::data::executor) fn stored_event_image(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        identity: &str,
+        stored: &[u8],
+    ) -> Vec<u8> {
+        match self.resolve_event_payload(database_id, tid, collection, stored) {
+            Some(converted) => converted,
+            None => self.body_event_image(database_id, tid, collection, identity, stored),
+        }
+    }
+
+    /// A MessagePack document body as the Event Plane reads it. A schemaless
+    /// body gains its `id`, the identity every read injects.
+    pub(in crate::data::executor) fn body_event_image(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        identity: &str,
+        body: &[u8],
+    ) -> Vec<u8> {
+        if self.is_schemaless_document_collection(database_id, tid, collection) {
+            msgpack_scan::inject_str_field(body, "id", identity)
+        } else {
+            body.to_vec()
+        }
+    }
+
     /// Whether `collection` is a schemaless document collection.
     ///
     /// A schemaless body carries no storage key of its own, so its `id` field
