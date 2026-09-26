@@ -157,7 +157,7 @@ pub async fn verify_bearer_token(
     crate::control::security::jwt_policy::enforce_stateful_jwt_policy(
         state,
         verified_claims,
-        identity.tenant_id,
+        &identity,
     )?;
 
     Ok((identity, verified))

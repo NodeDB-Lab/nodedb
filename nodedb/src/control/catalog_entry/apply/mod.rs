@@ -23,6 +23,7 @@ pub mod index_registry;
 pub mod local;
 pub mod materialized_view;
 pub mod oidc_provider;
+pub mod outcome;
 pub mod owner;
 pub mod permission;
 pub mod procedure;
@@ -45,3 +46,4 @@ pub mod vector;
 pub mod wal_tombstone;
 
 pub use dispatch::apply_to;
+pub use outcome::ApplyOutcome;

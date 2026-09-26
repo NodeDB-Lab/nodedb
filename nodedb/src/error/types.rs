@@ -557,6 +557,18 @@ pub enum Error {
     #[error("OIDC token rejected: authenticated provider tenant is unavailable")]
     OidcProviderTenantUnavailable { tenant_id: u64 },
 
+    /// An external identity (JWT or OIDC bearer) resolved to a custom role
+    /// that is not defined in its provider-bound tenant. The login is
+    /// refused: an identity holding an undefined role would hold nothing.
+    #[error(
+        "external identity '{subject}' claims role \"{role}\", which is not defined in tenant {tenant_id}"
+    )]
+    ExternalRoleUndefined {
+        subject: String,
+        role: String,
+        tenant_id: u64,
+    },
+
     /// OIDC bearer token rejected: claim mapping produced no default database.
     #[error("OIDC token rejected: claim mapping produced no default database for subject '{sub}'")]
     OidcNoDefaultDatabase { sub: String },

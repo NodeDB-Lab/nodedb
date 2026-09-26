@@ -126,30 +126,7 @@ impl RoleStore {
         tenant_id: TenantId,
         parent: Option<&str>,
     ) -> crate::Result<StoredRole> {
-        if is_builtin(name) {
-            return Err(crate::Error::BadRequest {
-                detail: format!("'{name}' is a built-in role and cannot be created"),
-            });
-        }
-        let roles = self.roles.read();
-        if roles.contains_key(name) {
-            return Err(crate::Error::BadRequest {
-                detail: format!("role '{name}' already exists"),
-            });
-        }
-        if let Some(parent_name) = parent {
-            validate_parent(name, parent_name, &roles)?;
-        }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Ok(StoredRole {
-            name: name.to_string(),
-            tenant_id: tenant_id.as_u64(),
-            parent: parent.unwrap_or("").to_string(),
-            created_at: now,
-        })
+        prepare_role_against(name, tenant_id, parent, &self.roles.read())
     }
 
     /// Create a custom role. Returns error if it already exists or would create a cycle.
@@ -309,6 +286,52 @@ impl RoleStore {
     }
 }
 
+/// Build a `StoredRole` ready for replication via `CatalogEntry::PutRole`,
+/// validated against `roles`: the custom roles the creating statement sees.
+/// Inside a transaction those include the roles it created earlier. Rejects a
+/// built-in name, a duplicate, an undefined parent, and a parent that would
+/// close a cycle or exceed [`MAX_ROLE_INHERITANCE_DEPTH`].
+pub fn prepare_role_against(
+    name: &str,
+    tenant_id: TenantId,
+    parent: Option<&str>,
+    roles: &HashMap<String, CustomRole>,
+) -> crate::Result<StoredRole> {
+    if is_builtin(name) {
+        return Err(crate::Error::BadRequest {
+            detail: format!("'{name}' is a built-in role and cannot be created"),
+        });
+    }
+    if roles.contains_key(name) {
+        return Err(crate::Error::BadRequest {
+            detail: format!("role '{name}' already exists"),
+        });
+    }
+    if let Some(parent_name) = parent {
+        validate_parent(name, parent_name, roles)?;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Ok(StoredRole {
+        name: name.to_string(),
+        tenant_id: tenant_id.as_u64(),
+        parent: parent.unwrap_or("").to_string(),
+        created_at: now,
+    })
+}
+
+/// [`RoleStore::check_inheritance_cycle`] against `roles`, the custom roles
+/// the altering statement sees.
+pub fn check_inheritance_cycle_against(
+    role_name: &str,
+    parent: &str,
+    roles: &HashMap<String, CustomRole>,
+) -> crate::Result<()> {
+    check_inheritance_chain(role_name, parent, roles)
+}
+
 /// Walk the inheritance chain starting from `start_name` upward through the
 /// given `roles` map. Returns the chain length (number of hops including
 /// `start_name` itself). If the chain is a cycle or exceeds
@@ -375,11 +398,11 @@ fn validate_parent(
     check_inheritance_chain(child_name, parent_name, roles)
 }
 
+/// Every name the role parser maps to a built-in role, so a custom role can
+/// never shadow one: `cluster_admin` and the `database_*:{id}` forms as well
+/// as the five tenant roles.
 fn is_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "superuser" | "tenant_admin" | "readwrite" | "readonly" | "monitor"
-    )
+    super::role_assignment::is_builtin_role_name(name)
 }
 
 #[cfg(test)]

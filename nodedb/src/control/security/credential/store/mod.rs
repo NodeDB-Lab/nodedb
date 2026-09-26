@@ -6,6 +6,7 @@ pub mod core;
 pub mod crud;
 pub mod list;
 pub mod replication;
+pub mod user_builders;
 
 pub use auth::{AuthRejection, PasswordVerification, ScramCredentials, ScramLookup};
 pub use core::CredentialStore;

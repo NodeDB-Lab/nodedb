@@ -43,6 +43,7 @@ pub mod request_scope;
 pub mod risk;
 pub mod rls;
 pub mod role;
+pub mod role_assignment;
 pub mod scope;
 pub mod session_handle;
 pub mod session_registry;

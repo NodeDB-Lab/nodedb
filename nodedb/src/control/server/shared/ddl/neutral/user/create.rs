@@ -58,9 +58,17 @@ pub fn create_user(
         ));
     }
 
+    // The name is taken when the statement sees the user: created earlier
+    // in its transaction counts, dropped earlier in it frees the name.
     // `IF NOT EXISTS`: re-creating an existing user is a no-op success.
-    if if_not_exists && state.credentials.get_user(username).is_some() {
-        return Ok(status("CREATE USER"));
+    if super::super::role_checks::visible_user(state, username).is_some() {
+        if if_not_exists {
+            return Ok(status("CREATE USER"));
+        }
+        return Err(DdlError::new(
+            "42710",
+            format!("user '{username}' already exists"),
+        ));
     }
 
     if password.is_empty() {
@@ -80,13 +88,17 @@ pub fn create_user(
         identity.tenant_id
     };
 
+    // A role that is neither built in nor defined in the tenant would leave
+    // the user with no permissions: refuse it by name.
+    super::super::role_checks::check_user_roles(state, std::slice::from_ref(&role), tenant_id)?;
+
     // Build the full `StoredUser` locally (hash + salt + user_id).
     // Followers cannot reproduce the random salt, so this step
     // MUST happen on the proposer node. The computed record is
     // then replicated verbatim.
     let stored = state
         .credentials
-        .prepare_user(username, password, tenant_id, vec![role])
+        .prepare_new_user(username, password, tenant_id, vec![role.clone()])
         .map_err(|e| DdlError::new("42710", e.to_string()))?;
 
     let entry = crate::control::catalog_entry::CatalogEntry::PutUser(Box::new(stored.clone()));
@@ -109,26 +121,21 @@ pub fn create_user(
         // CREATE USER: no open sessions exist for a brand-new user.
         state.credentials.install_replicated_user(&stored, None);
     } else if outcome.is_replicated() {
-        // Cluster mode: `propose_catalog_entry` waits for the
-        // entry to be applied on THIS node, which runs the
-        // synchronous post_apply (`install_replicated_user`)
-        // inline BEFORE the applied-index watermark bumps. So if
-        // our entry really committed, `get_user` must see it now.
-        //
-        // If `get_user` returns None, the Raft log entry at the
-        // index our leader assigned has been truncated and
-        // overwritten with a noop from a new leader term (a known
-        // Raft subtlety: `propose` returns the assigned log index
-        // without waiting for commit; if leadership changes
-        // before the quorum ack, the entry is dropped). Return a
-        // retryable error so `exec_ddl_on_any_leader` re-proposes
-        // on the next attempt against whoever is now leader.
-        if state.credentials.get_user(username).is_none() {
-            return Err(DdlError::new(
-                "40001",
-                "transient: metadata entry truncated by leader change, retry",
-            ));
-        }
+        // Cluster mode: `propose_catalog_entry` waits for the entry to apply
+        // on THIS node, and the synchronous post_apply
+        // (`install_replicated_user`) runs before the applied-index watermark
+        // bumps. So a committed entry is visible now. A missing user means
+        // the applier skipped the entry because its role was dropped first,
+        // or the entry was truncated by a leader change (`propose` returns
+        // the assigned index before the quorum ack). The first is refused by
+        // name; the second is retryable, and `exec_ddl_on_any_leader`
+        // re-proposes against whoever leads now.
+        super::super::role_checks::confirm_user_roles(
+            state,
+            username,
+            std::slice::from_ref(&role),
+            tenant_id,
+        )?;
     }
     // A `Buffered` outcome falls through: the open transaction owns the entry
     // until COMMIT, so neither the cache install nor the truncation check

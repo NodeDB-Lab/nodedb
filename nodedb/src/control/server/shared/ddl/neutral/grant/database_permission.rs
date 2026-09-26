@@ -48,10 +48,9 @@ pub fn grant_database(
         .map_err(|e| DdlError::new("XX000", format!("catalog lookup: {e}")))?
         .ok_or_else(|| DdlError::new("42704", format!("database '{db_name}' does not exist")))?;
 
-    // Resolve the target user_id from the grantee name.
-    let user_record = state
-        .credentials
-        .get_user(grantee)
+    // Resolve the target user_id from the grantee name, as this statement
+    // sees it: a user created earlier in the transaction counts.
+    let user_record = super::super::role_checks::visible_user(state, grantee)
         .ok_or_else(|| DdlError::new("42704", format!("user '{grantee}' does not exist")))?;
 
     let privileges: Vec<&str> = if privilege.eq_ignore_ascii_case("ALL") {
@@ -105,9 +104,7 @@ pub fn revoke_database(
         .map_err(|e| DdlError::new("XX000", format!("catalog lookup: {e}")))?
         .ok_or_else(|| DdlError::new("42704", format!("database '{db_name}' does not exist")))?;
 
-    let user_record = state
-        .credentials
-        .get_user(grantee)
+    let user_record = super::super::role_checks::visible_user(state, grantee)
         .ok_or_else(|| DdlError::new("42704", format!("user '{grantee}' does not exist")))?;
 
     let privileges: Vec<&str> = if privilege.eq_ignore_ascii_case("ALL") {

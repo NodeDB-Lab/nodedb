@@ -8,6 +8,8 @@ use crate::control::catalog_entry::entry::CatalogEntry;
 use crate::control::security::catalog::SystemCatalog;
 use crate::control::security::catalog::types::CheckpointDoc;
 
+use super::outcome::ApplyOutcome;
+
 use super::{
     alert_rule, api_key, auth_user, change_stream, checkpoint, collection, column_stats,
     consumer_group, continuous_aggregate, custom_type, database, function, index_registry,
@@ -20,22 +22,34 @@ use super::{
 /// Apply `entry` to `catalog`.
 ///
 /// A failed catalog write raises: skipping a committed metadata entry
-/// diverges this node from the quorum. `Ok(false)` reports that the entry
-/// wrote nothing, which still concludes its DDL. Debug builds verify
+/// diverges this node from the quorum. [`ApplyOutcome::Unchanged`] reports
+/// that the entry wrote nothing, which still concludes its DDL.
+/// [`ApplyOutcome::Refused`] reports an entry that breaks a role rule at its
+/// log position; every node refuses it alike. Debug builds verify
 /// referential integrity after every apply — release-gated because a full
 /// rescan would wedge `raft_tick_loop` on a node with a pre-existing orphan.
-pub fn apply_to(entry: &CatalogEntry, catalog: &SystemCatalog) -> Result<bool, crate::Error> {
-    let applied = match entry {
+pub fn apply_to(
+    entry: &CatalogEntry,
+    catalog: &SystemCatalog,
+) -> Result<ApplyOutcome, crate::Error> {
+    let outcome = match entry {
         CatalogEntry::PutTenantWithAdmin { tenant, admin } => {
-            tenant::put_with_admin(tenant, admin, catalog)?
+            if tenant::put_with_admin(tenant, admin, catalog)? {
+                ApplyOutcome::Applied
+            } else {
+                ApplyOutcome::Unchanged
+            }
         }
+        CatalogEntry::PutUser(stored) => user::put(stored, catalog)?,
+        CatalogEntry::PutRole(stored) => role::put(stored, catalog)?,
+        CatalogEntry::DeleteRole { name } => role::delete(name, catalog)?,
         _ => {
             apply_to_inner(entry, catalog)?;
-            true
+            ApplyOutcome::Applied
         }
     };
-    if !applied {
-        return Ok(false);
+    if !outcome.wrote() {
+        return Ok(outcome);
     }
     #[cfg(debug_assertions)]
     {
@@ -62,7 +76,7 @@ pub fn apply_to(entry: &CatalogEntry, catalog: &SystemCatalog) -> Result<bool, c
             });
         }
     }
-    Ok(true)
+    Ok(outcome)
 }
 
 fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) -> crate::Result<()> {
@@ -144,10 +158,13 @@ fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) -> crate::Resul
             tenant_id,
             name,
         } => change_stream::delete(*database_id, *tenant_id, name, catalog),
-        CatalogEntry::PutUser(stored) => user::put(stored, catalog),
+        // Applied by `apply_to`, which reports a refused entry.
+        CatalogEntry::PutUser(_) => Ok(()),
         CatalogEntry::DropUser { username } => user::delete(username, catalog),
-        CatalogEntry::PutRole(stored) => role::put(stored, catalog),
-        CatalogEntry::DeleteRole { name } => role::delete(name, catalog),
+        // Applied by `apply_to`, which reports a refused entry.
+        CatalogEntry::PutRole(_) => Ok(()),
+        // Applied by `apply_to`, which reports a refused entry.
+        CatalogEntry::DeleteRole { .. } => Ok(()),
         CatalogEntry::PutApiKey(stored) => api_key::put(stored, catalog),
         CatalogEntry::RevokeApiKey { key_id } => api_key::revoke(key_id, catalog),
         CatalogEntry::PutAuthUser(stored) => auth_user::put(stored, catalog),

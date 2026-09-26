@@ -293,31 +293,6 @@ impl CredentialStore {
         Ok(())
     }
 
-    /// Replace the `accessible_databases` list on a service account.
-    ///
-    /// Requires the caller to have already verified superuser authority.
-    /// For non-service-account users, returns an error.
-    pub fn set_service_account_databases(
-        &self,
-        name: &str,
-        databases: Vec<nodedb_types::id::DatabaseId>,
-    ) -> crate::Result<()> {
-        let mut users = write_lock(&self.users);
-        let record = users
-            .get_mut(name)
-            .ok_or_else(|| crate::Error::BadRequest {
-                detail: format!("service account '{name}' not found"),
-            })?;
-        if !record.is_service_account {
-            return Err(crate::Error::BadRequest {
-                detail: format!("'{name}' is a user, not a service account"),
-            });
-        }
-        record.accessible_databases = databases;
-        self.commit_user_mutation(record, Some(SessionInvalidationReason::RoleAltered))?;
-        Ok(())
-    }
-
     /// Remove a role from a user. Triggers `RoleRevoked` soft-revoke on
     /// open sessions.
     pub fn remove_role(&self, username: &str, role: &Role) -> crate::Result<()> {

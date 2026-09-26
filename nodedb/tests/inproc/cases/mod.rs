@@ -151,6 +151,7 @@ mod request_tracker_backpressure;
 mod resp_row_level_security;
 mod retention_policy_replication_apply;
 mod rls_fuzz;
+mod role_assignment_rules;
 mod scope_quota_hard_refusal;
 mod scope_quota_replication_apply;
 mod security;

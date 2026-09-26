@@ -33,7 +33,9 @@ use super::support::{require_tenant_admin, status};
 /// names that resolve to neither, so unresolved typos don't sink into the
 /// store as silently unenforceable rows.
 fn canonicalize_grantee(state: &SharedState, raw: &str) -> Result<String, DdlError> {
-    if state.credentials.get_user(raw).is_some() {
+    // Users and roles the statement sees: created earlier in the
+    // transaction counts, dropped earlier in it does not.
+    if super::super::role_checks::visible_user(state, raw).is_some() {
         return Ok(format!("user:{raw}"));
     }
     let parsed: Role = match raw.parse() {
@@ -41,7 +43,7 @@ fn canonicalize_grantee(state: &SharedState, raw: &str) -> Result<String, DdlErr
         Err(e) => match e {},
     };
     let is_known_role = match &parsed {
-        Role::Custom(name) => state.roles.get_role(name).is_some(),
+        Role::Custom(name) => super::super::role_checks::visible_roles(state).contains_key(name),
         _ => true,
     };
     if is_known_role {

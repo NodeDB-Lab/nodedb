@@ -64,6 +64,7 @@ pub mod replicate;
 pub mod retention_policy;
 pub mod rls;
 pub mod role;
+mod role_checks;
 pub mod router;
 pub mod schedule;
 pub mod scope_ddl;

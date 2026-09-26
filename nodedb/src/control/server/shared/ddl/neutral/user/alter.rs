@@ -19,6 +19,7 @@ use crate::control::state::SharedState;
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::super::auth_support::{parse_role, require_tenant_admin, status};
+use super::super::role_checks::visible_user_or_missing;
 use super::iso8601::parse_iso8601_to_unix;
 
 /// ALTER USER <name> ... — typed dispatch for all AlterUserOp forms.
@@ -53,9 +54,10 @@ pub fn alter_user(
                     "password must be a non-empty single-quoted string",
                 ));
             }
+            let base = visible_user_or_missing(state, username)?;
             let stored = state
                 .credentials
-                .prepare_user_update(username, Some(password.as_str()), None)
+                .prepare_user_update_from(base, Some(password.as_str()), None)
                 .map_err(|e| DdlError::new("XX000", e.to_string()))?;
             // Password change — no role/access change; no invalidation.
             propose_and_install(state, stored, None)?;
@@ -78,15 +80,24 @@ pub fn alter_user(
                 return Err(DdlError::new("42601", "expected role name after SET ROLE"));
             }
             let parsed_role: Role = parse_role(role);
+            let base = visible_user_or_missing(state, username)?;
+            let tenant_id = crate::types::TenantId::new(base.tenant_id);
+            let new_roles = vec![parsed_role.clone()];
+            super::super::role_checks::check_user_roles(state, &new_roles, tenant_id)?;
             let stored = state
                 .credentials
-                .prepare_user_update(username, None, Some(vec![parsed_role.clone()]))
+                .prepare_user_update_from(base, None, Some(new_roles.clone()))
                 .map_err(|e| DdlError::new("XX000", e.to_string()))?;
-            propose_and_install(
+            let replicated = propose_and_install(
                 state,
                 stored,
                 Some(crate::control::security::buses::SessionInvalidationReason::RoleAltered),
             )?;
+            if replicated {
+                super::super::role_checks::confirm_user_roles(
+                    state, username, &new_roles, tenant_id,
+                )?;
+            }
 
             state.audit_record(
                 AuditEvent::PrivilegeChange,
@@ -99,10 +110,10 @@ pub fn alter_user(
 
         AlterUserOp::MustChangePassword => {
             require_tenant_admin(identity, "set must_change_password")?;
+            let base = visible_user_or_missing(state, username)?;
             let stored = state
                 .credentials
-                .prepare_set_must_change_password(username, true)
-                .map_err(|e| DdlError::new("XX000", e.to_string()))?;
+                .prepare_set_must_change_password_from(base, true);
             propose_and_install(state, stored, None)?;
 
             state.audit_record(
@@ -116,10 +127,10 @@ pub fn alter_user(
 
         AlterUserOp::PasswordNeverExpires => {
             require_tenant_admin(identity, "set password expiry")?;
+            let base = visible_user_or_missing(state, username)?;
             let stored = state
                 .credentials
-                .prepare_set_password_expires_at(username, 0)
-                .map_err(|e| DdlError::new("XX000", e.to_string()))?;
+                .prepare_set_password_expires_at_from(base, 0);
             propose_and_install(state, stored, None)?;
 
             state.audit_record(
@@ -139,10 +150,10 @@ pub fn alter_user(
                     format!("invalid ISO-8601 datetime '{iso8601}': {e}"),
                 )
             })?;
+            let base = visible_user_or_missing(state, username)?;
             let stored = state
                 .credentials
-                .prepare_set_password_expires_at(username, expires_at)
-                .map_err(|e| DdlError::new("XX000", e.to_string()))?;
+                .prepare_set_password_expires_at_from(base, expires_at);
             propose_and_install(state, stored, None)?;
 
             state.audit_record(
@@ -163,10 +174,10 @@ pub fn alter_user(
                 ));
             }
             let expires_at = crate::control::security::time::now_secs() + (*days as u64) * 86400;
+            let base = visible_user_or_missing(state, username)?;
             let stored = state
                 .credentials
-                .prepare_set_password_expires_at(username, expires_at)
-                .map_err(|e| DdlError::new("XX000", e.to_string()))?;
+                .prepare_set_password_expires_at_from(base, expires_at);
             propose_and_install(state, stored, None)?;
 
             state.audit_record(
@@ -200,10 +211,10 @@ pub fn alter_user(
                 .ok_or_else(|| {
                     DdlError::new("42704", format!("database '{db_name}' does not exist"))
                 })?;
+            let base = visible_user_or_missing(state, username)?;
             let stored = state
                 .credentials
-                .prepare_set_default_database(username, db_id.as_u64())
-                .map_err(|e| DdlError::new("XX000", e.to_string()))?;
+                .prepare_set_default_database_from(base, db_id.as_u64());
             propose_and_install(state, stored, None)?;
 
             state.audit_record(
@@ -218,6 +229,7 @@ pub fn alter_user(
 }
 
 /// Propose a `StoredUser` via Raft and install it locally on single-node.
+/// Returns whether the entry was replicated through the metadata group.
 ///
 /// `invalidation` is passed to `install_replicated_user` for in-process
 /// session notification in single-node mode. Cluster-mode notifications
@@ -226,7 +238,7 @@ fn propose_and_install(
     state: &SharedState,
     stored: crate::control::security::catalog::StoredUser,
     invalidation: Option<crate::control::security::buses::SessionInvalidationReason>,
-) -> Result<(), DdlError> {
+) -> Result<bool, DdlError> {
     let entry = crate::control::catalog_entry::CatalogEntry::PutUser(Box::new(stored.clone()));
     let outcome = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
         .map_err(|e| DdlError::new("XX000", format!("metadata propose: {e}")))?;
@@ -241,5 +253,5 @@ fn propose_and_install(
             .credentials
             .install_replicated_user(&stored, invalidation);
     }
-    Ok(())
+    Ok(outcome.is_replicated())
 }

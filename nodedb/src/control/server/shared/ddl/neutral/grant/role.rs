@@ -26,23 +26,28 @@ use crate::control::state::SharedState;
 use super::super::super::result::{DdlError, DdlResult};
 use super::support::{parse_role, require_tenant_admin, status};
 
-fn current_roles(state: &SharedState, username: &str) -> Result<Vec<Role>, DdlError> {
-    state
-        .credentials
-        .get_user(username)
-        .map(|r| r.roles)
-        .ok_or_else(|| DdlError::new("42704", format!("user '{username}' not found")))
+/// The roles and tenant of user `username` as this statement sees it: a user
+/// created earlier in the transaction is visible, one dropped in it is not.
+fn current_roles(
+    state: &SharedState,
+    username: &str,
+) -> Result<(Vec<Role>, crate::types::TenantId), DdlError> {
+    let user = super::super::role_checks::visible_user_or_missing(state, username)?;
+    let roles = user.roles.iter().map(|name| parse_role(name)).collect();
+    Ok((roles, crate::types::TenantId::new(user.tenant_id)))
 }
 
 fn propose_user_with_roles(
     state: &SharedState,
     username: &str,
+    tenant_id: crate::types::TenantId,
     new_roles: Vec<Role>,
     invalidation: crate::control::security::buses::SessionInvalidationReason,
 ) -> Result<(), DdlError> {
+    let base = super::super::role_checks::visible_user_or_missing(state, username)?;
     let stored = state
         .credentials
-        .prepare_user_update(username, None, Some(new_roles))
+        .prepare_user_update_from(base, None, Some(new_roles.clone()))
         .map_err(|e| DdlError::new("42704", e.to_string()))?;
     let entry = CatalogEntry::PutUser(Box::new(stored.clone()));
     let outcome = propose_catalog_entry(state, &entry)
@@ -57,6 +62,8 @@ fn propose_user_with_roles(
         state
             .credentials
             .install_replicated_user(&stored, Some(invalidation));
+    } else if outcome.is_replicated() {
+        super::super::role_checks::confirm_user_roles(state, username, &new_roles, tenant_id)?;
     }
     Ok(())
 }
@@ -79,9 +86,9 @@ pub fn grant_role(
         return Err(DdlError::new("42601", "GRANT: missing role name"));
     }
 
-    if state.credentials.get_user(grantee).is_some() {
+    if super::super::role_checks::visible_user(state, grantee).is_some() {
         grant_roles_to_user(state, identity, roles, grantee)
-    } else if state.roles.get_role(grantee).is_some() {
+    } else if super::super::role_checks::visible_roles(state).contains_key(grantee) {
         grant_role_to_role(state, identity, roles, grantee)
     } else {
         Err(DdlError::new(
@@ -97,9 +104,12 @@ fn grant_roles_to_user(
     role_names: &[String],
     username: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
-    let mut roles = current_roles(state, username)?;
-    for name in role_names {
-        let role = parse_role(name);
+    let (mut roles, tenant_id) = current_roles(state, username)?;
+    let granted: Vec<Role> = role_names.iter().map(|name| parse_role(name)).collect();
+    // A role that is neither built in nor defined in the user's tenant would
+    // grant nothing: refuse it by name.
+    super::super::role_checks::check_user_roles(state, &granted, tenant_id)?;
+    for role in granted {
         if matches!(role, Role::Superuser) && !identity.is_superuser {
             return Err(DdlError::new(
                 "42501",
@@ -113,6 +123,7 @@ fn grant_roles_to_user(
     propose_user_with_roles(
         state,
         username,
+        tenant_id,
         roles,
         crate::control::security::buses::SessionInvalidationReason::RoleGranted,
     )?;
@@ -181,9 +192,9 @@ pub fn revoke_role(
         ));
     }
 
-    if state.credentials.get_user(grantee).is_some() {
+    if super::super::role_checks::visible_user(state, grantee).is_some() {
         revoke_roles_from_user(state, identity, roles, grantee)
-    } else if state.roles.get_role(grantee).is_some() {
+    } else if super::super::role_checks::visible_roles(state).contains_key(grantee) {
         revoke_role_from_role(state, identity, roles, grantee)
     } else {
         Err(DdlError::new(
@@ -199,7 +210,7 @@ fn revoke_roles_from_user(
     role_names: &[String],
     username: &str,
 ) -> Result<Vec<DdlResult>, DdlError> {
-    let mut roles = current_roles(state, username)?;
+    let (mut roles, tenant_id) = current_roles(state, username)?;
     let revoked: Vec<Role> = role_names.iter().map(|n| parse_role(n)).collect();
     for role in &revoked {
         if !roles.contains(role) {
@@ -213,6 +224,7 @@ fn revoke_roles_from_user(
     propose_user_with_roles(
         state,
         username,
+        tenant_id,
         roles,
         crate::control::security::buses::SessionInvalidationReason::RoleRevoked,
     )?;

@@ -308,6 +308,14 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::OidcNoDefaultDatabase { sub } => NodeDbError::bad_request(format!(
             "OIDC: no default database resolved for sub '{sub}'"
         )),
+        Error::ExternalRoleUndefined {
+            subject,
+            role,
+            tenant_id,
+        } => NodeDbError::bad_request(format!(
+            "external identity '{subject}' claims role \"{role}\", which is not defined in \
+             tenant {tenant_id}"
+        )),
         // Exhaustive by construction: a code falling through to `internal`
         // reaches the client as an indistinguishable NDB-9000.
         Error::DataPlane(code) => {

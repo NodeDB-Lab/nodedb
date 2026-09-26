@@ -70,7 +70,14 @@ fn has_ambiguous_issuer_route(existing_audience: Option<&str>, audience: Option<
     }
 }
 
-fn validate_claim_mapping_roles(claim_mappings: &[OidcClaimMappingClause]) -> Result<(), DdlError> {
+/// Refuse a claim mapping that grants superuser, or a role that is neither
+/// built in nor defined in the provider's tenant: a login mapped to it would
+/// hold nothing. A role dropped after this check refuses the login instead.
+fn validate_claim_mapping_roles(
+    state: &SharedState,
+    claim_mappings: &[OidcClaimMappingClause],
+    tenant_id: Option<u64>,
+) -> Result<(), DdlError> {
     if claim_mappings
         .iter()
         .flat_map(|mapping| mapping.add_roles.iter())
@@ -80,6 +87,19 @@ fn validate_claim_mapping_roles(claim_mappings: &[OidcClaimMappingClause]) -> Re
             "22023",
             "OIDC claim mappings cannot grant the database-owned superuser role",
         ));
+    }
+    if let Some(tenant_id) = tenant_id {
+        let roles: Vec<crate::control::security::identity::Role> = claim_mappings
+            .iter()
+            .flat_map(|mapping| mapping.add_roles.iter())
+            .map(String::as_str)
+            .map(crate::control::security::role_assignment::parse_role_name)
+            .collect();
+        super::role_checks::check_user_roles(
+            state,
+            &roles,
+            crate::types::TenantId::new(tenant_id),
+        )?;
     }
     Ok(())
 }
@@ -116,7 +136,6 @@ pub fn create_oidc_provider(
     if jwks_uri.is_empty() {
         return Err(DdlError::new("22023", "JWKS_URI must not be empty"));
     }
-    validate_claim_mapping_roles(claim_mappings)?;
 
     let catalog = state.credentials.catalog();
 
@@ -131,6 +150,7 @@ pub fn create_oidc_provider(
             format!("tenant '{tenant_id}' does not exist"),
         ));
     }
+    validate_claim_mapping_roles(state, claim_mappings, Some(tenant_id))?;
 
     // Check for duplicate by provider name.
     match catalog.get_oidc_provider(name) {
@@ -223,7 +243,7 @@ pub fn alter_oidc_provider_claim_mapping(
         .get_oidc_provider(name)
         .map_err(|e| DdlError::new("XX000", format!("catalog read: {e}")))?
         .ok_or_else(|| DdlError::new("42704", format!("OIDC provider '{name}' does not exist")))?;
-    validate_claim_mapping_roles(claim_mappings)?;
+    validate_claim_mapping_roles(state, claim_mappings, provider.tenant_id)?;
 
     let stored_mappings: Vec<StoredClaimMappingRule> = claim_mappings
         .iter()

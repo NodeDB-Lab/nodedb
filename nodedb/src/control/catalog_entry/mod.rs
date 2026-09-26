@@ -39,6 +39,7 @@ pub mod entry;
 pub mod kind;
 pub mod persist_collection;
 pub mod post_apply;
+pub mod role_rules;
 
 pub use codec::{decode, encode};
 pub use entry::CatalogEntry;

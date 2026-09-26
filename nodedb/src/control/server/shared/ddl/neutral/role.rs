@@ -40,8 +40,13 @@ pub fn create_role(
 
     let name = parts[2];
 
+    // The roles this statement sees: committed ones, and inside a
+    // transaction those it created earlier, so a parent created in the same
+    // transaction resolves. COMMIT checks the whole batch again.
+    let visible = super::role_checks::visible_roles(state);
+
     // `IF NOT EXISTS`: re-creating an existing role is a no-op success.
-    if if_not_exists && state.roles.get_role(name).is_some() {
+    if if_not_exists && visible.contains_key(name) {
         return Ok(status("CREATE ROLE"));
     }
 
@@ -51,12 +56,15 @@ pub fn create_role(
         None
     };
 
-    // Build the `StoredRole` on the proposer (runs the same
-    // validation as `create_role` but without touching state).
-    let stored = state
-        .roles
-        .prepare_role(name, identity.tenant_id, parent)
-        .map_err(|e| DdlError::new("42710", e.to_string()))?;
+    // Build the `StoredRole` on the proposer: the same validation as
+    // `create_role`, against the visible roles, without touching state.
+    let stored = crate::control::security::role::prepare_role_against(
+        name,
+        identity.tenant_id,
+        parent,
+        &visible,
+    )
+    .map_err(|e| DdlError::new("42710", e.to_string()))?;
 
     let entry = crate::control::catalog_entry::CatalogEntry::PutRole(Box::new(stored.clone()));
     let outcome = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
@@ -67,6 +75,8 @@ pub fn create_role(
             .put_role(&stored)
             .map_err(|e| DdlError::new("XX000", format!("catalog write: {e}")))?;
         state.roles.install_replicated_role(&stored);
+    } else if outcome.is_replicated() {
+        super::role_checks::confirm_role(state, name, parent)?;
     }
 
     state.audit_record(
@@ -100,7 +110,7 @@ pub fn drop_role(
     }
 
     let name = parts[2];
-    let exists_before = state.roles.get_role(name).is_some();
+    let exists_before = super::role_checks::visible_roles(state).contains_key(name);
     if !exists_before {
         // `IF EXISTS`: dropping a missing role is a no-op success.
         if if_exists {
@@ -112,6 +122,11 @@ pub fn drop_role(
         ));
     }
 
+    // As PostgreSQL does, a role that users hold or roles inherit from is
+    // not dropped: dropping it would leave them naming a role that grants
+    // nothing.
+    super::role_checks::check_role_droppable(state, name)?;
+
     let entry = crate::control::catalog_entry::CatalogEntry::DeleteRole {
         name: name.to_string(),
     };
@@ -122,11 +137,22 @@ pub fn drop_role(
         state
             .roles
             .drop_role(name, Some(catalog))
-            .map_err(|e| DdlError::new("42704", e.to_string()))?
+            .map_err(|e| DdlError::new("2BP01", e.to_string()))?
+    } else if outcome.is_replicated() {
+        // The synchronous post-apply removed the role from this node's
+        // cache before the applied index advanced. A role still present
+        // means the applier skipped the entry: a user or role came to
+        // depend on it before the drop committed.
+        if state.roles.get_role(name).is_some() {
+            super::role_checks::check_role_droppable(state, name)?;
+            return Err(DdlError::new(
+                "40001",
+                format!("transient: the drop of role '{name}' was superseded, retry"),
+            ));
+        }
+        true
     } else {
-        // Cluster mode: the raft entry committed, trust the
-        // log index. The in-memory cache update runs in a
-        // spawned tokio task and may not be visible yet.
+        // Buffered in an open transaction: COMMIT applies it.
         true
     };
 
@@ -159,11 +185,14 @@ pub fn alter_role_typed(
 ) -> Result<Vec<DdlResult>, DdlError> {
     require_tenant_admin(identity, "alter roles")?;
 
-    // The role must exist before we mutate it.
-    state
-        .roles
-        .get_role(role_name)
-        .ok_or_else(|| DdlError::new("42704", format!("role '{role_name}' not found")))?;
+    // The role must exist before we mutate it: committed, or created earlier
+    // in this transaction.
+    if !super::role_checks::visible_roles(state).contains_key(role_name) {
+        return Err(DdlError::new(
+            "42704",
+            format!("role '{role_name}' not found"),
+        ));
+    }
 
     match sub_op {
         AlterRoleOp::Grant {
@@ -220,17 +249,18 @@ pub fn set_role_parent(
     role_name: &str,
     parent: Option<&str>,
 ) -> Result<(), DdlError> {
-    let old_role = state
-        .roles
-        .get_role(role_name)
+    // Roles created earlier in this transaction count, as they do for
+    // `CREATE ROLE`.
+    let visible = super::role_checks::visible_roles(state);
+    let old_role = visible
+        .get(role_name)
+        .cloned()
         .ok_or_else(|| DdlError::new("42704", format!("role '{role_name}' not found")))?;
 
     if let Some(parent) = parent {
-        let parent_is_builtin = matches!(
-            parent,
-            "superuser" | "tenant_admin" | "readwrite" | "readonly" | "monitor"
-        );
-        if !parent_is_builtin && state.roles.get_role(parent).is_none() {
+        let parent_is_builtin =
+            crate::control::security::role_assignment::is_builtin_role_name(parent);
+        if !parent_is_builtin && !visible.contains_key(parent) {
             return Err(DdlError::new(
                 "42704",
                 format!("parent role '{parent}' does not exist"),
@@ -238,10 +268,10 @@ pub fn set_role_parent(
         }
         // Reject self-inheritance and multi-hop cycles, and enforce the
         // inheritance-depth cap — the same invariant `CREATE ROLE` checks.
-        state
-            .roles
-            .check_inheritance_cycle(role_name, parent)
-            .map_err(|e| DdlError::new("42P16", e.to_string()))?;
+        crate::control::security::role::check_inheritance_cycle_against(
+            role_name, parent, &visible,
+        )
+        .map_err(|e| DdlError::new("42P16", e.to_string()))?;
     }
 
     let now = std::time::SystemTime::now()
@@ -264,6 +294,8 @@ pub fn set_role_parent(
             .put_role(&stored)
             .map_err(|e| DdlError::new("XX000", format!("catalog write: {e}")))?;
         state.roles.install_replicated_role(&stored);
+    } else if outcome.is_replicated() {
+        super::role_checks::confirm_role(state, role_name, parent)?;
     }
     Ok(())
 }

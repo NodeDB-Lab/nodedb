@@ -2,14 +2,10 @@
 
 //! Protocol-neutral service-account DDL — CREATE / DROP / ALTER SET DATABASES.
 //!
-//! Ported from the pgwire `ddl::service_account` and
-//! `ddl::service_account_alter` handlers. All non-return logic (permission
-//! checks, `IF [NOT] EXISTS` token stripping, ROLE / TENANT / FOR DATABASE /
-//! IN DATABASE parsing, credential-store `create_service_account` /
-//! `drop_user` / `set_service_account_databases`, database-name resolution via
-//! the system catalog, and the `audit_record` calls) is preserved verbatim;
-//! only the result construction changed from pgwire `Response` / `PgWireError`
-//! to the protocol-neutral [`DdlResult`] / [`DdlError`].
+//! Every change replicates through the metadata group as a user entry:
+//! CREATE and ALTER SET DATABASES propose `PutUser`, and DROP runs the
+//! replicated `DROP USER` path. A single node applies the entry locally.
+//! Database names resolve through the system catalog.
 
 use crate::control::security::audit::AuditEvent;
 use crate::control::security::identity::{AuthenticatedIdentity, Role};
@@ -70,9 +66,17 @@ pub fn create_service_account(
 
     let name = parts[3];
 
+    // The name is taken when the statement sees the account: created
+    // earlier in its transaction counts, dropped earlier in it frees it.
     // `IF NOT EXISTS`: re-creating an existing service account is a no-op.
-    if if_not_exists && state.credentials.get_user(name).is_some() {
-        return Ok(status("CREATE SERVICE ACCOUNT"));
+    if super::role_checks::visible_user(state, name).is_some() {
+        if if_not_exists {
+            return Ok(status("CREATE SERVICE ACCOUNT"));
+        }
+        return Err(DdlError::new(
+            "42710",
+            format!("user or service account '{name}' already exists"),
+        ));
     }
 
     // Parse optional ROLE, TENANT, FOR DATABASE / IN DATABASE.
@@ -170,10 +174,35 @@ pub fn create_service_account(
     }
     let _ = seen_for_tenant; // suppress unused warning
 
-    state
+    // A role that is neither built in nor defined in the tenant would leave
+    // the account with no permissions: refuse it by name.
+    super::role_checks::check_user_roles(state, std::slice::from_ref(&role), tenant_id)?;
+
+    // The account replicates through the metadata group like any user, so
+    // every node authenticates it and every node sees its role.
+    let stored = state
         .credentials
-        .create_service_account(name, tenant_id, vec![role], accessible_databases)
+        .prepare_new_service_account(name, tenant_id, vec![role.clone()], accessible_databases)
         .map_err(|e| DdlError::new("42710", e.to_string()))?;
+    let entry = crate::control::catalog_entry::CatalogEntry::PutUser(Box::new(stored.clone()));
+    let outcome = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
+        .map_err(|e| DdlError::new("XX000", format!("metadata propose: {e}")))?;
+    if outcome.needs_local_apply() {
+        state
+            .credentials
+            .catalog()
+            .put_user(&stored)
+            .map_err(|e| DdlError::new("XX000", format!("catalog write: {e}")))?;
+        // A new account has no open sessions to invalidate.
+        state.credentials.install_replicated_user(&stored, None);
+    } else if outcome.is_replicated() {
+        super::role_checks::confirm_user_roles(
+            state,
+            name,
+            std::slice::from_ref(&role),
+            tenant_id,
+        )?;
+    }
 
     state.audit_record(
         AuditEvent::PrivilegeChange,
@@ -204,8 +233,8 @@ pub fn drop_service_account(
 
     let name = parts[3];
 
-    // Verify it's actually a service account.
-    let user = match state.credentials.get_user(name) {
+    // Verify it's actually a service account, as this statement sees it.
+    let user = match super::role_checks::visible_user(state, name) {
         Some(u) => u,
         None => {
             // `IF EXISTS`: dropping a missing account is a no-op success.
@@ -225,25 +254,11 @@ pub fn drop_service_account(
         ));
     }
 
-    let dropped = state
-        .credentials
-        .drop_user(name)
-        .map_err(|e| DdlError::new("XX000", e.to_string()))?;
-
-    if dropped {
-        state.audit_record(
-            AuditEvent::PrivilegeChange,
-            Some(identity.tenant_id),
-            &identity.username,
-            &format!("dropped service account '{name}'"),
-        );
-        Ok(status("DROP SERVICE ACCOUNT"))
-    } else {
-        Err(DdlError::new(
-            "42704",
-            format!("service account '{name}' not found"),
-        ))
-    }
+    // Dropped through the replicated `DROP USER` path, so the account goes
+    // on every node, and its owned objects and grants are handled as a
+    // user's are. That path records the audit entry.
+    super::user::drop_user(state, identity, &["DROP", "USER", name])?;
+    Ok(status("DROP SERVICE ACCOUNT"))
 }
 
 /// ALTER SERVICE ACCOUNT <name> SET DATABASES (db1, db2, ...)
@@ -277,10 +292,8 @@ pub fn alter_service_account_set_databases(
 
     let name = parts[3];
 
-    // Verify it's actually a service account.
-    let user = state
-        .credentials
-        .get_user(name)
+    // Verify it's actually a service account, as this statement sees it.
+    let user = super::role_checks::visible_user(state, name)
         .ok_or_else(|| DdlError::new("42704", format!("service account '{name}' not found")))?;
     if !user.is_service_account {
         return Err(DdlError::new(
@@ -324,10 +337,24 @@ pub fn alter_service_account_set_databases(
         }
     }
 
-    state
+    let stored = state
         .credentials
-        .set_service_account_databases(name, db_ids)
+        .prepare_service_account_databases_from(user, db_ids)
         .map_err(|e| DdlError::new("XX000", e.to_string()))?;
+    let entry = crate::control::catalog_entry::CatalogEntry::PutUser(Box::new(stored.clone()));
+    let outcome = crate::control::metadata_proposer::propose_catalog_entry(state, &entry)
+        .map_err(|e| DdlError::new("XX000", format!("metadata propose: {e}")))?;
+    if outcome.needs_local_apply() {
+        state
+            .credentials
+            .catalog()
+            .put_user(&stored)
+            .map_err(|e| DdlError::new("XX000", format!("catalog write: {e}")))?;
+        state.credentials.install_replicated_user(
+            &stored,
+            Some(crate::control::security::buses::SessionInvalidationReason::RoleAltered),
+        );
+    }
 
     state.audit_record(
         AuditEvent::PrivilegeChange,

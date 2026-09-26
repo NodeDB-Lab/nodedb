@@ -107,9 +107,12 @@ impl MetadataCommitApplier {
         }
 
         debug!(kind = stamped.kind(), "catalog_entry: applying to redb");
-        if !catalog_entry::apply::apply_to(&stamped, catalog)? {
+        let outcome = catalog_entry::apply::apply_to(&stamped, catalog)?;
+        if !outcome.wrote() {
             // A `Put*` that wrote nothing (e.g. an if-absent create for a
-            // descriptor that already exists) still concludes its DDL.
+            // descriptor that already exists) still concludes its DDL. So
+            // does a refused entry: every node refuses it at this position,
+            // and the proposer reports the refusal to its client.
             self.clear_implicit_drain(&stamped);
             return Ok(());
         }

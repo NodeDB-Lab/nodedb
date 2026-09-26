@@ -90,13 +90,27 @@ pub(super) fn flush_local(state: &SharedState, buffered: DdlBuffer) -> Option<Ab
         Err(error) => return Some(AbortReason::DdlPropose(error)),
     };
     let catalog = shared.credentials.catalog();
+    // A statement can break a role rule for a later one in the same
+    // transaction. Refuse the batch before anything is written.
+    if let Err(error) = crate::control::catalog_entry::role_rules::check_batch(
+        buffered.iter().map(|item| &item.entry),
+        catalog,
+    ) {
+        return Some(AbortReason::DdlPropose(error));
+    }
     let total = buffered.len();
     for (position, item) in buffered.into_iter().enumerate() {
         match crate::control::catalog_entry::apply::apply_to(&item.entry, catalog) {
             // Wrote nothing (if-absent create for an existing descriptor):
             // the applier suppresses post-apply here, so this must too.
-            Ok(false) => continue,
-            Ok(true) => {}
+            Ok(crate::control::catalog_entry::apply::ApplyOutcome::Unchanged) => continue,
+            // An earlier statement of this transaction broke a role rule for
+            // this one, such as dropping a role a user created earlier in
+            // the same transaction holds. The COMMIT fails with the refusal.
+            Ok(crate::control::catalog_entry::apply::ApplyOutcome::Refused(refusal)) => {
+                return Some(AbortReason::DdlPropose(crate::Error::from(refusal)));
+            }
+            Ok(crate::control::catalog_entry::apply::ApplyOutcome::Applied) => {}
             Err(error) => {
                 return Some(AbortReason::DdlPropose(crate::Error::Internal {
                     detail: format!(
@@ -248,6 +262,13 @@ fn propose_pending_buffered<'a>(
         })?;
     let distributed_guard =
         crate::control::metadata_proposer::acquire_ddl_prepare_lease(state, handle.as_ref())?;
+    // Checked under the preparation lease, which every DDL takes: no other
+    // role or user change commits between this check and the finalize, so
+    // the finalize never applies part of the batch.
+    crate::control::catalog_entry::role_rules::check_batch(
+        buffered.iter().map(|item| &item.entry),
+        state.credentials.catalog(),
+    )?;
 
     for item in &buffered {
         if let Some((descriptor_id, prior_version)) =

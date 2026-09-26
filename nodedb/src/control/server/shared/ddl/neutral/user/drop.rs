@@ -70,17 +70,19 @@ fn drop_user_inner(
         return Err(DdlError::new("42501", "cannot drop your own user"));
     }
 
+    // The user as this statement sees it: created earlier in the
+    // transaction counts, dropped earlier in it does not.
+    let visible = super::super::role_checks::visible_user(state, username);
+
     // Look up user's tenant before dropping (for ownership reassignment).
-    let user_tenant = state
-        .credentials
-        .get_user(username)
-        .map(|u| u.tenant_id)
+    let user_tenant = visible
+        .as_ref()
+        .map(|u| crate::types::TenantId::new(u.tenant_id))
         .unwrap_or(identity.tenant_id);
 
     // Pre-check existence so a DROP USER on a missing user is a
     // clean error that doesn't touch raft.
-    let exists_before = state.credentials.get_user(username).is_some();
-    if !exists_before {
+    if visible.is_none() {
         // `IF EXISTS`: dropping a missing user is a no-op success.
         if if_exists {
             return Ok(status("DROP USER"));

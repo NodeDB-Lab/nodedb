@@ -27,14 +27,8 @@ use crate::types::TenantId;
 
 use super::super::super::catalog::StoredUser;
 use super::super::super::identity::Role;
-use super::super::super::time::now_secs;
-use super::super::hash::{
-    compute_scram_salted_password, generate_scram_salt, hash_password_argon2,
-};
 use super::super::record::UserRecord;
-use super::core::{
-    CredentialStore, PasswordPrincipal, read_lock, validate_password_assignment, write_lock,
-};
+use super::core::{CredentialStore, read_lock, write_lock};
 
 impl CredentialStore {
     /// Build a `StoredUser` ready for replication via
@@ -49,116 +43,62 @@ impl CredentialStore {
         tenant_id: TenantId,
         roles: Vec<Role>,
     ) -> crate::Result<StoredUser> {
-        {
-            let users = read_lock(&self.users);
-            if users.contains_key(username) {
-                return Err(crate::Error::BadRequest {
-                    detail: format!("user '{username}' already exists"),
-                });
-            }
+        if read_lock(&self.users).contains_key(username) {
+            return Err(crate::Error::BadRequest {
+                detail: format!("user '{username}' already exists"),
+            });
         }
-        validate_password_assignment(password, PasswordPrincipal::New)?;
-
-        let salt = generate_scram_salt();
-        let scram_salted_password = compute_scram_salted_password(password, &salt);
-        let password_hash = hash_password_argon2(password, &self.argon2_config)?;
-        let user_id = self.alloc_user_id()?;
-        let is_superuser = roles.contains(&Role::Superuser);
-        let now = now_secs();
-
-        Ok(StoredUser {
-            user_id,
-            username: username.to_string(),
-            tenant_id: tenant_id.as_u64(),
-            password_hash,
-            scram_salt: salt,
-            scram_salted_password,
-            roles: roles.iter().map(|r| r.to_string()).collect(),
-            is_superuser,
-            is_active: true,
-            is_service_account: false,
-            created_at: now,
-            updated_at: now,
-            password_expires_at: self.compute_expiry(),
-            must_change_password: false,
-            password_changed_at: now,
-            default_database_id: 0,
-            accessible_databases: vec![],
-        })
+        self.prepare_new_user(username, password, tenant_id, roles)
     }
 
-    /// Build an updated `StoredUser` from an existing user with
-    /// specific fields replaced. Used by `ALTER USER SET PASSWORD`
-    /// and `ALTER USER SET ROLE`. Returns the updated record
-    /// ready for propose.
+    /// Build a service-account `StoredUser` ready for replication via
+    /// `CatalogEntry::PutUser`.
+    pub fn prepare_service_account(
+        &self,
+        name: &str,
+        tenant_id: TenantId,
+        roles: Vec<Role>,
+        accessible_databases: Vec<nodedb_types::id::DatabaseId>,
+    ) -> crate::Result<StoredUser> {
+        if read_lock(&self.users).contains_key(name) {
+            return Err(crate::Error::BadRequest {
+                detail: format!("user or service account '{name}' already exists"),
+            });
+        }
+        self.prepare_new_service_account(name, tenant_id, roles, accessible_databases)
+    }
+
+    /// Build the updated `StoredUser` of committed service account `name`
+    /// restricted to `databases`.
+    pub fn prepare_service_account_databases(
+        &self,
+        name: &str,
+        databases: Vec<nodedb_types::id::DatabaseId>,
+    ) -> crate::Result<StoredUser> {
+        let base = self.existing_active(name)?;
+        self.prepare_service_account_databases_from(base, databases)
+    }
+
+    /// Build an updated `StoredUser` from committed user `username` with a
+    /// new password and/or role set.
     pub fn prepare_user_update(
         &self,
         username: &str,
         new_password: Option<&str>,
         new_roles: Option<Vec<Role>>,
     ) -> crate::Result<StoredUser> {
-        let users = read_lock(&self.users);
-        let existing = users
-            .get(username)
-            .ok_or_else(|| crate::Error::BadRequest {
-                detail: format!("user '{username}' not found"),
-            })?;
-        if !existing.is_active {
-            return Err(crate::Error::BadRequest {
-                detail: format!("user '{username}' is inactive"),
-            });
-        }
-        if let Some(password) = new_password {
-            validate_password_assignment(
-                password,
-                PasswordPrincipal::Existing {
-                    is_service_account: existing.is_service_account,
-                },
-            )?;
-        }
-        let mut stored = existing.to_stored();
-        drop(users);
-
-        if let Some(pw) = new_password {
-            let salt = generate_scram_salt();
-            stored.scram_salted_password = compute_scram_salted_password(pw, &salt);
-            stored.scram_salt = salt;
-            stored.password_hash = hash_password_argon2(pw, &self.argon2_config)?;
-            stored.password_expires_at = self.compute_expiry();
-            stored.must_change_password = false;
-            stored.password_changed_at = now_secs();
-        }
-        if let Some(roles) = new_roles {
-            stored.is_superuser = roles.contains(&Role::Superuser);
-            stored.roles = roles.iter().map(|r| r.to_string()).collect();
-        }
-        stored.updated_at = now_secs();
-        Ok(stored)
+        let base = self.existing_active(username)?;
+        self.prepare_user_update_from(base, new_password, new_roles)
     }
 
     /// Build an updated `StoredUser` that sets `must_change_password`.
-    /// Used by `ALTER USER <name> MUST CHANGE PASSWORD`.
     pub fn prepare_set_must_change_password(
         &self,
         username: &str,
         required: bool,
     ) -> crate::Result<StoredUser> {
-        let users = read_lock(&self.users);
-        let existing = users
-            .get(username)
-            .ok_or_else(|| crate::Error::BadRequest {
-                detail: format!("user '{username}' not found"),
-            })?;
-        if !existing.is_active {
-            return Err(crate::Error::BadRequest {
-                detail: format!("user '{username}' is inactive"),
-            });
-        }
-        let mut stored = existing.to_stored();
-        drop(users);
-        stored.must_change_password = required;
-        stored.updated_at = now_secs();
-        Ok(stored)
+        let base = self.existing_active(username)?;
+        Ok(self.prepare_set_must_change_password_from(base, required))
     }
 
     /// Build an updated `StoredUser` that sets `password_expires_at`.
@@ -168,47 +108,18 @@ impl CredentialStore {
         username: &str,
         expires_at: u64,
     ) -> crate::Result<StoredUser> {
-        let users = read_lock(&self.users);
-        let existing = users
-            .get(username)
-            .ok_or_else(|| crate::Error::BadRequest {
-                detail: format!("user '{username}' not found"),
-            })?;
-        if !existing.is_active {
-            return Err(crate::Error::BadRequest {
-                detail: format!("user '{username}' is inactive"),
-            });
-        }
-        let mut stored = existing.to_stored();
-        drop(users);
-        stored.password_expires_at = expires_at;
-        stored.updated_at = now_secs();
-        Ok(stored)
+        let base = self.existing_active(username)?;
+        Ok(self.prepare_set_password_expires_at_from(base, expires_at))
     }
 
     /// Build an updated `StoredUser` that sets `default_database_id`.
-    /// Used by `ALTER USER <name> SET DEFAULT DATABASE <db>`.
     pub fn prepare_set_default_database(
         &self,
         username: &str,
         database_id: u64,
     ) -> crate::Result<StoredUser> {
-        let users = read_lock(&self.users);
-        let existing = users
-            .get(username)
-            .ok_or_else(|| crate::Error::BadRequest {
-                detail: format!("user '{username}' not found"),
-            })?;
-        if !existing.is_active {
-            return Err(crate::Error::BadRequest {
-                detail: format!("user '{username}' is inactive"),
-            });
-        }
-        let mut stored = existing.to_stored();
-        drop(users);
-        stored.default_database_id = database_id;
-        stored.updated_at = now_secs();
-        Ok(stored)
+        let base = self.existing_active(username)?;
+        Ok(self.prepare_set_default_database_from(base, database_id))
     }
 
     /// Install a replicated `StoredUser` into the in-memory cache and

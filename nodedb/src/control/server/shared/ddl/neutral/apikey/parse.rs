@@ -120,17 +120,20 @@ pub(super) fn parse_with_databases(
     Ok(Some(ids))
 }
 
-/// Build the owner's `DatabaseSet` from a `UserRecord` for CREATE-time subset validation.
+/// Build the owner's `DatabaseSet` for CREATE-time subset validation, from
+/// the user as the statement sees it.
 pub(super) fn build_owner_database_set_for_user(
     state: &SharedState,
-    user: &crate::control::security::credential::record::UserRecord,
+    user: &crate::control::security::catalog::auth_types::user::StoredUser,
 ) -> Result<DatabaseSet, DdlError> {
     if user.is_superuser {
         return Ok(DatabaseSet::All);
     }
     if user.is_service_account && !user.accessible_databases.is_empty() {
         return Ok(DatabaseSet::Some(SmallVec::from_iter(
-            user.accessible_databases.iter().copied(),
+            user.accessible_databases
+                .iter()
+                .map(|&id| crate::types::DatabaseId::new(id)),
         )));
     }
     // Regular user or legacy service account: read from database_grants.

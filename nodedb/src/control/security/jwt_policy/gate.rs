@@ -10,28 +10,33 @@
 //! [`SharedState`] carries, so it hangs off the two call sites that own one:
 //! the HTTP bearer path and the native/OIDC bearer path.
 
+use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::jwt::JwtClaims;
 use crate::control::state::SharedState;
-use crate::types::TenantId;
 
-use super::{provisioning, scopes};
+use super::{provisioning, roles, scopes};
 
 /// Apply the state-dependent half of the JWT policy to a verified token.
 ///
-/// `tenant_id` is the tenant the *identity* was bound to by its provider —
-/// never a tenant asserted by the token's claims.
+/// `identity` is the identity the token bound to: its tenant is the one its
+/// provider is bound to — never a tenant asserted by the token's claims —
+/// and its roles are the resolved ones the session will hold.
 ///
-/// A deployment with no JWKS registry has no JWT authentication at all, so
-/// there is no policy to apply and the gate is a no-op.
+/// An identity holding a custom role not defined in its tenant is refused
+/// first, before any record is provisioned. A deployment with no JWKS
+/// registry has no JWT authentication at all, so there is no other policy to
+/// apply.
 pub fn enforce_stateful_jwt_policy(
     state: &SharedState,
     claims: &JwtClaims,
-    tenant_id: TenantId,
+    identity: &AuthenticatedIdentity,
 ) -> crate::Result<()> {
+    roles::refuse_undefined_roles(state, identity)?;
     let Some(registry) = state.jwks_registry.as_ref() else {
         return Ok(());
     };
     let config = registry.jwt_config();
+    let tenant_id = identity.tenant_id;
 
     scopes::enforce_declared_scopes(config.enforce_scopes, &state.scope_defs, claims, tenant_id)?;
     provisioning::provision_and_check_status(
