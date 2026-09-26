@@ -9,6 +9,8 @@
 //! Decoding raw bytes as msgpack instead either fails (multi-byte value) or
 //! reads the first byte as a fixint and discards the rest.
 
+use std::collections::HashMap;
+
 use nodedb_types::{MsgpackError, NotScalar, Value, scalar_to_raw_bytes};
 
 use crate::msgpack_scan::{map_header, write_map_header, write_str};
@@ -124,10 +126,91 @@ pub fn row_to_kv_body(row: &Value, shape: KvBodyShape) -> Result<Vec<u8>, KvBody
     }
 }
 
+/// The fields a KV body stores for a msgpack-encoded row, and the body shape.
+///
+/// This is the inverse of [`super::kv_row_msgpack`]. `key` is the entry's key.
+/// A `key` field equal to it is the injected primary key and is dropped. A
+/// `key` field that differs is a stored column and is kept. The remaining
+/// fields pick the shape the SQL lowering picks for a fresh insert:
+/// - `value` alone: [`KvBodyShape::Raw`];
+/// - any other field set: [`KvBodyShape::Map`].
+///
+/// The caller encodes the fields in its own body format.
+/// [`row_to_kv_body`] is the Origin format.
+pub fn kv_row_to_body_fields(
+    key: &str,
+    row: &[u8],
+) -> Result<(HashMap<String, Value>, KvBodyShape), KvBodyError> {
+    let row = nodedb_types::value_from_msgpack(row)?;
+    let Value::Object(mut fields) = row else {
+        return Err(KvBodyError::RowNotObject {
+            kind: row.type_name(),
+        });
+    };
+    if matches!(fields.get("key"), Some(Value::String(stored)) if stored == key) {
+        fields.remove("key");
+    }
+    let shape = if fields.len() == 1 && fields.contains_key("value") {
+        KvBodyShape::Raw
+    } else {
+        KvBodyShape::Map
+    };
+    Ok((fields, shape))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+
+    fn body_from_row(key: &str, row: &[u8]) -> Vec<u8> {
+        let (fields, shape) = kv_row_to_body_fields(key, row).unwrap();
+        row_to_kv_body(&Value::Object(fields), shape).unwrap()
+    }
+
+    #[test]
+    fn a_raw_body_round_trips_through_its_row() {
+        for body in [b"v1".to_vec(), b"1".to_vec(), Vec::new()] {
+            let row = crate::msgpack_scan::kv_row_msgpack("k1", &body);
+            assert_eq!(body_from_row("k1", &row), body);
+        }
+    }
+
+    #[test]
+    fn a_map_body_round_trips_through_its_row() {
+        let mut fields = HashMap::new();
+        fields.insert("n".to_string(), Value::Integer(7));
+        fields.insert("s".to_string(), Value::String("x".into()));
+        let body = row_to_kv_body(&Value::Object(fields), KvBodyShape::Map).unwrap();
+        let row = crate::msgpack_scan::kv_row_msgpack("k2", &body);
+        assert_eq!(body_from_row("k2", &row), body);
+    }
+
+    #[test]
+    fn a_key_column_that_differs_from_the_entry_key_is_kept() {
+        let mut fields = HashMap::new();
+        fields.insert("key".to_string(), Value::String("stored".into()));
+        fields.insert("n".to_string(), Value::Integer(1));
+        let body = row_to_kv_body(&Value::Object(fields), KvBodyShape::Map).unwrap();
+        let row = crate::msgpack_scan::kv_row_msgpack("slot", &body);
+        assert_eq!(body_from_row("slot", &row), body);
+    }
+
+    #[test]
+    fn a_row_that_is_not_a_map_is_an_error() {
+        let not_a_map = nodedb_types::value_to_msgpack(&Value::Integer(118)).unwrap();
+        assert!(matches!(
+            kv_row_to_body_fields("k", &not_a_map),
+            Err(KvBodyError::RowNotObject { kind: "int" })
+        ));
+    }
+
+    #[test]
+    fn bytes_that_are_not_msgpack_are_a_decode_error() {
+        assert!(matches!(
+            kv_row_to_body_fields("k", &[0x81]),
+            Err(KvBodyError::Decode(_))
+        ));
+    }
 
     fn value_of(row: &Value) -> &Value {
         row.get("value").expect("row carries `value`")
