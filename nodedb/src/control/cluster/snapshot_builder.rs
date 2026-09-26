@@ -104,7 +104,10 @@ impl DataPlaneSnapshotBuilder {
         group_vshards: &HashSet<u32>,
         merged: &mut TenantDataSnapshot,
     ) -> Result<(), Error> {
-        let plan = PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot { tenant_id });
+        let plan = PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot {
+            tenant_id,
+            cut_watermark: None,
+        });
         let bytes = crate::control::server::shared::ddl::sync_dispatch::dispatch_system(
             &self.shared,
             crate::control::server::shared::ddl::sync_dispatch::SystemTask::new(
@@ -144,6 +147,16 @@ impl DataPlaneSnapshotBuilder {
         for (k, v) in snap.indexes {
             if in_group_db_tenant_scoped(&k) {
                 merged.indexes.push((k, v));
+            }
+        }
+        for (k, v) in snap.documents_versioned {
+            if in_group_db_tenant_scoped(&k) {
+                merged.documents_versioned.push((k, v));
+            }
+        }
+        for (k, v) in snap.indexes_versioned {
+            if in_group_db_tenant_scoped(&k) {
+                merged.indexes_versioned.push((k, v));
             }
         }
         for (k, v) in snap.vectors {
@@ -302,6 +315,10 @@ impl nodedb_cluster::SnapshotBuilder for DataPlaneSnapshotBuilder {
             Self::capture_surrogates(catalog, &tenants, &group_vshards, &mut merged)
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         }
+
+        // The group's tenant write marks travel with its data: the follower
+        // that installs the snapshot never applies the entries it covers.
+        merged.group_write_marks = self.shared.tenant_marks.group_entries(group_id);
 
         // Always return a well-formed serialized struct (even when empty) so the
         // follower-apply unit receives a decodable payload rather than a stub.

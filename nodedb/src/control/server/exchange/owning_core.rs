@@ -90,6 +90,40 @@ pub async fn gather_single_owning_core(
     trace_id: TraceId,
     txn_id: Option<TxnId>,
 ) -> crate::Result<GatherOutcome> {
+    let resp = dispatch_single_owning_core(
+        state,
+        tenant_id,
+        database_id,
+        plan,
+        vshard_id,
+        trace_id,
+        txn_id,
+    )
+    .await?;
+    let payload_bytes: &[u8] = resp.payload.as_ref();
+    let all_elements = extract_msgpack_elements(payload_bytes);
+    let merged_array = encode_msgpack_array(&all_elements);
+
+    Ok(GatherOutcome {
+        raw: payload_bytes.to_vec(),
+        merged_array,
+        watermark_lsn: resp.watermark_lsn,
+        read_version_lsn: resp.read_version_lsn,
+        shard_watermarks: vec![(vshard_id, resp.watermark_lsn)],
+    })
+}
+
+/// Dispatch `plan` to the single Data-Plane core that owns `vshard_id` and
+/// return that core's response, its payload in the shape the core produced.
+pub async fn dispatch_single_owning_core(
+    state: &SharedState,
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+    plan: PhysicalPlan,
+    vshard_id: VShardId,
+    trace_id: TraceId,
+    txn_id: Option<TxnId>,
+) -> crate::Result<crate::bridge::envelope::Response> {
     // `Box::pin` breaks an async-fn recursion cycle: `dispatch_to_data_plane_*`
     // re-enters `resolve_exchange_in_plan`. The plan handed here is the bare,
     // Exchange-free child of the resolved Gather, so the re-entrant resolve is a
@@ -109,16 +143,5 @@ pub async fn gather_single_owning_core(
     // validatable) observation; any other error status surfaces with its typed
     // code rather than being swallowed as an empty success.
     reject_data_plane_error(&resp)?;
-
-    let payload_bytes: &[u8] = resp.payload.as_ref();
-    let all_elements = extract_msgpack_elements(payload_bytes);
-    let merged_array = encode_msgpack_array(&all_elements);
-
-    Ok(GatherOutcome {
-        raw: payload_bytes.to_vec(),
-        merged_array,
-        watermark_lsn: resp.watermark_lsn,
-        read_version_lsn: resp.read_version_lsn,
-        shard_watermarks: vec![(vshard_id, resp.watermark_lsn)],
-    })
+    Ok(resp)
 }

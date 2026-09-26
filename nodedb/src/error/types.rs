@@ -358,6 +358,31 @@ pub enum Error {
     )]
     RetryableLeaderChange { group_id: u64, log_index: u64 },
 
+    /// A Raft group has no reachable majority of its voters, so nothing can
+    /// commit in it. The operation that needed it applied nothing. It succeeds
+    /// once enough of `unreachable` rejoin.
+    #[error(
+        "raft group {group_id} has no reachable quorum: voters {voters:?}, unreachable \
+         {unreachable:?}; nothing was applied. Retry once a majority of its voters is reachable"
+    )]
+    GroupQuorumUnavailable {
+        group_id: u64,
+        voters: Vec<u64>,
+        unreachable: Vec<u64>,
+    },
+
+    /// RESTORE's staleness guard found no replica of a data group that
+    /// reported the tenant's write marks before the statement deadline. The
+    /// restore cannot prove it is not stale, so it applied nothing.
+    /// `refused_by` lists the nodes that answered that they do not replicate
+    /// the group.
+    #[error(
+        "restore: no replica of raft group {group_id} reported the tenant's write marks before \
+         the statement deadline (nodes that do not replicate it: {refused_by:?}); nothing was \
+         restored. Retry once the group's placement settles"
+    )]
+    GroupMarksUnavailable { group_id: u64, refused_by: Vec<u64> },
+
     /// No leader elected on the metadata group yet. Transient — an election
     /// is in progress — so callers can wait it out instead of failing.
     #[error("metadata raft group has no elected leader yet; retry needed")]

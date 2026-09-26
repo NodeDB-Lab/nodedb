@@ -328,6 +328,7 @@ impl SharedState {
             quarantine_storage: Arc::new(object_store::memory::InMemory::new()),
             hlc_clock: Arc::new(nodedb_types::HlcClock::new()),
             tenant_write_hlc: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            tenant_marks: super::tenant_marks::TenantMarks::load(test_credentials.catalog())?,
             lease_admission_gate: Mutex::new(()),
             lease_grant_gate: Arc::new(Mutex::new(())),
             lease_drain: Arc::new(crate::control::lease::DescriptorDrainTracker::new()),

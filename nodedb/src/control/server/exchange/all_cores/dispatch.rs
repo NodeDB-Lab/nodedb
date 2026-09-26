@@ -195,7 +195,17 @@ pub(crate) async fn execute_plan_all_local_cores(
     }
 }
 
-/// Generic gather path: delegate to [`gather_all_cores`] and wrap.
+/// Generic gather path.
+///
+/// A plan on one collection that is not cluster-partitioned lives wholly on
+/// the core that owns the collection's vShard. It runs there alone, and its
+/// payload returns verbatim: the shape a single core produces. That shape is
+/// not always a msgpack array. A KV point read answers with the stored value
+/// itself, and wrapping it as an array element hands the requesting node a
+/// different value than a local read returns.
+///
+/// Every other plan fans across all local cores, and their row arrays merge
+/// into one.
 async fn generic_gather(
     state: &SharedState,
     tenant_id: TenantId,
@@ -205,9 +215,31 @@ async fn generic_gather(
     txn_id: Option<TxnId>,
 ) -> crate::Result<NodeLevelResult> {
     use crate::control::server::exchange::gather::gather_all_cores;
+    use crate::control::server::exchange::owning_core::dispatch_single_owning_core;
 
     // Forwarded `txn_id`, if any, is stamped on each core's request so a
     // transactional read honours its staged overlay. Inert when `None`.
+    if !nodedb_physical::physical_plan::plan_contains_cluster_partitioned_leaf(&plan)
+        && let Some(collection) = plan.collection()
+    {
+        let vshard_id =
+            crate::types::VShardId::from_collection_in_database(database_id, collection);
+        let resp = dispatch_single_owning_core(
+            state,
+            tenant_id,
+            database_id,
+            plan,
+            vshard_id,
+            trace_id,
+            txn_id,
+        )
+        .await?;
+        return Ok(NodeLevelResult {
+            payload: resp.payload.to_vec(),
+            watermark_lsn: resp.watermark_lsn,
+            read_version_lsn: resp.read_version_lsn,
+        });
+    }
     let outcome = gather_all_cores(state, tenant_id, database_id, plan, trace_id, txn_id).await?;
     Ok(NodeLevelResult {
         payload: outcome.merged_array,

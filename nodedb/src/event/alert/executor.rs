@@ -45,8 +45,12 @@ async fn alert_eval_loop(
     registry: Arc<AlertRegistry>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    // Initial delay to let the system warm up.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Initial delay to let the system warm up. Shutdown ends the delay: a
+    // server stopped within it must not wait it out.
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+        _ = shutdown.wait_for(|stopping| *stopping) => return,
+    }
 
     // Use the shared hysteresis manager from SharedState so DROP/ALTER handlers
     // and the eval loop operate on the same state.

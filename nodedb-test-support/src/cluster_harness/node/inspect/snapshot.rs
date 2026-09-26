@@ -44,6 +44,7 @@ impl TestClusterNode {
             vshard_id,
             plan: PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot {
                 tenant_id: tenant.as_u64(),
+                cut_watermark: None,
             }),
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
             priority: Priority::Normal,

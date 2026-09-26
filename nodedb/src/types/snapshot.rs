@@ -157,6 +157,30 @@ pub struct TenantDataSnapshot {
     #[msgpack(default)]
     #[serde(default)]
     pub crdt_constraints: Vec<CrdtConstraintEntry>,
+
+    /// The group's tenant write marks, for the per-group Raft snapshot:
+    /// `[(tenant_id, commit_hlc, site_code, collection), ...]`. A follower
+    /// caught up by the snapshot never applies the entries it covers, so it
+    /// takes their marks from here, and RESTORE's staleness guard reads the
+    /// same marks on it as on every other replica. Empty in a backup: the
+    /// guard reads the marks of the destination cluster.
+    #[msgpack(default)]
+    #[serde(default)]
+    pub group_write_marks: Vec<(u64, u64, u8, String)>,
+
+    /// Document versions of `bitemporal=true` collections:
+    /// `[("{db}:{tid}:{collection}:{doc_id}\x00{system_from:020}", versioned_value), ...]`.
+    /// These collections write only the versioned table, so `documents`
+    /// carries none of their rows. Every version keeps its system time.
+    #[msgpack(default)]
+    #[serde(default)]
+    pub documents_versioned: Vec<(String, Vec<u8>)>,
+
+    /// Versioned secondary-index entries of `bitemporal=true` collections:
+    /// `[("{db}:{tid}:{collection}:{field}:{value}:{doc_id}\x00{system_from:020}", tag), ...]`.
+    #[msgpack(default)]
+    #[serde(default)]
+    pub indexes_versioned: Vec<(String, Vec<u8>)>,
 }
 
 /// One collection's CRDT constraint set plus its installed version, carried

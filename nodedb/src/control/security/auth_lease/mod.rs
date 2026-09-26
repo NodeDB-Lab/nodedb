@@ -10,6 +10,7 @@ pub mod service;
 pub mod status;
 pub mod table;
 pub mod timing;
+pub mod withheld_warn;
 
 pub use barrier::{
     authorization_barrier, await_local_coverage, block_on_barrier, calvin_write_barrier,

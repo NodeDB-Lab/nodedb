@@ -188,6 +188,7 @@ mod tests {
             redo: Vec::new(),
             collections: collections.clone(),
             sum_targets: Vec::new(),
+            origin: crate::physical_plan::RedoOrigin::Commit,
         });
         let flush = PhysicalPlan::Meta(MetaOp::CalvinFlush {
             epoch: 1,

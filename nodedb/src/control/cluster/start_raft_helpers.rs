@@ -9,7 +9,7 @@ use nodedb_cluster::vshard_handler::{DispatchTarget, dispatch_by_type};
 use nodedb_cluster::wire::VShardEnvelope;
 
 use crate::control::cluster::calvin::scheduler::metrics::SchedulerMetrics;
-use crate::control::cluster::calvin::scheduler::read_applied_recovery;
+use crate::control::cluster::calvin::scheduler::recover_applied;
 use crate::control::cluster::calvin::{
     RaftSequencerProposer, ReadResultEvent, Scheduler, SchedulerConfig, SchedulerParams,
     SequencerProposer,
@@ -159,7 +159,10 @@ fn reconcile_vshard_schedulers(params: ReconcileSchedulersParams<'_>) -> crate::
             continue;
         }
 
-        let recovery = read_applied_recovery(&shared.wal, vshard_id)?;
+        // The applied state the last checkpoint saved, with the markers the
+        // WAL still holds: a checkpoint deletes the segments that held older
+        // markers, and the sequencer log delivers their entries again.
+        let recovery = recover_applied(&shared.wal, shared.credentials.catalog(), vshard_id)?;
         let (sequenced_tx, sequenced_rx) =
             tokio::sync::mpsc::channel(scheduler_config.channel_capacity);
 
@@ -331,8 +334,17 @@ pub(super) fn spawn_vshard_schedulers(
     let sequencer_proposer: Arc<dyn SequencerProposer> = Arc::new(RaftSequencerProposer::new(
         node_id,
         Arc::clone(&raft_loop_handle),
-        Arc::clone(shared),
+        shared,
     ));
+    // A backup's cut proposes its marker through the same proposer.
+    if shared
+        .calvin
+        .sequencer_proposer
+        .set(Arc::clone(&sequencer_proposer))
+        .is_err()
+    {
+        tracing::warn!("calvin: the sequencer proposer was set already; keeping the first");
+    }
 
     // Initial reconcile: schedulers for vShards this node already knows it hosts.
     reconcile_vshard_schedulers(ReconcileSchedulersParams {

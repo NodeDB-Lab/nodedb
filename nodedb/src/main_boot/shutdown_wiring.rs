@@ -60,6 +60,17 @@ pub(crate) fn wire_shutdown_bus(
         shared.tuning.shutdown.deadline(),
     );
 
+    // Final WAL fsync. Every append before this phase is buffered until an
+    // fsync covers it, and a write whose caller never awaited durability
+    // (a Calvin applied marker, a background maintenance record) has only
+    // this fsync between it and a graceful exit. Registered at startup so the
+    // bus cannot pass `WalFsync` without it.
+    spawn_wal_fsync_barrier(Arc::clone(shared), &shutdown_bus);
+
+    // Close the cluster's QUIC endpoint once the Raft loops stopped, so peers
+    // see the close at once and the node's UDP port is free for a restart.
+    spawn_transport_close(Arc::clone(shared), &shutdown_bus);
+
     // Test-only injection: if NODEDB_TEST_SLOW_DRAIN_TASK=1, register a drain
     // task that sleeps for 2s without calling report_drained, to verify the
     // offender-abort path in integration tests. This code path is guarded
@@ -79,6 +90,53 @@ pub(crate) fn wire_shutdown_bus(
     }
 
     (shutdown_rx, shutdown_bus, loop_registry_supervisors)
+}
+
+/// Register the `WalFsync` participant: once the phase starts, fsync the
+/// WAL on a blocking thread, then report drained.
+fn spawn_wal_fsync_barrier(shared: Arc<SharedState>, shutdown_bus: &ShutdownBus) {
+    let mut guard =
+        shutdown_bus.register_critical_task(ShutdownPhase::WalFsync, "wal::final_fsync");
+    tokio::spawn(async move {
+        guard.await_signal().await;
+        let wal = Arc::clone(&shared.wal);
+        match tokio::task::spawn_blocking(move || wal.sync()).await {
+            Ok(Ok(())) => tracing::info!("shutdown: WAL fsynced"),
+            Ok(Err(error)) => {
+                tracing::error!(%error, "shutdown: final WAL fsync failed; restart replays only what reached disk")
+            }
+            Err(error) => {
+                tracing::error!(%error, "shutdown: final WAL fsync task did not complete")
+            }
+        }
+        guard.report_drained();
+    });
+}
+
+/// Register the cluster transport's close at `WalFsync`, after every Raft
+/// loop stopped in an earlier phase. A node with no cluster transport
+/// registers nothing.
+fn spawn_transport_close(shared: Arc<SharedState>, shutdown_bus: &ShutdownBus) {
+    let Some(transport) = shared.cluster_transport.clone() else {
+        return;
+    };
+    let mut guard =
+        shutdown_bus.register_task(ShutdownPhase::WalFsync, "cluster::transport_close", None);
+    tokio::spawn(async move {
+        guard.await_signal().await;
+        if transport
+            .close(nodedb::control::shutdown::PHASE_BUDGET)
+            .await
+        {
+            tracing::info!("shutdown: cluster transport closed");
+        } else {
+            tracing::warn!(
+                "shutdown: cluster transport closed, but peers did not acknowledge the close \
+                 within the phase budget"
+            );
+        }
+        guard.report_drained();
+    });
 }
 
 /// Drain phases that own registry loops, in shutdown order, each with the

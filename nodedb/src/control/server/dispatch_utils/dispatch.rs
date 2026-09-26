@@ -97,6 +97,7 @@ pub async fn dispatch_authorized_autocommit_write(
             durability: WalDurability::AppendHere {
                 now_override: None,
                 apply_key: 0,
+                commit_hlc: None,
             },
         },
     )
@@ -130,6 +131,7 @@ pub(crate) async fn dispatch_authorized_autocommit_write_with_source(
             durability: WalDurability::AppendHere {
                 now_override: None,
                 apply_key: 0,
+                commit_hlc: None,
             },
         },
     )
@@ -283,6 +285,7 @@ pub(crate) async fn dispatch_autocommit_write(
             durability: WalDurability::AppendHere {
                 now_override: None,
                 apply_key: 0,
+                commit_hlc: None,
             },
         },
     )
@@ -916,6 +919,7 @@ mod tests {
                 durability: super::WalDurability::AppendHere {
                     now_override: None,
                     apply_key: KEY,
+                    commit_hlc: None,
                 },
                 ordering: super::WriteOrdering::AlreadyOrdered,
                 change_feed: super::ChangeFeedOwner::Unowned,

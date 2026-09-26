@@ -36,6 +36,7 @@ pub async fn run(
 ) -> Result<Bytes, NodeDbError> {
     let plan = PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot {
         tenant_id: tenant_id.as_u64(),
+        cut_watermark: None,
     });
     // Route to the source database: the snapshot reads the tenant's live
     // data from the database it is being moved out of.

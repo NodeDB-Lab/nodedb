@@ -8,8 +8,10 @@
 use pgwire::api::results::{FieldFormat, Response};
 use pgwire::error::PgWireResult;
 
+use crate::bridge::envelope::PhysicalPlan;
 use crate::control::server::response_shape::compose::{self, ShapeOutcome};
 use crate::control::server::response_shape::redaction::QueryRedaction;
+use crate::control::server::response_shape::request::MaterializedShapeRequest;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::response_shape::types::{
     ShapedRows, StatementTag, payload_to_dml_outcome,
@@ -24,6 +26,8 @@ use super::super::shape_encode;
 
 /// How forwarded rows shape back to the client.
 pub(super) struct GatewayShaping<'a> {
+    pub(super) tenant_id: crate::types::TenantId,
+    pub(super) database_id: crate::types::DatabaseId,
     pub(super) projection: Option<&'a OutputSchema>,
     pub(super) result_formats: &'a [FieldFormat],
     /// Resolved once over the whole forwarded task set.
@@ -85,6 +89,15 @@ impl NodeDbPgHandler {
     /// not answer the statement (`counts_toward_tag` false: a derived
     /// implicit-edge write beside the user's own) folds as opaque.
     ///
+    /// A row-producing payload shapes exactly as a locally dispatched one
+    /// does, through `shape_response_materialized` with the task's plan. A
+    /// forwarded Data-Plane payload has the shape a local core produces, and
+    /// the plan-dependent steps (the KV point-get `{key, value}` row wrap, the
+    /// vector surrogate-to-PK translation) must run on it too: shaped without
+    /// them, a KV point read's stored value decodes as a scalar and yields no
+    /// row. `shape_plan` is the task's plan, which a row-producing kind always
+    /// carries (see [`plan_produces_rows`]).
+    ///
     /// Returns the rows the payload decoded to, `None` for a passthrough
     /// payload with no row count.
     pub(super) fn fold_gateway_payload(
@@ -92,21 +105,36 @@ impl NodeDbPgHandler {
         fold: &mut GatewayFold,
         payload: &[u8],
         plan_kind: PlanKind,
+        shape_plan: Option<&PhysicalPlan>,
         counts_toward_tag: bool,
         shaping: &GatewayShaping<'_>,
     ) -> PgWireResult<Option<u64>> {
-        // Gateway forwarding carries no sequence access: a projection with
-        // Control-Plane computed columns is refused by the shaper rather
-        // than NULL-filled.
-        match compose::shape_payload_no_plan(
-            payload,
-            plan_kind,
-            shaping.projection,
-            Some(shaping.redaction.ctx(&self.state.redaction)),
-            None,
-        )
-        .map_err(|e| shape_error_to_pg(&e))?
-        {
+        let outcome = match (plan_produces_rows(plan_kind), shape_plan) {
+            (false, _) => ShapeOutcome::Passthrough,
+            // Gateway forwarding carries no sequence access: a projection
+            // with Control-Plane computed columns is refused by the shaper
+            // rather than NULL-filled.
+            (true, Some(plan)) => compose::shape_response_materialized(MaterializedShapeRequest {
+                payload,
+                plan,
+                plan_kind,
+                projection: shaping.projection,
+                state: &self.state,
+                database_id: shaping.database_id,
+                tenant_id: shaping.tenant_id,
+                redaction: Some(shaping.redaction.ctx(&self.state.redaction)),
+                sequences: None,
+            })
+            .map_err(|e| shape_error_to_pg(&e))?,
+            (true, None) => {
+                return Err(error_to_pg(&crate::Error::Internal {
+                    detail: format!(
+                        "gateway fold: a {plan_kind:?} task reached shaping without its plan"
+                    ),
+                }));
+            }
+        };
+        match outcome {
             ShapeOutcome::Rows(shaped) => {
                 let rows = shaped.rows.len() as u64;
                 if matches!(plan_kind, PlanKind::ReturningRows) {
@@ -141,5 +169,17 @@ impl NodeDbPgHandler {
                 Ok(None)
             }
         }
+    }
+}
+
+/// Whether a plan of `kind` answers with rows, which shape through the
+/// task's plan. Every other kind folds into the command tag.
+pub(super) fn plan_produces_rows(kind: PlanKind) -> bool {
+    match kind {
+        PlanKind::SingleDocument
+        | PlanKind::MultiRow
+        | PlanKind::ArraySlice
+        | PlanKind::ReturningRows => true,
+        PlanKind::Execution | PlanKind::DmlResult(_) | PlanKind::DmlResultByOp => false,
     }
 }

@@ -56,13 +56,17 @@ pub(super) struct DispatchOutcome {
 /// the request enters dispatch; the caller observes it on every exit path
 /// (success, budget over-run, timeout) so the histogram captures the true
 /// end-to-end shape of the work routed to this vshard.
-pub(super) fn dispatch_to_data_plane(
+///
+/// `waits_for_capacity` makes a capacity refusal wait for freed capacity and
+/// retry, up to the request's deadline. Every other refusal returns at once.
+pub(super) async fn dispatch_to_data_plane(
     shared: &SharedState,
     ddl_transition: &AuthorizedDdlTransition,
     target: DispatchTarget,
     admission_guard: Option<WriteAdmissionGuard>,
     order_guard: Option<OwnedMutexGuard<()>>,
     post_apply_pending: bool,
+    waits_for_capacity: bool,
 ) -> crate::Result<DispatchOutcome> {
     let dispatch_started = Instant::now();
 
@@ -90,9 +94,13 @@ pub(super) fn dispatch_to_data_plane(
 
     let rx = shared.tracker.register(request_id);
 
-    let dispatched = match shared.dispatcher.lock() {
-        Ok(mut d) => d.dispatch(request),
-        Err(poisoned) => poisoned.into_inner().dispatch(request),
+    let dispatched = if waits_for_capacity {
+        dispatch_when_capacity_frees(shared, request).await
+    } else {
+        match shared.dispatcher.lock() {
+            Ok(mut d) => d.dispatch(request),
+            Err(poisoned) => poisoned.into_inner().dispatch(request),
+        }
     };
     if dispatched.is_err() {
         // No response will ever arrive for a refused request.
@@ -128,4 +136,38 @@ pub(super) fn dispatch_to_data_plane(
         dispatch_started,
         deferred_guards,
     })
+}
+
+/// Dispatch `request`, waiting for freed capacity after each capacity
+/// refusal, until the request's deadline. Returns the last refusal once the
+/// deadline passes.
+async fn dispatch_when_capacity_frees(shared: &SharedState, request: Request) -> crate::Result<()> {
+    let deadline = tokio::time::Instant::from_std(request.deadline);
+    let capacity_freed = match shared.dispatcher.lock() {
+        Ok(d) => d.capacity_freed(),
+        Err(poisoned) => poisoned.into_inner().capacity_freed(),
+    };
+    let mut request = request;
+    loop {
+        // Registered before the attempt, so a slot freed between the refusal
+        // and the wait still wakes it.
+        let freed = capacity_freed.notified();
+        tokio::pin!(freed);
+        freed.as_mut().enable();
+        let attempt = match shared.dispatcher.lock() {
+            Ok(mut d) => d.try_dispatch(request),
+            Err(poisoned) => poisoned.into_inner().try_dispatch(request),
+        };
+        let refusal = match attempt {
+            Ok(()) => return Ok(()),
+            Err(refusal) => *refusal,
+        };
+        if !matches!(refusal.error, crate::Error::DispatchCapacity { .. }) {
+            return Err(refusal.error);
+        }
+        if tokio::time::timeout_at(deadline, freed).await.is_err() {
+            return Err(refusal.error);
+        }
+        request = refusal.request;
+    }
 }

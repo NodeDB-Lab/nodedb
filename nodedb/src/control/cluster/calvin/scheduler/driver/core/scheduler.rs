@@ -112,6 +112,10 @@ pub struct Scheduler {
     /// deterministic threshold below which an orphaned shared reservation is
     /// released. Purely a function of replicated input order — no wall clock.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) max_input_epoch: u64,
+    /// Backup cut markers this scheduler received: the commit HLC floors they
+    /// set and the markers not yet reported.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) cut_floors:
+        crate::control::cluster::calvin::scheduler::cut_floor::CutFloors,
     /// Shared mirror of `applied`, read by authorization coverage.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) applied_mirror:
         Arc<crate::control::cluster::calvin::scheduler::AppliedMirror>,
@@ -241,6 +245,9 @@ impl Scheduler {
             &applied_tail,
         );
 
+        // A backup's cut waits on every scheduler this node runs.
+        shared.calvin.cuts.register(vshard_id);
+
         let capacity_freed = shared
             .dispatcher
             .lock()
@@ -261,6 +268,7 @@ impl Scheduler {
             dependent_barrier: BTreeMap::new(),
             read_result_rx,
             applied: AppliedGate::new(fully_applied_epoch, applied_tail),
+            cut_floors: Default::default(),
             applied_mirror,
             rebuild_target_epoch,
             max_input_epoch: 0,
@@ -317,7 +325,7 @@ impl Scheduler {
     /// committed, which would let a session anchor on a torn epoch. `fetch_max`
     /// keeps it monotonic across all per-vShard schedulers writing the counter.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn publish_watermark(
-        &self,
+        &mut self,
         watermark: u64,
     ) {
         self.metrics.update_last_applied_epoch(watermark);
@@ -326,6 +334,8 @@ impl Scheduler {
             .calvin
             .last_applied_epoch
             .fetch_max(watermark, std::sync::atomic::Ordering::Release);
+        // A marker passes once every epoch delivered before it folded.
+        self.report_passed_cuts();
     }
 
     /// Spawn a bridge task that awaits a single executor response and forwards
@@ -401,7 +411,10 @@ impl Scheduler {
 
                 maybe_completion = self.completion_rx.recv() => {
                     if let Some((txn_id, request_id, resp_opt)) = maybe_completion {
-                        self.handle_completion(txn_id, request_id, resp_opt);
+                        // Awaited in the arm: the loop takes no other input
+                        // until this completion, its durability wait included,
+                        // is fully handled.
+                        self.handle_completion(txn_id, request_id, resp_opt).await;
                     }
                 }
 

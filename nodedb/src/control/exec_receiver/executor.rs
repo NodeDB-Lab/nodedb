@@ -21,6 +21,7 @@ use crate::control::state::SharedState;
 use crate::control::trace_export::EmitSpanParams;
 use crate::types::DatabaseId;
 
+use super::backup_cut::take_backup_cut;
 use super::plan_decode::decode_plan;
 use super::request_validation::validate_request;
 use super::support::{PLAN_DECODE_FAILED, SinkOutcome, execution_error_to_typed};
@@ -108,7 +109,7 @@ impl LocalPlanExecutor {
     /// paths: validate deadline + descriptor versions, decode the plan, reject
     /// unresolved Exchange nodes.  Returns `(plan, database_id, deadline)` on
     /// success or a typed cluster error to surface to the caller.
-    fn validate_and_decode(
+    async fn validate_and_decode(
         &self,
         req: &ExecuteRequest,
     ) -> Result<
@@ -121,19 +122,37 @@ impl LocalPlanExecutor {
     > {
         let (deadline, database_id) = validate_request(&self.state, req)?;
         let plan = decode_plan(&self.state, database_id, req.tenant_id, &req.plan_bytes)?;
+        // A backup's snapshot plan takes the backup's cut on this node first.
+        let plan = take_backup_cut(&self.state, plan).await?;
         Ok((plan, database_id, deadline))
     }
 
     /// One-shot execution: validate + decode, fan across all local cores,
     /// merge, and return the merged payload.
     async fn execute_plan_inner(&self, req: ExecuteRequest) -> ExecuteResponse {
-        let (plan, database_id, deadline) = match self.validate_and_decode(&req) {
+        let (plan, database_id, deadline) = match self.validate_and_decode(&req).await {
             Ok(t) => t,
             Err(e) => return ExecuteResponse::err(e),
         };
 
         let tenant_id = crate::types::TenantId::new(req.tenant_id);
         let trace_id = nodedb_types::TraceId(req.trace_id);
+
+        if let PhysicalPlan::ClusterEvent(
+            nodedb_physical::physical_plan::ClusterEventOp::TenantWriteMarks {
+                tenant_id: marks_tenant,
+                group_ids,
+            },
+        ) = &plan
+        {
+            return super::tenant_marks::answer_tenant_marks(
+                &self.state,
+                *marks_tenant,
+                group_ids,
+                deadline,
+            )
+            .await;
+        }
 
         if let PhysicalPlan::ClusterEvent(
             nodedb_physical::physical_plan::ClusterEventOp::PublishTopic {
@@ -365,7 +384,7 @@ impl LocalPlanExecutor {
         req: ExecuteRequest,
         mut sink: impl ChunkSink,
     ) -> Option<TypedClusterError> {
-        let (plan, database_id, deadline) = match self.validate_and_decode(&req) {
+        let (plan, database_id, deadline) = match self.validate_and_decode(&req).await {
             Ok(t) => t,
             Err(e) => return Some(e),
         };

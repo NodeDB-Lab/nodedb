@@ -10,7 +10,6 @@
 //! identity re-derived from tag columns.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use nodedb_types::RlsWriteCheck;
 use nodedb_types::columnar::schema::TS_SYSTEM;
@@ -19,19 +18,12 @@ use nodedb_types::value::Value;
 
 use crate::Error;
 use crate::bridge::envelope::PhysicalPlan;
-use crate::control::server::dispatch_utils::{MintedRecords, RecordOwner};
-use crate::control::server::shared::ddl::sync_dispatch;
-use crate::control::state::SharedState;
 use crate::engine::timeseries::columnar_memtable::{
     ColumnData, ColumnType, ColumnarMemtable, ColumnarMemtableConfig, MemtableSnapshot,
 };
 use crate::engine::timeseries::columnar_segment::ColumnarSegmentReader;
-use crate::types::{DatabaseId, TenantId, TsFlushedCollectionBlob, VShardId};
+use crate::types::TsFlushedCollectionBlob;
 use nodedb_physical::physical_plan::TimeseriesOp;
-
-/// Per-collection re-issue dispatch timeout. Generous: a restored collection may
-/// carry many flushed partitions' worth of rows in one ingest.
-const REISSUE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Server-stamped reserved column — re-derived by the ingest path, so it must
 /// NOT be carried back into the re-issued rows (the ingest handler restamps it).
@@ -310,68 +302,6 @@ pub fn build_timeseries_ingest_plan(
         returning: None,
         rls_filters: Vec::new(),
     }))
-}
-
-/// Re-issue a restored timeseries collection's rows durably.
-///
-/// Branches identically to a normal write (and to `reissue_columnar_durably`):
-/// - Cluster: `to_replicated_entry` + `propose_replicated_entry`.
-/// - Single-node: append the redo under an outcome-floor window, then
-///   `sync_dispatch::dispatch_system`, which closes the window.
-pub async fn reissue_timeseries_durably(
-    state: &SharedState,
-    tenant_id: TenantId,
-    database_id: DatabaseId,
-    collection: &str,
-    plan: PhysicalPlan,
-) -> crate::Result<()> {
-    let vshard = VShardId::from_collection_in_database(database_id, collection);
-
-    if let Some(proposer) = state.async_raft_proposer() {
-        let entry = crate::control::wal_replication::to_replicated_entry(
-            tenant_id,
-            database_id,
-            vshard,
-            &crate::control::wal_replication::ReplicableWrite::decide_for_replication(&plan)?,
-        )?
-        .ok_or_else(|| Error::Internal {
-            detail: format!(
-                "restore reissue: timeseries plan for '{collection}' did not map to a \
-                     replicated write"
-            ),
-        })?;
-        crate::control::wal_replication::propose_replicated_entry(state, proposer, entry).await?;
-        return Ok(());
-    }
-
-    // Single-node: WAL first (durable for restart replay), then install live.
-    // The record's outcome-floor window opens before the append and closes
-    // from the install's outcome.
-    let owner = RecordOwner {
-        tenant_id,
-        database_id,
-        vshard_id: vshard,
-    };
-    let minted = MintedRecords::open(&state.outcome_floor);
-    if let Err(error) = minted.append_plan(&state.wal, owner, &plan) {
-        // Any record appended before the error never reaches a core.
-        minted.cancel(&state.wal, owner, 0).await?;
-        return Err(error);
-    }
-    sync_dispatch::dispatch_system(
-        state,
-        sync_dispatch::SystemTask::new(
-            sync_dispatch::SystemReason::BackupRestore,
-            tenant_id,
-            database_id,
-            collection,
-            plan,
-        )
-        .with_minted(minted),
-        REISSUE_TIMEOUT,
-    )
-    .await?;
-    Ok(())
 }
 
 #[cfg(test)]

@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Durable re-issue of columnar, timeseries, and vector rows drained from the
-//! snapshot before the topology split (see [`super::restore_tenant`]'s
-//! doc comments on why these engines bypass the per-node snapshot
-//! install path).
+//! merged backup snapshot (see [`super::restore_tenant`]).
 
 use std::sync::Arc;
 
@@ -80,7 +78,7 @@ pub(super) async fn reissue_timeseries_snapshots(
 
         let plan =
             super::super::timeseries_reissue::build_timeseries_ingest_plan(&collection, rows)?;
-        super::super::timeseries_reissue::reissue_timeseries_durably(
+        super::super::durable::reissue_plan_durably(
             state,
             TenantId::new(tenant_id),
             database_id,
@@ -138,7 +136,7 @@ pub(super) async fn reissue_columnar_snapshots(
 
         let plan =
             super::super::columnar_reissue::build_columnar_insert_plan(&collection, decoded)?;
-        super::super::columnar_reissue::reissue_columnar_durably(
+        super::super::durable::reissue_plan_durably(
             state,
             TenantId::new(tenant_id),
             database_id,
@@ -203,7 +201,7 @@ pub(super) async fn reissue_vector_snapshots(
                 vector,
                 surrogate,
             );
-            super::super::vector_reissue::reissue_vector_durably(
+            super::super::durable::reissue_plan_durably(
                 state,
                 TenantId::new(tenant_id),
                 database_id,
@@ -308,7 +306,7 @@ pub(super) async fn reissue_vector_params(
             &field_name,
             &config,
         );
-        super::super::vector_reissue::reissue_vector_durably(
+        super::super::durable::reissue_plan_durably(
             state,
             TenantId::new(tenant_id),
             database_id,

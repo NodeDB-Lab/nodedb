@@ -21,6 +21,7 @@ pub fn transaction_redo_payload(write: &ReplicatedWrite) -> crate::Result<Transa
         sum_targets,
         identities,
         event_source,
+        origin,
     } = write
     else {
         return Err(crate::Error::Internal {
@@ -41,6 +42,7 @@ pub fn transaction_redo_payload(write: &ReplicatedWrite) -> crate::Result<Transa
             })
             .collect(),
         event_source: (*event_source).into(),
+        origin: *origin,
     })
 }
 
@@ -52,7 +54,7 @@ mod tests {
     use crate::event::EventSource;
     use crate::types::{DatabaseId, TenantId, VShardId};
     use crate::wal::{CalvinStamp, RedoRecord, RedoSubRecord};
-    use nodedb_physical::physical_plan::{RedoSumTargets, ResolvedSumTarget};
+    use nodedb_physical::physical_plan::{RedoOrigin, RedoSumTargets, ResolvedSumTarget};
 
     fn payload() -> TransactionRedoPayload {
         TransactionRedoPayload {
@@ -82,6 +84,7 @@ mod tests {
                 surrogate: Surrogate::new(3),
             }],
             event_source: EventSource::Trigger,
+            origin: RedoOrigin::Restore,
         }
     }
 
@@ -107,6 +110,7 @@ mod tests {
         assert_eq!(decoded.sum_targets, original.sum_targets);
         assert_eq!(decoded.identities, original.identities);
         assert_eq!(decoded.event_source, EventSource::Trigger);
+        assert_eq!(decoded.origin, RedoOrigin::Restore);
     }
 
     #[test]
@@ -114,13 +118,14 @@ mod tests {
         let original = payload();
         let plan = original.apply_plan().expect("plan builds");
         let nodedb_physical::physical_plan::PhysicalPlan::Meta(
-            nodedb_physical::physical_plan::MetaOp::ApplyTransactionRedo { redo, .. },
+            nodedb_physical::physical_plan::MetaOp::ApplyTransactionRedo { redo, origin, .. },
         ) = plan
         else {
             panic!("apply plan must be ApplyTransactionRedo");
         };
         let redo = RedoRecord::from_bytes(&redo).expect("redo decodes");
         assert_eq!(redo, original.redo);
+        assert_eq!(origin, RedoOrigin::Restore);
     }
 
     #[test]

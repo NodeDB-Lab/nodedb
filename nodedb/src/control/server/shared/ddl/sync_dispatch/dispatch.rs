@@ -25,7 +25,6 @@ pub(crate) async fn dispatch_system(
     task: SystemTask<'_>,
     timeout: Duration,
 ) -> crate::Result<Vec<u8>> {
-    let tenant_id = task.tenant_id;
     let resp =
         dispatch_system_response_with_source(state, task, timeout, crate::event::EventSource::User)
             .await?;
@@ -42,16 +41,9 @@ pub(crate) async fn dispatch_system(
         return Err(crate::Error::Internal { detail });
     }
 
-    // Advance the tenant's observed write-HLC high-water. Used by RESTORE to
-    // reject stale envelopes. Tracking on every dispatch (not just known-write
-    // ops) is intentional: advance is monotonic, and capturing the backup
-    // envelope's watermark AFTER its own fan-out ensures envelope.wm >=
-    // tenant_wm on a fresh backup (so a same-cluster roundtrip passes the
-    // staleness gate). Reached only after the `resp.status != Ok` early-return
-    // above, so this point is the "success" branch per the
-    // advance_tenant_write_hlc contract.
-    state.advance_tenant_write_hlc(tenant_id.as_u64());
-
+    // A system task never advances the tenant's observed write-HLC. Its
+    // `SystemReason` states that no client asked for the work, and RESTORE's
+    // staleness gate counts only user data writes.
     Ok(resp.payload.to_vec())
 }
 

@@ -27,14 +27,18 @@ pub struct RestoreStats {
     pub crdt_reissued: usize,
     /// Number of individual vectors re-issued durably (Raft/WAL) on restore.
     pub vectors_reissued: usize,
+    /// Number of individual KV rows re-issued durably (Raft/WAL) on restore.
+    pub kv_reissued: usize,
     /// Number of (collection, field) vector-index HNSW/PQ/IVF configs
     /// re-issued durably (Raft/WAL) on restore.
     pub vector_params_reissued: usize,
     /// Number of PK→surrogate identity bindings rebound into the catalog.
     pub surrogate_pk: usize,
-    pub nodes_dispatched: usize,
-    /// Non-zero = snapshot contained unparseable keys (possible corruption).
-    pub malformed_keys: usize,
-    /// Non-zero = some entries were routed to local node due to missing shard leader.
-    pub route_fallbacks: usize,
+    /// Document sub-records re-issued: one per current row, one per version
+    /// of a `bitemporal=true` row.
+    pub documents_reissued: usize,
+    /// Edge versions re-issued.
+    pub edges_reissued: usize,
+    /// Redo records the document and edge re-issue committed.
+    pub redo_records: usize,
 }

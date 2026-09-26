@@ -245,6 +245,7 @@ mod tests {
                 redo: redo.clone(),
                 collections: Vec::new(),
                 sum_targets: Vec::new(),
+                origin: nodedb_physical::physical_plan::RedoOrigin::Commit,
             },
         );
 

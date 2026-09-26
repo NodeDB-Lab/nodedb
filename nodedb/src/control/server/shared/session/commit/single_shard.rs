@@ -166,7 +166,7 @@ async fn commit_redo(
             }
         }
         // No Raft: this node is the only replica, and its apply is the log.
-        None => match apply_transaction_redo(state, target, payload, 0).await {
+        None => match apply_transaction_redo(state, target, payload, 0, None).await {
             Ok(outcome) if outcome.response.status == Status::Ok => None,
             Ok(outcome) => Some(AbortReason::BatchRejected {
                 code: outcome.response.error_code.as_deref().cloned(),

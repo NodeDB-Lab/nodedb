@@ -438,7 +438,9 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | ClusterArrayOp::Delete { .. },
         )
         | PhysicalPlan::ClusterEvent(
-            ClusterEventOp::ConsumeStream { .. } | ClusterEventOp::PublishTopic { .. },
+            ClusterEventOp::ConsumeStream { .. }
+            | ClusterEventOp::PublishTopic { .. }
+            | ClusterEventOp::TenantWriteMarks { .. },
         ) => {}
     }
 }

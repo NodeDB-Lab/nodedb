@@ -74,6 +74,9 @@ pub(crate) async fn dispatch_write_replicated(
     event_source: EventSource,
     minted: Option<MintedRecords>,
 ) -> crate::Result<Vec<u8>> {
+    // The caller appended this write's records before the call, so this
+    // instant bounds its commit from above and precedes the ack.
+    let committed_at = state.hlc_clock.now().wall_ns;
     let task = authorized.into_physical_task();
     let tenant_id = task.tenant_id;
     let database_id = task.database_id;
@@ -190,14 +193,30 @@ pub(crate) async fn dispatch_write_replicated(
     // substring-matching a message.
     let payload = payload_or_typed_error(resp)?;
 
+    // On a node with no Raft groups the write's mark lives in the catalog, and
+    // it is durable before the ack.
+    if state.async_raft_proposer().is_none() {
+        state.tenant_marks.record_local_write(
+            state.credentials.catalog(),
+            tenant_id.as_u64(),
+            committed_at,
+            Some(collection),
+        )?;
+    }
+
     // System-task dispatch bypasses the write funnel's own durable-at-ack barrier —
     // without this fsync, `kill -9` erases an acked write.
     if let Some(lsn) = wal_lsn {
         state.wal.wait_durable(lsn).await?;
     }
 
-    // Mirrors `dispatch_system_with_source`'s success-path write-HLC advance.
-    state.advance_tenant_write_hlc(tenant_id.as_u64());
+    // A device's sync write is user data: RESTORE's staleness gate counts it.
+    state.advance_tenant_write_hlc(
+        tenant_id.as_u64(),
+        committed_at,
+        "sync write",
+        Some(collection),
+    );
     Ok(payload)
 }
 
@@ -405,7 +424,7 @@ mod tests {
     async fn a_failed_cancel_keeps_the_proposed_result_and_holds_the_window() {
         let (state, _side, _directory) = fixture();
         let raw: Arc<crate::control::wal_replication::AsyncRaftProposer> =
-            Arc::new(|_vshard, _key, _data| {
+            Arc::new(|_vshard, _key, _data, _deadline| {
                 Box::pin(async { Ok((b"applied".to_vec(), crate::types::Lsn::ZERO)) })
             });
         crate::control::vshard_admission::install_async_raft_proposer(&state, raw)

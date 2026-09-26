@@ -29,6 +29,7 @@ impl NodeDbPgHandler {
             WalDurability::AppendHere {
                 now_override: None,
                 apply_key: 0,
+                commit_hlc: None,
             },
         )
         .await

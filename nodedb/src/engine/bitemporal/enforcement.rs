@@ -61,7 +61,15 @@ async fn enforcement_loop(
     mut shutdown: watch::Receiver<bool>,
     tick: Duration,
 ) {
-    tokio::time::sleep(Duration::from_secs(STARTUP_DELAY_SECS)).await;
+    // Shutdown ends the startup delay: a server stopped within it must not
+    // wait it out.
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs(STARTUP_DELAY_SECS)) => {}
+        _ = shutdown.wait_for(|stopping| *stopping) => {
+            info!("bitemporal retention loop shutting down");
+            return;
+        }
+    }
 
     loop {
         tokio::select! {

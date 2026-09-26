@@ -13,6 +13,7 @@ pub mod index;
 pub mod key;
 pub mod purge;
 pub mod scan;
+pub mod snapshot;
 pub mod value;
 
 pub use doc::VersionedRow;

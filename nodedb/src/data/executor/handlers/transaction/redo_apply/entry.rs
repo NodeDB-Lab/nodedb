@@ -31,7 +31,7 @@
 //! 5. the fold target rows in `Response::write_set`, so the funnel journals
 //!    them.
 
-use nodedb_physical::physical_plan::RedoSumTargets;
+use nodedb_physical::physical_plan::{RedoOrigin, RedoSumTargets};
 use nodedb_wal::WalRecord;
 use nodedb_wal::record::{RecordType, WalRecordArgs};
 
@@ -57,6 +57,7 @@ pub(in crate::data::executor) struct CommittedRedo<'a> {
 impl CoreLoop {
     /// Apply one committed redo record. The request carries the LSN of the
     /// `TransactionRedo` WAL record the funnel appended for it.
+    #[cfg(test)]
     pub(in crate::data::executor) fn execute_apply_transaction_redo(
         &mut self,
         task: &ExecutionTask,
@@ -75,6 +76,18 @@ impl CoreLoop {
         task: &ExecutionTask,
         tid: u64,
         committed: CommittedRedo<'_>,
+    ) -> Response {
+        self.install_redo(task, tid, committed, RedoOrigin::Commit)
+    }
+
+    /// [`Self::install_committed_redo`] for a record from `origin`, which
+    /// decides the commit-boundary checks the validate pass runs.
+    pub(in crate::data::executor) fn install_redo(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        committed: CommittedRedo<'_>,
+        origin: RedoOrigin,
     ) -> Response {
         let Some(lsn) = task.wal_lsn() else {
             return self.response_error(
@@ -98,7 +111,7 @@ impl CoreLoop {
         let check_scope =
             RedoApplyScope::new(RedoApplyPass::Validate, committed.sum_targets.to_vec());
         if let Err(error) =
-            self.validate_redo_document_ops(database_id, tid, &doc_ops, &check_scope)
+            self.validate_redo_document_ops(database_id, tid, &doc_ops, &check_scope, origin)
         {
             return self.response_error(task, error);
         }

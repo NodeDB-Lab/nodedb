@@ -38,7 +38,8 @@ pub(crate) use minted::{
     Collect, MintedRecords, OwnedResponse, OwnedWait, RecordOwner, await_response_owned,
 };
 pub(crate) use submit_write::{
-    ChangeFeedOwner, SubmitOutcome, SubmitWrite, WalDurability, WriteOrdering, submit_write,
+    ChangeFeedOwner, PendingWrite, SubmitOutcome, SubmitWrite, WalDurability, WriteOrdering,
+    enqueue_write, submit_write,
 };
 pub(crate) use types::{AutocommitWrite, WriteDispatch};
 pub(crate) use write_abort::{

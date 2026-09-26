@@ -73,6 +73,8 @@ pub struct OutcomeFloor {
     windows: Mutex<Windows>,
     /// Windows dropped without a settle or a hold.
     leaked: AtomicU64,
+    /// Woken each time a window closes, so a waiter re-reads the floor.
+    closed: tokio::sync::Notify,
 }
 
 #[derive(Debug)]
@@ -294,6 +296,12 @@ impl OutcomeFloor {
         Lsn::new(self.lock().floor())
     }
 
+    /// The highest LSN any window noted: every record a write window minted
+    /// so far is at or below it.
+    pub fn max_noted(&self) -> Lsn {
+        Lsn::new(self.lock().max_noted)
+    }
+
     /// Windows dropped without a settle or a hold since the process started.
     pub fn leaked_windows(&self) -> u64 {
         self.leaked.load(Ordering::Relaxed)
@@ -331,6 +339,24 @@ impl OutcomeFloor {
 
     fn close(&self, ticket: u64) {
         self.lock().close(ticket);
+        self.closed.notify_waiters();
+    }
+
+    /// Wait until the floor reaches `target`: every record minted at or below
+    /// it has a final outcome. Returns `false` when `deadline` passes first,
+    /// for example behind a window held until restart.
+    pub async fn await_floor(&self, target: Lsn, deadline: tokio::time::Instant) -> bool {
+        loop {
+            let notified = self.closed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.floor() >= target {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return self.floor() >= target;
+            }
+        }
     }
 
     /// Count a leaked window and report it. The window stays open.

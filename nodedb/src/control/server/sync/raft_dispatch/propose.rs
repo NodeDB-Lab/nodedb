@@ -30,7 +30,8 @@ use crate::control::wal_replication::{AsyncRaftProposer, ReplicatedEntry};
 /// to determine the idempotency gate verdict.
 ///
 /// Retries transparently up to five times on [`crate::Error::RetryableLeaderChange`]
-/// (leader failover during the propose). Only propose-layer machinery failures
+/// (leader failover during the propose). All attempts share one statement
+/// deadline, so a retry gets only the time that remains. Only propose-layer machinery failures
 /// map to [`crate::Error::Dispatch`]; a classified apply verdict passes through.
 pub(crate) async fn propose_sync_write(
     state: &SharedState,
@@ -40,13 +41,15 @@ pub(crate) async fn propose_sync_write(
     let idempotency_key = entry.idempotency_key;
     let data = entry.to_bytes();
     let vshard_id = entry.vshard_id;
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_secs(state.tuning.network.default_deadline_secs);
 
     const BACKOFF_MS: [u64; 5] = [10, 25, 50, 100, 200];
     let mut payload: Option<Vec<u8>> = None;
     let mut last_err: Option<crate::Error> = None;
 
     for (attempt, backoff_ms) in BACKOFF_MS.iter().enumerate() {
-        match proposer(vshard_id, idempotency_key, data.clone()).await {
+        match proposer(vshard_id, idempotency_key, data.clone(), deadline).await {
             // The committed log index rides alongside the payload; the sync-ack
             // path only needs the payload bytes.
             Ok((p, _committed_version)) => {
@@ -70,7 +73,11 @@ pub(crate) async fn propose_sync_write(
                     group_id,
                     log_index,
                 });
-                tokio::time::sleep(Duration::from_millis(*backoff_ms)).await;
+                let backoff = Duration::from_millis(*backoff_ms);
+                if tokio::time::Instant::now() + backoff >= deadline {
+                    break;
+                }
+                tokio::time::sleep(backoff).await;
                 continue;
             }
             // Only a machinery failure is re-wrapped. A state-machine verdict

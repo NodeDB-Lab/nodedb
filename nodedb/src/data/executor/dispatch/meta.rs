@@ -68,7 +68,7 @@ impl CoreLoop {
                 }
             }
 
-            MetaOp::CreateTenantSnapshot { tenant_id } => {
+            MetaOp::CreateTenantSnapshot { tenant_id, .. } => {
                 self.execute_create_tenant_snapshot(task, *tenant_id)
             }
 
@@ -307,7 +307,8 @@ impl CoreLoop {
                 redo,
                 collections,
                 sum_targets,
-            } => self.execute_apply_transaction_redo(
+                origin,
+            } => self.install_redo(
                 task,
                 tid,
                 crate::data::executor::handlers::transaction::redo_apply::CommittedRedo {
@@ -315,6 +316,7 @@ impl CoreLoop {
                     collections,
                     sum_targets,
                 },
+                *origin,
             ),
 
             MetaOp::StageWrite { plan } => self.execute_stage_write(task, tid, plan),

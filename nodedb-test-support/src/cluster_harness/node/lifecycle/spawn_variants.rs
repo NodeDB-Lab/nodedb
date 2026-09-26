@@ -159,6 +159,6 @@ impl TestClusterNode {
             replication_factor: 1,
             single_node_calvin: true,
         };
-        Self::spawn_with_full_config_at(1, vec![], &config, data_dir_path).await
+        Self::spawn_with_full_config_at(1, vec![], &config, data_dir_path, None).await
     }
 }

@@ -141,6 +141,20 @@ impl TestServer {
         (server, dir)
     }
 
+    /// [`Self::open_on_path`] for a server booted with
+    /// [`Self::start_standalone`]: no cluster topology, so no Raft groups.
+    pub async fn open_on_path_standalone(dir: TestDataDir) -> (Self, TestDataDir) {
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::standalone(),
+            1,
+        );
+        let placeholder = tempfile::tempdir().expect("placeholder tempdir");
+        let server = Self::connect_and_build(spawned, placeholder, AuthMode::Trust).await;
+        (server, dir)
+    }
+
     /// Open a server backed by an existing data directory with a custom
     /// `columnar_flush_threshold`. Pass the same value the original server
     /// used to keep flush behaviour consistent across the restart boundary.

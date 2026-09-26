@@ -21,15 +21,26 @@ use crate::types::{DatabaseId, ReadConsistency, TenantId, TraceId, VShardId};
 
 /// Identifies a committed Raft entry within the apply loop.
 ///
-/// Groups the three fields that always travel together: the Raft group, the
-/// log index within that group, and the idempotency key extracted from the
-/// `ReplicatedEntry` header. All three are forwarded together to
-/// `ProposeTracker::complete` after each apply.
+/// Groups the fields that always travel together: the Raft group, the log
+/// index within that group, and the idempotency key extracted from the
+/// `ReplicatedEntry` header, all forwarded to `ProposeTracker::complete` after
+/// each apply, plus the entry's commit HLC.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AppliedPosition {
     pub group_id: u64,
     pub log_index: u64,
     pub applied_key: u64,
+    /// HLC wall time, in nanoseconds, the proposer stamped on the entry. `0`
+    /// when the entry carries none. It is the write's commit instant on the
+    /// tenant's observed write high-water, however late this replica applies.
+    pub commit_hlc: u64,
+}
+
+impl AppliedPosition {
+    /// The entry's commit HLC for the write funnel, `None` when it carries none.
+    pub(crate) fn carried_commit_hlc(&self) -> Option<u64> {
+        (self.commit_hlc != 0).then_some(self.commit_hlc)
+    }
 }
 
 /// One committed array write, ready for the Control-Plane write funnel.
@@ -46,6 +57,8 @@ pub(super) struct ArrayWriteSubmit {
     /// The idempotency key of the committed entry, carried by the redo
     /// record's header.
     pub apply_key: u64,
+    /// The committed entry's commit HLC, `None` when it carries none.
+    pub commit_hlc: Option<u64>,
     /// Contextual label for the error surfaced to the propose waiter.
     pub op_label: &'static str,
 }
@@ -74,6 +87,7 @@ pub(super) async fn submit_array_write(
         event_source,
         resolved_now_ms,
         apply_key,
+        commit_hlc,
         op_label,
     } = params;
 
@@ -97,6 +111,7 @@ pub(super) async fn submit_array_write(
             durability: WalDurability::AppendHere {
                 now_override: resolved_now_ms,
                 apply_key,
+                commit_hlc,
             },
             // Raft committed this entry at a fixed log index and every replica
             // applies it in that order; re-entering the write-admission gate

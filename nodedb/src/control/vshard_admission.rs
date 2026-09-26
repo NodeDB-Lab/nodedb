@@ -110,7 +110,7 @@ fn wrap_async_raft_proposer(
     sequencer: Arc<VShardAdmissionSequencer>,
     raw: Arc<AsyncRaftProposer>,
 ) -> Arc<AsyncRaftProposer> {
-    Arc::new(move |vshard_id, idempotency_key, data| {
+    Arc::new(move |vshard_id, idempotency_key, data, deadline| {
         let sequencer = Arc::clone(&sequencer);
         let raw = Arc::clone(&raw);
         Box::pin(async move {
@@ -122,7 +122,7 @@ fn wrap_async_raft_proposer(
             let vshard_id = VShardId::new(vshard_id);
             sequencer
                 .run(vshard_id, move || async move {
-                    raw(vshard_id.as_u32(), idempotency_key, data).await
+                    raw(vshard_id.as_u32(), idempotency_key, data, deadline).await
                 })
                 .await
         })
@@ -138,6 +138,10 @@ mod tests {
 
     use super::*;
     use crate::types::Lsn;
+
+    fn test_deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + std::time::Duration::from_secs(30)
+    }
 
     fn shard(id: u32) -> VShardId {
         VShardId::new(id)
@@ -353,7 +357,7 @@ mod tests {
             let maximum = Arc::clone(&maximum);
             let release = Arc::clone(&release);
             let entered = Arc::clone(&entered);
-            Arc::new(move |_vshard, key, data| {
+            Arc::new(move |_vshard, key, data, _deadline| {
                 let active = Arc::clone(&active);
                 let maximum = Arc::clone(&maximum);
                 let release = Arc::clone(&release);
@@ -371,12 +375,12 @@ mod tests {
         let wrapped = wrap_async_raft_proposer(Arc::clone(&sequencer), raw);
         let first = {
             let wrapped = Arc::clone(&wrapped);
-            tokio::spawn(async move { wrapped(5, 11, vec![1]).await })
+            tokio::spawn(async move { wrapped(5, 11, vec![1], test_deadline()).await })
         };
         entered.notified().await;
         let second = {
             let wrapped = Arc::clone(&wrapped);
-            tokio::spawn(async move { wrapped(5, 12, vec![2]).await })
+            tokio::spawn(async move { wrapped(5, 12, vec![2], test_deadline()).await })
         };
         while sequencer.slots[5].capacity.available_permits() != 0 {
             tokio::task::yield_now().await;

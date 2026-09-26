@@ -12,7 +12,7 @@ pub type RaftProposer =
 
 /// Type alias for the asynchronous Raft propose callback with leader forwarding.
 ///
-/// Takes `(vshard_id, idempotency_key, serialized_entry)` and returns, on
+/// Takes `(vshard_id, idempotency_key, serialized_entry, deadline)` and returns, on
 /// success, the Data Plane apply payload bytes together with the write's
 /// per-collection version: the written collection's `coll_write_lsn` AFTER the
 /// write, as the replica that applied the entry recorded it. It is a WAL LSN,
@@ -26,10 +26,16 @@ pub type RaftProposer =
 /// serialized `ReplicatedEntry`; the proposer registers the tracker waiter with
 /// this key so apply-side mismatch detection can surface `RetryableLeaderChange`
 /// when a new leader's entry overwrites this one.
+///
+/// `deadline` is the caller's absolute statement deadline. A caller that
+/// re-proposes passes the same instant to every attempt, so each attempt gets
+/// only the time that remains. The proposer never computes a deadline of its
+/// own. Past `deadline` it returns [`crate::Error::DeadlineExceeded`].
 pub type AsyncRaftProposer = dyn Fn(
         u32,
         u64,
         Vec<u8>,
+        tokio::time::Instant,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<

@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex};
 
+use super::apply_window::ApplyWindow;
+
 use tokio::sync::oneshot;
 
 use nodedb_cluster::GroupAppliedWatchers;
@@ -98,14 +100,41 @@ enum TrackerSlot {
 /// immediately if `complete()` already fired.
 pub struct ProposeTracker {
     slots: Mutex<HashMap<(u64, u64), TrackerSlot>>,
-    /// Per-Raft-group apply watermark registry. Bumped on every
-    /// [`Self::complete`] so the watcher reflects "data applied on
-    /// this node up to index N" — the only semantic that's useful
-    /// for cross-node visibility waits. Tick-loop bumps cover the
-    /// metadata group (sync redb apply); this tracker covers data
-    /// groups (async SPSC dispatch through `run_apply_loop`).
-    /// `None` only in tests that don't exercise the watcher.
+    /// Per-Raft-group apply watermark registry. Bumped by
+    /// [`Self::note_applied`] once every entry of the group up to the index
+    /// finished, so the watcher reflects "data applied on this node up to
+    /// index N" — the only semantic that's useful for cross-node visibility
+    /// waits. Tick-loop bumps cover the metadata group (sync redb apply);
+    /// this tracker covers data groups (async SPSC dispatch through
+    /// `run_apply_loop`). `None` only in tests that don't exercise the
+    /// watcher.
     group_watchers: Option<Arc<GroupAppliedWatchers>>,
+    /// Per group, the oldest committed entry the apply loop has not finished.
+    applying: Mutex<HashMap<u64, ApplyingEntry>>,
+    /// Per-group bound on entries between hand-off and settle, shared by the
+    /// applier that hands entries off and the loop that settles them.
+    window: Arc<ApplyWindow>,
+}
+
+/// The oldest committed entry of a group the apply loop has not finished:
+/// what a propose waiter that timed out names as the entry its group's
+/// applied index waits behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyingEntry {
+    pub group_id: u64,
+    pub log_index: u64,
+    /// The collection the entry's plan writes, once the apply decoded it.
+    pub collection: Option<String>,
+}
+
+impl std::fmt::Display for ApplyingEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "group {} index {}", self.group_id, self.log_index)?;
+        if let Some(collection) = &self.collection {
+            write!(f, " writing '{collection}'")?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for ProposeTracker {
@@ -119,6 +148,8 @@ impl ProposeTracker {
         Self {
             slots: Mutex::new(HashMap::new()),
             group_watchers: None,
+            applying: Mutex::new(HashMap::new()),
+            window: Arc::new(ApplyWindow::default()),
         }
     }
 
@@ -127,6 +158,42 @@ impl ProposeTracker {
     pub fn with_group_watchers(mut self, watchers: Arc<GroupAppliedWatchers>) -> Self {
         self.group_watchers = Some(watchers);
         self
+    }
+
+    /// The per-group apply window.
+    pub fn window(&self) -> &Arc<ApplyWindow> {
+        &self.window
+    }
+
+    /// Record the oldest entry of `group_id` the apply loop has not finished,
+    /// or `None` once every entry it holds for the group finished.
+    pub fn note_applying(&self, group_id: u64, entry: Option<ApplyingEntry>) {
+        let mut applying = self.applying.lock().unwrap_or_else(|p| p.into_inner());
+        match entry {
+            Some(entry) => {
+                applying.insert(group_id, entry);
+            }
+            None => {
+                applying.remove(&group_id);
+            }
+        }
+    }
+
+    /// The oldest entry of `group_id` the apply loop has not finished, if any.
+    pub fn applying(&self, group_id: u64) -> Option<ApplyingEntry> {
+        self.applying
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&group_id)
+            .cloned()
+    }
+
+    /// Advance `group_id`'s applied watermark to `log_index`. The apply loop
+    /// calls it once every entry of the group up to `log_index` finished.
+    pub fn note_applied(&self, group_id: u64, log_index: u64) {
+        if let Some(w) = &self.group_watchers {
+            w.bump(group_id, log_index);
+        }
     }
 
     /// Register a waiter for a proposed entry. Returns a receiver that
@@ -167,11 +234,26 @@ impl ProposeTracker {
         rx
     }
 
+    /// Drop the waiter a proposer registered at `(group_id, log_index)` and
+    /// stopped waiting on: its deadline passed, or this node left the group
+    /// and will never apply the index. A result already stored there stays.
+    pub fn abandon(&self, group_id: u64, log_index: u64) {
+        let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+        if let Entry::Occupied(e) = slots.entry((group_id, log_index))
+            && matches!(e.get(), TrackerSlot::Waiting { .. })
+        {
+            e.remove();
+        }
+    }
+
     /// Complete a waiter after the entry has been committed and executed.
     ///
     /// If the proposer has already called `register()`, the result is sent
     /// immediately. If not, the result is stored so the next `register()`
     /// call picks it up without waiting.
+    ///
+    /// Entries of one group complete in any order. The applied watermark
+    /// moves only through [`Self::note_applied`], in log order.
     ///
     /// Returns true if a live waiter was found and notified, false otherwise.
     pub fn complete(
@@ -181,17 +263,6 @@ impl ProposeTracker {
         applied_key: u64,
         result: ProposeResult,
     ) -> bool {
-        // Bump the per-group apply watermark. Bumping unconditionally
-        // (success and error) keeps the watcher monotonic with raft's
-        // commit progression — a data-plane error means "the entry
-        // could not be applied" but the entry IS committed and Raft
-        // has advanced its applied index. Tests waiting on
-        // visibility care about the success path; liveness on the
-        // error path requires the bump too.
-        if let Some(w) = &self.group_watchers {
-            w.bump(group_id, log_index);
-        }
-
         let mut slots = self.slots.lock().unwrap_or_else(|p| p.into_inner());
         match slots.entry((group_id, log_index)) {
             Entry::Vacant(e) => {

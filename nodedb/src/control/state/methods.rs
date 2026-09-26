@@ -240,43 +240,6 @@ impl SharedState {
         }
     }
 
-    /// Advance the per-tenant observed write-HLC high-water to the current
-    /// HLC wall time. Idempotent and monotonic: no-op if a larger value is
-    /// already recorded. Callers MUST invoke this only after a successful
-    /// dispatch; "success" is defined as `Response.status == Status::Ok`
-    /// (and, for `Result<Response>` callers, `Result::Ok` as well). A
-    /// poisoned lock is silently ignored — the high-water is best-effort
-    /// and the RESTORE staleness gate treats missing entries as zero.
-    pub fn advance_tenant_write_hlc(&self, tenant_id: u64) {
-        let wall = self.hlc_clock.now().wall_ns;
-        // Recover a poisoned lock rather than skipping the advance. The map is
-        // a plain `HashMap` that a panic elsewhere cannot corrupt, and dropping
-        // the write would leave the restore staleness gate reading a stale
-        // high-water mark.
-        let mut map = self
-            .tenant_write_hlc
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let entry = map.entry(tenant_id).or_insert(0);
-        if wall > *entry {
-            *entry = wall;
-        }
-    }
-
-    /// Last observed write HLC for `tenant_id`, or `0` when none is recorded.
-    ///
-    /// Recovers a poisoned lock. Reporting `0` because the mutex is poisoned
-    /// would silently disable the restore staleness gate, which compares an
-    /// envelope's watermark against this value.
-    pub fn tenant_write_hlc(&self, tenant_id: u64) -> u64 {
-        self.tenant_write_hlc
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&tenant_id)
-            .copied()
-            .unwrap_or(0)
-    }
-
     /// Shared HTTP client reused by every outbound emitter. Cloning the
     /// Arc is cheap — the client itself owns a connection pool, DNS
     /// resolver, and TLS session cache that every caller benefits from.

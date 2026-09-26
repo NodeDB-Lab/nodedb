@@ -449,7 +449,7 @@ impl SparseEngine {
     }
 
     /// Shared scan logic for any redb table with database/tenant-prefixed keys.
-    fn scan_table_for_tenant(
+    pub(in crate::engine::sparse) fn scan_table_for_tenant(
         &self,
         table_def: redb::TableDefinition<&str, &[u8]>,
         database_id: u64,

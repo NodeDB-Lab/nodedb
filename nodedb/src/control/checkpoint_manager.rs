@@ -129,6 +129,30 @@ pub struct CheckpointCycleInputs<'a> {
     pub cold_storage: Option<std::sync::Arc<crate::storage::cold::ColdStorage>>,
     /// When present, the tombstone set is GC'd to the new truncation point.
     pub catalog: Option<&'a crate::control::security::catalog::SystemCatalog>,
+    /// The applied state of every Calvin scheduler on this node. Saved in
+    /// `catalog` before truncation deletes the applied markers it came from.
+    pub calvin_mirrors: Option<&'a crate::control::cluster::calvin::scheduler::AppliedMirrors>,
+}
+
+/// The applied state of every mirror, as the catalog stores it.
+fn calvin_applied_states(
+    mirrors: &crate::control::cluster::calvin::scheduler::AppliedMirrors,
+) -> Vec<crate::control::security::catalog::calvin_applied::StoredCalvinApplied> {
+    mirrors.snapshot_all()
+}
+
+/// Save `states` in `catalog`.
+fn save_calvin_applied(
+    states: Vec<crate::control::security::catalog::calvin_applied::StoredCalvinApplied>,
+    catalog: Option<&crate::control::security::catalog::SystemCatalog>,
+) -> crate::Result<()> {
+    if states.is_empty() {
+        return Ok(());
+    }
+    let catalog = catalog.ok_or_else(|| crate::Error::Internal {
+        detail: "checkpoint has no catalog to save the Calvin applied state in".into(),
+    })?;
+    catalog.save_calvin_applied(states)
 }
 
 /// Run one checkpoint cycle: dispatch checkpoint to all cores, collect LSNs,
@@ -147,6 +171,7 @@ pub async fn run_checkpoint_cycle(inputs: CheckpointCycleInputs<'_>) -> Option<L
         timeout,
         cold_storage,
         catalog,
+        calvin_mirrors,
     } = inputs;
 
     if num_cores == 0 {
@@ -293,6 +318,11 @@ pub async fn run_checkpoint_cycle(inputs: CheckpointCycleInputs<'_>) -> Option<L
 
     let checkpoint_lsn = Lsn::new(global_lsn);
 
+    // Read the Calvin applied state before the WAL sync below. A scheduler
+    // marks a position applied only after the position's records were
+    // appended, so the sync makes every record behind this state durable.
+    let calvin_states = calvin_mirrors.map(calvin_applied_states);
+
     // 5. Write checkpoint marker to WAL.
     match wal
         .appender(crate::wal::manager::NO_APPLY_KEY)
@@ -325,6 +355,22 @@ pub async fn run_checkpoint_cycle(inputs: CheckpointCycleInputs<'_>) -> Option<L
     // proof that truncation happened — replay has to cover everything from
     // the marker's LSN onward.
     crate::fail_point!("checkpoint::after_marker_before_truncate");
+
+    // Save every Calvin scheduler's applied state before any segment holding
+    // an applied marker is deleted. The sequencer log delivers those entries
+    // again after a restart, and the saved state is what tells the scheduler
+    // they already applied. A save that fails holds the truncation back.
+    if let Some(states) = calvin_states
+        && let Err(error) = save_calvin_applied(states, catalog)
+    {
+        warn!(
+            checkpoint_lsn = global_lsn,
+            %error,
+            "WAL truncation deferred: the Calvin applied state was not saved, and the \
+             segments hold the only record of which Calvin transactions applied"
+        );
+        return Some(checkpoint_lsn);
+    }
 
     // 6. Archive eligible WAL segments to cold storage before deletion. A
     // segment the archive did not accept bounds truncation: deleting it would

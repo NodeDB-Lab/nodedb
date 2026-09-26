@@ -26,7 +26,7 @@ use nodedb_physical::physical_task::PhysicalTask;
 
 use super::super::core::NodeDbPgHandler;
 use super::super::plan::describe_plan;
-use super::gateway_fold::{GatewayFold, GatewayShaping};
+use super::gateway_fold::{GatewayFold, GatewayShaping, plan_produces_rows};
 
 /// Meter one gateway-forwarded task, once its response has already shaped
 /// successfully — mirrors `calvin_dispatch::meter_calvin_task`, the sibling
@@ -99,6 +99,8 @@ impl NodeDbPgHandler {
         // Resolved once for the whole forwarded task set, before the loop.
         let redaction = QueryRedaction::for_plans(tenant_id, auth, tasks.iter().map(|t| &t.plan));
         let shaping = GatewayShaping {
+            tenant_id,
+            database_id,
             projection,
             result_formats,
             redaction: &redaction,
@@ -127,6 +129,9 @@ impl NodeDbPgHandler {
         let mut fold = GatewayFold::with_capacity(tasks.len());
         for task in tasks {
             let plan_kind = describe_plan(&task.plan);
+            // The task moves into authorization below; a row-producing task
+            // keeps its plan for shaping the rows it answers with.
+            let shape_plan = plan_produces_rows(plan_kind).then(|| task.plan.clone());
             let counts_toward_tag = plan_counts_toward_statement_tag(&task.plan, has_user_write);
             let metering_info = PlanMeteringInfo::extract(&task.plan);
             let emitter = crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(
@@ -164,6 +169,7 @@ impl NodeDbPgHandler {
                             &mut fold,
                             resp.payload.as_ref(),
                             plan_kind,
+                            shape_plan.as_ref(),
                             counts_toward_tag,
                             &shaping,
                         )?;
@@ -201,6 +207,7 @@ impl NodeDbPgHandler {
                     &mut fold,
                     &[],
                     plan_kind,
+                    shape_plan.as_ref(),
                     counts_toward_tag,
                     &shaping,
                 )?;
@@ -210,6 +217,7 @@ impl NodeDbPgHandler {
                     &mut fold,
                     payload,
                     plan_kind,
+                    shape_plan.as_ref(),
                     counts_toward_tag,
                     &shaping,
                 )? {

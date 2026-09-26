@@ -44,7 +44,7 @@ pub async fn authenticate_bearer_jwt(
     if let Err(error) = crate::control::security::jwt_policy::enforce_stateful_jwt_policy(
         state,
         verified.claims(),
-        identity.tenant_id,
+        &identity,
     ) {
         debug!(%error, "bearer token refused by auth.jwt policy");
         return None;

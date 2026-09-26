@@ -26,9 +26,15 @@ pub(crate) enum WalDurability {
     /// write applies, `0` for a write no proposal carries. Every record the
     /// funnel appends for the write carries it in its header, so the record
     /// names the proposal it applied in the same durable write.
+    ///
+    /// `commit_hlc` is the HLC wall time, in nanoseconds, at which the write
+    /// committed upstream: the proposer's stamp on a replicated entry. `None`
+    /// when this append is the commit, so the funnel stamps the instant of the
+    /// append itself.
     AppendHere {
         now_override: Option<u64>,
         apply_key: u64,
+        commit_hlc: Option<u64>,
     },
     /// The caller already recorded this write's durability elsewhere — COMMIT's
     /// single `Transaction` record, the procedural batch flush, a trigger /

@@ -49,170 +49,65 @@ impl CoreLoop {
                 );
             }
         }
+        // A `bitemporal=true` collection writes only the versioned tables.
+        match self
+            .sparse
+            .scan_versioned_documents_for_tenant(database_id, tenant_id)
+        {
+            Ok(docs) => snapshot.documents_versioned = docs,
+            Err(e) => {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("snapshot: versioned document scan failed: {e}"),
+                    },
+                );
+            }
+        }
+        match self
+            .sparse
+            .scan_versioned_indexes_for_tenant(database_id, tenant_id)
+        {
+            Ok(idx) => snapshot.indexes_versioned = idx,
+            Err(e) => {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("snapshot: versioned index scan failed: {e}"),
+                    },
+                );
+            }
+        }
 
-        // 2. Graph edges: scan edge_store by tenant prefix.
+        // 2. Graph edges: scan edge_store by tenant prefix. A snapshot that
+        // omitted them would restore every node with no edges.
         match self
             .edge_store
             .scan_edges_for_tenant(database_id, crate::types::TenantId::new(tenant_id))
         {
             Ok(edges) => snapshot.edges = edges,
-            Err(e) => warn!(tenant_id, error = %e, "snapshot: edge scan failed, skipping"),
-        }
-
-        // 3. Vector collections: export raw vectors + doc_id_map.
-        // The snapshot format stores keys as `"{db}:{tid}:{coll_key}"` strings
-        // for disk/wire compatibility — convert the tuple key at the boundary.
-        let tid_obj = crate::types::TenantId::new(tenant_id);
-        for (key, collection) in &self.vector_collections {
-            if key.1 != tid_obj {
-                continue;
-            }
-            let vectors = match collection.export_snapshot() {
-                Ok(v) => v,
-                Err(e) => {
-                    // Skipping is consistent with the other per-item failures
-                    // here, but omitting vectors from a snapshot is data loss,
-                    // so it is logged at error level rather than warn.
-                    tracing::error!(
-                        key = &key.2,
-                        error = %e,
-                        "snapshot: vector export failed, collection omitted from snapshot"
-                    );
-                    continue;
-                }
-            };
-            let key_str = format!("{}:{}:{}", key.0.as_u64(), key.1.as_u64(), key.2);
-            match zerompk::to_msgpack_vec(&vectors) {
-                Ok(bytes) => snapshot.vectors.push((key_str, bytes)),
-                Err(e) => warn!(key = &key.2, error = %e, "snapshot: vector serialization failed"),
+            Err(e) => {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("snapshot: edge scan failed: {e}"),
+                    },
+                );
             }
         }
 
-        // 3b. Vector params: export HnswParams per collection.
-        for (key, params) in &self.vector_params {
-            if key.1 != tid_obj {
-                continue;
-            }
-            let key_str = format!("{}:{}:{}", key.0.as_u64(), key.1.as_u64(), key.2);
-            match zerompk::to_msgpack_vec(params) {
-                Ok(bytes) => snapshot.vector_params.push((key_str, bytes)),
-                Err(e) => {
-                    warn!(key = &key.2, error = %e, "snapshot: vector_params serialization failed")
-                }
-            }
-        }
-
-        // 3c. Index configs: export IndexConfig per collection.
-        for (key, cfg) in &self.index_configs {
-            if key.1 != tid_obj {
-                continue;
-            }
-            let key_str = format!("{}:{}:{}", key.0.as_u64(), key.1.as_u64(), key.2);
-            match zerompk::to_msgpack_vec(cfg) {
-                Ok(bytes) => snapshot.index_configs.push((key_str, bytes)),
-                Err(e) => {
-                    warn!(key = &key.2, error = %e, "snapshot: index_configs serialization failed")
-                }
-            }
-        }
-
-        // 4. KV tables: export all entries per tenant table.
-        for (&hash, table) in &self.kv_engine.tables {
-            let Some(&tid) = self.kv_engine.hash_to_tenant.get(&hash) else {
-                continue;
-            };
-            if tid != tenant_id {
-                continue;
-            }
-            let collection_name = self
-                .kv_engine
-                .hash_to_collection
-                .get(&hash)
-                .cloned()
-                .unwrap_or_else(|| hash.to_string());
-            let entries = table.export_entries();
-            match zerompk::to_msgpack_vec(&entries) {
-                Ok(bytes) => snapshot.kv_tables.push((collection_name, bytes)),
-                Err(e) => warn!(hash, error = %e, "snapshot: kv serialization failed"),
-            }
-        }
-
-        // 5. CRDT state: one Loro export per collection. Each (tenant,
-        // collection) owns its own doc; entries are carried tenant-explicit and
-        // collection-tagged so the per-group Raft snapshot builder routes each
-        // by its single collection's vshard.
-        if let Some(crdt) = self.crdt_engines.get(&(task.request.database_id, tid_obj)) {
-            match crdt.export_all_snapshots() {
-                Ok(per_collection) => {
-                    for (collection, bytes) in per_collection {
-                        snapshot.crdt_state.push((
-                            task.request.database_id.as_u64(),
-                            tenant_id,
-                            collection,
-                            bytes,
-                        ));
-                    }
-                }
-                Err(e) => warn!(tenant_id, error = %e, "snapshot: crdt export failed"),
-            }
-
-            // 5b. CRDT constraint state: capture the installed constraint set
-            // + version per collection so a snapshot-installed follower
-            // reconstructs its validator instead of coming up empty and
-            // retry-fencing every peer delta on constrained collections.
-            for collection in crdt.collections_with_constraints() {
-                let version = crdt.installed_constraint_version(&collection);
-                if version == 0 {
-                    continue;
-                }
-                let constraints = crdt.constraints_for_collection(&collection);
-                let mut encoded = Vec::with_capacity(constraints.len());
-                let mut failed = false;
-                for constraint in &constraints {
-                    match zerompk::to_msgpack_vec(constraint) {
-                        Ok(bytes) => encoded.push(bytes),
-                        Err(e) => {
-                            warn!(
-                                tenant_id,
-                                collection,
-                                error = %e,
-                                "snapshot: crdt constraint serialization failed"
-                            );
-                            failed = true;
-                            break;
-                        }
-                    }
-                }
-                if failed || encoded.is_empty() {
-                    continue;
-                }
-                snapshot
-                    .crdt_constraints
-                    .push(crate::types::snapshot::CrdtConstraintEntry {
-                        database_id: task.request.database_id.as_u64(),
-                        tenant_id,
-                        collection,
-                        version,
-                        constraints: encoded,
-                    });
-            }
-        }
-
-        // 6. Timeseries memtables: serialize column data.
-        // Snapshot format encodes "{database_id}:{tenant_id}:{collection}" keys.
+        // 3-6. The in-memory engines: vectors, KV, CRDT, timeseries
+        // memtables. A section that fails to export fails the snapshot: a
+        // snapshot that left it out would restore without it.
         let tid_id = crate::types::TenantId::new(tenant_id);
-        for ((d, t, coll), mt) in &self.columnar_memtables {
-            if *t != tid_id {
-                continue;
-            }
-            let key_str = format!("{}:{}:{}", d.as_u64(), t.as_u64(), coll);
-            match zerompk::to_msgpack_vec(&mt.export_snapshot()) {
-                Ok(bytes) => snapshot.timeseries.push((key_str, bytes)),
-                Err(e) => {
-                    let key = &key_str;
-                    warn!(key, error = %e, "snapshot: timeseries serialization failed");
-                }
-            }
+        if let Err(e) = self.capture_memory_engines(task.request.database_id, tid_id, &mut snapshot)
+        {
+            return self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: format!("snapshot: in-memory engine capture failed: {e}"),
+                },
+            );
         }
 
         // 7. Flushed timeseries segments: capture all on-disk partition
@@ -246,6 +141,8 @@ impl CoreLoop {
             tenant_id,
             documents = snapshot.documents.len(),
             indexes = snapshot.indexes.len(),
+            documents_versioned = snapshot.documents_versioned.len(),
+            indexes_versioned = snapshot.indexes_versioned.len(),
             edges = snapshot.edges.len(),
             vectors = snapshot.vectors.len(),
             kv_tables = snapshot.kv_tables.len(),

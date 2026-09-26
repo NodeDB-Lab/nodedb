@@ -99,6 +99,16 @@ impl AppliedGate {
         self.fully_applied_epoch == NOT_YET_APPLIED_EPOCH
     }
 
+    /// The highest epoch delivered to this vShard, or `None` when none was.
+    pub fn highest_seen_epoch(&self) -> Option<u64> {
+        (self.highest_seen_epoch != NOT_YET_APPLIED_EPOCH).then_some(self.highest_seen_epoch)
+    }
+
+    /// Whether every position of every epoch at or below `epoch` is applied.
+    pub fn is_fully_applied_through(&self, epoch: u64) -> bool {
+        !self.is_sentinel() && self.fully_applied_epoch >= epoch
+    }
+
     /// Record the delivery of `(epoch, position)` on this vShard, carrying the
     /// sequencer's per-`(epoch, vShard)` position `count`.
     ///

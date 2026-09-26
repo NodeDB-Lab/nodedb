@@ -29,4 +29,8 @@ pub enum SchedulerInput {
         owner: TxnIdWire,
         reason: ReleaseReason,
     },
+    /// A backup's consistent-cut marker carrying its watermark `hlc`. Every
+    /// transaction delivered before it must finish before the scheduler
+    /// reports it; every transaction delivered after it commits above `hlc`.
+    CutMarker { hlc: u64 },
 }

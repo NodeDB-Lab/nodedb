@@ -135,7 +135,10 @@ mod tests {
     #[test]
     fn tenant_snapshot_is_refused_while_any_tree_applies() {
         let cache = cache_with_tree("docs");
-        let mut plan = PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot { tenant_id: 1 });
+        let mut plan = PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot {
+            tenant_id: 1,
+            cut_watermark: None,
+        });
         assert!(matches!(
             apply(&mut plan, &cache),
             Err(crate::Error::PlanError { .. })

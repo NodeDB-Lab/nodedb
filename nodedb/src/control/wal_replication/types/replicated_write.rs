@@ -1015,6 +1015,15 @@ pub enum ReplicatedWrite {
         /// Identities every replica binds before the apply.
         identities: Vec<ReplicatedIdentity>,
         event_source: ReplicatedEventSource,
+        /// Which commit-boundary checks every replica's apply runs.
+        origin: nodedb_physical::physical_plan::RedoOrigin,
+    },
+    /// A backup's consistent cut through this group's log. It writes no
+    /// data. Every entry before it applies before the backup snapshots, and
+    /// every entry after it records a commit HLC above `hlc`, the backup's
+    /// watermark, so a restore of that backup refuses it.
+    CutBarrier {
+        hlc: u64,
     },
 }
 

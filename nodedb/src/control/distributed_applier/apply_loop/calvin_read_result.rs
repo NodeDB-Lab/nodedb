@@ -44,6 +44,7 @@ pub(super) fn forward_calvin_read_result(
         group_id,
         log_index,
         applied_key,
+        ..
     } = pos;
 
     let decoded_values: Vec<(

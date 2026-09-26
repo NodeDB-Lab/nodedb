@@ -165,6 +165,26 @@ impl TestCluster {
         .await
     }
 
+    /// Spawn a 3-node cluster whose data groups each place
+    /// `replication_factor` of the three nodes. With a factor below 3 some
+    /// node replicates no copy of a group, so a test can act on a node that
+    /// never applied the group's writes.
+    ///
+    /// Uses the standard fast-election tuning and 1 Data-Plane core per node.
+    pub async fn spawn_three_with_replication_factor(
+        replication_factor: usize,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::spawn_three_inner(
+            fast_cluster_tuning(),
+            nodedb_types::config::tuning::GraphTuning::default(),
+            nodedb_types::config::tuning::QueryTuning::default(),
+            1,
+            None,
+            replication_factor,
+        )
+        .await
+    }
+
     /// Spawn a 3-node cluster with custom cluster-transport, graph engine tuning,
     /// query execution tuning, and a specific core count per node.
     ///

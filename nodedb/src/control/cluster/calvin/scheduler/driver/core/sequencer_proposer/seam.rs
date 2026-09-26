@@ -28,6 +28,9 @@ pub enum SequencerProposeError {
     /// again on a later tick.
     #[error("{limit} sequencer forwards are in flight; the entry for node {leader} waits")]
     ForwardBusy { leader: u64, limit: usize },
+    /// The node shut down: its state is gone.
+    #[error("the node is shutting down")]
+    ShutDown,
     /// The local sequencer group refused the proposal.
     #[error("sequencer propose: {0}")]
     Cluster(#[from] ClusterError),

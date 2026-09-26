@@ -2,6 +2,7 @@
 
 pub mod applied_gate;
 pub mod applied_mirror;
+pub mod cut_floor;
 pub mod driver;
 pub mod lock;
 pub mod metrics;
@@ -19,4 +20,6 @@ pub use lock::{AcquireOutcome, HotKeyTable, LockKey, LockManager, LockMode, TxnI
 // keep that path stable via an alias while the module lives under `lock/`.
 pub use lock as lock_manager;
 pub use metrics::SchedulerMetrics;
-pub use recovery::{AppliedRecovery, NOT_YET_APPLIED_EPOCH, read_applied_recovery};
+pub use recovery::{
+    AppliedRecovery, NOT_YET_APPLIED_EPOCH, read_applied_recovery, recover_applied,
+};

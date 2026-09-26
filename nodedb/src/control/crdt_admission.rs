@@ -525,9 +525,7 @@ async fn apply_fenced(
             vshard_id: workflow.vshard_id,
             timeout_ms: timeout_ms(workflow.timeout),
         })??;
-        workflow
-            .state
-            .advance_tenant_write_hlc(workflow.tenant_id.as_u64());
+        // This node's apply of the entry recorded its commit HLC.
         return Ok(CrdtAdmissionOutcome {
             payload: outcome.0,
             write_version: outcome.1,
@@ -777,12 +775,7 @@ mod tests {
         }));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let policy = RecordingPolicy { seen, reject: true };
-        let before_hlc = state
-            .tenant_write_hlc
-            .lock()
-            .expect("hlc lock")
-            .get(&1)
-            .copied();
+        let before_hlc = state.tenant_write_mark(1);
         let result = dispatch_crdt_apply_admitted(&state, admission_request(&policy)).await;
         responder.await.expect("responder completes");
         assert!(matches!(
@@ -790,12 +783,7 @@ mod tests {
             Err(crate::Error::CrdtAdmissionCallerFence)
         ));
         assert_eq!(
-            state
-                .tenant_write_hlc
-                .lock()
-                .expect("hlc lock")
-                .get(&1)
-                .copied(),
+            state.tenant_write_mark(1),
             before_hlc,
             "policy rejection must not advance the tenant write HLC"
         );
@@ -827,7 +815,7 @@ mod tests {
         let fenced = Arc::new(Mutex::new(Vec::new()));
         let observed = Arc::clone(&fenced);
         let raw: Arc<crate::control::wal_replication::AsyncRaftProposer> =
-            Arc::new(move |_shard, _key, bytes| {
+            Arc::new(move |_shard, _key, bytes, _deadline| {
                 let observed = Arc::clone(&observed);
                 Box::pin(async move {
                     let entry =
@@ -883,7 +871,7 @@ mod tests {
         let fences = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&fences);
         let raw: Arc<crate::control::wal_replication::AsyncRaftProposer> =
-            Arc::new(move |_shard, _key, _bytes| {
+            Arc::new(move |_shard, _key, _bytes, _deadline| {
                 let count = Arc::clone(&count);
                 Box::pin(async move {
                     if count.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -947,7 +935,7 @@ mod tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let raw: Arc<crate::control::wal_replication::AsyncRaftProposer> = {
             let attempts = Arc::clone(&attempts);
-            Arc::new(move |_shard, _key, _bytes| {
+            Arc::new(move |_shard, _key, _bytes, _deadline| {
                 let attempts = Arc::clone(&attempts);
                 Box::pin(async move {
                     if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -1015,7 +1003,7 @@ mod tests {
         let fenced_count = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&fenced_count);
         let raw: Arc<crate::control::wal_replication::AsyncRaftProposer> =
-            Arc::new(move |_shard, _key, _bytes| {
+            Arc::new(move |_shard, _key, _bytes, _deadline| {
                 let count = Arc::clone(&count);
                 Box::pin(async move {
                     count.fetch_add(1, Ordering::SeqCst);

@@ -44,7 +44,9 @@ pub use cluster_mgmt::{
     PongResponse, TopologyAck, TopologyUpdate,
 };
 pub use data_plane_error::{DataPlaneCounterFault, DataPlaneErrorCode};
-pub use data_propose::{DataProposeRequest, DataProposeResponse, ProposeTarget};
+pub use data_propose::{
+    DataProposeRequest, DataProposeResponse, ForwardedProposeRefusal, ProposeTarget,
+};
 pub use execute::{
     DescriptorVersionEntry, ExecuteRequest, ExecuteResponse, ExecuteStreamChunk, ExecuteStreamEnd,
     PLAN_DECODE_FAILED, TypedClusterError,

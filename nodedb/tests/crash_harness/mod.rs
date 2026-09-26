@@ -32,6 +32,7 @@ mod pgwire;
 pub use pgwire::{RetryableSchemaChange, Session};
 #[path = "../support/mod.rs"]
 pub mod support;
+pub mod vshards;
 
 /// Re-exported so a crash test can state its own filesystem precondition
 /// without pulling the support module in a second time.

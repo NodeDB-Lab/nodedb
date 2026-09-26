@@ -53,16 +53,19 @@ impl Scheduler {
             SchedulerInput::Txn(txn) => self.process_new_txn(txn),
             SchedulerInput::Reserve { owner, key } => self.install_reservation(owner, key),
             SchedulerInput::Release { owner, reason } => self.release_reservation(owner, reason),
+            SchedulerInput::CutMarker { hlc } => self.receive_cut_marker(hlc),
         }
     }
 
     /// The replicated epoch an input is stamped with — the monotonic logical
-    /// clock the lease reap advances on.
+    /// clock the lease reap advances on. A cut marker carries no epoch, so it
+    /// reports `0`, which never advances the clock.
     fn input_epoch(input: &SchedulerInput) -> u64 {
         match input {
             SchedulerInput::Txn(txn) => txn.epoch,
             SchedulerInput::Reserve { owner, .. } => owner.epoch,
             SchedulerInput::Release { owner, .. } => owner.epoch,
+            SchedulerInput::CutMarker { .. } => 0,
         }
     }
 

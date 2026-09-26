@@ -3,9 +3,8 @@
 //! RESTORE TENANT orchestrator logic.
 //!
 //! Validates a backup envelope, merges all sections into a single
-//! `TenantDataSnapshot`, then splits the merged snapshot into per-node
-//! sub-snapshots according to the *current* cluster topology and
-//! dispatches `MetaOp::RestoreTenantSnapshot` to each owning node.
+//! `TenantDataSnapshot`, then re-issues every section as durable, replicated
+//! writes.
 //!
 //! Durable re-issue of columnar/timeseries/vector rows lives in [`reissue`];
 //! post-install surrogate rebinding and tombstone warnings live in

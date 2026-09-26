@@ -17,6 +17,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use super::recovery::NOT_YET_APPLIED_EPOCH;
+use crate::control::security::catalog::calvin_applied::StoredCalvinApplied;
 
 #[derive(Debug)]
 struct MirrorState {
@@ -67,6 +68,13 @@ impl AppliedMirror {
         state.tail = state.tail.split_off(&(watermark.saturating_add(1), 0));
     }
 
+    /// The mirror's state: the fully-applied watermark and the applied
+    /// positions above it.
+    pub fn snapshot(&self) -> (u64, BTreeSet<(u64, u32)>) {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        (state.fully_applied_epoch, state.tail.clone())
+    }
+
     /// Whether this node's replica applied `(epoch, position)`.
     pub fn is_applied(&self, epoch: u64, position: u32) -> bool {
         let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -96,6 +104,28 @@ impl AppliedMirrors {
             .unwrap_or_else(|p| p.into_inner())
             .insert(vshard_id, Arc::clone(&mirror));
         mirror
+    }
+
+    /// Every registered mirror's state, in the shape the catalog stores.
+    pub fn snapshot_all(&self) -> Vec<StoredCalvinApplied> {
+        let mirrors: Vec<(u32, Arc<AppliedMirror>)> = self
+            .by_vshard
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|(vshard_id, mirror)| (*vshard_id, Arc::clone(mirror)))
+            .collect();
+        mirrors
+            .into_iter()
+            .map(|(vshard_id, mirror)| {
+                let (fully_applied_epoch, tail) = mirror.snapshot();
+                StoredCalvinApplied {
+                    vshard_id,
+                    fully_applied_epoch,
+                    tail,
+                }
+            })
+            .collect()
     }
 
     /// The mirror of `vshard_id`, when this node runs its scheduler.

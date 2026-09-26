@@ -168,6 +168,18 @@ impl nodedb_cluster::SnapshotApplier for DataPlaneSnapshotApplier {
             }
         }
 
+        // Take the group's tenant write marks, durably, before this node
+        // reports the group applied through the snapshot.
+        if !snap.group_write_marks.is_empty() {
+            self.shared
+                .tenant_marks
+                .raise_group_entries(group_id, &snap.group_write_marks);
+            self.shared
+                .tenant_marks
+                .persist(self.shared.credentials.catalog())
+                .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?;
+        }
+
         // The install emitted no per-row events, so the permission cache
         // reloads before this node reports coverage of the group again.
         self.shared.authorization_fence.note_snapshot_installed();

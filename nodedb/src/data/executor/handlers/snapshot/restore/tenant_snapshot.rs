@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
@@ -72,8 +72,17 @@ impl CoreLoop {
             }
         };
 
-        let (docs_written, indexes_written) =
-            self.restore_sparse(tenant_id, &snap.documents, &snap.indexes);
+        let (docs_written, indexes_written) = match self.restore_sparse(&snap) {
+            Ok(written) => written,
+            Err(e) => {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("restore: document install failed: {e}"),
+                    },
+                );
+            }
+        };
 
         let mut edges_written = 0u64;
         let mut vectors_written = 0u64;
@@ -90,8 +99,12 @@ impl CoreLoop {
             let database_id = task.request.database_id.as_u64();
             for (key, props) in &snap.edges {
                 if let Err(e) = self.edge_store.put_edge_raw(database_id, tid, key, props) {
-                    warn!(key, error = %e, "failed to restore edge");
-                    continue;
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("restore: edge install failed: {e}"),
+                        },
+                    );
                 }
                 edges_written += 1;
             }
@@ -107,8 +120,12 @@ impl CoreLoop {
                     .edge_store
                     .put_edge_raw(database_id, edge_tid, key, props)
                 {
-                    warn!(key, error = %e, "failed to restore tenant edge");
-                    continue;
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("restore: tenant edge install failed: {e}"),
+                        },
+                    );
                 }
                 edges_written += 1;
             }
@@ -144,8 +161,14 @@ impl CoreLoop {
                     match zerompk::from_msgpack(bytes) {
                         Ok(p) => p,
                         Err(e) => {
-                            warn!(key, error = %e, "failed to decode vector_params snapshot entry");
-                            continue;
+                            return self.response_error(
+                                task,
+                                ErrorCode::Internal {
+                                    detail: format!(
+                                        "restore: vector params '{key}' do not decode: {e}"
+                                    ),
+                                },
+                            );
                         }
                     };
                 let (vp_db, coll_key) = parse_vector_snapshot_key(key, tenant_id);
@@ -164,8 +187,14 @@ impl CoreLoop {
                     match zerompk::from_msgpack(bytes) {
                         Ok(c) => c,
                         Err(e) => {
-                            warn!(key, error = %e, "failed to decode index_configs snapshot entry");
-                            continue;
+                            return self.response_error(
+                                task,
+                                ErrorCode::Internal {
+                                    detail: format!(
+                                        "restore: vector index config '{key}' does not decode: {e}"
+                                    ),
+                                },
+                            );
                         }
                     };
                 let (ic_db, coll_key) = parse_vector_snapshot_key(key, tenant_id);
@@ -186,8 +215,14 @@ impl CoreLoop {
                     match zerompk::from_msgpack(bytes) {
                         Ok(v) => v,
                         Err(e) => {
-                            warn!(key, error = %e, "failed to decode vector snapshot");
-                            continue;
+                            return self.response_error(
+                                task,
+                                ErrorCode::Internal {
+                                    detail: format!(
+                                        "restore: vector collection '{key}' does not decode: {e}"
+                                    ),
+                                },
+                            );
                         }
                     };
                 let count = vectors.len() as u64;
@@ -210,12 +245,9 @@ impl CoreLoop {
             // own fsynced `.snap` file plus this local checkpoint. Without a
             // synchronous checkpoint here, a crash before the next periodic
             // `checkpoint_vector_indexes()` run (every 5 minutes) would lose
-            // the just-installed vectors. Checkpointing is cheap-idempotent
-            // (skips empty collections), so this is unconditional rather than
-            // gated on `replace_mode`: the user-RESTORE path drains vector
-            // data before it ever reaches here (see
-            // `control/backup/restore/orchestrate/mod.rs`), so `vectors_written`
-            // is 0 and the call is a no-op on that path.
+            // the just-installed vectors. A failed checkpoint fails the
+            // install, so the snapshot is installed again rather than left
+            // memory-only.
             if vectors_written > 0 {
                 match self.checkpoint_vector_indexes() {
                     Ok(outcome) => {
@@ -226,21 +258,14 @@ impl CoreLoop {
                             "vector snapshot install checkpointed synchronously"
                         );
                     }
-                    // The install path has no LSN to clamp — it applies
-                    // Raft-committed vectors with no WAL record behind them, so
-                    // there is no truncation authority to narrow here. What a
-                    // failure does mean is that this core's only local copy of
-                    // the just-installed vectors is still in memory, which the
-                    // operator needs to see rather than have it disappear into
-                    // a discarded count.
                     Err(e) => {
-                        warn!(
-                            core = self.core_id,
-                            tenant_id,
-                            error = %e,
-                            "vector snapshot install checkpoint failed; the installed \
-                             vectors are memory-only on this core until the next \
-                             successful checkpoint"
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: format!(
+                                    "restore: vector checkpoint after the install failed: {e}"
+                                ),
+                            },
                         );
                     }
                 }
@@ -251,8 +276,14 @@ impl CoreLoop {
                 let entries: Vec<(Vec<u8>, Vec<u8>, u64)> = match zerompk::from_msgpack(bytes) {
                     Ok(e) => e,
                     Err(e) => {
-                        warn!(collection_name, error = %e, "failed to decode kv snapshot");
-                        continue;
+                        return self.response_error(
+                            task,
+                            ErrorCode::Internal {
+                                detail: format!(
+                                    "restore: KV table '{collection_name}' does not decode: {e}"
+                                ),
+                            },
+                        );
                     }
                 };
                 let count = entries.len() as u64;
@@ -269,19 +300,22 @@ impl CoreLoop {
             for (database_raw, tid_raw, collection, bytes) in &snap.crdt_state {
                 if let Err(e) = self.restore_crdt_state(*database_raw, *tid_raw, collection, bytes)
                 {
-                    warn!(tid_raw, %collection, error = %e, "failed to restore crdt state");
-                } else {
-                    crdt_written += 1;
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!(
+                                "restore: CRDT state of '{collection}' (tenant {tid_raw}) failed: {e}"
+                            ),
+                        },
+                    );
                 }
+                crdt_written += 1;
             }
 
             // Restore CRDT constraint state per collection: reconstructs the
             // validator's installed constraint set + `installed_constraint_version`
             // so a snapshot-installed follower does not come up empty and
-            // retry-fence every peer delta on constrained collections. Fail-safe
-            // on error — warn and continue, matching the `crdt_state` loop, since
-            // a failed reconstruction only reverts to the pre-fix (over-rejecting)
-            // behavior rather than corrupting state.
+            // retry-fence every peer delta on constrained collections.
             for entry in &snap.crdt_constraints {
                 if let Err(e) = self.restore_crdt_constraints(
                     entry.database_id,
@@ -290,11 +324,17 @@ impl CoreLoop {
                     entry.version,
                     &entry.constraints,
                 ) {
-                    let (tid_raw, collection) = (entry.tenant_id, &entry.collection);
-                    warn!(tid_raw, %collection, error = %e, "failed to restore crdt constraints");
-                } else {
-                    crdt_constraints_written += 1;
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!(
+                                "restore: CRDT constraints of '{}' (tenant {}) failed: {e}",
+                                entry.collection, entry.tenant_id
+                            ),
+                        },
+                    );
                 }
+                crdt_constraints_written += 1;
             }
 
             // Restore timeseries memtables and flush each to an on-disk segment

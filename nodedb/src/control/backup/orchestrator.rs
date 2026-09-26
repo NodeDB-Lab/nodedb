@@ -43,20 +43,29 @@ pub async fn backup_tenant(state: &Arc<SharedState>, tenant_id: u64) -> Result<B
     // replication factor. Filtering each source node's snapshot to the vshards
     // it owns makes the union cover each vshard exactly once.
     let assignment = source_assignment(state);
-    let snapshot_plan = PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot { tenant_id });
 
-    // Collect per-node sections first. The orchestrator's own
-    // dispatches advance the tenant write-HLC high-water via
-    // `dispatch_system`; capturing the envelope watermark AFTER the
-    // fan-out guarantees `envelope.watermark ≥ tenant_write_hlc`
-    // at backup time, so a subsequent restore of this envelope into
-    // the same (unchanged) cluster passes the staleness gate.
+    // The envelope watermark is the consistent cut: every user write
+    // committed below it has applied before the snapshots below, and every
+    // write committed at or above it refuses a restore of this envelope.
+    let snapshot_watermark = super::cut::consistent_cut(state, tenant_id).await?;
+    // This node took the cut already. A remote source node takes it at the
+    // same watermark before it snapshots.
+    let local_plan = PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot {
+        tenant_id,
+        cut_watermark: None,
+    });
+    let remote_plan = PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot {
+        tenant_id,
+        cut_watermark: Some(snapshot_watermark),
+    });
+
+    // Collect per-node sections.
     let mut sections = Vec::with_capacity(assignment.len());
     for (node_id, source_vshards) in assignment {
         let body = if is_self(state, node_id) {
-            snapshot_self(state, tenant_id, &snapshot_plan).await?
+            snapshot_self(state, tenant_id, &local_plan).await?
         } else {
-            snapshot_remote(state, node_id, tenant_id, &snapshot_plan).await?
+            snapshot_remote(state, node_id, tenant_id, &remote_plan).await?
         };
         // Single-node / single-replica: the node owns every vshard it leads, so
         // the filter retains everything (no-op). Under RF>1: keep only the
@@ -66,13 +75,6 @@ pub async fn backup_tenant(state: &Arc<SharedState>, tenant_id: u64) -> Result<B
         sections.push((node_id, body));
     }
 
-    // Capture a cluster-wide logical instant for the envelope via the
-    // HLC. `hlc_clock.now()` advances past any previously observed
-    // local or remote HLC — the wall-ns component is the scalar
-    // watermark we stamp into the header. Restore compares this
-    // against the destination's `tenant_write_hlc` to detect stale
-    // envelopes.
-    let snapshot_watermark = state.hlc_clock.now().wall_ns;
     let meta = EnvelopeMeta {
         tenant_id,
         source_vshard_count: VSHARD_COUNT as u16,
@@ -96,94 +98,7 @@ pub async fn backup_tenant(state: &Arc<SharedState>, tenant_id: u64) -> Result<B
     // window loses its soft-deleted row (UNDROP can't work after
     // restore), and a restore whose source has already purged a
     // collection can resurrect rows that were properly reaped.
-    {
-        let catalog = state.credentials.catalog();
-        if let Ok(all) = catalog.load_all_collections(DatabaseId::DEFAULT) {
-            let mut blobs: Vec<nodedb_types::backup_envelope::StoredCollectionBlob> = Vec::new();
-            for coll in all.iter().filter(|c| c.tenant_id == tenant_id) {
-                if let Ok(bytes) = zerompk::to_msgpack_vec(coll) {
-                    blobs.push(nodedb_types::backup_envelope::StoredCollectionBlob {
-                        name: coll.name.clone(),
-                        bytes,
-                    });
-                }
-            }
-            if !blobs.is_empty()
-                && let Ok(body) = zerompk::to_msgpack_vec(&blobs)
-            {
-                writer
-                    .push_section(
-                        nodedb_types::backup_envelope::SECTION_ORIGIN_CATALOG_ROWS,
-                        body,
-                    )
-                    .map_err(|e| Error::Internal {
-                        detail: format!("backup envelope (catalog rows): {e}"),
-                    })?;
-            }
-        }
-
-        // PK→surrogate identity map for the tenant's collections. This is
-        // DATA-derived per-node state that the per-node engine sections do NOT
-        // carry (the Data-Plane snapshot handler has no catalog access). Without
-        // it a restored node has documents but cannot resolve PK point-lookups
-        // (`WHERE id=<pk>`) — full scans work, point-lookups silently miss. The
-        // restore path rebinds these into the destination catalog.
-        if let Ok(all) = catalog.load_all_collections(DatabaseId::DEFAULT) {
-            let mut binds: Vec<nodedb_types::backup_envelope::SurrogateBindBlob> = Vec::new();
-            for coll in all.iter().filter(|c| c.tenant_id == tenant_id) {
-                if let Ok(rows) = catalog.scan_surrogates_for_collection(
-                    DatabaseId::DEFAULT,
-                    TenantId::new(tenant_id),
-                    &coll.name,
-                ) {
-                    for (pk, surrogate) in rows {
-                        binds.push(nodedb_types::backup_envelope::SurrogateBindBlob {
-                            tenant_id,
-                            collection: coll.name.clone(),
-                            pk,
-                            surrogate: surrogate.as_u32(),
-                        });
-                    }
-                }
-            }
-            if !binds.is_empty()
-                && let Ok(body) = zerompk::to_msgpack_vec(&binds)
-            {
-                writer
-                    .push_section(
-                        nodedb_types::backup_envelope::SECTION_ORIGIN_SURROGATE_PK,
-                        body,
-                    )
-                    .map_err(|e| Error::Internal {
-                        detail: format!("backup envelope (surrogate pk): {e}"),
-                    })?;
-            }
-        }
-
-        if let Ok(tset) = catalog.load_wal_tombstones() {
-            let mut tombs: Vec<nodedb_types::backup_envelope::SourceTombstoneEntry> = Vec::new();
-            for (database_id, tid, name, purge_lsn) in tset.iter() {
-                if database_id == DatabaseId::DEFAULT.as_u64() && tid == tenant_id {
-                    tombs.push(nodedb_types::backup_envelope::SourceTombstoneEntry {
-                        collection: name.to_string(),
-                        purge_lsn,
-                    });
-                }
-            }
-            if !tombs.is_empty()
-                && let Ok(body) = zerompk::to_msgpack_vec(&tombs)
-            {
-                writer
-                    .push_section(
-                        nodedb_types::backup_envelope::SECTION_ORIGIN_SOURCE_TOMBSTONES,
-                        body,
-                    )
-                    .map_err(|e| Error::Internal {
-                        detail: format!("backup envelope (source tombstones): {e}"),
-                    })?;
-            }
-        }
-    }
+    push_metadata_sections(state, tenant_id, &mut writer)?;
 
     // A backup KEK must be configured; plaintext backup envelopes are no
     // longer supported.
@@ -254,8 +169,7 @@ fn source_assignment(state: &SharedState) -> Vec<(u64, HashSet<u32>)> {
 ///
 /// The per-section vshard classification is shared with the Raft snapshot SEND
 /// builder via `snapshot_keys::retain_tenant_data_for_vshards`. The vshard-of
-/// closure is the canonical routing function, matching both the snapshot
-/// builder and the restore topology splitter.
+/// closure is the canonical routing function, matching the snapshot builder.
 fn filter_node_snapshot(
     body: Vec<u8>,
     tenant_id: u64,
@@ -276,6 +190,112 @@ fn filter_node_snapshot(
     zerompk::to_msgpack_vec(&snap).map_err(|e| Error::Internal {
         detail: format!("backup: re-encode filtered snapshot: {e}"),
     })
+}
+
+/// Push the metadata sections: the tenant's catalog rows, its PK-to-surrogate
+/// binds, and its source-side tombstones. A catalog read or encode error fails
+/// the backup: an envelope without these sections restores rows a point
+/// lookup cannot find, or resurrects a purged collection.
+fn push_metadata_sections(
+    state: &SharedState,
+    tenant_id: u64,
+    writer: &mut EnvelopeWriter,
+) -> Result<(), Error> {
+    let catalog = state.credentials.catalog();
+    let collections: Vec<_> = catalog
+        .load_all_collections(DatabaseId::DEFAULT)?
+        .into_iter()
+        .filter(|coll| coll.tenant_id == tenant_id)
+        .collect();
+
+    let mut blobs = Vec::with_capacity(collections.len());
+    for coll in &collections {
+        blobs.push(nodedb_types::backup_envelope::StoredCollectionBlob {
+            name: coll.name.clone(),
+            bytes: encode_section_part("catalog row", coll)?,
+        });
+    }
+    if !blobs.is_empty() {
+        push_encoded(
+            writer,
+            nodedb_types::backup_envelope::SECTION_ORIGIN_CATALOG_ROWS,
+            "catalog rows",
+            &blobs,
+        )?;
+    }
+
+    // PK→surrogate identity map for the tenant's collections. This is
+    // DATA-derived per-node state that the per-node engine sections do NOT
+    // carry (the Data-Plane snapshot handler has no catalog access). Without
+    // it a restored node has documents but cannot resolve PK point-lookups
+    // (`WHERE id=<pk>`): full scans work, point-lookups silently miss. The
+    // restore path rebinds these into the destination catalog.
+    let mut binds: Vec<nodedb_types::backup_envelope::SurrogateBindBlob> = Vec::new();
+    for coll in &collections {
+        let rows = catalog.scan_surrogates_for_collection(
+            DatabaseId::DEFAULT,
+            TenantId::new(tenant_id),
+            &coll.name,
+        )?;
+        for (pk, surrogate) in rows {
+            binds.push(nodedb_types::backup_envelope::SurrogateBindBlob {
+                tenant_id,
+                collection: coll.name.clone(),
+                pk,
+                surrogate: surrogate.as_u32(),
+            });
+        }
+    }
+    if !binds.is_empty() {
+        push_encoded(
+            writer,
+            nodedb_types::backup_envelope::SECTION_ORIGIN_SURROGATE_PK,
+            "surrogate pk",
+            &binds,
+        )?;
+    }
+
+    let mut tombs: Vec<nodedb_types::backup_envelope::SourceTombstoneEntry> = Vec::new();
+    for (database_id, tid, name, purge_lsn) in catalog.load_wal_tombstones()?.iter() {
+        if database_id == DatabaseId::DEFAULT.as_u64() && tid == tenant_id {
+            tombs.push(nodedb_types::backup_envelope::SourceTombstoneEntry {
+                collection: name.to_string(),
+                purge_lsn,
+            });
+        }
+    }
+    if !tombs.is_empty() {
+        push_encoded(
+            writer,
+            nodedb_types::backup_envelope::SECTION_ORIGIN_SOURCE_TOMBSTONES,
+            "source tombstones",
+            &tombs,
+        )?;
+    }
+    Ok(())
+}
+
+/// Encode one part of a metadata section.
+fn encode_section_part<T: zerompk::ToMessagePack>(what: &str, value: &T) -> Result<Vec<u8>, Error> {
+    zerompk::to_msgpack_vec(value).map_err(|e| Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("backup envelope ({what}): encode: {e}"),
+    })
+}
+
+/// Encode `value` and push it as the section `origin`.
+fn push_encoded<T: zerompk::ToMessagePack>(
+    writer: &mut EnvelopeWriter,
+    origin: u64,
+    what: &str,
+    value: &T,
+) -> Result<(), Error> {
+    let body = encode_section_part(what, value)?;
+    writer
+        .push_section(origin, body)
+        .map_err(|e| Error::Internal {
+            detail: format!("backup envelope ({what}): {e}"),
+        })
 }
 
 fn is_self(state: &SharedState, node_id: u64) -> bool {

@@ -35,10 +35,12 @@ pub(crate) async fn apply_array_op(
         database_id,
         array,
     } = target;
+    let commit_hlc = pos.carried_commit_hlc();
     let AppliedPosition {
         group_id,
         log_index,
         applied_key,
+        ..
     } = pos;
     use nodedb_array::sync::op_codec;
 
@@ -202,6 +204,7 @@ pub(crate) async fn apply_array_op(
             // KV writes resolve one, and no array op is such a write.
             resolved_now_ms: None,
             apply_key: applied_key,
+            commit_hlc,
             op_label: "array op",
         },
     )

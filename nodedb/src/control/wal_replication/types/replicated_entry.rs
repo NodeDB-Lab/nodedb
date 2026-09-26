@@ -42,6 +42,19 @@ pub struct ReplicatedEntry {
     /// upgrade.
     pub idempotency_key: u64,
     pub write: ReplicatedWrite,
+    /// HLC wall time, in nanoseconds, at which the proposer committed to the
+    /// write. Stamped once before the first propose, so a re-proposal keeps
+    /// it. Every replica records it as the write's instant on the tenant's
+    /// observed write high-water, however late it applies. `0` for an entry
+    /// proposed without one; its apply stamps the instant of its own append.
+    pub write_hlc: u64,
+    /// The metadata-group index the proposer had applied when it proposed
+    /// the write. Every replica applies the write only once its own metadata
+    /// apply reached this index, so the write never lands against an older
+    /// catalog than the one it was planned against: a same-name collection's
+    /// pending purge has reclaimed its storage, and the collection the write
+    /// targets is registered. `0` for an entry proposed without one.
+    pub metadata_floor: u64,
 }
 
 impl ReplicatedEntry {
@@ -60,6 +73,8 @@ impl ReplicatedEntry {
             vshard_id,
             idempotency_key,
             write,
+            write_hlc: 0,
+            metadata_floor: 0,
         }
     }
 
@@ -70,7 +85,7 @@ impl ReplicatedEntry {
 
     /// Deserialize from Raft log entry data bytes.
     ///
-    /// Tries the current 5-field shape first. If that fails specifically
+    /// Tries the current 7-field shape first. If that fails specifically
     /// because the encoded array is the pre-`database_id` 4-element shape
     /// (an entry proposed by an old leader still mid-upgrade), falls back to
     /// [`super::legacy_entry::LegacyReplicatedEntry`] and defaults

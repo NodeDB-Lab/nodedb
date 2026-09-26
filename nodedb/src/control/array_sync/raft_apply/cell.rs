@@ -63,10 +63,12 @@ pub(crate) async fn apply_array_cell_write(
     target: ArrayCellTarget,
     plan: PhysicalPlan,
 ) -> bool {
+    let commit_hlc = pos.carried_commit_hlc();
     let AppliedPosition {
         group_id,
         log_index,
         applied_key,
+        ..
     } = pos;
     let ArrayCellTarget {
         tenant_id,
@@ -118,6 +120,7 @@ pub(crate) async fn apply_array_cell_write(
             event_source: crate::event::EventSource::User,
             resolved_now_ms,
             apply_key: applied_key,
+            commit_hlc,
             op_label: "array cell write",
         },
     )

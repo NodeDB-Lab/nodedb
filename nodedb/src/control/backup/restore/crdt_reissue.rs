@@ -27,7 +27,7 @@ const REISSUE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Re-issue one collection's snapshot import to the data group owning its
 /// vshard.
 ///
-/// Branches identically to a normal write (and to `reissue_timeseries_durably`):
+/// Branches identically to a normal write (and to `durable::reissue_plan_durably`):
 /// - Cluster: `to_replicated_entry` + `propose_replicated_entry`.
 /// - Single-node: the autocommit funnel appends the redo and installs it.
 async fn reissue_crdt_collection(

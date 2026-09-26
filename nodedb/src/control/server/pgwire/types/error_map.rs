@@ -136,6 +136,16 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::AuthorizationStateBehind { .. } => {
             ("ERROR", sqlstate::STALE_READ_NOT_LEADER, err.to_string())
         }
+        // Nothing was applied, and a retry succeeds once the group's majority
+        // is reachable again.
+        crate::Error::GroupQuorumUnavailable { .. } => {
+            ("ERROR", sqlstate::LOCK_NOT_AVAILABLE, err.to_string())
+        }
+        // Nothing was restored, and a retry succeeds once a replica of the
+        // group answers.
+        crate::Error::GroupMarksUnavailable { .. } => {
+            ("ERROR", sqlstate::LOCK_NOT_AVAILABLE, err.to_string())
+        }
         crate::Error::ConflictRetry { .. } => {
             ("ERROR", sqlstate::SERIALIZATION_FAILURE, err.to_string())
         }

@@ -22,6 +22,12 @@ const PASSWORD: &str = "sidx-secret-42";
 /// Create a principal that holds no grant on anything: a custom role confers
 /// nothing without an explicit grant.
 async fn create_stranger(server: &TestServer, user: &str) {
+    // The role is defined and granted nothing: a user may hold only a
+    // defined role.
+    server
+        .exec("CREATE ROLE IF NOT EXISTS sidx_nobody")
+        .await
+        .unwrap_or_else(|e| panic!("create role sidx_nobody: {e}"));
     server
         .exec(&format!(
             "CREATE USER {user} PASSWORD '{PASSWORD}' ROLE sidx_nobody"

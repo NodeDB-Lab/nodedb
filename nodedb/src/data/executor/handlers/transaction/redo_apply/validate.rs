@@ -17,9 +17,15 @@
 //! * Stateless PUT / DELETE enforcement — append-only, period lock, state
 //!   transitions, transition checks, retention and legal hold, each against
 //!   the stored pre-image.
+//!
+//! A [`RedoOrigin::Restore`] record re-installs rows a backup captured. Each
+//! row passed BALANCED and the stateless rules when it was first written, and
+//! a bitemporal row's earlier versions are history. So a restore runs UNIQUE
+//! only. UNIQUE judges the post-state: the last write to each row.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use nodedb_physical::physical_plan::RedoOrigin;
 use nodedb_types::Surrogate;
 
 use crate::data::executor::core_loop::CoreLoop;
@@ -44,6 +50,7 @@ impl CoreLoop {
         tid: u64,
         ops: &[RedoDocOp],
         apply_scope: &super::state::RedoApplyScope,
+        origin: RedoOrigin,
     ) -> crate::Result<()> {
         let mut by_collection: BTreeMap<&str, Vec<&RedoDocOp>> = BTreeMap::new();
         for op in ops {
@@ -70,7 +77,9 @@ impl CoreLoop {
                 bitemporal,
                 resolved: &resolved,
             };
-            self.check_collection_ops(&scope, &collection_ops)?;
+            if origin == RedoOrigin::Commit {
+                self.check_collection_ops(&scope, &collection_ops)?;
+            }
             self.check_unique_post_state(&scope, &collection_ops)?;
         }
         Ok(())
@@ -177,17 +186,28 @@ impl CoreLoop {
         // Rows this record rewrites or removes: their stored values do not
         // count, whatever they are.
         let touched: HashSet<u32> = ops.iter().map(|op| op.surrogate()).collect();
+        // The post-state holds each row's last write only. A restored
+        // bitemporal row writes each of its versions in order, and a value an
+        // earlier version held is not in the post-state.
+        let last_write: HashMap<u32, usize> = ops
+            .iter()
+            .enumerate()
+            .map(|(index, op)| (op.surrogate(), index))
+            .collect();
         let doc_engine = DocumentEngine::new(&self.sparse, scope.database_id, scope.tid);
         for path in unique_paths {
             // Needle → the surrogate of the record's own row holding it.
             let mut claimed: HashMap<String, u32> = HashMap::new();
-            for op in ops {
+            for (index, op) in ops.iter().enumerate() {
                 let RedoDocOp::Put {
                     value, surrogate, ..
                 } = op
                 else {
                     continue;
                 };
+                if last_write.get(surrogate) != Some(&index) {
+                    continue;
+                }
                 let Ok(doc) = doc_format::decode_document(value) else {
                     continue;
                 };

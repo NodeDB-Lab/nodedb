@@ -10,6 +10,10 @@ description = "3-node integration test suite for NodeDB. Heavy; runs in its own 
 [lib]
 path = "src/lib.rs"
 
+[features]
+# Arms the in-process fail points the cluster tests park writes at.
+failpoints = ["nodedb/failpoints", "nodedb-types/failpoints"]
+
 [dependencies]
 
 [dev-dependencies]

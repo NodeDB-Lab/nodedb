@@ -37,3 +37,24 @@ pub(super) fn deterministic_crdt_fence_noop(result: &crate::Result<AppliedWrite>
         ))
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::distributed_applier::applied_index::AppliedPrefix;
+
+    #[test]
+    fn fenced_frontier_mismatch_completes_retry_and_advances_durable_prefix() {
+        let result: crate::Result<AppliedWrite> = Err(crate::Error::DataPlane(
+            crate::bridge::envelope::ErrorCode::CrdtFrontierMismatch {
+                expected: [1; 32],
+                actual: [2; 32],
+            },
+        ));
+        assert!(deterministic_crdt_fence_noop(&result));
+
+        let mut prefix = AppliedPrefix::new();
+        prefix.record(17, deterministic_crdt_fence_noop(&result));
+        assert_eq!(prefix.floor(), Some(17));
+    }
+}

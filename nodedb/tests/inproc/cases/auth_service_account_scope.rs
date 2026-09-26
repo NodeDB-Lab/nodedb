@@ -116,30 +116,53 @@ async fn alter_service_account_set_databases_unknown_db_rejected() {
     );
 }
 
-/// set_service_account_databases replaces the accessible_databases list.
+/// `ALTER SERVICE ACCOUNT ... SET DATABASES` replaces the account's database
+/// scope through the replicated user entry: the new database is in scope and
+/// the old one is not.
 #[tokio::test]
 async fn set_service_account_databases_replaces_list() {
-    use nodedb::types::TenantId;
-    let state = make_state();
-
-    state
+    let state = make_state_with_catalog();
+    let su = superuser();
+    ddl_ok(&state, &su, "CREATE DATABASE svc_scope_b").await;
+    let db_b = state
         .credentials
-        .create_service_account(
-            "svc_replace",
-            TenantId::new(1),
-            vec![nodedb::control::security::identity::Role::ReadWrite],
-            vec![DatabaseId::DEFAULT],
-        )
-        .unwrap();
+        .catalog()
+        .get_database_id_by_name("svc_scope_b")
+        .unwrap()
+        .expect("svc_scope_b exists");
+    ddl_ok(
+        &state,
+        &su,
+        "CREATE SERVICE ACCOUNT svc_replace FOR DATABASE default",
+    )
+    .await;
+    let before = state.credentials.get_user("svc_replace").unwrap();
+    assert_eq!(before.accessible_databases, vec![DatabaseId::DEFAULT]);
 
-    let db2 = DatabaseId::new(2);
-    state
-        .credentials
-        .set_service_account_databases("svc_replace", vec![db2])
-        .unwrap();
+    ddl_ok(
+        &state,
+        &su,
+        "ALTER SERVICE ACCOUNT svc_replace SET DATABASES svc_scope_b",
+    )
+    .await;
 
     let user = state.credentials.get_user("svc_replace").unwrap();
-    assert_eq!(user.accessible_databases, vec![db2]);
+    assert_eq!(user.accessible_databases, vec![db_b]);
+    assert!(
+        !user.accessible_databases.contains(&DatabaseId::DEFAULT),
+        "the replaced database must leave the account's scope"
+    );
+    let stored = state
+        .credentials
+        .catalog()
+        .get_user("svc_replace")
+        .unwrap()
+        .expect("the catalog holds the account");
+    assert_eq!(
+        stored.accessible_databases,
+        vec![db_b.as_u64()],
+        "the catalog must hold the replaced scope"
+    );
 }
 
 /// Service account + key inheritance: key picks up service account's databases.

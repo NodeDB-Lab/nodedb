@@ -345,7 +345,10 @@ pub struct SharedState {
     /// Hybrid Logical Clock for metadata descriptor `modification_hlc` stamps.
     pub hlc_clock: Arc<nodedb_types::HlcClock>,
     /// Per-tenant monotonic HLC high-water used by RESTORE for write-order safety.
-    pub tenant_write_hlc: Arc<std::sync::Mutex<std::collections::HashMap<u64, u64>>>,
+    pub tenant_write_hlc: Arc<std::sync::Mutex<super::TenantWriteMarks>>,
+    /// Durable per-group tenant write marks, the replicated form of the
+    /// high-water above that RESTORE's staleness guard reads cluster-wide.
+    pub tenant_marks: super::tenant_marks::TenantMarks,
     /// Serializes descriptor plan admission with local drain-start installation.
     ///
     /// Hold this std mutex while checking drain state and changing lease

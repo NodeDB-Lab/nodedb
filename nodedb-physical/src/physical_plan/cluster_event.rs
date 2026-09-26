@@ -44,6 +44,11 @@ pub enum ClusterEventOp {
         topic_name: String,
         payload: String,
     },
+    /// Read the receiving node's tenant write marks of `group_ids`, once it
+    /// applied every entry the groups committed before the request. RESTORE's
+    /// staleness guard asks a replica of each group this way when the
+    /// restoring node does not replicate the group.
+    TenantWriteMarks { tenant_id: u64, group_ids: Vec<u64> },
 }
 
 #[cfg(test)]

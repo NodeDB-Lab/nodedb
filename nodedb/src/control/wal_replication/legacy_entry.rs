@@ -37,6 +37,8 @@ impl LegacyReplicatedEntry {
             vshard_id: self.vshard_id,
             idempotency_key: self.idempotency_key,
             write: self.write,
+            write_hlc: 0,
+            metadata_floor: 0,
         }
     }
 }

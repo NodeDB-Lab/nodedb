@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! `restore_tenant`: validates a backup envelope, merges all sections into
-//! a single `TenantDataSnapshot`, splits it by current cluster topology, and
-//! dispatches `MetaOp::RestoreTenantSnapshot` to each owning node.
+//! a single `TenantDataSnapshot`, and re-issues every section as durable,
+//! replicated writes.
 
 use std::sync::Arc;
 
@@ -11,16 +11,10 @@ use nodedb_types::backup_envelope::{
 };
 
 use crate::Error;
-use crate::bridge::envelope::PhysicalPlan;
 use crate::control::server::shared::ddl::neutral::collection::dispatch_register_from_stored;
-use crate::control::server::shared::ddl::sync_dispatch;
 use crate::control::state::SharedState;
-use crate::types::TenantId;
-use nodedb_physical::physical_plan::MetaOp;
 
-use super::super::remote::{NODE_RESTORE_TIMEOUT, dispatch_remote};
 use super::super::sections::{apply_metadata_sections, merge_sections};
-use super::super::topology::{SplitOutput, is_self, split_by_current_topology};
 use super::rebind;
 use super::reissue;
 use super::stats::RestoreStats;
@@ -51,14 +45,27 @@ pub async fn restore_tenant(
         .into());
     }
 
-    if !dry_run && env.meta.snapshot_watermark != 0 {
-        let current_high_water = state.tenant_write_hlc(tenant_id);
+    // Every group the restore reads or writes has a reachable majority, or
+    // the restore fails here, before it proposes anything.
+    if !dry_run {
+        super::super::quorum::require_quorum(state)?;
+    }
+
+    let newest = if !dry_run && env.meta.snapshot_watermark != 0 {
+        super::super::guard::newest_committed_write(state, tenant_id).await?
+    } else {
+        None
+    };
+    if let Some(mark) = newest {
+        let current_high_water = mark.hlc;
         if env.meta.snapshot_watermark < current_high_water {
             if force {
                 tracing::warn!(
                     tenant_id,
                     envelope_watermark = env.meta.snapshot_watermark,
                     current_high_water,
+                    newest_write_site = mark.site.as_str(),
+                    newest_write_collection = mark.collection.as_deref().unwrap_or(""),
                     "restore staleness protection explicitly overridden via FORCE: \
                      envelope watermark is older than the destination cluster's last \
                      observed write-HLC for this tenant — newer writes will be overwritten"
@@ -68,8 +75,13 @@ pub async fn restore_tenant(
                     detail: format!(
                         "restore refused: envelope watermark {} is older than the \
                          destination cluster's last observed write-HLC {} for tenant \
-                         {} — newer writes would be silently overwritten",
-                        env.meta.snapshot_watermark, current_high_water, tenant_id
+                         {} (newest write: {} on collection '{}') — newer writes would \
+                         be silently overwritten",
+                        env.meta.snapshot_watermark,
+                        current_high_water,
+                        tenant_id,
+                        mark.site,
+                        mark.collection.as_deref().unwrap_or("<none>"),
                     ),
                 });
             }
@@ -109,8 +121,8 @@ pub async fn restore_tenant(
     }
 
     let mut merged = merge_sections(&env.sections)?;
-    stats.documents = merged.documents.len();
-    stats.indexes = merged.indexes.len();
+    stats.documents = merged.documents.len() + merged.documents_versioned.len();
+    stats.indexes = merged.indexes.len() + merged.indexes_versioned.len();
     stats.edges = merged.edges.len();
     stats.vectors = merged.vectors.len();
     stats.kv_tables = merged.kv_tables.len();
@@ -127,136 +139,50 @@ pub async fn restore_tenant(
         return Ok(stats);
     }
 
-    // Plain-columnar engine state is NOT installed via the snapshot path (that
-    // lands in in-memory-only Data Plane maps — lost on restart, never
-    // replicated). Drain it here and re-issue durably below as
-    // `ColumnarOp::Insert`s. The topology split must therefore never see
-    // columnar engines.
+    // Every section re-issues as durable writes: Raft-replicated to every
+    // replica of its group in cluster mode, WAL-appended then installed on a
+    // single node. None is installed straight into a Data-Plane map, which
+    // would hold it on one node only and lose it on restart.
     let columnar_snapshots = std::mem::take(&mut merged.columnar_engines);
-
-    // Timeseries engine state (memtable section + flushed on-disk segments) is
-    // likewise NOT installed via the snapshot path — `restore_timeseries` and
-    // `restore_flushed_ts_segments` do a per-node DIRECT install that is never
-    // Raft-replicated, so on a multi-replica cluster the data lands on only one
-    // node. Drain both sections here and re-issue durably below as
-    // `TimeseriesOp::Ingest`s (Raft-replicated in cluster mode; WAL-appended
-    // then installed in single-node mode). The topology split must therefore
-    // never see timeseries data — otherwise it would be double-installed.
     let timeseries_memtables = std::mem::take(&mut merged.timeseries);
     let flushed_ts_segments = std::mem::take(&mut merged.flushed_ts_segments);
-
-    // CRDT state is NOT installed via the per-node snapshot fan-out: that
-    // dispatch is race-prone (skips data groups with no leader yet) and not
-    // durable across restart. Drain the per-collection CRDT section here and
-    // re-issue durably below as `CrdtOp::ImportSnapshot` (Raft-replicated in
-    // cluster mode; WAL-appended then installed in single-node mode). The
-    // topology split must therefore never see CRDT state — otherwise the
-    // coordinator would double-import.
     let crdt_state = std::mem::take(&mut merged.crdt_state);
-
-    // Vector engine state is likewise NOT installed via the snapshot path —
-    // `restore_vector_collection` installs straight into the in-memory-only
-    // `vector_collections` Data Plane map with no WAL record and no Raft
-    // entry, so it is lost on restart (single-node) and never replicated
-    // (cluster). Drain it here and re-issue durably below, one
-    // `VectorOp::Insert` per restored vector (Raft-replicated in cluster
-    // mode; WAL-appended then installed in single-node mode). The topology
-    // split must therefore never see vector data — otherwise it would be
-    // double-installed.
+    let kv_tables = std::mem::take(&mut merged.kv_tables);
     let vector_snapshots = std::mem::take(&mut merged.vectors);
-
-    // Vector-index HNSW/PQ/IVF configuration (metric, M, ef_construction,
-    // quantization/index_type) is captured at backup alongside the raw
-    // vectors above (see `TenantDataSnapshot::vector_params` /
-    // `::index_configs` doc comments) but is likewise NOT installed via the
-    // snapshot path. Drain both here and re-issue durably below as
-    // `VectorOp::SetParams` — BEFORE the vector `Insert` re-issue, since
-    // `get_or_create_vector_index` lazily creates the Data Plane HNSW index
-    // from `self.vector_params` on the first `Insert` it sees for a
-    // (collection, field), defaulting silently if no `SetParams` landed
-    // first. The topology split must therefore never see these sections.
+    // Vector-index config re-issues as `VectorOp::SetParams` before the first
+    // vector `Insert`: the Data Plane creates a (collection, field) HNSW index
+    // on its first `Insert`, from whatever params it holds by then.
     let vector_params_snapshots = std::mem::take(&mut merged.vector_params);
     let index_config_snapshots = std::mem::take(&mut merged.index_configs);
 
-    // Drain the PK→surrogate identity map before the topology split (the split
-    // only routes per-key engine data). It is rebound into the destination
-    // catalog after the data install dispatches succeed — without it restored
-    // documents are unreachable by PK point-lookup (`WHERE id=<pk>`).
+    // The PK→surrogate identity map. It is bound on this node before any
+    // re-issue, so a re-issued row keeps the surrogate the backup stored it
+    // under unless this node already binds its key.
     let surrogate_binds = std::mem::take(&mut merged.surrogate_pk);
+    rebind::rebind_surrogates(state, &surrogate_binds)?;
 
-    let SplitOutput {
-        buckets,
-        malformed_keys,
-        route_fallbacks,
-    } = split_by_current_topology(state, tenant_id, merged);
-    stats.nodes_dispatched = buckets.len();
-    stats.malformed_keys = malformed_keys;
-    stats.route_fallbacks = route_fallbacks;
-    if malformed_keys > 0 {
-        tracing::warn!(
-            tenant_id,
-            count = malformed_keys,
-            "restore: snapshot contained keys that did not parse — possible corruption"
-        );
-    }
-    if route_fallbacks > 0 {
-        tracing::warn!(
-            tenant_id,
-            count = route_fallbacks,
-            "restore: routed some entries to local node because no current leader was visible"
-        );
-    }
-
-    let mut local_plan: Option<PhysicalPlan> = None;
-    let mut remote_futs = Vec::with_capacity(buckets.len());
-    for (node_id, sub) in buckets {
-        let payload = zerompk::to_msgpack_vec(&sub).map_err(|e| Error::Internal {
-            detail: format!("restore: snapshot encode failed: {e}"),
-        })?;
-        let plan = PhysicalPlan::Meta(MetaOp::RestoreTenantSnapshot {
-            tenant_id,
-            snapshot: payload,
-            // User RESTORE keeps the fail-closed collision behavior.
-            replace_mode: false,
-            clear_vshards: Vec::new(),
-            collections_to_clear: Vec::new(),
-        });
-        if is_self(state, node_id) {
-            local_plan = Some(plan);
-        } else {
-            let state = state.clone();
-            remote_futs
-                .push(async move { dispatch_remote(&state, node_id, tenant_id, plan).await });
-        }
-    }
-    if let Some(plan) = local_plan {
-        sync_dispatch::dispatch_system(
-            state,
-            sync_dispatch::SystemTask::new(
-                sync_dispatch::SystemReason::BackupRestore,
-                TenantId::new(tenant_id),
-                // TODO(A8-followup): backup/restore not yet multi-database.
-                crate::types::DatabaseId::DEFAULT,
-                "__system",
-                plan,
-            ),
-            NODE_RESTORE_TIMEOUT,
-        )
-        .await?;
-    }
-    let results = futures::future::join_all(remote_futs).await;
-    if let Some(first_err) = results.into_iter().find_map(Result::err) {
-        return Err(first_err);
-    }
-
-    // Rebind the PK→surrogate identity map into the destination catalog now
-    // that the data is installed. The catalog is the SOURCE OF TRUTH the
-    // planner consults for PK point-lookups (`surrogate_assigner.lookup(pk)`);
-    // a missing binding makes a restored row unreachable by PK even though it
-    // is present in the doc store. A rebind failure is FATAL — silently
-    // shipping unqueryable rows is the partial-success anti-pattern this
-    // codebase forbids.
-    rebind::rebind_surrogates(state, surrogate_binds)?;
+    // Document rows, their versions and graph edges re-issue as committed
+    // redo records through each collection's apply log: every replica binds
+    // the rows' identities, appends the record to its WAL, installs the rows
+    // and derives their secondary index entries. The backup's own index
+    // entries are therefore not installed.
+    let documents = std::mem::take(&mut merged.documents);
+    let documents_versioned = std::mem::take(&mut merged.documents_versioned);
+    let edges = std::mem::take(&mut merged.edges);
+    let redo = super::super::redo_reissue::reissue_rows_and_edges(
+        state,
+        tenant_id,
+        super::super::redo_reissue::RestoredRows {
+            documents,
+            documents_versioned,
+            edges,
+            binds: &surrogate_binds,
+        },
+    )
+    .await?;
+    stats.documents_reissued = redo.documents;
+    stats.edges_reissued = redo.edges;
+    stats.redo_records = redo.records;
 
     // Durable re-issue of plain-columnar rows. Each restored collection's live
     // rows are decoded from the snapshot and replayed as a durable
@@ -288,6 +214,11 @@ pub async fn restore_tenant(
     // warn-and-continue.
     stats.crdt_reissued =
         super::super::crdt_reissue::reissue_crdt_snapshots(state, crdt_state).await?;
+
+    // Durable re-issue of KV rows, one `KvOp::Put` per live row. Any failure
+    // is fatal — no warn-and-continue.
+    stats.kv_reissued =
+        super::super::kv_reissue::reissue_kv_tables(state, tenant_id, kv_tables).await?;
 
     // Durable re-issue of vector-index configuration. Each restored
     // (collection, field) HNSW/PQ/IVF config is replayed as a

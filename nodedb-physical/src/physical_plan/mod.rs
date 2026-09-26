@@ -20,6 +20,7 @@ pub mod meta;
 pub mod meta_calvin;
 pub mod plan;
 pub mod query;
+pub mod redo_origin;
 pub mod rls_write_check_accessor;
 pub mod routing;
 pub mod set_op;
@@ -54,6 +55,7 @@ pub use kv::{
 pub use meta::{MetaOp, SAVEPOINT_MARKER_BYTES};
 pub use plan::PhysicalPlan;
 pub use query::{AggregateSpec, GroupKeySpec, JoinProjection, QueryOp};
+pub use redo_origin::RedoOrigin;
 pub use routing::plan_contains_cluster_partitioned_leaf;
 pub use set_op::SetOpKind;
 pub use sort_key::SortKeySpec;

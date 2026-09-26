@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Public dispatch entry points, and the write-HLC bookkeeping wrapper around
-//! them.
+//! Public dispatch entry points.
+//!
+//! A write records its commit HLC on the tenant's observed high-water where it
+//! commits: the write funnel for a local append, the Raft proposer and each
+//! replica's apply for a replicated entry.
 
 use std::sync::Arc;
 
@@ -27,7 +30,7 @@ impl NodeDbPgHandler {
     ) -> crate::Result<Response> {
         let mut shard_watermarks = Vec::new();
         let mut distributed_reads = Vec::new();
-        self.dispatch_task_hlc(
+        self.dispatch_task_inner(
             task,
             user_id,
             identity,
@@ -49,7 +52,7 @@ impl NodeDbPgHandler {
         let mut shard_watermarks = Vec::new();
         let mut distributed_reads = Vec::new();
         let resp = self
-            .dispatch_task_hlc(
+            .dispatch_task_inner(
                 task,
                 user_id,
                 identity,
@@ -58,27 +61,5 @@ impl NodeDbPgHandler {
             )
             .await?;
         Ok((resp, shard_watermarks, distributed_reads))
-    }
-
-    async fn dispatch_task_hlc(
-        &self,
-        task: PhysicalTask,
-        user_id: Option<Arc<str>>,
-        identity: &AuthenticatedIdentity,
-        shard_watermarks: &mut Vec<(VShardId, Lsn)>,
-        distributed_reads: &mut Vec<DistributedReadCapture>,
-    ) -> crate::Result<Response> {
-        let tenant_id = task.tenant_id;
-        let result = self
-            .dispatch_task_inner(task, user_id, identity, shard_watermarks, distributed_reads)
-            .await;
-        // Advances per-tenant write-HLC on any successful dispatch; used by RESTORE's
-        // staleness gate. Backup captures its watermark after fan-out, so it dominates.
-        if let Ok(ref resp) = result
-            && resp.status == crate::bridge::envelope::Status::Ok
-        {
-            self.state.advance_tenant_write_hlc(tenant_id.as_u64());
-        }
-        result
     }
 }

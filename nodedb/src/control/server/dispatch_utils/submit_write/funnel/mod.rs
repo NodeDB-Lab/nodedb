@@ -31,11 +31,14 @@
 //!   Plane.
 //! - [`response`]: collecting the response, classifying the outcome, and the
 //!   post-apply steps a successful write still owes.
+//! - [`pending`]: the write between its enqueue and its response phase.
 
 mod admission;
 mod dispatch;
 mod driver;
+mod pending;
 mod response;
 mod wal_append;
 
-pub(crate) use driver::submit_write;
+pub(crate) use driver::enqueue_write;
+pub(crate) use pending::{PendingWrite, submit_write};

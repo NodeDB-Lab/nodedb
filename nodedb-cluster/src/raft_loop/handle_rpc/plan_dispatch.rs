@@ -88,10 +88,7 @@ fn propose_forwarded(mr: &mut MultiRaft, req: DataProposeRequest) -> DataPropose
     };
     match proposed {
         Ok((group_id, log_index)) => DataProposeResponse::ok(group_id, log_index),
-        Err(ClusterError::Raft(nodedb_raft::RaftError::NotLeader { leader_hint })) => {
-            DataProposeResponse::err("not leader", leader_hint)
-        }
-        Err(e) => DataProposeResponse::err(e.to_string(), None),
+        Err(error) => DataProposeResponse::refused(&error),
     }
 }
 

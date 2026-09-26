@@ -45,6 +45,7 @@ pub(crate) fn apply_array_schema(
         group_id,
         log_index,
         applied_key,
+        ..
     } = pos;
     use nodedb_array::sync::hlc::Hlc;
 

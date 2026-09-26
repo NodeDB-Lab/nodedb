@@ -29,18 +29,28 @@ pub async fn run_renew_loop(
 ) {
     let mut confirmed: Vec<GroupCoverage> = Vec::new();
     loop {
-        match confirmed_coverage(&state, &confirmed, timing.renew_every).await {
-            Ok(coverage) => {
-                confirmed = coverage;
-                renew_once(&state, timing, &confirmed).await;
-            }
-            Err(error) => {
-                tracing::warn!(%error, "authorization lease: coverage could not be computed");
-            }
+        // Shutdown ends a renewal in flight too: a coverage read or a renew
+        // RPC holds the node's state until it returns.
+        tokio::select! {
+            _ = renew_round(&state, timing, &mut confirmed) => {}
+            _ = shutdown.wait_cancelled() => return,
         }
         tokio::select! {
             _ = tokio::time::sleep(timing.renew_every) => {}
             _ = shutdown.wait_cancelled() => return,
+        }
+    }
+}
+
+/// Compute this node's confirmed coverage and renew the lease with it.
+async fn renew_round(state: &SharedState, timing: LeaseTiming, confirmed: &mut Vec<GroupCoverage>) {
+    match confirmed_coverage(state, confirmed, timing.renew_every).await {
+        Ok(coverage) => {
+            *confirmed = coverage;
+            renew_once(state, timing, confirmed).await;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "authorization lease: coverage could not be computed");
         }
     }
 }

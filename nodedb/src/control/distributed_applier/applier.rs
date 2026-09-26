@@ -129,69 +129,37 @@ impl CommitApplier for DistributedApplier {
         }
         let fresh_last = fresh.last().map(|e| e.index).unwrap_or(last_index);
 
-        // Empty entries are Raft leader-transition no-ops, not user
-        // proposals. A waiter registered at (group_id, idx) was
-        // proposed by a previous leader at index `idx`; when that
-        // leader stepped down before the entry committed, the new
-        // leader's election no-op commits at the same index and
-        // overwrites it. The proposer's data is GONE — silently
-        // firing `tracker.complete(Ok([]))` here would tell the
-        // proposer their INSERT succeeded when in fact it was
-        // truncated, producing the classic "simple_query returned
-        // Ok but the row never appears" silent data-loss bug.
-        //
-        // Surface the truncation as an explicit error so the gateway
-        // / caller can retry. Idempotent re-propose is safe because
-        // the encoded payload carries enough identity (collection,
-        // PK, surrogate) for the apply path to be replayable.
-        for entry in &fresh {
-            if entry.data.is_empty() {
-                tracing::error!(
-                    group_id,
-                    log_index = entry.index,
-                    "leader-change no-op committed at index where a proposer was waiting; \
-                     surfacing RetryableLeaderChange so the gateway re-proposes"
-                );
-                // applied_key = 0 (no entry payload to derive a key
-                // from). The slot fires the explicit
-                // `RetryableLeaderChange` carried in `result`.
-                self.tracker.complete(
-                    group_id,
-                    entry.index,
-                    0,
-                    Err(crate::Error::RetryableLeaderChange {
-                        group_id,
-                        log_index: entry.index,
-                    }),
-                );
-            }
+        // Empty entries are Raft leader-transition no-ops. They go to the apply
+        // loop with the rest of the batch: the loop resolves a waiter at a
+        // no-op's index with `RetryableLeaderChange`, and moves the applied
+        // watermark past the no-op only once every entry before it finished.
+        let batch: Vec<LogEntry> = fresh.iter().map(|e| (*e).clone()).collect();
+        let first_index = batch.first().map(|e| e.index).unwrap_or(fresh_last);
+        let count = batch.len();
+
+        // A group whose window is full waits: Raft delivers the batch again on
+        // a later tick. Every other group keeps its own window.
+        if !self.tracker.window().try_admit(group_id, count) {
+            debug!(
+                group_id,
+                outstanding = self.tracker.window().outstanding(group_id),
+                "apply window full, entries will be retried on next tick"
+            );
+            self.release_claim(group_id, fresh_last, first_index.saturating_sub(1));
+            return 0;
         }
-
-        let real_entries: Vec<LogEntry> = fresh
-            .iter()
-            .filter(|e| !e.data.is_empty())
-            .map(|e| (*e).clone())
-            .collect();
-
-        let Some(first_real_index) = real_entries.first().map(|e| e.index) else {
-            // Nothing but no-ops, and they are now fully handled. The claim
-            // already covers them.
-            return last_index;
-        };
 
         // Push to background task. If the channel is full, log a warning
         // but don't block the tick loop.
         if let Err(e) = self.apply_tx.try_send(ApplyBatch {
             group_id,
-            entries: real_entries,
+            entries: batch,
         }) {
             warn!(group_id, error = %e, "apply queue full, entries will be retried on next tick");
-            // Release the part of the claim that was never handed off. The
-            // watermark may only cover the no-ops strictly BELOW the first
-            // rejected entry — those were completed above and must not fire a
-            // second time. Everything from `first_real_index` up is re-collected
-            // on the next tick.
-            self.release_claim(group_id, fresh_last, first_real_index.saturating_sub(1));
+            self.tracker.window().release(group_id, count);
+            // Release the claim: every entry of the batch is re-collected on
+            // the next tick.
+            self.release_claim(group_id, fresh_last, first_index.saturating_sub(1));
             // Don't advance applied index — entries will be re-delivered.
             return 0;
         }
@@ -270,24 +238,18 @@ mod tests {
     }
 
     #[test]
-    fn redelivered_leader_change_noop_does_not_resolve_a_waiter_twice() {
-        let tracker = Arc::new(ProposeTracker::new());
-        let (applier, _rx) = create_distributed_applier(tracker.clone());
+    fn a_leader_change_noop_is_handed_off_once() {
+        let (applier, mut rx) = create_distributed_applier(Arc::new(ProposeTracker::new()));
         let noop = vec![entry(1, b"")];
 
-        let mut waiter = tracker.register(7, 1, 0);
         applier.apply_committed(7, &noop);
-        assert!(matches!(
-            waiter.try_recv(),
-            Ok(Err(crate::Error::RetryableLeaderChange { .. }))
-        ));
+        let batch = rx.try_recv().expect("the no-op reaches the apply loop");
+        assert!(batch.entries[0].data.is_empty());
 
         applier.apply_committed(7, &noop);
-        let mut probe = tracker.register(7, 1, 0);
         assert!(
-            probe.try_recv().is_err(),
-            "a second completion would park an orphan result on an index whose \
-             waiter is already gone"
+            rx.try_recv().is_err(),
+            "a second hand-off would resolve the no-op's waiter twice"
         );
     }
 
@@ -312,33 +274,51 @@ mod tests {
     }
 
     #[test]
-    fn noops_below_a_rejected_entry_are_not_completed_twice() {
-        let tracker = Arc::new(ProposeTracker::new());
+    fn a_rejected_batch_is_handed_off_whole_with_its_noops_on_retry() {
         let (tx, mut rx) = mpsc::channel(1);
-        let applier = DistributedApplier::new(tx, tracker.clone());
+        let applier = DistributedApplier::new(tx, Arc::new(ProposeTracker::new()));
         let entries = vec![entry(2, b""), entry(3, b"x")];
 
         applier.apply_committed(7, &[entry(1, b"a")]);
-        let mut waiter = tracker.register(7, 2, 0);
         assert_eq!(applier.apply_committed(7, &entries), 0);
-        assert!(matches!(
-            waiter.try_recv(),
-            Ok(Err(crate::Error::RetryableLeaderChange { .. }))
-        ));
 
         rx.try_recv().expect("first batch queued");
         assert_eq!(applier.apply_committed(7, &entries), 3);
+        let batch = rx
+            .try_recv()
+            .expect("the rejected entries must be re-accepted");
+        let indexes: Vec<u64> = batch.entries.iter().map(|e| e.index).collect();
+        assert_eq!(indexes, vec![2, 3]);
+    }
 
-        let mut probe = tracker.register(7, 2, 0);
-        assert!(
-            probe.try_recv().is_err(),
-            "the no-op below the rejected entry was already handled"
+    /// A group past its apply window waits for Raft to deliver it again. A
+    /// different group still hands its entries off.
+    #[test]
+    fn a_group_past_its_window_waits_while_another_group_hands_off() {
+        let tracker = Arc::new(ProposeTracker::new());
+        let (applier, mut rx) = create_distributed_applier(Arc::clone(&tracker));
+        let limit = crate::control::distributed_applier::APPLY_WINDOW_PER_GROUP as u64;
+        let full: Vec<LogEntry> = (1..=limit).map(|i| entry(i, b"w")).collect();
+
+        assert_eq!(applier.apply_committed(7, &full), limit);
+        rx.try_recv().expect("group 7 fills its window");
+        assert_eq!(
+            applier.apply_committed(7, &[entry(limit + 1, b"w")]),
+            0,
+            "a full window must not advance raft's applied index"
+        );
+        assert_eq!(applier.apply_committed(8, &[entry(1, b"w")]), 1);
+        assert_eq!(rx.try_recv().expect("group 8 hands off").group_id, 8);
+
+        tracker.window().release(7, 1);
+        assert_eq!(
+            applier.apply_committed(7, &[entry(limit + 1, b"w")]),
+            limit + 1
         );
         let batch = rx
             .try_recv()
-            .expect("the rejected entry must be re-accepted");
-        let indexes: Vec<u64> = batch.entries.iter().map(|e| e.index).collect();
-        assert_eq!(indexes, vec![3]);
+            .expect("group 7 hands off once a slot settles");
+        assert_eq!(batch.entries[0].index, limit + 1);
     }
 
     /// Two concurrent deliveries of one group must not both claim the same

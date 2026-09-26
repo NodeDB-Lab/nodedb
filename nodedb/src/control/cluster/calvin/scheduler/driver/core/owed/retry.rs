@@ -231,7 +231,9 @@ mod tests {
         scheduler.sequencer_proposer = proposer.clone();
         scheduler.registry.seed_expected(cluster_txn_id(txn_id), 2);
 
-        scheduler.finish_resolved_commit(txn_id, staged_response(Status::Ok, None), false, None);
+        scheduler
+            .finish_resolved_commit(txn_id, staged_response(Status::Ok, None), false, None)
+            .await;
         assert!(!scheduler.pending.contains_key(&txn_id));
         assert_eq!(proposer.attempt_count(), 1, "the first proposal is refused");
 

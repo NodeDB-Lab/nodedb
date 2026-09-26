@@ -133,6 +133,12 @@ pub enum SequencerEntry {
         position: u32,
         reason: AbortReason,
     },
+    /// A backup's consistent-cut marker, carrying the backup's watermark
+    /// `hlc`. Every replica fans it out to each of its vShard schedulers in
+    /// log order. A scheduler reports the marker once every transaction
+    /// delivered to it before the marker finished, and gives every
+    /// transaction delivered after it a commit HLC above `hlc`.
+    CutMarker { hlc: u64 },
 }
 
 #[cfg(test)]

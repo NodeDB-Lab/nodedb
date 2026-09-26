@@ -27,9 +27,11 @@
 //!
 //! Struct definition in [`types`]; thin `spawn*` convenience wrappers in
 //! [`spawn_variants`]; the full spawn body in [`spawn_full`]; query
-//! execution + shutdown + `Drop` teardown in [`teardown`].
+//! execution + shutdown + `Drop` teardown in [`teardown`]; the in-place
+//! restart in [`restart`].
 
 mod client_slot;
+mod restart;
 mod spawn_full;
 mod spawn_variants;
 mod teardown;

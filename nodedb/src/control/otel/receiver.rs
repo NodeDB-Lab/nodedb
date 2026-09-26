@@ -428,7 +428,7 @@ pub(super) async fn authenticate_otel(
         crate::control::security::jwt_policy::enforce_stateful_jwt_policy(
             shared,
             verified.claims(),
-            identity.tenant_id,
+            &identity,
         )
         .map_err(|_| "invalid bearer token".to_owned())?;
         return admit_transport(shared, identity, peer_addr);

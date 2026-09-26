@@ -5,13 +5,15 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, AtomicU64};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::control::cluster::calvin::scheduler::SequencerProposer;
 use crate::control::cluster::calvin::scheduler::lock::HotKeyTable;
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
 
 use super::calvin_apply::CalvinApplyResult;
 use super::calvin_counters::CalvinCounters;
+use super::calvin_cuts::CalvinCuts;
 
 /// Per-vShard promotion senders, keyed by vShard id.
 pub type PromotionSenders = BTreeMap<u32, tokio::sync::mpsc::UnboundedSender<Vec<TxnId>>>;
@@ -67,6 +69,11 @@ pub struct CalvinLocalState {
     /// with [`TxnId::AUTOCOMMIT_EPOCH`] to mint holder identities that never
     /// collide with a real Calvin `(epoch, position)` schedule position.
     pub autocommit_lock_seq: AtomicU32,
+    /// The backup cut markers each local scheduler passed.
+    pub cuts: CalvinCuts,
+    /// Hands this node's sequencer entries to the sequencer Raft group. Set
+    /// once the schedulers start; unset on a node that runs none.
+    pub sequencer_proposer: OnceLock<Arc<dyn SequencerProposer>>,
 }
 
 impl CalvinLocalState {
@@ -85,6 +92,8 @@ impl CalvinLocalState {
             hot_key_table: Arc::new(Mutex::new(HotKeyTable::new())),
             promotion_senders: Arc::new(Mutex::new(BTreeMap::new())),
             autocommit_lock_seq: AtomicU32::new(0),
+            cuts: CalvinCuts::default(),
+            sequencer_proposer: OnceLock::new(),
         }
     }
 }

@@ -56,6 +56,7 @@ impl SequencerStateMachine {
     ///   computed identically to the live [`SequencerStateMachine::apply`] path.
     /// * `ReserveRead`  targeting `vshard_id` → [`SchedulerInput::Reserve`].
     /// * `ReleaseReservation` targeting `vshard_id` → [`SchedulerInput::Release`].
+    /// * `CutMarker` → [`SchedulerInput::CutMarker`], for every vShard.
     /// * All other variants carry no per-vShard scheduler input.
     ///
     /// Entries are emitted in Raft-log order (and, within an epoch batch, in
@@ -79,6 +80,11 @@ impl SequencerStateMachine {
         for entry in entries {
             if entry.data.is_empty() {
                 // No-op entry (newly elected leader heartbeat).
+                continue;
+            }
+            if crate::conf_change::ConfChange::is_conf_change(&entry.data) {
+                // A membership change of the sequencer group, applied by the
+                // Raft layer; it carries no sequencer input.
                 continue;
             }
             let seq_entry: SequencerEntry = match zerompk::from_msgpack(&entry.data) {
@@ -139,6 +145,11 @@ impl SequencerStateMachine {
                     reason,
                 } if vshard == vshard_id => {
                     result.push(SchedulerInput::Release { owner, reason });
+                }
+                // A cut marker reaches every vShard, exactly as the live
+                // `CutMarker` arm fans it out.
+                SequencerEntry::CutMarker { hlc } => {
+                    result.push(SchedulerInput::CutMarker { hlc });
                 }
                 // Reservation entries for a different vShard carry nothing for us.
                 SequencerEntry::ReserveRead { .. } => {}

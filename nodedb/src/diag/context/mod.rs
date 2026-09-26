@@ -12,6 +12,7 @@ mod data_plane;
 mod ingest;
 mod outcome_floor;
 mod quota;
+mod raft_apply;
 mod recovery;
 mod retention;
 mod vector;
@@ -34,6 +35,7 @@ pub(in crate::diag) use quota::{
     QuotaRowNotInstalled, QuotaRowWriteFailed, QuotaScopePurgeIncomplete, QuotaScopeReplayAborted,
     ScopeQuotaNotInstalled,
 };
+pub(in crate::diag) use raft_apply::{RaftEntryReapplied, ReplicatedWriteParked};
 pub(in crate::diag) use recovery::{ReplayRecordUnapplied, WalArchivalFailedTruncationHeld};
 pub(in crate::diag) use retention::RetentionAutowireOrphaned;
 pub(in crate::diag) use vector::VectorIndexNotApplied;

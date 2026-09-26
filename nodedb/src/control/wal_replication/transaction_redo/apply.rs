@@ -9,7 +9,8 @@
 //! it to the owning core, and the fsync completes before the result returns.
 
 use crate::control::server::dispatch_utils::{
-    ChangeFeedOwner, SubmitOutcome, SubmitWrite, WalDurability, WriteOrdering, submit_write,
+    ChangeFeedOwner, PendingWrite, SubmitOutcome, SubmitWrite, WalDurability, WriteOrdering,
+    enqueue_write,
 };
 use crate::control::state::SharedState;
 use crate::control::surrogate::bind_carried_identities;
@@ -28,15 +29,32 @@ pub struct RedoTarget {
 /// Bind the redo's identities, then append and apply it on this node.
 ///
 /// `apply_key` is the idempotency key of the Raft entry the redo comes from,
-/// `0` on a node with no Raft. The redo record's header carries it. The
-/// outcome carries the Data Plane's response verbatim, including an error
-/// status.
+/// `0` on a node with no Raft. The redo record's header carries it.
+/// `commit_hlc` is the entry's commit stamp, `None` on a node with no Raft,
+/// where the append here is the commit. The outcome carries the Data Plane's
+/// response verbatim, including an error status.
 pub(crate) async fn apply_transaction_redo(
     state: &SharedState,
     target: RedoTarget,
     payload: &TransactionRedoPayload,
     apply_key: u64,
+    commit_hlc: Option<u64>,
 ) -> crate::Result<SubmitOutcome> {
+    enqueue_transaction_redo(state, target, payload, apply_key, commit_hlc)
+        .await?
+        .finish(state)
+        .await
+}
+
+/// Bind the redo's identities, then append it and enqueue it on its core.
+/// [`PendingWrite::finish`] collects the outcome.
+pub(crate) async fn enqueue_transaction_redo(
+    state: &SharedState,
+    target: RedoTarget,
+    payload: &TransactionRedoPayload,
+    apply_key: u64,
+    commit_hlc: Option<u64>,
+) -> crate::Result<PendingWrite> {
     bind_carried_identities(
         &state.surrogate_assigner,
         target.database_id,
@@ -44,7 +62,7 @@ pub(crate) async fn apply_transaction_redo(
         &payload.identities,
     )?;
     let plan = payload.apply_plan()?;
-    submit_write(
+    enqueue_write(
         state,
         SubmitWrite {
             tenant_id: target.tenant_id,
@@ -60,6 +78,7 @@ pub(crate) async fn apply_transaction_redo(
             durability: WalDurability::AppendHere {
                 now_override: None,
                 apply_key,
+                commit_hlc,
             },
             // Raft fixed the order; a node with no Raft already validated the
             // commit and holds no gate for it.

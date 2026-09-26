@@ -213,6 +213,7 @@ fn single_node_submit(
         durability: WalDurability::AppendHere {
             now_override: None,
             apply_key: 0,
+            commit_hlc: None,
         },
         ordering: WriteOrdering::Gate,
         change_feed: ChangeFeedOwner::Funnel,

@@ -136,6 +136,20 @@ impl TestClusterNode {
             }
         }
 
+        // Close the QUIC endpoint. Its driver owns the UDP socket and runs
+        // until every connection is gone, and a live peer keeps its
+        // connection open until the idle timeout. Without the close, a
+        // restart on the same address finds the port still bound.
+        if let Some(transport) = self.shared.cluster_transport.clone()
+            && !transport.close(Duration::from_secs(2)).await
+        {
+            eprintln!(
+                "graceful_shutdown_wal_only: node {} peers did not acknowledge the transport \
+                 close within 2s",
+                self.node_id
+            );
+        }
+
         // `start_raft` fans out to background tasks (raft apply loop, tick
         // loop, sequencer service, RPC server, health monitor, per-vShard
         // Calvin schedulers, reconcile loop) that each hold an

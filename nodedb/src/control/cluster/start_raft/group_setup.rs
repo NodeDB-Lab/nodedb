@@ -92,11 +92,10 @@ pub(super) fn build_group_setup(
 
     // Build the propose tracker and distributed applier.
     //
-    // The tracker is wired with the per-group apply watermark
-    // registry so every `tracker.complete(group_id, idx, _)` call
-    // also bumps the watcher — coupling the "data applied on this
-    // node" signal to the single source of truth that proposers
-    // and cross-node visibility waits both consume.
+    // The tracker is wired with the per-group apply watermark registry. The
+    // apply loop bumps it through the tracker once every entry of a group up
+    // to an index finished, so proposers and cross-node visibility waits read
+    // one in-order "data applied on this node" signal.
     let tracker =
         Arc::new(ProposeTracker::new().with_group_watchers(handle.group_watchers.clone()));
     let (dist_applier, apply_rx) = create_distributed_applier(tracker.clone());

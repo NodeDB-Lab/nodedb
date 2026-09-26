@@ -16,9 +16,8 @@
 //! - **collection-name-only** — the key IS the bare collection name (kv tables).
 //!   Routed directly; no extractor needed.
 //!
-//! Both the RESTORE topology splitter and the Raft snapshot SEND builder filter
-//! sections by which vshard each entry's collection routes to, so the parsing
-//! lives here once and is shared by both — never duplicated ad-hoc.
+//! The Raft snapshot SEND builder filters sections by which vshard each
+//! entry's collection routes to, so the parsing lives here once.
 //!
 //! The backup orchestrator additionally needs to filter a fully-gathered,
 //! single-tenant [`TenantDataSnapshot`] *in place* to a set of source vshards
@@ -85,8 +84,9 @@ pub fn extract_db_scoped_collection(key: &str, tenant_id: u64) -> Option<&str> {
 /// SEND builder. Every section kind the snapshot carries is classified here so
 /// adding a section without updating this filter is impossible to miss:
 ///
-/// - db-tenant-scoped keys (`documents`, `indexes`, `vectors`, `timeseries`)
-///   via [`extract_db_tenant_scoped_collection`].
+/// - db-tenant-scoped keys (`documents`, `indexes`, `documents_versioned`,
+///   `indexes_versioned`, `vectors`, `timeseries`) via
+///   [`extract_db_tenant_scoped_collection`].
 /// - db-scoped keys (`flushed_ts_segments`, `columnar_engines`) via
 ///   [`extract_db_scoped_collection`].
 /// - collection-name-only keys (`kv_tables`) routed directly.
@@ -115,6 +115,10 @@ pub fn retain_tenant_data_for_vshards(
 
     snap.documents.retain(|(k, _)| in_group_db_tenant_scoped(k));
     snap.indexes.retain(|(k, _)| in_group_db_tenant_scoped(k));
+    snap.documents_versioned
+        .retain(|(k, _)| in_group_db_tenant_scoped(k));
+    snap.indexes_versioned
+        .retain(|(k, _)| in_group_db_tenant_scoped(k));
     snap.vectors.retain(|(k, _)| in_group_db_tenant_scoped(k));
     snap.timeseries
         .retain(|(k, _)| in_group_db_tenant_scoped(k));

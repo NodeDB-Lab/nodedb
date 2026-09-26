@@ -125,6 +125,26 @@ impl LeaseTable {
         RenewDecision::Granted
     }
 
+    /// Every group whose floor `coverage` does not reach, as
+    /// `(group_id, floor, reported)`. `reported` is `None` for a group the
+    /// report omits.
+    pub fn shortfall(&self, coverage: &[GroupCoverage]) -> Vec<(u64, u64, Option<u64>)> {
+        let mut short: Vec<(u64, u64, Option<u64>)> = self
+            .floors
+            .iter()
+            .filter_map(|(group_id, floor)| {
+                let reported = coverage
+                    .iter()
+                    .find(|report| report.group_id == *group_id)
+                    .map(|report| report.through);
+                (reported.is_none_or(|through| through < *floor))
+                    .then_some((*group_id, *floor, reported))
+            })
+            .collect();
+        short.sort_unstable();
+        short
+    }
+
     /// Where a barrier on `targets` stands at `now`.
     pub fn barrier(
         &self,
@@ -187,6 +207,18 @@ mod tests {
             RenewDecision::Withheld
         );
         assert_eq!(table.barrier(&[], now, LEASE), BarrierState::NotReady);
+    }
+
+    #[test]
+    fn the_shortfall_names_each_uncovered_floor() {
+        let mut table = settled_table(Instant::now());
+        table.raise_floors(&[cover(7, 19)]);
+        assert_eq!(
+            table.shortfall(&[cover(0, 10), cover(7, 12)]),
+            vec![(7, 19, Some(12))]
+        );
+        assert_eq!(table.shortfall(&[cover(7, 19)]), vec![(0, 10, None)]);
+        assert!(table.shortfall(&[cover(0, 10), cover(7, 19)]).is_empty());
     }
 
     #[test]

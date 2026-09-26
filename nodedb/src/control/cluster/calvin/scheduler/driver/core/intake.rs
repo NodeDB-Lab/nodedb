@@ -302,7 +302,9 @@ mod tests {
         scheduler
             .pending
             .insert(held, staged_pending(make_validate_only_txn(3, 0), held));
-        scheduler.handle_completion(held, RequestId::new(9), None);
+        scheduler
+            .handle_completion(held, RequestId::new(9), None)
+            .await;
         assert_eq!(scheduler.intake_closure(), Some(IntakeClosure::ApplyHalted));
         let metrics = Arc::clone(&scheduler.metrics);
 

@@ -22,7 +22,7 @@ impl Scheduler {
     /// Process a completed executor response (or disconnected channel).
     ///
     /// Called from the `completion_rx` arm of the main `select!` loop.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn handle_completion(
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) async fn handle_completion(
         &mut self,
         txn_id: TxnId,
         request_id: RequestId,
@@ -133,7 +133,8 @@ impl Scheduler {
                 committed,
                 redo_lsn,
             }) => {
-                self.finish_resolved_commit(txn_id, response, committed, redo_lsn);
+                self.finish_resolved_commit(txn_id, response, committed, redo_lsn)
+                    .await;
                 return;
             }
             Some(CommitState::AwaitingVerdict) => {
@@ -191,7 +192,7 @@ impl Scheduler {
         }
         // `false` means the commit tail halted the scheduler: the txn stays
         // pending and unapplied.
-        if self.commit_apply_tail(txn_id, response, None) {
+        if self.commit_apply_tail(txn_id, response, None).await {
             self.metrics.record_completed();
             self.on_txn_complete(txn_id);
         }
@@ -223,7 +224,9 @@ mod tests {
             },
         );
 
-        scheduler.handle_completion(txn_id, RequestId::new(9), None);
+        scheduler
+            .handle_completion(txn_id, RequestId::new(9), None)
+            .await;
 
         assert!(
             !scheduler.applied.is_applied(5, 1),
@@ -256,8 +259,12 @@ mod tests {
         pending.commit_state = Some(CommitState::AwaitingRedoResolve);
         scheduler.pending.insert(second, pending);
 
-        scheduler.handle_completion(first, RequestId::new(9), None);
-        scheduler.handle_completion(second, RequestId::new(10), None);
+        scheduler
+            .handle_completion(first, RequestId::new(9), None)
+            .await;
+        scheduler
+            .handle_completion(second, RequestId::new(10), None)
+            .await;
 
         assert!(!scheduler.applied.is_applied(6, 0));
         assert!(scheduler.pending.contains_key(&second));
@@ -282,13 +289,15 @@ mod tests {
             },
         );
 
-        scheduler.handle_completion(
-            txn_id,
-            RequestId::new(9),
-            Some(error_response(
-                crate::bridge::envelope::ErrorCode::OllpRetryRequired,
-            )),
-        );
+        scheduler
+            .handle_completion(
+                txn_id,
+                RequestId::new(9),
+                Some(error_response(
+                    crate::bridge::envelope::ErrorCode::OllpRetryRequired,
+                )),
+            )
+            .await;
 
         assert!(!scheduler.applied.is_applied(5, 1));
         assert!(

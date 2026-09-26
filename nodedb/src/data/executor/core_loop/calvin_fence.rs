@@ -190,6 +190,25 @@ impl CoreLoop {
     ) -> Option<ExecutionTask> {
         match self.calvin_owner_of(&task) {
             Some(owner) => {
+                // Raft fixed this write's order. Parking it holds its data
+                // group's applied index behind the owner's flush, so the
+                // capture names the write and its owner.
+                if matches!(
+                    task.request.admission,
+                    crate::bridge::envelope::Admission::Exempt(
+                        crate::bridge::envelope::ExemptReason::AlreadyOrdered
+                    )
+                ) {
+                    crate::diag::replicated_write_parked(
+                        self.core_id,
+                        task.plan()
+                            .named_collections()
+                            .first()
+                            .copied()
+                            .unwrap_or(""),
+                        owner,
+                    );
+                }
                 self.calvin.fence.parked.push_back(ParkedWrite {
                     task,
                     owner,

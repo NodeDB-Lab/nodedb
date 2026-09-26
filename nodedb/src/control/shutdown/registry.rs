@@ -191,18 +191,10 @@ impl LoopRegistry {
             } = entry;
             let (mut join, can_abort) = handle.take_handle();
 
+            // Polled even with no budget left: `timeout` polls the handle
+            // before its timer, so a loop that already exited while an
+            // earlier one used up the budget is counted clean.
             let elapsed_budget = deadline.saturating_sub(start.elapsed());
-            if elapsed_budget.is_zero() {
-                // Deadline already consumed — treat anything
-                // still outstanding as a laggard without
-                // awaiting.
-                laggards.push(
-                    abort_and_report_laggard(&mut join, name, registered_at, start, can_abort)
-                        .await,
-                );
-                continue;
-            }
-
             match tokio::time::timeout(elapsed_budget, &mut join).await {
                 Ok(Ok(())) => exited_clean.push(name),
                 Ok(Err(join_err)) => {
@@ -288,11 +280,10 @@ impl LoopRegistry {
             let (mut join, can_abort) = handle.take_handle();
             let elapsed_budget = deadline.saturating_sub(start.elapsed());
 
-            let joined = if elapsed_budget.is_zero() {
-                None
-            } else {
-                tokio::time::timeout(elapsed_budget, &mut join).await.ok()
-            };
+            // Polled even with no budget left: `timeout` polls the handle
+            // before its timer, so a loop that already exited while an
+            // earlier one used up the budget is counted clean, not aborted.
+            let joined = tokio::time::timeout(elapsed_budget, &mut join).await.ok();
             match joined {
                 Some(Ok(())) => exited_clean.push(name),
                 Some(Err(join_err)) => {
@@ -593,6 +584,44 @@ mod tests {
         );
         assert_eq!(report.laggards.len(), 1);
         assert!(!report.laggards[0].aborted);
+    }
+
+    /// A loop that overruns the budget must not make every loop joined after
+    /// it a laggard: those exited on the signal, within the budget.
+    #[tokio::test]
+    async fn a_slow_loop_does_not_make_later_loops_laggards() {
+        let watch = Arc::new(ShutdownWatch::new());
+        let registry = LoopRegistry::new();
+        registry
+            .register(
+                "slow",
+                ShutdownPhase::DrainingControlPlane,
+                LoopHandle::Async(tokio::spawn(async {
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                })),
+            )
+            .expect("register slow loop");
+        let mut prompt_rx = watch.subscribe();
+        registry
+            .register(
+                "prompt",
+                ShutdownPhase::DrainingControlPlane,
+                LoopHandle::Async(tokio::spawn(
+                    async move { prompt_rx.wait_cancelled().await },
+                )),
+            )
+            .expect("register prompt loop");
+
+        let report = registry
+            .shutdown_phase_strict(
+                &watch,
+                ShutdownPhase::DrainingControlPlane,
+                Duration::from_millis(50),
+            )
+            .await;
+        assert_eq!(report.exited_clean, vec!["prompt"]);
+        let laggards: Vec<&str> = report.laggards.iter().map(|l| l.name).collect();
+        assert_eq!(laggards, vec!["slow"]);
     }
 
     #[tokio::test]

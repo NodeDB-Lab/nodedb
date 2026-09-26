@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The funnel's orchestrator: runs admission, WAL append, dispatch, and
-//! response classification in that fixed order for one write.
+//! The funnel's enqueue phase: runs admission, WAL append, and dispatch in
+//! that fixed order for one write. [`super::pending::PendingWrite::finish`]
+//! runs the response phase.
 
 use crate::control::server::dispatch_utils::change_events::extract_write_change_set;
 use crate::control::server::dispatch_utils::durability_barrier::funnel_minted_redo_engine;
@@ -11,19 +12,24 @@ use crate::control::server::shared::write_admission::{bare_ok_response, route_wr
 use crate::control::server::wal_dispatch;
 use crate::control::state::SharedState;
 
-use super::super::params::{ChangeFeedOwner, SubmitOutcome, SubmitWrite, WalDurability};
+use super::super::params::{
+    ChangeFeedOwner, SubmitOutcome, SubmitWrite, WalDurability, WriteOrdering,
+};
 use super::admission::{AdmissionOutcome, admit_write};
 use super::dispatch::{DispatchTarget, dispatch_to_data_plane};
-use super::response::{ResponsePhaseInput, collect_classify_and_finish};
+use super::pending::PendingWrite;
+use super::response::{ResponsePhaseInput, UserWriteMark};
 use super::wal_append::authorize_and_append;
 
-/// Admit, make durable, enqueue, collect, and publish one write.
+/// Admit, make durable, and enqueue one write on its core.
 ///
-/// See [`SubmitOutcome`] for what comes back.
-pub(crate) async fn submit_write(
+/// The write is on its core's queue when this returns, so a caller that
+/// enqueues writes one after another fixes their arrival order at the core.
+/// [`PendingWrite::finish`] collects the outcome.
+pub(crate) async fn enqueue_write(
     shared: &SharedState,
     params: SubmitWrite,
-) -> crate::Result<SubmitOutcome> {
+) -> crate::Result<PendingWrite> {
     let SubmitWrite {
         tenant_id,
         database_id,
@@ -52,6 +58,29 @@ pub(crate) async fn submit_write(
                 .sources()
                 .is_source_collection(collection)
         });
+    // Only a user data write advances the tenant's observed write-HLC, which
+    // the RESTORE staleness gate compares envelopes against. A schema install
+    // such as a constraint set writes no row, so it records no mark. The mark
+    // keeps the path and collection of the write, so a refused restore names it.
+    let user_write_origin =
+        crate::control::server::shared::write_admission::plan_writes_user_data(&plan).then(|| {
+            let site = match &durability {
+                WalDurability::AppendHere { apply_key: 0, .. } => "write funnel (autocommit)",
+                WalDurability::AppendHere { .. } => "write funnel (replicated apply)",
+                WalDurability::CallerSupplied { .. } => "write funnel (caller-appended)",
+            };
+            let collection = plan.named_collections().first().map(|c| (*c).to_owned());
+            (site, collection)
+        });
+    // The instant the write committed, which is the value its mark carries:
+    // - a replicated entry carries its proposer's stamp;
+    // - a caller that appended upstream committed before this call, so the
+    //   instant this call starts bounds it from above;
+    // - otherwise the append below is the commit, stamped once it lands.
+    let upstream_commit_hlc = match &durability {
+        WalDurability::AppendHere { commit_hlc, .. } => *commit_hlc,
+        WalDurability::CallerSupplied { .. } => Some(shared.hlc_clock.now().wall_ns),
+    };
     // Records the caller appended for this write, under their outcome-floor
     // window. Every path below closes the window.
     let caller_minted = durability.take_minted();
@@ -93,6 +122,10 @@ pub(crate) async fn submit_write(
     // redelivered copy is never applied. A write no proposal carries has key
     // `0`.
     let final_refusal_key = apply_key;
+    // A write whose order is already final waits out a full dispatcher queue
+    // rather than failing: a committed entry that fails for local load leaves
+    // this replica without a write every other replica applied.
+    let waits_for_capacity = matches!(ordering, WriteOrdering::AlreadyOrdered);
 
     // Durable-at-ack obligation, also computed before `plan` moves. `Some` only
     // for a write whose redo record THIS funnel is required to mint; a caller
@@ -131,13 +164,34 @@ pub(crate) async fn submit_write(
                     superseded.finish().await;
                 }
                 let routed = routed?;
-                return Ok(SubmitOutcome {
+                return Ok(PendingWrite::done(SubmitOutcome {
                     response: routed
                         .unwrap_or_else(|| bare_ok_response(crate::types::RequestId::new(0))),
                     wal_lsn: None,
-                });
+                }));
             }
         };
+
+    // On a server with no Raft groups a user write that mints its own record
+    // takes its commit stamp now, and its mark is durable before the mint: a
+    // crash after the record reaches disk keeps the mark. The stamp stays open
+    // until the mint, so a backup cut at or above it waits for the record.
+    let local_stamp = match &user_write_origin {
+        Some((_, collection))
+            if appends_here
+                && caller_minted.is_none()
+                && upstream_commit_hlc.is_none()
+                && shared.async_raft_proposer().is_none() =>
+        {
+            Some(shared.tenant_marks.stamp_local_write(
+                &shared.hlc_clock,
+                shared.credentials.catalog(),
+                tenant_id.as_u64(),
+                collection.as_deref(),
+            )?)
+        }
+        _ => None,
+    };
 
     // A write that mints its own LSN opens its outcome-floor window before the
     // mint, and appends through it.
@@ -159,6 +213,19 @@ pub(crate) async fn submit_write(
                 return Err(error);
             }
         };
+    let commit_hlc = local_stamp
+        .as_ref()
+        .map(|stamp| stamp.hlc())
+        .or(upstream_commit_hlc)
+        .unwrap_or_else(|| shared.hlc_clock.now().wall_ns);
+    // The record is minted: a backup cut now waits for it through the outcome
+    // floor.
+    drop(local_stamp);
+    let user_write = user_write_origin.map(|(site, collection)| UserWriteMark {
+        site,
+        collection,
+        commit_hlc,
+    });
     let ddl_transition = wal_append_outcome.ddl_transition;
     let plan = wal_append_outcome.plan;
     let wal_lsn = wal_append_outcome.wal_lsn;
@@ -169,7 +236,7 @@ pub(crate) async fn submit_write(
     // with a higher LSN applies first. The write still holds its own per-key
     // admission guards, which no write to another key contends on.
     #[cfg(feature = "failpoints")]
-    crate::control::fail_gate::before_dispatch(&plan, wal_lsn).await;
+    crate::control::fail_gate::before_dispatch(shared.node_id, &plan, wal_lsn).await;
 
     // Build the wire request and hand it to the Data-Plane dispatcher.
     let dispatched = dispatch_to_data_plane(
@@ -192,7 +259,9 @@ pub(crate) async fn submit_write(
         admission_guard,
         order_guard,
         post_apply.is_some(),
-    );
+        waits_for_capacity,
+    )
+    .await;
     let dispatch_outcome = match dispatched {
         Ok(outcome) => {
             // A core holds the request now. From here the records close
@@ -213,12 +282,9 @@ pub(crate) async fn submit_write(
         }
     };
 
-    // Collect response(s), classify the outcome, and run the post-apply steps
-    // a successful write still owes.
-    let max_result_bytes = shared.tuning.network.max_query_result_bytes as usize;
-    let outcome = collect_classify_and_finish(
-        shared,
-        max_result_bytes,
+    // The response phase collects the outcome and runs the post-apply steps a
+    // successful write still owes.
+    Ok(PendingWrite::dispatched(
         ResponsePhaseInput {
             request_id: dispatch_outcome.request_id,
             rx: dispatch_outcome.rx,
@@ -237,16 +303,8 @@ pub(crate) async fn submit_write(
             ddl_transition,
             deferred_guards: dispatch_outcome.deferred_guards,
             minted,
+            user_write,
         },
-    )
-    .await?;
-    if binds_authorization {
-        crate::control::security::auth_lease::await_local_coverage(
-            shared,
-            std::time::Instant::now()
-                + std::time::Duration::from_secs(shared.tuning.network.default_deadline_secs),
-        )
-        .await?;
-    }
-    Ok(outcome)
+        binds_authorization,
+    ))
 }

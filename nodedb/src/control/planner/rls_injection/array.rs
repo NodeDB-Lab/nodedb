@@ -59,6 +59,8 @@ pub(super) fn inject_cluster_event(_ctx: &RlsCtx<'_>, op: &ClusterEventOp) -> cr
         // topic publish by topic name — neither names a collection this pass
         // could resolve a policy against. Access to a stream or topic is
         // authorized on the stream/topic object itself.
-        ClusterEventOp::ConsumeStream { .. } | ClusterEventOp::PublishTopic { .. } => Ok(()),
+        ClusterEventOp::ConsumeStream { .. }
+        | ClusterEventOp::PublishTopic { .. }
+        | ClusterEventOp::TenantWriteMarks { .. } => Ok(()),
     }
 }

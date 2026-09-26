@@ -39,6 +39,7 @@ use crate::control::state::SharedState;
 use super::leadership::{leader_hint, leading_term};
 use super::table::{BarrierState, LeaseTable, RenewDecision};
 use super::timing::LeaseTiming;
+use super::withheld_warn::WithheldWarnings;
 
 /// Answers lease renewals and barriers while this node leads the metadata
 /// group.
@@ -51,6 +52,8 @@ pub struct LeaderLeaseService {
     changed: Notify,
     /// One floor load at a time.
     floors_loading: tokio::sync::Mutex<()>,
+    /// Rate limit of the withheld-renewal warning.
+    withheld_warnings: WithheldWarnings,
 }
 
 impl std::fmt::Debug for LeaderLeaseService {
@@ -69,6 +72,7 @@ impl LeaderLeaseService {
             table: Mutex::new(None),
             changed: Notify::new(),
             floors_loading: tokio::sync::Mutex::new(()),
+            withheld_warnings: WithheldWarnings::default(),
         }
     }
 
@@ -166,23 +170,53 @@ impl LeaderLeaseService {
             return Self::not_leader_renewal(Some(&state));
         };
         if let Err(error) = self.table_ready(&state, term).await {
-            tracing::debug!(%error, "authorization lease: floors not loaded; renewal withheld");
+            if self
+                .withheld_warnings
+                .should_warn(req.node_id, Instant::now())
+            {
+                tracing::warn!(
+                    node_id = req.node_id,
+                    %error,
+                    "authorization lease: renewal withheld: the floors of this term are not loaded"
+                );
+            }
             return AuthLeaseRenewResponse {
                 outcome: AuthLeaseRenewOutcome::Withheld,
             };
         }
-        let decision = {
+        let (decision, shortfall) = {
             let mut table = self.table();
             match table.as_mut().filter(|t| t.term() == term) {
-                Some(table) => table.renew(
-                    req.node_id,
-                    &req.coverage,
-                    Instant::now(),
-                    self.timing.lease,
-                ),
+                Some(table) => {
+                    let decision = table.renew(
+                        req.node_id,
+                        &req.coverage,
+                        Instant::now(),
+                        self.timing.lease,
+                    );
+                    let shortfall = match decision {
+                        RenewDecision::Withheld => table.shortfall(&req.coverage),
+                        RenewDecision::Granted => Vec::new(),
+                    };
+                    (decision, shortfall)
+                }
                 None => return Self::not_leader_renewal(Some(&state)),
             }
         };
+        if decision == RenewDecision::Withheld
+            && self
+                .withheld_warnings
+                .should_warn(req.node_id, Instant::now())
+        {
+            // Each entry: (group_id, floor, reported coverage or None).
+            tracing::warn!(
+                node_id = req.node_id,
+                term,
+                short_groups = ?shortfall,
+                "authorization lease: renewal withheld: the node's coverage is below the floor \
+                 of each group listed as (group_id, floor, reported)"
+            );
+        }
         self.changed.notify_waiters();
         let outcome = match decision {
             RenewDecision::Withheld => AuthLeaseRenewOutcome::Withheld,

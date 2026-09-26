@@ -176,6 +176,9 @@ fn to_physical_plan(
         ReplicatedWrite::ArraySchema { .. } => Err(crate::Error::Internal {
             detail: "ArraySchema reached to_physical_plan (should have been intercepted)".into(),
         }),
+        ReplicatedWrite::CutBarrier { .. } => Err(crate::Error::Internal {
+            detail: "CutBarrier reached to_physical_plan (should have been intercepted)".into(),
+        }),
         ReplicatedWrite::CalvinReadResult { .. } => Err(crate::Error::Internal {
             detail: "CalvinReadResult reached to_physical_plan (should have been intercepted)"
                 .into(),

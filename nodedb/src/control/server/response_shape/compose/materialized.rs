@@ -12,8 +12,10 @@
 //! encoder; each protocol then encodes those rows in its own wire format
 //! (pgwire's RowDescription/DataRow, native's MessagePack, http's JSON).
 //!
-//! Producers with no `PhysicalPlan` in scope (ClusterArray, set-op merges,
-//! gateway forwarding, clone merges) call [`shape_payload_no_plan`], which
+//! Gateway forwarding shapes through this same call with the forwarded task's
+//! plan, so a forwarded payload yields the rows a local one does. Producers
+//! with no `PhysicalPlan` in scope (ClusterArray, set-op merges, clone merges)
+//! call [`shape_payload_no_plan`], which
 //! skips the plan-dependent `apply_kv_wrap` / `translate_search_response`
 //! transforms those callers never ran. The pure kernel `shape_decoded_rows`
 //! is shared with per-batch lazy streaming callers, which have an
@@ -102,7 +104,7 @@ pub fn shape_response_materialized(
 /// Shape a Data-Plane payload with no `PhysicalPlan` in scope.
 ///
 /// Producers that never had a plan to KV-wrap or vector-translate
-/// (ClusterArray, set-op merges, gateway forwarding, clone merges) call this
+/// (ClusterArray, set-op merges, clone merges) call this
 /// instead of [`shape_response_materialized`]: it applies only the decode +
 /// scan-envelope unwrap + optional SELECT-list projection steps, skipping the
 /// plan-dependent `apply_kv_wrap` / `translate_search_response` transforms those

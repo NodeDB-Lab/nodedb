@@ -45,6 +45,8 @@ pub(super) fn merge_sections(
             })?;
         merged.documents.extend(snap.documents);
         merged.indexes.extend(snap.indexes);
+        merged.documents_versioned.extend(snap.documents_versioned);
+        merged.indexes_versioned.extend(snap.indexes_versioned);
         merged.edges.extend(snap.edges);
         merged.vectors.extend(snap.vectors);
         merged.vector_params.extend(snap.vector_params);
@@ -103,23 +105,21 @@ pub(super) fn apply_metadata_sections(
     for section in &env.sections {
         match section.origin_node_id {
             SECTION_ORIGIN_CATALOG_ROWS => {
-                let Ok(blobs) = zerompk::from_msgpack::<Vec<StoredCollectionBlob>>(&section.body)
-                else {
-                    tracing::warn!(
-                        tenant_id,
-                        "restore: catalog-rows section failed to decode — skipping"
-                    );
-                    continue;
-                };
+                let blobs = zerompk::from_msgpack::<Vec<StoredCollectionBlob>>(&section.body)
+                    .map_err(|_| Error::Internal {
+                        detail: "invalid backup format: catalog-rows section is not decodable"
+                            .into(),
+                    })?;
                 for blob in blobs {
-                    let Ok(coll) = zerompk::from_msgpack::<StoredCollection>(&blob.bytes) else {
-                        tracing::warn!(
-                            tenant_id,
-                            name = %blob.name,
-                            "restore: catalog row failed to decode — skipping"
-                        );
-                        continue;
-                    };
+                    let coll =
+                        zerompk::from_msgpack::<StoredCollection>(&blob.bytes).map_err(|_| {
+                            Error::Internal {
+                                detail: format!(
+                                    "invalid backup format: catalog row of '{}' is not decodable",
+                                    blob.name
+                                ),
+                            }
+                        })?;
                     // Propose the collection through the metadata Raft
                     // group so every node's applier (`catalog_entry::
                     // apply::collection::put`) writes the row — mirroring
@@ -144,14 +144,12 @@ pub(super) fn apply_metadata_sections(
                 }
             }
             SECTION_ORIGIN_SOURCE_TOMBSTONES => {
-                let Ok(tombs) = zerompk::from_msgpack::<Vec<SourceTombstoneEntry>>(&section.body)
-                else {
-                    tracing::warn!(
-                        tenant_id,
-                        "restore: source-tombstones section failed to decode — skipping"
-                    );
-                    continue;
-                };
+                let tombs = zerompk::from_msgpack::<Vec<SourceTombstoneEntry>>(&section.body)
+                    .map_err(|_| Error::Internal {
+                        detail: "invalid backup format: source-tombstones section is not \
+                                 decodable"
+                            .into(),
+                    })?;
                 for t in tombs {
                     // Replicate via the metadata Raft group so every node's boot WAL
                     // replay barrier matches — a coordinator-local tombstone lets purged

@@ -70,6 +70,12 @@ impl SequencerStateMachine {
         // committed at `index` regardless, so it is a safe replay upper bound.
         self.last_committed_index = index;
 
+        // A membership change of the sequencer group commits in its log too.
+        // It is no sequencer entry, and the Raft layer applied it already.
+        if crate::conf_change::ConfChange::is_conf_change(data) {
+            return;
+        }
+
         let entry: SequencerEntry = match zerompk::from_msgpack(data) {
             Ok(e) => e,
             Err(err) => {
@@ -388,6 +394,34 @@ impl SequencerStateMachine {
                                 vshard,
                                 "sequencer apply: vshard sender gone; \
                                  scheduler may have exited (reservation)"
+                            );
+                            self.record_catch_up(vshard, index);
+                        }
+                    }
+                }
+            }
+            // Fan a backup's cut marker out to every vShard scheduler this
+            // node hosts. Same `try_send` discipline as `ReserveRead`: a
+            // dropped marker is recovered by the scheduler's catch-up drain,
+            // which replays it in log order.
+            SequencerEntry::CutMarker { hlc } => {
+                for (&vshard, sender) in &self.vshard_senders {
+                    match sender.try_send(SchedulerInput::CutMarker { hlc }) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            warn!(
+                                vshard,
+                                hlc,
+                                "sequencer apply: vshard channel full (backpressure); \
+                                 dropping cut marker"
+                            );
+                            self.record_catch_up(vshard, index);
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            warn!(
+                                vshard,
+                                "sequencer apply: vshard sender gone; \
+                                 scheduler may have exited (cut marker)"
                             );
                             self.record_catch_up(vshard, index);
                         }

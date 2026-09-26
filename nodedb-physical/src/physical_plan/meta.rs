@@ -93,7 +93,16 @@ pub enum MetaOp {
 
     /// Snapshot a tenant's data from the sparse engine.
     /// Returns serialized `(documents, indexes)` as JSON payload.
-    CreateTenantSnapshot { tenant_id: u64 },
+    CreateTenantSnapshot {
+        tenant_id: u64,
+        /// `Some(W)` asks the node that receives the plan to take a backup's
+        /// consistent cut at watermark `W` before it snapshots: every write
+        /// committed below `W` has its final outcome there first. The
+        /// receiving Control Plane takes the cut and clears the field. The
+        /// Data Plane never reads it.
+        #[serde(default)]
+        cut_watermark: Option<u64>,
+    },
 
     /// Restore a tenant's data across all engines from a snapshot.
     /// `snapshot` is a MessagePack-serialized `TenantDataSnapshot`.
@@ -586,9 +595,11 @@ pub enum MetaOp {
     /// collection the transaction wrote; each gets a collection-floor write
     /// version at the record's LSN. `sum_targets` is the materialized-sum
     /// resolution the transaction's document writes fold into their targets.
+    /// `origin` decides which commit-boundary checks the apply runs.
     ApplyTransactionRedo {
         redo: Vec<u8>,
         collections: Vec<String>,
         sum_targets: Vec<super::RedoSumTargets>,
+        origin: super::RedoOrigin,
     },
 }

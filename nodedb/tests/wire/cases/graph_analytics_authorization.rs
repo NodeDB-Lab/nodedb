@@ -43,6 +43,12 @@ async fn seed(server: &TestServer, collection: &str, stranger: &str) {
     // A custom role confers nothing without an explicit grant, which is what
     // "no access to this collection" actually looks like — `CREATE USER`
     // defaults to ReadWrite and `monitor` still confers `Permission::Read`.
+    // The role is defined and granted nothing: a user may hold only a
+    // defined role.
+    server
+        .exec("CREATE ROLE IF NOT EXISTS analytics_nobody")
+        .await
+        .unwrap_or_else(|e| panic!("create role analytics_nobody: {e}"));
     server
         .exec(&format!(
             "CREATE USER {stranger} PASSWORD '{PASSWORD}' ROLE analytics_nobody"

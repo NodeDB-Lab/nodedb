@@ -145,6 +145,27 @@ impl TestClusterNode {
             .any(|g| g.group_id == group_id)
     }
 
+    /// True iff this node is a current replica of data group `group_id`: it
+    /// has the group mounted, and its own routing table lists it as a voter or
+    /// learner of the group.
+    ///
+    /// [`Self::hosts_data_group`] alone does not answer this. A node removed
+    /// from a group keeps its mounted replica: a join adds the joiner as a
+    /// learner of every group, and placement convergence later removes the
+    /// nodes outside the group's placement from its membership only.
+    pub fn replicates_data_group(&self, group_id: u64) -> bool {
+        if !self.hosts_data_group(group_id) {
+            return false;
+        }
+        let Some(routing) = self.shared.cluster_routing.as_ref() else {
+            return false;
+        };
+        let routing = routing.read().unwrap_or_else(|p| p.into_inner());
+        routing.group_info(group_id).is_some_and(|info| {
+            info.members.contains(&self.node_id) || info.learners.contains(&self.node_id)
+        })
+    }
+
     /// The local `snapshot_index` for `group_id` from this node's own Raft
     /// state, or `0` if the group isn't hosted here.
     ///

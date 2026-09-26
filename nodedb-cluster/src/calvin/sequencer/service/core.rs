@@ -509,6 +509,7 @@ fn entry_txn_count(entry: &SequencerEntry) -> usize {
         SequencerEntry::AbortVerdict { .. } => 0,
         SequencerEntry::ReserveRead { .. } => 0,
         SequencerEntry::ReleaseReservation { .. } => 0,
+        SequencerEntry::CutMarker { .. } => 0,
     }
 }
 

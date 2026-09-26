@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 mod aggregate_cache_delete_invalidation;
+mod backup_support;
 mod bitemporal_array_sql;
 mod bitemporal_asof_scan_parity;
 mod bitemporal_delete_index_tombstone;
@@ -162,8 +163,14 @@ mod spatial_cp_dp_query;
 mod sql_aggregate_functions;
 mod sql_alter_after_drop;
 mod sql_arithmetic_overflow;
+mod sql_backup_calvin_cut;
+mod sql_backup_consistent_cut;
 mod sql_backup_restore_columnar;
 mod sql_backup_restore_columnar_restart;
+mod sql_backup_restore_documents;
+mod sql_backup_restore_durable_marks;
+mod sql_backup_restore_local_marks;
+mod sql_backup_restore_staleness;
 mod sql_backup_restore_timeseries;
 mod sql_backup_restore_vector_params;
 mod sql_backup_restore_vector_restart;

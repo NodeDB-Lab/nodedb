@@ -1780,7 +1780,10 @@ mod tests {
                 schema_json: "{}".into(),
                 source_storage_mode: nodedb_physical::physical_plan::StorageMode::Schemaless,
             }),
-            PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot { tenant_id: 1 }),
+            PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot {
+                tenant_id: 1,
+                cut_watermark: None,
+            }),
             PhysicalPlan::Meta(MetaOp::RestoreTenantSnapshot {
                 tenant_id: 1,
                 snapshot: Vec::new(),

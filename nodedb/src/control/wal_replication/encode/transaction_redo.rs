@@ -37,6 +37,7 @@ pub fn transaction_redo_entry(
                 })
                 .collect(),
             event_source: ReplicatedEventSource::from(payload.event_source),
+            origin: payload.origin,
         },
     )
 }

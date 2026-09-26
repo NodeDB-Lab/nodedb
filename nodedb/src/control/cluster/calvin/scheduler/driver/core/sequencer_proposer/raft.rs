@@ -9,7 +9,7 @@
 //! proposes it to its sequencer group.
 
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::Semaphore;
 use tracing::debug;
@@ -60,18 +60,21 @@ pub(super) fn sequencer_route(
 pub struct RaftSequencerProposer {
     node_id: u64,
     multi_raft: Arc<Mutex<MultiRaft>>,
-    /// Source of the cluster transport and topology for forwards.
-    shared: Arc<SharedState>,
+    /// Source of the cluster transport and topology for forwards. Weak: the
+    /// node's `SharedState` holds this proposer, and a strong handle back
+    /// would keep the state, and every file it holds open, alive after
+    /// shutdown.
+    shared: Weak<SharedState>,
     /// One permit per forward RPC in flight.
     forwards: Arc<Semaphore>,
 }
 
 impl RaftSequencerProposer {
-    pub fn new(node_id: u64, multi_raft: Arc<Mutex<MultiRaft>>, shared: Arc<SharedState>) -> Self {
+    pub fn new(node_id: u64, multi_raft: Arc<Mutex<MultiRaft>>, shared: &Arc<SharedState>) -> Self {
         Self {
             node_id,
             multi_raft,
-            shared,
+            shared: Arc::downgrade(shared),
             forwards: Arc::new(Semaphore::new(MAX_INFLIGHT_SEQUENCER_FORWARDS)),
         }
     }
@@ -86,7 +89,10 @@ impl RaftSequencerProposer {
         leader: u64,
         bytes: Vec<u8>,
     ) -> Result<ProposeDispatch, SequencerProposeError> {
-        let Some(transport) = self.shared.cluster_transport.as_ref() else {
+        let Some(shared) = self.shared.upgrade() else {
+            return Err(SequencerProposeError::ShutDown);
+        };
+        let Some(transport) = shared.cluster_transport.as_ref() else {
             return Err(SequencerProposeError::NoTransport { leader });
         };
         let permit = Arc::clone(&self.forwards)
@@ -95,7 +101,7 @@ impl RaftSequencerProposer {
                 leader,
                 limit: MAX_INFLIGHT_SEQUENCER_FORWARDS,
             })?;
-        register_peers_from_topology(&self.shared, transport, &BTreeSet::from([leader]));
+        register_peers_from_topology(&shared, transport, &BTreeSet::from([leader]));
         let transport = Arc::clone(transport);
         tokio::spawn(async move {
             let _permit = permit;
@@ -230,8 +236,8 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
             .last_log_index(SEQUENCER_GROUP_ID)
             .unwrap_or(0);
-        let proposer =
-            RaftSequencerProposer::new(LOCAL_NODE, Arc::clone(&mr), shared_state(dir.path()));
+        let shared = shared_state(dir.path());
+        let proposer = RaftSequencerProposer::new(LOCAL_NODE, Arc::clone(&mr), &shared);
 
         let dispatch = proposer.propose(vec![9, 9]).expect("local propose");
 
@@ -267,8 +273,8 @@ mod tests {
             assert_eq!(guard.group_leader(SEQUENCER_GROUP_ID), REMOTE_LEADER);
             guard.last_log_index(SEQUENCER_GROUP_ID).unwrap_or(0)
         };
-        let proposer =
-            RaftSequencerProposer::new(LOCAL_NODE, Arc::clone(&mr), shared_state(dir.path()));
+        let shared = shared_state(dir.path());
+        let proposer = RaftSequencerProposer::new(LOCAL_NODE, Arc::clone(&mr), &shared);
 
         let result = proposer.propose(vec![9, 9]);
 
@@ -287,5 +293,26 @@ mod tests {
             .last_log_index(SEQUENCER_GROUP_ID)
             .unwrap_or(0);
         assert_eq!(after, before, "a follower appends nothing locally");
+    }
+
+    /// The node's state holds its proposer. The proposer must not hold the
+    /// state back: that cycle keeps the catalog open after shutdown, and a
+    /// reopen on the same path fails to take the catalog lock.
+    #[test]
+    fn a_proposer_held_by_the_state_does_not_keep_the_state_alive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mr = multi_raft(dir.path(), vec![LOCAL_NODE]);
+        let shared = shared_state(dir.path());
+        let proposer: Arc<dyn SequencerProposer> =
+            Arc::new(RaftSequencerProposer::new(LOCAL_NODE, mr, &shared));
+        assert!(shared.calvin.sequencer_proposer.set(proposer).is_ok());
+
+        assert_eq!(Arc::strong_count(&shared), 1);
+        let weak = Arc::downgrade(&shared);
+        drop(shared);
+        assert!(
+            weak.upgrade().is_none(),
+            "the state outlived its last owner"
+        );
     }
 }

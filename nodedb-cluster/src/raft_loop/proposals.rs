@@ -252,16 +252,8 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             crate::rpc_codec::RaftRpc::DataProposeResponse(r) => {
                 if r.success {
                     Ok((r.group_id, r.log_index))
-                } else if let Some(hint) = r.leader_hint {
-                    Err(crate::error::ClusterError::Raft(
-                        nodedb_raft::RaftError::NotLeader {
-                            leader_hint: Some(hint),
-                        },
-                    ))
                 } else {
-                    Err(crate::error::ClusterError::Transport {
-                        detail: format!("data propose forward failed: {}", r.error_message),
-                    })
+                    Err(r.refusal_error())
                 }
             }
             other => Err(crate::error::ClusterError::Transport {

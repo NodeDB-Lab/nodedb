@@ -2,9 +2,10 @@
 
 //! Generic per-entry apply path: decode the replicated entry, route
 //! Raft-native array cell writes through the array-open bootstrap, and
-//! dispatch everything else through the shared Control-Plane write funnel.
-
-use std::sync::Arc;
+//! enqueue everything else through the shared Control-Plane write funnel.
+//!
+//! The enqueue runs in log order when the entry starts. The outcome is
+//! collected by the returned apply, in any order.
 
 use tracing::debug;
 
@@ -17,28 +18,70 @@ use crate::control::array_sync::raft_apply::{
 };
 use crate::control::distributed_applier::propose_tracker::{AppliedWrite, ProposeTracker};
 use crate::control::server::dispatch_utils::{
-    ChangeFeedOwner, SubmitWrite, WalDurability, WriteOrdering, error_is_final_refusal,
-    submit_write,
+    ChangeFeedOwner, SubmitWrite, WalDurability, WriteOrdering, enqueue_write,
+    error_is_final_refusal,
 };
-use crate::control::state::SharedState;
 use crate::control::wal_replication::from_replicated_entry;
 use crate::types::{DatabaseId, TraceId};
 
+use crate::control::server::shared::write_admission::plan_writes_user_data;
+
+use super::context::{ApplyContext, FinishedApply, Started, StartedEntry};
 use super::helpers::{committed_response_result, deterministic_crdt_fence_noop};
 use super::proposal_gate::{EntryOutcome, ledger_outcome};
+use super::start::Prepared;
 
-/// Decode `entry` and apply it: Raft-native array cell writes route through
-/// the array-open bootstrap and the write funnel; everything else dispatches
-/// through the write funnel directly. Returns the outcome the caller records
-/// into its applied prefix.
-pub(super) async fn apply_generic_entry(
-    state: &Arc<SharedState>,
-    tracker: &Arc<ProposeTracker>,
-    group_id: u64,
-    entry: &LogEntry,
-    applied_key: u64,
+/// Prepare a generic entry. `exclusive` marks a Raft-native array cell write:
+/// its apply awaits the array-open bootstrap and its own write, so it runs
+/// with nothing else of its group in flight. Every other entry leaves as its
+/// enqueue.
+pub(super) fn prepare_generic_entry<'a>(
+    ctx: ApplyContext<'a>,
+    pos: AppliedPosition,
+    entry: LogEntry,
     database_id: DatabaseId,
-) -> EntryOutcome {
+    exclusive: bool,
+) -> Prepared<'a> {
+    if !exclusive {
+        return Prepared::Enqueue(Box::pin(enqueue_generic_entry(
+            ctx,
+            pos,
+            entry,
+            database_id,
+        )));
+    }
+    Prepared::Exclusive(Box::pin(async move {
+        let outcome = match enqueue_generic_entry(ctx, pos, entry, database_id)
+            .await
+            .started
+        {
+            Started::Running(apply) => return apply.await,
+            Started::Concluded(outcome) => outcome,
+        };
+        FinishedApply {
+            group_id: pos.group_id,
+            log_index: pos.log_index,
+            outcome,
+        }
+    }))
+}
+
+/// Decode `entry` and enqueue it: Raft-native array cell writes route through
+/// the array-open bootstrap and the write funnel, and conclude here; everything
+/// else is enqueued through the write funnel directly.
+async fn enqueue_generic_entry<'a>(
+    ctx: ApplyContext<'a>,
+    pos: AppliedPosition,
+    entry: LogEntry,
+    database_id: DatabaseId,
+) -> StartedEntry<'a> {
+    let ApplyContext { state, tracker, .. } = ctx;
+    let AppliedPosition {
+        group_id,
+        log_index,
+        applied_key,
+        ..
+    } = pos;
     let decoded = from_replicated_entry(&entry.data, Some(state.surrogate_assigner.as_ref()));
     let (tenant_id, vshard_id, plan, resolved_now_ms) = match decoded {
         Ok(Some(t)) => t,
@@ -61,7 +104,7 @@ pub(super) async fn apply_generic_entry(
             // it buys nothing and costs a double-apply of every later
             // write in the batch. It applied no state, so it must not
             // advance the floor either.
-            return EntryOutcome::Skipped;
+            return StartedEntry::concluded(EntryOutcome::Skipped);
         }
         Err(e) => {
             tracing::warn!(
@@ -83,10 +126,10 @@ pub(super) async fn apply_generic_entry(
             // state rather than on its own bytes, so a re-delivery can
             // legitimately succeed. Holding the floor below it is what
             // keeps it replayable.
-            return EntryOutcome::Applied {
+            return StartedEntry::concluded(EntryOutcome::Applied {
                 durable: false,
                 result: None,
-            };
+            });
         }
     };
 
@@ -97,7 +140,7 @@ pub(super) async fn apply_generic_entry(
     // write funnel as the generic branch below, which is what gives them
     // a redo record and the fsync the applied floor asserts. No other
     // `ReplicatedWrite` variant decodes to a `PhysicalPlan::Array`, so
-    // this match is exact.
+    // this match is exact, and the caller runs them as exclusive entries.
     if matches!(
         plan,
         PhysicalPlan::Array(ArrayOp::Put { .. } | ArrayOp::Delete { .. })
@@ -105,11 +148,7 @@ pub(super) async fn apply_generic_entry(
         let applied_ok = apply_array_cell_write(
             state,
             tracker,
-            AppliedPosition {
-                group_id,
-                log_index: entry.index,
-                applied_key,
-            },
+            pos,
             ArrayCellTarget {
                 tenant_id,
                 database_id,
@@ -119,13 +158,27 @@ pub(super) async fn apply_generic_entry(
             plan,
         )
         .await;
-        return EntryOutcome::Applied {
+        return StartedEntry::concluded(EntryOutcome::Applied {
             durable: applied_ok,
             result: None,
-        };
+        });
     }
 
-    let submitted = submit_write(
+    let collection = plan
+        .named_collections()
+        .first()
+        .map(|collection| (*collection).to_owned());
+    let user_write = plan_writes_user_data(&plan);
+    debug!(
+        group_id,
+        log_index,
+        tenant_id = tenant_id.as_u64(),
+        vshard_id = vshard_id.as_u32(),
+        collection = collection.as_deref().unwrap_or(""),
+        user_write,
+        "applying a committed write entry"
+    );
+    let enqueued = enqueue_write(
         state,
         SubmitWrite {
             tenant_id,
@@ -154,6 +207,7 @@ pub(super) async fn apply_generic_entry(
             durability: WalDurability::AppendHere {
                 now_override: resolved_now_ms,
                 apply_key: applied_key,
+                commit_hlc: pos.carried_commit_hlc(),
             },
             // Raft committed this entry at a fixed log index; every
             // replica applies it in that order. Re-entering the
@@ -168,8 +222,38 @@ pub(super) async fn apply_generic_entry(
             change_feed: ChangeFeedOwner::Unowned,
         },
     )
-    .await
-    .map(|outcome| outcome.response);
+    .await;
+    let started = match enqueued {
+        Ok(pending) => Started::Running(Box::pin(async move {
+            let submitted = pending.finish(state).await.map(|outcome| outcome.response);
+            FinishedApply {
+                group_id,
+                log_index,
+                outcome: conclude_generic_entry(tracker, pos, submitted),
+            }
+        })),
+        Err(error) => Started::Concluded(conclude_generic_entry(tracker, pos, Err(error))),
+    };
+    StartedEntry {
+        started,
+        collection,
+        user_write,
+    }
+}
+
+/// Resolve a generic entry's waiter from what the funnel returned, and report
+/// the outcome its group's prefix records.
+fn conclude_generic_entry(
+    tracker: &ProposeTracker,
+    pos: AppliedPosition,
+    submitted: crate::Result<crate::bridge::envelope::Response>,
+) -> EntryOutcome {
+    let AppliedPosition {
+        group_id,
+        log_index,
+        applied_key,
+        ..
+    } = pos;
 
     // The funnel returns an error-status response as `Ok`; a committed
     // entry that failed to apply must surface to the propose waiter as a
@@ -186,7 +270,7 @@ pub(super) async fn apply_generic_entry(
         Err(e) => {
             tracing::warn!(
                 group_id,
-                index = entry.index,
+                index = log_index,
                 error = %e,
                 "applying committed write failed"
             );
@@ -201,11 +285,11 @@ pub(super) async fn apply_generic_entry(
         || deterministic_crdt_fence_noop(&result)
         || result.as_ref().is_err_and(error_is_final_refusal);
     let applied = ledger_outcome(&result);
-    tracker.complete(group_id, entry.index, applied_key, result);
+    tracker.complete(group_id, log_index, applied_key, result);
 
-    // Extend the batch's durable prefix. On success `submit_write`'s
+    // Extend the group's durable prefix. On success the funnel's
     // durable-at-ack barrier has already fsynced this entry's redo,
-    // which is exactly the fact the floor asserts — `entry.index` is
+    // which is exactly the fact the floor asserts — `log_index` is
     // the data-plane applied watermark here, NOT raft's commit index.
     // On failure the engines did not persist this index, so it is
     // neither a safe compaction boundary nor a safe restart floor;

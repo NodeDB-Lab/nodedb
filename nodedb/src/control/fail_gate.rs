@@ -36,12 +36,20 @@ pub(crate) async fn wait(name: &str) {
 /// `funnel::before_dispatch::<collection>`, and only a write carrying a WAL
 /// LSN reaches it. A committed redo parks on the gate of each collection it
 /// writes.
-pub(crate) async fn before_dispatch(plan: &PhysicalPlan, wal_lsn: Option<Lsn>) {
+///
+/// `funnel::before_dispatch::node<N>::<collection>` parks the write only on
+/// node `N`. An in-process cluster test shares one fail-point registry across
+/// its nodes, so it names the node to hold one replica's apply.
+pub(crate) async fn before_dispatch(node_id: u64, plan: &PhysicalPlan, wal_lsn: Option<Lsn>) {
     if wal_lsn.is_none() {
         return;
     }
     for collection in plan.named_collections() {
         wait(&format!("funnel::before_dispatch::{collection}")).await;
+        wait(&format!(
+            "funnel::before_dispatch::node{node_id}::{collection}"
+        ))
+        .await;
     }
 }
 

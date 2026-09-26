@@ -51,6 +51,20 @@ pub(super) struct ResponsePhaseInput {
     pub deferred_guards: super::dispatch::DeferredGuards,
     /// The records minted for this write, under their outcome-floor window.
     pub minted: Option<MintedRecords>,
+    /// `Some` when the plan writes user data, so a success advances the
+    /// tenant's observed write-HLC. Reads and system operations never do.
+    pub user_write: Option<UserWriteMark>,
+}
+
+/// The origin a successful user data write records on the tenant's observed
+/// write-HLC.
+pub(super) struct UserWriteMark {
+    /// Which funnel path dispatched the write.
+    pub site: &'static str,
+    /// The collection the plan wrote, when it named one.
+    pub collection: Option<String>,
+    /// HLC wall time, in nanoseconds, at which the write committed.
+    pub commit_hlc: u64,
 }
 
 /// Collect the response(s), classify the outcome, and run every step a
@@ -86,6 +100,7 @@ pub(super) async fn collect_classify_and_finish(
         ddl_transition,
         deferred_guards,
         minted,
+        user_write,
     } = input;
     let owner = RecordOwner {
         tenant_id,
@@ -222,6 +237,25 @@ pub(super) async fn collect_classify_and_finish(
     // ops / trigger / staged-write dispatch carry no LSN and skip the barrier;
     // `durability_barrier` decides which of those skips are legitimate and makes
     // the rest loud instead of letting them ack a write nothing can recover.
+    // On a server with no Raft groups the write's mark lives in the catalog.
+    // It is durable before the ack. A write that minted its own record made it
+    // durable before the mint, so this costs no catalog commit there.
+    if response.status == Status::Ok
+        && let Some(mark) = &user_write
+        && shared.async_raft_proposer().is_none()
+    {
+        rollback_on_err(
+            shared,
+            &ddl_transition,
+            shared.tenant_marks.record_local_write(
+                shared.credentials.catalog(),
+                tenant_id.as_u64(),
+                mark.commit_hlc,
+                mark.collection.as_deref(),
+            ),
+        )?;
+    }
+
     if response.status == Status::Ok {
         let durable_target = match (wal_lsn, post_apply_lsn) {
             (Some(a), Some(b)) => Some(a.max(b)),
@@ -252,12 +286,19 @@ pub(super) async fn collect_classify_and_finish(
             publish_change_set(shared, tenant_id, database_id, change_set, &response);
         }
 
-        // Advance the tenant's observed write-HLC high-water on any successful
-        // dispatch. Used by the RESTORE staleness gate. Advancing on every
-        // success (not just writes) is intentionally conservative —
-        // envelope.watermark is captured AFTER fan-out so it always dominates
-        // the tenant_wm of a fresh backup.
-        shared.advance_tenant_write_hlc(tenant_id.as_u64());
+        // Record the write's commit HLC on the tenant's observed high-water
+        // before this response, the ack, returns. The RESTORE staleness gate
+        // refuses an envelope older than the mark, so the mark is the instant
+        // the write committed, never the instant this bookkeeping ran: a
+        // backup taken after the ack then always carries a newer watermark.
+        if let Some(mark) = &user_write {
+            shared.advance_tenant_write_hlc(
+                tenant_id.as_u64(),
+                mark.commit_hlc,
+                mark.site,
+                mark.collection.as_deref(),
+            );
+        }
     }
 
     observe(shared);

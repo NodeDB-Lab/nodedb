@@ -38,7 +38,7 @@ impl Scheduler {
     /// past the bound, halts the scheduler: a skipped flush tears the
     /// committed txn on this replica. A non-`Ok` drop completes the txn:
     /// under an abort verdict no replica writes anything.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn finish_resolved_commit(
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) async fn finish_resolved_commit(
         &mut self,
         txn_id: TxnId,
         response: Response,
@@ -74,7 +74,7 @@ impl Scheduler {
         }
 
         let completed = if committed {
-            self.commit_apply_tail(txn_id, response, redo_lsn)
+            self.commit_apply_tail(txn_id, response, redo_lsn).await
         } else {
             self.propose_sequencer_entry(txn_id, SchedulerProposal::CompletionAck);
             true
@@ -142,7 +142,7 @@ impl Scheduler {
     /// or the direct-apply dependent/active path, which carries no redo record)
     /// falls back to appending a `CalvinApplied` marker here, exactly as before
     /// this record existed.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn commit_apply_tail(
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) async fn commit_apply_tail(
         &mut self,
         txn_id: TxnId,
         response: Response,
@@ -282,6 +282,20 @@ impl Scheduler {
             // scheduler halted above.
             return false;
         };
+        // The record at `lsn` is this position's only applied marker. An
+        // append only buffers it, so it is durable before the mark and the
+        // ack: a restart that lost it would take the position for unapplied,
+        // run the transaction again, and never settle its ack. The wait joins
+        // the WAL group commit, so concurrent Calvin commits share one fsync.
+        if let Err(e) = self.shared.wal.wait_durable(lsn).await {
+            self.halt_apply(
+                txn_id,
+                HaltReason::WalAppendFailed,
+                HaltStep::AppliedMarker,
+                format!("applied marker fsync at lsn {} failed: {e}", lsn.as_u64()),
+            );
+            return false;
+        }
         // Control change-stream events are distinct from Data-Plane
         // WriteEvents. Publish the participant-local logical manifests once,
         // from the data-group leader, at the authoritative committed LSN.
@@ -300,6 +314,9 @@ impl Scheduler {
                 );
             }
         }
+        // The commit's mark lands before the ack, as a write through the
+        // funnel records its mark before its response returns.
+        self.record_calvin_write_mark(txn_id);
         self.propose_sequencer_entry(txn_id, SchedulerProposal::CompletionAck);
         true
     }
@@ -343,7 +360,9 @@ mod tests {
             },
         );
 
-        scheduler.finish_resolved_commit(txn_id, internal_error(), true, None);
+        scheduler
+            .finish_resolved_commit(txn_id, internal_error(), true, None)
+            .await;
 
         assert!(!scheduler.applied.is_applied(9, 2));
         assert!(scheduler.pending.contains_key(&txn_id));
@@ -367,7 +386,9 @@ mod tests {
             },
         );
 
-        scheduler.finish_resolved_commit(txn_id, internal_error(), false, None);
+        scheduler
+            .finish_resolved_commit(txn_id, internal_error(), false, None)
+            .await;
 
         assert!(scheduler.applied.is_applied(9, 2));
         assert!(!scheduler.pending.contains_key(&txn_id));
@@ -402,7 +423,9 @@ mod tests {
         pending.flush_scope.sends = 1;
         scheduler.pending.insert(txn_id, pending);
 
-        scheduler.finish_resolved_commit(txn_id, retryable_refusal(), true, None);
+        scheduler
+            .finish_resolved_commit(txn_id, retryable_refusal(), true, None)
+            .await;
 
         assert!(!scheduler.is_apply_halted());
         assert!(!scheduler.applied.is_applied(9, 2));
@@ -436,7 +459,9 @@ mod tests {
             pending.flush_scope.sends = MAX_FLUSH_SENDS;
         }
 
-        scheduler.finish_resolved_commit(txn_id, retryable_refusal(), true, None);
+        scheduler
+            .finish_resolved_commit(txn_id, retryable_refusal(), true, None)
+            .await;
 
         assert!(scheduler.pending.contains_key(&txn_id));
         assert_eq!(

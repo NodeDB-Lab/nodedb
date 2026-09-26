@@ -74,7 +74,11 @@ impl OriginArrayInbound {
         // Use the async proposer (with transparent leader forwarding + apply
         // wait) when available. It returns the apply payload directly.
         if let Some(async_proposer) = self.shared().async_raft_proposer().map(|a| a.as_ref()) {
-            return match async_proposer(vshard_id, idempotency_key, data).await {
+            let deadline = tokio::time::Instant::now()
+                + std::time::Duration::from_secs(
+                    self.shared().tuning.network.default_deadline_secs,
+                );
+            return match async_proposer(vshard_id, idempotency_key, data, deadline).await {
                 Ok((_payload, _committed_version)) => Ok(()),
                 Err(e) => {
                     warn!(array = %array, error = %e, "array_inbound: raft propose+apply failed");

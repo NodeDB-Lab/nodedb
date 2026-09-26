@@ -74,6 +74,9 @@ pub(super) async fn fan_tenant_snapshot_all_cores(
             index_configs,
             surrogate_pk,
             tenant_edges,
+            group_write_marks,
+            documents_versioned,
+            indexes_versioned,
         } = part;
         merged.documents.extend(documents);
         merged.indexes.extend(indexes);
@@ -89,6 +92,9 @@ pub(super) async fn fan_tenant_snapshot_all_cores(
         merged.index_configs.extend(index_configs);
         merged.surrogate_pk.extend(surrogate_pk);
         merged.tenant_edges.extend(tenant_edges);
+        merged.group_write_marks.extend(group_write_marks);
+        merged.documents_versioned.extend(documents_versioned);
+        merged.indexes_versioned.extend(indexes_versioned);
     }
 
     let payload = zerompk::to_msgpack_vec(&merged).map_err(|e| crate::Error::Serialization {

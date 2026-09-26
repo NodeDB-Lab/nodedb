@@ -123,6 +123,58 @@ pub fn read_applied_recovery(wal: &WalManager, vshard_id: u32) -> crate::Result<
     })
 }
 
+/// This vShard's applied state after a restart: the state the last
+/// checkpoint saved in `catalog`, together with the markers the WAL still
+/// holds.
+///
+/// A checkpoint deletes WAL segments that hold applied markers, while the
+/// sequencer log keeps delivering their entries after a restart. Without the
+/// saved state the scheduler would take an applied transaction for a new
+/// one: its local stage refuses the rows it already wrote, the scheduler
+/// halts, and the transaction's completion ack never settles.
+pub fn recover_applied(
+    wal: &WalManager,
+    catalog: &crate::control::security::catalog::SystemCatalog,
+    vshard_id: u32,
+) -> crate::Result<AppliedRecovery> {
+    let from_wal = read_applied_recovery(wal, vshard_id)?;
+    let Some(saved) = catalog.load_calvin_applied(vshard_id)? else {
+        return Ok(from_wal);
+    };
+    Ok(merge_saved(from_wal, saved.fully_applied_epoch, saved.tail))
+}
+
+/// Fold a saved `(fully_applied_epoch, tail)` into a WAL scan's result.
+fn merge_saved(
+    from_wal: AppliedRecovery,
+    fully_applied_epoch: u64,
+    saved_tail: BTreeSet<(u64, u32)>,
+) -> AppliedRecovery {
+    let above_watermark =
+        |epoch: u64| fully_applied_epoch == NOT_YET_APPLIED_EPOCH || epoch > fully_applied_epoch;
+    let applied_tail: BTreeSet<(u64, u32)> = from_wal
+        .applied_tail
+        .into_iter()
+        .chain(saved_tail)
+        .filter(|(epoch, _)| above_watermark(*epoch))
+        .collect();
+    let mut max_applied_epoch = from_wal.max_applied_epoch;
+    let candidates = applied_tail
+        .iter()
+        .map(|(epoch, _)| *epoch)
+        .chain((fully_applied_epoch != NOT_YET_APPLIED_EPOCH).then_some(fully_applied_epoch));
+    for epoch in candidates {
+        if max_applied_epoch == NOT_YET_APPLIED_EPOCH || epoch > max_applied_epoch {
+            max_applied_epoch = epoch;
+        }
+    }
+    AppliedRecovery {
+        fully_applied_epoch,
+        applied_tail,
+        max_applied_epoch,
+    }
+}
+
 /// Decode a WAL record's logical [`RecordType`], stripping the encryption
 /// flag (bit 31) before comparing.
 fn record_type_of(record: &WalRecord) -> Option<RecordType> {
@@ -297,5 +349,41 @@ mod tests {
         );
         assert_eq!(rec.applied_tail.len(), 2);
         assert_eq!(rec.max_applied_epoch, 1);
+    }
+
+    #[test]
+    fn saved_state_restores_what_a_truncated_wal_lost() {
+        let dir = TempDir::new().unwrap();
+        let wal = open_wal(&dir);
+        use crate::types::VShardId;
+        // The WAL still holds only the marker written after the checkpoint.
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .append_calvin_applied(VShardId::new(1), 6, 0)
+            .unwrap();
+        wal.sync().unwrap();
+        let catalog_dir = TempDir::new().unwrap();
+        let catalog = crate::control::security::catalog::SystemCatalog::open(
+            &catalog_dir.path().join("system.redb"),
+        )
+        .unwrap();
+        catalog
+            .save_calvin_applied(vec![
+                crate::control::security::catalog::calvin_applied::StoredCalvinApplied {
+                    vshard_id: 1,
+                    fully_applied_epoch: 2,
+                    tail: [(4, 1)].into_iter().collect(),
+                },
+            ])
+            .unwrap();
+
+        let rec = recover_applied(&wal, &catalog, 1).unwrap();
+        assert_eq!(rec.fully_applied_epoch, 2);
+        assert!(rec.applied_tail.contains(&(4, 1)));
+        assert!(rec.applied_tail.contains(&(6, 0)));
+        assert_eq!(rec.max_applied_epoch, 6);
+
+        // A vShard with nothing saved keeps the plain WAL scan.
+        let other = recover_applied(&wal, &catalog, 9).unwrap();
+        assert_eq!(other, read_applied_recovery(&wal, 9).unwrap());
     }
 }

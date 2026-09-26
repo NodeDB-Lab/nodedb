@@ -33,7 +33,7 @@ impl TestClusterNode {
         seed_nodes: Vec<SocketAddr>,
         config: &ClusterSpawnConfig,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        Self::spawn_with_full_config_at(node_id, seed_nodes, config, None).await
+        Self::spawn_with_full_config_at(node_id, seed_nodes, config, None, None).await
     }
 
     /// Lowest-level cluster-node spawn. In addition to the tuning knobs of
@@ -67,11 +67,16 @@ impl TestClusterNode {
     /// before this parameter existed); on a reopened directory it rebuilds
     /// in-memory-only structures (e.g. the vector HNSW index) from the
     /// persisted `TransactionRedo` / `Put` / etc. records.
+    ///
+    /// `listen_override`: `None` binds the QUIC transport on an ephemeral
+    /// port. `Some(addr)` binds it on `addr`, the address a restarted node's
+    /// peers already hold for it.
     pub(crate) async fn spawn_with_full_config_at(
         node_id: u64,
         seed_nodes: Vec<SocketAddr>,
         config: &ClusterSpawnConfig,
         data_dir_path_override: Option<PathBuf>,
+        listen_override: Option<SocketAddr>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Every cluster node funnels through here, so installing tracing at
         // this one point means no test has to opt in to see server-side logs.
@@ -143,9 +148,13 @@ impl TestClusterNode {
         } else {
             // Pre-bind the QUIC transport on a random port so we know the
             // listen address before wiring seeds / cluster settings.
+            let bind_addr = match listen_override {
+                Some(addr) => addr,
+                None => "127.0.0.1:0".parse()?,
+            };
             let transport = Arc::new(nodedb_cluster::NexarTransport::new(
                 node_id,
-                "127.0.0.1:0".parse()?,
+                bind_addr,
                 nodedb_cluster::TransportCredentials::Insecure,
             )?);
             let listen_addr = transport.local_addr();

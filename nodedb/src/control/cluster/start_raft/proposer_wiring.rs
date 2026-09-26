@@ -150,9 +150,8 @@ pub(super) fn wire_proposers(
     // Held weakly for the same cycle-breaking reason as `raft_proposer` above:
     // the proposer lives on `SharedState`.
     let state_for_proposer = Arc::downgrade(shared);
-    let deadline_secs = shared.tuning.network.default_deadline_secs;
     let async_proposer: Arc<crate::control::wal_replication::AsyncRaftProposer> =
-        Arc::new(move |vshard_id, idempotency_key, data| {
+        Arc::new(move |vshard_id, idempotency_key, data, deadline| {
             let rl_weak = raft_loop_async.clone();
             let tk = tracker_for_proposer.clone();
             let state_weak = state_for_proposer.clone();
@@ -160,12 +159,15 @@ pub(super) fn wire_proposers(
                 let rl = rl_weak.upgrade().ok_or_else(|| crate::Error::Internal {
                     detail: "raft propose (async): cluster not running".into(),
                 })?;
-                let (group_id, log_index) = rl
-                    .propose_via_data_leader(vshard_id, data)
-                    .await
-                    .map_err(|e| crate::Error::Internal {
-                        detail: format!("raft propose (async): {e}"),
-                    })?;
+                // The attempt gets only what remains of the caller's deadline.
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(propose_deadline_exceeded());
+                }
+                let (group_id, log_index) =
+                    tokio::time::timeout_at(deadline, rl.propose_via_data_leader(vshard_id, data))
+                        .await
+                        .map_err(|_| propose_deadline_exceeded())?
+                        .map_err(|e| async_propose_error(vshard_id, e))?;
 
                 // Register the waiter with the proposer's idempotency
                 // key. The apply path compares against the committed
@@ -175,43 +177,42 @@ pub(super) fn wire_proposers(
                 // `RetryableLeaderChange` instead of leaking a
                 // not-our-payload back to the caller.
                 let rx = tk.register(group_id, log_index, idempotency_key);
-                let applied =
-                    tokio::time::timeout(std::time::Duration::from_secs(deadline_secs), rx)
-                        .await
-                        .map_err(|_| crate::Error::Dispatch {
-                            detail: format!(
-                                "raft commit timeout for group {group_id} index {log_index}"
-                            ),
-                        })?
-                        .map_err(|_| crate::Error::Dispatch {
-                            detail: "propose waiter channel closed".into(),
-                        })?
-                        // Preserve `RetryableLeaderChange` so the gateway
-                        // retry loop can re-propose against the new leader
-                        // — wrapping it in `Dispatch` would hide the
-                        // retryable signal and surface as silent INSERT
-                        // success. Only machinery failures stay wrapped for
-                        // diagnostics; a classified apply verdict keeps its
-                        // client-visible classification.
-                        .map_err(|e| {
-                            if crate::error_classify::is_unclassified_failure(&e) {
-                                crate::Error::Dispatch {
-                                    detail: format!("apply error: {e}"),
-                                }
-                            } else {
-                                e
-                            }
-                        })
-                        // Carry out the write-version the APPLY side stamped, not
-                        // `log_index`. The tracker resolves on the node that applied
-                        // the entry locally, so `write_version` is this replica's own
-                        // post-write `coll_write_lsn` — a WAL LSN, the same domain
-                        // every other feed of that map records in, and the only
-                        // domain the shard-local OCC read validator compares in. The
-                        // raft log index is a per-group counter on a different scale
-                        // entirely; publishing it here made reads validate a WAL LSN
-                        // against a log index.
-                        .map(|applied| (applied.payload, applied.write_version));
+                let applied = await_local_apply(LocalApplyWait {
+                    state: &state_weak,
+                    tracker: &tk,
+                    group_id,
+                    log_index,
+                    vshard_id,
+                    deadline,
+                    rx,
+                })
+                .await
+                // Preserve `RetryableLeaderChange` so the gateway
+                // retry loop can re-propose against the new leader
+                // — wrapping it in `Dispatch` would hide the
+                // retryable signal and surface as silent INSERT
+                // success. Only machinery failures stay wrapped for
+                // diagnostics; a classified apply verdict keeps its
+                // client-visible classification.
+                .map_err(|e| {
+                    if crate::error_classify::is_unclassified_failure(&e) {
+                        crate::Error::Dispatch {
+                            detail: format!("apply error: {e}"),
+                        }
+                    } else {
+                        e
+                    }
+                })
+                // Carry out the write-version the APPLY side stamped, not
+                // `log_index`. The tracker resolves on the node that applied
+                // the entry locally, so `write_version` is this replica's own
+                // post-write `coll_write_lsn` — a WAL LSN, the same domain
+                // every other feed of that map records in, and the only
+                // domain the shard-local OCC read validator compares in. The
+                // raft log index is a per-group counter on a different scale
+                // entirely; publishing it here made reads validate a WAL LSN
+                // against a log index.
+                .map(|applied| (applied.payload, applied.write_version));
                 let applied = applied?;
                 // A write to a vShard homing a permission-tree source is
                 // acknowledged only once every lease holder covers it, or its
@@ -270,4 +271,136 @@ pub(super) fn wire_proposers(
         },
     );
     Ok(())
+}
+
+/// Where a group's pipeline stands, for a propose waiter that timed out: the
+/// Raft commit index, the index handed to the apply loop, and the index the
+/// apply loop applied. The first of the three that stops short of the waited
+/// index names the stage that stalled.
+fn apply_progress(state: Option<&SharedState>, group_id: u64) -> String {
+    let Some(state) = state else {
+        return "node is shutting down".to_owned();
+    };
+    let status = state
+        .raft_status_fn
+        .get()
+        .and_then(|status| status().into_iter().find(|g| g.group_id == group_id));
+    let applied = state.applied_index_watcher(group_id).current();
+    match status {
+        Some(group) => format!(
+            "commit_index={} handed_to_apply_loop={} applied={applied} role={} leader={}",
+            group.commit_index, group.last_applied, group.role, group.leader_id
+        ),
+        None => format!("group not hosted here, applied={applied}"),
+    }
+}
+
+/// The error an async propose that reached no leader returns.
+///
+/// A group with no leader to take the proposal right now accepts the same
+/// proposal once it has one, so the proposal is retried:
+/// [`crate::Error::NoLeader`]. That covers an election, a leadership transfer
+/// in flight, and a leader that stepped down after this node or a forwarding
+/// node chose it; a forwarded refusal arrives here with its typed Raft error
+/// (`DataProposeResponse::refusal_error`). Every other failure is final here.
+fn async_propose_error(vshard_id: u32, error: nodedb_cluster::ClusterError) -> crate::Error {
+    match error {
+        nodedb_cluster::ClusterError::Raft(
+            nodedb_raft::RaftError::LeadershipTransferInProgress
+            | nodedb_raft::RaftError::NotLeader { .. },
+        ) => crate::Error::NoLeader {
+            vshard_id: crate::types::VShardId::new(vshard_id),
+        },
+        other => crate::Error::Internal {
+            detail: format!("raft propose (async): {other}"),
+        },
+    }
+}
+
+/// The error a proposal returns once the caller's statement deadline passed.
+///
+/// The proposer carries no request id, so the error names request 0.
+fn propose_deadline_exceeded() -> crate::Error {
+    crate::Error::DeadlineExceeded {
+        request_id: crate::types::RequestId::new(0),
+    }
+}
+
+/// How often a waiting proposer checks that this node still replicates the
+/// entry's group.
+const MEMBERSHIP_CHECK: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// One proposer's wait for this node's apply of its entry.
+struct LocalApplyWait<'a> {
+    state: &'a std::sync::Weak<SharedState>,
+    tracker: &'a ProposeTracker,
+    group_id: u64,
+    log_index: u64,
+    vshard_id: u32,
+    deadline: tokio::time::Instant,
+    rx: tokio::sync::oneshot::Receiver<crate::control::distributed_applier::ProposeResult>,
+}
+
+/// Wait until this node applied the proposer's entry, and return what the
+/// apply produced.
+///
+/// The wait ends early when this node leaves the entry's group: a removed
+/// replica receives no further entries, so it never applies the index. That
+/// ends as [`crate::Error::NotLeader`] naming no leader, which sends the
+/// caller to the group's current members.
+///
+/// `deadline` is the caller's statement deadline, shared by every attempt.
+/// Once it passes, the wait ends as [`crate::Error::DeadlineExceeded`]. The
+/// pipeline stage that stalled goes to the log first.
+async fn await_local_apply(
+    wait: LocalApplyWait<'_>,
+) -> crate::Result<crate::control::distributed_applier::AppliedWrite> {
+    let LocalApplyWait {
+        state,
+        tracker,
+        group_id,
+        log_index,
+        vshard_id,
+        deadline,
+        mut rx,
+    } = wait;
+    loop {
+        let check = tokio::time::sleep(
+            MEMBERSHIP_CHECK.min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+        );
+        tokio::select! {
+            received = &mut rx => {
+                return received.map_err(|_| crate::Error::Dispatch {
+                    detail: "propose waiter channel closed".into(),
+                })?;
+            }
+            _ = check => {}
+        }
+        let state = state.upgrade();
+        if let Some(state) = state.as_deref()
+            && !crate::control::security::auth_fence::cluster::hosts_group(state, group_id)
+        {
+            tracker.abandon(group_id, log_index);
+            return Err(crate::Error::NotLeader {
+                vshard_id: crate::types::VShardId::new(vshard_id),
+                leader_node: 0,
+                leader_addr: format!(
+                    "this node left raft group {group_id} before it applied index {log_index}"
+                ),
+            });
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracker.abandon(group_id, log_index);
+            tracing::warn!(
+                group_id,
+                log_index,
+                progress = %apply_progress(state.as_deref(), group_id),
+                oldest_unfinished = %tracker
+                    .applying(group_id)
+                    .map_or_else(|| "nothing".to_owned(), |entry| entry.to_string()),
+                "raft proposal reached the statement deadline before this node applied it"
+            );
+            return Err(propose_deadline_exceeded());
+        }
+    }
 }

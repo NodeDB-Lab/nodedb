@@ -43,8 +43,15 @@ async fn enforcement_loop(
     registry: Arc<RetentionPolicyRegistry>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    // Start with a short initial delay to let the system warm up.
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    // Start with a short initial delay to let the system warm up. Shutdown
+    // ends the delay: a server stopped within it must not wait it out.
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+        _ = shutdown.wait_for(|stopping| *stopping) => {
+            info!("retention enforcement loop shutting down");
+            return;
+        }
+    }
 
     loop {
         // Find the shortest eval interval among all enabled policies.

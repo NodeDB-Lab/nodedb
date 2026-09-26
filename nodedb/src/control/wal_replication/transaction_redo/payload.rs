@@ -3,7 +3,7 @@
 //! One committed transaction's redo for one vShard, as a commit hands it to
 //! the data-group log and as every replica applies it.
 
-use nodedb_physical::physical_plan::{MetaOp, PhysicalPlan, RedoSumTargets};
+use nodedb_physical::physical_plan::{MetaOp, PhysicalPlan, RedoOrigin, RedoSumTargets};
 
 use crate::control::state::SharedState;
 use crate::control::surrogate::{CarriedIdentity, collect_plan_identities};
@@ -28,6 +28,8 @@ pub struct TransactionRedoPayload {
     pub identities: Vec<CarriedIdentity>,
     /// Event source every replica stamps on the writes.
     pub event_source: EventSource,
+    /// Which commit-boundary checks every replica's apply runs.
+    pub origin: RedoOrigin,
 }
 
 impl TransactionRedoPayload {
@@ -52,6 +54,7 @@ impl TransactionRedoPayload {
                 plans,
             )?,
             event_source,
+            origin: RedoOrigin::Commit,
         })
     }
 
@@ -61,6 +64,7 @@ impl TransactionRedoPayload {
             redo: self.redo.to_bytes()?,
             collections: self.collections.clone(),
             sum_targets: self.sum_targets.clone(),
+            origin: self.origin,
         }))
     }
 }

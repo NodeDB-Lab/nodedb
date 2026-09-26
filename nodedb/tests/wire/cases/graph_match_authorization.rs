@@ -45,6 +45,12 @@ async fn seed(server: &TestServer, collection: &str, stranger: &str) {
     // `Permission::Read`, so neither is an unprivileged principal. A custom
     // role confers nothing without an explicit grant, which is what "no access
     // to this collection" actually looks like.
+    // The role is defined and granted nothing: a user may hold only a
+    // defined role.
+    server
+        .exec("CREATE ROLE IF NOT EXISTS match_nobody")
+        .await
+        .unwrap_or_else(|e| panic!("create role match_nobody: {e}"));
     server
         .exec(&format!(
             "CREATE USER {stranger} PASSWORD '{PASSWORD}' ROLE match_nobody"

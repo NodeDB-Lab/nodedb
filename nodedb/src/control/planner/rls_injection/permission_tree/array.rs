@@ -57,6 +57,8 @@ pub(super) fn apply_cluster_event(_ctx: &PermCtx<'_>, op: &ClusterEventOp) -> cr
         // topic publish by topic name — neither names a collection this pass
         // could resolve a tree definition against. Access to a stream or topic
         // is authorized on the stream/topic object itself.
-        ClusterEventOp::ConsumeStream { .. } | ClusterEventOp::PublishTopic { .. } => Ok(()),
+        ClusterEventOp::ConsumeStream { .. }
+        | ClusterEventOp::PublishTopic { .. }
+        | ClusterEventOp::TenantWriteMarks { .. } => Ok(()),
     }
 }

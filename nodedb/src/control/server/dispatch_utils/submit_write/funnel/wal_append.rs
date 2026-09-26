@@ -86,6 +86,7 @@ pub(super) fn authorize_and_append(
         WalDurability::AppendHere {
             now_override,
             apply_key,
+            ..
         } => {
             let outcome = rollback_on_err(
                 shared,

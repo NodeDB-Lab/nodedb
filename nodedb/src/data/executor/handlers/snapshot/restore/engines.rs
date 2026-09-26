@@ -4,36 +4,35 @@
 //! `tenant_snapshot::execute_restore_tenant_snapshot` for the sparse/document,
 //! vector, KV, CRDT, and timeseries engines.
 
-use tracing::warn;
-
 use crate::data::executor::core_loop::CoreLoop;
 
 use super::keys::database_id_from_qualified;
 
 impl CoreLoop {
+    /// Install the snapshot's document rows, document versions and index
+    /// entries under their exported keys. Returns `(documents, indexes)`
+    /// written. The first entry that fails to install fails the restore: a
+    /// follower missing it would serve a partial collection.
     pub(super) fn restore_sparse(
         &self,
-        _tenant_id: u64,
-        documents: &[(String, Vec<u8>)],
-        indexes: &[(String, Vec<u8>)],
-    ) -> (u64, u64) {
-        let mut docs_written = 0u64;
-        for (key, value) in documents {
-            if let Err(e) = self.sparse.put_raw(key, value) {
-                warn!(key, error = %e, "failed to restore document");
-                continue;
-            }
-            docs_written += 1;
+        snap: &crate::types::TenantDataSnapshot,
+    ) -> crate::Result<(u64, u64)> {
+        for (key, value) in &snap.documents {
+            self.sparse.put_raw(key, value)?;
         }
-        let mut indexes_written = 0u64;
-        for (key, value) in indexes {
-            if let Err(e) = self.sparse.put_index_raw(key, value) {
-                warn!(key, error = %e, "failed to restore index");
-                continue;
-            }
-            indexes_written += 1;
+        for (key, value) in &snap.documents_versioned {
+            self.sparse.put_versioned_document_raw(key, value)?;
         }
-        (docs_written, indexes_written)
+        for (key, value) in &snap.indexes {
+            self.sparse.put_index_raw(key, value)?;
+        }
+        for (key, value) in &snap.indexes_versioned {
+            self.sparse.put_versioned_index_raw(key, value)?;
+        }
+        Ok((
+            (snap.documents.len() + snap.documents_versioned.len()) as u64,
+            (snap.indexes.len() + snap.indexes_versioned.len()) as u64,
+        ))
     }
 
     pub(super) fn restore_vector_collection(

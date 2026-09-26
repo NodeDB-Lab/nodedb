@@ -35,6 +35,12 @@ async fn seed(server: &TestServer, collection: &str, stranger: &str) {
         ))
         .await
         .unwrap_or_else(|e| panic!("seed doc-1: {e}"));
+    // The role is defined and granted nothing: a user may hold only a
+    // defined role.
+    server
+        .exec("CREATE ROLE IF NOT EXISTS version_nobody")
+        .await
+        .unwrap_or_else(|e| panic!("create role version_nobody: {e}"));
     server
         .exec(&format!(
             "CREATE USER {stranger} PASSWORD '{PASSWORD}' ROLE version_nobody"
