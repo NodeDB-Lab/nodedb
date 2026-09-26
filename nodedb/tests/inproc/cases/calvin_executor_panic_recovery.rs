@@ -139,6 +139,7 @@ fn kv_put_in(coll: &str, key: &[u8], value: &[u8]) -> PhysicalPlan {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     })
 }
 

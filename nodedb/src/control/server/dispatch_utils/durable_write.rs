@@ -51,6 +51,7 @@ pub(crate) async fn dispatch_durable_autocommit_write(
                 vshard_id: write.vshard_id,
             },
             &write.plan,
+            write.event_source,
         )
         .await?
     {
@@ -94,12 +95,66 @@ pub(crate) async fn dispatch_authorized_durable_write(
                 vshard_id: checked.vshard_id(),
             },
             checked.plan(),
+            crate::event::EventSource::User,
         )
         .await?
     {
         return Ok(response);
     }
     dispatch_authorized_autocommit_write(shared, checked, trace_id).await
+}
+
+/// Dispatch an authorized autocommit write on the durable route, tagged with
+/// `event_source`.
+///
+/// Same routing as [`dispatch_authorized_durable_write`], for a write that
+/// runs under a source other than a client's, such as a Lite sync push. Every
+/// replica stamps the source on the write's events, so a synced write does
+/// not re-fire AFTER triggers.
+///
+/// A clustered write whose RLS write policy must resolve against current rows
+/// before it is proposed is refused: the resolved write carries none of the
+/// plan's sync provenance, so the idempotency gate could not run.
+pub(crate) async fn dispatch_authorized_durable_write_with_source(
+    shared: &SharedState,
+    checked: CloneCheckedTask,
+    trace_id: TraceId,
+    event_source: crate::event::EventSource,
+) -> crate::Result<Response> {
+    if checked.txn_id().is_none()
+        && shared.async_raft_proposer().is_some()
+        && crate::control::write_resolve::resolver_for_plan(checked.plan()).is_some()
+    {
+        return Err(crate::Error::PlanError {
+            detail: format!(
+                "a {event_source:?} write to '{}' needs its row-level-security policy resolved \
+                 before it is proposed, and the resolved write cannot carry its sync provenance",
+                checked.plan().collection().unwrap_or("<unknown>")
+            ),
+        });
+    }
+    if checked.txn_id().is_none()
+        && let Some(response) = propose_if_replicable(
+            shared,
+            WriteTarget {
+                tenant_id: checked.tenant_id(),
+                database_id: checked.database_id(),
+                vshard_id: checked.vshard_id(),
+            },
+            checked.plan(),
+            event_source,
+        )
+        .await?
+    {
+        return Ok(response);
+    }
+    super::dispatch::dispatch_authorized_autocommit_write_with_source(
+        shared,
+        checked,
+        trace_id,
+        event_source,
+    )
+    .await
 }
 
 /// Dispatch one authorized task by its class: a write on the durable route,
@@ -135,6 +190,7 @@ async fn propose_if_replicable(
     shared: &SharedState,
     target: WriteTarget,
     plan: &PhysicalPlan,
+    event_source: crate::event::EventSource,
 ) -> crate::Result<Option<Response>> {
     let Some(proposer) = shared.async_raft_proposer() else {
         return Ok(None);
@@ -148,6 +204,7 @@ async fn propose_if_replicable(
     let Some(entry) = to_replicated_entry(tenant_id, database_id, vshard_id, &replicable)? else {
         return Ok(None);
     };
+    let entry = entry.with_event_source(event_source);
     let (payload, write_version) = propose_replicated_entry(shared, proposer, entry).await?;
     // Replicas apply with `ChangeFeedOwner::Unowned`. The proposing node
     // handled the write once, so it publishes the change event.

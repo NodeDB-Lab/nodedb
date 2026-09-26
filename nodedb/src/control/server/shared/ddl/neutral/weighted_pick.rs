@@ -182,6 +182,7 @@ pub async fn weighted_pick(
             surrogate: audit_surrogate,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         // The caller asked for an audited pick, so the pick is answered only
         // once its audit record is durable: Raft in cluster mode, else the

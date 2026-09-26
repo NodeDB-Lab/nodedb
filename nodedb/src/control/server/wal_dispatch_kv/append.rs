@@ -41,6 +41,20 @@ fn resolve_expiry(ttl_ms: u64, now_override: Option<u64>) -> (Option<u64>, Optio
     }
 }
 
+/// Append the `SyncSeqAdvance` record of a Lite KV push, ahead of the
+/// write's own record.
+///
+/// Both records land in the write's outcome-floor window. A frame the gate
+/// holds back cancels both, so the mark never moves for a write that did not
+/// apply. The write's record is the higher LSN, so the durable-at-ack wait
+/// on it covers the mark too.
+fn append_sync_mark(
+    wal: WalAppender<'_>,
+    prov: &nodedb_types::sync::wire::SyncProvenance,
+) -> crate::Result<crate::types::Lsn> {
+    wal.append_sync_seq_advance(prov.producer_id, prov.epoch, prov.stream_id, prov.seq)
+}
+
 /// Serialize a KV operation and append to the WAL — see [`KvAppendOutcome`].
 /// `now_override` pins `expire_at_ms` to an instant decided elsewhere (e.g. a
 /// Raft-committed entry), so every replica's redo installs it verbatim.
@@ -60,9 +74,25 @@ pub fn wal_append_kv_op(
             value,
             ttl_ms,
             surrogate,
+            provenance,
             ..
+        } => {
+            if let Some(prov) = provenance {
+                append_sync_mark(wal, prov)?;
+            }
+            let (now_ms, expire_at_ms) = resolve_expiry(*ttl_ms, now_override);
+            resolved_now_ms = now_ms;
+            let entry = encode_kv_put(
+                collection.as_str(),
+                key,
+                value,
+                *ttl_ms,
+                expire_at_ms,
+                surrogate.as_u32(),
+            )?;
+            Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
-        | KvOp::Insert {
+        KvOp::Insert {
             collection,
             key,
             value,
@@ -116,8 +146,14 @@ pub fn wal_append_kv_op(
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
         KvOp::Delete {
-            collection, keys, ..
+            collection,
+            keys,
+            provenance,
+            ..
         } => {
+            if let Some(prov) = provenance {
+                append_sync_mark(wal, prov)?;
+            }
             let entry = encode_kv_delete(collection.as_str(), keys)?;
             Some(wal.append_delete(tenant_id, vshard_id, database_id, &entry)?)
         }

@@ -8,9 +8,11 @@
 //! fails to compile here until it is mirrored on the wire instead of silently
 //! degrading to `Internal` and losing its SQLSTATE at the coordinator.
 
-use nodedb_cluster::rpc_codec::{DataPlaneCounterFault, DataPlaneErrorCode, TypedClusterError};
+use nodedb_cluster::rpc_codec::{
+    DataPlaneCounterFault, DataPlaneErrorCode, DataPlaneSyncHold, TypedClusterError,
+};
 
-use crate::bridge::envelope::{CounterFault, ErrorCode};
+use crate::bridge::envelope::{CounterFault, ErrorCode, SyncHold};
 
 /// Map a local-execution [`crate::Error`] to the wire error a remote caller
 /// receives.
@@ -88,6 +90,10 @@ impl From<ErrorCode> for DataPlaneErrorCode {
                 epoch: provenance.epoch,
                 stream_id: provenance.stream_id,
                 seq: provenance.seq,
+            },
+            ErrorCode::SyncNotApplied { hold, applied_seq } => Self::SyncNotApplied {
+                hold: sync_hold_to_wire(hold),
+                applied_seq,
             },
             ErrorCode::NotFound => Self::NotFound,
             ErrorCode::RejectedAuthz { resource } => Self::RejectedAuthz { resource },
@@ -204,6 +210,10 @@ impl From<DataPlaneErrorCode> for ErrorCode {
                     seq,
                 },
             },
+            DataPlaneErrorCode::SyncNotApplied { hold, applied_seq } => Self::SyncNotApplied {
+                hold: sync_hold_from_wire(hold),
+                applied_seq,
+            },
             DataPlaneErrorCode::NotFound => Self::NotFound,
             DataPlaneErrorCode::RejectedAuthz { resource } => Self::RejectedAuthz { resource },
             DataPlaneErrorCode::ConflictRetry => Self::ConflictRetry,
@@ -299,6 +309,24 @@ impl From<DataPlaneErrorCode> for ErrorCode {
     }
 }
 
+/// The wire form of a sync hold.
+fn sync_hold_to_wire(hold: SyncHold) -> DataPlaneSyncHold {
+    match hold {
+        SyncHold::Duplicate => DataPlaneSyncHold::Duplicate,
+        SyncHold::Fenced => DataPlaneSyncHold::Fenced,
+        SyncHold::Gap { expected } => DataPlaneSyncHold::Gap { expected },
+    }
+}
+
+/// The sync hold a wire form names.
+fn sync_hold_from_wire(hold: DataPlaneSyncHold) -> SyncHold {
+    match hold {
+        DataPlaneSyncHold::Duplicate => SyncHold::Duplicate,
+        DataPlaneSyncHold::Fenced => SyncHold::Fenced,
+        DataPlaneSyncHold::Gap { expected } => SyncHold::Gap { expected },
+    }
+}
+
 /// The wire form of a counter fault. Both types live in other crates, so the
 /// mapping is a function, not a `From` impl.
 fn counter_fault_to_wire(fault: CounterFault) -> DataPlaneCounterFault {
@@ -380,6 +408,22 @@ mod tests {
             }
         );
         assert_eq!(ErrorCode::from(wire), original);
+    }
+
+    #[test]
+    fn sync_not_applied_roundtrips_verbatim() {
+        for hold in [
+            SyncHold::Duplicate,
+            SyncHold::Fenced,
+            SyncHold::Gap { expected: 7 },
+        ] {
+            let original = ErrorCode::SyncNotApplied {
+                hold,
+                applied_seq: 6,
+            };
+            let wire = DataPlaneErrorCode::from(original.clone());
+            assert_eq!(ErrorCode::from(wire), original);
+        }
     }
 
     #[test]

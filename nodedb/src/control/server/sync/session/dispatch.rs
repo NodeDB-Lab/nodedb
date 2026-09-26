@@ -176,6 +176,15 @@ impl SyncSession {
             | SyncMessageType::SpatialDelete
             | SyncMessageType::SpatialInsertAck
             | SyncMessageType::SpatialDeleteAck => None,
+            // KvPush is intercepted in session_handler before reaching here.
+            // KvPushAck is server→client; receiving it here means a mis-wired
+            // client — ignore silently.
+            SyncMessageType::KvPush | SyncMessageType::KvPushAck => None,
+            SyncMessageType::RowPushReject => {
+                let msg: RowPushRejectMsg = frame.decode_body()?;
+                self.handle_row_push_reject(&msg, shared);
+                None
+            }
             SyncMessageType::ResyncRequest => {
                 // In the production path (shared = Some), session_handler.rs
                 // intercepts ResyncRequest before process_frame and dispatches

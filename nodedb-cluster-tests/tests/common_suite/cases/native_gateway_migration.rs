@@ -77,6 +77,7 @@ async fn native_gateway_migration_single_node_select() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let put_checked = common::authorize_gateway_plan(&node.shared, &ctx, put_plan).await;
     gateway
@@ -147,6 +148,7 @@ async fn native_gateway_migration_cross_node_select() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let put_checked =
         common::authorize_gateway_plan(&cluster.nodes[0].shared, &ctx, put_plan).await;

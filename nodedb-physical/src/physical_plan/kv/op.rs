@@ -61,6 +61,10 @@ pub enum KvOp {
         /// principal would show.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// Sync provenance of a Lite KV push. `Some` puts the write behind
+        /// the sync idempotency gate. `None` for every other write.
+        #[serde(default)]
+        provenance: Option<nodedb_types::sync::wire::SyncProvenance>,
     },
 
     /// SQL `INSERT` semantics: write only if the key does not already exist.
@@ -141,6 +145,9 @@ pub enum KvOp {
         /// See `Put::rls_filters`.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// See `Put::provenance`.
+        #[serde(default)]
+        provenance: Option<nodedb_types::sync::wire::SyncProvenance>,
     },
 
     /// Cursor-based scan with optional filter predicate.

@@ -2,8 +2,8 @@
 
 //! Per-engine sync-message dispatch for the session loop.
 //!
-//! Every engine sync message (timeseries / columnar / vector / FTS / spatial)
-//! follows the same shape: decode the typed body, pick the production
+//! Every engine sync message (timeseries / columnar / vector / FTS / spatial /
+//! KV) follows the same shape: decode the typed body, pick the production
 //! (`SharedState`) or no-op dispatcher, invoke the session handler, and forward
 //! the ACK frame. [`dispatch_engine_frame`] factors that boilerplate into one
 //! place so adding an engine is a single match arm.
@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::super::session::SyncSession;
 use super::super::wire::{
-    ColumnarInsertMsg, FtsDeleteMsg, FtsIndexMsg, SpatialDeleteMsg, SpatialInsertMsg,
+    ColumnarInsertMsg, FtsDeleteMsg, FtsIndexMsg, KvPushMsg, SpatialDeleteMsg, SpatialInsertMsg,
     SyncMessageType, TimeseriesPushMsg, VectorDeleteMsg, VectorInsertMsg,
 };
 use crate::control::state::SharedState;
@@ -67,11 +67,13 @@ pub(super) async fn dispatch_engine_frame(
     shared: &Option<Arc<SharedState>>,
 ) -> EngineOutcome {
     use super::super::{
-        columnar_handler, fts_handler, spatial_handler, timeseries_handler, vector_handler,
+        columnar_handler, fts_handler, kv_handler, spatial_handler, timeseries_handler,
+        vector_handler,
     };
 
     let dispatcher_identity = session.identity.clone();
     let dispatcher_database = session.database_id();
+    let dispatcher_peer = session.device_metadata.remote_addr.clone();
 
     match frame.msg_type {
         SyncMessageType::TimeseriesPush => dispatch!(
@@ -187,6 +189,21 @@ pub(super) async fn dispatch_engine_frame(
                 database_id: dispatcher_database,
             },
             spatial_handler::NoOpSpatialDispatcher
+        ),
+        SyncMessageType::KvPush => dispatch!(
+            ws,
+            session,
+            frame,
+            shared,
+            KvPushMsg,
+            handle_kv_push,
+            |s| kv_handler::SharedStateKvDispatcher {
+                shared: s,
+                identity: dispatcher_identity.as_ref(),
+                database_id: dispatcher_database,
+                peer_addr: &dispatcher_peer,
+            },
+            kv_handler::NoOpKvDispatcher
         ),
         _ => EngineOutcome::NotEngine,
     }

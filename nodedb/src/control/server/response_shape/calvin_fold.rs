@@ -243,6 +243,7 @@ mod tests {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         assert_eq!(
             calvin_tag_for_plan(&plan),
@@ -264,6 +265,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         assert!(calvin_tag_for_plan(&delete).is_none());
 

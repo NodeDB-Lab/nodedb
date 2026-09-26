@@ -278,6 +278,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let incr = PhysicalPlan::Kv(KvOp::Incr {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
@@ -311,6 +312,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let incr1 = PhysicalPlan::Kv(KvOp::Incr {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
@@ -353,6 +355,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let incr = PhysicalPlan::Kv(KvOp::Incr {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),
@@ -391,6 +394,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let entry = encode_kv_incr(KvIncrRecord {
             collection: "counters",
@@ -446,6 +450,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let incr = PhysicalPlan::Kv(KvOp::Incr {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "counters"),

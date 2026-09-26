@@ -5,10 +5,10 @@
 //! `Kv*` variants stamp `resolved_now_ms` so every replica installs the same
 //! `expire_at_ms`. See `entry_document::decode_arm` for the trailing-arm contract.
 
-use super::super::decode_sync_engines::decode_returning;
+use super::super::decode_sync_engines::{decode_provenance, decode_returning};
 use super::super::types::ReplicatedWrite;
 use super::kv;
-use super::kv::ReturningFields;
+use super::kv::{PutFields, ReturningFields};
 use crate::bridge::envelope::PhysicalPlan;
 
 pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan, Option<u64>)> {
@@ -27,18 +27,22 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
             resolved_now_ms: rn,
             returning,
             rls_filters,
+            provenance,
         } => {
             resolved_now_ms = *rn;
             kv::put(
-                collection,
-                key,
-                value,
-                *ttl_ms,
-                *surrogate,
+                PutFields {
+                    collection,
+                    key,
+                    value,
+                    ttl_ms: *ttl_ms,
+                    surrogate: *surrogate,
+                },
                 ReturningFields {
                     returning: decode_returning(returning)?,
                     rls_filters,
                 },
+                decode_provenance(provenance)?,
             )?
         }
         ReplicatedWrite::KvDelete {
@@ -46,6 +50,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
             keys,
             returning,
             rls_filters,
+            provenance,
         } => kv::delete(
             collection,
             keys,
@@ -53,6 +58,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
                 returning: decode_returning(returning)?,
                 rls_filters,
             },
+            decode_provenance(provenance)?,
         ),
         ReplicatedWrite::KvInsert {
             collection,
@@ -354,6 +360,7 @@ mod tests {
                 resolved_now_ms: Some(resolved_now_ms),
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             },
         );
         let bytes = entry.to_bytes();
@@ -400,6 +407,7 @@ mod tests {
                 resolved_now_ms: None,
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             },
         );
         let bytes = entry.to_bytes();
@@ -525,6 +533,7 @@ mod tests {
             surrogate: nodedb_types::Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
             .expect("encode must not error")
@@ -547,6 +556,7 @@ mod tests {
             surrogate: nodedb_types::Surrogate::new(2),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let entry_no_ttl = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan_no_ttl)
             .expect("encode must not error")

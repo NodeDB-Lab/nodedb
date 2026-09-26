@@ -149,6 +149,7 @@ mod tests {
             surrogate: Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         })
     }
 

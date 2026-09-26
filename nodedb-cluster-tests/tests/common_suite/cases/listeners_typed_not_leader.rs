@@ -179,6 +179,7 @@ async fn pgwire_not_leader_retry_uses_shared_gateway() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let ctx = test_ctx();
     let checked = common::authorize_gateway_plan(&node.shared, &ctx, put_plan).await;
@@ -244,6 +245,7 @@ async fn http_not_leader_gateway_error_mapping() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let ctx = test_ctx();
     let checked = common::authorize_gateway_plan(&node.shared, &ctx, put_plan).await;
@@ -315,6 +317,7 @@ async fn resp_not_leader_gateway_error_mapping() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let ctx = test_ctx();
     let checked = common::authorize_gateway_plan(&node.shared, &ctx, put_plan).await;
@@ -449,6 +452,7 @@ async fn native_not_leader_gateway_error_mapping() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let ctx = test_ctx();
     let checked = common::authorize_gateway_plan(&node.shared, &ctx, put_plan).await;

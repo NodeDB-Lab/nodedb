@@ -35,6 +35,7 @@ fn kv_put_scan_roundtrip() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 
@@ -54,6 +55,7 @@ fn kv_put_scan_roundtrip() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 

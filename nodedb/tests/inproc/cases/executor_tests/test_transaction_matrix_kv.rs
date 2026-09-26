@@ -33,6 +33,7 @@ fn kv_put(key: &[u8], value: &[u8]) -> PhysicalPlan {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     })
 }
 
@@ -196,6 +197,7 @@ fn rollback_matrix_kv_delete_then_doc_fail() {
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             }),
             doc_insert_conflict("docs"),
         ],

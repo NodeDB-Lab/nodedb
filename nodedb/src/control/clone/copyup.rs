@@ -69,6 +69,7 @@ pub async fn perform_kv_clone_copyup(params: KvCopyUpParams<'_>) -> crate::Resul
         surrogate,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
 
     let vshard_id = VShardId::from_collection_in_database(target_db_id, &target_coll_qualified);

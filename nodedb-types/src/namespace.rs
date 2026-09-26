@@ -114,6 +114,10 @@ pub enum Namespace {
     /// transport to Origin. Keys are big-endian monotonic u64 IDs; values are
     /// zerompk-encoded `PendingSpatialDelete` payloads.
     SpatialDeletePending = 24,
+    /// Durable FIFO queue of outbound KV writes waiting for transport to
+    /// Origin. Keys are big-endian monotonic u64 IDs; values are
+    /// zerompk-encoded `PendingKvWrite` payloads.
+    KvPushPending = 25,
 }
 
 impl Namespace {
@@ -145,6 +149,7 @@ impl Namespace {
             22 => Some(Self::FtsDeletePending),
             23 => Some(Self::SpatialInsertPending),
             24 => Some(Self::SpatialDeletePending),
+            25 => Some(Self::KvPushPending),
             _ => None,
         }
     }
@@ -156,10 +161,10 @@ mod tests {
 
     #[test]
     fn namespace_roundtrip() {
-        for v in 0u8..=24 {
+        for v in 0u8..=25 {
             let ns = Namespace::from_u8(v).unwrap();
             assert_eq!(ns as u8, v);
         }
-        assert!(Namespace::from_u8(25).is_none());
+        assert!(Namespace::from_u8(26).is_none());
     }
 }

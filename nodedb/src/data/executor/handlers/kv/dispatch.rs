@@ -41,9 +41,9 @@ impl CoreLoop {
                 surrogate,
                 returning,
                 rls_filters,
-            } => self.execute_kv_put(
-                task,
-                super::crud::KvWriteParams {
+                provenance,
+            } => {
+                let params = super::crud::KvWriteParams {
                     did,
                     tid,
                     collection: collection.as_str(),
@@ -53,8 +53,12 @@ impl CoreLoop {
                     surrogate: *surrogate,
                     returning: returning.as_ref(),
                     rls_filters,
-                },
-            ),
+                };
+                match provenance {
+                    Some(prov) => self.execute_kv_sync_put(task, params, prov),
+                    None => self.execute_kv_put(task, params),
+                }
+            }
             KvOp::Insert {
                 collection,
                 key,
@@ -131,9 +135,9 @@ impl CoreLoop {
                 rls_write_check,
                 returning,
                 rls_filters,
-            } => self.execute_kv_delete(
-                task,
-                super::crud::KvDeleteParams {
+                provenance,
+            } => {
+                let params = super::crud::KvDeleteParams {
                     did,
                     tid,
                     collection: collection.as_str(),
@@ -141,8 +145,12 @@ impl CoreLoop {
                     rls_write_check,
                     returning: returning.as_ref(),
                     rls_filters,
-                },
-            ),
+                };
+                match provenance {
+                    Some(prov) => self.execute_kv_sync_delete(task, params, prov),
+                    None => self.execute_kv_delete(task, params),
+                }
+            }
             KvOp::Scan { .. } => self.dispatch_kv_scan(task, did, tid, op),
             KvOp::Expire {
                 collection,

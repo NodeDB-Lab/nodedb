@@ -413,6 +413,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let cas = PhysicalPlan::Kv(KvOp::Cas {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "state"),
@@ -445,6 +446,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         // Live dispatch would have failed this compare (expected "idle" but
         // the seeded value is "fighting"); the WAL record still exists
@@ -535,6 +537,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let incr = PhysicalPlan::Kv(KvOp::IncrFloat {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "scores"),
@@ -567,6 +570,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let getset = PhysicalPlan::Kv(KvOp::GetSet {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "session"),

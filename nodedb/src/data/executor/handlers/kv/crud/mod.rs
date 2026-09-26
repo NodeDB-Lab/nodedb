@@ -4,6 +4,7 @@
 
 mod delete;
 mod get;
+mod sync_write;
 mod types;
 mod write_basic;
 mod write_upsert;

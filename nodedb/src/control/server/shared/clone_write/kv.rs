@@ -38,6 +38,10 @@ pub(super) async fn intercept_kv_clone_write(
             rls_write_check,
             returning,
             rls_filters,
+            // The tombstone path answers a count, not a sync ack. A Lite KV
+            // push that lands here moves its stream mark on its own, after
+            // this returns `Handled`.
+            provenance: _,
         }) => {
             // Delete may have multiple keys; handle each. We serialize here
             // (one tombstone per key) and return Handled with synthetic OK.
@@ -167,6 +171,7 @@ pub(super) async fn intercept_kv_clone_write(
                     // Same statement, same projection and read gate.
                     returning: returning.clone(),
                     rls_filters: rls_filters.clone(),
+                    provenance: None,
                 });
                 let vshard_id = VShardId::from_collection_in_database(db_id, collection_qualified);
                 let resp = dispatch_data_plane_raw(state, tenant_id, vshard_id, db_id, delete_plan)

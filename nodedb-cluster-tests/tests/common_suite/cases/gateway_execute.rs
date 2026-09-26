@@ -76,6 +76,7 @@ async fn gateway_execute_kv_put_get_single_node() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let put_checked = common::authorize_gateway_plan(&node.shared, &ctx, put_plan).await;
     let put_result = gateway.execute(&ctx, put_checked).await;

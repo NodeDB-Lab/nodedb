@@ -297,6 +297,7 @@ fn one_savepoint_reverts_value_and_graph_overlays_together() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 

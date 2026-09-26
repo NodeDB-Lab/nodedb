@@ -58,6 +58,7 @@ fn single_core_cross_type_hash_join() {
                 surrogate: nodedb_types::Surrogate::ZERO,
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             }),
         );
     }
@@ -177,6 +178,7 @@ fn single_core_left_join_with_nulls() {
                 surrogate: nodedb_types::Surrogate::ZERO,
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             }),
         );
     }

@@ -8,6 +8,7 @@
 use crate::bridge::envelope::PhysicalPlan;
 use nodedb_physical::physical_plan::{KvCounterShape, KvOp, ReturningSpec};
 use nodedb_types::RlsWriteCheck;
+use nodedb_types::sync::wire::SyncProvenance;
 
 /// A decoded RETURNING projection spec plus the read filters gating it — see
 /// `ReplicatedWrite::KvPut::returning`. Bundled — plain positional arguments
@@ -17,14 +18,27 @@ pub(super) struct ReturningFields<'a> {
     pub rls_filters: &'a [u8],
 }
 
+/// The row a replicated KV put writes, and the identity it is written under.
+pub(super) struct PutFields<'a> {
+    pub collection: &'a str,
+    pub key: &'a [u8],
+    pub value: &'a [u8],
+    pub ttl_ms: u64,
+    pub surrogate: u32,
+}
+
 pub(super) fn put(
-    collection: &str,
-    key: &[u8],
-    value: &[u8],
-    ttl_ms: u64,
-    surrogate: u32,
+    put: PutFields<'_>,
     returning: ReturningFields<'_>,
+    provenance: Option<SyncProvenance>,
 ) -> crate::Result<PhysicalPlan> {
+    let PutFields {
+        collection,
+        key,
+        value,
+        ttl_ms,
+        surrogate,
+    } = put;
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Put {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
@@ -35,6 +49,8 @@ pub(super) fn put(
         // Carried on the record — a replay re-executes for the originating request.
         returning: returning.returning,
         rls_filters: returning.rls_filters.to_vec(),
+        // Every replica gates the write on the same stream mark.
+        provenance,
     }))
 }
 
@@ -45,6 +61,7 @@ pub(super) fn delete(
     collection: &str,
     keys: &[Vec<u8>],
     returning: ReturningFields<'_>,
+    provenance: Option<SyncProvenance>,
 ) -> PhysicalPlan {
     PhysicalPlan::Kv(KvOp::Delete {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
@@ -52,6 +69,7 @@ pub(super) fn delete(
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
         returning: returning.returning,
         rls_filters: returning.rls_filters.to_vec(),
+        provenance,
     })
 }
 
@@ -633,6 +651,53 @@ mod tests {
         }
     }
 
+    /// A Lite KV push carries its sync provenance to every replica, so each
+    /// one gates the write on the same stream mark.
+    #[test]
+    fn kv_put_and_delete_provenance_roundtrips() {
+        let tenant = TenantId::new(1);
+        let vshard = VShardId::new(0);
+        let prov = SyncProvenance {
+            producer_id: 7,
+            epoch: 2,
+            stream_id: 99,
+            seq: 5,
+        };
+        let put = PhysicalPlan::Kv(KvOp::Put {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "kv"),
+            key: b"k1".to_vec(),
+            value: b"v1".to_vec(),
+            ttl_ms: 0,
+            surrogate: Surrogate::new(1),
+            returning: None,
+            rls_filters: Vec::new(),
+            provenance: Some(prov.clone()),
+        });
+        let delete = PhysicalPlan::Kv(KvOp::Delete {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "kv"),
+            keys: vec![b"k1".to_vec()],
+            rls_write_check: RlsWriteCheck::NoPolicyApplies,
+            returning: None,
+            rls_filters: Vec::new(),
+            provenance: Some(prov.clone()),
+        });
+        for plan in [put, delete] {
+            let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
+                .expect("encode must not error")
+                .expect("a KV write produces a ReplicatedEntry");
+            let (_, _, decoded, _) = decode::from_replicated_entry(&entry.to_bytes(), None)
+                .expect("from_replicated_entry error")
+                .expect("from_replicated_entry returned None");
+            match decoded {
+                PhysicalPlan::Kv(KvOp::Put { provenance, .. })
+                | PhysicalPlan::Kv(KvOp::Delete { provenance, .. }) => {
+                    assert_eq!(provenance, Some(prov.clone()));
+                }
+                other => panic!("expected a KV write, got {other:?}"),
+            }
+        }
+    }
+
     /// `entry_kv::kv_write` must not drop `KvOp::Put::returning` / `rls_filters`
     /// — the leader re-derives its plan from the committed entry, so a drop here
     /// loses `RETURNING` for the originating request too, not just followers.
@@ -651,6 +716,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: Some(spec.clone()),
             rls_filters: b"rls-predicate".to_vec(),
+            provenance: None,
         });
         let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
             .expect("encode must not error")

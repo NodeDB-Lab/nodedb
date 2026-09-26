@@ -84,6 +84,7 @@ pub(in crate::control::backup::restore) async fn reissue_kv_tables(
                 surrogate,
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             });
             super::durable::reissue_plan_durably(state, tenant, database_id, collection, plan)
                 .await?;

@@ -140,6 +140,7 @@ pub(in crate::control::server::resp) async fn handle_set(
         surrogate,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
 
     // A rejected write surfaces as the error it is, never as `OK`.
@@ -170,6 +171,7 @@ pub(in crate::control::server::resp) async fn handle_del(
         // RESP has no RETURNING clause.
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
 
     // A rejected delete surfaces as the error it is, never as `0` deleted.

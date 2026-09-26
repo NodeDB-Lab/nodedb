@@ -92,6 +92,7 @@ fn hash_join_completeness_past_50k_cap() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 
@@ -165,6 +166,7 @@ fn sort_merge_join_completeness_past_50k_cap() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 
@@ -223,6 +225,7 @@ fn nested_loop_join_completeness_past_50k_cap() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 

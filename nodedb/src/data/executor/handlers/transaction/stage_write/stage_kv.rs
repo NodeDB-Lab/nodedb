@@ -108,6 +108,9 @@ impl CoreLoop {
                 // before the write is staged, so no row image is projected here.
                 returning: _,
                 rls_filters: _,
+                // A Lite KV push dispatches with no transaction id, so a
+                // staged delete never carries sync provenance.
+                provenance: _,
             } => self.stage_kv_delete(task, tid, txn_id, collection.as_str(), keys, rls_write_check),
             // Predicate DML staged like Document `BulkUpdate`/`BulkDelete`:
             // the row set resolves against BASE ∪ OVERLAY. Same `RETURNING`

@@ -71,6 +71,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
                 // Attached by `inject_returning_spec` after plan conversion.
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             }),
             post_set_op: PostSetOp::None,
             txn_id: None,

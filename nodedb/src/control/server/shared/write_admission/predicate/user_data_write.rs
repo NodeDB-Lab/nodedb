@@ -69,6 +69,7 @@ mod tests {
             surrogate: Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         assert!(plan_writes_user_data(&plan));
     }

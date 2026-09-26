@@ -78,6 +78,7 @@ async fn pgwire_gateway_smoke_cache_hit() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let checked = common::authorize_gateway_plan(&node.shared, &ctx, put_plan).await;
     gateway.execute(&ctx, checked).await.expect("gateway Put");
@@ -148,6 +149,7 @@ async fn http_gateway_smoke_cache_hit() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let checked = common::authorize_gateway_plan(&node.shared, &ctx, put_plan).await;
     gateway.execute(&ctx, checked).await.expect("gateway Put");
@@ -212,6 +214,7 @@ async fn resp_gateway_smoke_cache_hit() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let checked = common::authorize_gateway_plan(&node.shared, &ctx, put_plan).await;
     gateway.execute(&ctx, checked).await.expect("gateway Put");
@@ -279,6 +282,7 @@ async fn ilp_gateway_smoke_cache_hit() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let checked = common::authorize_gateway_plan(&node.shared, &ctx, put_plan).await;
     gateway.execute(&ctx, checked).await.expect("gateway Put");
@@ -343,6 +347,7 @@ async fn native_gateway_smoke_cache_hit() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let checked = common::authorize_gateway_plan(&node.shared, &ctx, put_plan).await;
     gateway.execute(&ctx, checked).await.expect("gateway Put");

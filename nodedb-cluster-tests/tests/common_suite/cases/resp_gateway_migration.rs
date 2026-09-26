@@ -74,6 +74,7 @@ async fn resp_gateway_migration_single_node_set_get() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let put_checked = common::authorize_gateway_plan(&node.shared, &ctx, put_plan).await;
     let put_result = gateway.execute(&ctx, put_checked).await;
@@ -146,6 +147,7 @@ async fn resp_gateway_migration_cross_node_get() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let put_checked =
         common::authorize_gateway_plan(&cluster.nodes[0].shared, &ctx, put_plan).await;

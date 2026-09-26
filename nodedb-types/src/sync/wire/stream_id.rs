@@ -22,6 +22,7 @@ pub enum EngineKind {
     Fts,
     Spatial,
     Array,
+    Kv,
 }
 
 /// Derive a stable, deterministic `stream_id` for a `(engine, collection)` pair.

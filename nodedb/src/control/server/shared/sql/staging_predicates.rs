@@ -535,6 +535,7 @@ mod tests {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         };
         assert_eq!(
             kv_write_shape(&op).expect("stageable").tag_kind(&payload),

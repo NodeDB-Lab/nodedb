@@ -281,6 +281,7 @@ mod tests {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         })
     }
 
@@ -294,6 +295,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         })
     }
 
@@ -353,6 +355,7 @@ mod tests {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         assert!(matches!(
             inject(&mut plan, &store),
@@ -466,6 +469,7 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             },
             KvOp::FieldSet {
                 collection: collection(),

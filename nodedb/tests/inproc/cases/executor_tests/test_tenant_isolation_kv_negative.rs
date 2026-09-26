@@ -33,6 +33,7 @@ fn kv_cross_tenant_put_does_not_overwrite() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 
@@ -54,6 +55,7 @@ fn kv_cross_tenant_put_does_not_overwrite() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 
@@ -107,6 +109,7 @@ fn kv_cross_tenant_delete_does_not_affect_owner() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 
@@ -127,6 +130,7 @@ fn kv_cross_tenant_delete_does_not_affect_owner() {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
     // Either Ok (deleted 0 rows from B's namespace) or NotFound — both correct.

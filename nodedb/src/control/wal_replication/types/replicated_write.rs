@@ -402,6 +402,9 @@ pub enum ReplicatedWrite {
         /// See `ReplicatedWrite::PointPut::rls_filters`.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// Sync provenance of a Lite KV push, encoded as zerompk bytes.
+        #[serde(default)]
+        provenance: Option<Vec<u8>>,
     },
     KvDelete {
         collection: String,
@@ -412,6 +415,9 @@ pub enum ReplicatedWrite {
         /// See `ReplicatedWrite::PointPut::rls_filters`.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// Sync provenance of a Lite KV push, encoded as zerompk bytes.
+        #[serde(default)]
+        provenance: Option<Vec<u8>>,
     },
     KvInsert {
         collection: String,

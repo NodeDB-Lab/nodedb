@@ -42,6 +42,7 @@ fn make_kv_put_request(
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
 
     let plan_bytes = plan_wire::encode(&plan).expect("encode plan");
@@ -286,6 +287,7 @@ async fn execute_request_cross_node_dispatch() {
                 surrogate: nodedb_types::Surrogate::ZERO,
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             });
             plan_wire::encode(&plan).expect("encode plan")
         },

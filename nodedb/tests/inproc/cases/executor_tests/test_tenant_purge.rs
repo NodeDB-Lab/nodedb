@@ -78,6 +78,7 @@ fn purge_removes_all_tenant_data() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 

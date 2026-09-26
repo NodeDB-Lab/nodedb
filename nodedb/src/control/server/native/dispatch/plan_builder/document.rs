@@ -83,6 +83,7 @@ pub(crate) fn build_point_put(
                 surrogate,
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             }))
         }
         Some(CollectionType::Columnar(ColumnarProfile::Timeseries { .. })) => {
@@ -151,6 +152,7 @@ pub(crate) fn build_point_delete(
             // The native point-delete carries no RETURNING clause.
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         })),
         Some(CollectionType::Columnar(ColumnarProfile::Timeseries { .. })) => {
             Err(crate::Error::BadRequest {

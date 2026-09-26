@@ -40,6 +40,13 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
         ErrorCode::SyncRejected { violation, .. } => {
             NodeDbError::constraint_violation("", "sync", violation.to_string())
         }
+        // The gate held the frame back without applying it. The sender
+        // re-sends or retires it by the hold, so it presents as the
+        // retriable class.
+        ErrorCode::SyncNotApplied { hold, .. } => NodeDbError::from_wire(
+            PublicCode::WRITE_CONFLICT,
+            format!("sync frame not applied: {hold}"),
+        ),
         // Nothing was applied and the identical frame is expected to succeed
         // once the transient precondition resolves, so it presents as the
         // retriable class rather than a permanent refusal.

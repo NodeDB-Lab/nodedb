@@ -35,7 +35,8 @@ use crate::bridge::envelope::ErrorCode;
 /// precondition is not final: another replica can apply the same entry, and
 /// a redelivery here can too. That covers admission and capacity verdicts,
 /// a task that expired before it started, concurrency retries, the staging
-/// byte budget, and `RetryableRefusal`,
+/// byte budget, a sync hold, which depends on the core's own stream mark,
+/// and `RetryableRefusal`,
 /// which a committed-redo apply answers with after it rolled a failed
 /// install back.
 pub(crate) fn refusal_is_final(code: &ErrorCode) -> bool {
@@ -43,6 +44,7 @@ pub(crate) fn refusal_is_final(code: &ErrorCode) -> bool {
         && !matches!(
             code,
             ErrorCode::RetryableRefusal { .. }
+                | ErrorCode::SyncNotApplied { .. }
                 | ErrorCode::RateExceeded { .. }
                 | ErrorCode::CollectionDraining { .. }
                 | ErrorCode::DispatchCapacity { .. }
@@ -71,6 +73,8 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         | ErrorCode::RejectedPrevalidation { .. }
         // The sync gate refused the frame before its delta installed.
         | ErrorCode::SyncRejected { .. }
+        // The sync gate held the frame back before anything installed.
+        | ErrorCode::SyncNotApplied { .. }
         | ErrorCode::RejectedAuthz { .. }
         | ErrorCode::RejectedDanglingEdge { .. }
         | ErrorCode::AppendOnlyViolation { .. }

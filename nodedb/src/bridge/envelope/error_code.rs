@@ -33,6 +33,12 @@ pub enum ErrorCode {
         applied_seq: u64,
         provenance: nodedb_types::sync::wire::SyncProvenance,
     },
+    /// A sync frame the idempotency gate held back. Nothing applied, and
+    /// the stream's mark did not move. `applied_seq` is that mark.
+    SyncNotApplied {
+        hold: super::SyncHold,
+        applied_seq: u64,
+    },
     /// Document/collection not found.
     NotFound,
     /// Authorization failure.

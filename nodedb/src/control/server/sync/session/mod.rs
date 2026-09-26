@@ -14,6 +14,7 @@
 //! - `clock_ping.rs` — `handle_vector_clock_sync` + `handle_ping`.
 //! - `token.rs` — `handle_token_refresh`.
 //! - `dispatch.rs` — `process_frame` (match on `msg_type`, route).
+//! - `row_push_reject.rs` — `handle_row_push_reject` (peer refused a row push).
 
 pub mod clock_ping;
 pub mod collection_schema;
@@ -21,6 +22,7 @@ pub mod delta;
 pub mod dispatch;
 pub mod fencing;
 pub mod handshake;
+pub mod row_push_reject;
 pub mod state;
 pub mod token;
 

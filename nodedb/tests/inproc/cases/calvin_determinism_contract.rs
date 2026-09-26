@@ -177,6 +177,7 @@ fn kv_no_ttl_byte_identical() {
                 surrogate: nodedb_types::Surrogate::new(i),
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             })
         })
         .collect();
@@ -361,6 +362,7 @@ fn kv_with_ttl_byte_identical() {
                 surrogate: nodedb_types::Surrogate::new(i),
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             })
         })
         .collect();

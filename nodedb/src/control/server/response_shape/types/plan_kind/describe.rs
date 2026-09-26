@@ -205,6 +205,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::ZERO,
                 returning: spec(),
                 rls_filters: Vec::new(),
+                provenance: None,
             }),
             PhysicalPlan::Kv(KvOp::BatchPut {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -242,6 +243,7 @@ mod tests {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         })
     }
 

@@ -77,6 +77,7 @@ async fn http_gateway_migration_single_node_query() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let put_checked = common::authorize_gateway_plan(&node.shared, &ctx, put_plan).await;
     let put_result = gateway.execute(&ctx, put_checked).await;
@@ -156,6 +157,7 @@ async fn http_gateway_migration_cross_node_query() {
         surrogate: nodedb_types::Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
     let put_checked = common::authorize_gateway_plan(&follower.shared, &ctx, put_plan).await;
     let put_result = gateway.execute(&ctx, put_checked).await;

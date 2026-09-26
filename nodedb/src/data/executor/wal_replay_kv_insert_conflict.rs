@@ -366,6 +366,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let updates = vec![(
             "mana".to_string(),
@@ -459,6 +460,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
 
         let excluded = obj_bytes(&[("hp", 1)]);
@@ -549,6 +551,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let upsert = PhysicalPlan::Kv(KvOp::InsertOnConflictUpdate {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "raw"),

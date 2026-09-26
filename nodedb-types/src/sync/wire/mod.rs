@@ -12,6 +12,8 @@
 //! - `0x12` DeltaReject (server → client)
 //! - `0x13` CollectionSchema (bidirectional)
 //! - `0x14` CollectionPurged (server → client)
+//! - `0x15` RowPush (server → client)
+//! - `0x16` RowPushReject (client → server)
 //! - `0x20` ShapeSubscribe (client → server)
 //! - `0x21` ShapeSnapshot (server → client)
 //! - `0x22` ShapeDelta (server → client)
@@ -49,6 +51,8 @@
 //! - `0xAB` SpatialInsertAck (server → client)
 //! - `0xAC` SpatialDelete (client → server)
 //! - `0xAD` SpatialDeleteAck (server → client)
+//! - `0xAE` KvPush (client → server)
+//! - `0xAF` KvPushAck (server → client)
 //! - `0xFF` Ping/Pong (bidirectional)
 
 pub mod ack_result;
@@ -59,6 +63,7 @@ pub mod columnar;
 pub mod delta;
 pub mod frame;
 pub mod fts;
+pub mod kv;
 pub mod presence;
 pub mod provenance;
 pub mod resync;
@@ -82,6 +87,7 @@ pub use delta::{
 };
 pub use frame::{SyncFrame, SyncMessageType};
 pub use fts::{FtsDeleteAckMsg, FtsDeleteMsg, FtsIndexAckMsg, FtsIndexMsg};
+pub use kv::{KvPushAckMsg, KvPushMsg, KvPushOp, RowPushRefusal, RowPushRejectMsg};
 pub use presence::{PeerPresence, PresenceBroadcastMsg, PresenceLeaveMsg, PresenceUpdateMsg};
 pub use provenance::SyncProvenance;
 pub use resync::{ResyncReason, ResyncRequestMsg, ThrottleMsg};

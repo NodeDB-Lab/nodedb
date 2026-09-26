@@ -895,6 +895,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(1),
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             });
         let responder = tokio::spawn(respond_once_with(
             Arc::clone(&state),

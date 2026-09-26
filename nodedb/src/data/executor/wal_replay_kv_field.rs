@@ -189,6 +189,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let field_set = PhysicalPlan::Kv(KvOp::FieldSet {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "players"),
@@ -272,6 +273,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let field_set = PhysicalPlan::Kv(KvOp::FieldSet {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "players"),

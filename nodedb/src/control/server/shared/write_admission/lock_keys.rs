@@ -379,6 +379,7 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             }),
             None
         );

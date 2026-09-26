@@ -60,12 +60,16 @@ impl CoreLoop {
                 },
                 task,
             ),
+            // A sync-gated delete never takes the resolve route: the resolved
+            // write carries no provenance, so the gate would not run. It
+            // falls to the refusal below.
             KvOp::Delete {
                 collection,
                 keys,
                 rls_write_check,
                 returning,
                 rls_filters,
+                provenance: None,
             } => self.resolve_kv_delete(KvDeleteParams {
                 did,
                 tid,

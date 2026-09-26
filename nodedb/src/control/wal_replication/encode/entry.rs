@@ -236,6 +236,7 @@ mod tests {
             surrogate: Surrogate::new(7),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         assert!(
             to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &kv_put)

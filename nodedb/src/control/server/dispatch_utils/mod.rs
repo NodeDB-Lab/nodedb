@@ -29,8 +29,8 @@ pub(crate) use dispatch::{
 };
 pub use durability_barrier::writes_acked_without_durability;
 pub(crate) use durable_write::{
-    dispatch_authorized_durable_write, dispatch_authorized_task_by_class,
-    dispatch_durable_autocommit_write,
+    dispatch_authorized_durable_write, dispatch_authorized_durable_write_with_source,
+    dispatch_authorized_task_by_class, dispatch_durable_autocommit_write,
 };
 pub(crate) use error_status::reject_data_plane_error;
 pub(crate) use local_read::{LocalRead, dispatch_local_read};

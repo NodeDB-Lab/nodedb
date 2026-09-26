@@ -272,6 +272,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let entry = crate::control::server::wal_dispatch_kv::encode::encode_kv_expire(
             "sessions", b"tok1", 5_000, 6_000,
@@ -325,6 +326,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         wal_append_if_write(
             &wal,
@@ -396,6 +398,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let persist_p = PhysicalPlan::Kv(KvOp::Persist {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "sessions"),

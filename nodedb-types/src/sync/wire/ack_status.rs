@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
     Clone,
     Default,
     PartialEq,
+    Eq,
     Serialize,
     Deserialize,
     zerompk::ToMessagePack,

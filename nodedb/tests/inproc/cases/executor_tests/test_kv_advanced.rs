@@ -32,6 +32,7 @@ fn kv_protocol_command_sequence() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 
@@ -68,6 +69,7 @@ fn kv_protocol_command_sequence() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 
@@ -119,6 +121,7 @@ fn kv_protocol_command_sequence() {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
     let json: serde_json::Value = payload_value(&payload);
@@ -197,6 +200,7 @@ fn kv_protocol_command_sequence() {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
     let json: serde_json::Value = payload_value(&payload);
@@ -231,6 +235,7 @@ fn kv_and_vector_coexist() {
                 surrogate: nodedb_types::Surrogate::ZERO,
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             }),
         );
     }
@@ -322,6 +327,7 @@ fn ttl_expiry_produces_expired_key_info() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 
@@ -366,6 +372,7 @@ fn ttl_expiry_produces_expired_key_info() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 
@@ -422,6 +429,7 @@ fn kv_field_get_and_set() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 
@@ -512,6 +520,7 @@ fn kv_truncate_clears_all() {
                 surrogate: nodedb_types::Surrogate::ZERO,
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             }),
         );
     }
@@ -600,6 +609,7 @@ fn kv_index_write_amp_ratio_matches() {
                 surrogate: nodedb_types::Surrogate::ZERO,
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             }),
         );
     }
@@ -657,6 +667,7 @@ fn kv_mass_expiry_respects_reap_budget() {
                 surrogate: nodedb_types::Surrogate::ZERO,
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             }),
         );
     }
@@ -677,6 +688,7 @@ fn kv_mass_expiry_respects_reap_budget() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 

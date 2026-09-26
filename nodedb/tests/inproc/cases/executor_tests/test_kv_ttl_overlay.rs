@@ -96,6 +96,7 @@ fn staged_expire_is_observed_by_in_tx_get_ttl_then_reverts_on_rollback() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 
@@ -181,6 +182,7 @@ fn staged_persist_hides_base_ttl_then_reverts_on_rollback() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 
@@ -277,6 +279,7 @@ fn staged_expire_with_zero_ttl_makes_key_appear_absent_to_in_tx_get() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         }),
     );
 

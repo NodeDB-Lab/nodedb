@@ -97,6 +97,7 @@ mod tests {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let outcome = calvin_tag_for_plan(&plan).expect("an upsert folds without a round-trip");
         let tag: pgwire::messages::response::CommandComplete = render(outcome).into();

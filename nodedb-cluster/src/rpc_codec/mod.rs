@@ -43,7 +43,7 @@ pub use cluster_mgmt::{
     JoinGroupInfo, JoinNodeInfo, JoinRequest, JoinResponse, LEADER_REDIRECT_PREFIX, PingRequest,
     PongResponse, TopologyAck, TopologyUpdate,
 };
-pub use data_plane_error::{DataPlaneCounterFault, DataPlaneErrorCode};
+pub use data_plane_error::{DataPlaneCounterFault, DataPlaneErrorCode, DataPlaneSyncHold};
 pub use data_propose::{
     DataProposeRequest, DataProposeResponse, ForwardedProposeRefusal, ProposeTarget,
 };

@@ -112,6 +112,7 @@ pub(in super::super) fn convert_kv_insert(
                 // RLS injection pass.
                 returning: None,
                 rls_filters: Vec::new(),
+                provenance: None,
             },
         };
         tasks.push(PhysicalTask {

@@ -254,6 +254,7 @@ pub async fn rate_reset(
         rls_write_check: nodedb_types::RlsWriteCheck::system_internal_collection(),
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
 
     match dispatch_counter_write(state, tenant_id, vshard, plan).await {

@@ -174,6 +174,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let outcome = wal_append_if_write(
             &wal,
@@ -225,6 +226,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let outcome = wal_append_if_write(
             &wal,
@@ -289,6 +291,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         // 1_000 is vastly less than the real wall clock, so a live-apply path
         // that ignores `resolved_now_ms` and reads the wall clock instead

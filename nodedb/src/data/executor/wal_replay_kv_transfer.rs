@@ -410,6 +410,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let put_bob = PhysicalPlan::Kv(KvOp::Put {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),
@@ -419,6 +420,7 @@ mod tests {
             surrogate: Surrogate::new(2),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let transfer = PhysicalPlan::Kv(KvOp::Transfer {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),
@@ -486,6 +488,7 @@ mod tests {
             surrogate: Surrogate::new(1),
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let transfer_item = PhysicalPlan::Kv(KvOp::TransferItem {
             source_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "inventory"),

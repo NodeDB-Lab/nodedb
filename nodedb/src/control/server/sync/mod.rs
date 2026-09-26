@@ -7,6 +7,8 @@ pub mod definition_fanout;
 pub mod dlq;
 pub mod fts_handler;
 mod fts_session;
+pub mod kv_handler;
+mod kv_session;
 pub mod listener;
 pub mod presence;
 pub mod raft_dispatch;

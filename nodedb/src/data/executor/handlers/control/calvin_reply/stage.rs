@@ -614,6 +614,7 @@ mod tests {
             surrogate: Surrogate::new(5),
             returning: returning(&["v"]),
             rls_filters: Vec::new(),
+            provenance: None,
         })
     }
 
@@ -635,6 +636,7 @@ mod tests {
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: returning(&["v"]),
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let response = commit(&[kv_put("put"), delete], |_| {});
         assert_eq!(returned(&response), vec![text("put")]);
@@ -652,6 +654,7 @@ mod tests {
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: returning(&["v"]),
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());

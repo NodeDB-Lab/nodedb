@@ -141,6 +141,20 @@ pub enum DataPlaneErrorCode {
         stream_id: u64,
         seq: u64,
     },
+    /// A sync frame the idempotency gate held back. Nothing applied, and
+    /// the stream's mark did not move.
+    SyncNotApplied {
+        hold: DataPlaneSyncHold,
+        applied_seq: u64,
+    },
+}
+
+/// Wire mirror of `nodedb::bridge::envelope::SyncHold`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub enum DataPlaneSyncHold {
+    Duplicate,
+    Fenced,
+    Gap { expected: u64 },
 }
 
 /// Wire mirror of `nodedb_physical::kv_atomic::CounterFault`.

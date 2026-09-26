@@ -81,6 +81,7 @@ pub(super) async fn handle_zadd(
             surrogate,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
 
         match dispatch_kv_write(state, session, plan).await {
@@ -116,6 +117,7 @@ pub(super) async fn handle_zrem(
         // RESP has no RETURNING clause.
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     });
 
     match dispatch_kv_write(state, session, plan).await {

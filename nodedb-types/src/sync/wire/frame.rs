@@ -15,6 +15,9 @@
 //! - `0xAB` SpatialInsertAck (server → client)
 //! - `0xAC` SpatialDelete (client → server)
 //! - `0xAD` SpatialDeleteAck (server → client)
+//! - `0xAE` KvPush (client → server)
+//! - `0xAF` KvPushAck (server → client)
+//! - `0x16` RowPushReject (client → server)
 
 /// Sync message type identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +47,10 @@ pub enum SyncMessageType {
     /// originated on the server (SQL DML, DDL-managed system rows), where no
     /// client-authored CRDT operation exists to replicate.
     RowPush = 0x15,
+    /// Row push refusal (client → server, 0x16).
+    ///
+    /// Lite sends this for a [`Self::RowPush`] it could not apply.
+    RowPushReject = 0x16,
     ShapeSubscribe = 0x20,
     ShapeSnapshot = 0x21,
     ShapeDelta = 0x22,
@@ -116,6 +123,10 @@ pub enum SyncMessageType {
     SpatialDelete = 0xAC,
     /// Spatial delete acknowledgment (server → client, 0xAD).
     SpatialDeleteAck = 0xAD,
+    /// KV write push (client → server, 0xAE).
+    KvPush = 0xAE,
+    /// KV push acknowledgment (server → client, 0xAF).
+    KvPushAck = 0xAF,
     PingPong = 0xFF,
 }
 
@@ -130,6 +141,7 @@ impl SyncMessageType {
             0x13 => Some(Self::CollectionSchema),
             0x14 => Some(Self::CollectionPurged),
             0x15 => Some(Self::RowPush),
+            0x16 => Some(Self::RowPushReject),
             0x20 => Some(Self::ShapeSubscribe),
             0x21 => Some(Self::ShapeSnapshot),
             0x22 => Some(Self::ShapeDelta),
@@ -167,6 +179,8 @@ impl SyncMessageType {
             0xAB => Some(Self::SpatialInsertAck),
             0xAC => Some(Self::SpatialDelete),
             0xAD => Some(Self::SpatialDeleteAck),
+            0xAE => Some(Self::KvPush),
+            0xAF => Some(Self::KvPushAck),
             0xFF => Some(Self::PingPong),
             _ => None,
         }

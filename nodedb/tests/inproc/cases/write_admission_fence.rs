@@ -89,6 +89,7 @@ fn kv_put(collection: &str, key: &[u8]) -> PhysicalPlan {
         surrogate: Surrogate::ZERO,
         returning: None,
         rls_filters: Vec::new(),
+        provenance: None,
     })
 }
 

@@ -191,6 +191,7 @@ async fn pgwire_gateway_migration_plan_cache_hits() {
             surrogate: nodedb_types::Surrogate::ZERO,
             returning: None,
             rls_filters: Vec::new(),
+            provenance: None,
         });
         let put_checked = common::authorize_gateway_plan(&node.shared, &ctx, put_plan).await;
         gateway
