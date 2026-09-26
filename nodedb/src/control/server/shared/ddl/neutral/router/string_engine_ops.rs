@@ -330,14 +330,16 @@ pub(super) async fn try_string(
         return Some(estimate_count::estimate_count(state, identity, database_id, sql).await);
     }
 
-    // `DEFINE FIELD …` / `DEFINE EVENT …` — string-recognized (no typed DDL
-    // variant); the pgwire schema string router dispatched both from the raw
-    // SQL. Replicate that exactly here, before the parse gate.
+    // `DEFINE FIELD …` / `DEFINE EVENT …` / `REMOVE EVENT …` —
+    // string-recognized (no typed DDL variant), before the parse gate.
     if upper.starts_with("DEFINE FIELD ") {
         return Some(field_def::define_field(state, identity, database_id, sql));
     }
     if upper.starts_with("DEFINE EVENT ") {
         return Some(field_def::define_event(state, identity, database_id, sql));
+    }
+    if upper.starts_with("REMOVE EVENT ") {
+        return Some(field_def::remove_event(state, identity, database_id, sql));
     }
 
     // `EXPLAIN TIERS ON <collection> [RANGE …]` — string-recognized (no typed

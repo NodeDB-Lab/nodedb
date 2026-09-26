@@ -8,6 +8,8 @@
 //!   reads (VALUE computed fields).
 //! - `DEFINE EVENT <name> ON <collection> WHEN <condition> THEN <action>` —
 //!   stores an event definition in the catalog.
+//! - `REMOVE EVENT <name> ON <collection>` — removes an event definition from
+//!   the catalog.
 //!
 //! Handlers build [`DdlResult`] directly and carry no pgwire wire types.
 
@@ -248,6 +250,79 @@ pub fn define_event(
 
     Ok(vec![DdlResult::Status {
         command: "DEFINE EVENT".to_string(),
+        rows_affected: None,
+    }])
+}
+
+/// Parse and apply a REMOVE EVENT statement.
+///
+/// Syntax: REMOVE EVENT <name> ON <collection>
+///
+/// The collection descriptor is replicated without the definition, the same
+/// way DEFINE EVENT replicates it with one. Inside a transaction the change
+/// is held for COMMIT, as DEFINE EVENT's is. An undefined name is an error
+/// with SQLSTATE 42704.
+pub fn remove_event(
+    state: &SharedState,
+    identity: &AuthenticatedIdentity,
+    database_id: DatabaseId,
+    sql: &str,
+) -> Result<Vec<DdlResult>, DdlError> {
+    let parts: Vec<&str> = sql
+        .trim()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .collect();
+    if parts.len() != 5 || !parts[3].eq_ignore_ascii_case("ON") {
+        return Err(err("42601", "syntax: REMOVE EVENT <name> ON <collection>"));
+    }
+    let event_name = parse_ident_token(parts[2])?;
+    let collection = parse_ident_token(parts[4])?;
+    let tenant_id = identity.tenant_id;
+
+    let audit = ArcAuditEmitter(std::sync::Arc::clone(&state.audit));
+    authorize_collection(
+        identity,
+        database_id,
+        &collection,
+        Permission::Alter,
+        &state.permissions,
+        &state.roles,
+        &audit,
+    )
+    .map_err(|error| err("42501", &format!("permission denied: {}", error.resource())))?;
+
+    let catalog = state.credentials.catalog();
+    let mut coll = match catalog.get_collection(database_id, tenant_id.as_u64(), &collection) {
+        Ok(Some(coll)) => coll,
+        Ok(None) => {
+            return Err(err(
+                "42P01",
+                &format!("collection '{collection}' does not exist"),
+            ));
+        }
+        Err(e) => return Err(err("XX000", &format!("read collection: {e}"))),
+    };
+    let before = coll.event_defs.len();
+    coll.event_defs.retain(|e| e.name != event_name);
+    if coll.event_defs.len() == before {
+        return Err(err(
+            "42704",
+            &format!("event '{event_name}' on '{collection}' does not exist"),
+        ));
+    }
+    crate::control::catalog_entry::persist_collection_replicated(state, database_id, &coll)
+        .map_err(|e| err("XX000", &format!("save collection: {e}")))?;
+
+    state.audit_record(
+        crate::control::security::audit::AuditEvent::AdminAction,
+        Some(tenant_id),
+        &identity.username,
+        &format!("removed event '{event_name}' from '{collection}'"),
+    );
+
+    Ok(vec![DdlResult::Status {
+        command: "REMOVE EVENT".to_string(),
         rows_affected: None,
     }])
 }

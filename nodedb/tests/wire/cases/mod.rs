@@ -189,6 +189,7 @@ mod sql_default_declared_types;
 mod sql_default_expressions;
 mod sql_default_vector_primary;
 mod sql_default_volatility;
+mod sql_define_event_lifecycle;
 mod sql_division_by_zero;
 mod sql_division_by_zero_composite;
 mod sql_dml_affected_counts;

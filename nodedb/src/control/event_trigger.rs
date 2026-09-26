@@ -55,22 +55,17 @@ pub async fn process_write_event(
         return;
     }
 
-    let catalog = shared.credentials.catalog();
-    let coll = match catalog.get_collection(
+    // The committed definitions, from memory: the Event Plane reads no redb.
+    let Some(event_defs) = shared.credentials.catalog().event_definitions(
         event.database_id,
         event.tenant_id.as_u64(),
         &event.collection,
-    ) {
-        Ok(Some(collection)) => collection,
-        _ => return,
+    ) else {
+        return;
     };
 
-    if coll.event_defs.is_empty() {
-        return;
-    }
-
     let op_str = event_operation(event.op);
-    for (index, event_def) in coll.event_defs.iter().enumerate() {
+    for (index, event_def) in event_defs.iter().enumerate() {
         let when_upper = event_def.when_condition.to_uppercase();
         let matches = match when_upper.as_str() {
             "INSERT" => matches!(event.op, WriteOp::Insert | WriteOp::BulkInsert { .. }),

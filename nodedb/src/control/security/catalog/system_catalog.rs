@@ -21,6 +21,9 @@ use super::types::*;
 pub struct SystemCatalog {
     pub(super) db: Arc<Database>,
     pub(super) crdt_signing_root: Arc<std::sync::RwLock<Option<[u8; 32]>>>,
+    /// Committed DEFINE EVENT definitions, for readers that must not read
+    /// redb.
+    pub(super) event_defs: Arc<super::event_defs_index::EventDefsIndex>,
     #[cfg(test)]
     pub(super) fail_next_user_counter_write: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
@@ -47,6 +50,7 @@ impl SystemCatalog {
         let catalog = Self {
             db: Arc::new(db),
             crdt_signing_root: Arc::new(std::sync::RwLock::new(None)),
+            event_defs: Arc::new(super::event_defs_index::EventDefsIndex::new()),
             #[cfg(test)]
             fail_next_user_counter_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
@@ -55,6 +59,7 @@ impl SystemCatalog {
             fail_next_collection_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         catalog.bootstrap_default_database()?;
+        catalog.reload_event_definitions()?;
         Ok(catalog)
     }
 
@@ -69,6 +74,7 @@ impl SystemCatalog {
         let catalog = Self {
             db: Arc::new(db),
             crdt_signing_root: Arc::new(std::sync::RwLock::new(None)),
+            event_defs: Arc::new(super::event_defs_index::EventDefsIndex::new()),
             #[cfg(test)]
             fail_next_user_counter_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
@@ -77,6 +83,7 @@ impl SystemCatalog {
             fail_next_collection_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         catalog.bootstrap_default_database()?;
+        catalog.reload_event_definitions()?;
         Ok(catalog)
     }
 

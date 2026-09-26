@@ -28,6 +28,7 @@ pub mod database_grants;
 pub mod database_quotas;
 pub mod database_types;
 pub mod dependencies;
+pub mod event_defs_index;
 pub mod function_types;
 pub mod functions;
 pub mod index_record;

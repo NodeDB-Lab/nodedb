@@ -119,7 +119,9 @@ impl SystemCatalog {
                 .insert((database_id.as_u64(), inner_key.as_str()), bytes.as_slice())
                 .map_err(|e| catalog_err("insert collection", e))?;
         }
-        write_txn.commit().map_err(|e| catalog_err("commit", e))
+        write_txn.commit().map_err(|e| catalog_err("commit", e))?;
+        self.event_defs.install(database_id, coll);
+        Ok(())
     }
 
     /// Insert a collection only when its catalog key is absent.
@@ -157,6 +159,9 @@ impl SystemCatalog {
             }
         };
         write_txn.commit().map_err(|e| catalog_err("commit", e))?;
+        if inserted {
+            self.event_defs.install(database_id, coll);
+        }
         Ok(inserted)
     }
 
@@ -254,6 +259,9 @@ impl SystemCatalog {
                 .is_some();
         }
         write_txn.commit().map_err(|e| catalog_err("commit", e))?;
+        if removed {
+            self.event_defs.remove(database_id, tenant_id, name);
+        }
         Ok(removed)
     }
 
@@ -398,7 +406,9 @@ impl SystemCatalog {
         }
         write_txn
             .commit()
-            .map_err(|e| catalog_err("migrate_collections commit", e))
+            .map_err(|e| catalog_err("migrate_collections commit", e))?;
+        // The migration wrote rows outside `put_collection`.
+        self.reload_event_definitions()
     }
 }
 
@@ -491,6 +501,73 @@ mod tests {
         let fetched = cat.get_collection(DatabaseId::DEFAULT, 1, "users").unwrap();
         assert!(fetched.is_some());
         assert_eq!(fetched.unwrap().name, "users");
+    }
+
+    fn with_event(tenant_id: u64, name: &str) -> StoredCollection {
+        let mut c = make_coll(tenant_id, name);
+        c.event_defs = vec![super::super::collection_constraints::EventDefinition {
+            name: "ev".into(),
+            collection: name.into(),
+            when_condition: "INSERT".into(),
+            then_action: "SELECT 1".into(),
+        }];
+        c
+    }
+
+    #[test]
+    fn committed_writes_keep_the_event_index_in_step() {
+        let (_dir, cat) = open_catalog();
+        let db = DatabaseId::DEFAULT;
+        cat.put_collection(db, &with_event(1, "orders")).unwrap();
+        assert_eq!(
+            cat.event_definitions(db, 1, "orders").map(|d| d.len()),
+            Some(1)
+        );
+
+        cat.put_collection(db, &make_coll(1, "orders")).unwrap();
+        assert!(cat.event_definitions(db, 1, "orders").is_none());
+
+        cat.put_collection(db, &with_event(1, "orders")).unwrap();
+        assert!(cat.delete_collection(db, 1, "orders").unwrap());
+        assert!(cat.event_definitions(db, 1, "orders").is_none());
+    }
+
+    #[test]
+    fn a_skipped_insert_leaves_the_event_index_unchanged() {
+        let (_dir, cat) = open_catalog();
+        let db = DatabaseId::DEFAULT;
+        cat.put_collection(db, &make_coll(1, "orders")).unwrap();
+        assert!(
+            !cat.put_collection_if_absent(db, &with_event(1, "orders"))
+                .unwrap()
+        );
+        assert!(cat.event_definitions(db, 1, "orders").is_none());
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_event_index_unchanged() {
+        let (_dir, cat) = open_catalog();
+        let db = DatabaseId::DEFAULT;
+        cat.fail_next_collection_write_for_test();
+        assert!(cat.put_collection(db, &with_event(1, "orders")).is_err());
+        assert!(cat.event_definitions(db, 1, "orders").is_none());
+    }
+
+    #[test]
+    fn reopening_the_catalog_loads_the_event_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("system.redb");
+        {
+            let cat = SystemCatalog::open(&path).unwrap();
+            cat.put_collection(DatabaseId::DEFAULT, &with_event(1, "orders"))
+                .unwrap();
+        }
+        let cat = SystemCatalog::open(&path).unwrap();
+        assert_eq!(
+            cat.event_definitions(DatabaseId::DEFAULT, 1, "orders")
+                .map(|d| d.len()),
+            Some(1)
+        );
     }
 
     #[test]
