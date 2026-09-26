@@ -65,14 +65,55 @@ impl VShardAdmissionSequencer {
         Fut: Future<Output = crate::Result<T>>,
     {
         let slot = self.slot(vshard_id)?;
-        let _queued = Arc::clone(&slot.capacity)
-            .try_acquire_owned()
-            .map_err(|_| crate::Error::VShardAdmissionCapacityExceeded {
-                vshard_id,
-                capacity: self.capacity,
-            })?;
+        let _queued = self.reserve(slot, vshard_id)?;
         let _active = slot.active.lock().await;
         operation().await
+    }
+
+    /// Run one admission operation like [`Self::run`], but wait in the queue
+    /// only until `deadline`.
+    ///
+    /// A queued operation still waiting at `deadline` leaves the queue and
+    /// returns [`crate::Error::DeadlineExceeded`]. Its factory is never
+    /// called. Waiters behind it keep their order.
+    ///
+    /// `timeout_at` polls the lock before the timer. A lock granted in the
+    /// same poll the deadline fires wins, and the operation runs. A lock future
+    /// dropped on timeout hands any turn it was granted to the next waiter. So
+    /// each operation either runs once or leaves without running.
+    pub async fn run_until<T, F, Fut>(
+        &self,
+        vshard_id: VShardId,
+        deadline: tokio::time::Instant,
+        operation: F,
+    ) -> crate::Result<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = crate::Result<T>>,
+    {
+        let slot = self.slot(vshard_id)?;
+        let _queued = self.reserve(slot, vshard_id)?;
+        let _active = tokio::time::timeout_at(deadline, slot.active.lock())
+            .await
+            .map_err(|_| crate::Error::DeadlineExceeded {
+                request_id: crate::types::RequestId::new(0),
+            })?;
+        operation().await
+    }
+
+    /// Take one of the vShard's queue places, or fail at once when all are
+    /// taken.
+    fn reserve(
+        &self,
+        slot: &VShardAdmissionSlot,
+        vshard_id: VShardId,
+    ) -> crate::Result<tokio::sync::OwnedSemaphorePermit> {
+        Arc::clone(&slot.capacity).try_acquire_owned().map_err(|_| {
+            crate::Error::VShardAdmissionCapacityExceeded {
+                vshard_id,
+                capacity: self.capacity,
+            }
+        })
     }
 }
 
@@ -120,8 +161,10 @@ fn wrap_async_raft_proposer(
                 });
             }
             let vshard_id = VShardId::new(vshard_id);
+            // The queue wait ends at the caller's deadline. A proposal that
+            // leaves the queue then never reaches `raw`.
             sequencer
-                .run(vshard_id, move || async move {
+                .run_until(vshard_id, deadline, move || async move {
                     raw(vshard_id.as_u32(), idempotency_key, data, deadline).await
                 })
                 .await
@@ -398,5 +441,108 @@ mod tests {
             (vec![2], Lsn::new(12))
         );
         assert_eq!(maximum.load(Ordering::SeqCst), 1);
+    }
+
+    /// Records the key of every proposal that reaches the raw proposer.
+    fn recording_proposer() -> (Arc<AsyncRaftProposer>, Arc<std::sync::Mutex<Vec<u64>>>) {
+        let proposed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let raw: Arc<AsyncRaftProposer> = {
+            let proposed = Arc::clone(&proposed);
+            Arc::new(move |_vshard, key, data, _deadline| {
+                let proposed = Arc::clone(&proposed);
+                Box::pin(async move {
+                    proposed.lock().expect("proposed log").push(key);
+                    Ok((data, Lsn::new(key)))
+                })
+            })
+        };
+        (raw, proposed)
+    }
+
+    /// Wait until `taken` places of `vshard`'s queue are held.
+    async fn until_queued(sequencer: &VShardAdmissionSequencer, vshard: usize, taken: usize) {
+        while sequencer.capacity - sequencer.slots[vshard].capacity.available_permits() != taken {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_queued_proposal_past_its_deadline_leaves_the_queue_and_never_proposes() {
+        let sequencer = Arc::new(VShardAdmissionSequencer::with_capacity(8));
+        let (raw, proposed) = recording_proposer();
+        let wrapped = wrap_async_raft_proposer(Arc::clone(&sequencer), raw);
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let holder = {
+            let sequencer = Arc::clone(&sequencer);
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            tokio::spawn(async move {
+                sequencer
+                    .run(shard(6), move || async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        entered.notified().await;
+
+        let start = tokio::time::Instant::now();
+        let expiring = tokio::spawn(wrapped(
+            6,
+            21,
+            vec![21],
+            start + std::time::Duration::from_secs(1),
+        ));
+        until_queued(&sequencer, 6, 2).await;
+        let second = tokio::spawn(wrapped(
+            6,
+            22,
+            vec![22],
+            start + std::time::Duration::from_secs(60),
+        ));
+        until_queued(&sequencer, 6, 3).await;
+        let third = tokio::spawn(wrapped(
+            6,
+            23,
+            vec![23],
+            start + std::time::Duration::from_secs(60),
+        ));
+        until_queued(&sequencer, 6, 4).await;
+
+        let expired = expiring.await.expect("expiring joins");
+        assert!(
+            matches!(expired, Err(crate::Error::DeadlineExceeded { .. })),
+            "a proposal still queued at its deadline fails with the deadline error, got {expired:?}"
+        );
+        assert!(
+            proposed.lock().expect("proposed log").is_empty(),
+            "a proposal that left the queue never reaches the raw proposer"
+        );
+        until_queued(&sequencer, 6, 3).await;
+
+        release.notify_one();
+        holder
+            .await
+            .expect("holder joins")
+            .expect("holder succeeds");
+        assert_eq!(
+            second
+                .await
+                .expect("second joins")
+                .expect("second proposes"),
+            (vec![22], Lsn::new(22))
+        );
+        assert_eq!(
+            third.await.expect("third joins").expect("third proposes"),
+            (vec![23], Lsn::new(23))
+        );
+        assert_eq!(
+            *proposed.lock().expect("proposed log"),
+            vec![22, 23],
+            "the waiters behind the expired proposal propose in their queue order"
+        );
     }
 }
