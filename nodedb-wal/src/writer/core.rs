@@ -389,6 +389,15 @@ mod tests {
 
         writer.sync().unwrap();
         assert!(writer.file_offset() > 0);
+        // `file_offset` alone cannot prove the flush wrote anything: wasm32
+        // used to advance it, clear the buffer and report success without a
+        // single byte reaching the file (`flush_buffer` had no wasi arm). Pin
+        // the count on disk to the count the writer claims.
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            writer.file_offset(),
+            "bytes on disk must equal bytes flushed"
+        );
     }
 
     #[test]

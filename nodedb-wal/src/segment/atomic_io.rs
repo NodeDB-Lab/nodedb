@@ -48,6 +48,10 @@ use crate::error::{Result, WalError};
 /// before the directory entry is persisted causes the file to "disappear"
 /// on reboot. Calling fsync on the directory fd ensures the metadata
 /// (filename, inode pointer) is on stable storage.
+///
+/// The one exception is `wasm32-wasip1`: wasi preview1 has no directory
+/// fsync, so on that target this is a documented no-op (see below) and the
+/// durability guarantee above does not hold there.
 pub fn fsync_directory(dir: &Path) -> Result<()> {
     // Crash injection: the directory entry never reaches stable storage.
     // Every caller must treat this as a durability failure, not a warning.
@@ -55,9 +59,23 @@ pub fn fsync_directory(dir: &Path) -> Result<()> {
         std::io::Error::other(format!("failpoint wal::fsync_directory: {detail}"))
     ));
 
-    let dir_file = fs::File::open(dir).map_err(WalError::Io)?;
-    dir_file.sync_all().map_err(WalError::Io)?;
-    Ok(())
+    #[cfg(target_arch = "wasm32")]
+    {
+        // wasi preview1 has no directory fsync: `File::sync_all` on a directory
+        // returns EBADF and there is no weaker syscall with the same guarantee.
+        // The rename itself still succeeds; what is lost on this target is the
+        // guarantee that the directory entry survives a host crash. Native
+        // callers keep it, and the failpoint injection above still fires here.
+        let _ = dir;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let dir_file = fs::File::open(dir).map_err(WalError::Io)?;
+        dir_file.sync_all().map_err(WalError::Io)?;
+        Ok(())
+    }
 }
 
 fn invalid_input(detail: String) -> WalError {

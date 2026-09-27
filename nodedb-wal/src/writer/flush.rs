@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::error::Result;
-// Only the unix `pwrite` path constructs an error value directly; elsewhere
-// failures propagate as `Result` from calls that build their own.
-#[cfg(unix)]
+// The unix `pwrite` path and the wasm seek+write path both construct an error
+// value directly; elsewhere failures propagate as `Result` from calls that
+// build their own.
+#[cfg(any(unix, target_arch = "wasm32"))]
 use crate::error::WalError;
 
 use super::core::WalWriter;
@@ -42,8 +43,12 @@ impl WalWriter {
             self.buffer.as_slice()
         };
 
-        // Use pwrite to write at the exact offset, retrying on short writes.
-        #[cfg(unix)]
+        // Write at the exact offset. The unix path uses `pwrite` and retries
+        // short writes. `cfg(unix)` is false on wasm32-wasip1 (its
+        // `target_family` is "wasm", not "unix"), so wasi needs its own arm or
+        // this function would advance `file_offset`, clear the buffer and
+        // report the flush with nothing written at all.
+        #[cfg(all(unix, not(target_arch = "wasm32")))]
         {
             use std::os::unix::io::AsRawFd;
             let fd = self.file.as_raw_fd();
@@ -79,6 +84,21 @@ impl WalWriter {
             }
         }
 
+        // wasi has no positional write, and the file is only ever appended to,
+        // so seeking to the current end and writing is equivalent. The shared
+        // `file_offset` advance below accounts for the bytes; nothing is
+        // advanced here.
+        #[cfg(target_arch = "wasm32")]
+        {
+            use std::io::{Seek as _, SeekFrom, Write as _};
+            self.file
+                .seek(SeekFrom::Start(self.file_offset))
+                .map_err(WalError::Io)?;
+            self.file.write_all(data).map_err(|_| {
+                write_error("WAL segment append", self.file_offset, data.len() as u64)
+            })?;
+        }
+
         self.file_offset += data.len() as u64;
         self.buffer.clear();
 
@@ -98,10 +118,11 @@ impl WalWriter {
 /// where the batch stalled and how much of it never reached the file, which is
 /// what a report needs to describe the write that could not complete.
 ///
-/// Gated to match its only call site: the `pwrite` loop is unix-only, so on
-/// other targets (wasm32) this would be dead code and a `-D warnings` build
-/// would reject it.
-#[cfg(unix)]
+/// Gated to match its call sites: the `pwrite` loop is unix-only and the wasm
+/// seek+write arm also classifies its failure through here. The ENOSPC branch
+/// itself stays unix-only — on wasi `raw_os_error()` is `None`, so the generic
+/// `WalError::Io` branch is what wasm takes.
+#[cfg(any(unix, target_arch = "wasm32"))]
 fn write_error(context: &'static str, offset: u64, pending: u64) -> WalError {
     let err = std::io::Error::last_os_error();
     #[cfg(unix)]
