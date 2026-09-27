@@ -464,13 +464,14 @@ pub(crate) async fn dispatch_crdt_restore_admitted(
         collection,
         // The restore path builds its own Apply from this same string, so the
         // preview and that apply agree with each other. The string is the bare
-        // caller form, which the collection registry qualifies before the engine
-        // is keyed, so in a non-default database this path addresses a different
-        // document than every ordinary apply, which routes the database-qualified
-        // key (`engine_key` above). Pre-existing and deliberately not changed
-        // here: canonicalizing it means changing the form the restore caller
-        // passes, and `CrdtOp::Apply.collection` below is rebuilt from this same
-        // string.
+        // caller form, and nothing qualifies it on the way in: it is handed to
+        // `from_stored` verbatim and the tenant engine keys its collections by
+        // exactly that string. Every ordinary apply instead routes the
+        // database-qualified key (`engine_key` above), so in a non-default
+        // database restore addresses a different document than an apply of the
+        // same collection. Pre-existing and deliberately not changed here:
+        // canonicalizing it means changing the form the restore caller passes,
+        // and `CrdtOp::Apply.collection` below is rebuilt from this same string.
         engine_collection: collection,
         timeout,
         event_source,

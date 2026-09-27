@@ -440,3 +440,127 @@ async fn dispatch_dependent_edge_recon_inner(
         apply_result,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::control::security::catalog::StoredCollection;
+    use crate::types::VShardId;
+    use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
+    use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
+    use nodedb_types::QualifiedCollection;
+
+    /// A `SharedState` with a real on-disk catalog and no Data Plane: this test
+    /// only reads the catalog, so nothing else has to be live.
+    fn state_with_edge_bearing_collection(
+        dir: &tempfile::TempDir,
+        database_id: DatabaseId,
+        tenant_id: u64,
+    ) -> Arc<SharedState> {
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+        let wal = Arc::new(crate::wal::WalManager::open_for_testing(&wal_dir).unwrap());
+        let (dispatcher, _) = crate::bridge::dispatch::Dispatcher::new(1, 16);
+        let state = SharedState::open(
+            crate::control::state::DataPlaneHandles {
+                dispatcher,
+                quiesce: crate::bridge::quiesce::CollectionQuiesce::new(),
+                array_catalog: crate::control::array_catalog::ArrayCatalog::handle(),
+                system_metrics: Arc::new(crate::control::metrics::SystemMetrics::new()),
+            },
+            wal,
+            &dir.path().join("catalog.redb"),
+            &crate::config::auth::AuthConfig::default(),
+            Default::default(),
+            false,
+            crate::data::executor::core_loop::test_governor(),
+        )
+        .unwrap();
+
+        let mut coll = StoredCollection::new(tenant_id, "edges_nd", "admin");
+        coll.collection_type = nodedb_types::CollectionType::document();
+        coll.has_implicit_edges = true;
+        state
+            .credentials
+            .catalog()
+            .put_collection(database_id, &coll)
+            .unwrap();
+        state
+    }
+
+    /// A `BulkUpdate` on `collection`, the shape the planner lowers a
+    /// PK-equality `DELETE`/`UPDATE` into so this gate picks it up.
+    fn bulk_update_task(database_id: DatabaseId, collection: QualifiedCollection) -> PhysicalTask {
+        PhysicalTask {
+            tenant_id: TenantId::new(1),
+            vshard_id: VShardId::new(0),
+            database_id,
+            plan: PhysicalPlan::Document(DocumentOp::BulkUpdate {
+                collection,
+                filters: vec![],
+                updates: vec![],
+                returning: None,
+                ollp_predicted_surrogates: None,
+                ollp_predicted_edges: None,
+                rls_filters: vec![],
+                rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
+            }),
+            post_set_op: PostSetOp::None,
+            txn_id: None,
+        }
+    }
+
+    /// The gate must fire for an edge-bearing collection in a NON-DEFAULT
+    /// database.
+    ///
+    /// The plan carries the database-qualified collection, but the catalog is
+    /// keyed by the bare name, so a lookup with the qualified form misses, this
+    /// gate returns `None`, and the OLLP/Calvin reconnaissance that cleans up
+    /// mirrored edges never routes. That failure is silent — the write still
+    /// succeeds — so only a test that asserts the gate's own answer catches it.
+    #[test]
+    fn gate_fires_for_an_edge_bearing_collection_in_a_non_default_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let database_id = DatabaseId::new(1024);
+        let state = state_with_edge_bearing_collection(&dir, database_id, 1);
+        let task = bulk_update_task(
+            database_id,
+            QualifiedCollection::new(database_id, "edges_nd"),
+        );
+
+        let fired = plan_needs_implicit_edge_recon(&state, &[task], TenantId::new(1)).unwrap();
+        assert!(
+            fired.is_some(),
+            "the gate must fire for an edge-bearing collection in a non-default database; \
+             a qualified catalog lookup misses and the mirrored edges leak"
+        );
+        let (collection, db) = fired.unwrap();
+        assert_eq!(db, database_id);
+        assert_eq!(
+            collection, "1024/edges_nd",
+            "the returned collection is the plan's routing key, not the bare catalog name"
+        );
+    }
+
+    /// The default database is the identity case and must keep firing.
+    #[test]
+    fn gate_fires_for_an_edge_bearing_collection_in_the_default_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_edge_bearing_collection(&dir, DatabaseId::DEFAULT, 1);
+        let task = bulk_update_task(
+            DatabaseId::DEFAULT,
+            QualifiedCollection::new(DatabaseId::DEFAULT, "edges_nd"),
+        );
+
+        let fired = plan_needs_implicit_edge_recon(&state, &[task], TenantId::new(1)).unwrap();
+        assert!(
+            fired.is_some(),
+            "the default-database path must be unchanged"
+        );
+        assert_eq!(fired.unwrap().0, "edges_nd");
+    }
+}
