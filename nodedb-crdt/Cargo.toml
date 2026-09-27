@@ -27,5 +27,10 @@ subtle = { workspace = true }
 getrandom = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
 serde_json = { workspace = true }
+
+# Native-only: the workspace `tokio` entry inherits `features = ["full"]`, which
+# tokio's wasm guard rejects. This crate has no tokio call sites (the dev-dep was
+# unused), so native test builds keep it unchanged and wasm drops it entirely.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true }

@@ -36,4 +36,23 @@ tokio-rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+# The only default-feature tokio use is `#[tokio::test]` in
+# src/traits/core/trait_def.rs (8 tests, default current-thread flavour), which
+# needs `macros` + `rt`. This narrow set is also the only shape that is legal on
+# wasm: `tokio = { workspace = true }` inherits `features = ["full"]`, whose
+# fs/io-std/net/process/rt-multi-thread/signal arms trip tokio's wasm
+# compile_error. The native/remote feature-gated modules do reach
+# net/spawn/io-util/time/sync, but enabling those features re-enables the
+# optional production `tokio` dependency below, which carries `full` again.
+tokio = { version = "1", default-features = false, features = [
+  "io-util",
+  "macros",
+  "rt",
+  "sync",
+  "time",
+] }
+
+# Restores the pre-split native resolution exactly: off wasm the union of this
+# entry and the narrow one above is `full`, as it was before.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true }

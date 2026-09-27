@@ -23,7 +23,13 @@ tikv-jemalloc-ctl = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
-fluxbench = { workspace = true }
 tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
+
+# Native-only: see nodedb-wal/Cargo.toml. Both entries resolve tokio with
+# `features = ["full"]` (the workspace entry directly, fluxbench through its own
+# normal dependency), which tokio rejects on wasm, and neither is referenced by
+# any test target in this crate. Native test builds keep them, unchanged.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true }
+fluxbench = { workspace = true }

@@ -63,8 +63,6 @@ getrandom_03 = { workspace = true }
 getrandom_02 = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
-fluxbench = { workspace = true }
 tracing-subscriber = { workspace = true }
 # Named again here so the diagnostics integration tests can act as the host —
 # call `init` and read reports back. Same published version as the optional
@@ -72,6 +70,20 @@ tracing-subscriber = { workspace = true }
 faultbox = { workspace = true }
 tempfile = { workspace = true }
 rand = { workspace = true }
+
+# Native-only dev-dependencies. `tokio = { workspace = true }` inherits
+# `features = ["full"]`, and `fluxbench` declares its own normal
+# `tokio = { features = ["full"] }`; tokio's wasm guard
+# (tokio/src/lib.rs: `Only features sync,macros,io-util,rt,time are supported
+# on wasm.`) rejects fs/io-std/net/process/rt-multi-thread/signal, and Cargo
+# unifies features across the whole `cargo test` invocation, so either entry
+# breaks every wasm test target in the build. Neither is reachable from a wasm
+# test: this crate has no tokio call sites, and `fluxbench` is used only by
+# benches/wal_throughput.rs, which `cargo test` does not build. Native test and
+# bench builds keep both, unchanged.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true }
+fluxbench = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 io-uring = { workspace = true }
