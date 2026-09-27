@@ -4,7 +4,10 @@
 
 NodeDB-Lite compiles to WebAssembly and exposes the same `NodeDb` trait you use in native Lite. To talk to an Origin cluster from the browser, use Lite-WASM locally and replicate via CRDT sync over WebSocket — never run Origin in the browser.
 
-**Status: Experimental.** Lite-WASM support is feature-complete for all eight engines. Testing and CI integration are ongoing; treat the build as preview-quality. Report issues via GitHub.
+**Status: Experimental.** Lite-WASM support is feature-complete for all eight engines. The shared
+crates are compiled and their test suites executed for a WASI target in CI, so a target-specific
+build or runtime failure is caught here rather than in the Lite repo; treat the build as
+preview-quality and report issues via GitHub.
 
 ## Building for WASM
 
@@ -197,6 +200,25 @@ See [NodeDB-Lite](https://github.com/NodeDB-Lab/nodedb-lite) for full CRDT sync 
 - **No cluster role** — Lite-WASM is a client/edge node only. It cannot act as a Raft member or vShard host
 - **Module size** — measure your own build; gzip before serving
 - **Browser compatibility** — Requires WebAssembly support (all modern browsers + Node.js 14+)
+
+### The WAL on a WASI target
+
+The shared crates are compiled and their test suites executed for `wasm32-wasip1` in CI, so the
+coverage below is measured rather than assumed. Three guarantees the native WAL provides are weaker
+or absent there:
+
+- **Directory fsync does not exist.** WASI preview 1 has no directory fsync — `File::sync_all()` on a
+  directory returns `EBADF`, and there is no weaker syscall with the same effect. File creation,
+  rename and file fsync all still work; what is lost is the guarantee that a rename survives a host
+  crash. `fsync_directory` is a documented no-op on this target.
+- **Positional writes do not exist.** There is no `pwrite`, so the writer seeks to its offset and
+  writes sequentially instead. This is equivalent for an append-only log, which is what the WAL is.
+- **The double-write buffer is unavailable.** It depends on O_DIRECT and positional reads;
+  `raw_io::pwrite_all` returns `WalError::Unsupported` for DWB Direct mode on this target rather than
+  falling back to a weaker write.
+
+`std::thread::spawn` is also unavailable, so any WAL coordination that spawns a thread is
+native-only.
 
 ## Deployment
 
