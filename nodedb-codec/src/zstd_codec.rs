@@ -431,6 +431,20 @@ impl ZstdDecoder {
 mod tests {
     use super::*;
 
+    // Zstd *encoding* does not exist on wasm: `compress_native` returns
+    // `CompressFailed` there (the target decodes with `ruzstd` and encodes with
+    // LZ4). Every test below that roundtrips through `encode`, or that drives
+    // `ZstdEncoder`, asserts a property of an encoder this target does not have,
+    // so on wasm32 it is ignored by name and by reason rather than weakened.
+    // The decoder-only tests -- the hostile-frame and truncation checks -- carry
+    // no such attribute and still run on wasm, because decoding is the half the
+    // target does implement.
+    const _: () = ();
+
+    #[cfg_attr(
+        target_arch = "wasm32",
+        ignore = "zstd encoding is not available on wasm; decode-only target"
+    )]
     #[test]
     fn empty_data() {
         let encoded = encode(&[]).unwrap();
@@ -438,6 +452,10 @@ mod tests {
         assert!(decoded.is_empty());
     }
 
+    #[cfg_attr(
+        target_arch = "wasm32",
+        ignore = "zstd encoding is not available on wasm; decode-only target"
+    )]
     #[test]
     fn small_data_roundtrip() {
         let data = b"hello world, zstd compression test";
@@ -446,6 +464,10 @@ mod tests {
         assert_eq!(decoded, data);
     }
 
+    #[cfg_attr(
+        target_arch = "wasm32",
+        ignore = "zstd encoding is not available on wasm; decode-only target"
+    )]
     #[test]
     fn large_data_roundtrip() {
         let line = "2024-01-15 ERROR database connection timeout host=db-prod-01 retry=3\n";
@@ -461,6 +483,10 @@ mod tests {
         );
     }
 
+    #[cfg_attr(
+        target_arch = "wasm32",
+        ignore = "zstd encoding is not available on wasm; decode-only target"
+    )]
     #[test]
     fn high_compression_level() {
         let data: Vec<u8> = (0..10_000).map(|i| (i % 256) as u8).collect();
@@ -475,6 +501,10 @@ mod tests {
         assert_eq!(decode(&high_encoded).unwrap(), data);
     }
 
+    #[cfg_attr(
+        target_arch = "wasm32",
+        ignore = "zstd encoding is not available on wasm; decode-only target"
+    )]
     #[test]
     fn header_metadata() {
         let data = vec![42u8; 1000];
@@ -484,6 +514,10 @@ mod tests {
         assert_eq!(compression_level(&encoded).unwrap(), 7);
     }
 
+    #[cfg_attr(
+        target_arch = "wasm32",
+        ignore = "zstd encoding is not available on wasm; decode-only target"
+    )]
     #[test]
     fn better_ratio_than_lz4() {
         // Structured data where Zstd should beat LZ4.
@@ -551,6 +585,10 @@ mod tests {
         ));
     }
 
+    #[cfg_attr(
+        target_arch = "wasm32",
+        ignore = "zstd encoding is not available on wasm; decode-only target"
+    )]
     #[test]
     fn streaming_encoder() {
         let parts: Vec<&[u8]> = vec![b"part one ", b"part two ", b"part three"];
@@ -584,6 +622,10 @@ mod tests {
         assert_eq!(encoder.len(), MAX_DECODED_BYTES);
     }
 
+    #[cfg_attr(
+        target_arch = "wasm32",
+        ignore = "zstd encoding is not available on wasm; decode-only target"
+    )]
     #[test]
     fn level_clamping() {
         let data = b"test data for clamping";
