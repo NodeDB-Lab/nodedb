@@ -213,9 +213,13 @@ or absent there:
   crash. `fsync_directory` is a documented no-op on this target.
 - **Positional writes do not exist.** There is no `pwrite`, so the writer seeks to its offset and
   writes sequentially instead. This is equivalent for an append-only log, which is what the WAL is.
-- **The double-write buffer is unavailable.** It depends on O_DIRECT and positional reads;
-  `raw_io::pwrite_all` returns `WalError::Unsupported` for DWB Direct mode on this target rather than
-  falling back to a weaker write.
+- **The double-write buffer is unavailable.** It depends on positional reads as well as writes, and
+  `recover_record` is a stub on this target, so a slot written here could never be read back.
+  `raw_io::pwrite_all` therefore returns `WalError::Unsupported` for DWB Direct mode rather than
+  falling back to a seek-and-write: a fallback would mirror the slot, let the writer report
+  `DwbProtection::Active`, and deliver no protection at all. As it stands the append still succeeds —
+  DWB failures are deliberately not fatal to the WAL — while `dwb_protection()` reports
+  `Degraded(WriteFailed)` and every record is counted as unprotected.
 
 `std::thread::spawn` is also unavailable, so any WAL coordination that spawns a thread is
 native-only.
