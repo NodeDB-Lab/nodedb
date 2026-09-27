@@ -158,9 +158,9 @@ pub(in super::super) fn convert_vector_primary_insert(
         let key_column = declared.as_deref().unwrap_or(primary_key);
         let mut fields = row.payload_fields.clone();
         if !is_auto_rowid_pk(primary_key)
-            && !fields
+            && fields
                 .get(key_column)
-                .is_some_and(|v| !matches!(v, SqlValue::Null))
+                .is_none_or(|v| matches!(v, SqlValue::Null))
         {
             fields.insert(key_column.to_string(), SqlValue::String(doc_id.clone()));
         }
