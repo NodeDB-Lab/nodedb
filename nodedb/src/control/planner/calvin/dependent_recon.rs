@@ -63,6 +63,11 @@ pub struct DependentReconOutcome {
 /// task (`BulkUpdate`/`BulkDelete`) whose target collection has
 /// `has_implicit_edges` set in the catalog, else `None`.
 ///
+/// The returned collection is the form the plan carries — database-qualified
+/// outside `DatabaseId::DEFAULT` — because that is the routing key. The catalog
+/// lookup underneath reduces it to the bare name the catalog is keyed by; both
+/// current call sites take only the `database_id`.
+///
 /// A genuine catalog READ error propagates as a typed [`crate::Error`]:
 /// misrouting a delete on a real I/O fault would silently skip edge cleanup
 /// (dangling edges). An ABSENT catalog (`None`) or absent collection row
@@ -83,8 +88,17 @@ pub fn plan_needs_implicit_edge_recon(
     let db = dep_task.database_id;
     let edge_bearing = {
         let catalog = state.credentials.catalog();
+        // The plan carries the database-qualified collection (the router keys
+        // its vShard on that form), but the catalog stores collections under
+        // the bare name. Reading it qualified misses in every non-default
+        // database, so `has_implicit_edges` reads false, this gate returns
+        // `None`, and the OLLP/Calvin recon that cleans up mirrored edges never
+        // routes — the plan lowers a PK-equality UPDATE/DELETE to `Bulk*`
+        // precisely so this gate picks it up. Identity for
+        // `DatabaseId::DEFAULT`.
+        let bare = crate::control::target_identity::bare_collection_name(db, &coll);
         catalog
-            .get_collection(db, tenant_id.as_u64(), &coll)?
+            .get_collection(db, tenant_id.as_u64(), &bare)?
             .map(|c| c.has_implicit_edges)
             .unwrap_or(false)
     };
