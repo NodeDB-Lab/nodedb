@@ -189,6 +189,12 @@ fn corrupted_checksum_mid_file_fails_recovery_instead_of_truncating() {
     }
 }
 
+// Needs the DWB splice-back, i.e. `DoubleWriteBuffer::recover_record`, which is
+// a deliberate `Ok(None)` stub on wasm32 (`double_write/recover.rs`: slot
+// recovery needs `pread`/O_DIRECT). Without it the reader stops at the torn
+// record, so this is native-only; the surrounding recovery tests still run on
+// wasm.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn dwb_recovery_mid_segment_keeps_every_later_record() {
     let dir = crate::tempdir().unwrap();

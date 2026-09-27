@@ -287,6 +287,13 @@ mod tests {
     use crate::double_write::metrics::wal_dwb_bytes_written_total;
     use crate::record::{RecordType, WalRecordArgs};
 
+    // `DoubleWriteBuffer::recover_record` is a deliberate no-op on wasm32
+    // (`double_write/recover.rs`: the only arm that compiles there is
+    // `Ok(None)`, because slot recovery needs `pread`/O_DIRECT). Every
+    // assertion below that expects a record *back* from it is therefore gated
+    // to native, while writes, flushes and the skip accounting still run on
+    // wasm.
+
     fn open_buffered(path: &Path) -> DoubleWriteBuffer {
         DoubleWriteBuffer::open(path, DwbMode::Buffered).unwrap()
     }
@@ -313,6 +320,7 @@ mod tests {
         assert_eq!(dwb.write_record_deferred(rec).unwrap(), DwbMirror::Mirrored);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn write_and_recover() {
         let dir = crate::test_tempdir().unwrap();
@@ -325,6 +333,7 @@ mod tests {
         assert_eq!(rec.payload, b"hello double-write");
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn recover_nonexistent_returns_none() {
         let dir = crate::test_tempdir().unwrap();
@@ -332,6 +341,7 @@ mod tests {
         assert!(dwb.recover_record(999).unwrap().is_none());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn survives_reopen() {
         let dir = crate::test_tempdir().unwrap();
@@ -360,6 +370,7 @@ mod tests {
         dwb.flush().unwrap();
         assert!(!dwb.dirty);
 
+        #[cfg(not(target_arch = "wasm32"))]
         for lsn in 1..=5u64 {
             let recovered = dwb.recover_record(lsn).unwrap().expect("recoverable");
             assert_eq!(recovered.payload, format!("batch-{lsn}").into_bytes());
@@ -395,6 +406,7 @@ mod tests {
                 max: DWB_SLOT_RECORD_MAX,
             })
         );
+        #[cfg(not(target_arch = "wasm32"))]
         assert!(dwb.recover_record(11).unwrap().is_none());
     }
 

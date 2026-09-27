@@ -320,6 +320,10 @@ mod tests {
         assert_eq!(budget.allocated(), 0);
     }
 
+    // wasm32 has no thread spawn: `std::thread::spawn` fails with
+    // `Unsupported`, and wasm targets abort on panic, so this test cannot run
+    // there. It still runs in full on native.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn concurrent_reserves() {
         use std::sync::Arc;

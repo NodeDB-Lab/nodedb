@@ -10,6 +10,10 @@
 //! the behaviour where consumers actually observe it.
 
 use nodedb_wal::crypto::{KeyRing, WalEncryptionKey};
+// `mmap_reader` is gated off on wasm32 (src/lib.rs:32-33), so the import and
+// the one test that drives it are gated together. The other four cases here use
+// only wasm-safe readers and stay in the wasm run.
+#[cfg(not(target_arch = "wasm32"))]
 use nodedb_wal::mmap_reader::replay_segments_mmap;
 use nodedb_wal::record::RecordType;
 use nodedb_wal::segmented::{SegmentedWal, SegmentedWalConfig, replay_all_segments};
@@ -75,6 +79,7 @@ fn replay_of_encrypted_wal_returns_plaintext() {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn mmap_replay_of_encrypted_wal_returns_plaintext() {
     let dir = crate::tempdir().expect("tempdir");

@@ -439,6 +439,10 @@ mod tests {
     /// The shape the durability barrier actually uses: many threads append
     /// through one shared writer and a single `sync()` covers the whole batch.
     /// Every record must survive, exactly once, with no LSN reused.
+    ///
+    /// Not run on wasm32: `std::thread::spawn` fails with `Unsupported` there,
+    /// and wasm targets abort on panic. It still runs in full on native.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn concurrent_appends_through_a_shared_writer_all_land() {
         use std::sync::{Arc, Mutex};

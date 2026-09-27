@@ -78,6 +78,9 @@ fn truncate_within_last_window(path: &std::path::Path, rng: &mut StdRng) -> u64 
     trunc_at
 }
 
+// wasm32 has no thread spawn: `std::thread::scope` fails there with
+// `Unsupported`, and wasm targets abort on panic. Still runs in full on native.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn parallel_writers_survive_truncation() {
     let wall_start = Instant::now();

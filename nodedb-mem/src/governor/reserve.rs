@@ -169,6 +169,7 @@ impl MemoryGovernor {
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
+    #[cfg(not(target_arch = "wasm32"))]
     use std::thread;
 
     use nodedb_types::{DatabaseId, TenantId};
@@ -345,6 +346,10 @@ mod tests {
 
     // ── Concurrent reserves ───────────────────────────────────────────────────
 
+    // wasm32 has no thread spawn: `std::thread::spawn` fails with
+    // `Unsupported`, and wasm targets abort on panic, so this test cannot run
+    // there. It still runs in full on native.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn concurrent_reserves_never_exceed_cap() {
         let limits = EngineLimits::zeroed().with(EngineId::Vector, 10_000);

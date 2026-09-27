@@ -170,6 +170,12 @@ mod tests {
     use crate::double_write::status::DwbMirror;
     use crate::record::{RecordType, WalRecordArgs};
 
+    // `recover_record` itself is a no-op on wasm32 — the only arm that compiles
+    // there is `Ok(None)`, because slot recovery needs `pread`/O_DIRECT. Every
+    // test in this module asserts what recovery returns, so they are all
+    // native-only; `scan_max_seq`'s wasm arm is still exercised indirectly by
+    // the write path on wasm.
+
     fn open_buffered(path: &Path) -> DoubleWriteBuffer {
         DoubleWriteBuffer::open(path, DwbMode::Buffered).unwrap()
     }
@@ -196,6 +202,7 @@ mod tests {
         assert_eq!(dwb.write_record_deferred(rec).unwrap(), DwbMirror::Mirrored);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn recover_after_wraparound() {
         let dir = crate::test_tempdir().unwrap();
@@ -224,6 +231,7 @@ mod tests {
     /// LSN durable here but missing from the WAL. Recovery resumes at that LSN
     /// and a *different* record is written under it, so two CRC-valid slots
     /// claim it. The one written last is the one the WAL committed.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn reused_lsn_recovers_the_newer_copy() {
         let dir = crate::test_tempdir().unwrap();
@@ -244,6 +252,7 @@ mod tests {
     /// selection to the sequence number: neither ascending nor descending slot
     /// order is correct on its own, and this case is the one a descending scan
     /// would get wrong.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn reused_lsn_across_a_wrap_recovers_the_newer_copy() {
         let dir = crate::test_tempdir().unwrap();
@@ -264,6 +273,7 @@ mod tests {
 
     /// Reopening must not restart the sequence: a fresh copy written after a
     /// restart still has to outrank the stale one already on disk.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn reused_lsn_across_a_reopen_recovers_the_newer_copy() {
         let dir = crate::test_tempdir().unwrap();
