@@ -4,7 +4,7 @@
 
 use std::mem::size_of;
 
-use crate::bounds::{checked_mul, checked_range, decoded_len, u32_to_usize};
+use crate::bounds::{checked_capacity, checked_mul, checked_range, u32_to_usize};
 use crate::error::CodecError;
 
 use super::block::skip_block;
@@ -23,8 +23,9 @@ pub(super) fn parse_header(data: &[u8]) -> Result<(usize, usize), CodecError> {
         u32::from_le_bytes([header[0], header[1], header[2], header[3]]),
         "FastLanes value count",
     )?;
-    let decoded_bytes = checked_mul(total_count, size_of::<i64>(), "FastLanes decoded bytes")?;
-    decoded_len(decoded_bytes, "FastLanes")?;
+    // Rejects a hostile count before it is used for block math; see
+    // `checked_capacity` for why the scaling is done in 64-bit arithmetic.
+    checked_capacity(total_count, size_of::<i64>(), "FastLanes")?;
     let block_count = usize::from(u16::from_le_bytes([header[4], header[5]]));
     let expected_blocks = total_count.div_ceil(BLOCK_SIZE);
     if block_count != expected_blocks {

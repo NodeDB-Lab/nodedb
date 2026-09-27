@@ -20,9 +20,7 @@
 
 use std::mem::size_of;
 
-use crate::bounds::{
-    checked_add, checked_capacity, checked_mul, decoded_len, encode_input_len, u32_to_usize,
-};
+use crate::bounds::{checked_add, checked_capacity, checked_mul, encode_input_len, u32_to_usize};
 use crate::error::CodecError;
 
 // ---------------------------------------------------------------------------
@@ -198,8 +196,10 @@ fn encode_value_count(len: usize, codec: &str) -> Result<u32, CodecError> {
 }
 
 fn validate_value_count(count: usize, codec: &str) -> Result<(), CodecError> {
-    let bytes = checked_mul(count, size_of::<i64>(), "integer decoded bytes")?;
-    decoded_len(bytes, codec)?;
+    // See `checked_capacity`: the byte count is scaled in 64-bit arithmetic so
+    // a 32-bit target reports the resource limit rather than a `usize`
+    // overflow for a count it simply cannot express.
+    checked_capacity(count, size_of::<i64>(), codec)?;
     Ok(())
 }
 
