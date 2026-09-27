@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let dst = dir.path().join("payload.ckpt");
 
         write_checkpoint_framed(dir.path(), "payload.ckpt", b"hello framed world").unwrap();
@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn corruption_detected() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let dst = dir.path().join("payload.ckpt");
 
         write_checkpoint_framed(dir.path(), "payload.ckpt", b"integrity matters").unwrap();
@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn truncation_detected() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let dst = dir.path().join("payload.ckpt");
 
         write_checkpoint_framed(dir.path(), "payload.ckpt", b"a longer payload body here").unwrap();
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn legacy_unframed_accepted() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let dst = dir.path().join("payload.ckpt");
 
         // Raw pre-framing bytes: first 4 bytes are NOT the NCKF magic.

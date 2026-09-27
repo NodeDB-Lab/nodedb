@@ -73,3 +73,24 @@ pub use temporal_purge::{TemporalPurgeEngine, TemporalPurgePayload};
 pub use tombstone::{CollectionTombstonePayload, MAX_COLLECTION_NAME_LEN};
 pub use torn_tail::{TailVerdict, verify_committed_prefix};
 pub use writer::WalWriter;
+
+/// Create a temporary directory that also works under `wasm32-wasip1`.
+///
+/// `tempfile::tempdir()` aborts there: `std::env::temp_dir()` is
+/// `unimplemented!("not supported by WASI yet")` in std
+/// (`library/std/src/sys/paths/wasi.rs`), so the call fails before it reaches
+/// the filesystem and neither a preopen nor `TMPDIR` can help. The wasm test
+/// runner preopens only the working directory (`wasmtime --dir=.`), so on wasm
+/// the directory is created under it. Native keeps `tempfile::tempdir()`
+/// exactly as it was.
+#[cfg(test)]
+pub(crate) fn test_tempdir() -> std::io::Result<tempfile::TempDir> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        tempfile::Builder::new().tempdir_in(".")
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tempfile::tempdir()
+    }
+}

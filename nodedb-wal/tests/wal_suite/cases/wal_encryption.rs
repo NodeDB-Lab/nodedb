@@ -15,7 +15,7 @@ use nodedb_wal::{
 
 #[test]
 fn wal_encryption_restart_roundtrip() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let wal_dir = dir.path().join("wal");
     let kek = [0x42u8; 32];
 

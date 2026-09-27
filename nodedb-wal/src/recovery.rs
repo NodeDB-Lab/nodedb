@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn recover_empty_wal() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("empty.wal");
 
         // Create empty WAL.
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn recover_nonexistent_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("nonexistent.wal");
 
         let info = recover(&path).unwrap();
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn recover_with_records() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("test.wal");
 
         {
@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn recover_truncated_wal() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("truncated.wal");
 
         {

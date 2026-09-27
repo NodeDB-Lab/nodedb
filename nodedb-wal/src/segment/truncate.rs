@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn truncate_deletes_old_segments() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
 
         fs::write(dir.path().join("wal-00000000000000000001.seg"), b"data1").unwrap();
         fs::write(dir.path().join("wal-00000000000000000001.dwb"), b"dwb1").unwrap();
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn truncate_never_deletes_active_segment() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
 
         fs::write(dir.path().join("wal-00000000000000000001.seg"), b"data").unwrap();
 
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn truncate_no_segments_below_checkpoint() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
 
         fs::write(dir.path().join("wal-00000000000000000100.seg"), b"data").unwrap();
         fs::write(dir.path().join("wal-00000000000000000200.seg"), b"data").unwrap();

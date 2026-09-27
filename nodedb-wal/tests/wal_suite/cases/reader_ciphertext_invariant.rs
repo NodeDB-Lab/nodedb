@@ -51,7 +51,7 @@ fn write_segment(wal_dir: &Path, ring: Option<KeyRing>) -> PathBuf {
 
 #[test]
 fn keyed_wal_reader_yields_plaintext_from_an_encrypted_segment() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = write_segment(&dir.path().join("wal"), Some(test_ring()));
 
     let ring = test_ring();
@@ -74,7 +74,7 @@ fn keyed_wal_reader_yields_plaintext_from_an_encrypted_segment() {
 
 #[test]
 fn keyed_wal_reader_without_a_key_refuses_an_encrypted_segment() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = write_segment(&dir.path().join("wal"), Some(test_ring()));
 
     let mut reader = WalReader::open(&path, None).unwrap();
@@ -87,7 +87,7 @@ fn keyed_wal_reader_without_a_key_refuses_an_encrypted_segment() {
 
 #[test]
 fn keyed_mmap_reader_yields_plaintext_from_an_encrypted_segment() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = write_segment(&dir.path().join("wal"), Some(test_ring()));
 
     let ring = test_ring();
@@ -110,7 +110,7 @@ fn keyed_mmap_reader_yields_plaintext_from_an_encrypted_segment() {
 
 #[test]
 fn keyed_mmap_reader_without_a_key_refuses_an_encrypted_segment() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = write_segment(&dir.path().join("wal"), Some(test_ring()));
 
     let mut reader = MmapWalReader::open(&path, None).unwrap();
@@ -122,7 +122,7 @@ fn keyed_mmap_reader_without_a_key_refuses_an_encrypted_segment() {
 
 #[test]
 fn recovery_scans_an_encrypted_segment_with_no_key_available() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let encrypted = write_segment(&dir.path().join("enc"), Some(test_ring()));
     let plain = write_segment(&dir.path().join("plain"), None);
 
@@ -146,7 +146,7 @@ fn recovery_scans_an_encrypted_segment_with_no_key_available() {
 
 #[test]
 fn an_encrypted_wal_can_still_be_reopened_for_writing() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let wal_dir = dir.path().join("wal");
     let path = write_segment(&wal_dir, Some(test_ring()));
 
@@ -184,7 +184,7 @@ fn an_encrypted_wal_can_still_be_reopened_for_writing() {
 
 #[test]
 fn unencrypted_segments_read_the_same_through_both_constructors() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = write_segment(&dir.path().join("wal"), None);
 
     let keyed: Vec<_> = WalReader::open(&path, None)

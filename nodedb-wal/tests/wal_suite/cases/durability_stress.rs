@@ -84,7 +84,7 @@ fn parallel_writers_survive_truncation() {
 
     // Each thread gets its own tempdir so there's no shared state.
     let dirs: Vec<tempfile::TempDir> = (0..WRITER_COUNT)
-        .map(|_| tempfile::tempdir().unwrap())
+        .map(|_| crate::tempdir().unwrap())
         .collect();
 
     let paths: Vec<std::path::PathBuf> = dirs.iter().map(|d| d.path().join("writer.wal")).collect();

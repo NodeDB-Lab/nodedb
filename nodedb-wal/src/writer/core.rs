@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn write_and_sync_single_record() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("test.wal");
 
         let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn lsn_increments() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("test.wal");
 
         let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn sealed_writer_rejects_writes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("test.wal");
 
         let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
@@ -443,7 +443,7 @@ mod tests {
     fn concurrent_appends_through_a_shared_writer_all_land() {
         use std::sync::{Arc, Mutex};
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("test.wal");
 
         let writer = Arc::new(Mutex::new(

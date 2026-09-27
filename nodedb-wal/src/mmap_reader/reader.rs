@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn mmap_reader_basic() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("test.wal");
 
         // Write some records with the standard writer.
@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn mmap_reader_empty_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("empty.wal");
         std::fs::write(&path, []).unwrap();
 
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn mmap_reader_truncated_header() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("truncated.wal");
         // Write 10 bytes — not enough for a header (30 bytes).
         std::fs::write(&path, [0u8; 10]).unwrap();
@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn mmap_reader_truncated_payload_stops_at_committed_prefix() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("truncated-payload.wal");
         let header = RecordHeader {
             magic: WAL_MAGIC,
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn oversized_payload_header_is_a_typed_error_before_allocation() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("oversized.wal");
         let header = RecordHeader {
             magic: WAL_MAGIC,

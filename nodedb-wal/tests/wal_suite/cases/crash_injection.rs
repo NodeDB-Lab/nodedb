@@ -32,7 +32,7 @@ fn read_lsns(path: &Path) -> Vec<u64> {
 
 #[test]
 fn out_of_space_on_sync_retains_the_batch_for_retry() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("enospc_sync.wal");
 
     let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
@@ -82,7 +82,7 @@ fn out_of_space_on_sync_retains_the_batch_for_retry() {
 
 #[test]
 fn out_of_space_on_append_does_not_burn_an_lsn() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("enospc_append.wal");
 
     // A small buffer makes `append` itself flush once it fills up, which is
@@ -140,7 +140,7 @@ fn out_of_space_on_append_does_not_burn_an_lsn() {
 
 #[test]
 fn crash_before_dwb_flush_keeps_the_acknowledged_prefix() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("crash_dwb.wal");
 
     let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
@@ -195,7 +195,7 @@ fn crash_before_dwb_flush_keeps_the_acknowledged_prefix() {
 
 #[test]
 fn crash_before_wal_fsync_never_resurrects_records_from_the_dwb() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("crash_fsync.wal");
 
     let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
@@ -225,7 +225,7 @@ fn crash_before_wal_fsync_never_resurrects_records_from_the_dwb() {
 
 #[test]
 fn crash_mid_truncate_leaves_a_replayable_log() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let wal_dir = dir.path().join("wal");
 
     let mut wal = SegmentedWal::open(SegmentedWalConfig {

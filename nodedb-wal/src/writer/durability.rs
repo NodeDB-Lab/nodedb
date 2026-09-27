@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn successful_fsync_clears_the_marker() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let file = File::create(dir.path().join("f")).unwrap();
         let mut state = DurabilityState::new();
         state.record_flush();

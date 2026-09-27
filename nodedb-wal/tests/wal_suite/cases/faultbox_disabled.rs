@@ -45,7 +45,7 @@ fn second_record_offset(path: &Path) -> u64 {
 
 #[test]
 fn a_hole_still_fails_recovery_with_the_same_error() {
-    let dir = tempfile::tempdir().expect("temp dir");
+    let dir = crate::tempdir().expect("temp dir");
     let path = dir.path().join("hole.wal");
     write_segment(&path, 6);
 
@@ -76,7 +76,7 @@ fn a_hole_still_fails_recovery_with_the_same_error() {
 
 #[test]
 fn a_healthy_segment_recovers_untouched() {
-    let dir = tempfile::tempdir().expect("temp dir");
+    let dir = crate::tempdir().expect("temp dir");
     let path = dir.path().join("clean.wal");
     write_segment(&path, 4);
 

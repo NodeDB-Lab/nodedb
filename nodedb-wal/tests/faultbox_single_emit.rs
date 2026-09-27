@@ -21,6 +21,20 @@ use nodedb_wal::record::{HEADER_SIZE, RecordType, WAL_MAGIC};
 use nodedb_wal::segmented::replay_all_segments;
 use nodedb_wal::{SegmentedWal, SegmentedWalConfig, WalError};
 
+/// Create a temporary directory that also works under `wasm32-wasip1`, where
+/// `std::env::temp_dir()` is `unimplemented!()` (see the same helper in
+/// `tests/wal_suite/main.rs`). Native keeps `tempfile::tempdir()`.
+fn tempdir() -> std::io::Result<tempfile::TempDir> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        tempfile::Builder::new().tempdir_in(".")
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tempfile::tempdir()
+    }
+}
+
 fn init_recorder(reports_dir: &Path) {
     assert!(
         faultbox::init(
@@ -47,10 +61,10 @@ fn second_record_offset(path: &Path) -> u64 {
 
 #[test]
 fn one_damaged_segment_files_one_report() {
-    let reports = tempfile::tempdir().expect("reports temp dir");
+    let reports = tempdir().expect("reports temp dir");
     init_recorder(reports.path());
 
-    let dir = tempfile::tempdir().expect("wal temp dir");
+    let dir = tempdir().expect("wal temp dir");
     let wal_dir = dir.path().join("wal");
 
     {

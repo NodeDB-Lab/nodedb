@@ -39,7 +39,7 @@ fn read_all(path: &std::path::Path) -> Vec<WalRecord> {
 
 #[test]
 fn crash_before_sync_loses_buffered_records() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("test.wal");
 
     // Write and sync 3 records.
@@ -64,7 +64,7 @@ fn crash_before_sync_loses_buffered_records() {
 
 #[test]
 fn torn_write_mid_header() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("test.wal");
 
     write_records(&path, 5);
@@ -89,7 +89,7 @@ fn torn_write_mid_header() {
 
 #[test]
 fn torn_write_mid_payload() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("test.wal");
 
     write_records(&path, 3);
@@ -126,7 +126,7 @@ fn torn_write_mid_payload() {
 
 #[test]
 fn corrupted_checksum_mid_file_fails_recovery_instead_of_truncating() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("test.wal");
 
     write_records(&path, 5);
@@ -191,7 +191,7 @@ fn corrupted_checksum_mid_file_fails_recovery_instead_of_truncating() {
 
 #[test]
 fn dwb_recovery_mid_segment_keeps_every_later_record() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("dwb_mid.wal");
 
     write_records(&path, 5);
@@ -239,7 +239,7 @@ fn dwb_recovery_mid_segment_keeps_every_later_record() {
 
 #[test]
 fn corrupted_tail_record_is_a_torn_write() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("torn_tail.wal");
 
     write_records(&path, 5);
@@ -267,7 +267,7 @@ fn corrupted_tail_record_is_a_torn_write() {
 
 #[test]
 fn reopen_after_crash_continues_correctly() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("test.wal");
 
     // Session 1: write 5 records.
@@ -305,7 +305,7 @@ fn reopen_after_crash_continues_correctly() {
 
 #[test]
 fn idempotent_replay() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("test.wal");
 
     write_records(&path, 10);
@@ -323,7 +323,7 @@ fn idempotent_replay() {
 
 #[test]
 fn many_records_roundtrip() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("test.wal");
 
     let count = 10_000u32;

@@ -24,7 +24,7 @@ static REPORTS: OnceLock<tempfile::TempDir> = OnceLock::new();
 fn reports_dir() -> &'static Path {
     REPORTS
         .get_or_init(|| {
-            let dir = tempfile::tempdir().expect("reports temp dir");
+            let dir = crate::tempdir().expect("reports temp dir");
             faultbox::init(
                 faultbox::Config::new("nodedb-wal-test", "0.0.0", dir.path())
                     // The test harness owns panic reporting; a chained hook here
@@ -102,7 +102,7 @@ fn group_for(kind: &str) -> faultbox::reader::Group {
 #[test]
 fn recovery_reports_mid_file_corruption_and_preserves_the_segment() {
     let _ = reports_dir();
-    let dir = tempfile::tempdir().expect("wal temp dir");
+    let dir = crate::tempdir().expect("wal temp dir");
     let (path, hole) = corrupt_segment(dir.path(), "hole.wal");
 
     let err = recover(&path).expect_err("a hole must fail recovery");

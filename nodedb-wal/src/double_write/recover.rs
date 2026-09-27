@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn recover_after_wraparound() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let mut dwb = open_buffered(&dir.path().join("wrap.dwb"));
 
         let total = DWB_CAPACITY as u64 + 5;
@@ -226,7 +226,7 @@ mod tests {
     /// claim it. The one written last is the one the WAL committed.
     #[test]
     fn reused_lsn_recovers_the_newer_copy() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let mut dwb = open_buffered(&dir.path().join("reuse.dwb"));
 
         mirror(&mut dwb, &record(9, b"never-acknowledged"));
@@ -246,7 +246,7 @@ mod tests {
     /// would get wrong.
     #[test]
     fn reused_lsn_across_a_wrap_recovers_the_newer_copy() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let mut dwb = open_buffered(&dir.path().join("reuse_wrap.dwb"));
 
         // Older copy lands in the last slot of the ring.
@@ -266,7 +266,7 @@ mod tests {
     /// restart still has to outrank the stale one already on disk.
     #[test]
     fn reused_lsn_across_a_reopen_recovers_the_newer_copy() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("reuse_reopen.dwb");
 
         {

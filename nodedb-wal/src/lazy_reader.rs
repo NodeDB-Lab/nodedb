@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn lazy_read_all_payloads() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("test.wal");
 
         {
@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn lazy_skip_non_matching() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("test.wal");
 
         {
@@ -449,7 +449,7 @@ mod tests {
 
     #[test]
     fn oversized_payload_header_is_a_typed_error_before_skip_or_allocation() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("oversized.wal");
         let header = RecordHeader {
             magic: crate::record::WAL_MAGIC,
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn skip_payload_rejects_truncated_tail_without_seeking_beyond_eof() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("truncated.wal");
         let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
         writer
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn replay_all_segments_lazy_works() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         // Use proper segment filename pattern: wal-{lsn:020}.seg
         let path = dir.path().join("wal-00000000000000000001.seg");
 
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn empty_wal_no_records() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("empty.wal");
 
         {

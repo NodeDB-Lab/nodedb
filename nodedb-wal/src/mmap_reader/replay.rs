@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn replay_mmap_from_lsn() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
         std::fs::create_dir_all(&wal_dir).unwrap();
 
@@ -270,7 +270,7 @@ mod tests {
     fn replay_mmap_below_the_retained_floor_is_rejected() {
         use crate::error::WalError;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
         let config = crate::segmented::SegmentedWalConfig {

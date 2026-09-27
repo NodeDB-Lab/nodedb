@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn buffered_open_creates_the_segment() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("seg.wal");
         let file = open_segment_file(&path, false).unwrap();
         drop(file);
@@ -143,7 +143,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn classifying_a_direct_io_refusal_leaves_no_files_behind() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("seg.wal");
 
         let err = std::io::Error::from_raw_os_error(libc::EINVAL);
@@ -172,7 +172,7 @@ mod tests {
     /// about the filesystem's `O_DIRECT` support.
     #[test]
     fn unrelated_open_failure_is_not_reported_as_direct_io_unsupported() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("absent").join("seg.wal");
         let err = open_segment_file(&path, true).unwrap_err();
         assert!(

@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn atomic_write_fsync_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
 
         atomic_write_fsync(dir.path(), "payload.ckpt", b"hello world").unwrap();
 
@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn atomic_write_fsync_overwrites() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
 
         atomic_write_fsync(dir.path(), "payload.ckpt", b"v1").unwrap();
         atomic_write_fsync(dir.path(), "payload.ckpt", b"v2").unwrap();
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn atomic_swap_dirs_fsync_swaps() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let live = dir.path().join("live");
         let backup = dir.path().join("backup");
         let staged = dir.path().join("staged");
@@ -277,7 +277,7 @@ mod tests {
     /// helper takes. Without the check each of these escapes `dir`.
     #[test]
     fn atomic_write_fsync_rejects_a_name_that_is_not_one_component() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         fs::create_dir(dir.path().join("sub")).unwrap();
 
         for name in BAD_NAMES {
@@ -304,7 +304,7 @@ mod tests {
     fn atomic_swap_dirs_fsync_rejects_a_bad_name_in_each_position() {
         for position in 0..3 {
             for name in BAD_NAMES {
-                let dir = tempfile::tempdir().unwrap();
+                let dir = crate::test_tempdir().unwrap();
                 let live = dir.path().join("live");
                 fs::create_dir(&live).unwrap();
                 fs::write(live.join("marker"), b"old").unwrap();
@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn read_checkpoint_dontneed_returns_bytes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("ckpt");
         fs::write(&path, b"checkpoint bytes").unwrap();
 

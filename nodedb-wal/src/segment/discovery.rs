@@ -45,7 +45,7 @@ mod tests {
 
     #[test]
     fn discover_empty_dir() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let segments = discover_segments(dir.path()).unwrap();
         assert!(segments.is_empty());
     }
@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn discover_segments_sorted() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
 
         fs::write(dir.path().join("wal-00000000000000000050.seg"), b"seg3").unwrap();
         fs::write(dir.path().join("wal-00000000000000000001.seg"), b"seg1").unwrap();

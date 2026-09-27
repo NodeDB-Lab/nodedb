@@ -385,7 +385,7 @@ mod tests {
 
     #[test]
     fn uring_write_and_read_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("uring.wal");
 
         {
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn uring_group_commit_many_records() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("uring_batch.wal");
 
         {
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn uring_reopen_continues_lsn() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("uring_reopen.wal");
 
         {

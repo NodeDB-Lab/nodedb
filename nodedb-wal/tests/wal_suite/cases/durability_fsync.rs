@@ -39,7 +39,7 @@ fn append(wal: &mut SegmentedWal, payload: &[u8]) -> WalResult<u64> {
 /// not mistake emptiness for durability.
 #[test]
 fn retry_after_a_failed_fsync_never_reports_durability() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("failed_fsync.wal");
 
     let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
@@ -86,7 +86,7 @@ fn retry_after_a_failed_fsync_never_reports_durability() {
 /// if the fsync were issued, this would return an error.
 #[test]
 fn sync_with_nothing_outstanding_skips_the_fsync() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("noop_sync.wal");
 
     let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
@@ -104,7 +104,7 @@ fn sync_with_nothing_outstanding_skips_the_fsync() {
 /// record is acknowledged into an inode whose name may never reach disk.
 #[test]
 fn rollover_propagates_a_failed_directory_fsync() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let mut wal = SegmentedWal::open(rolling_config(dir.path().join("wal"))).unwrap();
 
     append(&mut wal, b"first").unwrap();
@@ -124,7 +124,7 @@ fn rollover_propagates_a_failed_directory_fsync() {
 /// installed and unsealed, so the next append retries the roll and lands.
 #[test]
 fn a_failed_rollover_leaves_the_wal_writable() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let mut wal = SegmentedWal::open(rolling_config(dir.path().join("wal"))).unwrap();
 
     append(&mut wal, b"first").unwrap();
@@ -168,7 +168,7 @@ fn a_failed_rollover_leaves_the_wal_writable() {
 /// back after a crash and replay below the checkpoint.
 #[test]
 fn truncation_propagates_a_failed_directory_fsync() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let mut wal = SegmentedWal::open(rolling_config(dir.path().join("wal"))).unwrap();
 
     for i in 0..5u32 {
@@ -189,7 +189,7 @@ fn truncation_propagates_a_failed_directory_fsync() {
 /// segment creation, rollover, and truncation all still work end to end.
 #[test]
 fn rollover_and_truncation_succeed_when_the_directory_fsync_works() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let mut wal = SegmentedWal::open(rolling_config(dir.path().join("wal"))).unwrap();
 
     for i in 0..5u32 {

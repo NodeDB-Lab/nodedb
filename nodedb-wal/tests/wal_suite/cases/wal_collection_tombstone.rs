@@ -36,7 +36,7 @@ fn read_all(path: &std::path::Path) -> Vec<WalRecord> {
 
 #[test]
 fn tombstone_record_roundtrips_through_wal() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("wal");
 
     let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
@@ -59,7 +59,7 @@ fn tombstone_record_roundtrips_through_wal() {
 
 #[test]
 fn extract_and_shadow_writes_before_purge_lsn() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("wal");
 
     let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
@@ -124,7 +124,7 @@ fn extract_and_shadow_writes_before_purge_lsn() {
 fn multiple_tombstones_keep_highest_purge_lsn() {
     // Simulates drop → recreate → drop on the same collection: the
     // second tombstone's purge_lsn shadows more history than the first.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("wal");
 
     let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
@@ -167,7 +167,7 @@ fn multiple_tombstones_keep_highest_purge_lsn() {
 
 #[test]
 fn extract_ignores_unrelated_record_types() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("wal");
 
     let mut writer = WalWriter::open_without_direct_io(&path).unwrap();

@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn write_then_read_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("test.wal");
 
         // Write records.
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn empty_wal_yields_no_records() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("empty.wal");
 
         // Create an empty file.
@@ -429,7 +429,7 @@ mod tests {
 
     #[test]
     fn truncated_file_stops_at_committed_prefix() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("truncated.wal");
 
         // Write records.
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn oversized_payload_header_is_a_typed_error_before_allocation() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("oversized.wal");
         let header = RecordHeader {
             magic: crate::record::WAL_MAGIC,
@@ -499,7 +499,7 @@ mod tests {
         const UNKNOWN_OPTIONAL: u32 = 99; // no 0x8000 bit → optional, not in enum
         const SKIP_COUNT: usize = 50_000;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("many_unknown.wal");
 
         {

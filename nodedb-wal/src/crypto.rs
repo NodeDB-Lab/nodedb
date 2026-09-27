@@ -563,7 +563,7 @@ mod tests {
         use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt as _;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("key.bin");
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(&[0x42u8; 32]).unwrap();
@@ -579,7 +579,7 @@ mod tests {
         use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt as _;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("key.bin");
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(&[0x42u8; 32]).unwrap();
@@ -595,7 +595,7 @@ mod tests {
         use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt as _;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("key.bin");
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(&[0x42u8; 32]).unwrap();
@@ -619,7 +619,7 @@ mod tests {
         use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt as _;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let target = dir.path().join("target.bin");
         let mut f = std::fs::File::create(&target).unwrap();
         f.write_all(&[0x42u8; 32]).unwrap();

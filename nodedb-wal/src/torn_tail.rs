@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn truncated_tail_is_a_torn_write() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("torn.wal");
         write_segment(&path, 4);
 
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn garbage_at_the_end_is_a_torn_write() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("garbage_tail.wal");
         write_segment(&path, 3);
 
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn damage_with_committed_records_behind_it_is_mid_file_corruption() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("hole.wal");
         write_segment(&path, 6);
 
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_a_hole_and_accepts_a_torn_tail() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
 
         let hole_path = dir.path().join("verify_hole.wal");
         write_segment(&hole_path, 6);
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn clean_eof_needs_no_scan() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("clean.wal");
         write_segment(&path, 2);
         assert!(verify_committed_prefix(&path, Some(StopReason::Eof), 2).is_ok());

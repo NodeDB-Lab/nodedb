@@ -33,7 +33,7 @@ fn replayed_payloads(path: &std::path::Path) -> Vec<Vec<u8>> {
 /// simply counts every append.
 #[test]
 fn mirrored_records_report_full_protection() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("healthy.wal");
 
     let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
@@ -53,7 +53,7 @@ fn mirrored_records_report_full_protection() {
 /// was covered.
 #[test]
 fn oversized_record_is_reported_as_unprotected() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("oversized.wal");
 
     let before = wal_dwb_unprotected_records_total();
@@ -85,7 +85,7 @@ fn oversized_record_is_reported_as_unprotected() {
 /// show up as one.
 #[test]
 fn a_disabled_dwb_is_not_reported_as_degraded() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("dwb_off.wal");
 
     let mut writer = WalWriter::open(
@@ -118,7 +118,7 @@ mod injected {
     /// pretend protection is still in place.
     #[test]
     fn dwb_write_failure_is_observable_and_the_append_still_succeeds() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempdir().unwrap();
         let path = dir.path().join("dwb_write_failure.wal");
 
         let unprotected_before = wal_dwb_unprotected_records_total();

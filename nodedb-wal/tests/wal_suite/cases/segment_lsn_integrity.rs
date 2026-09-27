@@ -82,7 +82,7 @@ fn build_multi_segment_wal(wal_dir: &Path, records: usize) -> Vec<PathBuf> {
 
 #[test]
 fn empty_rolled_segment_does_not_reuse_lsns() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let wal_dir = dir.path().join("wal");
 
     let written = {
@@ -120,7 +120,7 @@ fn empty_rolled_segment_does_not_reuse_lsns() {
 
 #[test]
 fn torn_last_segment_does_not_reuse_lsns() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let wal_dir = dir.path().join("wal");
 
     {
@@ -162,7 +162,7 @@ fn torn_last_segment_does_not_reuse_lsns() {
 
 #[test]
 fn missing_middle_segment_fails_replay() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let wal_dir = dir.path().join("wal");
     let paths = build_multi_segment_wal(&wal_dir, 20);
 
@@ -189,7 +189,7 @@ fn missing_middle_segment_fails_replay() {
 
 #[test]
 fn missing_oldest_segments_replay_cleanly() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let wal_dir = dir.path().join("wal");
     let paths = build_multi_segment_wal(&wal_dir, 20);
 
@@ -208,7 +208,7 @@ fn missing_oldest_segments_replay_cleanly() {
 
 #[test]
 fn limited_replay_stopping_early_reports_no_gap() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let wal_dir = dir.path().join("wal");
     let paths = build_multi_segment_wal(&wal_dir, 20);
 

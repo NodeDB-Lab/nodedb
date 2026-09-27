@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn create_and_append() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
         let mut wal = SegmentedWal::open(test_config(&wal_dir)).unwrap();
@@ -449,7 +449,7 @@ mod tests {
 
     #[test]
     fn replay_after_close() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
         // Write records.
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn automatic_segment_rollover() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
         // Use a tiny segment target to force rollover.
@@ -519,7 +519,7 @@ mod tests {
 
     #[test]
     fn truncation_removes_old_segments() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
         let config = SegmentedWalConfig {
@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn replay_from_checkpoint_lsn() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
         let mut wal = SegmentedWal::open(test_config(&wal_dir)).unwrap();
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn replay_from_the_retained_floor_returns_the_whole_suffix() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let (wal, floor) = truncated_wal(&dir.path().join("wal"));
 
         let records = wal.replay_from(floor).expect("floor is fully retained");
@@ -628,7 +628,7 @@ mod tests {
     /// request starting exactly there is complete, not short.
     #[test]
     fn replay_from_exactly_the_floor_is_not_an_error() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let (wal, floor) = truncated_wal(&dir.path().join("wal"));
 
         assert!(wal.replay_from(floor).is_ok());
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn replay_below_the_retained_floor_is_a_typed_error_naming_both_lsns() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let (wal, floor) = truncated_wal(&dir.path().join("wal"));
 
         match wal.replay_from(1) {
@@ -666,7 +666,7 @@ mod tests {
 
     #[test]
     fn total_size_bytes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
         let mut wal = SegmentedWal::open(test_config(&wal_dir)).unwrap();
@@ -680,7 +680,7 @@ mod tests {
 
     #[test]
     fn reopen_continues_lsn() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
         {
@@ -713,7 +713,7 @@ mod tests {
         //  3. Reopen a new reader and replay — records are marked encrypted.
         //  4. For each segment, open the reader, read its preamble epoch, and
         //     decrypt each record using that epoch. Verify payloads match.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
         let key_bytes = [42u8; 32];
 
@@ -793,7 +793,7 @@ mod tests {
     /// is read from the on-disk preamble rather than the current key's epoch.
     #[test]
     fn wal_encrypted_restart_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
         let key_bytes = [0xABu8; 32];
 
@@ -856,7 +856,7 @@ mod tests {
     /// Decryption must fail because the preamble is part of the AAD.
     #[test]
     fn epoch_tamper_rejected() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
         let key_bytes = [0x55u8; 32];
 
@@ -902,7 +902,7 @@ mod tests {
 
     #[test]
     fn replay_from_limit_basic() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let config = test_config(dir.path());
         let mut wal = SegmentedWal::open(config).unwrap();
 
@@ -927,7 +927,7 @@ mod tests {
 
     #[test]
     fn replay_from_limit_with_lsn_filter() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let config = test_config(dir.path());
         let mut wal = SegmentedWal::open(config).unwrap();
 
@@ -950,7 +950,7 @@ mod tests {
 
     #[test]
     fn replay_from_limit_empty() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let config = test_config(dir.path());
         let mut wal = SegmentedWal::open(config).unwrap();
 
@@ -965,7 +965,7 @@ mod tests {
 
     #[test]
     fn replay_from_limit_across_segments() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let config = test_config(dir.path());
         let mut wal = SegmentedWal::open(config).unwrap();
 

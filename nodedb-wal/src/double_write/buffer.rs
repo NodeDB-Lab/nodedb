@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn write_and_recover() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let mut dwb = open_buffered(&dir.path().join("test.dwb"));
 
         mirror(&mut dwb, &record(42, b"hello double-write"));
@@ -327,14 +327,14 @@ mod tests {
 
     #[test]
     fn recover_nonexistent_returns_none() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let mut dwb = open_buffered(&dir.path().join("test2.dwb"));
         assert!(dwb.recover_record(999).unwrap().is_none());
     }
 
     #[test]
     fn survives_reopen() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let path = dir.path().join("reopen.dwb");
 
         {
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn batch_deferred_writes_and_flush() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let mut dwb = open_buffered(&dir.path().join("batch.dwb"));
 
         for lsn in 1..=5u64 {
@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn flush_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let mut dwb = open_buffered(&dir.path().join("idem.dwb"));
 
         dwb.flush().unwrap();
@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn oversized_record_is_reported_as_skipped() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let mut dwb = open_buffered(&dir.path().join("oversized.dwb"));
 
         let payload = vec![0xabu8; DWB_SLOT_RECORD_MAX];
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn bytes_written_counter_increments() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_tempdir().unwrap();
         let before = wal_dwb_bytes_written_total();
 
         let mut dwb = open_buffered(&dir.path().join("counter.dwb"));

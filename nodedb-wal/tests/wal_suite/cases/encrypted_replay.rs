@@ -46,7 +46,7 @@ fn reopen_with_key(wal_dir: &std::path::Path) -> SegmentedWal {
 
 #[test]
 fn replay_of_encrypted_wal_returns_plaintext() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::tempdir().expect("tempdir");
     let wal_dir = dir.path().join("wal");
 
     let payloads: Vec<Vec<u8>> = (0..8)
@@ -77,7 +77,7 @@ fn replay_of_encrypted_wal_returns_plaintext() {
 
 #[test]
 fn mmap_replay_of_encrypted_wal_returns_plaintext() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::tempdir().expect("tempdir");
     let wal_dir = dir.path().join("wal");
 
     let payloads: Vec<Vec<u8>> = (0..4).map(|i| format!("mmap-{i}").into_bytes()).collect();
@@ -93,7 +93,7 @@ fn mmap_replay_of_encrypted_wal_returns_plaintext() {
 
 #[test]
 fn tombstones_are_extracted_from_an_encrypted_wal() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::tempdir().expect("tempdir");
     let wal_dir = dir.path().join("wal");
 
     let tombstone = CollectionTombstonePayload::new("users", 42)
@@ -115,7 +115,7 @@ fn tombstones_are_extracted_from_an_encrypted_wal() {
 
 #[test]
 fn encrypted_replay_without_a_key_is_a_typed_error() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::tempdir().expect("tempdir");
     let wal_dir = dir.path().join("wal");
 
     write_encrypted(&wal_dir, RecordType::Put as u32, &[b"secret".to_vec()]);
@@ -133,7 +133,7 @@ fn encrypted_replay_without_a_key_is_a_typed_error() {
 
 #[test]
 fn unencrypted_replay_is_unchanged() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::tempdir().expect("tempdir");
     let wal_dir = dir.path().join("wal");
 
     let payloads: Vec<Vec<u8>> = (0..5).map(|i| format!("plain-{i}").into_bytes()).collect();

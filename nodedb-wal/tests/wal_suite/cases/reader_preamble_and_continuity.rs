@@ -61,7 +61,7 @@ fn write_plain_segment(wal_dir: &Path, payloads: &[&[u8]]) -> PathBuf {
 
 #[test]
 fn mmap_reader_replays_every_record_of_an_encrypted_segment() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let payloads: Vec<&[u8]> = vec![b"enc-mmap-0", b"enc-mmap-1", b"enc-mmap-2"];
     let path = write_encrypted_segment(&dir.path().join("wal"), &payloads);
 
@@ -92,7 +92,7 @@ fn mmap_reader_replays_every_record_of_an_encrypted_segment() {
 
 #[test]
 fn lazy_reader_replays_every_record_of_an_encrypted_segment() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let payloads: Vec<&[u8]> = vec![b"enc-lazy-0", b"enc-lazy-1", b"enc-lazy-2"];
     let path = write_encrypted_segment(&dir.path().join("wal"), &payloads);
 
@@ -127,7 +127,7 @@ fn lazy_reader_replays_every_record_of_an_encrypted_segment() {
 
 #[test]
 fn both_readers_still_replay_an_unencrypted_segment() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let payloads: Vec<&[u8]> = vec![b"plain-0", b"plain-1", b"plain-2"];
     let path = write_plain_segment(&dir.path().join("wal"), &payloads);
 
@@ -182,7 +182,7 @@ fn record_header_offset(path: &Path, n: usize) -> u64 {
 
 #[test]
 fn mmap_replay_rejects_mid_file_corruption_instead_of_truncating() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let wal_dir = dir.path().join("wal");
     let payloads: Vec<&[u8]> = vec![b"row-0", b"row-1", b"row-2", b"row-3", b"row-4", b"row-5"];
     let path = write_plain_segment(&wal_dir, &payloads);
@@ -225,7 +225,7 @@ fn write_many_segments(wal_dir: &Path, count: u32) {
 
 #[test]
 fn mmap_replay_rejects_a_missing_middle_segment() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let wal_dir = dir.path().join("wal");
     write_many_segments(&wal_dir, 20);
 
@@ -249,7 +249,7 @@ fn mmap_replay_rejects_a_missing_middle_segment() {
 
 #[test]
 fn mmap_replay_accepts_a_truncated_prefix() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let wal_dir = dir.path().join("wal");
     write_many_segments(&wal_dir, 20);
 
