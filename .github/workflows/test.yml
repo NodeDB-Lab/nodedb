@@ -123,6 +123,20 @@ jobs:
       # (512 KiB) is far below what tokio's and libtest's frames need. Without
       # it the run dies on a stack overflow rather than on a test failure.
       CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime -W max-wasm-stack=33554432 --dir=.
+      # Clear the workflow-level `RUSTFLAGS`, which points the linker at mold
+      # (`-C link-arg=-fuse-ld=mold`). Mold is a native linker; this target links
+      # through the `wasm32-wasip1` spec with `rust-lld`, which rejects that
+      # argument outright — so every test binary that has to *link* fails with
+      # "rust-lld: error: unknown argument: -fuse-ld=mold". The compile-only job
+      # this replaces never linked, which is why it went unnoticed until tests
+      # were actually executed here.
+      #
+      # This has to be `RUSTFLAGS` and not `CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS`:
+      # cargo gives the un-prefixed variable precedence, verified by building a
+      # scratch crate with both set — the mold argument still reached rustc. A
+      # job-level `env` overrides the workflow-level one, so the native jobs keep
+      # mold and this job gets a clean linker command.
+      RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
