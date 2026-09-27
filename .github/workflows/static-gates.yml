@@ -25,6 +25,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Scheduled-main and wasm-probe gate
+        run: |
+          python3 scripts/ci/check_wasm_probe.py --self-test
+          python3 scripts/ci/check_wasm_probe.py
       - name: Warm-storage ObjectStore gate
         run: bash scripts/ci/check_warm_storage_gate.sh
       - name: Format-path .expect() gate
