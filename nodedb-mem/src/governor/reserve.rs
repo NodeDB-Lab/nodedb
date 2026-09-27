@@ -167,11 +167,16 @@ impl MemoryGovernor {
 
 #[cfg(test)]
 mod tests {
+    // `Arc`, `DatabaseId` and `TenantId` are used only by the thread test that
+    // wasm32 cannot run, so they are gated with it to keep the wasm test build
+    // warning-free.
+    #[cfg(not(target_arch = "wasm32"))]
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     #[cfg(not(target_arch = "wasm32"))]
     use std::thread;
 
+    #[cfg(not(target_arch = "wasm32"))]
     use nodedb_types::{DatabaseId, TenantId};
 
     use super::*;

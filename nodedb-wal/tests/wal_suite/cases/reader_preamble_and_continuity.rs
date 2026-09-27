@@ -8,6 +8,13 @@
 //! missing from the middle of the log) must be an error rather than a quiet
 //! truncation.
 
+// `MmapWalReader` drives `nodedb_wal::mmap_reader`, which `src/lib.rs` gates
+// off on wasm32, and the corrupted-segment cases compare it against the lazy
+// reader. Gating the whole case keeps the wasm build from resolving the import
+// at all — the equivalent of the `mod` gate in cases/mod.rs, which this file's
+// target cannot use because that file is held elsewhere.
+#![cfg(not(target_arch = "wasm32"))]
+
 use std::path::{Path, PathBuf};
 
 use nodedb_wal::{

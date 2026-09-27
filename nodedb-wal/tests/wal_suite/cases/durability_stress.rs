@@ -12,6 +12,12 @@
 //! - All recovered records pass the built-in checksum check (WalReader
 //!   already enforces this; stopping before a torn record is enough).
 
+// The case spawns 8 writer threads, and wasm32 has no thread spawn:
+// `std::thread::scope` fails with `Unsupported` there and wasm targets abort on
+// panic. The whole file is one native-only case, so it is gated as a unit —
+// equivalent to the `mod` gate in cases/mod.rs.
+#![cfg(not(target_arch = "wasm32"))]
+
 use std::time::Instant;
 
 use nodedb_wal::Result;
@@ -78,9 +84,6 @@ fn truncate_within_last_window(path: &std::path::Path, rng: &mut StdRng) -> u64 
     trunc_at
 }
 
-// wasm32 has no thread spawn: `std::thread::scope` fails there with
-// `Unsupported`, and wasm targets abort on panic. Still runs in full on native.
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn parallel_writers_survive_truncation() {
     let wall_start = Instant::now();
