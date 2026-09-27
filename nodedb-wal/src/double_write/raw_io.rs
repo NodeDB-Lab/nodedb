@@ -30,6 +30,16 @@ pub(crate) fn full_capacity_slice(buf: &AlignedBuf) -> &[u8] {
 }
 
 /// `pwrite`-retry helper that handles short writes.
+///
+/// Reports [`WalError::Unsupported`] on wasm32 rather than falling back to a
+/// seek-and-write. A fallback would mirror the slot successfully and the writer
+/// would then report `DwbProtection::Active`, but `recover_record` is a stub on
+/// that target (slot recovery needs `pread`), so nothing could ever read the
+/// slot back. The protection would be claimed and unusable. Failing here keeps
+/// the writer's own degradation signal honest: the append still succeeds
+/// (`DoubleWriteBuffer` failures are deliberately not fatal to the WAL), while
+/// `dwb_protection()` reports `Degraded(WriteFailed)` and every record is
+/// counted as unprotected.
 pub(crate) fn pwrite_all(file: &File, data: &[u8], offset: u64) -> Result<()> {
     #[cfg(not(target_arch = "wasm32"))]
     {
