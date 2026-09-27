@@ -65,7 +65,9 @@ pub fn read_i64(buf: &[u8], offset: usize) -> Option<i64> {
 /// or invalid UTF-8.
 pub fn read_str(buf: &[u8], offset: usize) -> Option<&str> {
     let (start, len) = str_bounds(buf, offset)?;
-    let bytes = buf.get(start..start + len)?;
+    // `start + len` is a hostile-length addition; see `checked_advance_len`.
+    let end = checked_advance_len(buf, start, 0, len)?;
+    let bytes = buf.get(start..end)?;
     str::from_utf8(bytes).ok()
 }
 
@@ -73,9 +75,10 @@ pub fn read_str(buf: &[u8], offset: usize) -> Option<&str> {
 /// Returns `None` for non-string types, invalid UTF-8, or truncated input.
 pub fn read_str_advance<'a>(buf: &'a [u8], off: &mut usize) -> Option<&'a str> {
     let (start, len) = str_bounds(buf, *off)?;
-    let bytes = buf.get(start..start + len)?;
+    let end = checked_advance_len(buf, start, 0, len)?;
+    let bytes = buf.get(start..end)?;
     let s = str::from_utf8(bytes).ok()?;
-    *off = start + len;
+    *off = end;
     Some(s)
 }
 
@@ -91,7 +94,7 @@ pub fn read_bin_advance<'a>(buf: &'a [u8], off: &mut usize) -> Option<&'a [u8]> 
         _ => return None,
     };
     let start = *off + header;
-    let end = start + len;
+    let end = checked_advance_len(buf, start, 0, len)?;
     let data = buf.get(start..end)?;
     *off = end;
     Some(data)

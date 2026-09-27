@@ -9,7 +9,7 @@
 //! Uses a flat array with linear search for small docs (≤ 16 fields) to
 //! avoid HashMap allocation overhead. Falls back to HashMap for large docs.
 
-use crate::msgpack_scan::reader::{map_header, skip_value, str_bounds};
+use crate::msgpack_scan::reader::{checked_advance_len, map_header, skip_value, str_bounds};
 
 /// Threshold: docs with more fields than this use HashMap, otherwise flat array.
 const HASH_THRESHOLD: usize = 16;
@@ -38,7 +38,9 @@ impl FieldIndex {
             let mut entries = Vec::with_capacity(count);
             for _ in 0..count {
                 let key_str = if let Some((start, len)) = str_bounds(buf, pos) {
-                    std::str::from_utf8(buf.get(start..start + len)?).ok()
+                    // Hostile-length addition: see `checked_advance_len`.
+                    let end = checked_advance_len(buf, start, 0, len)?;
+                    std::str::from_utf8(buf.get(start..end)?).ok()
                 } else {
                     None
                 };
@@ -61,7 +63,9 @@ impl FieldIndex {
             let mut offsets = std::collections::HashMap::with_capacity(cap);
             for _ in 0..count {
                 let key_str = if let Some((start, len)) = str_bounds(buf, pos) {
-                    std::str::from_utf8(buf.get(start..start + len)?).ok()
+                    // Hostile-length addition: see `checked_advance_len`.
+                    let end = checked_advance_len(buf, start, 0, len)?;
+                    std::str::from_utf8(buf.get(start..end)?).ok()
                 } else {
                     None
                 };

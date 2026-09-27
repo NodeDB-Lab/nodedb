@@ -44,27 +44,50 @@ pub(super) fn get(buf: &[u8], pos: usize) -> Option<u8> {
 
 #[inline(always)]
 pub(super) fn read_u16_be(buf: &[u8], pos: usize) -> Option<u16> {
-    let bytes = buf.get(pos..pos + 2)?;
+    let bytes = buf.get(pos..pos.checked_add(2)?)?;
     Some(u16::from_be_bytes([bytes[0], bytes[1]]))
 }
 
 #[inline(always)]
 pub(super) fn read_u32_be(buf: &[u8], pos: usize) -> Option<u32> {
-    let bytes = buf.get(pos..pos + 4)?;
+    let bytes = buf.get(pos..pos.checked_add(4)?)?;
     Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 #[inline(always)]
 pub(super) fn read_u64_be(buf: &[u8], pos: usize) -> Option<u64> {
-    let bytes = buf.get(pos..pos + 8)?;
+    let bytes = buf.get(pos..pos.checked_add(8)?)?;
     Some(u64::from_be_bytes([
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
     ]))
 }
 
 /// Return `Some(offset + size)` only if the buffer has enough bytes.
+///
+/// The addition is checked. `size` reaches this function as a tag's header
+/// width plus a payload length read from the input, so on a 32-bit target it
+/// can exceed `usize` before the buffer is ever consulted: `5 + 0xffff_ffff`
+/// panics rather than returning `None`. Checking here keeps a hostile length
+/// field a decode failure on every target instead of an abort on 32-bit.
 #[inline(always)]
 pub(super) fn checked_advance(buf: &[u8], offset: usize, size: usize) -> Option<usize> {
-    let end = offset + size;
+    checked_advance_len(buf, offset, size, 0)
+}
+
+/// Return `Some(offset + header + len)` only if the buffer has enough bytes,
+/// with both additions checked.
+///
+/// Every length-prefixed tag (`str`, `bin`, `ext`) reaches this shape, and
+/// `len` is read straight from the input as up to a `u32`. Folding it into the
+/// header width first — `header + len` — is what overflows a 32-bit `usize`
+/// before any bounds check can reject the value.
+#[inline(always)]
+pub(crate) fn checked_advance_len(
+    buf: &[u8],
+    offset: usize,
+    header: usize,
+    len: usize,
+) -> Option<usize> {
+    let end = offset.checked_add(header)?.checked_add(len)?;
     if end <= buf.len() { Some(end) } else { None }
 }

@@ -5,7 +5,7 @@
 //! Given a `&[u8]` containing a MessagePack map, extract the byte range
 //! of a value for a given key — without allocating or decoding.
 
-use crate::msgpack_scan::reader::{map_header, skip_value, str_bounds};
+use crate::msgpack_scan::reader::{checked_advance_len, map_header, skip_value, str_bounds};
 
 /// A byte range `(start, end)` within a MessagePack buffer, pointing to
 /// a complete value (tag + payload). Use `read_f64`, `read_i64`, `read_str`
@@ -28,10 +28,16 @@ pub fn extract_field(buf: &[u8], offset: usize, field: &str) -> Option<FieldRang
     for _ in 0..count {
         // Read key string bounds
         let key_match = match str_bounds(buf, pos) {
-            Some((start, len)) => buf
-                .get(start..start + len)
-                .map(|kb| kb == field_bytes)
-                .unwrap_or(false),
+            Some((start, len)) => {
+                // Hostile-length addition: see `checked_advance_len`.
+                match checked_advance_len(buf, start, 0, len) {
+                    Some(end) => buf
+                        .get(start..end)
+                        .map(|kb| kb == field_bytes)
+                        .unwrap_or(false),
+                    None => false,
+                }
+            }
             None => false,
         };
 

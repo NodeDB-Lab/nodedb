@@ -57,33 +57,33 @@ fn skip_value_depth(buf: &[u8], offset: usize, depth: u16) -> Option<usize> {
         // fixstr (0xa0..=0xbf)
         0xa0..=0xbf => {
             let len = (tag & 0x1f) as usize;
-            checked_advance(buf, offset, 1 + len)
+            checked_advance_len(buf, offset, 1, len)
         }
         STR8 => {
             let len = get(buf, offset + 1)? as usize;
-            checked_advance(buf, offset, 2 + len)
+            checked_advance_len(buf, offset, 2, len)
         }
         STR16 => {
             let len = read_u16_be(buf, offset + 1)? as usize;
-            checked_advance(buf, offset, 3 + len)
+            checked_advance_len(buf, offset, 3, len)
         }
         STR32 => {
             let len = read_u32_be(buf, offset + 1)? as usize;
-            checked_advance(buf, offset, 5 + len)
+            checked_advance_len(buf, offset, 5, len)
         }
 
         // bin
         BIN8 => {
             let len = get(buf, offset + 1)? as usize;
-            checked_advance(buf, offset, 2 + len)
+            checked_advance_len(buf, offset, 2, len)
         }
         BIN16 => {
             let len = read_u16_be(buf, offset + 1)? as usize;
-            checked_advance(buf, offset, 3 + len)
+            checked_advance_len(buf, offset, 3, len)
         }
         BIN32 => {
             let len = read_u32_be(buf, offset + 1)? as usize;
-            checked_advance(buf, offset, 5 + len)
+            checked_advance_len(buf, offset, 5, len)
         }
 
         // fixed-width numerics (bounds-check against buffer length)
@@ -102,15 +102,15 @@ fn skip_value_depth(buf: &[u8], offset: usize, depth: u16) -> Option<usize> {
         FIXEXT16 => checked_advance(buf, offset, 18),
         EXT8 => {
             let len = get(buf, offset + 1)? as usize;
-            checked_advance(buf, offset, 3 + len)
+            checked_advance_len(buf, offset, 3, len)
         }
         EXT16 => {
             let len = read_u16_be(buf, offset + 1)? as usize;
-            checked_advance(buf, offset, 4 + len)
+            checked_advance_len(buf, offset, 4, len)
         }
         EXT32 => {
             let len = read_u32_be(buf, offset + 1)? as usize;
-            checked_advance(buf, offset, 6 + len)
+            checked_advance_len(buf, offset, 6, len)
         }
 
         // 0xc1 is never used in the spec

@@ -16,4 +16,5 @@ pub use scalar::{
     read_str_advance, read_u32_advance,
 };
 pub use skip::skip_value;
+pub(crate) use tags::checked_advance_len;
 pub use value::read_value;
