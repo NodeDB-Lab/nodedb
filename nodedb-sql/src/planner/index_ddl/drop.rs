@@ -2,6 +2,7 @@
 
 //! Plan a `DROP INDEX` statement parsed by sqlparser.
 
+use crate::types::DropIndexPlan;
 use sqlparser::ast;
 
 use crate::SqlPlan;
@@ -42,11 +43,11 @@ pub fn plan_drop_index(stmt: &ast::Statement) -> Result<SqlPlan> {
         None => None,
     };
 
-    Ok(SqlPlan::DropIndex {
+    Ok(SqlPlan::DropIndex(DropIndexPlan {
         index_name,
         collection,
         if_exists: *if_exists,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -61,11 +62,11 @@ mod tests {
 
     #[test]
     fn basic_drop() {
-        let SqlPlan::DropIndex {
+        let SqlPlan::DropIndex(DropIndexPlan {
             index_name,
             collection,
             if_exists,
-        } = plan("DROP INDEX idx_users_email").unwrap()
+        }) = plan("DROP INDEX idx_users_email").unwrap()
         else {
             panic!("expected DropIndex");
         };
@@ -76,7 +77,9 @@ mod tests {
 
     #[test]
     fn if_exists_honored() {
-        let SqlPlan::DropIndex { if_exists, .. } = plan("DROP INDEX IF EXISTS idx").unwrap() else {
+        let SqlPlan::DropIndex(DropIndexPlan { if_exists, .. }) =
+            plan("DROP INDEX IF EXISTS idx").unwrap()
+        else {
             panic!("expected DropIndex");
         };
         assert!(if_exists);

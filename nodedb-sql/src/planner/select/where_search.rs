@@ -17,7 +17,7 @@ use sqlparser::ast;
 use super::entry_ann::parse_ann_options;
 use super::helpers::{
     convert_where_to_filters, extract_column_name, extract_float, extract_float_array,
-    extract_func_args, extract_string_literal, metric_from_func_name,
+    extract_func_args, extract_string_literal, extract_text_field, metric_from_func_name,
 };
 use crate::error::{Result, SqlError};
 use crate::functions::registry::{FunctionRegistry, SearchTrigger};
@@ -185,6 +185,7 @@ fn plan_text_from_where(
     if args.len() < 2 {
         return Ok(None);
     }
+    let field = extract_text_field(&args[0])?;
     let query_text = extract_string_literal(&args[1])?;
 
     // Detect a phrase query: query_text surrounded by double-quotes.
@@ -212,6 +213,7 @@ fn plan_text_from_where(
 
     Ok(Some(SqlPlan::TextSearch {
         collection: table.name.clone(),
+        field,
         query: fts_query,
         top_k: 1000,
         filters: extra_filter_to_filters(extra_filter, table)?,

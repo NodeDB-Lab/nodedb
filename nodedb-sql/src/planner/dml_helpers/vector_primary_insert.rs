@@ -100,16 +100,18 @@ pub(crate) fn build_vector_primary_insert_plan(
         });
     }
 
-    Ok(vec![SqlPlan::VectorPrimaryInsert {
-        collection: collection.to_string(),
-        field: vpc.vector_field.clone(),
-        quantization: vpc.quantization,
-        storage_dtype: vpc.storage_dtype,
-        payload_indexes: vpc.payload_indexes.clone(),
-        rows: result_rows,
-        volatile_defaults,
-        intent,
-        on_conflict_updates,
-        primary_key,
-    }])
+    Ok(vec![SqlPlan::VectorPrimaryInsert(
+        VectorPrimaryInsertPlan {
+            collection: collection.to_string(),
+            field: vpc.vector_field.clone(),
+            quantization: vpc.quantization,
+            storage_dtype: vpc.storage_dtype,
+            payload_indexes: vpc.payload_indexes.clone(),
+            rows: result_rows,
+            volatile_defaults,
+            intent,
+            on_conflict_updates,
+            primary_key,
+        },
+    )])
 }

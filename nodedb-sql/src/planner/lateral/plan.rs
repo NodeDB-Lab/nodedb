@@ -170,7 +170,7 @@ pub fn plan_lateral_join(args: LateralJoinArgs<'_>) -> Result<SqlPlan> {
             .iter()
             .map(|c| (c.inner_col.clone(), c.outer_col.clone()))
             .collect();
-        Ok(SqlPlan::LateralLoop {
+        Ok(SqlPlan::LateralLoop(LateralLoopPlan {
             outer: Box::new(outer_plan),
             outer_alias,
             inner: Box::new(inner_plan),
@@ -179,7 +179,7 @@ pub fn plan_lateral_join(args: LateralJoinArgs<'_>) -> Result<SqlPlan> {
             projection: outer_projection,
             outer_row_cap: LATERAL_LOOP_CAP,
             left_join,
-        })
+        }))
     }
 }
 
@@ -327,7 +327,7 @@ fn plan_lateral_top_k(args: LateralTopKPlanArgs<'_>) -> Result<SqlPlan> {
         .map(|c| (c.outer_col, c.inner_col))
         .collect();
 
-    Ok(SqlPlan::LateralTopK {
+    Ok(SqlPlan::LateralTopK(LateralTopKPlan {
         outer: Box::new(outer_plan),
         outer_alias,
         inner_collection,
@@ -338,5 +338,5 @@ fn plan_lateral_top_k(args: LateralTopKPlanArgs<'_>) -> Result<SqlPlan> {
         lateral_alias: lateral_alias.to_string(),
         projection: outer_projection,
         left_join,
-    })
+    }))
 }

@@ -113,6 +113,7 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
         fn text_search(
             &mut self,
             collection: &str,
+            _field: Option<&str>,
             query: &nodedb_sql::fts_types::FtsQuery,
             top_k: usize,
             _filters: &[nodedb_sql::types::filter::Filter],

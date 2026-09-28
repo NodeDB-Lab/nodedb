@@ -20,7 +20,7 @@
 //! `LIMIT NULL` to derive the row description (see
 //! `fn prepared_limit_placeholder_null_plans_cleanly` below).
 
-use nodedb_sql::types::{CollectionInfo, EngineType, SqlPlan};
+use nodedb_sql::types::{CollectionInfo, CtePlan, DocumentIndexLookupPlan, EngineType, SqlPlan};
 use nodedb_sql::{SqlCatalog, SqlCatalogError, plan_sql};
 use nodedb_types::DatabaseId;
 
@@ -79,9 +79,9 @@ impl SqlCatalog for Catalog {
 fn bound_of(plan: &SqlPlan) -> String {
     match plan {
         SqlPlan::Scan { limit, offset, .. }
-        | SqlPlan::DocumentIndexLookup { limit, offset, .. }
+        | SqlPlan::DocumentIndexLookup(DocumentIndexLookupPlan { limit, offset, .. })
         | SqlPlan::Subquery { limit, offset, .. } => format!("limit={limit:?} offset={offset}"),
-        SqlPlan::Cte { outer, .. } => format!("cte outer -> {}", bound_of(outer)),
+        SqlPlan::Cte(CtePlan { outer, .. }) => format!("cte outer -> {}", bound_of(outer)),
         other => format!("{other:?}"),
     }
 }

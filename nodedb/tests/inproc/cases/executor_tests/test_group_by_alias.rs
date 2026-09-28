@@ -8,7 +8,7 @@
 
 use nodedb::control::planner::sql_plan_convert::{ConvertContext, convert};
 use nodedb_physical::physical_plan::{PhysicalPlan, TimeseriesOp};
-use nodedb_sql::types::{CollectionInfo, EngineType, SqlCatalog, SqlPlan};
+use nodedb_sql::types::{CollectionInfo, EngineType, SqlCatalog, SqlPlan, TimeseriesScanPlan};
 use nodedb_types::QualifiedCollection;
 
 use super::helpers::*;
@@ -152,9 +152,9 @@ fn plan_group_by_full_expression_has_bucket_interval() {
         "SELECT time_bucket('1 hour', timestamp) AS b, COUNT(*) FROM dns_bench \
          GROUP BY time_bucket('1 hour', timestamp)",
     );
-    let SqlPlan::TimeseriesScan {
+    let SqlPlan::TimeseriesScan(TimeseriesScanPlan {
         bucket_interval_ms, ..
-    } = plan
+    }) = plan
     else {
         panic!("expected TimeseriesScan, got {plan:?}");
     };
@@ -170,9 +170,9 @@ fn plan_group_by_alias_has_bucket_interval() {
     let plan = plan_sql(
         "SELECT time_bucket('1 hour', timestamp) AS b, COUNT(*) FROM dns_bench GROUP BY b",
     );
-    let SqlPlan::TimeseriesScan {
+    let SqlPlan::TimeseriesScan(TimeseriesScanPlan {
         bucket_interval_ms, ..
-    } = plan
+    }) = plan
     else {
         panic!("expected TimeseriesScan, got {plan:?}");
     };
@@ -188,9 +188,9 @@ fn plan_group_by_positional_has_bucket_interval() {
     let plan = plan_sql(
         "SELECT time_bucket('1 hour', timestamp) AS b, COUNT(*) FROM dns_bench GROUP BY 1",
     );
-    let SqlPlan::TimeseriesScan {
+    let SqlPlan::TimeseriesScan(TimeseriesScanPlan {
         bucket_interval_ms, ..
-    } = plan
+    }) = plan
     else {
         panic!("expected TimeseriesScan, got {plan:?}");
     };

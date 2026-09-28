@@ -10,7 +10,7 @@ pub struct ColumnarRules;
 
 impl EngineRules for ColumnarRules {
     fn plan_insert(&self, p: InsertParams) -> Result<Vec<SqlPlan>> {
-        Ok(vec![SqlPlan::Insert {
+        Ok(vec![SqlPlan::Insert(InsertPlan {
             collection: p.collection,
             engine: EngineType::Columnar,
             route: WriteRoute::ColumnarFamily,
@@ -19,7 +19,7 @@ impl EngineRules for ColumnarRules {
             if_absent: p.if_absent,
             column_schema: p.column_schema,
             primary_key: p.primary_key,
-        }])
+        })])
     }
 
     /// `UPSERT` / `INSERT ... ON CONFLICT (pk) DO UPDATE` on columnar.
@@ -27,7 +27,7 @@ impl EngineRules for ColumnarRules {
     /// bitmap; the new row (or its merged form, when `on_conflict_updates`
     /// is non-empty) is appended. Sort-key semantics are unchanged.
     fn plan_upsert(&self, p: UpsertParams) -> Result<Vec<SqlPlan>> {
-        Ok(vec![SqlPlan::Upsert {
+        Ok(vec![SqlPlan::Upsert(UpsertPlan {
             collection: p.collection,
             engine: EngineType::Columnar,
             route: WriteRoute::ColumnarFamily,
@@ -36,7 +36,7 @@ impl EngineRules for ColumnarRules {
             on_conflict_updates: p.on_conflict_updates,
             column_schema: p.column_schema,
             primary_key: p.primary_key,
-        }])
+        })])
     }
 
     fn plan_scan(&self, p: ScanParams) -> Result<SqlPlan> {

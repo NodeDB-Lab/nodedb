@@ -2,6 +2,7 @@
 
 //! Plan a `CREATE [UNIQUE] INDEX` statement parsed by sqlparser.
 
+use crate::types::CreateIndexPlan;
 use sqlparser::ast;
 
 use crate::SqlPlan;
@@ -57,14 +58,14 @@ pub fn plan_create_index(ci: &ast::CreateIndex) -> Result<SqlPlan> {
         });
     }
 
-    Ok(SqlPlan::CreateIndex {
+    Ok(SqlPlan::CreateIndex(CreateIndexPlan {
         index_name,
         collection,
         field,
         unique: ci.unique,
         if_not_exists: ci.if_not_exists,
         case_insensitive,
-    })
+    }))
 }
 
 /// Strip a `COLLATE <name>` wrapper from `expr` and return the inner
@@ -106,14 +107,14 @@ mod tests {
 
     #[test]
     fn basic_index() {
-        let SqlPlan::CreateIndex {
+        let SqlPlan::CreateIndex(CreateIndexPlan {
             index_name,
             collection,
             field,
             unique,
             if_not_exists,
             case_insensitive,
-        } = plan("CREATE INDEX idx_users_email ON users (email)").unwrap()
+        }) = plan("CREATE INDEX idx_users_email ON users (email)").unwrap()
         else {
             panic!("expected CreateIndex");
         };
@@ -127,7 +128,7 @@ mod tests {
 
     #[test]
     fn anonymous_index_name() {
-        let SqlPlan::CreateIndex { index_name, .. } =
+        let SqlPlan::CreateIndex(CreateIndexPlan { index_name, .. }) =
             plan("CREATE INDEX ON users (email)").unwrap()
         else {
             panic!("expected CreateIndex");
@@ -137,11 +138,11 @@ mod tests {
 
     #[test]
     fn unique_and_if_not_exists() {
-        let SqlPlan::CreateIndex {
+        let SqlPlan::CreateIndex(CreateIndexPlan {
             unique,
             if_not_exists,
             ..
-        } = plan("CREATE UNIQUE INDEX IF NOT EXISTS u ON users (email)").unwrap()
+        }) = plan("CREATE UNIQUE INDEX IF NOT EXISTS u ON users (email)").unwrap()
         else {
             panic!("expected CreateIndex");
         };
@@ -157,9 +158,9 @@ mod tests {
             "CREATE INDEX i ON users (email COLLATE ci)",
             "CREATE INDEX i ON users (email COLLATE case_insensitive)",
         ] {
-            let SqlPlan::CreateIndex {
+            let SqlPlan::CreateIndex(CreateIndexPlan {
                 case_insensitive, ..
-            } = plan(sql).unwrap()
+            }) = plan(sql).unwrap()
             else {
                 panic!("expected CreateIndex for {sql}");
             };
@@ -169,9 +170,9 @@ mod tests {
 
     #[test]
     fn collate_other_not_case_insensitive() {
-        let SqlPlan::CreateIndex {
+        let SqlPlan::CreateIndex(CreateIndexPlan {
             case_insensitive, ..
-        } = plan("CREATE INDEX i ON users (email COLLATE \"en_US\")").unwrap()
+        }) = plan("CREATE INDEX i ON users (email COLLATE \"en_US\")").unwrap()
         else {
             panic!("expected CreateIndex");
         };

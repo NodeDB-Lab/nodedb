@@ -15,11 +15,11 @@ pub struct TimeseriesRules;
 impl EngineRules for TimeseriesRules {
     fn plan_insert(&self, p: InsertParams) -> Result<Vec<SqlPlan>> {
         // Timeseries INSERT routes to TimeseriesIngest — append-only semantics.
-        Ok(vec![SqlPlan::TimeseriesIngest {
+        Ok(vec![SqlPlan::TimeseriesIngest(TimeseriesIngestPlan {
             collection: p.collection,
             rows: p.rows,
             volatile_defaults: p.volatile_defaults,
-        }])
+        })])
     }
 
     fn plan_upsert(&self, _p: UpsertParams) -> Result<Vec<SqlPlan>> {
@@ -40,7 +40,7 @@ impl EngineRules for TimeseriesRules {
         }
         // Timeseries scans use TimeseriesScan for time-range-aware execution.
         let time_range = default_time_range();
-        Ok(SqlPlan::TimeseriesScan {
+        Ok(SqlPlan::TimeseriesScan(TimeseriesScanPlan {
             collection: p.collection,
             time_range,
             bucket_interval_ms: 0,
@@ -53,7 +53,7 @@ impl EngineRules for TimeseriesRules {
             sort_keys: p.sort_keys,
             tiered: false,
             temporal: p.temporal,
-        })
+        }))
     }
 
     fn plan_point_get(&self, _p: PointGetParams) -> Result<SqlPlan> {
@@ -111,7 +111,7 @@ impl EngineRules for TimeseriesRules {
                 ),
             });
         }
-        Ok(SqlPlan::TimeseriesScan {
+        Ok(SqlPlan::TimeseriesScan(TimeseriesScanPlan {
             collection: p.collection,
             time_range: default_time_range(),
             bucket_interval_ms: p.bucket_interval_ms.unwrap_or(0),
@@ -126,7 +126,7 @@ impl EngineRules for TimeseriesRules {
             sort_keys: Vec::new(),
             tiered: p.has_auto_tier,
             temporal: p.temporal,
-        })
+        }))
     }
 
     fn plan_merge(&self, p: MergeParams) -> Result<Vec<SqlPlan>> {

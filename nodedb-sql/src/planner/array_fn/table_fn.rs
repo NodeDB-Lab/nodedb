@@ -3,6 +3,7 @@
 //! `SELECT * FROM ARRAY_*(...)` table-valued function planning:
 //! slice / project / aggregate / elementwise.
 
+use crate::types::{ArrayAggPlan, ArrayElementwisePlan, ArrayProjectPlan, ArraySlicePlan};
 use sqlparser::ast;
 
 use nodedb_types::Value;
@@ -145,13 +146,13 @@ fn plan_slice(
         0
     };
 
-    Ok(SqlPlan::ArraySlice {
+    Ok(SqlPlan::ArraySlice(ArraySlicePlan {
         name,
         slice: ArraySliceAst { dim_ranges },
         attr_projection,
         limit,
         temporal,
-    })
+    }))
 }
 
 fn plan_project(args: &[ast::Expr], catalog: &dyn SqlCatalog) -> Result<SqlPlan> {
@@ -182,10 +183,10 @@ fn plan_project(args: &[ast::Expr], catalog: &dyn SqlCatalog) -> Result<SqlPlan>
             });
         }
     }
-    Ok(SqlPlan::ArrayProject {
+    Ok(SqlPlan::ArrayProject(ArrayProjectPlan {
         name,
         attr_projection,
-    })
+    }))
 }
 
 fn plan_agg(
@@ -232,13 +233,13 @@ fn plan_agg(
         None
     };
 
-    Ok(SqlPlan::ArrayAgg {
+    Ok(SqlPlan::ArrayAgg(ArrayAggPlan {
         name,
         attr,
         reducer,
         group_by_dim,
         temporal,
-    })
+    }))
 }
 
 fn plan_elementwise(args: &[ast::Expr], catalog: &dyn SqlCatalog) -> Result<SqlPlan> {
@@ -279,12 +280,12 @@ fn plan_elementwise(args: &[ast::Expr], catalog: &dyn SqlCatalog) -> Result<SqlP
             detail: format!("ARRAY_ELEMENTWISE: array '{left}' has no attr '{attr}'"),
         });
     }
-    Ok(SqlPlan::ArrayElementwise {
+    Ok(SqlPlan::ArrayElementwise(ArrayElementwisePlan {
         left,
         right,
         op,
         attr,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -293,6 +294,7 @@ mod tests {
     use crate::error::Result;
     use crate::functions::registry::FunctionRegistry;
     use crate::parser::statement::parse_sql;
+    use crate::types::{ArrayAggPlan, ArrayProjectPlan, ArraySlicePlan};
     use crate::types::{CollectionInfo, SqlCatalog, SqlPlan};
     use crate::types_array::{
         ArrayAttrAst, ArrayAttrType, ArrayDimAst, ArrayDimType, ArrayDomainBound, ArrayReducerAst,
@@ -382,13 +384,13 @@ mod tests {
         )
         .unwrap();
         match p {
-            SqlPlan::ArraySlice {
+            SqlPlan::ArraySlice(ArraySlicePlan {
                 name,
                 slice,
                 attr_projection,
                 limit,
                 ..
-            } => {
+            }) => {
                 assert_eq!(name, "g");
                 assert_eq!(slice.dim_ranges.len(), 2);
                 assert_eq!(attr_projection, vec!["qual".to_string()]);
@@ -410,10 +412,10 @@ mod tests {
     fn project_happy() {
         let p = plan_one("SELECT * FROM ARRAY_PROJECT('g', ['qual', 'variant'])").unwrap();
         match p {
-            SqlPlan::ArrayProject {
+            SqlPlan::ArrayProject(ArrayProjectPlan {
                 name,
                 attr_projection,
-            } => {
+            }) => {
                 assert_eq!(name, "g");
                 assert_eq!(attr_projection, vec!["qual".to_string(), "variant".into()]);
             }
@@ -430,13 +432,13 @@ mod tests {
     fn agg_scalar() {
         let p = plan_one("SELECT * FROM ARRAY_AGG('g', 'qual', 'sum')").unwrap();
         match p {
-            SqlPlan::ArrayAgg {
+            SqlPlan::ArrayAgg(ArrayAggPlan {
                 name,
                 attr,
                 reducer,
                 group_by_dim,
                 ..
-            } => {
+            }) => {
                 assert_eq!(name, "g");
                 assert_eq!(attr, "qual");
                 assert_eq!(reducer, ArrayReducerAst::Sum);
@@ -450,11 +452,11 @@ mod tests {
     fn agg_grouped() {
         let p = plan_one("SELECT * FROM ARRAY_AGG('g', 'qual', 'mean', 'chrom')").unwrap();
         match p {
-            SqlPlan::ArrayAgg {
+            SqlPlan::ArrayAgg(ArrayAggPlan {
                 reducer,
                 group_by_dim,
                 ..
-            } => {
+            }) => {
                 assert_eq!(reducer, ArrayReducerAst::Mean);
                 assert_eq!(group_by_dim, Some("chrom".into()));
             }

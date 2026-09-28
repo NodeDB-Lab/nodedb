@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `SqlPlan` enum — top-level plan produced by the SQL planner.
+//! The `SqlPlan` enum — top-level plan produced by the SQL planner. Larger
+//! payloads live in per-family structs beside it.
 
 use crate::fts_types::FtsQuery;
 use crate::temporal::TemporalScope;
-use crate::types_array;
 use crate::types_expr::{SqlExpr, SqlPayloadAtom, SqlValue};
 pub use nodedb_types::vector_distance::DistanceMetric;
 
@@ -14,9 +14,25 @@ use crate::types::query::{
     WindowSpec,
 };
 
-use super::merge_types::MergePlanClause;
-use super::row_types::{KvInsertIntent, VectorPrimaryInsertIntent, VectorPrimaryRow, WriteRoute};
-use super::vector_opts::{ArrayPrefilter, VectorAnnOptions};
+use super::super::vector_opts::{ArrayPrefilter, VectorAnnOptions};
+
+use super::array::{
+    AlterArrayPlan, ArrayAggPlan, ArrayElementwisePlan, ArrayProjectPlan, ArraySlicePlan,
+    CreateArrayPlan, DeleteArrayPlan, InsertArrayPlan,
+};
+use super::cte::CtePlan;
+use super::hybrid::{HybridSearchPlan, HybridSearchTriplePlan};
+use super::index_ddl::{CreateIndexPlan, DropIndexPlan};
+use super::index_reads::{DocumentIndexLookupPlan, RangeScanPlan};
+use super::lateral::{LateralLoopPlan, LateralTopKPlan};
+use super::merge::MergePlan;
+use super::recursive::{RecursiveScanPlan, RecursiveValuePlan};
+use super::timeseries::{TimeseriesIngestPlan, TimeseriesScanPlan};
+use super::vector_primary::{
+    VectorPrimaryDeletePlan, VectorPrimaryInsertPlan, VectorPrimaryTruncatePlan,
+    VectorPrimaryUpdatePlan,
+};
+use super::writes::{InsertPlan, KvInsertPlan, UpsertPlan};
 
 /// The top-level plan produced by the SQL planner.
 #[derive(Debug, Clone)]
@@ -67,115 +83,16 @@ pub enum SqlPlan {
     /// `document_strict::plan_scan` when the WHERE clause contains a
     /// single equality predicate on a `Ready` indexed field. Any
     /// additional predicates fall through as post-filters.
-    DocumentIndexLookup {
-        collection: String,
-        alias: Option<String>,
-        engine: EngineType,
-        /// Indexed field path used for the lookup.
-        field: String,
-        /// Equality value from the WHERE clause.
-        value: SqlValue,
-        /// Remaining filters after extracting the equality used for lookup.
-        filters: Vec<Filter>,
-        projection: Vec<Projection>,
-        sort_keys: Vec<SortKey>,
-        limit: Option<usize>,
-        offset: usize,
-        distinct: bool,
-        window_functions: Vec<WindowSpec>,
-        /// Whether the chosen index is COLLATE NOCASE — the executor
-        /// lowercases the lookup value before probing.
-        case_insensitive: bool,
-        /// Bitemporal qualifier — mirrors `Scan::temporal`. Document
-        /// engines must honor it at the Ceiling stage.
-        temporal: TemporalScope,
-    },
-    RangeScan {
-        collection: String,
-        field: String,
-        lower: Option<SqlValue>,
-        upper: Option<SqlValue>,
-        limit: usize,
-        /// Resolved SELECT target list, for output-schema derivation.
-        projection: Vec<Projection>,
-    },
+    DocumentIndexLookup(DocumentIndexLookupPlan),
+    RangeScan(RangeScanPlan),
 
     // ── Writes ──
-    Insert {
-        collection: String,
-        engine: EngineType,
-        /// The lowering these rows take, chosen by the engine's `EngineRules`.
-        /// The conversion layer reads it instead of re-deciding from `engine`.
-        route: WriteRoute,
-        /// Every declared DEFAULT already materialized and every literal
-        /// coerced to its declared column type by the planner.
-        rows: Vec<Vec<(String, SqlValue)>>,
-        /// Whether a DEFAULT materialized into `rows` was volatile. The
-        /// planner evaluates declared defaults while building this plan, so a
-        /// cached plan would replay one execution's value; a volatile plan is
-        /// never cached.
-        volatile_defaults: bool,
-        /// `ON CONFLICT DO NOTHING` semantics: when true, duplicate-PK rows
-        /// are silently skipped instead of raising `unique_violation`. Plain
-        /// `INSERT` (no `ON CONFLICT` clause) sets this to `false`.
-        if_absent: bool,
-        /// Raw column type strings from the catalog: `(column_name, type_str)`.
-        /// Forwarded from `InsertParams::column_schema`. Used by columnar
-        /// converters to reconstruct the exact `ColumnType` for columns whose
-        /// `SqlDataType` is ambiguous (e.g. JSON and Bytes both map to Bytes).
-        column_schema: Vec<(String, String)>,
-        /// Declared `PRIMARY KEY` column name (if any), from
-        /// `InsertParams::primary_key`. Used by the conversion layer to
-        /// extract the document id from the correct column instead of
-        /// guessing at `id`/`document_id`/`key`.
-        primary_key: Option<String>,
-    },
+    Insert(InsertPlan),
     /// KV INSERT: key and value are fundamentally separate.
     /// Each entry is `(key, value_columns)`.
-    KvInsert {
-        collection: String,
-        entries: Vec<(SqlValue, Vec<(String, SqlValue)>)>,
-        /// TTL in seconds (0 = no expiry). Extracted from `ttl` column if present.
-        ttl_secs: u64,
-        /// INSERT-vs-UPSERT distinction. `KvOp::Put` is a Redis-SET-style
-        /// upsert by design; to honor SQL `INSERT` semantics the planner must
-        /// tell the converter whether a duplicate key should raise (plain
-        /// `INSERT`, `Insert`), be silently skipped (`ON CONFLICT DO NOTHING`,
-        /// `InsertIfAbsent`), or overwrite (`UPSERT` / `ON CONFLICT DO
-        /// UPDATE`, `Put`).
-        intent: KvInsertIntent,
-        /// `ON CONFLICT (key) DO UPDATE SET field = expr` assignments, carried
-        /// through when `intent == Put` via the ON-CONFLICT-DO-UPDATE path.
-        /// Empty for plain UPSERT (whole-value overwrite) and for INSERT
-        /// variants.
-        on_conflict_updates: Vec<(String, SqlExpr)>,
-        /// Whether any DEFAULT materialized into `entries` came from a
-        /// `Volatile` expression. The key-value planner evaluates declared
-        /// defaults while building this plan, so a cached plan would replay
-        /// one execution's value; a volatile plan is never cached.
-        volatile_defaults: bool,
-    },
+    KvInsert(KvInsertPlan),
     /// UPSERT: insert or merge if document exists.
-    Upsert {
-        collection: String,
-        engine: EngineType,
-        /// The lowering these rows take. Mirrors `Insert::route`.
-        route: WriteRoute,
-        /// Defaults materialized and literals coerced, as in `Insert::rows`.
-        rows: Vec<Vec<(String, SqlValue)>>,
-        /// Mirrors `Insert::volatile_defaults`.
-        volatile_defaults: bool,
-        /// `ON CONFLICT (...) DO UPDATE SET field = expr` assignments.
-        /// When empty, upsert is a plain merge: new columns overwrite existing.
-        /// When non-empty, the engine applies these per-row against the
-        /// *existing* document instead of merging the inserted values.
-        on_conflict_updates: Vec<(String, SqlExpr)>,
-        /// Raw column type strings from the catalog: `(column_name, type_str)`.
-        /// Mirrors `Insert::column_schema` — see that field for rationale.
-        column_schema: Vec<(String, String)>,
-        /// Declared `PRIMARY KEY` column name (if any). See `Insert::primary_key`.
-        primary_key: Option<String>,
-    },
+    Upsert(UpsertPlan),
     InsertSelect {
         target: String,
         source: Box<SqlPlan>,
@@ -282,35 +199,8 @@ pub enum SqlPlan {
     },
 
     // ── Timeseries ──
-    TimeseriesScan {
-        collection: String,
-        time_range: (i64, i64),
-        bucket_interval_ms: i64,
-        group_by: Vec<String>,
-        aggregates: Vec<AggregateExpr>,
-        filters: Vec<Filter>,
-        projection: Vec<Projection>,
-        gap_fill: String,
-        limit: usize,
-        /// ORDER BY applied to the scan result. Empty = the engine's natural
-        /// order (ascending by the collection's time key).
-        sort_keys: Vec<SortKey>,
-        tiered: bool,
-        /// Bitemporal system-time / valid-time scope. Only non-default
-        /// on collections created `WITH BITEMPORAL`; `TimeseriesRules::plan_scan`
-        /// rejects temporal scopes otherwise.
-        temporal: TemporalScope,
-    },
-    TimeseriesIngest {
-        collection: String,
-        /// Defaults materialized and literals coerced, as in `Insert::rows`.
-        /// A row that omits the `TIME_KEY` column carries its declared
-        /// default here when one exists; only a row with no time value at
-        /// all takes the ingest clock.
-        rows: Vec<Vec<(String, SqlValue)>>,
-        /// Mirrors `Insert::volatile_defaults`.
-        volatile_defaults: bool,
-    },
+    TimeseriesScan(TimeseriesScanPlan),
+    TimeseriesIngest(TimeseriesIngestPlan),
 
     // ── Search (first-class) ──
     VectorSearch {
@@ -376,6 +266,9 @@ pub enum SqlPlan {
     },
     TextSearch {
         collection: String,
+        /// Column named as the first argument of `text_match(field, q)` or
+        /// `bm25_score(field, q)`. `None` searches every text column.
+        field: Option<String>,
         /// Structured FTS query.  Use `FtsQuery::Plain { text, fuzzy }` for
         /// simple keyword search.  `FtsQuery::And/Or/Prefix` are supported;
         /// `FtsQuery::Phrase` and `FtsQuery::Not` are represented but rejected
@@ -393,47 +286,13 @@ pub enum SqlPlan {
         /// Resolved SELECT target list, for output-schema derivation.
         projection: Vec<Projection>,
     },
-    HybridSearch {
-        collection: String,
-        query_vector: Vec<f32>,
-        query_text: String,
-        top_k: usize,
-        ef_search: usize,
-        vector_weight: f32,
-        fuzzy: bool,
-        /// SELECT-list alias the response should use for the RRF score
-        /// column. `None` means the executor falls back to the fixed
-        /// internal field name `rrf_score`. Set by the planner from the
-        /// SELECT projection's `AS <alias>` for the `rrf_score(...)` call.
-        score_alias: Option<String>,
-        /// Resolved SELECT target list, for output-schema derivation.
-        projection: Vec<Projection>,
-    },
+    HybridSearch(HybridSearchPlan),
 
     /// Three-source hybrid search: vector + BM25 text + graph BFS, fused via weighted RRF.
     ///
     /// Produced when the planner detects `rrf_score(vector_distance(...),
     /// bm25_score(...), graph_score(...))` with three source arguments.
-    HybridSearchTriple {
-        collection: String,
-        query_vector: Vec<f32>,
-        query_text: String,
-        /// Node id used as the BFS seed for the graph leg.
-        graph_seed_id: String,
-        /// Maximum BFS depth from the seed node.
-        graph_depth: usize,
-        /// Edge label filter for graph BFS. `None` = all edges.
-        graph_edge_label: Option<String>,
-        top_k: usize,
-        ef_search: usize,
-        fuzzy: bool,
-        /// Per-source RRF k constants: (vector_k, text_k, graph_k).
-        rrf_k: (f64, f64, f64),
-        /// SELECT-list alias for the fused RRF score column.
-        score_alias: Option<String>,
-        /// Resolved SELECT target list, for output-schema derivation.
-        projection: Vec<Projection>,
-    },
+    HybridSearchTriple(HybridSearchTriplePlan),
     SpatialScan {
         collection: String,
         field: String,
@@ -460,21 +319,7 @@ pub enum SqlPlan {
         right: Box<SqlPlan>,
         all: bool,
     },
-    RecursiveScan {
-        collection: String,
-        base_filters: Vec<Filter>,
-        recursive_filters: Vec<Filter>,
-        /// Equi-join link for tree-traversal recursion:
-        /// `(collection_field, working_table_field)`.
-        /// e.g. `("parent_id", "id")` means each iteration finds rows
-        /// where `collection.parent_id` matches a `working_table.id`.
-        join_link: Option<(String, String)>,
-        max_iterations: usize,
-        distinct: bool,
-        limit: usize,
-        /// Resolved SELECT target list, for output-schema derivation.
-        projection: Vec<Projection>,
-    },
+    RecursiveScan(RecursiveScanPlan),
 
     /// Value-generating recursive CTE (`WITH RECURSIVE name(cols) AS (anchor UNION [ALL] step)`).
     ///
@@ -487,32 +332,10 @@ pub enum SqlPlan {
     /// SPSC bridge without requiring `SqlExpr` to implement `Serialize`.  The executor
     /// parses them at execution time via the same lightweight expression evaluator used
     /// by the procedural executor.
-    RecursiveValue {
-        /// CTE name (used in error messages).
-        cte_name: String,
-        /// Column names declared on the CTE (e.g. `(n)` in `c(n) AS ...`).
-        columns: Vec<String>,
-        /// Anchor SELECT expressions as raw SQL text (one per column).
-        init_exprs: Vec<String>,
-        /// Recursive step SELECT expressions as raw SQL text (one per column).
-        /// May reference column names from `columns`.
-        step_exprs: Vec<String>,
-        /// Optional WHERE condition as raw SQL text applied to each new row
-        /// to decide whether to continue.  `None` → run until fixed point.
-        condition: Option<String>,
-        /// Maximum iterations before a `RecursionDepthExceeded` error is raised.
-        max_depth: usize,
-        /// `false` → UNION ALL (keep duplicates); `true` → UNION (deduplicate).
-        distinct: bool,
-    },
+    RecursiveValue(RecursiveValuePlan),
 
     /// Non-recursive CTE: execute each definition, then the outer query.
-    Cte {
-        /// CTE definitions: `(name, subquery_plan)`.
-        definitions: Vec<(String, SqlPlan)>,
-        /// The outer query that references CTE names.
-        outer: Box<SqlPlan>,
-    },
+    Cte(CtePlan),
 
     /// Relational post-processing over a subquery/derived-table body whose leaf
     /// plan cannot absorb the outer query's constraints.
@@ -554,89 +377,40 @@ pub enum SqlPlan {
     /// `CREATE ARRAY <name> DIMS (...) ATTRS (...) TILE_EXTENTS (...)`.
     /// AST is engine-agnostic — the Origin converter builds the typed
     /// `nodedb_array::ArraySchema` and persists the catalog row.
-    CreateArray {
-        name: String,
-        dims: Vec<types_array::ArrayDimAst>,
-        attrs: Vec<types_array::ArrayAttrAst>,
-        tile_extents: Vec<i64>,
-        cell_order: types_array::ArrayCellOrderAst,
-        tile_order: types_array::ArrayTileOrderAst,
-        /// Hilbert-prefix bits for vShard routing (1–16, default 8).
-        prefix_bits: u8,
-        /// Audit-retention horizon in milliseconds. `None` = non-bitemporal.
-        audit_retain_ms: Option<u64>,
-        /// Compliance floor for `audit_retain_ms`. `None` = no floor.
-        minimum_audit_retain_ms: Option<u64>,
-    },
+    CreateArray(CreateArrayPlan),
     /// `DROP ARRAY [IF EXISTS] <name>` — pure Control-Plane catalog
     /// mutation. Per-core array store cleanup happens lazily.
-    DropArray { name: String, if_exists: bool },
+    DropArray {
+        name: String,
+        if_exists: bool,
+    },
     /// `ALTER ARRAY <name> SET (audit_retain_ms = N, ...)`.
     ///
     /// Double-`Option` semantics for each diff field:
     /// - `None`          = key was absent from SET clause → field unchanged.
     /// - `Some(None)`    = key present with value `NULL` → field set to NULL.
     /// - `Some(Some(v))` = key present with integer value → field set to v.
-    AlterArray {
-        name: String,
-        /// New value for `audit_retain_ms`. `Some(None)` unregisters
-        /// the array from the bitemporal retention registry.
-        audit_retain_ms: Option<Option<i64>>,
-        /// New value for `minimum_audit_retain_ms`. Cannot be NULL.
-        minimum_audit_retain_ms: Option<u64>,
-    },
+    AlterArray(AlterArrayPlan),
     /// `INSERT INTO ARRAY <name> COORDS (...) VALUES (...) [, ...]`.
-    InsertArray {
-        name: String,
-        rows: Vec<types_array::ArrayInsertRow>,
-    },
+    InsertArray(InsertArrayPlan),
     /// `DELETE FROM ARRAY <name> WHERE COORDS IN ((...), (...))`.
-    DeleteArray {
-        name: String,
-        coords: Vec<Vec<types_array::ArrayCoordLiteral>>,
-    },
+    DeleteArray(DeleteArrayPlan),
     /// `SELECT * FROM ARRAY_SLICE(name, {dim:[lo,hi],..}, [attrs], limit)`.
-    ArraySlice {
-        name: String,
-        slice: types_array::ArraySliceAst,
-        /// Attribute names. Empty = all attrs.
-        attr_projection: Vec<String>,
-        /// 0 = unlimited.
-        limit: u32,
-        /// Bitemporal qualifier. When both axes are `None` / `Any`, the Data
-        /// Plane returns the live (current) state — the default fast path.
-        /// Populated from `AS OF SYSTEM TIME` / `AS OF VALID TIME` clauses.
-        temporal: TemporalScope,
-    },
+    ArraySlice(ArraySlicePlan),
     /// `SELECT * FROM ARRAY_PROJECT(name, [attrs])`.
-    ArrayProject {
-        name: String,
-        /// Attribute names. Must be non-empty.
-        attr_projection: Vec<String>,
-    },
+    ArrayProject(ArrayProjectPlan),
     /// `SELECT * FROM ARRAY_AGG(name, attr, reducer [, group_by_dim])`.
-    ArrayAgg {
-        name: String,
-        attr: String,
-        reducer: types_array::ArrayReducerAst,
-        /// `None` = scalar fold; `Some(name)` = group by that dim.
-        group_by_dim: Option<String>,
-        /// Bitemporal qualifier. When both axes are `None` / `Any`, the Data
-        /// Plane aggregates against the live (current) state — the default
-        /// fast path. Populated from `AS OF SYSTEM TIME` / `AS OF VALID TIME`.
-        temporal: TemporalScope,
-    },
+    ArrayAgg(ArrayAggPlan),
     /// `SELECT * FROM ARRAY_ELEMENTWISE(left, right, op, attr)`.
-    ArrayElementwise {
-        left: String,
-        right: String,
-        op: types_array::ArrayBinaryOpAst,
-        attr: String,
-    },
+    ArrayElementwise(ArrayElementwisePlan),
     /// `SELECT ARRAY_FLUSH(name)` — returns one row `{result: BOOL}`.
-    ArrayFlush { name: String },
+    ArrayFlush {
+        name: String,
+    },
     /// `SELECT ARRAY_COMPACT(name)` — returns one row `{result: BOOL}`.
-    ArrayCompact { name: String },
+    ArrayCompact {
+        name: String,
+    },
 
     // ── MERGE ──────────────────────────────────────────────────────────
     /// `MERGE INTO target USING source ON ... WHEN ... THEN ...`
@@ -644,21 +418,7 @@ pub enum SqlPlan {
     /// Supported only for `document_schemaless` and `document_strict` engines.
     /// The Data Plane handler evaluates WHEN arms in declaration order and
     /// applies the first matching action to each joined or unmatched row.
-    Merge {
-        target: String,
-        engine: EngineType,
-        /// Source plan (Scan, DocumentIndexLookup, or Join of a sub-select).
-        source: Box<SqlPlan>,
-        /// Column in the target used for the equi-join (from ON clause).
-        target_join_col: String,
-        /// Column in the source used for the equi-join (from ON clause).
-        source_join_col: String,
-        /// Alias used to qualify source columns in expressions (e.g. `src.col`).
-        source_alias: String,
-        /// WHEN arms in declaration order.
-        clauses: Vec<MergePlanClause>,
-        returning: bool,
-    },
+    Merge(MergePlan),
 
     // ── Lateral joins ───────────────────────────────────────────────────
     /// LATERAL subquery that is equi-correlated and has ORDER BY + LIMIT k.
@@ -670,28 +430,7 @@ pub enum SqlPlan {
     ///
     /// `correlation_keys` is `(outer_col, inner_col)` — the equi-join pairs
     /// that correlate inner to outer.
-    LateralTopK {
-        /// Plan producing outer rows.
-        outer: Box<SqlPlan>,
-        /// Alias used to qualify outer table columns (e.g. `"u"`).
-        outer_alias: Option<String>,
-        /// Inner collection to scan.
-        inner_collection: String,
-        /// Pre-filter applied to inner rows (non-correlated filters).
-        inner_filters: Vec<Filter>,
-        /// Sort keys for the inner per-outer-row result.
-        inner_order_by: Vec<SortKey>,
-        /// Maximum number of inner rows per outer row.
-        inner_limit: usize,
-        /// Equi-join pairs `(outer_col, inner_col)`.
-        correlation_keys: Vec<(String, String)>,
-        /// Alias under which inner rows are presented.
-        lateral_alias: String,
-        /// Post-lateral projection.
-        projection: Vec<Projection>,
-        /// LEFT join semantics: preserve outer rows even when inner is empty.
-        left_join: bool,
-    },
+    LateralTopK(LateralTopKPlan),
 
     /// General LATERAL subquery — per-outer-row correlated nested loop.
     ///
@@ -702,25 +441,7 @@ pub enum SqlPlan {
     ///
     /// Bounded by `outer_row_cap`; queries that exceed the cap receive a typed
     /// `SqlError::Unsupported` before any data is returned.
-    LateralLoop {
-        /// Plan producing outer rows.
-        outer: Box<SqlPlan>,
-        /// Alias used to qualify outer table columns.
-        outer_alias: Option<String>,
-        /// Inner subquery plan (correlation predicates are injected at runtime).
-        inner: Box<SqlPlan>,
-        /// Correlated predicates extracted from the inner WHERE that reference
-        /// outer columns.  Each entry is `(inner_field, outer_field)`.
-        correlation_predicates: Vec<(String, String)>,
-        /// Alias under which inner rows are presented.
-        lateral_alias: String,
-        /// Post-lateral projection.
-        projection: Vec<Projection>,
-        /// Maximum outer rows allowed. Queries exceeding this return an error.
-        outer_row_cap: usize,
-        /// LEFT join semantics: preserve outer rows even when inner is empty.
-        left_join: bool,
-    },
+    LateralLoop(LateralLoopPlan),
 
     // ── Vector-primary ──────────────────────────────────────────────────
     /// INSERT / UPSERT into a vector-primary collection.
@@ -730,80 +451,23 @@ pub enum SqlPlan {
     /// PrimaryEngine::Vector`. Each row lowers to one of
     /// `VectorOp::DirectInsert` / `DirectInsertIfAbsent` / `DirectUpsert`
     /// per `intent`, bypassing full-document MessagePack encoding.
-    VectorPrimaryInsert {
-        collection: String,
-        /// Vector column name (matches `VectorPrimaryConfig::vector_field`).
-        /// Plumbed to the direct write op so the Data Plane keys its HNSW
-        /// index by `(tid, collection, field)` — the same key the SELECT
-        /// path uses.
-        field: String,
-        /// Collection-level quantization. Applied via `set_quantization` on
-        /// the first DirectUpsert so subsequent seals trigger codec-dispatch
-        /// rebuilds against the configured codec.
-        quantization: nodedb_types::VectorQuantization,
-        /// Native storage dtype for vector values (F32 / F16 / BF16).
-        storage_dtype: nodedb_types::VectorStorageDtype,
-        /// Payload field names that get equality bitmap indexes. Registered
-        /// via `payload.add_index` on the first DirectUpsert.
-        payload_indexes: Vec<(String, nodedb_types::PayloadIndexKind)>,
-        rows: Vec<VectorPrimaryRow>,
-        /// Whether any row carries a value materialized from a volatile
-        /// DEFAULT such as `nextval`. The value was evaluated while the plan
-        /// was built, so caching the lowered tasks would replay one
-        /// execution's value into every later one.
-        volatile_defaults: bool,
-        /// What an existing primary key means for each row. Mirrors
-        /// `KvInsert::intent`.
-        intent: VectorPrimaryInsertIntent,
-        /// `ON CONFLICT (pk) DO UPDATE SET field = expr` assignments, carried
-        /// when `intent == Upsert`. Empty means whole-row replace.
-        on_conflict_updates: Vec<(String, SqlExpr)>,
-        /// Resolved primary-key column name. See `Insert::primary_key`.
-        primary_key: Option<String>,
-    },
+    VectorPrimaryInsert(VectorPrimaryInsertPlan),
     /// DELETE on a vector-primary collection.
     ///
     /// `target_keys` carries the primary keys when the WHERE clause is a
     /// pure primary-key equality (or IN / OR of equalities). Otherwise
     /// `filters` is evaluated against every sidecar row on the Data Plane.
-    VectorPrimaryDelete {
-        collection: String,
-        /// Vector column name; keys the HNSW index the rows live in.
-        field: String,
-        filters: Vec<Filter>,
-        target_keys: Vec<SqlValue>,
-        /// Resolved primary-key column name. See `Insert::primary_key`.
-        primary_key: Option<String>,
-    },
+    VectorPrimaryDelete(VectorPrimaryDeletePlan),
     /// TRUNCATE on a vector-primary collection.
     ///
     /// Removes every row from the HNSW index and its payload sidecar.
-    VectorPrimaryTruncate {
-        collection: String,
-        /// Vector column name; keys the HNSW index the rows live in.
-        field: String,
-        restart_identity: bool,
-    },
+    VectorPrimaryTruncate(VectorPrimaryTruncatePlan),
     /// UPDATE on a vector-primary collection.
     ///
     /// `new_vector` is the literal the statement assigns to the vector
     /// column, when it assigns one. Every other assignment stays in
     /// `assignments` and patches the payload sidecar.
-    VectorPrimaryUpdate {
-        collection: String,
-        /// Vector column name; keys the HNSW index the rows live in.
-        field: String,
-        quantization: nodedb_types::VectorQuantization,
-        storage_dtype: nodedb_types::VectorStorageDtype,
-        payload_indexes: Vec<(String, nodedb_types::PayloadIndexKind)>,
-        new_vector: Option<Vec<f32>>,
-        assignments: Vec<(String, SqlExpr)>,
-        filters: Vec<Filter>,
-        target_keys: Vec<SqlValue>,
-        returning: bool,
-        /// Resolved primary-key column name. See `Insert::primary_key`.
-        primary_key: Option<String>,
-    },
+    VectorPrimaryUpdate(VectorPrimaryUpdatePlan),
 
     // ── Index DDL ───────────────────────────────────────────────────────
     /// `CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON collection (field)`
@@ -811,31 +475,11 @@ pub enum SqlPlan {
     /// Registers a secondary index on the named field of a document or KV
     /// collection. The executor backtracks existing rows into the index so
     /// it is immediately consistent.
-    CreateIndex {
-        /// Name of the index. `None` requests an auto-generated name.
-        index_name: Option<String>,
-        /// Target collection.
-        collection: String,
-        /// Indexed field path.
-        field: String,
-        /// Whether the index enforces uniqueness.
-        unique: bool,
-        /// `IF NOT EXISTS` — succeed silently if the index already exists.
-        if_not_exists: bool,
-        /// Case-insensitive string collation (`COLLATE NOCASE`).
-        case_insensitive: bool,
-    },
+    CreateIndex(CreateIndexPlan),
 
     /// `DROP INDEX [IF EXISTS] name [ON collection]`
     ///
     /// Removes a secondary index from a collection. All index entries are
     /// erased and the index metadata is unregistered.
-    DropIndex {
-        /// Name of the index.
-        index_name: String,
-        /// Target collection (may be inferred from the index catalog).
-        collection: Option<String>,
-        /// `IF EXISTS` — succeed silently if the index does not exist.
-        if_exists: bool,
-    },
+    DropIndex(DropIndexPlan),
 }

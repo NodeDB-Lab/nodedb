@@ -9,6 +9,11 @@
 //! the data-plane evaluator pure (no catalog/session context) while still
 //! supporting the `'name'::regclass` / `'name'::regtype` PostgreSQL idiom.
 
+use crate::types::{
+    CtePlan, DocumentIndexLookupPlan, HybridSearchPlan, HybridSearchTriplePlan, LateralLoopPlan,
+    LateralTopKPlan, MergePlan, RangeScanPlan, RecursiveScanPlan, VectorPrimaryDeletePlan,
+    VectorPrimaryUpdatePlan,
+};
 use nodedb_types::DatabaseId;
 
 use crate::catalog::SqlCatalog;
@@ -95,13 +100,13 @@ fn walk_plan(
             all,
         },
 
-        SqlPlan::Cte { definitions, outer } => SqlPlan::Cte {
+        SqlPlan::Cte(CtePlan { definitions, outer }) => SqlPlan::Cte(CtePlan {
             definitions: definitions
                 .into_iter()
                 .map(|(name, plan)| (name, walk_plan(plan, catalog, database_id, tenant_id)))
                 .collect(),
             outer: Box::new(walk_plan(*outer, catalog, database_id, tenant_id)),
-        },
+        }),
 
         // The post-processing tail wraps a body that keeps its own filters. A
         // wrapper that stopped the walk left every catalog cast inside the body
@@ -165,7 +170,8 @@ fn walk_plan(
 
         mut plan @ (SqlPlan::PointGet { .. } | SqlPlan::RangeScan { .. }) => {
             match &mut plan {
-                SqlPlan::PointGet { projection, .. } | SqlPlan::RangeScan { projection, .. } => {
+                SqlPlan::PointGet { projection, .. }
+                | SqlPlan::RangeScan(RangeScanPlan { projection, .. }) => {
                     fold_projection(projection, catalog, database_id, tenant_id);
                 }
                 _ => unreachable!(),
@@ -179,13 +185,13 @@ fn walk_plan(
         | SqlPlan::VectorPrimaryUpdate { .. }
         | SqlPlan::VectorPrimaryDelete { .. }) => {
             match &mut plan {
-                SqlPlan::DocumentIndexLookup {
+                SqlPlan::DocumentIndexLookup(DocumentIndexLookupPlan {
                     filters,
                     projection,
                     sort_keys,
                     window_functions,
                     ..
-                } => {
+                }) => {
                     for filter in filters {
                         fold_filter(filter, catalog, database_id, tenant_id);
                     }
@@ -193,7 +199,8 @@ fn walk_plan(
                     fold_sort_keys(sort_keys, catalog, database_id, tenant_id);
                     fold_windows(window_functions, catalog, database_id, tenant_id);
                 }
-                SqlPlan::Delete { filters, .. } | SqlPlan::VectorPrimaryDelete { filters, .. } => {
+                SqlPlan::Delete { filters, .. }
+                | SqlPlan::VectorPrimaryDelete(VectorPrimaryDeletePlan { filters, .. }) => {
                     for filter in filters {
                         fold_filter(filter, catalog, database_id, tenant_id);
                     }
@@ -203,11 +210,11 @@ fn walk_plan(
                     filters,
                     ..
                 }
-                | SqlPlan::VectorPrimaryUpdate {
+                | SqlPlan::VectorPrimaryUpdate(VectorPrimaryUpdatePlan {
                     assignments,
                     filters,
                     ..
-                } => {
+                }) => {
                     for (_, expr) in assignments {
                         let owned = std::mem::replace(expr, SqlExpr::Wildcard);
                         *expr = fold_expr(owned, catalog, database_id, tenant_id);
@@ -295,7 +302,7 @@ fn walk_plan(
             }
         }
 
-        SqlPlan::LateralTopK {
+        SqlPlan::LateralTopK(LateralTopKPlan {
             outer,
             outer_alias,
             inner_collection,
@@ -306,13 +313,13 @@ fn walk_plan(
             lateral_alias,
             mut projection,
             left_join,
-        } => {
+        }) => {
             for filter in &mut inner_filters {
                 fold_filter(filter, catalog, database_id, tenant_id);
             }
             fold_sort_keys(&mut inner_order_by, catalog, database_id, tenant_id);
             fold_projection(&mut projection, catalog, database_id, tenant_id);
-            SqlPlan::LateralTopK {
+            SqlPlan::LateralTopK(LateralTopKPlan {
                 outer: Box::new(walk_plan(*outer, catalog, database_id, tenant_id)),
                 outer_alias,
                 inner_collection,
@@ -323,10 +330,10 @@ fn walk_plan(
                 lateral_alias,
                 projection,
                 left_join,
-            }
+            })
         }
 
-        SqlPlan::LateralLoop {
+        SqlPlan::LateralLoop(LateralLoopPlan {
             outer,
             outer_alias,
             inner,
@@ -335,9 +342,9 @@ fn walk_plan(
             mut projection,
             outer_row_cap,
             left_join,
-        } => {
+        }) => {
             fold_projection(&mut projection, catalog, database_id, tenant_id);
-            SqlPlan::LateralLoop {
+            SqlPlan::LateralLoop(LateralLoopPlan {
                 outer: Box::new(walk_plan(*outer, catalog, database_id, tenant_id)),
                 outer_alias,
                 inner: Box::new(walk_plan(*inner, catalog, database_id, tenant_id)),
@@ -346,10 +353,10 @@ fn walk_plan(
                 projection,
                 outer_row_cap,
                 left_join,
-            }
+            })
         }
 
-        SqlPlan::Merge {
+        SqlPlan::Merge(MergePlan {
             target,
             engine,
             source,
@@ -358,7 +365,7 @@ fn walk_plan(
             source_alias,
             mut clauses,
             returning,
-        } => {
+        }) => {
             for clause in &mut clauses {
                 for filter in &mut clause.extra_predicate {
                     fold_filter(filter, catalog, database_id, tenant_id);
@@ -379,7 +386,7 @@ fn walk_plan(
                     MergePlanAction::Delete | MergePlanAction::DoNothing => {}
                 }
             }
-            SqlPlan::Merge {
+            SqlPlan::Merge(MergePlan {
                 target,
                 engine,
                 source: Box::new(walk_plan(*source, catalog, database_id, tenant_id)),
@@ -388,7 +395,7 @@ fn walk_plan(
                 source_alias,
                 clauses,
                 returning,
-            }
+            })
         }
 
         mut plan @ (SqlPlan::VectorSearch { .. }
@@ -426,12 +433,12 @@ fn walk_plan(
                     }
                     fold_projection(projection, catalog, database_id, tenant_id);
                 }
-                SqlPlan::RecursiveScan {
+                SqlPlan::RecursiveScan(RecursiveScanPlan {
                     base_filters,
                     recursive_filters,
                     projection,
                     ..
-                } => {
+                }) => {
                     for filter in base_filters {
                         fold_filter(filter, catalog, database_id, tenant_id);
                     }
@@ -452,8 +459,8 @@ fn walk_plan(
             match &mut plan {
                 SqlPlan::MultiVectorSearch { projection, .. }
                 | SqlPlan::SparseSearch { projection, .. }
-                | SqlPlan::HybridSearch { projection, .. }
-                | SqlPlan::HybridSearchTriple { projection, .. } => {
+                | SqlPlan::HybridSearch(HybridSearchPlan { projection, .. })
+                | SqlPlan::HybridSearchTriple(HybridSearchTriplePlan { projection, .. }) => {
                     fold_projection(projection, catalog, database_id, tenant_id);
                 }
                 _ => unreachable!(),

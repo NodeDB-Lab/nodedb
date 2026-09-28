@@ -12,7 +12,10 @@
 use std::collections::HashMap;
 
 use nodedb_sql::catalog::SqlCatalog;
-use nodedb_sql::types::SqlPlan;
+use nodedb_sql::types::{
+    DocumentIndexLookupPlan, HybridSearchPlan, HybridSearchTriplePlan, RangeScanPlan,
+    RecursiveScanPlan, SqlPlan, TimeseriesScanPlan,
+};
 
 use crate::control::server::response_shape::types::DdlColType;
 
@@ -97,24 +100,24 @@ fn collect_sides(plan: &SqlPlan, out: &mut Vec<JoinSide>) {
         | SqlPlan::PointGet {
             collection, alias, ..
         }
-        | SqlPlan::DocumentIndexLookup {
+        | SqlPlan::DocumentIndexLookup(DocumentIndexLookupPlan {
             collection, alias, ..
-        } => out.push(JoinSide {
+        }) => out.push(JoinSide {
             collection: collection.clone(),
             alias: alias.clone(),
         }),
         // Reads over one collection that carry no alias slot: the merged row
         // qualifies their columns by the collection name.
-        SqlPlan::RangeScan { collection, .. }
-        | SqlPlan::TimeseriesScan { collection, .. }
+        SqlPlan::RangeScan(RangeScanPlan { collection, .. })
+        | SqlPlan::TimeseriesScan(TimeseriesScanPlan { collection, .. })
         | SqlPlan::SpatialScan { collection, .. }
         | SqlPlan::VectorSearch { collection, .. }
         | SqlPlan::MultiVectorSearch { collection, .. }
         | SqlPlan::SparseSearch { collection, .. }
         | SqlPlan::TextSearch { collection, .. }
-        | SqlPlan::HybridSearch { collection, .. }
-        | SqlPlan::HybridSearchTriple { collection, .. }
-        | SqlPlan::RecursiveScan { collection, .. } => out.push(JoinSide {
+        | SqlPlan::HybridSearch(HybridSearchPlan { collection, .. })
+        | SqlPlan::HybridSearchTriple(HybridSearchTriplePlan { collection, .. })
+        | SqlPlan::RecursiveScan(RecursiveScanPlan { collection, .. }) => out.push(JoinSide {
             collection: collection.clone(),
             alias: None,
         }),

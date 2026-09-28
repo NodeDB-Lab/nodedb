@@ -171,10 +171,12 @@ pub trait PlanVisitor {
         top_k: usize,
     ) -> Result<Self::Output, Self::Error>;
 
-    /// Handle [`SqlPlan::TextSearch`].
+    /// Handle [`SqlPlan::TextSearch`]. `field` is the column the query is
+    /// scoped to; `None` searches every text column.
     fn text_search(
         &mut self,
         collection: &str,
+        field: Option<&str>,
         query: &FtsQuery,
         top_k: usize,
         filters: &[Filter],

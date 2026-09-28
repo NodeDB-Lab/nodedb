@@ -7,7 +7,7 @@
 //! with a typed error naming `DROP ARRAY`, and an unknown name is
 //! `UnknownTable`.
 
-use nodedb_sql::types::{CollectionInfo, EngineType};
+use nodedb_sql::types::{CollectionInfo, EngineType, VectorPrimaryTruncatePlan};
 use nodedb_sql::{SqlCatalog, SqlCatalogError, SqlError, SqlPlan, plan_sql};
 use nodedb_types::DatabaseId;
 
@@ -110,11 +110,11 @@ fn truncate_restart_identity_is_carried() {
 #[test]
 fn truncate_vector_primary_lowers_to_its_own_plan() {
     match plan_one("TRUNCATE vecs RESTART IDENTITY") {
-        SqlPlan::VectorPrimaryTruncate {
+        SqlPlan::VectorPrimaryTruncate(VectorPrimaryTruncatePlan {
             collection,
             field,
             restart_identity,
-        } => {
+        }) => {
             assert_eq!(collection, "vecs");
             assert_eq!(field, "emb");
             assert!(restart_identity);

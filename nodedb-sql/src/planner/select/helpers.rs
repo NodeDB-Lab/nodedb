@@ -235,6 +235,23 @@ pub(super) fn extract_column_name(expr: &ast::Expr) -> Result<String> {
     }
 }
 
+/// Resolve the field argument of `text_match(field, q)` / `bm25_score(field, q)`.
+///
+/// A bare or table-qualified column (`body`, `t.body`) names the field. Any
+/// other expression names no single column, so the search covers every text
+/// column (`None`). A schema-qualified column is rejected as in
+/// [`extract_column_name`].
+pub(super) fn extract_text_field(expr: &ast::Expr) -> Result<Option<String>> {
+    match expr {
+        ast::Expr::Identifier(ident) => Ok(Some(normalize_ident(ident))),
+        ast::Expr::CompoundIdentifier(parts) if parts.len() >= 3 => {
+            extract_column_name(expr).map(Some)
+        }
+        ast::Expr::CompoundIdentifier(parts) => Ok(parts.last().map(normalize_ident)),
+        _ => Ok(None),
+    }
+}
+
 pub fn extract_string_literal(expr: &ast::Expr) -> Result<String> {
     match expr {
         ast::Expr::Value(v) => match &v.value {

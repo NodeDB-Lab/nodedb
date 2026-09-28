@@ -67,7 +67,7 @@ pub(super) fn plan_recursive_value(
         }
     }
 
-    Ok(SqlPlan::RecursiveValue {
+    Ok(SqlPlan::RecursiveValue(RecursiveValuePlan {
         cte_name: cte_name.to_owned(),
         columns,
         init_exprs,
@@ -75,7 +75,7 @@ pub(super) fn plan_recursive_value(
         condition,
         max_depth: DEFAULT_MAX_RECURSION_DEPTH,
         distinct,
-    })
+    }))
 }
 
 /// One anchor projection item: the expression as SQL text, plus the output
