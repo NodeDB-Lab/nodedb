@@ -58,11 +58,21 @@ impl<B: FtsBackend> FtsIndex<B> {
     /// Create a new FTS index with custom BM25 parameters and a memory governor.
     pub fn with_params(backend: B, params: Bm25Params, governor: Arc<MemoryGovernor>) -> Self {
         Self {
-            backend,
             bm25_params: params,
-            memtable: Memtable::new(MemtableConfig::default()),
-            next_segment_id: AtomicU64::new(1),
-            governor,
+            ..Self::new(backend, governor)
+        }
+    }
+
+    /// Create a new FTS index whose memtable spills at `memtable` thresholds.
+    /// Unreachable thresholds keep every posting in the memtable.
+    pub fn with_memtable_config(
+        backend: B,
+        memtable: MemtableConfig,
+        governor: Arc<MemoryGovernor>,
+    ) -> Self {
+        Self {
+            memtable: Memtable::new(memtable),
+            ..Self::new(backend, governor)
         }
     }
 
