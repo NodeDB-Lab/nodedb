@@ -8,6 +8,7 @@
 //! schema-hash + the typed `ArraySchema` are computed in the Origin
 //! converter where `nodedb-array` is available.
 
+use crate::types::{AlterArrayPlan, CreateArrayPlan};
 use std::collections::HashSet;
 
 use crate::error::{Result, SqlError};
@@ -102,7 +103,7 @@ pub fn plan_create_array(ast: &CreateArrayAst) -> Result<SqlPlan> {
             ),
         });
     }
-    Ok(SqlPlan::CreateArray {
+    Ok(SqlPlan::CreateArray(CreateArrayPlan {
         name: ast.name.clone(),
         dims: ast.dims.clone(),
         attrs: ast.attrs.clone(),
@@ -112,7 +113,7 @@ pub fn plan_create_array(ast: &CreateArrayAst) -> Result<SqlPlan> {
         prefix_bits: ast.prefix_bits,
         audit_retain_ms: ast.audit_retain_ms,
         minimum_audit_retain_ms: ast.minimum_audit_retain_ms,
-    })
+    }))
 }
 
 pub fn plan_alter_array(ast: &AlterArrayAst) -> Result<SqlPlan> {
@@ -156,11 +157,11 @@ pub fn plan_alter_array(ast: &AlterArrayAst) -> Result<SqlPlan> {
         }
     }
 
-    Ok(SqlPlan::AlterArray {
+    Ok(SqlPlan::AlterArray(AlterArrayPlan {
         name: ast.name.clone(),
         audit_retain_ms,
         minimum_audit_retain_ms,
-    })
+    }))
 }
 
 pub fn plan_drop_array(ast: &DropArrayAst) -> Result<SqlPlan> {

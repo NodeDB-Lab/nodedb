@@ -19,7 +19,7 @@
 
 use sqlparser::ast;
 
-use super::super::helpers::{extract_func_args, extract_string_literal};
+use super::super::helpers::{extract_func_args, extract_string_literal, extract_text_field};
 use super::aliases::function_call_name;
 use super::hybrid::{no_args_rrf_score_error, plan_hybrid_from_sort};
 use crate::error::Result;
@@ -79,6 +79,7 @@ pub(in crate::planner::select) fn try_hybrid_from_projection(
                 if query_text.is_empty() {
                     continue;
                 }
+                let field = extract_text_field(&args[0])?;
                 // Use the explicit AS alias when present; otherwise use the
                 // stringified expression so the injected row field key matches
                 // the lookup key the pgwire projection layer derives from
@@ -87,6 +88,7 @@ pub(in crate::planner::select) fn try_hybrid_from_projection(
                 return Ok(Some(build_text_search_score_scan(
                     plan,
                     &collection,
+                    field,
                     query_text,
                     score_alias,
                 )));
@@ -101,10 +103,12 @@ pub(in crate::planner::select) fn try_hybrid_from_projection(
                 if query_text.is_empty() {
                     continue;
                 }
+                let field = extract_text_field(&args[0])?;
                 let score_alias = alias.clone().unwrap_or_else(|| expr.to_string());
                 return Ok(Some(build_text_search_score_scan(
                     plan,
                     &collection,
+                    field,
                     query_text,
                     score_alias,
                 )));
@@ -119,16 +123,18 @@ pub(in crate::planner::select) fn try_hybrid_from_projection(
 ///
 /// Carries forward filters from an existing `Scan` or `TextSearch` plan.
 /// When the input is already a `TextSearch` (from a WHERE `text_match(...)`),
-/// the existing query and filters are preserved and only the `score_alias`
-/// is attached.
+/// the existing field, query, and filters are preserved and only the
+/// `score_alias` is attached. Otherwise `field` names the scored column.
 fn build_text_search_score_scan(
     plan: &SqlPlan,
     collection: &str,
+    field: Option<String>,
     query_text: String,
     score_alias: String,
 ) -> SqlPlan {
     match plan {
         SqlPlan::TextSearch {
+            field: existing_field,
             query,
             top_k,
             filters,
@@ -136,6 +142,7 @@ fn build_text_search_score_scan(
             ..
         } => SqlPlan::TextSearch {
             collection: collection.to_string(),
+            field: existing_field.clone(),
             query: query.clone(),
             top_k: *top_k,
             filters: filters.clone(),
@@ -149,6 +156,7 @@ fn build_text_search_score_scan(
             ..
         } => SqlPlan::TextSearch {
             collection: collection.to_string(),
+            field,
             query: FtsQuery::Plain {
                 text: query_text,
                 fuzzy: true,
@@ -160,6 +168,7 @@ fn build_text_search_score_scan(
         },
         _ => SqlPlan::TextSearch {
             collection: collection.to_string(),
+            field,
             query: FtsQuery::Plain {
                 text: query_text,
                 fuzzy: true,

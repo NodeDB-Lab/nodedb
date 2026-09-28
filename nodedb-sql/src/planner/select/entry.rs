@@ -153,10 +153,10 @@ fn plan_query_at(
             statement_output,
         )?;
 
-        return Ok(SqlPlan::Cte {
+        return Ok(SqlPlan::Cte(CtePlan {
             definitions,
             outer: Box::new(outer),
-        });
+        }));
     }
 
     // Handle UNION.

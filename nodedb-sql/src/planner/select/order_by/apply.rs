@@ -177,7 +177,7 @@ pub(in crate::planner::select) fn apply_order_by(
         // rows in the order it finds them (memtable, then partitions), which
         // is not the order the client asked for. Dropping the sort here would
         // silently answer `ORDER BY ts DESC` with ascending rows.
-        SqlPlan::TimeseriesScan {
+        SqlPlan::TimeseriesScan(TimeseriesScanPlan {
             collection,
             time_range,
             bucket_interval_ms,
@@ -190,7 +190,7 @@ pub(in crate::planner::select) fn apply_order_by(
             tiered,
             temporal,
             ..
-        } => Ok(SqlPlan::TimeseriesScan {
+        }) => Ok(SqlPlan::TimeseriesScan(TimeseriesScanPlan {
             collection: collection.clone(),
             time_range: *time_range,
             bucket_interval_ms: *bucket_interval_ms,
@@ -203,12 +203,12 @@ pub(in crate::planner::select) fn apply_order_by(
             sort_keys,
             tiered: *tiered,
             temporal: *temporal,
-        }),
+        })),
         // Cte wraps an inner outer plan; push ORDER BY into that outer
         // so derived-table queries (`SELECT … FROM (…) AS t ORDER BY …`)
         // honour the sort. inline_cte downstream merges the outer Scan
         // with the inner subquery plan; the sort_keys ride along.
-        SqlPlan::Cte { definitions, outer } => Ok(SqlPlan::Cte {
+        SqlPlan::Cte(CtePlan { definitions, outer }) => Ok(SqlPlan::Cte(CtePlan {
             definitions: definitions.clone(),
             outer: Box::new(apply_order_by(
                 outer,
@@ -217,7 +217,7 @@ pub(in crate::planner::select) fn apply_order_by(
                 select_items,
                 scope,
             )?),
-        }),
+        })),
         // The clause is non-empty here (`exprs` was checked above), so these
         // keys were asked for. A variant with no slot to hold them must not
         // pass through unchanged — that answers the query in whatever order

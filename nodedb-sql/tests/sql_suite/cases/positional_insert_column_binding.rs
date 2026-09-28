@@ -14,7 +14,9 @@
 //! All tests use `plan_sql()` with a minimal catalog (mirrors
 //! `point_get_operand_order.rs` / `schema_qualified_rejection.rs`).
 
-use nodedb_sql::types::{CollectionInfo, ColumnInfo, EngineType, SqlDataType};
+use nodedb_sql::types::{
+    CollectionInfo, ColumnInfo, EngineType, InsertPlan, SqlDataType, UpsertPlan,
+};
 use nodedb_sql::{SqlCatalog, SqlCatalogError, SqlError, SqlPlan, SqlValue, plan_sql};
 use nodedb_types::DatabaseId;
 
@@ -118,8 +120,8 @@ fn plan_one(sql: &str) -> SqlPlan {
 
 fn insert_rows(plan: SqlPlan) -> Vec<Vec<(String, SqlValue)>> {
     match plan {
-        SqlPlan::Insert { rows, .. } => rows,
-        SqlPlan::Upsert { rows, .. } => rows,
+        SqlPlan::Insert(InsertPlan { rows, .. }) => rows,
+        SqlPlan::Upsert(UpsertPlan { rows, .. }) => rows,
         other => panic!("expected an Insert or Upsert plan, got {other:?}"),
     }
 }

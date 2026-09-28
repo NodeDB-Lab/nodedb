@@ -4,6 +4,12 @@ use crate::types::query::EngineType;
 
 use super::SqlPlan;
 use super::expr_scan::projection_is_cp_computed;
+use super::variants::{
+    CtePlan, DocumentIndexLookupPlan, HybridSearchPlan, HybridSearchTriplePlan, InsertPlan,
+    KvInsertPlan, LateralLoopPlan, LateralTopKPlan, MergePlan, RangeScanPlan, RecursiveScanPlan,
+    TimeseriesIngestPlan, TimeseriesScanPlan, UpsertPlan, VectorPrimaryDeletePlan,
+    VectorPrimaryInsertPlan, VectorPrimaryUpdatePlan,
+};
 
 /// Whether a logical plan may be lowered once and reused from the physical-plan cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,45 +56,45 @@ impl SqlPlan {
             // must not replay one execution's rows for another.
             Self::Scan { projection, .. }
             | Self::PointGet { projection, .. }
-            | Self::DocumentIndexLookup { projection, .. }
-            | Self::RangeScan { projection, .. }
+            | Self::DocumentIndexLookup(DocumentIndexLookupPlan { projection, .. })
+            | Self::RangeScan(RangeScanPlan { projection, .. })
             | Self::Join { projection, .. }
-            | Self::TimeseriesScan { projection, .. }
+            | Self::TimeseriesScan(TimeseriesScanPlan { projection, .. })
             | Self::VectorSearch { projection, .. }
             | Self::MultiVectorSearch { projection, .. }
             | Self::SparseSearch { projection, .. }
             | Self::TextSearch { projection, .. }
-            | Self::HybridSearch { projection, .. }
-            | Self::HybridSearchTriple { projection, .. }
+            | Self::HybridSearch(HybridSearchPlan { projection, .. })
+            | Self::HybridSearchTriple(HybridSearchTriplePlan { projection, .. })
             | Self::SpatialScan { projection, .. }
-            | Self::RecursiveScan { projection, .. }
+            | Self::RecursiveScan(RecursiveScanPlan { projection, .. })
             | Self::Subquery { projection, .. }
-            | Self::LateralTopK { projection, .. }
-            | Self::LateralLoop { projection, .. }
+            | Self::LateralTopK(LateralTopKPlan { projection, .. })
+            | Self::LateralLoop(LateralLoopPlan { projection, .. })
                 if projection_is_cp_computed(projection) =>
             {
                 DataDependent
             }
-            Self::Insert {
+            Self::Insert(InsertPlan {
                 volatile_defaults: true,
                 ..
-            }
-            | Self::Upsert {
+            })
+            | Self::Upsert(UpsertPlan {
                 volatile_defaults: true,
                 ..
-            }
-            | Self::TimeseriesIngest {
+            })
+            | Self::TimeseriesIngest(TimeseriesIngestPlan {
                 volatile_defaults: true,
                 ..
-            }
-            | Self::KvInsert {
+            })
+            | Self::KvInsert(KvInsertPlan {
                 volatile_defaults: true,
                 ..
-            }
-            | Self::VectorPrimaryInsert {
+            })
+            | Self::VectorPrimaryInsert(VectorPrimaryInsertPlan {
                 volatile_defaults: true,
                 ..
-            } => DataDependent,
+            }) => DataDependent,
             Self::PointGet {
                 engine: EngineType::DocumentSchemaless | EngineType::DocumentStrict,
                 ..
@@ -112,8 +118,8 @@ impl SqlPlan {
             }
             // A point-key delete or update binds its surrogates while the plan
             // is lowered, from the catalog state of that moment.
-            Self::VectorPrimaryDelete { target_keys, .. }
-            | Self::VectorPrimaryUpdate { target_keys, .. }
+            Self::VectorPrimaryDelete(VectorPrimaryDeletePlan { target_keys, .. })
+            | Self::VectorPrimaryUpdate(VectorPrimaryUpdatePlan { target_keys, .. })
                 if !target_keys.is_empty() =>
             {
                 DataDependent
@@ -121,7 +127,7 @@ impl SqlPlan {
             Self::InsertSelect { source, .. }
             | Self::UpdateFrom { source, .. }
             | Self::Aggregate { input: source, .. }
-            | Self::Merge { source, .. } => source.cache_eligibility(),
+            | Self::Merge(MergePlan { source, .. }) => source.cache_eligibility(),
             Self::Join { left, right, .. }
             | Self::Intersect { left, right, .. }
             | Self::Except { left, right, .. } => {
@@ -130,14 +136,14 @@ impl SqlPlan {
             Self::Union { inputs, .. } => inputs.iter().fold(Cacheable, |eligibility, input| {
                 eligibility.combine(input.cache_eligibility())
             }),
-            Self::Cte { definitions, outer } => definitions
+            Self::Cte(CtePlan { definitions, outer }) => definitions
                 .iter()
                 .fold(outer.cache_eligibility(), |eligibility, (_, plan)| {
                     eligibility.combine(plan.cache_eligibility())
                 }),
             Self::Subquery { input, .. } => input.cache_eligibility(),
-            Self::LateralTopK { outer, .. } => outer.cache_eligibility(),
-            Self::LateralLoop { outer, inner, .. } => {
+            Self::LateralTopK(LateralTopKPlan { outer, .. }) => outer.cache_eligibility(),
+            Self::LateralLoop(LateralLoopPlan { outer, inner, .. }) => {
                 outer.cache_eligibility().combine(inner.cache_eligibility())
             }
             Self::ConstantResult { .. }
@@ -318,10 +324,10 @@ mod tests {
 
     #[test]
     fn nested_point_dependency_propagates() {
-        let plan = SqlPlan::Cte {
+        let plan = SqlPlan::Cte(CtePlan {
             definitions: vec![("selected".into(), point_get(EngineType::DocumentStrict))],
             outer: Box::new(point_get(EngineType::KeyValue)),
-        };
+        });
         assert_eq!(
             plan.cache_eligibility(),
             PlanCacheEligibility::DataDependent

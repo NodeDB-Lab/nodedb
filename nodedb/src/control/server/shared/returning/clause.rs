@@ -14,9 +14,12 @@ use nodedb_physical::physical_plan::{ReturningColumns, ReturningItem, ReturningS
 use crate::Error;
 use crate::control::planner::plan_error_map::map_plan_error;
 use nodedb_sql::catalog::SqlCatalog;
-use nodedb_sql::types::SqlPlan;
 use nodedb_sql::types::plan::referenced_columns;
 use nodedb_sql::types::query::Projection;
+use nodedb_sql::types::{
+    InsertPlan, KvInsertPlan, MergePlan, SqlPlan, TimeseriesIngestPlan, UpsertPlan,
+    VectorPrimaryDeletePlan, VectorPrimaryInsertPlan, VectorPrimaryUpdatePlan,
+};
 
 /// A resolved RETURNING clause: the Control-Plane projection and the
 /// Data-Plane spec derived from it.
@@ -98,17 +101,19 @@ fn spec_from_projection(projection: &[Projection]) -> ReturningSpec {
 pub fn returning_target_collection(plans: &[SqlPlan]) -> Option<String> {
     let plan = plans.first()?;
     match plan {
-        SqlPlan::Insert { collection, .. }
-        | SqlPlan::KvInsert { collection, .. }
-        | SqlPlan::Upsert { collection, .. }
+        SqlPlan::Insert(InsertPlan { collection, .. })
+        | SqlPlan::KvInsert(KvInsertPlan { collection, .. })
+        | SqlPlan::Upsert(UpsertPlan { collection, .. })
         | SqlPlan::Update { collection, .. }
         | SqlPlan::UpdateFrom { collection, .. }
         | SqlPlan::Delete { collection, .. }
-        | SqlPlan::TimeseriesIngest { collection, .. }
-        | SqlPlan::VectorPrimaryInsert { collection, .. }
-        | SqlPlan::VectorPrimaryDelete { collection, .. }
-        | SqlPlan::VectorPrimaryUpdate { collection, .. } => Some(collection.clone()),
-        SqlPlan::Merge { target, .. } | SqlPlan::InsertSelect { target, .. } => {
+        | SqlPlan::TimeseriesIngest(TimeseriesIngestPlan { collection, .. })
+        | SqlPlan::VectorPrimaryInsert(VectorPrimaryInsertPlan { collection, .. })
+        | SqlPlan::VectorPrimaryDelete(VectorPrimaryDeletePlan { collection, .. })
+        | SqlPlan::VectorPrimaryUpdate(VectorPrimaryUpdatePlan { collection, .. }) => {
+            Some(collection.clone())
+        }
+        SqlPlan::Merge(MergePlan { target, .. }) | SqlPlan::InsertSelect { target, .. } => {
             Some(target.clone())
         }
         SqlPlan::ConstantResult { .. }

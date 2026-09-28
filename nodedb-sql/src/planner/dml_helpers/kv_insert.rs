@@ -130,14 +130,14 @@ pub(crate) fn build_kv_insert_plan(params: KvInsertParams<'_>) -> Result<Vec<Sql
             .collect();
         entries.push((key_val, value_cols));
     }
-    Ok(vec![SqlPlan::KvInsert {
+    Ok(vec![SqlPlan::KvInsert(KvInsertPlan {
         collection: table_name,
         entries,
         ttl_secs,
         intent,
         on_conflict_updates,
         volatile_defaults,
-    }])
+    })])
 }
 
 #[cfg(test)]

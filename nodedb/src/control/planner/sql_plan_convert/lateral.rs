@@ -6,7 +6,7 @@
 //! inside the `QueryOp` so the Data Plane executor can materialise outer rows
 //! in-process before iterating over them.
 
-use nodedb_sql::types::{Filter, Projection, SortKey, SqlPlan};
+use nodedb_sql::types::{DocumentIndexLookupPlan, Filter, Projection, SortKey, SqlPlan};
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::types::TenantId;
@@ -160,7 +160,7 @@ pub(super) fn convert_lateral_loop(
 pub(super) fn collection_name_from_plan(plan: &SqlPlan) -> Option<String> {
     match plan {
         SqlPlan::Scan { collection, .. }
-        | SqlPlan::DocumentIndexLookup { collection, .. }
+        | SqlPlan::DocumentIndexLookup(DocumentIndexLookupPlan { collection, .. })
         | SqlPlan::PointGet { collection, .. } => Some(collection.clone()),
         _ => None,
     }
@@ -169,7 +169,8 @@ pub(super) fn collection_name_from_plan(plan: &SqlPlan) -> Option<String> {
 /// Extract base filters from a scan-like SqlPlan.
 fn inner_filters_from_plan(plan: &SqlPlan) -> crate::Result<Vec<u8>> {
     match plan {
-        SqlPlan::Scan { filters, .. } | SqlPlan::DocumentIndexLookup { filters, .. } => {
+        SqlPlan::Scan { filters, .. }
+        | SqlPlan::DocumentIndexLookup(DocumentIndexLookupPlan { filters, .. }) => {
             serialize_filters(filters)
         }
         _ => Ok(Vec::new()),

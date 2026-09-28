@@ -10,6 +10,7 @@
 //! [`Projection::CpComputed`] entry at the item's position. The wrap runs
 //! after ORDER BY and LIMIT are attached, so those stay on the aggregate.
 
+use crate::types::CtePlan;
 use sqlparser::ast;
 
 use crate::aggregate_walk::contains_aggregate;
@@ -52,12 +53,12 @@ pub fn wrap_aggregate_cp_items(
         return Err(SqlError::SequencePerRowUnsupported { name: accessor });
     }
     match plan {
-        SqlPlan::Cte { definitions, outer } => Ok(SqlPlan::Cte {
+        SqlPlan::Cte(CtePlan { definitions, outer }) => Ok(SqlPlan::Cte(CtePlan {
             definitions,
             outer: Box::new(wrap_aggregate_cp_items(
                 *outer, items, grouped, functions, scope,
             )?),
-        }),
+        })),
         SqlPlan::Aggregate { .. } => {
             let projection = aggregate_cp_projection(&plan, items, functions, scope)?;
             Ok(SqlPlan::Subquery {

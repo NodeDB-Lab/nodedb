@@ -7,6 +7,7 @@
 //! from the array slice. This module isolates the AST inspection used by
 //! the trigger detector to recognise the fusion-eligible join shape.
 
+use crate::types::ArraySlicePlan;
 use crate::types::SqlPlan;
 
 /// Result of inspecting a `SqlPlan::Join` for the
@@ -27,24 +28,26 @@ pub(super) fn extract_vector_join_target(
     right: &SqlPlan,
 ) -> Option<VectorJoinTarget> {
     match (left, right) {
-        (SqlPlan::Scan { collection, .. }, SqlPlan::ArraySlice { name, slice, .. }) => {
-            Some(VectorJoinTarget {
-                vector_collection: collection.clone(),
-                array_prefilter: Some(crate::types::ArrayPrefilter {
-                    array_name: name.clone(),
-                    slice: slice.clone(),
-                }),
-            })
-        }
-        (SqlPlan::ArraySlice { name, slice, .. }, SqlPlan::Scan { collection, .. }) => {
-            Some(VectorJoinTarget {
-                vector_collection: collection.clone(),
-                array_prefilter: Some(crate::types::ArrayPrefilter {
-                    array_name: name.clone(),
-                    slice: slice.clone(),
-                }),
-            })
-        }
+        (
+            SqlPlan::Scan { collection, .. },
+            SqlPlan::ArraySlice(ArraySlicePlan { name, slice, .. }),
+        ) => Some(VectorJoinTarget {
+            vector_collection: collection.clone(),
+            array_prefilter: Some(crate::types::ArrayPrefilter {
+                array_name: name.clone(),
+                slice: slice.clone(),
+            }),
+        }),
+        (
+            SqlPlan::ArraySlice(ArraySlicePlan { name, slice, .. }),
+            SqlPlan::Scan { collection, .. },
+        ) => Some(VectorJoinTarget {
+            vector_collection: collection.clone(),
+            array_prefilter: Some(crate::types::ArrayPrefilter {
+                array_name: name.clone(),
+                slice: slice.clone(),
+            }),
+        }),
         _ => None,
     }
 }

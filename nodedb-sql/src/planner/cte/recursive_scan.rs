@@ -211,7 +211,7 @@ fn plan_recursive_scan_from_parts(
         _ => Vec::new(),
     };
 
-    Ok(SqlPlan::RecursiveScan {
+    Ok(SqlPlan::RecursiveScan(RecursiveScanPlan {
         collection,
         base_filters: extract_filters(base),
         recursive_filters,
@@ -220,7 +220,7 @@ fn plan_recursive_scan_from_parts(
         distinct: *distinct,
         limit: 10000,
         projection,
-    })
+    }))
 }
 
 pub(super) fn plan_cte_branch(

@@ -101,10 +101,10 @@ pub(in crate::planner::select) fn try_plan_derived_from(
     )?;
 
     Ok(Some(PlannedSelect {
-        plan: SqlPlan::Cte {
+        plan: SqlPlan::Cte(CtePlan {
             definitions: vec![(alias_name, inner_plan)],
             outer: Box::new(outer.plan),
-        },
+        }),
         scope: outer.scope,
     }))
 }
