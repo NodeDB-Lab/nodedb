@@ -9,8 +9,7 @@
 //! hop. They differ only in what they retain from each hop:
 //!
 //! * BFS keeps the merged destination set (flat reachable nodes).
-//! * Subgraph traversal keeps the fully-attributed edge triples *plus*
-//!   the merged destination set (for next-frontier expansion).
+//! * Subgraph traversal admits discovered nodes and retains physical edge triples.
 //!
 //! ## Owner-targeted expansion (cluster mode)
 //!
@@ -52,9 +51,6 @@ pub(super) type NeighborTriple = (String, String, String);
 
 /// Result of one BFS hop.
 pub(super) struct HopOutput {
-    /// `(src,label,dst)` edges crossed this hop. Fully-attributed for both
-    /// the local-shard and remote-shard portions of the frontier.
-    pub local_triples: Vec<NeighborTriple>,
     /// Deduplicated destination node IDs after merging local + remote
     /// expansion. Feeds the next frontier.
     pub merged_destinations: Vec<String>,
@@ -81,6 +77,19 @@ pub(super) async fn execute_neighbor_hop(
     database_id: DatabaseId,
     params: NeighborHopParams<'_>,
 ) -> crate::Result<HopOutput> {
+    let triples = execute_neighbor_triples(shared, tenant_id, database_id, params).await?;
+    let merged_destinations = dedup_destinations(&triples);
+    Ok(HopOutput {
+        merged_destinations,
+    })
+}
+
+async fn execute_neighbor_triples(
+    shared: &SharedState,
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+    params: NeighborHopParams<'_>,
+) -> crate::Result<Vec<NeighborTriple>> {
     let NeighborHopParams {
         collection,
         frontier,
@@ -116,11 +125,7 @@ pub(super) async fn execute_neighbor_hop(
             frontier,
         )
         .await?;
-        let merged = dedup_destinations(&triples);
-        return Ok(HopOutput {
-            local_triples: triples,
-            merged_destinations: merged,
-        });
+        return Ok(triples);
     }
 
     // Cluster mode: partition the incoming frontier by owning vShard, using
@@ -166,11 +171,32 @@ pub(super) async fn execute_neighbor_hop(
         all_triples.extend(remote_triples);
     }
 
-    let merged = dedup_destinations(&all_triples);
-    Ok(HopOutput {
-        local_triples: all_triples,
-        merged_destinations: merged,
-    })
+    Ok(all_triples)
+}
+
+/// Execute a hop with a positive raw-row allowance across the merged shard results.
+pub(super) async fn execute_neighbor_hop_bounded(
+    shared: &SharedState,
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+    params: NeighborHopParams<'_>,
+    max_results: std::num::NonZeroU32,
+) -> crate::Result<Vec<NeighborTriple>> {
+    let mut options = params.options.clone();
+    options.max_visited = max_results.get() as usize;
+    let mut triples = execute_neighbor_triples(
+        shared,
+        tenant_id,
+        database_id,
+        NeighborHopParams {
+            options: &options,
+            discovered_so_far: 0,
+            ..params
+        },
+    )
+    .await?;
+    triples.truncate(max_results.get() as usize);
+    Ok(triples)
 }
 
 /// A remote-owned frontier subset: the owning node, its vShard, and the

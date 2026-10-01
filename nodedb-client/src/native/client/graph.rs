@@ -21,19 +21,14 @@ impl NativeClient {
         collection: &str,
         start: &NodeId,
         depth: u8,
+        direction: nodedb_types::graph::Direction,
         edge_filter: Option<&EdgeFilter>,
     ) -> NodeDbResult<SubGraph> {
         let mut conn = self.pool.acquire().await?;
         let resp = conn
             .send(
                 OpCode::GraphHop,
-                TextFields {
-                    collection: Some(collection.to_string()),
-                    start_node: Some(start.as_str().to_string()),
-                    depth: Some(depth as u32),
-                    edge_label: edge_filter.and_then(|f| f.labels.first().cloned()),
-                    ..Default::default()
-                },
+                build_graph_traverse_fields(collection, start, depth, direction, edge_filter),
             )
             .await?;
         // An error frame carries no rows; parsed unchecked it would read as
@@ -133,6 +128,24 @@ impl NativeClient {
     }
 }
 
+/// Build a native traversal request with an explicit direction.
+fn build_graph_traverse_fields(
+    collection: &str,
+    start: &NodeId,
+    depth: u8,
+    direction: nodedb_types::graph::Direction,
+    edge_filter: Option<&EdgeFilter>,
+) -> TextFields {
+    TextFields {
+        collection: Some(collection.to_string()),
+        start_node: Some(start.as_str().to_string()),
+        depth: Some(depth as u32),
+        direction: Some(direction.as_str().to_string()),
+        edge_label: edge_filter.and_then(|filter| filter.labels.first().cloned()),
+        ..Default::default()
+    }
+}
+
 /// Build the SQL for `SHOW GRAPH STATS` for the native protocol. Collection
 /// and `as_of` are both optional; when absent the corresponding clause is
 /// omitted entirely.
@@ -162,6 +175,24 @@ pub(crate) fn parse_native_graph_stats(
 mod tests {
     use super::*;
     use nodedb_types::value::Value;
+
+    #[test]
+    fn traverse_request_preserves_direction_and_scope() {
+        let start = NodeId::try_new("seed").unwrap();
+        let filter = EdgeFilter::labels(["NEXT"]);
+        for direction in [
+            nodedb_types::graph::Direction::Out,
+            nodedb_types::graph::Direction::In,
+            nodedb_types::graph::Direction::Both,
+        ] {
+            let fields = build_graph_traverse_fields("social", &start, 3, direction, Some(&filter));
+            assert_eq!(fields.collection.as_deref(), Some("social"));
+            assert_eq!(fields.start_node.as_deref(), Some("seed"));
+            assert_eq!(fields.depth, Some(3));
+            assert_eq!(fields.edge_label.as_deref(), Some("NEXT"));
+            assert_eq!(fields.direction.as_deref(), Some(direction.as_str()));
+        }
+    }
 
     fn stat_columns() -> Vec<String> {
         GraphStats::EXPECTED_COLUMNS

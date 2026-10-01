@@ -13,10 +13,8 @@
 //! to a same-session traverse.
 //!
 //! The shared per-hop scatter/decode/merge logic lives in
-//! [`super::hop::execute_neighbor_hop`]; this dispatcher layers depth
+//! [`super::hop::execute_neighbor_hop_bounded`]; this dispatcher layers depth
 //! tagging and edge recording on top.
-
-use std::collections::{HashMap, HashSet};
 
 use sonic_rs;
 
@@ -27,7 +25,8 @@ use crate::engine::graph::traversal_options::GraphTraversalOptions;
 use crate::types::{DatabaseId, TenantId};
 
 use super::helpers::ok_response;
-use super::hop::{NeighborHopParams, execute_neighbor_hop};
+use super::hop::{NeighborHopParams, execute_neighbor_hop_bounded};
+use super::subgraph_accumulator::{EdgeOrientation, RowAllowance, SubgraphAccumulator};
 
 /// Wire-shape JSON node entry. Field names mirror the client decoder in
 /// `nodedb-client/src/remote/parse.rs::parse_graph_traverse_json`.
@@ -45,12 +44,7 @@ struct WireEdge<'a> {
     label: &'a str,
 }
 
-/// Wire-shape JSON envelope. The client decoder calls
-/// `parsed.get("nodes")` and `parsed.get("edges")`; a flat array or any
-/// other key set decodes to an empty `SubGraph`, which is the visible
-/// failure mode the regression test in
-/// `nodedb-client-tests/tests/graph_traverse_remote_round_trip.rs`
-/// guards against.
+/// Wire JSON envelope with node IDs, discovery depths, and physical edge endpoints.
 #[derive(serde::Serialize)]
 struct WireSubGraph<'a> {
     nodes: Vec<WireNode<'a>>,
@@ -72,13 +66,9 @@ pub struct CrossCoreTraverseSubgraphParams<'a> {
 
 /// BFS that returns a `{nodes,edges}` JSON subgraph for `GRAPH TRAVERSE`.
 ///
-/// Each hop expands every frontier node at the node that owns
-/// `from_key(node)` via the shared [`execute_neighbor_hop`] helper and
-/// records:
-///   * each newly-visited node (with its discovery depth), and
-///   * each `(src, label, dst)` edge the hop crossed where `src` is in the
-///     current frontier — fully attributed for BOTH the local-shard and
-///     remote-shard portions of the frontier.
+/// Incoming rows retain their physical edge orientation. Both-direction traversal
+/// expands outgoing then incoming edges over the same frontier with one raw-row allowance.
+/// Node admission enforces `max_visited` across shard results. Physical edges appear once.
 pub async fn cross_core_traverse_subgraph(
     shared: &SharedState,
     params: CrossCoreTraverseSubgraphParams<'_>,
@@ -93,75 +83,63 @@ pub async fn cross_core_traverse_subgraph(
         max_depth,
         options,
     } = params;
-    // Per-node depth: the start node is at depth 0; subsequent nodes
-    // are tagged with the hop index that first surfaced them.
-    let mut depth_of: HashMap<String, u8> = HashMap::new();
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut node_order: Vec<String> = Vec::new();
-    let mut edges: Vec<(String, String, String)> = Vec::new();
-    let mut frontier: Vec<String> = vec![start.clone()];
-
-    visited.insert(start.clone());
-    depth_of.insert(start.clone(), 0);
-    node_order.push(start);
-
+    let mut frontier = if options.max_visited > 0 {
+        vec![start.clone()]
+    } else {
+        Vec::new()
+    };
+    let mut state = SubgraphAccumulator::new(start, options.max_visited);
     for hop_idx in 0..max_depth {
-        if frontier.is_empty() {
+        if frontier.is_empty() || state.remaining_nodes() == 0 {
             break;
         }
-
-        let hop = execute_neighbor_hop(
-            shared,
-            tenant_id,
-            database_id,
-            NeighborHopParams {
-                collection: collection.as_deref(),
-                frontier: &frontier,
-                edge_label: edge_label.as_deref(),
-                direction,
-                options,
-                discovered_so_far: node_order.len(),
-            },
-        )
-        .await?;
-
-        // Edges are fully attributed for BOTH local-shard and remote-shard
-        // expansion (each frontier node was expanded at its owner). Always
-        // record them — even when the destination is already visited (an
-        // A→B→C graph with a back-edge B→A should surface that edge once).
-        edges.extend(hop.local_triples);
-
-        // Tag newly-discovered nodes with the current hop's depth and
-        // build the next frontier. `hop_idx=0` expands the depth-0
-        // start node into depth-1 neighbors.
-        let next_depth_tag = (hop_idx + 1).min(u8::MAX as usize) as u8;
-        let mut next_frontier: Vec<String> = Vec::new();
-        for node in hop.merged_destinations {
-            if visited.insert(node.clone()) {
-                depth_of.insert(node.clone(), next_depth_tag);
-                node_order.push(node.clone());
-                next_frontier.push(node);
-                if node_order.len() >= options.max_visited {
-                    break;
-                }
-            }
+        let mut allowance = RowAllowance::new(state.remaining_nodes());
+        let directions: &[EdgeOrientation] = match direction {
+            Direction::Out => &[EdgeOrientation::Out],
+            Direction::In => &[EdgeOrientation::In],
+            Direction::Both => &[EdgeOrientation::Out, EdgeOrientation::In],
+        };
+        let mut next_frontier = Vec::new();
+        for &pass_direction in directions {
+            let Some(limit) = allowance.dispatch_limit() else {
+                break;
+            };
+            let triples = execute_neighbor_hop_bounded(
+                shared,
+                tenant_id,
+                database_id,
+                NeighborHopParams {
+                    collection: collection.as_deref(),
+                    frontier: &frontier,
+                    edge_label: edge_label.as_deref(),
+                    direction: pass_direction.direction(),
+                    options,
+                    discovered_so_far: state.nodes.len(),
+                },
+                limit,
+            )
+            .await?;
+            allowance.consume(triples.len());
+            state.record(
+                triples,
+                pass_direction,
+                (hop_idx + 1).min(u8::MAX as usize) as u8,
+                &mut next_frontier,
+            );
         }
-
         frontier = next_frontier;
-
-        if node_order.len() >= options.max_visited {
-            break;
-        }
     }
 
-    let wire_nodes: Vec<WireNode<'_>> = node_order
+    let wire_nodes: Vec<WireNode<'_>> = state
+        .nodes
         .iter()
-        .map(|id| WireNode {
+        .map(|(id, depth)| WireNode {
             id: id.as_str(),
-            depth: *depth_of.get(id).unwrap_or(&0),
+            depth: *depth,
         })
         .collect();
-    let wire_edges: Vec<WireEdge<'_>> = edges
+    let wire_edges: Vec<WireEdge<'_>> = state
+        .edges
         .iter()
         .map(|(src, label, dst)| WireEdge {
             from: src.as_str(),

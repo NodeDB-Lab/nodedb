@@ -22,21 +22,10 @@ impl NodeDbRemote {
         collection: &str,
         start: &NodeId,
         depth: u8,
+        direction: nodedb_types::graph::Direction,
         edge_filter: Option<&EdgeFilter>,
     ) -> NodeDbResult<SubGraph> {
-        // Server-side DSL: `GRAPH TRAVERSE IN '<collection>' FROM '<start>'
-        // DEPTH <n> [LABEL '<l>']`. The collection is not decorative: the
-        // server authorizes the traversal against it, and without it the walk
-        // would cross every collection in the tenant.
-        let label_clause = edge_filter
-            .and_then(|f| f.labels.first())
-            .map(|l| format!(" LABEL {}", quote_string_literal(l)))
-            .unwrap_or_default();
-        let collection_lit = quote_string_literal(collection);
-        let start_lit = quote_string_literal(start.as_str());
-        let sql = format!(
-            "GRAPH TRAVERSE IN {collection_lit} FROM {start_lit} DEPTH {depth}{label_clause}"
-        );
+        let sql = build_graph_traverse_sql(collection, start, depth, direction, edge_filter);
 
         let (columns, rows) = self.simple_query_raw(&sql).await?;
 
@@ -218,6 +207,26 @@ impl NodeDbRemote {
     }
 }
 
+/// Build a collection-scoped traversal with escaped string literals.
+pub(crate) fn build_graph_traverse_sql(
+    collection: &str,
+    start: &NodeId,
+    depth: u8,
+    direction: nodedb_types::graph::Direction,
+    edge_filter: Option<&EdgeFilter>,
+) -> String {
+    let label_clause = edge_filter
+        .and_then(|filter| filter.labels.first())
+        .map(|label| format!(" LABEL {}", quote_string_literal(label)))
+        .unwrap_or_default();
+    let collection_lit = quote_string_literal(collection);
+    let start_lit = quote_string_literal(start.as_str());
+    let direction = direction.as_str();
+    format!(
+        "GRAPH TRAVERSE IN {collection_lit} FROM {start_lit} DEPTH {depth} DIRECTION {direction}{label_clause}"
+    )
+}
+
 /// Build the SQL for `SHOW GRAPH STATS`. Collection and `as_of` are both
 /// optional; when absent the corresponding clause is omitted entirely.
 pub(crate) fn build_graph_stats_sql(collection: Option<&str>, as_of: Option<i64>) -> String {
@@ -246,6 +255,26 @@ pub(crate) fn parse_graph_stats_response(
 mod tests {
     use super::*;
     use nodedb_types::value::Value;
+
+    #[test]
+    fn traverse_sql_preserves_direction_and_escapes_literals() {
+        let start = NodeId::try_new("seed'one").unwrap();
+        let filter = EdgeFilter::labels(["it's"]);
+        for direction in [
+            nodedb_types::graph::Direction::Out,
+            nodedb_types::graph::Direction::In,
+            nodedb_types::graph::Direction::Both,
+        ] {
+            let sql = build_graph_traverse_sql("it's", &start, 3, direction, Some(&filter));
+            assert_eq!(
+                sql,
+                format!(
+                    "GRAPH TRAVERSE IN 'it''s' FROM 'seed''one' DEPTH 3 DIRECTION {} LABEL 'it''s'",
+                    direction.as_str()
+                )
+            );
+        }
+    }
 
     fn stat_columns() -> Vec<String> {
         GraphStats::EXPECTED_COLUMNS
