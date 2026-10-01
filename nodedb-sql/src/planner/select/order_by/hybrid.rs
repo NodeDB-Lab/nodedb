@@ -23,6 +23,7 @@
 //! - 3 sources + 2 k constants: typed error (inconsistent arity).
 //! - 3 sources + 3 k constants: valid triple-source form.
 
+use crate::types::{HybridSearchPlan, HybridSearchTriplePlan};
 use sqlparser::ast;
 
 use super::super::helpers::{
@@ -96,7 +97,7 @@ fn plan_hybrid_two_source(
 
     let vector_weight = k2 as f32 / (k1 as f32 + k2 as f32);
 
-    Ok(Some(SqlPlan::HybridSearch {
+    Ok(Some(SqlPlan::HybridSearch(HybridSearchPlan {
         collection: collection.into(),
         query_vector: vector,
         query_text: text,
@@ -106,7 +107,7 @@ fn plan_hybrid_two_source(
         fuzzy: true,
         score_alias: score_alias.map(|s| s.to_string()),
         projection,
-    }))
+    })))
 }
 
 /// Three-source: `rrf_score(vector_distance(...), bm25_score(...), graph_score(...), k1?, k2?, k3?)`.
@@ -156,7 +157,7 @@ fn plan_hybrid_triple(
         .and_then(|e| extract_float(e).ok())
         .unwrap_or(60.0);
 
-    Ok(Some(SqlPlan::HybridSearchTriple {
+    Ok(Some(SqlPlan::HybridSearchTriple(HybridSearchTriplePlan {
         collection: collection.into(),
         query_vector: vector,
         query_text: text,
@@ -169,7 +170,7 @@ fn plan_hybrid_triple(
         rrf_k: (k1, k2, k3),
         score_alias: score_alias.map(|s| s.to_string()),
         projection,
-    }))
+    })))
 }
 
 /// Extract the float-array from a `vector_distance(col, ARRAY[...])` expression.

@@ -10,7 +10,7 @@ pub struct SchemalessRules;
 
 impl EngineRules for SchemalessRules {
     fn plan_insert(&self, p: InsertParams) -> Result<Vec<SqlPlan>> {
-        Ok(vec![SqlPlan::Insert {
+        Ok(vec![SqlPlan::Insert(InsertPlan {
             collection: p.collection,
             engine: EngineType::DocumentSchemaless,
             route: WriteRoute::Document,
@@ -19,11 +19,11 @@ impl EngineRules for SchemalessRules {
             if_absent: p.if_absent,
             column_schema: vec![],
             primary_key: p.primary_key,
-        }])
+        })])
     }
 
     fn plan_upsert(&self, p: UpsertParams) -> Result<Vec<SqlPlan>> {
-        Ok(vec![SqlPlan::Upsert {
+        Ok(vec![SqlPlan::Upsert(UpsertPlan {
             collection: p.collection,
             engine: EngineType::DocumentSchemaless,
             route: WriteRoute::Document,
@@ -32,7 +32,7 @@ impl EngineRules for SchemalessRules {
             on_conflict_updates: p.on_conflict_updates,
             column_schema: vec![],
             primary_key: p.primary_key,
-        }])
+        })])
     }
 
     fn plan_scan(&self, p: ScanParams) -> Result<SqlPlan> {
@@ -110,7 +110,7 @@ impl EngineRules for SchemalessRules {
     }
 
     fn plan_merge(&self, p: MergeParams) -> Result<Vec<SqlPlan>> {
-        Ok(vec![SqlPlan::Merge {
+        Ok(vec![SqlPlan::Merge(MergePlan {
             target: p.collection,
             engine: EngineType::DocumentSchemaless,
             source: p.source,
@@ -119,7 +119,7 @@ impl EngineRules for SchemalessRules {
             source_alias: p.source_alias,
             clauses: p.clauses,
             returning: p.returning,
-        }])
+        })])
     }
 
     fn plan_truncate(&self, p: TruncateParams) -> Result<Vec<SqlPlan>> {

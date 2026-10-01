@@ -106,6 +106,12 @@ impl Memtable {
             let before = postings.len();
             postings.retain(|p| p.doc_id != doc_id);
             removed += before - postings.len();
+            if postings.len() < before
+                && !postings.is_empty()
+                && postings.capacity() > postings.len().saturating_mul(2).max(4)
+            {
+                postings.shrink_to(postings.len());
+            }
             !postings.is_empty()
         });
         *self.total_postings.borrow_mut() -= removed;
@@ -216,6 +222,46 @@ mod tests {
             term_freq: tf,
             fieldnorm: smallfloat::encode(100),
             positions: vec![0],
+        }
+    }
+
+    #[test]
+    fn anchored_posting_lists_release_sparse_migration_capacity() {
+        let mt = Memtable::new(MemtableConfig::default());
+        let terms = 12u32;
+        let movers = 64u32;
+        for term in 0..terms {
+            mt.insert(&format!("term{term}"), make_posting(term + 1, 1));
+            mt.record_doc(Surrogate(term + 1), 1);
+        }
+        for term in 0..terms {
+            let key = format!("term{term}");
+            for mover in 0..movers {
+                let id = terms + mover + 1;
+                mt.insert(&key, make_posting(id, 1));
+                mt.record_doc(Surrogate(id), 1);
+            }
+            assert_eq!(mt.posting_count(), (terms + movers) as usize);
+            assert_eq!(mt.stats(), (terms + movers, (terms + movers) as u64));
+            for mover in 0..movers {
+                mt.remove_doc(Surrogate(terms + mover + 1));
+                let map = mt.postings.borrow();
+                for postings in map.values() {
+                    assert!(postings.capacity() <= postings.len().saturating_mul(2).max(4));
+                }
+            }
+            let anchor = mt.get_postings(&key);
+            assert_eq!(anchor.len(), 1);
+            assert_eq!(anchor[0].doc_id, Surrogate(term + 1));
+            assert_eq!(anchor[0].positions, vec![0]);
+            assert_eq!(mt.posting_count(), terms as usize);
+            assert_eq!(mt.stats(), (terms, terms as u64));
+        }
+        for term in 0..terms {
+            assert_eq!(
+                mt.get_postings(&format!("term{term}"))[0].doc_id,
+                Surrogate(term + 1)
+            );
         }
     }
 

@@ -90,7 +90,7 @@ pub(crate) fn try_document_index_lookup(
             value
         };
 
-        return Some(SqlPlan::DocumentIndexLookup {
+        return Some(SqlPlan::DocumentIndexLookup(DocumentIndexLookupPlan {
             collection: params.collection.clone(),
             alias: params.alias.clone(),
             engine,
@@ -105,7 +105,7 @@ pub(crate) fn try_document_index_lookup(
             window_functions: params.window_functions.clone(),
             case_insensitive: idx.case_insensitive,
             temporal: params.temporal,
-        });
+        }));
     }
     None
 }

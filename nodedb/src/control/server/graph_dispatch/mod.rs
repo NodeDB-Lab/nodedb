@@ -27,6 +27,7 @@ pub(crate) mod hop;
 pub mod match_broadcast;
 pub mod match_scatter;
 pub mod shortest_path;
+mod subgraph_accumulator;
 pub mod traverse_subgraph;
 
 pub use bfs::{CrossCoreBfsParams, cross_core_bfs_with_options};

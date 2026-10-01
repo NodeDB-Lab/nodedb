@@ -19,8 +19,8 @@
 //! node expands its IN edges symmetrically. Staged edges bypass the frontier
 //! bitmap: the transaction's own writes have no durable surrogate to gate on.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 
 use crate::csr::CsrIndex;
 use crate::overlay_delta::GraphOverlayDelta;
@@ -59,8 +59,13 @@ impl CsrIndex {
         let mut fwd_frontier: Vec<String> = vec![src.to_string()];
         let mut bwd_frontier: Vec<String> = vec![dst.to_string()];
 
-        let label_id = label_filter.and_then(|l| self.label_id(l));
+        let label_ids: HashSet<u32> = label_filter
+            .iter()
+            .filter_map(|label| self.label_id(label))
+            .collect();
+        let label_filter: HashSet<&str> = label_filter.iter().copied().collect();
 
+        // Alternating complete BFS levels makes the first meeting shortest.
         for _depth in 0..max_depth {
             if fwd_parent.len() + bwd_parent.len() >= max_visited {
                 break;
@@ -68,8 +73,13 @@ impl CsrIndex {
 
             let mut next_fwd = Vec::new();
             for node in std::mem::take(&mut fwd_frontier) {
-                let neighbors =
-                    self.forward_neighbors(&node, label_id, label_filter, frontier_bitmap, overlay);
+                let neighbors = self.forward_neighbors(
+                    &node,
+                    &label_ids,
+                    &label_filter,
+                    frontier_bitmap,
+                    overlay,
+                );
                 for neighbor in neighbors {
                     if let Some(meeting) = relax(
                         &neighbor,
@@ -78,7 +88,8 @@ impl CsrIndex {
                         &bwd_parent,
                         &mut next_fwd,
                     ) {
-                        return Some(reconstruct(&meeting, &fwd_parent, &bwd_parent));
+                        let path = reconstruct(&meeting, &fwd_parent, &bwd_parent);
+                        return (path.len().saturating_sub(1) <= max_depth).then_some(path);
                     }
                 }
             }
@@ -88,8 +99,8 @@ impl CsrIndex {
             for node in std::mem::take(&mut bwd_frontier) {
                 let neighbors = self.backward_neighbors(
                     &node,
-                    label_id,
-                    label_filter,
+                    &label_ids,
+                    &label_filter,
                     frontier_bitmap,
                     overlay,
                 );
@@ -101,7 +112,8 @@ impl CsrIndex {
                         &fwd_parent,
                         &mut next_bwd,
                     ) {
-                        return Some(reconstruct(&meeting, &fwd_parent, &bwd_parent));
+                        let path = reconstruct(&meeting, &fwd_parent, &bwd_parent);
+                        return (path.len().saturating_sub(1) <= max_depth).then_some(path);
                     }
                 }
             }
@@ -120,8 +132,8 @@ impl CsrIndex {
     fn forward_neighbors(
         &self,
         node: &str,
-        label_id: Option<u32>,
-        label_filter: Option<&str>,
+        label_ids: &HashSet<u32>,
+        label_filter: &HashSet<&str>,
         frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
         overlay: &GraphOverlayDelta,
     ) -> Vec<String> {
@@ -129,7 +141,7 @@ impl CsrIndex {
         if let Some(&node_id) = self.node_to_id.get(node) {
             self.record_access(node_id);
             for (lid, dst) in self.dense_iter_out(node_id) {
-                if label_id.is_some_and(|f| f != lid) {
+                if !label_filter.is_empty() && !label_ids.contains(&lid) {
                     continue;
                 }
                 let dst_name = &self.id_to_node[dst as usize];
@@ -144,7 +156,10 @@ impl CsrIndex {
                 out.push(dst_name.clone());
             }
         }
-        for (_, dst) in overlay.out_neighbors(node, label_filter) {
+        for (label, dst) in overlay.out_neighbors(node, None) {
+            if !label_filter.is_empty() && !label_filter.contains(&label) {
+                continue;
+            }
             out.push(dst.to_string());
         }
         out
@@ -156,8 +171,8 @@ impl CsrIndex {
     fn backward_neighbors(
         &self,
         node: &str,
-        label_id: Option<u32>,
-        label_filter: Option<&str>,
+        label_ids: &HashSet<u32>,
+        label_filter: &HashSet<&str>,
         frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
         overlay: &GraphOverlayDelta,
     ) -> Vec<String> {
@@ -165,7 +180,7 @@ impl CsrIndex {
         if let Some(&node_id) = self.node_to_id.get(node) {
             self.record_access(node_id);
             for (lid, src) in self.dense_iter_in(node_id) {
-                if label_id.is_some_and(|f| f != lid) {
+                if !label_filter.is_empty() && !label_ids.contains(&lid) {
                     continue;
                 }
                 let src_name = &self.id_to_node[src as usize];
@@ -180,7 +195,10 @@ impl CsrIndex {
                 out.push(src_name.clone());
             }
         }
-        for (_, src) in overlay.in_neighbors(node, label_filter) {
+        for (label, src) in overlay.in_neighbors(node, None) {
+            if !label_filter.is_empty() && !label_filter.contains(&label) {
+                continue;
+            }
             out.push(src.to_string());
         }
         out
@@ -263,7 +281,7 @@ mod tests {
     fn params<'a>(
         src: &'a str,
         dst: &'a str,
-        label_filter: Option<&'a str>,
+        label_filter: &'a [&'a str],
         max_depth: usize,
     ) -> ShortestPathParams<'a> {
         ShortestPathParams {
@@ -286,13 +304,13 @@ mod tests {
         ov.stage_edge("b", "KNOWS", "c");
 
         let path = csr
-            .shortest_path(params("a", "c", Some("KNOWS"), 5), Some(&ov))
+            .shortest_path(params("a", "c", &["KNOWS"], 5), Some(&ov))
             .expect("staged edge should complete the path");
         assert_eq!(path, vec!["a", "b", "c"]);
 
         // Without the overlay the path does not exist.
         assert!(
-            csr.shortest_path(params("a", "c", Some("KNOWS"), 5), None)
+            csr.shortest_path(params("a", "c", &["KNOWS"], 5), None)
                 .is_none()
         );
     }
@@ -308,7 +326,7 @@ mod tests {
         ov.stage_edge("x", "KNOWS", "d");
 
         let path = csr
-            .shortest_path(params("a", "d", Some("KNOWS"), 5), Some(&ov))
+            .shortest_path(params("a", "d", &["KNOWS"], 5), Some(&ov))
             .expect("staged-only path should be found");
         assert_eq!(path, vec!["a", "x", "d"]);
     }
@@ -326,7 +344,7 @@ mod tests {
         ov.stage_tombstone("a", "KNOWS", "d");
 
         let path = csr
-            .shortest_path(params("a", "d", Some("KNOWS"), 5), Some(&ov))
+            .shortest_path(params("a", "d", &["KNOWS"], 5), Some(&ov))
             .expect("detour path should be found");
         assert_eq!(path, vec!["a", "b", "d"]);
     }
@@ -340,7 +358,7 @@ mod tests {
         ov.stage_tombstone("a", "KNOWS", "d");
 
         assert!(
-            csr.shortest_path(params("a", "d", Some("KNOWS"), 5), Some(&ov))
+            csr.shortest_path(params("a", "d", &["KNOWS"], 5), Some(&ov))
                 .is_none()
         );
     }
@@ -358,9 +376,9 @@ mod tests {
         // Empty overlay dispatches to dense; force the overlay code path by
         // calling it directly, then compare with dense.
         let dense = csr
-            .shortest_path(params("a", "d", Some("KNOWS"), 10), None)
+            .shortest_path(params("a", "d", &["KNOWS"], 10), None)
             .unwrap();
-        let overlaid = csr.shortest_path_overlay(params("a", "d", Some("KNOWS"), 10), &ov);
+        let overlaid = csr.shortest_path_overlay(params("a", "d", &["KNOWS"], 10), &ov);
         assert_eq!(overlaid, Some(dense));
     }
 
@@ -371,7 +389,7 @@ mod tests {
         let mut ov = GraphOverlayDelta::new();
         ov.stage_edge("a", "KNOWS", "x");
         let path = csr
-            .shortest_path(params("a", "a", None, 5), Some(&ov))
+            .shortest_path(params("a", "a", &[], 5), Some(&ov))
             .unwrap();
         assert_eq!(path, vec!["a"]);
     }
@@ -383,7 +401,7 @@ mod tests {
         let mut ov = GraphOverlayDelta::new();
         ov.stage_edge("m", "KNOWS", "n");
         assert!(
-            csr.shortest_path(params("a", "n", Some("KNOWS"), 5), Some(&ov))
+            csr.shortest_path(params("a", "n", &["KNOWS"], 5), Some(&ov))
                 .is_none()
         );
     }

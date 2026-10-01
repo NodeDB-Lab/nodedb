@@ -13,6 +13,15 @@ pub mod query;
 pub use collection::{CollectionInfo, ColumnInfo, IndexSpec, IndexState};
 pub use filter::{CompareOp, Filter, FilterExpr};
 pub use plan::{
+    AlterArrayPlan, ArrayAggPlan, ArrayElementwisePlan, ArrayProjectPlan, ArraySlicePlan,
+    CreateArrayPlan, CreateIndexPlan, CtePlan, DeleteArrayPlan, DocumentIndexLookupPlan,
+    DropIndexPlan, HybridSearchPlan, HybridSearchTriplePlan, InsertArrayPlan, InsertPlan,
+    KvInsertPlan, LateralLoopPlan, LateralTopKPlan, MergePlan, RangeScanPlan, RecursiveScanPlan,
+    RecursiveValuePlan, TimeseriesIngestPlan, TimeseriesScanPlan, UpsertPlan,
+    VectorPrimaryDeletePlan, VectorPrimaryInsertPlan, VectorPrimaryTruncatePlan,
+    VectorPrimaryUpdatePlan,
+};
+pub use plan::{
     ArrayPrefilter, DistanceMetric, KvInsertIntent, MergeClauseKind, MergePlanAction,
     MergePlanClause, PlanCacheEligibility, SqlPlan, VectorAnnOptions, VectorPrimaryInsertIntent,
     VectorPrimaryRow, VectorQuantization, WriteRoute,

@@ -12,6 +12,7 @@ use crate::catalog::{ArrayCatalogView, SqlCatalog};
 use crate::error::{Result, SqlError};
 use crate::parser::array_stmt::{DeleteArrayAst, InsertArrayAst};
 use crate::types::SqlPlan;
+use crate::types::{DeleteArrayPlan, InsertArrayPlan};
 use crate::types_array::{ArrayAttrLiteral, ArrayAttrType, ArrayCoordLiteral, ArrayDimType};
 
 pub fn plan_insert_array(ast: &InsertArrayAst, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
@@ -29,10 +30,10 @@ pub fn plan_insert_array(ast: &InsertArrayAst, catalog: &dyn SqlCatalog) -> Resu
         validate_coords(&ast.name, ri, &row.coords, &view)?;
         validate_attrs(&ast.name, ri, &row.attrs, &view)?;
     }
-    Ok(vec![SqlPlan::InsertArray {
+    Ok(vec![SqlPlan::InsertArray(InsertArrayPlan {
         name: ast.name.clone(),
         rows: ast.rows.clone(),
-    }])
+    })])
 }
 
 pub fn plan_delete_array(ast: &DeleteArrayAst, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
@@ -52,10 +53,10 @@ pub fn plan_delete_array(ast: &DeleteArrayAst, catalog: &dyn SqlCatalog) -> Resu
     for (ri, row) in ast.coords.iter().enumerate() {
         validate_coords(&ast.name, ri, row, &view)?;
     }
-    Ok(vec![SqlPlan::DeleteArray {
+    Ok(vec![SqlPlan::DeleteArray(DeleteArrayPlan {
         name: ast.name.clone(),
         coords: ast.coords.clone(),
-    }])
+    })])
 }
 
 fn validate_coords(

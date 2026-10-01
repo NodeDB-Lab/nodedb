@@ -1,26 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Plan-time refusal of index-owned search functions in row-evaluated
-//! positions.
-//!
-//! `bm25_score`, `search_score`, `text_match`, `search`, `rrf_score`,
-//! `sparse_score`, `graph_score`, `multi_vector_score` and
-//! `multi_vector_search` read a search index. The planner lowers each call it
-//! recognises into its search plan, which serves the score as a column. A
-//! call the planner could not lower stays in a filter, projection, sort key,
-//! assignment or aggregate argument. The row evaluator has no index and no
-//! value for it, so this pass refuses the statement at plan time. The
-//! refusal does not depend on whether the collection holds rows.
-//!
-//! A wrapper plan (a subquery tail, aggregate, join or lateral join) over a
-//! search plan is not checked for its own expressions: its projection names
-//! the score column the search plan serves.
+//! The pass that walks a plan and refuses a search function in a
+//! row-evaluated position.
 
-use crate::error::{Result, SqlError};
-use crate::functions::registry::{FunctionRegistry, SearchTrigger};
-use crate::types::query::{AggregateExpr, Projection, SortKey, WindowSpec};
-use crate::types::{Filter, FilterExpr, MergePlanAction, SqlPlan};
-use crate::types_expr::SqlExpr;
+use crate::error::Result;
+use crate::functions::registry::FunctionRegistry;
+use crate::types::{
+    CtePlan, DocumentIndexLookupPlan, KvInsertPlan, LateralLoopPlan, LateralTopKPlan, MergePlan,
+    RangeScanPlan, RecursiveScanPlan, TimeseriesScanPlan, UpsertPlan, VectorPrimaryDeletePlan,
+    VectorPrimaryInsertPlan, VectorPrimaryUpdatePlan,
+};
+use crate::types::{MergePlanAction, SqlPlan};
+
+use super::lookup::has_search_plan;
 
 /// Refuse `plan` when an index-owned search function sits where the row
 /// evaluator runs it.
@@ -31,8 +23,8 @@ pub fn refuse_row_scoped_search_functions(
     Scope { functions }.plan(plan)
 }
 
-struct Scope<'a> {
-    functions: &'a FunctionRegistry,
+pub(super) struct Scope<'a> {
+    pub(super) functions: &'a FunctionRegistry,
 }
 
 impl Scope<'_> {
@@ -45,33 +37,32 @@ impl Scope<'_> {
                 window_functions,
                 ..
             }
-            | SqlPlan::DocumentIndexLookup {
+            | SqlPlan::DocumentIndexLookup(DocumentIndexLookupPlan {
                 filters,
                 projection,
                 sort_keys,
                 window_functions,
                 ..
-            } => {
+            }) => {
                 self.filters(filters)?;
                 self.projection(projection)?;
                 self.sort_keys(sort_keys)?;
                 self.windows(window_functions)
             }
-            SqlPlan::PointGet { projection, .. } | SqlPlan::RangeScan { projection, .. } => {
-                self.projection(projection)
-            }
-            SqlPlan::KvInsert {
+            SqlPlan::PointGet { projection, .. }
+            | SqlPlan::RangeScan(RangeScanPlan { projection, .. }) => self.projection(projection),
+            SqlPlan::KvInsert(KvInsertPlan {
                 on_conflict_updates,
                 ..
-            }
-            | SqlPlan::Upsert {
+            })
+            | SqlPlan::Upsert(UpsertPlan {
                 on_conflict_updates,
                 ..
-            }
-            | SqlPlan::VectorPrimaryInsert {
+            })
+            | SqlPlan::VectorPrimaryInsert(VectorPrimaryInsertPlan {
                 on_conflict_updates,
                 ..
-            } => self.assignments(on_conflict_updates),
+            }) => self.assignments(on_conflict_updates),
             SqlPlan::InsertSelect {
                 source, column_map, ..
             } => {
@@ -83,11 +74,11 @@ impl Scope<'_> {
                 filters,
                 ..
             }
-            | SqlPlan::VectorPrimaryUpdate {
+            | SqlPlan::VectorPrimaryUpdate(VectorPrimaryUpdatePlan {
                 assignments,
                 filters,
                 ..
-            } => {
+            }) => {
                 self.assignments(assignments)?;
                 self.filters(filters)
             }
@@ -101,7 +92,8 @@ impl Scope<'_> {
                 self.assignments(assignments)?;
                 self.filters(target_filters)
             }
-            SqlPlan::Delete { filters, .. } | SqlPlan::VectorPrimaryDelete { filters, .. } => {
+            SqlPlan::Delete { filters, .. }
+            | SqlPlan::VectorPrimaryDelete(VectorPrimaryDeletePlan { filters, .. }) => {
                 self.filters(filters)
             }
             SqlPlan::Join {
@@ -140,13 +132,13 @@ impl Scope<'_> {
                 self.filters(having)?;
                 self.sort_keys(sort_keys)
             }
-            SqlPlan::TimeseriesScan {
+            SqlPlan::TimeseriesScan(TimeseriesScanPlan {
                 aggregates,
                 filters,
                 projection,
                 sort_keys,
                 ..
-            } => {
+            }) => {
                 self.aggregates(aggregates)?;
                 self.filters(filters)?;
                 self.projection(projection)?;
@@ -160,11 +152,11 @@ impl Scope<'_> {
             SqlPlan::SpatialScan {
                 attribute_filters, ..
             } => self.filters(attribute_filters),
-            SqlPlan::RecursiveScan {
+            SqlPlan::RecursiveScan(RecursiveScanPlan {
                 base_filters,
                 recursive_filters,
                 ..
-            } => {
+            }) => {
                 self.filters(base_filters)?;
                 self.filters(recursive_filters)
             }
@@ -173,7 +165,7 @@ impl Scope<'_> {
                 self.plan(left)?;
                 self.plan(right)
             }
-            SqlPlan::Cte { definitions, outer } => {
+            SqlPlan::Cte(CtePlan { definitions, outer }) => {
                 for (_, definition) in definitions {
                     self.plan(definition)?;
                 }
@@ -196,9 +188,9 @@ impl Scope<'_> {
                 self.windows(window_functions)?;
                 self.sort_keys(sort_keys)
             }
-            SqlPlan::Merge {
+            SqlPlan::Merge(MergePlan {
                 source, clauses, ..
-            } => {
+            }) => {
                 self.plan(source)?;
                 for clause in clauses {
                     self.filters(&clause.extra_predicate)?;
@@ -210,13 +202,13 @@ impl Scope<'_> {
                 }
                 Ok(())
             }
-            SqlPlan::LateralTopK {
+            SqlPlan::LateralTopK(LateralTopKPlan {
                 outer,
                 inner_filters,
                 inner_order_by,
                 projection,
                 ..
-            } => {
+            }) => {
                 self.plan(outer)?;
                 self.filters(inner_filters)?;
                 self.sort_keys(inner_order_by)?;
@@ -225,12 +217,12 @@ impl Scope<'_> {
                 }
                 self.projection(projection)
             }
-            SqlPlan::LateralLoop {
+            SqlPlan::LateralLoop(LateralLoopPlan {
                 outer,
                 inner,
                 projection,
                 ..
-            } => {
+            }) => {
                 self.plan(outer)?;
                 self.plan(inner)?;
                 if has_search_plan(outer) || has_search_plan(inner) {
@@ -266,208 +258,17 @@ impl Scope<'_> {
             | SqlPlan::DropIndex { .. } => Ok(()),
         }
     }
-
-    fn filters(&self, filters: &[Filter]) -> Result<()> {
-        filters
-            .iter()
-            .try_for_each(|filter| self.filter(&filter.expr))
-    }
-
-    fn filter(&self, expr: &FilterExpr) -> Result<()> {
-        match expr {
-            FilterExpr::Expr(expr) => self.expr(expr),
-            FilterExpr::And(children) | FilterExpr::Or(children) => self.filters(children),
-            FilterExpr::Not(child) => self.filter(&child.expr),
-            FilterExpr::Comparison { .. }
-            | FilterExpr::InList { .. }
-            | FilterExpr::Between { .. }
-            | FilterExpr::IsNull { .. }
-            | FilterExpr::IsNotNull { .. } => Ok(()),
-        }
-    }
-
-    fn projection(&self, projection: &[Projection]) -> Result<()> {
-        for item in projection {
-            match item {
-                Projection::Computed { expr, .. } | Projection::CpComputed { expr, .. } => {
-                    self.expr(expr)?
-                }
-                Projection::Column(_) | Projection::Star | Projection::QualifiedStar(_) => {}
-            }
-        }
-        Ok(())
-    }
-
-    fn sort_keys(&self, sort_keys: &[SortKey]) -> Result<()> {
-        sort_keys.iter().try_for_each(|key| self.expr(&key.expr))
-    }
-
-    fn windows(&self, windows: &[WindowSpec]) -> Result<()> {
-        for window in windows {
-            self.exprs(&window.args)?;
-            self.exprs(&window.partition_by)?;
-            self.sort_keys(&window.order_by)?;
-        }
-        Ok(())
-    }
-
-    fn aggregates(&self, aggregates: &[AggregateExpr]) -> Result<()> {
-        aggregates
-            .iter()
-            .try_for_each(|aggregate| self.exprs(&aggregate.args))
-    }
-
-    fn assignments(&self, assignments: &[(String, SqlExpr)]) -> Result<()> {
-        assignments.iter().try_for_each(|(_, expr)| self.expr(expr))
-    }
-
-    fn exprs(&self, exprs: &[SqlExpr]) -> Result<()> {
-        exprs.iter().try_for_each(|expr| self.expr(expr))
-    }
-
-    fn expr(&self, expr: &SqlExpr) -> Result<()> {
-        match first_search_function(expr, self.functions) {
-            Some(name) => Err(SqlError::SearchFunctionOutsideSearch {
-                name: name.to_owned(),
-            }),
-            None => Ok(()),
-        }
-    }
-}
-
-/// Whether the search trigger `trigger` names a function that reads an
-/// index and has no per-row value.
-fn is_index_owned(trigger: SearchTrigger) -> bool {
-    match trigger {
-        SearchTrigger::MultiVectorSearch
-        | SearchTrigger::SparseSearch
-        | SearchTrigger::TextSearch
-        | SearchTrigger::HybridSearch
-        | SearchTrigger::TextMatch
-        | SearchTrigger::GraphSearch => true,
-        // The vector distances and the spatial predicates evaluate per row;
-        // the time bucket is a scalar; the array functions are table-valued
-        // and planned from FROM.
-        SearchTrigger::None
-        | SearchTrigger::VectorSearch
-        | SearchTrigger::SpatialDWithin
-        | SearchTrigger::SpatialContains
-        | SearchTrigger::SpatialIntersects
-        | SearchTrigger::SpatialWithin
-        | SearchTrigger::TimeBucket
-        | SearchTrigger::ArraySlice
-        | SearchTrigger::ArrayProject
-        | SearchTrigger::ArrayAgg
-        | SearchTrigger::ArrayElementwise
-        | SearchTrigger::ArrayFlush
-        | SearchTrigger::ArrayCompact => false,
-    }
-}
-
-/// The first index-owned search function `expr` calls outside a subquery.
-fn first_search_function<'e>(expr: &'e SqlExpr, functions: &FunctionRegistry) -> Option<&'e str> {
-    let find = |e: &'e SqlExpr| first_search_function(e, functions);
-    match expr {
-        SqlExpr::Function { name, args, .. } => {
-            if is_index_owned(functions.search_trigger(name)) {
-                return Some(name.as_str());
-            }
-            args.iter().find_map(find)
-        }
-        SqlExpr::BinaryOp { left, right, .. } => find(left).or_else(|| find(right)),
-        SqlExpr::UnaryOp { expr, .. }
-        | SqlExpr::Cast { expr, .. }
-        | SqlExpr::IsNull { expr, .. } => find(expr),
-        SqlExpr::Case {
-            operand,
-            when_then,
-            else_expr,
-        } => operand
-            .as_deref()
-            .and_then(find)
-            .or_else(|| {
-                when_then
-                    .iter()
-                    .find_map(|(when, then)| find(when).or_else(|| find(then)))
-            })
-            .or_else(|| else_expr.as_deref().and_then(find)),
-        SqlExpr::InList { expr, list, .. } => find(expr).or_else(|| list.iter().find_map(find)),
-        SqlExpr::Between {
-            expr, low, high, ..
-        } => find(expr).or_else(|| find(low)).or_else(|| find(high)),
-        SqlExpr::Like { expr, pattern, .. } => find(expr).or_else(|| find(pattern)),
-        SqlExpr::ArrayLiteral(items) => items.iter().find_map(find),
-        SqlExpr::Column { .. } | SqlExpr::Literal(_) | SqlExpr::Subquery(_) | SqlExpr::Wildcard => {
-            None
-        }
-    }
-}
-
-/// Whether `plan` is, or wraps, a search plan that serves a score column.
-fn has_search_plan(plan: &SqlPlan) -> bool {
-    match plan {
-        SqlPlan::VectorSearch { .. }
-        | SqlPlan::MultiVectorSearch { .. }
-        | SqlPlan::SparseSearch { .. }
-        | SqlPlan::TextSearch { .. }
-        | SqlPlan::HybridSearch { .. }
-        | SqlPlan::HybridSearchTriple { .. } => true,
-        SqlPlan::Subquery { input, .. } | SqlPlan::Aggregate { input, .. } => {
-            has_search_plan(input)
-        }
-        SqlPlan::Join { left, right, .. } => has_search_plan(left) || has_search_plan(right),
-        SqlPlan::LateralTopK { outer, .. } => has_search_plan(outer),
-        SqlPlan::LateralLoop { outer, inner, .. } => {
-            has_search_plan(outer) || has_search_plan(inner)
-        }
-        SqlPlan::Union { inputs, .. } => inputs.iter().any(has_search_plan),
-        SqlPlan::Intersect { left, right, .. } | SqlPlan::Except { left, right, .. } => {
-            has_search_plan(left) || has_search_plan(right)
-        }
-        SqlPlan::Cte { outer, .. } => has_search_plan(outer),
-        SqlPlan::ConstantResult { .. }
-        | SqlPlan::Scan { .. }
-        | SqlPlan::PointGet { .. }
-        | SqlPlan::DocumentIndexLookup { .. }
-        | SqlPlan::RangeScan { .. }
-        | SqlPlan::Insert { .. }
-        | SqlPlan::KvInsert { .. }
-        | SqlPlan::Upsert { .. }
-        | SqlPlan::InsertSelect { .. }
-        | SqlPlan::Update { .. }
-        | SqlPlan::UpdateFrom { .. }
-        | SqlPlan::Delete { .. }
-        | SqlPlan::Truncate { .. }
-        | SqlPlan::TimeseriesScan { .. }
-        | SqlPlan::TimeseriesIngest { .. }
-        | SqlPlan::SpatialScan { .. }
-        | SqlPlan::RecursiveScan { .. }
-        | SqlPlan::RecursiveValue { .. }
-        | SqlPlan::CreateArray { .. }
-        | SqlPlan::DropArray { .. }
-        | SqlPlan::AlterArray { .. }
-        | SqlPlan::InsertArray { .. }
-        | SqlPlan::DeleteArray { .. }
-        | SqlPlan::ArraySlice { .. }
-        | SqlPlan::ArrayProject { .. }
-        | SqlPlan::ArrayAgg { .. }
-        | SqlPlan::ArrayElementwise { .. }
-        | SqlPlan::ArrayFlush { .. }
-        | SqlPlan::ArrayCompact { .. }
-        | SqlPlan::Merge { .. }
-        | SqlPlan::VectorPrimaryInsert { .. }
-        | SqlPlan::VectorPrimaryDelete { .. }
-        | SqlPlan::VectorPrimaryTruncate { .. }
-        | SqlPlan::VectorPrimaryUpdate { .. }
-        | SqlPlan::CreateIndex { .. }
-        | SqlPlan::DropIndex { .. } => false,
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::refuse_row_scoped_search_functions;
+    use crate::error::{Result, SqlError};
+    use crate::functions::registry::FunctionRegistry;
     use crate::types::query::EngineType;
+    use crate::types::query::Projection;
+    use crate::types::{Filter, FilterExpr, SqlPlan};
+    use crate::types_expr::SqlExpr;
     use crate::types_expr::SqlValue;
 
     fn call(name: &str) -> SqlExpr {
@@ -562,6 +363,7 @@ mod tests {
     fn a_search_plan_projection_serves_its_score() {
         let plan = SqlPlan::TextSearch {
             collection: "docs".into(),
+            field: None,
             query: crate::fts_types::FtsQuery::Plain {
                 text: "rust".into(),
                 fuzzy: true,
@@ -581,6 +383,7 @@ mod tests {
     fn a_subquery_tail_over_a_search_plan_is_not_checked() {
         let search = SqlPlan::TextSearch {
             collection: "docs".into(),
+            field: None,
             query: crate::fts_types::FtsQuery::Plain {
                 text: "rust".into(),
                 fuzzy: true,

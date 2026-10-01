@@ -10,7 +10,8 @@
 pub struct ShortestPathParams<'a> {
     pub src: &'a str,
     pub dst: &'a str,
-    pub label_filter: Option<&'a str>,
+    /// Empty permits every label. Otherwise, any listed label matches.
+    pub label_filter: &'a [&'a str],
     pub max_depth: usize,
     pub max_visited: usize,
     pub frontier_bitmap: Option<&'a nodedb_types::SurrogateBitmap>,

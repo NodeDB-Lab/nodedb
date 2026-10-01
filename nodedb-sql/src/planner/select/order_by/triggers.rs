@@ -12,7 +12,7 @@ use sqlparser::ast::{self, FunctionArg, FunctionArguments};
 use super::super::entry_ann::parse_ann_options;
 use super::super::helpers::{
     extract_column_name, extract_float_array, extract_func_args, extract_string_literal,
-    metric_from_func_name, source_projection,
+    extract_text_field, metric_from_func_name, source_projection,
 };
 use super::aliases::function_call_name;
 use super::hybrid::{no_args_rrf_score_error, plan_hybrid_from_sort};
@@ -124,6 +124,7 @@ pub(super) fn try_extract_sort_search(
             }))
         }
         SearchTrigger::TextSearch if args.len() >= 2 => {
+            let field = extract_text_field(&args[0])?;
             let query_text = extract_string_literal(&args[1])?;
             let limit = match plan {
                 SqlPlan::Scan { limit, .. } => limit.unwrap_or(10),
@@ -131,6 +132,7 @@ pub(super) fn try_extract_sort_search(
             };
             Ok(Some(SqlPlan::TextSearch {
                 collection,
+                field,
                 query: crate::fts_types::FtsQuery::Plain {
                     text: query_text,
                     fuzzy: true,

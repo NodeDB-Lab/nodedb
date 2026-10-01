@@ -2,7 +2,9 @@
 
 //! Lower `SqlPlan::Merge` to `DocumentOp::Merge` physical task.
 
-use nodedb_sql::types::{MergeClauseKind, MergePlanAction, MergePlanClause, SqlExpr, SqlPlan};
+use nodedb_sql::types::{
+    DocumentIndexLookupPlan, MergeClauseKind, MergePlanAction, MergePlanClause, SqlExpr, SqlPlan,
+};
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::types::TenantId;
@@ -54,7 +56,7 @@ pub(in super::super) fn convert_merge(
         SqlPlan::Scan { collection, .. } => {
             nodedb_types::QualifiedCollection::new(ctx.database_id, collection)
         }
-        SqlPlan::DocumentIndexLookup { collection, .. } => {
+        SqlPlan::DocumentIndexLookup(DocumentIndexLookupPlan { collection, .. }) => {
             nodedb_types::QualifiedCollection::new(ctx.database_id, collection)
         }
         other => {

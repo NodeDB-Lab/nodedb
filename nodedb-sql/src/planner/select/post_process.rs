@@ -17,6 +17,11 @@
 
 use crate::error::{Result, SqlError};
 use crate::planner::qualified_name;
+use crate::types::{
+    ArrayProjectPlan, ArraySlicePlan, DocumentIndexLookupPlan, HybridSearchPlan,
+    HybridSearchTriplePlan, LateralLoopPlan, LateralTopKPlan, RangeScanPlan, RecursiveScanPlan,
+    TimeseriesScanPlan,
+};
 use crate::types::{Projection, SortKey, SqlExpr, SqlPlan};
 
 /// Wrap `input` in a post-processing node that applies `sort_keys`, `offset`
@@ -59,12 +64,12 @@ fn retain_sort_columns(input: &mut SqlPlan, sort_keys: &[SortKey]) -> Result<Vec
 
     // An array body narrows to named attributes rather than a SELECT list, so
     // a sort column it does not already emit cannot be added back.
-    if let SqlPlan::ArraySlice {
+    if let SqlPlan::ArraySlice(ArraySlicePlan {
         attr_projection, ..
-    }
-    | SqlPlan::ArrayProject {
+    })
+    | SqlPlan::ArrayProject(ArrayProjectPlan {
         attr_projection, ..
-    } = input
+    }) = input
         && !attr_projection.is_empty()
         && let Some(missing) = first_missing_attr(attr_projection, sort_keys)
     {
@@ -164,19 +169,19 @@ fn body_projection_mut(plan: &mut SqlPlan) -> Option<&mut Vec<Projection>> {
         SqlPlan::Scan { projection, .. }
         | SqlPlan::Join { projection, .. }
         | SqlPlan::PointGet { projection, .. }
-        | SqlPlan::RangeScan { projection, .. }
-        | SqlPlan::DocumentIndexLookup { projection, .. }
-        | SqlPlan::TimeseriesScan { projection, .. }
+        | SqlPlan::RangeScan(RangeScanPlan { projection, .. })
+        | SqlPlan::DocumentIndexLookup(DocumentIndexLookupPlan { projection, .. })
+        | SqlPlan::TimeseriesScan(TimeseriesScanPlan { projection, .. })
         | SqlPlan::VectorSearch { projection, .. }
         | SqlPlan::MultiVectorSearch { projection, .. }
         | SqlPlan::SparseSearch { projection, .. }
         | SqlPlan::TextSearch { projection, .. }
-        | SqlPlan::HybridSearch { projection, .. }
-        | SqlPlan::HybridSearchTriple { projection, .. }
+        | SqlPlan::HybridSearch(HybridSearchPlan { projection, .. })
+        | SqlPlan::HybridSearchTriple(HybridSearchTriplePlan { projection, .. })
         | SqlPlan::SpatialScan { projection, .. }
-        | SqlPlan::RecursiveScan { projection, .. }
-        | SqlPlan::LateralTopK { projection, .. }
-        | SqlPlan::LateralLoop { projection, .. }
+        | SqlPlan::RecursiveScan(RecursiveScanPlan { projection, .. })
+        | SqlPlan::LateralTopK(LateralTopKPlan { projection, .. })
+        | SqlPlan::LateralLoop(LateralLoopPlan { projection, .. })
         | SqlPlan::Subquery { projection, .. } => Some(projection),
         _ => None,
     }

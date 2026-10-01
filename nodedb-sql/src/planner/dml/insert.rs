@@ -215,11 +215,11 @@ mod tests {
             ],
         ));
         let plan = plan("INSERT INTO t (id) VALUES ('r1')", &catalog).expect("plans");
-        let SqlPlan::Insert {
+        let SqlPlan::Insert(InsertPlan {
             rows,
             volatile_defaults,
             ..
-        } = plan
+        }) = plan
         else {
             panic!("expected SqlPlan::Insert, got {plan:?}");
         };
@@ -260,11 +260,11 @@ mod tests {
             ],
         ));
         let plan = plan("INSERT INTO t (v) VALUES (1.0)", &catalog).expect("plans");
-        let SqlPlan::TimeseriesIngest {
+        let SqlPlan::TimeseriesIngest(TimeseriesIngestPlan {
             rows,
             volatile_defaults,
             ..
-        } = plan
+        }) = plan
         else {
             panic!("expected SqlPlan::TimeseriesIngest, got {plan:?}");
         };

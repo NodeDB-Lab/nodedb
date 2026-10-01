@@ -16,6 +16,7 @@
 //! The hint carries the collection name, index field, and the predicate value(s)
 //! so the converter layer can build an `IndexedFetch` physical sub-plan.
 
+use crate::types::DocumentIndexLookupPlan;
 use crate::types::{CompareOp, FilterExpr, SqlPlan, SqlValue};
 
 /// Maximum IN-list cardinality for which bitmap emission is attempted.
@@ -42,12 +43,12 @@ pub struct BitmapHint {
 pub fn analyze(plan: &SqlPlan) -> Option<BitmapHint> {
     match plan {
         // Already a single-field equality index lookup — always qualifies.
-        SqlPlan::DocumentIndexLookup {
+        SqlPlan::DocumentIndexLookup(DocumentIndexLookupPlan {
             collection,
             field,
             value,
             ..
-        } => Some(BitmapHint {
+        }) => Some(BitmapHint {
             collection: collection.clone(),
             field: field.clone(),
             primary_value: value.clone(),

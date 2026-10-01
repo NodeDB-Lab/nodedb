@@ -6,7 +6,7 @@
 //! Assignments are converted with table-qualified column references so the Data
 //! Plane can resolve `src.col` against the merged `{target + "src.col": ...}` doc.
 
-use nodedb_sql::types::{Filter, SqlExpr, SqlPlan};
+use nodedb_sql::types::{DocumentIndexLookupPlan, Filter, SqlExpr, SqlPlan};
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::types::TenantId;
@@ -62,9 +62,9 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update_from(
             let alias_str = alias.as_deref().unwrap_or(collection.as_str()).to_string();
             (qualified, alias_str)
         }
-        SqlPlan::DocumentIndexLookup {
+        SqlPlan::DocumentIndexLookup(DocumentIndexLookupPlan {
             collection, alias, ..
-        } => {
+        }) => {
             let qualified = nodedb_types::QualifiedCollection::new(ctx.database_id, collection);
             let alias_str = alias.as_deref().unwrap_or(collection.as_str()).to_string();
             (qualified, alias_str)

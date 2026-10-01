@@ -7,6 +7,7 @@
 //! where each row is itself a `LoroMap` of field→value.
 
 pub mod bitemporal_archive;
+pub mod changed_rows;
 pub mod core;
 pub(crate) mod document_cell;
 pub mod frontier_digest;
@@ -14,6 +15,7 @@ pub mod history;
 pub(crate) mod import_admission;
 pub mod preview;
 pub mod rekey;
+pub mod remove_fields;
 pub(crate) mod restore_containers;
 pub mod snapshot;
 pub mod write_set;

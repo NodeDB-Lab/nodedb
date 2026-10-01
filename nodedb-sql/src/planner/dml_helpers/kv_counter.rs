@@ -103,7 +103,7 @@ pub fn plan_kv_counter_fresh_row(
         catalog,
     })?;
     let cells = match plans.into_iter().next() {
-        Some(SqlPlan::KvInsert { mut entries, .. }) if entries.len() == 1 => {
+        Some(SqlPlan::KvInsert(KvInsertPlan { mut entries, .. })) if entries.len() == 1 => {
             let (_, cells) = entries.remove(0);
             cells
                 .into_iter()

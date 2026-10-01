@@ -19,6 +19,16 @@ pub use expr_scan::{
 };
 pub use merge_types::{MergeClauseKind, MergePlanAction, MergePlanClause};
 pub use row_types::{KvInsertIntent, VectorPrimaryInsertIntent, VectorPrimaryRow, WriteRoute};
+/// Per-family payloads of the larger `SqlPlan` variants.
+pub use variants::{
+    AlterArrayPlan, ArrayAggPlan, ArrayElementwisePlan, ArrayProjectPlan, ArraySlicePlan,
+    CreateArrayPlan, CreateIndexPlan, CtePlan, DeleteArrayPlan, DocumentIndexLookupPlan,
+    DropIndexPlan, HybridSearchPlan, HybridSearchTriplePlan, InsertArrayPlan, InsertPlan,
+    KvInsertPlan, LateralLoopPlan, LateralTopKPlan, MergePlan, RangeScanPlan, RecursiveScanPlan,
+    RecursiveValuePlan, TimeseriesIngestPlan, TimeseriesScanPlan, UpsertPlan,
+    VectorPrimaryDeletePlan, VectorPrimaryInsertPlan, VectorPrimaryTruncatePlan,
+    VectorPrimaryUpdatePlan,
+};
 pub use variants::{DistanceMetric, SqlPlan};
 pub use vector_opts::{ArrayPrefilter, VectorAnnOptions, VectorQuantization};
 pub use volatility_scan::expr_is_volatile;

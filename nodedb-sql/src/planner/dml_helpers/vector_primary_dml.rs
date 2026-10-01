@@ -77,19 +77,21 @@ pub(crate) fn build_vector_primary_update_plan(
         }
         payload_assignments.push((column, expr));
     }
-    Ok(vec![SqlPlan::VectorPrimaryUpdate {
-        collection: collection.to_string(),
-        field: vpc.vector_field.clone(),
-        quantization: vpc.quantization,
-        storage_dtype: vpc.storage_dtype,
-        payload_indexes: vpc.payload_indexes.clone(),
-        new_vector,
-        assignments: payload_assignments,
-        filters,
-        target_keys,
-        returning,
-        primary_key: info.primary_key.clone(),
-    }])
+    Ok(vec![SqlPlan::VectorPrimaryUpdate(
+        VectorPrimaryUpdatePlan {
+            collection: collection.to_string(),
+            field: vpc.vector_field.clone(),
+            quantization: vpc.quantization,
+            storage_dtype: vpc.storage_dtype,
+            payload_indexes: vpc.payload_indexes.clone(),
+            new_vector,
+            assignments: payload_assignments,
+            filters,
+            target_keys,
+            returning,
+            primary_key: info.primary_key.clone(),
+        },
+    )])
 }
 
 /// Build a `SqlPlan::VectorPrimaryDelete`.
@@ -100,13 +102,13 @@ pub(crate) fn build_vector_primary_delete_plan(
     filters: Vec<Filter>,
     target_keys: Vec<SqlValue>,
 ) -> Vec<SqlPlan> {
-    vec![SqlPlan::VectorPrimaryDelete {
+    vec![SqlPlan::VectorPrimaryDelete(VectorPrimaryDeletePlan {
         collection: collection.to_string(),
         field: vpc.vector_field.clone(),
         filters,
         target_keys,
         primary_key: info.primary_key.clone(),
-    }]
+    })]
 }
 
 /// Build a `SqlPlan::VectorPrimaryTruncate`.
@@ -115,11 +117,11 @@ pub(crate) fn build_vector_primary_truncate_plan(
     vpc: &nodedb_types::VectorPrimaryConfig,
     restart_identity: bool,
 ) -> SqlPlan {
-    SqlPlan::VectorPrimaryTruncate {
+    SqlPlan::VectorPrimaryTruncate(VectorPrimaryTruncatePlan {
         collection: collection.to_string(),
         field: vpc.vector_field.clone(),
         restart_identity,
-    }
+    })
 }
 
 /// The `f32` components of an assigned vector expression.

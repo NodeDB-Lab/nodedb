@@ -91,16 +91,14 @@ pub fn plan_lateral_join(args: LateralJoinArgs<'_>) -> Result<SqlPlan> {
     let has_equi = !analysis.equi_keys.is_empty();
     let inner_limit = limit_from_query(subquery)?;
     reject_lateral_offset(subquery)?;
-    let is_top_k = has_equi && inner_limit.is_some() && analysis.non_equi.is_empty();
-
-    if is_top_k {
+    if let Some(inner_limit) = inner_limit.filter(|_| has_equi && analysis.non_equi.is_empty()) {
         plan_lateral_top_k(LateralTopKPlanArgs {
             outer_plan,
             outer_alias,
             select,
             subquery,
             equi_keys: analysis.equi_keys,
-            inner_limit: inner_limit.expect("checked above"),
+            inner_limit,
             lateral_alias,
             left_join,
             outer_projection,
@@ -170,7 +168,7 @@ pub fn plan_lateral_join(args: LateralJoinArgs<'_>) -> Result<SqlPlan> {
             .iter()
             .map(|c| (c.inner_col.clone(), c.outer_col.clone()))
             .collect();
-        Ok(SqlPlan::LateralLoop {
+        Ok(SqlPlan::LateralLoop(LateralLoopPlan {
             outer: Box::new(outer_plan),
             outer_alias,
             inner: Box::new(inner_plan),
@@ -179,7 +177,7 @@ pub fn plan_lateral_join(args: LateralJoinArgs<'_>) -> Result<SqlPlan> {
             projection: outer_projection,
             outer_row_cap: LATERAL_LOOP_CAP,
             left_join,
-        })
+        }))
     }
 }
 
@@ -327,7 +325,7 @@ fn plan_lateral_top_k(args: LateralTopKPlanArgs<'_>) -> Result<SqlPlan> {
         .map(|c| (c.outer_col, c.inner_col))
         .collect();
 
-    Ok(SqlPlan::LateralTopK {
+    Ok(SqlPlan::LateralTopK(LateralTopKPlan {
         outer: Box::new(outer_plan),
         outer_alias,
         inner_collection,
@@ -338,5 +336,5 @@ fn plan_lateral_top_k(args: LateralTopKPlanArgs<'_>) -> Result<SqlPlan> {
         lateral_alias: lateral_alias.to_string(),
         projection: outer_projection,
         left_join,
-    })
+    }))
 }

@@ -13,6 +13,12 @@ use super::args::{
 };
 use super::trait_def::PlanVisitor;
 use crate::types::SqlPlan;
+use crate::types::{
+    AlterArrayPlan, ArrayAggPlan, ArrayElementwisePlan, ArrayProjectPlan, ArraySlicePlan,
+    CreateArrayPlan, CreateIndexPlan, CtePlan, DeleteArrayPlan, DropIndexPlan, InsertArrayPlan,
+    LateralLoopPlan, LateralTopKPlan, MergePlan, VectorPrimaryDeletePlan, VectorPrimaryInsertPlan,
+    VectorPrimaryTruncatePlan, VectorPrimaryUpdatePlan,
+};
 
 pub(super) fn dispatch_rest<V: PlanVisitor>(
     visitor: &mut V,
@@ -22,7 +28,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
         SqlPlan::Union { inputs, distinct } => visitor.union(inputs, *distinct),
         SqlPlan::Intersect { left, right, all } => visitor.intersect(left, right, *all),
         SqlPlan::Except { left, right, all } => visitor.except(left, right, *all),
-        SqlPlan::Cte { definitions, outer } => visitor.cte(definitions, outer),
+        SqlPlan::Cte(CtePlan { definitions, outer }) => visitor.cte(definitions, outer),
         SqlPlan::Subquery {
             input,
             filters,
@@ -42,7 +48,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             distinct: *distinct,
             limit: *limit,
         }),
-        SqlPlan::CreateArray {
+        SqlPlan::CreateArray(CreateArrayPlan {
             name,
             dims,
             attrs,
@@ -52,7 +58,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             prefix_bits,
             audit_retain_ms,
             minimum_audit_retain_ms,
-        } => visitor.create_array(CreateArrayVisitArgs {
+        }) => visitor.create_array(CreateArrayVisitArgs {
             name,
             dims,
             attrs,
@@ -64,40 +70,42 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             minimum_audit_retain_ms: *minimum_audit_retain_ms,
         }),
         SqlPlan::DropArray { name, if_exists } => visitor.drop_array(name, *if_exists),
-        SqlPlan::AlterArray {
+        SqlPlan::AlterArray(AlterArrayPlan {
             name,
             audit_retain_ms,
             minimum_audit_retain_ms,
-        } => visitor.alter_array(name, *audit_retain_ms, *minimum_audit_retain_ms),
-        SqlPlan::InsertArray { name, rows } => visitor.insert_array(name, rows),
-        SqlPlan::DeleteArray { name, coords } => visitor.delete_array(name, coords),
-        SqlPlan::ArraySlice {
+        }) => visitor.alter_array(name, *audit_retain_ms, *minimum_audit_retain_ms),
+        SqlPlan::InsertArray(InsertArrayPlan { name, rows }) => visitor.insert_array(name, rows),
+        SqlPlan::DeleteArray(DeleteArrayPlan { name, coords }) => {
+            visitor.delete_array(name, coords)
+        }
+        SqlPlan::ArraySlice(ArraySlicePlan {
             name,
             slice,
             attr_projection,
             limit,
             temporal,
-        } => visitor.array_slice(name, slice, attr_projection, *limit, temporal),
-        SqlPlan::ArrayProject {
+        }) => visitor.array_slice(name, slice, attr_projection, *limit, temporal),
+        SqlPlan::ArrayProject(ArrayProjectPlan {
             name,
             attr_projection,
-        } => visitor.array_project(name, attr_projection),
-        SqlPlan::ArrayAgg {
+        }) => visitor.array_project(name, attr_projection),
+        SqlPlan::ArrayAgg(ArrayAggPlan {
             name,
             attr,
             reducer,
             group_by_dim,
             temporal,
-        } => visitor.array_agg(name, attr, reducer, group_by_dim.as_deref(), temporal),
-        SqlPlan::ArrayElementwise {
+        }) => visitor.array_agg(name, attr, reducer, group_by_dim.as_deref(), temporal),
+        SqlPlan::ArrayElementwise(ArrayElementwisePlan {
             left,
             right,
             op,
             attr,
-        } => visitor.array_elementwise(left, right, *op, attr),
+        }) => visitor.array_elementwise(left, right, *op, attr),
         SqlPlan::ArrayFlush { name } => visitor.array_flush(name),
         SqlPlan::ArrayCompact { name } => visitor.array_compact(name),
-        SqlPlan::Merge {
+        SqlPlan::Merge(MergePlan {
             target,
             engine,
             source,
@@ -106,7 +114,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             source_alias,
             clauses,
             returning,
-        } => visitor.merge(MergeVisitArgs {
+        }) => visitor.merge(MergeVisitArgs {
             target,
             engine: *engine,
             source,
@@ -116,7 +124,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             clauses,
             returning: *returning,
         }),
-        SqlPlan::LateralTopK {
+        SqlPlan::LateralTopK(LateralTopKPlan {
             outer,
             outer_alias,
             inner_collection,
@@ -127,7 +135,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             lateral_alias,
             projection,
             left_join,
-        } => visitor.lateral_top_k(LateralTopKVisitArgs {
+        }) => visitor.lateral_top_k(LateralTopKVisitArgs {
             outer,
             outer_alias: outer_alias.as_deref(),
             inner_collection,
@@ -139,7 +147,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             projection,
             left_join: *left_join,
         }),
-        SqlPlan::LateralLoop {
+        SqlPlan::LateralLoop(LateralLoopPlan {
             outer,
             outer_alias,
             inner,
@@ -148,7 +156,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             projection,
             outer_row_cap,
             left_join,
-        } => visitor.lateral_loop(LateralLoopVisitArgs {
+        }) => visitor.lateral_loop(LateralLoopVisitArgs {
             outer,
             outer_alias: outer_alias.as_deref(),
             inner,
@@ -158,7 +166,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             outer_row_cap: *outer_row_cap,
             left_join: *left_join,
         }),
-        SqlPlan::VectorPrimaryInsert {
+        SqlPlan::VectorPrimaryInsert(VectorPrimaryInsertPlan {
             collection,
             field,
             quantization,
@@ -170,7 +178,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             intent,
             on_conflict_updates,
             primary_key,
-        } => visitor.vector_primary_insert(VectorPrimaryInsertVisitArgs {
+        }) => visitor.vector_primary_insert(VectorPrimaryInsertVisitArgs {
             collection,
             field,
             quantization: *quantization,
@@ -181,25 +189,25 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             on_conflict_updates,
             primary_key: primary_key.as_deref(),
         }),
-        SqlPlan::VectorPrimaryDelete {
+        SqlPlan::VectorPrimaryDelete(VectorPrimaryDeletePlan {
             collection,
             field,
             filters,
             target_keys,
             primary_key,
-        } => visitor.vector_primary_delete(VectorPrimaryDeleteVisitArgs {
+        }) => visitor.vector_primary_delete(VectorPrimaryDeleteVisitArgs {
             collection,
             field,
             filters,
             target_keys,
             primary_key: primary_key.as_deref(),
         }),
-        SqlPlan::VectorPrimaryTruncate {
+        SqlPlan::VectorPrimaryTruncate(VectorPrimaryTruncatePlan {
             collection,
             field,
             restart_identity,
-        } => visitor.vector_primary_truncate(collection, field, *restart_identity),
-        SqlPlan::VectorPrimaryUpdate {
+        }) => visitor.vector_primary_truncate(collection, field, *restart_identity),
+        SqlPlan::VectorPrimaryUpdate(VectorPrimaryUpdatePlan {
             collection,
             field,
             quantization,
@@ -211,7 +219,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             target_keys,
             returning,
             primary_key,
-        } => visitor.vector_primary_update(VectorPrimaryUpdateVisitArgs {
+        }) => visitor.vector_primary_update(VectorPrimaryUpdateVisitArgs {
             collection,
             field,
             quantization: *quantization,
@@ -224,14 +232,14 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             returning: *returning,
             primary_key: primary_key.as_deref(),
         }),
-        SqlPlan::CreateIndex {
+        SqlPlan::CreateIndex(CreateIndexPlan {
             index_name,
             collection,
             field,
             unique,
             if_not_exists,
             case_insensitive,
-        } => visitor.create_index(
+        }) => visitor.create_index(
             index_name.as_deref(),
             collection,
             field,
@@ -239,11 +247,11 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             *if_not_exists,
             *case_insensitive,
         ),
-        SqlPlan::DropIndex {
+        SqlPlan::DropIndex(DropIndexPlan {
             index_name,
             collection,
             if_exists,
-        } => visitor.drop_index(index_name, collection.as_deref(), *if_exists),
+        }) => visitor.drop_index(index_name, collection.as_deref(), *if_exists),
         _ => unreachable!(
             "dispatch() already handles every remaining SqlPlan variant before forwarding here"
         ),

@@ -7,23 +7,18 @@
 //! item that calls a sequence accessor is neither, so the aggregate cannot
 //! carry it. The planner wraps the finished aggregate in a `Subquery` whose
 //! projection restates every output column in SELECT-list order and places a
-//! [`Projection::CpComputed`] entry at the item's position. The wrap runs
+//! [`crate::types::Projection::CpComputed`] entry at the item's position. The wrap runs
 //! after ORDER BY and LIMIT are attached, so those stay on the aggregate.
 
+use crate::types::CtePlan;
 use sqlparser::ast;
 
-use crate::aggregate_walk::contains_aggregate;
+use super::projection::aggregate_cp_projection;
 use crate::error::{Result, SqlError};
 use crate::functions::registry::FunctionRegistry;
-use crate::parser::normalize::normalize_ident;
-use crate::planner::agg_naming::group_key_row_name;
-use crate::planner::aggregate_order::compute_output_order_by_item;
-use crate::planner::cp_projection::{ast_calls_sequence_accessor, ast_sequence_accessor};
-use crate::resolver::ColumnScope;
+use crate::planner::cp_projection::ast_sequence_accessor;
 use crate::resolver::columns::TableScope;
-use crate::resolver::expr::convert_expr;
-use crate::types::plan::{first_sequence_accessor, referenced_columns};
-use crate::types::{AggOutputSlot, AggregateExpr, Projection, SqlExpr, SqlPlan};
+use crate::types::SqlPlan;
 
 /// Wrap `plan` when `items` hold a sequence accessor the aggregate cannot
 /// carry. A plan with no such item, or one that is not grouped, returns
@@ -52,12 +47,12 @@ pub fn wrap_aggregate_cp_items(
         return Err(SqlError::SequencePerRowUnsupported { name: accessor });
     }
     match plan {
-        SqlPlan::Cte { definitions, outer } => Ok(SqlPlan::Cte {
+        SqlPlan::Cte(CtePlan { definitions, outer }) => Ok(SqlPlan::Cte(CtePlan {
             definitions,
             outer: Box::new(wrap_aggregate_cp_items(
                 *outer, items, grouped, functions, scope,
             )?),
-        }),
+        })),
         SqlPlan::Aggregate { .. } => {
             let projection = aggregate_cp_projection(&plan, items, functions, scope)?;
             Ok(SqlPlan::Subquery {
@@ -120,200 +115,6 @@ fn item_accessor(item: &ast::SelectItem) -> Option<String> {
         ast::SelectItem::ExprWithAliases { .. }
         | ast::SelectItem::Wildcard(_)
         | ast::SelectItem::QualifiedWildcard(..) => None,
-    }
-}
-
-/// The projection restating `plan`'s output columns in SELECT-list order,
-/// with a [`Projection::CpComputed`] entry at each accessor item's position.
-/// `plan` is the `Aggregate` the items were planned into.
-fn aggregate_cp_projection(
-    plan: &SqlPlan,
-    items: &[ast::SelectItem],
-    functions: &FunctionRegistry,
-    scope: &TableScope,
-) -> Result<Vec<Projection>> {
-    let (group_by, aggregates) = match plan {
-        SqlPlan::Aggregate {
-            group_by,
-            aggregates,
-            ..
-        } => (group_by, aggregates),
-        other => {
-            return Err(SqlError::Unsupported {
-                detail: format!("aggregate wrap over a {} plan", other.variant_name()),
-            });
-        }
-    };
-    let key_names: Vec<String> = group_by
-        .iter()
-        .enumerate()
-        .map(|(index, key)| group_key_row_name(key, index))
-        .collect();
-    let by_item = compute_output_order_by_item(items, group_by, functions, scope)?;
-    // The item resolves against the input relations, so an unknown column is
-    // the usual resolve error, and against the group-key row names, so a
-    // computed key (`group_0`) is addressable. The reference check below
-    // then narrows to the keys: the finalized group row carries nothing
-    // else the Control Plane can read.
-    let cp_scope = scope
-        .with_output_names(key_names.iter().cloned())
-        .allowing_cp_functions();
-
-    let mut projection = Vec::with_capacity(items.len());
-    for (item, slots) in items.iter().zip(by_item) {
-        let (expr, alias) = match item {
-            ast::SelectItem::UnnamedExpr(expr) => (expr, format!("{expr}").to_lowercase()),
-            ast::SelectItem::ExprWithAlias { expr, alias } => (expr, normalize_ident(alias)),
-            ast::SelectItem::ExprWithAliases { .. }
-            | ast::SelectItem::Wildcard(_)
-            | ast::SelectItem::QualifiedWildcard(..) => continue,
-        };
-        if ast_calls_sequence_accessor(expr) {
-            let converted = convert_expr(expr, &ColumnScope::Relations(&cp_scope))?;
-            if let Some(name) = first_sequence_accessor(&converted) {
-                let name = name.to_string();
-                projection.push(cp_item(
-                    converted, name, alias, expr, &key_names, functions,
-                )?);
-                continue;
-            }
-        }
-        for slot in slots {
-            projection.push(Projection::Column(slot_row_name(
-                slot, &key_names, aggregates,
-            )?));
-        }
-    }
-    Ok(projection)
-}
-
-/// The Control-Plane entry for one accessor item over a grouped result.
-///
-/// The item holds no aggregate: the Control Plane evaluates it over the
-/// finalized group row, which carries aggregate values under their output
-/// names but no per-row aggregate state. Every column it references is a
-/// group key, unqualified so the reference matches the row's bare key.
-fn cp_item(
-    converted: SqlExpr,
-    accessor: String,
-    alias: String,
-    raw: &ast::Expr,
-    key_names: &[String],
-    functions: &FunctionRegistry,
-) -> Result<Projection> {
-    if contains_aggregate(raw, functions) {
-        return Err(SqlError::SequencePerRowUnsupported { name: accessor });
-    }
-    for column in referenced_columns(&converted) {
-        let bare = column.rsplit('.').next().unwrap_or(&column);
-        if !key_names.iter().any(|key| key.eq_ignore_ascii_case(bare)) {
-            return Err(SqlError::Unsupported {
-                detail: format!(
-                    "column '{column}' beside a sequence accessor in a grouped SELECT list \
-                     must be a GROUP BY key"
-                ),
-            });
-        }
-    }
-    Ok(Projection::CpComputed {
-        expr: unqualify_columns(converted),
-        alias,
-    })
-}
-
-/// The key a finalized group row carries one output slot under.
-fn slot_row_name(
-    slot: AggOutputSlot,
-    key_names: &[String],
-    aggregates: &[AggregateExpr],
-) -> Result<String> {
-    match slot {
-        AggOutputSlot::GroupKey(index) => key_names.get(index).cloned(),
-        AggOutputSlot::Aggregate(index) => aggregates.get(index).map(|a| a.alias.clone()),
-    }
-    .ok_or_else(|| SqlError::Unsupported {
-        detail: format!("aggregate output slot {slot:?} names no output column"),
-    })
-}
-
-/// `expr` with every column reference stripped of its table qualifier. A
-/// finalized group row keys its columns by bare name.
-fn unqualify_columns(expr: SqlExpr) -> SqlExpr {
-    match expr {
-        SqlExpr::Column { name, .. } => SqlExpr::Column { table: None, name },
-        SqlExpr::Function {
-            name,
-            args,
-            distinct,
-        } => SqlExpr::Function {
-            name,
-            args: args.into_iter().map(unqualify_columns).collect(),
-            distinct,
-        },
-        SqlExpr::BinaryOp { left, op, right } => SqlExpr::BinaryOp {
-            left: Box::new(unqualify_columns(*left)),
-            op,
-            right: Box::new(unqualify_columns(*right)),
-        },
-        SqlExpr::UnaryOp { op, expr } => SqlExpr::UnaryOp {
-            op,
-            expr: Box::new(unqualify_columns(*expr)),
-        },
-        SqlExpr::Cast { expr, to_type } => SqlExpr::Cast {
-            expr: Box::new(unqualify_columns(*expr)),
-            to_type,
-        },
-        SqlExpr::IsNull { expr, negated } => SqlExpr::IsNull {
-            expr: Box::new(unqualify_columns(*expr)),
-            negated,
-        },
-        SqlExpr::Case {
-            operand,
-            when_then,
-            else_expr,
-        } => SqlExpr::Case {
-            operand: operand.map(|e| Box::new(unqualify_columns(*e))),
-            when_then: when_then
-                .into_iter()
-                .map(|(when, then)| (unqualify_columns(when), unqualify_columns(then)))
-                .collect(),
-            else_expr: else_expr.map(|e| Box::new(unqualify_columns(*e))),
-        },
-        SqlExpr::InList {
-            expr,
-            list,
-            negated,
-        } => SqlExpr::InList {
-            expr: Box::new(unqualify_columns(*expr)),
-            list: list.into_iter().map(unqualify_columns).collect(),
-            negated,
-        },
-        SqlExpr::Between {
-            expr,
-            low,
-            high,
-            negated,
-        } => SqlExpr::Between {
-            expr: Box::new(unqualify_columns(*expr)),
-            low: Box::new(unqualify_columns(*low)),
-            high: Box::new(unqualify_columns(*high)),
-            negated,
-        },
-        SqlExpr::Like {
-            expr,
-            pattern,
-            negated,
-            case_insensitive,
-        } => SqlExpr::Like {
-            expr: Box::new(unqualify_columns(*expr)),
-            pattern: Box::new(unqualify_columns(*pattern)),
-            negated,
-            case_insensitive,
-        },
-        SqlExpr::ArrayLiteral(items) => {
-            SqlExpr::ArrayLiteral(items.into_iter().map(unqualify_columns).collect())
-        }
-        SqlExpr::Literal(_) | SqlExpr::Subquery(_) | SqlExpr::Wildcard => expr,
     }
 }
 

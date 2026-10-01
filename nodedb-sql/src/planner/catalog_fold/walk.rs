@@ -9,14 +9,18 @@
 //! the data-plane evaluator pure (no catalog/session context) while still
 //! supporting the `'name'::regclass` / `'name'::regtype` PostgreSQL idiom.
 
+use crate::types::{CtePlan, LateralLoopPlan, LateralTopKPlan, MergePlan};
 use nodedb_types::DatabaseId;
 
+use super::filter::fold_filter;
 use crate::catalog::SqlCatalog;
-use crate::types::{Filter, FilterExpr, MergePlanAction, SqlExpr, SqlPlan};
+use crate::types::{MergePlanAction, SqlExpr, SqlPlan};
 
-use super::catalog_expr_fold::fold_expr;
-use super::catalog_plan_shapes::{fold_aggregates, fold_projection, fold_sort_keys, fold_windows};
-use super::catalog_plan_validate::validate_catalog_exprs;
+use crate::planner::catalog_expr_fold::fold_expr;
+use crate::planner::catalog_plan_shapes::{
+    fold_aggregates, fold_projection, fold_sort_keys, fold_windows,
+};
+use crate::planner::catalog_plan_validate::validate_catalog_exprs;
 
 /// Walk every `Filter` in `plan` and fold catalog-dependent cast expressions
 /// to their constant OID equivalents.
@@ -95,13 +99,13 @@ fn walk_plan(
             all,
         },
 
-        SqlPlan::Cte { definitions, outer } => SqlPlan::Cte {
+        SqlPlan::Cte(CtePlan { definitions, outer }) => SqlPlan::Cte(CtePlan {
             definitions: definitions
                 .into_iter()
                 .map(|(name, plan)| (name, walk_plan(plan, catalog, database_id, tenant_id)))
                 .collect(),
             outer: Box::new(walk_plan(*outer, catalog, database_id, tenant_id)),
-        },
+        }),
 
         // The post-processing tail wraps a body that keeps its own filters. A
         // wrapper that stopped the walk left every catalog cast inside the body
@@ -161,64 +165,6 @@ fn walk_plan(
                 projection,
                 filters,
             }
-        }
-
-        mut plan @ (SqlPlan::PointGet { .. } | SqlPlan::RangeScan { .. }) => {
-            match &mut plan {
-                SqlPlan::PointGet { projection, .. } | SqlPlan::RangeScan { projection, .. } => {
-                    fold_projection(projection, catalog, database_id, tenant_id);
-                }
-                _ => unreachable!(),
-            }
-            plan
-        }
-
-        mut plan @ (SqlPlan::DocumentIndexLookup { .. }
-        | SqlPlan::Update { .. }
-        | SqlPlan::Delete { .. }
-        | SqlPlan::VectorPrimaryUpdate { .. }
-        | SqlPlan::VectorPrimaryDelete { .. }) => {
-            match &mut plan {
-                SqlPlan::DocumentIndexLookup {
-                    filters,
-                    projection,
-                    sort_keys,
-                    window_functions,
-                    ..
-                } => {
-                    for filter in filters {
-                        fold_filter(filter, catalog, database_id, tenant_id);
-                    }
-                    fold_projection(projection, catalog, database_id, tenant_id);
-                    fold_sort_keys(sort_keys, catalog, database_id, tenant_id);
-                    fold_windows(window_functions, catalog, database_id, tenant_id);
-                }
-                SqlPlan::Delete { filters, .. } | SqlPlan::VectorPrimaryDelete { filters, .. } => {
-                    for filter in filters {
-                        fold_filter(filter, catalog, database_id, tenant_id);
-                    }
-                }
-                SqlPlan::Update {
-                    assignments,
-                    filters,
-                    ..
-                }
-                | SqlPlan::VectorPrimaryUpdate {
-                    assignments,
-                    filters,
-                    ..
-                } => {
-                    for (_, expr) in assignments {
-                        let owned = std::mem::replace(expr, SqlExpr::Wildcard);
-                        *expr = fold_expr(owned, catalog, database_id, tenant_id);
-                    }
-                    for filter in filters {
-                        fold_filter(filter, catalog, database_id, tenant_id);
-                    }
-                }
-                _ => unreachable!(),
-            }
-            plan
         }
 
         SqlPlan::UpdateFrom {
@@ -295,7 +241,7 @@ fn walk_plan(
             }
         }
 
-        SqlPlan::LateralTopK {
+        SqlPlan::LateralTopK(LateralTopKPlan {
             outer,
             outer_alias,
             inner_collection,
@@ -306,13 +252,13 @@ fn walk_plan(
             lateral_alias,
             mut projection,
             left_join,
-        } => {
+        }) => {
             for filter in &mut inner_filters {
                 fold_filter(filter, catalog, database_id, tenant_id);
             }
             fold_sort_keys(&mut inner_order_by, catalog, database_id, tenant_id);
             fold_projection(&mut projection, catalog, database_id, tenant_id);
-            SqlPlan::LateralTopK {
+            SqlPlan::LateralTopK(LateralTopKPlan {
                 outer: Box::new(walk_plan(*outer, catalog, database_id, tenant_id)),
                 outer_alias,
                 inner_collection,
@@ -323,10 +269,10 @@ fn walk_plan(
                 lateral_alias,
                 projection,
                 left_join,
-            }
+            })
         }
 
-        SqlPlan::LateralLoop {
+        SqlPlan::LateralLoop(LateralLoopPlan {
             outer,
             outer_alias,
             inner,
@@ -335,9 +281,9 @@ fn walk_plan(
             mut projection,
             outer_row_cap,
             left_join,
-        } => {
+        }) => {
             fold_projection(&mut projection, catalog, database_id, tenant_id);
-            SqlPlan::LateralLoop {
+            SqlPlan::LateralLoop(LateralLoopPlan {
                 outer: Box::new(walk_plan(*outer, catalog, database_id, tenant_id)),
                 outer_alias,
                 inner: Box::new(walk_plan(*inner, catalog, database_id, tenant_id)),
@@ -346,10 +292,10 @@ fn walk_plan(
                 projection,
                 outer_row_cap,
                 left_join,
-            }
+            })
         }
 
-        SqlPlan::Merge {
+        SqlPlan::Merge(MergePlan {
             target,
             engine,
             source,
@@ -358,7 +304,7 @@ fn walk_plan(
             source_alias,
             mut clauses,
             returning,
-        } => {
+        }) => {
             for clause in &mut clauses {
                 for filter in &mut clause.extra_predicate {
                     fold_filter(filter, catalog, database_id, tenant_id);
@@ -379,7 +325,7 @@ fn walk_plan(
                     MergePlanAction::Delete | MergePlanAction::DoNothing => {}
                 }
             }
-            SqlPlan::Merge {
+            SqlPlan::Merge(MergePlan {
                 target,
                 engine,
                 source: Box::new(walk_plan(*source, catalog, database_id, tenant_id)),
@@ -388,117 +334,13 @@ fn walk_plan(
                 source_alias,
                 clauses,
                 returning,
-            }
-        }
-
-        mut plan @ (SqlPlan::VectorSearch { .. }
-        | SqlPlan::TextSearch { .. }
-        | SqlPlan::SpatialScan { .. }
-        | SqlPlan::RecursiveScan { .. }) => {
-            match &mut plan {
-                SqlPlan::VectorSearch {
-                    filters,
-                    projection,
-                    ..
-                } => {
-                    for filter in filters {
-                        fold_filter(filter, catalog, database_id, tenant_id);
-                    }
-                    fold_projection(projection, catalog, database_id, tenant_id);
-                }
-                SqlPlan::TextSearch {
-                    filters,
-                    projection,
-                    ..
-                } => {
-                    for filter in filters {
-                        fold_filter(filter, catalog, database_id, tenant_id);
-                    }
-                    fold_projection(projection, catalog, database_id, tenant_id);
-                }
-                SqlPlan::SpatialScan {
-                    attribute_filters,
-                    projection,
-                    ..
-                } => {
-                    for filter in attribute_filters {
-                        fold_filter(filter, catalog, database_id, tenant_id);
-                    }
-                    fold_projection(projection, catalog, database_id, tenant_id);
-                }
-                SqlPlan::RecursiveScan {
-                    base_filters,
-                    recursive_filters,
-                    projection,
-                    ..
-                } => {
-                    for filter in base_filters {
-                        fold_filter(filter, catalog, database_id, tenant_id);
-                    }
-                    for filter in recursive_filters {
-                        fold_filter(filter, catalog, database_id, tenant_id);
-                    }
-                    fold_projection(projection, catalog, database_id, tenant_id);
-                }
-                _ => unreachable!(),
-            }
-            plan
-        }
-
-        mut plan @ (SqlPlan::MultiVectorSearch { .. }
-        | SqlPlan::SparseSearch { .. }
-        | SqlPlan::HybridSearch { .. }
-        | SqlPlan::HybridSearchTriple { .. }) => {
-            match &mut plan {
-                SqlPlan::MultiVectorSearch { projection, .. }
-                | SqlPlan::SparseSearch { projection, .. }
-                | SqlPlan::HybridSearch { projection, .. }
-                | SqlPlan::HybridSearchTriple { projection, .. } => {
-                    fold_projection(projection, catalog, database_id, tenant_id);
-                }
-                _ => unreachable!(),
-            }
-            plan
+            })
         }
 
         // Plan variants without expression-bearing filters pass through unchanged.
-        other => other,
-    }
-}
-
-fn fold_filter(
-    filter: &mut Filter,
-    catalog: &dyn SqlCatalog,
-    database_id: DatabaseId,
-    tenant_id: u64,
-) {
-    fold_filter_expr(&mut filter.expr, catalog, database_id, tenant_id);
-}
-
-fn fold_filter_expr(
-    expr: &mut FilterExpr,
-    catalog: &dyn SqlCatalog,
-    database_id: DatabaseId,
-    tenant_id: u64,
-) {
-    match expr {
-        FilterExpr::Expr(sql_expr) => {
-            let owned = std::mem::replace(sql_expr, SqlExpr::Wildcard);
-            *sql_expr = fold_expr(owned, catalog, database_id, tenant_id);
+        mut other => {
+            super::leaf::fold_leaf(&mut other, catalog, database_id, tenant_id);
+            other
         }
-        FilterExpr::And(children) | FilterExpr::Or(children) => {
-            for child in children {
-                fold_filter_expr(&mut child.expr, catalog, database_id, tenant_id);
-            }
-        }
-        FilterExpr::Not(child) => {
-            fold_filter_expr(&mut child.expr, catalog, database_id, tenant_id);
-        }
-        // Simple comparison, InList, Between, IsNull, IsNotNull — no sub-expressions to fold.
-        FilterExpr::Comparison { .. }
-        | FilterExpr::InList { .. }
-        | FilterExpr::Between { .. }
-        | FilterExpr::IsNull { .. }
-        | FilterExpr::IsNotNull { .. } => {}
     }
 }
