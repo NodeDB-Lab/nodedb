@@ -13,6 +13,7 @@ use crate::error::{MemError, Result};
 use crate::over_release::ReleaseIdentity;
 use crate::reservation_token::{ReservationParams, ReservationToken};
 use crate::reserve_scope::{ReserveScope, ReservedLayers};
+use crate::scoped_budget::ScopedBudget;
 
 /// Build the token both entry points return. They differ in how they reach
 /// a committed [`ReservedLayers`], never in what they build from one.
@@ -62,21 +63,34 @@ impl MemoryGovernor {
         scope.try_credit_global()?;
 
         {
-            let map = self
-                .database_budgets
-                .read()
-                .unwrap_or_else(|p| p.into_inner());
-            if let Some(budget) = map.get(&db) {
-                match budget.try_reserve(size) {
-                    Ok(arc) => scope.credit_database(arc),
-                    Err(denied) => {
-                        return Err(MemError::DatabaseBudgetExhausted {
-                            db,
-                            requested: size,
-                            available: budget.available(),
-                            limit: denied.limit,
-                        });
-                    }
+            let budget = {
+                let map = self
+                    .database_budgets
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner());
+                map.get(&db).cloned()
+            };
+            let budget = match budget {
+                Some(b) => b,
+                None => {
+                    let mut map = self
+                        .database_budgets
+                        .write()
+                        .unwrap_or_else(|p| p.into_inner());
+                    map.entry(db)
+                        .or_insert_with(|| ScopedBudget::new(None))
+                        .clone()
+                }
+            };
+            match budget.try_reserve(size) {
+                Ok(arc) => scope.credit_database(arc),
+                Err(denied) => {
+                    return Err(MemError::DatabaseBudgetExhausted {
+                        db,
+                        requested: size,
+                        available: budget.available(),
+                        limit: denied.limit,
+                    });
                 }
             }
         }
@@ -138,13 +152,26 @@ impl MemoryGovernor {
         scope.credit_global_unchecked();
 
         {
-            let map = self
-                .database_budgets
-                .read()
-                .unwrap_or_else(|p| p.into_inner());
-            if let Some(budget) = map.get(&db) {
-                scope.credit_database(budget.credit(size));
-            }
+            let budget = {
+                let map = self
+                    .database_budgets
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner());
+                map.get(&db).cloned()
+            };
+            let budget = match budget {
+                Some(b) => b,
+                None => {
+                    let mut map = self
+                        .database_budgets
+                        .write()
+                        .unwrap_or_else(|p| p.into_inner());
+                    map.entry(db)
+                        .or_insert_with(|| ScopedBudget::new(None))
+                        .clone()
+                }
+            };
+            scope.credit_database(budget.credit(size));
         }
 
         {
@@ -492,5 +519,34 @@ mod tests {
             "rejected reservations must not exhaust the database quota, got {:?}",
             tok.err()
         );
+    }
+
+    #[test]
+    fn uncapped_database_usage_tracks_allocation() {
+        let gov = MemoryGovernor::new(test_config()).unwrap();
+        assert_eq!(gov.database_usage_bytes(db()), 0);
+
+        let tok = gov
+            .try_reserve(db(), tenant(), EngineId::Vector, 512)
+            .unwrap();
+        assert_eq!(gov.database_usage_bytes(db()), 512);
+
+        drop(tok);
+        assert_eq!(gov.database_usage_bytes(db()), 0);
+    }
+
+    #[test]
+    fn unbudgeted_database_tracks_8192_bytes_and_releases_on_drop() {
+        let gov = MemoryGovernor::new(test_config()).unwrap();
+        let unbudgeted_db = DatabaseId::new(42);
+        assert_eq!(gov.database_usage_bytes(unbudgeted_db), 0);
+
+        let token = gov
+            .try_reserve(unbudgeted_db, tenant(), EngineId::Vector, 8192)
+            .unwrap();
+        assert_eq!(gov.database_usage_bytes(unbudgeted_db), 8192);
+
+        drop(token);
+        assert_eq!(gov.database_usage_bytes(unbudgeted_db), 0);
     }
 }

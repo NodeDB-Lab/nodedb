@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 ///
 /// Quota changes mutate `limit` in place so live tokens keep decrementing the
 /// same counter.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ScopedBudget {
     /// `None` means uncapped, still counted.
     pub(crate) limit: Option<usize>,
@@ -25,7 +25,7 @@ pub(crate) struct BudgetDenied {
 }
 
 impl ScopedBudget {
-    fn new(limit: Option<usize>) -> Self {
+    pub(crate) fn new(limit: Option<usize>) -> Self {
         Self {
             limit,
             allocated: Arc::new(AtomicUsize::new(0)),

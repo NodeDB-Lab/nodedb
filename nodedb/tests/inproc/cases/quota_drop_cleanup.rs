@@ -245,11 +245,11 @@ async fn dropped_database_id_does_not_inherit_cap() {
         None,
         "the dead cap must not survive for a database reusing this id"
     );
+    let permit = registry
+        .try_acquire_database(db)
+        .expect("an uncapped database admits");
     assert!(
-        registry
-            .try_acquire_database(db)
-            .expect("an uncapped database admits")
-            .is_none(),
-        "an uncapped database hands out no permit"
+        permit.is_some(),
+        "an uncapped database hands out an unconstrained permit"
     );
 }

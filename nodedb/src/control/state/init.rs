@@ -395,6 +395,20 @@ impl SharedState {
             startup: Arc::clone(&startup_gate),
         });
         Self::wire_session_handle_audit(&state);
+        if let Some(metrics) = &state.system_metrics {
+            state.wal.set_metrics(Arc::clone(metrics));
+        }
+        state
+            .maintenance_budget
+            .set_metrics(Arc::clone(&state.database_metrics));
+        state
+            .maintenance_budget
+            .set_database_name(nodedb_types::DatabaseId::DEFAULT, "default");
+        if let Ok(databases) = state.credentials.catalog().list_databases() {
+            for db in databases {
+                state.maintenance_budget.set_database_name(db.id, &db.name);
+            }
+        }
         Ok(state)
     }
 }

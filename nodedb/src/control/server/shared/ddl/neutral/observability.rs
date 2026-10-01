@@ -171,19 +171,19 @@ pub fn show_metrics(
     if let Some(sys) = state.system_metrics.as_ref() {
         rows.push((
             "wal_fsync_p50_us".into(),
-            sys.wal_fsync_seconds.percentile(50.0).to_string(),
+            sys.wal_fsync_seconds.percentile(0.5).to_string(),
         ));
         rows.push((
             "wal_fsync_p99_us".into(),
-            sys.wal_fsync_seconds.percentile(99.0).to_string(),
+            sys.wal_fsync_seconds.percentile(0.99).to_string(),
         ));
         rows.push((
             "query_latency_p50_us".into(),
-            sys.query_latency.percentile(50.0).to_string(),
+            sys.query_latency.percentile(0.5).to_string(),
         ));
         rows.push((
             "query_latency_p99_us".into(),
-            sys.query_latency.percentile(99.0).to_string(),
+            sys.query_latency.percentile(0.99).to_string(),
         ));
     }
 

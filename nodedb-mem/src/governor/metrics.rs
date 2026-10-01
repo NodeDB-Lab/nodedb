@@ -5,11 +5,25 @@
 
 use std::sync::atomic::Ordering;
 
+use nodedb_types::DatabaseId;
+
 use super::core::MemoryGovernor;
 use crate::engine::EngineId;
 use crate::pressure::{PressureLevel, PressureThresholds};
 
 impl MemoryGovernor {
+    /// Current allocated memory in bytes for a database.
+    ///
+    /// Returns 0 if the database has no scoped budget or no active allocations.
+    pub fn database_usage_bytes(&self, db: DatabaseId) -> usize {
+        self.database_budgets
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&db)
+            .map(|b| b.allocated.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
     /// Total memory allocated across all engines (engine-layer sum). A
     /// separate aggregate from [`global_utilization_percent`](Self::global_utilization_percent),
     /// which reads the global counter admission enforces the ceiling against.
@@ -163,5 +177,17 @@ mod tests {
             .unwrap();
         assert_eq!(gov.engine_pressure(EngineId::Vector), PressureLevel::Normal);
         assert_eq!(gov.worst_engine_pressure(), PressureLevel::Critical);
+    }
+
+    #[test]
+    fn database_usage_bytes_tracks_allocation() {
+        let gov = MemoryGovernor::new(test_config()).unwrap();
+        gov.set_database_budget(db(), 10_000);
+        assert_eq!(gov.database_usage_bytes(db()), 0);
+
+        let _tok = gov
+            .try_reserve(db(), tenant(), EngineId::Vector, 512)
+            .unwrap();
+        assert_eq!(gov.database_usage_bytes(db()), 512);
     }
 }

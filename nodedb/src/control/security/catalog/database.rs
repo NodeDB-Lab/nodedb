@@ -223,6 +223,256 @@ impl SystemCatalog {
             .map_err(|e| catalog_err("list_databases read txn", e))?;
         list_databases_in(&txn)
     }
+
+    /// Calculate the real storage size in bytes used by a database across all catalog tables.
+    ///
+    /// Sums the persisted key and value byte lengths for all entries belonging to `db_id`
+    /// across collections, surrogate indexes, topics, streams, materialized views,
+    /// policies, procedures, triggers, functions, and database descriptors.
+    pub fn database_storage_bytes(&self, db_id: DatabaseId) -> crate::Result<u64> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| catalog_err("read txn for database_storage_bytes", e))?;
+
+        let id = db_id.as_u64();
+        let mut total_bytes: u64 = 0;
+
+        // 1. Collections: (database_id: u64, "{tenant_id}:{name}") -> msgpack
+        if let Ok(table) = read_txn.open_table(super::types::COLLECTIONS) {
+            if let Ok(range) = table.iter() {
+                for entry in range {
+                    if let Ok((k, v)) = entry {
+                        let (db, name) = k.value();
+                        if db == id {
+                            total_bytes = total_bytes
+                                .saturating_add(8 + name.len() as u64 + v.value().len() as u64);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Surrogate PKs: (database_id: u64, tenant_id: u64, collection, encoded_pk) -> u32
+        if let Ok(table) = read_txn.open_table(super::types::SURROGATE_PK_V3) {
+            if let Ok(range) = table.iter() {
+                for entry in range {
+                    if let Ok((k, _v)) = entry {
+                        let (db, _tid, coll, pk) = k.value();
+                        if db == id {
+                            total_bytes = total_bytes
+                                .saturating_add(16 + coll.len() as u64 + pk.len() as u64 + 4);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Surrogate PK Rev: (database_id: u64, tenant_id: u64, collection, surrogate: u32) -> encoded pk
+        if let Ok(table) = read_txn.open_table(super::types::SURROGATE_PK_REV_V3) {
+            if let Ok(range) = table.iter() {
+                for entry in range {
+                    if let Ok((k, v)) = entry {
+                        let (db, _tid, coll, _surr) = k.value();
+                        if db == id {
+                            total_bytes = total_bytes
+                                .saturating_add(20 + coll.len() as u64 + v.value().len() as u64);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Topic messages: [database_id: be u64]...
+        if let Ok(table) = read_txn.open_table(super::types::TOPIC_MESSAGES) {
+            let be_bytes = id.to_be_bytes();
+            if let Ok(range) = table.iter() {
+                for entry in range {
+                    if let Ok((k, v)) = entry {
+                        let k_bytes = k.value();
+                        if k_bytes.starts_with(&be_bytes) {
+                            total_bytes = total_bytes
+                                .saturating_add(k_bytes.len() as u64 + v.value().len() as u64);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. Ep Topics: "v2/{database_id}/{tenant_id}..."
+        if let Ok(table) = read_txn.open_table(super::types::TOPICS_EP) {
+            let prefix = format!("v2/{id}/");
+            if let Ok(range) = table.iter() {
+                for entry in range {
+                    if let Ok((k, v)) = entry {
+                        let k_str = k.value();
+                        if k_str.starts_with(&prefix) {
+                            total_bytes = total_bytes
+                                .saturating_add(k_str.len() as u64 + v.value().len() as u64);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 6. Change streams: "v2/{database_id}/..."
+        if let Ok(table) = read_txn.open_table(super::types::CHANGE_STREAMS) {
+            let prefix = format!("v2/{id}/");
+            if let Ok(range) = table.iter() {
+                for entry in range {
+                    if let Ok((k, v)) = entry {
+                        let k_str = k.value();
+                        if k_str.starts_with(&prefix) {
+                            total_bytes = total_bytes
+                                .saturating_add(k_str.len() as u64 + v.value().len() as u64);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 7. Consumer groups: "v2:{database_id}:..."
+        if let Ok(table) = read_txn.open_table(super::types::CONSUMER_GROUPS) {
+            let prefix = format!("v2:{id}:");
+            if let Ok(range) = table.iter() {
+                for entry in range {
+                    if let Ok((k, v)) = entry {
+                        let k_str = k.value();
+                        if k_str.starts_with(&prefix) {
+                            total_bytes = total_bytes
+                                .saturating_add(k_str.len() as u64 + v.value().len() as u64);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 8. Streaming MVs: "v2:{database_id}:..."
+        if let Ok(table) = read_txn.open_table(super::types::STREAMING_MVS) {
+            let prefix = format!("v2:{id}:");
+            if let Ok(range) = table.iter() {
+                for entry in range {
+                    if let Ok((k, v)) = entry {
+                        let k_str = k.value();
+                        if k_str.starts_with(&prefix) {
+                            total_bytes = total_bytes
+                                .saturating_add(k_str.len() as u64 + v.value().len() as u64);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 9. Continuous Aggregates: (database_id: u64, "{tenant_id}:{name}")
+        if let Ok(table) = read_txn.open_table(super::types::CONTINUOUS_AGGREGATES) {
+            if let Ok(range) = table.iter() {
+                for entry in range {
+                    if let Ok((k, v)) = entry {
+                        let (db, name) = k.value();
+                        if db == id {
+                            total_bytes = total_bytes
+                                .saturating_add(8 + name.len() as u64 + v.value().len() as u64);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 10. Retention policies: (database_id: u64, "{tenant_id}:{policy_name}")
+        if let Ok(table) = read_txn.open_table(super::types::RETENTION_POLICIES) {
+            if let Ok(range) = table.iter() {
+                for entry in range {
+                    if let Ok((k, v)) = entry {
+                        let (db, name) = k.value();
+                        if db == id {
+                            total_bytes = total_bytes
+                                .saturating_add(8 + name.len() as u64 + v.value().len() as u64);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 11. Alert rules: (database_id: u64, "{tenant_id}:{alert_name}")
+        if let Ok(table) = read_txn.open_table(super::types::ALERT_RULES) {
+            if let Ok(range) = table.iter() {
+                for entry in range {
+                    if let Ok((k, v)) = entry {
+                        let (db, name) = k.value();
+                        if db == id {
+                            total_bytes = total_bytes
+                                .saturating_add(8 + name.len() as u64 + v.value().len() as u64);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 12. Synonym groups: "{database_id}:{tenant_id}:{group_name}"
+        if let Ok(table) = read_txn.open_table(super::types::SYNONYM_GROUPS) {
+            let prefix = format!("{id}:");
+            if let Ok(range) = table.iter() {
+                for entry in range {
+                    if let Ok((k, v)) = entry {
+                        let k_str = k.value();
+                        if k_str.starts_with(&prefix) {
+                            total_bytes = total_bytes
+                                .saturating_add(k_str.len() as u64 + v.value().len() as u64);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 13. Column stats: "{database_id}:{tenant_id}:{collection}:{column}"
+        if let Ok(table) = read_txn.open_table(super::types::COLUMN_STATS) {
+            let prefix = format!("{id}:");
+            if let Ok(range) = table.iter() {
+                for entry in range {
+                    if let Ok((k, v)) = entry {
+                        let k_str = k.value();
+                        if k_str.starts_with(&prefix) {
+                            total_bytes = total_bytes
+                                .saturating_add(k_str.len() as u64 + v.value().len() as u64);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 14. Database descriptor: `database_id (u64)`
+        if let Ok(table) = read_txn.open_table(DATABASES) {
+            if let Ok(Some(v)) = table.get(id) {
+                total_bytes = total_bytes.saturating_add(8 + v.value().len() as u64);
+            }
+        }
+
+        // 15. Functions, triggers, procedures, arrays: "v2:{tenant_id}:{database_id}:{name}" or "\0v2:..."
+        let mid_pattern = format!(":{id}:");
+        for table_def in [
+            super::types::FUNCTIONS,
+            super::types::TRIGGERS,
+            super::types::PROCEDURES,
+            super::types::ARRAYS,
+            super::types::DEPENDENCIES,
+        ] {
+            if let Ok(table) = read_txn.open_table(table_def) {
+                if let Ok(range) = table.iter() {
+                    for entry in range {
+                        if let Ok((k, v)) = entry {
+                            let k_str = k.value();
+                            if k_str.contains(&mid_pattern) {
+                                total_bytes = total_bytes
+                                    .saturating_add(k_str.len() as u64 + v.value().len() as u64);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(total_bytes)
+    }
 }
 
 /// Body of [`SystemCatalog::list_databases`], over an already-open read
@@ -348,5 +598,29 @@ mod tests {
         assert!(cat.get_database_id_by_name("default").unwrap().is_none());
         // second delete is a no-op
         cat.delete_database(DatabaseId::DEFAULT).unwrap();
+    }
+
+    #[test]
+    fn database_storage_bytes_reflects_actual_usage() {
+        let (_dir, cat) = open_catalog();
+        cat.bootstrap_default_database().unwrap();
+        let initial_bytes = cat.database_storage_bytes(DatabaseId::DEFAULT).unwrap();
+        assert!(
+            initial_bytes > 0,
+            "bootstrapped default database descriptor must contribute non-zero bytes"
+        );
+
+        let mut coll = super::super::collection::StoredCollection::new(1, "users", "admin");
+        coll.database_id = DatabaseId::DEFAULT;
+        cat.put_collection(DatabaseId::DEFAULT, &coll).unwrap();
+
+        let after_coll_bytes = cat.database_storage_bytes(DatabaseId::DEFAULT).unwrap();
+        assert!(
+            after_coll_bytes > initial_bytes,
+            "adding collection must increase database_storage_bytes: {after_coll_bytes} > {initial_bytes}"
+        );
+
+        // Unrelated database reports 0 bytes
+        assert_eq!(cat.database_storage_bytes(DatabaseId::new(999)).unwrap(), 0);
     }
 }

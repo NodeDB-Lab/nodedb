@@ -19,6 +19,8 @@ use std::time::Instant;
 
 use nodedb_types::DatabaseId;
 
+use crate::control::metrics::DatabaseMetricsRegistry;
+
 /// Single slot in the 60-bucket sliding window.
 #[derive(Clone, Default)]
 struct Bucket {
@@ -82,6 +84,10 @@ struct TrackerInner {
     /// Per-database CPU-seconds cap per minute.
     /// Derived from `maintenance_cpu_pct / 100.0 * 60.0`.
     caps: HashMap<DatabaseId, f64>,
+    /// Per-database human-readable names for observability and metrics routing.
+    names: HashMap<DatabaseId, String>,
+    /// Optional metrics registry handle for per-database Prometheus counters.
+    metrics: Option<Arc<DatabaseMetricsRegistry>>,
 }
 
 impl TrackerInner {
@@ -89,6 +95,8 @@ impl TrackerInner {
         Self {
             windows: HashMap::new(),
             caps: HashMap::new(),
+            names: HashMap::new(),
+            metrics: None,
         }
     }
 
@@ -98,6 +106,16 @@ impl TrackerInner {
 
     fn window_for_mut(&mut self, db: DatabaseId) -> &mut DbWindow {
         self.windows.entry(db).or_insert_with(DbWindow::new)
+    }
+
+    fn resolve_name(&self, db: DatabaseId) -> String {
+        if let Some(name) = self.names.get(&db) {
+            return name.clone();
+        }
+        if db == DatabaseId::DEFAULT {
+            return "default".to_string();
+        }
+        format!("db-{}", db.as_u64())
     }
 }
 
@@ -115,6 +133,39 @@ impl MaintenanceBudgetTracker {
         }
     }
 
+    /// Create a new tracker pre-wired with a database metrics registry.
+    pub fn with_metrics(metrics: Arc<DatabaseMetricsRegistry>) -> Self {
+        let tracker = Self::new();
+        tracker.set_metrics(metrics);
+        tracker
+    }
+
+    /// Wire or replace the database metrics registry handle.
+    pub fn set_metrics(&self, metrics: Arc<DatabaseMetricsRegistry>) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.metrics = Some(metrics);
+    }
+
+    /// Optional handle to the currently installed metrics registry.
+    pub fn metrics(&self) -> Option<Arc<DatabaseMetricsRegistry>> {
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.metrics.clone()
+    }
+
+    /// Associate a human-readable database name with `db`.
+    pub fn set_database_name(&self, db: DatabaseId, name: impl Into<String>) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.names.insert(db, name.into());
+    }
+
+    /// Remove a database's budget window, cap, and name mapping (e.g. on database drop).
+    pub fn remove_database(&self, db: DatabaseId) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.names.remove(&db);
+        inner.caps.remove(&db);
+        inner.windows.remove(&db);
+    }
+
     /// Install or replace the maintenance CPU cap for `db`.
     ///
     /// `maintenance_cpu_pct` is the `QuotaRecord` field (0–100).
@@ -129,7 +180,22 @@ impl MaintenanceBudgetTracker {
         inner.caps.insert(db, cap);
     }
 
+    /// Install or replace the maintenance CPU cap and register the database name for `db`.
+    pub fn set_cap_named(&self, db: DatabaseId, name: impl Into<String>, maintenance_cpu_pct: u8) {
+        let cap = if maintenance_cpu_pct == 0 {
+            f64::INFINITY
+        } else {
+            (maintenance_cpu_pct as f64 / 100.0) * 60.0
+        };
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.caps.insert(db, cap);
+        inner.names.insert(db, name.into());
+    }
+
     /// Attempt to acquire a maintenance lease for `db`.
+    ///
+    /// Resolves `db_name` from registered database names, falling back to
+    /// `"default"` for `DatabaseId::DEFAULT` or `"db-{id}"` if unregistered.
     ///
     /// Returns `Some(MaintenanceLease)` when `consumed + estimated_secs ≤ cap`
     /// for the current 60-second window. Returns `None` when the database is
@@ -143,6 +209,37 @@ impl MaintenanceBudgetTracker {
         db: DatabaseId,
         estimated_secs: f64,
     ) -> Option<MaintenanceLease> {
+        self.try_acquire_internal(db, None, estimated_secs, None)
+    }
+
+    /// Attempt to acquire a maintenance lease for `db` with an explicitly provided database name.
+    pub fn try_acquire_named(
+        self: &Arc<Self>,
+        db: DatabaseId,
+        db_name: &str,
+        estimated_secs: f64,
+    ) -> Option<MaintenanceLease> {
+        self.try_acquire_internal(db, Some(db_name.to_string()), estimated_secs, None)
+    }
+
+    /// Attempt to acquire a maintenance lease for `db` with optional overrides for name and metrics.
+    pub fn try_acquire_with_metrics(
+        self: &Arc<Self>,
+        db: DatabaseId,
+        db_name: Option<String>,
+        estimated_secs: f64,
+        metrics: Option<Arc<DatabaseMetricsRegistry>>,
+    ) -> Option<MaintenanceLease> {
+        self.try_acquire_internal(db, db_name, estimated_secs, metrics)
+    }
+
+    fn try_acquire_internal(
+        self: &Arc<Self>,
+        db: DatabaseId,
+        explicit_name: Option<String>,
+        estimated_secs: f64,
+        explicit_metrics: Option<Arc<DatabaseMetricsRegistry>>,
+    ) -> Option<MaintenanceLease> {
         let now_secs = current_secs();
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let cap = inner.cap_for(db);
@@ -151,10 +248,14 @@ impl MaintenanceBudgetTracker {
         let consumed = window.window_total();
 
         if consumed + estimated_secs <= cap {
+            let db_name = explicit_name.unwrap_or_else(|| inner.resolve_name(db));
+            let metrics = explicit_metrics.or_else(|| inner.metrics.clone());
             Some(MaintenanceLease {
                 tracker: Arc::clone(self),
                 db,
+                db_name,
                 start: Instant::now(),
+                metrics,
             })
         } else {
             None
@@ -171,11 +272,26 @@ impl Default for MaintenanceBudgetTracker {
 /// RAII lease returned by [`MaintenanceBudgetTracker::try_acquire`].
 ///
 /// On drop, the actual elapsed wall-clock seconds are recorded into the
-/// sliding window for the database.
+/// sliding window for the database and, if a [`DatabaseMetricsRegistry`]
+/// is wired, forwarded to `add_maintenance_cpu_secs`.
 pub struct MaintenanceLease {
     tracker: Arc<MaintenanceBudgetTracker>,
     db: DatabaseId,
+    db_name: String,
     start: Instant,
+    metrics: Option<Arc<DatabaseMetricsRegistry>>,
+}
+
+impl MaintenanceLease {
+    /// Database id for which the lease was acquired.
+    pub fn db(&self) -> DatabaseId {
+        self.db
+    }
+
+    /// Resolved database name.
+    pub fn db_name(&self) -> &str {
+        &self.db_name
+    }
 }
 
 impl Drop for MaintenanceLease {
@@ -184,6 +300,9 @@ impl Drop for MaintenanceLease {
         let now_secs = current_secs();
         let mut inner = self.tracker.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.window_for_mut(self.db).record(now_secs, elapsed);
+        if let Some(m) = &self.metrics {
+            m.add_maintenance_cpu_secs(&self.db_name, elapsed);
+        }
     }
 }
 
@@ -191,6 +310,7 @@ impl std::fmt::Debug for MaintenanceLease {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MaintenanceLease")
             .field("db", &self.db)
+            .field("db_name", &self.db_name)
             .finish()
     }
 }
@@ -293,5 +413,36 @@ mod tests {
             lease.is_some(),
             "old consumption should have expired out of the window"
         );
+    }
+
+    #[test]
+    fn lease_drop_increments_prometheus_metrics() {
+        let reg = Arc::new(DatabaseMetricsRegistry::new());
+        let t = Arc::new(MaintenanceBudgetTracker::with_metrics(Arc::clone(&reg)));
+        let db = DatabaseId::new(42);
+        t.set_database_name(db, "analytics");
+        t.set_cap(db, 100);
+
+        {
+            let lease = t.try_acquire(db, 1.0).expect("acquire should succeed");
+            assert_eq!(lease.db_name(), "analytics");
+            assert_eq!(lease.db(), db);
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            // Lease drops here, forwarding elapsed CPU time to DatabaseMetricsRegistry.
+        }
+
+        let c = reg.get_or_create("analytics");
+        let recorded_us = c
+            .maintenance_cpu_seconds_total
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            recorded_us > 0,
+            "cumulative maintenance CPU counter should be > 0 after lease drop"
+        );
+
+        let mut out = String::new();
+        reg.render_prometheus(&mut out);
+        assert!(out.contains(r#"database="analytics""#));
+        assert!(out.contains("nodedb_database_maintenance_cpu_us_total"));
     }
 }

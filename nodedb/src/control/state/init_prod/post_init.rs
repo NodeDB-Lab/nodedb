@@ -33,6 +33,20 @@ pub(super) fn hydrate_caches(state: &Arc<SharedState>) {
             "boot: failed to populate idle_timeout_cache from catalog"
         );
     }
+    if let Some(metrics) = &state.system_metrics {
+        state.wal.set_metrics(Arc::clone(metrics));
+    }
+    state
+        .maintenance_budget
+        .set_metrics(Arc::clone(&state.database_metrics));
+    state
+        .maintenance_budget
+        .set_database_name(nodedb_types::DatabaseId::DEFAULT, "default");
+    if let Ok(databases) = catalog.list_databases() {
+        for db in databases {
+            state.maintenance_budget.set_database_name(db.id, &db.name);
+        }
+    }
 }
 
 /// Spawn the array GC background task. The handle is stored by the caller

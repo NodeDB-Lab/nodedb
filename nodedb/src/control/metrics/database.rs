@@ -27,10 +27,12 @@ pub struct DatabaseCounters {
     /// Current storage usage in bytes.
     pub storage_bytes: AtomicU64,
     /// Current active connection count.
+    /// Current active connection count.
     pub connections: AtomicU64,
     /// SPSC bridge virtual-queue depth snapshot.
     pub bridge_queue_depth: AtomicU64,
-    /// WAL commit latency P99 in microseconds (updated by WAL group-commit path).
+    /// WAL commit latency P99 in microseconds. Node-wide metric sampled from the node's
+    /// single WalManager; every database reports the same node-wide value.
     pub wal_commit_latency_p99_us: AtomicU64,
     /// Cumulative maintenance CPU-seconds consumed by this database.
     pub maintenance_cpu_seconds_total: AtomicU64,
@@ -77,6 +79,12 @@ impl DatabaseMetricsRegistry {
             .clone()
     }
 
+    /// Remove all metrics for `db_name` from the registry (e.g. on DROP DATABASE).
+    pub fn remove(&self, db_name: &str) {
+        let mut w = self.counters.write().unwrap_or_else(|p| p.into_inner());
+        w.remove(db_name);
+    }
+
     /// Increment the QPS counter for `db_name` by 1.
     pub fn record_qps(&self, db_name: &str) {
         self.get_or_create(db_name)
@@ -113,6 +121,9 @@ impl DatabaseMetricsRegistry {
     }
 
     /// Set the WAL commit latency P99 (microseconds) for `db_name`.
+    ///
+    /// Note: WAL latency is a node-wide metric (one WalManager per node); all databases
+    /// report the same node-wide latency.
     pub fn set_wal_latency_p99(&self, db_name: &str, us: u64) {
         self.get_or_create(db_name)
             .wal_commit_latency_p99_us
@@ -135,6 +146,9 @@ impl DatabaseMetricsRegistry {
     /// Converts to integer microseconds (rounded) to avoid `AtomicF64` complexity.
     /// Negative or non-finite inputs are clamped to zero so accidental underflow
     /// in upstream timing arithmetic cannot subtract from the cumulative counter.
+    ///
+    /// Called from [`crate::control::maintenance::MaintenanceLease::drop`]
+    /// when a maintenance lease finishes and records elapsed wall-clock CPU time.
     pub fn add_maintenance_cpu_secs(&self, db_name: &str, secs: f64) {
         let us = if secs.is_finite() && secs > 0.0 {
             (secs * 1_000_000.0).round() as u64
@@ -226,7 +240,7 @@ impl DatabaseMetricsRegistry {
         );
         emit_gauge!(
             "nodedb_database_wal_commit_latency_p99_us",
-            "WAL commit latency P99 in microseconds per database",
+            "WAL commit latency P99 in microseconds (node-wide; shared across all databases)",
             wal_commit_latency_p99_us
         );
         emit_counter!(
@@ -325,5 +339,62 @@ mod tests {
             maintenance_cpu_pct_limit: 25,
         };
         assert!(m.is_over_quota());
+    }
+
+    #[test]
+    fn gauge_setters_update_counters() {
+        let reg = DatabaseMetricsRegistry::new();
+        reg.set_connections("db1", 42);
+        reg.set_memory_bytes("db1", 1024 * 1024);
+        reg.set_storage_bytes("db1", 10 * 1024 * 1024);
+        reg.set_bridge_queue_depth("db1", 7);
+        reg.set_wal_latency_p99("db1", 1500);
+
+        let c = reg.get_or_create("db1");
+        assert_eq!(c.connections.load(Ordering::Relaxed), 42);
+        assert_eq!(c.memory_bytes.load(Ordering::Relaxed), 1024 * 1024);
+        assert_eq!(c.storage_bytes.load(Ordering::Relaxed), 10 * 1024 * 1024);
+        assert_eq!(c.bridge_queue_depth.load(Ordering::Relaxed), 7);
+        assert_eq!(c.wal_commit_latency_p99_us.load(Ordering::Relaxed), 1500);
+    }
+
+    #[test]
+    fn remove_clears_database_metrics() {
+        let reg = DatabaseMetricsRegistry::new();
+        reg.set_connections("db_to_drop", 10);
+        assert_eq!(
+            reg.get_or_create("db_to_drop")
+                .connections
+                .load(Ordering::Relaxed),
+            10
+        );
+        reg.remove("db_to_drop");
+        let mut out = String::new();
+        reg.render_prometheus(&mut out);
+        assert!(!out.contains(r#"database="db_to_drop""#));
+    }
+
+    #[test]
+    fn add_maintenance_cpu_secs_accumulates() {
+        let reg = Arc::new(DatabaseMetricsRegistry::new());
+        let tracker = Arc::new(
+            crate::control::maintenance::MaintenanceBudgetTracker::with_metrics(Arc::clone(&reg)),
+        );
+        let db = DatabaseId::new(42);
+        tracker.set_database_name(db, "analytics");
+        tracker.set_cap(db, 100);
+
+        {
+            let _lease = tracker.try_acquire(db, 1.0).expect("acquire lease");
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            // Lease dropped here, calling add_maintenance_cpu_secs via Drop
+        }
+
+        let c = reg.get_or_create("analytics");
+        let recorded = c.maintenance_cpu_seconds_total.load(Ordering::Relaxed);
+        assert!(
+            recorded > 0,
+            "MaintenanceLease drop must increment maintenance_cpu_seconds_total, got {recorded}"
+        );
     }
 }

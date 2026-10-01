@@ -168,6 +168,19 @@ impl AtomicHistogram {
         snap
     }
 
+    /// Create a point-in-time snapshot of bucket counts for rolling delta calculations.
+    pub fn snapshot_counts(&self) -> HistogramSnapshot {
+        HistogramSnapshot {
+            boundaries: self.boundaries,
+            buckets: self
+                .buckets
+                .iter()
+                .map(|b| b.load(Ordering::Relaxed))
+                .collect(),
+            count: self.count.load(Ordering::Relaxed),
+        }
+    }
+
     /// Merge another histogram's counts into this one.
     ///
     /// Both histograms must share the same bucket boundaries — if they do
@@ -183,6 +196,71 @@ impl AtomicHistogram {
             .fetch_add(other.count.load(Ordering::Relaxed), Ordering::Relaxed);
         self.sum
             .fetch_add(other.sum.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+}
+
+/// Point-in-time snapshot of bucket counts for rolling-window percentile calculations.
+#[derive(Debug, Clone, Default)]
+pub struct HistogramSnapshot {
+    /// Upper bounds in microseconds.
+    pub boundaries: &'static [u64],
+    /// Bucket counters at snapshot time.
+    pub buckets: Vec<u64>,
+    /// Total observations at snapshot time.
+    pub count: u64,
+}
+
+impl HistogramSnapshot {
+    /// Compute percentile from the bucket count delta between `self` (earlier) and `newer`.
+    ///
+    /// `p` is a fraction between `0.0` and `1.0` (e.g. `0.99` for P99).
+    /// Returns `0` if no new observations occurred in the interval.
+    pub fn delta_percentile(&self, newer: &HistogramSnapshot, p: f64) -> u64 {
+        let is_empty_baseline = self.boundaries.is_empty() && self.count == 0;
+        if !is_empty_baseline && (self.boundaries != newer.boundaries || newer.count <= self.count)
+        {
+            return 0;
+        }
+        if newer.count == 0 {
+            return 0;
+        }
+        let delta_count = if is_empty_baseline {
+            newer.count
+        } else {
+            newer.count - self.count
+        };
+        if delta_count == 0 {
+            return 0;
+        }
+        let target = (p * delta_count as f64) as u64;
+        let mut cumulative = 0u64;
+        let mut prev_boundary = 0u64;
+
+        for (i, &boundary) in newer.boundaries.iter().enumerate() {
+            let older_bucket = if is_empty_baseline {
+                0
+            } else {
+                self.buckets.get(i).copied().unwrap_or(0)
+            };
+            let newer_bucket = newer.buckets.get(i).copied().unwrap_or(0);
+            let bucket_delta = newer_bucket.saturating_sub(older_bucket);
+            cumulative += bucket_delta;
+            if cumulative >= target {
+                let bucket_start = prev_boundary;
+                let bucket_width = boundary - bucket_start;
+                if bucket_delta == 0 {
+                    return boundary;
+                }
+                let fraction = if cumulative > target {
+                    (bucket_delta - (cumulative - target)) as f64 / bucket_delta as f64
+                } else {
+                    1.0
+                };
+                return bucket_start + (fraction * bucket_width as f64) as u64;
+            }
+            prev_boundary = boundary;
+        }
+        newer.boundaries.last().copied().unwrap_or(0)
     }
 }
 
@@ -227,6 +305,69 @@ mod tests {
         let p50 = h.percentile(0.5);
         // Should be somewhere in the 500-1000µs range.
         assert!((500..=1000).contains(&p50), "p50={p50}");
+    }
+
+    #[test]
+    fn percentile_p99_numerically_correct() {
+        // WAL buckets: [100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000]
+        let h = AtomicHistogram::with_buckets(WAL_FSYNC_BUCKETS_US);
+        // Observe 90 items at 80us (falls in <=100us bucket)
+        for _ in 0..90 {
+            h.observe(80);
+        }
+        // Observe 9 items at 400us (falls in <=500us bucket)
+        for _ in 0..9 {
+            h.observe(400);
+        }
+        // Observe 1 item at 800us (falls in <=1000us bucket)
+        h.observe(800);
+
+        assert_eq!(h.count(), 100);
+
+        // p50 is rank 50 (within first bucket 0..100us)
+        let p50 = h.percentile(0.50);
+        assert!(p50 <= 100, "expected p50 <= 100, got {p50}");
+
+        // p99 is rank 99 (90 in bucket0 + 9 in bucket1 = 99 -> top of <=500us bucket)
+        let p99 = h.percentile(0.99);
+        assert!(
+            (100..=500).contains(&p99),
+            "expected p99 in [100, 500], got {p99}"
+        );
+        // Passing 99.0 would have returned 1_000_000 (the last boundary).
+        assert_ne!(p99, 1_000_000);
+    }
+
+    #[test]
+    fn rolling_window_delta_percentile() {
+        let h = AtomicHistogram::with_buckets(WAL_FSYNC_BUCKETS_US);
+
+        // Window 1: 100 observations at 80us (<=100us)
+        for _ in 0..100 {
+            h.observe(80);
+        }
+        let snap1 = h.snapshot_counts();
+
+        // Window 2: 90 observations at 80us, 10 observations at 4000us (<=5000us)
+        for _ in 0..90 {
+            h.observe(80);
+        }
+        for _ in 0..10 {
+            h.observe(4000);
+        }
+        let snap2 = h.snapshot_counts();
+
+        // Delta p99 in Window 2 alone (100 new observations: 90 at 80us, 10 at 4000us)
+        let delta_p99 = snap1.delta_percentile(&snap2, 0.99);
+        assert!(
+            (1000..=5000).contains(&delta_p99),
+            "expected delta p99 in [1000, 5000], got {delta_p99}"
+        );
+
+        // Window 3: No new observations
+        let snap3 = h.snapshot_counts();
+        let delta_p99_empty = snap2.delta_percentile(&snap3, 0.99);
+        assert_eq!(delta_p99_empty, 0);
     }
 
     #[test]

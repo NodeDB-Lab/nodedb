@@ -227,6 +227,13 @@ impl Dispatcher {
             .unwrap_or(PressureState::Normal)
     }
 
+    /// Sum of bridge virtual-queue depths for a database across all cores.
+    pub fn virtual_queue_depth(&self, database_id: u64) -> u64 {
+        self.cores
+            .iter()
+            .map(|c| c.wfq.depth_for(database_id) as u64)
+            .sum()
+    }
     /// Number of Data Plane cores.
     pub fn num_cores(&self) -> usize {
         self.cores.len()
@@ -242,5 +249,56 @@ impl Dispatcher {
     /// Router reference for vShard lookups.
     pub fn router(&self) -> &VShardRouter {
         &self.router
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::dispatch::test_requests::make_request_for_db;
+
+    #[test]
+    fn virtual_queue_depth_reporting() {
+        let (mut dispatcher, data_sides) = Dispatcher::new(2, 2);
+        assert_eq!(dispatcher.virtual_queue_depth(1), 0);
+
+        // Fill physical rings on core 0 and core 1 so subsequent requests park in WFQ.
+        dispatcher
+            .dispatch_to_core(0, make_request_for_db(0, 1, 1))
+            .unwrap();
+        dispatcher
+            .dispatch_to_core(0, make_request_for_db(0, 1, 2))
+            .unwrap();
+        assert_eq!(data_sides[0].request_rx.len(), 2);
+
+        dispatcher
+            .dispatch_to_core(1, make_request_for_db(1, 1, 10))
+            .unwrap();
+        dispatcher
+            .dispatch_to_core(1, make_request_for_db(1, 1, 11))
+            .unwrap();
+        assert_eq!(data_sides[1].request_rx.len(), 2);
+
+        // Park 2 requests in core 0's WFQ for db 1.
+        dispatcher
+            .dispatch_to_core(0, make_request_for_db(0, 1, 3))
+            .unwrap();
+        dispatcher
+            .dispatch_to_core(0, make_request_for_db(0, 1, 4))
+            .unwrap();
+
+        // Park 3 requests in core 1's WFQ for db 1.
+        dispatcher
+            .dispatch_to_core(1, make_request_for_db(1, 1, 12))
+            .unwrap();
+        dispatcher
+            .dispatch_to_core(1, make_request_for_db(1, 1, 13))
+            .unwrap();
+        dispatcher
+            .dispatch_to_core(1, make_request_for_db(1, 1, 14))
+            .unwrap();
+
+        // Virtual queue depth must sum across all cores.
+        assert_eq!(dispatcher.virtual_queue_depth(1), 5);
+        assert_eq!(dispatcher.virtual_queue_depth(2), 0);
     }
 }

@@ -142,6 +142,11 @@ pub fn spawn_background_loops(
         info!("mirror lag monitor running");
     }
 
+    // Database metrics sampler (10-second interval).
+    // Samples live per-database metrics across subsystems and updates
+    // `DatabaseMetricsRegistry` gauges for Prometheus scraping.
+    crate::bootstrap::database_metrics_sampler::spawn_database_metrics_sampler(shared);
+
     // Wire stream delivery managers before Event Plane creation can admit
     // CREATE CHANGE STREAM delivery tasks.
     shared.webhook_manager.set_state(Arc::clone(shared));

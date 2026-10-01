@@ -45,6 +45,8 @@ pub struct WalManager {
     /// Wakes `wait_durable` followers when `durable_lsn` advances (or a leader's
     /// fsync fails, so they re-attempt and observe the same error).
     pub(super) durable_notify: tokio::sync::Notify,
+    /// System metrics registry handle for recording group-commit fsync latency.
+    pub(super) metrics: std::sync::RwLock<Option<Arc<crate::control::metrics::SystemMetrics>>>,
 }
 
 impl WalManager {
@@ -61,6 +63,20 @@ impl WalManager {
     /// by a successful group-commit fsync in [`WalManager::wait_durable`].
     pub fn durable_through(&self) -> u64 {
         self.durable_lsn.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Wire or replace the system metrics handle used to record group-commit fsync latency.
+    pub fn set_metrics(&self, metrics: Arc<crate::control::metrics::SystemMetrics>) {
+        let mut w = self.metrics.write().unwrap_or_else(|p| p.into_inner());
+        *w = Some(metrics);
+    }
+
+    /// Read the optional system metrics handle.
+    pub fn metrics(&self) -> Option<Arc<crate::control::metrics::SystemMetrics>> {
+        self.metrics
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Return the stable in-memory root for per-user CRDT signing keys.
@@ -165,13 +181,14 @@ impl WalManager {
 
         Ok(Self {
             wal: Arc::new(Mutex::new(wal)),
-            wal_dir,
+            wal_dir: wal_dir.to_path_buf(),
             encryption_ring: None,
             crdt_signing_root: None,
             audit_wal,
             durable_lsn: AtomicU64::new(0),
             commit_lock: tokio::sync::Mutex::new(()),
             durable_notify: tokio::sync::Notify::new(),
+            metrics: std::sync::RwLock::new(None),
         })
     }
 

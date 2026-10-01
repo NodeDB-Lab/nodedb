@@ -18,9 +18,15 @@ use crate::control::state::SharedState;
 
 /// Install a database quota into live enforcement.
 pub fn put_database(db_id: DatabaseId, record: &QuotaRecord, shared: &SharedState) {
-    shared
-        .maintenance_budget
-        .set_cap(db_id, record.maintenance_cpu_pct);
+    if let Ok(Some(name)) = shared.credentials.catalog().get_database_name_by_id(db_id) {
+        shared
+            .maintenance_budget
+            .set_cap_named(db_id, name, record.maintenance_cpu_pct);
+    } else {
+        shared
+            .maintenance_budget
+            .set_cap(db_id, record.maintenance_cpu_pct);
+    }
     if record.max_memory_bytes > 0 {
         shared
             .governor
