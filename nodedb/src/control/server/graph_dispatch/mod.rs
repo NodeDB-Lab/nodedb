@@ -30,6 +30,7 @@ pub mod read_groups;
 pub(crate) mod run_cut;
 pub(crate) mod shard_reads;
 pub mod shortest_path;
+mod subgraph_edges;
 pub mod traverse_subgraph;
 pub mod walk_reads;
 pub mod whole_graph;

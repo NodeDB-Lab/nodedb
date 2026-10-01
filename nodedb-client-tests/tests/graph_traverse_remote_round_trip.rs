@@ -6,9 +6,7 @@
 //! After three `graph_insert_edge` calls fanning from a seed
 //! (`a → b`, `b → c`, `a → s`), `graph_traverse(seed, depth=2)` must
 //! return a non-empty `SubGraph` containing every reachable node.
-//! An empty subgraph is indistinguishable from "the wire short-circuits
-//! before the server's traversal runs" — the silent-fake pattern this
-//! test guards against.
+//! Traversal returns reachable nodes and crossed edges through the remote protocol.
 
 use nodedb_client::{NodeDb, NodeDbRemote, NodeId};
 use nodedb_test_support::pgwire_harness::TestServer;
@@ -48,19 +46,14 @@ async fn graph_traverse_returns_inserted_subgraph() {
         .expect("seed edge a->s");
 
     let sg = remote
-        .graph_traverse("smoke_g", &a, 2, None)
+        .graph_traverse("smoke_g", &a, 2, nodedb_types::graph::Direction::Out, None)
         .await
         .expect("graph_traverse must complete against a populated graph");
 
-    // Spec: with edges {a→b, b→c, a→s} present, a depth-2 traversal
-    // from `a` reaches at least {a, b, c, s}. Returning an empty
-    // subgraph reproduces the original bug: the wire returns success
-    // with `nodes=[], edges=[]` indistinguishable from "the seed has
-    // no out-edges within depth N".
+    // A depth-2 outgoing traversal reaches both direct and two-hop neighbors.
     assert!(
         !sg.nodes.is_empty(),
-        "depth-2 traversal from seed must surface reachable nodes, got empty subgraph \
-         (regression: graph_traverse short-circuits after same-session graph_insert_edge)"
+        "depth-2 traversal from seed must surface reachable nodes, got empty subgraph"
     );
 
     let node_ids: std::collections::HashSet<&str> =
@@ -78,15 +71,96 @@ async fn graph_traverse_returns_inserted_subgraph() {
         "depth-2 traversal must reach direct neighbor sess; nodes={node_ids:?}"
     );
 
-    // Edge regression guard: a populated traversal must also carry
-    // the edges it crossed. The original bug returned an object with
-    // both `nodes=[]` AND `edges=[]`; asserting on edges separately
-    // catches a half-fix that surfaces nodes but drops edges.
+    // A populated traversal includes the edges it crossed.
     assert!(
         !sg.edges.is_empty(),
-        "depth-2 traversal must surface the edges it crossed; got empty edges \
-         (regression: traverse drops traversed edges from the wire response)"
+        "depth-2 traversal must surface the edges it crossed; got empty edges"
     );
+
+    for (direction, includes_a, includes_c) in [
+        (nodedb_types::graph::Direction::In, true, false),
+        (nodedb_types::graph::Direction::Out, false, true),
+        (nodedb_types::graph::Direction::Both, true, true),
+    ] {
+        let traversal = remote
+            .graph_traverse("smoke_g", &b, 1, direction, None)
+            .await
+            .expect("depth-1 traversal must complete");
+        let nodes: std::collections::HashSet<&str> = traversal
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(
+            nodes.contains(a.as_str()),
+            includes_a,
+            "direction={direction}, nodes={nodes:?}"
+        );
+        assert_eq!(
+            nodes.contains(c.as_str()),
+            includes_c,
+            "direction={direction}, nodes={nodes:?}"
+        );
+        let edges: std::collections::HashSet<(&str, &str, &str)> = traversal
+            .edges
+            .iter()
+            .map(|edge| (edge.from.as_str(), edge.label.as_str(), edge.to.as_str()))
+            .collect();
+        assert_eq!(
+            edges.contains(&(a.as_str(), "next", b.as_str())),
+            includes_a
+        );
+        assert_eq!(
+            edges.contains(&(b.as_str(), "next", c.as_str())),
+            includes_c
+        );
+        assert_eq!(
+            edges.len(),
+            usize::from(includes_a) + usize::from(includes_c)
+        );
+    }
+
+    remote
+        .graph_insert_edge("smoke_g", &b, &a, "next", None)
+        .await
+        .expect("reciprocal edge b->a");
+    remote
+        .graph_insert_edge("smoke_g", &b, &b, "self", None)
+        .await
+        .expect("self loop b->b");
+    let reciprocal = remote
+        .graph_traverse("smoke_g", &b, 2, nodedb_types::graph::Direction::Both, None)
+        .await
+        .expect("bidirectional traversal with reciprocal edges");
+    let edges: std::collections::HashSet<(&str, &str, &str)> = reciprocal
+        .edges
+        .iter()
+        .map(|edge| (edge.from.as_str(), edge.label.as_str(), edge.to.as_str()))
+        .collect();
+    assert_eq!(
+        edges.len(),
+        reciprocal.edges.len(),
+        "physical edges appear once"
+    );
+    assert_eq!(edges.len(), 5);
+    for edge in [
+        (a.as_str(), "next", b.as_str()),
+        (b.as_str(), "next", a.as_str()),
+        (b.as_str(), "next", c.as_str()),
+        (a.as_str(), "in_session", s.as_str()),
+        (b.as_str(), "self", b.as_str()),
+    ] {
+        assert!(edges.contains(&edge), "missing physical edge {edge:?}");
+    }
+    for node in &reciprocal.nodes {
+        let expected_depth = match node.id.as_str() {
+            "chunk_b" => 0,
+            "chunk_a" | "chunk_c" => 1,
+            "sess" => 2,
+            other => panic!("unexpected node {other}"),
+        };
+        assert_eq!(node.depth, expected_depth);
+    }
 
     server.graceful_shutdown().await;
 }

@@ -68,12 +68,13 @@ impl CoreLoop {
                     crate::types::TenantId::new(tid),
                 )
             });
+        let label_filter = edge_label.as_deref();
         let path = match self.csr_partition(database_id, tid) {
             Some(partition) => partition.shortest_path(
                 crate::engine::graph::csr::ShortestPathParams {
                     src,
                     dst,
-                    label_filter: edge_label.as_deref(),
+                    label_filter: label_filter.as_slice(),
                     max_depth,
                     max_visited,
                     frontier_bitmap,

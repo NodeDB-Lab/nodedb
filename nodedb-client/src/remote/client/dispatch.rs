@@ -81,9 +81,10 @@ impl NodeDb for NodeDbRemote {
         collection: &str,
         start: &NodeId,
         depth: u8,
+        direction: nodedb_types::graph::Direction,
         edge_filter: Option<&EdgeFilter>,
     ) -> NodeDbResult<SubGraph> {
-        self.graph_traverse_impl(collection, start, depth, edge_filter)
+        self.graph_traverse_impl(collection, start, depth, direction, edge_filter)
             .await
     }
 

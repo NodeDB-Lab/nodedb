@@ -25,16 +25,13 @@ pub(crate) struct DenseAdjacency {
 }
 
 impl CsrIndex {
-    /// Partition tag assigned at construction. Embedded in every
-    /// `LocalNodeId` this index produces.
+    /// Partition tag assigned at construction. Embedded in every `LocalNodeId` this index produces.
     #[inline]
     pub fn partition_tag(&self) -> u32 {
         self.partition_tag
     }
 
-    /// Mint a `LocalNodeId` for this partition from a raw dense index.
-    /// Used by algorithm code that iterates `0..node_count` and needs
-    /// to call `LocalNodeId`-taking APIs.
+    /// Mint a `LocalNodeId` for this partition from a raw dense index. Used by algorithm code that iterates `0..node_count` and needs to call `LocalNodeId`-taking APIs.
     #[inline]
     pub fn local(&self, id: u32) -> LocalNodeId {
         LocalNodeId::new(id, self.partition_tag)
@@ -124,11 +121,9 @@ impl CsrIndex {
         result
     }
 
-    /// Add a node without any edges. Idempotent — returns the existing
-    /// tagged id if the name is already present.
+    /// Add a node without any edges. Idempotent — returns the existing tagged id if the name is already present.
     ///
-    /// Returns `Err(GraphError::NodeOverflow)` when the partition's node-id
-    /// space is exhausted (more than `MAX_NODES_PER_CSR` distinct nodes).
+    /// Returns `Err(GraphError::NodeOverflow)` when the partition's node-id space is exhausted (more than `MAX_NODES_PER_CSR` distinct nodes).
     pub fn add_node(&mut self, name: &str) -> Result<LocalNodeId, crate::GraphError> {
         let result = self.ensure_node(name);
         self.journal_record(
@@ -193,8 +188,7 @@ impl CsrIndex {
     ///
     /// # Errors
     ///
-    /// Returns [`GraphError::MemoryBudget`] if the reservation for the
-    /// three output arrays exceeds the `Graph` engine budget.
+    /// Returns [`GraphError::MemoryBudget`] if the reservation for the three output arrays exceeds the `Graph` engine budget.
     pub(crate) fn build_dense(
         edges: &[Vec<(u32, u32)>],
         collections: &[Vec<u32>],
@@ -231,10 +225,7 @@ impl CsrIndex {
         })
     }
 
-    /// Check if a specific `(src, label, dst, collection)` edge exists in the
-    /// dense CSR. Edge identity is collection-aware: the same triple under two
-    /// collections is two distinct edges, so dedup / re-insert must key on the
-    /// collection too.
+    /// Check if a specific `(src, label, dst, collection)` edge exists in the dense CSR. Edge identity is collection-aware: the same triple under two collections is two distinct edges, so dedup / re-insert must key on the collection too.
     pub(crate) fn dense_has_edge(&self, src: u32, label: u32, dst: u32, collection: u32) -> bool {
         for (lid, target, coll) in self.dense_out_edges(src) {
             if lid == label && target == dst && coll == collection {
@@ -247,43 +238,35 @@ impl CsrIndex {
     /// Iterate dense outbound edges for a node as `(label, dst, collection)`
     /// (raw u32, no tag check, no deletion filter).
     pub(crate) fn dense_out_edges(&self, node: u32) -> impl Iterator<Item = (u32, u32, u32)> + '_ {
-        let idx = node as usize;
-        if idx + 1 >= self.out_offsets.len() {
-            return Vec::new().into_iter();
-        }
-        let start = self.out_offsets[idx] as usize;
-        let end = self.out_offsets[idx + 1] as usize;
-        (start..end)
-            .map(move |i| {
-                (
-                    self.out_labels[i],
-                    self.out_targets[i],
-                    self.out_collections.get(i).copied().unwrap_or(0),
-                )
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
+        let range = self
+            .out_offsets
+            .get(node as usize..)
+            .and_then(|offsets| offsets.first().zip(offsets.get(1)))
+            .map_or(0..0, |(&start, &end)| start as usize..end as usize);
+        range.map(move |i| {
+            (
+                self.out_labels[i],
+                self.out_targets[i],
+                self.out_collections.get(i).copied().unwrap_or(0),
+            )
+        })
     }
 
     /// Iterate dense inbound edges for a node as `(label, src, collection)`
     /// (raw u32, no tag check, no deletion filter).
     pub(crate) fn dense_in_edges(&self, node: u32) -> impl Iterator<Item = (u32, u32, u32)> + '_ {
-        let idx = node as usize;
-        if idx + 1 >= self.in_offsets.len() {
-            return Vec::new().into_iter();
-        }
-        let start = self.in_offsets[idx] as usize;
-        let end = self.in_offsets[idx + 1] as usize;
-        (start..end)
-            .map(move |i| {
-                (
-                    self.in_labels[i],
-                    self.in_targets[i],
-                    self.in_collections.get(i).copied().unwrap_or(0),
-                )
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
+        let range = self
+            .in_offsets
+            .get(node as usize..)
+            .and_then(|offsets| offsets.first().zip(offsets.get(1)))
+            .map_or(0..0, |(&start, &end)| start as usize..end as usize);
+        range.map(move |i| {
+            (
+                self.in_labels[i],
+                self.in_targets[i],
+                self.in_collections.get(i).copied().unwrap_or(0),
+            )
+        })
     }
 
     /// Raw u32 iteration over outbound edges (dense + buffer - deleted),
@@ -355,23 +338,21 @@ impl CsrIndex {
     }
 
     /// Buffer-only iteration over outbound edges for a node.
-    pub(crate) fn buffer_out_iter(&self, node: u32) -> std::vec::IntoIter<(u32, u32)> {
-        let idx = node as usize;
-        if idx < self.buffer_out.len() {
-            self.buffer_out[idx].clone().into_iter()
-        } else {
-            Vec::new().into_iter()
-        }
+    pub(crate) fn buffer_out_iter(&self, node: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.buffer_out
+            .get(node as usize)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .copied()
     }
 
     /// Buffer-only iteration over inbound edges for a node.
-    pub(crate) fn buffer_in_iter(&self, node: u32) -> std::vec::IntoIter<(u32, u32)> {
-        let idx = node as usize;
-        if idx < self.buffer_in.len() {
-            self.buffer_in[idx].clone().into_iter()
-        } else {
-            Vec::new().into_iter()
-        }
+    pub(crate) fn buffer_in_iter(&self, node: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.buffer_in
+            .get(node as usize)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .copied()
     }
 
     /// Iterate all outbound edges for a tagged node. Yields
@@ -451,5 +432,66 @@ impl CsrIndex {
     /// Raw dense index lookup by name. In-partition algorithm use only.
     pub fn node_id_raw(&self, name: &str) -> Option<u32> {
         self.node_to_id.get(name).copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Live adjacency iteration across dense and buffered edges.
+
+    use super::CsrIndex;
+    use crate::test_support::test_memory;
+
+    fn names(csr: &CsrIndex, node: &str) -> Vec<(String, String)> {
+        csr.iter_out_edges(csr.node_id(node).unwrap())
+            .map(|(label, target)| (csr.label_name(label).into(), csr.node_name(target).into()))
+            .collect()
+    }
+
+    #[test]
+    fn live_iterators_preserve_dense_then_buffer_order() {
+        let mut csr = CsrIndex::new(test_memory());
+        csr.add_edge("a", "FIRST", "b").unwrap();
+        assert_eq!(names(&csr, "a"), vec![("FIRST".into(), "b".into())]);
+        csr.compact().unwrap();
+        assert_eq!(names(&csr, "a"), vec![("FIRST".into(), "b".into())]);
+        csr.add_edge("a", "SECOND", "c").unwrap();
+        assert_eq!(
+            names(&csr, "a"),
+            vec![("FIRST".into(), "b".into()), ("SECOND".into(), "c".into())]
+        );
+        let a = csr.node_id_raw("a").unwrap();
+        assert_eq!(csr.iter_out_edges_raw(a).count(), 2);
+        for target in ["b", "c"] {
+            let tagged = csr.node_id(target).unwrap();
+            let inbound: Vec<_> = csr
+                .iter_in_edges(tagged)
+                .map(|(_, source)| csr.node_name(source))
+                .collect();
+            assert_eq!(inbound, vec!["a"]);
+            assert_eq!(
+                csr.iter_in_edges_raw(csr.node_id_raw(target).unwrap())
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(csr.iter_out_edges_raw(u32::MAX).count(), 0);
+        assert_eq!(csr.iter_in_edges_raw(u32::MAX).count(), 0);
+    }
+
+    #[test]
+    fn collection_tombstones_remove_only_the_matching_copy() {
+        let mut csr = CsrIndex::new(test_memory());
+        csr.add_edge_in_collection("a", "LINK", "b", "first")
+            .unwrap();
+        csr.add_edge_in_collection("a", "LINK", "b", "second")
+            .unwrap();
+        csr.compact().unwrap();
+        csr.remove_edge_in_collection("a", "LINK", "b", "first");
+        csr.add_edge("a", "STAGED", "c").unwrap();
+        csr.remove_edge("a", "STAGED", "c");
+        assert_eq!(names(&csr, "a"), vec![("LINK".into(), "b".into())]);
+        assert_eq!(csr.iter_in_edges(csr.node_id("b").unwrap()).count(), 1);
+        assert_eq!(csr.iter_in_edges(csr.node_id("c").unwrap()).count(), 0);
     }
 }

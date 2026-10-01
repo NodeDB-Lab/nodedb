@@ -30,6 +30,7 @@ use super::bfs::{admit_by_name, walk_visit_cap, whole_hop};
 use super::helpers::ok_response;
 use super::hop::{NeighborHopParams, execute_neighbor_hop};
 use super::shard_reads::ShardReadLog;
+use super::subgraph_edges::{EdgeOrientation, PhysicalEdges};
 
 /// Wire-shape JSON node entry. Field names mirror the client decoder in
 /// `nodedb-client/src/remote/parse.rs::parse_graph_traverse_json`.
@@ -85,9 +86,9 @@ pub struct CrossCoreTraverseSubgraphParams<'a> {
 /// `from_key(node)` via the shared [`execute_neighbor_hop`] helper and
 /// records:
 ///   * each newly-visited node (with its discovery depth), and
-///   * each `(src, label, dst)` edge the hop crossed where `src` is in the
-///     current frontier — fully attributed for BOTH the local-shard and
-///     remote-shard portions of the frontier.
+///   * each physical `(src, label, dst)` edge the hop crossed, once. An
+///     incoming edge keeps its physical orientation. A `Both` hop expands
+///     outgoing, then incoming, edges over the same frontier.
 pub async fn cross_core_traverse_subgraph(
     shared: &SharedState,
     params: CrossCoreTraverseSubgraphParams<'_>,
@@ -157,7 +158,7 @@ pub(crate) async fn walk_subgraph(
     let mut depth_of: HashMap<String, u8> = HashMap::new();
     let mut visited: HashSet<String> = HashSet::new();
     let mut node_order: Vec<String> = Vec::new();
-    let mut edges: Vec<(String, String, String)> = Vec::new();
+    let mut edges = PhysicalEdges::default();
     let mut frontier: Vec<String> = vec![start.clone()];
     let mut reads = ShardReadLog::new();
     let cap = walk_visit_cap(shared, options);
@@ -172,34 +173,38 @@ pub(crate) async fn walk_subgraph(
             break;
         }
 
-        let hop = execute_neighbor_hop(
-            shared,
-            tenant_id,
-            database_id,
-            NeighborHopParams {
-                collection: collection.as_deref(),
-                frontier: &frontier,
-                edge_label: edge_label.as_deref(),
-                direction,
-                options: &whole,
-                discovered_so_far: node_order.len(),
-                linearizable,
-            },
-        )
-        .await?;
-
-        // Edges are fully attributed for BOTH local-shard and remote-shard
-        // expansion (each frontier node was expanded at its owner). Always
-        // record them — even when the destination is already visited (an
-        // A→B→C graph with a back-edge B→A must surface that edge once).
-        edges.extend(hop.local_triples);
-        reads.merge(hop.reads);
+        // Every pass expands the whole frontier. A row carries no
+        // orientation, so each direction runs as its own pass.
+        let mut destinations: Vec<String> = Vec::new();
+        for &pass in EdgeOrientation::passes(direction) {
+            let hop = execute_neighbor_hop(
+                shared,
+                tenant_id,
+                database_id,
+                NeighborHopParams {
+                    collection: collection.as_deref(),
+                    frontier: &frontier,
+                    edge_label: edge_label.as_deref(),
+                    direction: pass.direction(),
+                    options: &whole,
+                    discovered_so_far: node_order.len(),
+                    linearizable,
+                },
+            )
+            .await?;
+            // Every frontier node was expanded at its owner. Each edge is
+            // recorded even when its other endpoint is already visited: an
+            // A→B→C graph with a back-edge B→A surfaces that edge once.
+            edges.record(hop.local_triples, pass);
+            destinations.extend(hop.merged_destinations);
+            reads.merge(hop.reads);
+        }
 
         // Admit the level's new nodes in name order under the cap, and tag
         // them with the current hop's depth. `hop_idx=0` expands the depth-0
         // start node into depth-1 neighbors.
         let next_depth_tag = (hop_idx + 1).min(u8::MAX as usize) as u8;
-        frontier = admit_by_name(hop.merged_destinations, &mut visited, &mut node_order, cap);
+        frontier = admit_by_name(destinations, &mut visited, &mut node_order, cap);
         for node in &frontier {
             depth_of.insert(node.clone(), next_depth_tag);
         }
@@ -210,6 +215,6 @@ pub(crate) async fn walk_subgraph(
     Ok(SubgraphWalk {
         node_order,
         depth_of,
-        edges,
+        edges: edges.into_vec(),
     })
 }
