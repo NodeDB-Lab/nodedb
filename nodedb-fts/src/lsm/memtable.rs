@@ -106,7 +106,9 @@ impl Memtable {
             let before = postings.len();
             postings.retain(|p| p.doc_id != doc_id);
             removed += before - postings.len();
-            if !postings.is_empty() && postings.capacity() > postings.len().saturating_mul(2).max(4)
+            if postings.len() < before
+                && !postings.is_empty()
+                && postings.capacity() > postings.len().saturating_mul(2).max(4)
             {
                 postings.shrink_to(postings.len());
             }

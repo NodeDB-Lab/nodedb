@@ -16,9 +16,8 @@
 //! search plan is not checked for its own expressions: its projection names
 //! the score column the search plan serves.
 
+mod expressions;
 mod lookup;
 mod scope;
-#[cfg(test)]
-mod tests;
 
 pub use scope::refuse_row_scoped_search_functions;

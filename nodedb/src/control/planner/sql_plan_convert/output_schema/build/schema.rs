@@ -10,9 +10,8 @@
 
 use std::collections::HashMap;
 
-use nodedb_query::agg_key::canonical_agg_key;
 use nodedb_sql::catalog::SqlCatalog;
-use nodedb_sql::types::query::{AggOutputSlot, Projection};
+use nodedb_sql::types::query::Projection;
 use nodedb_sql::types::{
     ArrayProjectPlan, ArraySlicePlan, CtePlan, DocumentIndexLookupPlan, HybridSearchPlan,
     HybridSearchTriplePlan, InsertPlan, KvInsertPlan, LateralLoopPlan, LateralTopKPlan, MergePlan,
@@ -21,15 +20,10 @@ use nodedb_sql::types::{
     VectorPrimaryUpdatePlan,
 };
 
-use crate::control::planner::sql_plan_convert::aggregate::agg_expr_to_pair;
-use crate::control::planner::sql_plan_convert::lateral::collection_name_from_plan;
-use crate::control::planner::sql_plan_convert::output_schema_types::infer_aggregate_type;
 use crate::control::server::response_shape::schema::{OutputColumn, OutputSchema};
 use crate::control::server::response_shape::types::DdlColType;
 
-use super::super::columns::{
-    column_types_for, group_by_key_column, ordered_columns_for, schema_from_projection,
-};
+use super::super::columns::{column_types_for, ordered_columns_for, schema_from_projection};
 use super::super::returning::build_returning_schema;
 
 /// Derives the planner-authoritative output schema of a compiled plan list.
@@ -67,35 +61,11 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
         // boundary column that the plan's GROUP BY list does not name, so the
         // announced shape would not be the emitted one.
         SqlPlan::TimeseriesScan(TimeseriesScanPlan {
-            collection,
             group_by,
-            aggregates,
             bucket_interval_ms,
             ..
         }) if !group_by.is_empty() && *bucket_interval_ms == 0 => {
-            let types = column_types_for(catalog, database_id, collection);
-            let mut columns = Vec::with_capacity(group_by.len() + aggregates.len());
-            for key in group_by {
-                columns.push(OutputColumn {
-                    display_name: key.clone(),
-                    lookup_key: key.clone(),
-                    ty: types.get(key).copied().unwrap_or(DdlColType::Text),
-                });
-            }
-            for agg in aggregates {
-                let (function, field) = agg_expr_to_pair(agg);
-                let key = canonical_agg_key(&function, &field);
-                columns.push(OutputColumn {
-                    display_name: key.clone(),
-                    lookup_key: key,
-                    ty: DdlColType::Text,
-                });
-            }
-            OutputSchema {
-                columns,
-                is_star: false,
-                cp_computed: Vec::new(),
-            }
+            super::aggregate::build_aggregate_schema(plan, catalog, database_id)
         }
         SqlPlan::Scan {
             collection,
@@ -184,98 +154,9 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
         }
         SqlPlan::ConstantResult {
             columns, values, ..
-        } => {
-            // The row payload keys each cell by the unique per-column key
-            // (`cell_keys`), not the raw display name: two constant columns may
-            // share a name (`SELECT nextval('s'), nextval('s')`), and a single
-            // object would collapse them. `display_name` keeps the
-            // client-facing name; `lookup_key` is the cell key.
-            //
-            // The type mirrors the cell `convert_constant_result` encodes:
-            // `Int`/`Float`/`Bool` keep their typed cell, every other variant
-            // (`String`/`Null`/`Decimal`/`Bytes`/`Array`/`Timestamp`/
-            // `Timestamptz`) is encoded as text.
-            let lookup_keys = crate::control::server::response_shape::project::cell_keys(columns);
-            OutputSchema {
-                columns: columns
-                    .iter()
-                    .zip(lookup_keys)
-                    .enumerate()
-                    .map(|(index, (c, lookup_key))| OutputColumn {
-                        display_name: c.clone(),
-                        lookup_key,
-                        ty: constant_cell_type(values.get(index)),
-                    })
-                    .collect(),
-                is_star: false,
-                cp_computed: Vec::new(),
-            }
-        }
-        SqlPlan::Aggregate {
-            input,
-            group_by,
-            group_by_aliases,
-            output_order,
-            aggregates,
-            ..
-        } => {
-            // Catalog types of the aggregate's underlying columns, resolved from
-            // the input plan's single source collection when it has one (Scan /
-            // point-get style). GROUP BY bare keys and MIN/MAX/SUM/AVG argument
-            // columns are typed against this; anything unresolvable stays Text.
-            let types = match collection_name_from_plan(input) {
-                Some(collection) => column_types_for(catalog, database_id, &collection),
-                None => HashMap::new(),
-            };
-            // Derives the `OutputColumn` for one GROUP BY key: `group_by_aliases`
-            // is parallel to `group_by` when populated, but may be empty when the
-            // plan was built without a projection in scope — treat a
-            // missing/`None` entry as "no alias".
-            let key_column = |index: usize| {
-                group_by.get(index).map(|key| {
-                    let alias = group_by_aliases.get(index).and_then(|a| a.as_deref());
-                    group_by_key_column(key, index, alias, &types)
-                })
-            };
-            // Derives the `OutputColumn` for one aggregate. `AggregateExpr::alias`
-            // is always populated by the planner: either the user's explicit
-            // alias, or (for unnamed projections) the lowercased unparsed
-            // expression text — e.g. `count(*)` — matching this module's own
-            // lowercasing of non-column expressions. So the alias is already the
-            // canonical name; no separate derivation needed. The result type is
-            // inferred conservatively (COUNT -> Int8, MIN/MAX preserve the input
-            // column type, SUM/AVG of a float -> Float8, else Text).
-            let agg_column = |index: usize| {
-                aggregates.get(index).map(|agg| OutputColumn {
-                    display_name: agg.alias.clone(),
-                    lookup_key: agg.alias.clone(),
-                    ty: infer_aggregate_type(agg, &types),
-                })
-            };
-            let mut columns = Vec::with_capacity(group_by.len() + aggregates.len());
-            if output_order.is_empty() {
-                // Built without a projection in scope: fall back to
-                // group-keys-first, then aggregates.
-                for index in 0..group_by.len() {
-                    columns.extend(key_column(index));
-                }
-                for index in 0..aggregates.len() {
-                    columns.extend(agg_column(index));
-                }
-            } else {
-                // Emit columns in the recorded SELECT-list order.
-                for slot in output_order {
-                    match slot {
-                        AggOutputSlot::GroupKey(index) => columns.extend(key_column(*index)),
-                        AggOutputSlot::Aggregate(index) => columns.extend(agg_column(*index)),
-                    }
-                }
-            }
-            OutputSchema {
-                columns,
-                is_star: false,
-                cp_computed: Vec::new(),
-            }
+        } => super::constant::constant_schema(columns, values),
+        SqlPlan::Aggregate { .. } => {
+            super::aggregate::build_aggregate_schema(plan, catalog, database_id)
         }
         // Set operations take their column names/types from the first
         // (left) branch, matching standard SQL set-op semantics.
@@ -404,23 +285,177 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
     }
 }
 
-/// Wire type of one constant cell. A column with no value (a plan built
-/// without values) is `Text`.
-fn constant_cell_type(value: Option<&nodedb_sql::types_expr::SqlValue>) -> DdlColType {
-    use nodedb_sql::types_expr::SqlValue;
-    match value {
-        Some(SqlValue::Int(_)) => DdlColType::Int8,
-        Some(SqlValue::Float(_)) => DdlColType::Float8,
-        Some(SqlValue::Bool(_)) => DdlColType::Bool,
-        Some(
-            SqlValue::String(_)
-            | SqlValue::Null
-            | SqlValue::Decimal(_)
-            | SqlValue::Bytes(_)
-            | SqlValue::Array(_)
-            | SqlValue::Timestamp(_)
-            | SqlValue::Timestamptz(_),
-        )
-        | None => DdlColType::Text,
+#[cfg(test)]
+mod tests {
+    use super::super::fixtures::{NoCatalog, TypedCatalog, metrics_column, scan_plan};
+    use super::build_output_schema;
+    use crate::control::server::response_shape::schema::OutputSchema;
+    use crate::control::server::response_shape::types::DdlColType;
+    use nodedb_sql::types::query::Projection;
+    use nodedb_sql::types::{HybridSearchPlan, RecursiveValuePlan, SqlPlan};
+    use nodedb_sql::types_expr::SqlExpr;
+    #[test]
+    fn union_takes_schema_from_first_input() {
+        let plans = vec![SqlPlan::Union {
+            inputs: vec![
+                scan_plan("a", vec![Projection::Column("id".to_string())]),
+                scan_plan("b", vec![Projection::Column("other".to_string())]),
+            ],
+            distinct: false,
+        }];
+        let schema =
+            build_output_schema(&plans, &NoCatalog, nodedb_types::DatabaseId::DEFAULT, None);
+        assert_eq!(schema.columns.len(), 1);
+        assert_eq!(schema.columns[0].display_name, "id");
+    }
+
+    #[test]
+    fn recursive_value_columns_map_to_text_output_columns() {
+        let plans = vec![SqlPlan::RecursiveValue(RecursiveValuePlan {
+            cte_name: "c".to_string(),
+            columns: vec!["n".to_string()],
+            init_exprs: vec!["1".to_string()],
+            step_exprs: vec!["n + 1".to_string()],
+            condition: None,
+            max_depth: 100,
+            distinct: false,
+        })];
+        let schema =
+            build_output_schema(&plans, &NoCatalog, nodedb_types::DatabaseId::DEFAULT, None);
+        assert_eq!(schema.columns.len(), 1);
+        assert_eq!(schema.columns[0].display_name, "n");
+        assert_eq!(schema.columns[0].lookup_key, "n");
+        assert_eq!(schema.columns[0].ty, DdlColType::Text);
+        assert!(!schema.is_star);
+    }
+
+    /// Shared projection for the leaf-variant tests below: a bare `id`
+    /// column plus a computed `dist` alias.
+    fn id_and_dist_projection() -> Vec<Projection> {
+        vec![
+            Projection::Column("id".to_string()),
+            Projection::Computed {
+                expr: SqlExpr::Wildcard,
+                alias: "dist".to_string(),
+            },
+        ]
+    }
+
+    fn assert_id_and_dist_schema(schema: &OutputSchema) {
+        assert_eq!(schema.columns.len(), 2);
+        assert_eq!(schema.columns[0].display_name, "id");
+        assert_eq!(schema.columns[0].lookup_key, "id");
+        assert_eq!(schema.columns[0].ty, DdlColType::Text);
+        assert_eq!(schema.columns[1].display_name, "dist");
+        assert_eq!(schema.columns[1].lookup_key, "dist");
+        assert_eq!(schema.columns[1].ty, DdlColType::Text);
+        assert!(!schema.is_star);
+    }
+
+    #[test]
+    fn point_get_uses_its_own_projection() {
+        let plans = vec![SqlPlan::PointGet {
+            collection: "users".to_string(),
+            alias: None,
+            engine: nodedb_sql::types::query::EngineType::DocumentSchemaless,
+            key_column: "id".to_string(),
+            key_value: nodedb_sql::types_expr::SqlValue::Null,
+            projection: id_and_dist_projection(),
+        }];
+        let schema =
+            build_output_schema(&plans, &NoCatalog, nodedb_types::DatabaseId::DEFAULT, None);
+        assert_id_and_dist_schema(&schema);
+    }
+
+    #[test]
+    fn vector_search_uses_its_own_projection() {
+        let plans = vec![SqlPlan::VectorSearch {
+            collection: "docs".to_string(),
+            field: "embedding".to_string(),
+            query_vector: vec![0.0, 1.0],
+            top_k: 10,
+            ef_search: 64,
+            metric: nodedb_sql::types::DistanceMetric::L2,
+            filters: Vec::new(),
+            array_prefilter: None,
+            ann_options: nodedb_sql::types::VectorAnnOptions::default(),
+            skip_payload_fetch: false,
+            payload_filters: Vec::new(),
+            projection: id_and_dist_projection(),
+        }];
+        let schema =
+            build_output_schema(&plans, &NoCatalog, nodedb_types::DatabaseId::DEFAULT, None);
+        assert_id_and_dist_schema(&schema);
+    }
+
+    #[test]
+    fn hybrid_search_uses_its_own_projection() {
+        let plans = vec![SqlPlan::HybridSearch(HybridSearchPlan {
+            collection: "docs".to_string(),
+            query_vector: vec![0.0, 1.0],
+            query_text: "hello".to_string(),
+            top_k: 10,
+            ef_search: 64,
+            vector_weight: 0.5,
+            fuzzy: false,
+            score_alias: None,
+            projection: id_and_dist_projection(),
+        })];
+        let schema =
+            build_output_schema(&plans, &NoCatalog, nodedb_types::DatabaseId::DEFAULT, None);
+        assert_id_and_dist_schema(&schema);
+    }
+
+    #[test]
+    fn text_search_uses_its_own_projection() {
+        let plans = vec![SqlPlan::TextSearch {
+            collection: "docs".to_string(),
+            field: None,
+            query: nodedb_sql::types::FtsQuery::Plain {
+                text: "hello".to_string(),
+                fuzzy: false,
+            },
+            top_k: 10,
+            filters: Vec::new(),
+            score_alias: None,
+            projection: id_and_dist_projection(),
+        }];
+        let schema =
+            build_output_schema(&plans, &NoCatalog, nodedb_types::DatabaseId::DEFAULT, None);
+        assert_id_and_dist_schema(&schema);
+    }
+
+    /// Computed column projections retain catalog types. Boolean comparisons use Bool.
+    #[test]
+    fn computed_projection_types_resolve_against_catalog() {
+        let projection = vec![
+            Projection::Computed {
+                expr: metrics_column("n"),
+                alias: "aliased_n".to_string(),
+            },
+            Projection::Computed {
+                expr: SqlExpr::BinaryOp {
+                    left: Box::new(metrics_column("n")),
+                    op: nodedb_sql::types_expr::BinaryOp::Gt,
+                    right: Box::new(SqlExpr::Literal(nodedb_sql::types_expr::SqlValue::Int(0))),
+                },
+                alias: "positive".to_string(),
+            },
+        ];
+        let plans = vec![scan_plan("metrics", projection)];
+        let schema = build_output_schema(
+            &plans,
+            &TypedCatalog,
+            nodedb_types::DatabaseId::DEFAULT,
+            None,
+        );
+        assert_eq!(schema.columns.len(), 2);
+        // Bare-column-passthrough computed expr -> the column's catalog type.
+        assert_eq!(schema.columns[0].display_name, "aliased_n");
+        assert_eq!(schema.columns[0].lookup_key, "n");
+        assert_eq!(schema.columns[0].ty, DdlColType::Int8);
+        // Boolean comparison expression -> Bool.
+        assert_eq!(schema.columns[1].display_name, "positive");
+        assert_eq!(schema.columns[1].ty, DdlColType::Bool);
     }
 }

@@ -12,9 +12,12 @@ use std::sync::{Arc, atomic::AtomicU64};
 
 /// Full-text search index generic over storage backend.
 ///
-/// Provides identical indexing, search, and highlighting logic for Origin (redb), Lite (in-memory), and WASM deployments.
+/// Indexing, search, and highlighting use the [`FtsBackend`] storage contract.
 ///
-/// Writes accumulate in an in-memory `Memtable`. When the memtable exceeds its threshold, it is flushed to an immutable segment stored via the backend. Queries merge the active memtable with all persisted segments.
+/// Writes accumulate in an in-memory `Memtable`.
+/// Threshold-triggered flushing creates immutable segments through the backend.
+/// Queries merge the active memtable with stored segments.
+/// The backend determines segment durability.
 ///
 /// [`MemoryGovernor`] enforces per-engine memory budgets on large allocations (compaction, segment merge, query term collection).
 pub struct FtsIndex<B: FtsBackend> {

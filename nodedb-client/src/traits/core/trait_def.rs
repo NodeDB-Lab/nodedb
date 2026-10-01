@@ -305,7 +305,9 @@ pub trait NodeDb: NodeDbMarker {
     ///
     /// Returns the path as a list of node IDs (`from` first, `to` last), or `None` if no path exists within `max_depth` hops.
     ///
-    /// Default: forward breadth-first search built on `graph_traverse`. Each frontier expansion calls `graph_traverse(node, 1, edge_filter)` to discover outgoing neighbors. Inherits the underlying impl's edge direction semantics. Implementations with a server-side shortest-path operator (e.g. NodeDB's `GRAPH PATH IN <collection> FROM <src> TO <dst>` DSL) should override for performance — round-tripping per-hop is O(path_length) wire hops.
+    /// The default uses breadth-first search with `Direction::Out`.
+    /// Each expanded node requires one `graph_traverse` request at depth 1.
+    /// Implementations with a server-side shortest-path operator can override this default to reduce network requests.
     async fn graph_shortest_path(
         &self,
         collection: &str,
