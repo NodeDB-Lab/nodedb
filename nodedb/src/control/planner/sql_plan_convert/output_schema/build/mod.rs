@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Output-schema derivation: `schema` builds it, `tests` pins it.
+//! Output schemas for read, aggregate, constant, and write plans.
 
-mod schema;
+mod aggregate;
+mod constant;
 #[cfg(test)]
-mod tests;
+mod fixtures;
+mod schema;
 
 pub use schema::build_output_schema;

@@ -3,18 +3,16 @@
 //! The pass that walks a plan and refuses a search function in a
 //! row-evaluated position.
 
-use crate::error::{Result, SqlError};
+use crate::error::Result;
 use crate::functions::registry::FunctionRegistry;
-use crate::types::query::{AggregateExpr, Projection, SortKey, WindowSpec};
 use crate::types::{
     CtePlan, DocumentIndexLookupPlan, KvInsertPlan, LateralLoopPlan, LateralTopKPlan, MergePlan,
     RangeScanPlan, RecursiveScanPlan, TimeseriesScanPlan, UpsertPlan, VectorPrimaryDeletePlan,
     VectorPrimaryInsertPlan, VectorPrimaryUpdatePlan,
 };
-use crate::types::{Filter, FilterExpr, MergePlanAction, SqlPlan};
-use crate::types_expr::SqlExpr;
+use crate::types::{MergePlanAction, SqlPlan};
 
-use super::lookup::{first_search_function, has_search_plan};
+use super::lookup::has_search_plan;
 
 /// Refuse `plan` when an index-owned search function sits where the row
 /// evaluator runs it.
@@ -25,8 +23,8 @@ pub fn refuse_row_scoped_search_functions(
     Scope { functions }.plan(plan)
 }
 
-struct Scope<'a> {
-    functions: &'a FunctionRegistry,
+pub(super) struct Scope<'a> {
+    pub(super) functions: &'a FunctionRegistry,
 }
 
 impl Scope<'_> {
@@ -260,71 +258,154 @@ impl Scope<'_> {
             | SqlPlan::DropIndex { .. } => Ok(()),
         }
     }
+}
 
-    fn filters(&self, filters: &[Filter]) -> Result<()> {
-        filters
-            .iter()
-            .try_for_each(|filter| self.filter(&filter.expr))
-    }
+#[cfg(test)]
+mod tests {
+    use super::refuse_row_scoped_search_functions;
+    use crate::error::{Result, SqlError};
+    use crate::functions::registry::FunctionRegistry;
+    use crate::types::query::EngineType;
+    use crate::types::query::Projection;
+    use crate::types::{Filter, FilterExpr, SqlPlan};
+    use crate::types_expr::SqlExpr;
+    use crate::types_expr::SqlValue;
 
-    fn filter(&self, expr: &FilterExpr) -> Result<()> {
-        match expr {
-            FilterExpr::Expr(expr) => self.expr(expr),
-            FilterExpr::And(children) | FilterExpr::Or(children) => self.filters(children),
-            FilterExpr::Not(child) => self.filter(&child.expr),
-            FilterExpr::Comparison { .. }
-            | FilterExpr::InList { .. }
-            | FilterExpr::Between { .. }
-            | FilterExpr::IsNull { .. }
-            | FilterExpr::IsNotNull { .. } => Ok(()),
+    fn call(name: &str) -> SqlExpr {
+        SqlExpr::Function {
+            name: name.into(),
+            args: vec![
+                SqlExpr::Column {
+                    table: None,
+                    name: "body".into(),
+                },
+                SqlExpr::Literal(SqlValue::String("rust".into())),
+            ],
+            distinct: false,
         }
     }
 
-    fn projection(&self, projection: &[Projection]) -> Result<()> {
-        for item in projection {
-            match item {
-                Projection::Computed { expr, .. } | Projection::CpComputed { expr, .. } => {
-                    self.expr(expr)?
-                }
-                Projection::Column(_) | Projection::Star | Projection::QualifiedStar(_) => {}
-            }
+    fn scan(projection: Vec<Projection>, filters: Vec<Filter>) -> SqlPlan {
+        SqlPlan::Scan {
+            collection: "docs".into(),
+            alias: None,
+            engine: EngineType::DocumentSchemaless,
+            filters,
+            projection,
+            sort_keys: Vec::new(),
+            limit: None,
+            offset: 0,
+            distinct: false,
+            window_functions: Vec::new(),
+            temporal: Default::default(),
         }
-        Ok(())
     }
 
-    fn sort_keys(&self, sort_keys: &[SortKey]) -> Result<()> {
-        sort_keys.iter().try_for_each(|key| self.expr(&key.expr))
+    fn check(plan: &SqlPlan) -> Result<()> {
+        refuse_row_scoped_search_functions(plan, &FunctionRegistry::new())
     }
 
-    fn windows(&self, windows: &[WindowSpec]) -> Result<()> {
-        for window in windows {
-            self.exprs(&window.args)?;
-            self.exprs(&window.partition_by)?;
-            self.sort_keys(&window.order_by)?;
-        }
-        Ok(())
+    #[test]
+    fn a_score_in_a_scan_projection_is_refused() {
+        let plan = scan(
+            vec![Projection::Computed {
+                expr: call("bm25_score"),
+                alias: "s".into(),
+            }],
+            Vec::new(),
+        );
+        assert_eq!(
+            check(&plan),
+            Err(SqlError::SearchFunctionOutsideSearch {
+                name: "bm25_score".into()
+            })
+        );
     }
 
-    fn aggregates(&self, aggregates: &[AggregateExpr]) -> Result<()> {
-        aggregates
-            .iter()
-            .try_for_each(|aggregate| self.exprs(&aggregate.args))
+    #[test]
+    fn a_match_nested_in_a_scan_filter_is_refused() {
+        let nested = SqlExpr::BinaryOp {
+            left: Box::new(call("text_match")),
+            op: crate::types_expr::BinaryOp::Or,
+            right: Box::new(SqlExpr::Literal(SqlValue::Bool(false))),
+        };
+        let plan = scan(
+            Vec::new(),
+            vec![Filter {
+                expr: FilterExpr::Expr(nested),
+            }],
+        );
+        assert!(matches!(
+            check(&plan),
+            Err(SqlError::SearchFunctionOutsideSearch { .. })
+        ));
     }
 
-    fn assignments(&self, assignments: &[(String, SqlExpr)]) -> Result<()> {
-        assignments.iter().try_for_each(|(_, expr)| self.expr(expr))
+    #[test]
+    fn row_scalars_in_a_scan_pass() {
+        let plan = scan(
+            vec![
+                Projection::Computed {
+                    expr: call("vector_distance"),
+                    alias: "d".into(),
+                },
+                Projection::Computed {
+                    expr: call("doc_get"),
+                    alias: "g".into(),
+                },
+            ],
+            Vec::new(),
+        );
+        assert_eq!(check(&plan), Ok(()));
     }
 
-    fn exprs(&self, exprs: &[SqlExpr]) -> Result<()> {
-        exprs.iter().try_for_each(|expr| self.expr(expr))
+    #[test]
+    fn a_search_plan_projection_serves_its_score() {
+        let plan = SqlPlan::TextSearch {
+            collection: "docs".into(),
+            field: None,
+            query: crate::fts_types::FtsQuery::Plain {
+                text: "rust".into(),
+                fuzzy: true,
+            },
+            top_k: 10,
+            filters: Vec::new(),
+            score_alias: Some("s".into()),
+            projection: vec![Projection::Computed {
+                expr: call("bm25_score"),
+                alias: "s".into(),
+            }],
+        };
+        assert_eq!(check(&plan), Ok(()));
     }
 
-    fn expr(&self, expr: &SqlExpr) -> Result<()> {
-        match first_search_function(expr, self.functions) {
-            Some(name) => Err(SqlError::SearchFunctionOutsideSearch {
-                name: name.to_owned(),
-            }),
-            None => Ok(()),
-        }
+    #[test]
+    fn a_subquery_tail_over_a_search_plan_is_not_checked() {
+        let search = SqlPlan::TextSearch {
+            collection: "docs".into(),
+            field: None,
+            query: crate::fts_types::FtsQuery::Plain {
+                text: "rust".into(),
+                fuzzy: true,
+            },
+            top_k: 10,
+            filters: Vec::new(),
+            score_alias: Some("s".into()),
+            projection: Vec::new(),
+        };
+        let plan = SqlPlan::Subquery {
+            input: Box::new(search),
+            filters: Vec::new(),
+            projection: vec![Projection::Computed {
+                expr: call("bm25_score"),
+                alias: "s".into(),
+            }],
+            window_functions: Vec::new(),
+            sort_keys: Vec::new(),
+            offset: 0,
+            distinct: false,
+            limit: None,
+        };
+        assert_eq!(check(&plan), Ok(()));
     }
 }
