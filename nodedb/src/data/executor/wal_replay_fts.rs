@@ -212,7 +212,7 @@ impl CoreLoop {
                             payload.collection.clone(),
                         ),
                         surrogate,
-                        text: payload.text.clone(),
+                        fields: payload.fields.clone(),
                         provenance: Some(prov.clone()),
                     }),
                 );
@@ -222,7 +222,7 @@ impl CoreLoop {
                     tenant_id,
                     &payload.collection,
                     surrogate,
-                    &payload.text,
+                    &payload.fields,
                     Some(&prov),
                 );
 
@@ -437,11 +437,15 @@ mod tests {
     }
 
     fn index_record(lsn: u64, text: &str) -> nodedb_wal::WalRecord {
+        fields_record(lsn, vec![("body".to_string(), text.to_string())])
+    }
+
+    fn fields_record(lsn: u64, fields: Vec<(String, String)>) -> nodedb_wal::WalRecord {
         let payload = FtsIndexPayload::new(
             local_provenance(),
             COLLECTION,
             format!("{SURROGATE:08x}"),
-            text,
+            fields,
         )
         .to_bytes()
         .expect("encode FtsIndexPayload");
@@ -568,5 +572,43 @@ mod tests {
             after_first,
             "re-applying a durable FtsDelete record must be a no-op"
         );
+    }
+
+    /// An `FtsIndex` record with several fields replays into each field's
+    /// index and into the whole-document index.
+    #[test]
+    fn an_index_record_replays_into_its_field_scopes() {
+        let mut h = make_core();
+        replay(
+            &mut h.core,
+            &fields_record(
+                10,
+                vec![
+                    ("title".to_string(), "alpha".to_string()),
+                    ("body".to_string(), "bravo".to_string()),
+                ],
+            ),
+        );
+        let tid = TenantId::new(TENANT);
+        let title = nodedb_fts::IndexScope::field(COLLECTION, "title").expect("field scope");
+        let body = nodedb_fts::IndexScope::field(COLLECTION, "body").expect("field scope");
+        let df = |index: nodedb_fts::IndexScope<'_>, word: &str| {
+            let term = h
+                .core
+                .inverted
+                .analyze_for_collection(DB, tid, COLLECTION, word)
+                .expect("analyze")
+                .remove(0);
+            h.core
+                .inverted
+                .term_df(DB, tid, index, &term)
+                .expect("term df")
+        };
+        assert_eq!(df(title, "alpha"), 1);
+        assert_eq!(df(title, "bravo"), 0);
+        assert_eq!(df(body, "bravo"), 1);
+        assert_eq!(df(body, "alpha"), 0);
+        assert_eq!(df(COLLECTION.into(), "alpha"), 1);
+        assert_eq!(df(COLLECTION.into(), "bravo"), 1);
     }
 }

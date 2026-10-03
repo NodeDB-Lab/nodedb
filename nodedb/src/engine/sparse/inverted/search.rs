@@ -6,17 +6,18 @@
 use redb::{ReadableDatabase, ReadableTable};
 use tracing::debug;
 
-use nodedb_fts::FtsSearchParams;
 use nodedb_fts::posting::{MatchOffset, Posting, TextSearchResult};
+use nodedb_fts::{FtsSearchParams, IndexScope};
 use nodedb_types::{Surrogate, TenantId};
 
 use super::core::InvertedIndex;
 use super::errors::{fts_index_err, inverted_err};
+use crate::engine::sparse::fts_redb::keys::posting_key;
 use crate::engine::sparse::fts_redb::tables::POSTINGS;
 
 /// Query and tuning parameters for an inverted-index phrase search.
 ///
-/// The `(database_id, tid, collection)` scope is passed separately so callers
+/// The `(database_id, tid, index)` scope is passed separately so callers
 /// can reuse their existing scope variables.
 pub struct PhraseSearchParams<'a> {
     /// Ordered terms that must appear as a contiguous sequence.
@@ -25,6 +26,8 @@ pub struct PhraseSearchParams<'a> {
     pub top_k: usize,
     /// Optional surrogate bitmap restricting candidates before position match.
     pub prefilter: Option<&'a nodedb_types::SurrogateBitmap>,
+    /// Documents that never match, excluded before the top-k cut.
+    pub exclude: Option<&'a nodedb_types::SurrogateBitmap>,
 }
 
 impl InvertedIndex {
@@ -36,17 +39,20 @@ impl InvertedIndex {
     ///
     /// The result is scored by position rank (earlier = higher). An optional
     /// `prefilter` bitmap restricts the candidate set before position matching.
-    pub fn phrase_search(
+    pub fn phrase_search<'a>(
         &self,
         database_id: u64,
         tid: TenantId,
-        collection: &str,
+        index: impl Into<IndexScope<'a>>,
         params: PhraseSearchParams<'_>,
     ) -> crate::Result<Vec<TextSearchResult>> {
+        let index = index.into();
+        let collection = index.collection();
         let PhraseSearchParams {
             terms,
             top_k,
             prefilter,
+            exclude,
         } = params;
         if terms.is_empty() {
             return Ok(Vec::new());
@@ -64,11 +70,14 @@ impl InvertedIndex {
         for term in terms {
             let analyzed = self.analyze_for_collection(database_id, tid, collection, term)?;
             let canonical = analyzed.into_iter().next().unwrap_or_else(|| term.clone());
-            let postings: Vec<Posting> = postings_table
-                .get((database_id, t, collection, canonical.as_str()))
+            let postings: Vec<Posting> = match postings_table
+                .get(posting_key(database_id, t, index, canonical.as_str()))
                 .map_err(|e| inverted_err("read posting", e))?
-                .and_then(|v| zerompk::from_msgpack(v.value()).ok())
-                .unwrap_or_default();
+            {
+                Some(v) => zerompk::from_msgpack(v.value())
+                    .map_err(|e| inverted_err("decode posting", e))?,
+                None => Vec::new(),
+            };
             term_lists.push(postings);
         }
 
@@ -79,7 +88,9 @@ impl InvertedIndex {
 
         'outer: for posting in first {
             // Prefilter check.
-            if prefilter.is_some_and(|bm| !bm.0.contains(posting.doc_id.as_u32())) {
+            if prefilter.is_some_and(|bm| !bm.contains(posting.doc_id))
+                || exclude.is_some_and(|bm| bm.contains(posting.doc_id))
+            {
                 continue;
             }
 
@@ -121,6 +132,7 @@ impl InvertedIndex {
         debug!(
             tid = t,
             %collection,
+            field = index.field_key(),
             terms = terms.len(),
             hits = results.len(),
             "phrase search"
@@ -132,15 +144,15 @@ impl InvertedIndex {
     ///
     /// Supports `NOT <term>` and `-<term>` negation in the query string.
     /// Returns `Err` for invalid queries (NOT-only, unsupported parentheses).
-    pub fn search(
+    pub fn search<'a>(
         &self,
         database_id: u64,
         tid: TenantId,
-        collection: &str,
+        index: impl Into<IndexScope<'a>>,
         params: FtsSearchParams<'_>,
     ) -> crate::Result<Vec<TextSearchResult>> {
         self.inner
-            .search(database_id, tid.as_u64(), collection, params)
+            .search(database_id, tid.as_u64(), index, params)
             .map_err(fts_index_err)
     }
 
@@ -164,6 +176,7 @@ mod tests {
     use nodedb_fts::posting::QueryMode;
 
     use super::*;
+    use crate::engine::sparse::inverted::test_support::body;
 
     const DB: u64 = 0;
     const T: TenantId = TenantId::new(1);
@@ -187,7 +200,7 @@ mod tests {
             T,
             "docs",
             Surrogate::new(1),
-            "The quick brown fox jumps over the lazy dog",
+            &body("The quick brown fox jumps over the lazy dog"),
         )
         .unwrap();
         idx.index_document(
@@ -195,7 +208,7 @@ mod tests {
             T,
             "docs",
             Surrogate::new(2),
-            "A fast brown dog runs across the field",
+            &body("A fast brown dog runs across the field"),
         )
         .unwrap();
         idx.index_document(
@@ -203,7 +216,7 @@ mod tests {
             T,
             "docs",
             Surrogate::new(3),
-            "Rust programming language for systems",
+            &body("Rust programming language for systems"),
         )
         .unwrap();
 
@@ -233,11 +246,17 @@ mod tests {
             T,
             "docs",
             Surrogate::new(1),
-            "running distributed databases",
+            &body("running distributed databases"),
         )
         .unwrap();
-        idx.index_document(DB, T, "docs", Surrogate::new(2), "the cat sat on a mat")
-            .unwrap();
+        idx.index_document(
+            DB,
+            T,
+            "docs",
+            Surrogate::new(2),
+            &body("the cat sat on a mat"),
+        )
+        .unwrap();
 
         let results = idx
             .search(
@@ -265,7 +284,7 @@ mod tests {
             T,
             "docs",
             Surrogate::new(1),
-            "distributed database systems",
+            &body("distributed database systems"),
         )
         .unwrap();
 
@@ -290,7 +309,7 @@ mod tests {
     #[test]
     fn empty_query() {
         let (idx, _dir) = open_temp();
-        idx.index_document(DB, T, "docs", Surrogate::new(1), "some text here")
+        idx.index_document(DB, T, "docs", Surrogate::new(1), &body("some text here"))
             .unwrap();
 
         let results = idx
@@ -313,10 +332,22 @@ mod tests {
     #[test]
     fn collections_isolated() {
         let (idx, _dir) = open_temp();
-        idx.index_document(DB, T, "col_a", Surrogate::new(1), "alpha bravo charlie")
-            .unwrap();
-        idx.index_document(DB, T, "col_b", Surrogate::new(1), "delta echo foxtrot")
-            .unwrap();
+        idx.index_document(
+            DB,
+            T,
+            "col_a",
+            Surrogate::new(1),
+            &body("alpha bravo charlie"),
+        )
+        .unwrap();
+        idx.index_document(
+            DB,
+            T,
+            "col_b",
+            Surrogate::new(1),
+            &body("delta echo foxtrot"),
+        )
+        .unwrap();
 
         let results = idx
             .search(

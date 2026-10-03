@@ -133,6 +133,7 @@ pub(super) async fn dispatch_graph_owner_read(
                 tenant_id,
                 database_id,
                 plan,
+                txn_id,
                 true,
             )
             .await?

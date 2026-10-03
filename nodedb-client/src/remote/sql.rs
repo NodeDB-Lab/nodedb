@@ -10,6 +10,8 @@
 //! pgwire driver; the trait method `execute_sql` borrows them as
 //! `&[&(dyn ToSql + Sync)]` for the actual `Client::query` call.
 
+use std::collections::HashSet;
+
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 use nodedb_types::filter::MetadataFilter;
 use nodedb_types::value::Value;
@@ -24,16 +26,35 @@ use crate::sql_escape::{quote_identifier, quote_string_literal};
 /// shape so the optional `WHERE` clause precedes `ORDER BY` (the SEARCH
 /// preprocessor's "trailing append" form would have placed `WHERE` after
 /// `ORDER BY`, which is invalid SQL).
+///
+/// `allowed_ids` adds a top-level `id IN (...)` conjunct. The server lowers
+/// that key conjunct to the candidate bitmap the index search honors, so the
+/// top-k is drawn from the allowed ids only.
 pub(super) fn build_vector_search_sql(
     collection: &str,
     query: &[f32],
     k: usize,
     filter: Option<&MetadataFilter>,
+    allowed_ids: Option<&HashSet<String>>,
 ) -> NodeDbResult<String> {
     let collection = quote_identifier(collection);
-    let where_clause = match filter {
-        Some(f) => format!(" WHERE {}", render_metadata_filter(f)?),
-        None => String::new(),
+    let mut conjuncts: Vec<String> = Vec::new();
+    if let Some(f) = filter {
+        conjuncts.push(render_metadata_filter(f)?);
+    }
+    if let Some(ids) = allowed_ids {
+        let mut ids: Vec<&String> = ids.iter().collect();
+        ids.sort();
+        let list: Vec<String> = ids
+            .iter()
+            .map(|id| quote_string_literal(id.as_str()))
+            .collect();
+        conjuncts.push(format!("id IN ({})", list.join(", ")));
+    }
+    let where_clause = if conjuncts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conjuncts.join(" AND "))
     };
     Ok(format!(
         "SELECT * FROM {collection}{where_clause} ORDER BY vector_distance({}) LIMIT {k}",
@@ -182,7 +203,8 @@ mod tests {
     fn vector_search_sql_without_filter_renders_basic_form() {
         // No-filter path: SELECT * FROM <coll> ORDER BY vector_distance(ARRAY[..]) LIMIT k.
         let sql =
-            build_vector_search_sql("docs", &[0.1, 0.2, 0.3], 5, None).expect("no-filter is fine");
+            build_vector_search_sql("docs", &[0.1, 0.2, 0.3], 5, None, None)
+                .expect("no-filter is fine");
         assert!(sql.contains("SELECT"));
         assert!(sql.contains("docs"));
         assert!(sql.contains("vector_distance"));
@@ -199,7 +221,7 @@ mod tests {
         // Spec: a non-None Eq filter renders into a server-side predicate
         // referencing both the field and the value.
         let filter = MetadataFilter::eq("category", Value::String("ai".into()));
-        let sql = build_vector_search_sql("docs", &[0.1, 0.2], 5, Some(&filter))
+        let sql = build_vector_search_sql("docs", &[0.1, 0.2], 5, Some(&filter), None)
             .expect("non-None metadata filter must be accepted client-side, not rejected");
         assert!(
             sql.contains("category"),
@@ -233,7 +255,7 @@ mod tests {
                 value: Value::Float(0.5),
             },
         ]);
-        let sql = build_vector_search_sql("docs", &[0.1], 3, Some(&filter))
+        let sql = build_vector_search_sql("docs", &[0.1], 3, Some(&filter), None)
             .expect("compound metadata filter must be rendered, not rejected");
         assert!(
             sql.contains("category"),
@@ -255,10 +277,26 @@ mod tests {
                 Value::String("databases".into()),
             ],
         };
-        let sql = build_vector_search_sql("docs", &[0.0], 1, Some(&filter)).unwrap();
+        let sql = build_vector_search_sql("docs", &[0.0], 1, Some(&filter), None).unwrap();
         assert!(sql.contains(" IN ("));
         assert!(sql.contains("'rust'"));
         assert!(sql.contains("'databases'"));
+    }
+
+    #[test]
+    fn vector_search_sql_restricts_to_allowed_ids() {
+        let ids: HashSet<String> = ["b", "a'"].iter().map(|s| s.to_string()).collect();
+        let sql = build_vector_search_sql("docs", &[0.0], 2, None, Some(&ids)).unwrap();
+        assert!(
+            sql.contains(" WHERE id IN ('a''', 'b') ORDER BY "),
+            "allowed ids render as a key conjunct; got: {sql}"
+        );
+        let filter = MetadataFilter::eq("category", Value::String("ai".into()));
+        let sql = build_vector_search_sql("docs", &[0.0], 2, Some(&filter), Some(&ids)).unwrap();
+        assert!(
+            sql.contains(" WHERE \"category\" = 'ai' AND id IN ('a''', 'b') ORDER BY "),
+            "the key conjunct joins the filter at the top level; got: {sql}"
+        );
     }
 
     #[test]

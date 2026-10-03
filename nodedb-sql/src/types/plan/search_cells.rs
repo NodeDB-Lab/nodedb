@@ -64,6 +64,7 @@ mod tests {
                 ann_options: VectorAnnOptions::default(),
                 skip_payload_fetch: false,
                 payload_filters: Vec::new(),
+                pk_prefilter: None,
                 projection: Vec::new(),
             }
             .carries_search_cells()

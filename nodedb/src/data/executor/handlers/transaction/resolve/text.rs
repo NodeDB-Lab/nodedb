@@ -4,7 +4,7 @@
 //!
 //! **Plan-driven.** An `FtsIndexDoc` / `FtsDeleteDoc` buffered inside a
 //! transaction carries the complete posting input (collection, surrogate,
-//! text), so it resolves to the exact `FtsIndex` / `FtsDelete` record its
+//! fields), so it resolves to the exact `FtsIndex` / `FtsDelete` record its
 //! autocommit form journals (`wal_dispatch::encode_text_op_record`). A row the
 //! same transaction also writes as a document re-derives the same postings at
 //! install; an index upsert for one document is idempotent, so the two agree.
@@ -37,7 +37,7 @@ mod tests {
         let op = TextOp::FtsIndexDoc {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
             surrogate: Surrogate::new(7),
-            text: "hello world".to_string(),
+            fields: vec![("body".to_string(), "hello world".to_string())],
             provenance: None,
         };
         let mut ops = Vec::new();

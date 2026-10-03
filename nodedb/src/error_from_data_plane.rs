@@ -144,6 +144,11 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
              add a stricter termination condition or raise max_recursion_depth"
         )),
         ErrorCode::UndefinedColumn { column } => NodeDbError::undefined_column(column),
+        ErrorCode::TextColumn {
+            collection,
+            column,
+            fault,
+        } => text_column_to_public(&collection, &column, &fault),
         // `0A000` (feature_not_supported). `SQL_NOT_ENABLED` is the class
         // every bare `0A000` refusal carries.
         ErrorCode::Unsupported { detail } => {
@@ -205,6 +210,26 @@ pub(crate) fn rejected_constraint_to_public(
         sqlstate::GENERATED_ALWAYS => NodeDbError::bad_request(detail),
         _ => NodeDbError::constraint_violation(collection, constraint, detail),
     }
+}
+
+/// The public error of a full-text column fault. A field that does not exist
+/// as text is an undefined column (`42703`). An argument that is not a text
+/// column is a type mismatch (class `42`). Shared by the Data-Plane code and
+/// the Control-Plane variant, so both render one message.
+pub(crate) fn text_column_to_public(
+    collection: &str,
+    column: &str,
+    fault: &nodedb_types::text_search::TextColumnFault,
+) -> NodeDbError {
+    use nodedb_types::text_search::TextColumnFault;
+    let code = match fault {
+        TextColumnFault::Undeclared | TextColumnFault::NotIndexed => PublicCode::UNDEFINED_COLUMN,
+        TextColumnFault::NotText { .. } | TextColumnFault::NotAColumn => PublicCode::TYPE_MISMATCH,
+    };
+    NodeDbError::from_wire(
+        code,
+        format!("column \"{column}\" of collection \"{collection}\" {fault}"),
+    )
 }
 
 #[cfg(test)]

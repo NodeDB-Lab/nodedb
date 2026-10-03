@@ -4,21 +4,22 @@
 
 use crate::backend::FtsBackend;
 use crate::index::FtsIndex;
+use crate::scope::IndexScope;
 
 impl<B: FtsBackend> FtsIndex<B> {
-    /// Get total document count and average document length for a collection.
+    /// Get total document count and average document length of one index.
     ///
-    /// Returns `(total_docs, avg_doc_len)`. If the collection is empty,
+    /// Returns `(total_docs, avg_doc_len)`. If the index is empty,
     /// returns `(0, 1.0)` to avoid division by zero.
-    pub fn index_stats(
+    pub fn index_stats<'a>(
         &self,
         database_id: u64,
         tid: u64,
-        collection: &str,
+        index: impl Into<IndexScope<'a>>,
     ) -> Result<(u32, f32), B::Error> {
         let (count, total_len) = self
             .backend
-            .collection_stats(database_id, tid, collection)?;
+            .collection_stats(database_id, tid, index.into())?;
         let avg = if count > 0 {
             total_len as f32 / count as f32
         } else {

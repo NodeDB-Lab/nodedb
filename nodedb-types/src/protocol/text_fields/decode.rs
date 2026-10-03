@@ -116,8 +116,8 @@ impl<'a> zerompk::FromMessagePack<'a> for TextFields {
                 FID_VECTOR_TOP_K => {
                     out.vector_top_k = Some(reader.read_u32()?);
                 }
-                FID_EDGE_LABEL => {
-                    out.edge_label = Some(reader.read_string()?.into_owned());
+                FID_EDGE_LABELS => {
+                    out.edge_labels = Some(Vec::<String>::read(reader)?);
                 }
                 FID_DIRECTION => {
                     out.direction = Some(reader.read_string()?.into_owned());
@@ -344,6 +344,12 @@ impl<'a> zerompk::FromMessagePack<'a> for TextFields {
                 FID_LIST_FIELDS_JSON => {
                     out.list_fields_json = Some(reader.read_string()?.into_owned());
                 }
+                FID_TEXT_MODE => {
+                    out.text_mode = Some(crate::text_search::QueryMode::read(reader)?);
+                }
+                FID_ALLOWED_IDS => {
+                    out.allowed_ids = Some(Vec::<String>::read(reader)?);
+                }
                 // Unknown field ID — skip value for forward compatibility.
                 _ => {
                     skip_msgpack_value(reader)?;
@@ -552,5 +558,51 @@ mod tests {
             "binary field must use bin8/bin16/bin32 marker, not fixarray; \
              saw marker 0x{value_marker:02x}"
         );
+    }
+
+    #[test]
+    fn edge_labels_roundtrip_two_labels() {
+        let tf = TextFields {
+            edge_labels: Some(vec!["KNOWS".into(), "WORKS".into()]),
+            ..Default::default()
+        };
+        let decoded = roundtrip(&tf);
+        assert_eq!(
+            decoded.edge_labels,
+            Some(vec!["KNOWS".to_string(), "WORKS".to_string()])
+        );
+    }
+
+    #[test]
+    fn text_mode_and_allowed_ids_roundtrip() {
+        let tf = TextFields {
+            text_mode: Some(crate::text_search::QueryMode::And),
+            fuzzy: Some(false),
+            allowed_ids: Some(vec!["a".into(), "b'c".into()]),
+            ..Default::default()
+        };
+        let decoded = roundtrip(&tf);
+        assert_eq!(decoded.text_mode, Some(crate::text_search::QueryMode::And));
+        assert_eq!(decoded.fuzzy, Some(false));
+        assert_eq!(
+            decoded.allowed_ids,
+            Some(vec!["a".to_string(), "b'c".to_string()])
+        );
+        // An empty allowed set is a restriction to nothing, not an absent one.
+        let empty = roundtrip(&TextFields {
+            allowed_ids: Some(Vec::new()),
+            ..Default::default()
+        });
+        assert_eq!(empty.allowed_ids, Some(Vec::new()));
+    }
+
+    #[test]
+    fn edge_labels_roundtrip_empty_set_stays_present() {
+        let tf = TextFields {
+            edge_labels: Some(Vec::new()),
+            ..Default::default()
+        };
+        let decoded = roundtrip(&tf);
+        assert_eq!(decoded.edge_labels, Some(Vec::new()));
     }
 }

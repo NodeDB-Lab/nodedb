@@ -260,23 +260,30 @@ impl CoreLoop {
                 .join("groupby-spill")
                 .join(format!("core-{}-columnar", self.core_id));
             let columnar_spill_cap = self.query_tuning.groupby_max_groups_in_mem;
-            if let Some(mut agg_result) = legacy_aggs.and_then(|pairs| {
-                super::super::columnar_agg::try_columnar_aggregate(
-                    &super::super::columnar_agg::ColumnarAggParams {
-                        mt,
-                        group_by: &group_fields,
-                        aggregates: &pairs,
-                        filters: &filter_predicates,
-                        limit,
-                        scan_limit,
-                        spill_dir: &columnar_spill_dir,
-                        spill_cap: columnar_spill_cap,
-                        governor: self.governor.clone(),
-                        db: task.request.database_id,
-                        tenant: task.request.tenant_id,
-                    },
-                )
-            }) {
+            let columnar = legacy_aggs
+                .map(|pairs| {
+                    super::super::columnar_agg::try_columnar_aggregate(
+                        &super::super::columnar_agg::ColumnarAggParams {
+                            mt,
+                            group_by: &group_fields,
+                            aggregates: &pairs,
+                            filters: &filter_predicates,
+                            limit,
+                            scan_limit,
+                            spill_dir: &columnar_spill_dir,
+                            spill_cap: columnar_spill_cap,
+                            governor: self.governor.clone(),
+                            db: task.request.database_id,
+                            tenant: task.request.tenant_id,
+                        },
+                    )
+                })
+                .transpose();
+            let columnar = match columnar {
+                Ok(result) => result.flatten(),
+                Err(e) => return self.response_error(task, ErrorCode::from(e)),
+            };
+            if let Some(mut agg_result) = columnar {
                 if !having.is_empty() {
                     let having_predicates: Vec<ScanFilter> = match zerompk::from_msgpack(having) {
                         Ok(h) => h,

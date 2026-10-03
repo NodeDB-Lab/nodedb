@@ -109,6 +109,23 @@ impl SqlCatalog for TestCatalog {
                 partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
                 open_schema: CollectionInfo::open_schema_for(EngineType::DocumentSchemaless),
             }),
+            "articles" => Some(CollectionInfo {
+                name: "articles".into(),
+                engine: EngineType::DocumentStrict,
+                columns: vec![
+                    strict_column("id", SqlDataType::String, "TEXT", true),
+                    strict_column("title", SqlDataType::String, "TEXT", false),
+                    strict_column("views", SqlDataType::Int64, "INT", false),
+                ],
+                primary_key: Some("id".into()),
+                has_auto_tier: false,
+                indexes: Vec::new(),
+                bitemporal: false,
+                primary: nodedb_types::PrimaryEngine::Document,
+                vector_primary: None,
+                partition_strategy: nodedb_types::PartitionStrategy::CollectionHomed,
+                open_schema: CollectionInfo::open_schema_for(EngineType::DocumentStrict),
+            }),
             _ => None,
         };
         Ok(info)
@@ -145,7 +162,30 @@ impl SqlCatalog for TestCatalog {
     }
 }
 
+fn strict_column(
+    name: &str,
+    data_type: SqlDataType,
+    raw: &str,
+    is_primary_key: bool,
+) -> ColumnInfo {
+    ColumnInfo {
+        name: name.into(),
+        data_type,
+        nullable: !is_primary_key,
+        is_primary_key,
+        default: None,
+        raw_type: Some(raw.into()),
+        int_width: None,
+        float_width: None,
+    }
+}
+
 pub(super) fn plan_select_sql(sql: &str) -> SqlPlan {
+    try_plan_select_sql(sql).unwrap()
+}
+
+/// Plan `sql` against the test catalog, keeping the planner's error.
+pub(super) fn try_plan_select_sql(sql: &str) -> crate::error::Result<SqlPlan> {
     // Run preprocessor so operator rewrites (`<->`, `<=>`, `<#>`) are applied
     // before sqlparser sees the SQL.
     let (preprocessed_sql, temporal) = match preprocess(sql).unwrap() {
@@ -156,5 +196,5 @@ pub(super) fn plan_select_sql(sql: &str) -> SqlPlan {
     let Statement::Query(query) = &statements[0] else {
         panic!("expected query statement");
     };
-    plan_query(query, &TestCatalog, &FunctionRegistry::new(), temporal).unwrap()
+    plan_query(query, &TestCatalog, &FunctionRegistry::new(), temporal)
 }

@@ -18,9 +18,10 @@
 use crate::analyzer::synonym::SynonymMap;
 use crate::backend::FtsBackend;
 use crate::index::writer::FtsIndex;
+use crate::scope::IndexScope;
 
-/// Sentinel collection name for synonym group meta storage.
-const SYNONYM_GROUPS_COLLECTION: &str = "_synonym_groups";
+/// Sentinel index whose metadata holds the synonym groups.
+const SYNONYM_GROUPS_COLLECTION: IndexScope<'static> = IndexScope::document("_synonym_groups");
 
 /// Special meta subkey that holds the JSON array of all group names.
 const INDEX_SUBKEY: &str = "_index";
@@ -176,6 +177,31 @@ impl<B: FtsBackend> FtsIndex<B> {
         let map = self.build_synonym_map_for_tenant(database_id, tid, &groups);
         let expanded = map.expand(&tokens);
         Ok(expanded)
+    }
+
+    /// Expand each analyzed query token into its word group: the token
+    /// first, then its distinct synonyms. One group per token, in token
+    /// order. A document matches a word when it holds any term of the group.
+    pub fn expand_query_groups(
+        &self,
+        database_id: u64,
+        tid: u64,
+        tokens: Vec<String>,
+    ) -> Result<Vec<Vec<String>>, B::Error> {
+        let groups = self.list_synonym_groups(database_id, tid)?;
+        if groups.is_empty() {
+            return Ok(tokens.into_iter().map(|token| vec![token]).collect());
+        }
+        let map = self.build_synonym_map_for_tenant(database_id, tid, &groups);
+        Ok(tokens
+            .into_iter()
+            .map(|token| {
+                let mut group = map.expand(std::slice::from_ref(&token));
+                let mut seen = std::collections::HashSet::new();
+                group.retain(|term| seen.insert(term.clone()));
+                group
+            })
+            .collect())
     }
 
     // ── internal helpers ──────────────────────────────────────────────────────

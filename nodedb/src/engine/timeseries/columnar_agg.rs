@@ -7,6 +7,10 @@
 //! dispatch to SIMD kernels via `simd_agg::ts_runtime()` which
 //! auto-detects AVX-512 / AVX2 / NEON at startup.
 
+use nodedb_query::ExactSum;
+use nodedb_query::window::extremum::value_replaces;
+use nodedb_types::Value;
+
 use super::simd_agg::ts_runtime;
 
 /// Aggregation result for a group of rows.
@@ -254,61 +258,52 @@ pub fn count_by_time_bucket(timestamps: &[i64], bucket_interval_ms: i64) -> Vec<
 
 /// Streaming accumulator for single-pass aggregation.
 ///
-/// Maintains running sum (with Kahan compensation), min, max, count,
-/// first, and last. Zero intermediate allocation.
-#[derive(Debug, Clone)]
+/// SUM / AVG total exactly per `ExactSum`: an integer cell never rounds
+/// through `f64`. MIN / MAX / FIRST / LAST keep the original cell, so an
+/// integer column returns an integer; MIN / MAX compare exactly, and a NaN
+/// extreme yields to any number. STDDEV stays in `f64` (Welford).
+#[derive(Debug, Clone, Default)]
 pub struct AggAccum {
     pub count: u64,
-    sum: f64,
-    compensation: f64,
-    pub min: f64,
-    pub max: f64,
-    first: f64,
-    last: f64,
+    sum: ExactSum,
+    min: Option<Value>,
+    max: Option<Value>,
+    first: Option<Value>,
+    last: Option<Value>,
     /// Welford's M2 for online variance/stddev computation.
     mean: f64,
     m2: f64,
 }
 
-impl Default for AggAccum {
-    fn default() -> Self {
-        Self {
-            count: 0,
-            sum: 0.0,
-            compensation: 0.0,
-            min: f64::INFINITY,
-            max: f64::NEG_INFINITY,
-            first: f64::NAN,
-            last: f64::NAN,
-            mean: 0.0,
-            m2: 0.0,
-        }
-    }
-}
-
 impl AggAccum {
-    /// Feed a single value into the accumulator.
+    /// Feed a single float value into the accumulator.
     pub fn feed(&mut self, v: f64) {
+        self.feed_cell(Value::Float(v), v);
+    }
+
+    /// Feed a single integer value into the accumulator, kept exact.
+    pub fn feed_int(&mut self, v: i64) {
+        self.feed_cell(Value::Integer(v), v as f64);
+    }
+
+    /// Feed `cell`; `as_f64` is its reading for the `f64` STDDEV state.
+    fn feed_cell(&mut self, cell: Value, as_f64: f64) {
         if self.count == 0 {
-            self.first = v;
+            self.first = Some(cell.clone());
         }
-        self.last = v;
         self.count += 1;
-        // Kahan compensated summation.
-        let y = v - self.compensation;
-        let t = self.sum + y;
-        self.compensation = (t - self.sum) - y;
-        self.sum = t;
-        if v < self.min {
-            self.min = v;
+        self.sum.add_value(&cell);
+        if value_replaces(&cell, self.min.as_ref(), false) {
+            self.min = Some(cell.clone());
         }
-        if v > self.max {
-            self.max = v;
+        if value_replaces(&cell, self.max.as_ref(), true) {
+            self.max = Some(cell.clone());
         }
+        self.last = Some(cell);
         // Welford's online variance (for stddev).
-        let delta = v - self.mean;
+        let delta = as_f64 - self.mean;
         self.mean += delta / self.count as f64;
-        let delta2 = v - self.mean;
+        let delta2 = as_f64 - self.mean;
         self.m2 += delta * delta2;
     }
 
@@ -317,15 +312,17 @@ impl AggAccum {
         self.count += 1;
     }
 
-    /// Merge another accumulator into this one.
+    /// Merge another accumulator into this one. Integer totals stay exact.
     pub fn merge(&mut self, other: &AggAccum) {
         if other.count == 0 {
             return;
         }
-        if self.count == 0 {
-            self.first = other.first;
+        if self.first.is_none() {
+            self.first = other.first.clone();
         }
-        self.last = other.last;
+        if other.last.is_some() {
+            self.last = other.last.clone();
+        }
 
         // Chan's parallel algorithm for merging Welford variance.
         let n_a = self.count as f64;
@@ -335,12 +332,16 @@ impl AggAccum {
         self.mean = (n_a * self.mean + n_b * other.mean) / (n_a + n_b);
 
         self.count += other.count;
-        self.sum += other.sum;
-        if other.min < self.min {
-            self.min = other.min;
+        self.sum.merge(&other.sum);
+        if let Some(min) = &other.min
+            && value_replaces(min, self.min.as_ref(), false)
+        {
+            self.min = Some(min.clone());
         }
-        if other.max > self.max {
-            self.max = other.max;
+        if let Some(max) = &other.max
+            && value_replaces(max, self.max.as_ref(), true)
+        {
+            self.max = Some(max.clone());
         }
     }
 
@@ -352,28 +353,55 @@ impl AggAccum {
         (self.m2 / self.count as f64).max(0.0).sqrt()
     }
 
-    /// Convert to final `AggResult`.
+    /// Convert to the `f64` `AggResult` of a float series.
     pub fn into_agg_result(self) -> AggResult {
+        let reading = |v: &Option<Value>| v.as_ref().and_then(Value::as_f64).unwrap_or(f64::NAN);
         AggResult {
             count: self.count,
-            sum: self.sum,
-            min: if self.count == 0 { f64::NAN } else { self.min },
-            max: if self.count == 0 { f64::NAN } else { self.max },
-            first: self.first,
-            last: self.last,
+            sum: self.sum.sum_f64(),
+            min: reading(&self.min),
+            max: reading(&self.max),
+            first: reading(&self.first),
+            last: reading(&self.last),
         }
     }
 
-    pub fn sum(&self) -> f64 {
-        self.sum
+    /// Exact SUM: `Integer`, `Decimal`, or `Float` per `ExactSum`; NULL for
+    /// no value.
+    pub fn sum_value(&self) -> Result<Value, nodedb_query::EvalError> {
+        self.sum.sum()
     }
 
-    pub fn first(&self) -> f64 {
-        self.first
+    /// AVG from the exact total. `None` for no value.
+    pub fn avg_f64(&self) -> Result<Option<f64>, nodedb_query::EvalError> {
+        self.sum.avg_f64()
     }
 
-    pub fn last(&self) -> f64 {
-        self.last
+    /// The `f64` running mean of the values fed (Welford), `0.0` for none.
+    /// For float-valued consumers such as gap-fill interpolation; AVG
+    /// results use [`Self::avg_f64`].
+    pub fn mean_f64(&self) -> f64 {
+        self.mean
+    }
+
+    /// The smallest value fed, as fed.
+    pub fn min(&self) -> Option<&Value> {
+        self.min.as_ref()
+    }
+
+    /// The largest value fed, as fed.
+    pub fn max(&self) -> Option<&Value> {
+        self.max.as_ref()
+    }
+
+    /// The first value fed, as fed.
+    pub fn first(&self) -> Option<&Value> {
+        self.first.as_ref()
+    }
+
+    /// The last value fed, as fed.
+    pub fn last(&self) -> Option<&Value> {
+        self.last.as_ref()
     }
 }
 

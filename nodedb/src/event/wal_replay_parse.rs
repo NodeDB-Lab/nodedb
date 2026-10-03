@@ -87,6 +87,7 @@ pub(super) fn parse_put_record(
             user_id: None,
             statement_digest: None,
             commit_hlc,
+            image_fault: None,
         });
     }
 
@@ -115,6 +116,7 @@ pub(super) fn parse_put_record(
             user_id: None,
             statement_digest: None,
             commit_hlc,
+            image_fault: None,
         });
     }
 
@@ -146,6 +148,7 @@ pub(super) fn parse_put_record(
             user_id: None,
             statement_digest: None,
             commit_hlc,
+            image_fault: None,
         });
     }
 
@@ -197,6 +200,7 @@ pub(super) fn parse_put_record(
             user_id: None,
             statement_digest: None,
             commit_hlc,
+            image_fault: None,
         });
     }
 
@@ -269,6 +273,7 @@ pub(super) fn parse_graph_node_label_record(
         user_id: None,
         statement_digest: None,
         commit_hlc,
+        image_fault: None,
     })
 }
 
@@ -312,6 +317,7 @@ pub(super) fn parse_delete_record(
             user_id: None,
             statement_digest: None,
             commit_hlc,
+            image_fault: None,
         });
     }
 
@@ -338,6 +344,7 @@ pub(super) fn parse_delete_record(
             user_id: None,
             statement_digest: None,
             commit_hlc,
+            image_fault: None,
         });
     }
 
@@ -364,6 +371,7 @@ pub(super) fn parse_delete_record(
             user_id: None,
             statement_digest: None,
             commit_hlc,
+            image_fault: None,
         });
     }
 
@@ -388,6 +396,7 @@ pub(super) fn parse_delete_record(
             user_id: None,
             statement_digest: None,
             commit_hlc,
+            image_fault: None,
         });
     }
 
@@ -434,6 +443,7 @@ pub(super) fn parse_delete_record(
             user_id: None,
             statement_digest: None,
             commit_hlc,
+            image_fault: None,
         });
     }
 

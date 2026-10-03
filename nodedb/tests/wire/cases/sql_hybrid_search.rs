@@ -316,3 +316,144 @@ async fn invalid_fts_query_is_a_syntax_error() {
         "an invalid FTS query must be syntax_error, not XX000; got: {err}"
     );
 }
+
+/// `t` holds the term in its title, `b` only in its body. The query vector
+/// sits nearest `b`, so the vector leg ranks `b` first and only the text leg
+/// can lift `t` above it.
+async fn create_scoped_hybrid_collection(server: &TestServer, name: &str) {
+    server
+        .exec(&format!("CREATE COLLECTION {name}"))
+        .await
+        .unwrap();
+    server
+        .exec(&format!(
+            "CREATE VECTOR INDEX idx_{name}_emb ON {name} (embedding) METRIC cosine DIM 4"
+        ))
+        .await
+        .unwrap();
+    for (id, tenant, title, body, emb) in [
+        (
+            "t",
+            "t1",
+            "consensus primer",
+            "plain words",
+            "1.0, 0.0, 0.0, 0.0",
+        ),
+        (
+            "b",
+            "t1",
+            "gardening",
+            "consensus inside",
+            "0.0, 1.0, 0.0, 0.0",
+        ),
+        (
+            "o",
+            "t2",
+            "consensus other",
+            "consensus again",
+            "0.0, 1.0, 0.1, 0.0",
+        ),
+    ] {
+        server
+            .exec(&format!(
+                "INSERT INTO {name} (id, tenant_id, title, body, embedding) \
+                 VALUES ('{id}', '{tenant}', '{title}', '{body}', ARRAY[{emb}])"
+            ))
+            .await
+            .unwrap();
+    }
+}
+
+/// The text leg of `rrf_score(..., bm25_score(title, q))` reads the title
+/// index: a body-only match contributes nothing to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hybrid_text_leg_reads_only_its_column() {
+    let server = TestServer::start().await;
+    create_scoped_hybrid_collection(&server, "hs_scoped").await;
+
+    let rows = server
+        .query_rows(
+            "SELECT id, \
+                    rrf_score(\
+                      vector_distance(embedding, ARRAY[0.0, 1.0, 0.0, 0.0]), \
+                      bm25_score(title, 'consensus')\
+                    ) AS score \
+             FROM hs_scoped WHERE tenant_id = 't1' \
+             ORDER BY score DESC LIMIT 5",
+        )
+        .await
+        .expect("a field-scoped hybrid search must succeed");
+    assert_eq!(rows.len(), 2, "both t1 rows fuse: {rows:?}");
+    assert_eq!(
+        rows[0][0], "t",
+        "the title match must outrank the body-only row: {rows:?}"
+    );
+}
+
+/// A WHERE predicate restricts both legs: a row it excludes never fuses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hybrid_where_filter_restricts_the_fused_rows() {
+    let server = TestServer::start().await;
+    create_scoped_hybrid_collection(&server, "hs_filtered").await;
+
+    let rows = server
+        .query_rows(
+            "SELECT id, \
+                    rrf_score(\
+                      vector_distance(embedding, ARRAY[0.0, 1.0, 0.1, 0.0]), \
+                      bm25_score(body, 'consensus')\
+                    ) AS score \
+             FROM hs_filtered WHERE tenant_id = 't2' LIMIT 5",
+        )
+        .await
+        .expect("a filtered hybrid search must succeed");
+    let ids: Vec<&str> = rows.iter().map(|r| r[0].as_str()).collect();
+    assert_eq!(ids, vec!["o"], "only the t2 row may fuse: {rows:?}");
+}
+
+/// The vector leg searches the column `vector_distance` names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hybrid_vector_leg_reads_the_named_column() {
+    let server = TestServer::start().await;
+    server.exec("CREATE COLLECTION hs_two_vec").await.unwrap();
+    server
+        .exec("CREATE VECTOR INDEX idx_hs_two_vec_a ON hs_two_vec (emb_a) METRIC cosine DIM 4")
+        .await
+        .unwrap();
+    server
+        .exec("CREATE VECTOR INDEX idx_hs_two_vec_b ON hs_two_vec (emb_b) METRIC cosine DIM 4")
+        .await
+        .unwrap();
+    // `x` is nearest the query in `emb_b`, `y` in `emb_a`.
+    server
+        .exec(
+            "INSERT INTO hs_two_vec (id, body, emb_a, emb_b) VALUES \
+             ('x', 'plain', ARRAY[0.0, 1.0, 0.0, 0.0], ARRAY[1.0, 0.0, 0.0, 0.0])",
+        )
+        .await
+        .unwrap();
+    server
+        .exec(
+            "INSERT INTO hs_two_vec (id, body, emb_a, emb_b) VALUES \
+             ('y', 'plain', ARRAY[1.0, 0.0, 0.0, 0.0], ARRAY[0.0, 1.0, 0.0, 0.0])",
+        )
+        .await
+        .unwrap();
+
+    let rows = server
+        .query_rows(
+            "SELECT id, \
+                    rrf_score(\
+                      vector_distance(emb_b, ARRAY[1.0, 0.0, 0.0, 0.0]), \
+                      bm25_score(body, 'absent')\
+                    ) AS score \
+             FROM hs_two_vec ORDER BY score DESC LIMIT 5",
+        )
+        .await
+        .expect("a hybrid search over a named vector column must succeed");
+    assert!(
+        !rows.is_empty(),
+        "the emb_b index must answer the vector leg"
+    );
+    assert_eq!(rows[0][0], "x", "emb_b ranks x first: {rows:?}");
+}

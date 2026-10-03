@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use crate::bridge::envelope::Response;
 use crate::control::state::SharedState;
 use crate::engine::graph::traversal_options::GraphTraversalOptions;
-use crate::types::{DatabaseId, TenantId};
+use crate::types::{DatabaseId, TenantId, TxnId};
 
 use super::helpers::{encode_path, ok_response};
 use super::hop::{NeighborHopParams, execute_neighbor_hop};
@@ -30,12 +30,15 @@ pub struct CrossCoreBfsParams<'a> {
     /// traversal.
     pub collection: Option<&'a str>,
     pub start_nodes: Vec<String>,
-    pub edge_label: Option<String>,
+    /// Empty keeps every edge. Otherwise an edge with any listed label.
+    pub edge_labels: &'a [String],
     pub direction: crate::engine::graph::edge_store::Direction,
     pub max_depth: usize,
     pub options: &'a GraphTraversalOptions,
     /// Each node that expands part of the walk confirms its groups first.
     pub linearizable: bool,
+    /// The session's transaction. The walk sees its staged edge writes.
+    pub txn_id: Option<TxnId>,
 }
 
 /// Cross-core BFS with explicit traversal options.
@@ -56,11 +59,12 @@ pub async fn cross_core_bfs_with_options(
         database_id,
         collection,
         start_nodes,
-        edge_label,
+        edge_labels,
         direction,
         max_depth,
         options,
         linearizable,
+        txn_id,
     } = params;
     let cap = walk_visit_cap(shared, options);
     let whole = whole_hop();
@@ -84,11 +88,14 @@ pub async fn cross_core_bfs_with_options(
             NeighborHopParams {
                 collection,
                 frontier: &frontier,
-                edge_label: edge_label.as_deref(),
+                edge_labels,
                 direction,
                 options: &whole,
                 discovered_so_far: all_discovered.len(),
                 linearizable,
+                edge_predicate: &[],
+                with_properties: false,
+                txn_id,
             },
         )
         .await?;
@@ -97,9 +104,10 @@ pub async fn cross_core_bfs_with_options(
         frontier = admit_by_name(
             hop.merged_destinations,
             &mut visited,
-            &mut all_discovered,
+            all_discovered.len(),
             cap,
         );
+        all_discovered.extend(frontier.iter().cloned());
     }
 
     // Every vShard the walk expanded joins the transaction read-set.
@@ -126,27 +134,23 @@ pub(super) fn whole_hop() -> GraphTraversalOptions {
     }
 }
 
-/// Admit the unvisited `candidates` in node-name order until `discovered`
-/// holds `cap` nodes. Returns the admitted nodes: the next frontier.
+/// Admit the unvisited `candidates` in node-name order until the walk holds
+/// `cap` nodes, `discovered` of them already admitted. Marks each admitted
+/// node visited. Returns the admitted nodes: the next frontier.
 pub(super) fn admit_by_name(
     mut candidates: Vec<String>,
     visited: &mut HashSet<String>,
-    discovered: &mut Vec<String>,
+    discovered: usize,
     cap: usize,
 ) -> Vec<String> {
     candidates.retain(|node| !visited.contains(node));
     candidates.sort();
     candidates.dedup();
-    let mut admitted = Vec::with_capacity(candidates.len());
-    for node in candidates {
-        if discovered.len() >= cap {
-            break;
-        }
+    candidates.truncate(cap.saturating_sub(discovered));
+    for node in &candidates {
         visited.insert(node.clone());
-        discovered.push(node.clone());
-        admitted.push(node);
     }
-    admitted
+    candidates
 }
 
 #[cfg(test)]
@@ -156,10 +160,9 @@ mod tests {
     #[test]
     fn a_capped_level_is_admitted_in_name_order() {
         let mut visited: HashSet<String> = ["a".to_string()].into_iter().collect();
-        let mut discovered = vec!["a".to_string()];
         let candidates = ["z", "m", "a", "b", "m"].map(str::to_string).to_vec();
-        let next = admit_by_name(candidates, &mut visited, &mut discovered, 3);
+        let next = admit_by_name(candidates, &mut visited, 1, 3);
         assert_eq!(next, vec!["b", "m"]);
-        assert_eq!(discovered, vec!["a", "b", "m"]);
+        assert!(visited.contains("b") && visited.contains("m") && !visited.contains("z"));
     }
 }

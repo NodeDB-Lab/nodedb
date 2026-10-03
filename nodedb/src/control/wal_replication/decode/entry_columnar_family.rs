@@ -67,9 +67,9 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
         ReplicatedWrite::FtsIndex {
             collection,
             surrogate,
-            text,
+            fields,
             provenance,
-        } => decode_sync_engines::fts_index(collection, *surrogate, text, provenance),
+        } => decode_sync_engines::fts_index(collection, *surrogate, fields, provenance),
         ReplicatedWrite::FtsDelete {
             collection,
             surrogate,

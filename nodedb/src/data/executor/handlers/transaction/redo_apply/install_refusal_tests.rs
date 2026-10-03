@@ -332,7 +332,7 @@ fn fts_documents(refuse: bool) -> u32 {
     let op = nodedb_physical::physical_plan::TextOp::FtsIndexDoc {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
         surrogate: Surrogate::new(91),
-        text: "hello world".to_string(),
+        fields: vec![("body".to_string(), "hello world".to_string())],
         provenance: None,
     };
     let (record_type, payload) = crate::control::server::wal_dispatch::encode_text_op_record(&op)

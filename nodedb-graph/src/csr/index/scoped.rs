@@ -13,7 +13,8 @@ use super::types::{CsrIndex, Direction};
 impl CsrIndex {
     /// Collection-scoped neighbor lookup by string name.
     ///
-    /// Like [`Self::neighbors`] but only traverses edges tagged with
+    /// Like [`Self::neighbors`], with the same `label_filter` set semantics,
+    /// but only traverses edges tagged with
     /// `collection`. A collection with no edges in this partition yields an
     /// empty result (never falls back to the merged, cross-collection view).
     /// Used by collection-scoped GraphRAG BFS so expansion never crosses a
@@ -21,7 +22,7 @@ impl CsrIndex {
     pub fn neighbors_in_collection(
         &self,
         node: &str,
-        label_filter: Option<&str>,
+        label_filter: &[&str],
         direction: Direction,
         collection: &str,
     ) -> Vec<(String, String)> {

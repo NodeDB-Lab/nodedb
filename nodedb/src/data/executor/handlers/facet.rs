@@ -179,7 +179,8 @@ impl CoreLoop {
                     let value_str =
                         if let Some(s) = nodedb_query::msgpack_scan::read_str(&mp, start) {
                             s.to_string()
-                        } else if let Some(i) = nodedb_query::msgpack_scan::read_i64(&mp, start) {
+                        } else if let Some(i) = nodedb_query::msgpack_scan::read_integer(&mp, start)
+                        {
                             i.to_string()
                         } else if let Some(f) = nodedb_query::msgpack_scan::read_f64(&mp, start) {
                             f.to_string()

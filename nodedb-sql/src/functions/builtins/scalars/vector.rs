@@ -83,11 +83,12 @@ pub(super) fn vector_functions() -> Vec<FunctionMeta> {
             Some(ColumnType::Float64),
             arg_types::SEARCH_SCORE_ARGS,
         ),
+        // Options are named (`mode => 'or'`, `fuzzy => true`), not positional.
         m(
             "text_match",
             Scalar,
             2,
-            3,
+            2,
             SearchTrigger::TextMatch,
             None,
             arg_types::TEXT_MATCH_ARGS,
@@ -98,7 +99,7 @@ pub(super) fn vector_functions() -> Vec<FunctionMeta> {
             "search",
             Scalar,
             2,
-            3,
+            2,
             SearchTrigger::TextMatch,
             None,
             arg_types::TEXT_MATCH_ARGS,

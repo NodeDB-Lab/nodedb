@@ -169,6 +169,8 @@ pub fn ingest_batch_with_lvc(args: IngestBatchArgs<'_, '_>) -> IngestBatchOutcom
 /// - A `Symbol` column takes a tag or a string field. A numeric or boolean
 ///   field conflicts.
 /// - A `Timestamp` column takes a numeric field or a datetime string.
+/// - An `Int64` or `Timestamp` column refuses an unsigned field past
+///   `i64::MAX`.
 pub fn line_type_conflict(
     schema: &super::columnar_memtable::ColumnarSchema,
     line: &IlpLine<'_>,
@@ -193,6 +195,16 @@ pub fn line_type_conflict(
         let Some(column_type) = column_type(key.as_ref()) else {
             continue;
         };
+        // An `Int64` or `Timestamp` cell is an `i64`: an unsigned field past
+        // `i64::MAX` would wrap to a negative number.
+        if let (ColumnType::Int64 | ColumnType::Timestamp(_), FieldValue::UInt(u)) =
+            (column_type, value)
+            && i64::try_from(*u).is_err()
+        {
+            return Some(format!(
+                "value {u} of '{key}' is out of range for a {column_type:?} column"
+            ));
+        }
         let fits = match column_type {
             ColumnType::Float64 | ColumnType::Int64 => !matches!(value, FieldValue::Str(_)),
             ColumnType::Symbol => matches!(value, FieldValue::Str(_)),
@@ -458,6 +470,30 @@ mod tests {
         assert_eq!(schema.columns[2].1, ColumnType::Symbol); // dc
         assert_eq!(schema.columns[3].1, ColumnType::Float64); // value
         assert_eq!(schema.columns[4].1, ColumnType::Int64); // count
+    }
+
+    /// An unsigned field past `i64::MAX` is refused by an `Int64` column
+    /// instead of wrapping to a negative number. One in range is stored.
+    #[test]
+    fn unsigned_field_past_i64_max_is_refused_not_wrapped() {
+        let schema = infer_schema(
+            &parse_batch("m count=1i 1000000000")
+                .expect("valid ILP batch")
+                .into_lines(),
+        );
+        let lines = parse_batch(
+            "m count=18446744073709551615u 1000000000\n\
+             m count=9223372036854775807u 2000000000",
+        )
+        .expect("valid ILP batch")
+        .into_lines();
+        let conflict = line_type_conflict(&schema, &lines[0]).expect("out of range");
+        assert!(conflict.contains("18446744073709551615"), "{conflict}");
+        assert_eq!(line_type_conflict(&schema, &lines[1]), None);
+
+        let mut mt = ColumnarMemtable::new(schema, default_config());
+        let mut catalog = SeriesCatalog::new();
+        assert_eq!(ingest_batch(&mut mt, &lines, &mut catalog, 0), (1, 1));
     }
 
     #[test]

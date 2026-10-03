@@ -511,7 +511,7 @@ fn mixed_engine_isolation_no_cross_eviction() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "doc_25".into(),
-            edge_label: Some("NEXT".into()),
+            edge_labels: vec!["NEXT".into()],
             direction: nodedb::engine::graph::edge_store::Direction::Out,
             rls_filters: Vec::new(),
             collection: None,

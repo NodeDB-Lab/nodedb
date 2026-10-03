@@ -31,17 +31,20 @@ impl CsrIndex {
         self.partition_tag
     }
 
-    /// Mint a `LocalNodeId` for this partition from a raw dense index. Used by algorithm code that iterates `0..node_count` and needs to call `LocalNodeId`-taking APIs.
+    /// Mint a `LocalNodeId` for this partition from a raw dense index.
+    /// Used by algorithm code that iterates `0..node_count` and needs
+    /// to call `LocalNodeId`-taking APIs.
     #[inline]
     pub fn local(&self, id: u32) -> LocalNodeId {
         LocalNodeId::new(id, self.partition_tag)
     }
 
-    /// Get immediate neighbors by string name.
+    /// Get immediate neighbors by string name. An empty `label_filter` keeps
+    /// every edge. Otherwise an edge whose label is any listed label passes.
     pub fn neighbors(
         &self,
         node: &str,
-        label_filter: Option<&str>,
+        label_filter: &[&str],
         direction: Direction,
     ) -> Vec<(String, String)> {
         let Some(&node_id) = self.node_to_id.get(node) else {
@@ -76,54 +79,11 @@ impl CsrIndex {
         result
     }
 
-    /// Get neighbors with multi-label filter. Empty labels = all edges.
-    pub fn neighbors_multi(
-        &self,
-        node: &str,
-        label_filters: &[&str],
-        direction: Direction,
-    ) -> Vec<(String, String)> {
-        let Some(&node_id) = self.node_to_id.get(node) else {
-            return Vec::new();
-        };
-        self.record_access(node_id);
-        let label_ids: Vec<u32> = label_filters
-            .iter()
-            .filter_map(|l| self.label_to_id.get(*l).copied())
-            .collect();
-        // Filters this partition has never seen match no edge here; they must
-        // not widen the filter to every edge.
-        let match_label = |lid: u32| label_filters.is_empty() || label_ids.contains(&lid);
-
-        let mut result = Vec::new();
-
-        if matches!(direction, Direction::Out | Direction::Both) {
-            for (lid, dst) in self.dense_iter_out(node_id) {
-                if match_label(lid) {
-                    result.push((
-                        self.id_to_label[lid as usize].clone(),
-                        self.id_to_node[dst as usize].clone(),
-                    ));
-                }
-            }
-        }
-        if matches!(direction, Direction::In | Direction::Both) {
-            for (lid, src) in self.dense_iter_in(node_id) {
-                if match_label(lid) {
-                    result.push((
-                        self.id_to_label[lid as usize].clone(),
-                        self.id_to_node[src as usize].clone(),
-                    ));
-                }
-            }
-        }
-
-        result
-    }
-
-    /// Add a node without any edges. Idempotent — returns the existing tagged id if the name is already present.
+    /// Add a node without any edges. Idempotent — returns the existing
+    /// tagged id if the name is already present.
     ///
-    /// Returns `Err(GraphError::NodeOverflow)` when the partition's node-id space is exhausted (more than `MAX_NODES_PER_CSR` distinct nodes).
+    /// Returns `Err(GraphError::NodeOverflow)` when the partition's node-id
+    /// space is exhausted (more than `MAX_NODES_PER_CSR` distinct nodes).
     pub fn add_node(&mut self, name: &str) -> Result<LocalNodeId, crate::GraphError> {
         let result = self.ensure_node(name);
         self.journal_record(
@@ -188,7 +148,8 @@ impl CsrIndex {
     ///
     /// # Errors
     ///
-    /// Returns [`GraphError::MemoryBudget`] if the reservation for the three output arrays exceeds the `Graph` engine budget.
+    /// Returns [`GraphError::MemoryBudget`] if the reservation for the three
+    /// output arrays exceeds the `Graph` engine budget.
     pub(crate) fn build_dense(
         edges: &[Vec<(u32, u32)>],
         collections: &[Vec<u32>],
@@ -225,7 +186,10 @@ impl CsrIndex {
         })
     }
 
-    /// Check if a specific `(src, label, dst, collection)` edge exists in the dense CSR. Edge identity is collection-aware: the same triple under two collections is two distinct edges, so dedup / re-insert must key on the collection too.
+    /// Check if a specific `(src, label, dst, collection)` edge exists in the
+    /// dense CSR. Edge identity is collection-aware: the same triple under two
+    /// collections is two distinct edges, so dedup / re-insert must key on the
+    /// collection too.
     pub(crate) fn dense_has_edge(&self, src: u32, label: u32, dst: u32, collection: u32) -> bool {
         for (lid, target, coll) in self.dense_out_edges(src) {
             if lid == label && target == dst && coll == collection {

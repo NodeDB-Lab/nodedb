@@ -104,6 +104,9 @@ pub(in crate::data::executor) fn msgpack_rows_to_ilp(
             match val {
                 MsgpackValue::Float(f) => fields.push(format!("{key}={f}")),
                 MsgpackValue::Int(n) => fields.push(format!("{key}={n}i")),
+                // An unsigned field keeps its exact number. A column whose
+                // type cannot hold it refuses the line at ingest.
+                MsgpackValue::UInt(u) => fields.push(format!("{key}={u}u")),
                 MsgpackValue::Str(s) => {
                     // Recover the numeric type `SqlValue::Decimal` encoded as a
                     // string, so schema inference picks Float64/Int64, not Symbol.
@@ -157,6 +160,8 @@ fn time_column_nanos(
             .checked_mul(NANOS_PER_MILLI)
             .map(Some)
             .ok_or_else(|| invalid(&n.to_string())),
+        // Past `i64::MAX` milliseconds: no timestamp holds it.
+        MsgpackValue::UInt(u) => Err(invalid(&u.to_string())),
         MsgpackValue::Float(f) => (*f as i64)
             .checked_mul(NANOS_PER_MILLI)
             .map(Some)

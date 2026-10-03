@@ -114,8 +114,11 @@ fn compare_values(a: Option<&rmpv::Value>, b: Option<&rmpv::Value>) -> Ordering 
         (None, Some(_)) => return Ordering::Greater,
         (Some(_), None) => return Ordering::Less,
     };
-    if let (Some(x), Some(y)) = (as_f64(a), as_f64(b)) {
-        return x.partial_cmp(&y).unwrap_or(Ordering::Equal);
+    if let (Some(x), Some(y)) = (as_number(a), as_number(b)) {
+        // Exact: integers never round through f64. A NaN pair is Equal.
+        return nodedb_query::value_ops::numeric_order(&x, &y)
+            .flatten()
+            .unwrap_or(Ordering::Equal);
     }
     match (a, b) {
         (rmpv::Value::String(x), rmpv::Value::String(y)) => {
@@ -138,12 +141,17 @@ fn compare_values(a: Option<&rmpv::Value>, b: Option<&rmpv::Value>) -> Ordering 
 }
 
 /// Numeric view of a value, so an integer column and a float column compare
-/// against each other the way SQL expects.
-fn as_f64(value: &rmpv::Value) -> Option<f64> {
+/// against each other the way SQL expects. An integer stays exact: a `u64`
+/// above `i64::MAX` is an integral `Decimal`.
+fn as_number(value: &rmpv::Value) -> Option<nodedb_types::Value> {
     match value {
-        rmpv::Value::Integer(n) => n.as_i64().map(|i| i as f64).or_else(|| n.as_f64()),
-        rmpv::Value::F32(f) => Some(*f as f64),
-        rmpv::Value::F64(f) => Some(*f),
+        rmpv::Value::Integer(n) => match (n.as_i64(), n.as_u64()) {
+            (Some(i), _) => Some(nodedb_types::Value::Integer(i)),
+            (None, Some(u)) => Some(nodedb_types::Value::from_u64(u)),
+            (None, None) => None,
+        },
+        rmpv::Value::F32(f) => Some(nodedb_types::Value::Float(f64::from(*f))),
+        rmpv::Value::F64(f) => Some(nodedb_types::Value::Float(*f)),
         _ => None,
     }
 }
@@ -233,11 +241,42 @@ mod tests {
             row(&[("v", rmpv::Value::F64(1.5))]),
         ];
         sort_rows(&mut rows, &[SortKeySpec::column("v", true)]).expect("sort");
-        let vs: Vec<f64> = rows
+        let vs: Vec<nodedb_types::Value> = rows
             .iter()
-            .map(|r| as_f64(field_of(r, "v").unwrap()).unwrap())
+            .map(|r| as_number(field_of(r, "v").unwrap()).unwrap())
             .collect();
-        assert_eq!(vs, vec![1.5, 2.0, 2.5]);
+        assert_eq!(
+            vs,
+            vec![
+                nodedb_types::Value::Float(1.5),
+                nodedb_types::Value::Integer(2),
+                nodedb_types::Value::Float(2.5)
+            ]
+        );
+    }
+
+    #[test]
+    fn integers_past_two_pow_53_and_u64_sort_exactly() {
+        let mut rows = vec![
+            row(&[("v", rmpv::Value::Integer(9_007_199_254_740_993_i64.into()))]),
+            row(&[("v", rmpv::Value::Integer(u64::MAX.into()))]),
+            row(&[("v", rmpv::Value::Integer(9_007_199_254_740_992_i64.into()))]),
+            row(&[("v", rmpv::Value::F64(9_007_199_254_740_992.0))]),
+        ];
+        sort_rows(&mut rows, &[SortKeySpec::column("v", false)]).expect("sort");
+        let vs: Vec<rmpv::Value> = rows
+            .iter()
+            .map(|r| field_of(r, "v").unwrap().clone())
+            .collect();
+        assert_eq!(
+            vs,
+            vec![
+                rmpv::Value::Integer(u64::MAX.into()),
+                rmpv::Value::Integer(9_007_199_254_740_993_i64.into()),
+                rmpv::Value::Integer(9_007_199_254_740_992_i64.into()),
+                rmpv::Value::F64(9_007_199_254_740_992.0),
+            ]
+        );
     }
 
     #[test]

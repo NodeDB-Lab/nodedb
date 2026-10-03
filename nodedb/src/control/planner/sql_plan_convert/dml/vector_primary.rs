@@ -24,6 +24,7 @@ use super::super::value::{
 use super::insert::{
     declared_primary_key_name, is_auto_rowid_pk, resolve_doc_identity_with_declared,
 };
+use super::key_assignment::check_assignments_keep_key;
 
 /// Collection-level settings every vector-primary write carries.
 pub(in super::super) struct VectorPrimaryCfg<'a> {
@@ -159,6 +160,10 @@ pub(in super::super) fn convert_vector_primary_insert(
             &row_fields,
         )?;
         let key_column = declared.as_deref().unwrap_or(primary_key);
+        // The conflict branch patches the sidecar of the node stored under
+        // `doc_id`, which keeps its surrogate. An assignment to the key
+        // column must name that key.
+        check_assignments_keep_key(collection, key_column, on_conflict_updates, &doc_id)?;
         let mut fields = row.payload_fields.clone();
         if !is_auto_rowid_pk(primary_key)
             && !fields

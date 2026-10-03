@@ -7,6 +7,7 @@ use nodedb_query::agg_key::canonical_agg_key;
 use crate::data::executor::core_loop::TsGroupKeyKind;
 use crate::data::executor::handlers::columnar_read::rmpv_time_cell;
 use crate::engine::timeseries::columnar_memtable::TimeKind;
+use crate::util::rmpv_value::value_to_rmpv;
 
 /// The wire types of a grouped result's key columns.
 pub(in crate::data::executor) struct GroupedKeyTypes<'a> {
@@ -136,14 +137,17 @@ pub(in crate::data::executor) fn encode_grouped_results(
         for (agg_idx, agg_key) in agg_keys.iter().enumerate() {
             let accum = &accums[agg_idx];
             let op = &aggregates[agg_idx].0;
+            // SUM is exact; MIN / MAX / FIRST / LAST keep the cell's own
+            // type, so an integer column stays an integer.
+            let cell = |v: Option<&nodedb_types::Value>| v.map_or(rmpv::Value::Nil, value_to_rmpv);
             let val = match op.as_str() {
                 "count" => rmpv::Value::Integer((accum.count as i64).into()),
-                "sum" if accum.count > 0 => rmpv::Value::F64(accum.sum()),
-                "avg" if accum.count > 0 => rmpv::Value::F64(accum.sum() / accum.count as f64),
-                "min" if accum.count > 0 => rmpv::Value::F64(accum.min),
-                "max" if accum.count > 0 => rmpv::Value::F64(accum.max),
-                "first" if accum.count > 0 => rmpv::Value::F64(accum.first()),
-                "last" if accum.count > 0 => rmpv::Value::F64(accum.last()),
+                "sum" => value_to_rmpv(&accum.sum_value()?),
+                "avg" => accum.avg_f64()?.map_or(rmpv::Value::Nil, rmpv::Value::F64),
+                "min" => cell(accum.min()),
+                "max" => cell(accum.max()),
+                "first" => cell(accum.first()),
+                "last" => cell(accum.last()),
                 "stddev" | "ts_stddev" if accum.count >= 2 => {
                     rmpv::Value::F64(accum.stddev_population())
                 }
@@ -225,6 +229,137 @@ mod tests {
         assert_eq!(
             bucket_cell(TimeKind::Millis),
             rmpv::Value::Integer(BUCKET_MS.into())
+        );
+    }
+
+    /// Encode one ungrouped row whose accumulators were fed `feed`, and
+    /// return the aggregate cells by key.
+    fn aggregate_cells(
+        ops: &[&str],
+        feed: impl Fn(&mut crate::engine::timeseries::columnar_agg::AggAccum),
+    ) -> Vec<(String, rmpv::Value)> {
+        let mut result = GroupedAggResult::new(ops.len());
+        let accums = ops
+            .iter()
+            .map(|_| {
+                let mut a = crate::engine::timeseries::columnar_agg::AggAccum::default();
+                feed(&mut a);
+                a
+            })
+            .collect();
+        result.groups.insert(String::new(), accums);
+        let aggregates: Vec<(String, String)> = ops
+            .iter()
+            .map(|op| (op.to_string(), "v".to_string()))
+            .collect();
+        let bytes = encode_grouped_results(
+            &result,
+            &[],
+            &aggregates,
+            usize::MAX,
+            0,
+            &[],
+            GroupedKeyTypes {
+                group_key_kinds: &[],
+                bucket_kind: TimeKind::Millis,
+            },
+        )
+        .expect("encode");
+        let rmpv::Value::Array(rows) =
+            crate::util::bounded_msgpack::read_value(&bytes).expect("decode")
+        else {
+            panic!("not an array");
+        };
+        let rmpv::Value::Map(fields) = &rows[0] else {
+            panic!("not a map");
+        };
+        fields
+            .iter()
+            .map(|(k, v)| (k.as_str().unwrap_or_default().to_string(), v.clone()))
+            .collect()
+    }
+
+    fn cell<'a>(cells: &'a [(String, rmpv::Value)], key: &str) -> &'a rmpv::Value {
+        &cells.iter().find(|(k, _)| k == key).expect("aggregate cell").1
+    }
+
+    #[test]
+    fn integer_sum_min_max_first_last_stay_exact() {
+        const ABOVE: i64 = 9_007_199_254_740_993;
+        const AT: i64 = 9_007_199_254_740_992;
+        let ops = ["sum", "min", "max", "first", "last", "avg"];
+        let cells = aggregate_cells(&ops, |a| {
+            a.feed_int(ABOVE);
+            a.feed_int(AT);
+        });
+        assert_eq!(*cell(&cells, "sum(v)"), rmpv::Value::Integer((ABOVE + AT).into()));
+        assert_eq!(*cell(&cells, "min(v)"), rmpv::Value::Integer(AT.into()));
+        assert_eq!(*cell(&cells, "max(v)"), rmpv::Value::Integer(ABOVE.into()));
+        assert_eq!(*cell(&cells, "first(v)"), rmpv::Value::Integer(ABOVE.into()));
+        assert_eq!(*cell(&cells, "last(v)"), rmpv::Value::Integer(AT.into()));
+        assert_eq!(*cell(&cells, "avg(v)"), rmpv::Value::F64(AT as f64));
+    }
+
+    #[test]
+    fn nanosecond_timestamps_and_sum_past_i64() {
+        let ops = ["sum", "min", "max"];
+        let cells = aggregate_cells(&ops, |a| {
+            a.feed_int(1_700_000_000_000_000_002);
+            a.feed_int(1_700_000_000_000_000_001);
+            a.feed_int(i64::MAX);
+        });
+        let want = 3_400_000_000_000_000_003_i128 + i128::from(i64::MAX);
+        assert_eq!(
+            *cell(&cells, "sum(v)"),
+            rmpv::Value::String(want.to_string().into())
+        );
+        assert_eq!(
+            *cell(&cells, "min(v)"),
+            rmpv::Value::Integer(1_700_000_000_000_000_001_i64.into())
+        );
+        assert_eq!(*cell(&cells, "max(v)"), rmpv::Value::Integer(i64::MAX.into()));
+    }
+
+    #[test]
+    fn mixed_int_float_and_nan_extremes() {
+        let ops = ["sum", "min", "max"];
+        let cells = aggregate_cells(&ops, |a| {
+            a.feed(f64::NAN);
+            a.feed_int(2);
+            a.feed(0.5);
+        });
+        assert!(matches!(cell(&cells, "sum(v)"), rmpv::Value::F64(f) if f.is_nan()));
+        assert_eq!(*cell(&cells, "min(v)"), rmpv::Value::F64(0.5));
+        assert_eq!(*cell(&cells, "max(v)"), rmpv::Value::Integer(2.into()));
+
+        let cells = aggregate_cells(&ops, |a| {
+            a.feed_int(2);
+            a.feed(0.5);
+        });
+        assert_eq!(*cell(&cells, "sum(v)"), rmpv::Value::F64(2.5));
+    }
+
+    #[test]
+    fn partial_merge_keeps_integer_sum_exact() {
+        use crate::engine::timeseries::columnar_agg::AggAccum;
+        let mut a = AggAccum::default();
+        a.feed_int(9_007_199_254_740_993);
+        let mut b = AggAccum::default();
+        b.feed_int(9_007_199_254_740_992);
+        b.feed_int(1);
+        a.merge(&b);
+        assert_eq!(
+            a.sum_value().unwrap(),
+            nodedb_types::Value::Integer(18_014_398_509_481_986)
+        );
+        assert_eq!(a.min(), Some(&nodedb_types::Value::Integer(1)));
+        assert_eq!(
+            a.max(),
+            Some(&nodedb_types::Value::Integer(9_007_199_254_740_993))
+        );
+        assert_eq!(
+            a.last(),
+            Some(&nodedb_types::Value::Integer(1))
         );
     }
 

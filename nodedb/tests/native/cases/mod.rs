@@ -9,6 +9,7 @@ mod native_database_collection_key_placement;
 mod native_direct_op_txn_overlay;
 mod native_dml_affected_counts;
 mod native_dml_outcome_conformance;
+mod native_document_identity_update;
 mod native_error_code_classification;
 mod native_gateway_txn_overlay;
 mod native_index_ddl_opcodes;

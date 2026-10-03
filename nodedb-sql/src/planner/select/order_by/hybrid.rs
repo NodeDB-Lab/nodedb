@@ -30,46 +30,60 @@ use super::super::helpers::{
     extract_float, extract_float_array, extract_func_args, extract_string_literal,
     source_projection,
 };
+use super::super::text_call::{TextCall, resolve_table_column, resolve_text_call};
+use super::aliases::function_call_name;
+use super::text_score::refuse_scan_clauses;
 use crate::error::{Result, SqlError};
-use crate::types::{Projection, SqlPlan};
+use crate::resolver::columns::ResolvedTable;
+use crate::types::{Filter, Projection, SqlPlan};
+
+/// What every hybrid plan takes from the plan it replaces.
+struct HybridBase<'a> {
+    table: &'a ResolvedTable,
+    limit: usize,
+    filters: Vec<Filter>,
+    score_alias: Option<&'a str>,
+    projection: Vec<Projection>,
+}
 
 /// Build a `SqlPlan::HybridSearch` or `SqlPlan::HybridSearchTriple` from a
 /// `rrf_score(...)` call depending on argument arity.
 pub(super) fn plan_hybrid_from_sort(
     args: &[ast::Expr],
-    collection: &str,
+    table: &ResolvedTable,
     plan: &SqlPlan,
     score_alias: Option<&str>,
 ) -> Result<Option<SqlPlan>> {
     if args.len() < 2 {
         return Err(no_args_rrf_score_error());
     }
+    refuse_scan_clauses(plan, "rrf_score()")?;
 
-    let limit = match plan {
-        SqlPlan::Scan { limit, .. } => limit.unwrap_or(10),
-        _ => 10,
+    let (limit, filters) = match plan {
+        SqlPlan::Scan { limit, filters, .. } => (limit.unwrap_or(10), filters.clone()),
+        _ => (10, Vec::new()),
     };
-    let projection = source_projection(plan);
+    let base = HybridBase {
+        table,
+        limit,
+        filters,
+        score_alias,
+        projection: source_projection(plan),
+    };
 
     // Determine whether args[2] (if present) is a function call (graph source)
     // or a numeric literal (k-constant for the two-source form).
     let third_is_graph_score = args.get(2).is_some_and(is_function_call);
 
     if third_is_graph_score {
-        plan_hybrid_triple(args, collection, limit, score_alias, projection)
+        plan_hybrid_triple(args, base)
     } else {
-        plan_hybrid_two_source(args, collection, limit, score_alias, projection)
+        plan_hybrid_two_source(args, base)
     }
 }
 
 /// Two-source: `rrf_score(vector_distance(...), bm25_score(...), k1?, k2?)`.
-fn plan_hybrid_two_source(
-    args: &[ast::Expr],
-    collection: &str,
-    limit: usize,
-    score_alias: Option<&str>,
-    projection: Vec<Projection>,
-) -> Result<Option<SqlPlan>> {
+fn plan_hybrid_two_source(args: &[ast::Expr], base: HybridBase<'_>) -> Result<Option<SqlPlan>> {
     // args[2] and args[3] are optional k-constants. If there are more than 4
     // args in the two-source form, something is wrong.
     if args.len() > 4 {
@@ -84,8 +98,8 @@ fn plan_hybrid_two_source(
         });
     }
 
-    let vector = extract_vector_arg(&args[0])?;
-    let text = extract_text_arg(&args[1])?;
+    let (vector_field, vector) = extract_vector_arg(&args[0], base.table)?;
+    let text = extract_text_arg(&args[1], base.table)?;
     let k1 = args
         .get(2)
         .and_then(|e| extract_float(e).ok())
@@ -98,26 +112,24 @@ fn plan_hybrid_two_source(
     let vector_weight = k2 as f32 / (k1 as f32 + k2 as f32);
 
     Ok(Some(SqlPlan::HybridSearch(HybridSearchPlan {
-        collection: collection.into(),
+        collection: base.table.name.clone(),
+        vector_field,
         query_vector: vector,
-        query_text: text,
-        top_k: limit,
-        ef_search: limit * 2,
+        text_field: text.field,
+        query_text: text.query,
+        filters: base.filters,
+        top_k: base.limit,
+        ef_search: base.limit * 2,
         vector_weight,
-        fuzzy: true,
-        score_alias: score_alias.map(|s| s.to_string()),
-        projection,
+        mode: text.options.params.mode,
+        fuzzy: text.options.params.fuzzy,
+        score_alias: base.score_alias.map(|s| s.to_string()),
+        projection: base.projection,
     })))
 }
 
 /// Three-source: `rrf_score(vector_distance(...), bm25_score(...), graph_score(...), k1?, k2?, k3?)`.
-fn plan_hybrid_triple(
-    args: &[ast::Expr],
-    collection: &str,
-    limit: usize,
-    score_alias: Option<&str>,
-    projection: Vec<Projection>,
-) -> Result<Option<SqlPlan>> {
+fn plan_hybrid_triple(args: &[ast::Expr], base: HybridBase<'_>) -> Result<Option<SqlPlan>> {
     // After the three source functions, we accept 0 or 3 k-constants.
     // Anything else (e.g. 1 or 2 k-constants) is an inconsistent arity.
     let k_count = args.len().saturating_sub(3);
@@ -140,8 +152,8 @@ fn plan_hybrid_triple(
         });
     }
 
-    let vector = extract_vector_arg(&args[0])?;
-    let text = extract_text_arg(&args[1])?;
+    let (vector_field, vector) = extract_vector_arg(&args[0], base.table)?;
+    let text = extract_text_arg(&args[1], base.table)?;
     let (graph_seed_id, graph_depth, graph_edge_label) = extract_graph_score_args(&args[2])?;
 
     let k1 = args
@@ -158,49 +170,56 @@ fn plan_hybrid_triple(
         .unwrap_or(60.0);
 
     Ok(Some(SqlPlan::HybridSearchTriple(HybridSearchTriplePlan {
-        collection: collection.into(),
+        collection: base.table.name.clone(),
+        vector_field,
         query_vector: vector,
-        query_text: text,
+        text_field: text.field,
+        query_text: text.query,
+        filters: base.filters,
         graph_seed_id,
         graph_depth,
         graph_edge_label,
-        top_k: limit,
-        ef_search: limit * 2,
-        fuzzy: true,
+        top_k: base.limit,
+        ef_search: base.limit * 2,
+        mode: text.options.params.mode,
+        fuzzy: text.options.params.fuzzy,
         rrf_k: (k1, k2, k3),
-        score_alias: score_alias.map(|s| s.to_string()),
-        projection,
+        score_alias: base.score_alias.map(|s| s.to_string()),
+        projection: base.projection,
     })))
 }
 
-/// Extract the float-array from a `vector_distance(col, ARRAY[...])` expression.
-fn extract_vector_arg(expr: &ast::Expr) -> Result<Vec<f32>> {
-    Ok(match expr {
-        ast::Expr::Function(f) => {
-            let inner_args = extract_func_args(f)?;
-            if inner_args.len() >= 2 {
-                extract_float_array(&inner_args[1]).unwrap_or_default()
-            } else {
-                Vec::new()
-            }
-        }
-        _ => Vec::new(),
-    })
+/// The column and query vector of the `vector_distance(column, [...])` leg.
+fn extract_vector_arg(expr: &ast::Expr, table: &ResolvedTable) -> Result<(String, Vec<f32>)> {
+    let leg_error = || SqlError::InvalidFunction {
+        detail: format!(
+            "rrf_score(): the first argument must be vector_distance(column, [...]); got {expr}"
+        ),
+    };
+    let ast::Expr::Function(f) = expr else {
+        return Err(leg_error());
+    };
+    let inner_args = extract_func_args(f)?;
+    let [column, query, ..] = inner_args.as_slice() else {
+        return Err(leg_error());
+    };
+    let field = resolve_table_column(column, table)?.ok_or_else(leg_error)?;
+    Ok((field, extract_float_array(query)?))
 }
 
-/// Extract the query string from a `bm25_score(col, 'query')` expression.
-fn extract_text_arg(expr: &ast::Expr) -> Result<String> {
-    Ok(match expr {
-        ast::Expr::Function(f) => {
-            let inner_args = extract_func_args(f)?;
-            if inner_args.len() >= 2 {
-                extract_string_literal(&inner_args[1]).unwrap_or_default()
-            } else {
-                String::new()
-            }
-        }
-        _ => String::new(),
-    })
+/// The column, query string, and options of the
+/// `bm25_score(column, 'query', ...)` leg. `None` column for
+/// `bm25_score(*, 'query')`: the whole-document index.
+fn extract_text_arg(expr: &ast::Expr, table: &ResolvedTable) -> Result<TextCall> {
+    let ast::Expr::Function(f) = expr else {
+        return Err(SqlError::InvalidFunction {
+            detail: format!(
+                "rrf_score(): the second argument must be bm25_score(column, 'query'); got {expr}"
+            ),
+        });
+    };
+    let name = function_call_name(expr).unwrap_or_default();
+    resolve_text_call(&name, f, table)
 }
 
 /// Extract `(seed_id, depth, edge_label)` from a

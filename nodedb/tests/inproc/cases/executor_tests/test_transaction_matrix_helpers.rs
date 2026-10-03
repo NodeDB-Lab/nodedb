@@ -70,7 +70,7 @@ pub fn edge_put(coll: &str, src: &str, dst: &str) -> PhysicalPlan {
 pub fn neighbors(src: &str) -> PhysicalPlan {
     PhysicalPlan::Graph(GraphOp::Neighbors {
         node_id: src.into(),
-        edge_label: Some("REL".into()),
+        edge_labels: vec!["REL".into()],
         direction: nodedb::engine::graph::edge_store::Direction::Out,
         rls_filters: Vec::new(),
         collection: None,

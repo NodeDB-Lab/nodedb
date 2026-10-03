@@ -15,6 +15,11 @@
 //! first node both sides reached. The visit cap is checked before each step.
 //! One core does all of this in the same order, so a capped search answers
 //! the same path here as there.
+//!
+//! Round `k` meets on a path of `2k - 1` edges (forward level) or `2k` edges
+//! (backward level), so the first meeting is a shortest path, and
+//! `max_depth.div_ceil(2)` rounds reach every path of at most `max_depth`
+//! edges. A meeting on a longer path answers no path.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -23,12 +28,15 @@ use crate::bridge::envelope::Response;
 use crate::control::state::SharedState;
 use crate::engine::graph::edge_store::Direction;
 use crate::engine::graph::traversal_options::GraphTraversalOptions;
-use crate::types::{DatabaseId, TenantId};
+use crate::types::{DatabaseId, TenantId, TxnId};
 
 use super::bfs::{walk_visit_cap, whole_hop};
 use super::helpers::{encode_path, ok_response};
 use super::hop::{NeighborHopParams, execute_neighbor_hop};
+use super::neighbor_rows::NeighborRow;
+use super::presence::{PresenceScope, graph_nodes_present};
 use super::shard_reads::ShardReadLog;
+use nodedb_types::filter::MetadataFilter;
 
 /// Parameters for [`cross_core_shortest_path`].
 pub struct CrossCoreShortestPathParams {
@@ -40,13 +48,21 @@ pub struct CrossCoreShortestPathParams {
     pub collection: Option<String>,
     pub src: String,
     pub dst: String,
-    pub edge_label: Option<String>,
+    /// Empty keeps every edge. Otherwise an edge with any listed label.
+    pub edge_labels: Vec<String>,
     pub max_depth: usize,
     /// The plan's traversal options. The visit cap is
     /// `options.max_visited`, bounded by this node's graph tuning.
     pub options: GraphTraversalOptions,
     /// Each node that expands part of the walk confirms its groups first.
     pub linearizable: bool,
+    /// AND-ed edge-property predicate. A path crosses only edges it admits:
+    /// the forward side tests each outgoing edge, the backward side each
+    /// incoming edge in its physical orientation. Empty admits every edge.
+    /// Non-empty requires `collection`.
+    pub edge_predicate: Vec<MetadataFilter>,
+    /// The session's transaction. The path sees its staged edge writes.
+    pub txn_id: Option<TxnId>,
 }
 
 /// Node → the node it was reached from. An endpoint maps to itself.
@@ -68,10 +84,12 @@ pub async fn cross_core_shortest_path(
         collection,
         src,
         dst,
-        edge_label,
+        edge_labels,
         max_depth,
         options,
         linearizable,
+        edge_predicate,
+        txn_id,
     } = params;
     let whole = whole_hop();
     // One core finds no path when either endpoint is absent from its graph,
@@ -85,6 +103,7 @@ pub async fn cross_core_shortest_path(
             database_id,
             options: &whole,
             linearizable,
+            txn_id,
         },
         &[src.clone(), dst.clone()],
         &mut presence_reads,
@@ -104,8 +123,9 @@ pub async fn cross_core_shortest_path(
     let mut fwd_frontier = vec![src];
     let mut bwd_frontier = vec![dst];
     let mut path: Vec<String> = Vec::new();
+    let mut met = false;
 
-    for _depth in 0..max_depth {
+    for _round in 0..max_depth.div_ceil(2) {
         if fwd.len() + bwd.len() >= cap {
             break;
         }
@@ -125,16 +145,19 @@ pub async fn cross_core_shortest_path(
                     NeighborHopParams {
                         collection: collection.as_deref(),
                         frontier,
-                        edge_label: edge_label.as_deref(),
+                        edge_labels: &edge_labels,
                         direction,
                         options: &whole,
                         discovered_so_far: fwd.len() + bwd.len(),
                         linearizable,
+                        edge_predicate: &edge_predicate,
+                        with_properties: false,
+                        txn_id,
                     },
                 )
                 .await?;
                 reads.merge(hop.reads);
-                hop.local_triples
+                hop.rows.into_iter().map(NeighborRow::into_triple).collect()
             };
             let (this, other) = if forward {
                 (&mut fwd, &bwd)
@@ -143,7 +166,8 @@ pub async fn cross_core_shortest_path(
             };
             let (next, meeting) = relax_level(triples, this, other);
             if let Some(meeting) = meeting {
-                path = reconstruct(&meeting, &fwd, &bwd);
+                path = within_depth(reconstruct(&meeting, &fwd, &bwd), max_depth);
+                met = true;
                 break;
             }
             if forward {
@@ -152,7 +176,7 @@ pub async fn cross_core_shortest_path(
                 bwd_frontier = next;
             }
         }
-        if !path.is_empty() || (fwd_frontier.is_empty() && bwd_frontier.is_empty()) {
+        if met || (fwd_frontier.is_empty() && bwd_frontier.is_empty()) {
             break;
         }
     }
@@ -160,47 +184,6 @@ pub async fn cross_core_shortest_path(
     // Every vShard the walk expanded joins the transaction read-set.
     reads.publish(shared, tenant_id, database_id, collection);
     Ok(ok_response(encode_path(&path)?))
-}
-
-/// The tenancy scope of a presence check.
-struct PresenceScope<'a> {
-    tenant_id: TenantId,
-    database_id: DatabaseId,
-    options: &'a GraphTraversalOptions,
-    linearizable: bool,
-}
-
-/// The nodes of `nodes` that exist in the graph: those with an edge of any
-/// label, in either direction, in any collection. One core's graph holds a
-/// node exactly while an edge names it, so this is the node set one core's
-/// path search checks its endpoints against.
-async fn graph_nodes_present(
-    shared: &SharedState,
-    scope: PresenceScope<'_>,
-    nodes: &[String],
-    reads: &mut ShardReadLog,
-) -> crate::Result<std::collections::HashSet<String>> {
-    let hop = execute_neighbor_hop(
-        shared,
-        scope.tenant_id,
-        scope.database_id,
-        NeighborHopParams {
-            collection: None,
-            frontier: nodes,
-            edge_label: None,
-            direction: Direction::Both,
-            options: scope.options,
-            discovered_so_far: 0,
-            linearizable: scope.linearizable,
-        },
-    )
-    .await?;
-    reads.merge(hop.reads);
-    Ok(hop
-        .local_triples
-        .into_iter()
-        .map(|(from, _label, _to)| from)
-        .collect())
 }
 
 /// Relax one level's `(frontier node, label, neighbour)` edges into `this`
@@ -223,6 +206,15 @@ fn relax_level(
         }
     }
     (next, None)
+}
+
+/// `path` when it has at most `max_depth` edges, else no path.
+fn within_depth(path: Vec<String>, max_depth: usize) -> Vec<String> {
+    if path.len().saturating_sub(1) <= max_depth {
+        path
+    } else {
+        Vec::new()
+    }
 }
 
 /// The path through `meeting`: forward parents back to the source, then
@@ -259,6 +251,13 @@ mod tests {
         let fwd = parents(&[("a", "a"), ("b", "a")]);
         let bwd = parents(&[("d", "d"), ("c", "d"), ("b", "c")]);
         assert_eq!(reconstruct("b", &fwd, &bwd), vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn a_path_longer_than_max_depth_is_no_path() {
+        let path = || ["a", "b", "c"].map(str::to_string).to_vec();
+        assert!(within_depth(path(), 1).is_empty());
+        assert_eq!(within_depth(path(), 2), path());
     }
 
     #[test]

@@ -211,6 +211,12 @@ mod tests {
         zerompk::to_msgpack_vec(&vec![filter]).expect("encode policy filter")
     }
 
+    /// The stored property map `{"owner": owner}`, as plain MessagePack.
+    fn owner_properties(owner: &str) -> Vec<u8> {
+        nodedb_types::json_msgpack::json_to_msgpack(&serde_json::json!({ "owner": owner }))
+            .expect("encode properties")
+    }
+
     /// The delete is decided against the edge's STORED property object before
     /// the tombstone is written, so a rejected delete leaves the edge in place.
     #[test]
@@ -227,7 +233,7 @@ mod tests {
                         src_id: "a",
                         label: "KNOWS",
                         dst_id: "b",
-                        properties: br#"{"owner":"alice"}"#,
+                        properties: &owner_properties("alice"),
                         src_surrogate: Surrogate::new(1),
                         dst_surrogate: Surrogate::new(2),
                     },
@@ -285,7 +291,7 @@ mod tests {
                         src_id: "a",
                         label: "KNOWS",
                         dst_id: "b",
-                        properties: br#"{"owner":"alice"}"#,
+                        properties: &owner_properties("alice"),
                         src_surrogate: Surrogate::new(1),
                         dst_surrogate: Surrogate::new(2),
                     },

@@ -48,15 +48,17 @@ impl RlsCtx<'_> {
         Ok(())
     }
 
-    /// Store the collection's read policy in a dedicated post-fetch slot.
+    /// AND the collection's read policy into a post-fetch slot. The slot can
+    /// already hold the statement's own WHERE predicates (a vector search
+    /// carries them there), so the policy joins them and never replaces them.
     pub(super) fn set_post_filters(
         &self,
         collection: &nodedb_types::QualifiedCollection,
         rls_filters: &mut Vec<u8>,
     ) -> crate::Result<()> {
-        let rls = self.read_filters(collection)?;
-        if !rls.is_empty() {
-            *rls_filters = rls;
+        let policy = self.read_filters(collection)?;
+        if !policy.is_empty() {
+            merge_filters(rls_filters, &policy)?;
         }
         Ok(())
     }
@@ -130,10 +132,10 @@ impl RlsCtx<'_> {
         self.admit_write_image(collection, &with_id)
     }
 
-    /// Admit a write whose post-image is a JSON object (a graph edge's
-    /// `PROPERTIES`). Non-object bytes, including an empty `PROPERTIES`,
-    /// deny rather than admit by omission.
-    pub(super) fn admit_write_json_image(
+    /// Admit a write whose post-image is a plain-MessagePack property map (a
+    /// graph edge's `PROPERTIES`). Non-map bytes, including an empty
+    /// `PROPERTIES`, deny rather than admit by omission.
+    pub(super) fn admit_write_property_image(
         &self,
         collection: &nodedb_types::QualifiedCollection,
         image: &[u8],
@@ -142,8 +144,8 @@ impl RlsCtx<'_> {
         if check.is_empty() {
             return Ok(());
         }
-        let decoded = sonic_rs::from_slice::<serde_json::Value>(image).ok();
-        let Some(object @ serde_json::Value::Object(_)) = decoded else {
+        let decoded = nodedb_types::json_msgpack::value_from_msgpack(image).ok();
+        let Some(nodedb_types::Value::Object(_)) = decoded else {
             return Err(crate::Error::RejectedAuthz {
                 tenant_id: crate::types::TenantId::new(self.tenant_id),
                 resource: format!(
@@ -154,7 +156,7 @@ impl RlsCtx<'_> {
         };
         crate::control::security::rls::admit_compiled_write_image(
             &check,
-            &nodedb_types::json_to_msgpack_or_empty(&object),
+            image,
             self.tenant_id,
             collection.as_str(),
         )

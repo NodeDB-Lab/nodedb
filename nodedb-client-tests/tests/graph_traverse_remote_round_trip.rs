@@ -6,7 +6,12 @@
 //! After three `graph_insert_edge` calls fanning from a seed
 //! (`a → b`, `b → c`, `a → s`), `graph_traverse(seed, depth=2)` must
 //! return a non-empty `SubGraph` containing every reachable node.
-//! Traversal returns reachable nodes and crossed edges through the remote protocol.
+//! An empty subgraph is indistinguishable from "the wire short-circuits
+//! before the server's traversal runs" — the silent-fake pattern this
+//! test guards against.
+//!
+//! The test also checks In/Out/Both direction, edge orientation, reciprocal
+//! edges, a self-loop and discovery depths.
 
 use nodedb_client::{NodeDb, NodeDbRemote, NodeId};
 use nodedb_test_support::pgwire_harness::TestServer;
@@ -161,6 +166,38 @@ async fn graph_traverse_returns_inserted_subgraph() {
         };
         assert_eq!(node.depth, expected_depth);
     }
+
+    // A label set follows every listed label and no other.
+    let x = NodeId::try_new("outside").expect("fixture");
+    remote
+        .graph_insert_edge("smoke_g", &a, &x, "other", None)
+        .await
+        .expect("seed edge a->outside");
+    let labelled = remote
+        .graph_traverse(
+            "smoke_g",
+            &a,
+            1,
+            nodedb_types::graph::Direction::Out,
+            Some(&nodedb_types::filter::EdgeFilter::labels([
+                "next",
+                "in_session",
+            ])),
+        )
+        .await
+        .expect("label-set traversal must complete");
+    let nodes: std::collections::BTreeSet<&str> =
+        labelled.nodes.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(
+        nodes,
+        std::collections::BTreeSet::from(["chunk_a", "chunk_b", "sess"]),
+        "'other' is not listed"
+    );
+    assert!(
+        labelled.edges.iter().all(|edge| edge.label != "other"),
+        "no 'other' edge is crossed: {:?}",
+        labelled.edges
+    );
 
     server.graceful_shutdown().await;
 }

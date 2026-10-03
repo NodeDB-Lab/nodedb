@@ -266,8 +266,8 @@ impl CoreLoop {
             .unwrap_or_else(crate::engine::kv::current_ms)
     }
 
-    /// Write a raw segment blob directly into the FTS LSM segment store for
-    /// a given `(tenant, collection)`.
+    /// Write a raw segment blob directly into the FTS LSM segment store of a
+    /// collection's whole-document index.
     ///
     /// This bypasses the memtable flush path and is intended for maintenance
     /// tests and bootstrapping code that need to pre-populate a known number
@@ -286,7 +286,7 @@ impl CoreLoop {
         self.inverted.backend().write_segment(
             database_id,
             tenant.as_u64(),
-            collection,
+            nodedb_fts::IndexScope::document(collection),
             segment_id,
             data,
         )
@@ -304,8 +304,10 @@ impl CoreLoop {
         collection: &str,
     ) -> crate::Result<Vec<String>> {
         use nodedb_fts::backend::FtsBackend;
-        self.inverted
-            .backend()
-            .list_segments(database_id, tenant.as_u64(), collection)
+        self.inverted.backend().list_segments(
+            database_id,
+            tenant.as_u64(),
+            nodedb_fts::IndexScope::document(collection),
+        )
     }
 }

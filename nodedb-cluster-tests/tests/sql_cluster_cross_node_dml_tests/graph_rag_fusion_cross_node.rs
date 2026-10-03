@@ -195,7 +195,7 @@ fn opcode_fields() -> TextFields {
         collection: Some(COLL.to_string()),
         query_vector: Some(QUERY.iter().map(|v| *v as f32).collect()),
         vector_top_k: Some(3),
-        edge_label: Some("hop".to_string()),
+        edge_labels: Some(vec!["hop".to_string()]),
         expansion_depth: Some(2),
         final_top_k: Some(10),
         vector_k: Some(60.0),

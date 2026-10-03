@@ -66,14 +66,14 @@ pub(super) fn sort_aggregated_rows(
     let mut order: Vec<usize> = (0..rows.len()).collect();
     order.sort_by(|&a, &b| {
         for (idx, key) in sort_keys.iter().enumerate() {
-            let av = keyed[a].get(idx);
-            let bv = keyed[b].get(idx);
-            let ord = match key.order_nulls(
-                matches!(av, None | Some(serde_json::Value::Null)),
-                matches!(bv, None | Some(serde_json::Value::Null)),
-            ) {
-                Some(ord) => ord,
-                None => key.direct(compare_json_values(av, bv)),
+            let av = keyed[a].get(idx).filter(|v| !v.is_null());
+            let bv = keyed[b].get(idx).filter(|v| !v.is_null());
+            let ord = match (av, bv) {
+                (Some(x), Some(y)) => key.direct(nodedb_query::compare_json(x, y)),
+                // At least one side is NULL, so `order_nulls` returns `Some`.
+                _ => key
+                    .order_nulls(av.is_none(), bv.is_none())
+                    .unwrap_or(std::cmp::Ordering::Equal),
             };
             if ord != std::cmp::Ordering::Equal {
                 return ord;
@@ -89,34 +89,90 @@ pub(super) fn sort_aggregated_rows(
     Ok(())
 }
 
-/// Compare two `Option<&serde_json::Value>` for sort. Nulls / absent
-/// keys sort last; numbers compare numerically; everything else falls
-/// back to string comparison.
-fn compare_json_values(
-    a: Option<&serde_json::Value>,
-    b: Option<&serde_json::Value>,
-) -> std::cmp::Ordering {
-    use serde_json::Value as V;
-    use std::cmp::Ordering;
-    let a_is_null = matches!(a, None | Some(V::Null));
-    let b_is_null = matches!(b, None | Some(V::Null));
-    if a_is_null && b_is_null {
-        return Ordering::Equal;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nodedb_physical::physical_plan::SortKeySpec;
+    use serde_json::json;
+
+    fn sorted(mut rows: Vec<serde_json::Value>, key: SortKeySpec) -> Vec<serde_json::Value> {
+        sort_aggregated_rows(&mut rows, &[key]).expect("sort");
+        rows
     }
-    if a_is_null {
-        return Ordering::Greater;
+
+    fn column(rows: &[serde_json::Value], name: &str) -> Vec<serde_json::Value> {
+        rows.iter().map(|r| r[name].clone()).collect()
     }
-    if b_is_null {
-        return Ordering::Less;
+
+    /// `2^53 + 1` and `2^53` collapse to one `f64`. MAX outputs order exactly.
+    #[test]
+    fn max_outputs_past_two_pow_53_order_exactly() {
+        let rows = vec![
+            json!({"g": "a", "max_v": 9_007_199_254_740_993_i64}),
+            json!({"g": "b", "max_v": 9_007_199_254_740_992_i64}),
+        ];
+        let asc = sorted(rows.clone(), SortKeySpec::column("max_v", true));
+        assert_eq!(column(&asc, "g"), vec![json!("b"), json!("a")]);
+        let desc = sorted(rows, SortKeySpec::column("max_v", false));
+        assert_eq!(column(&desc, "g"), vec![json!("a"), json!("b")]);
     }
-    match (a.unwrap(), b.unwrap()) {
-        (V::Number(x), V::Number(y)) => {
-            let xf = x.as_f64().unwrap_or(0.0);
-            let yf = y.as_f64().unwrap_or(0.0);
-            xf.partial_cmp(&yf).unwrap_or(Ordering::Equal)
-        }
-        (V::String(x), V::String(y)) => x.cmp(y),
-        (V::Bool(x), V::Bool(y)) => x.cmp(y),
-        (x, y) => x.to_string().cmp(&y.to_string()),
+
+    #[test]
+    fn min_outputs_nanosecond_timestamps_order_exactly() {
+        let rows = vec![
+            json!({"g": "late", "min_ts": 1_700_000_000_000_000_002_i64}),
+            json!({"g": "early", "min_ts": 1_700_000_000_000_000_001_i64}),
+            json!({"g": "mid", "min_ts": 1_700_000_000_000_000_001.5_f64}),
+        ];
+        let asc = sorted(rows, SortKeySpec::column("min_ts", true));
+        // The float rounds to `1_700_000_000_000_000_000`, below both integers.
+        assert_eq!(
+            column(&asc, "g"),
+            vec![json!("mid"), json!("early"), json!("late")]
+        );
+    }
+
+    #[test]
+    fn u64_outputs_order_above_i64() {
+        let rows = vec![
+            json!({"g": "u", "v": u64::MAX}),
+            json!({"g": "i", "v": i64::MAX}),
+            json!({"g": "neg", "v": i64::MIN}),
+        ];
+        let asc = sorted(rows, SortKeySpec::column("v", true));
+        assert_eq!(column(&asc, "g"), vec![json!("neg"), json!("i"), json!("u")]);
+    }
+
+    #[test]
+    fn small_values_and_nulls_keep_their_order() {
+        let rows = vec![
+            json!({"g": "two", "v": 2}),
+            json!({"g": "null", "v": null}),
+            json!({"g": "half", "v": 1.5}),
+            json!({"g": "absent"}),
+            json!({"g": "one", "v": 1}),
+        ];
+        let asc = sorted(rows.clone(), SortKeySpec::column("v", true));
+        assert_eq!(
+            column(&asc, "g"),
+            vec![
+                json!("one"),
+                json!("half"),
+                json!("two"),
+                json!("null"),
+                json!("absent")
+            ]
+        );
+        let desc = sorted(rows, SortKeySpec::column("v", false));
+        assert_eq!(
+            column(&desc, "g"),
+            vec![
+                json!("null"),
+                json!("absent"),
+                json!("two"),
+                json!("half"),
+                json!("one")
+            ]
+        );
     }
 }

@@ -71,6 +71,7 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
                 ann_options,
                 skip_payload_fetch,
                 payload_filters,
+                pk_prefilter,
             } = args;
             super::super::scan::convert_vector_search(
                 super::super::scan_params::VectorSearchParams {
@@ -87,6 +88,7 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
                     ctx: self.ctx,
                     skip_payload_fetch,
                     payload_filters,
+                    pk_prefilter,
                 },
             )
         }
@@ -112,20 +114,23 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
 
         fn text_search(
             &mut self,
-            collection: &str,
-            _field: Option<&str>,
-            query: &nodedb_sql::fts_types::FtsQuery,
-            top_k: usize,
-            _filters: &[nodedb_sql::types::filter::Filter],
-            score_alias: Option<&str>,
+            args: nodedb_sql::TextSearchVisitArgs<'_>,
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
-            super::super::scan::convert_text_search(
+            let nodedb_sql::TextSearchVisitArgs {
                 collection,
-                query,
-                &top_k,
-                score_alias,
-                self.tenant_id,
-                self.ctx.database_id,
+                shape,
+                filters,
+                scores,
+            } = args;
+            super::super::scan::convert_text_search(
+                super::super::scan_params::TextSearchConvertParams {
+                    collection,
+                    shape,
+                    filters,
+                    scores,
+                    tenant_id: self.tenant_id,
+                    database_id: self.ctx.database_id,
+                },
             )
         }
 
@@ -135,22 +140,30 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
             let nodedb_sql::HybridSearchVisitArgs {
                 collection,
+                vector_field,
                 query_vector,
+                text_field,
                 query_text,
+                filters,
                 top_k,
                 ef_search,
                 vector_weight,
+                mode,
                 fuzzy,
                 score_alias,
             } = args;
             super::super::scan::convert_hybrid_search(
                 super::super::scan_params::HybridSearchParams {
                     collection,
+                    vector_field,
                     query_vector,
+                    text_field,
                     query_text,
+                    filters,
                     top_k: &top_k,
                     ef_search: &ef_search,
                     vector_weight: &vector_weight,
+                    mode,
                     fuzzy: &fuzzy,
                     score_alias,
                     tenant_id: self.tenant_id,
@@ -165,13 +178,17 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
             let nodedb_sql::HybridSearchTripleVisitArgs {
                 collection,
+                vector_field,
                 query_vector,
+                text_field,
                 query_text,
+                filters,
                 graph_seed_id,
                 graph_depth,
                 graph_edge_label,
                 top_k,
                 ef_search,
+                mode,
                 fuzzy,
                 rrf_k,
                 score_alias,
@@ -180,13 +197,17 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
             super::super::scan::convert_hybrid_search_triple(
                 super::super::scan_params::HybridSearchTripleParams {
                     collection,
+                    vector_field,
                     query_vector,
+                    text_field,
                     query_text,
+                    filters,
                     graph_seed_id,
                     graph_depth: &graph_depth,
                     graph_edge_label: &graph_edge_label_owned,
                     top_k: &top_k,
                     ef_search: &ef_search,
+                    mode,
                     fuzzy: &fuzzy,
                     rrf_k: &rrf_k,
                     score_alias,

@@ -315,7 +315,7 @@ mod tests {
             Some(2.5)
         );
         assert_eq!(csr.edge_weight_in_collection("a", "L", "b", "c"), Some(9.0));
-        assert_eq!(csr.neighbors("a", None, Direction::Out).len(), 1);
+        assert_eq!(csr.neighbors("a", &[], Direction::Out).len(), 1);
     }
 
     #[test]
@@ -330,10 +330,10 @@ mod tests {
             Some(2.5)
         );
         assert_eq!(csr.edge_weight_in_collection("a", "L", "b", "c"), Some(9.0));
-        assert_eq!(csr.neighbors("a", None, Direction::Out).len(), 1);
+        assert_eq!(csr.neighbors("a", &[], Direction::Out).len(), 1);
         csr.compact().expect("compact again");
         assert_eq!(csr.edge_weight_in_collection("a", "L", "b", "c"), Some(9.0));
-        assert_eq!(csr.neighbors("a", None, Direction::Out).len(), 1);
+        assert_eq!(csr.neighbors("a", &[], Direction::Out).len(), 1);
     }
 
     #[test]
@@ -348,7 +348,7 @@ mod tests {
         csr.restore_edge_in_collection("a", "L", "b", "c", Some(1.0))
             .expect("restore");
         assert_eq!(csr.edge_weight_in_collection("a", "L", "b", "c"), Some(1.0));
-        assert_eq!(csr.neighbors("a", None, Direction::Out).len(), 1);
+        assert_eq!(csr.neighbors("a", &[], Direction::Out).len(), 1);
     }
 
     #[test]
@@ -360,7 +360,7 @@ mod tests {
         csr.remove_edge_in_collection("a", "L", "b", "c");
         csr.add_edge_in_collection("a", "L", "b", "c")
             .expect("re-add");
-        assert_eq!(csr.neighbors("a", None, Direction::Out).len(), 1);
+        assert_eq!(csr.neighbors("a", &[], Direction::Out).len(), 1);
     }
 
     #[test]
@@ -383,7 +383,7 @@ mod tests {
         csr.add_edge("a", "L", "y")
             .expect("a later node takes the freed id");
         csr.compact().expect("compact");
-        assert_eq!(csr.neighbors("a", None, Direction::Out).len(), 2);
+        assert_eq!(csr.neighbors("a", &[], Direction::Out).len(), 2);
     }
 
     #[test]

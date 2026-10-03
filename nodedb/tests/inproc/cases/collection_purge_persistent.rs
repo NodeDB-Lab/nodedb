@@ -179,11 +179,14 @@ fn inverted_index_purge_is_scoped_to_collection() {
     .unwrap();
     let tid = TenantId::new(TENANT);
 
+    let body = |text: &str| {
+        nodedb_fts::DocumentText::from_fields([("body".to_string(), text.to_string())])
+    };
     inverted
-        .index_document(DB, tid, "keep", Surrogate(1), "hello world")
+        .index_document(DB, tid, "keep", Surrogate(1), &body("hello world"))
         .unwrap();
     inverted
-        .index_document(DB, tid, "purge_me", Surrogate(2), "hello universe")
+        .index_document(DB, tid, "purge_me", Surrogate(2), &body("hello universe"))
         .unwrap();
 
     inverted.purge_collection(DB, tid, "purge_me").unwrap();

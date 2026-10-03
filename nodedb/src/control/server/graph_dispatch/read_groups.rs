@@ -169,10 +169,12 @@ mod tests {
         PhysicalPlan::Graph(GraphOp::NeighborsMulti {
             collection: None,
             node_ids: node_ids.iter().map(|id| (*id).to_owned()).collect(),
-            edge_label: None,
+            edge_labels: Vec::new(),
             direction: Direction::Out,
             max_results: 0,
             rls_filters: Vec::new(),
+            edge_predicate: Vec::new(),
+            with_properties: false,
         })
     }
 

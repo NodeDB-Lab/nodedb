@@ -58,6 +58,22 @@ impl GraphTxnOverlay {
         }
     }
 
+    /// The property map of a put of `(src, label, dst)` staged in `coll_key`,
+    /// or `None` when this transaction staged no put of that edge there.
+    pub fn staged_edge_properties(
+        &self,
+        coll_key: &GraphCollKey,
+        src: &str,
+        label: &str,
+        dst: &str,
+    ) -> Option<&[u8]> {
+        self.collections
+            .get(coll_key)?
+            .pending_edges
+            .get(&(src.to_string(), label.to_string(), dst.to_string()))
+            .map(Vec::as_slice)
+    }
+
     /// True if `(src, label, dst)` has been staged-deleted in this
     /// transaction.
     pub fn is_edge_tombstoned(

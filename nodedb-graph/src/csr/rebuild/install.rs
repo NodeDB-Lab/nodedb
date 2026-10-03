@@ -103,7 +103,7 @@ mod tests {
 
     fn out_of(csr: &CsrIndex, node: &str) -> Vec<String> {
         let mut dsts: Vec<String> = csr
-            .neighbors(node, None, Direction::Out)
+            .neighbors(node, &[], Direction::Out)
             .into_iter()
             .map(|(_, d)| d)
             .collect();

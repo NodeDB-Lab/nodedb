@@ -10,8 +10,8 @@
 //! (which is keyed by `u32` surrogate), so this is a parallel, independent
 //! overlay type held alongside it on `CoreLoop` (`graph_txn_overlays`).
 //!
-//! Scope: this overlay serves read-your-own-writes for Neighbors / Hop
-//! (single-hop reads), and COMMIT resolves the staged edges and labels into
+//! Scope: this overlay serves read-your-own-writes for Neighbors, Hop and
+//! the `NeighborsMulti` hops of the walk coordinators, and COMMIT resolves the staged edges and labels into
 //! the transaction's redo record, which the redo install applies.
 //! This overlay is in-memory only and is dropped at commit or rollback, same
 //! lifecycle as `super::TxnOverlay`.

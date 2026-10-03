@@ -109,6 +109,7 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
             sqlstate::UNDEFINED_COLUMN,
             format!("column \"{column}\" does not exist"),
         ),
+        crate::Error::TextColumn { fault, .. } => ("ERROR", fault.sqlstate(), err.to_string()),
         crate::Error::AmbiguousColumn { column } => (
             "ERROR",
             sqlstate::AMBIGUOUS_COLUMN,

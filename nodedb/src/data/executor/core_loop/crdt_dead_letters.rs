@@ -19,8 +19,9 @@ impl CoreLoop {
     /// record already bound keeps its one entry. A write with no record has
     /// nothing to replay, so its entry stays in memory only.
     ///
-    /// A store error is returned: the entry is then in memory only, and the
-    /// caller must not report the rejection as durable.
+    /// A store error is returned, and the entry is removed from the queue:
+    /// nothing on this node records the rejection. The caller fails or holds
+    /// the write that needed the entry.
     pub(in crate::data::executor) fn store_crdt_dead_letter(
         &mut self,
         database_id: DatabaseId,
@@ -36,36 +37,50 @@ impl CoreLoop {
         let Some(entry) = engine.bind_dead_letter_source(source_lsn.as_u64()) else {
             return Ok(());
         };
-        self.sparse.put_crdt_dead_letter(
+        let stored = self.sparse.put_crdt_dead_letter(
             database_id.as_u64(),
             tenant_id.as_u64(),
             source_lsn.as_u64(),
             &entry,
-        )
+        );
+        if let Err(error) = &stored {
+            crate::diag::crdt_dead_letter_not_stored(
+                error,
+                database_id.as_u64(),
+                tenant_id.as_u64(),
+                &entry,
+                source_lsn.as_u64(),
+            );
+            engine.discard_dead_letter(entry.id);
+        }
+        stored
     }
 }
 
 impl CoreLoop {
     /// Store the entry the rejection of the replayed record at `lsn`
-    /// produced. The live apply of the record stored the same entry, so this
-    /// keeps one. A store error is logged, and the record keeps the entry in
-    /// memory.
+    /// produced. Returns whether replay may count the record as replayed.
+    ///
+    /// A store error stops restart replay at the record: the core
+    /// fail-stops, no checkpoint covers the record, and boot refuses to start
+    /// with a rejection nothing records. A committed-redo apply fails instead.
     pub(in crate::data::executor) fn store_replayed_dead_letter(
         &mut self,
         database_id: DatabaseId,
         tenant_id: TenantId,
         lsn: u64,
-    ) {
-        if let Err(error) = self.store_crdt_dead_letter(database_id, tenant_id, Some(Lsn::new(lsn)))
-        {
-            tracing::error!(
-                core = self.core_id,
-                %database_id,
-                %tenant_id,
-                lsn,
-                %error,
-                "a replayed CRDT rejection's dead-letter entry could not be stored"
-            );
+    ) -> bool {
+        match self.store_crdt_dead_letter(database_id, tenant_id, Some(Lsn::new(lsn))) {
+            Ok(()) => true,
+            Err(error) => {
+                self.replay_record_unapplied(
+                    "crdt",
+                    "dead_letter_store",
+                    lsn,
+                    &format!("the rejected delta's dead-letter entry could not be stored: {error}"),
+                );
+                false
+            }
         }
     }
 }

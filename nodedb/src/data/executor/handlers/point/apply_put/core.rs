@@ -172,7 +172,7 @@ impl CoreLoop {
         // inverted-index write failure is real and rejects the write.
         if let Ok(doc) = doc_format::decode_document(value) {
             // Shared with the DELETE-rollback re-index path.
-            let text_content = crate::data::executor::fts_text::extract_fts_text(&doc);
+            let text_content = crate::data::executor::fts_text::extract_fts_fields(&doc);
             // Empty text is NOT skipped — stripping every indexable word
             // must still remove the document from the index.
             if index_text {
@@ -362,7 +362,7 @@ mod tests {
     const COLL: &str = "articles";
     const SURROGATE: Surrogate = Surrogate(7);
     /// Raw JSON body — `doc_format::decode_document`'s JSON fallback accepts
-    /// it, and its single string field is what `extract_fts_text` feeds the
+    /// it, and its single string field is what `extract_fts_fields` feeds the
     /// inverted index, so this document has real text to index.
     const BODY: &[u8] = br#"{"title":"alpha bravo charlie"}"#;
 

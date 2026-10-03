@@ -17,8 +17,9 @@ use sqlparser::ast;
 use super::entry_ann::parse_ann_options;
 use super::helpers::{
     convert_where_to_filters, extract_column_name, extract_float, extract_float_array,
-    extract_func_args, extract_string_literal, extract_text_field, metric_from_func_name,
+    extract_func_args, metric_from_func_name,
 };
+use super::text_call::{TextCall, resolve_text_call};
 use crate::error::{Result, SqlError};
 use crate::functions::registry::{FunctionRegistry, SearchTrigger};
 use crate::parser::normalize::normalize_ident;
@@ -42,25 +43,25 @@ pub(super) fn try_extract_where_search(
     functions: &FunctionRegistry,
     projection: &[Projection],
 ) -> Result<Option<SqlPlan>> {
-    try_extract_with_extra_filters(expr, table, functions, None, projection)
+    try_extract_with_extra_filters(expr, table, functions, &[], projection)
 }
 
-/// Internal entry that threads an optional sibling-AND filter through to the
-/// concrete trigger handler. The public entry calls this with `None`; the
-/// AND recursion branch calls it with the *other* side of the AND so a
-/// vector / spatial / text trigger can carry the sibling predicate as a
-/// scan filter instead of silently dropping it.
+/// Internal entry that threads the sibling-AND predicates through to the
+/// concrete trigger handler. The public entry calls this with none; each AND
+/// recursion adds the *other* side of that AND, so a vector / spatial / text
+/// trigger nested in `a AND (t AND b)` carries both `a` and `b` as scan
+/// filters instead of silently dropping one.
 fn try_extract_with_extra_filters(
     expr: &ast::Expr,
     table: &crate::resolver::columns::ResolvedTable,
     functions: &FunctionRegistry,
-    extra_filter: Option<&ast::Expr>,
+    extra_filters: &[&ast::Expr],
     projection: &[Projection],
 ) -> Result<Option<SqlPlan>> {
     match expr {
         ast::Expr::Function(func) => {
             let name = function_name(func);
-            dispatch_trigger(&name, func, table, functions, extra_filter, projection)
+            dispatch_trigger(&name, func, table, functions, extra_filters, projection)
         }
         // AND: recurse on each side, carrying the other side as a scan filter.
         ast::Expr::BinaryOp {
@@ -68,29 +69,66 @@ fn try_extract_with_extra_filters(
             op: ast::BinaryOperator::And,
             right,
         } => {
-            // Try left as the trigger, with right as the carried filter.
-            if let Some(plan) = try_extract_with_extra_filters(
-                left,
-                table,
-                functions,
-                Some(right.as_ref()),
-                projection,
-            )? {
+            // Try left as the trigger, with right as a carried filter.
+            let mut with_right = extra_filters.to_vec();
+            with_right.push(right.as_ref());
+            if let Some(plan) =
+                try_extract_with_extra_filters(left, table, functions, &with_right, projection)?
+            {
                 return Ok(Some(plan));
             }
-            // Try right as the trigger, with left as the carried filter.
-            if let Some(plan) = try_extract_with_extra_filters(
-                right,
-                table,
-                functions,
-                Some(left.as_ref()),
-                projection,
-            )? {
+            // Try right as the trigger, with left as a carried filter.
+            let mut with_left = extra_filters.to_vec();
+            with_left.push(left.as_ref());
+            if let Some(plan) =
+                try_extract_with_extra_filters(right, table, functions, &with_left, projection)?
+            {
                 return Ok(Some(plan));
             }
             Ok(None)
         }
+        // A parenthesised conjunction is the same conjunction.
+        ast::Expr::Nested(inner) => {
+            try_extract_with_extra_filters(inner, table, functions, extra_filters, projection)
+        }
         _ => Ok(None),
+    }
+}
+
+/// The SELECT clauses a WHERE-derived search plan has no slot for.
+pub(super) struct SearchBodyClauses<'a> {
+    pub temporal: &'a crate::temporal::TemporalScope,
+    pub has_subqueries: bool,
+    pub aggregates: bool,
+    pub distinct: bool,
+    pub windows: bool,
+}
+
+/// Refuse a WHERE-derived search plan whose SELECT carries a clause the plan
+/// cannot hold. Returning the plan would answer the query without it.
+pub(super) fn refuse_dropped_clauses(plan: &SqlPlan, clauses: SearchBodyClauses<'_>) -> Result<()> {
+    let dropped = if clauses.temporal.is_temporal() {
+        Some("AS OF")
+    } else if clauses.has_subqueries {
+        Some("a WHERE subquery")
+    } else if clauses.aggregates {
+        Some("aggregation")
+    } else if clauses.distinct {
+        Some("DISTINCT")
+    } else if clauses.windows {
+        Some("a window function")
+    } else {
+        None
+    };
+    match dropped {
+        Some(clause) => Err(SqlError::Unsupported {
+            detail: format!(
+                "{clause} over a WHERE-clause {} is not supported; \
+                 wrap the search in a subquery",
+                plan.variant_name()
+            ),
+        }),
+        None => Ok(()),
     }
 }
 
@@ -111,7 +149,7 @@ fn dispatch_trigger(
     func: &ast::Function,
     table: &crate::resolver::columns::ResolvedTable,
     functions: &FunctionRegistry,
-    extra_filter: Option<&ast::Expr>,
+    extra_filters: &[&ast::Expr],
     projection: &[Projection],
 ) -> Result<Option<SqlPlan>> {
     // Exhaustive match on `SearchTrigger`: when a new trigger is added,
@@ -119,18 +157,20 @@ fn dispatch_trigger(
     // for it. This is the structural fix for the original bug class —
     // silent fall-through on unhandled triggers.
     match functions.search_trigger(name) {
-        SearchTrigger::TextMatch => plan_text_from_where(func, table, extra_filter, projection),
+        SearchTrigger::TextMatch => {
+            plan_text_from_where(name, func, table, extra_filters, projection)
+        }
         SearchTrigger::SpatialDWithin
         | SearchTrigger::SpatialContains
         | SearchTrigger::SpatialIntersects
         | SearchTrigger::SpatialWithin => {
-            plan_spatial_from_where(name, func, table, extra_filter, projection)
+            plan_spatial_from_where(name, func, table, extra_filters, projection)
         }
         SearchTrigger::VectorSearch => {
-            plan_vector_from_where(name, func, table, extra_filter, projection)
+            plan_vector_from_where(name, func, table, extra_filters, projection)
         }
         SearchTrigger::MultiVectorSearch => {
-            plan_multi_vector_from_where(func, table, extra_filter, projection)
+            plan_multi_vector_from_where(func, table, extra_filters, projection)
         }
         // The remaining triggers either have no WHERE-clause shape advertised
         // anywhere in the docs (`HybridSearch`, `TextSearch`, the array TVFs,
@@ -160,33 +200,37 @@ fn dispatch_trigger(
     }
 }
 
+/// The conjunction of every sibling-AND predicate, as scan filters.
 fn extra_filter_to_filters(
-    extra: Option<&ast::Expr>,
+    extra: &[&ast::Expr],
     table: &crate::resolver::columns::ResolvedTable,
 ) -> Result<Vec<Filter>> {
-    match extra {
-        Some(e) => {
-            let scope = crate::resolver::columns::TableScope::single(table.clone())?;
-            convert_where_to_filters(e, &scope)
-        }
-        None => Ok(Vec::new()),
+    if extra.is_empty() {
+        return Ok(Vec::new());
     }
+    let scope = crate::resolver::columns::TableScope::single(table.clone())?;
+    let mut filters = Vec::new();
+    for e in extra {
+        filters.extend(convert_where_to_filters(e, &scope)?);
+    }
+    Ok(filters)
 }
 
 fn plan_text_from_where(
+    name: &str,
     func: &ast::Function,
     table: &crate::resolver::columns::ResolvedTable,
-    extra_filter: Option<&ast::Expr>,
+    extra_filters: &[&ast::Expr],
     projection: &[Projection],
 ) -> Result<Option<SqlPlan>> {
     use crate::fts_types::FtsQuery;
 
-    let args = extract_func_args(func)?;
-    if args.len() < 2 {
-        return Ok(None);
-    }
-    let field = extract_text_field(&args[0])?;
-    let query_text = extract_string_literal(&args[1])?;
+    let TextCall {
+        field,
+        query: query_text,
+        options,
+    } = resolve_text_call(name, func, table)?;
+    let fuzzy = options.params.fuzzy;
 
     // Detect a phrase query: query_text surrounded by double-quotes.
     // SQL form: `text_match(body, '"quick brown fox"')`.
@@ -201,32 +245,45 @@ fn plan_text_from_where(
             } else {
                 FtsQuery::Plain {
                     text: inner.to_string(),
-                    fuzzy: true,
+                    fuzzy,
                 }
             }
         } else {
             FtsQuery::Plain {
                 text: query_text,
-                fuzzy: true,
+                fuzzy,
             }
         };
+    // A phrase matches its exact terms in order: neither option applies.
+    if options.named && matches!(fts_query, FtsQuery::Phrase(_)) {
+        return Err(SqlError::Unsupported {
+            detail: format!(
+                "{name}(): a phrase query matches its exact terms in order; \
+                 the mode and fuzzy options do not apply to it"
+            ),
+        });
+    }
 
-    Ok(Some(SqlPlan::TextSearch {
+    // `top_k: None` returns every match; `apply_limit` sets a LIMIT's bound.
+    Ok(Some(SqlPlan::TextSearch(TextSearchPlan {
         collection: table.name.clone(),
-        field,
-        query: fts_query,
-        top_k: 1000,
-        filters: extra_filter_to_filters(extra_filter, table)?,
-        score_alias: None,
+        shape: TextSearchShape::Match {
+            field,
+            query: fts_query,
+            mode: options.params.mode,
+            top_k: None,
+        },
+        filters: extra_filter_to_filters(extra_filters, table)?,
+        scores: Vec::new(),
         projection: projection.to_vec(),
-    }))
+    })))
 }
 
 fn plan_vector_from_where(
     name: &str,
     func: &ast::Function,
     table: &crate::resolver::columns::ResolvedTable,
-    extra_filter: Option<&ast::Expr>,
+    extra_filters: &[&ast::Expr],
     projection: &[Projection],
 ) -> Result<Option<SqlPlan>> {
     let args = extract_func_args(func)?;
@@ -252,7 +309,7 @@ fn plan_vector_from_where(
         top_k: DEFAULT_TOP_K,
         ef_search,
         metric: metric_from_func_name(name),
-        filters: extra_filter_to_filters(extra_filter, table)?,
+        filters: extra_filter_to_filters(extra_filters, table)?,
         array_prefilter: None,
         ann_options,
         // Vector-primary skip-payload-fetch and payload-filter peeling are
@@ -262,6 +319,8 @@ fn plan_vector_from_where(
         // and need no special handling here.
         skip_payload_fetch: false,
         payload_filters: Vec::new(),
+        // Key conjuncts move here in the same post-pass.
+        pk_prefilter: None,
         projection: projection.to_vec(),
     }))
 }
@@ -269,7 +328,7 @@ fn plan_vector_from_where(
 fn plan_multi_vector_from_where(
     func: &ast::Function,
     table: &crate::resolver::columns::ResolvedTable,
-    extra_filter: Option<&ast::Expr>,
+    extra_filters: &[&ast::Expr],
     projection: &[Projection],
 ) -> Result<Option<SqlPlan>> {
     let args = extract_func_args(func)?;
@@ -281,7 +340,7 @@ fn plan_multi_vector_from_where(
     // once the executor accepts filters on MultiVectorSearch; for now we keep
     // parity with the existing variant fields and raise on a sibling filter
     // so the user gets a clear "not yet supported here" instead of silent drop.
-    if extra_filter.is_some() {
+    if !extra_filters.is_empty() {
         return Err(SqlError::Unsupported {
             detail:
                 "AND-combined predicates with multi_vector_distance(...) in WHERE are not supported; \
@@ -304,7 +363,7 @@ fn plan_spatial_from_where(
     name: &str,
     func: &ast::Function,
     table: &crate::resolver::columns::ResolvedTable,
-    extra_filter: Option<&ast::Expr>,
+    extra_filters: &[&ast::Expr],
     projection: &[Projection],
 ) -> Result<Option<SqlPlan>> {
     let predicate = match name {
@@ -348,7 +407,7 @@ fn plan_spatial_from_where(
         predicate,
         query_geometry: geometry,
         distance_meters: distance,
-        attribute_filters: extra_filter_to_filters(extra_filter, table)?,
+        attribute_filters: extra_filter_to_filters(extra_filters, table)?,
         limit: 1000,
         projection: projection.to_vec(),
     }))

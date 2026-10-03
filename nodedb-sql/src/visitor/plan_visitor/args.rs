@@ -10,8 +10,8 @@ use crate::temporal::TemporalScope;
 use crate::types::SqlPlan;
 use crate::types::filter::Filter;
 use crate::types::plan::{
-    ArrayPrefilter, MergePlanClause, VectorAnnOptions, VectorPrimaryInsertIntent, VectorPrimaryRow,
-    WriteRoute,
+    ArrayPrefilter, MergePlanClause, TextScoreColumn, TextSearchShape, VectorAnnOptions,
+    VectorPrimaryInsertIntent, VectorPrimaryRow, WriteRoute,
 };
 use crate::types::query::{
     AggregateExpr, EngineType, JoinType, Projection, SortKey, SpatialPredicate, WindowSpec,
@@ -153,16 +153,34 @@ pub struct VectorSearchVisitArgs<'a> {
     pub ann_options: &'a VectorAnnOptions,
     pub skip_payload_fetch: bool,
     pub payload_filters: &'a [SqlPayloadAtom],
+    /// Primary keys the search ranks among. `None`: every row.
+    pub pk_prefilter: Option<&'a [SqlValue]>,
+}
+
+/// Parameters for [`super::trait_def::PlanVisitor::text_search`].
+pub struct TextSearchVisitArgs<'a> {
+    pub collection: &'a str,
+    pub shape: &'a TextSearchShape,
+    /// Residual WHERE predicates, applied before ranking.
+    pub filters: &'a [Filter],
+    /// Score columns the SELECT list or ORDER BY reads.
+    pub scores: &'a [TextScoreColumn],
 }
 
 /// Parameters for [`super::trait_def::PlanVisitor::hybrid_search`].
 pub struct HybridSearchVisitArgs<'a> {
     pub collection: &'a str,
+    pub vector_field: &'a str,
     pub query_vector: &'a [f32],
+    /// `None` for `bm25_score(*, q)`: the whole-document index.
+    pub text_field: Option<&'a str>,
     pub query_text: &'a str,
+    /// Residual WHERE predicates, applied to both legs before fusion.
+    pub filters: &'a [Filter],
     pub top_k: usize,
     pub ef_search: usize,
     pub vector_weight: f32,
+    pub mode: nodedb_types::text_search::QueryMode,
     pub fuzzy: bool,
     pub score_alias: Option<&'a str>,
 }
@@ -170,13 +188,19 @@ pub struct HybridSearchVisitArgs<'a> {
 /// Parameters for [`super::trait_def::PlanVisitor::hybrid_search_triple`].
 pub struct HybridSearchTripleVisitArgs<'a> {
     pub collection: &'a str,
+    pub vector_field: &'a str,
     pub query_vector: &'a [f32],
+    /// `None` for `bm25_score(*, q)`: the whole-document index.
+    pub text_field: Option<&'a str>,
     pub query_text: &'a str,
+    /// Residual WHERE predicates, applied to every leg before fusion.
+    pub filters: &'a [Filter],
     pub graph_seed_id: &'a str,
     pub graph_depth: usize,
     pub graph_edge_label: Option<&'a str>,
     pub top_k: usize,
     pub ef_search: usize,
+    pub mode: nodedb_types::text_search::QueryMode,
     pub fuzzy: bool,
     pub rrf_k: (f64, f64, f64),
     pub score_alias: Option<&'a str>,

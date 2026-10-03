@@ -167,6 +167,7 @@ impl CoreLoop {
                     }
                     self.emit_document_delete_event(
                         task,
+                        tid,
                         collection,
                         row_identity,
                         outcome.prior_value.as_deref(),

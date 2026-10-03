@@ -93,6 +93,19 @@ impl TermBlocks {
             None
         }
     }
+
+    /// The `(term_freq, fieldnorm)` of `doc_id`'s posting, or `None` when the
+    /// term does not occur in the document.
+    pub fn lookup(&self, doc_id: Surrogate) -> Option<(u32, u8)> {
+        let block = &self.blocks[self.advance_to_block(doc_id)?];
+        let pos = block.doc_ids.binary_search(&doc_id).ok()?;
+        Some((block.term_freqs[pos], block.fieldnorms[pos]))
+    }
+
+    /// Every document the term occurs in.
+    pub fn doc_ids(&self) -> impl Iterator<Item = Surrogate> + '_ {
+        self.blocks.iter().flat_map(|b| b.doc_ids.iter().copied())
+    }
 }
 
 #[cfg(test)]
@@ -152,5 +165,23 @@ mod tests {
         assert_eq!(tb.df, 0);
         assert_eq!(tb.num_blocks(), 0);
         assert_eq!(tb.advance_to_block(Surrogate(0)), None);
+        assert_eq!(tb.lookup(Surrogate(0)), None);
+    }
+
+    #[test]
+    fn lookup_finds_postings_across_blocks() {
+        let ids: Vec<u32> = (0..300).map(|i| i * 2).collect();
+        let tb = make_term_blocks(&ids, 3);
+        assert_eq!(
+            tb.lookup(Surrogate(0)),
+            Some((3, smallfloat::encode(100)))
+        );
+        assert_eq!(
+            tb.lookup(Surrogate(400)),
+            Some((3, smallfloat::encode(100)))
+        );
+        assert_eq!(tb.lookup(Surrogate(401)), None);
+        assert_eq!(tb.lookup(Surrogate(1000)), None);
+        assert_eq!(tb.doc_ids().count(), 300);
     }
 }

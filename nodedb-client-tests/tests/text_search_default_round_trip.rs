@@ -10,7 +10,7 @@
 
 use nodedb_client::{NodeDb, NodeDbRemote};
 use nodedb_test_support::pgwire_harness::TestServer;
-use nodedb_types::text_search::TextSearchParams;
+use nodedb_types::text_search::{QueryMode, TextSearchParams};
 
 #[tokio::test]
 async fn text_search_returns_real_matches() {
@@ -58,7 +58,10 @@ async fn text_search_returns_real_matches() {
             "body",
             "machine learning",
             10,
-            TextSearchParams::default(),
+            TextSearchParams {
+                mode: QueryMode::And,
+                fuzzy: true,
+            },
             None,
         )
         .await
@@ -66,6 +69,94 @@ async fn text_search_returns_real_matches() {
     assert!(
         !matches.is_empty(),
         "text_search must return real BM25-ranked matches; got empty"
+    );
+
+    // A second document holds one of the two terms. `And` keeps only the
+    // document holding both; `Or` returns both.
+    let mut doc = nodedb_client::Document::new("d2");
+    doc.set(
+        "body",
+        nodedb_client::Value::String("machine shop tools".into()),
+    );
+    remote
+        .document_put("docs", doc)
+        .await
+        .expect("seed second document");
+    let ids = |hits: &[nodedb_client::SearchResult]| -> Vec<String> {
+        let mut ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
+        ids.sort();
+        ids
+    };
+    let all_terms = remote
+        .text_search(
+            "docs",
+            "body",
+            "machine learning",
+            10,
+            TextSearchParams {
+                mode: QueryMode::And,
+                fuzzy: false,
+            },
+            None,
+        )
+        .await
+        .expect("And-mode text_search");
+    assert_eq!(ids(&all_terms), vec!["d1".to_string()]);
+    let any_term = remote
+        .text_search(
+            "docs",
+            "body",
+            "machine learning",
+            10,
+            TextSearchParams::default(),
+            None,
+        )
+        .await
+        .expect("Or-mode text_search");
+    assert_eq!(ids(&any_term), vec!["d1".to_string(), "d2".to_string()]);
+
+    // A typo matches only through the fuzzy fallback.
+    let exact = remote
+        .text_search("docs", "body", "machime", 10, TextSearchParams::default(), None)
+        .await
+        .expect("non-fuzzy text_search");
+    assert!(exact.is_empty(), "no exact match for a typo; got {exact:?}");
+    let fuzzy = remote
+        .text_search(
+            "docs",
+            "body",
+            "machime",
+            10,
+            TextSearchParams {
+                mode: QueryMode::Or,
+                fuzzy: true,
+            },
+            None,
+        )
+        .await
+        .expect("fuzzy text_search");
+    assert_eq!(ids(&fuzzy), vec!["d1".to_string(), "d2".to_string()]);
+
+    // `allowed_ids` restricts the candidates on the server.
+    let only_other: std::collections::HashSet<String> =
+        std::iter::once("other".to_string()).collect();
+    let restricted = remote
+        .text_search(
+            "docs",
+            "body",
+            "machine learning",
+            10,
+            TextSearchParams {
+                mode: QueryMode::And,
+                fuzzy: true,
+            },
+            Some(&only_other),
+        )
+        .await
+        .expect("text_search with allowed_ids");
+    assert!(
+        restricted.is_empty(),
+        "d1 is not in allowed_ids, so no hit may return; got {restricted:?}"
     );
 
     server.graceful_shutdown().await;

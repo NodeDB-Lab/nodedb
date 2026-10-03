@@ -10,6 +10,7 @@ pub(crate) mod crdt;
 mod dispatch;
 pub(crate) mod document;
 pub(crate) mod document_bulk;
+mod document_identity;
 pub(crate) mod graph;
 mod helpers;
 pub(crate) mod kv;
@@ -19,6 +20,7 @@ pub(crate) mod spatial;
 pub(crate) mod text;
 pub(crate) mod timeseries;
 pub(crate) mod vector;
+mod vector_filter;
 
 pub(crate) use dispatch::build_plan;
 pub(super) use helpers::{collection_type, declared_primary_key, parse_direction, require_doc_id};

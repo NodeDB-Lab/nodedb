@@ -14,15 +14,23 @@ use super::format::{self, TermDictEntry};
 
 /// Flush a memtable's postings into an immutable segment byte buffer.
 ///
-/// `term_postings` is the drained HashMap from `Memtable::drain()`.
+/// `term_postings` is one index's drained map from `Memtable::drain_scope()`.
 /// Returns the serialized segment bytes or a `SegmentError` if any term
 /// exceeds `MAX_TERM_LEN`.
 pub fn flush_to_segment(
     term_postings: HashMap<String, Vec<CompactPosting>>,
 ) -> Result<Vec<u8>, SegmentError> {
+    flush_postings_to_segment(&term_postings)
+}
+
+/// Build a segment from a borrowed term→postings map. The map stays intact,
+/// so a caller can drop it only after the segment is durably written.
+pub fn flush_postings_to_segment(
+    term_postings: &HashMap<String, Vec<CompactPosting>>,
+) -> Result<Vec<u8>, SegmentError> {
     // Sort terms for binary-searchable term dictionary.
-    let mut sorted_terms: Vec<(String, Vec<CompactPosting>)> = term_postings.into_iter().collect();
-    sorted_terms.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let mut sorted_terms: Vec<(&String, &Vec<CompactPosting>)> = term_postings.iter().collect();
+    sorted_terms.sort_by_key(|(term, _)| *term);
 
     // Phase 1: Encode posting blocks for each term, collect byte offsets.
     let mut posting_data = Vec::new();
@@ -41,7 +49,7 @@ pub fn flush_to_segment(
         let df = postings.len() as u32;
 
         // Split into 128-doc blocks and serialize each.
-        let blocks = into_blocks(postings.clone());
+        let blocks = into_blocks(postings.to_vec());
         let mut term_bytes = Vec::new();
 
         // Write number of blocks.
@@ -57,7 +65,7 @@ pub fn flush_to_segment(
         posting_data.extend_from_slice(&term_bytes);
 
         dict_entries.push(TermDictEntry {
-            term: term.clone(),
+            term: term.to_string(),
             posting_offset: offset,
             posting_len,
             df,
@@ -124,7 +132,7 @@ pub fn build_from_blocks(
         posting_data.extend_from_slice(&term_bytes);
 
         dict_entries.push(TermDictEntry {
-            term: term.clone(),
+            term: term.to_string(),
             posting_offset: offset,
             posting_len,
             df,

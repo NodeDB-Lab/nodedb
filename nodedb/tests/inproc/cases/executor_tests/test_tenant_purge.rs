@@ -185,7 +185,7 @@ fn purge_removes_all_tenant_data() {
         TENANT_A,
         PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "u0".into(),
-            edge_label: Some("KNOWS".into()),
+            edge_labels: vec!["KNOWS".into()],
             direction: nodedb::engine::graph::edge_store::Direction::Out,
             rls_filters: Vec::new(),
             collection: None,

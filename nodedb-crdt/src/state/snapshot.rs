@@ -58,12 +58,15 @@ impl CrdtState {
     /// The limits are checked before Loro can import the blob, so rejected
     /// bytes never mutate this document or allocate an import graph.
     ///
-    /// An update whose causal predecessors are absent from this document is
-    /// buffered by Loro as *pending* and leaves the applied state untouched.
-    /// That is reported as [`CrdtError::ImportPendingDependencies`], never as
-    /// success: a caller that took `Ok` here would acknowledge a write that
-    /// was never applied. The buffered operations remain queued inside Loro,
-    /// so a later import carrying the missing predecessors still converges.
+    /// A change whose causal predecessors are absent from this document is
+    /// buffered by Loro as *pending* and does not reach the applied state.
+    /// A blob that carries any such change returns
+    /// [`CrdtError::ImportPendingDependencies`], never success: a caller that
+    /// took `Ok` here would acknowledge a write that was never applied. The
+    /// ready changes in the same blob still apply, so the state can advance
+    /// under that error. [`Self::import_tracked`] reports the rows they
+    /// changed. The buffered changes stay queued inside Loro, so a later
+    /// import carrying the missing predecessors still converges.
     ///
     /// The returned [`ImportAdmission`] reports how much of the blob was new
     /// and how much Loro trimmed as already-known. An `Ok` whose
@@ -104,6 +107,9 @@ impl CrdtState {
     /// Call this periodically (e.g., every 30 minutes or when memory
     /// pressure exceeds threshold) to prevent unbounded history growth.
     pub fn compact_history(&mut self) -> Result<()> {
+        // `oplog_frontiers` excludes an open auto-commit transaction. Commit
+        // it first so the shallow root covers every write made so far.
+        self.doc.commit();
         self.compact_to_frontiers(&self.doc.oplog_frontiers())
     }
 

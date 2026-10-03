@@ -31,7 +31,7 @@ use super::hit_key::parse_surrogate_hex;
 use super::vector::resolve_surrogate_pk;
 
 /// Decode the DP-side JSON/msgpack array of `TextOp::Search` /
-/// `PhraseSearch`-shaped hits (`{id: <surrogate hex>, data: {...}}`), and for
+/// `PhraseSearch` / `BM25ScoreScan` rows (`{id: <surrogate hex>, data: {...}}`), and for
 /// any row whose `data` object has no `id` field of its own, resolve the
 /// surrogate to the user PK via the catalog and inject it into `data`. Rows
 /// whose body already carries an `id` (the common case) are left untouched;

@@ -36,7 +36,9 @@ pub(in crate::data::executor) struct GraphExpansionParams<'a> {
     pub database_id: u64,
     pub tid: u64,
     pub seeds: GraphSeeds<'a>,
-    pub label_filter: Option<&'a str>,
+    /// Edge labels to expand over. Empty keeps every edge. Otherwise an edge
+    /// whose label is any listed label passes.
+    pub label_filter: &'a [&'a str],
     pub direction: Direction,
     pub max_depth: usize,
     pub max_visited: usize,

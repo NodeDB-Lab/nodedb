@@ -472,6 +472,7 @@ impl CoreLoop {
                     row_id: RowId::Batch,
                     new_value: Some(*image),
                     old_value: None,
+                    image_fault: None,
                 },
             );
         }

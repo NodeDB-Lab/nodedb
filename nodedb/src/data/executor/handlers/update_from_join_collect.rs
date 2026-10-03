@@ -159,6 +159,12 @@ impl CoreLoop {
                 }
             }
             let merged_ndb: nodedb_types::Value = merged.clone().into();
+            let identity = super::identity_guard::IdentitySnapshot::capture(
+                strict_schema,
+                declared_primary_key,
+                updates,
+                &target_doc,
+            );
 
             // Apply SET assignments evaluated against the merged document.
             if let Some(target_obj) = target_doc.as_object_mut() {
@@ -191,6 +197,7 @@ impl CoreLoop {
                     declared_primary_key,
                 )?;
             }
+            identity.check_unchanged(target_collection, &target_doc)?;
 
             // Recompute generated columns if any dependency changed. A column
             // the engine cannot recompute fails the statement.

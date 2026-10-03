@@ -2,8 +2,11 @@
 
 //! SELECT-body search triggers and post-processing order.
 
+use super::payload::apply_vector_payload;
+use super::pk_prefilter::apply_vector_pk_prefilter;
 use crate::error::Result;
 use crate::functions::registry::FunctionRegistry;
+use crate::planner::aggregate_cp_wrap::wrap_aggregate_cp_items;
 use crate::planner::select::limit::apply_limit;
 use crate::planner::select::order_by::{apply_order_by, try_hybrid_from_projection};
 use crate::planner::select::query_tail::QueryTail;
@@ -60,8 +63,8 @@ pub(super) fn plan_select_query(
     //
     // Also fires when the plan is already `TextSearch` (set by the
     // WHERE `text_match(...)` path) and the SELECT list additionally
-    // contains `bm25_score(...)` — in that case we attach the
-    // `score_alias` so the executor knows to inject the score column.
+    // contains `bm25_score(...)` — in that case each call joins the
+    // plan as a score column the executor injects.
     //
     // `apply_order_by` may have wrapped a search plan in a
     // post-processing tail to carry the sort, so the upgrade inspects
@@ -72,10 +75,11 @@ pub(super) fn plan_select_query(
             SqlPlan::Subquery { input, .. } => input.as_ref(),
             other => other,
         };
-        if matches!(leaf, SqlPlan::Scan { .. } | SqlPlan::TextSearch { .. }) {
-            try_hybrid_from_projection(leaf, &select.projection, functions)?
-        } else {
-            None
+        match scope.single_table() {
+            Some(table) if matches!(leaf, SqlPlan::Scan { .. } | SqlPlan::TextSearch(_)) => {
+                try_hybrid_from_projection(leaf, &select.projection, functions, table)?
+            }
+            _ => None,
         }
     };
     if let Some(upgraded_leaf) = upgrade {
@@ -102,7 +106,8 @@ pub(super) fn plan_select_query(
             _ => upgraded_leaf,
         };
     }
-    super::payload::apply_vector_payload(
+    apply_vector_pk_prefilter(&mut plan, catalog)?;
+    apply_vector_payload(
         &mut plan,
         catalog,
         pre_order_by_projection.as_deref(),
@@ -111,7 +116,7 @@ pub(super) fn plan_select_query(
     let plan = apply_limit(plan, &tail)?;
     // ORDER BY and LIMIT sit on the aggregate by now, so the wrap
     // only restates the output columns around it.
-    crate::planner::aggregate_cp_wrap::wrap_aggregate_cp_items(
+    wrap_aggregate_cp_items(
         plan,
         &select.projection,
         has_aggregation(select, functions),
@@ -122,8 +127,10 @@ pub(super) fn plan_select_query(
 
 #[cfg(test)]
 mod tests {
-    use super::super::fixtures::plan_select_sql;
+    use super::super::fixtures::{plan_select_sql, try_plan_select_sql};
+    use crate::error::SqlError;
     use crate::types::*;
+    use nodedb_types::text_search::{QueryMode, TextColumnFault, TextSearchParams};
     #[test]
     fn order_by_vector_distance_with_array_join_fuses_into_vector_search() {
         let plan = plan_select_sql(
@@ -286,5 +293,388 @@ mod tests {
             panic!("expected VectorSearch plan");
         };
         assert_eq!(metric, DistanceMetric::InnerProduct);
+    }
+
+    /// The text plan of `plan`, under at most one post-processing tail.
+    fn text_plan(plan: &SqlPlan) -> &TextSearchPlan {
+        match plan {
+            SqlPlan::TextSearch(search) => search,
+            SqlPlan::Subquery { input, .. } => match input.as_ref() {
+                SqlPlan::TextSearch(search) => search,
+                other => panic!("expected TextSearch under the tail, got {other:?}"),
+            },
+            other => panic!("expected TextSearch, got {other:?}"),
+        }
+    }
+
+    /// The field and top-k of a `Match` shape.
+    fn match_shape(search: &TextSearchPlan) -> (Option<&str>, Option<usize>) {
+        match &search.shape {
+            TextSearchShape::Match { field, top_k, .. } => (field.as_deref(), *top_k),
+            TextSearchShape::ScoreScan => panic!("expected a Match shape"),
+        }
+    }
+
+    #[test]
+    fn where_text_match_scopes_to_the_column_and_returns_every_match() {
+        let plan = plan_select_sql("SELECT id FROM docs WHERE text_match(title, 'rust')");
+        let search = text_plan(&plan);
+        assert_eq!(match_shape(search), (Some("title"), None));
+        assert!(search.scores.is_empty());
+        assert!(search.filters.is_empty());
+    }
+
+    #[test]
+    fn where_text_match_star_reads_the_whole_document() {
+        let plan = plan_select_sql("SELECT id FROM docs WHERE text_match(*, 'rust')");
+        assert_eq!(match_shape(text_plan(&plan)), (None, None));
+        let plan = plan_select_sql("SELECT id FROM docs WHERE text_match(docs.*, 'rust')");
+        assert_eq!(match_shape(text_plan(&plan)), (None, None));
+    }
+
+    #[test]
+    fn where_text_match_limit_is_the_top_k() {
+        let plan = plan_select_sql("SELECT id FROM docs WHERE text_match(body, 'rust') LIMIT 3");
+        assert_eq!(match_shape(text_plan(&plan)), (Some("body"), Some(3)));
+    }
+
+    #[test]
+    fn a_score_beside_a_match_keeps_the_match_shape() {
+        let plan = plan_select_sql(
+            "SELECT id, bm25_score(title, 'x') AS s FROM docs WHERE text_match(body, 'y')",
+        );
+        let search = text_plan(&plan);
+        assert_eq!(match_shape(search), (Some("body"), None));
+        assert_eq!(
+            search.scores,
+            vec![TextScoreColumn {
+                field: Some("title".into()),
+                query: "x".into(),
+                mode: QueryMode::Or,
+                fuzzy: false,
+                alias: "s".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn every_sibling_predicate_restricts_the_match() {
+        let plan = plan_select_sql(
+            "SELECT id FROM docs WHERE text_match(body, 'w') AND tag = 'a' AND n > 1 LIMIT 3",
+        );
+        let search = text_plan(&plan);
+        assert_eq!(match_shape(search), (Some("body"), Some(3)));
+        assert_eq!(search.filters.len(), 2);
+    }
+
+    #[test]
+    fn a_score_without_a_match_scans_the_filtered_rows_in_order() {
+        let plan = plan_select_sql(
+            "SELECT id, bm25_score(body, 'x') FROM docs WHERE tag = 'a' ORDER BY id LIMIT 2",
+        );
+        let SqlPlan::Subquery {
+            sort_keys, limit, ..
+        } = &plan
+        else {
+            panic!("expected a post-processing tail, got {plan:?}");
+        };
+        assert_eq!(*limit, Some(2));
+        assert_eq!(sort_keys.len(), 1);
+        let search = text_plan(&plan);
+        assert!(matches!(search.shape, TextSearchShape::ScoreScan));
+        assert_eq!(search.filters.len(), 1);
+        assert_eq!(search.scores.len(), 1);
+        assert_eq!(search.scores[0].field.as_deref(), Some("body"));
+    }
+
+    #[test]
+    fn order_by_score_sorts_by_the_score_column() {
+        let plan =
+            plan_select_sql("SELECT id FROM docs ORDER BY bm25_score(body, 'x') DESC LIMIT 5");
+        let SqlPlan::Subquery {
+            sort_keys, limit, ..
+        } = &plan
+        else {
+            panic!("expected a post-processing tail, got {plan:?}");
+        };
+        assert_eq!(*limit, Some(5));
+        let search = text_plan(&plan);
+        assert!(matches!(search.shape, TextSearchShape::ScoreScan));
+        let alias = &search.scores[0].alias;
+        assert!(matches!(
+            &sort_keys[0].expr,
+            SqlExpr::Column { table: None, name } if name == alias
+        ));
+        assert!(!sort_keys[0].ascending);
+        // A null score takes the default NULL placement of a DESC key: first.
+        assert!(sort_keys[0].nulls_first);
+    }
+
+    #[test]
+    fn order_by_score_honors_an_explicit_nulls_clause() {
+        let plan = plan_select_sql(
+            "SELECT id FROM docs ORDER BY bm25_score(body, 'x') DESC NULLS LAST LIMIT 5",
+        );
+        let SqlPlan::Subquery { sort_keys, .. } = &plan else {
+            panic!("expected a post-processing tail, got {plan:?}");
+        };
+        assert!(!sort_keys[0].ascending);
+        assert!(!sort_keys[0].nulls_first);
+
+        let plan = plan_select_sql("SELECT id FROM docs ORDER BY bm25_score(body, 'x') LIMIT 5");
+        let SqlPlan::Subquery { sort_keys, .. } = &plan else {
+            panic!("expected a post-processing tail, got {plan:?}");
+        };
+        assert!(sort_keys[0].ascending);
+        assert!(!sort_keys[0].nulls_first);
+    }
+
+    #[test]
+    fn order_by_score_alias_reuses_the_select_alias() {
+        let plan = plan_select_sql(
+            "SELECT id, bm25_score(body, 'x') AS score FROM docs \
+             WHERE text_match(body, 'x') ORDER BY score DESC LIMIT 20",
+        );
+        let search = text_plan(&plan);
+        assert_eq!(match_shape(search), (Some("body"), None));
+        assert_eq!(search.scores.len(), 1);
+        assert_eq!(search.scores[0].alias, "score");
+    }
+
+    #[test]
+    fn order_by_qualifier_of_the_table_names_its_column() {
+        let plan = plan_select_sql("SELECT d.id FROM docs d ORDER BY bm25_score(d.body, 'x')");
+        assert_eq!(text_plan(&plan).scores[0].field.as_deref(), Some("body"));
+    }
+
+    #[test]
+    fn order_by_vector_qualifier_of_the_table_names_its_column() {
+        let plan = plan_select_sql(
+            "SELECT e.id FROM embeddings e ORDER BY vector_distance(e.embedding, [1.0, 0.0]) LIMIT 5",
+        );
+        let SqlPlan::VectorSearch { field, .. } = plan else {
+            panic!("expected VectorSearch plan");
+        };
+        assert_eq!(field, "embedding");
+    }
+
+    #[test]
+    fn order_by_foreign_qualifier_is_an_unknown_table() {
+        let err = try_plan_select_sql("SELECT id FROM docs ORDER BY bm25_score(zz.body, 'x')")
+            .unwrap_err();
+        assert_eq!(err, SqlError::UnknownTable { name: "zz".into() });
+    }
+
+    #[test]
+    fn a_literal_is_not_a_text_column() {
+        let err =
+            try_plan_select_sql("SELECT id FROM docs WHERE text_match('lit', 'x')").unwrap_err();
+        assert!(matches!(
+            err,
+            SqlError::TextColumn {
+                fault: TextColumnFault::NotAColumn,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn strict_columns_are_checked_for_text() {
+        let plan = plan_select_sql("SELECT id FROM articles WHERE text_match(title, 'x')");
+        assert_eq!(match_shape(text_plan(&plan)), (Some("title"), None));
+
+        let err = try_plan_select_sql("SELECT id FROM articles WHERE text_match(views, 'x')")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SqlError::TextColumn {
+                fault: TextColumnFault::NotText { .. },
+                ..
+            }
+        ));
+
+        let err = try_plan_select_sql("SELECT id FROM articles WHERE text_match(ghost, 'x')")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SqlError::TextColumn {
+                ref collection,
+                fault: TextColumnFault::Undeclared,
+                ..
+            } if collection == "articles"
+        ));
+    }
+
+    #[test]
+    fn a_text_match_with_one_argument_is_an_arity_error() {
+        let err = try_plan_select_sql("SELECT id FROM docs WHERE text_match(body)").unwrap_err();
+        assert!(matches!(err, SqlError::Arity { .. }));
+    }
+
+    #[test]
+    fn distinct_over_a_score_scan_is_refused() {
+        let err =
+            try_plan_select_sql("SELECT DISTINCT id, bm25_score(body, 'x') FROM docs").unwrap_err();
+        assert!(matches!(err, SqlError::Unsupported { .. }));
+    }
+
+    #[test]
+    fn aggregation_over_a_where_match_is_refused() {
+        let err = try_plan_select_sql("SELECT count(*) FROM docs WHERE text_match(body, 'x')")
+            .unwrap_err();
+        assert!(matches!(err, SqlError::Unsupported { .. }));
+    }
+
+    #[test]
+    fn hybrid_carries_both_columns_and_the_filters() {
+        let plan = plan_select_sql(
+            "SELECT id, rrf_score(vector_distance(emb, [1.0, 0.0]), bm25_score(title, 'rust')) \
+             AS s FROM docs WHERE tag = 'a' LIMIT 5",
+        );
+        let SqlPlan::HybridSearch(hybrid) = plan else {
+            panic!("expected HybridSearch, got {plan:?}");
+        };
+        assert_eq!(hybrid.vector_field, "emb");
+        assert_eq!(hybrid.text_field.as_deref(), Some("title"));
+        assert_eq!(hybrid.query_text, "rust");
+        assert_eq!(hybrid.filters.len(), 1);
+        assert_eq!(hybrid.top_k, 5);
+    }
+
+    /// The mode and fuzzy flag of a `Match` shape.
+    fn match_options(search: &TextSearchPlan) -> (QueryMode, bool) {
+        match &search.shape {
+            TextSearchShape::Match { query, mode, .. } => (*mode, query.is_fuzzy()),
+            TextSearchShape::ScoreScan => panic!("expected a Match shape"),
+        }
+    }
+
+    /// The `Unsupported` detail of a planning error.
+    fn unsupported_detail(sql: &str) -> String {
+        match try_plan_select_sql(sql).unwrap_err() {
+            SqlError::Unsupported { detail } => detail,
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_match_without_options_runs_the_trait_default() {
+        let defaults = TextSearchParams::default();
+        let plan = plan_select_sql("SELECT id FROM docs WHERE text_match(body, 'rust db')");
+        assert_eq!(
+            match_options(text_plan(&plan)),
+            (defaults.mode, defaults.fuzzy)
+        );
+        let plan = plan_select_sql("SELECT id FROM docs ORDER BY bm25_score(body, 'x') LIMIT 5");
+        let score = &text_plan(&plan).scores[0];
+        assert_eq!((score.mode, score.fuzzy), (defaults.mode, defaults.fuzzy));
+    }
+
+    #[test]
+    fn text_match_mode_option_reaches_the_plan() {
+        let plan = plan_select_sql(
+            "SELECT id FROM docs WHERE text_match(body, 'rust db', mode => 'and')",
+        );
+        assert_eq!(match_options(text_plan(&plan)), (QueryMode::And, false));
+        let plan =
+            plan_select_sql("SELECT id FROM docs WHERE text_match(body, 'rust db', mode => 'or')");
+        assert_eq!(match_options(text_plan(&plan)), (QueryMode::Or, false));
+    }
+
+    #[test]
+    fn text_match_fuzzy_option_reaches_the_plan() {
+        let plan =
+            plan_select_sql("SELECT id FROM docs WHERE text_match(body, 'databse', fuzzy => true)");
+        assert_eq!(match_options(text_plan(&plan)), (QueryMode::Or, true));
+        let plan = plan_select_sql(
+            "SELECT id FROM docs WHERE text_match(body, 'databse', fuzzy => false, mode => 'and')",
+        );
+        assert_eq!(match_options(text_plan(&plan)), (QueryMode::And, false));
+    }
+
+    #[test]
+    fn bm25_score_options_reach_the_score_column() {
+        let plan = plan_select_sql(
+            "SELECT id FROM docs \
+             ORDER BY bm25_score(body, 'x y', mode => 'and', fuzzy => true) DESC LIMIT 5",
+        );
+        let score = &text_plan(&plan).scores[0];
+        assert_eq!((score.mode, score.fuzzy), (QueryMode::And, true));
+        let plan = plan_select_sql(
+            "SELECT id, bm25_score(title, 'x', fuzzy => true) AS s FROM docs \
+             WHERE text_match(body, 'y', mode => 'and')",
+        );
+        let search = text_plan(&plan);
+        assert_eq!(match_options(search), (QueryMode::And, false));
+        assert_eq!(
+            (search.scores[0].mode, search.scores[0].fuzzy),
+            (QueryMode::Or, true)
+        );
+    }
+
+    #[test]
+    fn hybrid_text_leg_takes_the_bm25_options() {
+        let plan = plan_select_sql(
+            "SELECT id, rrf_score(vector_distance(emb, [1.0, 0.0]), \
+             bm25_score(title, 'rust', mode => 'and', fuzzy => true)) AS s FROM docs LIMIT 5",
+        );
+        let SqlPlan::HybridSearch(hybrid) = plan else {
+            panic!("expected HybridSearch, got {plan:?}");
+        };
+        assert_eq!((hybrid.mode, hybrid.fuzzy), (QueryMode::And, true));
+    }
+
+    #[test]
+    fn an_unknown_text_option_is_refused() {
+        let detail =
+            unsupported_detail("SELECT id FROM docs WHERE text_match(body, 'x', boost => 2)");
+        assert!(detail.contains("unknown text-search option 'boost'"), "{detail}");
+        let detail = unsupported_detail(
+            "SELECT id FROM docs ORDER BY bm25_score(body, 'x', slop => 1) LIMIT 5",
+        );
+        assert!(detail.contains("unknown text-search option 'slop'"), "{detail}");
+    }
+
+    #[test]
+    fn an_equals_text_option_is_refused() {
+        let detail =
+            unsupported_detail("SELECT id FROM docs WHERE text_match(body, 'x', mode = 'or')");
+        assert!(detail.contains("use '=>'"), "{detail}");
+    }
+
+    #[test]
+    fn a_positional_third_text_argument_is_refused() {
+        let detail =
+            unsupported_detail("SELECT id FROM docs WHERE text_match(body, 'x', 'fuzzy')");
+        assert!(detail.contains("third positional argument"), "{detail}");
+        let detail = unsupported_detail(
+            "SELECT id FROM docs WHERE text_match(body, 'x', { fuzzy: true })",
+        );
+        assert!(detail.contains("third positional argument"), "{detail}");
+    }
+
+    #[test]
+    fn options_on_a_phrase_query_are_refused() {
+        let detail = unsupported_detail(
+            "SELECT id FROM docs WHERE text_match(body, '\"quick fox\"', fuzzy => true)",
+        );
+        assert!(detail.contains("phrase"), "{detail}");
+        let plan = plan_select_sql("SELECT id FROM docs WHERE text_match(body, '\"quick fox\"')");
+        assert!(matches!(
+            &text_plan(&plan).shape,
+            TextSearchShape::Match {
+                query: crate::fts_types::FtsQuery::Phrase(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn hybrid_without_a_vector_leg_is_an_error() {
+        let err = try_plan_select_sql(
+            "SELECT id, rrf_score(1, bm25_score(title, 'rust')) AS s FROM docs LIMIT 5",
+        )
+        .unwrap_err();
+        assert!(matches!(err, SqlError::InvalidFunction { .. }));
     }
 }

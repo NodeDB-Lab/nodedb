@@ -7,6 +7,7 @@ use sqlparser::ast;
 use crate::error::{Result, SqlError};
 use crate::parser::normalize::{normalize_ident, normalize_object_name_checked};
 use crate::planner::select::convert_where_to_filters;
+use crate::resolver::columns::ResolvedTable;
 use crate::types::Filter;
 
 /// Return `(table, column)` for a `table.col` compound identifier, or `None`.
@@ -184,6 +185,17 @@ pub fn strip_single_table_qualifiers(
     }
 
     Ok(out)
+}
+
+/// The qualifiers a single-table query's column references may carry: the
+/// table's name, and its alias when it has one.
+pub(crate) fn single_table_qualifiers(table: &ResolvedTable) -> Vec<&str> {
+    let ref_name = table.ref_name();
+    if ref_name == table.name {
+        vec![table.name.as_str()]
+    } else {
+        vec![table.name.as_str(), ref_name]
+    }
 }
 
 /// Strip `qualifier.` from all compound identifiers in `expr`, then convert

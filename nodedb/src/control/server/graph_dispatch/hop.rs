@@ -14,11 +14,12 @@
 //!
 //! ## Owner-targeted expansion (cluster mode)
 //!
-//! Graph edges are Raft-homed on `VShardId::from_key(src)`, and each
-//! Data-Plane core's CSR is partitioned (it holds only its owned nodes'
-//! out-edges). A traversal coordinated from a node that does NOT own a
-//! frontier node therefore CANNOT expand that node on its local cores —
-//! the edges live on the owner. Each hop partitions the *incoming*
+//! A graph edge lives on the key vShard of each endpoint:
+//! `VShardId::from_key(src)` holds it for forward traversal and
+//! `VShardId::from_key(dst)` for reverse traversal. Every edge of a node, in
+//! either direction, therefore lives on the owner of `from_key(node)`. A
+//! traversal coordinated from a node that does NOT own a frontier node
+//! CANNOT expand that node on its local cores. Each hop partitions the *incoming*
 //! frontier by `VShardId::from_key` owner BEFORE any expansion, expands
 //! the locally-owned subset on local cores, and ships a
 //! `NeighborsMulti{remote_subset}` plan to each remote owner via the typed
@@ -29,8 +30,27 @@
 //! Ownership is resolved against LIVE Raft leadership (via
 //! [`LiveLeaders::resolve`]), not the cached routing
 //! table, so a stale routing hint cannot misroute a frontier node.
+//!
+//! ## Read-your-own-writes
+//!
+//! A hop inside a transaction carries the session's `txn_id` to every core
+//! that expands part of the frontier, local or remote. Each core merges that
+//! transaction's staged edge writes into its rows (`NeighborsMulti` in
+//! `data/executor/handlers/graph.rs`). The merge is complete:
+//!
+//! - A staged edge write lands on the leader of each home vShard of the edge,
+//!   `from_key(src)` and `from_key(dst)`
+//!   (`shared/ddl/neutral/graph_ops/edge_stage.rs`, `stage_edge_dual_home`).
+//!   A write staged on a follower is forwarded to that leader
+//!   (`shared/session/leader_forward.rs`).
+//! - The hop expands each frontier node on the live leader of
+//!   `from_key(node)` (`partition_frontier_by_owner`). The core that owns
+//!   that vShard takes part in the expansion.
+//!
+//! So the core that expands a node holds every staged write to that node's
+//! edges.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use futures::future::join_all;
 
@@ -44,19 +64,19 @@ use crate::control::gateway::{RouteDecision, TaskRoute};
 use crate::control::state::SharedState;
 use crate::engine::graph::edge_store::Direction;
 use crate::engine::graph::traversal_options::GraphTraversalOptions;
-use crate::types::{DatabaseId, TenantId, TraceId, VShardId};
+use crate::types::{DatabaseId, TenantId, TraceId, TxnId, VShardId};
 use nodedb_physical::physical_plan::GraphOp;
+use nodedb_types::filter::MetadataFilter;
 
+use super::neighbor_rows::{NeighborRow, decode_neighbor_rows};
 use super::shard_reads::{ShardReadLog, key_vshards};
-
-/// A fully-attributed edge crossed by the hop: `(src, label, dst)`.
-pub(super) type NeighborTriple = (String, String, String);
 
 /// Result of one BFS hop.
 pub(super) struct HopOutput {
-    /// `(src,label,dst)` edges crossed this hop. Fully-attributed for both
-    /// the local-shard and remote-shard portions of the frontier.
-    pub local_triples: Vec<NeighborTriple>,
+    /// `(frontier node, label, neighbour)` rows of the edges crossed this
+    /// hop. Fully-attributed for both the local-shard and remote-shard
+    /// portions of the frontier.
+    pub rows: Vec<NeighborRow>,
     /// Deduplicated destination node IDs after merging local + remote
     /// expansion. Feeds the next frontier.
     pub merged_destinations: Vec<String>,
@@ -70,7 +90,8 @@ pub(super) struct NeighborHopParams<'a> {
     /// Collection whose edges this hop traverses.
     pub collection: Option<&'a str>,
     pub frontier: &'a [String],
-    pub edge_label: Option<&'a str>,
+    /// Empty keeps every edge. Otherwise an edge with any listed label.
+    pub edge_labels: &'a [String],
     pub direction: Direction,
     pub options: &'a GraphTraversalOptions,
     /// Count of nodes already in the global visited set. Bounds the
@@ -79,6 +100,14 @@ pub(super) struct NeighborHopParams<'a> {
     pub discovered_so_far: usize,
     /// Each node that expands part of the frontier confirms its groups first.
     pub linearizable: bool,
+    /// AND-ed edge-property predicate, evaluated on the core that holds
+    /// each edge. Empty admits every edge. Non-empty requires `collection`.
+    pub edge_predicate: &'a [MetadataFilter],
+    /// Each row carries the crossed edge's property object. Requires
+    /// `collection`.
+    pub with_properties: bool,
+    /// The session's transaction. Its staged edge writes merge into the hop.
+    pub txn_id: Option<TxnId>,
 }
 
 /// Execute one hop of BFS from `params.frontier`.
@@ -91,11 +120,14 @@ pub(super) async fn execute_neighbor_hop(
     let NeighborHopParams {
         collection,
         frontier,
-        edge_label,
+        edge_labels,
         direction,
         options,
         discovered_so_far,
         linearizable,
+        edge_predicate,
+        with_properties,
+        txn_id,
     } = params;
 
     // Cap this hop's handler-side allocation to the remaining budget under
@@ -109,25 +141,25 @@ pub(super) async fn execute_neighbor_hop(
         .saturating_sub(discovered_so_far)
         .min(u32::MAX as usize) as u32;
 
+    let scope = ExpandScope {
+        tenant_id,
+        database_id,
+        collection,
+        edge_labels,
+        direction,
+        max_results: remaining_budget,
+        linearizable,
+        edge_predicate,
+        with_properties,
+        txn_id,
+    };
+
     // Single-node mode: no routing table — every frontier node is local.
     if shared.cluster_routing.is_none() {
-        let (triples, _watermark) = expand_local(
-            shared,
-            ExpandScope {
-                tenant_id,
-                database_id,
-                collection,
-                edge_label,
-                direction,
-                max_results: remaining_budget,
-                linearizable,
-            },
-            frontier,
-        )
-        .await?;
-        let merged = dedup_destinations(&triples);
+        let (rows, _watermark) = expand_local(shared, scope, frontier).await?;
+        let merged = dedup_destinations(&rows);
         return Ok(HopOutput {
-            local_triples: triples,
+            rows,
             merged_destinations: merged,
             reads: ShardReadLog::new(),
         });
@@ -139,52 +171,25 @@ pub(super) async fn execute_neighbor_hop(
 
     let mut reads = ShardReadLog::new();
     // Local-owned subset: expand on local cores.
-    let mut all_triples: Vec<NeighborTriple> = if local_nodes.is_empty() {
+    let mut all_rows: Vec<NeighborRow> = if local_nodes.is_empty() {
         Vec::new()
     } else {
-        let (triples, watermark) = expand_local(
-            shared,
-            ExpandScope {
-                tenant_id,
-                database_id,
-                collection,
-                edge_label,
-                direction,
-                max_results: remaining_budget,
-                linearizable,
-            },
-            &local_nodes,
-        )
-        .await?;
+        let (rows, watermark) = expand_local(shared, scope, &local_nodes).await?;
         reads.note(key_vshards(&local_nodes), watermark, shared.node_id);
-        triples
+        rows
     };
 
     // Remote-owned subsets: ship a typed `NeighborsMulti` to each owner and
     // decode its response with the SAME decoder. Issue all remote dispatches
     // concurrently.
     if !remote_by_owner.is_empty() {
-        let remote_triples = expand_remote(
-            shared,
-            ExpandScope {
-                tenant_id,
-                database_id,
-                collection,
-                edge_label,
-                direction,
-                max_results: remaining_budget,
-                linearizable,
-            },
-            remote_by_owner,
-            &mut reads,
-        )
-        .await?;
-        all_triples.extend(remote_triples);
+        let remote_rows = expand_remote(shared, scope, remote_by_owner, &mut reads).await?;
+        all_rows.extend(remote_rows);
     }
 
-    let merged = dedup_destinations(&all_triples);
+    let merged = dedup_destinations(&all_rows);
     Ok(HopOutput {
-        local_triples: all_triples,
+        rows: all_rows,
         merged_destinations: merged,
         reads,
     })
@@ -218,8 +223,9 @@ fn partition_frontier_by_owner(
         .map(|rw| rw.read().unwrap_or_else(|p| p.into_inner()));
 
     let mut local: Vec<String> = Vec::new();
-    // Group remote nodes by owning vShard so each owner gets one batched plan.
-    let mut remote: HashMap<u32, RemoteOwnerBatch> = HashMap::new();
+    // Group remote nodes by owning vShard so each owner gets one batched plan,
+    // dispatched in vShard order.
+    let mut remote: BTreeMap<u32, RemoteOwnerBatch> = BTreeMap::new();
 
     for node in frontier {
         let vshard_id = VShardId::from_key(node.as_bytes()).as_u32();
@@ -263,15 +269,41 @@ fn partition_frontier_by_owner(
 }
 
 /// Shared scope for one expansion of a BFS frontier.
+#[derive(Clone, Copy)]
 struct ExpandScope<'a> {
     tenant_id: TenantId,
     database_id: DatabaseId,
     /// Collection scope, or `None` for a label-only traversal.
     collection: Option<&'a str>,
-    edge_label: Option<&'a str>,
+    /// Empty keeps every edge. Otherwise an edge with any listed label.
+    edge_labels: &'a [String],
     direction: Direction,
     max_results: u32,
     linearizable: bool,
+    /// AND-ed edge-property predicate. Empty admits every edge.
+    edge_predicate: &'a [MetadataFilter],
+    /// Each row carries the crossed edge's property object.
+    with_properties: bool,
+    /// The session's transaction, whose staged edge writes merge in.
+    txn_id: Option<TxnId>,
+}
+
+impl ExpandScope<'_> {
+    /// The `NeighborsMulti` plan that expands `node_ids` in this scope.
+    fn plan(&self, node_ids: Vec<String>) -> PhysicalPlan {
+        PhysicalPlan::Graph(GraphOp::NeighborsMulti {
+            collection: self
+                .collection
+                .map(|c| nodedb_types::QualifiedCollection::from_stored(c.to_string())),
+            node_ids,
+            edge_labels: self.edge_labels.to_vec(),
+            direction: self.direction,
+            max_results: self.max_results,
+            rls_filters: Vec::new(),
+            edge_predicate: self.edge_predicate.to_vec(),
+            with_properties: self.with_properties,
+        })
+    }
 }
 
 /// Expand a locally-owned subset on all local Data-Plane cores. Returns the
@@ -280,38 +312,22 @@ async fn expand_local(
     shared: &SharedState,
     scope: ExpandScope<'_>,
     node_ids: &[String],
-) -> crate::Result<(Vec<NeighborTriple>, crate::types::Lsn)> {
-    let ExpandScope {
-        tenant_id,
-        database_id,
-        collection,
-        edge_label,
-        direction,
-        max_results,
-        linearizable,
-    } = scope;
-    let plan = PhysicalPlan::Graph(GraphOp::NeighborsMulti {
-        collection: collection
-            .map(|c| nodedb_types::QualifiedCollection::from_stored(c.to_string())),
-        node_ids: node_ids.to_vec(),
-        edge_label: edge_label.map(str::to_string),
-        direction,
-        max_results,
-        rls_filters: Vec::new(),
-    });
+) -> crate::Result<(Vec<NeighborRow>, crate::types::Lsn)> {
+    let plan = scope.plan(node_ids.to_vec());
     // A linearizable hop confirms the groups its plan reads first.
-    if linearizable {
-        super::read_groups::confirm_graph_read(shared, database_id, &plan).await?;
+    if scope.linearizable {
+        super::read_groups::confirm_graph_read(shared, scope.database_id, &plan).await?;
     }
-    let resp = crate::control::server::broadcast::broadcast_to_all_cores(
+    let resp = crate::control::server::broadcast::broadcast_to_all_cores_txn(
         shared,
-        tenant_id,
-        database_id,
+        scope.tenant_id,
+        scope.database_id,
         plan,
         TraceId::ZERO,
+        scope.txn_id,
     )
     .await?;
-    Ok((decode_neighbor_triples(&resp.payload)?, resp.watermark_lsn))
+    Ok((decode_neighbor_rows(&resp.payload)?, resp.watermark_lsn))
 }
 
 /// Expand the remote-owned subsets concurrently: ship a typed
@@ -323,15 +339,13 @@ async fn expand_remote(
     scope: ExpandScope<'_>,
     owners: Vec<RemoteOwnerBatch>,
     reads: &mut ShardReadLog,
-) -> crate::Result<Vec<NeighborTriple>> {
+) -> crate::Result<Vec<NeighborRow>> {
     let ExpandScope {
         tenant_id,
         database_id,
-        collection,
-        edge_label,
-        direction,
-        max_results,
         linearizable,
+        txn_id,
+        ..
     } = scope;
     // The dispatcher's remote path needs an owned `Arc<SharedState>`. In
     // cluster mode the gateway is always wired; `gateway_shared` fails loudly
@@ -345,23 +359,13 @@ async fn expand_remote(
     // empty (descriptor-version checks do not apply to node-id-keyed edges).
     let version_set = GatewayVersionSet::from_pairs(Vec::new());
 
-    let edge_label_owned = edge_label.map(str::to_string);
-
     let dispatches = owners.into_iter().map(|owner| {
         let RemoteOwnerBatch {
             node_id,
             vshard_id,
             node_ids,
         } = owner;
-        let plan = PhysicalPlan::Graph(GraphOp::NeighborsMulti {
-            collection: collection
-                .map(|c| nodedb_types::QualifiedCollection::from_stored(c.to_string())),
-            node_ids,
-            edge_label: edge_label_owned.clone(),
-            direction,
-            max_results,
-            rls_filters: Vec::new(),
-        });
+        let plan = scope.plan(node_ids);
         let route = TaskRoute {
             plan,
             decision: RouteDecision::Remote { node_id, vshard_id },
@@ -381,8 +385,7 @@ async fn expand_remote(
                 trace_id: TraceId::ZERO,
                 deadline_ms,
                 version_set: &version_set,
-                // Graph hop traversal carries no session-transaction context.
-                txn_id: None,
+                txn_id,
                 linearizable,
             })
             .await
@@ -392,131 +395,27 @@ async fn expand_remote(
 
     let results = join_all(dispatches).await;
 
-    let mut triples: Vec<NeighborTriple> = Vec::new();
+    let mut rows: Vec<NeighborRow> = Vec::new();
     for result in results {
         // A remote dispatch error is fatal: a dropped owner means a partial
         // reachable set.
         let (read_vshard, node_id, outcome) = result?;
         reads.note_leg([read_vshard], &outcome.shard_watermarks, node_id);
         for payload in outcome.payloads {
-            triples.extend(decode_neighbor_triples_bytes(&payload)?);
+            rows.extend(decode_neighbor_rows(&payload)?);
         }
     }
-    Ok(triples)
+    Ok(rows)
 }
 
-/// Deduplicate the destination node IDs of a triple set, preserving order.
-fn dedup_destinations(triples: &[NeighborTriple]) -> Vec<String> {
+/// Deduplicate the neighbour node IDs of a row set, preserving order.
+fn dedup_destinations(rows: &[NeighborRow]) -> Vec<String> {
     let mut seen: std::collections::HashSet<&String> = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for (_, _, dst) in triples {
-        if seen.insert(dst) {
-            out.push(dst.clone());
+    for row in rows {
+        if seen.insert(&row.node) {
+            out.push(row.node.clone());
         }
     }
     out
-}
-
-/// Decode a Data-Plane response [`Payload`] of `{src,label,node}` rows into
-/// fully-typed triples. (`Payload` derefs to `[u8]`.)
-///
-/// [`Payload`]: crate::bridge::envelope::Payload
-fn decode_neighbor_triples(
-    payload: &crate::bridge::envelope::Payload,
-) -> crate::Result<Vec<NeighborTriple>> {
-    decode_neighbor_triples_bytes(payload)
-}
-
-/// Decode raw Data-Plane response bytes (the shape both a local broadcast and
-/// a remote `dispatch_route` return — the same `NeighborsMulti` op produces it
-/// on any node) into fully-typed triples.
-pub(super) fn decode_neighbor_triples_bytes(payload: &[u8]) -> crate::Result<Vec<NeighborTriple>> {
-    if payload.is_empty() {
-        return Ok(Vec::new());
-    }
-    let json_text = crate::data::executor::response_codec::decode_payload_to_json(payload);
-    decode_neighbor_triples_json(&json_text)
-}
-
-/// Shared inner decode: parse the `{src,label,node}` JSON array into triples.
-///
-/// A payload that is not a JSON array, or a row without a non-empty string
-/// `src` and `node`, fails with a `Codec` error naming the row. Dropping it
-/// returns a partial neighbor set as a complete one. `label` defaults to ""
-/// because a label-less edge is a valid graph shape.
-fn decode_neighbor_triples_json(json_text: &str) -> crate::Result<Vec<NeighborTriple>> {
-    let arr = sonic_rs::from_str::<Vec<serde_json::Value>>(json_text).map_err(|e| {
-        crate::Error::Codec {
-            detail: format!("graph neighbor rows: payload is not a JSON array: {e}"),
-        }
-    })?;
-    let mut out = Vec::with_capacity(arr.len());
-    for (index, item) in arr.iter().enumerate() {
-        let src = item.get("src").and_then(|v| v.as_str());
-        let node = item.get("node").and_then(|v| v.as_str());
-        let (src, node) = match (src, node) {
-            (Some(s), Some(n)) if !s.is_empty() && !n.is_empty() => (s, n),
-            _ => {
-                return Err(crate::Error::Codec {
-                    detail: format!(
-                        "graph neighbor row {index} lacks a non-empty string `src` and `node`: {item}"
-                    ),
-                });
-            }
-        };
-        let label = item.get("label").and_then(|v| v.as_str()).unwrap_or("");
-        out.push((src.to_string(), label.to_string(), node.to_string()));
-    }
-    Ok(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn well_formed_rows_decode_with_an_optional_label() {
-        let triples = decode_neighbor_triples_json(
-            r#"[{"src":"a","label":"K","node":"b"},{"src":"b","node":"c"}]"#,
-        )
-        .unwrap();
-        assert_eq!(
-            triples,
-            vec![
-                ("a".to_string(), "K".to_string(), "b".to_string()),
-                ("b".to_string(), String::new(), "c".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_payload_that_is_not_an_array_is_a_codec_error() {
-        assert!(matches!(
-            decode_neighbor_triples_json(r#"{"src":"a"}"#),
-            Err(crate::Error::Codec { .. })
-        ));
-    }
-
-    #[test]
-    fn a_malformed_row_is_a_codec_error_naming_the_row() {
-        match decode_neighbor_triples_json(r#"[{"src":"a","node":"b"},{"src":"a"}]"#) {
-            Err(crate::Error::Codec { detail }) => {
-                assert!(detail.contains("row 1"), "{detail}");
-            }
-            other => panic!("expected a codec error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn an_empty_node_id_is_a_codec_error() {
-        assert!(matches!(
-            decode_neighbor_triples_json(r#"[{"src":"","node":"b"}]"#),
-            Err(crate::Error::Codec { .. })
-        ));
-    }
-
-    #[test]
-    fn an_empty_payload_is_no_neighbors() {
-        assert!(decode_neighbor_triples_bytes(&[]).unwrap().is_empty());
-    }
 }

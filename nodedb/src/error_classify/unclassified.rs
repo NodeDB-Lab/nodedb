@@ -81,6 +81,7 @@ pub(crate) fn is_unclassified_failure(e: &Error) -> bool {
         | Error::UndefinedObject { .. }
         | Error::ObjectNotInPrerequisiteState { .. }
         | Error::UndefinedColumn { .. }
+        | Error::TextColumn { .. }
         | Error::AmbiguousColumn { .. }
         | Error::UnknownStrictField { .. }
         | Error::DivisionByZero

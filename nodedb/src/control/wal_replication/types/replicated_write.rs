@@ -323,7 +323,8 @@ pub enum ReplicatedWrite {
         collection: String,
         /// Leader-assigned global surrogate for the document.
         surrogate: u32,
-        text: String,
+        /// `(field, text)` per top-level string field.
+        fields: Vec<(String, String)>,
         /// Sync provenance encoded as zerompk bytes.
         #[serde(default)]
         provenance: Option<Vec<u8>>,

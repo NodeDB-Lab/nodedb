@@ -89,8 +89,15 @@ pub enum ValidatedApplyOutcome {
         imported_ops: usize,
     },
     /// The candidate violated a constraint and was discarded. The violation
-    /// has been enqueued to the DLQ and translated for the caller.
+    /// is in the DLQ and translated for the caller.
     Rejected(ViolationType),
+    /// The candidate violated a constraint and was discarded, and the DLQ
+    /// refused its entry. Nothing applied and nothing on this node records
+    /// the delta, so the caller refuses it as an error and the sender keeps it.
+    DeadLetterRefused {
+        violation: ViolationType,
+        error: nodedb_crdt::CrdtError,
+    },
     /// The delta bytes could not be imported (corrupt / undecodable). Treated
     /// as an idempotent no-op so the stream is not wedged.
     Malformed,
@@ -104,6 +111,11 @@ pub enum ValidatedApplyOutcome {
     /// the high-water-mark past a write that was never applied — the silent
     /// data-loss path. The caller must refuse the delta instead.
     PendingDependencies,
+    /// This node could not build the detached candidate the delta validates
+    /// in: exporting or seeding the collection's document failed. Nothing
+    /// applied, and the failure says nothing about the delta, so the caller
+    /// refuses it retryably and never as malformed.
+    CandidateUnavailable,
 }
 
 impl TenantCrdtEngine {
@@ -160,25 +172,28 @@ impl TenantCrdtEngine {
         }
         let candidate = match self.take_apply_candidate(collection) {
             Ok(candidate) => candidate,
-            Err(()) => return ValidatedApplyOutcome::Malformed,
+            Err(()) => return ValidatedApplyOutcome::CandidateUnavailable,
         };
-        let before = candidate.frontier();
-        let admission = match candidate.import(delta) {
+        let imported = candidate.import_with_write_set(delta);
+        let admission = match imported.outcome {
             Ok(admission) => admission,
             // Well-formed operations that arrived without their causal history
             // (their predecessors live in another collection's document, absent
-            // from this candidate). The candidate did not move, so this is NOT a
-            // no-op the caller may acknowledge — refusing it preserves the row
-            // instead of advancing the high-water-mark past a write that never
-            // applied.
+            // from this candidate). Some of the delta stayed pending, so this is
+            // NOT a no-op the caller may acknowledge — refusing it preserves the
+            // row instead of advancing the high-water-mark past a write that
+            // never applied. The candidate is dropped with whatever part did
+            // apply, so authoritative state stays unchanged.
             Err(nodedb_crdt::CrdtError::ImportPendingDependencies) => {
                 return ValidatedApplyOutcome::PendingDependencies;
             }
             Err(_) => return ValidatedApplyOutcome::Malformed,
         };
-        let write_set = match candidate.write_set_since(&before) {
+        // A write outside the root-map-of-row-maps shape names no row the
+        // constraints can check. The candidate is dropped unapplied.
+        let write_set = match imported.write_set {
             Ok(write_set) => write_set,
-            Err(_) => return ValidatedApplyOutcome::Malformed,
+            Err(fault) => return self.reject_shape_fault(collection, delta, peer_id, &fault),
         };
         if write_set
             .iter()
@@ -213,7 +228,8 @@ impl TenantCrdtEngine {
                     },
                 },
             };
-            let violation = self.dlq_and_translate(coll, delta, peer_id, violation);
+            let wire = violation_to_type(&violation);
+            let outcome = self.dead_letter(coll, delta, peer_id, &violation, wire);
             match previous {
                 Some(previous) => {
                     self.collections.insert(collection.to_owned(), previous);
@@ -222,7 +238,7 @@ impl TenantCrdtEngine {
                     self.collections.remove(collection);
                 }
             }
-            return ValidatedApplyOutcome::Rejected(violation);
+            return outcome;
         }
 
         // The candidate is now authoritative. Bring the doc it displaced up to
@@ -315,62 +331,61 @@ impl TenantCrdtEngine {
         self.collections.get(collection).map(|s| s.peer_id())
     }
 
-    /// Enqueue a rejected delta to the DLQ and translate the internal violation
-    /// into the deterministic wire [`ViolationType`].
-    ///
-    /// The DLQ entry carries the INTERNAL compensation hint verbatim; the wire
-    /// hint the client eventually sees is derived from the returned
-    /// `ViolationType`, never from the DLQ. The DLQ id / timestamp are
-    /// node-local and non-deterministic and are deliberately not returned.
-    fn dlq_and_translate(
+    /// Dead-letter a delta whose writes break the collection shape. The
+    /// caller gets the fault as a schema violation.
+    fn reject_shape_fault(
         &mut self,
         collection: &str,
         delta: &[u8],
         peer_id: u64,
-        violation: Violation,
-    ) -> ViolationType {
+        fault: &nodedb_crdt::CrdtError,
+    ) -> ValidatedApplyOutcome {
+        let reason = fault.to_string();
+        let violation = Violation {
+            constraint_name: ROW_SHAPE_CONSTRAINT.to_string(),
+            reason: reason.clone(),
+            hint: nodedb_crdt::CompensationHint::ManualIntervention {
+                reason: reason.clone(),
+            },
+        };
+        let wire = ViolationType::SchemaViolation {
+            field: shape_fault_target(fault),
+            reason,
+        };
+        self.dead_letter(collection, delta, peer_id, &violation, wire)
+    }
+
+    /// Enqueue a rejected delta to the DLQ and report it as `wire`.
+    ///
+    /// The DLQ entry carries the INTERNAL compensation hint verbatim. The wire
+    /// hint the client sees derives from `wire`, never from the DLQ. The DLQ
+    /// id and timestamp are node-local and non-deterministic, so they are not
+    /// returned. A delta the DLQ cannot hold is recorded nowhere, so the apply
+    /// reports [`ValidatedApplyOutcome::DeadLetterRefused`].
+    fn dead_letter(
+        &mut self,
+        collection: &str,
+        delta: &[u8],
+        peer_id: u64,
+        violation: &Violation,
+        wire: ViolationType,
+    ) -> ValidatedApplyOutcome {
         // No authenticated user identity is threaded to the apply path in this
-        // layer, so the DLQ records `0` (unauthenticated/legacy). A real
-        // user_id would come from the sync session's auth context once that is
-        // carried alongside `SyncProvenance` into the delta apply.
+        // layer, so the DLQ records `0` (unauthenticated/legacy).
         let user_id = 0u64;
         let tenant_id = self.tenant_id().as_u64();
 
-        // Look up the violated constraint by name so the DLQ entry records the
-        // real collection/field. If it cannot be found, fall back to a
-        // best-effort ManualIntervention entry rather than panicking.
-        let constraint = self
+        // The violated constraint by name, so the DLQ entry records the real
+        // collection and field. An unresolved name records a
+        // ManualIntervention entry under a placeholder CHECK constraint.
+        let resolved = self
             .constraints_for_collection(collection)
             .into_iter()
             .find(|c| c.name == violation.constraint_name);
-
-        let reason = violation.reason.clone();
-        match constraint {
-            Some(constraint) => {
-                let enqueued =
-                    self.validator
-                        .dlq_mut()
-                        .enqueue(nodedb_crdt::EnqueueDeadLetterArgs {
-                            peer_id,
-                            user_id,
-                            tenant_id,
-                            delta: delta.to_vec(),
-                            constraint: &constraint,
-                            reason,
-                            hint: violation.hint.clone(),
-                        });
-                match enqueued {
-                    Ok(id) => self.last_dead_letter = Some(id),
-                    Err(e) => tracing::warn!(
-                        tenant = tenant_id,
-                        collection,
-                        error = %e,
-                        "crdt: failed to enqueue rejected delta to DLQ"
-                    ),
-                }
-            }
-            None => {
-                let fallback = nodedb_crdt::Constraint {
+        let (constraint, hint) = match resolved {
+            Some(constraint) => (constraint, violation.hint.clone()),
+            None => (
+                nodedb_crdt::Constraint {
                     name: violation.constraint_name.clone(),
                     collection: collection.to_string(),
                     field: String::new(),
@@ -378,35 +393,56 @@ impl TenantCrdtEngine {
                         expr: String::new(),
                         description: "unresolved constraint".to_string(),
                     },
-                };
-                let hint = nodedb_crdt::CompensationHint::ManualIntervention {
-                    reason: reason.clone(),
-                };
-                let enqueued =
-                    self.validator
-                        .dlq_mut()
-                        .enqueue(nodedb_crdt::EnqueueDeadLetterArgs {
-                            peer_id,
-                            user_id,
-                            tenant_id,
-                            delta: delta.to_vec(),
-                            constraint: &fallback,
-                            reason,
-                            hint,
-                        });
-                match enqueued {
-                    Ok(id) => self.last_dead_letter = Some(id),
-                    Err(e) => tracing::warn!(
-                        tenant = tenant_id,
-                        collection,
-                        error = %e,
-                        "crdt: failed to enqueue rejected delta to DLQ (unresolved constraint)"
-                    ),
+                },
+                nodedb_crdt::CompensationHint::ManualIntervention {
+                    reason: violation.reason.clone(),
+                },
+            ),
+        };
+        let enqueued = self
+            .validator
+            .dlq_mut()
+            .enqueue(nodedb_crdt::EnqueueDeadLetterArgs {
+                peer_id,
+                user_id,
+                tenant_id,
+                delta: delta.to_vec(),
+                constraint: &constraint,
+                reason: violation.reason.clone(),
+                hint,
+            });
+        match enqueued {
+            Ok(id) => {
+                self.last_dead_letter = Some(id);
+                ValidatedApplyOutcome::Rejected(wire)
+            }
+            Err(error) => {
+                crate::diag::crdt_dead_letter_not_enqueued(
+                    &error,
+                    tenant_id,
+                    collection,
+                    &constraint.name,
+                );
+                ValidatedApplyOutcome::DeadLetterRefused {
+                    violation: wire,
+                    error,
                 }
             }
         }
+    }
+}
 
-        violation_to_type(&violation)
+/// Name the dead-letter entry of a delta that breaks the collection shape.
+const ROW_SHAPE_CONSTRAINT: &str = "crdt_row_shape";
+
+/// The container or row a shape fault names, as `collection/row` for a row.
+fn shape_fault_target(fault: &nodedb_crdt::CrdtError) -> String {
+    match fault {
+        nodedb_crdt::CrdtError::NonMapRootContainer { container, .. } => container.clone(),
+        nodedb_crdt::CrdtError::NonMapRowValue {
+            collection, row_id, ..
+        } => format!("{collection}/{row_id}"),
+        other => other.to_string(),
     }
 }
 
@@ -476,6 +512,49 @@ mod tests {
             )
             .unwrap();
         state.export_snapshot().unwrap()
+    }
+
+    /// A raw Loro snapshot built by `write` on a fresh document.
+    fn raw_delta(peer: u64, write: impl FnOnce(&loro::LoroDoc)) -> Vec<u8> {
+        let doc = loro::LoroDoc::new();
+        doc.set_peer_id(peer).unwrap();
+        write(&doc);
+        doc.export(loro::ExportMode::Snapshot).unwrap()
+    }
+
+    #[test]
+    fn a_scalar_row_is_rejected_as_a_schema_violation() {
+        let mut engine = unique_engine();
+        let delta = raw_delta(5, |doc| {
+            doc.get_map("users").insert("s1", 5).unwrap();
+        });
+        let outcome =
+            engine.apply_committed_delta_validated("users", &delta, ApplyTarget::Collection, 5);
+        match outcome {
+            ValidatedApplyOutcome::Rejected(ViolationType::SchemaViolation { field, reason }) => {
+                assert_eq!(field, "users/s1");
+                assert!(reason.contains("s1"), "{reason}");
+            }
+            other => panic!("expected SchemaViolation, got {other:?}"),
+        }
+        assert_eq!(engine.dlq_len(), 1);
+        assert!(!engine.row_exists("users", "s1"));
+    }
+
+    #[test]
+    fn a_root_text_delta_is_rejected_as_a_schema_violation() {
+        let mut engine = unique_engine();
+        let delta = raw_delta(6, |doc| {
+            doc.get_text("notes").insert(0, "hi").unwrap();
+        });
+        let outcome =
+            engine.apply_committed_delta_validated("users", &delta, ApplyTarget::Collection, 6);
+        match outcome {
+            ValidatedApplyOutcome::Rejected(ViolationType::SchemaViolation { field, .. }) => {
+                assert_eq!(field, "notes");
+            }
+            other => panic!("expected SchemaViolation, got {other:?}"),
+        }
     }
 
     #[test]
@@ -851,6 +930,50 @@ mod tests {
         assert!(
             engine.read_row("users", "b").is_none(),
             "constraint-rejected delta must not mutate authoritative state"
+        );
+    }
+
+    /// A rejected delta the full DLQ refuses surfaces as an error carrying
+    /// the DLQ failure. Nothing applies and nothing is left to bind.
+    #[test]
+    fn a_rejection_the_full_dlq_refuses_surfaces_as_an_error() {
+        let mut engine = unique_engine();
+        let seed = row_delta(2, "a", "x@y.com", "A");
+        let seeded = engine.apply_committed_delta_validated(
+            "users",
+            &seed,
+            ApplyTarget::Document {
+                document_id: "a",
+                surrogate: nodedb_types::Surrogate::new(10),
+            },
+            2,
+        );
+        assert!(matches!(seeded, ValidatedApplyOutcome::Clean { .. }));
+        let capacity = engine.fill_dead_letter_queue_for_test();
+        assert!(capacity > 0);
+
+        let duplicate = row_delta(3, "b", "x@y.com", "B");
+        let outcome = engine.apply_committed_delta_validated(
+            "users",
+            &duplicate,
+            ApplyTarget::Document {
+                document_id: "b",
+                surrogate: nodedb_types::Surrogate::new(11),
+            },
+            3,
+        );
+        match outcome {
+            ValidatedApplyOutcome::DeadLetterRefused {
+                violation: ViolationType::UniqueViolation { field, .. },
+                error: nodedb_crdt::CrdtError::DlqFull { .. },
+            } => assert_eq!(field, "email"),
+            other => panic!("expected DeadLetterRefused(DlqFull), got {other:?}"),
+        }
+        assert_eq!(engine.dlq_len(), capacity, "the refused entry is not queued");
+        assert!(engine.read_row("users", "b").is_none());
+        assert!(
+            engine.bind_dead_letter_source(12).is_none(),
+            "a refused apply leaves no entry to bind"
         );
     }
 

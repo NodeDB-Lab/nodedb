@@ -32,11 +32,14 @@ impl From<Value> for serde_json::Value {
             Value::Decimal(d) => {
                 // Represent as a JSON Number so clients see a numeric type,
                 // not a quoted string. `from_str` handles the decimal notation
-                // produced by rust_decimal's `to_string`.
+                // produced by rust_decimal's `to_string`. An integer past the
+                // 64-bit range parses to a rounded float, so it keeps its
+                // exact digits as a string.
                 let s = d.to_string();
-                serde_json::Number::from_str(&s)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or_else(|_| serde_json::Value::String(s))
+                match serde_json::Number::from_str(&s) {
+                    Ok(n) if !(d.scale() == 0 && n.is_f64()) => serde_json::Value::Number(n),
+                    _ => serde_json::Value::String(s),
+                }
             }
             Value::Geometry(g) => serde_json::to_value(g).unwrap_or(serde_json::Value::Null),
             Value::Range { .. } | Value::Record { .. } => serde_json::Value::Null,
@@ -66,7 +69,7 @@ impl From<serde_json::Value> for Value {
                 if let Some(i) = n.as_i64() {
                     Value::Integer(i)
                 } else if let Some(u) = n.as_u64() {
-                    Value::Integer(u as i64)
+                    Value::from_u64(u)
                 } else if let Some(f) = n.as_f64() {
                     Value::Float(f)
                 } else {
@@ -88,6 +91,27 @@ impl From<serde_json::Value> for Value {
 mod tests {
     use super::*;
     use crate::array_cell::ArrayCell;
+
+    #[test]
+    fn json_u64_above_i64_max_keeps_its_number() {
+        let json: serde_json::Value =
+            sonic_rs::from_str("18446744073709551615").expect("parse u64::MAX");
+        assert_eq!(
+            Value::from(json),
+            Value::Decimal(rust_decimal::Decimal::from(u64::MAX))
+        );
+        let small: serde_json::Value = sonic_rs::from_str("42").expect("parse 42");
+        assert_eq!(Value::from(small), Value::Integer(42));
+    }
+
+    #[test]
+    fn integer_decimal_past_64_bits_keeps_exact_digits() {
+        let big = rust_decimal::Decimal::from_i128_with_scale(2 * i128::from(u64::MAX), 0);
+        let json = serde_json::Value::from(Value::Decimal(big));
+        assert_eq!(json, serde_json::Value::String("36893488147419103230".into()));
+        let max = serde_json::Value::from(Value::Decimal(rust_decimal::Decimal::from(u64::MAX)));
+        assert_eq!(max, serde_json::json!(u64::MAX));
+    }
 
     #[test]
     fn decimal_to_json_is_number_not_string() {

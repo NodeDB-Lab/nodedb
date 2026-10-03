@@ -14,7 +14,8 @@ pub(in crate::data::executor) struct GraphPathParams<'a> {
     pub tid: u64,
     pub src: &'a str,
     pub dst: &'a str,
-    pub edge_label: &'a Option<String>,
+    /// Empty keeps every edge. Otherwise an edge with any listed label.
+    pub edge_labels: &'a [String],
     pub max_depth: usize,
     /// The walk's visit cap ([`CoreLoop::walk_visit_cap`]).
     pub max_visited: usize,
@@ -25,7 +26,8 @@ pub(in crate::data::executor) struct GraphPathParams<'a> {
 pub(in crate::data::executor) struct GraphSubgraphParams<'a> {
     pub tid: u64,
     pub start_nodes: &'a [String],
-    pub edge_label: &'a Option<String>,
+    /// Empty keeps every edge. Otherwise an edge with any listed label.
+    pub edge_labels: &'a [String],
     pub depth: usize,
     /// The walk's visit cap ([`CoreLoop::walk_visit_cap`]).
     pub max_visited: usize,
@@ -41,14 +43,14 @@ impl CoreLoop {
             tid,
             src,
             dst,
-            edge_label,
+            edge_labels,
             max_depth,
             max_visited,
             frontier_bitmap,
         } = params;
         let max_depth =
             max_depth.min(crate::engine::graph::traversal_options::MAX_GRAPH_TRAVERSAL_DEPTH);
-        debug!(core = self.core_id, tid, %src, %dst, ?edge_label, max_depth, "graph path");
+        debug!(core = self.core_id, tid, %src, %dst, ?edge_labels, max_depth, "graph path");
         let database_id = task.request.database_id.as_u64();
         // Read-your-own-writes: fold this transaction's staged edges/tombstones
         // into the bidirectional search, including a path that must pass
@@ -68,13 +70,13 @@ impl CoreLoop {
                     crate::types::TenantId::new(tid),
                 )
             });
-        let label_filter = edge_label.as_deref();
+        let label_filter: Vec<&str> = edge_labels.iter().map(String::as_str).collect();
         let path = match self.csr_partition(database_id, tid) {
             Some(partition) => partition.shortest_path(
                 crate::engine::graph::csr::ShortestPathParams {
                     src,
                     dst,
-                    label_filter: label_filter.as_slice(),
+                    label_filter: &label_filter,
                     max_depth,
                     max_visited,
                     frontier_bitmap,
@@ -113,7 +115,7 @@ impl CoreLoop {
         let GraphSubgraphParams {
             tid,
             start_nodes,
-            edge_label,
+            edge_labels,
             depth,
             max_visited,
         } = params;
@@ -121,16 +123,14 @@ impl CoreLoop {
             core = self.core_id,
             tid,
             ?start_nodes,
-            ?edge_label,
+            ?edge_labels,
             depth,
             "graph subgraph"
         );
         let database_id = task.request.database_id.as_u64();
         let depth = depth.min(crate::engine::graph::traversal_options::MAX_GRAPH_TRAVERSAL_DEPTH);
         let refs: Vec<&str> = start_nodes.iter().map(String::as_str).collect();
-        // Subgraph currently materializes the out-edge closure; `direction` is
-        // threaded through so staged in-edges can surface once the DML surface
-        // carries it.
+        // A subgraph plan is the out-edge closure of its start nodes.
         let direction = crate::engine::graph::edge_store::Direction::Out;
         // Read-your-own-writes: fold this transaction's staged edges/tombstones
         // into the materialized subgraph, including through staged-only nodes.
@@ -149,10 +149,11 @@ impl CoreLoop {
                     crate::types::TenantId::new(tid),
                 )
             });
+        let labels: Vec<&str> = edge_labels.iter().map(String::as_str).collect();
         let edges: Vec<(String, String, String)> = match self.csr_partition(database_id, tid) {
             Some(partition) => partition.subgraph(
                 &refs,
-                edge_label.as_deref(),
+                &labels,
                 direction,
                 depth,
                 max_visited,

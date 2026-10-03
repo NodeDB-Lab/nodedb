@@ -7,9 +7,11 @@
 //! each direction in its own pass and records each row in the orientation
 //! of that pass.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use super::hop::NeighborTriple;
+use nodedb_types::Value;
+
+use super::neighbor_rows::NeighborRow;
 use crate::engine::graph::edge_store::Direction;
 
 /// The direction of one expansion pass.
@@ -38,30 +40,51 @@ impl EdgeOrientation {
     }
 }
 
-/// The `(src, label, dst)` edges a walk crossed, each physical edge once,
-/// in first-crossed order.
+/// One physical edge a walk crossed.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WalkEdge {
+    pub src: String,
+    pub label: String,
+    pub dst: String,
+    /// The edge's property object, when the walk returns properties.
+    pub properties: Option<HashMap<String, Value>>,
+}
+
+/// The edges a walk crossed, each physical edge once, in first-crossed
+/// order.
 #[derive(Default)]
 pub(super) struct PhysicalEdges {
-    edges: Vec<NeighborTriple>,
-    seen: HashSet<NeighborTriple>,
+    edges: Vec<WalkEdge>,
+    seen: HashSet<(String, String, String)>,
 }
 
 impl PhysicalEdges {
     /// Record the rows of one pass. An incoming row is flipped to its
     /// physical `(neighbour, label, frontier node)` orientation.
-    pub(super) fn record(&mut self, rows: Vec<NeighborTriple>, orientation: EdgeOrientation) {
-        for (frontier_node, label, neighbor) in rows {
-            let edge = match orientation {
-                EdgeOrientation::Out => (frontier_node, label, neighbor),
-                EdgeOrientation::In => (neighbor, label, frontier_node),
+    pub(super) fn record(&mut self, rows: Vec<NeighborRow>, orientation: EdgeOrientation) {
+        for row in rows {
+            let NeighborRow {
+                src: frontier_node,
+                label,
+                node: neighbor,
+                properties,
+            } = row;
+            let (src, dst) = match orientation {
+                EdgeOrientation::Out => (frontier_node, neighbor),
+                EdgeOrientation::In => (neighbor, frontier_node),
             };
-            if self.seen.insert(edge.clone()) {
-                self.edges.push(edge);
+            if self.seen.insert((src.clone(), label.clone(), dst.clone())) {
+                self.edges.push(WalkEdge {
+                    src,
+                    label,
+                    dst,
+                    properties,
+                });
             }
         }
     }
 
-    pub(super) fn into_vec(self) -> Vec<NeighborTriple> {
+    pub(super) fn into_vec(self) -> Vec<WalkEdge> {
         self.edges
     }
 }
@@ -70,15 +93,29 @@ impl PhysicalEdges {
 mod tests {
     use super::*;
 
-    fn row(source: &str, label: &str, neighbor: &str) -> NeighborTriple {
-        (source.into(), label.into(), neighbor.into())
+    fn row(source: &str, label: &str, neighbor: &str) -> NeighborRow {
+        NeighborRow {
+            src: source.into(),
+            label: label.into(),
+            node: neighbor.into(),
+            properties: None,
+        }
+    }
+
+    fn edge(src: &str, label: &str, dst: &str) -> WalkEdge {
+        WalkEdge {
+            src: src.into(),
+            label: label.into(),
+            dst: dst.into(),
+            properties: None,
+        }
     }
 
     #[test]
     fn incoming_rows_keep_physical_orientation() {
         let mut edges = PhysicalEdges::default();
         edges.record(vec![row("b", "LINK", "a")], EdgeOrientation::In);
-        assert_eq!(edges.into_vec(), vec![row("a", "LINK", "b")]);
+        assert_eq!(edges.into_vec(), vec![edge("a", "LINK", "b")]);
     }
 
     #[test]
@@ -98,10 +135,27 @@ mod tests {
         assert_eq!(
             edges.into_vec(),
             vec![
-                row("a", "LINK", "b"),
-                row("a", "SELF", "a"),
-                row("b", "LINK", "a"),
+                edge("a", "LINK", "b"),
+                edge("a", "SELF", "a"),
+                edge("b", "LINK", "a"),
             ]
+        );
+    }
+
+    #[test]
+    fn a_recorded_edge_keeps_its_properties() {
+        let mut edges = PhysicalEdges::default();
+        let mut with_properties = row("b", "LINK", "a");
+        with_properties.properties = Some(HashMap::from([("w".to_string(), Value::Integer(3))]));
+        edges.record(vec![with_properties], EdgeOrientation::In);
+        let recorded = edges.into_vec();
+        assert_eq!(recorded[0].src, "a");
+        assert_eq!(
+            recorded[0]
+                .properties
+                .as_ref()
+                .and_then(|p| p.get("w").cloned()),
+            Some(Value::Integer(3))
         );
     }
 

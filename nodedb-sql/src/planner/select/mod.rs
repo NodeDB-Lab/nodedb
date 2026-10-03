@@ -17,6 +17,8 @@ mod order_by;
 mod post_process;
 mod query_tail;
 mod select_stmt;
+mod text_call;
+mod text_options;
 mod where_search;
 
 pub(crate) use cte_catalog::CteCatalog;

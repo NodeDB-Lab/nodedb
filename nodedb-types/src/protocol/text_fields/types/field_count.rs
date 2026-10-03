@@ -51,7 +51,7 @@ impl TextFields {
         if self.vector_top_k.is_some() {
             n += 1;
         }
-        if self.edge_label.is_some() {
+        if self.edge_labels.is_some() {
             n += 1;
         }
         if self.direction.is_some() {
@@ -277,6 +277,12 @@ impl TextFields {
             n += 1;
         }
         if self.list_fields_json.is_some() {
+            n += 1;
+        }
+        if self.text_mode.is_some() {
+            n += 1;
+        }
+        if self.allowed_ids.is_some() {
             n += 1;
         }
         n

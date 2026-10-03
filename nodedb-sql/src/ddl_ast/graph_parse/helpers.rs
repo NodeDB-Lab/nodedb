@@ -20,17 +20,41 @@ pub(super) fn quoted_after(toks: &[Tok<'_>], keyword: &str) -> Option<String> {
     }
 }
 
-pub(super) fn quoted_list_after(toks: &[Tok<'_>], keyword: &str) -> Vec<String> {
-    let Some(pos) = find_keyword(toks, keyword) else {
-        return Vec::new();
-    };
-    toks[pos + 1..]
-        .iter()
+/// Collect the run of quoted tokens at the head of `toks`.
+///
+/// The run ends at the first unquoted token. The tokenizer drops `,`, `(`
+/// and `)`, so `'a', 'b'` and `('a', 'b')` give the same run.
+fn quoted_run(toks: &[Tok<'_>]) -> Vec<String> {
+    toks.iter()
         .map_while(|t| match t {
             Tok::Quoted(s) => Some(s.clone().into_owned()),
             _ => None,
         })
         .collect()
+}
+
+pub(super) fn quoted_list_after(toks: &[Tok<'_>], keyword: &str) -> Vec<String> {
+    find_keyword(toks, keyword)
+        .map(|pos| quoted_run(&toks[pos + 1..]))
+        .unwrap_or_default()
+}
+
+/// Read an optional `LABEL '<label>'[, '<label>' ...]` clause.
+///
+/// An omitted clause returns an empty set, which keeps every edge. A present
+/// clause needs one or more quoted labels. A bare word is refused: a quoted
+/// list ends at the first unquoted token.
+pub(super) fn label_set_after(toks: &[Tok<'_>], statement: &str) -> Result<Vec<String>, SqlError> {
+    let Some(pos) = find_keyword(toks, "LABEL") else {
+        return Ok(Vec::new());
+    };
+    let labels = quoted_run(&toks[pos + 1..]);
+    if labels.is_empty() {
+        return Err(SqlError::Parse {
+            detail: format!("{statement} LABEL needs one or more quoted labels, as LABEL 'a', 'b'"),
+        });
+    }
+    Ok(labels)
 }
 
 /// Extract a brace-balanced object literal (`{…}`, braces included) that

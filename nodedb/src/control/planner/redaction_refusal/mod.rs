@@ -5,6 +5,7 @@ mod graph;
 mod lookup;
 mod plan;
 mod streaming_mv;
+mod text;
 
 pub use plan::{
     refuse_unredactable_graph_collection, refuse_unredactable_graph_match,

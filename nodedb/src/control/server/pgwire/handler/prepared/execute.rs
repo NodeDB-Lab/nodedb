@@ -16,6 +16,7 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 
 use crate::control::server::response_shape::schema::{OutputColumn, OutputSchema};
+use crate::control::server::shared::session::TransactionState;
 
 use super::super::core::NodeDbPgHandler;
 use super::super::routing::result_shaping::ResultShaping;
@@ -154,7 +155,20 @@ impl NodeDbPgHandler {
             })
         };
 
+        // An aborted transaction block refuses every statement until it ends,
+        // the same gate the simple-query path applies.
+        if self.sessions.transaction_state(session_id) == TransactionState::Failed {
+            return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
+                "ERROR".to_owned(),
+                "25P02".to_owned(),
+                "current transaction is aborted, commands ignored until end of transaction block"
+                    .to_owned(),
+            ))));
+        }
+
         // Execute through the planned SQL path with AST-level parameter binding.
+        // An error here aborts an open transaction block: the connection loop
+        // applies that rule to every failed extended-query message.
         let mut results = self
             .execute_planned_sql_with_params(
                 &identity,

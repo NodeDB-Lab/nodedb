@@ -156,7 +156,7 @@ mod tests {
                 nodedb_types::QualifiedCollection::new(nodedb_types::DatabaseId::DEFAULT, c)
             }),
             node_id: "n1".into(),
-            edge_label: None,
+            edge_labels: Vec::new(),
             direction: nodedb_types::graph::Direction::Out,
             rls_filters: Vec::new(),
         })

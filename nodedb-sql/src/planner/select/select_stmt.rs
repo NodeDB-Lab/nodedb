@@ -8,10 +8,10 @@ use super::comma_lateral::try_plan_comma_lateral;
 use super::derived_from::try_plan_derived_from;
 use super::helpers::{convert_projection, convert_where_to_filters};
 use super::query_tail::QueryTail;
-use super::where_search::try_extract_where_search;
+use super::where_search::{SearchBodyClauses, refuse_dropped_clauses, try_extract_where_search};
 use crate::error::{Result, SqlError};
 use crate::functions::registry::FunctionRegistry;
-use crate::planner::ast_helpers::strip_single_table_qualifiers;
+use crate::planner::ast_helpers::{single_table_qualifiers, strip_single_table_qualifiers};
 use crate::resolver::columns::TableScope;
 use crate::temporal::TemporalScope;
 use crate::types::*;
@@ -146,14 +146,7 @@ pub(super) fn plan_select(
     // is scoped to the single-table branch only: the JOIN path (handled above
     // by `try_plan_join`) deliberately keeps qualifiers for merged-document
     // evaluation and is never reached here.
-    let valid_qualifiers: Vec<&str> = {
-        let ref_name = table.ref_name();
-        if ref_name == table.name {
-            vec![table.name.as_str()]
-        } else {
-            vec![table.name.as_str(), ref_name]
-        }
-    };
+    let valid_qualifiers = single_table_qualifiers(table);
     let normalized_select = strip_single_table_qualifiers(select, &valid_qualifiers)?;
     let select = &normalized_select;
 
@@ -182,6 +175,19 @@ pub(super) fn plan_select(
             let where_projection = convert_projection(&select.projection, &scope)?;
             if let Some(plan) = try_extract_where_search(expr, table, functions, &where_projection)?
             {
+                refuse_dropped_clauses(
+                    &plan,
+                    SearchBodyClauses {
+                        temporal: &temporal,
+                        has_subqueries: !subquery_joins.is_empty(),
+                        aggregates: has_aggregation(select, functions),
+                        distinct: select.distinct.is_some(),
+                        windows: !crate::planner::window::extract_window_functions(
+                            select, functions, &scope,
+                        )?
+                        .is_empty(),
+                    },
+                )?;
                 return Ok(PlannedSelect { plan, scope });
             }
             cached_projection = Some(where_projection);

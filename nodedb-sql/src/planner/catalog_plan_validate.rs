@@ -4,8 +4,8 @@
 
 use crate::types::{
     CtePlan, DocumentIndexLookupPlan, HybridSearchPlan, HybridSearchTriplePlan, LateralLoopPlan,
-    LateralTopKPlan, MergePlan, RangeScanPlan, RecursiveScanPlan, VectorPrimaryDeletePlan,
-    VectorPrimaryUpdatePlan,
+    LateralTopKPlan, MergePlan, RangeScanPlan, RecursiveScanPlan, TextSearchPlan,
+    VectorPrimaryDeletePlan, VectorPrimaryUpdatePlan,
 };
 use nodedb_types::DatabaseId;
 
@@ -196,16 +196,27 @@ pub(super) fn validate_catalog_exprs(
             validate_projection(projection, catalog, database_id, tenant_id)?;
         }
         SqlPlan::MultiVectorSearch { projection, .. }
-        | SqlPlan::SparseSearch { projection, .. }
-        | SqlPlan::HybridSearch(HybridSearchPlan { projection, .. })
-        | SqlPlan::HybridSearchTriple(HybridSearchTriplePlan { projection, .. }) => {
+        | SqlPlan::SparseSearch { projection, .. } => {
             validate_projection(projection, catalog, database_id, tenant_id)?;
         }
-        SqlPlan::TextSearch {
+        SqlPlan::HybridSearch(HybridSearchPlan {
             filters,
             projection,
             ..
-        } => {
+        })
+        | SqlPlan::HybridSearchTriple(HybridSearchTriplePlan {
+            filters,
+            projection,
+            ..
+        }) => {
+            validate_filters(filters, catalog, database_id, tenant_id)?;
+            validate_projection(projection, catalog, database_id, tenant_id)?;
+        }
+        SqlPlan::TextSearch(TextSearchPlan {
+            filters,
+            projection,
+            ..
+        }) => {
             validate_filters(filters, catalog, database_id, tenant_id)?;
             validate_projection(projection, catalog, database_id, tenant_id)?;
         }
@@ -227,7 +238,29 @@ pub(super) fn validate_catalog_exprs(
             validate_filters(recursive_filters, catalog, database_id, tenant_id)?;
             validate_projection(projection, catalog, database_id, tenant_id)?;
         }
-        _ => {}
+        SqlPlan::ConstantResult { .. }
+        | SqlPlan::Insert(_)
+        | SqlPlan::KvInsert(_)
+        | SqlPlan::Upsert(_)
+        | SqlPlan::Truncate { .. }
+        | SqlPlan::TimeseriesScan(_)
+        | SqlPlan::TimeseriesIngest(_)
+        | SqlPlan::RecursiveValue(_)
+        | SqlPlan::CreateArray(_)
+        | SqlPlan::DropArray { .. }
+        | SqlPlan::AlterArray(_)
+        | SqlPlan::InsertArray(_)
+        | SqlPlan::DeleteArray(_)
+        | SqlPlan::ArraySlice(_)
+        | SqlPlan::ArrayProject(_)
+        | SqlPlan::ArrayAgg(_)
+        | SqlPlan::ArrayElementwise(_)
+        | SqlPlan::ArrayFlush { .. }
+        | SqlPlan::ArrayCompact { .. }
+        | SqlPlan::VectorPrimaryInsert(_)
+        | SqlPlan::VectorPrimaryTruncate(_)
+        | SqlPlan::CreateIndex(_)
+        | SqlPlan::DropIndex(_) => {}
     }
     Ok(())
 }

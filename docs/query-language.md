@@ -857,11 +857,15 @@ GRAPH INSERT EDGE IN 'edges' FROM 'alice' TO 'bob' TYPE 'knows' PROPERTIES { sin
 -- Traversal
 GRAPH TRAVERSE FROM 'users:alice' DEPTH 3 LABEL 'follows' DIRECTION out;
 
+-- Traversal over edges whose properties match (EDGE WHERE is the last clause)
+GRAPH TRAVERSE FROM 'users:alice' DEPTH 2 LABEL 'follows', 'knows' EDGE WHERE since >= 2020;
+
 -- Neighbors
 GRAPH NEIGHBORS OF 'users:alice' LABEL 'follows' DIRECTION out;
 
 -- Shortest path
 GRAPH PATH FROM 'users:alice' TO 'users:carol' MAX_DEPTH 5;
+GRAPH PATH FROM 'users:alice' TO 'users:carol' MAX_DEPTH 5 EDGE WHERE "weight" > 0.5;
 
 -- Pattern matching (Cypher subset)
 MATCH (u:User)-[follows]->(other:User)

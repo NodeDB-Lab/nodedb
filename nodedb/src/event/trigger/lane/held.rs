@@ -153,6 +153,8 @@ impl HeldAction {
             user_id: None,
             statement_digest: None,
             commit_hlc: self.commit_hlc,
+            // Delivery holds no event whose image did not render.
+            image_fault: None,
         })
     }
 }
@@ -181,6 +183,7 @@ mod tests {
             user_id: None,
             statement_digest: None,
             commit_hlc: Some(5),
+            image_fault: None,
         };
         let held = HeldAction::of(&event).expect("a row write is held");
         let back = HeldAction::from_bytes(&held.to_bytes().expect("encode")).expect("decode");
@@ -215,6 +218,7 @@ mod tests {
             user_id: None,
             statement_digest: None,
             commit_hlc: None,
+            image_fault: None,
         };
         assert!(HeldAction::of(&event).is_none());
         event.op = WriteOp::Insert;

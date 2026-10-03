@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use nodedb_sql::catalog::SqlCatalog;
 use nodedb_sql::types::{
     DocumentIndexLookupPlan, HybridSearchPlan, HybridSearchTriplePlan, RangeScanPlan,
-    RecursiveScanPlan, SqlPlan, TimeseriesScanPlan,
+    RecursiveScanPlan, SqlPlan, TextSearchPlan, TimeseriesScanPlan,
 };
 
 use crate::control::server::response_shape::types::DdlColType;
@@ -114,7 +114,7 @@ fn collect_sides(plan: &SqlPlan, out: &mut Vec<JoinSide>) {
         | SqlPlan::VectorSearch { collection, .. }
         | SqlPlan::MultiVectorSearch { collection, .. }
         | SqlPlan::SparseSearch { collection, .. }
-        | SqlPlan::TextSearch { collection, .. }
+        | SqlPlan::TextSearch(TextSearchPlan { collection, .. })
         | SqlPlan::HybridSearch(HybridSearchPlan { collection, .. })
         | SqlPlan::HybridSearchTriple(HybridSearchTriplePlan { collection, .. })
         | SqlPlan::RecursiveScan(RecursiveScanPlan { collection, .. }) => out.push(JoinSide {

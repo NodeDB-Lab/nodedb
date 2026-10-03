@@ -38,20 +38,8 @@ impl SyncSession {
             return SyncFrame::try_encode(SyncMessageType::FtsIndexAck, &ack);
         }
 
-        if msg.text.is_empty() {
-            // Empty text — nothing to index; ACK immediately.
-            let ack = FtsIndexAckMsg {
-                collection: msg.collection.clone(),
-                doc_id: msg.doc_id.clone(),
-                batch_id: msg.batch_id,
-                accepted: true,
-                reject_reason: None,
-                applied_seq: msg.seq,
-                status: AckStatus::Applied,
-            };
-            return SyncFrame::try_encode(SyncMessageType::FtsIndexAck, &ack);
-        }
-
+        // Empty fields dispatch like any other text: indexing no text removes
+        // the document's prior postings from every index.
         let surrogate = match dispatcher
             .assign_surrogate(
                 self.database_id(),
@@ -105,7 +93,7 @@ impl SyncSession {
                 vshard,
                 msg.collection.clone(),
                 surrogate,
-                msg.text.clone(),
+                msg.fields.clone(),
                 nodedb_types::sync::wire::SyncProvenance {
                     producer_id: self.producer_id,
                     epoch: self.accepted_epoch,

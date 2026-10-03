@@ -293,17 +293,12 @@ impl CoreLoop {
         // removed, threading the pre-delete bytes through as `old_value` so
         // CDC/change-stream consumers observe the prior state.
         if let Some(prior_bytes) = prior_value.as_deref() {
-            let old_converted = self.resolve_event_payload(
-                task.request.database_id.as_u64(),
-                tid,
-                collection,
-                prior_bytes,
-            );
             self.emit_document_delete_event(
                 task,
+                tid,
                 collection,
                 RowIdentity::from_user_key(document_id),
-                Some(old_converted.as_deref().unwrap_or(prior_bytes)),
+                Some(prior_bytes),
             );
         }
 

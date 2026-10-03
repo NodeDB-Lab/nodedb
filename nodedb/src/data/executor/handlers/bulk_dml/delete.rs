@@ -16,7 +16,7 @@ use nodedb_physical::physical_plan::{
     OllpPredictedEdge, ResolvedSumTarget, ReturningSpec, StorageMode,
 };
 
-use super::delete_cascade::BulkDeleteRowCascade;
+use super::delete_cascade::{BulkDeleteRowCascade, TextFlush};
 
 /// OLLP prediction inputs threaded to `execute_bulk_delete`: the predicted
 /// matched-doc surrogate set and the predicted implicit-edge set. Both are
@@ -251,9 +251,10 @@ impl CoreLoop {
         } else {
             Vec::new()
         };
+        // Removed rows whose text has not left the inverted index yet. It
+        // leaves in batches, one write transaction each.
+        let mut pending_text: Vec<nodedb_types::Surrogate> = Vec::new();
         for storage_key in &apply_ids {
-            let doc_id = storage_key.to_string();
-
             // Capture pre-deletion snapshot if RETURNING was requested, or if
             // the collection is indexed (needed to recompute the removed
             // secondary-index tuples below — the delete cascade's prefix scan
@@ -285,7 +286,14 @@ impl CoreLoop {
                                 Ok(doc) => Some(doc),
                                 Err(e) => {
                                     let code = refusal_after_rows(affected, e);
-                                    return self.refusal_with_landed_rows(task, code, write_set);
+                                    return self.bulk_delete_refusal(
+                        task,
+                        tid,
+                        collection,
+                        code,
+                        &mut pending_text,
+                        write_set,
+                    );
                                 }
                             }
                         }
@@ -305,7 +313,14 @@ impl CoreLoop {
                 Ok(txn) => txn,
                 Err(e) => {
                     let code = refusal_after_rows(affected, e);
-                    return self.refusal_with_landed_rows(task, code, write_set);
+                    return self.bulk_delete_refusal(
+                        task,
+                        tid,
+                        collection,
+                        code,
+                        &mut pending_text,
+                        write_set,
+                    );
                 }
             };
             let deleted_bytes = self
@@ -344,7 +359,14 @@ impl CoreLoop {
                     // and every target it had already debited.
                     Err(e) => {
                         let code = refusal_after_rows(affected, e);
-                        return self.refusal_with_landed_rows(task, code, write_set);
+                        return self.bulk_delete_refusal(
+                        task,
+                        tid,
+                        collection,
+                        code,
+                        &mut pending_text,
+                        write_set,
+                    );
                     }
                 }
             }
@@ -355,7 +377,14 @@ impl CoreLoop {
                         detail: format!("bulk delete commit: {e}"),
                     },
                 );
-                return self.refusal_with_landed_rows(task, code, write_set);
+                return self.bulk_delete_refusal(
+                        task,
+                        tid,
+                        collection,
+                        code,
+                        &mut pending_text,
+                        write_set,
+                    );
             }
             // One durable redo entry per debited target row, naming the TARGET
             // collection: this statement's own redo describes the removed source
@@ -363,13 +392,12 @@ impl CoreLoop {
             // as it stood before the delete.
             write_set.extend(write_hook::target_write_set(&target_writes));
             if let Some(bytes) = deleted_bytes.as_deref() {
-                self.bulk_delete_row_cascade(
+                let cascaded = self.bulk_delete_row_cascade(
                     BulkDeleteRowCascade {
                         task,
                         database_id,
                         tid,
                         collection,
-                        doc_id: doc_id.as_str(),
                         storage_key: *storage_key,
                         deleted_bytes: bytes,
                         strict_schema: strict_schema.as_ref(),
@@ -383,7 +411,38 @@ impl CoreLoop {
                     &mut returned_docs,
                 );
                 affected += 1;
+                pending_text.push(storage_key.surrogate());
+                // The row is removed and journalled: its index cleanup error
+                // fails the statement after its pending text leaves the
+                // inverted index.
+                if let Err(e) = cascaded {
+                    let code = refusal_after_rows(
+                        affected,
+                        ErrorCode::Internal {
+                            detail: format!(
+                                "bulk delete of '{storage_key}' in '{collection}': removing its \
+                                 secondary index entries failed: {e}"
+                            ),
+                        },
+                    );
+                    return self.bulk_delete_refusal(
+                        task,
+                        tid,
+                        collection,
+                        code,
+                        &mut pending_text,
+                        write_set,
+                    );
+                }
+                let flush = TextFlush::full_batch(tid, collection, affected);
+                if let Err(code) = self.flush_deleted_text_at(task, flush, &mut pending_text) {
+                    return self.refusal_with_landed_rows(task, code, write_set);
+                }
             }
+        }
+        let flush = TextFlush::remainder(tid, collection, affected);
+        if let Err(code) = self.flush_deleted_text_at(task, flush, &mut pending_text) {
+            return self.refusal_with_landed_rows(task, code, write_set);
         }
 
         // Invalidate aggregate cache — a delete changes count(*) for this

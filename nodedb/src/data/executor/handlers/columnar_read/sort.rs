@@ -84,11 +84,12 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
         (_, Value::Null) => std::cmp::Ordering::Less,
         (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::Integer(x), Value::Float(y)) => (*x as f64)
-            .partial_cmp(y)
-            .unwrap_or(std::cmp::Ordering::Equal),
-        (Value::Float(x), Value::Integer(y)) => x
-            .partial_cmp(&(*y as f64))
+        // Exact: an integer or integral decimal never rounds through f64.
+        (
+            Value::Integer(_) | Value::Float(_) | Value::Decimal(_),
+            Value::Integer(_) | Value::Float(_) | Value::Decimal(_),
+        ) => nodedb_query::value_ops::numeric_order(a, b)
+            .flatten()
             .unwrap_or(std::cmp::Ordering::Equal),
         (Value::String(x), Value::String(y)) => x.cmp(y),
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
@@ -100,5 +101,32 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
         // deterministic for exotic types that happen to coincide in a
         // sort key column.
         _ => format!("{a:?}").cmp(&format!("{b:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn numbers_compare_exactly_across_types() {
+        let above = Value::Integer(9_007_199_254_740_993);
+        let float = Value::Float(9_007_199_254_740_992.0);
+        assert_eq!(compare_values(&above, &float), Ordering::Greater);
+        assert_eq!(compare_values(&float, &above), Ordering::Less);
+        let u_max = Value::from_u64(u64::MAX);
+        assert_eq!(
+            compare_values(&u_max, &Value::Integer(i64::MAX)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_values(&Value::from_u64(u64::MAX - 1), &u_max),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_values(&Value::Integer(2), &Value::Float(2.5)),
+            Ordering::Less
+        );
     }
 }

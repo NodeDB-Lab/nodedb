@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared graph-DSL builders and result parsers used by both the native and
-//! the remote clients — one implementation per concern, no per-transport
-//! duplicates. Both transports ultimately speak the same `GRAPH ALGO …` DSL
-//! and receive the same `(columns, rows)` shape, so the SQL construction and
-//! row decoding live here once.
+//! `GRAPH ALGO PAGERANK` statement builder and result decoder.
 
 use std::collections::HashMap;
 

@@ -12,13 +12,16 @@ use sqlparser::ast::{self, FunctionArg, FunctionArguments};
 use super::super::entry_ann::parse_ann_options;
 use super::super::helpers::{
     extract_column_name, extract_float_array, extract_func_args, extract_string_literal,
-    extract_text_field, metric_from_func_name, source_projection,
+    metric_from_func_name, source_projection,
 };
+use super::super::text_call::{resolve_table_column, resolve_text_call};
 use super::aliases::function_call_name;
 use super::hybrid::{no_args_rrf_score_error, plan_hybrid_from_sort};
+use super::text_score::{ScanSort, attach_scores};
 use super::vector_join::extract_vector_join_target;
 use crate::error::{Result, SqlError};
 use crate::functions::registry::{FunctionRegistry, SearchTrigger};
+use crate::resolver::columns::ResolvedTable;
 use crate::types::*;
 
 /// Default `ef_search` multiplier applied when the user has not supplied
@@ -26,20 +29,96 @@ use crate::types::*;
 /// the standard HNSW heuristic.
 const DEFAULT_EF_SEARCH_MULTIPLIER: usize = 2;
 
+/// The vector column `function(query)` searches when it names none: the
+/// vector-primary field, else the one declared vector column, else the
+/// collection-level index (`""`). Several declared vector columns are
+/// ambiguous, a typed error naming them.
+fn default_vector_field(function: &str, table: Option<&ResolvedTable>) -> Result<String> {
+    let Some(table) = table else {
+        return Ok(String::new());
+    };
+    if let Some(vp) = &table.info.vector_primary {
+        return Ok(vp.vector_field.clone());
+    }
+    let vector_columns: Vec<&str> = table
+        .info
+        .columns
+        .iter()
+        .filter(|c| matches!(c.data_type, SqlDataType::Vector(_)))
+        .map(|c| c.name.as_str())
+        .collect();
+    match vector_columns.as_slice() {
+        [] => Ok(String::new()),
+        [only] => Ok((*only).to_owned()),
+        several => Err(SqlError::Unsupported {
+            detail: format!(
+                "{function}(query) names no column and '{}' has several vector columns \
+                 ({}); name one: {function}(column, query)",
+                table.name,
+                several.join(", ")
+            ),
+        }),
+    }
+}
+
+/// A search plan an ORDER BY trigger produced.
+pub(super) enum SortSearch {
+    /// The plan returns its rows in the order the ORDER BY asked for.
+    Ranked(SqlPlan),
+    /// A text plan that carries the score under `alias`. Its rows are
+    /// sorted by that column.
+    Scored { plan: SqlPlan, alias: String },
+}
+
 /// Try to detect a search-triggering function call.
 ///
-/// `score_alias` is propagated only into hybrid-search plans — vector and
-/// text searches return a fixed-shape response.
+/// `score_alias` names the hybrid score column, and the score column of a
+/// `bm25_score(...)` sort. `table` is the single relation in scope: the
+/// text and hybrid triggers fire only over one.
 pub(super) fn try_extract_sort_search(
     expr: &ast::Expr,
     plan: &SqlPlan,
     functions: &FunctionRegistry,
     score_alias: Option<&str>,
-) -> Result<Option<SqlPlan>> {
+    table: Option<&ResolvedTable>,
+) -> Result<Option<SortSearch>> {
     let ast::Expr::Function(func) = expr else {
         return Ok(None);
     };
     let name = function_call_name(expr).unwrap_or_default();
+    match functions.search_trigger(&name) {
+        // ORDER BY bm25_score(column, q): the plan carries the score column
+        // and the rows sort by it.
+        SearchTrigger::TextSearch => {
+            let Some(table) = table else {
+                return Ok(None);
+            };
+            let call = resolve_text_call(&name, func, table)?;
+            let alias = score_alias.map_or_else(|| expr.to_string(), str::to_owned);
+            let column = TextScoreColumn {
+                field: call.field,
+                query: call.query,
+                mode: call.options.params.mode,
+                fuzzy: call.options.params.fuzzy,
+                alias: alias.clone(),
+            };
+            return Ok(attach_scores(plan, vec![column], ScanSort::Consumed)?
+                .map(|plan| SortSearch::Scored { plan, alias }));
+        }
+        SearchTrigger::HybridSearch => {
+            let (Some(table), SqlPlan::Scan { .. }) = (table, plan) else {
+                return Ok(None);
+            };
+            let args = extract_func_args(func)?;
+            if args.is_empty() {
+                return Err(no_args_rrf_score_error());
+            }
+            return Ok(
+                plan_hybrid_from_sort(&args, table, plan, score_alias)?.map(SortSearch::Ranked)
+            );
+        }
+        _ => {}
+    }
     let (collection, array_prefilter) = match plan {
         SqlPlan::Scan { collection, .. } => (collection.clone(), None),
         SqlPlan::Join { left, right, .. } => match extract_vector_join_target(left, right) {
@@ -56,11 +135,26 @@ pub(super) fn try_extract_sort_search(
 
     match functions.search_trigger(&name) {
         SearchTrigger::VectorSearch => {
-            if args.len() < 2 {
-                return Ok(None);
-            }
-            let field = extract_column_name(&args[0])?;
-            let vector = extract_float_array(&args[1])?;
+            let (field, query_arg) = match args.as_slice() {
+                [] => return Ok(None),
+                // `vector_distance(query)` (the `SEARCH c USING VECTOR(q, k)`
+                // form) searches the collection's default vector column.
+                [query] => (default_vector_field(&name, table)?, query),
+                // Over one relation, its qualifier is redundant: `t.embedding`
+                // names the `embedding` column.
+                [column, query, ..] => {
+                    let field = match table {
+                        Some(table) => resolve_table_column(column, table)?.ok_or_else(|| {
+                            SqlError::Unsupported {
+                                detail: format!("expected column name, got: {column}"),
+                            }
+                        })?,
+                        None => extract_column_name(column)?,
+                    };
+                    (field, query)
+                }
+            };
+            let vector = extract_float_array(query_arg)?;
             let ann_options = parse_ann_options(raw_func_args)?;
             let limit = match plan {
                 SqlPlan::Scan { limit, .. } => limit.unwrap_or(10),
@@ -73,7 +167,7 @@ pub(super) fn try_extract_sort_search(
                 .ef_search_override
                 .unwrap_or(limit * DEFAULT_EF_SEARCH_MULTIPLIER);
             let metric = metric_from_func_name(&name);
-            Ok(Some(SqlPlan::VectorSearch {
+            Ok(Some(SortSearch::Ranked(SqlPlan::VectorSearch {
                 collection,
                 field,
                 query_vector: vector,
@@ -91,8 +185,9 @@ pub(super) fn try_extract_sort_search(
                 // fields after `apply_order_by` returns.
                 skip_payload_fetch: false,
                 payload_filters: Vec::new(),
+                pk_prefilter: None,
                 projection: source_projection(plan),
-            }))
+            })))
         }
         SearchTrigger::SparseSearch => {
             if args.len() < 2 {
@@ -115,43 +210,13 @@ pub(super) fn try_extract_sort_search(
                 SqlPlan::Join { limit, .. } => limit.unwrap_or(10),
                 _ => 10,
             };
-            Ok(Some(SqlPlan::SparseSearch {
+            Ok(Some(SortSearch::Ranked(SqlPlan::SparseSearch {
                 collection,
                 field,
                 query_entries,
                 top_k,
                 projection: source_projection(plan),
-            }))
-        }
-        SearchTrigger::TextSearch if args.len() >= 2 => {
-            let field = extract_text_field(&args[0])?;
-            let query_text = extract_string_literal(&args[1])?;
-            let limit = match plan {
-                SqlPlan::Scan { limit, .. } => limit.unwrap_or(10),
-                _ => 10,
-            };
-            Ok(Some(SqlPlan::TextSearch {
-                collection,
-                field,
-                query: crate::fts_types::FtsQuery::Plain {
-                    text: query_text,
-                    fuzzy: true,
-                },
-                top_k: limit,
-                filters: match plan {
-                    SqlPlan::Scan { filters, .. } => filters.clone(),
-                    _ => Vec::new(),
-                },
-                score_alias: score_alias.map(|s| s.to_string()),
-                projection: source_projection(plan),
-            }))
-        }
-        SearchTrigger::TextSearch => Ok(None),
-        SearchTrigger::HybridSearch => {
-            if args.is_empty() {
-                return Err(no_args_rrf_score_error());
-            }
-            plan_hybrid_from_sort(&args, &collection, plan, score_alias)
+            })))
         }
         _ => Ok(None),
     }

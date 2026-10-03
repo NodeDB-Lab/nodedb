@@ -185,7 +185,7 @@ mod tests {
             },
             "articles",
             "doc-abc",
-            "hello world nodedb fts",
+            vec![("body".to_string(), "hello world nodedb fts".to_string())],
         );
         let bytes = payload.to_bytes().unwrap();
 
@@ -214,6 +214,9 @@ mod tests {
         assert_eq!(decoded.provenance.seq, 42);
         assert_eq!(decoded.collection, "articles");
         assert_eq!(decoded.doc_id, "doc-abc");
-        assert_eq!(decoded.text, "hello world nodedb fts");
+        assert_eq!(
+            decoded.fields,
+            vec![("body".to_string(), "hello world nodedb fts".to_string())]
+        );
     }
 }

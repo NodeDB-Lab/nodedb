@@ -10,7 +10,8 @@
 //! protocol shapes it as before:
 //!
 //! - `Hop`: a msgpack array of every reached node, start nodes first.
-//! - `Subgraph`: a msgpack array of `{src, label, dst}` edges.
+//! - `Subgraph`: a msgpack array of `{src, label, dst}` edges. The last
+//!   admitted level records its edges to admitted nodes.
 //! - `Path`: a msgpack array `[src, …, dst]`, or a `NotFound` refusal when
 //!   `dst` is unreachable.
 
@@ -20,7 +21,7 @@ use crate::bridge::envelope::{Payload, PhysicalPlan, Response};
 use crate::control::server::dispatch_utils::{not_found_response, ok_payload_response};
 use crate::control::state::SharedState;
 use crate::engine::graph::edge_store::Direction;
-use crate::types::{DatabaseId, TenantId};
+use crate::types::{DatabaseId, TenantId, TxnId};
 
 use super::bfs::{CrossCoreBfsParams, cross_core_bfs_with_options};
 use super::shortest_path::{CrossCoreShortestPathParams, cross_core_shortest_path};
@@ -36,12 +37,14 @@ struct SubgraphEdgeWire<'a> {
 }
 
 /// Run `plan` through the walk coordinators when it is a `Hop`, `Path` or
-/// `Subgraph`. Returns `None` for every other plan.
+/// `Subgraph`. Returns `None` for every other plan. The walk sees the staged
+/// edge writes of `txn_id`, the session's transaction.
 pub async fn serve_walk_plan(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
     plan: &PhysicalPlan,
+    txn_id: Option<TxnId>,
     linearizable: bool,
 ) -> Option<crate::Result<Response>> {
     let PhysicalPlan::Graph(op) = plan else {
@@ -51,7 +54,7 @@ pub async fn serve_walk_plan(
         GraphOp::Hop {
             collection,
             start_nodes,
-            edge_label,
+            edge_labels,
             direction,
             depth,
             options,
@@ -63,11 +66,12 @@ pub async fn serve_walk_plan(
                 database_id,
                 collection: collection.as_ref().map(|c| c.as_str()),
                 start_nodes: start_nodes.clone(),
-                edge_label: edge_label.clone(),
+                edge_labels,
                 direction: *direction,
                 max_depth: *depth,
                 options,
                 linearizable,
+                txn_id,
             },
         )
         .await
@@ -75,7 +79,7 @@ pub async fn serve_walk_plan(
         GraphOp::Subgraph {
             collection,
             start_nodes,
-            edge_label,
+            edge_labels,
             depth,
             options,
             ..
@@ -87,10 +91,11 @@ pub async fn serve_walk_plan(
                 SubgraphRequest {
                     collection: collection.as_ref().map(|c| c.as_str().to_owned()),
                     start_nodes,
-                    edge_label: edge_label.clone(),
+                    edge_labels,
                     depth: *depth,
                     options,
                     linearizable,
+                    txn_id,
                 },
             )
             .await
@@ -99,7 +104,7 @@ pub async fn serve_walk_plan(
             collection,
             src,
             dst,
-            edge_label,
+            edge_labels,
             max_depth,
             options,
             ..
@@ -112,10 +117,11 @@ pub async fn serve_walk_plan(
                     collection: collection.as_ref(),
                     src,
                     dst,
-                    edge_label: edge_label.clone(),
+                    edge_labels,
                     max_depth: *max_depth,
                     options,
                     linearizable,
+                    txn_id,
                 },
             )
             .await
@@ -128,10 +134,11 @@ pub async fn serve_walk_plan(
 struct SubgraphRequest<'a> {
     collection: Option<String>,
     start_nodes: &'a [String],
-    edge_label: Option<String>,
+    edge_labels: &'a [String],
     depth: usize,
     options: &'a crate::engine::graph::traversal_options::GraphTraversalOptions,
     linearizable: bool,
+    txn_id: Option<TxnId>,
 }
 
 async fn subgraph(
@@ -156,20 +163,23 @@ async fn subgraph(
             database_id,
             collection: request.collection,
             start: start.clone(),
-            edge_label: request.edge_label,
+            edge_labels: request.edge_labels,
             direction: Direction::Out,
             max_depth: request.depth,
             options: request.options,
             linearizable: request.linearizable,
+            edge_predicate: &[],
+            with_properties: false,
+            txn_id: request.txn_id,
         },
     )
     .await?;
     let wire: Vec<SubgraphEdgeWire<'_>> = edges
         .iter()
-        .map(|(src, label, dst)| SubgraphEdgeWire {
-            src: src.as_str(),
-            label: label.as_str(),
-            dst: dst.as_str(),
+        .map(|edge| SubgraphEdgeWire {
+            src: edge.src.as_str(),
+            label: edge.label.as_str(),
+            dst: edge.dst.as_str(),
         })
         .collect();
     let payload = zerompk::to_msgpack_vec(&wire).map_err(|e| crate::Error::Codec {
@@ -183,10 +193,11 @@ struct PathRequest<'a> {
     collection: Option<&'a nodedb_types::QualifiedCollection>,
     src: &'a str,
     dst: &'a str,
-    edge_label: Option<String>,
+    edge_labels: &'a [String],
     max_depth: usize,
     options: &'a crate::engine::graph::traversal_options::GraphTraversalOptions,
     linearizable: bool,
+    txn_id: Option<TxnId>,
 }
 
 async fn path(
@@ -205,10 +216,12 @@ async fn path(
             collection: request.collection.map(|c| c.as_str().to_owned()),
             src: request.src.to_owned(),
             dst: request.dst.to_owned(),
-            edge_label: request.edge_label,
+            edge_labels: request.edge_labels.to_vec(),
             max_depth: request.max_depth,
             options: request.options.clone(),
             linearizable: request.linearizable,
+            edge_predicate: Vec::new(),
+            txn_id: request.txn_id,
         },
     )
     .await?;

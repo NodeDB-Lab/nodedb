@@ -32,6 +32,7 @@ use crate::data::executor::core_loop::KvWriteEvent;
 use crate::data::executor::core_loop::deferred::DeferredWrite;
 use crate::data::executor::core_loop::event_emit::RowWriteEvent;
 use crate::data::executor::task::ExecutionTask;
+use crate::event::image_fault::ImageFault;
 use crate::event::types::RowId;
 use crate::event::{EventSource, WriteOp};
 use crate::wal::{RedoPublish, RowSourceIndex};
@@ -189,14 +190,19 @@ impl CoreLoop {
                 let new_value = write.new_body.as_deref().map(|body| {
                     self.body_event_image(database_id, tid, &write.collection, id, body)
                 });
-                let old_value = write.old_value.as_deref().map(|stored| {
+                // A stored strict row that does not decode has no image: the
+                // event names the fault instead.
+                let old_image = write.old_value.as_deref().map(|stored| {
                     self.stored_event_image(database_id, tid, &write.collection, id, stored)
                 });
+                let image_fault = ImageFault::of(false, matches!(old_image, Some(Err(_))));
+                let old_value = old_image.and_then(Result::ok);
                 let source =
                     committed_source(rows, record_source, document_source, &write.collection, id);
                 DeferredWrite {
                     new_value,
                     old_value,
+                    image_fault,
                     source,
                     collection: write.collection,
                     op: write.op,
@@ -247,6 +253,7 @@ impl CoreLoop {
                     row_id: RowId::Batch,
                     new_value: Some(&value),
                     old_value: None,
+                    image_fault: None,
                 },
             );
         }

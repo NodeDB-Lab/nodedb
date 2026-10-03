@@ -12,8 +12,10 @@
 //! other). This matches PostgreSQL behaviour for RANGE CURRENT ROW.
 
 use super::arg::{ArgValues, arg_at};
-use super::helpers::{as_f64, order_keys_equal, set_window_col};
+use super::extremum::{extremum_direction, json_replaces};
+use super::helpers::{order_keys_equal, set_window_col};
 use super::spec::WindowFuncSpec;
+use crate::numeric_sum::ExactSum;
 
 /// Apply a peer-aware running aggregate over a sorted partition.
 ///
@@ -34,10 +36,12 @@ pub(super) fn running_aggregate(
     // Accumulate state incrementally row-by-row, but defer writing results
     // until the end of each peer group (so all peers see the group's final
     // value). We track where the current peer group started.
-    let mut running_sum = 0.0f64;
+    // SUM / AVG total exactly per `ExactSum`.
+    let mut running_sum = ExactSum::new();
     let mut running_count = 0u64;
-    let mut running_min: Option<f64> = None;
-    let mut running_max: Option<f64> = None;
+    // MIN / MAX hold the original argument value, compared exactly.
+    let extremum_dir = extremum_direction(&spec.func_name);
+    let mut running_extreme: Option<serde_json::Value> = None;
 
     // Indices of rows belonging to the *current* peer group (deferred write).
     let mut peer_start = 0usize;
@@ -45,11 +49,13 @@ pub(super) fn running_aggregate(
     for pos in 0..len {
         let i = indices[pos];
         let val = arg_at(arg_values, pos);
-        if let Some(n) = as_f64(&val) {
-            running_sum += n;
+        if running_sum.add_json(&val) {
             running_count += 1;
-            running_min = Some(running_min.map_or(n, |m: f64| m.min(n)));
-            running_max = Some(running_max.map_or(n, |m: f64| m.max(n)));
+            if let Some(want_max) = extremum_dir
+                && json_replaces(&val, running_extreme.as_ref(), want_max)
+            {
+                running_extreme = Some(val);
+            }
         } else if spec.func_name == "count" && (arg_values.is_none() || !val.is_null()) {
             // `COUNT(*)` counts every row; `COUNT(expr)` counts rows whose
             // argument is non-NULL, including non-numeric values.
@@ -63,20 +69,11 @@ pub(super) fn running_aggregate(
         if is_last_in_group {
             // Compute the result at the end of this peer group.
             let result = match spec.func_name.as_str() {
-                "sum" => serde_json::json!(running_sum),
+                "sum" => serde_json::Value::from(running_sum.sum()?),
                 "count" => serde_json::json!(running_count),
-                "avg" => {
-                    if running_count > 0 {
-                        serde_json::json!(running_sum / running_count as f64)
-                    } else {
-                        serde_json::Value::Null
-                    }
-                }
-                "min" => running_min
-                    .map(|m| serde_json::json!(m))
-                    .unwrap_or(serde_json::Value::Null),
-                "max" => running_max
-                    .map(|m| serde_json::json!(m))
+                "avg" => serde_json::Value::from(running_sum.avg()?),
+                "min" | "max" => running_extreme
+                    .clone()
                     .unwrap_or(serde_json::Value::Null),
                 "first_value" => arg_at(arg_values, 0),
                 "last_value" => arg_at(arg_values, pos),

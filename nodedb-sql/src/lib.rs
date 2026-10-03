@@ -141,7 +141,7 @@ fn plan_statements(
             StatementKind::Select(query) => {
                 let plan =
                     planner::select::plan_statement_query(query, catalog, &functions, temporal)?;
-                let plan = optimizer::optimize(plan, catalog);
+                let plan = optimizer::optimize(plan, catalog)?;
                 plans.push(plan);
             }
             StatementKind::Insert(ins) => {

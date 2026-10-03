@@ -183,6 +183,11 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
             NodeDbError::object_not_ready(object.clone(), detail.clone())
         }
         Error::UndefinedColumn { column } => NodeDbError::undefined_column(column.clone()),
+        Error::TextColumn {
+            collection,
+            column,
+            fault,
+        } => crate::error_from_data_plane::text_column_to_public(collection, column, fault),
         Error::AmbiguousColumn { column } => NodeDbError::ambiguous_column(column.clone()),
         Error::UnknownStrictField { column, .. } => NodeDbError::undefined_column(column.clone()),
         Error::DivisionByZero => NodeDbError::division_by_zero(),

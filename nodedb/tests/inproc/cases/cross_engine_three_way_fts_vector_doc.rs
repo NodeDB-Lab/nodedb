@@ -272,11 +272,15 @@ fn three_way_fts_vector_doc_bitmap() {
                 nodedb_types::DatabaseId::DEFAULT,
                 COLLECTION,
             ),
+            field: None,
             query: "learning".into(),
             top_k: 20,
+            mode: nodedb_types::text_search::QueryMode::And,
             fuzzy: false,
             prefilter: None,
+            filters: Vec::new(),
             rls_filters: Vec::new(),
+            scores: Vec::new(),
         }),
     );
 

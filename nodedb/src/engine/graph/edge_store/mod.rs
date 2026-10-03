@@ -15,8 +15,8 @@ pub use scan::TenantEdgeScan;
 pub use stats::CollectionStats;
 pub use store::{Direction, Edge, EdgeRecord, EdgeStore};
 pub use temporal::{
-    EdgeCountChange, EdgeCutInstall, EdgeFlip, EdgeRef, EdgeValuePayload, EdgeVersionWrite,
-    GDPR_ERASURE_SENTINEL, NeighborsAsOfParams, SYSTEM_TIME_WIDTH, TOMBSTONE_SENTINEL,
-    VersionStamp, edge_version_prefix, is_gdpr_erasure, is_sentinel, is_tombstone,
-    parse_versioned_edge_key, versioned_edge_key,
+    EdgeCountChange, EdgeCutInstall, EdgeFlip, EdgePropertyReader, EdgeRef, EdgeValuePayload,
+    EdgeVersionWrite, GDPR_ERASURE_SENTINEL, NeighborsAsOfParams, SYSTEM_TIME_WIDTH,
+    TOMBSTONE_SENTINEL, VersionStamp, edge_version_prefix, is_gdpr_erasure, is_sentinel,
+    is_tombstone, parse_versioned_edge_key, versioned_edge_key,
 };

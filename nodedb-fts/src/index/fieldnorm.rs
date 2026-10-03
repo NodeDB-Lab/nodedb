@@ -11,21 +11,22 @@ use nodedb_types::Surrogate;
 use crate::backend::FtsBackend;
 use crate::codec::smallfloat;
 use crate::index::FtsIndex;
+use crate::scope::IndexScope;
 
 impl<B: FtsBackend> FtsIndex<B> {
     /// Get the fieldnorm (SmallFloat-encoded doc length) for a doc.
     ///
     /// Returns the decoded approximate u32 length, or `None` if not stored.
-    pub fn read_fieldnorm(
+    pub fn read_fieldnorm<'a>(
         &self,
         database_id: u64,
         tid: u64,
-        collection: &str,
+        index: impl Into<IndexScope<'a>>,
         doc_id: Surrogate,
     ) -> Result<Option<u32>, B::Error> {
         let data = self
             .backend
-            .read_meta(database_id, tid, collection, "fieldnorms")?;
+            .read_meta(database_id, tid, index.into(), "fieldnorms")?;
         match data {
             Some(bytes) if (doc_id.0 as usize) < bytes.len() => {
                 Ok(Some(smallfloat::decode(bytes[doc_id.0 as usize])))
@@ -35,17 +36,18 @@ impl<B: FtsBackend> FtsIndex<B> {
     }
 
     /// Write a fieldnorm byte for a surrogate. Grows the array if needed.
-    pub fn write_fieldnorm(
+    pub fn write_fieldnorm<'a>(
         &self,
         database_id: u64,
         tid: u64,
-        collection: &str,
+        index: impl Into<IndexScope<'a>>,
         doc_id: Surrogate,
         doc_length: u32,
     ) -> Result<(), B::Error> {
+        let index = index.into();
         let mut data = self
             .backend
-            .read_meta(database_id, tid, collection, "fieldnorms")?
+            .read_meta(database_id, tid, index, "fieldnorms")?
             .unwrap_or_default();
 
         let idx = doc_id.0 as usize;
@@ -55,7 +57,7 @@ impl<B: FtsBackend> FtsIndex<B> {
         data[idx] = smallfloat::encode(doc_length);
 
         self.backend
-            .write_meta(database_id, tid, collection, "fieldnorms", &data)
+            .write_meta(database_id, tid, index, "fieldnorms", &data)
     }
 }
 

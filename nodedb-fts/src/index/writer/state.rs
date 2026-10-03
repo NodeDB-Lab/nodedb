@@ -14,12 +14,14 @@ use std::sync::{Arc, atomic::AtomicU64};
 ///
 /// Indexing, search, and highlighting use the [`FtsBackend`] storage contract.
 ///
-/// Writes accumulate in an in-memory `Memtable`.
-/// Threshold-triggered flushing creates immutable segments through the backend.
+/// Writes accumulate in an in-memory `Memtable`, one state per index.
+/// Threshold-triggered flushing writes each index's postings to an
+/// immutable segment of that index through the backend.
 /// Queries merge the active memtable with stored segments.
 /// The backend determines segment durability.
 ///
-/// [`MemoryGovernor`] enforces per-engine memory budgets on large allocations (compaction, segment merge, query term collection).
+/// [`MemoryGovernor`] enforces per-engine memory budgets on large
+/// allocations (compaction, segment merge, query term collection).
 pub struct FtsIndex<B: FtsBackend> {
     pub(crate) backend: B,
     pub(crate) bm25_params: Bm25Params,
@@ -50,13 +52,29 @@ impl<B: FtsBackend> FtsIndex<B> {
         }
     }
 
-    /// Create a new FTS index whose memtable spills at `memtable` thresholds. Unreachable thresholds keep every posting in the memtable.
+    /// Create a new FTS index whose memtable spills at `memtable` thresholds.
+    /// Unreachable thresholds keep every posting in the memtable.
     pub fn with_memtable_config(
         backend: B,
         memtable: MemtableConfig,
         governor: Arc<MemoryGovernor>,
     ) -> Self {
         Self {
+            memtable: Memtable::new(memtable),
+            ..Self::new(backend, governor)
+        }
+    }
+
+    /// Create a new FTS index with custom BM25 parameters whose memtable
+    /// spills at `memtable` thresholds.
+    pub fn with_config(
+        backend: B,
+        params: Bm25Params,
+        memtable: MemtableConfig,
+        governor: Arc<MemoryGovernor>,
+    ) -> Self {
+        Self {
+            bm25_params: params,
             memtable: Memtable::new(memtable),
             ..Self::new(backend, governor)
         }

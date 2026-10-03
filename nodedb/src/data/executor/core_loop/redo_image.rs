@@ -9,36 +9,41 @@
 //! collection carries the version key it landed at.
 
 use crate::bridge::envelope::{RowVersion, WriteSetEntry};
+use crate::data::executor::strict_format::undecodable_strict_row;
 use crate::engine::document::store::RowIdentity;
 
 use super::CoreLoop;
+use super::event_image::StoredImage;
+use super::fail_stop::FailStopCause;
 
 impl CoreLoop {
-    /// The redo body of `stored`, a row as `collection` stores it: MessagePack
-    /// for a strict collection's Binary Tuple, the bytes themselves otherwise.
-    pub(in crate::data::executor) fn redo_body(
-        &self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
-        stored: &[u8],
-    ) -> Vec<u8> {
-        self.resolve_event_payload(database_id, tid, collection, stored)
-            .unwrap_or_else(|| stored.to_vec())
-    }
-
     /// The write-set entry of a row a write stored as `stored`.
     /// `sys_from_ms` is the version's system time on a `bitemporal=true`
     /// collection, whose version is valid for all time.
+    ///
+    /// The redo body is MessagePack: a strict collection's Binary Tuple is
+    /// decoded, other bytes are journalled as stored. A strict row that does
+    /// not decode is an error: replay would encode raw tuple bytes as a
+    /// MessagePack body and store a different row. The write already landed
+    /// and its write set cannot be journalled, so the core fail-stops.
     pub(in crate::data::executor) fn stored_row_image(
-        &self,
+        &mut self,
         row: StoredRow<'_>,
         stored: &[u8],
         sys_from_ms: Option<i64>,
-    ) -> WriteSetEntry {
-        let body = self.redo_body(row.database_id, row.tid, row.collection, stored);
-        WriteSetEntry::put(row.surrogate, row.identity, body)
-            .versioned(sys_from_ms.map(RowVersion::open))
+    ) -> crate::Result<WriteSetEntry> {
+        let body = match self.resolve_event_payload(row.database_id, row.tid, row.collection, stored)
+        {
+            StoredImage::Converted(converted) => converted,
+            StoredImage::AsStored => stored.to_vec(),
+            StoredImage::Undecodable => {
+                let error = undecodable_strict_row(row.collection, row.identity.as_str());
+                self.fail_stop_core(FailStopCause::WriteSetUnpersisted, &error.to_string());
+                return Err(error);
+            }
+        };
+        Ok(WriteSetEntry::put(row.surrogate, row.identity, body)
+            .versioned(sys_from_ms.map(RowVersion::open)))
     }
 }
 

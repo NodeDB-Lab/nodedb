@@ -56,7 +56,7 @@ impl zerompk::ToMessagePack for TextFields {
         write_opt_field!(binary writer, FID_DELTA, self.delta);
         write_opt_field!(writer, FID_PEER_ID, self.peer_id);
         write_opt_field!(writer, FID_VECTOR_TOP_K, self.vector_top_k);
-        write_opt_field!(writer, FID_EDGE_LABEL, self.edge_label);
+        write_opt_field!(writer, FID_EDGE_LABELS, self.edge_labels);
         write_opt_field!(writer, FID_DIRECTION, self.direction);
         write_opt_field!(writer, FID_EXPANSION_DEPTH, self.expansion_depth);
         write_opt_field!(writer, FID_FINAL_TOP_K, self.final_top_k);
@@ -136,6 +136,8 @@ impl zerompk::ToMessagePack for TextFields {
         write_opt_field!(writer, FID_LIST_FROM_INDEX, self.list_from_index);
         write_opt_field!(writer, FID_LIST_TO_INDEX, self.list_to_index);
         write_opt_field!(writer, FID_LIST_FIELDS_JSON, self.list_fields_json);
+        write_opt_field!(writer, FID_TEXT_MODE, self.text_mode);
+        write_opt_field!(writer, FID_ALLOWED_IDS, self.allowed_ids);
 
         Ok(())
     }

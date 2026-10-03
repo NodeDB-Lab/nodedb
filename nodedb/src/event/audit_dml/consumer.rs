@@ -136,6 +136,7 @@ mod tests {
             user_id: Some(Arc::from("alice")),
             statement_digest: None,
             commit_hlc: Some(crate::event::test_utils::test_commit_hlc()),
+            image_fault: None,
         }
     }
 

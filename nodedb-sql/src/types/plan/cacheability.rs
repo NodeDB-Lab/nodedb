@@ -7,7 +7,7 @@ use super::expr_scan::projection_is_cp_computed;
 use super::variants::{
     CtePlan, DocumentIndexLookupPlan, HybridSearchPlan, HybridSearchTriplePlan, InsertPlan,
     KvInsertPlan, LateralLoopPlan, LateralTopKPlan, MergePlan, RangeScanPlan, RecursiveScanPlan,
-    TimeseriesIngestPlan, TimeseriesScanPlan, UpsertPlan, VectorPrimaryDeletePlan,
+    TextSearchPlan, TimeseriesIngestPlan, TimeseriesScanPlan, UpsertPlan, VectorPrimaryDeletePlan,
     VectorPrimaryInsertPlan, VectorPrimaryUpdatePlan,
 };
 
@@ -63,7 +63,7 @@ impl SqlPlan {
             | Self::VectorSearch { projection, .. }
             | Self::MultiVectorSearch { projection, .. }
             | Self::SparseSearch { projection, .. }
-            | Self::TextSearch { projection, .. }
+            | Self::TextSearch(TextSearchPlan { projection, .. })
             | Self::HybridSearch(HybridSearchPlan { projection, .. })
             | Self::HybridSearchTriple(HybridSearchTriplePlan { projection, .. })
             | Self::SpatialScan { projection, .. }

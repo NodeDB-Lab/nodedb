@@ -18,6 +18,7 @@ use crate::loro_value::loro_to_value;
 use super::core::CrdtState;
 use super::document_cell::DocumentCell;
 use super::import_admission::{CrdtImportLimits, admit_import};
+use super::write_set::collect_write_set;
 
 /// Maximum raw CRDT delta bytes accepted by the default authoritative preview.
 pub const DEFAULT_MAX_DELTA_BYTES: usize = 1024 * 1024;
@@ -128,12 +129,16 @@ impl CrdtState {
 
         // The source is quiescent, so Loro's fork cannot publish source state.
         let fork = self.doc.fork();
-        let before_frontier = fork.state_frontiers();
         let before_oplog = fork.oplog_vv();
         if before_oplog != authoritative_oplog {
             return Err(CrdtError::PreviewInvalidOperationRange);
         }
-        let status = fork.import(delta).map_err(|error| match error {
+        // The write-set comes from the operations the import adds to the fork.
+        // It runs after byte and imported-operation caps have bounded the
+        // import work. `max_write_set_entries` is semantic cardinality
+        // enforcement, not an allocation short-circuit.
+        let (imported, write_set) = collect_write_set(&fork, || fork.import(delta));
+        let status = imported.map_err(|error| match error {
             loro::LoroError::ImportUpdatesThatDependsOnOutdatedVersion => {
                 CrdtError::PreviewPendingDependencies
             }
@@ -149,6 +154,9 @@ impl CrdtState {
         if imported_ops != admission.new_operations {
             return Err(CrdtError::PreviewInvalidOperationRange);
         }
+        // A delta that writes outside the root-map-of-row-maps shape is
+        // refused with the write-set's own typed error.
+        let write_set = write_set?;
 
         let resulting_frontier = fork.state_frontiers();
         let fork_state = CrdtState {
@@ -156,11 +164,6 @@ impl CrdtState {
             peer_id: self.peer_id,
             _single_owner: std::marker::PhantomData,
         };
-        // Loro exposes diffs only as a complete DiffBatch. This runs after
-        // byte and imported-operation caps have bounded the fork/import work;
-        // `max_write_set_entries` is semantic cardinality enforcement, not an
-        // allocation short-circuit.
-        let write_set = fork_state.write_set_since(&before_frontier)?;
         if write_set.len() > limits.max_write_set_entries {
             return Err(CrdtError::PreviewWriteSetLimitExceeded {
                 limit: limits.max_write_set_entries,

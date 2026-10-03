@@ -206,7 +206,9 @@ mod tests {
                     collection: COLL,
                     surrogate,
                 },
-                "alpha original",
+                &crate::data::executor::fts_text::extract_fts_fields(
+                    &serde_json::json!({ "body": "alpha original" }),
+                ),
             )
             .expect("index old text");
         txn.commit().expect("commit old index");

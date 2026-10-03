@@ -8,7 +8,7 @@ use nodedb_types::sync::wire::SyncProvenance;
 use crate::bridge::envelope::{CounterFault, ErrorCode, SyncHold};
 
 /// The number of `ErrorCode` variants [`variant_index`] numbers.
-pub(super) const VARIANT_COUNT: usize = 43;
+pub(super) const VARIANT_COUNT: usize = 44;
 
 /// A dense index per variant. Exhaustive, so a new variant fails to compile
 /// here until it gets an index, and [`every_variant_has_a_sample`] then fails
@@ -58,6 +58,7 @@ pub(super) fn variant_index(code: &ErrorCode) -> usize {
         ErrorCode::TransactionRollback { .. } => 41,
         ErrorCode::ActiveSqlTransaction { .. } => 42,
         ErrorCode::DependentObjectsExist { .. } => 10,
+        ErrorCode::TextColumn { .. } => 43,
     }
 }
 
@@ -159,6 +160,16 @@ pub(super) fn samples() -> Vec<ErrorCode> {
             max_depth: 100,
         },
         ErrorCode::UndefinedColumn { column: "x".into() },
+        ErrorCode::TextColumn {
+            collection: collection(),
+            column: "x".into(),
+            fault: nodedb_types::text_search::TextColumnFault::NotIndexed,
+        },
+        ErrorCode::TextColumn {
+            collection: collection(),
+            column: "x".into(),
+            fault: nodedb_types::text_search::TextColumnFault::NotAColumn,
+        },
         ErrorCode::Internal { detail: text() },
         ErrorCode::Unsupported { detail: text() },
         ErrorCode::RollbackFailed {

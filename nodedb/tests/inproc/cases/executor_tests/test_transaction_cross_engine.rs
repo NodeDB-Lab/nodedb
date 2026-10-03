@@ -98,7 +98,7 @@ fn transaction_edge_put_committed() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "alice".into(),
-            edge_label: Some("KNOWS".into()),
+            edge_labels: vec!["KNOWS".into()],
             direction: nodedb::engine::graph::edge_store::Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
@@ -178,7 +178,7 @@ fn a_refused_transaction_leaves_no_edge() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "alice".into(),
-            edge_label: Some("KNOWS".into()),
+            edge_labels: vec!["KNOWS".into()],
             direction: nodedb::engine::graph::edge_store::Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
@@ -302,7 +302,7 @@ fn a_refused_transaction_leaves_neither_doc_nor_edge() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "n1".into(),
-            edge_label: Some("LINKED".into()),
+            edge_labels: vec!["LINKED".into()],
             direction: nodedb::engine::graph::edge_store::Direction::Out,
             rls_filters: Vec::new(),
             collection: None,

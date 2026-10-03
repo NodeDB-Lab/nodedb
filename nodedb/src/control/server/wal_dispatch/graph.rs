@@ -513,7 +513,7 @@ mod tests {
         let wal = open_wal(dir.path());
         let plan = PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "a".to_string(),
-            edge_label: None,
+            edge_labels: Vec::new(),
             direction: Direction::Out,
             rls_filters: vec![],
             collection: None,

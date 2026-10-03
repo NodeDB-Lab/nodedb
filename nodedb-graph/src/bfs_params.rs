@@ -10,7 +10,9 @@ use crate::csr::Direction;
 /// traversal semantics.
 pub struct BfsParams<'a> {
     pub start_nodes: &'a [&'a str],
-    pub label_filter: Option<&'a str>,
+    /// Empty keeps every edge. Otherwise an edge whose label is any listed
+    /// label passes.
+    pub label_filter: &'a [&'a str],
     pub direction: Direction,
     pub max_depth: usize,
     pub max_visited: usize,

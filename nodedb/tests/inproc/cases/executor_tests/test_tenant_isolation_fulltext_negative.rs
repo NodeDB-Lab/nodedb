@@ -58,9 +58,12 @@ fn fulltext_cross_tenant_index_does_not_contaminate_search() {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "articles"),
             query: "quantum".into(),
             top_k: 20,
-            fuzzy: false,
+            mode: nodedb_types::text_search::QueryMode::And, fuzzy: false,
             rls_filters: Vec::new(),
             prefilter: None,
+            field: None,
+            filters: Vec::new(),
+            scores: Vec::new(),
         }),
     );
     assert_eq!(resp_baseline.status, Status::Ok);
@@ -102,9 +105,12 @@ fn fulltext_cross_tenant_index_does_not_contaminate_search() {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "articles"),
             query: "quantum".into(),
             top_k: 20,
-            fuzzy: false,
+            mode: nodedb_types::text_search::QueryMode::And, fuzzy: false,
             rls_filters: Vec::new(),
             prefilter: None,
+            field: None,
+            filters: Vec::new(),
+            scores: Vec::new(),
         }),
     );
     assert_eq!(resp_after.status, Status::Ok);

@@ -148,16 +148,16 @@ pub(in crate::data::executor) fn admit_stored_row(
 /// Decide one graph edge's STORED property object — the image of the edge
 /// about to be tombstoned — against the compiled write policy.
 ///
-/// An edge stores the `PROPERTIES` clause as the JSON object text the DSL
-/// produced, not MessagePack, so the decode goes through JSON and the result is
-/// decided by [`admit_row`]: the same evaluator the document path uses, so one
-/// compiled predicate cannot mean one thing for a document row and another for
-/// an edge's properties.
+/// An edge stores its properties as a plain-MessagePack map. The edge put
+/// decides its image in the Control Plane with `ScanFilter::all_match_binary`
+/// on those msgpack bytes. The delete decides the stored bytes with the same
+/// binary evaluator through [`rls_eval::rls_check_msgpack_bytes`], so one
+/// policy gives put and delete one verdict on one property map.
 ///
-/// `properties` is `None` when no live edge version exists, and a body that is
-/// not a JSON object — including an edge written with no `PROPERTIES` clause —
-/// carries no field the predicate can test. Both deny: an image the policy
-/// could not be evaluated against is not an image the policy admitted.
+/// `properties` is `None` when no live edge version exists. A body that is not
+/// a map, including an edge written with no `PROPERTIES` clause, carries no
+/// field the predicate can test. Both deny: an image the policy could not be
+/// evaluated against is not an image the policy admitted.
 pub(in crate::data::executor) fn admit_edge_properties(
     rls_write_check: &RlsWriteCheck,
     properties: Option<&[u8]>,
@@ -173,13 +173,17 @@ pub(in crate::data::executor) fn admit_edge_properties(
             ),
         }),
         WriteGateDecision::Evaluate(_) => {
-            let decoded =
-                properties.and_then(|bytes| sonic_rs::from_slice::<serde_json::Value>(bytes).ok());
-            match decoded {
-                Some(image @ serde_json::Value::Object(_)) => {
-                    admit_row(rls_write_check, &image, tid, collection)
-                }
-                _ => Err(crate::Error::RejectedAuthz {
+            let map = properties.filter(|bytes| {
+                matches!(
+                    nodedb_types::json_msgpack::value_from_msgpack(bytes),
+                    Ok(nodedb_types::Value::Object(_))
+                )
+            });
+            match map {
+                Some(bytes) => decide(rls_write_check, tid, collection, |filters| {
+                    rls_eval::rls_check_msgpack_bytes(filters, bytes)
+                }),
+                None => Err(crate::Error::RejectedAuthz {
                     tenant_id: crate::types::TenantId::new(tid),
                     resource: format!(
                         "RLS write policy on '{collection}': the edge carries no decodable \
@@ -323,12 +327,17 @@ mod tests {
         assert!(admit_edge_properties(&RlsWriteCheck::NoPolicyApplies, None, 1, "knows").is_ok());
     }
 
+    /// Edge properties as stored: a plain-MessagePack map.
+    fn edge_properties(value: serde_json::Value) -> Vec<u8> {
+        nodedb_types::json_msgpack::json_to_msgpack(&value).expect("encode properties")
+    }
+
     #[test]
     fn a_conforming_edge_property_object_is_admitted() {
         assert!(
             admit_edge_properties(
                 &RlsWriteCheck::Predicate(owner_policy("alice")),
-                Some(br#"{"owner":"alice"}"#),
+                Some(&edge_properties(json!({"owner": "alice"}))),
                 1,
                 "knows"
             )
@@ -341,7 +350,45 @@ mod tests {
         assert!(
             admit_edge_properties(
                 &RlsWriteCheck::Predicate(owner_policy("alice")),
-                Some(br#"{"owner":"bob"}"#),
+                Some(&edge_properties(json!({"owner": "bob"}))),
+                1,
+                "knows"
+            )
+            .is_err()
+        );
+    }
+
+    /// The binary evaluator resolves `owner` to a qualified `e.owner` key.
+    /// A typed-value evaluator does not. Put and delete both use the binary
+    /// one, so they agree on every property map.
+    #[test]
+    fn edge_put_and_delete_share_one_verdict() {
+        let policy = owner_policy("alice");
+        let check = RlsWriteCheck::Predicate(policy.clone());
+        for (properties, admitted) in [
+            (json!({"e.owner": "alice"}), true),
+            (json!({"owner": "alice"}), true),
+            (json!({"owner": "bob"}), false),
+            (json!({"e.owner": "bob"}), false),
+            (json!({"note": "x"}), false),
+        ] {
+            let bytes = edge_properties(properties.clone());
+            let put = crate::control::security::rls::admit_compiled_write_image(
+                &policy, &bytes, 1, "knows",
+            );
+            let delete = admit_edge_properties(&check, Some(&bytes), 1, "knows");
+            assert_eq!(put.is_ok(), admitted, "put {properties}");
+            assert_eq!(delete.is_ok(), admitted, "delete {properties}");
+        }
+    }
+
+    /// JSON text is not the stored encoding, so it carries no decodable map.
+    #[test]
+    fn json_text_properties_are_not_a_property_map() {
+        assert!(
+            admit_edge_properties(
+                &RlsWriteCheck::Predicate(owner_policy("alice")),
+                Some(br#"{"owner":"alice"}"#),
                 1,
                 "knows"
             )
@@ -350,14 +397,17 @@ mod tests {
     }
 
     /// An edge with no live version, an empty `PROPERTIES` clause, or a body
-    /// that is not a JSON object gives the predicate nothing to test, so each
-    /// denies rather than being admitted by omission.
+    /// that is not a map gives the predicate nothing to test, so each denies
+    /// rather than being admitted by omission.
     #[test]
     fn an_edge_without_a_decodable_property_object_is_rejected() {
         let policy = RlsWriteCheck::Predicate(owner_policy("alice"));
         assert!(admit_edge_properties(&policy, None, 1, "knows").is_err());
         assert!(admit_edge_properties(&policy, Some(b""), 1, "knows").is_err());
-        assert!(admit_edge_properties(&policy, Some(b"[1,2]"), 1, "knows").is_err());
+        assert!(
+            admit_edge_properties(&policy, Some(&edge_properties(json!([1, 2]))), 1, "knows")
+                .is_err()
+        );
     }
 
     /// A filter payload that does not deserialize denies rather than passing

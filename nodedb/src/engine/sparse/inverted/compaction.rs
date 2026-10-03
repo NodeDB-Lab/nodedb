@@ -23,21 +23,19 @@ impl InvertedIndex {
         self.inner.backend().compact_commit(params)
     }
 
-    /// Enumerate every `(database_id, TenantId, collection)` triple that has at
-    /// least one FTS segment in the backing store.
+    /// Enumerate every `(database_id, TenantId, collection, field)` index
+    /// that has at least one FTS segment in the backing store. `field` is
+    /// empty for a whole-document index.
     ///
     /// Used by the maintenance cycle to discover compaction candidates
     /// without requiring a separate in-memory registry of FTS-indexed
     /// collections.
-    pub fn list_all_fts_collections(&self) -> crate::Result<Vec<(u64, TenantId, String)>> {
-        self.inner
-            .backend()
-            .list_all_fts_collections()
-            .map(|triples| {
-                triples
-                    .into_iter()
-                    .map(|(d, t, c)| (d, TenantId::new(t), c))
-                    .collect()
-            })
+    pub fn list_all_fts_indexes(&self) -> crate::Result<Vec<(u64, TenantId, String, String)>> {
+        self.inner.backend().list_all_fts_indexes().map(|indexes| {
+            indexes
+                .into_iter()
+                .map(|(d, t, c, f)| (d, TenantId::new(t), c, f))
+                .collect()
+        })
     }
 }

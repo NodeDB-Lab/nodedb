@@ -63,6 +63,16 @@ pub(crate) fn map_plan_error(
         nodedb_sql::SqlError::AmbiguousColumn { column } => {
             crate::Error::AmbiguousColumn { column }
         }
+        nodedb_sql::SqlError::TextColumn {
+            collection,
+            column,
+            fault,
+            ..
+        } => crate::Error::TextColumn {
+            collection,
+            column,
+            fault,
+        },
         // A target/expression count mismatch is a syntax error in PostgreSQL,
         // so it renders 42601 through `BadRequest`.
         nodedb_sql::SqlError::Arity { detail } => crate::Error::BadRequest { detail },
@@ -77,6 +87,7 @@ pub(crate) fn map_plan_error(
         // A value out of range for its type is a data exception (class `22`),
         // the class PostgreSQL and the DDL DEFAULT gate give it.
         nodedb_sql::SqlError::ConstantOverflow { .. }
+        | nodedb_sql::SqlError::NumericLiteralOutOfRange { .. }
         | nodedb_sql::SqlError::IntegerOutOfRange { .. }
         | nodedb_sql::SqlError::FloatOutOfRange { .. } => crate::Error::DataException {
             detail: error.to_string(),

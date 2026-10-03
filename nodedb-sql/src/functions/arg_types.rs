@@ -120,7 +120,7 @@ pub static BM25_SCORE_ARGS: &[ArgTypeSpec] = &[any("column"), typed("query", TEX
 
 pub static SEARCH_SCORE_ARGS: &[ArgTypeSpec] = &[any("column"), typed("query", TEXT)];
 
-pub static TEXT_MATCH_ARGS: &[ArgTypeSpec] = &[any("column"), typed("query", TEXT), any("options")];
+pub static TEXT_MATCH_ARGS: &[ArgTypeSpec] = &[any("column"), typed("query", TEXT)];
 
 // ── Hybrid search ─────────────────────────────────────────────────────────────
 

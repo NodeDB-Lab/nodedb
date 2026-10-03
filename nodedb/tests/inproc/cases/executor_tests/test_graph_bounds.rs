@@ -60,7 +60,7 @@ fn graph_traversal_bounded_under_adversarial_queries() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::Hop {
             start_nodes: vec!["hub".into()],
-            edge_label: None,
+            edge_labels: Vec::new(),
             direction: Direction::Out,
             depth: 1,
             options: Default::default(),
@@ -84,7 +84,7 @@ fn graph_traversal_bounded_under_adversarial_queries() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::Hop {
             start_nodes: vec!["hub".into()],
-            edge_label: None,
+            edge_labels: Vec::new(),
             direction: Direction::Out,
             depth: 0,
             options: Default::default(),
@@ -104,7 +104,7 @@ fn graph_traversal_bounded_under_adversarial_queries() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::Hop {
             start_nodes: vec!["c0".into()],
-            edge_label: Some("NEXT".into()),
+            edge_labels: vec!["NEXT".into()],
             direction: Direction::Out,
             depth: 5,
             options: Default::default(),
@@ -130,7 +130,7 @@ fn graph_traversal_bounded_under_adversarial_queries() {
         PhysicalPlan::Graph(GraphOp::Path {
             src: "c0".into(),
             dst: "c50".into(),
-            edge_label: Some("NEXT".into()),
+            edge_labels: vec!["NEXT".into()],
             max_depth: 3,
             options: Default::default(),
             rls_filters: Vec::new(),
@@ -152,7 +152,7 @@ fn graph_traversal_bounded_under_adversarial_queries() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::Subgraph {
             start_nodes: vec!["c0".into()],
-            edge_label: Some("NEXT".into()),
+            edge_labels: vec!["NEXT".into()],
             depth: 3,
             options: Default::default(),
             rls_filters: Vec::new(),

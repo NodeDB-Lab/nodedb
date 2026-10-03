@@ -284,7 +284,7 @@ pub(super) fn merge_neighbors_named(
     }
 
     if want_out {
-        for (label, dst) in overlay.out_neighbors(src_name, label_filter) {
+        for (label, dst) in overlay.out_neighbors(src_name, label_filter.as_slice()) {
             if !out
                 .iter()
                 .any(|(l, n)| l.as_str() == label && n.as_str() == dst)
@@ -294,7 +294,7 @@ pub(super) fn merge_neighbors_named(
         }
     }
     if want_in {
-        for (label, src) in overlay.in_neighbors(src_name, label_filter) {
+        for (label, src) in overlay.in_neighbors(src_name, label_filter.as_slice()) {
             if !out
                 .iter()
                 .any(|(l, n)| l.as_str() == label && n.as_str() == src)

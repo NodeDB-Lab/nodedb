@@ -20,15 +20,22 @@ use crate::control::server::shared::session::{PendingOffsetCommit, SessionId, Tr
 use super::core::NodeDbPgHandler;
 use super::transaction_cmds::PgwireTxnDp;
 
-/// Map a neutral savepoint error to the pgwire error the pre-extraction path
-/// emitted (`25P01` outside a transaction, `3B001` for an unknown savepoint).
+/// Map a neutral savepoint error to its pgwire error: `25P01` outside a
+/// transaction, `25P02` in an aborted block, `3B001` for an unknown
+/// savepoint, `XX000` for a failed overlay mark or rewind.
 fn savepoint_error_to_pgerror(e: &SavepointError) -> PgWireError {
     let (code, message) = match e {
         SavepointError::NoActiveTransaction => (
             "25P01",
             "SAVEPOINT can only be used in transaction blocks".to_owned(),
         ),
+        SavepointError::TransactionAborted => (
+            "25P02",
+            "current transaction is aborted, commands ignored until end of transaction block"
+                .to_owned(),
+        ),
         SavepointError::NotFound { message } => ("3B001", message.clone()),
+        SavepointError::OverlayDispatch { message } => ("XX000", message.clone()),
     };
     PgWireError::UserError(Box::new(ErrorInfo::new(
         "ERROR".to_owned(),

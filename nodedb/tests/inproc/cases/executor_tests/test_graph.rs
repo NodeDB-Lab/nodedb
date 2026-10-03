@@ -38,7 +38,7 @@ fn edge_put_and_graph_neighbors() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "alice".into(),
-            edge_label: Some("KNOWS".into()),
+            edge_labels: vec!["KNOWS".into()],
             direction: Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
@@ -79,7 +79,7 @@ fn graph_hop_traversal() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::Hop {
             start_nodes: vec!["a".into()],
-            edge_label: Some("NEXT".into()),
+            edge_labels: vec!["NEXT".into()],
             direction: Direction::Out,
             depth: 2,
             options: Default::default(),
@@ -125,7 +125,7 @@ fn graph_path_and_subgraph() {
         PhysicalPlan::Graph(GraphOp::Path {
             src: "a".into(),
             dst: "c".into(),
-            edge_label: Some("L".into()),
+            edge_labels: vec!["L".into()],
             max_depth: 5,
             options: Default::default(),
             rls_filters: Vec::new(),
@@ -142,7 +142,7 @@ fn graph_path_and_subgraph() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::Subgraph {
             start_nodes: vec!["a".into()],
-            edge_label: None,
+            edge_labels: Vec::new(),
             depth: 2,
             options: Default::default(),
             rls_filters: Vec::new(),
@@ -199,7 +199,7 @@ fn edge_delete_updates_csr() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "x".into(),
-            edge_label: None,
+            edge_labels: Vec::new(),
             direction: Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
@@ -296,4 +296,169 @@ fn graph_rag_fusion_pipeline() {
     assert!(metadata.get("vector_candidates").is_some());
     assert!(metadata.get("graph_expanded").is_some());
     assert_eq!(metadata["truncated"], false);
+}
+
+/// `a -KNOWS-> b`, `a -WORKS-> c`, `a -LIKES-> d`, `b -WORKS-> e`,
+/// `c -LIKES-> f`.
+fn label_set_graph() -> (
+    nodedb::data::executor::core_loop::CoreLoop,
+    nodedb_bridge::buffer::Producer<BridgeRequest>,
+    nodedb_bridge::buffer::Consumer<nodedb::bridge::dispatch::BridgeResponse>,
+    tempfile::TempDir,
+) {
+    let (mut core, mut tx, mut rx, dir) = make_core();
+    for (s, label, d) in [
+        ("a", "KNOWS", "b"),
+        ("a", "WORKS", "c"),
+        ("a", "LIKES", "d"),
+        ("b", "WORKS", "e"),
+        ("c", "LIKES", "f"),
+    ] {
+        send_ok(
+            &mut core,
+            &mut tx,
+            &mut rx,
+            PhysicalPlan::Graph(GraphOp::EdgePut {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "col",
+                ),
+                src_id: s.into(),
+                label: label.into(),
+                dst_id: d.into(),
+                properties: vec![],
+                src_surrogate: doc_surrogate(s),
+                dst_surrogate: doc_surrogate(d),
+            }),
+        );
+    }
+    (core, tx, rx, dir)
+}
+
+fn knows_or_works() -> Vec<String> {
+    vec!["KNOWS".into(), "WORKS".into()]
+}
+
+#[test]
+fn hop_follows_every_listed_label() {
+    let (mut core, mut tx, mut rx, _dir) = label_set_graph();
+    let hop = |labels: Vec<String>| {
+        PhysicalPlan::Graph(GraphOp::Hop {
+            start_nodes: vec!["a".into()],
+            edge_labels: labels,
+            direction: Direction::Out,
+            depth: 2,
+            options: Default::default(),
+            rls_filters: Vec::new(),
+            frontier_bitmap: None,
+            collection: None,
+        })
+    };
+
+    let payload = send_ok(&mut core, &mut tx, &mut rx, hop(knows_or_works()));
+    let mut nodes: Vec<String> = serde_json::from_value(payload_value(&payload)).unwrap();
+    nodes.sort();
+    assert_eq!(nodes, vec!["a", "b", "c", "e"]);
+
+    // An unknown label adds nothing to the set it joins.
+    let payload = send_ok(
+        &mut core,
+        &mut tx,
+        &mut rx,
+        hop(vec!["KNOWS".into(), "ABSENT".into()]),
+    );
+    let mut nodes: Vec<String> = serde_json::from_value(payload_value(&payload)).unwrap();
+    nodes.sort();
+    assert_eq!(nodes, vec!["a", "b"]);
+
+    // A set of only unknown labels keeps no edge.
+    let payload = send_ok(&mut core, &mut tx, &mut rx, hop(vec!["ABSENT".into()]));
+    let nodes: Vec<String> = serde_json::from_value(payload_value(&payload)).unwrap();
+    assert!(
+        !nodes.iter().any(|n| n != "a"),
+        "no edge may be followed: {nodes:?}"
+    );
+}
+
+#[test]
+fn neighbors_multi_follows_every_listed_label() {
+    let (mut core, mut tx, mut rx, _dir) = label_set_graph();
+    let payload = send_ok(
+        &mut core,
+        &mut tx,
+        &mut rx,
+        PhysicalPlan::Graph(GraphOp::NeighborsMulti {
+            node_ids: vec!["a".into(), "b".into()],
+            edge_labels: knows_or_works(),
+            direction: Direction::Out,
+            max_results: 0,
+            rls_filters: Vec::new(),
+            collection: None,
+            edge_predicate: Vec::new(),
+            with_properties: false,
+        }),
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_value(payload_value(&payload)).unwrap();
+    let mut triples: Vec<(String, String, String)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row["src"].as_str().unwrap().to_string(),
+                row["label"].as_str().unwrap().to_string(),
+                row["node"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    triples.sort();
+    assert_eq!(
+        triples,
+        vec![
+            ("a".into(), "KNOWS".into(), "b".into()),
+            ("a".into(), "WORKS".into(), "c".into()),
+            ("b".into(), "WORKS".into(), "e".into()),
+        ]
+    );
+}
+
+#[test]
+fn path_and_subgraph_follow_every_listed_label() {
+    let (mut core, mut tx, mut rx, _dir) = label_set_graph();
+    let payload = send_ok(
+        &mut core,
+        &mut tx,
+        &mut rx,
+        PhysicalPlan::Graph(GraphOp::Path {
+            src: "a".into(),
+            dst: "e".into(),
+            edge_labels: knows_or_works(),
+            max_depth: 5,
+            options: Default::default(),
+            rls_filters: Vec::new(),
+            frontier_bitmap: None,
+            collection: None,
+        }),
+    );
+    let path: Vec<String> = serde_json::from_value(payload_value(&payload)).unwrap();
+    assert_eq!(path, vec!["a", "b", "e"]);
+
+    let payload = send_ok(
+        &mut core,
+        &mut tx,
+        &mut rx,
+        PhysicalPlan::Graph(GraphOp::Subgraph {
+            start_nodes: vec!["a".into()],
+            edge_labels: knows_or_works(),
+            depth: 2,
+            options: Default::default(),
+            rls_filters: Vec::new(),
+            collection: None,
+        }),
+    );
+    let edges: Vec<serde_json::Value> = serde_json::from_value(payload_value(&payload)).unwrap();
+    let mut labels: Vec<String> = edges
+        .iter()
+        .map(|edge| edge["label"].as_str().unwrap().to_string())
+        .collect();
+    labels.sort();
+    assert_eq!(labels, vec!["KNOWS", "WORKS", "WORKS"]);
 }

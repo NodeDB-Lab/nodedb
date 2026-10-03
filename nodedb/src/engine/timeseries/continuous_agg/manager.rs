@@ -9,7 +9,8 @@ use std::collections::HashMap;
 
 use super::definition::{ContinuousAggregateDef, RefreshPolicy};
 use super::partial::PartialAggregate;
-use super::refresh;
+use super::refresh::{self, RefreshResult};
+use super::rollup;
 use super::watermark::WatermarkState;
 use crate::engine::timeseries::columnar_memtable::ColumnarDrainResult;
 
@@ -19,7 +20,24 @@ type AggKey = (u64, String);
 
 /// Materialized partials for one aggregate:
 /// `(bucket_ts, group_key) → PartialAggregate`.
-type MaterializedBuckets = HashMap<(i64, Vec<u32>), PartialAggregate>;
+type MaterializedBuckets = refresh::Buckets;
+
+/// Whether an aggregate sourced from another aggregate takes that
+/// aggregate's refreshes. A `Manual` or `Periodic` aggregate refreshes only
+/// on its own trigger.
+fn takes_upstream_refresh(policy: &RefreshPolicy) -> bool {
+    matches!(policy, RefreshPolicy::OnFlush | RefreshPolicy::OnSeal)
+}
+
+/// Whether two definitions of one aggregate build the same partial state.
+/// A change to any of these makes the materialized buckets of the old
+/// definition meaningless under the new one.
+fn same_shape(a: &ContinuousAggregateDef, b: &ContinuousAggregateDef) -> bool {
+    a.source == b.source
+        && a.bucket_interval_ms == b.bucket_interval_ms
+        && a.group_by == b.group_by
+        && a.aggregates == b.aggregates
+}
 
 /// Manages all continuous aggregates for a timeseries engine instance.
 ///
@@ -58,18 +76,29 @@ impl ContinuousAggregateManager {
     /// Idempotent: boot re-registration and a replayed post-apply both
     /// register a definition the core can already hold. A repeated dependency
     /// edge refreshes the aggregate twice per flush.
+    ///
+    /// A definition of another shape (source, bucket, GROUP BY, or
+    /// aggregates) replaces the old one with no materialized buckets and a
+    /// default watermark: buckets built for the old shape do not hold the
+    /// new one's columns.
     pub fn register(&mut self, def: ContinuousAggregateDef) {
         let database_id = def.database_id;
         let source = def.source.clone();
         let name = def.name.clone();
+        let key = (database_id, name.clone());
 
-        if let Some(previous) = self.definitions.get(&(database_id, name.clone()))
-            && previous.source != source
-            && let Some(deps) = self
-                .dependencies
-                .get_mut(&(database_id, previous.source.clone()))
-        {
-            deps.retain(|n| n != &name);
+        if let Some(previous) = self.definitions.get(&key) {
+            if previous.source != source
+                && let Some(deps) = self
+                    .dependencies
+                    .get_mut(&(database_id, previous.source.clone()))
+            {
+                deps.retain(|n| n != &name);
+            }
+            if !same_shape(previous, &def) {
+                self.materialized.remove(&key);
+                self.watermarks.remove(&key);
+            }
         }
         self.watermarks
             .entry((database_id, name.clone()))
@@ -119,7 +148,8 @@ impl ContinuousAggregateManager {
     /// Process a flush event from a source collection.
     ///
     /// Finds all aggregates that depend on `source_collection` with
-    /// `RefreshPolicy::OnFlush` and refreshes them incrementally.
+    /// `RefreshPolicy::OnFlush` and refreshes them incrementally, then rolls
+    /// each refresh up into the aggregates sourced from it, transitively.
     ///
     /// Returns the names of aggregates that were refreshed.
     pub fn on_flush(
@@ -136,7 +166,6 @@ impl ContinuousAggregateManager {
             .unwrap_or_default();
 
         let mut refreshed = Vec::new();
-
         for agg_name in &agg_names {
             let key = (database_id, agg_name.clone());
             let Some(def) = self.definitions.get(&key) else {
@@ -145,44 +174,15 @@ impl ContinuousAggregateManager {
             if def.refresh_policy != RefreshPolicy::OnFlush || def.stale {
                 continue;
             }
-
-            let def_clone = def.clone();
             let watermark = self.watermarks.get(&key).cloned().unwrap_or_default();
-            let mat = self.materialized.entry(key.clone()).or_default();
-
-            let result = refresh::refresh_from_drain(&def_clone, drain, &watermark, mat);
-
-            // Update watermark.
-            if let Some(wm) = self.watermarks.get_mut(&key) {
-                wm.advance(result.max_ts, result.rows_processed, now_ms);
-                if let Some(o3_ts) = result.o3_min_ts {
-                    wm.record_o3(o3_ts);
-                }
-            }
-
-            refreshed.push(agg_name.clone());
+            let result = refresh::refresh_from_drain(def, drain, &watermark);
+            self.apply_refresh(database_id, agg_name, result, now_ms, &mut refreshed);
         }
-
-        // Multi-tier chaining: check if refreshed aggregates have downstream
-        // dependents within the same database.
-        let mut chain_refreshed = Vec::new();
-        for name in &refreshed {
-            if let Some(downstream) = self.dependencies.get(&(database_id, name.clone())).cloned() {
-                for ds_name in &downstream {
-                    if let Some(ds_def) = self.definitions.get(&(database_id, ds_name.clone()))
-                        && ds_def.refresh_policy == RefreshPolicy::OnFlush
-                        && !ds_def.stale
-                    {
-                        chain_refreshed.push(ds_name.clone());
-                    }
-                }
-            }
-        }
-        refreshed.extend(chain_refreshed);
         refreshed
     }
 
-    /// Manually refresh an aggregate (for Manual or Periodic policies).
+    /// Manually refresh an aggregate (for Manual or Periodic policies), and
+    /// roll the refresh up into the aggregates sourced from it.
     pub fn manual_refresh(
         &mut self,
         database_id: u64,
@@ -191,19 +191,70 @@ impl ContinuousAggregateManager {
         now_ms: i64,
     ) {
         let key = (database_id, agg_name.to_string());
-        let Some(def) = self.definitions.get(&key).cloned() else {
+        let Some(def) = self.definitions.get(&key) else {
             return;
         };
         let watermark = self.watermarks.get(&key).cloned().unwrap_or_default();
-        let mat = self.materialized.entry(key.clone()).or_default();
+        let result = refresh::refresh_from_drain(def, drain, &watermark);
+        let mut refreshed = Vec::new();
+        self.apply_refresh(database_id, agg_name, result, now_ms, &mut refreshed);
+    }
 
-        let result = refresh::refresh_from_drain(&def, drain, &watermark, mat);
+    /// Merge `result` into `name`'s materialized buckets and advance its
+    /// watermark. Then roll the refresh delta up into every non-stale
+    /// aggregate sourced from `name` that takes upstream refreshes, and so on
+    /// down the chain. Each aggregate takes one refresh per call, so a chain
+    /// that loops back stops at the first repeat. Appends every refreshed
+    /// name to `refreshed`.
+    fn apply_refresh(
+        &mut self,
+        database_id: u64,
+        name: &str,
+        result: RefreshResult,
+        now_ms: i64,
+        refreshed: &mut Vec<String>,
+    ) {
+        let mut pending = vec![(name.to_string(), result)];
+        while let Some((name, result)) = pending.pop() {
+            if refreshed.contains(&name) {
+                continue;
+            }
+            let key = (database_id, name);
+            let Some(def) = self.definitions.get(&key) else {
+                continue;
+            };
+            let RefreshResult {
+                rows_processed,
+                max_ts,
+                o3_min_ts,
+                delta,
+            } = result;
 
-        if let Some(wm) = self.watermarks.get_mut(&key) {
-            wm.advance(result.max_ts, result.rows_processed, now_ms);
-            if let Some(o3_ts) = result.o3_min_ts {
+            if let Some(downstream) = self.dependencies.get(&key) {
+                for ds_name in downstream {
+                    let Some(ds_def) = self.definitions.get(&(database_id, ds_name.clone())) else {
+                        continue;
+                    };
+                    if ds_def.stale || !takes_upstream_refresh(&ds_def.refresh_policy) {
+                        continue;
+                    }
+                    let rolled = RefreshResult {
+                        rows_processed,
+                        max_ts,
+                        o3_min_ts,
+                        delta: rollup::rollup_delta(def, ds_def, &delta),
+                    };
+                    pending.push((ds_name.clone(), rolled));
+                }
+            }
+
+            refresh::merge_delta(self.materialized.entry(key.clone()).or_default(), delta);
+            let wm = self.watermarks.entry(key.clone()).or_default();
+            wm.advance(max_ts, rows_processed, now_ms);
+            if let Some(o3_ts) = o3_min_ts {
                 wm.record_o3(o3_ts);
             }
+            refreshed.push(key.1);
         }
     }
 
@@ -374,6 +425,7 @@ mod tests {
         AggFunction, AggregateExpr, RefreshPolicy,
     };
     use crate::engine::timeseries::time_bucket;
+    use nodedb_types::Value;
     use nodedb_types::timeseries::MetricSample;
 
     fn test_memtable_config() -> ColumnarMemtableConfig {
@@ -629,5 +681,210 @@ mod tests {
             .unwrap();
         assert!(!results.is_empty());
         assert!(results.len() <= 11);
+    }
+
+    // ── Exactness: materialized buckets equal the ad-hoc aggregate ──
+
+    const ABOVE: i64 = 9_007_199_254_740_993;
+    const AT: i64 = 9_007_199_254_740_992;
+    const T0: i64 = 1_700_000_040_000;
+
+    /// `(timestamp_ms, v)` rows: integers one apart above 2^53, nanosecond
+    /// timestamps one tick apart, and `i64::MAX` twice so a bucket total
+    /// leaves `i64`.
+    fn exact_rows() -> Vec<(i64, i64)> {
+        vec![
+            (T0, ABOVE),
+            (T0 + 1_000, AT),
+            (T0 + 2_000, 1_700_000_000_000_000_002),
+            (T0 + 61_000, 1_700_000_000_000_000_001),
+            (T0 + 62_000, i64::MAX),
+            (T0 + 63_000, i64::MAX),
+            (T0 + 3_600_000, 1_700_000_000_000_000_003),
+        ]
+    }
+
+    fn exact_def(name: &str, source: &str, bucket: &str) -> ContinuousAggregateDef {
+        let expr = |function, column: &str| AggregateExpr {
+            function,
+            source_column: column.into(),
+            output_column: String::new(),
+        };
+        ContinuousAggregateDef {
+            aggregates: vec![
+                expr(AggFunction::Count, "*"),
+                expr(AggFunction::Sum, "v"),
+                expr(AggFunction::Min, "v"),
+                expr(AggFunction::Max, "v"),
+                expr(AggFunction::Avg, "v"),
+                expr(AggFunction::First, "v"),
+                expr(AggFunction::Last, "v"),
+            ],
+            ..make_agg_def(name, source, bucket)
+        }
+    }
+
+    /// One drain of `rows` over a `(timestamp, v BIGINT)` schema.
+    fn int_drain(rows: &[(i64, i64)]) -> ColumnarDrainResult {
+        let schema = ColumnarSchema {
+            columns: vec![
+                ("timestamp".into(), ColumnType::Timestamp(TimeKind::Millis)),
+                ("v".into(), ColumnType::Int64),
+            ],
+            timestamp_idx: 0,
+            codecs: vec![nodedb_codec::ColumnCodec::Auto; 2],
+        };
+        let mut mt = ColumnarMemtable::new(schema, test_memtable_config());
+        for &(ts, v) in rows {
+            mt.ingest_row(1, &[ColumnValue::Timestamp(ts), ColumnValue::Int64(v)])
+                .unwrap();
+        }
+        mt.drain()
+    }
+
+    /// The ad-hoc timeseries aggregate of `rows` per bucket of
+    /// `bucket_ms`, in `exact_def` order: COUNT, SUM, MIN, MAX, AVG, FIRST,
+    /// LAST.
+    fn ad_hoc(rows: &[(i64, i64)], bucket_ms: i64) -> Vec<(i64, Vec<Value>)> {
+        use crate::engine::timeseries::columnar_agg::AggAccum;
+        let mut sorted = rows.to_vec();
+        sorted.sort_by_key(|&(ts, _)| ts);
+        let mut buckets: std::collections::BTreeMap<i64, AggAccum> = Default::default();
+        for (ts, v) in sorted {
+            buckets
+                .entry(time_bucket::time_bucket(bucket_ms, ts))
+                .or_default()
+                .feed_int(v);
+        }
+        buckets
+            .into_iter()
+            .map(|(bucket, a)| {
+                let cell = |v: Option<&Value>| v.cloned().unwrap_or(Value::Null);
+                let values = vec![
+                    Value::Integer(a.count as i64),
+                    a.sum_value().unwrap(),
+                    cell(a.min()),
+                    cell(a.max()),
+                    a.avg_f64().unwrap().map_or(Value::Null, Value::Float),
+                    cell(a.first()),
+                    cell(a.last()),
+                ];
+                (bucket, values)
+            })
+            .collect()
+    }
+
+    /// Every materialized bucket of `name`, finalized.
+    fn materialized(mgr: &ContinuousAggregateManager, name: &str) -> Vec<(i64, Vec<Value>)> {
+        let def = mgr.get_definition(0, name).unwrap();
+        let layout = crate::engine::timeseries::continuous_agg::ColumnLayout::of(def);
+        mgr.get_materialized(0, name)
+            .unwrap()
+            .into_iter()
+            .map(|p| {
+                let values = def
+                    .aggregates
+                    .iter()
+                    .map(|e| p.finalize(e, &layout).unwrap())
+                    .collect();
+                (p.bucket_ts, values)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn materialized_integers_equal_ad_hoc_across_refreshes_and_o3() {
+        let mut mgr = ContinuousAggregateManager::new();
+        mgr.register(exact_def("v_1m", "metrics", "1m"));
+        let rows = exact_rows();
+
+        // Three refreshes; the last carries rows below the watermark.
+        mgr.on_flush(0, "metrics", &int_drain(&rows[3..5]), T0);
+        mgr.on_flush(0, "metrics", &int_drain(&rows[5..]), T0);
+        mgr.on_flush(0, "metrics", &int_drain(&rows[..3]), T0);
+
+        assert!(mgr.get_watermark(0, "v_1m").unwrap().o3_watermark_ts.is_some());
+        let got = materialized(&mgr, "v_1m");
+        assert_eq!(got, ad_hoc(&rows, 60_000));
+        // The second bucket's total left `i64`: an exact Decimal.
+        assert!(matches!(got[1].1[1], Value::Decimal(_)), "{:?}", got[1].1[1]);
+    }
+
+    #[test]
+    fn rollup_tier_equals_ad_hoc_over_raw_rows() {
+        let mut mgr = ContinuousAggregateManager::new();
+        mgr.register(exact_def("v_1m", "metrics", "1m"));
+        let mut tier2 = exact_def("v_1h", "v_1m", "1h");
+        tier2.refresh_policy = RefreshPolicy::OnSeal;
+        mgr.register(tier2);
+        let rows = exact_rows();
+
+        let refreshed = mgr.on_flush(0, "metrics", &int_drain(&rows[4..]), T0);
+        assert_eq!(refreshed, vec!["v_1m", "v_1h"]);
+        mgr.on_flush(0, "metrics", &int_drain(&rows[..4]), T0);
+
+        assert_eq!(materialized(&mgr, "v_1m"), ad_hoc(&rows, 60_000));
+        assert_eq!(materialized(&mgr, "v_1h"), ad_hoc(&rows, 3_600_000));
+        assert_eq!(mgr.get_watermark(0, "v_1h").unwrap().rows_aggregated, 7);
+    }
+
+    #[test]
+    fn manual_refresh_rolls_up_into_downstream() {
+        let mut mgr = ContinuousAggregateManager::new();
+        let mut tier1 = exact_def("v_1m", "metrics", "1m");
+        tier1.refresh_policy = RefreshPolicy::Manual;
+        mgr.register(tier1);
+        mgr.register(exact_def("v_1h", "v_1m", "1h"));
+        let rows = exact_rows();
+
+        mgr.manual_refresh(0, "v_1m", &int_drain(&rows), T0);
+        assert_eq!(materialized(&mgr, "v_1h"), ad_hoc(&rows, 3_600_000));
+    }
+
+    #[test]
+    fn three_tier_chain_equals_ad_hoc() {
+        let mut mgr = ContinuousAggregateManager::new();
+        mgr.register(exact_def("a", "metrics", "1m"));
+        mgr.register(exact_def("b", "a", "1m"));
+        mgr.register(exact_def("c", "b", "1h"));
+        let rows = exact_rows();
+
+        let refreshed = mgr.on_flush(0, "metrics", &int_drain(&rows), T0);
+        assert_eq!(refreshed, vec!["a", "b", "c"]);
+        assert_eq!(materialized(&mgr, "b"), ad_hoc(&rows, 60_000));
+        assert_eq!(materialized(&mgr, "c"), ad_hoc(&rows, 3_600_000));
+    }
+
+    /// Two aggregates sourced from each other: a refresh of one reaches the
+    /// other and stops there instead of cycling.
+    #[test]
+    fn chain_that_loops_back_refreshes_each_aggregate_once() {
+        let mut mgr = ContinuousAggregateManager::new();
+        let mut x = exact_def("x", "y", "1m");
+        x.refresh_policy = RefreshPolicy::OnSeal;
+        mgr.register(x);
+        mgr.register(exact_def("y", "x", "1m"));
+        let rows = exact_rows();
+
+        mgr.manual_refresh(0, "x", &int_drain(&rows), T0);
+        assert_eq!(materialized(&mgr, "x"), ad_hoc(&rows, 60_000));
+        assert_eq!(materialized(&mgr, "y"), ad_hoc(&rows, 60_000));
+    }
+
+    #[test]
+    fn reregister_with_another_shape_drops_old_buckets() {
+        let mut mgr = ContinuousAggregateManager::new();
+        mgr.register(exact_def("v_1m", "metrics", "1m"));
+        mgr.on_flush(0, "metrics", &int_drain(&exact_rows()), T0);
+        assert!(!mgr.get_materialized(0, "v_1m").unwrap().is_empty());
+
+        // Same shape: buckets stay.
+        mgr.register(exact_def("v_1m", "metrics", "1m"));
+        assert!(!mgr.get_materialized(0, "v_1m").unwrap().is_empty());
+
+        // Another bucket interval: buckets and watermark reset.
+        mgr.register(exact_def("v_1m", "metrics", "5m"));
+        assert!(mgr.get_materialized(0, "v_1m").unwrap().is_empty());
+        assert_eq!(mgr.get_watermark(0, "v_1m").unwrap().rows_aggregated, 0);
     }
 }

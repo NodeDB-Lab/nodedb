@@ -10,10 +10,20 @@ use super::context::RlsCtx;
 /// between injecting, refusing, and no-op.
 pub(super) fn inject_text(ctx: &RlsCtx<'_>, op: &mut TextOp) -> crate::Result<()> {
     match op {
-        // Inject: the policy lands in the post-score / post-fusion slot the
-        // handler applies before the ranked hits are returned. The result can
-        // hold fewer than `top_k` rows, which is the intended effect.
+        // Inject: the policy lands in the RLS slot. The handler folds it into
+        // the eligible rows before ranking, so `top_k` counts only rows the
+        // policy admits.
         TextOp::Search {
+            collection,
+            rls_filters,
+            ..
+        }
+        | TextOp::BM25ScoreScan {
+            collection,
+            rls_filters,
+            ..
+        }
+        | TextOp::PhraseSearch {
             collection,
             rls_filters,
             ..
@@ -28,16 +38,6 @@ pub(super) fn inject_text(ctx: &RlsCtx<'_>, op: &mut TextOp) -> crate::Result<()
             rls_filters,
             ..
         } => ctx.set_post_filters(collection, rls_filters),
-
-        // Refuse: the score scan emits every document in the collection with a
-        // score column appended, and the phrase search emits every positional
-        // hit — neither carries a filter slot for the policy to occupy.
-        TextOp::BM25ScoreScan { collection, .. } | TextOp::PhraseSearch { collection, .. } => ctx
-            .refuse_if_policy(
-                collection,
-                "the search returns matched document rows through a response shape that carries \
-                 no row filter",
-            ),
 
         // Refuse: an index write carries the extracted text and a surrogate,
         // not the row body the policy names. Indexing a row the policy hides
@@ -61,8 +61,8 @@ mod tests {
     use nodedb_physical::physical_plan::TextOp;
 
     use super::super::plan::test_support::{
-        assert_refused, assert_write_refused, inject, inject_without_policy,
-        store_with_read_policy, store_with_write_policy,
+        assert_write_refused, inject, inject_without_policy, store_with_read_policy,
+        store_with_write_policy,
     };
     use crate::bridge::envelope::PhysicalPlan;
 
@@ -73,7 +73,7 @@ mod tests {
                 collection,
             ),
             surrogate: nodedb_types::Surrogate::new(1),
-            text: "hello".into(),
+            fields: vec![("body".into(), "hello".into())],
             provenance: None,
         })
     }
@@ -96,21 +96,59 @@ mod tests {
         assert_eq!(plan, before);
     }
 
-    /// A BM25 score scan returns every row of the collection with no slot for
-    /// the policy, so it is refused rather than silently over-returning.
+    fn articles() -> nodedb_types::QualifiedCollection {
+        nodedb_types::QualifiedCollection::new(nodedb_types::DatabaseId::DEFAULT, "articles")
+    }
+
+    /// The RLS slot of a text read.
+    fn rls_slot(plan: &PhysicalPlan) -> &[u8] {
+        match plan {
+            PhysicalPlan::Text(
+                TextOp::Search { rls_filters, .. }
+                | TextOp::BM25ScoreScan { rls_filters, .. }
+                | TextOp::PhraseSearch { rls_filters, .. },
+            ) => rls_filters,
+            other => panic!("plan shape changed: {other:?}"),
+        }
+    }
+
+    /// A BM25 score scan applies the policy to every row it emits.
     #[test]
-    fn bm25_score_scan_is_refused_under_a_read_policy() {
+    fn bm25_score_scan_receives_the_policy_filter() {
         let store = store_with_read_policy("articles");
         let mut plan = PhysicalPlan::Text(TextOp::BM25ScoreScan {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "articles",
-            ),
-            query: "rust".into(),
-            score_alias: "score".into(),
-            fuzzy: false,
+            collection: articles(),
+            filters: Vec::new(),
+            rls_filters: Vec::new(),
+            scores: Vec::new(),
+            bound: None,
         });
-        assert_refused(inject(&mut plan, &store), "articles");
+        assert!(inject(&mut plan, &store).is_ok());
+        assert!(
+            !rls_slot(&plan).is_empty(),
+            "policy filter must be injected"
+        );
+    }
+
+    /// A phrase search applies the policy to its ranked hits.
+    #[test]
+    fn phrase_search_receives_the_policy_filter() {
+        let store = store_with_read_policy("articles");
+        let mut plan = PhysicalPlan::Text(TextOp::PhraseSearch {
+            collection: articles(),
+            field: None,
+            terms: vec!["rust".into(), "lang".into()],
+            top_k: 10,
+            prefilter: None,
+            filters: Vec::new(),
+            rls_filters: Vec::new(),
+            scores: Vec::new(),
+        });
+        assert!(inject(&mut plan, &store).is_ok());
+        assert!(
+            !rls_slot(&plan).is_empty(),
+            "policy filter must be injected"
+        );
     }
 
     /// A BM25 search does carry the slot, so the policy is injected.
@@ -118,22 +156,54 @@ mod tests {
     fn search_receives_the_policy_filter() {
         let store = store_with_read_policy("articles");
         let mut plan = PhysicalPlan::Text(TextOp::Search {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "articles",
-            ),
+            collection: articles(),
+            field: Some("body".into()),
             query: "rust".into(),
             top_k: 10,
-            fuzzy: false,
+            mode: nodedb_types::text_search::QueryMode::And, fuzzy: false,
             prefilter: None,
+            filters: Vec::new(),
             rls_filters: Vec::new(),
+            scores: Vec::new(),
         });
         assert!(inject(&mut plan, &store).is_ok());
-        match &plan {
-            PhysicalPlan::Text(TextOp::Search { rls_filters, .. }) => {
-                assert!(!rls_filters.is_empty(), "policy filter must be injected")
-            }
-            other => panic!("plan shape changed: {other:?}"),
-        }
+        assert!(
+            !rls_slot(&plan).is_empty(),
+            "policy filter must be injected"
+        );
+    }
+
+    /// A slot that already holds the statement's predicates keeps them: the
+    /// policy joins them.
+    #[test]
+    fn the_policy_joins_existing_post_filters() {
+        let store = store_with_read_policy("articles");
+        let own = vec![nodedb_query::scan_filter::ScanFilter {
+            field: "tag".into(),
+            op: nodedb_query::scan_filter::FilterOp::Eq,
+            value: nodedb_types::Value::String("a".into()),
+            clauses: Vec::new(),
+            expr: None,
+        }];
+        let own_bytes = zerompk::to_msgpack_vec(&own).expect("encode own filters");
+        let mut plan = PhysicalPlan::Text(TextOp::Search {
+            collection: articles(),
+            field: None,
+            query: "rust".into(),
+            top_k: 10,
+            mode: nodedb_types::text_search::QueryMode::And, fuzzy: false,
+            prefilter: None,
+            filters: Vec::new(),
+            rls_filters: own_bytes,
+            scores: Vec::new(),
+        });
+        assert!(inject(&mut plan, &store).is_ok());
+        let merged: Vec<nodedb_query::scan_filter::ScanFilter> =
+            zerompk::from_msgpack(rls_slot(&plan)).expect("decode merged filters");
+        assert!(
+            merged.len() > 1,
+            "policy must join, not replace: {merged:?}"
+        );
+        assert!(merged.iter().any(|f| f.field == "tag"));
     }
 }

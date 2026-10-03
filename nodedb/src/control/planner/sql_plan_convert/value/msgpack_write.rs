@@ -100,14 +100,20 @@ pub(crate) fn write_msgpack_value_with(buf: &mut Vec<u8>, val: &SqlValue, instan
             buf.push(0xCB);
             buf.extend_from_slice(&f.to_be_bytes());
         }
-        SqlValue::Decimal(d) => {
-            // Write as msgpack string of the decimal's canonical text representation.
-            // The Data Plane strict encoder accepts Value::String for Decimal columns
-            // and coerces via rust_decimal::Decimal::from_str. This matches the
-            // contract of write_msgpack_value: it produces standard msgpack that
-            // json_from_msgpack / value_from_msgpack can decode without loss.
-            write_msgpack_str(buf, &d.to_string());
-        }
+        SqlValue::Decimal(d) => match nodedb_types::Value::decimal_as_wide_u64(d) {
+            // An integer literal past `i64::MAX` that fits `u64` is a msgpack
+            // `uint64`, the number type that holds it. Readers decode it
+            // through `Value::from_u64`, back to this same `Decimal`.
+            Some(u) => {
+                buf.push(0xCF);
+                buf.extend_from_slice(&u.to_be_bytes());
+            }
+            // Any other decimal is the msgpack string of its canonical text.
+            // The Data Plane strict encoder accepts Value::String for Decimal
+            // columns and coerces via rust_decimal::Decimal::from_str, and
+            // json_from_msgpack / value_from_msgpack decode it without loss.
+            None => write_msgpack_str(buf, &d.to_string()),
+        },
         SqlValue::String(s) => write_msgpack_str(buf, s),
         SqlValue::Array(arr) => {
             write_msgpack_array_header(buf, arr.len());
@@ -189,6 +195,27 @@ mod tests {
         let mut buf = Vec::new();
         write_msgpack_value(&mut buf, &SqlValue::Int(42));
         assert_eq!(buf, vec![42]);
+    }
+
+    /// A literal past `i64::MAX` that fits `u64` is a msgpack `uint64` and
+    /// reads back as the same exact value. Any other decimal stays text.
+    #[test]
+    fn wide_integer_decimal_is_uint64() {
+        let wide = rust_decimal::Decimal::from(u64::MAX);
+        let mut buf = Vec::new();
+        write_msgpack_value(&mut buf, &SqlValue::Decimal(wide));
+        assert_eq!(buf, [0xCF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(
+            nodedb_types::value_from_msgpack(&buf).unwrap(),
+            nodedb_types::Value::Decimal(wide)
+        );
+
+        let mut buf = Vec::new();
+        let fractional = rust_decimal::Decimal::from_str_exact("1.5").unwrap();
+        write_msgpack_value(&mut buf, &SqlValue::Decimal(fractional));
+        let mut expected = Vec::new();
+        write_msgpack_str(&mut expected, "1.5");
+        assert_eq!(buf, expected);
     }
 
     #[test]

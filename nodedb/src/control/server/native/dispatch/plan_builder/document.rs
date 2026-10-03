@@ -12,6 +12,7 @@ use crate::bridge::envelope::PhysicalPlan;
 use nodedb_physical::physical_plan::{DocumentOp, KvOp, TimeseriesOp};
 
 use super::super::DispatchCtx;
+use super::document_identity::{identified_body, identified_json_body, stores_schemaless_bodies};
 use super::{collection_type, declared_primary_key, require_doc_id};
 
 pub(crate) async fn build_point_get(
@@ -62,7 +63,9 @@ pub(crate) async fn build_point_put(
 ) -> crate::Result<PhysicalPlan> {
     let doc_id = require_doc_id(fields)?;
     let value = fields.data.clone().unwrap_or_default();
-    match collection_type(ctx, collection)? {
+    let coll_type = collection_type(ctx, collection)?;
+    let schemaless = stores_schemaless_bodies(coll_type.as_ref());
+    match coll_type {
         Some(CollectionType::KeyValue(_)) => {
             let key = doc_id.into_bytes();
             let surrogate = super::helpers::assign_surrogate(ctx, collection, &key).await?;
@@ -108,6 +111,11 @@ pub(crate) async fn build_point_put(
                 .to_string(),
         }),
         Some(CollectionType::Document(_)) | None => {
+            let value = if schemaless {
+                identified_body(&value, &doc_id)?
+            } else {
+                value
+            };
             let pk_bytes = doc_id.as_bytes().to_vec();
             let surrogate = super::helpers::assign_surrogate(ctx, collection, &pk_bytes).await?;
             Ok(PhysicalPlan::Document(DocumentOp::PointPut {
@@ -258,12 +266,17 @@ pub(crate) async fn build_batch_insert(
     // Every row's identity in one batch at the collection's home.
     let pks: Vec<&[u8]> = batch_docs.iter().map(|d| d.id.as_bytes()).collect();
     let surrogates = super::helpers::assign_surrogates(ctx, collection, &pks).await?;
+    let schemaless = stores_schemaless_bodies(collection_type(ctx, collection)?.as_ref());
     let mut documents: Vec<(String, Vec<u8>)> = Vec::with_capacity(batch_docs.len());
     for d in batch_docs {
-        let value_bytes = sonic_rs::to_vec(&d.fields).map_err(|e| crate::Error::Serialization {
-            format: "json".into(),
-            detail: format!("failed to serialize document '{}': {e}", d.id),
-        })?;
+        let value_bytes = if schemaless {
+            identified_json_body(d.fields.clone(), &d.id)?
+        } else {
+            sonic_rs::to_vec(&d.fields).map_err(|e| crate::Error::Serialization {
+                format: "json".into(),
+                detail: format!("failed to serialize document '{}': {e}", d.id),
+            })?
+        };
         documents.push((d.id.clone(), value_bytes));
     }
     Ok(PhysicalPlan::Document(DocumentOp::BatchInsert {
@@ -363,6 +376,11 @@ pub(crate) async fn build_upsert(
 ) -> crate::Result<PhysicalPlan> {
     let doc_id = require_doc_id(fields)?;
     let value = fields.data.clone().unwrap_or_default();
+    let value = if stores_schemaless_bodies(collection_type(ctx, collection)?.as_ref()) {
+        identified_body(&value, &doc_id)?
+    } else {
+        value
+    };
     let surrogate = super::helpers::assign_surrogate(ctx, collection, doc_id.as_bytes()).await?;
     Ok(PhysicalPlan::Document(DocumentOp::Upsert {
         collection: QualifiedCollection::new(ctx.database_id(), collection),

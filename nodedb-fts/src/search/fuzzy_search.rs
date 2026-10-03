@@ -1,77 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Fuzzy term lookup for the FtsIndex.
+//! Fuzzy term candidates for the FtsIndex.
 
 use crate::backend::FtsBackend;
 use crate::fuzzy;
 use crate::index::FtsIndex;
 use crate::lsm::query as lsm_query;
-use crate::posting::Posting;
+use crate::scope::IndexScope;
 
 impl<B: FtsBackend> FtsIndex<B> {
-    /// Find the best fuzzy-matching term and return its posting list.
-    pub(crate) fn fuzzy_lookup(
+    /// Terms within fuzzy distance of `query_term`, best first. The
+    /// vocabulary is every term of the index plus `extra_vocabulary` (the
+    /// tokens of a transaction's staged documents).
+    pub(crate) fn fuzzy_candidates(
         &self,
         database_id: u64,
         tid: u64,
-        collection: &str,
+        index: IndexScope<'_>,
         query_term: &str,
-    ) -> Result<(Vec<Posting>, bool), B::Error> {
-        let mut all_terms = lsm_query::collect_all_terms(
-            &self.backend,
-            database_id,
-            tid,
-            collection,
-            self.memtable(),
-        )?;
-
-        let backend_terms = self
-            .backend
-            .collection_terms(database_id, tid, collection)?;
-        for t in backend_terms {
-            all_terms.push(t);
-        }
+        extra_vocabulary: &[&str],
+    ) -> Result<Vec<String>, B::Error> {
+        let mut all_terms =
+            lsm_query::collect_all_terms(&self.backend, database_id, tid, index, self.memtable())?;
+        all_terms.extend(self.backend.collection_terms(database_id, tid, index)?);
+        all_terms.extend(extra_vocabulary.iter().map(|t| (*t).to_string()));
         all_terms.sort();
         all_terms.dedup();
 
-        let matches = fuzzy::fuzzy_match(query_term, all_terms.iter().map(String::as_str));
-
-        if let Some((best_term, _dist)) = matches.first() {
-            let postings = self
-                .backend
-                .read_postings(database_id, tid, collection, best_term)?;
-            if !postings.is_empty() {
-                return Ok((postings, true));
-            }
-
-            let tokens = vec![best_term.to_string()];
-            let term_blocks = lsm_query::collect_merged_term_blocks(
-                &self.backend,
-                database_id,
-                tid,
-                collection,
-                self.memtable(),
-                &tokens,
-                &self.governor,
-            )?;
-            if !term_blocks.is_empty() && term_blocks[0].df > 0 {
-                let mut postings = Vec::new();
-                for block in &term_blocks[0].blocks {
-                    for i in 0..block.doc_ids.len() {
-                        postings.push(Posting {
-                            doc_id: block.doc_ids[i],
-                            term_freq: block.term_freqs[i],
-                            positions: block.positions[i].clone(),
-                        });
-                    }
-                }
-                if !postings.is_empty() {
-                    return Ok((postings, true));
-                }
-            }
-        }
-
-        Ok((Vec::new(), false))
+        Ok(
+            fuzzy::fuzzy_match(query_term, all_terms.iter().map(String::as_str))
+                .into_iter()
+                .map(|(term, _dist)| term.to_string())
+                .collect(),
+        )
     }
 }
 
@@ -86,24 +47,35 @@ mod tests {
     const T: u64 = 1;
 
     #[test]
-    fn fuzzy_lookup_finds_close_term() {
+    fn fuzzy_candidates_find_close_term() {
         let idx = FtsIndex::new(MemoryBackend::new(), test_governor());
         idx.index_document(DB, T, "docs", Surrogate(1), "distributed database systems")
             .unwrap();
 
-        let (postings, is_fuzzy) = idx.fuzzy_lookup(DB, T, "docs", "databse").unwrap();
-        assert!(is_fuzzy, "should find fuzzy match");
-        assert!(!postings.is_empty(), "should return postings from LSM");
+        let candidates = idx
+            .fuzzy_candidates(DB, T, "docs".into(), "databse", &[])
+            .unwrap();
+        assert!(!candidates.is_empty(), "should find a fuzzy match");
     }
 
     #[test]
-    fn fuzzy_lookup_no_match() {
+    fn fuzzy_candidates_no_match() {
         let idx = FtsIndex::new(MemoryBackend::new(), test_governor());
         idx.index_document(DB, T, "docs", Surrogate(1), "hello world")
             .unwrap();
 
-        let (postings, is_fuzzy) = idx.fuzzy_lookup(DB, T, "docs", "zzzzzzz").unwrap();
-        assert!(postings.is_empty());
-        assert!(!is_fuzzy);
+        let candidates = idx
+            .fuzzy_candidates(DB, T, "docs".into(), "zzzzzzz", &[])
+            .unwrap();
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn fuzzy_candidates_include_extra_vocabulary() {
+        let idx = FtsIndex::new(MemoryBackend::new(), test_governor());
+        let candidates = idx
+            .fuzzy_candidates(DB, T, "docs".into(), "databse", &["databas"])
+            .unwrap();
+        assert_eq!(candidates, vec!["databas".to_string()]);
     }
 }

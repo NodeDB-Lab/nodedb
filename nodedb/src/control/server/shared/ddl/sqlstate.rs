@@ -203,6 +203,15 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             sqlstate::UNDEFINED_COLUMN,
             format!("column \"{column}\" does not exist"),
         ),
+        ErrorCode::TextColumn {
+            collection,
+            column,
+            fault,
+        } => (
+            "ERROR",
+            fault.sqlstate(),
+            format!("column \"{column}\" of collection \"{collection}\" {fault}"),
+        ),
         ErrorCode::Internal { detail } => ("ERROR", sqlstate::INTERNAL_ERROR, detail.clone()),
         // Division/modulo by zero.
         ErrorCode::DivisionByZero => (

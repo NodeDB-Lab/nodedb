@@ -14,6 +14,7 @@ pub mod catalog_expr_fold;
 pub mod catalog_fold;
 pub mod catalog_plan_shapes;
 pub mod catalog_plan_validate;
+pub mod collection_predicate;
 pub mod const_fold;
 pub mod cp_projection;
 pub mod cte;

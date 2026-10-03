@@ -175,6 +175,22 @@ pub enum DataPlaneErrorCode {
         object: String,
         detail: String,
     },
+    /// A full-text search named a field that cannot serve it (SQLSTATE
+    /// `42703` or `42804`, by fault).
+    TextColumn {
+        collection: String,
+        column: String,
+        fault: DataPlaneTextColumnFault,
+    },
+}
+
+/// Wire mirror of `nodedb_types::text_search::TextColumnFault`.
+#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub enum DataPlaneTextColumnFault {
+    Undeclared,
+    NotText { data_type: String },
+    NotAColumn,
+    NotIndexed,
 }
 
 /// Wire mirror of `nodedb::bridge::envelope::SyncHold`.

@@ -22,60 +22,20 @@ pub(super) fn merge_accum(dst: &mut AggAccum, other: AggAccum) {
         (AggAccum::Count { n: a }, AggAccum::Count { n: b }) => {
             *a += b;
         }
-        (
-            AggAccum::SumAvg {
-                sum: sa,
-                comp: ca,
-                n: na,
-            },
-            AggAccum::SumAvg {
-                sum: sb,
-                comp: _cb,
-                n: nb,
-            },
-        ) => {
-            // Kahan-compensated addition of the other partial sum into self.
-            let y = sb - *ca;
-            let t = *sa + y;
-            *ca = (t - *sa) - y;
-            *sa = t;
-            *na += nb;
+        (AggAccum::SumAvg { sum: a }, AggAccum::SumAvg { sum: b }) => {
+            // Integer parts add exactly; float parts add compensated.
+            a.merge(&b);
         }
         (AggAccum::SumAvgDistinct { seen: a }, AggAccum::SumAvgDistinct { seen: b }) => {
-            // Union the deduped value maps; the first-seen parsed f64 wins
-            // (all instances of the same key carry the same value, so the
-            // choice is immaterial). The sum is re-derived at finalize.
+            // Union the deduped value maps; the first-seen number wins (all
+            // instances of the same key carry the same value, so the choice
+            // is immaterial). The sum is re-derived at finalize.
             for (key, value) in b {
                 a.entry(key).or_insert(value);
             }
         }
-        (AggAccum::Min { best: a }, AggAccum::Min { best: b }) => {
-            if let Some(bv) = b {
-                let replace = match a {
-                    None => true,
-                    Some(av) => {
-                        nodedb_query::value_ops::compare_values(&bv, av) == std::cmp::Ordering::Less
-                    }
-                };
-                if replace {
-                    *a = Some(bv);
-                }
-            }
-        }
-        (AggAccum::Max { best: a }, AggAccum::Max { best: b }) => {
-            if let Some(bv) = b {
-                let replace = match a {
-                    None => true,
-                    Some(av) => {
-                        nodedb_query::value_ops::compare_values(&bv, av)
-                            == std::cmp::Ordering::Greater
-                    }
-                };
-                if replace {
-                    *a = Some(bv);
-                }
-            }
-        }
+        (AggAccum::Min { best: a }, AggAccum::Min { best: b }) => merge_extremum(a, b, false),
+        (AggAccum::Max { best: a }, AggAccum::Max { best: b }) => merge_extremum(a, b, true),
         (AggAccum::CountDistinct { seen: a }, AggAccum::CountDistinct { seen: b }) => {
             a.extend(b);
         }
@@ -153,6 +113,21 @@ pub(super) fn merge_accum(dst: &mut AggAccum, other: AggAccum) {
                  both operands must be the same variant (same aggregate spec, same query)"
             );
         }
+    }
+}
+
+/// Merge a partial MIN (`want_max` false) or MAX (`want_max` true) extreme
+/// into `dst`. Exact comparison; a NaN extreme yields to any candidate, and
+/// a NaN candidate never replaces a number.
+fn merge_extremum(
+    dst: &mut Option<nodedb_types::Value>,
+    other: Option<nodedb_types::Value>,
+    want_max: bool,
+) {
+    if let Some(candidate) = other
+        && nodedb_query::window::extremum::value_replaces(&candidate, dst.as_ref(), want_max)
+    {
+        *dst = Some(candidate);
     }
 }
 
@@ -274,18 +249,18 @@ mod tests {
         a_sum.merge_from(b_sum);
         a_avg.merge_from(b_avg);
 
-        let Value::Float(cs) = combined_sum.finalize(&sum_spec) else {
+        let Value::Float(cs) = combined_sum.finalize(&sum_spec).unwrap() else {
             panic!("expected float");
         };
-        let Value::Float(ms) = a_sum.finalize(&sum_spec) else {
+        let Value::Float(ms) = a_sum.finalize(&sum_spec).unwrap() else {
             panic!("expected float");
         };
         assert!((cs - ms).abs() < 1e-9, "sum mismatch: {cs} vs {ms}");
 
-        let Value::Float(ca) = combined_avg.finalize(&avg_spec) else {
+        let Value::Float(ca) = combined_avg.finalize(&avg_spec).unwrap() else {
             panic!("expected float");
         };
-        let Value::Float(ma) = a_avg.finalize(&avg_spec) else {
+        let Value::Float(ma) = a_avg.finalize(&avg_spec).unwrap() else {
             panic!("expected float");
         };
         assert!((ca - ma).abs() < 1e-9, "avg mismatch: {ca} vs {ma}");
@@ -330,18 +305,134 @@ mod tests {
         a_sum.merge_from(b_sum);
         a_avg.merge_from(b_avg);
 
-        assert_eq!(combined_sum.finalize(&sum_spec), Value::Float(15.0));
-        assert_eq!(combined_avg.finalize(&avg_spec), Value::Float(3.0));
+        assert_eq!(combined_sum.finalize(&sum_spec), Ok(Value::Integer(15)));
+        assert_eq!(combined_avg.finalize(&avg_spec), Ok(Value::Float(3.0)));
         assert_eq!(
             a_sum.finalize(&sum_spec),
-            Value::Float(15.0),
+            Ok(Value::Integer(15)),
             "sum_distinct merge"
         );
         assert_eq!(
             a_avg.finalize(&avg_spec),
-            Value::Float(3.0),
+            Ok(Value::Float(3.0)),
             "avg_distinct merge"
         );
+    }
+
+    /// Feed `docs_a` and `docs_b` into one accumulator, and separately into
+    /// two partials merged after; return both finalized results.
+    fn single_and_merged(spec: &AggregateSpec, docs_a: &[Vec<u8>], docs_b: &[Vec<u8>]) -> [Value; 2] {
+        let mut combined = AggAccum::new(spec);
+        for d in docs_a.iter().chain(docs_b) {
+            combined.feed(spec, d).unwrap();
+        }
+        let mut a = AggAccum::new(spec);
+        for d in docs_a {
+            a.feed(spec, d).unwrap();
+        }
+        let mut b = AggAccum::new(spec);
+        for d in docs_b {
+            b.feed(spec, d).unwrap();
+        }
+        a.merge_from(b);
+        [combined.finalize(spec).unwrap(), a.finalize(spec).unwrap()]
+    }
+
+    const ABOVE: i64 = 9_007_199_254_740_993;
+    const AT: i64 = 9_007_199_254_740_992;
+
+    /// A one-field doc whose value is a raw msgpack `uint64`.
+    fn make_doc_u64(field: &str, value: u64) -> Vec<u8> {
+        let mut doc = vec![0x81, 0xa0 | field.len() as u8];
+        doc.extend_from_slice(field.as_bytes());
+        doc.push(0xcf);
+        doc.extend_from_slice(&value.to_be_bytes());
+        doc
+    }
+
+    #[test]
+    fn sum_min_max_keep_integers_above_2_pow_53_exact_through_merge() {
+        let a = [make_doc_i64("v", ABOVE)];
+        let b = [make_doc_i64("v", AT)];
+        for got in single_and_merged(&make_spec("sum", "v"), &a, &b) {
+            assert_eq!(got, Value::Integer(ABOVE + AT));
+        }
+        for got in single_and_merged(&make_spec("min", "v"), &a, &b) {
+            assert_eq!(got, Value::Integer(AT));
+        }
+        for got in single_and_merged(&make_spec("max", "v"), &a, &b) {
+            assert_eq!(got, Value::Integer(ABOVE));
+        }
+        for got in single_and_merged(&make_spec("avg", "v"), &a, &b) {
+            assert_eq!(got, Value::Float(AT as f64));
+        }
+    }
+
+    #[test]
+    fn nanosecond_timestamps_sum_and_extremes_exactly() {
+        let a = [make_doc_i64("v", 1_700_000_000_000_000_002)];
+        let b = [
+            make_doc_i64("v", 1_700_000_000_000_000_001),
+            make_doc_i64("v", 1_700_000_000_000_000_003),
+        ];
+        for got in single_and_merged(&make_spec("sum", "v"), &a, &b) {
+            assert_eq!(got, Value::Integer(5_100_000_000_000_000_006));
+        }
+        for got in single_and_merged(&make_spec("min", "v"), &a, &b) {
+            assert_eq!(got, Value::Integer(1_700_000_000_000_000_001));
+        }
+        for got in single_and_merged(&make_spec("max", "v"), &a, &b) {
+            assert_eq!(got, Value::Integer(1_700_000_000_000_000_003));
+        }
+    }
+
+    #[test]
+    fn sum_past_i64_is_decimal_through_merge() {
+        let a = [make_doc_i64("v", i64::MAX)];
+        let b = [make_doc_i64("v", i64::MAX), make_doc_u64("v", u64::MAX)];
+        let want = rust_decimal::Decimal::from_i128_with_scale(
+            2 * i128::from(i64::MAX) + i128::from(u64::MAX),
+            0,
+        );
+        for got in single_and_merged(&make_spec("sum", "v"), &a, &b) {
+            assert_eq!(got, Value::Decimal(want));
+        }
+        for got in single_and_merged(&make_spec("max", "v"), &a, &b) {
+            assert_eq!(got, Value::Decimal(rust_decimal::Decimal::from(u64::MAX)));
+        }
+    }
+
+    #[test]
+    fn sum_mixed_int_float_is_float() {
+        let a = [make_doc_i64("v", 2)];
+        let b = [make_doc_f64("v", 0.5)];
+        for got in single_and_merged(&make_spec("sum", "v"), &a, &b) {
+            assert_eq!(got, Value::Float(2.5));
+        }
+        for got in single_and_merged(&make_spec("max", "v"), &a, &b) {
+            assert_eq!(got, Value::Integer(2));
+        }
+    }
+
+    #[test]
+    fn nan_extreme_yields_to_numbers_in_feed_and_merge() {
+        let a = [make_doc_f64("v", f64::NAN), make_doc_i64("v", 5)];
+        let b = [make_doc_i64("v", 3)];
+        for got in single_and_merged(&make_spec("min", "v"), &a, &b) {
+            assert_eq!(got, Value::Integer(3));
+        }
+        for got in single_and_merged(&make_spec("max", "v"), &a, &b) {
+            assert_eq!(got, Value::Integer(5));
+        }
+        // A NaN-only partial merged into a numeric one never wins.
+        let nan_only = [make_doc_f64("v", f64::NAN)];
+        let nums = [make_doc_i64("v", 7)];
+        for got in single_and_merged(&make_spec("max", "v"), &nan_only, &nums) {
+            assert_eq!(got, Value::Integer(7));
+        }
+        for got in single_and_merged(&make_spec("min", "v"), &nums, &nan_only) {
+            assert_eq!(got, Value::Integer(7));
+        }
     }
 
     #[test]

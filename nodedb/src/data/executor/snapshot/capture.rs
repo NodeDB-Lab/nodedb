@@ -197,7 +197,7 @@ mod tests {
                 tid(),
                 "docs",
                 Surrogate::new(7),
-                "quick brown fox",
+                &crate::engine::sparse::inverted::test_support::body("quick brown fox"),
             )
             .unwrap();
 

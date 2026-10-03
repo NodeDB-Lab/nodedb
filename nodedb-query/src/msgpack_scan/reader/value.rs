@@ -29,9 +29,8 @@ pub fn read_value(buf: &[u8], offset: usize) -> Option<nodedb_types::Value> {
         UINT32 => Some(nodedb_types::Value::Integer(
             read_u32_be(buf, offset + 1)? as i64
         )),
-        UINT64 => Some(nodedb_types::Value::Integer(
-            read_u64_be(buf, offset + 1)? as i64
-        )),
+        // Above `i64::MAX` this is a `Decimal`, never a wrapped negative.
+        UINT64 => Some(nodedb_types::Value::from_u64(read_u64_be(buf, offset + 1)?)),
         INT8 => Some(nodedb_types::Value::Integer(
             get(buf, offset + 1)? as i8 as i64
         )),
@@ -94,6 +93,26 @@ mod tests {
             Some(Value::NaiveDateTime(NdbDateTime::from_micros(-5)))
         );
         assert_eq!(skip_value(&buf, 1), Some(11));
+    }
+
+    #[test]
+    fn read_value_uint64_above_i64_max_is_decimal() {
+        let mut buf = vec![UINT64];
+        buf.extend_from_slice(&u64::MAX.to_be_bytes());
+        assert_eq!(
+            read_value(&buf, 0),
+            Some(Value::Decimal(rust_decimal::Decimal::from(u64::MAX)))
+        );
+        let mut edge = vec![UINT64];
+        edge.extend_from_slice(&(i64::MAX as u64).to_be_bytes());
+        assert_eq!(read_value(&edge, 0), Some(Value::Integer(i64::MAX)));
+        let buf = encode(&json!(9_223_372_036_854_775_808_u64));
+        assert_eq!(
+            read_value(&buf, 0),
+            Some(Value::Decimal(rust_decimal::Decimal::from(
+                9_223_372_036_854_775_808_u64
+            )))
+        );
     }
 
     #[test]

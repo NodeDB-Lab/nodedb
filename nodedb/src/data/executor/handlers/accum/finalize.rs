@@ -8,46 +8,32 @@ use nodedb_types::Value;
 
 impl AggAccum {
     /// Consume the accumulator and produce the final `Value`.
-    pub(crate) fn finalize(self, agg: &AggregateSpec) -> Value {
-        match self {
+    ///
+    /// Fails with `EvalError::NumericOverflow` when an exact integer SUM /
+    /// AVG total lies outside the `Decimal` range.
+    pub(crate) fn finalize(self, agg: &AggregateSpec) -> Result<Value, nodedb_query::EvalError> {
+        Ok(match self {
             AggAccum::Count { n } => Value::Integer(n as i64),
-            AggAccum::SumAvg { sum, n, .. } => {
-                // Zero contributing values → NULL for both SUM and AVG. SUM has
-                // no natural zero identity in SQL: `SUM` over an empty input is
-                // NULL, not 0.0. `n` counts the values actually fed, so `n == 0`
-                // is the exact zero-contribution signal (a real SUM that happens
-                // to total 0.0 still has `n > 0` and returns `0.0`).
-                if n == 0 {
-                    Value::Null
-                } else if agg.function == "avg" {
-                    Value::Float(sum / n as f64)
+            // No contributing value is NULL for both SUM and AVG: SUM has no
+            // zero identity in SQL. Integer inputs total exactly.
+            AggAccum::SumAvg { sum } => {
+                if agg.function == "avg" {
+                    sum.avg()?
                 } else {
-                    Value::Float(sum)
+                    sum.sum()?
                 }
             }
             AggAccum::SumAvgDistinct { seen } => {
-                let n = seen.len();
-                // Kahan-compensated sum over the deduped values. Iteration
-                // order is arbitrary, but a DISTINCT sum is order-independent
-                // so the result is deterministic regardless.
-                let mut sum = 0.0f64;
-                let mut comp = 0.0f64;
-                for &v in seen.values() {
-                    let y = v - comp;
-                    let t = sum + y;
-                    comp = (t - sum) - y;
-                    sum = t;
+                // A DISTINCT sum is order-independent, so the arbitrary map
+                // iteration order gives a deterministic result.
+                let mut sum = nodedb_query::ExactSum::new();
+                for v in seen.values() {
+                    sum.add_value(v);
                 }
-                // Zero distinct values → NULL for both SUM(DISTINCT) and
-                // AVG(DISTINCT): same no-zero-identity rule as plain SUM. `n`
-                // is the distinct-value count (`seen.len()`), so `n == 0` is the
-                // zero-contribution signal.
-                if n == 0 {
-                    Value::Null
-                } else if agg.function == "avg_distinct" {
-                    Value::Float(sum / n as f64)
+                if agg.function == "avg_distinct" {
+                    sum.avg()?
                 } else {
-                    Value::Float(sum)
+                    sum.sum()?
                 }
             }
             AggAccum::Min { best } => best.unwrap_or(Value::Null),
@@ -55,7 +41,7 @@ impl AggAccum {
             AggAccum::CountDistinct { seen } => Value::Integer(seen.len() as i64),
             AggAccum::Welford { n, mean: _, m2 } => {
                 if n < 2 {
-                    return Value::Null;
+                    return Ok(Value::Null);
                 }
                 let population = matches!(
                     agg.function.as_str(),
@@ -107,7 +93,7 @@ impl AggAccum {
             AggAccum::ArrayAggDistinct { values, .. } => Value::Array(values),
             AggAccum::PercentileCont { mut values, pct } => {
                 if values.is_empty() {
-                    return Value::Null;
+                    return Ok(Value::Null);
                 }
                 values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let idx = (pct * (values.len() - 1) as f64).clamp(0.0, (values.len() - 1) as f64);
@@ -117,6 +103,6 @@ impl AggAccum {
                 Value::Float(values[lo] * (1.0 - frac) + values[hi] * frac)
             }
             AggAccum::StringAgg { parts } => Value::String(parts.join(",")),
-        }
+        })
     }
 }

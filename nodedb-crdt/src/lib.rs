@@ -46,6 +46,9 @@ pub use policy::{
 };
 pub use row_lookup::RowLookup;
 pub use signing::{DeltaSigner, DeviceRegistry};
-pub use state::{CrdtDeltaPreview, CrdtDeltaPreviewLimits, CrdtState, ImportAdmission};
+pub use state::{
+    CrdtDeltaPreview, CrdtDeltaPreviewLimits, CrdtState, ImportAdmission, TrackedImport,
+    WriteSetImport,
+};
 pub use state::{DEFAULT_MAX_DELTA_BYTES, DEFAULT_MAX_POST_IMAGE_BYTES};
 pub use validator::{ValidationOutcome, Validator};

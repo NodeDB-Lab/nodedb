@@ -263,7 +263,7 @@ mod tests {
             .iter()
             .flat_map(|node| {
                 partition
-                    .neighbors(node, None, Direction::Out)
+                    .neighbors(node, &[], Direction::Out)
                     .into_iter()
                     .map(|(_, dst)| (node.to_string(), dst))
                     .collect::<Vec<_>>()

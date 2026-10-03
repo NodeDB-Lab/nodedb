@@ -68,7 +68,7 @@ mod tests {
             collection: None,
             start_nodes: vec!["a".into()],
             depth: 2,
-            edge_label: None,
+            edge_labels: Vec::new(),
             direction: Direction::Out,
             options: GraphTraversalOptions::default(),
             rls_filters: Vec::new(),

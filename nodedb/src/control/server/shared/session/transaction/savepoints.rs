@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use crate::types::VShardId;
 
 use super::super::connection::SessionId;
-use super::super::state::{OverlayMarkers, SavepointEntry};
+use super::super::state::{OverlayMarkers, SavepointEntry, TransactionState};
 use super::super::store::SessionStore;
 
 /// What a ROLLBACK TO must rewind: per-vShard Data-Plane overlay journal
@@ -116,6 +116,12 @@ impl SessionStore {
             session.pending_publishes.truncate(pending_publish_len);
             debug_assert_eq!(session.tx_buffer.len(), session.tx_lease_scopes.len());
             session.savepoints.truncate(pos + 1);
+            // ROLLBACK TO leaves an aborted block usable again, as in
+            // PostgreSQL: the failed statement's work is discarded with the
+            // rest of the rewound buffer.
+            if session.tx_state == TransactionState::Failed {
+                session.tx_state = TransactionState::InBlock;
+            }
             Ok(SavepointRewind {
                 markers,
                 ddl_buffer_len,
@@ -213,5 +219,21 @@ mod tests {
         let pending = store.take_pending_offsets(addr);
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].offset, crate::event::cdc::CdcOffset::new(10, 1));
+    }
+
+    #[test]
+    fn rollback_to_savepoint_leaves_an_aborted_block_usable() {
+        let store = SessionStore::new();
+        let addr: std::net::SocketAddr = "127.0.0.1:6014".parse().expect("address");
+        store.ensure_session(addr);
+        store.begin(addr, Lsn::new(1), 0).expect("begin");
+        store.create_savepoint(addr, "sp".into(), BTreeMap::new(), 0);
+        store.fail_transaction(addr);
+        assert_eq!(store.transaction_state(addr), TransactionState::Failed);
+
+        store
+            .rollback_to_savepoint(addr, "sp")
+            .expect("rollback to savepoint");
+        assert_eq!(store.transaction_state(addr), TransactionState::InBlock);
     }
 }

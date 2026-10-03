@@ -47,7 +47,7 @@ impl CoreLoop {
         tombstones: &nodedb_wal::TombstoneSet,
     ) {
         use nodedb_wal::record::RecordType;
-        use tracing::{error, warn};
+        use tracing::{debug, warn};
 
         let mut replayed = 0usize;
 
@@ -97,21 +97,12 @@ impl CoreLoop {
             }
 
             let database_id = crate::types::DatabaseId::new(record.header.database_id);
-            if let Some(signing) = payload.signing {
-                let Some(provenance) = payload.provenance.as_ref() else {
-                    warn!(core = self.core_id, tenant = tid.as_u64(), %collection, "authenticated CRDT WAL record has no provenance");
-                    continue;
-                };
-                if signing.auth_user_id == 0
-                    || signing.auth_device_id == 0
-                    || signing.auth_seq_no == 0
-                    || provenance.producer_id != signing.auth_device_id
-                    || provenance.seq != signing.auth_seq_no
-                    || (signing.required && signing.delta_signature == [0; 32])
-                {
-                    warn!(core = self.core_id, tenant = tid.as_u64(), %collection, "authenticated CRDT WAL admission metadata is inconsistent");
-                    continue;
-                }
+            // The live apply never reads this metadata, so it applied the
+            // delta. A record its writer cannot produce halts replay: skipping
+            // it drops a committed delta.
+            if let Err(detail) = signed_record_metadata(&payload) {
+                self.replay_record_unapplied("crdt", "signing_metadata", record.header.lsn, &detail);
+                continue;
             }
             if let Some(expected) = payload.expected_frontier_digest {
                 let actual = self
@@ -127,65 +118,64 @@ impl CoreLoop {
                         )
                     });
                 if actual != expected {
-                    if payload.signing.is_some()
-                        && let Some(provenance) = payload.provenance.as_ref()
-                    {
-                        self.sync_commit(provenance);
-                    }
-                    warn!(
+                    // Replay rebuilds the collection in LSN order, so the
+                    // frontier here is the one the live apply fenced against.
+                    // The live apply refused the delta, applied nothing, and
+                    // held the stream's mark so the sender's re-push is
+                    // admitted. Replay skips it and holds the mark the same way.
+                    debug!(
                         core = self.core_id,
                         tenant = tid.as_u64(),
                         %collection,
-                        "skipping stale fenced CRDT WAL delta during replay"
+                        lsn = record.header.lsn,
+                        "replay skips a CRDT delta its live apply refused at the frontier fence"
                     );
                     continue;
                 }
             }
 
+            // Opening the engine restores the tenant's stored dead-letter
+            // entries. A record one of them names was rejected by its live
+            // apply, which stored the entry and changed no state, so it
+            // replays as that rejection. Applying it again would enqueue a
+            // second entry, which a queue full of restored entries refuses.
+            let already_rejected = match self.get_crdt_engine(database_id, tid) {
+                Ok(engine) => engine.dead_letter_recorded(record.header.lsn),
+                Err(error) => {
+                    self.replay_record_unapplied(
+                        "crdt",
+                        "engine_open",
+                        record.header.lsn,
+                        &error.to_string(),
+                    );
+                    continue;
+                }
+            };
+
             let projection = match &payload.target {
+                _ if already_rejected => None,
                 crate::wal::CrdtDeltaTarget::Document {
                     document_id,
                     surrogate,
                 } => {
                     let surrogate = *surrogate;
                     let applied = match self.get_crdt_engine(database_id, tid) {
-                        Ok(engine) => match payload.signing {
-                            Some(signing) => engine.apply_committed_delta_authenticated(
-                                collection,
-                                &payload.bytes,
-                                crate::engine::crdt::tenant_state::ApplyTarget::Document {
-                                    document_id,
-                                    surrogate,
-                                },
-                                payload.peer_id,
-                                crate::engine::crdt::tenant_state::DeltaSigningAdmission {
-                                    auth: nodedb_crdt::CrdtAuthContext {
-                                        user_id: signing.auth_user_id,
-                                        device_id: signing.auth_device_id,
-                                        seq_no: signing.auth_seq_no,
-                                        delta_signature: signing.delta_signature,
-                                        ..nodedb_crdt::CrdtAuthContext::default()
-                                    },
-                                    required: signing.required,
-                                    preverified: true,
-                                },
-                            ),
-                            None => engine.apply_committed_delta_validated(
-                                collection,
-                                &payload.bytes,
-                                crate::engine::crdt::tenant_state::ApplyTarget::Document {
-                                    document_id,
-                                    surrogate,
-                                },
-                                payload.peer_id,
-                            ),
-                        },
-                        Err(e) => {
-                            warn!(
-                                core = self.core_id,
-                                tenant = tid.as_u64(),
-                                error = %e,
-                                "failed to create CRDT engine during WAL replay"
+                        Ok(engine) => engine.apply_committed_delta_authenticated(
+                            collection,
+                            &payload.bytes,
+                            crate::engine::crdt::tenant_state::ApplyTarget::Document {
+                                document_id,
+                                surrogate,
+                            },
+                            payload.peer_id,
+                            replayed_admission(&payload),
+                        ),
+                        Err(error) => {
+                            self.replay_record_unapplied(
+                                "crdt",
+                                "engine_open",
+                                record.header.lsn,
+                                &error.to_string(),
                             );
                             continue;
                         }
@@ -195,31 +185,29 @@ impl CoreLoop {
                             write_set,
                             ..
                         } => {
+                            // The engine refuses a delta writing any row but
+                            // its target before it installs, so a clean apply
+                            // wrote the target alone. A wider write set is an
+                            // engine invariant broken after Loro installed the
+                            // delta: skipping its projection drops rows.
                             if let Err(detail) =
                                 Self::single_document_write_set(collection, document_id, &write_set)
                             {
-                                self.note_replay_write_lsn(
-                                    record.header.database_id,
-                                    tid.as_u64(),
-                                    collection,
-                                    None,
+                                self.replay_record_unapplied(
+                                    "crdt",
+                                    "one_document_contract",
                                     record.header.lsn,
-                                );
-                                warn!(
-                                    core = self.core_id,
-                                    tenant = tid.as_u64(),
-                                    %collection,
-                                    %document_id,
-                                    %detail,
-                                    "CRDT WAL delta violates one-document replay contract"
+                                    &detail,
                                 );
                                 continue;
                             }
                             let Some(engine) = self.crdt_engines.get(&(database_id, tid)) else {
-                                warn!(
-                                    core = self.core_id,
-                                    tenant = tid.as_u64(),
-                                    "CRDT engine disappeared during WAL replay"
+                                self.replay_record_unapplied(
+                                    "crdt",
+                                    "engine_missing",
+                                    record.header.lsn,
+                                    "the engine that applied the delta is gone before its row \
+                                     projected",
                                 );
                                 continue;
                             };
@@ -236,31 +224,68 @@ impl CoreLoop {
                             // The committed record remains a deterministic no-op
                             // whose collection floor advances on every replica.
                             warn!(core = self.core_id, tenant = tid.as_u64(), %collection, %reason, "CRDT WAL delta rejected during replay");
-                            self.store_replayed_dead_letter(database_id, tid, record.header.lsn);
+                            if !self.store_replayed_dead_letter(database_id, tid, record.header.lsn) {
+                                continue;
+                            }
                             None
                         }
+                        crate::engine::crdt::tenant_state::ValidatedApplyOutcome::DeadLetterRefused {
+                            violation,
+                            error,
+                        } => {
+                            // Rejected, and the queue refused its entry, so
+                            // nothing but this record holds the delta. Replay
+                            // stops at the record: no checkpoint covers it, and
+                            // boot refuses until the queue takes the entry.
+                            self.replay_record_unapplied(
+                                "crdt",
+                                "dead_letter_refused",
+                                record.header.lsn,
+                                &format!(
+                                    "delta for {collection} violates {violation}, and the \
+                                     dead-letter queue refused it: {error}"
+                                ),
+                            );
+                            continue;
+                        }
                         crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Malformed => {
+                            // The bytes, their rows, or a missing required
+                            // signature decide this, the same at replay as live.
+                            // The live apply refused the delta, applied nothing,
+                            // and advanced a sender's mark past it. Replay skips
+                            // it and advances the mark the same way.
                             if let Some(provenance) = payload.provenance.as_ref() {
                                 self.sync_commit(provenance);
                             }
-                            warn!(core = self.core_id, tenant = tid.as_u64(), %collection, "CRDT WAL delta malformed during replay");
+                            debug!(core = self.core_id, tenant = tid.as_u64(), %collection, lsn = record.header.lsn, "replay skips a CRDT delta its live apply refused as malformed");
                             continue;
                         }
                         crate::engine::crdt::tenant_state::ValidatedApplyOutcome::PendingDependencies => {
-                            // Records replay in LSN order, so a delta whose
-                            // causal predecessors are missing means the log is
-                            // inconsistent with this collection's document —
-                            // not a routine skip. Recovery continues so the
-                            // node still starts, but this is an error-level
-                            // event: the row it carried is NOT present.
-                            error!(
+                            // Replay rebuilds the collection in LSN order, so
+                            // the predecessors are absent here exactly when they
+                            // were absent live. The live apply applied nothing
+                            // and held the sender's mark for the re-push.
+                            // Replay skips the delta and holds the mark the
+                            // same way.
+                            debug!(
                                 core = self.core_id,
                                 tenant = tid.as_u64(),
                                 %collection,
                                 %document_id,
                                 lsn = record.header.lsn,
-                                "CRDT WAL delta depends on operations absent from this \
-                                 collection's document; row not recovered"
+                                "replay skips a CRDT delta its live apply held for missing \
+                                 predecessors"
+                            );
+                            continue;
+                        }
+                        crate::engine::crdt::tenant_state::ValidatedApplyOutcome::CandidateUnavailable => {
+                            // This node failed, not the delta: skipping it
+                            // drops a delta the live apply may have applied.
+                            self.replay_record_unapplied(
+                                "crdt",
+                                "candidate_unavailable",
+                                record.header.lsn,
+                                &format!("no apply candidate for {collection}"),
                             );
                             continue;
                         }
@@ -271,11 +296,12 @@ impl CoreLoop {
                     // It rebuilds Loro state only; each row's projection comes
                     // from the document records that carry its surrogate.
                     match self.get_crdt_engine(database_id, tid) {
-                        Ok(engine) => match engine.apply_committed_delta_validated(
+                        Ok(engine) => match engine.apply_committed_delta_authenticated(
                             collection,
                             &payload.bytes,
                             crate::engine::crdt::tenant_state::ApplyTarget::Collection,
                             payload.peer_id,
+                            replayed_admission(&payload),
                         ) {
                             crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Clean {
                                 ..
@@ -284,27 +310,55 @@ impl CoreLoop {
                                 reason,
                             ) => {
                                 warn!(core = self.core_id, tenant = tid.as_u64(), %collection, %reason, "CRDT WAL snapshot import rejected during replay");
-                                self.store_replayed_dead_letter(database_id, tid, record.header.lsn);
+                                if !self.store_replayed_dead_letter(database_id, tid, record.header.lsn) {
+                                    continue;
+                                }
                                 None
                             }
+                            // See the document arm: nothing but this record
+                            // holds the delta, so replay stops at it.
+                            crate::engine::crdt::tenant_state::ValidatedApplyOutcome::DeadLetterRefused {
+                                violation,
+                                error,
+                            } => {
+                                self.replay_record_unapplied(
+                                    "crdt",
+                                    "dead_letter_refused",
+                                    record.header.lsn,
+                                    &format!(
+                                        "snapshot import for {collection} violates {violation}, \
+                                         and the dead-letter queue refused it: {error}"
+                                    ),
+                                );
+                                continue;
+                            }
+                            // See the document arm: the live import refused
+                            // the snapshot on the same state, so replay skips it.
                             crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Malformed => {
-                                if let Some(provenance) = payload.provenance.as_ref() {
-                                    self.sync_commit(provenance);
-                                }
-                                warn!(core = self.core_id, tenant = tid.as_u64(), %collection, "CRDT WAL snapshot import malformed during replay");
+                                debug!(core = self.core_id, tenant = tid.as_u64(), %collection, lsn = record.header.lsn, "replay skips a CRDT snapshot import its live apply refused as malformed");
                                 continue;
                             }
                             crate::engine::crdt::tenant_state::ValidatedApplyOutcome::PendingDependencies => {
-                                // Committed record whose causal predecessors are
-                                // absent from this collection's document: the row
-                                // did NOT apply. Loud, and not acknowledged as a
-                                // clean replay.
-                                error!(core = self.core_id, tenant = tid.as_u64(), %collection, lsn = record.header.lsn, "CRDT WAL snapshot import depends on operations absent from this collection's document; state not recovered");
+                                debug!(core = self.core_id, tenant = tid.as_u64(), %collection, lsn = record.header.lsn, "replay skips a CRDT snapshot import its live apply refused for missing predecessors");
+                                continue;
+                            }
+                            crate::engine::crdt::tenant_state::ValidatedApplyOutcome::CandidateUnavailable => {
+                                self.replay_record_unapplied(
+                                    "crdt",
+                                    "candidate_unavailable",
+                                    record.header.lsn,
+                                    &format!("no apply candidate for {collection}"),
+                                );
                                 continue;
                             }
                         },
-                        Err(e) => {
-                            warn!(core = self.core_id, tenant = tid.as_u64(), error = %e, "failed to create CRDT engine during WAL replay");
+                        Err(error) => {
+                            self.replay_record_unapplied(
+                                "crdt",
+                                "engine_open",
+                                record.header.lsn,
+                                &error.to_string(),
+                            );
                             continue;
                         }
                     }
@@ -361,6 +415,65 @@ impl CoreLoop {
         if replayed > 0 {
             tracing::info!(core = self.core_id, replayed, "WAL CRDT replay complete");
         }
+    }
+}
+
+/// Check the admission metadata of a signed record against what its writer
+/// stamps. The writer copies the session's producer id and the frame's seq
+/// into both the provenance and the signing fields, so a signed record
+/// without provenance, or with fields that disagree, is not one it wrote.
+fn signed_record_metadata(payload: &crate::wal::CrdtDeltaWalPayload) -> Result<(), String> {
+    let Some(signing) = payload.signing else {
+        return Ok(());
+    };
+    let Some(provenance) = payload.provenance.as_ref() else {
+        return Err(format!(
+            "signed delta for {} carries no provenance",
+            payload.collection
+        ));
+    };
+    if provenance.producer_id != signing.auth_device_id || provenance.seq != signing.auth_seq_no {
+        return Err(format!(
+            "signed delta for {} names producer {} seq {} in its provenance and device {} seq {} \
+             in its signing fields",
+            payload.collection,
+            provenance.producer_id,
+            provenance.seq,
+            signing.auth_device_id,
+            signing.auth_seq_no
+        ));
+    }
+    Ok(())
+}
+
+/// The signing admission a committed record replays under: the one its live
+/// apply ran under.
+///
+/// A signed record carries the signing fields the session admitted, already
+/// verified, so it replays preverified. An absent required signature still
+/// refuses it, as it did live. An unsigned record replays the live local
+/// apply's admission: no signature, checked against the collection's signing
+/// policy.
+fn replayed_admission(
+    payload: &crate::wal::CrdtDeltaWalPayload,
+) -> crate::engine::crdt::tenant_state::DeltaSigningAdmission {
+    match payload.signing {
+        Some(signing) => crate::engine::crdt::tenant_state::DeltaSigningAdmission {
+            auth: nodedb_crdt::CrdtAuthContext {
+                user_id: signing.auth_user_id,
+                device_id: signing.auth_device_id,
+                seq_no: signing.auth_seq_no,
+                delta_signature: signing.delta_signature,
+                ..nodedb_crdt::CrdtAuthContext::default()
+            },
+            required: signing.required,
+            preverified: true,
+        },
+        None => crate::engine::crdt::tenant_state::DeltaSigningAdmission {
+            auth: nodedb_crdt::CrdtAuthContext::default(),
+            required: false,
+            preverified: false,
+        },
     }
 }
 
@@ -483,8 +596,12 @@ mod crdt_replay_tests {
         );
     }
 
+    /// The live apply refuses a stale fenced frame before admission, so the
+    /// sender's mark stays put and its re-push at the same seq is admitted.
+    /// Replay holds the mark the same way: advancing it would turn the
+    /// re-push after a restart into a `Duplicate` and drop the write.
     #[test]
-    fn replay_stale_v4_restores_authenticated_sequence_watermark() {
+    fn replay_stale_v4_holds_authenticated_sequence_watermark() {
         let tid = TenantId::new(9);
         let provenance = nodedb_types::sync::wire::SyncProvenance {
             producer_id: 77,
@@ -529,10 +646,157 @@ mod crdt_replay_tests {
         let mut h = make_core(0);
         h.core
             .replay_crdt_wal(&[record], 1, &nodedb_wal::TombstoneSet::new());
-        assert!(matches!(
-            h.core.sync_admit(&provenance),
-            crate::data::executor::sync_gate::SyncAdmit::Duplicate
-        ));
+        assert_eq!(
+            h.core
+                .sync_hwm_value(provenance.producer_id, provenance.stream_id),
+            0,
+            "a stale fenced frame leaves the mark where the live apply left it"
+        );
+        assert!(!h.core.is_fail_stopped(), "a stale fence is no halt");
+    }
+
+    /// A signed record of `secure_notes/doc` at LSN 5, unfenced.
+    fn signed_record(
+        tid: TenantId,
+        provenance: Option<nodedb_types::sync::wire::SyncProvenance>,
+        signing: crate::wal::CrdtDeltaSigning,
+    ) -> nodedb_wal::WalRecord {
+        let state = nodedb_crdt::state::CrdtState::new(77).expect("state");
+        state
+            .upsert(
+                "secure_notes",
+                "doc",
+                &[("body", LoroValue::String("signed".into()))],
+            )
+            .expect("upsert");
+        let payload = crate::wal::CrdtDeltaWalPayload::new(
+            state.export_snapshot().expect("snapshot"),
+            "secure_notes".into(),
+            provenance,
+            None,
+            document_target("doc", 1),
+        )
+        .with_signing(signing);
+        nodedb_wal::WalRecord::new(nodedb_wal::WalRecordArgs {
+            record_type: RecordType::CrdtDelta as u32,
+            lsn: 5,
+            tenant_id: tid.as_u64(),
+            vshard_id: 0,
+            database_id: DatabaseId::DEFAULT.as_u64(),
+            payload: payload.encode().expect("encode"),
+            encryption_key: None,
+            preamble_bytes: None,
+        })
+        .expect("record")
+    }
+
+    fn session_provenance() -> nodedb_types::sync::wire::SyncProvenance {
+        nodedb_types::sync::wire::SyncProvenance {
+            producer_id: 77,
+            epoch: 3,
+            stream_id: 5,
+            seq: 11,
+        }
+    }
+
+    fn signing(user: u64, signature: [u8; 32], required: bool) -> crate::wal::CrdtDeltaSigning {
+        crate::wal::CrdtDeltaSigning {
+            auth_user_id: user,
+            auth_device_id: 77,
+            auth_seq_no: 11,
+            delta_signature: signature,
+            required,
+        }
+    }
+
+    fn doc_replayed(h: &mut CoreHarness, tid: TenantId) -> bool {
+        h.core
+            .get_crdt_engine(DatabaseId::DEFAULT, tid)
+            .expect("engine")
+            .row_exists("secure_notes", "doc")
+    }
+
+    /// The writer stamps provenance on every signed record and the live apply
+    /// applied it, so a signed record without provenance halts replay.
+    #[test]
+    fn a_signed_record_without_provenance_halts_replay() {
+        let tid = TenantId::new(21);
+        let mut h = make_core(0);
+        h.core.replay_crdt_wal(
+            &[signed_record(tid, None, signing(42, [7; 32], true))],
+            1,
+            &nodedb_wal::TombstoneSet::new(),
+        );
+        assert!(h.core.is_fail_stopped());
+        assert!(h.core.replay_halt_error().is_some());
+    }
+
+    /// The writer copies one producer id and seq into the provenance and the
+    /// signing fields, so a record where they disagree halts replay.
+    #[test]
+    fn a_signed_record_with_disagreeing_metadata_halts_replay() {
+        let tid = TenantId::new(22);
+        let mut provenance = session_provenance();
+        provenance.seq = 12;
+        let mut h = make_core(0);
+        h.core.replay_crdt_wal(
+            &[signed_record(tid, Some(provenance), signing(42, [7; 32], true))],
+            1,
+            &nodedb_wal::TombstoneSet::new(),
+        );
+        assert!(h.core.is_fail_stopped());
+        assert!(!doc_replayed(&mut h, tid));
+    }
+
+    /// The live apply reads no user id from the signing fields, so a record
+    /// whose user id is zero applied live and applies on replay.
+    #[test]
+    fn a_signed_record_with_a_zero_user_id_replays() {
+        let tid = TenantId::new(23);
+        let provenance = session_provenance();
+        let mut h = make_core(0);
+        h.core.replay_crdt_wal(
+            &[signed_record(
+                tid,
+                Some(provenance.clone()),
+                signing(0, [7; 32], true),
+            )],
+            1,
+            &nodedb_wal::TombstoneSet::new(),
+        );
+        assert!(!h.core.is_fail_stopped());
+        assert!(doc_replayed(&mut h, tid));
+        assert_eq!(
+            h.core
+                .sync_hwm_value(provenance.producer_id, provenance.stream_id),
+            provenance.seq
+        );
+    }
+
+    /// A required signature that is absent made the live apply refuse the
+    /// delta as malformed and advance the mark. Replay reaches the same
+    /// refusal: nothing applies, the mark advances, and replay continues.
+    #[test]
+    fn a_record_missing_its_required_signature_replays_as_its_live_refusal() {
+        let tid = TenantId::new(24);
+        let provenance = session_provenance();
+        let mut h = make_core(0);
+        h.core.replay_crdt_wal(
+            &[signed_record(
+                tid,
+                Some(provenance.clone()),
+                signing(42, [0; 32], true),
+            )],
+            1,
+            &nodedb_wal::TombstoneSet::new(),
+        );
+        assert!(!h.core.is_fail_stopped());
+        assert!(!doc_replayed(&mut h, tid));
+        assert_eq!(
+            h.core
+                .sync_hwm_value(provenance.producer_id, provenance.stream_id),
+            provenance.seq
+        );
     }
 
     /// The WAL writer's own record for an apply carries the row's surrogate,
@@ -842,5 +1106,153 @@ mod crdt_replay_tests {
                 .expect("load"),
             entries
         );
+    }
+
+    /// A core whose `users` collection refuses a second row with one email.
+    fn unique_email_core(tid: TenantId) -> CoreHarness {
+        let mut h = make_core(0);
+        let engine = h
+            .core
+            .get_crdt_engine(DatabaseId::DEFAULT, tid)
+            .expect("engine");
+        assert!(engine.set_collection_constraints(
+            "users",
+            1,
+            vec![nodedb_crdt::Constraint {
+                name: "users_email_unique".into(),
+                collection: "users".into(),
+                field: "email".into(),
+                kind: nodedb_crdt::ConstraintKind::Unique,
+            }],
+        ));
+        engine.set_collection_policy_typed("users", nodedb_crdt::policy::CollectionPolicy::strict());
+        h
+    }
+
+    fn users_write_lsn(h: &CoreHarness, tid: TenantId) -> Option<crate::types::Lsn> {
+        h.core
+            .write_index
+            .collection_write_lsn(&crate::data::executor::core_loop::write_index::CollKey {
+                db: DatabaseId::DEFAULT,
+                tenant: tid,
+                collection: Box::from("users"),
+            })
+    }
+
+    /// A replayed rejection the full queue refuses stops replay at its
+    /// record: only the record holds the delta, so it stays uncovered.
+    #[test]
+    fn a_replayed_rejection_the_full_queue_refuses_halts_replay() {
+        let tid = TenantId::new(7);
+        let mut h = unique_email_core(tid);
+        let tombstones = nodedb_wal::TombstoneSet::new();
+        h.core
+            .replay_crdt_wal(&[email_record(tid, "a", "x@y.com", 2, 19)], 1, &tombstones);
+        let capacity = h
+            .core
+            .get_crdt_engine(DatabaseId::DEFAULT, tid)
+            .expect("engine")
+            .fill_dead_letter_queue_for_test();
+
+        h.core
+            .replay_crdt_wal(&[email_record(tid, "b", "x@y.com", 3, 20)], 1, &tombstones);
+
+        assert!(h.core.replay_halt_error().is_some(), "replay stopped");
+        let engine = h
+            .core
+            .get_crdt_engine(DatabaseId::DEFAULT, tid)
+            .expect("engine");
+        assert_eq!(engine.dead_letters().count(), capacity, "nothing queued");
+        assert!(!engine.row_exists("users", "b"));
+        assert!(
+            h.core
+                .sparse
+                .load_crdt_dead_letters(DatabaseId::DEFAULT.as_u64(), tid.as_u64())
+                .expect("load")
+                .is_empty()
+        );
+        assert_eq!(
+            users_write_lsn(&h, tid),
+            Some(crate::types::Lsn::new(19)),
+            "the refused record is not counted as replayed"
+        );
+    }
+
+    /// A replayed rejection whose entry the store refuses stops replay at
+    /// its record, and the queue keeps no entry storage lacks.
+    #[test]
+    fn a_replayed_rejection_the_store_refuses_halts_replay() {
+        let tid = TenantId::new(7);
+        let mut h = unique_email_core(tid);
+        let tombstones = nodedb_wal::TombstoneSet::new();
+        h.core
+            .replay_crdt_wal(&[email_record(tid, "a", "x@y.com", 2, 19)], 1, &tombstones);
+        h.core.sparse.break_crdt_dead_letter_table_for_test();
+
+        h.core
+            .replay_crdt_wal(&[email_record(tid, "b", "x@y.com", 3, 20)], 1, &tombstones);
+
+        assert!(h.core.replay_halt_error().is_some(), "replay stopped");
+        let engine = h
+            .core
+            .get_crdt_engine(DatabaseId::DEFAULT, tid)
+            .expect("engine");
+        assert_eq!(engine.dead_letters().count(), 0, "nothing queued");
+        assert_eq!(users_write_lsn(&h, tid), Some(crate::types::Lsn::new(19)));
+    }
+
+    /// A record whose stored entry the engine restored replays as that
+    /// rejection, so a queue full of restored entries does not stop replay.
+    #[test]
+    fn a_replayed_record_with_a_restored_entry_replays_under_a_full_queue() {
+        let tid = TenantId::new(7);
+        let mut h = unique_email_core(tid);
+        let tombstones = nodedb_wal::TombstoneSet::new();
+        let records = [
+            email_record(tid, "a", "x@y.com", 2, 19),
+            email_record(tid, "b", "x@y.com", 3, 20),
+        ];
+        h.core.replay_crdt_wal(&records, 1, &tombstones);
+        h.core
+            .get_crdt_engine(DatabaseId::DEFAULT, tid)
+            .expect("engine")
+            .fill_dead_letter_queue_for_test();
+
+        h.core.replay_crdt_wal(&records[1..], 1, &tombstones);
+
+        assert!(h.core.replay_halt_error().is_none(), "replay continued");
+        let engine = h
+            .core
+            .get_crdt_engine(DatabaseId::DEFAULT, tid)
+            .expect("engine");
+        assert_eq!(
+            engine
+                .dead_letters()
+                .filter(|entry| entry.source_lsn == Some(20))
+                .count(),
+            1
+        );
+        assert_eq!(users_write_lsn(&h, tid), Some(crate::types::Lsn::new(20)));
+    }
+
+    /// A stored entry that does not decode fails the engine open, and replay
+    /// stops at the first record that needs the engine.
+    #[test]
+    fn an_undecodable_stored_entry_halts_replay() {
+        let tid = TenantId::new(8);
+        let mut h = make_core(0);
+        h.core.sparse.put_raw_crdt_dead_letter_for_test(
+            DatabaseId::DEFAULT.as_u64(),
+            tid.as_u64(),
+            4,
+            b"\xc1",
+        );
+
+        let record = make_crdt_record(0, tid, 0, "notes", "row1");
+        h.core
+            .replay_crdt_wal(&[record], 1, &nodedb_wal::TombstoneSet::new());
+
+        assert!(h.core.replay_halt_error().is_some(), "replay stopped");
+        assert!(!h.core.crdt_engines.contains_key(&(DatabaseId::DEFAULT, tid)));
     }
 }

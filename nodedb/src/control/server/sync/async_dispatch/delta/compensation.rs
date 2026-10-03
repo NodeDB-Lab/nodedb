@@ -109,6 +109,7 @@ pub(super) fn compensation_hint_for_dispatch_error(e: &crate::Error) -> Compensa
         | crate::Error::UndefinedObject { .. }
         | crate::Error::ObjectNotInPrerequisiteState { .. }
         | crate::Error::UndefinedColumn { .. }
+        | crate::Error::TextColumn { .. }
         | crate::Error::AmbiguousColumn { .. }
         | crate::Error::UnknownStrictField { .. }
         | crate::Error::DivisionByZero
@@ -209,6 +210,7 @@ fn compensation_hint_for_code(code: &ErrorCode) -> CompensationHint {
         | ErrorCode::InsufficientBalance { .. }
         | ErrorCode::RecursionDepthExceeded { .. }
         | ErrorCode::UndefinedColumn { .. }
+        | ErrorCode::TextColumn { .. }
         | ErrorCode::Internal { .. }
         | ErrorCode::Unsupported { .. }
         | ErrorCode::RollbackFailed { .. }

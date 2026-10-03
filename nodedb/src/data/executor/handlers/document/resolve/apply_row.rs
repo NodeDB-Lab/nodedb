@@ -280,13 +280,12 @@ impl CoreLoop {
                     lsn,
                 );
             }
-            let old_converted =
-                self.resolve_event_payload(database_id, tid, collection, prior_bytes);
             self.emit_document_delete_event(
                 task,
+                tid,
                 collection,
                 RowIdentity::from_user_key(document_id),
-                Some(old_converted.as_deref().unwrap_or(prior_bytes)),
+                Some(prior_bytes),
             );
         }
         // The removal, journalled after apply, naming its own collection,

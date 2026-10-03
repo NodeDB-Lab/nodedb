@@ -16,6 +16,7 @@ use nodedb_types::{RowIdentity, StorageKey, Surrogate};
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::generated;
+use crate::data::executor::handlers::identity_guard::IdentitySnapshot;
 use crate::data::executor::handlers::merge_helpers::check_declared_pk_not_null;
 use crate::data::executor::{doc_format, strict_format};
 use crate::types::TenantId;
@@ -181,6 +182,13 @@ impl CoreLoop {
                 })?,
             };
 
+        let identity = IdentitySnapshot::capture(
+            strict_schema.as_ref(),
+            declared_primary_key,
+            updates,
+            &doc,
+        );
+
         // Expressions evaluate against the pre-update snapshot (PostgreSQL
         // semantics): a later assignment observing a column updated earlier in
         // the same statement still sees the pre-statement value.
@@ -213,6 +221,7 @@ impl CoreLoop {
         if strict_schema.is_none() {
             check_declared_pk_not_null(collection, &doc, declared_primary_key)?;
         }
+        identity.check_unchanged(collection, &doc)?;
 
         // Recompute generated columns after the patch.
         if let Some(config) = self.doc_configs.get(&config_key)

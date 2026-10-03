@@ -332,6 +332,16 @@ pub enum Error {
     #[error("column \"{column}\" does not exist")]
     UndefinedColumn { column: String },
 
+    /// The column argument of a full-text search cannot serve it. Propagated
+    /// from `SqlError::TextColumn` or the Data-Plane `ErrorCode::TextColumn`.
+    /// The pgwire layer renders `fault.sqlstate()`.
+    #[error("column \"{column}\" of collection \"{collection}\" {fault}")]
+    TextColumn {
+        collection: String,
+        column: String,
+        fault: nodedb_types::text_search::TextColumnFault,
+    },
+
     /// A bare column name resolved against more than one relation in scope.
     /// Propagated from `SqlError::AmbiguousColumn`; the pgwire layer renders
     /// it as SQLSTATE `42702` (ambiguous_column).

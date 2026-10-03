@@ -20,7 +20,7 @@ use crate::planner::qualified_name;
 use crate::types::{
     ArrayProjectPlan, ArraySlicePlan, DocumentIndexLookupPlan, HybridSearchPlan,
     HybridSearchTriplePlan, LateralLoopPlan, LateralTopKPlan, RangeScanPlan, RecursiveScanPlan,
-    TimeseriesScanPlan,
+    TextSearchPlan, TimeseriesScanPlan,
 };
 use crate::types::{Projection, SortKey, SqlExpr, SqlPlan};
 
@@ -175,7 +175,7 @@ fn body_projection_mut(plan: &mut SqlPlan) -> Option<&mut Vec<Projection>> {
         | SqlPlan::VectorSearch { projection, .. }
         | SqlPlan::MultiVectorSearch { projection, .. }
         | SqlPlan::SparseSearch { projection, .. }
-        | SqlPlan::TextSearch { projection, .. }
+        | SqlPlan::TextSearch(TextSearchPlan { projection, .. })
         | SqlPlan::HybridSearch(HybridSearchPlan { projection, .. })
         | SqlPlan::HybridSearchTriple(HybridSearchTriplePlan { projection, .. })
         | SqlPlan::SpatialScan { projection, .. }

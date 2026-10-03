@@ -67,13 +67,13 @@ pub(super) fn timeseries_ingest(fields: TimeseriesIngestFields<'_>) -> Replicate
 pub(super) fn fts_index(
     collection: &str,
     surrogate: u32,
-    text: &str,
+    fields: &[(String, String)],
     provenance: Option<Vec<u8>>,
 ) -> ReplicatedWrite {
     ReplicatedWrite::FtsIndex {
         collection: collection.to_owned(),
         surrogate,
-        text: text.to_owned(),
+        fields: fields.to_vec(),
         provenance,
     }
 }

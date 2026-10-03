@@ -29,8 +29,8 @@ pub use kv_body::{
 };
 pub use kv_row::kv_row_msgpack;
 pub use reader::{
-    array_header, map_header, read_bin_advance, read_bool, read_f64, read_i64, read_null, read_str,
-    read_str_advance, read_u32_advance, read_value, skip_value,
+    array_header, map_header, read_bin_advance, read_bool, read_f64, read_i64, read_integer,
+    read_null, read_str, read_str_advance, read_u32_advance, read_value, skip_value,
 };
 pub use sidecar::{
     SidecarEntry, SidecarFieldIndex, build_sidecar, field_index_from_sidecar, has_sidecar,

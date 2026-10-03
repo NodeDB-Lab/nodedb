@@ -77,14 +77,25 @@ impl std::fmt::Display for Direction {
     }
 }
 
+/// A traversal direction string that names no [`Direction`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown direction '{input}': expected 'out', 'in' or 'both'")]
+pub struct ParseDirectionError {
+    pub input: String,
+}
+
 impl std::str::FromStr for Direction {
-    type Err = String;
+    type Err = ParseDirectionError;
+    /// Case-insensitive. Accepts `out`/`outgoing`, `in`/`incoming` and
+    /// `both`/`any`.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
+        match s.to_ascii_lowercase().as_str() {
             "out" | "outgoing" => Ok(Self::Out),
             "in" | "incoming" => Ok(Self::In),
             "both" | "any" => Ok(Self::Both),
-            other => Err(format!("unknown direction: '{other}'")),
+            _ => Err(ParseDirectionError {
+                input: s.to_string(),
+            }),
         }
     }
 }
@@ -220,6 +231,16 @@ fn parse_u64_cell(v: &crate::value::Value) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direction_parses_case_insensitively_and_names_an_unknown_value() {
+        assert_eq!("IN".parse::<Direction>(), Ok(Direction::In));
+        assert_eq!("outgoing".parse::<Direction>(), Ok(Direction::Out));
+        assert_eq!("Both".parse::<Direction>(), Ok(Direction::Both));
+        let err = "sideways".parse::<Direction>().unwrap_err();
+        assert_eq!(err.input, "sideways");
+        assert!(err.to_string().contains("'sideways'"), "{err}");
+    }
 
     #[test]
     fn direction_roundtrip() {

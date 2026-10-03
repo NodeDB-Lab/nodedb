@@ -106,6 +106,9 @@ pub(super) struct VectorSearchParams<'a> {
     /// Translated to `nodedb_types::PayloadAtom` and emitted as
     /// `VectorOp::Search::payload_filters`.
     pub payload_filters: &'a [nodedb_sql::types::SqlPayloadAtom],
+    /// Primary keys the search ranks among, lowered to
+    /// `VectorOp::Search::filter_bitmap`. `None`: every row.
+    pub pk_prefilter: Option<&'a [nodedb_sql::types::SqlValue]>,
 }
 
 /// Parameters for `convert_sparse_search`.
@@ -119,14 +122,31 @@ pub(super) struct SparseSearchParams<'a> {
     pub database_id: crate::types::DatabaseId,
 }
 
+/// Parameters for `convert_text_search`.
+pub(super) struct TextSearchConvertParams<'a> {
+    pub collection: &'a str,
+    pub shape: &'a nodedb_sql::types::TextSearchShape,
+    /// Residual WHERE predicates, applied before ranking.
+    pub filters: &'a [Filter],
+    pub scores: &'a [nodedb_sql::types::TextScoreColumn],
+    pub tenant_id: TenantId,
+    pub database_id: crate::types::DatabaseId,
+}
+
 /// Parameters for `convert_hybrid_search`.
 pub(super) struct HybridSearchParams<'a> {
     pub collection: &'a str,
+    pub vector_field: &'a str,
     pub query_vector: &'a [f32],
+    /// `None` reads the whole-document index.
+    pub text_field: Option<&'a str>,
     pub query_text: &'a str,
+    /// Residual WHERE predicates, applied to both legs before fusion.
+    pub filters: &'a [Filter],
     pub top_k: &'a usize,
     pub ef_search: &'a usize,
     pub vector_weight: &'a f32,
+    pub mode: nodedb_types::text_search::QueryMode,
     pub fuzzy: &'a bool,
     /// SELECT-list alias for the RRF score column. Forwarded to
     /// `TextOp::HybridSearch.score_alias` so the executor renames the
@@ -139,13 +159,19 @@ pub(super) struct HybridSearchParams<'a> {
 /// Parameters for `convert_hybrid_search_triple`.
 pub(super) struct HybridSearchTripleParams<'a> {
     pub collection: &'a str,
+    pub vector_field: &'a str,
     pub query_vector: &'a [f32],
+    /// `None` reads the whole-document index.
+    pub text_field: Option<&'a str>,
     pub query_text: &'a str,
+    /// Residual WHERE predicates, applied to every leg before fusion.
+    pub filters: &'a [Filter],
     pub graph_seed_id: &'a str,
     pub graph_depth: &'a usize,
     pub graph_edge_label: &'a Option<String>,
     pub top_k: &'a usize,
     pub ef_search: &'a usize,
+    pub mode: nodedb_types::text_search::QueryMode,
     pub fuzzy: &'a bool,
     pub rrf_k: &'a (f64, f64, f64),
     pub score_alias: Option<&'a str>,

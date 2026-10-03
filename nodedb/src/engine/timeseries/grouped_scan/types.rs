@@ -132,14 +132,13 @@ pub(super) fn accumulate_row(
                 accums[agg_idx].feed_count_only();
             }
             AggColInfo::Numeric(col_idx) => {
-                if let Some(data) = columns[*col_idx] {
-                    let val = match data {
-                        ColumnData::Float64(v) => v[row_idx],
-                        ColumnData::Int64(v) => v[row_idx] as f64,
-                        ColumnData::Timestamp(v) => v[row_idx] as f64,
-                        _ => continue,
-                    };
-                    accums[agg_idx].feed(val);
+                // An integer cell feeds exactly: no rounding through `f64`.
+                match columns[*col_idx] {
+                    Some(ColumnData::Float64(v)) => accums[agg_idx].feed(v[row_idx]),
+                    Some(ColumnData::Int64(v)) | Some(ColumnData::Timestamp(v)) => {
+                        accums[agg_idx].feed_int(v[row_idx])
+                    }
+                    _ => {}
                 }
             }
             AggColInfo::Skip => {}

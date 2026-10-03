@@ -6,9 +6,8 @@ pub mod envelope;
 pub mod quiesce;
 
 // Shared query engine re-exports. Origin's internal code names
-// `crate::bridge::expr_eval`, `crate::bridge::json_ops`,
-// `crate::bridge::scan_filter`, and `crate::bridge::window_func`; the types
-// behind them come from nodedb-query.
+// `crate::bridge::expr_eval`, `crate::bridge::scan_filter`, and
+// `crate::bridge::window_func`; the types behind them come from nodedb-query.
 pub mod expr_eval {
     pub use nodedb_query::expr::{BinaryOp, CastType, ComputedColumn, SqlExpr};
 }

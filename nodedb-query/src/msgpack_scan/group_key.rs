@@ -10,7 +10,7 @@ use nodedb_types::{NdbDateTime, read_instant};
 use crate::expr::{EvalError, GroupKeySpec, SqlExpr};
 use crate::msgpack_scan::field::extract_field;
 use crate::msgpack_scan::index::FieldIndex;
-use crate::msgpack_scan::reader::{read_f64, read_i64, read_null, read_str};
+use crate::msgpack_scan::reader::{read_f64, read_integer, read_null, read_str};
 
 /// Build a GROUP BY key string from raw msgpack bytes.
 ///
@@ -113,7 +113,7 @@ fn append_value_at(buf: &mut String, doc: &[u8], start: usize, end: usize) {
         buf.push('"');
         buf.push_str(&NdbDateTime::from_micros(micros).to_iso8601());
         buf.push('"');
-    } else if let Some(n) = read_i64(doc, start) {
+    } else if let Some(n) = read_integer(doc, start) {
         use std::fmt::Write;
         let _ = write!(buf, "{n}");
     } else if let Some(n) = read_f64(doc, start) {
@@ -189,6 +189,21 @@ mod tests {
         let doc = encode(&json!({"status": 200}));
         let key = build_group_key(&doc, &keys(&["status"])).unwrap();
         assert_eq!(key, "[200]");
+    }
+
+    /// A `uint64` above `i64::MAX` keys by its exact digits, and integers one
+    /// apart above 2^53 key apart.
+    #[test]
+    fn large_integers_key_exactly() {
+        let doc = encode(&json!({"v": u64::MAX}));
+        let key = build_group_key(&doc, &keys(&["v"])).unwrap();
+        assert_eq!(key, "[18446744073709551615]");
+        let a = encode(&json!({"v": 9_007_199_254_740_993_i64}));
+        let b = encode(&json!({"v": 9_007_199_254_740_992_i64}));
+        assert_ne!(
+            build_group_key(&a, &keys(&["v"])).unwrap(),
+            build_group_key(&b, &keys(&["v"])).unwrap()
+        );
     }
 
     #[test]

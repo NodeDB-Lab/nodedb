@@ -3,9 +3,9 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use nodedb_query::msgpack_scan;
-
 use super::CoreLoop;
+use super::event_image::{StoredImage, UndecodableImage};
+use crate::event::image_fault::ImageFault;
 
 /// Bundled arguments for [`CoreLoop::emit_graph_edge_event`].
 pub(in crate::data::executor) struct GraphEdgeEvent<'a> {
@@ -27,103 +27,29 @@ pub(in crate::data::executor) struct RowWriteEvent<'a> {
     pub row_id: crate::event::types::RowId,
     pub new_value: Option<&'a [u8]>,
     pub old_value: Option<&'a [u8]>,
+    /// The image that did not render; its slot above is `None`.
+    pub image_fault: Option<ImageFault>,
 }
 
 impl CoreLoop {
-    /// Convert stored bytes to msgpack for Event Plane consumption.
-    ///
-    /// For strict collections, the stored format is Binary Tuple which the
-    /// Event Plane cannot decode (it lacks the schema). This method converts
-    /// Binary Tuple → msgpack so triggers can deserialize the payload.
-    /// Returns `None` for schemaless collections (already msgpack).
-    pub(in crate::data::executor) fn resolve_event_payload(
-        &self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
-        stored_bytes: &[u8],
-    ) -> Option<Vec<u8>> {
-        let config_key = (
-            crate::types::DatabaseId::new(database_id),
-            crate::types::TenantId::new(tid),
-            collection.to_string(),
-        );
-        let config = self.doc_configs.get(&config_key)?;
-        if let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
-            config.storage_mode
-        {
-            crate::data::executor::strict_format::binary_tuple_to_msgpack(stored_bytes, schema)
-        } else {
-            None
-        }
-    }
-
-    /// A stored document row as the Event Plane reads it. A strict Binary
-    /// Tuple becomes MessagePack. A schemaless body gains its `id`.
-    pub(in crate::data::executor) fn stored_event_image(
-        &self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
-        identity: &str,
-        stored: &[u8],
-    ) -> Vec<u8> {
-        match self.resolve_event_payload(database_id, tid, collection, stored) {
-            Some(converted) => converted,
-            None => self.body_event_image(database_id, tid, collection, identity, stored),
-        }
-    }
-
-    /// A MessagePack document body as the Event Plane reads it. A schemaless
-    /// body gains its `id`, the identity every read injects.
-    pub(in crate::data::executor) fn body_event_image(
-        &self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
-        identity: &str,
-        body: &[u8],
-    ) -> Vec<u8> {
-        if self.is_schemaless_document_collection(database_id, tid, collection) {
-            msgpack_scan::inject_str_field(body, "id", identity)
-        } else {
-            body.to_vec()
-        }
-    }
-
-    /// Whether `collection` is a schemaless document collection.
-    ///
-    /// A schemaless body carries no storage key of its own, so its `id` field
-    /// is absent whenever the caller declared no `id` column. A strict row's
-    /// `id` is a real tuple column, already present after Binary Tuple
-    /// conversion, so it needs no identity injection.
-    fn is_schemaless_document_collection(
-        &self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
-    ) -> bool {
-        let config_key = (
-            crate::types::DatabaseId::new(database_id),
-            crate::types::TenantId::new(tid),
-            collection.to_string(),
-        );
-        matches!(
-            self.doc_configs.get(&config_key).map(|c| &c.storage_mode),
-            Some(nodedb_physical::physical_plan::StorageMode::Schemaless)
-        )
-    }
-
     /// Emit a point write/overwrite/update event derived from the new bytes
     /// produced by the handler and the prior bytes returned from storage.
     ///
     /// Shared by every handler that runs a put-style mutation against a
     /// document engine: PointPut, Upsert (both branches), batched PointPut,
     /// columnar-row overwrite. Each of these knows its *new* bytes and
-    /// receives *prior* bytes from the storage API; the Event Plane
-    /// payload (`new_value` / `old_value`) is derived from both after
-    /// applying the strict→msgpack shim, and the `WriteOp` tag is computed
-    /// from their presence.
+    /// receives *prior* bytes from the storage API. Both become MessagePack
+    /// images through [`Self::stored_event_image`], and the `WriteOp` tag is
+    /// computed from the prior's presence.
+    ///
+    /// A schemaless body with no declared `id` column carries its identity
+    /// only in the storage key. The image gains that identity, the same
+    /// string every read path injects via `sparse_row_to_doc`, so a WHEN
+    /// filter, CDC, or change stream reads the same `id` a query returns.
+    /// This identity also becomes the `WriteEvent.row_id`.
+    ///
+    /// A stored strict row that does not decode has no image: its slot is
+    /// `None` and the event names the fault.
     pub(in crate::data::executor) fn emit_put_event(
         &mut self,
         task: &super::super::task::ExecutionTask,
@@ -134,73 +60,67 @@ impl CoreLoop {
         prior_stored: Option<&[u8]>,
     ) {
         let database_id = task.request.database_id.as_u64();
-        let new_converted = self.resolve_event_payload(database_id, tid, collection, new_stored);
-        let old_converted =
-            prior_stored.and_then(|p| self.resolve_event_payload(database_id, tid, collection, p));
-        let old_bytes: Option<&[u8]> = match (prior_stored, old_converted.as_deref()) {
-            (Some(_), Some(c)) => Some(c),
-            (Some(raw), None) => Some(raw),
-            (None, _) => None,
-        };
-        let op = if old_bytes.is_some() {
+        let id = identity.as_str();
+        let new_image = self.stored_event_image(database_id, tid, collection, id, new_stored);
+        let old_image = prior_stored
+            .map(|prior| self.stored_event_image(database_id, tid, collection, id, prior));
+        let op = if prior_stored.is_some() {
             crate::event::WriteOp::Update
         } else {
             crate::event::WriteOp::Insert
         };
-
-        // A schemaless body with no declared `id` column carries its identity
-        // only in the storage key. The caller decided that identity already;
-        // this injects it, the same string every read path injects via
-        // `sparse_row_to_doc`, so a WHEN filter, CDC, or change stream reads
-        // the same `id` a query returns. This identity also becomes the
-        // `WriteEvent.row_id` that fans out to CDC serialization, streaming
-        // materialized views, event-trigger SQL generation, CRDT sync
-        // packaging, and webhook delivery. `inject_str_field` is a no-op
-        // when the body already carries `id`, so a declared primary key is
-        // never overwritten.
-        let doc_id = self
-            .is_schemaless_document_collection(database_id, tid, collection)
-            .then_some(identity.as_str());
-        let new_final: Cow<[u8]> = match (new_converted.as_deref(), doc_id) {
-            (Some(c), _) => Cow::Borrowed(c),
-            (None, Some(id)) => Cow::Owned(msgpack_scan::inject_str_field(new_stored, "id", id)),
-            (None, None) => Cow::Borrowed(new_stored),
-        };
-        let old_final: Option<Cow<[u8]>> =
-            old_bytes.map(|b| match (old_converted.is_some(), doc_id) {
-                (false, Some(id)) => Cow::Owned(msgpack_scan::inject_str_field(b, "id", id)),
-                _ => Cow::Borrowed(b),
-            });
-
-        self.emit_write_event(
+        let image_fault = ImageFault::of(
+            new_image.is_err(),
+            matches!(old_image, Some(Err(UndecodableImage))),
+        );
+        self.emit_event_with_row_id_as(
             task,
-            collection,
-            op,
-            identity,
-            Some(new_final.as_ref()),
-            old_final.as_deref(),
+            task.request.event_source,
+            RowWriteEvent {
+                collection,
+                op,
+                row_id: crate::event::types::RowId::row(identity),
+                new_value: new_image.as_deref().ok(),
+                old_value: old_image.as_ref().and_then(|image| image.as_deref().ok()),
+                image_fault,
+            },
         );
     }
 
     /// Emit a document-row DELETE event to the Event Plane.
     ///
-    /// `identity` is the client-visible identity of the deleted row. The
-    /// caller decides the encoding, mirroring [`Self::emit_put_event`] on
-    /// the put side.
+    /// `identity` is the client-visible identity of the deleted row.
+    /// `old_stored` is the row as storage held it. A strict Binary Tuple
+    /// becomes MessagePack. A stored strict row that does not decode has no
+    /// image: the slot is `None` and the event names the fault.
     pub(in crate::data::executor) fn emit_document_delete_event(
         &mut self,
         task: &super::super::task::ExecutionTask,
+        tid: u64,
         collection: &str,
         identity: crate::engine::document::store::RowIdentity,
-        old_value: Option<&[u8]>,
+        old_stored: Option<&[u8]>,
     ) {
-        self.emit_write_event(
+        let database_id = task.request.database_id.as_u64();
+        let old_image = old_stored.map(|stored| {
+            match self.resolve_event_payload(database_id, tid, collection, stored) {
+                StoredImage::Converted(converted) => Ok(Cow::Owned(converted)),
+                StoredImage::AsStored => Ok(Cow::Borrowed(stored)),
+                StoredImage::Undecodable => Err(UndecodableImage),
+            }
+        });
+        let image_fault = ImageFault::of(false, matches!(old_image, Some(Err(UndecodableImage))));
+        self.emit_event_with_row_id_as(
             task,
-            collection,
-            crate::event::WriteOp::Delete,
-            identity,
-            None,
-            old_value,
+            task.request.event_source,
+            RowWriteEvent {
+                collection,
+                op: crate::event::WriteOp::Delete,
+                row_id: crate::event::types::RowId::row(identity),
+                new_value: None,
+                old_value: old_image.as_ref().and_then(|image| image.as_deref().ok()),
+                image_fault,
+            },
         );
     }
 
@@ -265,6 +185,7 @@ impl CoreLoop {
                 row_id,
                 new_value,
                 old_value,
+                image_fault: None,
             },
         );
     }
@@ -283,6 +204,7 @@ impl CoreLoop {
             row_id,
             new_value,
             old_value,
+            image_fault,
         } = event;
         if self.events.producer.is_none() {
             return; // Event Plane not configured.
@@ -313,6 +235,7 @@ impl CoreLoop {
             user_id: task.request.user_id.clone(),
             statement_digest: task.request.statement_digest.clone(),
             commit_hlc: task.request.commit_hlc,
+            image_fault,
         };
 
         // The install pass of a committed-redo apply holds its events until
@@ -384,6 +307,7 @@ impl CoreLoop {
             user_id: None,
             statement_digest: None,
             commit_hlc: None,
+            image_fault: None,
         };
 
         producer.emit(event);

@@ -11,6 +11,7 @@ mod lateral;
 mod merge;
 mod plan;
 mod recursive;
+mod text;
 mod timeseries;
 mod vector_primary;
 mod writes;
@@ -27,6 +28,7 @@ pub use lateral::{LateralLoopPlan, LateralTopKPlan};
 pub use merge::MergePlan;
 pub use plan::{DistanceMetric, SqlPlan};
 pub use recursive::{RecursiveScanPlan, RecursiveValuePlan};
+pub use text::{TextScoreColumn, TextSearchPlan, TextSearchShape};
 pub use timeseries::{TimeseriesIngestPlan, TimeseriesScanPlan};
 pub use vector_primary::{
     VectorPrimaryDeletePlan, VectorPrimaryInsertPlan, VectorPrimaryTruncatePlan,

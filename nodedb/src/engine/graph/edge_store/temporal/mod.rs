@@ -37,5 +37,6 @@ pub use keys::{
 };
 pub use payload::EdgeValuePayload;
 pub use query::NeighborsAsOfParams;
+pub use read::EdgePropertyReader;
 pub use revert::{EdgeCountChange, EdgeVersionWrite};
 pub use write::VersionStamp;

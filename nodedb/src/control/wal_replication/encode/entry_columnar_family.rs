@@ -183,12 +183,12 @@ pub(super) fn text_write(op: &TextOp) -> Option<ReplicatedWrite> {
         TextOp::FtsIndexDoc {
             collection,
             surrogate,
-            text,
+            fields,
             provenance,
         } => columnar::fts_index(
             collection.as_str(),
             surrogate.as_u32(),
-            text,
+            fields,
             encode_provenance(provenance),
         ),
         TextOp::FtsDeleteDoc {

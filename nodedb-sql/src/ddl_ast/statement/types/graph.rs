@@ -32,8 +32,11 @@ pub enum GraphStmt {
         collection: String,
         start: String,
         depth: usize,
-        edge_label: Option<String>,
+        /// Empty keeps every edge. Otherwise an edge with any listed label.
+        edge_labels: Vec<String>,
         direction: GraphDirection,
+        /// `EDGE WHERE` filters, AND-ed. Empty admits every edge.
+        edge_predicate: Vec<nodedb_types::filter::MetadataFilter>,
     },
     GraphNeighbors {
         /// Collection whose edges the traversal is scoped to. Required: a
@@ -41,7 +44,8 @@ pub enum GraphStmt {
         /// partition holds every collection's edges under one node space.
         collection: String,
         node: String,
-        edge_label: Option<String>,
+        /// Empty keeps every edge. Otherwise an edge with any listed label.
+        edge_labels: Vec<String>,
         direction: GraphDirection,
     },
     GraphPath {
@@ -52,7 +56,10 @@ pub enum GraphStmt {
         src: String,
         dst: String,
         max_depth: usize,
-        edge_label: Option<String>,
+        /// Empty keeps every edge. Otherwise an edge with any listed label.
+        edge_labels: Vec<String>,
+        /// `EDGE WHERE` filters, AND-ed. Empty admits every edge.
+        edge_predicate: Vec<nodedb_types::filter::MetadataFilter>,
     },
     GraphAlgo {
         algorithm: String,

@@ -120,14 +120,14 @@ pub fn timeseries_ingest(
 pub fn fts_index(
     collection: &str,
     surrogate: u32,
-    text: &str,
+    fields: &[(String, String)],
     prov_bytes: &Option<Vec<u8>>,
 ) -> crate::Result<PhysicalPlan> {
     let provenance = decode_provenance(prov_bytes)?;
     Ok(PhysicalPlan::Text(TextOp::FtsIndexDoc {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         surrogate: Surrogate::new(surrogate),
-        text: text.to_owned(),
+        fields: fields.to_vec(),
         provenance,
     }))
 }
@@ -603,7 +603,10 @@ mod tests {
         let plan = PhysicalPlan::Text(TextOp::FtsIndexDoc {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "articles"),
             surrogate: nodedb_types::Surrogate::new(500),
-            text: "hello world".into(),
+            fields: vec![
+                ("body".to_string(), "hello world".to_string()),
+                ("title".to_string(), "greeting".to_string()),
+            ],
             provenance: Some(prov.clone()),
         });
         let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
@@ -616,10 +619,18 @@ mod tests {
         match decoded_plan {
             PhysicalPlan::Text(TextOp::FtsIndexDoc {
                 surrogate,
+                fields,
                 provenance,
                 ..
             }) => {
                 assert_eq!(surrogate, nodedb_types::Surrogate::new(500));
+                assert_eq!(
+                    fields,
+                    vec![
+                        ("body".to_string(), "hello world".to_string()),
+                        ("title".to_string(), "greeting".to_string()),
+                    ]
+                );
                 assert_eq!(provenance, Some(prov));
             }
             other => panic!("expected Text(FtsIndexDoc), got {other:?}"),

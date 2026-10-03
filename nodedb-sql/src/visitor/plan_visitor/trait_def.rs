@@ -10,10 +10,10 @@ use super::args::{
     HybridSearchTripleVisitArgs, HybridSearchVisitArgs, InsertVisitArgs, JoinVisitArgs,
     LateralLoopVisitArgs, LateralTopKVisitArgs, MergeVisitArgs, RecursiveScanVisitArgs,
     RecursiveValueVisitArgs, ScanVisitArgs, SpatialScanVisitArgs, SubqueryVisitArgs,
-    TimeseriesScanVisitArgs, UpdateFromVisitArgs, UpsertVisitArgs, VectorPrimaryDeleteVisitArgs,
-    VectorPrimaryInsertVisitArgs, VectorPrimaryUpdateVisitArgs, VectorSearchVisitArgs,
+    TextSearchVisitArgs, TimeseriesScanVisitArgs, UpdateFromVisitArgs, UpsertVisitArgs,
+    VectorPrimaryDeleteVisitArgs, VectorPrimaryInsertVisitArgs, VectorPrimaryUpdateVisitArgs,
+    VectorSearchVisitArgs,
 };
-use crate::fts_types::FtsQuery;
 use crate::temporal::TemporalScope;
 use crate::types::SqlPlan;
 use crate::types::filter::Filter;
@@ -171,17 +171,8 @@ pub trait PlanVisitor {
         top_k: usize,
     ) -> Result<Self::Output, Self::Error>;
 
-    /// Handle [`SqlPlan::TextSearch`]. `field` is the column the query is
-    /// scoped to; `None` searches every text column.
-    fn text_search(
-        &mut self,
-        collection: &str,
-        field: Option<&str>,
-        query: &FtsQuery,
-        top_k: usize,
-        filters: &[Filter],
-        score_alias: Option<&str>,
-    ) -> Result<Self::Output, Self::Error>;
+    /// Handle [`SqlPlan::TextSearch`].
+    fn text_search(&mut self, args: TextSearchVisitArgs<'_>) -> Result<Self::Output, Self::Error>;
 
     /// Handle [`SqlPlan::HybridSearch`].
     fn hybrid_search(

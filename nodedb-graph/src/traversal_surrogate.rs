@@ -30,8 +30,9 @@ pub struct SurrogateBfsParams<'a> {
     /// name-seeded walk working on an index whose surrogate bindings have not
     /// been populated.
     pub seeds: &'a [u32],
-    /// Restrict expansion to one edge label.
-    pub label_filter: Option<&'a str>,
+    /// Edge labels to expand over. Empty keeps every edge. Otherwise an edge
+    /// whose label is any listed label passes.
+    pub label_filter: &'a [&'a str],
     pub direction: Direction,
     /// Hops from the seeds. `0` returns just the addressable seeds.
     pub max_depth: usize,
@@ -127,14 +128,14 @@ impl CsrIndex {
         let Some(collection_id) = self.collection_id(collection) else {
             return hops;
         };
-        // An unknown label matches no edge. Distinguishing that from "no filter"
-        // matters: falling through to unfiltered expansion would return another
-        // label's neighbourhood under the caller's label.
-        if label_filter.is_some_and(|l| self.label_id(l).is_none()) {
+        // A set of unknown labels matches no edge. Falling through to
+        // unfiltered expansion would return other labels' neighbourhoods under
+        // the caller's labels.
+        let labels = self.label_filter(label_filter);
+        if labels.keeps_none() {
             self.seed_only(seeds, &mut hops);
             return hops;
         }
-        let label_id = label_filter.and_then(|l| self.label_id(l));
 
         let mut visited: HashSet<u32> = HashSet::with_capacity(max_visited.min(1024));
         let mut frontier: Vec<u32> = Vec::new();
@@ -170,10 +171,7 @@ impl CsrIndex {
                     neighbors.extend(self.iter_in_edges_raw_in(node, collection_id));
                 }
                 for (lid, other) in neighbors {
-                    if label_id.is_some_and(|f| f != lid)
-                        || visited.contains(&other)
-                        || !offered.insert(other)
-                    {
+                    if !labels.keeps(lid) || visited.contains(&other) || !offered.insert(other) {
                         continue;
                     }
                     candidates.push(other);
@@ -202,8 +200,8 @@ impl CsrIndex {
         nodes.sort_by(|a, b| self.node_name_checked(*a).cmp(&self.node_name_checked(*b)));
     }
 
-    /// Record the addressable seeds and nothing else. Used when the requested
-    /// edge label does not exist in this partition, so no expansion is possible
+    /// Record the addressable seeds and nothing else. Used when no requested
+    /// edge label exists in this partition, so no expansion is possible
     /// but the seeds themselves are still legitimately reachable at depth 0.
     fn seed_only(&self, seeds: &[u32], hops: &mut SurrogateHops) {
         let mut seen: HashSet<u32> = HashSet::new();
@@ -250,7 +248,7 @@ mod tests {
     fn params<'a>(seeds: &'a [u32], collection: &'a str) -> SurrogateBfsParams<'a> {
         SurrogateBfsParams {
             seeds,
-            label_filter: None,
+            label_filter: &[],
             direction: Direction::Out,
             max_depth: 5,
             max_visited: 1000,
@@ -369,10 +367,54 @@ mod tests {
         let csr = seeded_csr();
         let seeds = [local(&csr, "a")];
         let mut p = params(&seeds, "people");
-        p.label_filter = Some("never_inserted");
+        p.label_filter = &["never_inserted"];
         let hops = csr.traverse_surrogates_in_collection(p);
         assert!(hops.reached.contains(Surrogate::new(10)));
         assert!(!hops.reached.contains(Surrogate::new(20)));
+    }
+
+    /// `a -knows-> b -likes-> c -hates-> d` in `people`.
+    fn three_label_csr() -> CsrIndex {
+        let mut csr = CsrIndex::new(test_memory());
+        for (src, label, dst) in [
+            ("a", "knows", "b"),
+            ("b", "likes", "c"),
+            ("c", "hates", "d"),
+        ] {
+            csr.add_edge_in_collection(src, label, dst, "people")
+                .unwrap_or_else(|e| panic!("seed edge {src}->{dst}: {e}"));
+        }
+        csr
+    }
+
+    fn reached_names<'a>(csr: &'a CsrIndex, hops: &SurrogateHops) -> Vec<&'a str> {
+        let mut names: Vec<&str> = hops
+            .distances
+            .iter()
+            .filter_map(|&(l, _)| csr.node_name_checked(l))
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    #[test]
+    fn a_label_set_expands_over_every_listed_label() {
+        let csr = three_label_csr();
+        let seeds = [local(&csr, "a")];
+        let mut p = params(&seeds, "people");
+        p.label_filter = &["knows", "likes"];
+        let hops = csr.traverse_surrogates_in_collection(p);
+        assert_eq!(reached_names(&csr, &hops), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn an_unknown_label_in_a_set_adds_nothing() {
+        let csr = three_label_csr();
+        let seeds = [local(&csr, "a")];
+        let mut p = params(&seeds, "people");
+        p.label_filter = &["knows", "never_inserted"];
+        let hops = csr.traverse_surrogates_in_collection(p);
+        assert_eq!(reached_names(&csr, &hops), vec!["a", "b"]);
     }
 
     #[test]

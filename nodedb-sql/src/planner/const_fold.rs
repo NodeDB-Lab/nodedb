@@ -97,6 +97,14 @@ pub fn fold_constant_scoped(
             // than wrapping (release) or panicking (debug).
             Some(SqlValue::Int(i)) => i.checked_neg().map(SqlValue::Int),
             Some(SqlValue::Float(f)) => Some(SqlValue::Float(-f)),
+            // `9223372036854775808` is past `i64::MAX`, so its literal is a
+            // `Decimal`. Negated it is `i64::MIN`, an integer like every
+            // other in range.
+            Some(SqlValue::Decimal(d))
+                if d.scale() == 0 && -d == rust_decimal::Decimal::from(i64::MIN) =>
+            {
+                Some(SqlValue::Int(i64::MIN))
+            }
             Some(SqlValue::Decimal(d)) => Some(SqlValue::Decimal(-d)),
             _ => None,
         }),
@@ -392,7 +400,8 @@ pub fn fold_function_call_scoped(
         Err(
             e @ (nodedb_query::EvalError::VectorDimensionMismatch { .. }
             | nodedb_query::EvalError::ArgumentType { .. }
-            | nodedb_query::EvalError::InvalidJsonPath { .. }),
+            | nodedb_query::EvalError::InvalidJsonPath { .. }
+            | nodedb_query::EvalError::NumericOverflow { .. }),
         ) => Err(SqlError::DataException {
             detail: e.to_string(),
         }),
@@ -482,6 +491,27 @@ mod tests {
             }
             other => panic!("expected SqlValue::Timestamptz, got {other:?}"),
         }
+    }
+
+    /// `-9223372036854775808` folds to the integer `i64::MIN`, and a negated
+    /// literal past it stays an exact `Decimal`.
+    #[test]
+    fn negated_integer_literal_past_i64_max_stays_exact() {
+        let registry = FunctionRegistry::new();
+        let neg = |digits: &str| SqlExpr::UnaryOp {
+            op: UnaryOp::Neg,
+            expr: Box::new(SqlExpr::Literal(SqlValue::Decimal(
+                rust_decimal::Decimal::from_str_exact(digits).unwrap(),
+            ))),
+        };
+        assert_eq!(
+            fold_constant(&neg("9223372036854775808"), &registry).unwrap(),
+            Some(SqlValue::Int(i64::MIN))
+        );
+        assert_eq!(
+            fold_constant(&neg("18446744073709551615"), &registry).unwrap(),
+            Some(SqlValue::Decimal(-rust_decimal::Decimal::from(u64::MAX)))
+        );
     }
 
     /// A constant call whose argument the function cannot compute on fails

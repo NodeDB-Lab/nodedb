@@ -36,27 +36,41 @@ pub fn read_f64(buf: &[u8], offset: usize) -> Option<f64> {
 }
 
 /// Read an i64 from the value at `offset`. Handles all integer types.
-/// Floats return `None` — use `read_f64` for those.
+/// Floats return `None` — use `read_f64` for those. A `uint64` above
+/// `i64::MAX` returns `None` — use `read_integer` for the exact value.
 pub fn read_i64(buf: &[u8], offset: usize) -> Option<i64> {
+    i64::try_from(read_integer(buf, offset)?).ok()
+}
+
+/// Read any msgpack integer at `offset` exactly. `i128` holds every `i64`
+/// and every `u64`. Floats and non-integers return `None`.
+pub fn read_integer(buf: &[u8], offset: usize) -> Option<i128> {
     let tag = get(buf, offset)?;
     match tag {
-        0x00..=0x7f => Some(tag as i64),
-        0xe0..=0xff => Some((tag as i8) as i64),
-        UINT8 => Some(get(buf, offset + 1)? as i64),
-        UINT16 => Some(read_u16_be(buf, offset + 1)? as i64),
-        UINT32 => Some(read_u32_be(buf, offset + 1)? as i64),
-        UINT64 => {
-            let v = read_u64_be(buf, offset + 1)?;
-            Some(v as i64)
-        }
-        INT8 => Some(get(buf, offset + 1)? as i8 as i64),
-        INT16 => Some(read_u16_be(buf, offset + 1)? as i16 as i64),
-        INT32 => Some(read_u32_be(buf, offset + 1)? as i32 as i64),
-        INT64 => {
-            let v = read_u64_be(buf, offset + 1)?;
-            Some(v as i64)
-        }
+        0x00..=0x7f => Some(i128::from(tag)),
+        0xe0..=0xff => Some(i128::from(tag as i8)),
+        UINT8 => Some(i128::from(get(buf, offset + 1)?)),
+        UINT16 => Some(i128::from(read_u16_be(buf, offset + 1)?)),
+        UINT32 => Some(i128::from(read_u32_be(buf, offset + 1)?)),
+        UINT64 => Some(i128::from(read_u64_be(buf, offset + 1)?)),
+        INT8 => Some(i128::from(get(buf, offset + 1)? as i8)),
+        INT16 => Some(i128::from(read_u16_be(buf, offset + 1)? as i16)),
+        INT32 => Some(i128::from(read_u32_be(buf, offset + 1)? as i32)),
+        INT64 => Some(i128::from(read_u64_be(buf, offset + 1)? as i64)),
         _ => None,
+    }
+}
+
+/// Read a msgpack integer or float at `offset` without rounding an integer
+/// through `f64`.
+pub(crate) fn read_numeric(buf: &[u8], offset: usize) -> Option<crate::json_ops::Numeric> {
+    use crate::json_ops::Numeric;
+    match read_integer(buf, offset) {
+        Some(i) => Some(Numeric::Int(i)),
+        None => match get(buf, offset)? {
+            FLOAT32 | FLOAT64 => read_f64(buf, offset).map(Numeric::Float),
+            _ => None,
+        },
     }
 }
 
@@ -242,6 +256,38 @@ mod tests {
 
         let buf = encode(&json!(-500));
         assert_eq!(read_i64(&buf, 0), Some(-500));
+    }
+
+    #[test]
+    fn uint64_above_i64_max_never_wraps() {
+        let mut buf = vec![UINT64];
+        buf.extend_from_slice(&u64::MAX.to_be_bytes());
+        assert_eq!(read_i64(&buf, 0), None);
+        assert_eq!(read_integer(&buf, 0), Some(i128::from(u64::MAX)));
+
+        let mut edge = vec![UINT64];
+        edge.extend_from_slice(&(i64::MAX as u64).to_be_bytes());
+        assert_eq!(read_i64(&edge, 0), Some(i64::MAX));
+
+        let mut neg = vec![INT64];
+        neg.extend_from_slice(&i64::MIN.to_be_bytes());
+        assert_eq!(read_i64(&neg, 0), Some(i64::MIN));
+        assert_eq!(read_integer(&neg, 0), Some(i128::from(i64::MIN)));
+    }
+
+    #[test]
+    fn read_numeric_keeps_integers_exact() {
+        use crate::json_ops::Numeric;
+        let buf = encode(&json!(9_007_199_254_740_993_i64));
+        assert!(matches!(
+            read_numeric(&buf, 0),
+            Some(Numeric::Int(9_007_199_254_740_993))
+        ));
+        let buf = encode(&json!(1.5));
+        assert!(matches!(read_numeric(&buf, 0), Some(Numeric::Float(f)) if f == 1.5));
+        let buf = encode(&json!("1"));
+        assert!(read_numeric(&buf, 0).is_none());
+        assert!(read_integer(&buf, 0).is_none());
     }
 
     #[test]

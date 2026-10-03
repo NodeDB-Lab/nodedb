@@ -29,13 +29,9 @@ impl AggAccum {
                     *n += 1;
                 }
             }
-            AggAccum::SumAvg { sum, comp, n } => {
-                if let Some(v) = ah::extract_f64(doc, &agg.field, agg.expr.as_ref())? {
-                    let y = v - *comp;
-                    let t = *sum + y;
-                    *comp = (t - *sum) - y;
-                    *sum = t;
-                    *n += 1;
+            AggAccum::SumAvg { sum } => {
+                if let Some(v) = ah::extract_sum_value(doc, &agg.field, agg.expr.as_ref())? {
+                    sum.add_value(&v);
                 }
             }
             AggAccum::SumAvgDistinct { seen } => {
@@ -43,52 +39,20 @@ impl AggAccum {
                 // SUM(DISTINCT col) / AVG(DISTINCT col) only credit each
                 // distinct value once. NULL bytes (msgpack `0xc0`) are
                 // ignored — they cannot meaningfully participate in a
-                // numeric aggregate. The parsed f64 is stored alongside
-                // the key so finalize can derive an order-independent
-                // sum (which also makes the state mergeable across
-                // spilled runs).
+                // numeric aggregate. The contributed number is stored
+                // alongside the key so finalize can derive an
+                // order-independent sum (which also makes the state
+                // mergeable across spilled runs).
                 if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref())?
                     && bytes != [0xc0u8]
                     && let Entry::Vacant(slot) = seen.entry(bytes)
-                    && let Some(v) = ah::extract_f64(doc, &agg.field, agg.expr.as_ref())?
+                    && let Some(v) = ah::extract_sum_value(doc, &agg.field, agg.expr.as_ref())?
                 {
                     slot.insert(v);
                 }
             }
-            AggAccum::Min { best } => {
-                if let Some(v) = ah::extract_value(doc, &agg.field, agg.expr.as_ref())? {
-                    if v.is_null() {
-                        return Ok(());
-                    }
-                    let replace = match best {
-                        None => true,
-                        Some(cur) => {
-                            nodedb_query::value_ops::compare_values(&v, cur)
-                                == std::cmp::Ordering::Less
-                        }
-                    };
-                    if replace {
-                        *best = Some(v);
-                    }
-                }
-            }
-            AggAccum::Max { best } => {
-                if let Some(v) = ah::extract_value(doc, &agg.field, agg.expr.as_ref())? {
-                    if v.is_null() {
-                        return Ok(());
-                    }
-                    let replace = match best {
-                        None => true,
-                        Some(cur) => {
-                            nodedb_query::value_ops::compare_values(&v, cur)
-                                == std::cmp::Ordering::Greater
-                        }
-                    };
-                    if replace {
-                        *best = Some(v);
-                    }
-                }
-            }
+            AggAccum::Min { best } => feed_extremum(best, agg, doc, false)?,
+            AggAccum::Max { best } => feed_extremum(best, agg, doc, true)?,
             AggAccum::CountDistinct { seen } => {
                 if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref())?
                     && bytes != [0xc0u8]
@@ -162,6 +126,25 @@ impl AggAccum {
         }
         Ok(())
     }
+}
+
+/// Fold one document into a MIN (`want_max` false) or MAX (`want_max` true)
+/// state. The original value is kept and compared exactly. A NaN extreme
+/// yields to any candidate. A NaN candidate never replaces a number.
+fn feed_extremum(
+    best: &mut Option<nodedb_types::Value>,
+    agg: &AggregateSpec,
+    doc: &[u8],
+    want_max: bool,
+) -> Result<(), nodedb_query::EvalError> {
+    use nodedb_query::msgpack_scan::aggregate_helpers as ah;
+    if let Some(v) = ah::extract_value(doc, &agg.field, agg.expr.as_ref())?
+        && !v.is_null()
+        && nodedb_query::window::extremum::value_replaces(&v, best.as_ref(), want_max)
+    {
+        *best = Some(v);
+    }
+    Ok(())
 }
 
 /// FNV-1a hash (matches the implementation in nodedb-query aggregate.rs).

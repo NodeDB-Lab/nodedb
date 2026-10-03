@@ -79,7 +79,7 @@ impl CoreLoop {
                     self.graph_txn_overlays.get(&txn_id),
                     &(task.request.database_id, tenant, collection.to_string()),
                     node_id,
-                    edge_label.as_deref(),
+                    edge_label.as_deref().as_slice(),
                     direction,
                     edges,
                 )

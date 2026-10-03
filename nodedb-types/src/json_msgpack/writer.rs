@@ -4,8 +4,9 @@
 //!
 //! `Value::DateTime` and `Value::NaiveDateTime` are written as the instant
 //! ext (`fixext8`, see `instant_ext`). `Duration`, `Decimal`, and `Geometry`
-//! are written as strings. `Vector` is a float64 array, `ArrayCell` a map,
-//! and `Range` / `Record` are `nil`.
+//! are written as strings, except a `Decimal` that holds a `u64` above
+//! `i64::MAX`, which is a `uint64`. `Vector` is a float64 array, `ArrayCell`
+//! a map, and `Range` / `Record` are `nil`.
 
 use zerompk::Write;
 
@@ -48,8 +49,10 @@ impl zerompk::ToMessagePack for NativeRef<'_> {
 
 /// Write a `nodedb_types::Value` as standard msgpack.
 ///
-/// `Duration`, `Decimal`, and `Geometry` are strings. `Vector` is a float64
-/// array, `ArrayCell` a map, and `Range` / `Record` are `nil`.
+/// `Duration`, `Decimal`, and `Geometry` are strings, except a `Decimal`
+/// that holds a `u64` above `i64::MAX` (see [`crate::Value::decimal_as_wide_u64`]),
+/// which is a `uint64`. `Vector` is a float64 array, `ArrayCell` a map, and
+/// `Range` / `Record` are `nil`.
 pub(crate) fn write_native_value<W: Write>(
     writer: &mut W,
     value: &crate::Value,
@@ -82,7 +85,10 @@ pub(crate) fn write_native_value<W: Write>(
         crate::Value::DateTime(dt) => write_instant_ext(writer, InstantKind::Utc, dt.micros),
         crate::Value::NaiveDateTime(dt) => write_instant_ext(writer, InstantKind::Naive, dt.micros),
         crate::Value::Duration(d) => writer.write_string(&d.to_string()),
-        crate::Value::Decimal(d) => writer.write_string(&d.to_string()),
+        crate::Value::Decimal(d) => match crate::Value::decimal_as_wide_u64(d) {
+            Some(u) => writer.write_u64(u),
+            None => writer.write_string(&d.to_string()),
+        },
         crate::Value::Geometry(g) => match sonic_rs::to_string(g) {
             Ok(s) => writer.write_string(&s),
             Err(_) => writer.write_nil(),

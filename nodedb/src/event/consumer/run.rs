@@ -460,8 +460,8 @@ mod tests {
     #[derive(Debug, PartialEq)]
     struct Totals {
         audit_rows: usize,
-        mv_count: f64,
-        mv_sum: f64,
+        mv_count: i64,
+        mv_sum: i64,
         crdt_events: u64,
     }
 
@@ -520,11 +520,16 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
             .query_by_event(&AuditEvent::DmlAudit)
             .len();
+        let int = |v: &nodedb_types::Value| match v {
+            nodedb_types::Value::Integer(i) => *i,
+            nodedb_types::Value::Null => 0,
+            other => panic!("an integer COUNT / SUM, got {other:?}"),
+        };
         let (mv_count, mv_sum) = shared
             .mv_registry
             .get_state(DatabaseId::DEFAULT, TENANT, "orders_totals")
-            .and_then(|state| state.read_results().into_iter().next())
-            .map_or((0.0, 0.0), |(_, row)| (row[0].1, row[1].1));
+            .and_then(|state| state.read_results().unwrap().into_iter().next())
+            .map_or((0, 0), |(_, row)| (int(&row[0].1), int(&row[1].1)));
         let crdt_events = shared.delta_packager.deltas_skipped.load(Ordering::Relaxed)
             + shared
                 .delta_packager
@@ -563,6 +568,7 @@ mod tests {
             user_id: None,
             statement_digest: None,
             commit_hlc: Some(crate::event::test_utils::test_commit_hlc()),
+            image_fault: None,
         }
     }
 
@@ -659,8 +665,8 @@ mod tests {
     async fn catch_up_mid_run_delivers_every_event_exactly_once() {
         let expected = Totals {
             audit_rows: WRITES as usize,
-            mv_count: WRITES as f64,
-            mv_sum: (1..=WRITES).sum::<u64>() as f64,
+            mv_count: WRITES as i64,
+            mv_sum: (1..=WRITES).sum::<u64>() as i64,
             crdt_events: WRITES,
         };
 
@@ -780,7 +786,7 @@ mod tests {
 
     async fn wait_for_mv_count(shared: &SharedState, count: u64) {
         tokio::time::timeout(Duration::from_secs(10), async {
-            while totals(shared).mv_count < count as f64 {
+            while totals(shared).mv_count < count as i64 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -896,10 +902,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         let seen = totals(&node.shared);
         assert_eq!(
-            seen.mv_count, WRITES as f64,
+            seen.mv_count, WRITES as i64,
             "a view counted an event twice"
         );
-        assert_eq!(seen.mv_sum, (1..=WRITES).sum::<u64>() as f64);
+        assert_eq!(seen.mv_sum, (1..=WRITES).sum::<u64>() as i64);
         assert_eq!(
             durable_audit_rows(&node.wal),
             WRITES as usize,

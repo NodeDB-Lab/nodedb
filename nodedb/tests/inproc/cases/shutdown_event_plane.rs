@@ -49,6 +49,7 @@ fn make_write_event(seq: u64, lsn_val: u64) -> WriteEvent {
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
             .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok()),
+        image_fault: None,
     }
 }
 

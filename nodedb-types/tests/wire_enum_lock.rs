@@ -454,7 +454,6 @@ fn query_mode_wire_forms() {
         match qm {
             QueryMode::Or => {}
             QueryMode::And => {}
-            _ => panic!("unrecognized QueryMode — update wire_enum_lock.rs"),
         }
         let v = serde_json::to_value(qm).expect("serialize");
         assert_eq!(v, json!(expected), "QueryMode::{expected} wire form");

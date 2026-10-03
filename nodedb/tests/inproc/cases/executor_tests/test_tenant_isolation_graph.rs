@@ -41,7 +41,7 @@ fn graph_neighbors_isolated() {
         TENANT_A,
         PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "node_2".into(),
-            edge_label: Some("FOLLOWS".into()),
+            edge_labels: vec!["FOLLOWS".into()],
             direction: nodedb::engine::graph::edge_store::Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
@@ -62,7 +62,7 @@ fn graph_neighbors_isolated() {
         TENANT_B,
         PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "node_2".into(),
-            edge_label: Some("FOLLOWS".into()),
+            edge_labels: vec!["FOLLOWS".into()],
             direction: nodedb::engine::graph::edge_store::Direction::Out,
             rls_filters: Vec::new(),
             collection: None,

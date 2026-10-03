@@ -6,14 +6,17 @@ use tracing::debug;
 
 use nodedb_fts::FtsSearchParams;
 use nodedb_fts::posting::QueryMode;
+use nodedb_types::{Surrogate, SurrogateBitmap};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 
+use nodedb_physical::physical_plan::TextScoreSpec;
+
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::document::read::decode::decode_scanned_row;
-use crate::data::executor::handlers::transaction::overlay::FtsMergeParams;
+use crate::data::executor::handlers::text_rows::{TextRowGate, combine_eligible, text_row_image};
+use crate::data::executor::handlers::text_score_columns::ScoreColumns;
 use crate::data::executor::response_codec::DocumentRow;
-use crate::data::executor::scan_normalize::sparse_body_to_msgpack;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, TenantId, TxnId};
 
@@ -21,11 +24,20 @@ use crate::types::{DatabaseId, TenantId, TxnId};
 pub(in crate::data::executor) struct TextSearchParams<'a> {
     pub tid: u64,
     pub collection: &'a str,
+    /// Field index the query reads. `None` reads the whole-document index.
+    pub field: Option<&'a str>,
     pub query: &'a str,
+    /// Hits returned. `usize::MAX` returns every match.
     pub top_k: usize,
+    /// Boolean combination of the query terms.
+    pub mode: nodedb_types::text_search::QueryMode,
     pub fuzzy: bool,
-    pub prefilter: Option<&'a nodedb_types::SurrogateBitmap>,
+    pub prefilter: Option<&'a SurrogateBitmap>,
+    /// Residual WHERE predicates (`Vec<ScanFilter>`), applied before ranking.
+    pub filters: &'a [u8],
+    /// RLS filters (`Vec<ScanFilter>`), applied before ranking.
     pub rls_filters: &'a [u8],
+    pub scores: &'a [TextScoreSpec],
 }
 
 /// Parameters for the internal [`CoreLoop::hydrate_text_hits`] helper.
@@ -42,13 +54,13 @@ pub(in crate::data::executor) struct HydrateTextHitsParams<'a> {
     pub database_id: u64,
     pub tid: u64,
     pub collection: &'a str,
-    pub top_k: usize,
-    pub rls_filters: &'a [u8],
     /// The issuing transaction, when this read runs inside `BEGIN..COMMIT`.
     /// A matched surrogate's body is resolved from this transaction's
     /// staging overlay first (a doc inserted/updated in THIS transaction is
     /// not yet in base storage), falling back to base storage otherwise.
     pub txn_id: Option<TxnId>,
+    /// Score columns injected into each hydrated row.
+    pub scores: &'a ScoreColumns<'a>,
 }
 
 impl CoreLoop {
@@ -58,82 +70,25 @@ impl CoreLoop {
         task: &ExecutionTask,
         params: TextSearchParams<'_>,
     ) -> Response {
-        let TextSearchParams {
-            tid,
-            collection,
-            query,
-            top_k,
-            fuzzy,
-            prefilter,
-            rls_filters,
-        } = params;
-        let tenant_id = TenantId::new(tid);
-        debug!(core = self.core_id, tid, %collection, %query, top_k, fuzzy, "text search");
+        debug!(
+            core = self.core_id,
+            tid = params.tid,
+            collection = %params.collection,
+            field = ?params.field,
+            query = %params.query,
+            top_k = params.top_k,
+            mode = params.mode.as_str(),
+            fuzzy = params.fuzzy,
+            "text search"
+        );
 
         // Scan-quiesce gate.
-        let _scan_guard = match self.acquire_scan_guard(task, tid, collection) {
+        let _scan_guard = match self.acquire_scan_guard(task, params.tid, params.collection) {
             Ok(g) => g,
             Err(resp) => return resp,
         };
 
-        // Fetch extra candidates when RLS is active.
-        let fetch_k = if rls_filters.is_empty() {
-            top_k
-        } else {
-            top_k.saturating_mul(2).max(20)
-        };
-
-        let results = match self.inverted.search(
-            task.request.database_id.as_u64(),
-            tenant_id,
-            collection,
-            FtsSearchParams {
-                query,
-                top_k: fetch_k,
-                fuzzy_enabled: fuzzy,
-                mode: QueryMode::And,
-                prefilter,
-            },
-        ) {
-            Ok(r) => r,
-            Err(e) => return self.response_error(task, e),
-        };
-
-        // Read-your-own-writes for FTS: fold this transaction's staged
-        // document bodies into the base search result before hydration, so
-        // a doc inserted/updated earlier in the same transaction appears
-        // (and one deleted is excluded) before COMMIT.
-        let mut merged: Vec<(nodedb_types::Surrogate, f32, bool)> = results
-            .iter()
-            .map(|r| (r.doc_id, r.score, r.fuzzy))
-            .collect();
-        if let Some(txn_id) = task.request.txn_id
-            && let Err(e) = self.merge_fts_overlay_into_results(
-                FtsMergeParams {
-                    txn_id,
-                    database_id: task.request.database_id,
-                    tid: tenant_id,
-                    collection,
-                    query,
-                    top_k: fetch_k,
-                },
-                &mut merged,
-            )
-        {
-            return self.response_error(task, e);
-        }
-
-        let rows = match self.hydrate_text_hits(
-            merged,
-            HydrateTextHitsParams {
-                database_id: task.request.database_id.as_u64(),
-                tid,
-                collection,
-                top_k,
-                rls_filters,
-                txn_id: task.request.txn_id,
-            },
-        ) {
+        let rows = match self.text_search_rows(task, &params) {
             Ok(rows) => rows,
             Err(e) => return self.response_error(task, e),
         };
@@ -150,6 +105,58 @@ impl CoreLoop {
                 },
             ),
         }
+    }
+
+    /// The hydrated hits of a text search, in this order: resolve the field's
+    /// index, restrict candidates to the rows the residual filters and RLS
+    /// admit, rank with the transaction's staged rows folded in, hydrate, and
+    /// inject the score columns.
+    ///
+    /// RLS needs no check after ranking: the eligible rows are read on this
+    /// core in the same task as the ranked rows are hydrated, so no write can
+    /// land between the two, and a row with no body is never eligible under a
+    /// gate.
+    fn text_search_rows(
+        &self,
+        task: &ExecutionTask,
+        p: &TextSearchParams<'_>,
+    ) -> crate::Result<Vec<DocumentRow>> {
+        let tenant_id = TenantId::new(p.tid);
+        let Some(index) = self.text_index(task, p.tid, p.collection, p.field)? else {
+            return Ok(Vec::new());
+        };
+        let gate = TextRowGate::new(p.filters, p.rls_filters)?;
+        let eligible = combine_eligible(
+            p.prefilter,
+            self.text_eligible_rows(task, p.tid, p.collection, &gate)?,
+        );
+        let staged = self.text_staged_view(task, p.tid, index)?;
+        let hits = self.inverted.search_staged(
+            task.request.database_id.as_u64(),
+            tenant_id,
+            index,
+            FtsSearchParams {
+                query: p.query,
+                top_k: p.top_k,
+                fuzzy_enabled: p.fuzzy,
+                mode: QueryMode::from(p.mode),
+                prefilter: eligible.as_ref(),
+            },
+            staged.as_ref(),
+        )?;
+
+        let scores =
+            self.text_score_columns(task, p.tid, p.collection, p.scores, eligible.as_ref())?;
+        self.hydrate_text_hits(
+            hits.iter().map(|r| (r.doc_id, r.score, r.fuzzy)),
+            HydrateTextHitsParams {
+                database_id: task.request.database_id.as_u64(),
+                tid: p.tid,
+                collection: p.collection,
+                txn_id: task.request.txn_id,
+                scores: &scores,
+            },
+        )
     }
 
     pub(in crate::data::executor) fn strict_schema_for(
@@ -170,28 +177,26 @@ impl CoreLoop {
         })
     }
 
+    /// Resolve ranked hits to rows, in hit order, each carrying `score`,
+    /// `fuzzy`, its `id`, and the score columns.
     pub(in crate::data::executor) fn hydrate_text_hits<I>(
         &self,
         hits: I,
         params: HydrateTextHitsParams<'_>,
     ) -> crate::Result<Vec<DocumentRow>>
     where
-        I: IntoIterator<Item = (nodedb_types::Surrogate, f32, bool)>,
+        I: IntoIterator<Item = (Surrogate, f32, bool)>,
     {
         let HydrateTextHitsParams {
             database_id,
             tid,
             collection,
-            top_k,
-            rls_filters,
             txn_id,
+            scores,
         } = params;
         // Read-your-own-writes for the projection step: a matched surrogate
-        // added by the overlay merge (a doc inserted/updated in THIS
-        // transaction) has no body in base storage yet, so its columns must
-        // be projected from the staged `Put` bytes. Resolve every matched
-        // surrogate's body from the transaction's overlay first, falling
-        // back to base storage — mirroring the index-lookup fetch fix.
+        // the transaction staged has no body in base storage yet, so its
+        // columns come from the staged bytes.
         let coll_key = (
             DatabaseId::new(database_id),
             TenantId::new(tid),
@@ -204,72 +209,42 @@ impl CoreLoop {
         let format =
             self.sparse_body_format(DatabaseId::new(database_id), TenantId::new(tid), collection);
         let mut rows: Vec<DocumentRow> = Vec::new();
+        let mut surrogates: Vec<Surrogate> = Vec::new();
         for (surrogate, score, fuzzy) in hits {
-            if rows.len() >= top_k {
-                break;
-            }
             let storage_key = nodedb_types::StorageKey::for_surrogate(surrogate);
-            let hex_key = storage_key.to_string();
-            let bytes_opt = match self.overlay_or_base_body(txn_id, &coll_key, &storage_key, || {
-                self.sparse.get(database_id, tid, collection, &storage_key)
-            }) {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!(
-                        err = %e,
-                        %hex_key,
-                        %collection,
-                        "sparse store error during text hit hydration; skipping row"
-                    );
-                    continue;
+            let bytes_opt = self.overlay_or_base_body(txn_id, &coll_key, &storage_key, || {
+                self.text_base_body(database_id, tid, collection, &storage_key)
+            })?;
+            // A surrogate with no body was indexed for FTS without a document
+            // write (FtsIndex frames synced from Lite). Its row is the
+            // surrogate-derived key alone. Under a filter or RLS gate such a
+            // row is never eligible, so it never reaches here.
+            let mut value = match bytes_opt {
+                Some(ref bytes) => {
+                    // The image carries `id` from the storage key, the same
+                    // image the document scan returns.
+                    let image = text_row_image(&storage_key, bytes, format.as_format_ref());
+                    decode_scanned_row(bytes, Some(image.as_slice()), format.as_format_ref())?
                 }
-            };
-            // When the sparse store has no body for this surrogate the document
-            // was indexed for FTS without a corresponding document write (e.g.
-            // FtsIndex frames synced from Lite). Return a minimal row containing
-            // only the surrogate-derived ID so callers that only project `id`
-            // (the common case in sync interop tests and CDC pipelines) still
-            // receive a result. RLS filters are skipped when there is no body.
-            let mut value = if let Some(ref bytes) = bytes_opt {
-                // RLS is evaluated against the NORMALIZED msgpack image — the
-                // same bytes the projection below reads — so the gate and the
-                // output agree. A strict Binary Tuple is not a msgpack map at
-                // all and a vector-primary sidecar is a TAGGED one, so a
-                // predicate pushed at the stored bytes finds no field it
-                // recognizes and drops the row on a format mismatch rather
-                // than on policy.
-                //
-                // The image built for the gate is then handed to the decoder
-                // rather than dropped, so a sidecar row is transcoded once for
-                // both steps.
-                let normalized = if rls_filters.is_empty() {
-                    None
-                } else {
-                    let normalized = sparse_body_to_msgpack(bytes, format.as_format_ref());
-                    if !super::rls_eval::rls_check_msgpack_bytes(rls_filters, &normalized) {
-                        continue;
-                    }
-                    Some(normalized)
-                };
-                decode_scanned_row(bytes, normalized.as_deref(), format.as_format_ref())?
-            } else {
-                serde_json::Value::Object(serde_json::Map::new())
+                None => serde_json::Value::Object(serde_json::Map::new()),
             };
             if let serde_json::Value::Object(ref mut map) = value {
                 map.insert(
                     "score".to_string(),
                     serde_json::Value::Number(
-                        serde_json::Number::from_f64(score as f64)
+                        serde_json::Number::from_f64(f64::from(score))
                             .unwrap_or_else(|| serde_json::Number::from(0)),
                     ),
                 );
                 map.insert("fuzzy".to_string(), serde_json::Value::Bool(fuzzy));
             }
+            surrogates.push(surrogate);
             rows.push(DocumentRow {
-                id: hex_key,
+                id: storage_key.to_string(),
                 data: value,
             });
         }
+        scores.inject(&surrogates, &mut rows)?;
         Ok(rows)
     }
 }

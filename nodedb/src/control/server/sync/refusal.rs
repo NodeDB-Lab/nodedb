@@ -53,6 +53,7 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
             | ErrorCode::CollectionDraining { .. }
             | ErrorCode::RecursionDepthExceeded { .. }
             | ErrorCode::UndefinedColumn { .. }
+            | ErrorCode::TextColumn { .. }
             | ErrorCode::Internal { .. }
             | ErrorCode::Unsupported { .. }
             | ErrorCode::RollbackFailed { .. }
@@ -116,6 +117,7 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
         | crate::Error::UndefinedObject { .. }
         | crate::Error::ObjectNotInPrerequisiteState { .. }
         | crate::Error::UndefinedColumn { .. }
+        | crate::Error::TextColumn { .. }
         | crate::Error::AmbiguousColumn { .. }
         | crate::Error::UnknownStrictField { .. }
         | crate::Error::DivisionByZero
@@ -271,6 +273,7 @@ fn is_indeterminate(error: &crate::Error) -> bool {
         | crate::Error::UndefinedObject { .. }
         | crate::Error::ObjectNotInPrerequisiteState { .. }
         | crate::Error::UndefinedColumn { .. }
+        | crate::Error::TextColumn { .. }
         | crate::Error::AmbiguousColumn { .. }
         | crate::Error::UnknownStrictField { .. }
         | crate::Error::DivisionByZero
@@ -361,6 +364,7 @@ fn is_indeterminate_code(code: &ErrorCode) -> bool {
         | ErrorCode::InsufficientBalance { .. }
         | ErrorCode::RecursionDepthExceeded { .. }
         | ErrorCode::UndefinedColumn { .. }
+        | ErrorCode::TextColumn { .. }
         | ErrorCode::Internal { .. }
         | ErrorCode::Unsupported { .. }
         | ErrorCode::RollbackFailed { .. }

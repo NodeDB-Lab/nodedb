@@ -36,6 +36,15 @@ pub enum QueryMode {
     Or,
 }
 
+impl From<nodedb_types::text_search::QueryMode> for QueryMode {
+    fn from(mode: nodedb_types::text_search::QueryMode) -> Self {
+        match mode {
+            nodedb_types::text_search::QueryMode::And => Self::And,
+            nodedb_types::text_search::QueryMode::Or => Self::Or,
+        }
+    }
+}
+
 /// A scored search result from the inverted index.
 #[derive(Debug, Clone)]
 pub struct TextSearchResult {
@@ -75,6 +84,13 @@ mod tests {
     #[test]
     fn default_query_mode_is_and() {
         assert_eq!(QueryMode::default(), QueryMode::And);
+    }
+
+    #[test]
+    fn public_query_mode_maps_to_the_same_mode() {
+        use nodedb_types::text_search::QueryMode as Public;
+        assert_eq!(QueryMode::from(Public::And), QueryMode::And);
+        assert_eq!(QueryMode::from(Public::Or), QueryMode::Or);
     }
 
     #[test]

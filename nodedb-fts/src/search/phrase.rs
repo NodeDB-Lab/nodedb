@@ -11,8 +11,6 @@
 
 use std::collections::HashMap;
 
-use nodedb_types::Surrogate;
-
 use crate::posting::Posting;
 
 /// Maximum phrase boost multiplier for a full consecutive phrase match.
@@ -73,33 +71,6 @@ fn has_consecutive_positions(a: &[u32], b: &[u32]) -> bool {
     }
 
     false
-}
-
-/// Collect per-document postings for phrase boost computation.
-///
-/// Given the query tokens and the posting lists retrieved during BM25 scoring,
-/// returns a map from `doc_id` → (token_index → posting).
-pub(crate) fn collect_doc_postings<'a>(
-    query_tokens: &[String],
-    term_postings: &'a [(Vec<Posting>, bool)],
-) -> HashMap<Surrogate, HashMap<usize, &'a Posting>> {
-    let mut doc_map: HashMap<Surrogate, HashMap<usize, &Posting>> = HashMap::new();
-
-    for (token_idx, (postings, _is_fuzzy)) in term_postings.iter().enumerate() {
-        for posting in postings {
-            doc_map
-                .entry(posting.doc_id)
-                .or_default()
-                .insert(token_idx, posting);
-        }
-    }
-
-    // Only keep documents that have at least 2 matched terms (phrase boost is meaningless for 1).
-    if query_tokens.len() >= 2 {
-        doc_map.retain(|_, postings| postings.len() >= 2);
-    }
-
-    doc_map
 }
 
 #[cfg(test)]

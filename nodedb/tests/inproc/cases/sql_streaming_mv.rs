@@ -15,7 +15,9 @@
 
 use std::time::Duration;
 
+use nodedb::event::streaming_mv::state::AggRow;
 use nodedb_test_support::pgwire_harness::TestServer;
+use nodedb_types::Value;
 
 /// The default harness superuser (`nodedb`) is provisioned under tenant id 1.
 const TENANT_ID: u64 = 1;
@@ -70,25 +72,10 @@ async fn streaming_mv_incrementally_aggregates_source_writes() {
     // The Event Plane consumes WriteEvents asynchronously. Poll the registry
     // until the MV state materializes both group keys (or time out). This is a
     // deterministic convergence poll, not a blind fixed sleep.
-    let mut results: Vec<(String, Vec<(String, f64)>)> = Vec::new();
-    for _ in 0..80 {
-        if let Some(state) = server.shared.mv_registry.get_state(
-            nodedb::types::DatabaseId::DEFAULT,
-            TENANT_ID,
-            "smv_order_stats",
-        ) {
-            results = state.read_results();
-            if results.len() >= 2 {
-                break;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let results = await_groups(&server, "smv_order_stats", 2).await;
 
     // A correctly-wired streaming MV registers its definition on CREATE and
     // then incrementally aggregates the three source writes into two groups.
-    // Today the neutral DDL handler never registers a `StreamingMvDef`, so the
-    // registry has no state for the view and this assertion fails.
     assert_eq!(
         results.len(),
         2,
@@ -100,12 +87,14 @@ async fn streaming_mv_incrementally_aggregates_source_writes() {
         .find(|(k, _)| k == "active")
         .expect("`active` group must be present in streaming MV state");
     // Aggregate order matches the SELECT list: index 0 = COUNT(*), 1 = SUM(amount).
-    assert!(
-        (active.1[0].1 - 2.0).abs() < f64::EPSILON,
+    assert_eq!(
+        active.1[0].1,
+        Value::Integer(2),
         "active COUNT(*) must be 2; got {active:?}"
     );
-    assert!(
-        (active.1[1].1 - 30.0).abs() < f64::EPSILON,
+    assert_eq!(
+        active.1[1].1,
+        Value::Integer(30),
         "active SUM(amount) must be 10 + 20 = 30; got {active:?}"
     );
 
@@ -113,14 +102,140 @@ async fn streaming_mv_incrementally_aggregates_source_writes() {
         .iter()
         .find(|(k, _)| k == "pending")
         .expect("`pending` group must be present in streaming MV state");
-    assert!(
-        (pending.1[0].1 - 1.0).abs() < f64::EPSILON,
+    assert_eq!(
+        pending.1[0].1,
+        Value::Integer(1),
         "pending COUNT(*) must be 1; got {pending:?}"
     );
-    assert!(
-        (pending.1[1].1 - 5.0).abs() < f64::EPSILON,
+    assert_eq!(
+        pending.1[1].1,
+        Value::Integer(5),
         "pending SUM(amount) must be 5; got {pending:?}"
     );
+}
+
+/// Poll `view`'s state until it holds at least `groups` group keys, or time
+/// out. The Event Plane consumes WriteEvents asynchronously, so this is a
+/// convergence poll, not a blind fixed sleep.
+async fn await_groups(server: &TestServer, view: &str, groups: usize) -> Vec<(String, AggRow)> {
+    let mut results = Vec::new();
+    for _ in 0..80 {
+        if let Some(state) =
+            server
+                .shared
+                .mv_registry
+                .get_state(nodedb::types::DatabaseId::DEFAULT, TENANT_ID, view)
+        {
+            results = state.read_results().expect("view totals stay in range");
+            if results.len() >= groups {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    results
+}
+
+/// Poll `view` until its `group` row's COUNT (aggregate 0) reaches `count`.
+async fn await_count(server: &TestServer, view: &str, group: &str, count: i64) -> AggRow {
+    let mut row = Vec::new();
+    for _ in 0..80 {
+        if let Some((_, found)) = await_groups(server, view, 1)
+            .await
+            .into_iter()
+            .find(|(k, _)| k == group)
+        {
+            row = found;
+            if row.first().map(|(_, v)| v) == Some(&Value::Integer(count)) {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    row
+}
+
+/// The cells of the ad-hoc `sql` result's one row.
+async fn ad_hoc_row(server: &TestServer, sql: &str) -> Vec<String> {
+    let rows = server.query_rows(sql).await.unwrap();
+    assert_eq!(rows.len(), 1, "{sql}: one row, got {rows:?}");
+    rows[0].clone()
+}
+
+/// A view value as the text the ad-hoc query returns for it.
+fn text(v: &Value) -> String {
+    v.to_string()
+}
+
+/// A streaming view over integers above 2^53 and nanosecond timestamps holds
+/// the same COUNT / SUM / MIN / MAX / AVG the ad-hoc query computes over the
+/// source rows, including a SUM past `i64::MAX`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn streaming_mv_integer_aggregates_equal_ad_hoc() {
+    let server = TestServer::start().await;
+    server.exec("CREATE COLLECTION smv_exact").await.unwrap();
+    server
+        .exec("CREATE CHANGE STREAM smv_exact_changes ON smv_exact")
+        .await
+        .unwrap();
+    server
+        .exec(
+            "CREATE MATERIALIZED VIEW smv_exact_stats ON smv_exact STREAMING AS \
+             SELECT g, COUNT(*) AS cnt, SUM(v) AS total, MIN(v) AS lo, MAX(v) AS hi, \
+             AVG(v) AS mean FROM smv_exact_changes GROUP BY g",
+        )
+        .await
+        .unwrap();
+
+    let groups: [(&str, &[i64]); 2] = [
+        ("big", &[9_007_199_254_740_993, 9_007_199_254_740_992, i64::MAX]),
+        (
+            "nanos",
+            &[
+                1_700_000_000_000_000_002,
+                1_700_000_000_000_000_001,
+                1_700_000_000_000_000_003,
+            ],
+        ),
+    ];
+    for (g, values) in groups {
+        for (i, v) in values.iter().enumerate() {
+            server
+                .exec(&format!(
+                    "INSERT INTO smv_exact {{ id: '{g}{i}', g: '{g}', v: {v} }}"
+                ))
+                .await
+                .unwrap();
+        }
+    }
+
+    for (g, values) in groups {
+        let view = await_count(&server, "smv_exact_stats", g, values.len() as i64).await;
+        let ad_hoc = ad_hoc_row(
+            &server,
+            &format!(
+                "SELECT COUNT(*), SUM(v), MIN(v), MAX(v), AVG(v) FROM smv_exact WHERE g = '{g}'"
+            ),
+        )
+        .await;
+        let cells: Vec<&Value> = view.iter().map(|(_, v)| v).collect();
+        assert_eq!(cells.len(), 5, "{g}: view row {view:?}");
+        for (i, name) in ["COUNT", "SUM", "MIN", "MAX"].iter().enumerate() {
+            assert_eq!(
+                text(cells[i]),
+                ad_hoc[i],
+                "{g}: view {name} must equal the ad-hoc {name}"
+            );
+        }
+        let view_avg = cells[4].as_f64().expect("AVG is a float");
+        let ad_hoc_avg: f64 = ad_hoc[4].parse().expect("ad-hoc AVG is numeric");
+        assert_eq!(view_avg, ad_hoc_avg, "{g}: view AVG must equal the ad-hoc AVG");
+    }
+
+    // The SUM past `i64::MAX` is exact, not rounded or wrapped.
+    let big = await_count(&server, "smv_exact_stats", "big", 3).await;
+    let exact: i128 = 9_007_199_254_740_993 + 9_007_199_254_740_992 + i128::from(i64::MAX);
+    assert_eq!(text(&big[1].1), exact.to_string());
 }
 
 /// Install a mask on `collection`.`field` for a single role, exactly as the

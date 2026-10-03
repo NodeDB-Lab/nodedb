@@ -116,6 +116,7 @@ impl RetryableSchemaChange for Error {
             | Error::UndefinedObject { .. }
             | Error::ObjectNotInPrerequisiteState { .. }
             | Error::UndefinedColumn { .. }
+            | Error::TextColumn { .. }
             | Error::AmbiguousColumn { .. }
             | Error::UnknownStrictField { .. }
             | Error::DivisionByZero

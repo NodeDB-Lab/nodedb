@@ -7,7 +7,11 @@
 //! A key this module does not derive is still correct: conversion records it
 //! as a miss, and the bind step resolves it and converts the plan again.
 
-use nodedb_sql::types::{EngineType, SqlPlan, SqlValue};
+use nodedb_sql::types::{
+    CtePlan, EngineType, InsertArrayPlan, InsertPlan, KvInsertPlan, SqlPlan, SqlValue,
+    TimeseriesIngestPlan, UpsertPlan, VectorPrimaryDeletePlan, VectorPrimaryInsertPlan,
+    VectorPrimaryUpdatePlan,
+};
 
 use super::super::convert::ConvertContext;
 use super::super::value::{sql_value_to_bytes, sql_value_to_string};
@@ -55,7 +59,7 @@ fn collect_key_batches<'p>(
     batches: &mut Vec<KeyBatch<'p>>,
 ) {
     match plan {
-        SqlPlan::Cte { definitions, outer } => {
+        SqlPlan::Cte(CtePlan { definitions, outer }) => {
             for (_, definition) in definitions {
                 collect_key_batches(definition, ctx, batches);
             }
@@ -88,24 +92,24 @@ fn plan_key_batch<'p>(
     ctx: &ConvertContext,
 ) -> crate::Result<Option<KeyBatch<'p>>> {
     let batch = match plan {
-        SqlPlan::Insert {
+        SqlPlan::Insert(InsertPlan {
             collection,
             rows,
             primary_key: Some(primary_key),
             ..
-        }
-        | SqlPlan::Upsert {
+        })
+        | SqlPlan::Upsert(UpsertPlan {
             collection,
             rows,
             primary_key: Some(primary_key),
             ..
-        } => row_identity_batch(ctx, collection, primary_key, rows)?,
-        SqlPlan::VectorPrimaryInsert {
+        }) => row_identity_batch(ctx, collection, primary_key, rows)?,
+        SqlPlan::VectorPrimaryInsert(VectorPrimaryInsertPlan {
             collection,
             rows,
             primary_key: Some(primary_key),
             ..
-        } => {
+        }) => {
             let rows: Vec<Vec<(String, SqlValue)>> = rows
                 .iter()
                 .map(|row| {
@@ -117,11 +121,11 @@ fn plan_key_batch<'p>(
                 .collect();
             row_identity_batch(ctx, collection, primary_key, &rows)?
         }
-        SqlPlan::KvInsert {
+        SqlPlan::KvInsert(KvInsertPlan {
             collection,
             entries,
             ..
-        } => KeyBatch {
+        }) => KeyBatch {
             collection,
             pks: entries
                 .iter()
@@ -192,31 +196,31 @@ fn plan_key_batch<'p>(
                 fresh: 0,
             },
         },
-        SqlPlan::VectorPrimaryDelete {
+        SqlPlan::VectorPrimaryDelete(VectorPrimaryDeletePlan {
             collection,
             target_keys,
             ..
-        }
-        | SqlPlan::VectorPrimaryUpdate {
+        })
+        | SqlPlan::VectorPrimaryUpdate(VectorPrimaryUpdatePlan {
             collection,
             target_keys,
             ..
-        } => KeyBatch {
+        }) => KeyBatch {
             collection,
             pks: document_keys(target_keys),
             binds: false,
             fresh: 0,
         },
         // Every timeseries row takes a fresh identity.
-        SqlPlan::TimeseriesIngest {
+        SqlPlan::TimeseriesIngest(TimeseriesIngestPlan {
             collection, rows, ..
-        } => KeyBatch {
+        }) => KeyBatch {
             collection,
             pks: Vec::new(),
             binds: true,
             fresh: rows.len(),
         },
-        SqlPlan::InsertArray { name, rows } => KeyBatch {
+        SqlPlan::InsertArray(InsertArrayPlan { name, rows }) => KeyBatch {
             collection: name,
             pks: super::super::array_convert::insert_array_cell_pks(
                 name,
@@ -275,7 +279,9 @@ fn kv_keys(target_keys: &[SqlValue]) -> Vec<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use nodedb_sql::types::{EngineType, SqlPlan, SqlValue, WriteRoute};
+    use nodedb_sql::types::{
+        CtePlan, EngineType, InsertPlan, SqlPlan, SqlValue, TimeseriesIngestPlan, WriteRoute,
+    };
 
     use super::plan_key_batches;
     use crate::control::planner::sql_plan_convert::{ConvertContext, PlanningPurpose};
@@ -313,7 +319,7 @@ mod tests {
     }
 
     fn insert(collection: &str, primary_key: &str, rows: Vec<Vec<(String, SqlValue)>>) -> SqlPlan {
-        SqlPlan::Insert {
+        SqlPlan::Insert(InsertPlan {
             collection: collection.to_string(),
             engine: EngineType::DocumentSchemaless,
             route: WriteRoute::Document,
@@ -322,7 +328,7 @@ mod tests {
             if_absent: false,
             column_schema: Vec::new(),
             primary_key: Some(primary_key.to_string()),
-        }
+        })
     }
 
     fn keys(pks: &[Vec<u8>]) -> Vec<&[u8]> {
@@ -393,10 +399,10 @@ mod tests {
     #[test]
     fn cte_outer_write_is_collected() {
         let ctx = ctx();
-        let plans = vec![SqlPlan::Cte {
+        let plans = vec![SqlPlan::Cte(CtePlan {
             definitions: Vec::new(),
             outer: Box::new(insert("users", "id", vec![row(Some("c"))])),
-        }];
+        })];
         let batches = plan_key_batches(&plans, &ctx);
         assert_eq!(batches.len(), 1);
         assert_eq!(keys(&batches[0].pks), vec![&b"c"[..]]);
@@ -434,11 +440,11 @@ mod tests {
     #[test]
     fn timeseries_ingest_draws_one_fresh_identity_per_row() {
         let ctx = ctx();
-        let plans = vec![SqlPlan::TimeseriesIngest {
+        let plans = vec![SqlPlan::TimeseriesIngest(TimeseriesIngestPlan {
             collection: "metrics".to_string(),
             rows: vec![Vec::new(), Vec::new(), Vec::new()],
             volatile_defaults: false,
-        }];
+        })];
         let batches = plan_key_batches(&plans, &ctx);
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].collection, "metrics");

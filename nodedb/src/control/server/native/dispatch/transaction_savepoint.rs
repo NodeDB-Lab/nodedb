@@ -7,7 +7,7 @@
 //! The overlay marker capture/decode and the `SessionStore` savepoint stack
 //! live in the neutral core; native only parses the statement, shares the same
 //! Data-Plane dispatch seam as COMMIT/ROLLBACK, and maps the neutral error to a
-//! native SQLSTATE frame (`25P01` / `3B001`).
+//! native SQLSTATE frame (`25P01` / `25P02` / `3B001` / `XX000`).
 
 use nodedb_types::protocol::NativeResponse;
 
@@ -25,7 +25,15 @@ fn savepoint_error_to_native(seq: u64, e: &SavepointError) -> NativeResponse {
             "25P01",
             "SAVEPOINT can only be used in transaction blocks",
         ),
+        SavepointError::TransactionAborted => sqlstate_error(
+            seq,
+            "25P02",
+            "current transaction is aborted, commands ignored until end of transaction block",
+        ),
         SavepointError::NotFound { message } => sqlstate_error(seq, "3B001", message.clone()),
+        SavepointError::OverlayDispatch { message } => {
+            sqlstate_error(seq, "XX000", message.clone())
+        }
     }
 }
 

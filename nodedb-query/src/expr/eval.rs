@@ -25,7 +25,8 @@ use super::types::SqlExpr;
 ///   silent `NULL`;
 /// - a function argument it cannot compute on: vectors of different
 ///   dimensions, an argument of the wrong type, a malformed JSONPath.
-///   SQLSTATE `22000`. A `NULL` argument stays `NULL` instead.
+///   SQLSTATE `22000`. A `NULL` argument stays `NULL` instead;
+/// - an exact integer SUM past the `Decimal` range, SQLSTATE `22000`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EvalError {
     #[error("division by zero")]
@@ -62,6 +63,9 @@ pub enum EvalError {
         path: String,
         reason: String,
     },
+    /// An exact integer aggregate total lies outside the `Decimal` range.
+    #[error("{function}(): integer total out of range")]
+    NumericOverflow { function: &'static str },
 }
 
 /// Row scope for `SqlExpr::eval_scope`: how `Column(..)` and `OldColumn(..)`

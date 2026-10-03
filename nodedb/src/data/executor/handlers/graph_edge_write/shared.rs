@@ -167,7 +167,7 @@ pub(super) mod test_support {
             vshard_id: VShardId::new(0),
             plan: PhysicalPlan::Graph(GraphOp::Neighbors {
                 node_id: "x".to_string(),
-                edge_label: None,
+                edge_labels: Vec::new(),
                 direction: nodedb_graph::Direction::Out,
                 rls_filters: Vec::new(),
                 collection: None,

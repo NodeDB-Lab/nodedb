@@ -25,11 +25,16 @@ mod row_decode;
 #[cfg(any(feature = "native", feature = "remote"))]
 mod sql_escape;
 
-/// Shared graph-DSL builders and result parsers. Used by both clients so the
-/// `GRAPH ALGO …` SQL construction and row decoding exist once, not per
-/// transport.
+/// Shared graph-DSL builders and result decoders. Used by both clients so the
+/// `GRAPH ALGO`, `GRAPH TRAVERSE` and `GRAPH PATH` SQL construction and result
+/// decoding exist once, not per transport.
 #[cfg(any(feature = "native", feature = "remote"))]
 mod graph_dsl;
+
+/// The identity column of a stored schemaless document, shared by both
+/// clients so a document reads back with the same fields whichever wrote it.
+#[cfg(any(feature = "native", feature = "remote"))]
+mod document_identity;
 
 #[cfg(feature = "remote")]
 pub mod remote;

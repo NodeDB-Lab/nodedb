@@ -14,7 +14,8 @@
 //! │producer_id u64│ epoch u64│stream_id u64│  seq u64 │ name_len u32 │ collection   │ id_len u32 + id... │
 //! └──────────────┴──────────┴───────────┴──────────┴──────────────┴──────────────┴────────────────────┘
 //! ```
-//! FtsIndex additionally carries `text_len u32 + text bytes`.
+//! FtsIndex additionally carries `field_count u32` followed by
+//! `field_len u32 + field bytes + text_len u32 + text bytes` per field.
 //! SpatialPut additionally carries `field_len u32 + field bytes + geometry_len u32 + geometry bytes`.
 //! SpatialDelete additionally carries `field_len u32 + field bytes`.
 //! FtsDelete and SpatialDelete prefix the id with a presence tag `u8`:
@@ -163,10 +164,9 @@ fn push_provenance(buf: &mut Vec<u8>, prov: &SyncProvenance) {
 /// WAL payload for `RecordType::FtsIndex`.
 ///
 /// Carries the minimum fields needed for Data-Plane replay: the collection
-/// name, document identifier, the text to index, and producer provenance for
-/// idempotency checks. Additional fields (field weights, analyzer config) can
-/// be appended when the handler is wired — the length-prefixed layout is
-/// forward-compatible.
+/// name, document identifier, the document's `(field, text)` pairs, and
+/// producer provenance for idempotency checks. Empty `fields` remove the
+/// document from every index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FtsIndexPayload {
     /// Producer provenance for idempotency checks.
@@ -175,22 +175,26 @@ pub struct FtsIndexPayload {
     pub collection: String,
     /// External document identifier.
     pub doc_id: String,
-    /// Concatenated text to index.
-    pub text: String,
+    /// `(field, text)` per top-level string field.
+    pub fields: Vec<(String, String)>,
 }
+
+/// Smallest encoding of one `(field, text)` pair: two empty length-prefixed
+/// strings.
+const MIN_FIELD_PAIR_BYTES: usize = 8;
 
 impl FtsIndexPayload {
     pub fn new(
         provenance: SyncProvenance,
         collection: impl Into<String>,
         doc_id: impl Into<String>,
-        text: impl Into<String>,
+        fields: Vec<(String, String)>,
     ) -> Self {
         Self {
             provenance,
             collection: collection.into(),
             doc_id: doc_id.into(),
-            text: text.into(),
+            fields,
         }
     }
 
@@ -199,7 +203,14 @@ impl FtsIndexPayload {
         push_provenance(&mut buf, &self.provenance);
         push_str_field(&mut buf, &self.collection)?;
         push_str_field(&mut buf, &self.doc_id)?;
-        push_str_field(&mut buf, &self.text)?;
+        let count = u32::try_from(self.fields.len()).map_err(|_| WalError::InvalidPayload {
+            detail: format!("too many FTS fields: {}", self.fields.len()),
+        })?;
+        push_u32_le(&mut buf, count);
+        for (field, text) in &self.fields {
+            push_str_field(&mut buf, field)?;
+            push_str_field(&mut buf, text)?;
+        }
         Ok(buf)
     }
 
@@ -209,12 +220,28 @@ impl FtsIndexPayload {
         off = next;
         let (doc_id, next) = read_utf8_field(buf, off)?;
         off = next;
-        let (text, _) = read_utf8_field(buf, off)?;
+        let count = read_u32_le(buf, off)? as usize;
+        off += 4;
+        let remaining = buf.len().saturating_sub(off);
+        if count > remaining / MIN_FIELD_PAIR_BYTES {
+            return Err(WalError::InvalidPayload {
+                detail: format!(
+                    "FTS field count {count} exceeds what {remaining} remaining bytes can hold"
+                ),
+            });
+        }
+        let mut fields = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (field, next) = read_utf8_field(buf, off)?;
+            let (text, next) = read_utf8_field(buf, next)?;
+            off = next;
+            fields.push((field, text));
+        }
         Ok(Self {
             provenance,
             collection,
             doc_id,
-            text,
+            fields,
         })
     }
 }
@@ -392,21 +419,28 @@ mod tests {
         }
     }
 
+    fn pairs(fields: &[(&str, &str)]) -> Vec<(String, String)> {
+        fields
+            .iter()
+            .map(|(f, t)| ((*f).to_string(), (*t).to_string()))
+            .collect()
+    }
+
     #[test]
     fn fts_index_roundtrip() {
         let p = FtsIndexPayload::new(
             prov(0xCAFE_BABE, 3, 7, 42),
             "articles",
             "doc-1",
-            "hello world",
+            pairs(&[("body", "hello world"), ("title", "Rust"), ("empty", "")]),
         );
         let bytes = p.to_bytes().unwrap();
         assert_eq!(FtsIndexPayload::from_bytes(&bytes).unwrap(), p);
     }
 
     #[test]
-    fn fts_index_empty_text_roundtrip() {
-        let p = FtsIndexPayload::new(prov(0, 0, 0, 0), "c", "d", "");
+    fn fts_index_no_fields_roundtrip() {
+        let p = FtsIndexPayload::new(prov(0, 0, 0, 0), "c", "d", Vec::new());
         assert_eq!(
             FtsIndexPayload::from_bytes(&p.to_bytes().unwrap()).unwrap(),
             p
@@ -480,9 +514,20 @@ mod tests {
 
     #[test]
     fn truncated_buf_rejected() {
-        let p = FtsIndexPayload::new(prov(1, 2, 3, 4), "col", "id", "text");
+        let p = FtsIndexPayload::new(prov(1, 2, 3, 4), "col", "id", pairs(&[("body", "text")]));
         let bytes = p.to_bytes().unwrap();
         // Truncated to just provenance — should fail on collection field.
         assert!(FtsIndexPayload::from_bytes(&bytes[..32]).is_err());
+        // Truncated inside the last field's text.
+        assert!(FtsIndexPayload::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn fts_index_field_count_past_the_buffer_is_rejected() {
+        let p = FtsIndexPayload::new(prov(1, 2, 3, 4), "col", "id", Vec::new());
+        let mut bytes = p.to_bytes().unwrap();
+        let count_at = bytes.len() - 4;
+        bytes[count_at..].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(FtsIndexPayload::from_bytes(&bytes).is_err());
     }
 }

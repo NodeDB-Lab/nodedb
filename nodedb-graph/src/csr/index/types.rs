@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn neighbors_out() {
         let csr = make_csr();
-        let n = csr.neighbors("a", None, Direction::Out);
+        let n = csr.neighbors("a", &[], Direction::Out);
         assert_eq!(n.len(), 2);
         let dsts: Vec<&str> = n.iter().map(|(_, d)| d.as_str()).collect();
         assert!(dsts.contains(&"b"));
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn neighbors_filtered() {
         let csr = make_csr();
-        let n = csr.neighbors("a", Some("KNOWS"), Direction::Out);
+        let n = csr.neighbors("a", &["KNOWS"], Direction::Out);
         assert_eq!(n.len(), 1);
         assert_eq!(n[0].1, "b");
     }
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn neighbors_in() {
         let csr = make_csr();
-        let n = csr.neighbors("b", None, Direction::In);
+        let n = csr.neighbors("b", &[], Direction::In);
         assert_eq!(n.len(), 1);
         assert_eq!(n[0].1, "a");
     }
@@ -249,9 +249,9 @@ mod tests {
     #[test]
     fn incremental_remove() {
         let mut csr = make_csr();
-        assert_eq!(csr.neighbors("a", Some("KNOWS"), Direction::Out).len(), 1);
+        assert_eq!(csr.neighbors("a", &["KNOWS"], Direction::Out).len(), 1);
         csr.remove_edge("a", "KNOWS", "b");
-        assert_eq!(csr.neighbors("a", Some("KNOWS"), Direction::Out).len(), 0);
+        assert_eq!(csr.neighbors("a", &["KNOWS"], Direction::Out).len(), 0);
     }
 
     #[test]
@@ -259,7 +259,7 @@ mod tests {
         let mut csr = CsrIndex::new(test_memory());
         csr.add_edge("a", "L", "b").unwrap();
         csr.add_edge("a", "L", "b").unwrap();
-        assert_eq!(csr.neighbors("a", None, Direction::Out).len(), 1);
+        assert_eq!(csr.neighbors("a", &[], Direction::Out).len(), 1);
     }
 
     #[test]
@@ -267,13 +267,13 @@ mod tests {
         let mut csr = CsrIndex::new(test_memory());
         csr.add_edge("a", "L", "b").unwrap();
         csr.add_edge("b", "L", "c").unwrap();
-        assert_eq!(csr.neighbors("a", None, Direction::Out).len(), 1);
+        assert_eq!(csr.neighbors("a", &[], Direction::Out).len(), 1);
 
         csr.compact()
             .expect("test governor ceiling covers this reservation");
         assert!(csr.buffer_out.iter().all(|b| b.is_empty()));
-        assert_eq!(csr.neighbors("a", None, Direction::Out).len(), 1);
-        assert_eq!(csr.neighbors("b", None, Direction::Out).len(), 1);
+        assert_eq!(csr.neighbors("a", &[], Direction::Out).len(), 1);
+        assert_eq!(csr.neighbors("b", &[], Direction::Out).len(), 1);
     }
 
     #[test]
@@ -285,12 +285,12 @@ mod tests {
             .expect("test governor ceiling covers this reservation");
 
         csr.remove_edge("a", "L", "b");
-        assert_eq!(csr.neighbors("a", None, Direction::Out).len(), 1);
+        assert_eq!(csr.neighbors("a", &[], Direction::Out).len(), 1);
 
         csr.compact()
             .expect("test governor ceiling covers this reservation");
-        assert_eq!(csr.neighbors("a", None, Direction::Out).len(), 1);
-        assert_eq!(csr.neighbors("a", None, Direction::Out)[0].1, "c");
+        assert_eq!(csr.neighbors("a", &[], Direction::Out).len(), 1);
+        assert_eq!(csr.neighbors("a", &[], Direction::Out)[0].1, "c");
     }
 
     #[test]
@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(restored.node_count(), csr.node_count());
         assert_eq!(restored.edge_count(), csr.edge_count());
 
-        let n = restored.neighbors("a", Some("KNOWS"), Direction::Out);
+        let n = restored.neighbors("a", &["KNOWS"], Direction::Out);
         assert_eq!(n.len(), 1);
         assert_eq!(n[0].1, "b");
     }
@@ -362,8 +362,8 @@ mod tests {
 
         let removed = csr.remove_node_edges("a");
         assert_eq!(removed, 3);
-        assert_eq!(csr.neighbors("a", None, Direction::Out).len(), 0);
-        assert_eq!(csr.neighbors("a", None, Direction::In).len(), 0);
+        assert_eq!(csr.neighbors("a", &[], Direction::Out).len(), 0);
+        assert_eq!(csr.neighbors("a", &[], Direction::In).len(), 0);
     }
 
     #[test]

@@ -231,6 +231,13 @@ async fn run_inner(
             }
         };
 
+        // An error in any extended-query message (Parse, Bind, Describe,
+        // Execute) inside a transaction block aborts the block, the same
+        // rule a failed simple-query statement applies.
+        if is_extended_query {
+            handlers.query.abort_transaction_block();
+        }
+
         let mut error = error;
         if std::panic::catch_unwind(AssertUnwindSafe(|| {
             handlers.error.on_error(&socket, &mut error);

@@ -13,7 +13,7 @@ use crate::error::{Result, SqlError};
 use crate::types::SqlPlan;
 use crate::types::{
     ArraySlicePlan, CtePlan, DocumentIndexLookupPlan, HybridSearchPlan, HybridSearchTriplePlan,
-    TimeseriesScanPlan,
+    TextSearchPlan, TextSearchShape, TimeseriesScanPlan,
 };
 
 /// Default `ef_search` multiplier applied when LIMIT is the only signal
@@ -126,10 +126,26 @@ pub(in crate::planner::select) fn apply_limit(
         // `LIMIT N` *is* the top-k bound. `ef_search` is deliberately left
         // alone on the fused-search variants: a wider beam than the final N
         // costs distance computations, never correctness.
-        SqlPlan::TextSearch {
-            top_k: ref mut k, ..
+        // A text match ranks its hits, so `LIMIT N` is its top-k bound. With
+        // no LIMIT it returns every match.
+        SqlPlan::TextSearch(TextSearchPlan {
+            shape: TextSearchShape::Match {
+                top_k: ref mut k, ..
+            },
+            ..
+        }) => {
+            *k = limit_val;
         }
-        | SqlPlan::MultiVectorSearch {
+        // A score scan has no ranked cut: its rows are bounded by a tail.
+        SqlPlan::TextSearch(TextSearchPlan {
+            shape: TextSearchShape::ScoreScan,
+            ..
+        }) => {
+            if limit_val.is_some() {
+                return post_process(plan, Vec::new(), limit_val, 0);
+            }
+        }
+        SqlPlan::MultiVectorSearch {
             top_k: ref mut k, ..
         }
         | SqlPlan::HybridSearch(HybridSearchPlan {

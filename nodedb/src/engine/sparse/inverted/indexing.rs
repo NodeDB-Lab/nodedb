@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Document indexing for the inverted index.
+//! Per-index writes for the inverted index.
 //!
 //! All writes bypass the LSM memtable and go directly to the persistent
 //! POSTINGS / DOC_LENGTHS / DOC_TERMS / STATS tables so they can participate
 //! in the caller's redb write transaction (Origin transactional indexing).
 //!
-//! A re-index is a full replacement of the document's index footprint, not an
-//! overlay: the terms the new text no longer contains are retracted first
-//! (see the `doc_terms` sibling module), then the new text's postings are
-//! written. Removal lives in the `removal` sibling module.
+//! A re-index of one index is a full replacement of the document's footprint
+//! there, not an overlay: the terms the new text no longer contains are
+//! retracted first (see the `doc_terms` sibling module), then the new text's
+//! postings are written. The per-document orchestration across indexes lives
+//! in the `document` sibling module. Removal lives in the `removal` sibling
+//! module.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -17,11 +19,13 @@ use redb::{ReadableTable as _, WriteTransaction};
 use tracing::debug;
 
 use nodedb_fts::posting::Posting;
+use nodedb_fts::{DocumentText, IndexScope};
 use nodedb_types::{Surrogate, TenantId};
 
 use super::core::InvertedIndex;
 use super::doc_terms;
 use super::errors::inverted_err;
+use crate::engine::sparse::fts_redb::keys::{doc_key, posting_key, stats_key};
 use crate::engine::sparse::fts_redb::tables::{DOC_LENGTHS, POSTINGS, STATS};
 
 /// `(database_id, tenant, collection, surrogate)` scope shared by the
@@ -47,7 +51,8 @@ impl InvertedIndex {
     /// `index_document_in_txn`) and query-term canonicalization
     /// (`phrase_search`) all call through here so a document is always
     /// tokenized the same way it is later matched against, whether the write
-    /// is durable or still staged in an open transaction.
+    /// is durable or still staged in an open transaction. Every index of a
+    /// collection shares its analyzer.
     pub fn analyze_for_collection(
         &self,
         database_id: u64,
@@ -87,73 +92,53 @@ impl InvertedIndex {
             .set_collection_fuzzy(database_id, tid.as_u64(), collection, fuzzy)
     }
 
-    /// Index a document's text content.
+    /// Index a document's text into its whole-document index and one index
+    /// per top-level string field, in its own write transaction.
     ///
     /// Text that analyzes to no terms is a removal, not a no-op: an update
-    /// that strips a document of every indexable word must take it out of the
-    /// index, or it keeps matching the words it used to contain.
+    /// that strips a document (or one field) of every indexable word must take
+    /// it out of that index, or it keeps matching the words it used to
+    /// contain.
     pub fn index_document(
         &self,
         database_id: u64,
         tid: TenantId,
         collection: &str,
         surrogate: Surrogate,
-        text: &str,
+        text: &DocumentText,
     ) -> crate::Result<()> {
-        let tokens = self.analyze_for_collection(database_id, tid, collection, text)?;
-        if tokens.is_empty() {
-            return self.remove_document(database_id, tid, collection, surrogate);
-        }
-        let scope = IndexDocScope {
+        let doc = IndexDocScope {
             database_id,
             tid,
             collection,
             surrogate,
         };
-
         let db = self.inner.backend().db();
         let write_txn = db.begin_write().map_err(|e| inverted_err("write txn", e))?;
-        self.write_index_data(&write_txn, scope, &tokens)?;
+        self.index_document_in_txn(&write_txn, doc, text)?;
         write_txn
             .commit()
             .map_err(|e| inverted_err("commit index", e))?;
         Ok(())
     }
 
-    /// Index a document within an externally-owned write transaction.
-    ///
-    /// Same empty-text semantics as [`Self::index_document`].
-    pub fn index_document_in_txn(
-        &self,
-        txn: &WriteTransaction,
-        scope: IndexDocScope<'_>,
-        text: &str,
-    ) -> crate::Result<()> {
-        let tokens =
-            self.analyze_for_collection(scope.database_id, scope.tid, scope.collection, text)?;
-        if tokens.is_empty() {
-            return self.remove_document_in_txn(txn, scope);
-        }
-        self.write_index_data(txn, scope, &tokens)
-    }
-
-    /// Core indexing logic: writes postings, doc length, and stats within
-    /// a transaction. Bypasses the LSM memtable so Origin transactions can
-    /// stay atomic with the document write.
+    /// Core per-index write: postings, doc length, term set, and stats of
+    /// `doc` in `index`, within a transaction. Bypasses the LSM memtable so
+    /// Origin transactions can stay atomic with the document write.
     pub(super) fn write_index_data(
         &self,
         txn: &WriteTransaction,
-        scope: IndexDocScope<'_>,
+        doc: IndexDocScope<'_>,
+        index: IndexScope<'_>,
         tokens: &[String],
     ) -> crate::Result<()> {
         let IndexDocScope {
             database_id,
             tid,
-            collection,
             surrogate,
-        } = scope;
+            ..
+        } = doc;
         let t = tid.as_u64();
-        self.note_doc_write(scope);
 
         let mut term_postings: HashMap<&str, (u32, Vec<u32>)> = HashMap::new();
         for (pos, token) in tokens.iter().enumerate() {
@@ -170,41 +155,45 @@ impl InvertedIndex {
         // the same write transaction as every mutation below, so the
         // check-and-increment is atomic (no TOCTOU). Its presence is the
         // idempotency key AND the "is this an update?" signal: it means this
-        // surrogate was already counted into STATS by a prior index (live
-        // write or an earlier WAL replay pass), so a repeat index of the SAME
-        // surrogate must not increment `count` again — and it means a previous
-        // version of the document holds postings that may need retracting.
-        let prior_len = prior_doc_length(txn, scope)?;
+        // surrogate was already counted into this index's STATS by a prior
+        // index (live write or an earlier WAL replay pass), so a repeat index
+        // of the SAME surrogate must not increment `count` again — and it
+        // means a previous version of the document holds postings that may
+        // need retracting.
+        let prior_len = prior_doc_length(txn, doc, index)?;
 
         // Retract the document from every term the previous version put it in
-        // that the new text does not: `write_index_data` below only touches
-        // terms present in `tokens`, so without this a word deleted by an
-        // update keeps its posting and its inflated `df` forever.
+        // that the new text does not: the loop below only touches terms
+        // present in `tokens`, so without this a word deleted by an update
+        // keeps its posting and its inflated `df` forever.
         let new_terms: BTreeSet<&str> = term_postings.keys().copied().collect();
-        let dropped: Vec<String> = doc_terms::occupied_terms(txn, scope, prior_len.is_some())?
+        let dropped: Vec<String> = doc_terms::occupied_terms(txn, doc, index, prior_len.is_some())?
             .into_iter()
             .filter(|term| !new_terms.contains(term.as_str()))
             .collect();
-        doc_terms::strip_postings(txn, scope, &dropped)?;
-        doc_terms::put(txn, scope, &new_terms)?;
+        doc_terms::strip_postings(txn, doc, index, &dropped)?;
+        doc_terms::put(txn, doc, index, &new_terms)?;
 
         let mut postings_table = txn
             .open_table(POSTINGS)
             .map_err(|e| inverted_err("open postings", e))?;
 
         for (term, (freq, positions)) in &term_postings {
+            let key = posting_key(database_id, t, index, term);
             let posting = Posting {
                 doc_id: surrogate,
                 term_freq: *freq,
                 positions: positions.clone(),
             };
 
-            let mut existing: Vec<Posting> = postings_table
-                .get((database_id, t, collection, *term))
-                .ok()
-                .flatten()
-                .and_then(|v| zerompk::from_msgpack(v.value()).ok())
-                .unwrap_or_default();
+            let mut existing: Vec<Posting> = match postings_table
+                .get(key)
+                .map_err(|e| inverted_err("read postings", e))?
+            {
+                Some(v) => zerompk::from_msgpack(v.value())
+                    .map_err(|e| inverted_err("decode postings", e))?,
+                None => Vec::new(),
+            };
 
             existing.retain(|p| p.doc_id != surrogate);
             existing.push(posting);
@@ -212,7 +201,7 @@ impl InvertedIndex {
             let bytes = zerompk::to_msgpack_vec(&existing)
                 .map_err(|e| inverted_err("serialize postings", e))?;
             postings_table
-                .insert((database_id, t, collection, *term), bytes.as_slice())
+                .insert(key, bytes.as_slice())
                 .map_err(|e| inverted_err("insert posting", e))?;
         }
         drop(postings_table);
@@ -225,7 +214,7 @@ impl InvertedIndex {
             zerompk::to_msgpack_vec(&doc_len).map_err(|e| inverted_err("serialize doc_len", e))?;
         lengths
             .insert(
-                (database_id, t, collection, surrogate.as_u32()),
+                doc_key(database_id, t, index, surrogate),
                 len_bytes.as_slice(),
             )
             .map_err(|e| inverted_err("insert doc_len", e))?;
@@ -242,76 +231,83 @@ impl InvertedIndex {
             Some(prior) => (0i64, doc_len as i64 - prior as i64),
         };
 
-        Self::update_stats_in_txn(txn, database_id, tid, collection, count_delta, total_delta)?;
+        Self::update_stats_in_txn(txn, database_id, tid, index, count_delta, total_delta)?;
 
-        debug!(database_id, tid = t, %collection, surrogate = surrogate.as_u32(), tokens = tokens.len(), terms = term_postings.len(), "indexed document");
+        debug!(
+            database_id,
+            tid = t,
+            collection = index.collection(),
+            field = index.field_key(),
+            surrogate = surrogate.as_u32(),
+            tokens = tokens.len(),
+            terms = term_postings.len(),
+            "indexed document"
+        );
         Ok(())
     }
 
-    /// Atomically update `(doc_count, total_token_sum)` in STATS by the given
-    /// explicit deltas.
+    /// Atomically update one index's `(doc_count, total_token_sum)` in STATS
+    /// by the given explicit deltas.
     ///
     /// Callers compute `count_delta` / `total_delta` themselves rather than
     /// this function inferring "new doc vs. removal" from the sign of a
     /// single combined delta: a re-index of an already-counted surrogate
     /// (e.g. WAL replay) needs `count_delta == 0` with a `total_delta` that
-    /// may be positive, negative, or zero — a case the old sign-based
-    /// inference could not express, which is what caused STATS to be
-    /// double-counted on replay.
+    /// may be positive, negative, or zero.
     pub(super) fn update_stats_in_txn(
         txn: &WriteTransaction,
         database_id: u64,
         tid: TenantId,
-        collection: &str,
+        index: IndexScope<'_>,
         count_delta: i64,
         total_delta: i64,
     ) -> crate::Result<()> {
-        let t = tid.as_u64();
+        let key = stats_key(database_id, tid.as_u64(), index);
         let mut stats = txn
             .open_table(STATS)
             .map_err(|e| inverted_err("open stats", e))?;
-        let (count, total) = stats
-            .get((database_id, t, collection))
-            .ok()
-            .flatten()
-            .and_then(|v| zerompk::from_msgpack::<(u32, u64)>(v.value()).ok())
-            .unwrap_or((0, 0));
+        let (count, total) = match stats.get(key).map_err(|e| inverted_err("read stats", e))? {
+            Some(v) => zerompk::from_msgpack::<(u32, u64)>(v.value())
+                .map_err(|e| inverted_err("decode stats", e))?,
+            None => (0, 0),
+        };
 
-        let new_count = (i64::from(count) + count_delta).max(0) as u32;
-        let new_total = (total as i64 + total_delta).max(0) as u64;
+        let new_count = (i64::from(count) + count_delta).clamp(0, i64::from(u32::MAX)) as u32;
+        let new_total = (total as i64).saturating_add(total_delta).max(0) as u64;
 
         let bytes = zerompk::to_msgpack_vec(&(new_count, new_total))
             .map_err(|e| inverted_err("serialize stats", e))?;
         stats
-            .insert((database_id, t, collection), bytes.as_slice())
+            .insert(key, bytes.as_slice())
             .map_err(|e| inverted_err("insert stats", e))?;
         Ok(())
     }
 }
 
-/// The token length a previous index recorded for this surrogate, or `None`
-/// when the document is not in the index.
+/// The token length a previous index recorded for this surrogate in `index`,
+/// or `None` when the document is not in that index.
 ///
 /// Shared by the index and removal paths: both need it as the authoritative
 /// "is this document already counted into STATS?" answer, and both must read
 /// it inside the same write transaction as the mutation it gates.
 pub(super) fn prior_doc_length(
     txn: &WriteTransaction,
-    scope: IndexDocScope<'_>,
+    doc: IndexDocScope<'_>,
+    index: IndexScope<'_>,
 ) -> crate::Result<Option<u32>> {
     let table = txn
         .open_table(DOC_LENGTHS)
         .map_err(|e| inverted_err("open doc_lengths", e))?;
-    let prior = table
-        .get((
-            scope.database_id,
-            scope.tid.as_u64(),
-            scope.collection,
-            scope.surrogate.as_u32(),
-        ))
+    let key = doc_key(doc.database_id, doc.tid.as_u64(), index, doc.surrogate);
+    match table
+        .get(key)
         .map_err(|e| inverted_err("read doc_length", e))?
-        .and_then(|v| zerompk::from_msgpack::<u32>(v.value()).ok());
-    Ok(prior)
+    {
+        Some(v) => zerompk::from_msgpack::<u32>(v.value())
+            .map(Some)
+            .map_err(|e| inverted_err("decode doc_length", e)),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -324,6 +320,7 @@ mod tests {
     use nodedb_fts::posting::QueryMode;
 
     use super::*;
+    use crate::engine::sparse::inverted::test_support::body;
 
     const DB: u64 = 0;
     const T: TenantId = TenantId::new(1);
@@ -346,14 +343,14 @@ mod tests {
     #[test]
     fn update_dropping_a_term_removes_its_posting_and_restores_df() {
         let (idx, _dir) = open_temp();
-        idx.index_document(DB, T, "docs", Surrogate::new(1), "alpha bravo")
+        idx.index_document(DB, T, "docs", Surrogate::new(1), &body("alpha bravo"))
             .unwrap();
-        idx.index_document(DB, T, "docs", Surrogate::new(2), "bravo charlie")
+        idx.index_document(DB, T, "docs", Surrogate::new(2), &body("bravo charlie"))
             .unwrap();
         assert_eq!(idx.term_df(DB, T, "docs", "bravo").unwrap(), 2);
 
         // Document 1 loses "bravo" and gains "delta".
-        idx.index_document(DB, T, "docs", Surrogate::new(1), "alpha delta")
+        idx.index_document(DB, T, "docs", Surrogate::new(1), &body("alpha delta"))
             .unwrap();
 
         assert_eq!(
@@ -389,11 +386,11 @@ mod tests {
     #[test]
     fn update_adding_a_term_indexes_it() {
         let (idx, _dir) = open_temp();
-        idx.index_document(DB, T, "docs", Surrogate::new(1), "alpha")
+        idx.index_document(DB, T, "docs", Surrogate::new(1), &body("alpha"))
             .unwrap();
         assert_eq!(idx.term_df(DB, T, "docs", "delta").unwrap(), 0);
 
-        idx.index_document(DB, T, "docs", Surrogate::new(1), "alpha delta")
+        idx.index_document(DB, T, "docs", Surrogate::new(1), &body("alpha delta"))
             .unwrap();
 
         assert_eq!(idx.term_df(DB, T, "docs", "alpha").unwrap(), 1);
@@ -409,9 +406,15 @@ mod tests {
     #[test]
     fn reindex_with_unchanged_tokens_is_a_no_op_for_counts() {
         let (idx, _dir) = open_temp();
-        idx.index_document(DB, T, "docs", Surrogate::new(1), "alpha bravo charlie")
-            .unwrap();
-        idx.index_document(DB, T, "docs", Surrogate::new(2), "bravo")
+        idx.index_document(
+            DB,
+            T,
+            "docs",
+            Surrogate::new(1),
+            &body("alpha bravo charlie"),
+        )
+        .unwrap();
+        idx.index_document(DB, T, "docs", Surrogate::new(2), &body("bravo"))
             .unwrap();
 
         let before = (
@@ -421,8 +424,14 @@ mod tests {
             idx.term_df(DB, T, "docs", "charlie").unwrap(),
         );
 
-        idx.index_document(DB, T, "docs", Surrogate::new(1), "alpha bravo charlie")
-            .unwrap();
+        idx.index_document(
+            DB,
+            T,
+            "docs",
+            Surrogate::new(1),
+            &body("alpha bravo charlie"),
+        )
+        .unwrap();
 
         let after = (
             idx.corpus_stats(DB, T, "docs").unwrap(),
@@ -433,29 +442,35 @@ mod tests {
         assert_eq!(before, after, "an identical re-index must change nothing");
     }
 
-    /// A document indexed before term sets were recorded has no stored set. Its
-    /// first re-index must still retract dropped terms, via the fallback scan.
+    /// A document whose stored term set is missing must still retract dropped
+    /// terms on its next re-index, via the fallback scan.
     #[test]
     fn update_of_a_document_without_a_stored_term_set_still_retracts() {
         use crate::engine::sparse::fts_redb::tables::DOC_TERMS;
 
         let (idx, _dir) = open_temp();
-        idx.index_document(DB, T, "docs", Surrogate::new(1), "alpha bravo")
+        idx.index_document(DB, T, "docs", Surrogate::new(1), &body("alpha bravo"))
             .unwrap();
 
-        // Drop the term-set row to reproduce a document written by a build that
-        // did not maintain one.
+        // Drop the term-set row of the whole-document index.
         {
             let db = idx.backend().db();
             let txn = db.begin_write().unwrap();
             {
                 let mut table = txn.open_table(DOC_TERMS).unwrap();
-                table.remove((DB, T.as_u64(), "docs", 1u32)).unwrap();
+                table
+                    .remove(doc_key(
+                        DB,
+                        T.as_u64(),
+                        IndexScope::document("docs"),
+                        Surrogate::new(1),
+                    ))
+                    .unwrap();
             }
             txn.commit().unwrap();
         }
 
-        idx.index_document(DB, T, "docs", Surrogate::new(1), "alpha")
+        idx.index_document(DB, T, "docs", Surrogate::new(1), &body("alpha"))
             .unwrap();
 
         assert_eq!(
@@ -472,12 +487,12 @@ mod tests {
     #[test]
     fn update_to_empty_text_removes_the_document() {
         let (idx, _dir) = open_temp();
-        idx.index_document(DB, T, "docs", Surrogate::new(1), "alpha bravo")
+        idx.index_document(DB, T, "docs", Surrogate::new(1), &body("alpha bravo"))
             .unwrap();
-        idx.index_document(DB, T, "docs", Surrogate::new(2), "bravo")
+        idx.index_document(DB, T, "docs", Surrogate::new(2), &body("bravo"))
             .unwrap();
 
-        idx.index_document(DB, T, "docs", Surrogate::new(1), "")
+        idx.index_document(DB, T, "docs", Surrogate::new(1), &body(""))
             .unwrap();
 
         assert_eq!(idx.term_df(DB, T, "docs", "alpha").unwrap(), 0);
@@ -489,5 +504,8 @@ mod tests {
         let (count, avg_len) = idx.corpus_stats(DB, T, "docs").unwrap();
         assert_eq!(count, 1, "the emptied document is no longer in the corpus");
         assert_eq!(avg_len, 1.0);
+        let body_index = IndexScope::field("docs", "body").unwrap();
+        assert_eq!(idx.term_df(DB, T, body_index, "alpha").unwrap(), 0);
+        assert_eq!(idx.corpus_stats(DB, T, body_index).unwrap().0, 1);
     }
 }

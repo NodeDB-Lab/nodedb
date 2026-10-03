@@ -370,6 +370,19 @@ pub fn spawn_persist_task(
 mod tests {
     use super::*;
 
+    use crate::event::streaming_mv::state::{AggInput, MvState};
+    use crate::event::streaming_mv::types::{AggDef, AggFunction};
+    use nodedb_types::Value;
+
+    /// A group state that took `values` for `func`.
+    fn state_of(func: AggFunction, values: &[i64]) -> GroupState {
+        let mut state = GroupState::default();
+        for v in values {
+            state.update(func, &AggInput::Value(Value::Integer(*v)));
+        }
+        state
+    }
+
     #[test]
     fn save_and_load_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
@@ -378,26 +391,9 @@ mod tests {
         let snapshot = vec![
             (
                 "INSERT".to_string(),
-                vec![GroupState {
-                    count: 5,
-                    sum: 100.0,
-                    min: Some(10.0),
-                    max: Some(50.0),
-                    finalized: false,
-                    latest_event_time: 0,
-                }],
+                vec![state_of(AggFunction::Sum, &[10, 20, 30, 40])],
             ),
-            (
-                "UPDATE".to_string(),
-                vec![GroupState {
-                    count: 3,
-                    sum: 30.0,
-                    min: Some(5.0),
-                    max: Some(15.0),
-                    finalized: false,
-                    latest_event_time: 0,
-                }],
-            ),
+            ("UPDATE".to_string(), vec![state_of(AggFunction::Sum, &[5, 15])]),
         ];
 
         persist
@@ -408,9 +404,73 @@ mod tests {
             .load(DatabaseId::new(1), 1, "order_stats")
             .unwrap()
             .unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].0, "INSERT");
-        assert_eq!(loaded[0].1[0].count, 5);
+        assert_eq!(loaded, snapshot);
+    }
+
+    /// Exact state survives a save, a fresh open of the store, and a restore:
+    /// the restored view reads the same exact values it held before.
+    #[test]
+    fn restart_round_trip_keeps_exact_values() {
+        const ABOVE: i64 = 9_007_199_254_740_993;
+        const AT: i64 = 9_007_199_254_740_992;
+        let aggregates = vec![
+            AggDef {
+                output_name: "s".into(),
+                function: AggFunction::Sum,
+                input_expr: "v".into(),
+            },
+            AggDef {
+                output_name: "lo".into(),
+                function: AggFunction::Min,
+                input_expr: "v".into(),
+            },
+            AggDef {
+                output_name: "hi".into(),
+                function: AggFunction::Max,
+                input_expr: "v".into(),
+            },
+            AggDef {
+                output_name: "mean".into(),
+                function: AggFunction::Avg,
+                input_expr: "v".into(),
+            },
+        ];
+        let before = MvState::new("m".into(), Vec::new(), aggregates.clone());
+        for v in [
+            Value::Integer(ABOVE),
+            Value::Integer(AT),
+            Value::Integer(1_700_000_000_000_000_001),
+            Value::from_u64(u64::MAX),
+        ] {
+            let input = AggInput::Value(v);
+            before.update_with_time("", &vec![input; 4], 1);
+        }
+        let expected = before.read_results().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let persist = MvPersistence::open(dir.path()).unwrap();
+            persist
+                .save(DatabaseId::new(1), 1, "m", &before.snapshot())
+                .unwrap();
+        }
+        let persist = MvPersistence::open(dir.path()).unwrap();
+        let after = MvState::new("m".into(), Vec::new(), aggregates);
+        after.restore(persist.load(DatabaseId::new(1), 1, "m").unwrap().unwrap());
+
+        assert_eq!(after.read_results().unwrap(), expected);
+        assert_eq!(
+            expected[0].1[0].1,
+            Value::Decimal(rust_decimal::Decimal::from_i128_with_scale(
+                i128::from(ABOVE)
+                    + i128::from(AT)
+                    + 1_700_000_000_000_000_001
+                    + i128::from(u64::MAX),
+                0
+            ))
+        );
+        assert_eq!(expected[0].1[1].1, Value::Integer(AT));
+        assert_eq!(expected[0].1[2].1, Value::from_u64(u64::MAX));
     }
 
     #[test]

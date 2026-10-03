@@ -7,9 +7,10 @@ use std::collections::HashMap;
 
 use nodedb_types::Value;
 
+use super::extremum::{extremum_direction, value_replaces};
 use super::spec::{FrameBound, WindowFrame, WindowFuncSpec};
 use super::value_eval::{WindowError, cmp_values, eval_arg_for_row, order_keys_equal_v, set_cell};
-use crate::simd_agg;
+use crate::numeric_sum::ExactSum;
 
 pub(super) fn apply_v_aggregate(
     rows: &mut [Vec<Value>],
@@ -52,10 +53,12 @@ fn apply_v_running_aggregate(
         return Ok(());
     }
 
-    let mut running_sum = 0.0f64;
+    // SUM / AVG total exactly per `ExactSum`.
+    let mut running_sum = ExactSum::new();
     let mut running_count = 0u64;
-    let mut running_min: Option<f64> = None;
-    let mut running_max: Option<f64> = None;
+    // MIN / MAX hold the original argument value, compared exactly.
+    let extremum_dir = extremum_direction(&spec.func_name);
+    let mut running_extreme: Option<Value> = None;
     let mut peer_start = 0usize;
 
     for pos in 0..len {
@@ -65,12 +68,17 @@ fn apply_v_running_aggregate(
             None => Value::Null,
         };
 
-        if let Some(n) = val.as_f64() {
-            running_sum += n;
+        if is_window_number(&val) {
+            running_sum.add_value(&val);
             running_count += 1;
-            running_min = Some(running_min.map_or(n, |m: f64| m.min(n)));
-            running_max = Some(running_max.map_or(n, |m: f64| m.max(n)));
-        } else if spec.func_name == "count" {
+            if let Some(want_max) = extremum_dir
+                && value_replaces(&val, running_extreme.as_ref(), want_max)
+            {
+                running_extreme = Some(val);
+            }
+        } else if spec.func_name == "count" && (spec.args.is_empty() || !val.is_null()) {
+            // `COUNT(*)` counts every row; `COUNT(expr)` counts rows whose
+            // argument is non-NULL, including non-numeric values.
             running_count += 1;
         }
 
@@ -88,17 +96,10 @@ fn apply_v_running_aggregate(
             };
 
             let result = match spec.func_name.as_str() {
-                "sum" => Value::Float(running_sum),
+                "sum" => running_sum.sum()?,
                 "count" => Value::Integer(running_count as i64),
-                "avg" => {
-                    if running_count > 0 {
-                        Value::Float(running_sum / running_count as f64)
-                    } else {
-                        Value::Null
-                    }
-                }
-                "min" => running_min.map(Value::Float).unwrap_or(Value::Null),
-                "max" => running_max.map(Value::Float).unwrap_or(Value::Null),
+                "avg" => running_sum.avg()?,
+                "min" | "max" => running_extreme.clone().unwrap_or(Value::Null),
                 "first_value" => first_val,
                 "last_value" => last_val,
                 _ => Value::Null,
@@ -140,29 +141,20 @@ fn apply_v_per_row_aggregate(
         Vec::new()
     };
 
-    let all_vals: Vec<Option<f64>> = indices
+    let arg_vals: Vec<Value> = indices
         .iter()
         .map(|&i| match rows.get(i) {
-            Some(row) => Ok(eval_arg(spec, row, column_index)?.as_f64()),
-            None => Ok(None),
+            Some(row) => eval_arg(spec, row, column_index),
+            None => Ok(Value::Null),
         })
         .collect::<Result<Vec<_>, WindowError>>()?;
-
     let results: Vec<Value> = (0..len)
         .map(|pos| {
             let (start_idx, end_idx) =
                 evaluate_v_frame_bounds(&spec.frame, pos, len, &order_values, &peer_groups);
-            aggregate_v_slice(
-                &all_vals,
-                indices,
-                rows,
-                column_index,
-                spec,
-                start_idx,
-                end_idx,
-            )
+            aggregate_v_slice(&arg_vals, spec, start_idx, end_idx)
         })
-        .collect::<Result<Vec<_>, WindowError>>()?;
+        .collect::<Result<_, _>>()?;
 
     for (pos, result) in results.into_iter().enumerate() {
         set_cell(rows, indices[pos], write_col, result);
@@ -170,74 +162,57 @@ fn apply_v_per_row_aggregate(
     Ok(())
 }
 
+/// A window SUM / AVG / MIN / MAX input: an integer, float, or decimal.
+fn is_window_number(v: &Value) -> bool {
+    matches!(v, Value::Integer(_) | Value::Float(_) | Value::Decimal(_))
+}
+
+/// Aggregate the evaluated argument over the frame slice
+/// `[start_idx, end_idx]` (partition positions). `arg_vals` holds the
+/// argument per partition position.
 fn aggregate_v_slice(
-    all_vals: &[Option<f64>],
-    indices: &[usize],
-    rows: &[Vec<Value>],
-    column_index: &HashMap<String, usize>,
+    arg_vals: &[Value],
     spec: &WindowFuncSpec,
     start_idx: usize,
     end_idx: usize,
 ) -> Result<Value, WindowError> {
-    let slice_vals: Vec<f64> = all_vals[start_idx..=end_idx]
-        .iter()
-        .filter_map(|v| *v)
-        .collect();
+    let frame_values = arg_vals.get(start_idx..=end_idx).unwrap_or(&[]);
     let slice_count = end_idx - start_idx + 1;
-
-    let result = match spec.func_name.as_str() {
-        "sum" => {
-            let rt = simd_agg::ts_runtime();
-            Value::Float((rt.sum_f64)(&slice_vals))
+    let frame_sum = || {
+        let mut acc = ExactSum::new();
+        for v in frame_values {
+            acc.add_value(v);
         }
-        "count" => Value::Integer(slice_count as i64),
-        "avg" => {
-            if slice_vals.is_empty() {
-                Value::Null
-            } else {
-                let rt = simd_agg::ts_runtime();
-                Value::Float((rt.sum_f64)(&slice_vals) / slice_vals.len() as f64)
-            }
-        }
-        "min" => {
-            if slice_vals.is_empty() {
-                Value::Null
-            } else {
-                let rt = simd_agg::ts_runtime();
-                Value::Float((rt.min_f64)(&slice_vals))
-            }
-        }
-        "max" => {
-            if slice_vals.is_empty() {
-                Value::Null
-            } else {
-                let rt = simd_agg::ts_runtime();
-                Value::Float((rt.max_f64)(&slice_vals))
-            }
-        }
-        "first_value" => match indices.get(start_idx).and_then(|&i| rows.get(i)) {
-            Some(row) => eval_arg_for_row(
-                spec.args
-                    .first()
-                    .unwrap_or(&crate::expr::types::SqlExpr::Literal(Value::Null)),
-                row,
-                column_index,
-            )?,
-            None => Value::Null,
-        },
-        "last_value" => match indices.get(end_idx).and_then(|&i| rows.get(i)) {
-            Some(row) => eval_arg_for_row(
-                spec.args
-                    .first()
-                    .unwrap_or(&crate::expr::types::SqlExpr::Literal(Value::Null)),
-                row,
-                column_index,
-            )?,
-            None => Value::Null,
-        },
-        _ => Value::Null,
+        acc
     };
-    Ok(result)
+
+    Ok(match spec.func_name.as_str() {
+        "sum" => frame_sum().sum()?,
+        // `COUNT(*)` counts frame rows; `COUNT(expr)` counts the rows whose
+        // argument is non-NULL.
+        "count" => {
+            let counted = if spec.args.is_empty() {
+                slice_count
+            } else {
+                frame_values.iter().filter(|v| !v.is_null()).count()
+            };
+            Value::Integer(counted as i64)
+        }
+        "avg" => frame_sum().avg()?,
+        "min" | "max" => {
+            let want_max = spec.func_name == "max";
+            let mut best: Option<&Value> = None;
+            for candidate in frame_values.iter().filter(|v| is_window_number(v)) {
+                if value_replaces(candidate, best, want_max) {
+                    best = Some(candidate);
+                }
+            }
+            best.cloned().unwrap_or(Value::Null)
+        }
+        "first_value" => arg_vals.get(start_idx).cloned().unwrap_or(Value::Null),
+        "last_value" => arg_vals.get(end_idx).cloned().unwrap_or(Value::Null),
+        _ => Value::Null,
+    })
 }
 
 fn build_v_peer_groups(order_values: &[Value]) -> Vec<usize> {
@@ -543,6 +518,206 @@ mod tests {
         let mx = agg_spec("max", f, vec![]);
         run_agg(&mut rows, &cols, &mx);
         assert!((rows[0][1].as_f64().unwrap() - 3.0).abs() < 1e-9);
+    }
+
+    fn whole_partition() -> WindowFrame {
+        frame(
+            "rows",
+            FrameBound::UnboundedPreceding,
+            FrameBound::UnboundedFollowing,
+        )
+    }
+
+    #[test]
+    fn frame_min_max_keep_integers_above_2_pow_53_exact() {
+        let cols = ci(&["v"]);
+        let vals = [9_007_199_254_740_993, 9_007_199_254_740_992];
+
+        let mut rows = rows_v(&vals);
+        run_agg(&mut rows, &cols, &agg_spec("min", whole_partition(), vec![]));
+        assert_eq!(rows[0][1], Value::Integer(9_007_199_254_740_992));
+
+        let mut rows = rows_v(&vals);
+        run_agg(&mut rows, &cols, &agg_spec("max", whole_partition(), vec![]));
+        assert_eq!(rows[0][1], Value::Integer(9_007_199_254_740_993));
+    }
+
+    #[test]
+    fn sum_keeps_integers_above_2_pow_53_exact() {
+        let cols = ci(&["v"]);
+        let vals = [9_007_199_254_740_993, 9_007_199_254_740_992];
+
+        let mut rows = rows_v(&vals);
+        run_agg(&mut rows, &cols, &agg_spec("sum", whole_partition(), vec![]));
+        assert_eq!(rows[0][1], Value::Integer(18_014_398_509_481_985));
+
+        let mut rows = rows_v(&[9_007_199_254_740_993, 1]);
+        let running = agg_spec("sum", WindowFrame::default(), vec![(col("v"), false)]);
+        run_agg(&mut rows, &cols, &running);
+        assert_eq!(rows[0][1], Value::Integer(9_007_199_254_740_993));
+        assert_eq!(rows[1][1], Value::Integer(9_007_199_254_740_994));
+
+        let mut rows = rows_v(&vals);
+        run_agg(&mut rows, &cols, &agg_spec("avg", whole_partition(), vec![]));
+        assert_eq!(rows[0][1], Value::Float(9_007_199_254_740_992.0));
+    }
+
+    #[test]
+    fn sum_past_i64_is_decimal_and_u64_counts() {
+        let cols = ci(&["v"]);
+        let mut rows = vec![
+            vec![Value::Integer(i64::MAX)],
+            vec![Value::from_u64(u64::MAX)],
+        ];
+        run_agg(&mut rows, &cols, &agg_spec("sum", whole_partition(), vec![]));
+        assert_eq!(
+            rows[0][1],
+            Value::Decimal(rust_decimal::Decimal::from_i128_with_scale(
+                i128::from(i64::MAX) + i128::from(u64::MAX),
+                0
+            ))
+        );
+
+        let mut rows = vec![
+            vec![Value::Integer(i64::MAX)],
+            vec![Value::from_u64(u64::MAX)],
+        ];
+        run_agg(&mut rows, &cols, &agg_spec("max", whole_partition(), vec![]));
+        assert_eq!(rows[0][1], Value::from_u64(u64::MAX));
+    }
+
+    #[test]
+    fn sum_mixed_int_float_is_float_and_nan_extreme_yields() {
+        let cols = ci(&["v"]);
+        let mixed = || vec![vec![Value::Integer(2)], vec![Value::Float(0.5)]];
+        let mut rows = mixed();
+        run_agg(&mut rows, &cols, &agg_spec("sum", whole_partition(), vec![]));
+        assert_eq!(rows[0][1], Value::Float(2.5));
+
+        let with_nan = || {
+            vec![
+                vec![Value::Float(f64::NAN)],
+                vec![Value::Integer(4)],
+                vec![Value::Integer(9)],
+            ]
+        };
+        let mut rows = with_nan();
+        run_agg(&mut rows, &cols, &agg_spec("min", whole_partition(), vec![]));
+        assert_eq!(rows[0][1], Value::Integer(4));
+        let mut rows = with_nan();
+        run_agg(&mut rows, &cols, &agg_spec("max", whole_partition(), vec![]));
+        assert_eq!(rows[0][1], Value::Integer(9));
+    }
+
+    #[test]
+    fn frame_min_max_over_nanosecond_timestamps() {
+        let cols = ci(&["v"]);
+        let ts = [
+            1_700_000_000_000_000_001,
+            1_700_000_000_000_000_003,
+            1_700_000_000_000_000_002,
+        ];
+
+        let mut rows = rows_v(&ts);
+        run_agg(&mut rows, &cols, &agg_spec("min", whole_partition(), vec![]));
+        assert_eq!(rows[1][1], Value::Integer(1_700_000_000_000_000_001));
+
+        let mut rows = rows_v(&ts);
+        run_agg(&mut rows, &cols, &agg_spec("max", whole_partition(), vec![]));
+        assert_eq!(rows[1][1], Value::Integer(1_700_000_000_000_000_003));
+    }
+
+    #[test]
+    fn frame_min_max_mixed_int_float_return_original_type() {
+        let cols = ci(&["v"]);
+        let mixed = || {
+            vec![
+                vec![Value::Integer(9_007_199_254_740_993)],
+                vec![Value::Float(9_007_199_254_740_992.0)],
+                vec![Value::Float(1.5)],
+                vec![Value::Integer(2)],
+            ]
+        };
+
+        let mut rows = mixed();
+        run_agg(&mut rows, &cols, &agg_spec("min", whole_partition(), vec![]));
+        assert_eq!(rows[0][1], Value::Float(1.5));
+
+        let mut rows = mixed();
+        run_agg(&mut rows, &cols, &agg_spec("max", whole_partition(), vec![]));
+        assert_eq!(rows[0][1], Value::Integer(9_007_199_254_740_993));
+    }
+
+    #[test]
+    fn running_min_max_keep_integers_exact() {
+        // Default frame, distinct order keys `k`: running extreme per row.
+        let cols = ci(&["v", "k"]);
+        let keyed = || {
+            vec![
+                vec![Value::Integer(9_007_199_254_740_993), Value::Integer(1)],
+                vec![Value::Integer(9_007_199_254_740_992), Value::Integer(2)],
+                vec![Value::Integer(9_007_199_254_740_995), Value::Integer(3)],
+            ]
+        };
+        let order = vec![(col("k"), true)];
+
+        let mut rows = keyed();
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("min", WindowFrame::default(), order.clone()),
+        );
+        let mins: Vec<Value> = rows.iter().map(|r| r[2].clone()).collect();
+        assert_eq!(
+            mins,
+            vec![
+                Value::Integer(9_007_199_254_740_993),
+                Value::Integer(9_007_199_254_740_992),
+                Value::Integer(9_007_199_254_740_992),
+            ]
+        );
+
+        let mut rows = keyed();
+        run_agg(&mut rows, &cols, &agg_spec("max", WindowFrame::default(), order));
+        let maxes: Vec<Value> = rows.iter().map(|r| r[2].clone()).collect();
+        assert_eq!(
+            maxes,
+            vec![
+                Value::Integer(9_007_199_254_740_993),
+                Value::Integer(9_007_199_254_740_993),
+                Value::Integer(9_007_199_254_740_995),
+            ]
+        );
+    }
+
+    #[test]
+    fn count_expr_skips_null_arguments() {
+        let cols = ci(&["v"]);
+        let rows_with_null = || {
+            vec![
+                vec![Value::Integer(1)],
+                vec![Value::Null],
+                vec![Value::String("x".into())],
+            ]
+        };
+
+        let mut rows = rows_with_null();
+        run_agg(&mut rows, &cols, &agg_spec("count", whole_partition(), vec![]));
+        assert_eq!(rows[0][1], Value::Integer(2));
+
+        let mut rows = rows_with_null();
+        let mut star = agg_spec("count", whole_partition(), vec![]);
+        star.args.clear();
+        run_agg(&mut rows, &cols, &star);
+        assert_eq!(rows[0][1], Value::Integer(3));
+
+        let mut rows = rows_with_null();
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("count", WindowFrame::default(), vec![]),
+        );
+        assert_eq!(rows[2][1], Value::Integer(2));
     }
 
     #[test]

@@ -98,7 +98,7 @@ pub(super) fn inject_graph(ctx: &RlsCtx<'_>, op: &mut GraphOp) -> crate::Result<
             collection,
             properties,
             ..
-        } => ctx.admit_write_json_image(collection, properties),
+        } => ctx.admit_write_property_image(collection, properties),
 
         // Ship the predicate: a delete carries no image; the stored property
         // object is readable only where the tombstone is written.
@@ -241,7 +241,16 @@ mod tests {
         }
     }
 
-    fn edge_put(collection: &str, properties: &str) -> PhysicalPlan {
+    /// An `EdgePut` whose properties are `properties_json` stored as plain
+    /// MessagePack. An empty string stores no properties.
+    fn edge_put(collection: &str, properties_json: &str) -> PhysicalPlan {
+        let properties = if properties_json.is_empty() {
+            Vec::new()
+        } else {
+            let json: serde_json::Value =
+                sonic_rs::from_str(properties_json).expect("test properties are JSON");
+            nodedb_types::json_msgpack::json_to_msgpack(&json).expect("encode properties")
+        };
         PhysicalPlan::Graph(GraphOp::EdgePut {
             collection: nodedb_types::QualifiedCollection::new(
                 nodedb_types::DatabaseId::DEFAULT,
@@ -250,7 +259,7 @@ mod tests {
             src_id: "a".into(),
             label: "knows".into(),
             dst_id: "b".into(),
-            properties: properties.as_bytes().to_vec(),
+            properties,
             src_surrogate: nodedb_types::Surrogate::new(1),
             dst_surrogate: nodedb_types::Surrogate::new(2),
         })

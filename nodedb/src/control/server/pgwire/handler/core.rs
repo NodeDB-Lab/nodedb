@@ -114,6 +114,12 @@ impl NodeDbPgHandler {
         }
     }
 
+    /// Mark this connection's open transaction block failed. A no-op outside
+    /// a block or in an already-failed block.
+    pub(crate) fn abort_transaction_block(&self) {
+        self.sessions.fail_transaction(self.session_id);
+    }
+
     pub(super) fn next_request_id(&self) -> RequestId {
         self.state.next_request_id()
     }

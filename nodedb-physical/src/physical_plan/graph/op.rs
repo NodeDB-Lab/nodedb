@@ -82,7 +82,8 @@ pub enum GraphOp {
         /// mapping back to a collection, authorized via the index DDL instead.
         collection: Option<QualifiedCollection>,
         start_nodes: Vec<String>,
-        edge_label: Option<String>,
+        /// Empty keeps every edge. Otherwise an edge with any listed label.
+        edge_labels: Vec<String>,
         direction: Direction,
         depth: usize,
         options: GraphTraversalOptions,
@@ -98,7 +99,8 @@ pub enum GraphOp {
         /// See `Hop::collection`.
         collection: Option<QualifiedCollection>,
         node_id: String,
-        edge_label: Option<String>,
+        /// Empty keeps every edge. Otherwise an edge with any listed label.
+        edge_labels: Vec<String>,
         direction: Direction,
         /// RLS filters applied to neighbor nodes before returning.
         rls_filters: Vec<u8>,
@@ -117,11 +119,20 @@ pub enum GraphOp {
         /// See `Hop::collection`.
         collection: Option<QualifiedCollection>,
         node_ids: Vec<String>,
-        edge_label: Option<String>,
+        /// Empty keeps every edge. Otherwise an edge with any listed label.
+        edge_labels: Vec<String>,
         direction: Direction,
         max_results: u32,
         /// RLS filters applied to neighbor nodes before returning.
         rls_filters: Vec<u8>,
+        /// Edge-property predicate, AND-ed. Evaluated against each crossed
+        /// edge's current property object in `collection` before the row
+        /// counts against `max_results`. Empty admits every edge. Non-empty
+        /// requires `collection`.
+        edge_predicate: Vec<nodedb_types::filter::MetadataFilter>,
+        /// Each row carries the crossed edge's current property object.
+        /// Requires `collection`.
+        with_properties: bool,
     },
 
     /// Shortest path between two nodes.
@@ -130,7 +141,8 @@ pub enum GraphOp {
         collection: Option<QualifiedCollection>,
         src: String,
         dst: String,
-        edge_label: Option<String>,
+        /// Empty keeps every edge. Otherwise an edge with any listed label.
+        edge_labels: Vec<String>,
         max_depth: usize,
         options: GraphTraversalOptions,
         /// RLS filters applied to path nodes before returning.
@@ -145,7 +157,8 @@ pub enum GraphOp {
         /// See `Hop::collection`.
         collection: Option<QualifiedCollection>,
         start_nodes: Vec<String>,
-        edge_label: Option<String>,
+        /// Empty keeps every edge. Otherwise an edge with any listed label.
+        edge_labels: Vec<String>,
         depth: usize,
         options: GraphTraversalOptions,
         /// RLS filters applied to subgraph nodes/edges before returning.

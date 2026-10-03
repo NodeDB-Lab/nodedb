@@ -4,7 +4,6 @@
 
 use nodedb_types::QualifiedCollection;
 use nodedb_types::protocol::TextFields;
-use sonic_rs;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::server::native::dispatch::DispatchCtx;
@@ -44,8 +43,8 @@ pub(crate) async fn build_rag_fusion(
         collection: QualifiedCollection::new(ctx.database_id(), collection),
         query_vector: query_vector.clone(),
         vector_top_k: fields.vector_top_k.unwrap_or(20) as usize,
-        edge_label: fields.edge_label.clone(),
-        direction: parse_direction(fields.direction.as_deref()),
+        edge_label: rag_fusion_edge_label(fields)?,
+        direction: parse_direction(fields.direction.as_deref())?,
         expansion_depth: clamped_depth(fields.expansion_depth, 2, "expansion_depth")?,
         final_top_k: fields.final_top_k.unwrap_or(10) as usize,
         rrf_k: (
@@ -59,6 +58,23 @@ pub(crate) async fn build_rag_fusion(
         bm25_field: None,
         stage: nodedb_physical::physical_plan::RagStage::Local,
     }))
+}
+
+/// The one edge label RAG fusion expands along.
+///
+/// RAG fusion follows one label or every label. A request with more than one
+/// label is refused, never cut down to its first.
+fn rag_fusion_edge_label(fields: &TextFields) -> crate::Result<Option<String>> {
+    match fields.edge_labels.as_deref() {
+        None | Some([]) => Ok(None),
+        Some([label]) => Ok(Some(label.clone())),
+        Some(labels) => Err(crate::Error::BadRequest {
+            detail: format!(
+                "RAG fusion takes one edge label, got {}: {labels:?}; send one label or none",
+                labels.len()
+            ),
+        }),
+    }
 }
 
 pub(crate) async fn build_hop(
@@ -78,8 +94,8 @@ pub(crate) async fn build_hop(
             .map(|c| QualifiedCollection::new(ctx.database_id(), &c.to_lowercase())),
         start_nodes: vec![start.clone()],
         depth: clamped_depth(fields.depth, 2, "depth")?,
-        edge_label: fields.edge_label.clone(),
-        direction: parse_direction(fields.direction.as_deref()),
+        edge_labels: fields.edge_labels.clone().unwrap_or_default(),
+        direction: parse_direction(fields.direction.as_deref())?,
         options: Default::default(),
         rls_filters: Vec::new(),
         frontier_bitmap: None,
@@ -102,8 +118,8 @@ pub(crate) async fn build_neighbors(
             .as_deref()
             .map(|c| QualifiedCollection::new(ctx.database_id(), &c.to_lowercase())),
         node_id: start.clone(),
-        edge_label: fields.edge_label.clone(),
-        direction: parse_direction(fields.direction.as_deref()),
+        edge_labels: fields.edge_labels.clone().unwrap_or_default(),
+        direction: parse_direction(fields.direction.as_deref())?,
         rls_filters: Vec::new(),
     }))
 }
@@ -132,7 +148,7 @@ pub(crate) async fn build_path(
         src: from.clone(),
         dst: to.clone(),
         max_depth: clamped_depth(fields.depth, 10, "depth")?,
-        edge_label: fields.edge_label.clone(),
+        edge_labels: fields.edge_labels.clone().unwrap_or_default(),
         options: Default::default(),
         rls_filters: Vec::new(),
         frontier_bitmap: None,
@@ -156,7 +172,7 @@ pub(crate) async fn build_subgraph(
             .map(|c| QualifiedCollection::new(ctx.database_id(), &c.to_lowercase())),
         start_nodes: vec![start.clone()],
         depth: clamped_depth(fields.depth, 2, "depth")?,
-        edge_label: fields.edge_label.clone(),
+        edge_labels: fields.edge_labels.clone().unwrap_or_default(),
         options: Default::default(),
         rls_filters: Vec::new(),
     }))
@@ -190,12 +206,7 @@ pub(crate) async fn build_edge_put(
         .ok_or_else(|| crate::Error::BadRequest {
             detail: "missing 'edge_type'".to_string(),
         })?;
-    let props = match fields.properties.as_ref() {
-        Some(v) => sonic_rs::to_string(v).map_err(|e| crate::Error::BadRequest {
-            detail: format!("edge properties are not serializable to JSON: {e}"),
-        })?,
-        None => String::new(),
-    };
+    let properties = edge_properties_msgpack(fields.properties.as_ref())?;
     // The endpoint surrogates come from the collection home, the one place a
     // key's surrogate is minted (`surrogate_exchange::authority`).
     let [src_surrogate, dst_surrogate] = endpoint_surrogates(ctx, collection, src, dst).await?;
@@ -204,10 +215,29 @@ pub(crate) async fn build_edge_put(
         src_id: src.clone(),
         label: label.clone(),
         dst_id: dst.clone(),
-        properties: props.into_bytes(),
+        properties,
         src_surrogate,
         dst_surrogate,
     }))
+}
+
+/// The plain-MessagePack property map an `EdgePut` stores. Absent or null
+/// properties store nothing. Any other non-object value is refused.
+fn edge_properties_msgpack(properties: Option<&serde_json::Value>) -> crate::Result<Vec<u8>> {
+    match properties {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(object @ serde_json::Value::Object(_)) => {
+            nodedb_types::json_msgpack::json_to_msgpack(object).map_err(|e| {
+                crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("edge properties: {e}"),
+                }
+            })
+        }
+        Some(other) => Err(crate::Error::BadRequest {
+            detail: format!("edge properties must be a JSON object, got {other}"),
+        }),
+    }
 }
 
 pub(crate) async fn build_edge_delete(
@@ -445,6 +475,50 @@ mod tests {
             json!({ "personalization_vector": { "alice": "high" } }),
         ));
         assert!(build_algo(&fields, "social").await.is_err());
+    }
+
+    fn label_fields(labels: Option<Vec<&str>>) -> TextFields {
+        TextFields {
+            edge_labels: labels.map(|l| l.into_iter().map(str::to_string).collect()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rag_fusion_edge_label_takes_none_or_one() {
+        assert_eq!(rag_fusion_edge_label(&label_fields(None)).unwrap(), None);
+        assert_eq!(
+            rag_fusion_edge_label(&label_fields(Some(vec![]))).unwrap(),
+            None
+        );
+        assert_eq!(
+            rag_fusion_edge_label(&label_fields(Some(vec!["hop"]))).unwrap(),
+            Some("hop".to_string())
+        );
+    }
+
+    #[test]
+    fn rag_fusion_edge_label_refuses_more_than_one() {
+        let error = rag_fusion_edge_label(&label_fields(Some(vec!["a", "b"])))
+            .expect_err("two labels must be refused");
+        assert!(error.to_string().contains("one edge label"), "{error}");
+    }
+
+    #[test]
+    fn edge_properties_store_plain_msgpack() {
+        let bytes = edge_properties_msgpack(Some(&json!({"weight": 3, "kind": "road"})))
+            .expect("object properties encode");
+        assert_eq!(
+            nodedb_graph::csr::weights::extract_weight_from_properties(&bytes),
+            3.0
+        );
+        assert!(edge_properties_msgpack(None).expect("absent").is_empty());
+        assert!(
+            edge_properties_msgpack(Some(&serde_json::Value::Null))
+                .expect("null")
+                .is_empty()
+        );
+        assert!(edge_properties_msgpack(Some(&json!([1, 2]))).is_err());
     }
 
     #[tokio::test]

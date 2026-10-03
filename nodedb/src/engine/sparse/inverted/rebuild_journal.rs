@@ -18,7 +18,7 @@
 
 use std::collections::HashSet;
 
-use redb::{ReadableDatabase as _, ReadableTable as _};
+use redb::ReadableDatabase as _;
 
 use nodedb_types::TenantId;
 
@@ -26,10 +26,9 @@ use super::core::InvertedIndex;
 use super::errors::inverted_err;
 use super::indexing::IndexDocScope;
 use super::rebuild_snapshot::FtsRebuildTicket;
+use crate::engine::sparse::fts_redb::keys::KeyOwner;
+use crate::engine::sparse::fts_redb::scan;
 use crate::engine::sparse::fts_redb::tables::{DOC_LENGTHS, POSTINGS};
-
-/// Upper bound for the `term` component of a posting range scan.
-const MAX_TERM: &str = "\u{10ffff}";
 
 /// Default bound on the distinct documents one rebuild journal records.
 pub const FTS_REBUILD_JOURNAL_MAX_DOCS: usize = 1 << 20;
@@ -148,26 +147,20 @@ impl InvertedIndex {
             .db()
             .begin_read()
             .map_err(|e| inverted_err("rebuild probe txn", e))?;
+        let owner = KeyOwner::collection(database_id, t, collection);
         let postings = txn
             .open_table(POSTINGS)
             .map_err(|e| inverted_err("rebuild probe postings", e))?;
-        if postings
-            .range((database_id, t, collection, "")..=(database_id, t, collection, MAX_TERM))
+        if scan::has_str_rows(&postings, owner)
             .map_err(|e| inverted_err("rebuild probe postings range", e))?
-            .next()
-            .is_some()
         {
             return Ok(true);
         }
         let lengths = txn
             .open_table(DOC_LENGTHS)
             .map_err(|e| inverted_err("rebuild probe doc_lengths", e))?;
-        let any = lengths
-            .range((database_id, t, collection, 0u32)..=(database_id, t, collection, u32::MAX))
-            .map_err(|e| inverted_err("rebuild probe doc_lengths range", e))?
-            .next()
-            .is_some();
-        Ok(any)
+        scan::has_doc_rows(&lengths, owner)
+            .map_err(|e| inverted_err("rebuild probe doc_lengths range", e))
     }
 
     /// Close the journal of rebuild `token`. The index is unchanged.

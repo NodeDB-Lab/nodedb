@@ -13,6 +13,7 @@ use nodedb_types::columnar::StrictSchema;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
+use crate::data::executor::handlers::identity_guard::IdentitySnapshot;
 use crate::engine::document::store::StorageKey;
 use crate::types::{DatabaseId, TenantId};
 
@@ -166,6 +167,8 @@ impl CoreLoop {
             }
         };
 
+        let identity =
+            IdentitySnapshot::capture(strict_schema, declared_primary_key, updates, &doc);
         // Feeds the secondary-index SET diff for values the UPDATE drops.
         let old_doc = doc.clone();
         // All assignments see this pre-update snapshot — they don't
@@ -203,6 +206,7 @@ impl CoreLoop {
                 declared_primary_key,
             )?;
         }
+        identity.check_unchanged(collection, &doc)?;
 
         // Recompute generated columns if any dependency changed. A column
         // the engine cannot recompute fails the statement.

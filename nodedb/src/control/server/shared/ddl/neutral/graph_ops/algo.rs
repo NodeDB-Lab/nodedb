@@ -182,9 +182,9 @@ fn clamp_opt(
 /// Render an algorithm result payload into a protocol-neutral row set.
 ///
 /// Every column is emitted as `Text` with its cell pre-rendered to the exact
-/// string (all algorithm result columns are text): `Text` → the raw string, `Float64` → `format!("{v}")` or the
-/// literal `Infinity` for a non-representable/non-finite score, `Int64` →
-/// decimal or `0`. Pre-rendering keeps the wire bytes byte-identical (a native
+/// string (all algorithm result columns are text): `Text` → the raw string,
+/// `Float64` → `format!("{v}")` or the literal `Infinity` for a
+/// non-representable/non-finite score, `Int64` → decimal or `0`. Pre-rendering keeps the wire bytes byte-identical (a native
 /// float path will change both the column OID and the `Infinity` fallback).
 fn algo_payload_to_rows(
     payload: &crate::bridge::envelope::Payload,

@@ -177,7 +177,7 @@ mod tests {
         )];
         let hops = csr.traverse_surrogates_in_collection(SurrogateBfsParams {
             seeds: &seeds,
-            label_filter: None,
+            label_filter: &[],
             direction: Direction::Out,
             max_depth: 2,
             max_visited: 100,

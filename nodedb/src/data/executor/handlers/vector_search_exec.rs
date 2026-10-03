@@ -6,10 +6,10 @@ use roaring::RoaringBitmap;
 use tracing::{debug, warn};
 
 use super::vector_search::{
-    VectorSearchParams, build_search_hit, effective_ef, encode_hits_response,
-    surrogate_bitmap_to_global_ids,
+    VectorSearchParams, encode_hits_response, surrogate_bitmap_to_global_ids,
 };
 use super::vector_search_ann::{ResolvedAnnOptions, apply_ann_options, quantization_matches};
+use super::vector_search_window::{BodySource, SearchWindow, WindowHits};
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
@@ -108,17 +108,27 @@ impl CoreLoop {
         // `filter_bitmap`. The sub-plan emits document-shaped rows whose
         // `id` is the cell's surrogate as 8-char zero-padded lowercase
         // hex; `collect_surrogates` decodes that back into surrogate IDs.
-        let inline_bitmap = inline_prefilter_plan.map(|sub_plan| {
-            crate::data::executor::dispatch::bitmap::hashjoin_inline::run_bitmap_subplan(
-                self, task, sub_plan,
-            )
-        });
+        // A failing sub-plan fails the search: an empty bitmap would admit no
+        // candidate and silently answer with zero rows.
+        let inline_bitmap = match inline_prefilter_plan
+            .map(|sub_plan| {
+                crate::data::executor::dispatch::bitmap::hashjoin_inline::run_bitmap_subplan(
+                    self, task, sub_plan,
+                )
+            })
+            .transpose()
+        {
+            Ok(bitmap) => bitmap,
+            Err(e) => return self.response_error(task, e),
+        };
         let effective_filter: Option<nodedb_types::SurrogateBitmap> =
             match (filter_bitmap.cloned(), inline_bitmap) {
                 (Some(a), Some(b)) => Some(a.intersect(&b)),
                 (Some(a), None) => Some(a),
-                (None, Some(b)) if !b.is_empty() => Some(b),
-                _ => None,
+                // An empty inline bitmap admits no candidate: the prefilter
+                // matched nothing, so the search returns nothing.
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
             };
         let filter_bitmap = effective_filter.as_ref();
         debug!(core = self.core_id, %collection, top_k, ef_search, "vector search");
@@ -130,25 +140,9 @@ impl CoreLoop {
         };
 
         let database_id = task.request.database_id.as_u64();
-        let index_key = CoreLoop::vector_index_key(database_id, tid, collection, field_name);
-
         // Every index type is one `VectorCollection`: an IVF-PQ collection
         // answers from its exact buffer or its trained IVF-PQ index.
-        // If the specific field-named index does not exist, fall back to the
-        // empty-field index. This handles data synced from NodeDB-Lite (which
-        // uses collection-level storage, not named-field storage) being
-        // searched via a field-specific SQL query (e.g. vector_distance(embedding, ...)).
-        let effective_key =
-            if !self.vector_collections.contains_key(&index_key) && !field_name.is_empty() {
-                let fallback_key = CoreLoop::vector_index_key(database_id, tid, collection, "");
-                if self.vector_collections.contains_key(&fallback_key) {
-                    fallback_key
-                } else {
-                    index_key
-                }
-            } else {
-                index_key
-            };
+        let effective_key = self.resolve_vector_index_key(database_id, tid, collection, field_name);
         // An index with no base rows still answers a transaction's own staged
         // rows: the merge ranks them over an empty base result.
         let staged_only = |core: &Self, txn_id| {
@@ -206,15 +200,31 @@ impl CoreLoop {
             }
         }
 
-        // Over-fetch to accommodate both oversample breadth (for re-rank
-        // headroom) and RLS post-filter headroom. The two factors are
-        // multiplied so each can independently request more candidates.
+        // Over-fetch for oversample re-rank headroom. A residual filter
+        // starts from a wider window, and `rank_window` widens it until
+        // `top_k` candidates pass the filter.
         let fetch_k = if rls_filters.is_empty() {
             top_k.saturating_mul(oversample)
         } else {
             top_k.saturating_mul(2).saturating_mul(oversample).max(20)
         };
-        let ef = effective_ef(ef_search, fetch_k);
+        // The Control Plane encoded these bytes. Bytes that do not decode
+        // fail the search: ranking without the filter cannot size the window.
+        let residual: Vec<nodedb_query::scan_filter::ScanFilter> = if rls_filters.is_empty() {
+            Vec::new()
+        } else {
+            match zerompk::from_msgpack(rls_filters) {
+                Ok(filters) => filters,
+                Err(e) => {
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("vector search residual filter decode: {e}"),
+                        },
+                    );
+                }
+            }
+        };
 
         // Derive payload bitmap (node-id space) from `(field, value)`
         // equalities by intersecting per-field equality bitmaps. Returns
@@ -273,7 +283,7 @@ impl CoreLoop {
 
         // A filter that cannot be serialized fails the search: searching
         // without it would return rows the filter excludes.
-        let searched = match combined_bm {
+        let bitmap_bytes = match combined_bm {
             Some(local_bm) => {
                 let mut buf = Vec::with_capacity(local_bm.serialized_size());
                 if let Err(e) = local_bm.serialize_into(&mut buf) {
@@ -284,93 +294,46 @@ impl CoreLoop {
                         },
                     );
                 }
-                collection_ref.search_with_bitmap_bytes_and_metric(
-                    query_vector,
-                    fetch_k,
-                    ef,
-                    &buf,
-                    metric,
-                )
+                Some(buf)
             }
-            None => collection_ref.search_with_metric(query_vector, fetch_k, ef, metric),
+            None => None,
         };
+
+        // The residual filter is evaluated at the Control-Plane response
+        // boundary (`response_translate::vector`): the Data Plane attaches
+        // each body so the Control Plane runs the predicate without a second
+        // round-trip, then truncates to `top_k`. The slow path (no
+        // `skip_payload_fetch`) also attaches bodies: the response translator
+        // flattens their fields into the hit for column projection. The
+        // pure-vector fast path fetches no body.
+        let attach = !skip_payload_fetch || !rls_filters.is_empty();
+        let window = self.rank_window(
+            &SearchWindow {
+                collection: collection_ref,
+                query_vector,
+                ef_search,
+                metric,
+                bitmap: bitmap_bytes.as_deref(),
+            },
+            &BodySource {
+                database_id: task.request.database_id.as_u64(),
+                tid,
+                collection,
+                attach,
+            },
+            &residual,
+            top_k,
+            fetch_k,
+        );
         // A query of the wrong dimension is the caller's data error (22000);
         // the core keeps serving.
-        let results = match searched {
-            Ok(results) => results,
-            Err(e) => return self.response_error(task, crate::Error::from(e)),
-        };
-
-        // Pure-vector fast path: projection contains only id/distance.
-        // Skip the sparse-store body fetch entirely.
-        if skip_payload_fetch {
-            let mut hits: Vec<_> = results
-                .iter()
-                .map(|r| build_search_hit(Some(collection_ref), r.id, r.distance))
-                .collect();
-            // Read-your-own-writes for vector search: fold this
-            // transaction's staged vector inserts into the base HNSW/IVF
-            // result before truncation, so a vector inserted earlier in the
-            // same transaction is ranked in by true distance before COMMIT.
-            if let Some(txn_id) = task.request.txn_id {
-                if let Err(e) = self.merge_vector_overlay_into_search(
-                    super::transaction::overlay::VectorMergeParams {
-                        txn_id,
-                        database_id: task.request.database_id,
-                        tid: crate::types::TenantId::new(tid),
-                        collection,
-                        field_name,
-                        query_vector,
-                        metric,
-                        top_k,
-                        filter_bitmap,
-                        payload_filters,
-                    },
-                    &mut hits,
-                ) {
-                    return self.response_error(task, e);
-                }
-            } else {
-                hits.truncate(top_k);
-            }
-            if let Some(ref m) = self.metrics {
-                m.record_vector_search(0);
-                m.record_query_by_engine("vector");
-            }
-            return encode_hits_response(self, task, &hits);
-        }
-
-        // RLS evaluation lives at the Control-Plane response boundary
-        // (`response_translate::vector`). DP attaches the document body
-        // when filters are active so CP can run the predicate without
-        // a follow-up round-trip; CP applies the filter and truncates to
-        // `top_k`. Data Plane stays pure SIMD + sparse-fetch.
-        // Attach body bytes whenever skip_payload_fetch is false (slow path)
-        // OR when RLS filters need them; the CP response translator flattens
-        // the bytes' fields into the hit JSON for client column projection.
-        let attach = !skip_payload_fetch || !rls_filters.is_empty();
-        let hits: crate::Result<Vec<_>> = results
-            .iter()
-            .map(|r| build_search_hit(Some(collection_ref), r.id, r.distance))
-            .map(|hit| {
-                self.attach_body(
-                    task.request.database_id.as_u64(),
-                    tid,
-                    collection,
-                    attach,
-                    hit,
-                )
-            })
-            .collect();
-        let mut hits = match hits {
-            Ok(hits) => hits,
+        let WindowHits { mut hits, fetch_k } = match window {
+            Ok(window) => window,
             Err(e) => return self.response_error(task, e),
         };
-        let truncate_to = if rls_filters.is_empty() {
-            top_k
-        } else {
-            fetch_k
-        };
+        // With a residual filter the Control Plane makes the top-k cut, so
+        // the whole window travels.
+        let truncate_to = if residual.is_empty() { top_k } else { fetch_k };
         // Read-your-own-writes for vector search: fold this transaction's
         // staged vector inserts into the base HNSW/IVF result before
         // truncation, so a vector inserted earlier in the same transaction

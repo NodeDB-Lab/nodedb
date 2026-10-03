@@ -14,7 +14,7 @@ use crate::event::cdc::event::CdcEvent;
 use crate::event::types::WriteEvent;
 
 use super::registry::MvRegistry;
-use super::state::MvState;
+use super::state::{AggInput, MvState};
 use super::types::{AggDef, AggFunction};
 
 /// Process a WriteEvent against all streaming MVs sourced from a given stream.
@@ -109,14 +109,14 @@ fn update_mv(event: &CdcEvent, mv_state: &MvState) {
     // Extract GROUP BY key from the event.
     let group_key = extract_group_key(event, &mv_state.group_by_columns);
 
-    // Extract aggregate values from the event.
-    let agg_values: Vec<f64> = mv_state
+    // Extract aggregate inputs from the event.
+    let inputs: Vec<AggInput> = mv_state
         .aggregates
         .iter()
-        .map(|agg| extract_agg_value(event, agg))
+        .map(|agg| extract_agg_input(event, agg))
         .collect();
 
-    mv_state.update_with_time(&group_key, &agg_values, event.event_time);
+    mv_state.update_with_time(&group_key, &inputs, event.event_time);
 
     trace!(
         mv = %mv_state.name,
@@ -157,36 +157,32 @@ fn extract_group_key(event: &CdcEvent, group_by_columns: &[String]) -> String {
     parts.join(":")
 }
 
-/// Extract a numeric value for an aggregate function from the event.
+/// Extract one aggregate's input from the event.
 ///
-/// For COUNT, always returns 1.0 (each event counts as one).
-/// For SUM/MIN/MAX/AVG, the aggregate's source column — the same one the
-/// definition-time redaction refusal decides on — is read from new_value.
-fn extract_agg_value(event: &CdcEvent, agg: &AggDef) -> f64 {
+/// COUNT takes the event itself. SUM / MIN / MAX / AVG take the value of the
+/// aggregate's source column — the same one the definition-time redaction
+/// refusal decides on — read from new_value as the exact `Value` it holds:
+/// an integer stays an integer, a `u64` above `i64::MAX` stays exact. A
+/// missing or null field is [`AggInput::Absent`]. Which values a function
+/// takes is the state's rule (`GroupState::update`).
+fn extract_agg_input(event: &CdcEvent, agg: &AggDef) -> AggInput {
     if agg.function == AggFunction::Count {
-        return 1.0; // Each event counts as one.
+        return AggInput::Event;
     }
     let Some(field_name) = agg.source_field() else {
         // An aggregate naming no column has nothing to read.
-        return f64::NAN; // NaN → skipped by GroupState::update.
+        return AggInput::Absent;
     };
-
-    // Look up the field in new_value.
-    event
-        .new_value
-        .as_ref()
-        .and_then(|v| v.get(field_name))
-        .and_then(|v| match v {
-            serde_json::Value::Number(n) => n.as_f64(),
-            serde_json::Value::String(s) => s.parse::<f64>().ok(),
-            _ => None,
-        })
-        .unwrap_or(f64::NAN) // NaN → skipped by GroupState::update.
+    match event.new_value.as_ref().and_then(|v| v.get(field_name)) {
+        None | Some(serde_json::Value::Null) => AggInput::Absent,
+        Some(v) => AggInput::Value(nodedb_types::conversion::json_to_value_ref(v)),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nodedb_types::Value;
 
     fn agg(function: AggFunction, input_expr: &str) -> AggDef {
         AggDef {
@@ -241,40 +237,74 @@ mod tests {
     }
 
     #[test]
-    fn extract_agg_value_count() {
+    fn extract_agg_input_count() {
         let event = make_event("INSERT", 99.0);
-        assert_eq!(extract_agg_value(&event, &agg(AggFunction::Count, "")), 1.0);
+        assert_eq!(
+            extract_agg_input(&event, &agg(AggFunction::Count, "")),
+            AggInput::Event
+        );
     }
 
     #[test]
-    fn extract_agg_value_sum() {
+    fn extract_agg_input_sum() {
         let event = make_event("INSERT", 42.5);
         assert_eq!(
-            extract_agg_value(&event, &agg(AggFunction::Sum, "total")),
-            42.5
+            extract_agg_input(&event, &agg(AggFunction::Sum, "total")),
+            AggInput::Value(Value::Float(42.5))
+        );
+    }
+
+    /// An integer field stays an exact integer, and a `u64` above `i64::MAX`
+    /// keeps its number.
+    #[test]
+    fn extract_agg_input_keeps_integers_exact() {
+        let mut event = make_event("INSERT", 0.0);
+        event.new_value = Some(serde_json::json!({
+            "big": 9_007_199_254_740_993_i64,
+            "huge": u64::MAX,
+            "none": null,
+        }));
+        assert_eq!(
+            extract_agg_input(&event, &agg(AggFunction::Sum, "big")),
+            AggInput::Value(Value::Integer(9_007_199_254_740_993))
+        );
+        assert_eq!(
+            extract_agg_input(&event, &agg(AggFunction::Max, "huge")),
+            AggInput::Value(Value::from_u64(u64::MAX))
+        );
+        assert_eq!(
+            extract_agg_input(&event, &agg(AggFunction::Min, "none")),
+            AggInput::Absent
+        );
+        assert_eq!(
+            extract_agg_input(&event, &agg(AggFunction::Min, "missing")),
+            AggInput::Absent
         );
     }
 
     /// A `doc_get` wrapper names the same stored column the plain form does, so
     /// both the extraction and the definition-time refusal see one field name.
     #[test]
-    fn extract_agg_value_reads_a_doc_get_wrapped_field() {
+    fn extract_agg_input_reads_a_doc_get_wrapped_field() {
         let event = make_event("INSERT", 7.5);
         assert_eq!(
-            extract_agg_value(
+            extract_agg_input(
                 &event,
                 &agg(AggFunction::Sum, "doc_get(new_value, '$.total')")
             ),
-            7.5
+            AggInput::Value(Value::Float(7.5))
         );
     }
 
-    /// A non-COUNT aggregate naming no column reads nothing, and must stay NaN
-    /// so `GroupState::update` skips it rather than counting it as a value.
+    /// A non-COUNT aggregate naming no column reads nothing, so
+    /// `GroupState::update` takes no input from it.
     #[test]
-    fn extract_agg_value_without_a_column_is_nan() {
+    fn extract_agg_input_without_a_column_is_absent() {
         let event = make_event("INSERT", 42.5);
-        assert!(extract_agg_value(&event, &agg(AggFunction::Sum, "  ")).is_nan());
+        assert_eq!(
+            extract_agg_input(&event, &agg(AggFunction::Sum, "  ")),
+            AggInput::Absent
+        );
     }
 
     #[test]
@@ -315,13 +345,13 @@ mod tests {
         let state = registry
             .get_state(crate::types::DatabaseId::new(7), 1, "order_stats")
             .unwrap();
-        let results = state.read_results();
+        let results = state.read_results().unwrap();
 
         let insert_row = results.iter().find(|(k, _)| k == "INSERT").unwrap();
-        assert_eq!(insert_row.1[0].1, 2.0); // COUNT = 2
-        assert_eq!(insert_row.1[1].1, 150.0); // SUM = 150
+        assert_eq!(insert_row.1[0].1, Value::Integer(2)); // COUNT = 2
+        assert_eq!(insert_row.1[1].1, Value::Float(150.0)); // SUM = 150
 
         let update_row = results.iter().find(|(k, _)| k == "UPDATE").unwrap();
-        assert_eq!(update_row.1[0].1, 1.0); // COUNT = 1
+        assert_eq!(update_row.1[0].1, Value::Integer(1)); // COUNT = 1
     }
 }

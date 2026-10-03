@@ -2,46 +2,58 @@
 
 //! Document writes reuse ordered analyzer output and preserve surrogate bounds.
 
-use super::{FtsIndex, memtable_key};
+use super::FtsIndex;
 use crate::{
     backend::FtsBackend,
     block::CompactPosting,
     codec::smallfloat,
     index::error::{FtsIndexError, MAX_INDEXABLE_SURROGATE},
+    scope::IndexScope,
 };
 use nodedb_types::Surrogate;
 use std::collections::HashMap;
 use tracing::debug;
 
 impl<B: FtsBackend> FtsIndex<B> {
-    /// Index a document's text content.
+    /// Index a document's text content into one index. The analyzer is the
+    /// one bound to the index's collection.
     ///
-    /// Returns `Err(FtsIndexError::SurrogateOutOfRange)` for `Surrogate::ZERO` or values exceeding `MAX_INDEXABLE_SURROGATE`. `Surrogate::ZERO` is the unassigned sentinel. Fieldnorm arrays use raw `u32` surrogates as indexes. Values near `u32::MAX` cause multi-GiB allocations. Runtime bounds checks run before analysis and remain active in release builds.
-    pub fn index_document(
+    /// Returns `Err(FtsIndexError::SurrogateOutOfRange)` for `Surrogate::ZERO`
+    /// or values exceeding `MAX_INDEXABLE_SURROGATE`. `Surrogate::ZERO` is the
+    /// unassigned sentinel. Fieldnorm arrays use raw `u32` surrogates as
+    /// indexes. Values near `u32::MAX` cause multi-GiB allocations. Runtime
+    /// bounds checks run before analysis and remain active in release builds.
+    pub fn index_document<'a>(
         &self,
         database_id: u64,
         tid: u64,
-        collection: &str,
+        index: impl Into<IndexScope<'a>>,
         doc_id: Surrogate,
         text: &str,
     ) -> Result<(), FtsIndexError<B::Error>> {
+        let index = index.into();
         Self::check_surrogate(doc_id)?;
 
         let tokens = self
-            .analyze_for_collection(database_id, tid, collection, text)
+            .analyze_for_collection(database_id, tid, index.collection(), text)
             .map_err(FtsIndexError::backend)?;
-        self.index_analyzed_document(database_id, tid, collection, doc_id, &tokens)
+        self.index_analyzed_document(database_id, tid, index, doc_id, &tokens)
     }
 
-    /// Index ordered tokens from this collection's current analyzer. Callers preserve token order and hold analyzer config stable through indexing.
-    pub fn index_analyzed_document(
+    /// Index ordered tokens from this collection's current analyzer. Callers
+    /// preserve token order and hold analyzer config stable through indexing.
+    ///
+    /// Returns `Err(FtsIndexError::SurrogateOutOfRange)` for `Surrogate::ZERO`
+    /// or values exceeding `MAX_INDEXABLE_SURROGATE`.
+    pub fn index_analyzed_document<'a>(
         &self,
         database_id: u64,
         tid: u64,
-        collection: &str,
+        index: impl Into<IndexScope<'a>>,
         doc_id: Surrogate,
         tokens: &[String],
     ) -> Result<(), FtsIndexError<B::Error>> {
+        let index = index.into();
         Self::check_surrogate(doc_id)?;
         if tokens.is_empty() {
             return Ok(());
@@ -55,57 +67,74 @@ impl<B: FtsBackend> FtsIndex<B> {
         }
 
         let doc_len = tokens.len() as u32;
+        let fieldnorm = smallfloat::encode(doc_len);
 
         let term_count = term_data.len();
-        for (term, (freq, positions)) in term_data {
-            let compact = CompactPosting {
-                doc_id,
-                term_freq: freq,
-                fieldnorm: smallfloat::encode(doc_len),
-                positions,
-            };
-            let scoped_term = memtable_key(database_id, tid, collection, term);
-            self.memtable.insert(&scoped_term, compact);
-        }
-        self.memtable.record_doc(doc_id, doc_len);
+        self.memtable.insert_doc(
+            database_id,
+            tid,
+            index,
+            doc_id,
+            doc_len,
+            term_data.into_iter().map(|(term, (freq, positions))| {
+                (
+                    term,
+                    CompactPosting {
+                        doc_id,
+                        term_freq: freq,
+                        fieldnorm,
+                        positions,
+                    },
+                )
+            }),
+        );
 
         // Write document length, fieldnorm, and update incremental stats.
         self.backend
-            .write_doc_length(database_id, tid, collection, doc_id, doc_len)
+            .write_doc_length(database_id, tid, index, doc_id, doc_len)
             .map_err(FtsIndexError::backend)?;
-        self.write_fieldnorm(database_id, tid, collection, doc_id, doc_len)
+        self.write_fieldnorm(database_id, tid, index, doc_id, doc_len)
             .map_err(FtsIndexError::backend)?;
         self.backend
-            .increment_stats(database_id, tid, collection, doc_len)
+            .increment_stats(database_id, tid, index, doc_len)
             .map_err(FtsIndexError::backend)?;
 
         if self.memtable.should_flush() {
-            self.flush_memtable(database_id, tid, collection)?;
+            self.flush_all_memtables()?;
         }
 
-        debug!(database_id, tid, %collection, doc_id = doc_id.0, tokens = tokens.len(), terms = term_count, "indexed document");
+        debug!(
+            database_id,
+            tid,
+            collection = index.collection(),
+            field = index.field_key(),
+            doc_id = doc_id.0,
+            tokens = tokens.len(),
+            terms = term_count,
+            "indexed document"
+        );
         Ok(())
     }
 
-    /// Remove a document from the index.
-    pub fn remove_document(
+    /// Remove a document from one index.
+    pub fn remove_document<'a>(
         &self,
         database_id: u64,
         tid: u64,
-        collection: &str,
+        index: impl Into<IndexScope<'a>>,
         doc_id: Surrogate,
     ) -> Result<(), B::Error> {
+        let index = index.into();
         let doc_len = self
             .backend
-            .read_doc_length(database_id, tid, collection, doc_id)?;
+            .read_doc_length(database_id, tid, index, doc_id)?;
 
-        self.memtable.remove_doc(doc_id);
+        self.memtable.remove_doc(database_id, tid, index, doc_id);
         self.backend
-            .remove_doc_length(database_id, tid, collection, doc_id)?;
+            .remove_doc_length(database_id, tid, index, doc_id)?;
 
         if let Some(len) = doc_len {
-            self.backend
-                .decrement_stats(database_id, tid, collection, len)?;
+            self.backend.decrement_stats(database_id, tid, index, len)?;
         }
 
         Ok(())
@@ -131,6 +160,7 @@ mod tests {
 
     const DB: u64 = 0;
     const T: u64 = 1;
+    const DOCS: IndexScope<'static> = IndexScope::document("docs");
 
     fn make_index() -> FtsIndex<MemoryBackend> {
         FtsIndex::new(MemoryBackend::new(), test_governor())
@@ -155,7 +185,7 @@ mod tests {
         idx.index_document(DB, T, "docs", Surrogate(11), "hello rust language")
             .unwrap();
 
-        let (count, _) = idx.backend.collection_stats(DB, T, "docs").unwrap();
+        let (count, _) = idx.backend.collection_stats(DB, T, DOCS).unwrap();
         assert_eq!(count, 2);
     }
 
@@ -169,7 +199,7 @@ mod tests {
 
         idx.remove_document(DB, T, "docs", Surrogate(10)).unwrap();
 
-        let (count, _) = idx.backend.collection_stats(DB, T, "docs").unwrap();
+        let (count, _) = idx.backend.collection_stats(DB, T, DOCS).unwrap();
         assert_eq!(count, 1);
     }
 
@@ -181,9 +211,31 @@ mod tests {
         idx.index_document(DB, T, "docs", Surrogate(11), "hello rust language")
             .unwrap();
 
-        let (count, total) = idx.backend.collection_stats(DB, T, "docs").unwrap();
+        let (count, total) = idx.backend.collection_stats(DB, T, DOCS).unwrap();
         assert_eq!(count, 2);
         assert!(total > 0);
+    }
+
+    #[test]
+    fn field_index_keeps_its_own_postings_and_stats() {
+        let idx = make_index();
+        let title = IndexScope::field("docs", "title").unwrap();
+        idx.index_document(DB, T, title, Surrogate(1), "rust")
+            .unwrap();
+        idx.index_document(DB, T, "docs", Surrogate(1), "rust handbook")
+            .unwrap();
+        idx.index_document(DB, T, "docs", Surrogate(2), "rust nomicon")
+            .unwrap();
+
+        assert_eq!(idx.backend.collection_stats(DB, T, title).unwrap(), (1, 1));
+        assert_eq!(idx.backend.collection_stats(DB, T, DOCS).unwrap(), (2, 4));
+        assert_eq!(idx.memtable.get_postings(DB, T, title, "rust").len(), 1);
+        assert_eq!(idx.memtable.get_postings(DB, T, DOCS, "rust").len(), 2);
+
+        idx.remove_document(DB, T, title, Surrogate(1)).unwrap();
+        assert_eq!(idx.backend.collection_stats(DB, T, title).unwrap(), (0, 0));
+        assert!(idx.memtable.get_postings(DB, T, title, "rust").is_empty());
+        assert_eq!(idx.memtable.get_postings(DB, T, DOCS, "rust").len(), 2);
     }
 
     #[test]
@@ -191,13 +243,14 @@ mod tests {
         let idx = make_index();
         idx.index_document(DB, T, "docs", Surrogate(1), "the a is")
             .unwrap();
-        assert_eq!(idx.backend.collection_stats(DB, T, "docs").unwrap(), (0, 0));
+        assert_eq!(idx.backend.collection_stats(DB, T, DOCS).unwrap(), (0, 0));
         assert!(idx.memtable.is_empty());
     }
 
     // ── Surrogate boundary tests ──────────────────────────────────────────────
 
-    /// Spec: Surrogate::ZERO (the unassigned sentinel) must be rejected at index time with FtsIndexError::SurrogateOutOfRange, not written into the index.
+    /// Spec: Surrogate::ZERO (the unassigned sentinel) must be rejected at index
+    /// time with FtsIndexError::SurrogateOutOfRange, not written into the index.
     #[test]
     fn index_document_rejects_zero_surrogate() {
         let idx = make_index();
@@ -210,7 +263,8 @@ mod tests {
         );
     }
 
-    /// Spec: Surrogate(u32::MAX) must be rejected — it is reserved as a sentinel and would also cause a 4 GiB fieldnorm array resize.
+    /// Spec: Surrogate(u32::MAX) must be rejected — it is reserved as a sentinel
+    /// and would also cause a 4 GiB fieldnorm array resize.
     #[test]
     fn index_document_rejects_u32_max_surrogate() {
         let idx = make_index();
@@ -271,12 +325,15 @@ mod tests {
         token_index
             .index_analyzed_document(DB, T, "docs", Surrogate(1), &tokens)
             .unwrap();
-        assert_eq!(text_index.memtable.stats(), token_index.memtable.stats());
-        let mut terms = text_index.memtable.terms();
+        assert_eq!(
+            text_index.memtable.stats(DB, T, DOCS),
+            token_index.memtable.stats(DB, T, DOCS)
+        );
+        let mut terms = text_index.memtable.terms(DB, T, DOCS);
         terms.sort();
         for term in terms {
-            let expected = text_index.memtable.get_postings(&term);
-            let actual = token_index.memtable.get_postings(&term);
+            let expected = text_index.memtable.get_postings(DB, T, DOCS, &term);
+            let actual = token_index.memtable.get_postings(DB, T, DOCS, &term);
             assert_eq!(actual.len(), expected.len());
             for (actual, expected) in actual.iter().zip(expected) {
                 assert_eq!(actual.doc_id, expected.doc_id);
@@ -286,8 +343,8 @@ mod tests {
             }
         }
         assert_eq!(
-            text_index.backend.collection_stats(DB, T, "docs").unwrap(),
-            token_index.backend.collection_stats(DB, T, "docs").unwrap()
+            text_index.backend.collection_stats(DB, T, DOCS).unwrap(),
+            token_index.backend.collection_stats(DB, T, DOCS).unwrap()
         );
         for id in [Surrogate::ZERO, Surrogate(u32::MAX)] {
             assert!(matches!(

@@ -290,6 +290,54 @@ fn ping_pong_roundtrip() {
     assert!(!parsed.is_pong);
 }
 
+fn fts_index_msg(fields: Vec<(String, String)>) -> FtsIndexMsg {
+    FtsIndexMsg {
+        lite_id: "lite-1".into(),
+        collection: "articles".into(),
+        doc_id: "doc-7".into(),
+        fields,
+        batch_id: 3,
+        producer_id: 9,
+        epoch: 1,
+        seq: 4,
+    }
+}
+
+/// A Lite `FtsIndex` frame carries each string field by name, so Origin can
+/// index every field on its own.
+#[test]
+fn lite_fts_index_frame_carries_fields() {
+    let fields = vec![
+        ("body".to_string(), "fearless concurrency".to_string()),
+        ("title".to_string(), "Rust".to_string()),
+    ];
+    let frame =
+        SyncFrame::new_msgpack(SyncMessageType::FtsIndex, &fts_index_msg(fields.clone())).unwrap();
+    let parsed: FtsIndexMsg = SyncFrame::from_bytes(&frame.to_bytes())
+        .unwrap()
+        .decode_body()
+        .unwrap();
+
+    assert_eq!(parsed.fields, fields);
+    assert_eq!(parsed.collection, "articles");
+    assert_eq!(parsed.seq, 4);
+}
+
+/// A document whose update stripped every string field syncs as an
+/// `FtsIndex` frame with no fields: Origin applies it as a removal.
+#[test]
+fn lite_fts_index_frame_with_no_fields_roundtrips() {
+    let frame =
+        SyncFrame::new_msgpack(SyncMessageType::FtsIndex, &fts_index_msg(Vec::new())).unwrap();
+    let parsed: FtsIndexMsg = SyncFrame::from_bytes(&frame.to_bytes())
+        .unwrap()
+        .decode_body()
+        .unwrap();
+
+    assert!(parsed.fields.is_empty());
+    assert_eq!(parsed.doc_id, "doc-7");
+}
+
 #[test]
 fn all_11_message_types_valid() {
     for (code, expected) in [

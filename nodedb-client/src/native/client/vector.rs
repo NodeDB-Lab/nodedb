@@ -2,6 +2,8 @@
 
 //! Vector operation implementations for `NativeClient`.
 
+use std::collections::HashSet;
+
 use nodedb_types::document::Document;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 use nodedb_types::filter::MetadataFilter;
@@ -20,8 +22,13 @@ impl NativeClient {
         query: &[f32],
         k: usize,
         filter: Option<&MetadataFilter>,
+        allowed_ids: Option<&HashSet<String>>,
     ) -> NodeDbResult<Vec<SearchResult>> {
-        let request = build_vector_search_request(collection, query, k, filter)?;
+        // An empty allowed set admits no candidate.
+        if allowed_ids.is_some_and(HashSet::is_empty) {
+            return Ok(Vec::new());
+        }
+        let request = build_vector_search_request(collection, query, k, filter, allowed_ids)?;
         let mut conn = self.pool.acquire().await?;
         let resp = conn.send(OpCode::VectorSearch, request).await?;
         // An error frame carries no rows; parsed unchecked it would read as
@@ -77,39 +84,41 @@ impl NativeClient {
 
 /// Build the `TextFields` payload for an `OpCode::VectorSearch` request.
 ///
-/// The native protocol reserves wire byte 68 for the optional
-/// `TextFields::filters: Option<Vec<u8>>` field. When the trait caller
-/// passes a non-`None` `MetadataFilter`, the predicate is serialized
-/// here so it travels alongside the SQL/DSL request rather than being
-/// dropped at the client.
+/// A non-`None` `MetadataFilter` travels as MessagePack in
+/// `TextFields::filters`. The server plans it as the `WHERE` a pgwire
+/// client renders from the same filter, so it narrows the candidates
+/// before the top-k cut.
 ///
-/// Wire-format note: the inline doc on `TextFields::filters` calls for
-/// MessagePack. Until the server-side decoder is wired (the dispatch
-/// path currently constructs plans with `filters: Vec::new()`), the
-/// client serializes via sonic_rs JSON. The server-side fix will switch
-/// both sides to a single agreed encoding; for now the bytes are
-/// observable as non-empty, which is what the trait contract requires.
+/// `allowed_ids` travel sorted in `TextFields::allowed_ids`. The server
+/// lowers them to the candidate bitmap the index search honors.
 pub(super) fn build_vector_search_request(
     collection: &str,
     query: &[f32],
     k: usize,
     filter: Option<&MetadataFilter>,
+    allowed_ids: Option<&HashSet<String>>,
 ) -> NodeDbResult<TextFields> {
     // Serialization failure here must surface to the caller. Dropping
     // the filter and sending the request anyway would send the query
     // to the server without the caller's predicate — exactly the
     // silent-drop pattern this client guards against.
     let filters_bytes = match filter {
-        Some(f) => Some(sonic_rs::to_vec(f).map_err(|e| {
-            NodeDbError::serialization("json", format!("vector_search metadata filter: {e}"))
+        Some(f) => Some(zerompk::to_msgpack_vec(f).map_err(|e| {
+            NodeDbError::serialization("msgpack", format!("vector_search metadata filter: {e}"))
         })?),
         None => None,
     };
+    let allowed_ids = allowed_ids.map(|ids| {
+        let mut ids: Vec<String> = ids.iter().cloned().collect();
+        ids.sort();
+        ids
+    });
     Ok(TextFields {
         collection: Some(collection.to_string()),
         query_vector: Some(query.to_vec()),
         top_k: Some(k as u32),
         filters: filters_bytes,
+        allowed_ids,
         ..Default::default()
     })
 }
@@ -132,8 +141,9 @@ mod tests {
 
     #[test]
     fn vector_search_request_without_filter_omits_filter_bytes() {
-        let req = build_vector_search_request("docs", &[0.1, 0.2], 5, None)
+        let req = build_vector_search_request("docs", &[0.1, 0.2], 5, None, None)
             .expect("no-filter request must build");
+        assert!(req.allowed_ids.is_none(), "no restriction sends no ids");
         assert_eq!(req.collection.as_deref(), Some("docs"));
         assert_eq!(req.query_vector.as_deref(), Some(&[0.1f32, 0.2][..]));
         assert_eq!(req.top_k, Some(5));
@@ -146,12 +156,22 @@ mod tests {
     #[test]
     fn vector_search_request_serializes_metadata_filter() {
         let filter = MetadataFilter::eq("category", Value::String("ai".into()));
-        let req = build_vector_search_request("docs", &[0.1], 3, Some(&filter))
+        let req = build_vector_search_request("docs", &[0.1], 3, Some(&filter), None)
             .expect("derived-Serialize MetadataFilter must encode");
         let bytes = req.filters.expect("non-None filter must produce bytes");
-        assert!(
-            !bytes.is_empty(),
-            "serialized filter bytes must not be empty"
+        let decoded: MetadataFilter =
+            zerompk::from_msgpack(&bytes).expect("filter bytes are a MessagePack MetadataFilter");
+        assert_eq!(decoded, filter);
+    }
+
+    #[test]
+    fn vector_search_request_carries_allowed_ids_sorted() {
+        let ids: HashSet<String> = ["b", "a"].iter().map(|s| s.to_string()).collect();
+        let req = build_vector_search_request("docs", &[0.1], 3, None, Some(&ids))
+            .expect("allowed ids must encode");
+        assert_eq!(
+            req.allowed_ids,
+            Some(vec!["a".to_string(), "b".to_string()])
         );
     }
 

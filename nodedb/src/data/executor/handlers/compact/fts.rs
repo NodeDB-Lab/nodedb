@@ -40,6 +40,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use nodedb_fts::IndexScope;
 use nodedb_fts::backend::FtsBackend as _;
 use nodedb_fts::lsm::compaction::{
     CompactError, CompactLevelParams, CompactionConfig, SegmentMeta, compact_level,
@@ -64,7 +65,7 @@ pub(super) struct FtsCompactionOutcome {
     pub enumeration_failed: bool,
 }
 
-/// Identifies one `(database, tenant, collection)` FTS compaction unit.
+/// Identifies one `(database, tenant, index)` FTS compaction unit.
 ///
 /// Bundled so `compact_one_fts_collection` stays within the argument budget;
 /// `force`, the shared `config`, and the mutable `outcome` accumulator are
@@ -72,7 +73,7 @@ pub(super) struct FtsCompactionOutcome {
 struct FtsCompactionTarget<'a> {
     database_id: u64,
     tid: TenantId,
-    collection: &'a str,
+    index: IndexScope<'a>,
 }
 
 impl CoreLoop {
@@ -94,7 +95,7 @@ impl CoreLoop {
         // segment. This queries the FTS subsystem for what it owns — no
         // external registry. A failure here is distinct from per-collection
         // deferral and is surfaced via `enumeration_failed`.
-        let collections = match self.inverted.list_all_fts_collections() {
+        let indexes = match self.inverted.list_all_fts_indexes() {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
@@ -107,12 +108,12 @@ impl CoreLoop {
             }
         };
 
-        for (database_id, tid, collection) in collections {
+        for (database_id, tid, collection, field) in &indexes {
             self.compact_one_fts_collection(
                 FtsCompactionTarget {
-                    database_id,
-                    tid,
-                    collection: &collection,
+                    database_id: *database_id,
+                    tid: *tid,
+                    index: IndexScope::from_key(collection, field),
                 },
                 force,
                 &config,
@@ -136,32 +137,32 @@ impl CoreLoop {
         let FtsCompactionTarget {
             database_id,
             tid,
-            collection,
+            index,
         } = target;
+        let collection = index.collection();
         let db = nodedb_types::DatabaseId::new(database_id);
         let tid_u64 = tid.as_u64();
 
         // Resolve segment list before acquiring the lease so we only hold
         // the lease across actual merge work, not the read path.
-        let segment_ids =
-            match self
-                .inverted
-                .backend()
-                .list_segments(database_id, tid_u64, collection)
-            {
-                Ok(ids) => ids,
-                Err(e) => {
-                    tracing::warn!(
-                        core = self.core_id,
-                        tid = tid_u64,
-                        collection = %collection,
-                        error = %e,
-                        "FTS compaction: failed to list segments — deferred to next cycle"
-                    );
-                    outcome.deferred += 1;
-                    return;
-                }
-            };
+        let segment_ids = match self
+            .inverted
+            .backend()
+            .list_segments(database_id, tid_u64, index)
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(
+                    core = self.core_id,
+                    tid = tid_u64,
+                    collection = %collection,
+                    error = %e,
+                    "FTS compaction: failed to list segments — deferred to next cycle"
+                );
+                outcome.deferred += 1;
+                return;
+            }
+        };
 
         if segment_ids.is_empty() {
             return;
@@ -205,7 +206,7 @@ impl CoreLoop {
             backend: self.inverted.backend(),
             database_id,
             tid: tid_u64,
-            collection,
+            index,
             segments: &segments,
             level,
             governor: &self.governor,
@@ -223,7 +224,7 @@ impl CoreLoop {
                     .compact_commit(crate::engine::sparse::fts_redb::CompactCommit {
                         database_id,
                         tid: tid_u64,
-                        collection,
+                        index,
                         new_segment_id: &new_seg_id,
                         new_segment_data: &new_bytes,
                         merged_ids: &merged_ids,

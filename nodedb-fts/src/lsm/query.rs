@@ -5,7 +5,7 @@
 
 use crate::backend::FtsBackend;
 use crate::block::{CompactPosting, into_blocks};
-use crate::index::writer::{memtable_collection_prefix, memtable_key};
+use crate::scope::IndexScope;
 use crate::search::bmw::skip_index::TermBlocks;
 
 use super::memtable::Memtable;
@@ -18,8 +18,27 @@ use nodedb_mem::MemoryGovernor;
 
 use crate::mem_scope::fts_scope;
 
+/// Open every readable segment of one index.
+fn open_segments<B: FtsBackend>(
+    backend: &B,
+    database_id: u64,
+    tid: u64,
+    index: IndexScope<'_>,
+) -> Result<Vec<SegmentReader>, B::Error> {
+    let seg_ids = backend.list_segments(database_id, tid, index)?;
+    let mut readers: Vec<SegmentReader> = Vec::new();
+    for id in &seg_ids {
+        if let Some(data) = backend.read_segment(database_id, tid, index, id)?
+            && let Ok(reader) = SegmentReader::open(data)
+        {
+            readers.push(reader);
+        }
+    }
+    Ok(readers)
+}
+
 /// Collect posting lists for a set of query tokens by merging across
-/// the active memtable and all immutable segments.
+/// the active memtable and all immutable segments of one index.
 ///
 /// Returns per-term `TermBlocks` ready for BMW scoring.
 ///
@@ -31,20 +50,12 @@ pub fn collect_merged_term_blocks<B: FtsBackend>(
     backend: &B,
     database_id: u64,
     tid: u64,
-    collection: &str,
+    index: IndexScope<'_>,
     memtable: &Memtable,
     query_tokens: &[String],
     governor: &Arc<MemoryGovernor>,
 ) -> Result<Vec<TermBlocks>, B::Error> {
-    let seg_ids = backend.list_segments(database_id, tid, collection)?;
-    let mut readers: Vec<SegmentReader> = Vec::new();
-    for id in &seg_ids {
-        if let Some(data) = backend.read_segment(database_id, tid, collection, id)?
-            && let Ok(reader) = SegmentReader::open(data)
-        {
-            readers.push(reader);
-        }
-    }
+    let readers = open_segments(backend, database_id, tid, index)?;
 
     let memory = fts_scope(governor, database_id, tid);
     let bytes = query_tokens.len() * std::mem::size_of::<TermBlocks>();
@@ -53,8 +64,7 @@ pub fn collect_merged_term_blocks<B: FtsBackend>(
     let mut term_blocks_list = Vec::with_capacity(query_tokens.len());
 
     for token in query_tokens {
-        let scoped_term = memtable_key(database_id, tid, collection, token);
-        let mt_postings = memtable.get_postings(&scoped_term);
+        let mt_postings = memtable.get_postings(database_id, tid, index, token);
 
         let seg_postings: Vec<Vec<CompactPosting>> = readers
             .iter()
@@ -88,47 +98,38 @@ pub fn collect_merged_term_blocks<B: FtsBackend>(
     Ok(term_blocks_list)
 }
 
-/// Collect all unique term names across memtable + segments for a collection.
+/// Collect all unique term names across memtable + segments of one index.
 ///
 /// Used by fuzzy matching to scan available terms.
 pub fn collect_all_terms<B: FtsBackend>(
     backend: &B,
     database_id: u64,
     tid: u64,
-    collection: &str,
+    index: IndexScope<'_>,
     memtable: &Memtable,
 ) -> Result<Vec<String>, B::Error> {
-    let prefix = memtable_collection_prefix(database_id, tid, collection);
-    let mut terms: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut terms: std::collections::HashSet<String> = memtable
+        .terms(database_id, tid, index)
+        .into_iter()
+        .collect();
 
-    for key in memtable.terms() {
-        if let Some(term) = key.strip_prefix(&prefix) {
-            terms.insert(term.to_string());
-        }
-    }
-
-    let seg_ids = backend.list_segments(database_id, tid, collection)?;
-    for id in &seg_ids {
-        if let Some(data) = backend.read_segment(database_id, tid, collection, id)?
-            && let Ok(reader) = SegmentReader::open(data)
-        {
-            for term in reader.terms() {
-                terms.insert(term);
-            }
+    for reader in open_segments(backend, database_id, tid, index)? {
+        for term in reader.terms() {
+            terms.insert(term);
         }
     }
 
     Ok(terms.into_iter().collect())
 }
 
-/// Compute merged corpus stats from memtable + all segments.
+/// Corpus stats of one index: `(doc_count, avg_doc_len)`.
 pub fn merged_collection_stats<B: FtsBackend>(
     backend: &B,
     database_id: u64,
     tid: u64,
-    collection: &str,
+    index: IndexScope<'_>,
 ) -> Result<(u32, f32), B::Error> {
-    let (count, total) = backend.collection_stats(database_id, tid, collection)?;
+    let (count, total) = backend.collection_stats(database_id, tid, index)?;
     let avg = if count > 0 {
         total as f32 / count as f32
     } else {
@@ -149,6 +150,7 @@ mod tests {
 
     const DB: u64 = 0;
     const T: u64 = 1;
+    const COL: IndexScope<'static> = IndexScope::document("col");
 
     fn cp(doc_id: u32, tf: u32) -> CompactPosting {
         CompactPosting {
@@ -163,12 +165,12 @@ mod tests {
     fn memtable_only() {
         let backend = MemoryBackend::new();
         let mt = Memtable::new(MemtableConfig::default());
-        mt.insert(&memtable_key(DB, T, "col", "hello"), cp(0, 2));
-        mt.insert(&memtable_key(DB, T, "col", "hello"), cp(1, 1));
+        mt.insert(DB, T, COL, "hello", cp(0, 2));
+        mt.insert(DB, T, COL, "hello", cp(1, 1));
 
         let tokens = vec!["hello".to_string()];
         let term_blocks =
-            collect_merged_term_blocks(&backend, DB, T, "col", &mt, &tokens, &test_governor())
+            collect_merged_term_blocks(&backend, DB, T, COL, &mt, &tokens, &test_governor())
                 .unwrap();
 
         assert_eq!(term_blocks.len(), 1);
@@ -182,13 +184,13 @@ mod tests {
         postings.insert("hello".to_string(), vec![cp(0, 1), cp(5, 2)]);
         let seg_bytes = writer::flush_to_segment(postings).unwrap();
         backend
-            .write_segment(DB, T, "col", "L0:0000000000000001", &seg_bytes)
+            .write_segment(DB, T, COL, "L0:0000000000000001", &seg_bytes)
             .unwrap();
 
         let mt = Memtable::new(MemtableConfig::default());
         let tokens = vec!["hello".to_string()];
         let term_blocks =
-            collect_merged_term_blocks(&backend, DB, T, "col", &mt, &tokens, &test_governor())
+            collect_merged_term_blocks(&backend, DB, T, COL, &mt, &tokens, &test_governor())
                 .unwrap();
 
         assert_eq!(term_blocks.len(), 1);
@@ -203,20 +205,43 @@ mod tests {
         seg_postings.insert("hello".to_string(), vec![cp(0, 1), cp(5, 2)]);
         let seg_bytes = writer::flush_to_segment(seg_postings).unwrap();
         backend
-            .write_segment(DB, T, "col", "L0:0000000000000001", &seg_bytes)
+            .write_segment(DB, T, COL, "L0:0000000000000001", &seg_bytes)
             .unwrap();
 
         let mt = Memtable::new(MemtableConfig::default());
-        mt.insert(&memtable_key(DB, T, "col", "hello"), cp(0, 10));
-        mt.insert(&memtable_key(DB, T, "col", "hello"), cp(3, 1));
+        mt.insert(DB, T, COL, "hello", cp(0, 10));
+        mt.insert(DB, T, COL, "hello", cp(3, 1));
 
         let tokens = vec!["hello".to_string()];
         let term_blocks =
-            collect_merged_term_blocks(&backend, DB, T, "col", &mt, &tokens, &test_governor())
+            collect_merged_term_blocks(&backend, DB, T, COL, &mt, &tokens, &test_governor())
                 .unwrap();
 
         assert_eq!(term_blocks.len(), 1);
         assert_eq!(term_blocks[0].df, 3);
+    }
+
+    #[test]
+    fn other_index_postings_are_invisible() {
+        let backend = MemoryBackend::new();
+        let title = IndexScope::field("col", "title").unwrap();
+        let mt = Memtable::new(MemtableConfig::default());
+        mt.insert(DB, T, title, "hello", cp(1, 1));
+
+        let tokens = vec!["hello".to_string()];
+        let term_blocks =
+            collect_merged_term_blocks(&backend, DB, T, COL, &mt, &tokens, &test_governor())
+                .unwrap();
+        assert_eq!(term_blocks[0].df, 0);
+        assert!(
+            collect_all_terms(&backend, DB, T, COL, &mt)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            collect_all_terms(&backend, DB, T, title, &mt).unwrap(),
+            vec!["hello".to_string()]
+        );
     }
 
     #[test]
@@ -226,7 +251,7 @@ mod tests {
 
         let tokens = vec!["nonexistent".to_string()];
         let term_blocks =
-            collect_merged_term_blocks(&backend, DB, T, "col", &mt, &tokens, &test_governor())
+            collect_merged_term_blocks(&backend, DB, T, COL, &mt, &tokens, &test_governor())
                 .unwrap();
 
         assert_eq!(term_blocks.len(), 1);

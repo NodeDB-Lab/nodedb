@@ -2,21 +2,42 @@
 
 //! Structural collection and tenant drops.
 //!
-//! Each table is scanned by tuple range and every matching entry is
-//! removed; no lexical-prefix scans appear here. `purge_tenant` performs
-//! the drop in a single write transaction so the teardown is atomic
+//! Each table is scanned from the owner's lower bound and every owned entry
+//! is removed: every index of the collection (whole-document and field),
+//! plus the per-document field sets. No lexical-prefix scans appear here.
+//! Each drop runs in a single write transaction so the teardown is atomic
 //! across tables.
 //!
 //! A tenant purge is scoped to a single `(database_id, tenant_id)` pair —
 //! the same tenant in a different database is unaffected.
 
-use redb::ReadableTable;
+use nodedb_fts::IndexScope;
+use nodedb_types::Surrogate;
+use redb::{TableDefinition, WriteTransaction};
 
 use super::core::RedbFtsBackend;
-use super::shared::{MAX_COLLECTION, MAX_SUBKEY, redb_err};
-use crate::engine::sparse::fts_redb::tables::{
-    DOC_LENGTHS, DOC_TERMS, INDEX_META, POSTINGS, SEGMENTS, STATS,
+use super::shared::redb_err;
+use crate::engine::sparse::fts_redb::keys::{
+    KeyOwner, doc_fields_key, doc_key, posting_key, stats_key,
 };
+use crate::engine::sparse::fts_redb::scan::{self, DocKeyDef, StrKeyDef};
+use crate::engine::sparse::fts_redb::tables::{
+    DOC_FIELDS, DOC_LENGTHS, DOC_TERMS, INDEX_META, POSTINGS, SEGMENTS, STATS,
+};
+
+/// Index metadata sub-keys that configure a collection rather than hold its
+/// indexed data: they survive a data-only purge.
+const CONFIG_META_KEYS: [&str; 3] = ["analyzer", "language", "fuzzy"];
+
+/// Which metadata rows a purge drops.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MetaRows {
+    /// Every metadata row: the collection is gone.
+    All,
+    /// Data rows only. The collection's analyzer, language, and fuzzy
+    /// configuration stay: the collection is emptied, not dropped.
+    KeepConfig,
+}
 
 pub(super) fn collection(
     backend: &RedbFtsBackend,
@@ -24,67 +45,94 @@ pub(super) fn collection(
     tid: u64,
     coll: &str,
 ) -> crate::Result<usize> {
+    purge(
+        backend,
+        database_id,
+        tid,
+        KeyOwner::collection(database_id, tid, coll),
+        MetaRows::All,
+    )
+}
+
+/// Drop every indexed row of one collection, keeping its configuration.
+pub(super) fn collection_data(
+    backend: &RedbFtsBackend,
+    database_id: u64,
+    tid: u64,
+    coll: &str,
+) -> crate::Result<usize> {
+    purge(
+        backend,
+        database_id,
+        tid,
+        KeyOwner::collection(database_id, tid, coll),
+        MetaRows::KeepConfig,
+    )
+}
+
+pub(super) fn tenant(backend: &RedbFtsBackend, database_id: u64, tid: u64) -> crate::Result<usize> {
+    purge(
+        backend,
+        database_id,
+        tid,
+        KeyOwner::tenant(database_id, tid),
+        MetaRows::All,
+    )
+}
+
+/// Drop every row `owner` covers from every FTS table, with metadata rows
+/// dropped per `meta`. Returns the number of posting lists, document-length
+/// rows, and segments removed.
+fn purge(
+    backend: &RedbFtsBackend,
+    database_id: u64,
+    tid: u64,
+    owner: KeyOwner<'_>,
+    meta: MetaRows,
+) -> crate::Result<usize> {
     let write_txn = backend
         .db
         .begin_write()
         .map_err(|e| redb_err("purge write txn", e))?;
     let mut removed = 0;
 
-    {
-        let mut table = write_txn
-            .open_table(POSTINGS)
-            .map_err(|e| redb_err("open postings", e))?;
-        let keys: Vec<String> = table
-            .range((database_id, tid, coll, "")..=(database_id, tid, coll, MAX_SUBKEY))
-            .map_err(|e| redb_err("postings range", e))?
-            .filter_map(|r| r.ok().map(|(k, _)| k.value().3.to_string()))
-            .collect();
-        removed += keys.len();
-        for term in &keys {
-            let _ = table.remove((database_id, tid, coll, term.as_str()));
-        }
-    }
-
-    // DOC_LENGTHS and DOC_TERMS are keyed by (u64, u64, &str, u32) — use
-    // numeric range bounds. Both are per-document rows for this collection and
+    removed += drop_str_rows(&write_txn, POSTINGS, database_id, tid, owner, "postings")?;
+    // DOC_LENGTHS and DOC_TERMS are per-document rows of the same indexes and
     // must go together: a surviving term set would name posting lists that no
     // longer exist.
-    removed += drop_surrogate_quad_collection(&write_txn, DOC_LENGTHS, database_id, tid, coll)?;
-    removed += drop_surrogate_quad_collection(&write_txn, DOC_TERMS, database_id, tid, coll)?;
+    removed += drop_doc_rows(
+        &write_txn,
+        DOC_LENGTHS,
+        database_id,
+        tid,
+        owner,
+        "doc_lengths",
+    )?;
+    drop_doc_rows(&write_txn, DOC_TERMS, database_id, tid, owner, "doc_terms")?;
+    drop_meta_rows(&write_txn, database_id, tid, owner, meta)?;
+    removed += drop_str_rows(&write_txn, SEGMENTS, database_id, tid, owner, "segments")?;
 
     {
-        let mut table = write_txn
-            .open_table(INDEX_META)
-            .map_err(|e| redb_err("open index_meta", e))?;
-        let keys: Vec<String> = table
-            .range((database_id, tid, coll, "")..=(database_id, tid, coll, MAX_SUBKEY))
-            .map_err(|e| redb_err("meta range", e))?
-            .filter_map(|r| r.ok().map(|(k, _)| k.value().3.to_string()))
-            .collect();
-        for sub in &keys {
-            let _ = table.remove((database_id, tid, coll, sub.as_str()));
-        }
-    }
-
-    {
-        let mut table = write_txn
+        let mut stats = write_txn
             .open_table(STATS)
             .map_err(|e| redb_err("open stats", e))?;
-        let _ = table.remove((database_id, tid, coll));
+        let keys = scan::stats_keys(&stats, owner).map_err(|e| redb_err("stats range", e))?;
+        for (c, f) in &keys {
+            stats
+                .remove(stats_key(database_id, tid, IndexScope::from_key(c, f)))
+                .map_err(|e| redb_err("remove stats", e))?;
+        }
     }
-
     {
-        let mut table = write_txn
-            .open_table(SEGMENTS)
-            .map_err(|e| redb_err("open segments", e))?;
-        let ids: Vec<String> = table
-            .range((database_id, tid, coll, "")..=(database_id, tid, coll, MAX_SUBKEY))
-            .map_err(|e| redb_err("segments range", e))?
-            .filter_map(|r| r.ok().map(|(k, _)| k.value().3.to_string()))
-            .collect();
-        removed += ids.len();
-        for id in &ids {
-            let _ = table.remove((database_id, tid, coll, id.as_str()));
+        let mut fields = write_txn
+            .open_table(DOC_FIELDS)
+            .map_err(|e| redb_err("open doc_fields", e))?;
+        let keys =
+            scan::doc_fields_keys(&fields, owner).map_err(|e| redb_err("doc_fields range", e))?;
+        for (c, s) in &keys {
+            fields
+                .remove(doc_fields_key(database_id, tid, c, Surrogate::new(*s)))
+                .map_err(|e| redb_err("remove doc_fields", e))?;
         }
     }
 
@@ -94,116 +142,72 @@ pub(super) fn collection(
     Ok(removed)
 }
 
-pub(super) fn tenant(backend: &RedbFtsBackend, database_id: u64, tid: u64) -> crate::Result<usize> {
-    let write_txn = backend
-        .db
-        .begin_write()
-        .map_err(|e| redb_err("purge_tenant write txn", e))?;
-    let mut removed = 0;
+/// Delete every row `owner` covers from a POSTINGS-shaped table.
+fn drop_str_rows(
+    txn: &WriteTransaction,
+    def: TableDefinition<'static, StrKeyDef, &'static [u8]>,
+    database_id: u64,
+    tid: u64,
+    owner: KeyOwner<'_>,
+    name: &str,
+) -> crate::Result<usize> {
+    let mut table = txn
+        .open_table(def)
+        .map_err(|e| redb_err(&format!("open {name}"), e))?;
+    let keys = scan::str_keys(&table, owner).map_err(|e| redb_err(&format!("{name} range"), e))?;
+    for (c, f, s) in &keys {
+        table
+            .remove(posting_key(database_id, tid, IndexScope::from_key(c, f), s))
+            .map_err(|e| redb_err(&format!("remove {name}"), e))?;
+    }
+    Ok(keys.len())
+}
 
-    removed += drop_str_quad_range(&write_txn, POSTINGS, database_id, tid)?;
-    removed += drop_surrogate_quad_tenant(&write_txn, DOC_LENGTHS, database_id, tid)?;
-    removed += drop_surrogate_quad_tenant(&write_txn, DOC_TERMS, database_id, tid)?;
-    let _ = drop_str_quad_range(&write_txn, INDEX_META, database_id, tid)?;
-
-    {
-        let mut stats = write_txn
-            .open_table(STATS)
-            .map_err(|e| redb_err("open stats", e))?;
-        let colls: Vec<String> = stats
-            .range((database_id, tid, "")..=(database_id, tid, MAX_COLLECTION))
-            .map_err(|e| redb_err("stats range", e))?
-            .filter_map(|r| r.ok().map(|(k, _)| k.value().2.to_string()))
-            .collect();
-        for c in &colls {
-            let _ = stats.remove((database_id, tid, c.as_str()));
+/// Delete the INDEX_META rows `owner` covers that `meta` drops.
+fn drop_meta_rows(
+    txn: &WriteTransaction,
+    database_id: u64,
+    tid: u64,
+    owner: KeyOwner<'_>,
+    meta: MetaRows,
+) -> crate::Result<()> {
+    let mut table = txn
+        .open_table(INDEX_META)
+        .map_err(|e| redb_err("open index_meta", e))?;
+    let keys = scan::str_keys(&table, owner).map_err(|e| redb_err("index_meta range", e))?;
+    for (c, f, s) in &keys {
+        if meta == MetaRows::KeepConfig && CONFIG_META_KEYS.contains(&s.as_str()) {
+            continue;
         }
+        table
+            .remove(posting_key(database_id, tid, IndexScope::from_key(c, f), s))
+            .map_err(|e| redb_err("remove index_meta", e))?;
     }
-
-    removed += drop_str_quad_range(&write_txn, SEGMENTS, database_id, tid)?;
-
-    write_txn
-        .commit()
-        .map_err(|e| redb_err("commit purge_tenant", e))?;
-    Ok(removed)
+    Ok(())
 }
 
-/// Delete every `(database_id, tid, *, *)` row from a
-/// `TableDefinition<(u64, u64, &str, &str), &[u8]>`.
-fn drop_str_quad_range(
-    txn: &redb::WriteTransaction,
-    def: redb::TableDefinition<(u64, u64, &str, &str), &[u8]>,
+/// Delete every row `owner` covers from a DOC_LENGTHS-shaped table.
+fn drop_doc_rows(
+    txn: &WriteTransaction,
+    def: TableDefinition<'static, DocKeyDef, &'static [u8]>,
     database_id: u64,
     tid: u64,
+    owner: KeyOwner<'_>,
+    name: &str,
 ) -> crate::Result<usize> {
     let mut table = txn
         .open_table(def)
-        .map_err(|e| redb_err("open quad table", e))?;
-    let keys: Vec<(String, String)> = table
-        .range((database_id, tid, "", "")..=(database_id, tid, MAX_COLLECTION, MAX_SUBKEY))
-        .map_err(|e| redb_err("quad range", e))?
-        .filter_map(|r| {
-            r.ok().map(|(k, _)| {
-                let (_, _, c, s) = k.value();
-                (c.to_string(), s.to_string())
-            })
-        })
-        .collect();
-    let n = keys.len();
-    for (c, s) in &keys {
-        let _ = table.remove((database_id, tid, c.as_str(), s.as_str()));
+        .map_err(|e| redb_err(&format!("open {name}"), e))?;
+    let keys = scan::doc_keys(&table, owner).map_err(|e| redb_err(&format!("{name} range"), e))?;
+    for (c, f, s) in &keys {
+        table
+            .remove(doc_key(
+                database_id,
+                tid,
+                IndexScope::from_key(c, f),
+                Surrogate::new(*s),
+            ))
+            .map_err(|e| redb_err(&format!("remove {name}"), e))?;
     }
-    Ok(n)
-}
-
-/// Delete every `(database_id, tid, coll, *)` row from a per-document table
-/// keyed by `(u64, u64, &str, u32)` (DOC_LENGTHS, DOC_TERMS).
-fn drop_surrogate_quad_collection(
-    txn: &redb::WriteTransaction,
-    def: redb::TableDefinition<(u64, u64, &str, u32), &[u8]>,
-    database_id: u64,
-    tid: u64,
-    coll: &str,
-) -> crate::Result<usize> {
-    let mut table = txn
-        .open_table(def)
-        .map_err(|e| redb_err("open surrogate-keyed table", e))?;
-    let surrogates: Vec<u32> = table
-        .range((database_id, tid, coll, 0u32)..=(database_id, tid, coll, u32::MAX))
-        .map_err(|e| redb_err("surrogate-keyed collection range", e))?
-        .filter_map(|r| r.ok().map(|(k, _)| k.value().3))
-        .collect();
-    let n = surrogates.len();
-    for s in surrogates {
-        let _ = table.remove((database_id, tid, coll, s));
-    }
-    Ok(n)
-}
-
-/// Delete every `(database_id, tid, *, *)` row from a per-document table
-/// keyed by `(u64, u64, &str, u32)` (DOC_LENGTHS, DOC_TERMS).
-fn drop_surrogate_quad_tenant(
-    txn: &redb::WriteTransaction,
-    def: redb::TableDefinition<(u64, u64, &str, u32), &[u8]>,
-    database_id: u64,
-    tid: u64,
-) -> crate::Result<usize> {
-    let mut table = txn
-        .open_table(def)
-        .map_err(|e| redb_err("open surrogate-keyed table", e))?;
-    let keys: Vec<(String, u32)> = table
-        .range((database_id, tid, "", 0u32)..=(database_id, tid, MAX_COLLECTION, u32::MAX))
-        .map_err(|e| redb_err("surrogate-keyed tenant range", e))?
-        .filter_map(|r| {
-            r.ok().map(|(k, _)| {
-                let (_, _, c, s) = k.value();
-                (c.to_string(), s)
-            })
-        })
-        .collect();
-    let n = keys.len();
-    for (c, s) in &keys {
-        let _ = table.remove((database_id, tid, c.as_str(), *s));
-    }
-    Ok(n)
+    Ok(keys.len())
 }

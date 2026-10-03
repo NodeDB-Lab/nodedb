@@ -8,6 +8,7 @@
 pub mod aggregate;
 pub mod arg;
 pub mod eval;
+pub mod extremum;
 pub mod frame;
 pub mod helpers;
 pub mod offset;

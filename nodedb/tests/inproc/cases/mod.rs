@@ -154,6 +154,7 @@ mod quota_live_enforcement_apply;
 mod quota_three_level_denial;
 mod redaction_policy_ddl;
 mod reindex_concurrent_writes;
+mod reindex_field_scopes;
 mod reindex_vector_concurrent;
 mod request_tracker_backpressure;
 mod resp_row_level_security;

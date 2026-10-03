@@ -236,3 +236,82 @@ async fn arrow_distance_in_where_does_not_silently_match_none_for_delete() {
         remaining.len()
     );
 }
+
+const RLS_PASSWORD: &str = "vec-where-rls-secret-7";
+
+/// Run `sql` as `user` and return the first column of each delivered row.
+async fn ids_as(server: &TestServer, user: &str, sql: &str) -> Vec<String> {
+    let (client, handle) = server
+        .connect_as(user, RLS_PASSWORD)
+        .await
+        .unwrap_or_else(|e| panic!("connect as {user}: {e}"));
+    let messages = client
+        .simple_query(sql)
+        .await
+        .unwrap_or_else(|e| panic!("{user} runs {sql}: {e}"));
+    let mut out = Vec::new();
+    for message in messages {
+        if let tokio_postgres::SimpleQueryMessage::Row(row) = message {
+            out.push(row.get(0).unwrap_or("").to_string());
+        }
+    }
+    drop(client);
+    handle.abort();
+    out
+}
+
+/// The statement's own WHERE predicate and a read policy share the vector
+/// search's post-filter slot. The policy joins the predicate and never
+/// replaces it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_where_filter_survives_a_read_policy() {
+    let server = TestServer::start().await;
+    server.exec("CREATE COLLECTION vec_rls").await.unwrap();
+    server
+        .exec("CREATE VECTOR INDEX idx_vec_rls_emb ON vec_rls METRIC cosine DIM 4")
+        .await
+        .unwrap();
+    for (id, owner, tag, v) in [
+        ("m1", "vec_rls_reader", "a", "0.10, 0.20, 0.30, 0.40"),
+        ("m2", "vec_rls_reader", "b", "0.11, 0.21, 0.31, 0.41"),
+        ("m3", "alice", "a", "0.12, 0.22, 0.32, 0.42"),
+    ] {
+        server
+            .exec(&format!(
+                "INSERT INTO vec_rls (id, owner, tag, embedding) \
+                 VALUES ('{id}', '{owner}', '{tag}', ARRAY[{v}])"
+            ))
+            .await
+            .unwrap();
+    }
+    server
+        .exec(&format!(
+            "CREATE USER vec_rls_reader PASSWORD '{RLS_PASSWORD}'"
+        ))
+        .await
+        .unwrap();
+    server
+        .exec("GRANT ROLE readwrite TO vec_rls_reader")
+        .await
+        .unwrap();
+    server
+        .exec(
+            "CREATE RLS POLICY vec_rls_owner ON vec_rls FOR READ \
+             USING (owner = $auth.username)",
+        )
+        .await
+        .unwrap();
+
+    let ids = ids_as(
+        &server,
+        "vec_rls_reader",
+        "SELECT id FROM vec_rls \
+         WHERE tag = 'a' AND embedding <-> ARRAY[0.1, 0.2, 0.3, 0.4] LIMIT 10",
+    )
+    .await;
+    assert_eq!(
+        ids,
+        vec!["m1".to_string()],
+        "both the tag filter and the owner policy must hold"
+    );
+}

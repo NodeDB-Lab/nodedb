@@ -2,16 +2,13 @@
 
 //! SQL execution and collection lifecycle implementations for `NodeDbRemote`.
 
-use std::collections::HashMap;
-
 use nodedb_types::dropped_collection::DroppedCollection;
 use nodedb_types::error::NodeDbResult;
-use nodedb_types::result::{QueryResult, SearchResult};
-use nodedb_types::text_search::TextSearchParams;
+use nodedb_types::result::QueryResult;
 use nodedb_types::value::Value;
 
 use crate::row_decode::parse_dropped_collection_rows;
-use crate::sql_escape::{quote_identifier, quote_string_literal};
+use crate::sql_escape::quote_identifier;
 
 use super::super::sql::translate_params;
 use super::core::NodeDbRemote;
@@ -73,71 +70,5 @@ impl NodeDbRemote {
                    FROM _system.dropped_collections";
         let (_columns, rows) = self.query_raw(sql, &[]).await?;
         parse_dropped_collection_rows(&rows)
-    }
-
-    pub(super) async fn text_search_impl(
-        &self,
-        collection: &str,
-        field: &str,
-        query: &str,
-        top_k: usize,
-        params: TextSearchParams,
-    ) -> NodeDbResult<Vec<SearchResult>> {
-        // Server-side FTS query SQL: `text_match(<field>, '<query>')` in
-        // a WHERE clause selects matching ids; `bm25_score(<field>,
-        // '<query>')` in the SELECT list exposes the score so callers
-        // can order/rank. The planner pattern-matches this shape and
-        // dispatches `SqlPlan::TextSearch`.
-        //
-        // `params` (mode, fuzzy, prefix, etc.) is intentionally ignored
-        // for now — every supported option is also expressible in the
-        // SQL form, but threading them through the DSL string is its
-        // own widening. The defaults (Plain query with fuzzy=true) cover
-        // the common case the trait's spec calls out.
-        let _ = params;
-        let coll = quote_identifier(collection);
-        let field_quoted = quote_identifier(field);
-        let q_lit = quote_string_literal(query);
-        let sql = format!(
-            "SELECT id, bm25_score({field_quoted}, {q_lit}) AS score \
-             FROM {coll} \
-             WHERE text_match({field_quoted}, {q_lit}) \
-             LIMIT {top_k}"
-        );
-
-        let (columns, rows) = self.simple_query_raw(&sql).await?;
-        let id_idx = columns.iter().position(|c| c == "id").unwrap_or(0);
-        let score_idx = columns.iter().position(|c| c == "score").unwrap_or(1);
-
-        let mut results = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let id = row
-                .get(id_idx)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            // simple_query returns text — score arrives as a stringified
-            // float. Parse defensively so a missing/malformed score does
-            // not torpedo the whole result set; callers prefer ordered
-            // ids with score 0.0 over an Err.
-            let score = row
-                .get(score_idx)
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<f32>().ok())
-                .or_else(|| {
-                    row.get(score_idx)
-                        .and_then(|v| v.as_f64())
-                        .map(|f| f as f32)
-                })
-                .unwrap_or(0.0);
-
-            results.push(SearchResult {
-                id,
-                node_id: None,
-                distance: score,
-                metadata: HashMap::new(),
-            });
-        }
-        Ok(results)
     }
 }

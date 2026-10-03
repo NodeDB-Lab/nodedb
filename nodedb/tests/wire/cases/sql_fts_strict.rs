@@ -304,3 +304,74 @@ async fn create_fulltext_index_rejects_unrecognized_trailing_tokens() {
         )
         .await;
 }
+
+// ── Column scoping on a strict schema ──────────────────────────────────────
+
+const TYPED_DDL: &str = "CREATE COLLECTION docs_typed TYPE DOCUMENT STRICT (\
+     id STRING PRIMARY KEY,\
+     title STRING,\
+     body STRING,\
+     views INT\
+   )";
+
+async fn seed_typed(server: &TestServer) {
+    server.exec(TYPED_DDL).await.unwrap();
+    server
+        .exec(
+            "INSERT INTO docs_typed (id, title, body, views) VALUES \
+             ('t1', 'consensus primer', 'nothing else', 1), \
+             ('t2', 'gardening', 'consensus in the body', 2)",
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_undeclared_strict_column_is_an_undefined_column() {
+    let server = TestServer::start().await;
+    seed_typed(&server).await;
+    let err = server
+        .query_text("SELECT id FROM docs_typed WHERE text_match(summary, 'consensus')")
+        .await
+        .expect_err("summary is not a column of docs_typed");
+    assert!(err.contains("42703"), "expected 42703: {err}");
+    assert!(
+        err.contains("docs_typed"),
+        "the message names the collection: {err}"
+    );
+    assert!(
+        err.contains("summary"),
+        "the message names the column: {err}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_int_strict_column_is_a_datatype_mismatch() {
+    let server = TestServer::start().await;
+    seed_typed(&server).await;
+    let err = server
+        .query_text("SELECT id FROM docs_typed WHERE text_match(views, 'consensus')")
+        .await
+        .expect_err("views is not a text column");
+    assert!(err.contains("42804"), "expected 42804: {err}");
+    assert!(err.contains("views"), "the message names the column: {err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_text_strict_column_scopes_the_search() {
+    let server = TestServer::start().await;
+    seed_typed(&server).await;
+    let rows = server
+        .query_rows("SELECT id FROM docs_typed WHERE text_match(title, 'consensus') ORDER BY id")
+        .await
+        .expect("a declared text column must be searchable");
+    let ids: Vec<&str> = rows.iter().map(|r| r[0].as_str()).collect();
+    assert_eq!(ids, vec!["t1"], "only the title match returns: {rows:?}");
+
+    let rows = server
+        .query_rows("SELECT id FROM docs_typed WHERE text_match(body, 'consensus') ORDER BY id")
+        .await
+        .expect("a declared text column must be searchable");
+    let ids: Vec<&str> = rows.iter().map(|r| r[0].as_str()).collect();
+    assert_eq!(ids, vec!["t2"], "only the body match returns: {rows:?}");
+}

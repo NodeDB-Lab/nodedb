@@ -203,6 +203,7 @@ fn event_source_preserved_through_write_event() {
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
             .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok()),
+        image_fault: None,
     };
     // After leader failover, new leader's Event Plane replays from WAL.
     // The replayed events have source: User → triggers fire.

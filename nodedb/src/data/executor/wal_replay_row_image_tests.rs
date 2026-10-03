@@ -361,7 +361,7 @@ struct StoredState {
 fn stored_state(core: &mut CoreLoop) -> StoredState {
     let mut neighbors = core
         .csr_partition_mut(DB, TID)
-        .neighbors("a", None, Direction::Out);
+        .neighbors("a", &[], Direction::Out);
     neighbors.sort();
     let sparse = &core.sparse;
     StoredState {

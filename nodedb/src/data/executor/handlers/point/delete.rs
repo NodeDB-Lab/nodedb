@@ -197,20 +197,15 @@ impl CoreLoop {
         };
         write_set.extend(target_write_set);
         if let Some(prior_bytes) = prior.as_deref() {
-            let old_converted = self.resolve_event_payload(
-                task.request.database_id.as_u64(),
-                tid,
-                collection,
-                prior_bytes,
-            );
             // `document_identity` is read again below for `RETURNING`'s `id`
             // field, so the event-emit boundary gets a clone rather than the
             // move.
             self.emit_document_delete_event(
                 task,
+                tid,
                 collection,
                 document_identity.clone(),
-                Some(old_converted.as_deref().unwrap_or(prior_bytes)),
+                Some(prior_bytes),
             );
         }
 

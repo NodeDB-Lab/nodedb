@@ -23,11 +23,14 @@ pub struct TopKHeap {
     capacity: usize,
 }
 
+/// Initial heap allocation. A larger `k` grows on demand; `usize::MAX` means every match.
+const INITIAL_HEAP_CAPACITY: usize = 1024;
+
 impl TopKHeap {
-    /// Create a new heap with the given capacity (k).
+    /// Create a new heap that keeps the best `k` candidates.
     pub fn new(k: usize) -> Self {
         Self {
-            data: Vec::with_capacity(k),
+            data: Vec::with_capacity(k.min(INITIAL_HEAP_CAPACITY)),
             capacity: k,
         }
     }
@@ -159,6 +162,17 @@ mod tests {
         let heap = TopKHeap::new(5);
         assert!(heap.is_empty());
         assert_eq!(heap.threshold(), 0.0);
+    }
+
+    #[test]
+    fn unbounded_k_allocates_at_most_the_initial_capacity() {
+        let mut heap = TopKHeap::new(usize::MAX);
+        assert!(heap.data.capacity() <= INITIAL_HEAP_CAPACITY);
+        for i in 1..=3000u32 {
+            heap.insert(i as f32, Surrogate(i));
+        }
+        assert_eq!(heap.len(), 3000, "an unbounded heap keeps every match");
+        assert_eq!(heap.into_sorted()[0].doc_id, Surrogate(3000));
     }
 
     #[test]

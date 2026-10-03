@@ -24,17 +24,17 @@ pub(super) const ARRAY_AGG_CAP: usize = 10_000;
 pub(crate) enum AggAccum {
     /// count(*) or count(field).
     Count { n: u64 },
-    /// sum / avg: Kahan-compensated running sum + count.
-    SumAvg { sum: f64, comp: f64, n: u64 },
+    /// sum / avg: exact integer total, compensated float total, count.
+    SumAvg { sum: nodedb_query::ExactSum },
     /// sum(DISTINCT col) / avg(DISTINCT col): map each distinct input
-    /// value (keyed by its raw msgpack bytes) to its parsed numeric
-    /// value. The sum and count are derived at finalize time, so the
-    /// state is order-independent and therefore mergeable across
-    /// spilled runs. Memory: O(num_distinct).
-    SumAvgDistinct { seen: HashMap<Vec<u8>, f64> },
-    /// min.
+    /// value (keyed by its raw msgpack bytes) to the number it contributes.
+    /// The sum and count are derived at finalize time, so the state is
+    /// order-independent and therefore mergeable across spilled runs.
+    /// Memory: O(num_distinct).
+    SumAvgDistinct { seen: HashMap<Vec<u8>, Value> },
+    /// min: the original value, compared exactly.
     Min { best: Option<Value> },
-    /// max.
+    /// max: the original value, compared exactly.
     Max { best: Option<Value> },
     /// count_distinct: set of raw msgpack bytes.
     CountDistinct { seen: HashSet<Vec<u8>> },
@@ -99,11 +99,17 @@ impl GroupState {
         super::merge::merge_group_state(self, other);
     }
 
-    pub(crate) fn finalize(self, aggregates: &[AggregateSpec]) -> Vec<(String, Value)> {
+    /// Produce `(alias, value)` per aggregate. Fails with
+    /// `EvalError::NumericOverflow` when an exact SUM / AVG total lies
+    /// outside the `Decimal` range.
+    pub(crate) fn finalize(
+        self,
+        aggregates: &[AggregateSpec],
+    ) -> Result<Vec<(String, Value)>, nodedb_query::EvalError> {
         self.accums
             .into_iter()
             .zip(aggregates)
-            .map(|(accum, agg)| (agg.alias.clone(), accum.finalize(agg)))
+            .map(|(accum, agg)| Ok((agg.alias.clone(), accum.finalize(agg)?)))
             .collect()
     }
 }

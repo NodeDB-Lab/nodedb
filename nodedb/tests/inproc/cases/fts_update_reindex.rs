@@ -62,6 +62,45 @@ async fn point_update_moves_the_row_to_its_new_terms() {
     assert_eq!(text_ids(&server, "fu_point", "beta").await, ["u1"]);
 }
 
+/// An update that moves a word from one field to another retracts it from
+/// the old field's index and adds it to the new one, and the per-field
+/// indexes hold that state across a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn update_across_fields_keeps_field_scopes_after_restart() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION fu_fields WITH (engine='document_schemaless')")
+        .await
+        .unwrap();
+    server
+        .exec("INSERT INTO fu_fields { id: 'f1', title: 'delta heading', body: 'plain body' }")
+        .await
+        .unwrap();
+    server
+        .exec("UPDATE fu_fields SET title = 'plain heading', body = 'delta body' WHERE id = 'f1'")
+        .await
+        .unwrap();
+
+    let (server, dir) = server.take_dir();
+    server.graceful_shutdown().await;
+    let (server, _dir) = TestServer::open_on_path(dir).await;
+
+    assert!(
+        text_ids_on(&server, "fu_fields", "title", "delta")
+            .await
+            .is_empty(),
+        "the title index must no longer hold the moved word"
+    );
+    assert_eq!(
+        text_ids_on(&server, "fu_fields", "body", "delta").await,
+        ["f1"]
+    );
+    assert_eq!(
+        text_ids_on(&server, "fu_fields", "*", "delta").await,
+        ["f1"]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bulk_update_moves_every_row_to_its_new_terms() {
     let server = TestServer::start().await;

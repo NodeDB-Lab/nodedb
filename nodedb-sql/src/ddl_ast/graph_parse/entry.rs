@@ -3,7 +3,7 @@
 //! Graph DSL entry point.
 
 use super::super::statement::{GraphStmt, NodedbStatement};
-use super::{tokenizer, variants};
+use super::{edge_predicate, tokenizer, variants};
 use crate::error::SqlError;
 
 /// Parse a graph DSL statement.
@@ -28,9 +28,36 @@ pub fn try_parse(sql: &str) -> Option<Result<NodedbStatement, SqlError>> {
         return None;
     }
 
-    let toks = tokenizer::tokenize(trimmed);
+    Some(parse_graph(trimmed, &upper))
+}
 
-    let parsed = if upper.starts_with("GRAPH INSERT EDGE ") {
+/// Parse a statement known to start with `GRAPH `. A trailing `EDGE WHERE`
+/// predicate splits off first, so the clause text before it tokenizes alone.
+fn parse_graph(trimmed: &str, upper: &str) -> Result<NodedbStatement, SqlError> {
+    let (head, predicate_text) = edge_predicate::split_edge_where(trimmed)?;
+    let predicate = match predicate_text {
+        Some(text) => edge_predicate::parse_edge_predicate(text)?,
+        None => Vec::new(),
+    };
+    let toks = tokenizer::tokenize(head);
+
+    if upper.starts_with("GRAPH TRAVERSE ") {
+        return variants::parse_traverse(&toks, predicate);
+    }
+    if upper.starts_with("GRAPH PATH ") {
+        return variants::parse_path(&toks, predicate);
+    }
+    if predicate_text.is_some() {
+        return Err(SqlError::Parse {
+            detail: format!(
+                "{} does not accept EDGE WHERE: only GRAPH TRAVERSE and GRAPH PATH filter on \
+                 edge properties",
+                graph_command(upper)
+            ),
+        });
+    }
+
+    if upper.starts_with("GRAPH INSERT EDGE ") {
         variants::parse_insert_edge(&toks)
     } else if upper.starts_with("GRAPH DELETE EDGE ") {
         variants::parse_delete_edge(&toks)
@@ -38,12 +65,8 @@ pub fn try_parse(sql: &str) -> Option<Result<NodedbStatement, SqlError>> {
         variants::parse_set_labels(&toks, false)
     } else if upper.starts_with("GRAPH UNLABEL ") {
         variants::parse_set_labels(&toks, true)
-    } else if upper.starts_with("GRAPH TRAVERSE ") {
-        variants::parse_traverse(&toks)
     } else if upper.starts_with("GRAPH NEIGHBORS ") {
         variants::parse_neighbors(&toks)
-    } else if upper.starts_with("GRAPH PATH ") {
-        variants::parse_path(&toks)
     } else if upper.starts_with("GRAPH ALGO ") {
         variants::parse_algo(&toks)
     } else if upper.starts_with("GRAPH RAG FUSION ") {
@@ -54,9 +77,21 @@ pub fn try_parse(sql: &str) -> Option<Result<NodedbStatement, SqlError>> {
         Err(SqlError::Parse {
             detail: "unrecognised GRAPH command".to_owned(),
         })
-    };
+    }
+}
 
-    Some(parsed)
+/// The command words of a `GRAPH` statement, for an error message:
+/// `GRAPH NEIGHBORS`, `GRAPH INSERT EDGE`, `GRAPH RAG FUSION`.
+fn graph_command(upper: &str) -> String {
+    const MULTI_WORD: [&str; 3] = ["GRAPH INSERT EDGE", "GRAPH DELETE EDGE", "GRAPH RAG FUSION"];
+    if let Some(command) = MULTI_WORD.iter().find(|c| upper.starts_with(*c)) {
+        return (*command).to_owned();
+    }
+    upper
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -174,15 +209,105 @@ mod tests {
                 src,
                 dst,
                 max_depth,
-                edge_label,
+                edge_labels,
+                edge_predicate,
             }) => {
+                assert!(edge_predicate.is_empty());
                 assert_eq!(collection, "docs");
                 assert_eq!(src, "a");
                 assert_eq!(dst, "b");
                 assert_eq!(max_depth, 5);
-                assert_eq!(edge_label.as_deref(), Some("l"));
+                assert_eq!(edge_labels, vec!["l".to_string()]);
             }
             other => panic!("expected GraphPath, got {other:?}"),
+        }
+    }
+
+    fn labels_of(sql: &str) -> Vec<String> {
+        match parsed(sql) {
+            NodedbStatement::Graph(
+                GraphStmt::GraphTraverse { edge_labels, .. }
+                | GraphStmt::GraphNeighbors { edge_labels, .. }
+                | GraphStmt::GraphPath { edge_labels, .. },
+            ) => edge_labels,
+            other => panic!("expected a graph walk statement, got {other:?}"),
+        }
+    }
+
+    fn ab() -> Vec<String> {
+        vec!["a".to_string(), "b".to_string()]
+    }
+
+    #[test]
+    fn label_list_parses_on_every_walk_statement() {
+        assert_eq!(
+            labels_of("GRAPH TRAVERSE IN 'c' FROM 'x' DEPTH 2 LABEL 'a', 'b' DIRECTION out"),
+            ab()
+        );
+        assert_eq!(
+            labels_of("GRAPH NEIGHBORS IN 'c' OF 'x' LABEL 'a', 'b' DIRECTION both"),
+            ab()
+        );
+        assert_eq!(
+            labels_of("GRAPH PATH IN 'c' FROM 'x' TO 'y' MAX_DEPTH 3 LABEL 'a', 'b'"),
+            ab()
+        );
+    }
+
+    #[test]
+    fn parenthesised_label_list_parses() {
+        assert_eq!(
+            labels_of("GRAPH TRAVERSE IN 'c' FROM 'x' LABEL ('a','b')"),
+            ab()
+        );
+        assert_eq!(
+            labels_of("GRAPH NEIGHBORS IN 'c' OF 'x' LABEL ('a', 'b')"),
+            ab()
+        );
+        assert_eq!(
+            labels_of("GRAPH PATH IN 'c' FROM 'x' TO 'y' LABEL ('a','b')"),
+            ab()
+        );
+    }
+
+    #[test]
+    fn omitted_label_clause_is_an_empty_set() {
+        assert!(labels_of("GRAPH TRAVERSE IN 'c' FROM 'x' DEPTH 2").is_empty());
+        assert!(labels_of("GRAPH NEIGHBORS IN 'c' OF 'x'").is_empty());
+        assert!(labels_of("GRAPH PATH IN 'c' FROM 'x' TO 'y'").is_empty());
+    }
+
+    #[test]
+    fn label_clause_without_quoted_labels_is_refused() {
+        for sql in [
+            "GRAPH TRAVERSE IN 'c' FROM 'x' LABEL DIRECTION out",
+            "GRAPH TRAVERSE IN 'c' FROM 'x' LABEL knows",
+            "GRAPH NEIGHBORS IN 'c' OF 'x' LABEL",
+            "GRAPH PATH IN 'c' FROM 'x' TO 'y' LABEL knows",
+        ] {
+            let error = try_parse(sql)
+                .expect("graph DSL")
+                .expect_err("a LABEL clause with no quoted label must be refused");
+            assert!(
+                error.to_string().contains("LABEL"),
+                "the error must name the LABEL clause: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_keyword_label_does_not_shadow_the_keyword() {
+        let stmt = parsed("GRAPH TRAVERSE IN 'c' FROM 'x' LABEL 'DIRECTION', 'b' DIRECTION in");
+        match stmt {
+            NodedbStatement::Graph(GraphStmt::GraphTraverse {
+                edge_labels,
+                direction,
+                ..
+            }) => {
+                assert_eq!(edge_labels, vec!["DIRECTION".to_string(), "b".to_string()]);
+                assert_eq!(direction, GraphDirection::In);
+            }
+            other => panic!("expected GraphTraverse, got {other:?}"),
         }
     }
 

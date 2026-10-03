@@ -7,13 +7,13 @@
 //! rollback restores the document body into the primary store, so it must also
 //! recompute and re-insert the FTS postings — otherwise the row comes back
 //! restored-but-unsearchable. `nodedb_fts::analyze` is deterministic, so the
-//! recomputed text (extracted via the same [`extract_fts_text`] helper the
-//! forward PUT path uses) reproduces byte-identical postings.
+//! recomputed text (extracted via the same [`extract_fts_fields`] helper the
+//! forward PUT path uses) reproduces byte-identical postings in every index.
 
 use tracing::error;
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::fts_text::extract_fts_text;
+use crate::data::executor::fts_text::extract_fts_fields;
 
 use super::document::UndoDocumentContext;
 
@@ -53,7 +53,7 @@ impl CoreLoop {
         let doc = self
             .decode_stored_document(config, old_value)
             .map_err(|e| (entry_index, e.to_string()))?;
-        let text = extract_fts_text(&doc);
+        let text = extract_fts_fields(&doc);
         if text.is_empty() {
             return Ok(());
         }

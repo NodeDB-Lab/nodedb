@@ -50,7 +50,7 @@ fn build_two_collection_csr() -> CsrIndex {
 
 fn out_neighbor_names(csr: &CsrIndex, node: &str, collection: &str) -> Vec<String> {
     let mut names: Vec<String> = csr
-        .neighbors_in_collection(node, Some("KNOWS"), Direction::Out, collection)
+        .neighbors_in_collection(node, &["KNOWS"], Direction::Out, collection)
         .into_iter()
         .map(|(_label, n)| n)
         .collect();
@@ -131,7 +131,7 @@ fn scoped_read_of_unknown_collection_is_empty_not_merged() {
 fn unscoped_neighbors_see_the_merged_graph() {
     let csr = build_two_collection_csr();
     let mut merged: Vec<String> = csr
-        .neighbors("alice", Some("KNOWS"), Direction::Out)
+        .neighbors("alice", &["KNOWS"], Direction::Out)
         .into_iter()
         .map(|(_label, n)| n)
         .collect();
@@ -213,7 +213,7 @@ fn distinct_partitions_do_not_share_edges() {
         .unwrap();
 
     // Tenant B's partition never received the edge, under any collection.
-    assert!(tenant_b.neighbors("alice", None, Direction::Out).is_empty());
+    assert!(tenant_b.neighbors("alice", &[], Direction::Out).is_empty());
     assert!(
         out_neighbor_names(&tenant_b, "alice", COLL_A).is_empty(),
         "a separate partition must not see another partition's edges"

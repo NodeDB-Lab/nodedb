@@ -12,6 +12,7 @@ mod catalog;
 mod continuous_agg;
 mod crdt;
 mod data_plane;
+mod event_image;
 mod index_rebuild;
 mod ingest;
 mod lease;
@@ -29,11 +30,15 @@ pub use catalog::{
     metadata_apply_wedged, synonym_group_not_applied,
 };
 pub use continuous_agg::continuous_aggregate_not_applied;
-pub use crdt::history_compaction_not_applied;
+pub use crdt::{
+    crdt_dead_letter_not_enqueued, crdt_dead_letter_not_restored, crdt_dead_letter_not_stored,
+    history_compaction_not_applied,
+};
 pub use data_plane::{
     calvin_apply_halted, calvin_completion_timeout, data_plane_core_fail_stopped,
     data_plane_response_lost, data_plane_responses_lost,
 };
+pub use event_image::strict_row_image_unrendered;
 pub use index_rebuild::{IndexRebuildTarget, index_rebuild_not_installed};
 pub use ingest::{ilp_invalid_utf8_drop, ilp_line_read_drop};
 pub use lease::descriptor_lease_not_renewed;

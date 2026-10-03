@@ -5,6 +5,7 @@
 #[cfg(test)]
 mod fixtures;
 mod payload;
+mod pk_prefilter;
 mod query;
 mod search;
 

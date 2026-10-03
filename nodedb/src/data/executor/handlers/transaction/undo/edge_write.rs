@@ -303,7 +303,7 @@ mod tests {
         assert_eq!(resolve(&core, "alice", "bob", 250), Some(weighted(2.5)));
         assert_eq!(
             core.csr_partition(DB, TID)
-                .map(|p| p.neighbors("alice", None, Direction::Out)),
+                .map(|p| p.neighbors("alice", &[], Direction::Out)),
             Some(vec![("KNOWS".to_string(), "bob".to_string())])
         );
     }

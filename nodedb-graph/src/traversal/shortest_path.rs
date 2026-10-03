@@ -2,7 +2,7 @@
 
 //! Bidirectional shortest paths over CSR adjacency.
 
-use std::collections::{HashMap, HashSet, hash_map::Entry};
+use std::collections::{HashMap, hash_map::Entry};
 
 #[cfg(test)]
 use super::DEFAULT_MAX_VISITED;
@@ -14,10 +14,12 @@ impl CsrIndex {
     /// Shortest path via bidirectional BFS.
     ///
     /// `max_visited` caps the combined forward+backward visited set to prevent
-    /// supernode fan-out explosion. Pass [`crate::traversal::DEFAULT_MAX_VISITED`] for the standard limit.
+    /// supernode fan-out explosion. Pass [`crate::traversal::DEFAULT_MAX_VISITED`]
+    /// for the standard limit.
     ///
-    /// `frontier_bitmap`: when `Some`, only nodes whose surrogate is present in the
-    /// bitmap are eligible for expansion. Start and end nodes are not gated.
+    /// `frontier_bitmap`: when `Some`, only nodes whose surrogate is present in
+    /// the bitmap are eligible for expansion. The start and end nodes are not
+    /// gated.
     ///
     /// `overlay`: when `Some` and non-empty, the search observes the
     /// transaction's staged edge writes/deletes (read-your-own-writes),
@@ -40,8 +42,12 @@ impl CsrIndex {
     /// Each step expands one forward level, then one backward level. A level
     /// relaxes its edges in `(neighbour, frontier node)` name order, and the
     /// search stops at the first node both sides reached. The cap is checked
-    /// before each step. A meeting whose path is longer than `max_depth`
-    /// edges returns `None`.
+    /// before each step.
+    ///
+    /// Round `k` meets on a path of `2k - 1` edges (forward level) or `2k`
+    /// edges (backward level), so the first meeting is a shortest path, and
+    /// `max_depth.div_ceil(2)` rounds reach every path of at most `max_depth`
+    /// edges. A meeting on a longer path returns `None`.
     fn shortest_path_dense(&self, params: ShortestPathParams<'_>) -> Option<Vec<String>> {
         let ShortestPathParams {
             src,
@@ -57,17 +63,15 @@ impl CsrIndex {
             return Some(vec![src.to_string()]);
         }
 
-        // Labels this partition has never seen match no edge here; they must
-        // not widen the filter to every edge.
-        let label_ids: HashSet<u32> = label_filter
-            .iter()
-            .filter_map(|label| self.label_id(label))
-            .collect();
-        let keeps = |lid: u32| label_filter.is_empty() || label_ids.contains(&lid);
+        let labels = self.label_filter(label_filter);
+        // The endpoints are never gated: a bitmap that leaves them out still
+        // admits the edges that reach them.
         let in_bitmap = |id: u32| {
-            frontier_bitmap.is_none_or(|bm| {
-                bm.contains(nodedb_types::Surrogate::new(self.node_surrogate_raw(id)))
-            })
+            id == src_id
+                || id == dst_id
+                || frontier_bitmap.is_none_or(|bm| {
+                    bm.contains(nodedb_types::Surrogate::new(self.node_surrogate_raw(id)))
+                })
         };
         let within_depth =
             |path: Vec<String>| (path.len().saturating_sub(1) <= max_depth).then_some(path);
@@ -79,7 +83,7 @@ impl CsrIndex {
         let mut fwd_frontier: Vec<u32> = vec![src_id];
         let mut bwd_frontier: Vec<u32> = vec![dst_id];
 
-        for _depth in 0..max_depth {
+        for _round in 0..max_depth.div_ceil(2) {
             if fwd_parent.len() + bwd_parent.len() >= max_visited {
                 break;
             }
@@ -92,7 +96,7 @@ impl CsrIndex {
             for &node in &fwd_frontier {
                 self.record_access(node);
                 for (lid, neighbor) in self.dense_iter_out(node) {
-                    if keeps(lid) && in_bitmap(neighbor) {
+                    if labels.keeps(lid) && in_bitmap(neighbor) {
                         candidates.push((neighbor, node));
                     }
                 }
@@ -114,7 +118,7 @@ impl CsrIndex {
             for &node in &bwd_frontier {
                 self.record_access(node);
                 for (lid, neighbor) in self.dense_iter_in(node) {
-                    if keeps(lid) && in_bitmap(neighbor) {
+                    if labels.keeps(lid) && in_bitmap(neighbor) {
                         candidates.push((neighbor, node));
                     }
                 }
@@ -187,16 +191,7 @@ impl CsrIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_memory;
-
-    fn make_csr() -> CsrIndex {
-        let mut csr = CsrIndex::new(test_memory());
-        csr.add_edge("a", "KNOWS", "b").unwrap();
-        csr.add_edge("b", "KNOWS", "c").unwrap();
-        csr.add_edge("c", "KNOWS", "d").unwrap();
-        csr.add_edge("a", "WORKS", "e").unwrap();
-        csr
-    }
+    use crate::test_support::{chain_csr, long_chain_csr, test_memory};
 
     fn path_params<'a>(
         src: &'a str,
@@ -217,7 +212,7 @@ mod tests {
 
     #[test]
     fn shortest_path_direct() {
-        let csr = make_csr();
+        let csr = chain_csr();
         let path = csr
             .shortest_path(path_params("a", "c", &["KNOWS"], 5, None), None)
             .unwrap();
@@ -239,8 +234,26 @@ mod tests {
     }
 
     #[test]
+    fn shortest_path_over_a_long_chain() {
+        let csr = long_chain_csr();
+        let path = csr
+            .shortest_path(path_params("n0", "n50", &["NEXT"], 100, None), None)
+            .unwrap();
+        assert_eq!(path.len(), 51);
+        // 50 edges: a depth of 49 finds none, 50 finds it.
+        assert!(
+            csr.shortest_path(path_params("n0", "n50", &["NEXT"], 49, None), None)
+                .is_none()
+        );
+        assert!(
+            csr.shortest_path(path_params("n0", "n50", &["NEXT"], 50, None), None)
+                .is_some()
+        );
+    }
+
+    #[test]
     fn shortest_path_same_node() {
-        let csr = make_csr();
+        let csr = chain_csr();
         let path = csr
             .shortest_path(path_params("a", "a", &[], 5, None), None)
             .unwrap();
@@ -249,14 +262,14 @@ mod tests {
 
     #[test]
     fn shortest_path_unreachable() {
-        let csr = make_csr();
+        let csr = chain_csr();
         let path = csr.shortest_path(path_params("d", "a", &["KNOWS"], 5, None), None);
         assert!(path.is_none());
     }
 
     #[test]
     fn shortest_path_depth_limit() {
-        let csr = make_csr();
+        let csr = chain_csr();
         let path = csr.shortest_path(path_params("a", "d", &["KNOWS"], 1, None), None);
         assert!(path.is_none());
     }
@@ -268,7 +281,7 @@ mod tests {
     fn shortest_path_frontier_bitmap_blocks_intermediate() {
         use nodedb_types::{Surrogate, SurrogateBitmap};
 
-        let mut csr = make_csr();
+        let mut csr = chain_csr();
         csr.set_node_surrogate("b", Surrogate::new(10));
         csr.set_node_surrogate("c", Surrogate::new(20));
 
@@ -280,6 +293,23 @@ mod tests {
         // "b" (surrogate 10) is not in the bitmap so expansion through it is
         // blocked, making the path from "a" to "c" unreachable.
         assert!(path.is_none());
+    }
+
+    /// A bitmap that holds neither endpoint still admits the edge between
+    /// them: the endpoints are never gated.
+    #[test]
+    fn the_frontier_bitmap_never_gates_the_endpoints() {
+        use nodedb_types::{Surrogate, SurrogateBitmap};
+
+        let mut csr = CsrIndex::new(test_memory());
+        csr.add_edge("a", "L", "c").unwrap();
+        csr.set_node_surrogate("a", Surrogate::new(1));
+        csr.set_node_surrogate("c", Surrogate::new(3));
+        let mut bm = SurrogateBitmap::new();
+        bm.insert(Surrogate::new(99));
+
+        let path = csr.shortest_path(path_params("a", "c", &[], 1, Some(&bm)), None);
+        assert_eq!(path, Some(vec!["a".to_string(), "c".to_string()]));
     }
 
     fn params<'a>(labels: &'a [&'a str], depth: usize) -> ShortestPathParams<'a> {
@@ -315,6 +345,28 @@ mod tests {
         );
         assert!(
             csr.shortest_path(params(&["FIRST", "SECOND"], 0), None)
+                .is_none()
+        );
+    }
+
+    /// `a -FIRST-> b -SECOND-> d` plus a shortcut `a -OTHER-> d`. An unknown
+    /// label in the set must not widen it to the shortcut.
+    #[test]
+    fn an_unknown_label_in_the_set_does_not_widen_it() {
+        let mut csr = CsrIndex::new(test_memory());
+        csr.add_edge("a", "FIRST", "b").unwrap();
+        csr.add_edge("b", "SECOND", "d").unwrap();
+        csr.add_edge("a", "OTHER", "d").unwrap();
+        assert_eq!(
+            csr.shortest_path(params(&["FIRST", "SECOND", "unknown"], 2), None),
+            Some(vec!["a".into(), "b".into(), "d".into()])
+        );
+        assert!(
+            csr.shortest_path(params(&["FIRST", "unknown"], 2), None)
+                .is_none()
+        );
+        assert!(
+            csr.shortest_path(params(&["unknown", "never"], 2), None)
                 .is_none()
         );
     }

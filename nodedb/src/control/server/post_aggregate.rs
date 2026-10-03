@@ -5,11 +5,20 @@
 //! When a query has `GROUP BY` over a `JOIN` result, the Data Plane cores
 //! return raw join rows. This module aggregates them in the Control Plane.
 //! All processing stays in msgpack — no JSON intermediary.
+//!
+//! SUM / AVG total exactly per `nodedb_query::ExactSum`. MIN / MAX keep the
+//! original number and compare exactly, so integers above 2^53 never round
+//! through `f64`.
 
 use std::collections::HashMap;
 
-use crate::bridge::envelope::{Payload, Response};
 use nodedb_query::agg_key::canonical_agg_key;
+use nodedb_query::msgpack_scan::reader;
+use nodedb_query::numeric_sum::{ExactSum, sum_input};
+use nodedb_query::window::extremum::value_replaces;
+use nodedb_types::Value;
+
+use crate::bridge::envelope::{Payload, Response};
 
 /// Apply GROUP BY + aggregate functions on a join response payload.
 ///
@@ -52,12 +61,8 @@ pub fn apply_post_aggregation(
         // Compute and write each aggregate.
         for (op, field) in aggregates {
             let agg_key = canonical_agg_key(op, field);
-            let value = compute_aggregate(op, field, group_rows);
-            match value {
-                AggValue::Int(n) => writer::write_kv_i64(&mut buf, &agg_key, n),
-                AggValue::Float(f) => writer::write_kv_f64(&mut buf, &agg_key, f),
-                AggValue::Null => writer::write_kv_null(&mut buf, &agg_key),
-            }
+            let value = compute_aggregate(op, field, group_rows)?;
+            write_kv_number(&mut buf, &agg_key, &value);
         }
     }
 
@@ -67,16 +72,20 @@ pub fn apply_post_aggregation(
     })
 }
 
-enum AggValue {
-    Int(i64),
-    Float(f64),
-    Null,
+/// Write an aggregate result: an integer, a float, NULL, or a `Decimal`
+/// as its exact text (the msgpack form of a `Decimal`).
+fn write_kv_number(buf: &mut Vec<u8>, key: &str, value: &Value) {
+    use nodedb_query::msgpack_scan::writer;
+    match value {
+        Value::Integer(n) => writer::write_kv_i64(buf, key, *n),
+        Value::Float(f) => writer::write_kv_f64(buf, key, *f),
+        Value::Decimal(d) => writer::write_kv_str(buf, key, &d.to_string()),
+        _ => writer::write_kv_null(buf, key),
+    }
 }
 
 /// Parse a msgpack array payload into individual row slices.
 fn parse_msgpack_rows(bytes: &[u8]) -> crate::Result<Vec<&[u8]>> {
-    use nodedb_query::msgpack_scan::reader;
-
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
@@ -99,17 +108,12 @@ fn parse_msgpack_rows(bytes: &[u8]) -> crate::Result<Vec<&[u8]>> {
     Ok(rows)
 }
 
-/// Extract a field value as string from a msgpack map row.
-/// Handles "collection.field" suffix matching.
-fn extract_field_str(row: &[u8], field: &str) -> Option<String> {
-    use nodedb_query::msgpack_scan::reader;
-
-    // Try exact match first.
-    if let Some((start, end)) = nodedb_query::msgpack_scan::extract_field(row, 0, field) {
-        return Some(read_value_as_string(row, start, end));
+/// The value range of `field` in a msgpack map row: an exact key match
+/// first, then a `"collection.field"` suffix match.
+fn field_range(row: &[u8], field: &str) -> Option<(usize, usize)> {
+    if let Some(range) = nodedb_query::msgpack_scan::extract_field(row, 0, field) {
+        return Some(range);
     }
-
-    // Suffix match: iterate map keys looking for "*.{field}".
     let suffix = format!(".{field}");
     let (count, mut pos) = reader::map_header(row, 0)?;
     for _ in 0..count {
@@ -117,68 +121,36 @@ fn extract_field_str(row: &[u8], field: &str) -> Option<String> {
         let key_end = reader::skip_value(row, pos)?;
         let val_end = reader::skip_value(row, key_end)?;
         if key.ends_with(&suffix) {
-            return Some(read_value_as_string(row, key_end, val_end));
+            return Some((key_end, val_end));
         }
         pos = val_end;
     }
     None
 }
 
-/// Extract a numeric field value from a msgpack map row.
-fn extract_number(row: &[u8], field: &str) -> Option<f64> {
-    use nodedb_query::msgpack_scan::reader;
+/// Extract a field value as string from a msgpack map row.
+fn extract_field_str(row: &[u8], field: &str) -> Option<String> {
+    let (start, end) = field_range(row, field)?;
+    Some(read_value_as_string(row, start, end))
+}
 
-    let try_field = |name: &str| -> Option<f64> {
-        let (start, _end) = nodedb_query::msgpack_scan::extract_field(row, 0, name)?;
-        if let Some(i) = reader::read_i64(row, start) {
-            return Some(i as f64);
-        }
-        if let Some(f) = reader::read_f64(row, start) {
-            return Some(f);
-        }
-        // Try parsing string as number.
-        reader::read_str(row, start).and_then(|s| s.parse().ok())
-    };
-
+/// The number a row contributes to SUM / AVG / MIN / MAX of `field`: a
+/// number as itself, a numeric string as the number it spells. Integers
+/// stay exact. `*` contributes `1`.
+fn extract_number(row: &[u8], field: &str) -> Option<Value> {
     if field == "*" {
-        return Some(1.0);
+        return Some(Value::Integer(1));
     }
-
-    // Exact match.
-    if let Some(v) = try_field(field) {
-        return Some(v);
-    }
-
-    // Suffix match.
-    let suffix = format!(".{field}");
-    let (count, mut pos) = nodedb_query::msgpack_scan::reader::map_header(row, 0)?;
-    for _ in 0..count {
-        let key = nodedb_query::msgpack_scan::reader::read_str(row, pos)?;
-        let key_end = nodedb_query::msgpack_scan::reader::skip_value(row, pos)?;
-        let val_end = nodedb_query::msgpack_scan::reader::skip_value(row, key_end)?;
-        if key.ends_with(&suffix) {
-            if let Some(i) = nodedb_query::msgpack_scan::reader::read_i64(row, key_end) {
-                return Some(i as f64);
-            }
-            if let Some(f) = nodedb_query::msgpack_scan::reader::read_f64(row, key_end) {
-                return Some(f);
-            }
-            if let Some(s) = nodedb_query::msgpack_scan::reader::read_str(row, key_end) {
-                return s.parse().ok();
-            }
-        }
-        pos = val_end;
-    }
-    None
+    let (start, _end) = field_range(row, field)?;
+    sum_input(&reader::read_value(row, start)?)
 }
 
 /// Read a msgpack value at [start..end) as a display string.
 fn read_value_as_string(bytes: &[u8], start: usize, end: usize) -> String {
-    use nodedb_query::msgpack_scan::reader;
     if let Some(s) = reader::read_str(bytes, start) {
         return s.to_string();
     }
-    if let Some(i) = reader::read_i64(bytes, start) {
+    if let Some(i) = reader::read_integer(bytes, start) {
         return i.to_string();
     }
     if let Some(f) = reader::read_f64(bytes, start) {
@@ -195,36 +167,129 @@ fn read_value_as_string(bytes: &[u8], start: usize, end: usize) -> String {
 }
 
 /// Compute a single aggregate over a group of msgpack rows.
-fn compute_aggregate(op: &str, field: &str, rows: &[&[u8]]) -> AggValue {
-    match op {
-        "count" => AggValue::Int(rows.len() as i64),
-        "sum" => {
-            let sum: f64 = rows.iter().filter_map(|r| extract_number(r, field)).sum();
-            AggValue::Float(sum)
+///
+/// Fails with `EvalError::NumericOverflow` when an exact integer SUM / AVG
+/// total lies outside the `Decimal` range.
+fn compute_aggregate(
+    op: &str,
+    field: &str,
+    rows: &[&[u8]],
+) -> Result<Value, nodedb_query::EvalError> {
+    let numbers = || rows.iter().filter_map(|r| extract_number(r, field));
+    let exact_sum = || {
+        let mut acc = ExactSum::new();
+        for v in numbers() {
+            acc.add_value(&v);
         }
-        "avg" => {
-            let values: Vec<f64> = rows
-                .iter()
-                .filter_map(|r| extract_number(r, field))
-                .collect();
-            if values.is_empty() {
-                AggValue::Null
-            } else {
-                AggValue::Float(values.iter().sum::<f64>() / values.len() as f64)
+        acc
+    };
+    let extremum = |want_max: bool| {
+        let mut best: Option<Value> = None;
+        for v in numbers() {
+            if value_replaces(&v, best.as_ref(), want_max) {
+                best = Some(v);
             }
         }
-        "min" => rows
-            .iter()
-            .filter_map(|r| extract_number(r, field))
-            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(AggValue::Float)
-            .unwrap_or(AggValue::Null),
-        "max" => rows
-            .iter()
-            .filter_map(|r| extract_number(r, field))
-            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(AggValue::Float)
-            .unwrap_or(AggValue::Null),
-        _ => AggValue::Null,
+        best.unwrap_or(Value::Null)
+    };
+    Ok(match op {
+        "count" => Value::Integer(rows.len() as i64),
+        "sum" => exact_sum().sum()?,
+        "avg" => exact_sum().avg()?,
+        "min" => extremum(false),
+        "max" => extremum(true),
+        _ => Value::Null,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const ABOVE: i64 = 9_007_199_254_740_993;
+    const AT: i64 = 9_007_199_254_740_992;
+
+    fn encode(v: &serde_json::Value) -> Vec<u8> {
+        nodedb_types::json_msgpack::json_to_msgpack(v).expect("encode")
+    }
+
+    fn agg(op: &str, vals: &[serde_json::Value]) -> Value {
+        let docs: Vec<Vec<u8>> = vals.iter().map(|v| encode(&json!({"t.v": v}))).collect();
+        let rows: Vec<&[u8]> = docs.iter().map(Vec::as_slice).collect();
+        compute_aggregate(op, "v", &rows).unwrap()
+    }
+
+    #[test]
+    fn integers_above_2_pow_53_stay_exact() {
+        let vals = [json!(ABOVE), json!(AT)];
+        assert_eq!(agg("sum", &vals), Value::Integer(ABOVE + AT));
+        assert_eq!(agg("min", &vals), Value::Integer(AT));
+        assert_eq!(agg("max", &vals), Value::Integer(ABOVE));
+        assert_eq!(agg("avg", &vals), Value::Float(AT as f64));
+    }
+
+    #[test]
+    fn nanosecond_timestamps_stay_exact() {
+        let vals = [
+            json!(1_700_000_000_000_000_002_i64),
+            json!(1_700_000_000_000_000_001_i64),
+        ];
+        assert_eq!(
+            agg("min", &vals),
+            Value::Integer(1_700_000_000_000_000_001)
+        );
+        assert_eq!(
+            agg("sum", &vals),
+            Value::Integer(3_400_000_000_000_000_003)
+        );
+    }
+
+    #[test]
+    fn u64_above_i64_max_and_sum_past_i64() {
+        let vals = [json!(u64::MAX), json!(i64::MAX)];
+        assert_eq!(
+            agg("max", &vals),
+            Value::Decimal(rust_decimal::Decimal::from(u64::MAX))
+        );
+        assert_eq!(agg("min", &vals), Value::Integer(i64::MAX));
+        assert_eq!(
+            agg("sum", &vals),
+            Value::Decimal(rust_decimal::Decimal::from_i128_with_scale(
+                i128::from(u64::MAX) + i128::from(i64::MAX),
+                0
+            ))
+        );
+    }
+
+    #[test]
+    fn mixed_int_float_and_numeric_strings() {
+        assert_eq!(
+            agg("sum", &[json!(2), json!(0.5), json!("7")]),
+            Value::Float(9.5)
+        );
+        let vals = [json!(AT), json!("9007199254740993"), json!(0.5)];
+        assert_eq!(agg("max", &vals), Value::Integer(ABOVE));
+        assert_eq!(agg("min", &vals), Value::Float(0.5));
+        assert_eq!(agg("sum", &[json!("x")]), Value::Null);
+    }
+
+    #[test]
+    fn group_key_text_keeps_u64_digits() {
+        let doc = encode(&json!({"k": u64::MAX}));
+        assert_eq!(
+            extract_field_str(&doc, "k"),
+            Some("18446744073709551615".to_string())
+        );
+    }
+
+    #[test]
+    fn decimal_results_write_exact_text() {
+        // A one-entry map: fixmap header, then the written key/value pair.
+        let mut doc = vec![0x81];
+        let total = Value::Decimal(rust_decimal::Decimal::from(u64::MAX));
+        write_kv_number(&mut doc, "sum(v)", &total);
+        let (start, _) = nodedb_query::msgpack_scan::extract_field(&doc, 0, "sum(v)").unwrap();
+        assert_eq!(reader::read_str(&doc, start), Some("18446744073709551615"));
     }
 }

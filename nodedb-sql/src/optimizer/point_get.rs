@@ -16,8 +16,9 @@ use crate::types::*;
 /// regular `id` column is NOT a point lookup and must stay a scan (routing it
 /// to PointGet would resolve a surrogate for the wrong key and return zero
 /// rows). When the catalog cannot resolve a primary key (unknown collection),
-/// fall back to the legacy convention so nothing regresses.
-pub fn optimize(plan: SqlPlan, catalog: &dyn SqlCatalog) -> SqlPlan {
+/// fall back to the legacy convention so nothing regresses. A catalog error
+/// fails the plan: `RetryableSchemaChanged` must reach the caller.
+pub fn optimize(plan: SqlPlan, catalog: &dyn SqlCatalog) -> crate::Result<SqlPlan> {
     match plan {
         SqlPlan::Scan {
             ref collection,
@@ -37,23 +38,21 @@ pub fn optimize(plan: SqlPlan, catalog: &dyn SqlCatalog) -> SqlPlan {
             }) =>
         {
             let pk = catalog
-                .get_collection(DatabaseId::DEFAULT, collection)
-                .ok()
-                .flatten()
+                .get_collection(DatabaseId::DEFAULT, collection)?
                 .and_then(|info| info.primary_key);
             if let Some((key_col, key_val)) = extract_pk_equality(&filters[0], pk.as_deref()) {
-                return SqlPlan::PointGet {
+                return Ok(SqlPlan::PointGet {
                     collection: collection.clone(),
                     alias: alias.clone(),
                     engine: *engine,
                     key_column: key_col,
                     key_value: key_val,
                     projection: projection.clone(),
-                };
+                });
             }
-            plan
+            Ok(plan)
         }
-        _ => plan,
+        _ => Ok(plan),
     }
 }
 
@@ -108,5 +107,59 @@ fn extract_pk_equality(filter: &Filter, pk: Option<&str>) -> Option<(String, Sql
             Some((col, val))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::SqlCatalogError;
+    use crate::temporal::TemporalScope;
+
+    struct ChangingCatalog;
+
+    impl SqlCatalog for ChangingCatalog {
+        fn get_collection(
+            &self,
+            _: DatabaseId,
+            _: &str,
+        ) -> std::result::Result<Option<CollectionInfo>, SqlCatalogError> {
+            Err(SqlCatalogError::RetryableSchemaChanged {
+                descriptor: "collection users".into(),
+            })
+        }
+    }
+
+    fn id_scan() -> SqlPlan {
+        SqlPlan::Scan {
+            collection: "users".into(),
+            alias: None,
+            engine: EngineType::DocumentSchemaless,
+            filters: vec![Filter {
+                expr: FilterExpr::Comparison {
+                    field: "id".into(),
+                    op: CompareOp::Eq,
+                    value: SqlValue::String("u1".into()),
+                },
+            }],
+            projection: Vec::new(),
+            sort_keys: Vec::new(),
+            limit: None,
+            offset: 0,
+            distinct: false,
+            window_functions: Vec::new(),
+            temporal: TemporalScope::default(),
+        }
+    }
+
+    #[test]
+    fn a_catalog_error_fails_the_point_get_rewrite() {
+        let error = optimize(id_scan(), &ChangingCatalog).unwrap_err();
+        assert_eq!(
+            error,
+            crate::SqlError::from(SqlCatalogError::RetryableSchemaChanged {
+                descriptor: "collection users".into(),
+            })
+        );
     }
 }

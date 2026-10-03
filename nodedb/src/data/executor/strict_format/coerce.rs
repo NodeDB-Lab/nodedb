@@ -25,6 +25,16 @@ pub fn coerce_value(val: &Value, col_type: &ColumnType, col_name: &str) -> crate
         ColumnType::Int64 => match val {
             Value::Integer(_) => Ok(val.clone()),
             Value::Float(f) => Ok(Value::Integer(*f as i64)),
+            // A whole decimal in `i64` range; a `u64` above `i64::MAX` reads
+            // as a `Decimal` and has no INT image.
+            Value::Decimal(d) => d
+                .is_integer()
+                .then(|| rust_decimal::prelude::ToPrimitive::to_i64(d))
+                .flatten()
+                .map(Value::Integer)
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: format!("column '{col_name}': {d} is out of range for INT"),
+                }),
             Value::String(s) => {
                 s.parse::<i64>()
                     .map(Value::Integer)
@@ -39,6 +49,11 @@ pub fn coerce_value(val: &Value, col_type: &ColumnType, col_name: &str) -> crate
         ColumnType::Float64 => match val {
             Value::Float(_) => Ok(val.clone()),
             Value::Integer(n) => Ok(Value::Float(*n as f64)),
+            Value::Decimal(d) => rust_decimal::prelude::ToPrimitive::to_f64(d)
+                .map(Value::Float)
+                .ok_or_else(|| crate::Error::BadRequest {
+                    detail: format!("column '{col_name}': cannot convert {d} to FLOAT"),
+                }),
             Value::String(s) => {
                 s.parse::<f64>()
                     .map(Value::Float)
@@ -54,6 +69,7 @@ pub fn coerce_value(val: &Value, col_type: &ColumnType, col_name: &str) -> crate
             Value::String(_) | Value::Uuid(_) | Value::Ulid(_) | Value::Regex(_) => Ok(val.clone()),
             Value::Integer(n) => Ok(Value::String(n.to_string())),
             Value::Float(f) => Ok(Value::String(f.to_string())),
+            Value::Decimal(d) => Ok(Value::String(d.to_string())),
             Value::Bool(b) => Ok(Value::String(b.to_string())),
             other => Ok(Value::String(format!("{other:?}"))),
         },

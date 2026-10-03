@@ -22,6 +22,7 @@ use super::hybrid_key::HybridFusionKey;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::graph_expansion::{GraphExpansionParams, GraphSeeds};
+use crate::data::executor::handlers::text_rows::{TextRowGate, combine_eligible};
 use crate::data::executor::scan_normalize::sparse_body_to_msgpack;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::graph::edge_store::Direction;
@@ -31,13 +32,23 @@ use crate::query::fusion::{FusedResult, RankedResult, reciprocal_rank_fusion_wei
 pub(in crate::data::executor) struct HybridSearchTripleParams<'a> {
     pub tid: u64,
     pub collection: &'a str,
+    /// Vector column the vector leg searches. Empty names the
+    /// collection-level index.
+    pub vector_field: &'a str,
     pub query_vector: &'a [f32],
+    /// Field index the text leg reads. `None` reads the whole-document index.
+    pub text_field: Option<&'a str>,
     pub query_text: &'a str,
+    /// Residual WHERE predicates (`Vec<ScanFilter>`), applied to every leg
+    /// before fusion.
+    pub filters: &'a [u8],
     pub graph_seed_id: &'a str,
     pub graph_depth: usize,
     pub graph_edge_label: Option<&'a str>,
     pub top_k: usize,
     pub ef_search: usize,
+    /// Boolean combination of the text leg's query terms.
+    pub mode: nodedb_types::text_search::QueryMode,
     pub fuzzy: bool,
     pub rrf_k: (f64, f64, f64),
     pub filter_bitmap: Option<&'a nodedb_types::SurrogateBitmap>,
@@ -58,13 +69,17 @@ impl CoreLoop {
         let HybridSearchTripleParams {
             tid,
             collection,
+            vector_field,
             query_vector,
+            text_field,
             query_text,
+            filters,
             graph_seed_id,
             graph_depth,
             graph_edge_label,
             top_k,
             ef_search,
+            mode,
             fuzzy,
             rrf_k,
             filter_bitmap,
@@ -90,9 +105,27 @@ impl CoreLoop {
 
         let fetch_k = top_k.saturating_mul(3).max(20);
 
+        // The rows the residual filters and RLS admit restrict every leg
+        // before fusion, so the fused top-k counts only admitted rows.
+        let eligible = match TextRowGate::new(filters, rls_filters)
+            .and_then(|gate| self.text_eligible_rows(task, tid, collection, &gate))
+        {
+            Ok(eligible) => combine_eligible(filter_bitmap, eligible),
+            Err(e) => return self.response_error(task, e),
+        };
+        let filter_bitmap = eligible.as_ref();
+        let text_index = match self.text_index(task, tid, collection, text_field) {
+            Ok(index) => index,
+            Err(e) => return self.response_error(task, e),
+        };
+
         // 1. Vector search.
-        let index_key =
-            CoreLoop::vector_index_key(task.request.database_id.as_u64(), tid, collection, "");
+        let index_key = self.resolve_vector_index_key(
+            task.request.database_id.as_u64(),
+            tid,
+            collection,
+            vector_field,
+        );
         let vector_collection = self.vector_collections.get(&index_key);
         let vector_results = match vector_collection {
             Some(index) => {
@@ -115,17 +148,18 @@ impl CoreLoop {
             None => Vec::new(),
         };
 
-        // 2. BM25 text search.
-        let text_results = match self.inverted.search(
-            task.request.database_id.as_u64(),
-            tenant_id,
-            collection,
+        // 2. BM25 text search over the field's index, restricted to the same
+        //    rows, with the transaction's staged rows ranked in.
+        let text_results = match self.hybrid_text_leg(
+            task,
+            tid,
+            text_index,
             FtsSearchParams {
                 query: query_text,
                 top_k: fetch_k,
                 fuzzy_enabled: fuzzy,
-                mode: QueryMode::And,
-                prefilter: None,
+                mode: QueryMode::from(mode),
+                prefilter: filter_bitmap,
             },
         ) {
             Ok(results) => results,
@@ -140,7 +174,7 @@ impl CoreLoop {
             database_id: task.request.database_id.as_u64(),
             tid,
             seeds: GraphSeeds::Names(&[graph_seed_id]),
-            label_filter: graph_edge_label,
+            label_filter: graph_edge_label.as_slice(),
             direction: Direction::Out,
             max_depth: graph_depth,
             max_visited: self.query_tuning.bfs_memory_budget_bytes
@@ -163,8 +197,8 @@ impl CoreLoop {
                         database_id: task.request.database_id,
                         tid: tenant_id,
                         collection,
+                        vector_field,
                         query_vector,
-                        query_text,
                         fetch_k,
                         filter_bitmap,
                     },
@@ -200,7 +234,19 @@ impl CoreLoop {
                 (vector_ranked, text_ranked)
             };
 
-        let graph_ranked = graph_reached_to_ranked_keys(&expansion.reached);
+        // The graph walk reaches rows regardless of the filters, so its leg
+        // keeps only the admitted ones. A node with no row is not admitted.
+        let mut graph_ranked = graph_reached_to_ranked_keys(&expansion.reached);
+        if let Some(admitted) = filter_bitmap {
+            graph_ranked.retain(|r| {
+                r.document_id
+                    .storage_key()
+                    .is_some_and(|key| admitted.contains(key.surrogate()))
+            });
+            for (rank, r) in graph_ranked.iter_mut().enumerate() {
+                r.rank = rank;
+            }
+        }
 
         let (k_vector, k_text, k_graph) = rrf_k;
         let fused = reciprocal_rank_fusion_weighted(
@@ -233,9 +279,7 @@ impl CoreLoop {
                 let Some(key) = f.document_id.storage_key() else {
                     return false;
                 };
-                match self
-                    .sparse
-                    .get(task.request.database_id.as_u64(), tid, collection, &key)
+                match self.text_base_body(task.request.database_id.as_u64(), tid, collection, &key)
                 {
                     Ok(Some(bytes)) => {
                         let normalized =

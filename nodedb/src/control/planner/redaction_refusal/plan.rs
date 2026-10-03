@@ -28,6 +28,7 @@ use crate::types::TenantId;
 use super::aggregate::{JoinSide, refuse_aggregates, refuse_facet_fields, refuse_join_aggregates};
 use super::graph::{refuse_graph_op, refuse_match_scoped};
 use super::lookup::RefusalCtx;
+use super::text::refuse_text_op;
 
 /// Refuse `plan` when it reads something a redaction policy protects but the
 /// result-path masking hook cannot rewrite.
@@ -167,6 +168,8 @@ fn walk(plan: &PhysicalPlan, ctx: &RefusalCtx<'_>) -> crate::Result<()> {
             inline_prefilter_plan: Some(child),
             ..
         }) => walk(child, ctx),
+        // A text match or score is computed over the stored text.
+        PhysicalPlan::Text(op) => refuse_text_op(op, ctx),
         // Every remaining op returns stored columns (which the result-path
         // hook masks), a write acknowledgement, or maintenance metadata — and
         // none of them embeds a sub-plan. The inner wildcards keep this arm
@@ -175,7 +178,6 @@ fn walk(plan: &PhysicalPlan, ctx: &RefusalCtx<'_>) -> crate::Result<()> {
         PhysicalPlan::Vector(_)
         | PhysicalPlan::Document(_)
         | PhysicalPlan::Kv(_)
-        | PhysicalPlan::Text(_)
         | PhysicalPlan::Columnar(_)
         | PhysicalPlan::Timeseries(_)
         | PhysicalPlan::Spatial(_)
@@ -547,7 +549,7 @@ mod tests {
                 "users",
             )),
             node_id: "n1".into(),
-            edge_label: None,
+            edge_labels: Vec::new(),
             direction: nodedb_types::graph::Direction::Out,
             rls_filters: Vec::new(),
         });

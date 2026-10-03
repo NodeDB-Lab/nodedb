@@ -1047,9 +1047,14 @@ mod tests {
             stream_id: 3,
             seq: 4,
         };
-        let idx = FtsIndexPayload::new(prov.clone(), "articles", "doc-1", "hello world")
-            .to_bytes()
-            .expect("enc idx");
+        let idx = FtsIndexPayload::new(
+            prov.clone(),
+            "articles",
+            "doc-1",
+            vec![("body".to_string(), "hello world".to_string())],
+        )
+        .to_bytes()
+        .expect("enc idx");
         let idx_record = make_record(RecordType::FtsIndex, &idx, 1, 0, 703);
         let mut seq = 0u64;
         assert!(record_to_events(&idx_record, &mut seq).is_empty());

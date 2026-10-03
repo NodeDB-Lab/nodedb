@@ -264,3 +264,102 @@ async fn strict_delete_hides_in_txn_then_rollback_restores() {
 async fn strict_update_changes_match_in_txn() {
     update_changes_match_in_txn("document_strict", "fts_ov_st_upd").await;
 }
+
+// ── Field scoping and residual filters inside a transaction ────────────────
+
+async fn ids_of(server: &TestServer, sql: &str) -> Vec<String> {
+    server
+        .query_rows(sql)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r[0].clone())
+        .collect()
+}
+
+/// A staged insert is visible to a search scoped to the field that holds the
+/// term, and invisible to a search scoped to another field.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn staged_insert_is_visible_to_a_field_scoped_search() {
+    let server = TestServer::start().await;
+    setup(&server, "fts_ov_scoped", "document_schemaless").await;
+
+    server.exec("BEGIN").await.unwrap();
+    server
+        .exec(
+            "INSERT INTO fts_ov_scoped (id, title, body) \
+             VALUES ('new1', 'elephant tales', 'nothing relevant')",
+        )
+        .await
+        .unwrap();
+    let by_title = ids_of(
+        &server,
+        "SELECT id FROM fts_ov_scoped WHERE text_match(title, 'elephant') ORDER BY id",
+    )
+    .await;
+    let by_body = ids_of(
+        &server,
+        "SELECT id FROM fts_ov_scoped WHERE text_match(body, 'elephant') ORDER BY id",
+    )
+    .await;
+    server.client.simple_query("ROLLBACK").await.unwrap();
+
+    assert_eq!(
+        by_title,
+        vec!["new1".to_string()],
+        "the title scope sees it"
+    );
+    assert!(by_body.is_empty(), "the body scope does not: {by_body:?}");
+}
+
+/// A staged row that fails the WHERE filter never enters the result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn staged_row_failing_the_filter_is_excluded() {
+    let server = TestServer::start().await;
+    setup(&server, "fts_ov_filtered", "document_schemaless").await;
+
+    server.exec("BEGIN").await.unwrap();
+    for (id, tag) in [("keep1", "a"), ("drop1", "b")] {
+        server
+            .exec(&format!(
+                "INSERT INTO fts_ov_filtered (id, tag, body) \
+                 VALUES ('{id}', '{tag}', 'an elephant never forgets')"
+            ))
+            .await
+            .unwrap();
+    }
+    let ids = ids_of(
+        &server,
+        "SELECT id FROM fts_ov_filtered \
+         WHERE text_match(body, 'elephant') AND tag = 'a' ORDER BY id",
+    )
+    .await;
+    server.client.simple_query("ROLLBACK").await.unwrap();
+
+    assert_eq!(ids, vec!["keep1".to_string()], "only the tag a row returns");
+}
+
+/// A field that first holds text inside the transaction is searchable there,
+/// not refused as a field no document holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn first_use_of_a_field_inside_a_transaction_is_not_an_error() {
+    let server = TestServer::start().await;
+    setup(&server, "fts_ov_new_field", "document_schemaless").await;
+
+    server.exec("BEGIN").await.unwrap();
+    server
+        .exec(
+            "INSERT INTO fts_ov_new_field (id, note) \
+             VALUES ('n1', 'brand new elephant note')",
+        )
+        .await
+        .unwrap();
+    let result = server
+        .query_rows("SELECT id FROM fts_ov_new_field WHERE text_match(note, 'elephant')")
+        .await;
+    server.client.simple_query("ROLLBACK").await.unwrap();
+
+    let rows = result.expect("a field staged in this transaction must be searchable");
+    let ids: Vec<&str> = rows.iter().map(|r| r[0].as_str()).collect();
+    assert_eq!(ids, vec!["n1"], "the staged note matches");
+}

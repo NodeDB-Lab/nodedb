@@ -35,13 +35,15 @@ pub enum CrdtError {
     #[error("CRDT import has too many operations: {actual} > {limit}")]
     ImportOperationLimitExceeded { limit: usize, actual: usize },
 
-    /// The imported update depends on operations this document has never seen,
-    /// so Loro buffered them as causally pending instead of applying them.
+    /// The imported blob carries changes that depend on operations this
+    /// document has never seen, so Loro buffered those changes as causally
+    /// pending instead of applying them.
     ///
-    /// The document state did NOT advance. Reporting such an import as success
-    /// is silent data loss: the caller acknowledges a write that was never
-    /// applied and may never be, since the missing predecessors are not part of
-    /// this document's operation history.
+    /// The ready changes in the same blob still apply, so the document state
+    /// can advance under this error. The pending changes do not. Reporting
+    /// such an import as success is silent data loss: the caller acknowledges
+    /// a write that was never applied and may never be, since the missing
+    /// predecessors are not part of this document's operation history.
     #[error("CRDT import depends on operations absent from this document")]
     ImportPendingDependencies,
 
@@ -135,6 +137,33 @@ pub enum CrdtError {
         collection: String,
         row_id: String,
         field: String,
+    },
+
+    /// A delta writes a root container that is not a map.
+    ///
+    /// Every collection is a root map of row maps. A root text, list, movable
+    /// list, tree, or counter holds no rows, so no constraint can check it.
+    #[error(
+        "CRDT delta writes root {container_type} container `{container}`; \
+         a collection is a root map of row maps"
+    )]
+    NonMapRootContainer {
+        container: String,
+        container_type: String,
+    },
+
+    /// A delta sets a collection row to a value that is not a map.
+    ///
+    /// A row is a map of fields. Any other row value has no fields, so NOT
+    /// NULL and CHECK constraints cannot run on it.
+    #[error(
+        "CRDT delta sets row `{row_id}` in collection `{collection}` to {value}; \
+         a row is a map of fields"
+    )]
+    NonMapRowValue {
+        collection: String,
+        row_id: String,
+        value: String,
     },
 
     /// Auth context has expired — agent must re-authenticate before syncing.

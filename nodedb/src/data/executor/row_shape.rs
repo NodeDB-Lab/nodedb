@@ -80,7 +80,7 @@ pub(in crate::data::executor) fn sparse_row_to_doc(
 ) -> (String, Vec<u8>) {
     let mp = sparse_body_to_msgpack(raw, format);
     let identity = msgpack_scan::extract_field(&mp, 0, nodedb_types::ROWID_COLUMN)
-        .and_then(|(start, _)| msgpack_scan::read_i64(&mp, start))
+        .and_then(|(start, _)| msgpack_scan::read_integer(&mp, start))
         .map(|rowid| rowid.to_string())
         .unwrap_or_else(|| key.to_identity().into_string());
     let mp = msgpack_scan::inject_str_field(&mp, "id", &identity);

@@ -12,12 +12,14 @@
 //! - `aliases` — alias resolution between ORDER BY and SELECT projection.
 //! - `triggers` — generic `SearchTrigger` → `SqlPlan` detection.
 //! - `hybrid` — `rrf_score(...)` → `SqlPlan::HybridSearch` construction.
+//! - `text_score` — `bm25_score(...)` columns attached to a text or scan plan.
 //! - `vector_join` — `vector_distance ⋈ ARRAY_SLICE` fusion target detection.
 
 mod aliases;
 mod apply;
 mod hybrid;
 mod projection;
+mod text_score;
 mod triggers;
 mod vector_join;
 

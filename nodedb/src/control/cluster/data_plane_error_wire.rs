@@ -8,11 +8,13 @@
 //! fails to compile here until it is mirrored on the wire instead of silently
 //! degrading to `Internal` and losing its SQLSTATE at the coordinator.
 
-use nodedb_cluster::rpc_codec::{
-    DataPlaneCounterFault, DataPlaneErrorCode, DataPlaneSyncHold, TypedClusterError,
-};
+use nodedb_cluster::rpc_codec::{DataPlaneErrorCode, TypedClusterError};
 
-use crate::bridge::envelope::{CounterFault, ErrorCode, SyncHold};
+use super::data_plane_fault_wire::{
+    counter_fault_from_wire, counter_fault_to_wire, sync_hold_from_wire, sync_hold_to_wire,
+    text_column_fault_from_wire, text_column_fault_to_wire,
+};
+use crate::bridge::envelope::ErrorCode;
 
 /// Map a local-execution [`crate::Error`] to the wire error a remote caller
 /// receives.
@@ -106,6 +108,7 @@ pub(crate) fn execution_error_to_typed(err: crate::Error) -> TypedClusterError {
         | crate::Error::UndefinedObject { .. }
         | crate::Error::ObjectNotInPrerequisiteState { .. }
         | crate::Error::UndefinedColumn { .. }
+        | crate::Error::TextColumn { .. }
         | crate::Error::AmbiguousColumn { .. }
         | crate::Error::UnknownStrictField { .. }
         | crate::Error::DivisionByZero
@@ -307,6 +310,15 @@ impl From<ErrorCode> for DataPlaneErrorCode {
             ErrorCode::DependentObjectsExist { object, detail } => {
                 Self::DependentObjectsExist { object, detail }
             }
+            ErrorCode::TextColumn {
+                collection,
+                column,
+                fault,
+            } => Self::TextColumn {
+                collection,
+                column,
+                fault: text_column_fault_to_wire(fault),
+            },
         }
     }
 }
@@ -445,52 +457,44 @@ impl From<DataPlaneErrorCode> for ErrorCode {
             DataPlaneErrorCode::DependentObjectsExist { object, detail } => {
                 Self::DependentObjectsExist { object, detail }
             }
+            DataPlaneErrorCode::TextColumn {
+                collection,
+                column,
+                fault,
+            } => Self::TextColumn {
+                collection,
+                column,
+                fault: text_column_fault_from_wire(fault),
+            },
         }
-    }
-}
-
-/// The wire form of a sync hold.
-fn sync_hold_to_wire(hold: SyncHold) -> DataPlaneSyncHold {
-    match hold {
-        SyncHold::Duplicate => DataPlaneSyncHold::Duplicate,
-        SyncHold::Fenced => DataPlaneSyncHold::Fenced,
-        SyncHold::Gap { expected } => DataPlaneSyncHold::Gap { expected },
-    }
-}
-
-/// The sync hold a wire form names.
-fn sync_hold_from_wire(hold: DataPlaneSyncHold) -> SyncHold {
-    match hold {
-        DataPlaneSyncHold::Duplicate => SyncHold::Duplicate,
-        DataPlaneSyncHold::Fenced => SyncHold::Fenced,
-        DataPlaneSyncHold::Gap { expected } => SyncHold::Gap { expected },
-    }
-}
-
-/// The wire form of a counter fault. Both types live in other crates, so the
-/// mapping is a function, not a `From` impl.
-fn counter_fault_to_wire(fault: CounterFault) -> DataPlaneCounterFault {
-    match fault {
-        CounterFault::NotAnInteger => DataPlaneCounterFault::NotAnInteger,
-        CounterFault::NotAFloat => DataPlaneCounterFault::NotAFloat,
-        CounterFault::IntegerOverflow => DataPlaneCounterFault::IntegerOverflow,
-        CounterFault::NonFinite => DataPlaneCounterFault::NonFinite,
-    }
-}
-
-/// The counter fault a wire form carries.
-fn counter_fault_from_wire(fault: DataPlaneCounterFault) -> CounterFault {
-    match fault {
-        DataPlaneCounterFault::NotAnInteger => CounterFault::NotAnInteger,
-        DataPlaneCounterFault::NotAFloat => CounterFault::NotAFloat,
-        DataPlaneCounterFault::IntegerOverflow => CounterFault::IntegerOverflow,
-        DataPlaneCounterFault::NonFinite => CounterFault::NonFinite,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::envelope::{CounterFault, SyncHold};
+    use nodedb_types::text_search::TextColumnFault;
+
+    #[test]
+    fn text_column_code_roundtrips_verbatim() {
+        for fault in [
+            TextColumnFault::Undeclared,
+            TextColumnFault::NotText {
+                data_type: "INT".into(),
+            },
+            TextColumnFault::NotAColumn,
+            TextColumnFault::NotIndexed,
+        ] {
+            let original = ErrorCode::TextColumn {
+                collection: "docs".into(),
+                column: "title".into(),
+                fault,
+            };
+            let wire = DataPlaneErrorCode::from(original.clone());
+            assert_eq!(ErrorCode::from(wire), original);
+        }
+    }
 
     #[test]
     fn division_by_zero_survives_the_wire_hop() {

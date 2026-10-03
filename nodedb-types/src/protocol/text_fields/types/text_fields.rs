@@ -56,8 +56,10 @@ pub struct TextFields {
     // ── Graph RAG fusion ─────────────────────────────────────
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vector_top_k: Option<u32>,
+    /// Edge labels a graph walk follows. Absent or empty keeps every edge.
+    /// Otherwise an edge with any listed label. RAG fusion takes at most one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub edge_label: Option<String>,
+    pub edge_labels: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub direction: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,6 +96,10 @@ pub struct TextFields {
     pub vector_weight: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fuzzy: Option<bool>,
+    /// Boolean combination of the query terms. `None` runs the
+    /// `TextSearchParams` default, `QueryMode::Or`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_mode: Option<crate::text_search::QueryMode>,
 
     // ── Vector search tuning ────────────────────────────────
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -218,7 +224,8 @@ pub struct TextFields {
     /// Field-level updates: [(field_name, value_bytes), ...].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updates: Option<Vec<(String, Vec<u8>)>>,
-    /// Serialized filter predicates (MessagePack).
+    /// Serialized filter predicates (MessagePack). A `VectorSearch` request
+    /// carries one `MetadataFilter`. Scan requests carry a `ScanFilter` list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filters: Option<Vec<u8>>,
 
@@ -230,6 +237,10 @@ pub struct TextFields {
     /// expansion; the server narrows to u32 via the surrogate space check.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vector_id: Option<u64>,
+    /// Document ids a vector search ranks among. The server restricts the
+    /// candidates before ranking. `None` ranks every document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_ids: Option<Vec<String>>,
 
     // ── Collection policy ────────────────────────────────────
     #[serde(skip_serializing_if = "Option::is_none")]

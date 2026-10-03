@@ -83,6 +83,7 @@ fn is_transient_verdict(code: &ErrorCode) -> bool {
         | ErrorCode::InsufficientBalance { .. }
         | ErrorCode::RecursionDepthExceeded { .. }
         | ErrorCode::UndefinedColumn { .. }
+        | ErrorCode::TextColumn { .. }
         | ErrorCode::Internal { .. }
         | ErrorCode::Unsupported { .. }
         | ErrorCode::RollbackFailed { .. }
@@ -156,7 +157,9 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         | ErrorCode::DivisionByZero
         | ErrorCode::UndefinedFunction { .. }
         | ErrorCode::DataException { .. }
-        | ErrorCode::UndefinedColumn { .. } => true,
+        | ErrorCode::UndefinedColumn { .. }
+        // A full-text read refused the field before ranking.
+        | ErrorCode::TextColumn { .. } => true,
 
         // NOT established — every one of these can be reported by a request
         // whose write reached, or can have reached, engine state. Emitting an

@@ -6,9 +6,10 @@
 use crate::error::Result;
 use crate::functions::registry::FunctionRegistry;
 use crate::types::{
-    CtePlan, DocumentIndexLookupPlan, KvInsertPlan, LateralLoopPlan, LateralTopKPlan, MergePlan,
-    RangeScanPlan, RecursiveScanPlan, TimeseriesScanPlan, UpsertPlan, VectorPrimaryDeletePlan,
-    VectorPrimaryInsertPlan, VectorPrimaryUpdatePlan,
+    CtePlan, DocumentIndexLookupPlan, HybridSearchPlan, HybridSearchTriplePlan, KvInsertPlan,
+    LateralLoopPlan, LateralTopKPlan, MergePlan, RangeScanPlan, RecursiveScanPlan, TextSearchPlan,
+    TimeseriesScanPlan, UpsertPlan, VectorPrimaryDeletePlan, VectorPrimaryInsertPlan,
+    VectorPrimaryUpdatePlan,
 };
 use crate::types::{MergePlanAction, SqlPlan};
 
@@ -146,7 +147,10 @@ impl Scope<'_> {
             }
             // A search plan serves its own score call as a column; only its
             // residual filters run on the row evaluator.
-            SqlPlan::VectorSearch { filters, .. } | SqlPlan::TextSearch { filters, .. } => {
+            SqlPlan::VectorSearch { filters, .. }
+            | SqlPlan::TextSearch(TextSearchPlan { filters, .. })
+            | SqlPlan::HybridSearch(HybridSearchPlan { filters, .. })
+            | SqlPlan::HybridSearchTriple(HybridSearchTriplePlan { filters, .. }) => {
                 self.filters(filters)
             }
             SqlPlan::SpatialScan {
@@ -239,8 +243,6 @@ impl Scope<'_> {
             | SqlPlan::TimeseriesIngest { .. }
             | SqlPlan::MultiVectorSearch { .. }
             | SqlPlan::SparseSearch { .. }
-            | SqlPlan::HybridSearch { .. }
-            | SqlPlan::HybridSearchTriple { .. }
             | SqlPlan::RecursiveValue { .. }
             | SqlPlan::CreateArray { .. }
             | SqlPlan::DropArray { .. }
@@ -359,40 +361,57 @@ mod tests {
         assert_eq!(check(&plan), Ok(()));
     }
 
-    #[test]
-    fn a_search_plan_projection_serves_its_score() {
-        let plan = SqlPlan::TextSearch {
+    /// A text search that scores `rust` in every document under alias `s`.
+    fn text_search(projection: Vec<Projection>) -> SqlPlan {
+        SqlPlan::TextSearch(crate::types::TextSearchPlan {
             collection: "docs".into(),
-            field: None,
-            query: crate::fts_types::FtsQuery::Plain {
-                text: "rust".into(),
-                fuzzy: true,
+            shape: crate::types::TextSearchShape::Match {
+                field: None,
+                query: crate::fts_types::FtsQuery::Plain {
+                    text: "rust".into(),
+                    fuzzy: true,
+                },
+                mode: nodedb_types::text_search::QueryMode::And,
+                top_k: Some(10),
             },
-            top_k: 10,
             filters: Vec::new(),
-            score_alias: Some("s".into()),
-            projection: vec![Projection::Computed {
-                expr: call("bm25_score"),
+            scores: vec![crate::types::TextScoreColumn {
+                field: None,
+                query: "rust".into(),
+                mode: nodedb_types::text_search::QueryMode::And,
+                fuzzy: true,
                 alias: "s".into(),
             }],
-        };
+            projection,
+        })
+    }
+
+    #[test]
+    fn a_search_plan_projection_serves_its_score() {
+        let plan = text_search(vec![Projection::Computed {
+            expr: call("bm25_score"),
+            alias: "s".into(),
+        }]);
         assert_eq!(check(&plan), Ok(()));
     }
 
     #[test]
-    fn a_subquery_tail_over_a_search_plan_is_not_checked() {
-        let search = SqlPlan::TextSearch {
-            collection: "docs".into(),
-            field: None,
-            query: crate::fts_types::FtsQuery::Plain {
-                text: "rust".into(),
-                fuzzy: true,
-            },
-            top_k: 10,
-            filters: Vec::new(),
-            score_alias: Some("s".into()),
-            projection: Vec::new(),
+    fn a_match_in_a_text_search_filter_is_refused() {
+        let SqlPlan::TextSearch(mut search) = text_search(Vec::new()) else {
+            unreachable!("text_search builds a TextSearch plan");
         };
+        search.filters.push(Filter {
+            expr: FilterExpr::Expr(call("text_match")),
+        });
+        assert!(matches!(
+            check(&SqlPlan::TextSearch(search)),
+            Err(SqlError::SearchFunctionOutsideSearch { .. })
+        ));
+    }
+
+    #[test]
+    fn a_subquery_tail_over_a_search_plan_is_not_checked() {
+        let search = text_search(Vec::new());
         let plan = SqlPlan::Subquery {
             input: Box::new(search),
             filters: Vec::new(),

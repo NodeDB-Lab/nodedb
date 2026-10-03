@@ -139,6 +139,9 @@ impl CoreLoop {
         // `DocumentOp::Truncate`, so these entries are the only record of the
         // removals WAL replay and a point-in-time restore apply.
         let mut write_set: Vec<WriteSetEntry> = Vec::new();
+        // Surrogates removed so far. A refusal part-way removes their text
+        // from the inverted index. A full TRUNCATE empties it in one purge.
+        let mut removed: Vec<nodedb_types::Surrogate> = Vec::new();
         for storage_key in &all_ids {
             let doc_id = storage_key.to_string();
 
@@ -151,7 +154,7 @@ impl CoreLoop {
                 Ok(txn) => txn,
                 Err(e) => {
                     let code = refusal_after_rows(truncated, e);
-                    return self.refusal_with_landed_rows(task, code, write_set);
+                    return self.truncate_refusal(task, tid, collection, code, &removed, write_set);
                 }
             };
             let deleted_bytes = self
@@ -182,7 +185,7 @@ impl CoreLoop {
                     Ok(outcome) => target_writes = outcome.target_writes,
                     Err(e) => {
                         let code = refusal_after_rows(truncated, e);
-                        return self.refusal_with_landed_rows(task, code, write_set);
+                        return self.truncate_refusal(task, tid, collection, code, &removed, write_set);
                     }
                 }
             }
@@ -193,7 +196,7 @@ impl CoreLoop {
                         detail: format!("truncate commit: {e}"),
                     },
                 );
-                return self.refusal_with_landed_rows(task, code, write_set);
+                return self.truncate_refusal(task, tid, collection, code, &removed, write_set);
             }
             if let Some(deleted_bytes) = deleted_bytes.as_deref() {
                 let surrogate = storage_key.surrogate();
@@ -207,14 +210,9 @@ impl CoreLoop {
                     declared_primary_key,
                     *storage_key,
                 );
-                if let Err(e) = self.inverted.remove_document(
-                    database_id,
-                    crate::types::TenantId::new(tid),
-                    collection,
-                    surrogate,
-                ) {
-                    warn!(core = self.core_id, %collection, %doc_id, error = %e, "truncate: inverted removal failed");
-                }
+                // The row's text leaves the inverted index with every other
+                // row's, in one purge once the loop ends.
+                removed.push(surrogate);
                 if let Err(e) = self.sparse.delete_indexes_for_document(
                     database_id,
                     tid,
@@ -255,21 +253,31 @@ impl CoreLoop {
                 // events were lost, and per-row events are what ROW-level
                 // AFTER-DELETE triggers match on (see
                 // `event::trigger::dispatcher::single`).
-                let old_converted = self.resolve_event_payload(
-                    task.request.database_id.as_u64(),
-                    tid,
-                    collection,
-                    deleted_bytes,
-                );
                 self.emit_document_delete_event(
                     task,
+                    tid,
                     collection,
                     row_identity,
-                    Some(old_converted.as_deref().unwrap_or(deleted_bytes)),
+                    Some(deleted_bytes),
                 );
                 truncated += 1;
             }
             write_set.extend(write_hook::target_write_set(&target_writes));
+        }
+
+        // Every row is removed: empty the collection's inverted index in one
+        // purge. Its analyzer, language, and fuzzy configuration stay.
+        if let Err(e) =
+            self.inverted
+                .clear_collection(database_id, crate::types::TenantId::new(tid), collection)
+        {
+            let code = refusal_after_rows(
+                truncated,
+                ErrorCode::Internal {
+                    detail: format!("truncate: emptying the inverted index failed: {e}"),
+                },
+            );
+            return self.refusal_with_landed_rows(task, code, write_set);
         }
 
         // Clear aggregate cache for this collection.
@@ -294,6 +302,38 @@ impl CoreLoop {
         };
         response.write_set = write_set;
         response
+    }
+
+    /// The refusal of a TRUNCATE that stopped part-way. The rows removed so
+    /// far stay removed, so their text leaves the inverted index in one batch
+    /// before the refusal answers. A failure of that removal is the refusal.
+    fn truncate_refusal(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        collection: &str,
+        code: ErrorCode,
+        removed: &[nodedb_types::Surrogate],
+        write_set: Vec<WriteSetEntry>,
+    ) -> Response {
+        let code = match self.inverted.remove_documents(
+            task.request.database_id.as_u64(),
+            crate::types::TenantId::new(tid),
+            collection,
+            removed,
+        ) {
+            Ok(()) => code,
+            Err(e) => refusal_after_rows(
+                removed.len() as u64,
+                ErrorCode::Internal {
+                    detail: format!(
+                        "{code:?}; removing the truncated rows' text from the inverted index \
+                         failed: {e}"
+                    ),
+                },
+            ),
+        };
+        self.refusal_with_landed_rows(task, code, write_set)
     }
 
     /// ESTIMATE_COUNT: return approximate row count from HLL cardinality stats.

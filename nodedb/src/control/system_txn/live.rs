@@ -86,7 +86,11 @@ pub(super) fn savepoint_error(error: SavepointError) -> crate::Error {
         SavepointError::NoActiveTransaction => crate::Error::Internal {
             detail: "a system transaction savepoint ran outside its block".into(),
         },
+        SavepointError::TransactionAborted => crate::Error::BadRequest {
+            detail: "a system transaction savepoint ran in an aborted block".into(),
+        },
         SavepointError::NotFound { message } => crate::Error::BadRequest { detail: message },
+        SavepointError::OverlayDispatch { message } => crate::Error::Internal { detail: message },
     }
 }
 

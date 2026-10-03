@@ -8,17 +8,18 @@
 //! body held and misses the words its new body holds.
 //!
 //! The text is extracted exactly as the insert path extracts it
-//! (`fts_text::extract_fts_text`), so an updated row indexes the same way a
+//! (`fts_text::extract_fts_fields`), so an updated row indexes the same way a
 //! freshly inserted row with the same body does. `index_document_in_txn`
-//! retracts the terms the new text no longer contains, and removes the row
-//! from the index when the new text has no indexable word.
+//! retracts the terms the new text no longer contains, retracts the row from
+//! every field index the new body no longer fills, and removes the row from
+//! an index whose new text has no indexable word.
 
 use redb::WriteTransaction;
 
 use nodedb_types::Surrogate;
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::fts_text::extract_fts_text;
+use crate::data::executor::fts_text::extract_fts_fields;
 use crate::engine::sparse::inverted::IndexDocScope;
 use crate::types::TenantId;
 
@@ -41,7 +42,7 @@ impl CoreLoop {
         txn: &WriteTransaction,
         p: UpdateTextReindex<'_>,
     ) -> crate::Result<()> {
-        let text = extract_fts_text(p.new_doc);
+        let text = extract_fts_fields(p.new_doc);
         self.inverted
             .index_document_in_txn(
                 txn,

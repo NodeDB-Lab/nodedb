@@ -62,6 +62,11 @@ impl TenantCrdtEngine {
                     detail: reason.to_string(),
                 },
             )),
+            // The DLQ refusal is the error: nothing applied and nothing
+            // records the snapshot.
+            super::ValidatedApplyOutcome::DeadLetterRefused { error, .. } => {
+                Err(crate::Error::Crdt(error))
+            }
             super::ValidatedApplyOutcome::Malformed => Err(crate::Error::Crdt(
                 nodedb_crdt::CrdtError::DeltaApplyFailed("malformed snapshot".into()),
             )),
@@ -69,6 +74,11 @@ impl TenantCrdtEngine {
                 nodedb_crdt::CrdtError::DeltaApplyFailed(
                     "snapshot import left operations causally pending".into(),
                 ),
+            )),
+            super::ValidatedApplyOutcome::CandidateUnavailable => Err(crate::Error::Crdt(
+                nodedb_crdt::CrdtError::DeltaApplyFailed(format!(
+                    "no apply candidate for collection {collection}; nothing was imported"
+                )),
             )),
         }
     }

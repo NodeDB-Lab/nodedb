@@ -117,6 +117,13 @@ pub enum ErrorCode {
     /// SQLSTATE a planner-side `SqlError::UnknownColumn` produces — a missing
     /// column reports identically wherever it is detected.
     UndefinedColumn { column: String },
+    /// A full-text search named a field that cannot serve it, detected when
+    /// the Data Plane resolves the field's index.
+    TextColumn {
+        collection: String,
+        column: String,
+        fault: nodedb_types::text_search::TextColumnFault,
+    },
     /// Internal error (io_uring failure, corruption, etc.)
     Internal { detail: String },
     /// Operation is not supported on this engine, or not yet implemented for
@@ -192,7 +199,8 @@ impl From<nodedb_query::EvalError> for ErrorCode {
             nodedb_query::EvalError::UnknownFunction { name } => Self::UndefinedFunction { name },
             e @ (nodedb_query::EvalError::VectorDimensionMismatch { .. }
             | nodedb_query::EvalError::ArgumentType { .. }
-            | nodedb_query::EvalError::InvalidJsonPath { .. }) => Self::DataException {
+            | nodedb_query::EvalError::InvalidJsonPath { .. }
+            | nodedb_query::EvalError::NumericOverflow { .. }) => Self::DataException {
                 detail: e.to_string(),
             },
         }
@@ -315,6 +323,15 @@ impl From<crate::Error> for ErrorCode {
                 detail: unsupported.to_string(),
             },
             crate::Error::UndefinedColumn { column } => Self::UndefinedColumn { column },
+            crate::Error::TextColumn {
+                collection,
+                column,
+                fault,
+            } => Self::TextColumn {
+                collection,
+                column,
+                fault,
+            },
             // Same condition an undefined column reports at plan time, raised
             // here by the strict encoder for a transport the planner never
             // sees (native client, `COPY FROM`, CRDT delta merge).

@@ -3,6 +3,7 @@
 mod balanced_gate;
 mod crdt_gate;
 mod insert;
+mod key_assignment;
 mod kv_insert;
 mod merge;
 mod surrogate_keys;

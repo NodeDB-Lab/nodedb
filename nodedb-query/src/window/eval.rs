@@ -149,11 +149,12 @@ mod tests {
         evaluate_window_functions(&mut rows, &[spec]).unwrap();
         // The frame runs in salary order within each dept, not in row
         // arrival order: eng = Carol(90) → Alice(100) → Bob(120).
-        assert_eq!(rows[0].1["running_total"], json!(190.0));
-        assert_eq!(rows[1].1["running_total"], json!(310.0));
-        assert_eq!(rows[2].1["running_total"], json!(90.0));
-        assert_eq!(rows[3].1["running_total"], json!(80.0));
-        assert_eq!(rows[4].1["running_total"], json!(190.0));
+        // Integer salaries total exactly as integers.
+        assert_eq!(rows[0].1["running_total"], json!(190));
+        assert_eq!(rows[1].1["running_total"], json!(310));
+        assert_eq!(rows[2].1["running_total"], json!(90));
+        assert_eq!(rows[3].1["running_total"], json!(80));
+        assert_eq!(rows[4].1["running_total"], json!(190));
     }
 
     #[test]

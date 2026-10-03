@@ -27,7 +27,7 @@
 //! 12  delta
 //! 13  peer_id
 //! 14  vector_top_k
-//! 15  edge_label
+//! 15  edge_labels
 //! 16  direction
 //! 17  expansion_depth
 //! 18  final_top_k
@@ -102,6 +102,9 @@
 //! 87  list_from_index
 //! 88  list_to_index
 //! 89  list_fields_json
+//! 90  vector_dim
+//! 91  text_mode
+//! 92  allowed_ids
 //! ```
 
 mod field_count;

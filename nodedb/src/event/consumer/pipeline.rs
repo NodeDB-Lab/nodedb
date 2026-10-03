@@ -72,6 +72,13 @@ async fn deliver_event(
             .advance_lsn_only(event.vshard_id.as_u32(), event.lsn.as_u64());
         return;
     }
+    if let Some(fault) = event.image_fault {
+        dead_letter_unrendered_image(event, fault, shared_state);
+        shared_state
+            .watermark_tracker
+            .advance_lsn_only(event.vshard_id.as_u32(), event.lsn.as_u64());
+        return;
+    }
     // The key the non-idempotent sinks remember the event by, so an event
     // delivered again after a restart reaches each of them once.
     let key = SinkEventKey::of(core_id, event);
@@ -85,6 +92,42 @@ async fn deliver_event(
         held.push(row);
     }
     accumulate_data_event(event, key.as_ref(), shared_state, cdc_router);
+}
+
+/// Dead-letter an event whose row image the Data Plane could not render.
+///
+/// The stored row is corrupt, so no side effect can act on the write: a
+/// trigger would bind a missing NEW or OLD row, a change stream would carry
+/// a row without its image, and a view or CRDT peer would apply it as one.
+/// The event runs none of them. A durable audit entry names the collection,
+/// row, LSN and image, and the Data Plane already filed the recorder report.
+fn dead_letter_unrendered_image(
+    event: &WriteEvent,
+    fault: crate::event::image_fault::ImageFault,
+    shared_state: &SharedState,
+) {
+    let detail = format!(
+        "event dead-lettered: the {} image of row '{}' in '{}' at LSN {} did not render; \
+         no trigger, change stream, view or CRDT peer received the write",
+        fault.as_str(),
+        event.row_id.as_str(),
+        event.collection,
+        event.lsn.as_u64(),
+    );
+    tracing::error!(
+        collection = %event.collection,
+        row = event.row_id.as_str(),
+        lsn = event.lsn.as_u64(),
+        image = fault.as_str(),
+        "{detail}"
+    );
+    shared_state.audit_record_with_db(
+        crate::control::security::audit::AuditEvent::AdminAction,
+        Some(event.tenant_id),
+        Some(event.database_id),
+        "event_plane",
+        &detail,
+    );
 }
 
 /// Whether `event` is a row write that triggers and event actions act on.
@@ -178,6 +221,7 @@ mod tests {
             user_id: None,
             statement_digest: None,
             commit_hlc: Some(crate::event::test_utils::test_commit_hlc()),
+            image_fault: None,
         }
     }
 
@@ -188,6 +232,40 @@ mod tests {
             count: 2
         })));
         assert!(!event_actions_required(&event(WriteOp::Heartbeat)));
+    }
+
+    #[tokio::test]
+    async fn an_event_with_an_unrendered_image_is_dead_lettered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_wal, _watermarks, shared_state, _dlq, cdc_router) =
+            crate::event::test_utils::event_test_deps(&dir);
+        let mut faulted = event(WriteOp::Update);
+        faulted.lsn = Lsn::new(9);
+        faulted.new_value = Some(Arc::from(&[0x80u8][..]));
+        faulted.image_fault = Some(crate::event::image_fault::ImageFault::Old);
+        let mut guard = super::super::delivery::DeliveryGuard::new(Lsn::new(0));
+
+        let delivered = super::deliver_events(
+            0,
+            std::slice::from_ref(&faulted),
+            &mut guard,
+            &shared_state,
+            &cdc_router,
+        )
+        .await;
+
+        assert_eq!(delivered, 1);
+        let audit = shared_state.audit.lock().expect("read audit log");
+        let entry = audit
+            .all()
+            .iter()
+            .find(|entry| entry.detail.contains("event dead-lettered"))
+            .expect("the dead-lettered event is audited");
+        assert!(entry.detail.contains("old image of row 'row-1' in 'events' at LSN 9"));
+        assert!(
+            cdc_router.stream_buffers().is_empty(),
+            "no change stream receives the write"
+        );
     }
 
     #[test]

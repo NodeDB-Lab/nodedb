@@ -283,7 +283,7 @@ mod tests {
         let plan = PhysicalPlan::Text(TextOp::FtsIndexDoc {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),
             surrogate: Surrogate::new(7),
-            text: "hello world".to_string(),
+            fields: vec![("body".to_string(), "hello world".to_string())],
             provenance: None,
         });
 
@@ -304,7 +304,10 @@ mod tests {
         let decoded =
             nodedb_wal::record::FtsIndexPayload::from_bytes(&record.payload).expect("decode");
         assert_eq!(decoded.collection, "docs");
-        assert_eq!(decoded.text, "hello world");
+        assert_eq!(
+            decoded.fields,
+            vec![("body".to_string(), "hello world".to_string())]
+        );
         assert_eq!(
             decoded.doc_id,
             crate::engine::document::store::StorageKey::for_surrogate(Surrogate::new(7))

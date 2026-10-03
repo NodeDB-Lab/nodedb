@@ -28,7 +28,8 @@ use nodedb_physical::physical_plan::{GraphOp, KvOp, MetaOp, PhysicalPlan};
 
 use super::helpers::*;
 
-fn send_txn(
+/// Send `plan` stamped with `txn_id` and return its response.
+pub(super) fn send_txn(
     core: &mut nodedb::data::executor::core_loop::CoreLoop,
     req_tx: &mut nodedb_bridge::buffer::Producer<nodedb::bridge::dispatch::BridgeRequest>,
     resp_rx: &mut nodedb_bridge::buffer::Consumer<nodedb::bridge::dispatch::BridgeResponse>,
@@ -46,7 +47,23 @@ fn send_txn(
     resp_rx.try_pop().unwrap().inner
 }
 
-fn stage_edge_put(collection: &str, src: &str, label: &str, dst: &str) -> PhysicalPlan {
+pub(super) fn stage_edge_put(
+    collection: &str,
+    src: &str,
+    label: &str,
+    dst: &str,
+) -> PhysicalPlan {
+    stage_edge_put_with(collection, src, label, dst, Vec::new())
+}
+
+/// A staged put of `src -label-> dst` carrying the plain-msgpack `properties`.
+pub(super) fn stage_edge_put_with(
+    collection: &str,
+    src: &str,
+    label: &str,
+    dst: &str,
+    properties: Vec<u8>,
+) -> PhysicalPlan {
     PhysicalPlan::Meta(MetaOp::StageWrite {
         plan: Box::new(PhysicalPlan::Graph(GraphOp::EdgePut {
             collection: nodedb_types::QualifiedCollection::new(
@@ -56,14 +73,14 @@ fn stage_edge_put(collection: &str, src: &str, label: &str, dst: &str) -> Physic
             src_id: src.into(),
             label: label.into(),
             dst_id: dst.into(),
-            properties: Vec::new(),
+            properties,
             src_surrogate: doc_surrogate(src),
             dst_surrogate: doc_surrogate(dst),
         })),
     })
 }
 
-fn stage_edge_delete(collection: &str, src: &str, label: &str, dst: &str) -> PhysicalPlan {
+pub(super) fn stage_edge_delete(collection: &str, src: &str, label: &str, dst: &str) -> PhysicalPlan {
     PhysicalPlan::Meta(MetaOp::StageWrite {
         plan: Box::new(PhysicalPlan::Graph(GraphOp::EdgeDelete {
             collection: nodedb_types::QualifiedCollection::new(
@@ -83,7 +100,7 @@ fn stage_edge_delete(collection: &str, src: &str, label: &str, dst: &str) -> Phy
 fn neighbors(node: &str, label: &str) -> PhysicalPlan {
     PhysicalPlan::Graph(GraphOp::Neighbors {
         node_id: node.into(),
-        edge_label: Some(label.into()),
+        edge_labels: vec![label.into()],
         direction: Direction::Out,
         rls_filters: Vec::new(),
         collection: None,
@@ -107,7 +124,7 @@ fn parse_markers(payload: &[u8]) -> (u64, u64, u64) {
     )
 }
 
-fn neighbor_nodes(payload: &[u8]) -> Vec<String> {
+pub(super) fn neighbor_nodes(payload: &[u8]) -> Vec<String> {
     let json = payload_json(payload);
     let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap_or_default();
     parsed

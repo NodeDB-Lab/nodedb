@@ -31,6 +31,10 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_vector_search(
         None => None,
     };
     let ann_options = p.ann_options.to_runtime();
+    let filter_bitmap = match p.pk_prefilter {
+        Some(keys) => Some(pk_prefilter_bitmap(p.ctx, collection_key, keys)?),
+        None => None,
+    };
     let payload_filters: Vec<nodedb_types::PayloadAtom> = p
         .payload_filters
         .iter()
@@ -46,7 +50,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_vector_search(
             top_k: *p.top_k,
             ef_search: *p.ef_search,
             metric: *p.metric,
-            filter_bitmap: None,
+            filter_bitmap,
             field_name: p.field.to_string(),
             rls_filters: filter_bytes,
             inline_prefilter_plan,
@@ -57,6 +61,24 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_vector_search(
         post_set_op: PostSetOp::None,
         txn_id: None,
     }])
+}
+
+/// The surrogates `keys` are bound to in `collection`, as the candidate
+/// bitmap of a vector search. A key bound to no row names no candidate, so
+/// keys that name no row yield an empty bitmap: the search returns nothing.
+fn pk_prefilter_bitmap(
+    ctx: &super::super::convert::ConvertContext,
+    collection: nodedb_types::CollectionKey<'_>,
+    keys: &[nodedb_sql::types::SqlValue],
+) -> crate::Result<nodedb_types::SurrogateBitmap> {
+    let mut bitmap = nodedb_types::SurrogateBitmap::new();
+    for key in keys {
+        let pk_bytes = super::super::value::sql_value_to_string(key).into_bytes();
+        if let Some(surrogate) = ctx.surrogate_for_existing_pk(collection, &pk_bytes)? {
+            bitmap.insert(surrogate);
+        }
+    }
+    Ok(bitmap)
 }
 
 pub(in crate::control::planner::sql_plan_convert) fn convert_sparse_search(
@@ -172,111 +194,20 @@ fn build_array_prefilter_plan(
     ))
 }
 
-pub(in crate::control::planner::sql_plan_convert) fn convert_text_search(
-    collection: &str,
-    query: &nodedb_sql::fts_types::FtsQuery,
-    top_k: &usize,
-    score_alias: Option<&str>,
-    tenant_id: TenantId,
-    database_id: crate::types::DatabaseId,
-) -> crate::Result<Vec<PhysicalTask>> {
-    use nodedb_sql::fts_types::FtsQuery;
-
-    let collection_key = nodedb_types::CollectionKey::from_bare(database_id, collection);
-    let qualified_collection = nodedb_types::QualifiedCollection::new(database_id, collection);
-    let vshard = collection_key.vshard();
-
-    // Phrase queries emit a dedicated PhraseSearch op rather than going
-    // through the BM25 plain-string path. Score alias is not meaningful
-    // for phrase search (no per-row score injection), so it is ignored.
-    if let FtsQuery::Phrase(terms) = query {
-        let analyzed_terms: Vec<String> =
-            terms.iter().flat_map(|t| nodedb_fts::analyze(t)).collect();
-        if analyzed_terms.is_empty() {
-            // No searchable terms after analysis — return empty result via
-            // a standard search that will match nothing.
-            return Ok(vec![PhysicalTask {
-                tenant_id,
-                vshard_id: vshard,
-                database_id,
-                plan: PhysicalPlan::Text(TextOp::Search {
-                    collection: qualified_collection.clone(),
-                    query: String::new(),
-                    top_k: *top_k,
-                    fuzzy: false,
-                    prefilter: None,
-                    rls_filters: Vec::new(),
-                }),
-                post_set_op: PostSetOp::None,
-                txn_id: None,
-            }]);
-        }
-        return Ok(vec![PhysicalTask {
-            tenant_id,
-            vshard_id: vshard,
-            database_id,
-            plan: PhysicalPlan::Text(TextOp::PhraseSearch {
-                collection: qualified_collection.clone(),
-                terms: analyzed_terms,
-                top_k: *top_k,
-                prefilter: None,
-            }),
-            post_set_op: PostSetOp::None,
-            txn_id: None,
-        }]);
-    }
-
-    let query_str = query
-        .to_plain_string()
-        .ok_or_else(|| crate::Error::BadRequest {
-            detail: "unsupported FTS query form; use plain terms, AND/OR combinations, \
-                     or phrase queries with text_match(field, '\"phrase here\"')"
-                .into(),
-        })?;
-    let fuzzy = query.is_fuzzy();
-
-    // When a score alias is present the caller wants a full-collection scan
-    // with BM25 scores injected per row (all rows appear, non-matching rows
-    // receive a null score). Emit `BM25ScoreScan` for that shape; emit the
-    // hit-only `Search` for the WHERE `text_match(...)` shape.
-    let op = if let Some(alias) = score_alias {
-        TextOp::BM25ScoreScan {
-            collection: qualified_collection.clone(),
-            query: query_str,
-            score_alias: alias.to_string(),
-            fuzzy,
-        }
-    } else {
-        TextOp::Search {
-            collection: qualified_collection.clone(),
-            query: query_str,
-            top_k: *top_k,
-            fuzzy,
-            prefilter: None,
-            rls_filters: Vec::new(),
-        }
-    };
-
-    Ok(vec![PhysicalTask {
-        tenant_id,
-        vshard_id: vshard,
-        database_id,
-        plan: PhysicalPlan::Text(op),
-        post_set_op: PostSetOp::None,
-        txn_id: None,
-    }])
-}
-
 pub(in crate::control::planner::sql_plan_convert) fn convert_hybrid_search(
     p: HybridSearchParams<'_>,
 ) -> crate::Result<Vec<PhysicalTask>> {
     let HybridSearchParams {
         collection,
+        vector_field,
         query_vector,
+        text_field,
         query_text,
+        filters,
         top_k,
         ef_search,
         vector_weight,
+        mode,
         fuzzy,
         score_alias,
         tenant_id,
@@ -291,10 +222,14 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_hybrid_search(
         database_id,
         plan: PhysicalPlan::Text(TextOp::HybridSearch {
             collection: qualified_collection,
+            vector_field: vector_field.to_string(),
             query_vector: query_vector.to_vec(),
+            text_field: text_field.map(str::to_owned),
             query_text: query_text.to_string(),
+            filters: serialize_filters(filters)?,
             top_k: *top_k,
             ef_search: *ef_search,
+            mode,
             fuzzy: *fuzzy,
             vector_weight: *vector_weight,
             filter_bitmap: None,
@@ -311,13 +246,17 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_hybrid_search_tripl
 ) -> crate::Result<Vec<PhysicalTask>> {
     let HybridSearchTripleParams {
         collection,
+        vector_field,
         query_vector,
+        text_field,
         query_text,
+        filters,
         graph_seed_id,
         graph_depth,
         graph_edge_label,
         top_k,
         ef_search,
+        mode,
         fuzzy,
         rrf_k,
         score_alias,
@@ -333,13 +272,17 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_hybrid_search_tripl
         database_id,
         plan: PhysicalPlan::Text(TextOp::HybridSearchTriple {
             collection: qualified_collection,
+            vector_field: vector_field.to_string(),
             query_vector: query_vector.to_vec(),
+            text_field: text_field.map(str::to_owned),
             query_text: query_text.to_string(),
+            filters: serialize_filters(filters)?,
             graph_seed_id: graph_seed_id.to_string(),
             graph_depth: *graph_depth,
             graph_edge_label: graph_edge_label.clone(),
             top_k: *top_k,
             ef_search: *ef_search,
+            mode,
             fuzzy: *fuzzy,
             rrf_k: *rrf_k,
             filter_bitmap: None,

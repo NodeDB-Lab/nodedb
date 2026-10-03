@@ -6,37 +6,45 @@
 //! finalization, backfill from buffer, state persistence + restore.
 
 use nodedb::event::streaming_mv::persist::MvPersistence;
-use nodedb::event::streaming_mv::state::{GroupState, MvState};
+use nodedb::event::streaming_mv::state::{AggInput, GroupState, MvState};
 use nodedb::event::streaming_mv::types::{AggDef, AggFunction};
 use nodedb::types::DatabaseId;
+use nodedb_types::Value;
+
+fn count_def() -> Vec<AggDef> {
+    vec![AggDef {
+        output_name: "cnt".to_string(),
+        function: AggFunction::Count,
+        input_expr: String::new(),
+    }]
+}
+
+fn int(v: i64) -> AggInput {
+    AggInput::Value(Value::Integer(v))
+}
 
 #[test]
 fn incremental_count() {
     let state = MvState::new(
         "order_counts".to_string(),
         vec!["op".to_string()],
-        vec![AggDef {
-            output_name: "cnt".to_string(),
-            function: AggFunction::Count,
-            input_expr: String::new(),
-        }],
+        count_def(),
     );
 
-    // Each update passes &[1.0]; GroupState::update increments count by 1 per call.
-    state.update_with_time("group_a", &[1.0], 0);
-    state.update_with_time("group_a", &[1.0], 0);
-    state.update_with_time("group_b", &[1.0], 0);
+    state.update_with_time("group_a", &[AggInput::Event], 0);
+    state.update_with_time("group_a", &[AggInput::Event], 0);
+    state.update_with_time("group_b", &[AggInput::Event], 0);
 
-    let results = state.read_results_with_status();
+    let results = state.read_results_with_status().unwrap();
     assert_eq!(results.len(), 2);
 
     // MvResultRow = (group_key, AggRow, finalized)
     // AggRow = Vec<(output_name, value)>
     let group_a = results.iter().find(|r| r.0 == "group_a").unwrap();
-    assert_eq!(group_a.1[0].1, 2.0); // COUNT = 2
+    assert_eq!(group_a.1[0].1, Value::Integer(2));
 
     let group_b = results.iter().find(|r| r.0 == "group_b").unwrap();
-    assert_eq!(group_b.1[0].1, 1.0); // COUNT = 1
+    assert_eq!(group_b.1[0].1, Value::Integer(1));
 }
 
 #[test]
@@ -64,19 +72,16 @@ fn incremental_sum_min_max() {
     );
 
     // Pass the same value to all three aggregate slots.
-    state.update_with_time("bucket", &[10.0, 10.0, 10.0], 0);
-    state.update_with_time("bucket", &[30.0, 30.0, 30.0], 0);
-    state.update_with_time("bucket", &[20.0, 20.0, 20.0], 0);
+    for v in [10, 30, 20] {
+        state.update_with_time("bucket", &[int(v), int(v), int(v)], 0);
+    }
 
-    let results = state.read_results_with_status();
+    let results = state.read_results_with_status().unwrap();
     let bucket = results.iter().find(|r| r.0 == "bucket").unwrap();
 
-    // Sum aggregate (index 0): SUM of 10+30+20 = 60.
-    assert!((bucket.1[0].1 - 60.0).abs() < f64::EPSILON);
-    // Min aggregate (index 1): MIN of 10, 30, 20 = 10.
-    assert!((bucket.1[1].1 - 10.0).abs() < f64::EPSILON);
-    // Max aggregate (index 2): MAX of 10, 30, 20 = 30.
-    assert!((bucket.1[2].1 - 30.0).abs() < f64::EPSILON);
+    assert_eq!(bucket.1[0].1, Value::Integer(60));
+    assert_eq!(bucket.1[1].1, Value::Integer(10));
+    assert_eq!(bucket.1[2].1, Value::Integer(30));
 }
 
 #[test]
@@ -91,14 +96,14 @@ fn incremental_avg() {
         }],
     );
 
-    state.update_with_time("g", &[10.0], 0);
-    state.update_with_time("g", &[20.0], 0);
-    state.update_with_time("g", &[30.0], 0);
+    for v in [10, 20, 30] {
+        state.update_with_time("g", &[int(v)], 0);
+    }
 
-    let results = state.read_results_with_status();
+    let results = state.read_results_with_status().unwrap();
     let g = results.iter().find(|r| r.0 == "g").unwrap();
     // AVG = SUM / COUNT = 60 / 3 = 20.
-    assert!((g.1[0].1 - 20.0).abs() < f64::EPSILON);
+    assert_eq!(g.1[0].1, Value::Float(20.0));
 }
 
 #[test]
@@ -106,22 +111,18 @@ fn watermark_finalization() {
     let state = MvState::new(
         "event_counts".to_string(),
         vec!["group".to_string()],
-        vec![AggDef {
-            output_name: "cnt".to_string(),
-            function: AggFunction::Count,
-            input_expr: String::new(),
-        }],
+        count_def(),
     );
 
     // Use update_with_time so latest_event_time is populated for finalization.
-    state.update_with_time("early", &[1.0], 1000);
-    state.update_with_time("late", &[1.0], 5000);
+    state.update_with_time("early", &[AggInput::Event], 1000);
+    state.update_with_time("late", &[AggInput::Event], 5000);
 
     // Finalize groups with latest_event_time < 3000.
     let finalized = state.finalize_buckets(3000);
     assert_eq!(finalized, 1); // Only "early" finalized.
 
-    let results = state.read_results_with_status();
+    let results = state.read_results_with_status().unwrap();
     // MvResultRow = (group_key, AggRow, finalized_bool)
     let early = results.iter().find(|r| r.0 == "early").unwrap();
     assert!(early.2); // finalized = true
@@ -135,15 +136,11 @@ fn snapshot_and_restore() {
     let state = MvState::new(
         "snap_mv".to_string(),
         vec!["group".to_string()],
-        vec![AggDef {
-            output_name: "cnt".to_string(),
-            function: AggFunction::Count,
-            input_expr: String::new(),
-        }],
+        count_def(),
     );
-    state.update_with_time("g1", &[1.0], 0);
-    state.update_with_time("g1", &[1.0], 0);
-    state.update_with_time("g2", &[1.0], 0);
+    state.update_with_time("g1", &[AggInput::Event], 0);
+    state.update_with_time("g1", &[AggInput::Event], 0);
+    state.update_with_time("g2", &[AggInput::Event], 0);
 
     let snapshot = state.snapshot();
     assert_eq!(snapshot.len(), 2);
@@ -152,17 +149,23 @@ fn snapshot_and_restore() {
     let restored = MvState::new(
         "snap_mv".to_string(),
         vec!["group".to_string()],
-        vec![AggDef {
-            output_name: "cnt".to_string(),
-            function: AggFunction::Count,
-            input_expr: String::new(),
-        }],
+        count_def(),
     );
     restored.restore(snapshot);
 
-    let results = restored.read_results_with_status();
+    let results = restored.read_results_with_status().unwrap();
     let g1 = results.iter().find(|r| r.0 == "g1").unwrap();
-    assert_eq!(g1.1[0].1, 2.0); // COUNT = 2
+    assert_eq!(g1.1[0].1, Value::Integer(2));
+}
+
+/// A group state that took `values` for `func`, at `event_time`.
+fn state_of(func: AggFunction, values: &[i64], event_time: u64) -> GroupState {
+    let mut state = GroupState::default();
+    for v in values {
+        state.update(func, &int(*v));
+    }
+    state.update_event_time(event_time);
+    state
 }
 
 #[test]
@@ -170,29 +173,14 @@ fn persistence_save_and_load() {
     let dir = tempfile::tempdir().unwrap();
     let persist = MvPersistence::open(dir.path()).unwrap();
 
+    let mut update = state_of(AggFunction::Sum, &[5, 10, 15], 3000);
+    update.finalized = true;
     let snapshot = vec![
         (
             "INSERT".to_string(),
-            vec![GroupState {
-                count: 5,
-                sum: 100.0,
-                min: Some(10.0),
-                max: Some(50.0),
-                finalized: false,
-                latest_event_time: 5000,
-            }],
+            vec![state_of(AggFunction::Sum, &[10, 20, 30, 40], 5000)],
         ),
-        (
-            "UPDATE".to_string(),
-            vec![GroupState {
-                count: 3,
-                sum: 30.0,
-                min: Some(5.0),
-                max: Some(15.0),
-                finalized: true,
-                latest_event_time: 3000,
-            }],
-        ),
+        ("UPDATE".to_string(), vec![update]),
     ];
 
     persist
@@ -202,8 +190,8 @@ fn persistence_save_and_load() {
         .load(DatabaseId::DEFAULT, 1, "order_stats")
         .unwrap()
         .unwrap();
-    assert_eq!(loaded.len(), 2);
-    assert_eq!(loaded[0].1[0].count, 5);
+    assert_eq!(loaded, snapshot);
+    assert_eq!(loaded[0].1[0].count, 4);
     assert!(loaded[1].1[0].finalized);
 }
 

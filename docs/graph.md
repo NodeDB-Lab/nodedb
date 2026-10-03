@@ -74,13 +74,28 @@ GRAPH TRAVERSE FROM 'users:alice' DEPTH 3;
 GRAPH TRAVERSE FROM 'users:alice' DEPTH 2 LABEL 'follows' DIRECTION out;
 ```
 
-Breadth-first search from a start node. Returns discovered nodes at each depth level.
+Breadth-first search from a start node. Returns the discovered nodes with their depth, and the crossed edges with their properties: `{"nodes": [{"id", "depth"}], "edges": [{"from", "to", "label", "properties"}]}`. Nodes at the last depth are not expanded. Their edges to nodes already in the result are included.
 
-| Parameter   | Default | Description            |
-| ----------- | ------- | ---------------------- |
-| `DEPTH`     | 2       | Maximum hop count      |
-| `LABEL`     | (any)   | Filter by edge label   |
-| `DIRECTION` | out     | `in`, `out`, or `both` |
+| Parameter    | Default | Description                                   |
+| ------------ | ------- | --------------------------------------------- |
+| `DEPTH`      | 2       | Maximum hop count                             |
+| `LABEL`      | (any)   | Follow edges with any listed label            |
+| `DIRECTION`  | out     | `in`, `out`, or `both`                        |
+| `EDGE WHERE` | (none)  | Cross only edges whose properties match; last |
+
+### Edge Property Predicate
+
+```sql
+GRAPH TRAVERSE FROM 'users:alice' DEPTH 2 LABEL 'follows' EDGE WHERE since >= 2020 AND active = TRUE;
+GRAPH PATH FROM 'a' TO 'z' MAX_DEPTH 6 EDGE WHERE "kind" IN ('road', 'rail') AND NOT (closed = TRUE);
+```
+
+- `EDGE WHERE` is the last clause. Only `GRAPH TRAVERSE` and `GRAPH PATH` accept it.
+- Terms: `=`, `<>`, `!=`, `>`, `>=`, `<`, `<=`, `IN`, `NOT IN`, `IS NULL`, `IS NOT NULL`, joined by `AND`, `OR`, `NOT`.
+- Each comparison names one property and one literal: `NULL`, `TRUE`, `FALSE`, a quoted string, an integer or a finite float.
+- A missing property matches `IS NULL` and `NOT IN`. It never matches `>`, `>=`, `<`, `<=` or `IN`.
+- An edge without properties evaluates as an empty object.
+- The predicate runs on the core that stores the edge, before the edge counts against the visit cap.
 
 ### Neighbors (1-Hop)
 
@@ -98,7 +113,7 @@ GRAPH PATH FROM 'users:alice' TO 'users:charlie';
 GRAPH PATH FROM 'users:alice' TO 'users:charlie' MAX_DEPTH 5 LABEL 'knows';
 ```
 
-Cross-core BFS path finding. Returns an ordered list of node IDs, or empty array if no path exists within `MAX_DEPTH` (default 10).
+Cross-core BFS path finding. Returns an ordered list of node IDs, or empty array if no path exists within `MAX_DEPTH` (default 10). `EDGE WHERE` restricts the path to edges whose properties match, tested in each edge's stored direction.
 
 ---
 

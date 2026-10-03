@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Forensic payloads for CRDT history post-apply capture sites.
+//! Forensic payloads for CRDT capture sites: history post-apply, and rejected
+//! deltas the dead-letter queue refused.
 //!
 //! COMPACT HISTORY discards oplog entries on every node. A node that misses
 //! the compaction keeps a history its peers reclaimed, so a read at an old
@@ -54,9 +55,68 @@ impl DomainContext for HistoryCompactionNotApplied<'_> {
     }
 }
 
+/// A constraint-rejected CRDT delta whose dead-letter entry the queue
+/// refused, so no node-local record of the rejection exists.
+pub(in crate::diag) struct CrdtDeadLetterNotEnqueued<'a> {
+    pub tenant_id: u64,
+    /// Collection the delta wrote.
+    pub collection: &'a str,
+    /// Constraint the delta violated.
+    pub constraint: &'a str,
+    /// What failed, without the per-occurrence detail.
+    pub error_class: &'a str,
+}
+
+impl DomainContext for CrdtDeadLetterNotEnqueued<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.crdt_dead_letter_not_enqueued"
+    }
+
+    fn grouping_key(&self) -> String {
+        // The error class names the cause. Tenant, collection and constraint
+        // are the occurrence, so a full queue files one report.
+        format!("cause={}", self.error_class)
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "tenant_id": self.tenant_id,
+            "collection": self.collection,
+            "constraint": self.constraint,
+            "error_class": self.error_class,
+            "why_reported": "the delta violated a constraint and was refused, but the \
+                             dead-letter queue did not take its entry. The apply is \
+                             refused as an error so the sender keeps the delta, and every \
+                             further rejected delta is refused the same way until the \
+                             queue has room",
+            "operator_action": "inspect and drain the tenant's dead-letter queue, then let \
+                                 the sender re-push. A full queue means rejected deltas \
+                                 arrive faster than they are resolved",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dead_letter_grouping_ignores_the_occurrence() {
+        let first = CrdtDeadLetterNotEnqueued {
+            tenant_id: 1,
+            collection: "users",
+            constraint: "users_email_unique",
+            error_class: "dead-letter queue full",
+        };
+        let second = CrdtDeadLetterNotEnqueued {
+            tenant_id: 7,
+            collection: "orders",
+            constraint: "orders_fk",
+            ..first
+        };
+        assert_eq!(first.grouping_key(), second.grouping_key());
+        assert_eq!(first.grouping_key(), "cause=dead-letter queue full");
+    }
 
     fn sample() -> HistoryCompactionNotApplied<'static> {
         HistoryCompactionNotApplied {

@@ -80,28 +80,36 @@ pub async fn dispatch_graph(
             collection,
             start,
             depth,
-            edge_label,
+            edge_labels,
             direction,
-        }) => Some(
-            traverse::traverse(
-                state,
-                identity,
-                database_id,
-                traverse::TraverseRequest {
-                    collection,
-                    start,
-                    depth,
-                    edge_label,
-                    direction,
-                    linearizable,
-                },
+            edge_predicate,
+        }) => {
+            // Every hop of the walk merges the session transaction's staged
+            // edge writes. Idle sessions resolve to `None`.
+            let (txn_id, _) = txn_ctx.sessions.txn_identity(txn_ctx.session_id);
+            Some(
+                traverse::traverse(
+                    state,
+                    identity,
+                    database_id,
+                    traverse::TraverseRequest {
+                        collection,
+                        start,
+                        depth,
+                        edge_labels,
+                        direction,
+                        edge_predicate,
+                        txn_id,
+                        linearizable,
+                    },
+                )
+                .await,
             )
-            .await,
-        ),
+        }
         NodedbStatement::Graph(GraphStmt::GraphNeighbors {
             collection,
             node,
-            edge_label,
+            edge_labels,
             direction,
         }) => {
             // Read-your-own-writes for single-hop GRAPH reads needs the
@@ -117,7 +125,7 @@ pub async fn dispatch_graph(
                     traverse::NeighborsRequest {
                         collection,
                         node,
-                        edge_label,
+                        edge_labels,
                         direction,
                         txn_id,
                         linearizable,
@@ -131,23 +139,31 @@ pub async fn dispatch_graph(
             src,
             dst,
             max_depth,
-            edge_label,
-        }) => Some(
-            traverse::shortest_path(
-                state,
-                identity,
-                database_id,
-                traverse::ShortestPathRequest {
-                    collection,
-                    src,
-                    dst,
-                    max_depth,
-                    edge_label,
-                    linearizable,
-                },
+            edge_labels,
+            edge_predicate,
+        }) => {
+            // Every hop of the path search merges the session transaction's
+            // staged edge writes. Idle sessions resolve to `None`.
+            let (txn_id, _) = txn_ctx.sessions.txn_identity(txn_ctx.session_id);
+            Some(
+                traverse::shortest_path(
+                    state,
+                    identity,
+                    database_id,
+                    traverse::ShortestPathRequest {
+                        collection,
+                        src,
+                        dst,
+                        max_depth,
+                        edge_labels,
+                        edge_predicate,
+                        txn_id,
+                        linearizable,
+                    },
+                )
+                .await,
             )
-            .await,
-        ),
+        }
         NodedbStatement::Graph(GraphStmt::GraphAlgo {
             algorithm,
             collection,

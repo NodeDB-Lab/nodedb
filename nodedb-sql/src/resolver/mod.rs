@@ -5,5 +5,6 @@ pub mod columns;
 pub mod derived;
 pub mod expr;
 pub mod scope;
+pub mod text_column;
 
 pub use scope::ColumnScope;

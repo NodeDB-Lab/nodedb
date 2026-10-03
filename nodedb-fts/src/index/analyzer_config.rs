@@ -2,7 +2,8 @@
 
 //! Per-collection analyzer configuration stored in backend metadata.
 //!
-//! Uses structural `(tid, collection, subkey)` meta blobs:
+//! Uses structural meta blobs of the collection's whole-document index
+//! (`IndexScope::document(collection)`), shared by every field index:
 //! - `subkey = "analyzer"` → analyzer name (e.g. "german", "standard")
 //! - `subkey = "language"` → lang code (e.g. "de", "ja")
 //! - `subkey = "fuzzy"` → `"1"` when the collection defaults to fuzzy matching
@@ -14,6 +15,7 @@ use crate::analyzer::pipeline::{TextAnalyzer, analyze};
 use crate::analyzer::standard::StandardAnalyzer;
 use crate::backend::FtsBackend;
 use crate::index::FtsIndex;
+use crate::scope::IndexScope;
 
 impl<B: FtsBackend> FtsIndex<B> {
     /// Set the analyzer for a collection. Persists to backend metadata.
@@ -27,7 +29,7 @@ impl<B: FtsBackend> FtsIndex<B> {
         self.backend.write_meta(
             database_id,
             tid,
-            collection,
+            IndexScope::document(collection),
             "analyzer",
             analyzer_name.as_bytes(),
         )
@@ -44,7 +46,7 @@ impl<B: FtsBackend> FtsIndex<B> {
         self.backend.write_meta(
             database_id,
             tid,
-            collection,
+            IndexScope::document(collection),
             "language",
             lang_code.as_bytes(),
         )
@@ -62,7 +64,7 @@ impl<B: FtsBackend> FtsIndex<B> {
         self.backend.write_meta(
             database_id,
             tid,
-            collection,
+            IndexScope::document(collection),
             "fuzzy",
             if fuzzy { b"1" } else { b"0" },
         )
@@ -77,7 +79,7 @@ impl<B: FtsBackend> FtsIndex<B> {
     ) -> Result<bool, B::Error> {
         Ok(self
             .backend
-            .read_meta(database_id, tid, collection, "fuzzy")?
+            .read_meta(database_id, tid, IndexScope::document(collection), "fuzzy")?
             .is_some_and(|bytes| bytes.as_slice() == b"1"))
     }
 
@@ -88,10 +90,12 @@ impl<B: FtsBackend> FtsIndex<B> {
         tid: u64,
         collection: &str,
     ) -> Result<Option<String>, B::Error> {
-        match self
-            .backend
-            .read_meta(database_id, tid, collection, "analyzer")?
-        {
+        match self.backend.read_meta(
+            database_id,
+            tid,
+            IndexScope::document(collection),
+            "analyzer",
+        )? {
             Some(bytes) => Ok(std::str::from_utf8(&bytes).ok().map(String::from)),
             None => Ok(None),
         }
@@ -104,10 +108,12 @@ impl<B: FtsBackend> FtsIndex<B> {
         tid: u64,
         collection: &str,
     ) -> Result<Option<String>, B::Error> {
-        match self
-            .backend
-            .read_meta(database_id, tid, collection, "language")?
-        {
+        match self.backend.read_meta(
+            database_id,
+            tid,
+            IndexScope::document(collection),
+            "language",
+        )? {
             Some(bytes) => Ok(std::str::from_utf8(&bytes).ok().map(String::from)),
             None => Ok(None),
         }

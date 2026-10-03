@@ -101,6 +101,7 @@ pub(crate) fn replayed_timeseries_events(
             user_id: None,
             statement_digest: None,
             commit_hlc: scope.commit_hlc,
+            image_fault: None,
         });
     }
     events

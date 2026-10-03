@@ -129,7 +129,7 @@ fn cross_model_query_vector_graph_relational() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::Hop {
             start_nodes: vec!["p0".into()],
-            edge_label: Some("CITES".into()),
+            edge_labels: vec!["CITES".into()],
             direction: Direction::Out,
             depth: 3,
             options: Default::default(),
@@ -291,11 +291,14 @@ fn rrf_fusion_mathematically_correct() {
             query_text: "database systems".into(),
             top_k: 5,
             ef_search: 0,
-            fuzzy: true,
+            mode: nodedb_types::text_search::QueryMode::And, fuzzy: true,
             vector_weight: 0.5,
             filter_bitmap: None,
             rls_filters: Vec::new(),
             score_alias: None,
+            vector_field: String::new(),
+            text_field: None,
+            filters: Vec::new(),
         }),
     );
     assert_eq!(resp_equal.status, Status::Ok);
@@ -316,11 +319,14 @@ fn rrf_fusion_mathematically_correct() {
             query_text: "database systems".into(),
             top_k: 5,
             ef_search: 0,
-            fuzzy: true,
+            mode: nodedb_types::text_search::QueryMode::And, fuzzy: true,
             vector_weight: 0.9,
             filter_bitmap: None,
             rls_filters: Vec::new(),
             score_alias: None,
+            vector_field: String::new(),
+            text_field: None,
+            filters: Vec::new(),
         }),
     );
     assert_eq!(resp_vec_heavy.status, Status::Ok);
@@ -404,9 +410,12 @@ fn document_indexes_consistent_after_simulated_crash() {
             ),
             query: "database".into(),
             top_k: 10,
-            fuzzy: true,
+            mode: nodedb_types::text_search::QueryMode::And, fuzzy: true,
             rls_filters: Vec::new(),
             prefilter: None,
+            field: None,
+            filters: Vec::new(),
+            scores: Vec::new(),
         }),
     );
     let text_json = payload_json(&text_payload);
@@ -447,9 +456,12 @@ fn document_indexes_consistent_after_simulated_crash() {
             ),
             query: "database".into(),
             top_k: 10,
-            fuzzy: true,
+            mode: nodedb_types::text_search::QueryMode::And, fuzzy: true,
             rls_filters: Vec::new(),
             prefilter: None,
+            field: None,
+            filters: Vec::new(),
+            scores: Vec::new(),
         }),
     );
     let text_after_json = payload_json(&text_after);
@@ -470,9 +482,12 @@ fn document_indexes_consistent_after_simulated_crash() {
             ),
             query: "vector search".into(),
             top_k: 10,
-            fuzzy: true,
+            mode: nodedb_types::text_search::QueryMode::And, fuzzy: true,
             rls_filters: Vec::new(),
             prefilter: None,
+            field: None,
+            filters: Vec::new(),
+            scores: Vec::new(),
         }),
     );
     let text_a2_json = payload_json(&text_a2);

@@ -2,7 +2,7 @@
 
 //! Vector operation implementations for `NodeDbRemote`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nodedb_types::document::Document;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
@@ -23,8 +23,13 @@ impl NodeDbRemote {
         query: &[f32],
         k: usize,
         filter: Option<&MetadataFilter>,
+        allowed_ids: Option<&HashSet<String>>,
     ) -> NodeDbResult<Vec<SearchResult>> {
-        let sql = build_vector_search_sql(collection, query, k, filter)?;
+        // An empty allowed set admits no candidate.
+        if allowed_ids.is_some_and(HashSet::is_empty) {
+            return Ok(Vec::new());
+        }
+        let sql = build_vector_search_sql(collection, query, k, filter, allowed_ids)?;
 
         let (columns, rows) = self.query_raw(&sql, &[]).await?;
 

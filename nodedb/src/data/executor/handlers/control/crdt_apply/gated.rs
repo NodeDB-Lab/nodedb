@@ -22,7 +22,7 @@ use nodedb_types::Surrogate;
 use nodedb_types::sync::violation::ViolationType;
 use nodedb_types::sync::wire::{AckStatus, SyncProvenance};
 
-use crate::bridge::envelope::{ErrorCode, Response};
+use crate::bridge::envelope::{ErrorCode, Response, SyncHold};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::sync_gate::SyncAdmit;
 use crate::data::executor::task::ExecutionTask;
@@ -44,6 +44,10 @@ enum GateDisposition {
     /// to succeed later. The high-water-mark is held back so the re-push is
     /// admitted rather than deduplicated.
     Retryable,
+    /// Nothing was applied and nothing on this node records the delta. The
+    /// refusal is an error, so the frame's record is cancelled, and the mark
+    /// is held so the re-push at the same seq is admitted.
+    NotApplied,
     /// The delta will never apply. The sender must compensate, and the
     /// high-water-mark advances so it cannot wedge the stream.
     Terminal(ViolationType),
@@ -298,21 +302,45 @@ impl CoreLoop {
             }
             // The candidate was discarded, so authoritative state did not
             // move. The record is cancelled and replay never reaches this
-            // rejection, so the dead-letter entry is stored now.
+            // rejection, so the dead-letter entry is stored now. An entry the
+            // store refused is removed from the queue, so nothing on this node
+            // records the delta: retiring it as terminal would lose it.
+            // Holding the mark keeps it on the sender, and the store recorded
+            // the refusal in the black box.
             GateOutcome::Applied(ValidatedApplyOutcome::Rejected(vt)) => {
-                if let Err(error) =
-                    self.store_crdt_dead_letter(task.request.database_id, tenant_id, task.wal_lsn())
+                match self.store_crdt_dead_letter(task.request.database_id, tenant_id, task.wal_lsn())
                 {
-                    tracing::error!(
-                        core = self.core_id,
-                        %collection,
-                        %document_id,
-                        %error,
-                        "crdt sync apply rejected a delta, and its dead-letter entry could not \
-                         be stored; it stays in memory only"
-                    );
+                    Ok(()) => GateDisposition::Terminal(vt),
+                    Err(error) => {
+                        warn!(
+                            core = self.core_id,
+                            %collection,
+                            %document_id,
+                            violation = %vt,
+                            %error,
+                            "crdt sync apply refused a delta whose dead-letter entry could not \
+                             be stored; nothing applied, high-water-mark held"
+                        );
+                        GateDisposition::NotApplied
+                    }
                 }
-                GateDisposition::Terminal(vt)
+            }
+            // Rejected, but the dead-letter queue refused the delta, so nothing
+            // on this node records it. Retiring it as terminal would lose it.
+            // Holding the mark keeps it on the sender, and the re-push is
+            // dead-lettered once the queue has room. The apply recorded the
+            // refusal in the black box.
+            GateOutcome::Applied(ValidatedApplyOutcome::DeadLetterRefused { violation, error }) => {
+                warn!(
+                    core = self.core_id,
+                    %collection,
+                    %document_id,
+                    %violation,
+                    %error,
+                    "crdt sync apply refused a delta it could not dead-letter; nothing \
+                     applied, high-water-mark held"
+                );
+                GateDisposition::NotApplied
             }
             GateOutcome::Applied(ValidatedApplyOutcome::Malformed) => {
                 // The bytes did not decode, so nothing was imported. Acking
@@ -332,6 +360,19 @@ impl CoreLoop {
                          nothing was applied"
                     ),
                 })
+            }
+            // This node could not build the candidate. The delta is not at
+            // fault and nothing records it, so the refusal is an error that
+            // holds the mark and the sender re-pushes.
+            GateOutcome::Applied(ValidatedApplyOutcome::CandidateUnavailable) => {
+                warn!(
+                    core = self.core_id,
+                    %collection,
+                    %document_id,
+                    "crdt sync apply refused: no apply candidate; nothing applied, \
+                     high-water-mark held"
+                );
+                GateDisposition::NotApplied
             }
             GateOutcome::Applied(ValidatedApplyOutcome::PendingDependencies) => {
                 // Well-formed operations that arrived without their causal
@@ -380,6 +421,13 @@ impl CoreLoop {
                 // exists to prevent. Report the unchanged mark instead.
                 self.sync_ack_response(task, AckStatus::Gap { expected: prov.seq }, current_hwm)
             }
+            GateDisposition::NotApplied => self.response_error(
+                task,
+                ErrorCode::SyncNotApplied {
+                    hold: SyncHold::Gap { expected: prov.seq },
+                    applied_seq: current_hwm,
+                },
+            ),
             GateDisposition::Terminal(violation) => {
                 // Permanently refused: it will never succeed on a re-push, so
                 // holding the stream for it buys nothing.
@@ -464,6 +512,99 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].peer_id, 3);
         assert_eq!(entries[0].source_lsn, Some(11));
+    }
+
+    /// A peer delta a constraint refuses while the dead-letter queue is full
+    /// is an error that holds the mark: nothing records it, so the sender
+    /// keeps it and its re-push at the same seq is admitted.
+    #[test]
+    fn a_refusal_the_full_dead_letter_queue_refuses_holds_the_mark() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _request_tx, _response_rx) = make_core_with_dir(dir.path());
+        let seed = task_at(10);
+        install_unique_email(&mut core, &seed);
+        let first = user_delta(2, "a", "x@y.com");
+        assert_eq!(
+            core.execute_crdt_apply(&seed, users_params("a", &first))
+                .status,
+            Status::Ok
+        );
+        let capacity = core
+            .get_crdt_engine(seed.request.database_id, seed.request.tenant_id)
+            .expect("engine")
+            .fill_dead_letter_queue_for_test();
+
+        let second = user_delta(3, "b", "x@y.com");
+        let prov = provenance(1);
+        let mut params = users_params("b", &second);
+        params.peer_id = 3;
+        params.provenance = Some(&prov);
+        let response = core.execute_crdt_apply(&task_at(11), params);
+
+        assert_eq!(response.status, Status::Error);
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(ErrorCode::SyncNotApplied {
+                    hold: crate::bridge::envelope::SyncHold::Gap { expected: 1 },
+                    applied_seq: 0,
+                })
+            ),
+            "got {:?}",
+            response.error_code
+        );
+        assert_eq!(core.sync_hwm_value(9, 1), 0, "the mark is held");
+        assert!(
+            core.crdt_engines
+                .get(&(seed.request.database_id, seed.request.tenant_id))
+                .is_some_and(|engine| !engine.row_exists("users", "b"))
+        );
+        assert_eq!(dead_letters(&mut core).len(), capacity, "nothing queued");
+    }
+
+    /// A peer delta a constraint refuses while the store refuses its
+    /// dead-letter entry is an error that holds the mark, and the queue keeps
+    /// no entry storage lacks.
+    #[test]
+    fn a_refusal_whose_dead_letter_the_store_refuses_holds_the_mark() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _request_tx, _response_rx) = make_core_with_dir(dir.path());
+        let seed = task_at(10);
+        install_unique_email(&mut core, &seed);
+        let first = user_delta(2, "a", "x@y.com");
+        assert_eq!(
+            core.execute_crdt_apply(&seed, users_params("a", &first))
+                .status,
+            Status::Ok
+        );
+        core.sparse.break_crdt_dead_letter_table_for_test();
+
+        let second = user_delta(3, "b", "x@y.com");
+        let prov = provenance(1);
+        let mut params = users_params("b", &second);
+        params.peer_id = 3;
+        params.provenance = Some(&prov);
+        let response = core.execute_crdt_apply(&task_at(11), params);
+
+        assert_eq!(response.status, Status::Error);
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(ErrorCode::SyncNotApplied {
+                    hold: crate::bridge::envelope::SyncHold::Gap { expected: 1 },
+                    applied_seq: 0,
+                })
+            ),
+            "got {:?}",
+            response.error_code
+        );
+        assert_eq!(core.sync_hwm_value(9, 1), 0, "the mark is held");
+        assert!(
+            core.crdt_engines
+                .get(&(seed.request.database_id, seed.request.tenant_id))
+                .is_some_and(|engine| !engine.row_exists("users", "b"))
+        );
+        assert!(dead_letters(&mut core).is_empty(), "nothing queued");
     }
 
     /// A delta with no target document is refused before anything installs.

@@ -13,6 +13,7 @@ use crate::types::{CtePlan, LateralLoopPlan, LateralTopKPlan, MergePlan};
 use nodedb_types::DatabaseId;
 
 use super::filter::fold_filter;
+use super::leaf::fold_leaf;
 use crate::catalog::SqlCatalog;
 use crate::types::{MergePlanAction, SqlExpr, SqlPlan};
 
@@ -337,9 +338,9 @@ fn walk_plan(
             })
         }
 
-        // Plan variants without expression-bearing filters pass through unchanged.
+        // Leaf plans: `fold_leaf` folds the expressions each one carries.
         mut other => {
-            super::leaf::fold_leaf(&mut other, catalog, database_id, tenant_id);
+            fold_leaf(&mut other, catalog, database_id, tenant_id);
             other
         }
     }

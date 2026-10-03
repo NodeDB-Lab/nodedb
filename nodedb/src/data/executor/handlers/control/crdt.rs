@@ -260,6 +260,9 @@ impl CoreLoop {
                 warn!(core = self.core_id, %reason, "crdt snapshot rejected by constraints");
                 // Nothing applied, so the record is cancelled and replay never
                 // reaches this rejection. Its dead-letter entry is stored first.
+                // An entry the store refused is removed from the queue, so
+                // nothing records the snapshot, as for a queue refusal. The
+                // store recorded the refusal in the black box.
                 let code = match self.store_crdt_dead_letter(
                     task.request.database_id,
                     tid,
@@ -268,15 +271,30 @@ impl CoreLoop {
                     Ok(()) => crate::data::executor::core_loop::crdt_rejection(
                         collection, "snapshot", &reason,
                     ),
-                    Err(error) => ErrorCode::Internal {
-                        detail: format!(
+                    Err(error) => ErrorCode::RetryableRefusal {
+                        reason: format!(
                             "CRDT snapshot for {collection} violates {reason}, and its \
-                             dead-letter entry could not be stored: {error}"
+                             dead-letter entry could not be stored: {error}; nothing was \
+                             applied"
                         ),
                     },
                 };
                 self.response_error(task, code)
             }
+            // Nothing applied and nothing records the snapshot. The apply
+            // recorded the refusal in the black box.
+            crate::engine::crdt::tenant_state::ValidatedApplyOutcome::DeadLetterRefused {
+                violation,
+                error,
+            } => self.response_error(
+                task,
+                ErrorCode::RetryableRefusal {
+                    reason: format!(
+                        "CRDT snapshot for {collection} violates {violation}, and the \
+                         dead-letter queue refused it: {error}; nothing was applied"
+                    ),
+                },
+            ),
             crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Malformed => {
                 warn!(core = self.core_id, "crdt snapshot import was malformed");
                 self.response_error(
@@ -298,6 +316,24 @@ impl CoreLoop {
                     task,
                     ErrorCode::Internal {
                         detail: "CRDT snapshot import left operations causally pending".into(),
+                    },
+                )
+            }
+            // This node failed to build the candidate; the snapshot itself
+            // is not at fault, so the refusal is retryable.
+            crate::engine::crdt::tenant_state::ValidatedApplyOutcome::CandidateUnavailable => {
+                warn!(
+                    core = self.core_id,
+                    %collection,
+                    "crdt snapshot import refused: no apply candidate"
+                );
+                self.response_error(
+                    task,
+                    ErrorCode::RetryableRefusal {
+                        reason: format!(
+                            "no apply candidate for CRDT collection {collection}; nothing was \
+                             imported"
+                        ),
                     },
                 )
             }

@@ -5,12 +5,17 @@
 //! Two-level skip: WAND pivot selection across terms, then block-level
 //! pruning within each term's posting list. Operates on `Surrogate` row
 //! identities for zero-allocation scoring.
+//!
+//! Admission (the allow and deny sets) is checked before a document is
+//! scored, so the top-k cut counts only admitted documents. Every term score
+//! comes from [`term_score`] and is combined by [`combine`] in term order, the
+//! same functions the per-document scorer uses.
 
 use nodedb_types::{Surrogate, SurrogateBitmap};
 
 use crate::bm25;
-use crate::codec::smallfloat;
 use crate::posting::Bm25Params;
+use crate::search::doc_score::{Combine, combine, term_score};
 
 use super::heap::TopKHeap;
 use super::skip_index::TermBlocks;
@@ -18,10 +23,33 @@ use super::skip_index::TermBlocks;
 /// Sentinel returned by an exhausted cursor — sorts after every real surrogate.
 const EXHAUSTED: Surrogate = Surrogate(u32::MAX);
 
+/// Inputs of one BMW run.
+pub struct BmwInput<'a> {
+    /// Posting blocks of each query term.
+    pub terms: &'a [TermBlocks],
+    /// Query word of each term, parallel to `terms`.
+    pub term_groups: &'a [usize],
+    /// Number of query words.
+    pub groups: usize,
+    pub total_docs: u32,
+    pub avg_doc_len: f32,
+    pub params: &'a Bm25Params,
+    pub top_k: usize,
+    /// Only these documents are scored. `None` admits every document.
+    pub allow: Option<&'a SurrogateBitmap>,
+    /// These documents are never scored.
+    pub deny: Option<&'a SurrogateBitmap>,
+    /// How term contributions combine into a document score. Every mode
+    /// scores at most the plain sum, so the BMW upper bounds stay valid.
+    pub combine: Combine,
+}
+
 /// Per-term iterator state during BMW traversal.
 struct TermCursor<'a> {
     /// The term's posting blocks + skip index.
     term: &'a TermBlocks,
+    /// Position of the term in the query's term list.
+    term_idx: usize,
     /// Current block index within `term.blocks`.
     block_idx: usize,
     /// Current position within the current block's doc_ids.
@@ -33,7 +61,13 @@ struct TermCursor<'a> {
 }
 
 impl<'a> TermCursor<'a> {
-    fn new(term: &'a TermBlocks, total_docs: u32, avg_doc_len: f32, params: &Bm25Params) -> Self {
+    fn new(
+        term: &'a TermBlocks,
+        term_idx: usize,
+        total_docs: u32,
+        avg_doc_len: f32,
+        params: &Bm25Params,
+    ) -> Self {
         let idf = bm25::idf(term.df, total_docs);
         let max_score = bm25::term_max_score(
             term.global_max_tf,
@@ -45,6 +79,7 @@ impl<'a> TermCursor<'a> {
         );
         Self {
             term,
+            term_idx,
             block_idx: 0,
             pos_in_block: 0,
             idf,
@@ -136,49 +171,53 @@ impl<'a> TermCursor<'a> {
             return 0.0;
         }
         let block = &self.term.blocks[self.block_idx];
-        let tf = block.term_freqs[self.pos_in_block];
-        let fieldnorm = block.fieldnorms[self.pos_in_block];
-        let doc_len = smallfloat::decode(fieldnorm).max(1);
-
-        let tf_f = tf as f32;
-        let dl = doc_len as f32;
-
-        let tf_norm = (tf_f * (params.k1 + 1.0))
-            / (tf_f + params.k1 * (1.0 - params.b + params.b * dl / avg_doc_len));
-
-        self.idf * tf_norm
+        term_score(
+            self.idf,
+            block.term_freqs[self.pos_in_block],
+            block.fieldnorms[self.pos_in_block],
+            avg_doc_len,
+            params,
+        )
     }
+}
+
+/// Whether `doc_id` may be scored.
+fn admitted(input: &BmwInput<'_>, doc_id: Surrogate) -> bool {
+    input.allow.is_none_or(|bm| bm.contains(doc_id))
+        && !input.deny.is_some_and(|bm| bm.contains(doc_id))
 }
 
 /// Run BMW scoring across multiple term posting lists.
 ///
-/// Returns the top-k `(score, doc_id_u32)` results.
-///
-/// When `prefilter` is `Some`, only surrogates present in the bitmap are
-/// scored; all others are skipped before any BM25 computation.
-pub fn bmw_score(
-    term_blocks: &[TermBlocks],
-    total_docs: u32,
-    avg_doc_len: f32,
-    params: &Bm25Params,
-    top_k: usize,
-    prefilter: Option<&SurrogateBitmap>,
-) -> TopKHeap {
-    let mut heap = TopKHeap::new(top_k);
+/// Returns the top-k admitted documents by score.
+pub fn bmw_score(input: &BmwInput<'_>) -> TopKHeap {
+    let mut heap = TopKHeap::new(input.top_k);
+    let BmwInput {
+        terms,
+        term_groups,
+        groups,
+        total_docs,
+        avg_doc_len,
+        params,
+        ..
+    } = *input;
 
-    if term_blocks.is_empty() {
+    if input.top_k == 0 || terms.is_empty() || input.allow.is_some_and(|bm| bm.is_empty()) {
         return heap;
     }
 
-    let mut cursors: Vec<TermCursor> = term_blocks
+    let mut cursors: Vec<TermCursor> = terms
         .iter()
-        .filter(|tb| tb.df > 0)
-        .map(|tb| TermCursor::new(tb, total_docs, avg_doc_len, params))
+        .enumerate()
+        .filter(|(_, tb)| tb.df > 0)
+        .map(|(idx, tb)| TermCursor::new(tb, idx, total_docs, avg_doc_len, params))
         .collect();
 
     if cursors.is_empty() {
         return heap;
     }
+
+    let mut contributions: Vec<Option<f32>> = vec![None; terms.len()];
 
     loop {
         // Sort cursors by current doc_id (ascending). Exhausted cursors go to the end.
@@ -218,34 +257,30 @@ pub fn bmw_score(
         // Check if all cursors [0..=pivot_idx] point to the same doc_id.
         let first_doc_id = cursors[0].current_doc_id();
         if first_doc_id == pivot_doc_id {
-            // Prefilter: skip surrogates not present in the bitmap.
-            if let Some(bm) = prefilter
-                && !bm.contains(pivot_doc_id)
-            {
-                for cursor in &mut cursors {
-                    if cursor.current_doc_id() == pivot_doc_id {
-                        cursor.next();
+            if admitted(input, pivot_doc_id) {
+                // Block-level pruning over every cursor on the pivot doc: a
+                // cursor past the pivot index can sit on the same doc and
+                // adds to its score.
+                let block_upper: f32 = cursors
+                    .iter()
+                    .filter(|c| c.current_doc_id() == pivot_doc_id)
+                    .map(|c| c.block_upper_bound(total_docs, avg_doc_len, params))
+                    .sum();
+
+                if block_upper > threshold {
+                    contributions.fill(None);
+                    for cursor in cursors.iter() {
+                        if cursor.current_doc_id() == pivot_doc_id {
+                            contributions[cursor.term_idx] =
+                                Some(cursor.score_current(avg_doc_len, params));
+                        }
+                    }
+                    if let Some((score, _)) =
+                        combine(&contributions, term_groups, groups, input.combine)
+                    {
+                        heap.insert(score, pivot_doc_id);
                     }
                 }
-                continue;
-            }
-
-            // All essential terms are at the pivot doc — score it.
-            // But first: block-level pruning. Sum block upper bounds.
-            let mut block_upper = 0.0f32;
-            for cursor in cursors.iter().take(pivot_idx + 1) {
-                block_upper += cursor.block_upper_bound(total_docs, avg_doc_len, params);
-            }
-
-            if block_upper > threshold {
-                // Actually score the document.
-                let mut doc_score = 0.0f32;
-                for cursor in cursors.iter() {
-                    if cursor.current_doc_id() == pivot_doc_id {
-                        doc_score += cursor.score_current(avg_doc_len, params);
-                    }
-                }
-                heap.insert(doc_score, pivot_doc_id);
             }
 
             // Advance all cursors that were at pivot_doc_id.
@@ -287,18 +322,40 @@ mod tests {
         TermBlocks::from_blocks(blocks)
     }
 
+    fn run(
+        terms: &[TermBlocks],
+        total_docs: u32,
+        top_k: usize,
+        allow: Option<&SurrogateBitmap>,
+        deny: Option<&SurrogateBitmap>,
+    ) -> Vec<Surrogate> {
+        let params = Bm25Params::default();
+        let term_groups: Vec<usize> = (0..terms.len()).collect();
+        bmw_score(&BmwInput {
+            terms,
+            term_groups: &term_groups,
+            groups: terms.len(),
+            total_docs,
+            avg_doc_len: 100.0,
+            params: &params,
+            top_k,
+            allow,
+            deny,
+            combine: Combine::Sum,
+        })
+        .into_sorted()
+        .iter()
+        .map(|d| d.doc_id)
+        .collect()
+    }
+
     #[test]
     fn bmw_basic() {
         let term_a = make_term(&[0, 1, 2, 3, 4], 2);
         let term_b = make_term(&[2, 3, 5, 6], 3);
-
-        let params = Bm25Params::default();
-        let heap = bmw_score(&[term_a, term_b], 100, 100.0, &params, 3, None);
-
-        let results = heap.into_sorted();
-        assert!(!results.is_empty());
+        let top_ids = run(&[term_a, term_b], 100, 3, None, None);
+        assert!(!top_ids.is_empty());
         // Docs 2 and 3 match both terms — should score highest.
-        let top_ids: Vec<Surrogate> = results.iter().map(|r| r.doc_id).collect();
         assert!(top_ids.contains(&Surrogate(2)));
         assert!(top_ids.contains(&Surrogate(3)));
     }
@@ -306,30 +363,19 @@ mod tests {
     #[test]
     fn bmw_single_term() {
         let term = make_term(&[10, 20, 30, 40, 50], 1);
-        let params = Bm25Params::default();
-        let heap = bmw_score(&[term], 1000, 100.0, &params, 3, None);
-
-        let results = heap.into_sorted();
-        assert_eq!(results.len(), 3);
-        // All have the same score (same tf, same doc_len).
+        assert_eq!(run(&[term], 1000, 3, None, None).len(), 3);
     }
 
     #[test]
     fn bmw_empty_terms() {
-        let params = Bm25Params::default();
-        let heap = bmw_score(&[], 1000, 100.0, &params, 10, None);
-        assert!(heap.is_empty());
+        assert!(run(&[], 1000, 10, None, None).is_empty());
     }
 
     #[test]
     fn bmw_respects_top_k() {
         let ids: Vec<u32> = (0..500).collect();
         let term = make_term(&ids, 1);
-        let params = Bm25Params::default();
-        let heap = bmw_score(&[term], 1000, 100.0, &params, 5, None);
-
-        let results = heap.into_sorted();
-        assert_eq!(results.len(), 5);
+        assert_eq!(run(&[term], 1000, 5, None, None).len(), 5);
     }
 
     #[test]
@@ -341,15 +387,41 @@ mod tests {
         let term_common = make_term(&common_ids, 1);
         let term_rare = make_term(&rare_ids, 5);
 
-        let params = Bm25Params::default();
-        let heap = bmw_score(&[term_common, term_rare], 10_000, 100.0, &params, 3, None);
-
-        let results = heap.into_sorted();
-        assert_eq!(results.len(), 3);
+        let top_ids = run(&[term_common, term_rare], 10_000, 3, None, None);
+        assert_eq!(top_ids.len(), 3);
         // The rare-term docs (50, 200, 500) should dominate due to high IDF + tf.
-        let top_ids: Vec<Surrogate> = results.iter().map(|r| r.doc_id).collect();
         assert!(top_ids.contains(&Surrogate(50)));
         assert!(top_ids.contains(&Surrogate(200)));
         assert!(top_ids.contains(&Surrogate(500)));
+    }
+
+    #[test]
+    fn deny_set_is_excluded_before_the_cut() {
+        let term = make_term(&[1, 2, 3, 4, 5], 1);
+        let mut deny = SurrogateBitmap::new();
+        deny.insert(Surrogate(1));
+        deny.insert(Surrogate(2));
+        let top_ids = run(&[term], 100, 2, None, Some(&deny));
+        assert_eq!(top_ids.len(), 2, "the cut counts only admitted documents");
+        assert!(!top_ids.contains(&Surrogate(1)));
+        assert!(!top_ids.contains(&Surrogate(2)));
+    }
+
+    #[test]
+    fn allow_set_restricts_candidates() {
+        let term = make_term(&[1, 2, 3, 4, 5], 1);
+        let mut allow = SurrogateBitmap::new();
+        allow.insert(Surrogate(4));
+        assert_eq!(run(&[term], 100, 10, Some(&allow), None), vec![Surrogate(4)]);
+    }
+
+    /// The document both terms occur in outranks every single-term document,
+    /// whichever cursor the pivot lands on.
+    #[test]
+    fn two_term_document_wins_top_one() {
+        let common: Vec<u32> = (0..300).collect();
+        let a = make_term(&common, 1);
+        let b = make_term(&[150], 1);
+        assert_eq!(run(&[a, b], 300, 1, None, None), vec![Surrogate(150)]);
     }
 }

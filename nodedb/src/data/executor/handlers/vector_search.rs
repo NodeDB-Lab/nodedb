@@ -153,7 +153,10 @@ pub(in crate::data::executor) struct VectorSearchParams<'a> {
     pub metric: DistanceMetric,
     pub filter_bitmap: Option<&'a nodedb_types::SurrogateBitmap>,
     pub field_name: &'a str,
-    /// RLS post-candidate filters. Applied after HNSW/IVF returns candidates.
+    /// Residual row filters: the statement's `WHERE` conjuncts and any read
+    /// policy, as `ScanFilter` msgpack. The Control Plane applies them to
+    /// the ranked candidates. The candidate window widens until `top_k`
+    /// candidates pass them.
     pub rls_filters: &'a [u8],
     /// Cross-engine prefilter sub-plan: when `Some`, executed locally and
     /// its output rows materialized into a `SurrogateBitmap` that is

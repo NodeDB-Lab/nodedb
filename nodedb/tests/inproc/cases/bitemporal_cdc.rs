@@ -59,6 +59,7 @@ fn write_event(seq: u64, op: WriteOp, payload_bytes: Vec<u8>, is_delete: bool) -
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
             .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok()),
+        image_fault: None,
     }
 }
 

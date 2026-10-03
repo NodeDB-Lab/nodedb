@@ -166,6 +166,37 @@ impl SparseEngine {
             .map_err(|e| redb_err("commit crdt dead letter purge", e))?;
         Ok(keys.len())
     }
+
+    /// Replace the dead-letter table with a same-named table of another
+    /// value type, so every later read or write of it fails.
+    #[cfg(test)]
+    pub(crate) fn break_crdt_dead_letter_table_for_test(&self) {
+        let txn = self.db.begin_write().expect("write txn");
+        txn.delete_table(CRDT_DEAD_LETTERS).expect("delete table");
+        {
+            let wrong: TableDefinition<&str, u64> = TableDefinition::new("crdt_dead_letters");
+            txn.open_table(wrong).expect("create mismatched table");
+        }
+        txn.commit().expect("commit");
+    }
+
+    /// Store `bytes` as the entry of the record at `source_lsn`, unchecked.
+    #[cfg(test)]
+    pub(crate) fn put_raw_crdt_dead_letter_for_test(
+        &self,
+        database_id: u64,
+        tenant_id: u64,
+        source_lsn: u64,
+        bytes: &[u8],
+    ) {
+        let key = entry_key(database_id, tenant_id, source_lsn);
+        let txn = self.db.begin_write().expect("write txn");
+        {
+            let mut table = txn.open_table(CRDT_DEAD_LETTERS).expect("open table");
+            table.insert(key.as_str(), bytes).expect("insert");
+        }
+        txn.commit().expect("commit");
+    }
 }
 
 #[cfg(test)]
@@ -225,6 +256,25 @@ mod tests {
             engine.load_crdt_dead_letters(1, 3).expect("load"),
             vec![first]
         );
+    }
+
+    #[test]
+    fn a_broken_table_fails_the_store_and_the_load() {
+        let (_dir, engine) = open();
+        engine.break_crdt_dead_letter_table_for_test();
+        assert!(
+            engine
+                .put_crdt_dead_letter(1, 3, 5, &entry("users", 5))
+                .is_err()
+        );
+        assert!(engine.load_crdt_dead_letters(1, 3).is_err());
+    }
+
+    #[test]
+    fn an_undecodable_entry_fails_the_load() {
+        let (_dir, engine) = open();
+        engine.put_raw_crdt_dead_letter_for_test(1, 3, 5, b"\xc1");
+        assert!(engine.load_crdt_dead_letters(1, 3).is_err());
     }
 
     #[test]

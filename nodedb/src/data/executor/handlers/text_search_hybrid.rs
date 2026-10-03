@@ -10,6 +10,7 @@ use nodedb_fts::posting::QueryMode;
 use crate::bridge::envelope::{ErrorCode, Response};
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::text_rows::{TextRowGate, combine_eligible};
 use crate::data::executor::scan_normalize::sparse_body_to_msgpack;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
@@ -21,10 +22,20 @@ const DEFAULT_VECTOR_WEIGHT: f32 = 0.5;
 pub(in crate::data::executor) struct HybridSearchParams<'a> {
     pub tid: u64,
     pub collection: &'a str,
+    /// Vector column the vector leg searches. Empty names the
+    /// collection-level index.
+    pub vector_field: &'a str,
     pub query_vector: &'a [f32],
+    /// Field index the text leg reads. `None` reads the whole-document index.
+    pub text_field: Option<&'a str>,
     pub query_text: &'a str,
+    /// Residual WHERE predicates (`Vec<ScanFilter>`), applied to both legs
+    /// before fusion.
+    pub filters: &'a [u8],
     pub top_k: usize,
     pub ef_search: usize,
+    /// Boolean combination of the text leg's query terms.
+    pub mode: nodedb_types::text_search::QueryMode,
     pub fuzzy: bool,
     pub vector_weight: f32,
     pub filter_bitmap: Option<&'a nodedb_types::SurrogateBitmap>,
@@ -45,10 +56,14 @@ impl CoreLoop {
         let HybridSearchParams {
             tid,
             collection,
+            vector_field,
             query_vector,
+            text_field,
             query_text,
+            filters,
             top_k,
             ef_search,
+            mode,
             fuzzy,
             vector_weight,
             filter_bitmap,
@@ -83,9 +98,27 @@ impl CoreLoop {
         // enough material to fuse. 3x is a good balance.
         let fetch_k = top_k.saturating_mul(3).max(20);
 
+        // The rows the residual filters and RLS admit restrict both legs
+        // before fusion, so the fused top-k counts only admitted rows.
+        let eligible = match TextRowGate::new(filters, rls_filters)
+            .and_then(|gate| self.text_eligible_rows(task, tid, collection, &gate))
+        {
+            Ok(eligible) => combine_eligible(filter_bitmap, eligible),
+            Err(e) => return self.response_error(task, e),
+        };
+        let filter_bitmap = eligible.as_ref();
+        let text_index = match self.text_index(task, tid, collection, text_field) {
+            Ok(index) => index,
+            Err(e) => return self.response_error(task, e),
+        };
+
         // 1. Vector search.
-        let index_key =
-            CoreLoop::vector_index_key(task.request.database_id.as_u64(), tid, collection, "");
+        let index_key = self.resolve_vector_index_key(
+            task.request.database_id.as_u64(),
+            tid,
+            collection,
+            vector_field,
+        );
         let vector_collection = self.vector_collections.get(&index_key);
         let vector_results = match vector_collection {
             Some(index) => {
@@ -108,17 +141,18 @@ impl CoreLoop {
             None => Vec::new(),
         };
 
-        // 2. Text search (no surrogate prefilter for the text leg of hybrid search).
-        let text_results = match self.inverted.search(
-            task.request.database_id.as_u64(),
-            tenant_id,
-            collection,
+        // 2. Text search over the field's index, restricted to the same rows,
+        //    with the transaction's staged rows ranked in.
+        let text_results = match self.hybrid_text_leg(
+            task,
+            tid,
+            text_index,
             FtsSearchParams {
                 query: query_text,
                 top_k: fetch_k,
                 fuzzy_enabled: fuzzy,
-                mode: QueryMode::And,
-                prefilter: None,
+                mode: QueryMode::from(mode),
+                prefilter: filter_bitmap,
             },
         ) {
             Ok(results) => results,
@@ -159,8 +193,8 @@ impl CoreLoop {
                         database_id: task.request.database_id,
                         tid: tenant_id,
                         collection,
+                        vector_field,
                         query_vector,
-                        query_text,
                         fetch_k,
                         filter_bitmap,
                     },
@@ -226,9 +260,7 @@ impl CoreLoop {
                 let Some(key) = f.document_id.storage_key() else {
                     return false;
                 };
-                match self
-                    .sparse
-                    .get(task.request.database_id.as_u64(), tid, collection, &key)
+                match self.text_base_body(task.request.database_id.as_u64(), tid, collection, &key)
                 {
                     Ok(Some(bytes)) => {
                         let normalized =

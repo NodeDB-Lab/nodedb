@@ -129,7 +129,7 @@ fn find_prev_bucket_avg(
             && let Some(a) = accums.first()
             && a.count > 0
         {
-            return Some((ts, a.sum() / a.count as f64));
+            return Some((ts, a.mean_f64()));
         }
         ts -= interval;
     }
@@ -151,7 +151,7 @@ fn find_next_bucket_avg(
             && let Some(a) = accums.first()
             && a.count > 0
         {
-            return Some((ts, a.sum() / a.count as f64));
+            return Some((ts, a.mean_f64()));
         }
         ts += interval;
     }

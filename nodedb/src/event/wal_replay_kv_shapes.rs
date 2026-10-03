@@ -98,6 +98,7 @@ pub(super) fn parse_kv_put_family(
             user_id: None,
             statement_digest: None,
             commit_hlc,
+            image_fault: None,
         });
     }
 
@@ -127,6 +128,7 @@ pub(super) fn parse_kv_put_family(
             user_id: None,
             statement_digest: None,
             commit_hlc,
+            image_fault: None,
         });
     }
 
@@ -154,6 +156,7 @@ pub(super) fn parse_kv_put_family(
             user_id: None,
             statement_digest: None,
             commit_hlc,
+            image_fault: None,
         });
     }
     None

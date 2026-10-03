@@ -2,7 +2,7 @@
 
 //! FTS index/delete sync messages (client → server / server → client).
 //!
-//! `FtsIndexMsg` carries one document's text content from a Lite client to
+//! `FtsIndexMsg` carries one document's string fields from a Lite client to
 //! Origin for full-text indexing. `FtsDeleteMsg` removes a document from
 //! Origin's inverted index.
 //!
@@ -18,9 +18,11 @@ use crate::sync::wire::ack_status::AckStatus;
 
 /// FTS index request (Lite → Origin, 0xA6).
 ///
-/// Requests that Origin index the concatenated text of a document into its
-/// inverted BM25 index. Origin allocates a surrogate for `(collection, doc_id)`
-/// and calls `InvertedIndex::index_document` on the Data Plane.
+/// Requests that Origin index a document's top-level string fields into its
+/// inverted BM25 indexes: the whole-document index and one index per field.
+/// Origin allocates a surrogate for `(collection, doc_id)` and calls
+/// `InvertedIndex::index_document` on the Data Plane. Empty `fields` remove
+/// the document from every index.
 #[derive(
     Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
 )]
@@ -31,8 +33,8 @@ pub struct FtsIndexMsg {
     pub collection: String,
     /// External document identifier.
     pub doc_id: String,
-    /// Concatenated text to index (all string fields joined by space).
-    pub text: String,
+    /// `(field, text)` per top-level string field of the document.
+    pub fields: Vec<(String, String)>,
     /// Monotonic batch ID (Lite-assigned, per-document). Used for ACK correlation.
     pub batch_id: u64,
     /// Stable identity of the originating producer. 0 for legacy clients.

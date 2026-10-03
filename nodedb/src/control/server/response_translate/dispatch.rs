@@ -65,7 +65,11 @@ pub fn translate_search_response(
             &[],
             *top_k,
         ),
-        PhysicalPlan::Text(TextOp::Search { collection, .. }) => translate_text_search_payload(
+        PhysicalPlan::Text(
+            TextOp::Search { collection, .. }
+            | TextOp::PhraseSearch { collection, .. }
+            | TextOp::BM25ScoreScan { collection, .. },
+        ) => translate_text_search_payload(
             payload,
             state,
             database_id,

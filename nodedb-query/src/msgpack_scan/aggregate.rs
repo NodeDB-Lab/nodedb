@@ -13,10 +13,13 @@ use std::collections::HashSet;
 use nodedb_types::Value;
 
 use crate::expr::EvalError;
+use crate::msgpack_scan::aggregate_helpers::extract_sum_value;
 use crate::msgpack_scan::compare::compare_field_bytes;
 use crate::msgpack_scan::field::extract_field;
 use crate::msgpack_scan::reader::{read_f64, read_null, read_str};
+use crate::numeric_sum::ExactSum;
 use crate::value_ops;
+use crate::window::extremum::value_replaces;
 
 /// Compute an aggregate function over raw MessagePack documents.
 ///
@@ -46,31 +49,9 @@ pub fn compute_aggregate_binary(
             }
         }
 
-        "sum" => {
-            let total: f64 = docs
-                .iter()
-                .map(|d| extract_f64_val(d, field, expr))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .flatten()
-                .sum();
-            Value::Float(total)
-        }
+        "sum" => exact_sum(docs, field, expr)?.sum()?,
 
-        "avg" => {
-            let (sum, count) = docs
-                .iter()
-                .map(|d| extract_f64_val(d, field, expr))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .flatten()
-                .fold((0.0f64, 0u64), |(s, c), v| (s + v, c + 1));
-            if count == 0 {
-                Value::Null
-            } else {
-                Value::Float(sum / count as f64)
-            }
-        }
+        "avg" => exact_sum(docs, field, expr)?.avg()?,
 
         "min" => find_minmax(docs, field, expr, false)?,
         "max" => find_minmax(docs, field, expr, true)?,
@@ -288,6 +269,21 @@ fn extract_f64_val(
     Ok(read_f64(doc, start))
 }
 
+/// Exact SUM / AVG state over `docs`, per [`ExactSum`].
+fn exact_sum(
+    docs: &[&[u8]],
+    field: &str,
+    expr: Option<&crate::expr::SqlExpr>,
+) -> Result<ExactSum, EvalError> {
+    let mut acc = ExactSum::new();
+    for doc in docs {
+        if let Some(v) = extract_sum_value(doc, field, expr)? {
+            acc.add_value(&v);
+        }
+    }
+    Ok(acc)
+}
+
 /// Extract a string from a field or expression result.
 fn extract_str_val(
     doc: &[u8],
@@ -328,7 +324,15 @@ fn value_from_field(doc: &[u8], field: &str) -> Option<Value> {
     nodedb_types::json_msgpack::value_from_msgpack(field_bytes).ok()
 }
 
-/// Find min or max across docs by comparing raw field bytes.
+/// The field value at `offset` when it is a msgpack integer or float.
+fn read_numeric(doc: &[u8], offset: usize) -> Option<Value> {
+    read_f64(doc, offset)?;
+    crate::msgpack_scan::reader::read_value(doc, offset)
+}
+
+/// Find min or max across docs. The winner is returned unchanged: an
+/// integer stays an integer, and a numeric pair compares exactly, so
+/// integers above 2^53 never round through `f64`.
 fn find_minmax(
     docs: &[&[u8]],
     field: &str,
@@ -343,26 +347,17 @@ fn find_minmax(
             let Some(value) = eval_expr_on_doc(doc, expr)? else {
                 continue;
             };
-            if value.is_null() {
-                continue;
-            }
-            let replace = match &best {
-                None => true,
-                Some(current) => {
-                    let ord = value_ops::compare_values(&value, current);
-                    if want_max {
-                        ord == Ordering::Greater
-                    } else {
-                        ord == Ordering::Less
-                    }
-                }
-            };
-            if replace {
+            if !value.is_null() && value_replaces(&value, best.as_ref(), want_max) {
                 best = Some(value);
             }
         }
         return Ok(best.unwrap_or(Value::Null));
     }
+    let wanted = if want_max {
+        Ordering::Greater
+    } else {
+        Ordering::Less
+    };
 
     let mut best_doc: Option<&[u8]> = None;
     let mut best_range: Option<(usize, usize)> = None;
@@ -379,11 +374,11 @@ fn find_minmax(
                 }
                 Some(br) => {
                     let Some(bd) = best_doc else { continue };
-                    let cmp = compare_field_bytes(doc, range, bd, br);
-                    let replace = if want_max {
-                        cmp == Ordering::Greater
-                    } else {
-                        cmp == Ordering::Less
+                    let replace = match (read_numeric(doc, range.0), read_numeric(bd, br.0)) {
+                        (Some(candidate), Some(current)) => {
+                            value_replaces(&candidate, Some(&current), want_max)
+                        }
+                        _ => compare_field_bytes(doc, range, bd, br) == wanted,
                     };
                     if replace {
                         best_doc = Some(doc);
@@ -496,7 +491,102 @@ mod tests {
         let docs: Vec<&[u8]> = vec![&d1, &d2, &d3];
         assert_eq!(
             compute_aggregate_binary("sum", "v", None, &docs).unwrap(),
-            Value::Float(60.0)
+            Value::Integer(60)
+        );
+    }
+
+    /// SUM and AVG of `vals` under field `v`, raw-field path then
+    /// expression path.
+    fn sum_avg_both_paths(vals: &[serde_json::Value]) -> [(Value, Value); 2] {
+        let encoded: Vec<Vec<u8>> = vals.iter().map(|v| encode(&json!({ "v": v }))).collect();
+        let docs: Vec<&[u8]> = encoded.iter().map(Vec::as_slice).collect();
+        let col = crate::expr::SqlExpr::Column("v".into());
+        [None, Some(&col)].map(|expr| {
+            (
+                compute_aggregate_binary("sum", "v", expr, &docs).unwrap(),
+                compute_aggregate_binary("avg", "v", expr, &docs).unwrap(),
+            )
+        })
+    }
+
+    #[test]
+    fn sum_keeps_integers_above_2_pow_53_exact() {
+        let vals = [
+            json!(9_007_199_254_740_993_i64),
+            json!(9_007_199_254_740_992_i64),
+        ];
+        for (sum, avg) in sum_avg_both_paths(&vals) {
+            assert_eq!(sum, Value::Integer(18_014_398_509_481_985));
+            assert_eq!(avg, Value::Float(9_007_199_254_740_992.0));
+        }
+    }
+
+    #[test]
+    fn sum_over_nanosecond_timestamps() {
+        let vals = [
+            json!(1_700_000_000_000_000_001_i64),
+            json!(1_700_000_000_000_000_002_i64),
+        ];
+        for (sum, _) in sum_avg_both_paths(&vals) {
+            assert_eq!(sum, Value::Integer(3_400_000_000_000_000_003));
+        }
+    }
+
+    #[test]
+    fn sum_past_i64_is_decimal() {
+        let vals = [json!(i64::MAX), json!(i64::MAX), json!(u64::MAX)];
+        let want = rust_decimal::Decimal::from_i128_with_scale(
+            2 * i128::from(i64::MAX) + i128::from(u64::MAX),
+            0,
+        );
+        for (sum, _) in sum_avg_both_paths(&vals) {
+            assert_eq!(sum, Value::Decimal(want));
+        }
+    }
+
+    #[test]
+    fn sum_mixed_int_float_is_float() {
+        let vals = [json!(2), json!(0.5)];
+        for (sum, avg) in sum_avg_both_paths(&vals) {
+            assert_eq!(sum, Value::Float(2.5));
+            assert_eq!(avg, Value::Float(1.25));
+        }
+    }
+
+    #[test]
+    fn sum_empty_is_null() {
+        let d1 = encode(&json!({"other": 1}));
+        let docs: Vec<&[u8]> = vec![&d1];
+        assert_eq!(
+            compute_aggregate_binary("sum", "v", None, &docs).unwrap(),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn min_max_u64_above_i64_max() {
+        let vals = [json!(u64::MAX), json!(i64::MAX), json!(-1)];
+        for (min, max) in min_max_both_paths(&vals) {
+            assert_eq!(min, Value::Integer(-1));
+            assert_eq!(max, Value::Decimal(rust_decimal::Decimal::from(u64::MAX)));
+        }
+    }
+
+    #[test]
+    fn min_max_nan_yields_to_numbers() {
+        // JSON has no NaN; write the float64 NaN by hand.
+        let mut nan_doc = vec![0x81, 0xa1, b'v', 0xcb];
+        nan_doc.extend_from_slice(&f64::NAN.to_bits().to_be_bytes());
+        let one = encode(&json!({"v": 1}));
+        let two = encode(&json!({"v": 2}));
+        let docs: Vec<&[u8]> = vec![&nan_doc, &one, &two];
+        assert_eq!(
+            compute_aggregate_binary("min", "v", None, &docs).unwrap(),
+            Value::Integer(1)
+        );
+        assert_eq!(
+            compute_aggregate_binary("max", "v", None, &docs).unwrap(),
+            Value::Integer(2)
         );
     }
 
@@ -532,6 +622,59 @@ mod tests {
         let max = compute_aggregate_binary("max", "v", None, &docs).unwrap();
         assert_eq!(min, Value::Integer(1));
         assert_eq!(max, Value::Integer(9));
+    }
+
+    /// MIN and MAX of `vals` under field `v`, raw-field path then
+    /// expression path.
+    fn min_max_both_paths(vals: &[serde_json::Value]) -> [(Value, Value); 2] {
+        let encoded: Vec<Vec<u8>> = vals.iter().map(|v| encode(&json!({ "v": v }))).collect();
+        let docs: Vec<&[u8]> = encoded.iter().map(Vec::as_slice).collect();
+        let col = crate::expr::SqlExpr::Column("v".into());
+        [None, Some(&col)].map(|expr| {
+            (
+                compute_aggregate_binary("min", "v", expr, &docs).unwrap(),
+                compute_aggregate_binary("max", "v", expr, &docs).unwrap(),
+            )
+        })
+    }
+
+    #[test]
+    fn min_max_keep_integers_above_2_pow_53_exact() {
+        let vals = [
+            json!(9_007_199_254_740_993_i64),
+            json!(9_007_199_254_740_992_i64),
+        ];
+        for (min, max) in min_max_both_paths(&vals) {
+            assert_eq!(min, Value::Integer(9_007_199_254_740_992));
+            assert_eq!(max, Value::Integer(9_007_199_254_740_993));
+        }
+    }
+
+    #[test]
+    fn min_max_over_nanosecond_timestamps() {
+        let vals = [
+            json!(1_700_000_000_000_000_002_i64),
+            json!(1_700_000_000_000_000_001_i64),
+            json!(1_700_000_000_000_000_003_i64),
+        ];
+        for (min, max) in min_max_both_paths(&vals) {
+            assert_eq!(min, Value::Integer(1_700_000_000_000_000_001));
+            assert_eq!(max, Value::Integer(1_700_000_000_000_000_003));
+        }
+    }
+
+    #[test]
+    fn min_max_mixed_int_float_return_original_type() {
+        let vals = [
+            json!(9_007_199_254_740_993_i64),
+            json!(9_007_199_254_740_992.0_f64),
+            json!(1.5),
+            json!(2),
+        ];
+        for (min, max) in min_max_both_paths(&vals) {
+            assert_eq!(min, Value::Float(1.5));
+            assert_eq!(max, Value::Integer(9_007_199_254_740_993));
+        }
     }
 
     #[test]
@@ -608,7 +751,7 @@ mod tests {
         let docs: Vec<&[u8]> = vec![&d1, &d2, &d3];
         assert_eq!(
             compute_aggregate_binary("sum", "v", None, &docs).unwrap(),
-            Value::Float(40.0)
+            Value::Integer(40)
         );
     }
 
@@ -658,7 +801,7 @@ mod tests {
 
         assert_eq!(
             compute_aggregate_binary("sum", "*", Some(&expr), &docs).unwrap(),
-            Value::Float(2.0)
+            Value::Integer(2)
         );
     }
 

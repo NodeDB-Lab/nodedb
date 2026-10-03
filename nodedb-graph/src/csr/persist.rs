@@ -424,7 +424,7 @@ mod tests {
         assert_eq!(restored.edge_count(), 2);
         assert!(!restored.has_weights());
 
-        let n = restored.neighbors("a", Some("KNOWS"), Direction::Out);
+        let n = restored.neighbors("a", &["KNOWS"], Direction::Out);
         assert_eq!(n.len(), 1);
         assert_eq!(n[0].1, "b");
     }

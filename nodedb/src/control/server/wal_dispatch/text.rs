@@ -45,14 +45,18 @@ pub(crate) fn encode_text_op_record(op: &TextOp) -> crate::Result<Option<(Record
         TextOp::FtsIndexDoc {
             collection,
             surrogate,
-            text,
+            fields,
             provenance,
         } => {
             let doc_id =
                 crate::engine::document::store::StorageKey::for_surrogate(*surrogate).to_string();
             let prov = provenance.clone().unwrap_or_default();
-            let payload =
-                nodedb_wal::record::FtsIndexPayload::new(prov, collection.as_str(), &doc_id, text);
+            let payload = nodedb_wal::record::FtsIndexPayload::new(
+                prov,
+                collection.as_str(),
+                &doc_id,
+                fields.clone(),
+            );
             Some((
                 RecordType::FtsIndex,
                 payload.to_bytes().map_err(crate::Error::Wal)?,

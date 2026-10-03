@@ -14,6 +14,7 @@ pub mod crdt_sync;
 pub mod cross_shard;
 pub mod field_diff;
 pub mod graph_cdc;
+pub mod image_fault;
 pub mod interest;
 pub mod kafka;
 pub mod metrics;

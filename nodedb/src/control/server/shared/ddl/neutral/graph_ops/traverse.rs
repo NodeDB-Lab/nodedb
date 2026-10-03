@@ -12,6 +12,7 @@ use crate::engine::graph::traversal_options::GraphTraversalOptions;
 use crate::engine::graph::traversal_options::MAX_GRAPH_TRAVERSAL_DEPTH;
 use nodedb_physical::physical_plan::GraphOp;
 use nodedb_types::DatabaseId;
+use nodedb_types::filter::MetadataFilter;
 
 use super::super::super::result::{DdlError, DdlResult};
 use super::super::refuse_gate::RefusingReadGate;
@@ -73,14 +74,6 @@ fn check_tenant_graph_depth(
     check_graph_depth_against_limit(depth, limit, field)
 }
 
-/// `GRAPH TRAVERSE FROM '<node_id>' [DEPTH <n>] [LABEL '<label>'] [DIRECTION in|out|both]`
-///
-/// No `txn_id` parameter, unlike [`neighbors`]: `GRAPH TRAVERSE` is a
-/// cross-core subgraph orchestrator (multi-hop, multi-core aggregation,
-/// `cross_core_traverse_subgraph`), not a single-shard `GraphOp::Neighbors` /
-/// depth-1 `GraphOp::Hop` dispatch -- merging staged edges into an N-hop
-/// cross-core BFS is out of scope for this single-hop read-your-own-writes
-/// unit (see `graph_txn_merge`'s doc comment).
 /// Fail closed unless `identity` can read the traversal's collection.
 ///
 /// A traversal discloses which nodes exist in a collection and how they are
@@ -121,12 +114,26 @@ pub struct TraverseRequest {
     pub collection: String,
     pub start: String,
     pub depth: usize,
-    pub edge_label: Option<String>,
+    /// Empty keeps every edge. Otherwise an edge with any listed label.
+    pub edge_labels: Vec<String>,
     pub direction: GraphDirection,
+    /// `EDGE WHERE` filters, AND-ed. Empty admits every edge.
+    pub edge_predicate: Vec<MetadataFilter>,
+    /// The session's active transaction, for read-your-own-writes overlay merge.
+    pub txn_id: Option<crate::types::TxnId>,
     /// The session reads linearizably.
     pub linearizable: bool,
 }
 
+/// `GRAPH TRAVERSE IN '<collection>' FROM '<node_id>' [DEPTH <n>]
+/// [LABEL '<label>'[, '<label>' ...]] [DIRECTION in|out|both]
+/// [EDGE WHERE <predicate>]`
+///
+/// Each result edge carries its current property object.
+///
+/// `txn_id` reaches every hop of the walk (`cross_core_traverse_subgraph`).
+/// The walk, its `EDGE WHERE` predicate and the returned properties see the
+/// transaction's staged edge puts, tombstones and property changes.
 pub async fn traverse(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
@@ -137,8 +144,10 @@ pub async fn traverse(
         collection,
         start,
         depth,
-        edge_label,
+        edge_labels,
         direction,
+        edge_predicate,
+        txn_id,
         linearizable,
     } = req;
     if start.is_empty() {
@@ -150,9 +159,8 @@ pub async fn traverse(
     check_tenant_graph_depth(state, tenant_id, depth, "DEPTH")?;
     let dir = to_engine_direction(direction);
 
-    // Subgraph-shaped dispatcher: emits `{nodes,edges}` JSON matching
-    // the remote client's `parse_graph_traverse_json` decoder. Tree
-    // DDL aggregates that only need a flat reachable set still call
+    // Subgraph-shaped dispatcher: emits the `{nodes,edges}` JSON both clients
+    // decode. Tree DDL aggregates that only need a flat reachable set call
     // `cross_core_bfs_with_options` directly.
     match crate::control::server::graph_dispatch::cross_core_traverse_subgraph(
         state,
@@ -166,11 +174,14 @@ pub async fn traverse(
                     .to_owned(),
             ),
             start,
-            edge_label,
+            edge_labels: &edge_labels,
             direction: dir,
             max_depth: depth,
             options: &GraphTraversalOptions::default(),
             linearizable,
+            edge_predicate: &edge_predicate,
+            with_properties: true,
+            txn_id,
         },
     )
     .await
@@ -180,16 +191,12 @@ pub async fn traverse(
     }
 }
 
-/// `GRAPH NEIGHBORS OF '<node_id>' [LABEL '<label>'] [DIRECTION in|out|both]`
-///
-/// `txn_id` (the caller's active session transaction, if any) is stamped
-/// onto the fan-out request so this read observes the transaction's own
-/// staged edge writes (read-your-own-writes) via `GraphTxnOverlay`.
 /// `GRAPH NEIGHBORS` request fields.
 pub struct NeighborsRequest {
     pub collection: String,
     pub node: String,
-    pub edge_label: Option<String>,
+    /// Empty keeps every edge. Otherwise an edge with any listed label.
+    pub edge_labels: Vec<String>,
     pub direction: GraphDirection,
     /// The session's active transaction, for read-your-own-writes overlay merge.
     pub txn_id: Option<crate::types::TxnId>,
@@ -197,6 +204,12 @@ pub struct NeighborsRequest {
     pub linearizable: bool,
 }
 
+/// `GRAPH NEIGHBORS IN '<collection>' OF '<node_id>'
+/// [LABEL '<label>'[, '<label>' ...]] [DIRECTION in|out|both]`
+///
+/// `txn_id` (the caller's active session transaction, if any) is stamped
+/// onto the request so this read observes the transaction's own staged
+/// edge writes (read-your-own-writes) via `GraphTxnOverlay`.
 pub async fn neighbors(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
@@ -206,7 +219,7 @@ pub async fn neighbors(
     let NeighborsRequest {
         collection,
         node,
-        edge_label,
+        edge_labels,
         direction,
         txn_id,
         linearizable,
@@ -225,7 +238,7 @@ pub async fn neighbors(
             &collection,
         )),
         node_id: node,
-        edge_label,
+        edge_labels,
         direction: dir,
         rls_filters: Vec::new(),
     });
@@ -248,24 +261,31 @@ pub async fn neighbors(
     }
 }
 
-/// `GRAPH PATH FROM '<src>' TO '<dst>' [MAX_DEPTH <n>] [LABEL '<label>']`
-///
-/// Returns the actual shortest path `[src, hop_1, ..., dst]`. An
-/// unreachable destination yields an empty array. Orchestrated by
-/// `cross_core_shortest_path`, which records parent pointers per
-/// hop so the path can be reconstructed across every topology —
-/// single core, single-node multi-core, and clustered.
 /// `GRAPH PATH` request fields.
 pub struct ShortestPathRequest {
     pub collection: String,
     pub src: String,
     pub dst: String,
     pub max_depth: usize,
-    pub edge_label: Option<String>,
+    /// Empty keeps every edge. Otherwise an edge with any listed label.
+    pub edge_labels: Vec<String>,
+    /// `EDGE WHERE` filters, AND-ed. Empty admits every edge.
+    pub edge_predicate: Vec<MetadataFilter>,
+    /// The session's active transaction, for read-your-own-writes overlay merge.
+    pub txn_id: Option<crate::types::TxnId>,
     /// The session reads linearizably.
     pub linearizable: bool,
 }
 
+/// `GRAPH PATH IN '<collection>' FROM '<src>' TO '<dst>' [MAX_DEPTH <n>]
+/// [LABEL '<label>'[, '<label>' ...]] [EDGE WHERE <predicate>]`
+///
+/// Returns the actual shortest path `[src, hop_1, ..., dst]`. An
+/// unreachable destination yields an empty array. Orchestrated by
+/// `cross_core_shortest_path`, which records parent pointers per
+/// hop so the path can be reconstructed across every topology —
+/// single core, single-node multi-core, and clustered. The path sees the
+/// staged edge writes of `txn_id`.
 pub async fn shortest_path(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
@@ -277,7 +297,9 @@ pub async fn shortest_path(
         src,
         dst,
         max_depth,
-        edge_label,
+        edge_labels,
+        edge_predicate,
+        txn_id,
         linearizable,
     } = req;
     if src.is_empty() || dst.is_empty() {
@@ -303,10 +325,12 @@ pub async fn shortest_path(
             ),
             src,
             dst,
-            edge_label,
+            edge_labels,
             max_depth,
             options: GraphTraversalOptions::default(),
             linearizable,
+            edge_predicate,
+            txn_id,
         },
     )
     .await

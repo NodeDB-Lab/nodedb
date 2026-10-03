@@ -14,6 +14,7 @@ use nodedb_physical::physical_plan::document::merge_types::{
     MergeActionOp, MergeClauseKind as MergeClauseKindOp,
 };
 
+use super::super::identity_guard::IdentitySnapshot;
 use super::super::merge::MergeParams;
 use super::super::merge_helpers::{
     build_insert_doc, build_merged, build_update_doc, find_arm, json_to_str,
@@ -162,6 +163,13 @@ impl CoreLoop {
                             upd,
                             pk,
                         )?;
+                        IdentitySnapshot::capture(
+                            strict_schema.as_ref(),
+                            params.declared_primary_key,
+                            upd,
+                            &target_doc,
+                        )
+                        .check_unchanged(params.target_collection, &updated)?;
                         updates.push(MergeUpdate {
                             key,
                             body: encode_doc_body(&updated),

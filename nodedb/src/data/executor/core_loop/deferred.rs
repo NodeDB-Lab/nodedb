@@ -24,6 +24,8 @@ pub(in crate::data::executor) struct DeferredWrite {
     pub source: EventSource,
     pub new_value: Option<Vec<u8>>,
     pub old_value: Option<Vec<u8>>,
+    /// The image that did not render; its slot above is `None`.
+    pub image_fault: Option<crate::event::image_fault::ImageFault>,
 }
 
 impl CoreLoop {
@@ -69,6 +71,7 @@ impl CoreLoop {
                 user_id: None,
                 statement_digest: None,
                 commit_hlc,
+                image_fault: write.image_fault,
             };
 
             self.send_write_event(event);

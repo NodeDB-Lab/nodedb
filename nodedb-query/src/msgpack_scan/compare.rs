@@ -10,7 +10,8 @@ use std::hash::{BuildHasher, Hasher};
 
 use nodedb_types::read_instant;
 
-use crate::msgpack_scan::reader::{read_f64, read_i64, read_null, str_bounds};
+use crate::json_ops::cmp_numeric;
+use crate::msgpack_scan::reader::{read_integer, read_null, read_numeric, str_bounds};
 
 /// Hash the raw bytes of a MessagePack value at `range` within `buf`.
 /// Uses a fast non-cryptographic hash suitable for hash joins and GROUP BY.
@@ -49,7 +50,9 @@ pub fn hash_field_bytes_with(
 ///
 /// Comparison order:
 /// 1. Null < Bool < Number < Instant < String < Binary < Array < Map < Ext
-/// 2. Within numbers: compare as f64
+/// 2. Within numbers: exact numeric order; integers (`uint64` included)
+///    never round through f64, and an integer against a float compares
+///    exactly
 /// 3. Within instants: by kind (UTC before naive), then signed epoch micros
 /// 4. Within strings: lexicographic on raw bytes (valid UTF-8 guarantees
 ///    byte order = Unicode code-point order for ASCII/Latin-1)
@@ -87,9 +90,9 @@ pub fn compare_field_bytes(
             a_val.cmp(&b_val)
         }
         RANK_NUMBER => {
-            // compare as f64
-            match (read_f64(a_buf, a_off), read_f64(b_buf, b_off)) {
-                (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
+            // Exact: integers never round through f64. A NaN pair is Equal.
+            match (read_numeric(a_buf, a_off), read_numeric(b_buf, b_off)) {
+                (Some(a), Some(b)) => cmp_numeric(a, b).unwrap_or(Ordering::Equal),
                 (Some(_), None) => Ordering::Greater,
                 (None, Some(_)) => Ordering::Less,
                 (None, None) => Ordering::Equal,
@@ -128,10 +131,10 @@ pub fn compare_field_bytes(
     }
 }
 
-/// Compare two numeric MessagePack values as i64.
+/// Compare two integer MessagePack values exactly, `uint64` included.
 /// Useful when the caller knows both values are integers.
 pub fn compare_field_i64(a_buf: &[u8], a_off: usize, b_buf: &[u8], b_off: usize) -> Ordering {
-    match (read_i64(a_buf, a_off), read_i64(b_buf, b_off)) {
+    match (read_integer(a_buf, a_off), read_integer(b_buf, b_off)) {
         (Some(a), Some(b)) => a.cmp(&b),
         (Some(_), None) => Ordering::Greater,
         (None, Some(_)) => Ordering::Less,
@@ -326,6 +329,54 @@ mod tests {
             compare_field_bytes(&a, val_range(&a), &b, val_range(&b)),
             Ordering::Less
         );
+    }
+
+    fn cmp(a: &serde_json::Value, b: &serde_json::Value) -> Ordering {
+        let (a, b) = (encode(a), encode(b));
+        compare_field_bytes(&a, val_range(&a), &b, val_range(&b))
+    }
+
+    #[test]
+    fn integers_past_two_pow_53_compare_exactly() {
+        let above = json!(9_007_199_254_740_993_i64);
+        let at = json!(9_007_199_254_740_992_i64);
+        assert_eq!(cmp(&above, &at), Ordering::Greater);
+        assert_eq!(cmp(&at, &above), Ordering::Less);
+        assert_eq!(cmp(&above, &above), Ordering::Equal);
+    }
+
+    #[test]
+    fn nanosecond_timestamps_compare_exactly() {
+        let t1 = json!(1_700_000_000_000_000_001_i64);
+        let t2 = json!(1_700_000_000_000_000_002_i64);
+        assert_eq!(cmp(&t1, &t2), Ordering::Less);
+        assert_eq!(cmp(&t2, &t1), Ordering::Greater);
+    }
+
+    #[test]
+    fn uint64_above_i64_max_orders_above_every_i64() {
+        assert_eq!(cmp(&json!(u64::MAX), &json!(i64::MAX)), Ordering::Greater);
+        assert_eq!(cmp(&json!(u64::MAX - 1), &json!(u64::MAX)), Ordering::Less);
+        assert_eq!(cmp(&json!(i64::MIN), &json!(u64::MAX)), Ordering::Less);
+        let (a, b) = (encode(&json!(u64::MAX)), encode(&json!(-1)));
+        assert_eq!(compare_field_i64(&a, 0, &b, 0), Ordering::Greater);
+    }
+
+    #[test]
+    fn integer_against_float_compares_exactly() {
+        let above = json!(9_007_199_254_740_993_i64);
+        let float = json!(9_007_199_254_740_992.0_f64);
+        assert_eq!(cmp(&above, &float), Ordering::Greater);
+        assert_eq!(cmp(&float, &above), Ordering::Less);
+        assert_eq!(cmp(&json!(2), &json!(2.5)), Ordering::Less);
+        assert_eq!(cmp(&json!(3), &json!(3.0)), Ordering::Equal);
+    }
+
+    #[test]
+    fn numbers_keep_cross_rank_order() {
+        assert_eq!(cmp(&json!(true), &json!(u64::MAX)), Ordering::Less);
+        assert_eq!(cmp(&json!(u64::MAX), &json!("")), Ordering::Less);
+        assert_eq!(cmp(&json!(null), &json!(-1.5)), Ordering::Less);
     }
 
     #[test]

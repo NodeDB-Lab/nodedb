@@ -12,12 +12,13 @@ use super::{
     super::statement::{GraphStmt, NodedbStatement},
     fusion_params::{FusionParams, RAG_FUSION_KEYWORDS},
     helpers::{
-        direction_after, extract_properties, missing_clause, quoted_after, quoted_list_after,
-        usize_after, usize_after_checked, word_after,
+        direction_after, extract_properties, label_set_after, missing_clause, quoted_after,
+        quoted_list_after, usize_after, usize_after_checked, word_after,
     },
     tokenizer::Tok,
 };
 use crate::error::SqlError;
+use nodedb_types::filter::MetadataFilter;
 
 pub(super) fn parse_insert_edge(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH INSERT EDGE";
@@ -66,20 +67,24 @@ pub(super) fn parse_set_labels(
     }))
 }
 
-pub(super) fn parse_traverse(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
+pub(super) fn parse_traverse(
+    toks: &[Tok<'_>],
+    edge_predicate: Vec<MetadataFilter>,
+) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH TRAVERSE";
     let collection =
         quoted_after(toks, "IN").ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
     let start = quoted_after(toks, "FROM").ok_or_else(|| missing_clause(STMT, "FROM <node>"))?;
     let depth = usize_after_checked(toks, "DEPTH")?.unwrap_or(2);
-    let edge_label = quoted_after(toks, "LABEL");
+    let edge_labels = label_set_after(toks, STMT)?;
     let direction = direction_after(toks)?;
     Ok(NodedbStatement::Graph(GraphStmt::GraphTraverse {
         collection,
         start,
         depth,
-        edge_label,
+        edge_labels,
         direction,
+        edge_predicate,
     }))
 }
 
@@ -88,30 +93,34 @@ pub(super) fn parse_neighbors(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlEr
     let collection =
         quoted_after(toks, "IN").ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
     let node = quoted_after(toks, "OF").ok_or_else(|| missing_clause(STMT, "OF <node>"))?;
-    let edge_label = quoted_after(toks, "LABEL");
+    let edge_labels = label_set_after(toks, STMT)?;
     let direction = direction_after(toks)?;
     Ok(NodedbStatement::Graph(GraphStmt::GraphNeighbors {
         collection,
         node,
-        edge_label,
+        edge_labels,
         direction,
     }))
 }
 
-pub(super) fn parse_path(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
+pub(super) fn parse_path(
+    toks: &[Tok<'_>],
+    edge_predicate: Vec<MetadataFilter>,
+) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH PATH";
     let collection =
         quoted_after(toks, "IN").ok_or_else(|| missing_clause(STMT, "IN <collection>"))?;
     let src = quoted_after(toks, "FROM").ok_or_else(|| missing_clause(STMT, "FROM <node>"))?;
     let dst = quoted_after(toks, "TO").ok_or_else(|| missing_clause(STMT, "TO <node>"))?;
     let max_depth = usize_after_checked(toks, "MAX_DEPTH")?.unwrap_or(10);
-    let edge_label = quoted_after(toks, "LABEL");
+    let edge_labels = label_set_after(toks, STMT)?;
     Ok(NodedbStatement::Graph(GraphStmt::GraphPath {
         collection,
         src,
         dst,
         max_depth,
-        edge_label,
+        edge_labels,
+        edge_predicate,
     }))
 }
 

@@ -14,6 +14,7 @@ pub mod calvin;
 pub mod calvin_snapshot;
 pub mod core_stall;
 pub mod data_plane_error_wire;
+pub mod data_plane_fault_wire;
 pub mod decommission_bridge;
 pub mod handle;
 pub mod init;

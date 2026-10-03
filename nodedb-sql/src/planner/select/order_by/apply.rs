@@ -9,7 +9,7 @@
 use sqlparser::ast;
 
 use super::aliases::{resolve_order_by_target, select_output_aliases};
-use super::triggers::try_extract_sort_search;
+use super::triggers::{SortSearch, try_extract_sort_search};
 use crate::error::Result;
 use crate::functions::registry::FunctionRegistry;
 use crate::planner::agg_bind::{BindName, bind_aggregate_calls};
@@ -51,10 +51,49 @@ pub(in crate::planner::select) fn apply_order_by(
     //       same call under an alias, and propagate that alias.
     let first = &exprs[0];
     let (resolved_expr, score_alias) = resolve_order_by_target(&first.expr, select_items);
-    if let Some(search_plan) =
-        try_extract_sort_search(resolved_expr, plan, functions, score_alias.as_deref())?
-    {
-        return Ok(search_plan);
+    match try_extract_sort_search(
+        resolved_expr,
+        plan,
+        functions,
+        score_alias.as_deref(),
+        scope.single_table(),
+    )? {
+        Some(SortSearch::Ranked(search_plan)) => return Ok(search_plan),
+        // The leading key sorts by the score column the plan carries. The
+        // rest convert as plain sort keys.
+        //
+        // A row the index does not hold scores `null`. Its key takes the
+        // NULL placement of every other ORDER BY key: last ascending, first
+        // descending, unless the clause names `NULLS FIRST` / `NULLS LAST`.
+        Some(SortSearch::Scored {
+            plan: scored,
+            alias,
+        }) => {
+            let sort_scope = scope.with_output_names(select_output_aliases(select_items));
+            let mut keys = vec![SortKey {
+                expr: SqlExpr::Column {
+                    table: None,
+                    name: alias,
+                },
+                ascending: first.options.asc.unwrap_or(true),
+                nulls_first: first
+                    .options
+                    .nulls_first
+                    .unwrap_or(!first.options.asc.unwrap_or(true)),
+            }];
+            for o in &exprs[1..] {
+                keys.push(SortKey {
+                    expr: convert_expr(&o.expr, &ColumnScope::Relations(&sort_scope))?,
+                    ascending: o.options.asc.unwrap_or(true),
+                    nulls_first: o
+                        .options
+                        .nulls_first
+                        .unwrap_or(!o.options.asc.unwrap_or(true)),
+                });
+            }
+            return post_process(scored, keys, None, 0);
+        }
+        None => {}
     }
 
     // After GROUP BY, an ORDER BY term may name an aggregate — projected or

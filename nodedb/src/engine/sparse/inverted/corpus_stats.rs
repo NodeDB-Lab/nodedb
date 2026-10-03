@@ -7,39 +7,66 @@
 //! base search used — a staged doc must not shift the corpus itself, only
 //! be scored against it.
 
+use nodedb_fts::IndexScope;
 use nodedb_fts::backend::FtsBackend;
 use nodedb_types::TenantId;
 
 use super::core::InvertedIndex;
 
 impl InvertedIndex {
-    /// Total document count and average document length for a collection,
-    /// as read by the base BM25 search (`FtsIndex::index_stats`).
-    pub fn corpus_stats(
+    /// Total document count and average document length of one index, as
+    /// read by the base BM25 search (`FtsIndex::index_stats`).
+    pub fn corpus_stats<'a>(
         &self,
         database_id: u64,
         tid: TenantId,
-        collection: &str,
+        index: impl Into<IndexScope<'a>>,
     ) -> crate::Result<(u32, f32)> {
-        self.inner
-            .index_stats(database_id, tid.as_u64(), collection)
+        self.inner.index_stats(database_id, tid.as_u64(), index)
     }
 
     /// Document frequency (number of documents containing `term`) for a
-    /// single already-analyzed term, read from the same POSTINGS table the
-    /// base search scores against.
-    pub fn term_df(
+    /// single already-analyzed term in one index, read from the same POSTINGS
+    /// table the base search scores against.
+    pub fn term_df<'a>(
         &self,
         database_id: u64,
         tid: TenantId,
-        collection: &str,
+        index: impl Into<IndexScope<'a>>,
         term: &str,
     ) -> crate::Result<u32> {
         let postings =
             self.inner
                 .backend()
-                .read_postings(database_id, tid.as_u64(), collection, term)?;
+                .read_postings(database_id, tid.as_u64(), index.into(), term)?;
         Ok(postings.len() as u32)
+    }
+
+    /// Every document one index holds, read in one transaction. An index
+    /// holds a document exactly when it records the document's length.
+    pub fn index_members<'a>(
+        &self,
+        database_id: u64,
+        tid: TenantId,
+        index: impl Into<IndexScope<'a>>,
+    ) -> crate::Result<std::collections::HashSet<nodedb_types::Surrogate>> {
+        self.inner
+            .backend()
+            .index_members(database_id, tid.as_u64(), index.into())
+    }
+
+    /// Whether any document currently holds text in one index.
+    pub fn has_text<'a>(
+        &self,
+        database_id: u64,
+        tid: TenantId,
+        index: impl Into<IndexScope<'a>>,
+    ) -> crate::Result<bool> {
+        let (count, _) =
+            self.inner
+                .backend()
+                .collection_stats(database_id, tid.as_u64(), index.into())?;
+        Ok(count > 0)
     }
 }
 
@@ -52,6 +79,7 @@ mod tests {
     use nodedb_types::Surrogate;
 
     use super::*;
+    use crate::engine::sparse::inverted::test_support::body;
 
     const DB: u64 = 0;
     const T: TenantId = TenantId::new(1);
@@ -67,6 +95,26 @@ mod tests {
         (idx, dir)
     }
 
+    #[test]
+    fn index_members_are_the_documents_with_a_recorded_length() {
+        let (idx, _dir) = open_temp();
+        idx.index_document(DB, T, "docs", Surrogate::new(1), &body("alpha bravo"))
+            .unwrap();
+        idx.index_document(DB, T, "docs", Surrogate::new(7), &body("charlie"))
+            .unwrap();
+        idx.index_document(DB, T, "other", Surrogate::new(3), &body("delta"))
+            .unwrap();
+
+        let members = idx.index_members(DB, T, "docs").unwrap();
+        assert_eq!(
+            members,
+            [Surrogate::new(1), Surrogate::new(7)]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+        );
+        assert!(idx.index_members(DB, T, "absent").unwrap().is_empty());
+    }
+
     /// STATS (doc count, avg doc length) must not double-count when the SAME
     /// surrogate is indexed more than once — this is exactly what happens on
     /// WAL replay, which re-invokes `index_document` for already-durable
@@ -79,8 +127,14 @@ mod tests {
         let (idx, _dir) = open_temp();
 
         // "alpha bravo charlie" tokenizes to 3 terms.
-        idx.index_document(DB, T, "docs", Surrogate::new(1), "alpha bravo charlie")
-            .unwrap();
+        idx.index_document(
+            DB,
+            T,
+            "docs",
+            Surrogate::new(1),
+            &body("alpha bravo charlie"),
+        )
+        .unwrap();
         let (count, avg_len) = idx.corpus_stats(DB, T, "docs").unwrap();
         assert_eq!(count, 1, "first index must count the doc once");
         assert_eq!(avg_len, 3.0, "avg doc len == the single doc's length");
@@ -88,8 +142,14 @@ mod tests {
         // Re-index the SAME surrogate with IDENTICAL content, simulating a WAL
         // replay of an already-durable FtsIndex record. Doc count and total
         // token sum must be unchanged (net zero), not doubled.
-        idx.index_document(DB, T, "docs", Surrogate::new(1), "alpha bravo charlie")
-            .unwrap();
+        idx.index_document(
+            DB,
+            T,
+            "docs",
+            Surrogate::new(1),
+            &body("alpha bravo charlie"),
+        )
+        .unwrap();
         let (count, avg_len) = idx.corpus_stats(DB, T, "docs").unwrap();
         assert_eq!(
             count, 1,
@@ -109,8 +169,14 @@ mod tests {
     fn reindex_same_surrogate_different_length_adjusts_total_by_delta() {
         let (idx, _dir) = open_temp();
 
-        idx.index_document(DB, T, "docs", Surrogate::new(1), "alpha bravo charlie")
-            .unwrap();
+        idx.index_document(
+            DB,
+            T,
+            "docs",
+            Surrogate::new(1),
+            &body("alpha bravo charlie"),
+        )
+        .unwrap();
         let (count, avg_len) = idx.corpus_stats(DB, T, "docs").unwrap();
         assert_eq!(count, 1);
         assert_eq!(avg_len, 3.0);
@@ -122,7 +188,7 @@ mod tests {
             T,
             "docs",
             Surrogate::new(1),
-            "alpha bravo charlie delta echo",
+            &body("alpha bravo charlie delta echo"),
         )
         .unwrap();
         let (count, avg_len) = idx.corpus_stats(DB, T, "docs").unwrap();

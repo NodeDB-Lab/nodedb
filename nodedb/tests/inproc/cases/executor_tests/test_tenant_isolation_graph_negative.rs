@@ -44,7 +44,7 @@ fn graph_cross_tenant_insert_does_not_contaminate_neighbors() {
         TENANT_A,
         PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "node_1".into(),
-            edge_label: Some("FOLLOWS".into()),
+            edge_labels: vec!["FOLLOWS".into()],
             direction: Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
@@ -89,7 +89,7 @@ fn graph_cross_tenant_insert_does_not_contaminate_neighbors() {
         TENANT_A,
         PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "node_1".into(),
-            edge_label: Some("FOLLOWS".into()),
+            edge_labels: vec!["FOLLOWS".into()],
             direction: Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
@@ -165,7 +165,7 @@ fn graph_cross_tenant_edge_delete_does_not_affect_owner() {
         TENANT_A,
         PhysicalPlan::Graph(GraphOp::Neighbors {
             node_id: "alpha".into(),
-            edge_label: Some("CONNECTED".into()),
+            edge_labels: vec!["CONNECTED".into()],
             direction: Direction::Out,
             rls_filters: Vec::new(),
             collection: None,

@@ -11,6 +11,8 @@ mod join_cost;
 mod recursive;
 mod search;
 mod spatial;
+mod text_score_bound;
+mod text_search;
 mod timeseries;
 
 pub(in crate::control::planner::sql_plan_convert) use core::{
@@ -22,9 +24,13 @@ pub(in crate::control::planner::sql_plan_convert) use recursive::{
 };
 pub(in crate::control::planner::sql_plan_convert) use search::{
     convert_hybrid_search, convert_hybrid_search_triple, convert_sparse_search,
-    convert_text_search, convert_vector_search,
+    convert_vector_search,
 };
 pub(in crate::control::planner::sql_plan_convert) use spatial::convert_spatial_scan;
+pub(in crate::control::planner::sql_plan_convert) use text_score_bound::{
+    ScoreScanTail, bound_score_scan,
+};
+pub(in crate::control::planner::sql_plan_convert) use text_search::convert_text_search;
 pub(in crate::control::planner::sql_plan_convert) use timeseries::{
     convert_timeseries_ingest, convert_timeseries_scan,
 };

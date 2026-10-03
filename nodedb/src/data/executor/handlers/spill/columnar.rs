@@ -99,14 +99,7 @@ impl ColumnarGroupBySpiller {
     ) -> crate::Result<HashMap<GroupKey, Vec<AggAccum>>> {
         self.core.merge(&mut self.in_mem, self.cap, |dst, src| {
             for (d, s) in dst.iter_mut().zip(src) {
-                d.count += s.count;
-                d.sum += s.sum;
-                if s.min < d.min {
-                    d.min = s.min;
-                }
-                if s.max > d.max {
-                    d.max = s.max;
-                }
+                d.merge(s);
             }
         })
     }

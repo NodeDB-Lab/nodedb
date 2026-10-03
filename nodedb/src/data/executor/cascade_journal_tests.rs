@@ -182,7 +182,7 @@ type Neighbors = Vec<(String, String)>;
 fn edges(core: &mut CoreLoop, node: &str) -> (EdgeVersions, Neighbors) {
     let mut neighbors = core
         .csr_partition_mut(DatabaseId::DEFAULT.as_u64(), TID)
-        .neighbors(node, None, Direction::Out);
+        .neighbors(node, &[], Direction::Out);
     neighbors.sort();
     let versions = core
         .edge_store

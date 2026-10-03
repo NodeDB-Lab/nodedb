@@ -99,7 +99,7 @@ impl CoreLoop {
             database_id: task.request.database_id.as_u64(),
             tid: tenant_id,
             seeds: GraphSeeds::Surrogates(&seeds),
-            label_filter: edge_label.as_deref(),
+            label_filter: edge_label.as_deref().as_slice(),
             direction,
             max_depth: expansion_depth,
             max_visited,

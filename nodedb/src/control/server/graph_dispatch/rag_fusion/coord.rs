@@ -184,7 +184,7 @@ async fn run(state: &SharedState, scope: RagScope, plan: &PhysicalPlan) -> crate
             scope,
             WalkSpec {
                 collection: &qualified,
-                edge_label: edge_label.as_deref(),
+                edge_labels: edge_label.as_slice(),
                 direction: *direction,
                 max_depth: *expansion_depth,
                 options,
@@ -274,10 +274,11 @@ async fn run(state: &SharedState, scope: RagScope, plan: &PhysicalPlan) -> crate
     Ok(ok_payload_response(Payload::from_vec(payload)))
 }
 
-/// What a walk reads: the collection's edges under a label and direction.
+/// What a walk reads: the collection's edges under a label set and direction.
 struct WalkSpec<'a> {
     collection: &'a str,
-    edge_label: Option<&'a str>,
+    /// Empty keeps every edge. Otherwise an edge with any listed label.
+    edge_labels: &'a [String],
     direction: Direction,
     max_depth: usize,
     options: &'a GraphTraversalOptions,
@@ -306,7 +307,7 @@ async fn walk_from_seeds(
 ) -> crate::Result<Walk> {
     let WalkSpec {
         collection,
-        edge_label,
+        edge_labels,
         direction,
         max_depth,
         options,
@@ -339,19 +340,23 @@ async fn walk_from_seeds(
             NeighborHopParams {
                 collection: Some(collection),
                 frontier: &frontier,
-                edge_label,
+                edge_labels,
                 direction,
                 options: &whole_hop,
                 discovered_so_far: visited.len(),
                 linearizable: scope.linearizable,
+                edge_predicate: &[],
+                with_properties: false,
+                // A RAG fusion plan carries no session transaction.
+                txn_id: None,
             },
         )
         .await?;
         reads.merge(hop.reads);
         let mut candidates: Vec<String> = hop
-            .local_triples
+            .rows
             .into_iter()
-            .map(|(_src, _label, dst)| dst)
+            .map(|row| row.node)
             .filter(|dst| !visited.contains(dst))
             .collect();
         candidates.sort();

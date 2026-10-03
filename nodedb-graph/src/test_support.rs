@@ -27,3 +27,29 @@ pub(crate) fn test_memory() -> ScopedMemory {
         EngineId::Graph,
     )
 }
+
+/// `a -KNOWS-> b -KNOWS-> c -KNOWS-> d` plus `a -WORKS-> e`.
+pub(crate) fn chain_csr() -> crate::csr::CsrIndex {
+    let mut csr = crate::csr::CsrIndex::new(test_memory());
+    for (src, label, dst) in [
+        ("a", "KNOWS", "b"),
+        ("b", "KNOWS", "c"),
+        ("c", "KNOWS", "d"),
+        ("a", "WORKS", "e"),
+    ] {
+        csr.add_edge(src, label, dst).expect("test edge");
+    }
+    csr
+}
+
+/// `n0 -NEXT-> n1 -> ... -> n999`, compacted.
+pub(crate) fn long_chain_csr() -> crate::csr::CsrIndex {
+    let mut csr = crate::csr::CsrIndex::new(test_memory());
+    for i in 0..999 {
+        csr.add_edge(&format!("n{i}"), "NEXT", &format!("n{}", i + 1))
+            .expect("test edge");
+    }
+    csr.compact()
+        .expect("test governor ceiling covers this reservation");
+    csr
+}

@@ -2,8 +2,8 @@
 
 //! Vector engine plan builders.
 
-use nodedb_types::QualifiedCollection;
 use nodedb_types::protocol::TextFields;
+use nodedb_types::{QualifiedCollection, SurrogateBitmap};
 use nodedb_types::vector_distance::DistanceMetric;
 
 use super::super::DispatchCtx;
@@ -24,6 +24,22 @@ pub(crate) async fn build_search(
     let top_k = fields.top_k.unwrap_or(10) as usize;
     let ef_search = fields.ef_search.unwrap_or(0) as usize;
     let field_name = fields.field_name.clone().unwrap_or_default();
+    // The allowed ids restrict the candidates before ranking: an id bound to
+    // no row names no candidate.
+    let filter_bitmap = match &fields.allowed_ids {
+        Some(ids) => {
+            let pks: Vec<&[u8]> = ids.iter().map(|id| id.as_bytes()).collect();
+            let surrogates = super::helpers::existing_surrogates(ctx, collection, &pks).await?;
+            Some(surrogates.into_iter().flatten().collect::<SurrogateBitmap>())
+        }
+        None => None,
+    };
+    // The metadata filter fills the residual-filter slot a SQL `WHERE`
+    // fills, so it narrows the candidates before the top-k cut.
+    let rls_filters = match fields.filters.as_deref() {
+        Some(bytes) => super::vector_filter::residual_filters(ctx, collection, bytes)?,
+        None => Vec::new(),
+    };
 
     Ok(PhysicalPlan::Vector(VectorOp::Search {
         collection: QualifiedCollection::new(ctx.database_id(), collection),
@@ -34,9 +50,9 @@ pub(crate) async fn build_search(
         // default metric (L2 as the wire sentinel — the Data Plane will apply
         // the collection-configured metric when these match).
         metric: DistanceMetric::L2,
-        filter_bitmap: None,
+        filter_bitmap,
         field_name,
-        rls_filters: Vec::new(),
+        rls_filters,
         inline_prefilter_plan: None,
         // The native protocol carries primitive top_k / ef_search fields
         // directly; advanced ANN tuning (quantization, oversample, target

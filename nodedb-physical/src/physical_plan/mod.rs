@@ -67,7 +67,7 @@ pub use routing::plan_contains_cluster_partitioned_leaf;
 pub use set_op::SetOpKind;
 pub use sort_key::SortKeySpec;
 pub use spatial::{SpatialOp, SpatialPredicate};
-pub use text::TextOp;
+pub use text::{ScoreScanBound, ScoreScanOrder, TextOp, TextScoreSpec};
 pub use timeseries::{TimeseriesOp, TimeseriesResolve, UNBOUNDED_TIME_RANGE};
 pub use vector::{
     VectorDirectWriteIntent, VectorOp, VectorResolveOutcome, VectorResolvedMutation,

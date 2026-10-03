@@ -439,7 +439,7 @@ mod tests {
             .is_some();
         let csr = !core
             .csr_partition_mut(DB, TID)
-            .neighbors(PK, None, Direction::Out)
+            .neighbors(PK, &[], Direction::Out)
             .is_empty();
         store && csr
     }

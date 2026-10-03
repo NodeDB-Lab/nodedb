@@ -10,7 +10,7 @@
 //! NEIGHBORS` will not observe it as staged (breaking read-your-own-writes)
 //! and a ROLLBACK cannot undo it. These helpers instead route the write
 //! through the protocol-neutral staging gate
-//! ([`route_in_tx_write`](crate::control::server::shared::session::staging_gate::route_in_tx_write)),
+//! ([`route_in_tx_write`]),
 //! exactly like every other in-transaction point write: the Data Plane stages
 //! the edge into the per-transaction `GraphTxnOverlay` (merged by Neighbors /
 //! Hop for RYOW), the plan is buffered for COMMIT's durable replay, and

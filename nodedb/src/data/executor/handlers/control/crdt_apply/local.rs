@@ -29,6 +29,13 @@ enum LocalRefusal {
     /// Permanent: a row the delta writes violates a constraint. Nothing
     /// applied, and the delta is in the dead-letter queue.
     Constraint(ViolationType),
+    /// A row the delta writes violates a constraint, and the dead-letter
+    /// queue refused the delta. Nothing applied and nothing records it, so
+    /// the sender keeps it and re-sends once the queue has room.
+    DeadLetterRefused { detail: String },
+    /// This node could not build the candidate the delta validates in.
+    /// Nothing applied, and the delta is not at fault, so the sender re-sends.
+    CandidateUnavailable { detail: String },
 }
 
 impl CoreLoop {
@@ -112,7 +119,23 @@ impl CoreLoop {
                     Ok(Self::encode_crdt_row(engine, collection, document_id))
                 }
                 ValidatedApplyOutcome::Rejected(vt) => Err(LocalRefusal::Constraint(vt)),
+                ValidatedApplyOutcome::DeadLetterRefused { violation, error } => {
+                    Err(LocalRefusal::DeadLetterRefused {
+                        detail: format!(
+                            "delta for {collection}/{document_id} violates {violation}, and \
+                             the dead-letter queue refused it: {error}; nothing was applied"
+                        ),
+                    })
+                }
                 ValidatedApplyOutcome::Malformed => Err(LocalRefusal::Malformed),
+                ValidatedApplyOutcome::CandidateUnavailable => {
+                    Err(LocalRefusal::CandidateUnavailable {
+                        detail: format!(
+                            "no apply candidate for {collection}; delta for \
+                             {collection}/{document_id} was not applied"
+                        ),
+                    })
+                }
                 ValidatedApplyOutcome::PendingDependencies => {
                     // Nothing was imported: the operations are buffered awaiting
                     // predecessors this collection's document has never seen.
@@ -180,17 +203,22 @@ impl CoreLoop {
                         );
                         // The record is cancelled, so replay never reaches
                         // this rejection. Its dead-letter entry is stored
-                        // before the refusal is reported.
+                        // before the refusal is reported. An entry the store
+                        // refused is removed from the queue, so nothing
+                        // records the delta and the sender keeps it, as for
+                        // a queue refusal. The store recorded the refusal in
+                        // the black box.
                         match self.store_crdt_dead_letter(
                             task.request.database_id,
                             tenant_id,
                             task.wal_lsn(),
                         ) {
                             Ok(()) => crdt_rejection(collection, document_id, &violation),
-                            Err(error) => ErrorCode::Internal {
-                                detail: format!(
+                            Err(error) => ErrorCode::RetryableRefusal {
+                                reason: format!(
                                     "delta for {collection}/{document_id} violates {violation}, \
-                                     and its dead-letter entry could not be stored: {error}"
+                                     and its dead-letter entry could not be stored: {error}; \
+                                     nothing was applied"
                                 ),
                             },
                         }
@@ -203,6 +231,20 @@ impl CoreLoop {
                             constraint = CRDT_PENDING_DEPENDENCIES,
                             detail = %detail,
                             "crdt apply refused retryably: delta depends on absent operations"
+                        );
+                        ErrorCode::RetryableRefusal { reason: detail }
+                    }
+                    // The apply recorded the refusal in the black box.
+                    LocalRefusal::DeadLetterRefused { detail } => {
+                        ErrorCode::RetryableRefusal { reason: detail }
+                    }
+                    LocalRefusal::CandidateUnavailable { detail } => {
+                        warn!(
+                            core = self.core_id,
+                            %collection,
+                            %document_id,
+                            detail = %detail,
+                            "crdt apply refused retryably: no apply candidate"
                         );
                         ErrorCode::RetryableRefusal { reason: detail }
                     }
@@ -471,6 +513,91 @@ pub(in crate::data::executor::handlers::control::crdt_apply) mod tests {
                 .load_crdt_dead_letters(db.as_u64(), tenant.as_u64())
                 .expect("load"),
             live
+        );
+    }
+
+    /// A rejected delta whose dead-letter entry the store refuses is a
+    /// retryable error, and the queue keeps no entry storage lacks.
+    #[test]
+    fn a_rejection_whose_dead_letter_the_store_refuses_is_a_retryable_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _request_tx, _response_rx) = make_core_with_dir(dir.path());
+        let seed = task_at(20);
+        install_unique_email(&mut core, &seed);
+        let first = user_delta(2, "a", "x@y.com");
+        assert_eq!(
+            core.apply_crdt_local(&seed, users_params("a", &first))
+                .status,
+            Status::Ok
+        );
+        core.sparse.break_crdt_dead_letter_table_for_test();
+
+        let second = user_delta(3, "b", "x@y.com");
+        let response = core.apply_crdt_local(&task_at(21), users_params("b", &second));
+
+        assert_eq!(response.status, Status::Error);
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(ErrorCode::RetryableRefusal { reason }) if reason.contains("could not be stored")
+            ),
+            "got {:?}",
+            response.error_code
+        );
+        assert!(
+            core.crdt_engines
+                .get(&(seed.request.database_id, seed.request.tenant_id))
+                .is_some_and(|engine| !engine.row_exists("users", "b")),
+            "a refused delta must not reach the CRDT state"
+        );
+        assert!(dead_letters(&mut core).is_empty(), "nothing queued");
+    }
+
+    /// A rejected delta the full dead-letter queue refuses is refused as a
+    /// retryable error, not as a constraint verdict: nothing records it, so
+    /// the sender keeps it. No entry is stored for its record.
+    #[test]
+    fn a_rejection_the_full_dead_letter_queue_refuses_is_a_retryable_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _request_tx, _response_rx) = make_core_with_dir(dir.path());
+        let seed = task_at(20);
+        install_unique_email(&mut core, &seed);
+        let first = user_delta(2, "a", "x@y.com");
+        assert_eq!(
+            core.apply_crdt_local(&seed, users_params("a", &first))
+                .status,
+            Status::Ok
+        );
+        core.get_crdt_engine(seed.request.database_id, seed.request.tenant_id)
+            .expect("engine")
+            .fill_dead_letter_queue_for_test();
+
+        let second = user_delta(3, "b", "x@y.com");
+        let response = core.apply_crdt_local(&task_at(21), users_params("b", &second));
+
+        assert_eq!(response.status, Status::Error);
+        assert!(
+            matches!(
+                response.error_code.as_deref(),
+                Some(ErrorCode::RetryableRefusal { reason }) if reason.contains("dead-letter")
+            ),
+            "got {:?}",
+            response.error_code
+        );
+        let db = seed.request.database_id;
+        let tenant = seed.request.tenant_id;
+        assert!(
+            core.crdt_engines
+                .get(&(db, tenant))
+                .is_some_and(|engine| !engine.row_exists("users", "b")),
+            "a refused delta must not reach the CRDT state"
+        );
+        assert!(
+            core.sparse
+                .load_crdt_dead_letters(db.as_u64(), tenant.as_u64())
+                .expect("load")
+                .is_empty(),
+            "no dead-letter entry exists for the refused record"
         );
     }
 

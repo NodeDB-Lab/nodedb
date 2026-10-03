@@ -8,7 +8,8 @@ use crate::planner::catalog_expr_fold::fold_expr;
 use crate::planner::catalog_plan_shapes::{fold_projection, fold_sort_keys, fold_windows};
 use crate::types::{
     DocumentIndexLookupPlan, HybridSearchPlan, HybridSearchTriplePlan, RangeScanPlan,
-    RecursiveScanPlan, SqlExpr, SqlPlan, VectorPrimaryDeletePlan, VectorPrimaryUpdatePlan,
+    RecursiveScanPlan, SqlExpr, SqlPlan, TextSearchPlan, VectorPrimaryDeletePlan,
+    VectorPrimaryUpdatePlan,
 };
 use nodedb_types::DatabaseId;
 
@@ -71,11 +72,21 @@ pub(super) fn fold_leaf(
             }
             fold_projection(projection, catalog, database_id, tenant_id);
         }
-        SqlPlan::TextSearch {
+        SqlPlan::TextSearch(TextSearchPlan {
             filters,
             projection,
             ..
-        } => {
+        })
+        | SqlPlan::HybridSearch(HybridSearchPlan {
+            filters,
+            projection,
+            ..
+        })
+        | SqlPlan::HybridSearchTriple(HybridSearchTriplePlan {
+            filters,
+            projection,
+            ..
+        }) => {
             for filter in filters {
                 fold_filter(filter, catalog, database_id, tenant_id);
             }
@@ -106,11 +117,46 @@ pub(super) fn fold_leaf(
             fold_projection(projection, catalog, database_id, tenant_id);
         }
         SqlPlan::MultiVectorSearch { projection, .. }
-        | SqlPlan::SparseSearch { projection, .. }
-        | SqlPlan::HybridSearch(HybridSearchPlan { projection, .. })
-        | SqlPlan::HybridSearchTriple(HybridSearchTriplePlan { projection, .. }) => {
+        | SqlPlan::SparseSearch { projection, .. } => {
             fold_projection(projection, catalog, database_id, tenant_id);
         }
-        _ => {}
+        // Composite plans: `walk_plan` folds them before reaching a leaf.
+        SqlPlan::Scan { .. }
+        | SqlPlan::Union { .. }
+        | SqlPlan::Intersect { .. }
+        | SqlPlan::Except { .. }
+        | SqlPlan::Cte(_)
+        | SqlPlan::Subquery { .. }
+        | SqlPlan::Join { .. }
+        | SqlPlan::UpdateFrom { .. }
+        | SqlPlan::InsertSelect { .. }
+        | SqlPlan::Aggregate { .. }
+        | SqlPlan::LateralTopK(_)
+        | SqlPlan::LateralLoop(_)
+        | SqlPlan::Merge(_) => {}
+        // Plans whose expressions this pass does not fold.
+        SqlPlan::ConstantResult { .. }
+        | SqlPlan::Insert(_)
+        | SqlPlan::KvInsert(_)
+        | SqlPlan::Upsert(_)
+        | SqlPlan::Truncate { .. }
+        | SqlPlan::TimeseriesScan(_)
+        | SqlPlan::TimeseriesIngest(_)
+        | SqlPlan::RecursiveValue(_)
+        | SqlPlan::CreateArray(_)
+        | SqlPlan::DropArray { .. }
+        | SqlPlan::AlterArray(_)
+        | SqlPlan::InsertArray(_)
+        | SqlPlan::DeleteArray(_)
+        | SqlPlan::ArraySlice(_)
+        | SqlPlan::ArrayProject(_)
+        | SqlPlan::ArrayAgg(_)
+        | SqlPlan::ArrayElementwise(_)
+        | SqlPlan::ArrayFlush { .. }
+        | SqlPlan::ArrayCompact { .. }
+        | SqlPlan::VectorPrimaryInsert(_)
+        | SqlPlan::VectorPrimaryTruncate(_)
+        | SqlPlan::CreateIndex(_)
+        | SqlPlan::DropIndex(_) => {}
     }
 }

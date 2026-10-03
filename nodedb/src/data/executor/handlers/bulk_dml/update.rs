@@ -306,7 +306,7 @@ impl CoreLoop {
             );
             // The row's post-image, then one durable redo entry per derived
             // target row, naming the TARGET collection.
-            write_set.push(self.stored_row_image(
+            let image = self.stored_row_image(
                 StoredRow {
                     database_id,
                     tid,
@@ -316,7 +316,15 @@ impl CoreLoop {
                 },
                 &updated_bytes,
                 None,
-            ));
+            );
+            match image {
+                Ok(image) => write_set.push(image),
+                // This row's transaction committed, so a row landed.
+                Err(e) => {
+                    let code = refusal_after_partial_apply(ErrorCode::from(e));
+                    return self.refusal_with_landed_rows(task, code, write_set);
+                }
+            }
             write_set.extend(write_hook::target_write_set(&target_writes));
             // Published only after the commit succeeded — the same
             // ordering the reindex helper used when it owned the

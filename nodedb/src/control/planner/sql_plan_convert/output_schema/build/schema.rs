@@ -15,9 +15,9 @@ use nodedb_sql::types::query::Projection;
 use nodedb_sql::types::{
     ArrayProjectPlan, ArraySlicePlan, CtePlan, DocumentIndexLookupPlan, HybridSearchPlan,
     HybridSearchTriplePlan, InsertPlan, KvInsertPlan, LateralLoopPlan, LateralTopKPlan, MergePlan,
-    RangeScanPlan, RecursiveScanPlan, RecursiveValuePlan, SqlPlan, TimeseriesIngestPlan,
-    TimeseriesScanPlan, UpsertPlan, VectorPrimaryDeletePlan, VectorPrimaryInsertPlan,
-    VectorPrimaryUpdatePlan,
+    RangeScanPlan, RecursiveScanPlan, RecursiveValuePlan, SqlPlan, TextSearchPlan,
+    TimeseriesIngestPlan, TimeseriesScanPlan, UpsertPlan, VectorPrimaryDeletePlan,
+    VectorPrimaryInsertPlan, VectorPrimaryUpdatePlan,
 };
 
 use crate::control::server::response_shape::schema::{OutputColumn, OutputSchema};
@@ -25,6 +25,8 @@ use crate::control::server::response_shape::types::DdlColType;
 
 use super::super::columns::{column_types_for, ordered_columns_for, schema_from_projection};
 use super::super::returning::build_returning_schema;
+use super::aggregate::{AggregateShape, aggregate_schema, timeseries_group_schema};
+use super::constant::constant_schema;
 
 /// Derives the planner-authoritative output schema of a compiled plan list.
 ///
@@ -61,11 +63,13 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
         // boundary column that the plan's GROUP BY list does not name, so the
         // announced shape would not be the emitted one.
         SqlPlan::TimeseriesScan(TimeseriesScanPlan {
+            collection,
             group_by,
+            aggregates,
             bucket_interval_ms,
             ..
         }) if !group_by.is_empty() && *bucket_interval_ms == 0 => {
-            super::aggregate::build_aggregate_schema(plan, catalog, database_id)
+            timeseries_group_schema(catalog, database_id, collection, group_by, aggregates)
         }
         SqlPlan::Scan {
             collection,
@@ -117,11 +121,11 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
             projection,
             ..
         }
-        | SqlPlan::TextSearch {
+        | SqlPlan::TextSearch(TextSearchPlan {
             collection,
             projection,
             ..
-        }
+        })
         | SqlPlan::HybridSearch(HybridSearchPlan {
             collection,
             projection,
@@ -154,10 +158,25 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
         }
         SqlPlan::ConstantResult {
             columns, values, ..
-        } => super::constant::constant_schema(columns, values),
-        SqlPlan::Aggregate { .. } => {
-            super::aggregate::build_aggregate_schema(plan, catalog, database_id)
-        }
+        } => constant_schema(columns, values),
+        SqlPlan::Aggregate {
+            input,
+            group_by,
+            group_by_aliases,
+            output_order,
+            aggregates,
+            ..
+        } => aggregate_schema(
+            catalog,
+            database_id,
+            AggregateShape {
+                input,
+                group_by,
+                group_by_aliases,
+                output_order,
+                aggregates,
+            },
+        ),
         // Set operations take their column names/types from the first
         // (left) branch, matching standard SQL set-op semantics.
         SqlPlan::Union { inputs, .. } => match inputs.first() {
@@ -292,7 +311,7 @@ mod tests {
     use crate::control::server::response_shape::schema::OutputSchema;
     use crate::control::server::response_shape::types::DdlColType;
     use nodedb_sql::types::query::Projection;
-    use nodedb_sql::types::{HybridSearchPlan, RecursiveValuePlan, SqlPlan};
+    use nodedb_sql::types::{HybridSearchPlan, RecursiveValuePlan, SqlPlan, TextSearchPlan};
     use nodedb_sql::types_expr::SqlExpr;
     #[test]
     fn union_takes_schema_from_first_input() {
@@ -381,6 +400,7 @@ mod tests {
             ann_options: nodedb_sql::types::VectorAnnOptions::default(),
             skip_payload_fetch: false,
             payload_filters: Vec::new(),
+            pk_prefilter: None,
             projection: id_and_dist_projection(),
         }];
         let schema =
@@ -392,11 +412,15 @@ mod tests {
     fn hybrid_search_uses_its_own_projection() {
         let plans = vec![SqlPlan::HybridSearch(HybridSearchPlan {
             collection: "docs".to_string(),
+            vector_field: "emb".to_string(),
             query_vector: vec![0.0, 1.0],
+            text_field: None,
             query_text: "hello".to_string(),
+            filters: Vec::new(),
             top_k: 10,
             ef_search: 64,
             vector_weight: 0.5,
+            mode: nodedb_types::text_search::QueryMode::Or,
             fuzzy: false,
             score_alias: None,
             projection: id_and_dist_projection(),
@@ -408,18 +432,21 @@ mod tests {
 
     #[test]
     fn text_search_uses_its_own_projection() {
-        let plans = vec![SqlPlan::TextSearch {
+        let plans = vec![SqlPlan::TextSearch(TextSearchPlan {
             collection: "docs".to_string(),
-            field: None,
-            query: nodedb_sql::types::FtsQuery::Plain {
-                text: "hello".to_string(),
-                fuzzy: false,
+            shape: nodedb_sql::types::TextSearchShape::Match {
+                field: None,
+                query: nodedb_sql::types::FtsQuery::Plain {
+                    text: "hello".to_string(),
+                    fuzzy: false,
+                },
+                mode: nodedb_types::text_search::QueryMode::Or,
+                top_k: Some(10),
             },
-            top_k: 10,
             filters: Vec::new(),
-            score_alias: None,
+            scores: Vec::new(),
             projection: id_and_dist_projection(),
-        }];
+        })];
         let schema =
             build_output_schema(&plans, &NoCatalog, nodedb_types::DatabaseId::DEFAULT, None);
         assert_id_and_dist_schema(&schema);

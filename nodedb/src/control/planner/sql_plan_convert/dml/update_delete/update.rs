@@ -209,6 +209,19 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
     }
     // CRDT partial-update payload, built once from the literal SET assignments.
     let crdt_fields_json = if is_crdt {
+        // The partial upsert merges these fields into the row stored under
+        // each target key, so an identity assignment must name that key.
+        let identity_column = declared_primary_key
+            .as_deref()
+            .unwrap_or(nodedb_types::DEFAULT_IDENTITY_COLUMN);
+        for key in target_keys {
+            super::super::key_assignment::check_assignments_keep_key(
+                collection,
+                identity_column,
+                assignments,
+                &sql_value_to_string(key),
+            )?;
+        }
         Some(super::super::crdt_gate::literal_assignments_to_fields_json(
             assignments,
         )?)

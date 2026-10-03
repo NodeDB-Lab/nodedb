@@ -18,6 +18,11 @@
 /// SQL planner (sqlparser) which does not recognise NodeDB extensions.
 pub(super) fn is_dsl_statement(sql: &str) -> bool {
     let upper = sql.trim().to_uppercase();
+    // Transaction control has no plan: the session handlers in `execute_sql`
+    // own it, including in an aborted block.
+    if is_transaction_control(&upper) {
+        return true;
+    }
     // `SEARCH ... USING VECTOR(...)` is preprocessor-rewritten into canonical
     // SELECT and goes through plan_sql like any other SELECT. Only the FUSION
     // form (and other SEARCH variants without a SELECT lowering) is a DSL
@@ -89,6 +94,26 @@ pub(super) fn is_dsl_statement(sql: &str) -> bool {
         || upper.starts_with("DROP SPARSE INDEX ")
 }
 
+/// Return true if `upper` (trimmed, upper-cased SQL) is a statement the
+/// transaction-command arms of `execute_sql` handle: BEGIN, COMMIT, ROLLBACK,
+/// SAVEPOINT, RELEASE and ROLLBACK TO.
+fn is_transaction_control(upper: &str) -> bool {
+    let statement = upper.trim_end_matches(';').trim_end();
+    matches!(
+        statement,
+        "BEGIN"
+            | "BEGIN TRANSACTION"
+            | "START TRANSACTION"
+            | "COMMIT"
+            | "END"
+            | "END TRANSACTION"
+            | "ROLLBACK"
+            | "ABORT"
+    ) || statement.starts_with("SAVEPOINT ")
+        || statement.starts_with("RELEASE ")
+        || statement.starts_with("ROLLBACK TO ")
+}
+
 /// Replace each `$N` placeholder in `sql` with the literal `NULL`.
 /// Used only for Parse-time schema inference — the real bound values
 /// are substituted at Execute time.
@@ -128,6 +153,27 @@ mod tests {
         assert_eq!(count_placeholders("SELECT $1, $2, $3"), 3);
         assert_eq!(count_placeholders("SELECT 1"), 0);
         assert_eq!(count_placeholders("WHERE id = $1 AND name = $1"), 1);
+    }
+
+    #[test]
+    fn transaction_control_routes_through_execute_sql() {
+        for sql in [
+            "BEGIN",
+            "begin;",
+            "START TRANSACTION",
+            "COMMIT",
+            "END",
+            "ROLLBACK",
+            "abort",
+            "SAVEPOINT s1",
+            "RELEASE SAVEPOINT s1",
+            "ROLLBACK TO SAVEPOINT s1",
+            "rollback to s1",
+        ] {
+            assert!(is_dsl_statement(sql), "{sql} must route through execute_sql");
+        }
+        assert!(!is_dsl_statement("SELECT 1"));
+        assert!(!is_dsl_statement("BEGINNING"));
     }
 
     #[test]

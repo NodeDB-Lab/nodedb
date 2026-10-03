@@ -20,7 +20,7 @@ use nodedb_physical::physical_plan::GraphOp;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::super::super::result::{DdlError, DdlResult};
-use super::edge_parse::{properties_to_json, validate_edge_label};
+use super::edge_parse::{properties_to_msgpack, validate_edge_label};
 use super::support::{data_plane_verdict, ddl_err};
 
 /// Read the affected count off a Data-Plane response. A missing count is an
@@ -31,7 +31,8 @@ fn response_affected(response: &crate::bridge::envelope::Response) -> Result<u64
     })
 }
 
-/// `GRAPH INSERT EDGE IN '<collection>' FROM '<src>' TO '<dst>' TYPE '<label>' [PROPERTIES '<json>' | { ... }]`
+/// `GRAPH INSERT EDGE IN '<collection>' FROM '<src>' TO '<dst>' TYPE '<label>'`
+/// `[PROPERTIES '<json object>' | { ... }]`
 ///
 /// Edge identity is bundled in [`EdgeRef`] to stay within the argument budget.
 pub async fn insert_edge(
@@ -58,7 +59,7 @@ pub async fn insert_edge(
         return Err(ddl_err("42601", "GRAPH INSERT EDGE requires FROM and TO"));
     }
     validate_edge_label(&label)?;
-    let properties_json = properties_to_json(properties)?;
+    let properties = properties_to_msgpack(properties)?;
     let tenant_id = identity.tenant_id;
 
     // Flags the collection edge-bearing so a later predicate DELETE routes through
@@ -98,7 +99,7 @@ pub async fn insert_edge(
             src_id: src,
             label,
             dst_id: dst,
-            properties: properties_json.into_bytes(),
+            properties,
             src_surrogate,
             dst_surrogate,
         },
@@ -183,7 +184,8 @@ pub struct EdgeRef {
 }
 
 /// The home vShard(s) an edge resolves to: `vsrc` holds the forward row, `vdst`
-/// the reverse row. `single_home` is true when both share one vShard. Bundled for [`stage_edge_dual_home`](super::edge_stage::stage_edge_dual_home).
+/// the reverse row. `single_home` is true when both share one vShard.
+/// Bundled for [`stage_edge_dual_home`](super::edge_stage::stage_edge_dual_home).
 pub struct EdgeHomes {
     pub vsrc: VShardId,
     pub vdst: VShardId,

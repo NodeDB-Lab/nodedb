@@ -317,7 +317,7 @@ impl CoreLoop {
                         };
                         // A versioned row landed at the system time the
                         // update encoded it with, valid for all time.
-                        response.write_set = vec![self.stored_row_image(
+                        response.write_set = match self.stored_row_image(
                             StoredRow {
                                 database_id,
                                 tid,
@@ -327,7 +327,10 @@ impl CoreLoop {
                             },
                             &updated_bytes,
                             bitemporal.then_some(sys_from_for_encode),
-                        )];
+                        ) {
+                            Ok(image) => vec![image],
+                            Err(e) => return self.response_error(task, e),
+                        };
                         // Derived target rows live in a DIFFERENT collection
                         // than this statement's, so each carries its own
                         // `Some(collection)` and homes to that collection's

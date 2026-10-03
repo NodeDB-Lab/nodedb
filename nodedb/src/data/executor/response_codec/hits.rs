@@ -53,12 +53,31 @@ pub(in crate::data::executor) struct NeighborEntry<'a> {
     pub node: &'a str,
 }
 
-#[derive(Serialize, zerompk::ToMessagePack)]
-#[msgpack(map)]
+/// One `NeighborsMulti` row: `{src, label, node[, properties]}`. The
+/// `properties` key is present only when the hop returns edge properties,
+/// and holds the edge's property map as plain MessagePack.
 pub(in crate::data::executor) struct NeighborMultiEntry<'a> {
     pub src: &'a str,
     pub label: &'a str,
     pub node: &'a str,
+    pub properties: Option<&'a NativeCell>,
+}
+
+impl zerompk::ToMessagePack for NeighborMultiEntry<'_> {
+    fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
+        writer.write_map_len(if self.properties.is_some() { 4 } else { 3 })?;
+        writer.write_string("src")?;
+        writer.write_string(self.src)?;
+        writer.write_string("label")?;
+        writer.write_string(self.label)?;
+        writer.write_string("node")?;
+        writer.write_string(self.node)?;
+        if let Some(properties) = self.properties {
+            writer.write_string("properties")?;
+            zerompk::ToMessagePack::write(properties, writer)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize, zerompk::ToMessagePack)]

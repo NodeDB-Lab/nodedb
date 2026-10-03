@@ -13,6 +13,8 @@ use nodedb_types::read_instant;
 
 pub(super) enum MsgpackValue {
     Int(i64),
+    /// A `uint64` above `i64::MAX`. Every smaller integer is `Int`.
+    UInt(u64),
     Float(f64),
     Str(String),
     Bool(bool),
@@ -169,10 +171,10 @@ fn read_value(buf: &[u8], pos: &mut usize) -> Result<MsgpackValue, &'static str>
             let v = read_be_u32(buf, pos)?;
             Ok(MsgpackValue::Int(v as i64))
         }
-        // uint64
+        // uint64: an `i64` when it fits, else the unsigned value itself.
         0xCF => {
-            let bytes = read_bytes::<8>(buf, pos)?;
-            Ok(MsgpackValue::Int(u64::from_be_bytes(bytes) as i64))
+            let v = u64::from_be_bytes(read_bytes::<8>(buf, pos)?);
+            Ok(i64::try_from(v).map_or(MsgpackValue::UInt(v), MsgpackValue::Int))
         }
         // fixext8: an instant of either kind. Any other ext type is
         // unsupported, like every other ext marker.

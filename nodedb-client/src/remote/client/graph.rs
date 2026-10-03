@@ -2,17 +2,14 @@
 
 //! Graph operation implementations for `NodeDbRemote`.
 
-use std::collections::HashMap;
-
 use nodedb_types::document::Document;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 use nodedb_types::filter::EdgeFilter;
 use nodedb_types::graph::GraphStats;
 use nodedb_types::id::{EdgeId, NodeId};
-use nodedb_types::result::{SubGraph, SubGraphEdge, SubGraphNode};
+use nodedb_types::result::SubGraph;
 use nodedb_types::value::Value;
 
-use super::super::parse::parse_graph_traverse_json;
 use super::core::NodeDbRemote;
 use crate::sql_escape::quote_string_literal;
 
@@ -25,57 +22,15 @@ impl NodeDbRemote {
         direction: nodedb_types::graph::Direction,
         edge_filter: Option<&EdgeFilter>,
     ) -> NodeDbResult<SubGraph> {
-        let sql = build_graph_traverse_sql(collection, start, depth, direction, edge_filter);
-
+        let sql = crate::graph_dsl::build_graph_traverse_sql(
+            collection,
+            start,
+            depth,
+            direction,
+            edge_filter,
+        )?;
         let (columns, rows) = self.simple_query_raw(&sql).await?;
-
-        if columns.len() == 1 && columns[0] == "result" {
-            if let Some(row) = rows.first()
-                && let Some(Value::String(json_text)) = row.first()
-            {
-                return parse_graph_traverse_json(json_text);
-            }
-            return Ok(SubGraph::empty());
-        }
-
-        // Structured: node_id, depth, edge_src, edge_dst, edge_label columns.
-        let mut nodes = Vec::new();
-        let mut edges = Vec::new();
-        let mut seen_nodes = std::collections::HashSet::new();
-
-        for row in &rows {
-            let node_id_str = row.first().and_then(|v| v.as_str()).unwrap_or("");
-            let d = row.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as u8;
-
-            if seen_nodes.insert(node_id_str.to_string()) {
-                nodes.push(SubGraphNode {
-                    id: NodeId::from_validated(node_id_str.to_owned()),
-                    depth: d,
-                    properties: HashMap::new(),
-                });
-            }
-
-            if let (Some(src), Some(dst), Some(label)) = (
-                row.get(2).and_then(|v| v.as_str()),
-                row.get(3).and_then(|v| v.as_str()),
-                row.get(4).and_then(|v| v.as_str()),
-            ) {
-                edges.push(SubGraphEdge {
-                    id: EdgeId::try_first(
-                        NodeId::from_validated(src.to_owned()),
-                        NodeId::from_validated(dst.to_owned()),
-                        label,
-                    )
-                    .expect("server wire label already validated"),
-                    from: NodeId::from_validated(src.to_owned()),
-                    to: NodeId::from_validated(dst.to_owned()),
-                    label: label.to_string(),
-                    properties: HashMap::new(),
-                });
-            }
-        }
-
-        Ok(SubGraph { nodes, edges })
+        crate::graph_dsl::decode_traverse_result(&columns, &rows)
     }
 
     pub(super) async fn graph_insert_edge_impl(
@@ -92,9 +47,12 @@ impl NodeDbRemote {
         // the collection's graph overlay. simple_query is required
         // because the DSL doesn't fit the extended-query row-description
         // shape (it returns CommandComplete only).
+        // The property object is the document's fields, as the native client
+        // sends them. The document id is not an edge property.
         let props_clause = match properties {
             Some(d) => {
-                let json = sonic_rs::to_string(&d)
+                let object = serde_json::Value::from(Value::Object(d.fields));
+                let json = sonic_rs::to_string(&object)
                     .map_err(|e| NodeDbError::storage(format!("properties serialization: {e}")))?;
                 format!(" PROPERTIES {}", quote_string_literal(&json))
             }
@@ -168,63 +126,14 @@ impl NodeDbRemote {
         max_depth: u8,
         edge_filter: Option<&EdgeFilter>,
     ) -> NodeDbResult<Option<Vec<NodeId>>> {
-        // Use the server's `GRAPH PATH` operator instead of the trait
-        // default's per-hop BFS — one round-trip vs O(path_length).
-        // Like `graph_traverse`, the path is scoped to `collection`: the server
-        // authorizes against it and walks only that collection's edges.
-        let label_clause = edge_filter
-            .and_then(|f| f.labels.first())
-            .map(|l| format!(" LABEL {}", quote_string_literal(l)))
-            .unwrap_or_default();
-        let collection_lit = quote_string_literal(collection);
-        let from_s = quote_string_literal(from.as_str());
-        let to_s = quote_string_literal(to.as_str());
-        let sql = format!(
-            "GRAPH PATH IN {collection_lit} FROM {from_s} TO {to_s} \
-             MAX_DEPTH {max_depth}{label_clause}"
-        );
-
-        let (_columns, rows) = self.simple_query_raw(&sql).await?;
-        // Server emits a single `result` column carrying a JSON array
-        // of node ids — empty array means unreachable.
-        let Some(row) = rows.first() else {
-            return Ok(None);
-        };
-        let Some(Value::String(json_text)) = row.first() else {
-            return Ok(None);
-        };
-        let parsed: Vec<String> = sonic_rs::from_str(json_text)
-            .map_err(|e| NodeDbError::storage(format!("graph shortest path response: {e}")))?;
-        if parsed.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(
-            parsed
-                .into_iter()
-                .map(NodeId::from_validated)
-                .collect::<Vec<_>>(),
-        ))
+        // The server's `GRAPH PATH` answers in one round trip. The path is
+        // scoped to `collection`: the server authorizes against it and walks
+        // only that collection's edges.
+        let sql =
+            crate::graph_dsl::build_graph_path_sql(collection, from, to, max_depth, edge_filter)?;
+        let (columns, rows) = self.simple_query_raw(&sql).await?;
+        crate::graph_dsl::decode_path_result(&columns, &rows)
     }
-}
-
-/// Build a collection-scoped traversal with escaped string literals.
-pub(crate) fn build_graph_traverse_sql(
-    collection: &str,
-    start: &NodeId,
-    depth: u8,
-    direction: nodedb_types::graph::Direction,
-    edge_filter: Option<&EdgeFilter>,
-) -> String {
-    let label_clause = edge_filter
-        .and_then(|filter| filter.labels.first())
-        .map(|label| format!(" LABEL {}", quote_string_literal(label)))
-        .unwrap_or_default();
-    let collection_lit = quote_string_literal(collection);
-    let start_lit = quote_string_literal(start.as_str());
-    let direction = direction.as_str();
-    format!(
-        "GRAPH TRAVERSE IN {collection_lit} FROM {start_lit} DEPTH {depth} DIRECTION {direction}{label_clause}"
-    )
 }
 
 /// Build the SQL for `SHOW GRAPH STATS`. Collection and `as_of` are both
@@ -255,26 +164,6 @@ pub(crate) fn parse_graph_stats_response(
 mod tests {
     use super::*;
     use nodedb_types::value::Value;
-
-    #[test]
-    fn traverse_sql_preserves_direction_and_escapes_literals() {
-        let start = NodeId::try_new("seed'one").unwrap();
-        let filter = EdgeFilter::labels(["it's"]);
-        for direction in [
-            nodedb_types::graph::Direction::Out,
-            nodedb_types::graph::Direction::In,
-            nodedb_types::graph::Direction::Both,
-        ] {
-            let sql = build_graph_traverse_sql("it's", &start, 3, direction, Some(&filter));
-            assert_eq!(
-                sql,
-                format!(
-                    "GRAPH TRAVERSE IN 'it''s' FROM 'seed''one' DEPTH 3 DIRECTION {} LABEL 'it''s'",
-                    direction.as_str()
-                )
-            );
-        }
-    }
 
     fn stat_columns() -> Vec<String> {
         GraphStats::EXPECTED_COLUMNS

@@ -254,7 +254,7 @@ impl CoreLoop {
                 // The row's post-image, journalled after apply: this plan
                 // carries no pre-dispatch record of it. Then one entry per
                 // moved target row, naming the TARGET collection.
-                write_set.push(self.stored_row_image(
+                let image = self.stored_row_image(
                     StoredRow {
                         database_id,
                         tid,
@@ -265,7 +265,15 @@ impl CoreLoop {
                     &updated_bytes,
                     // A versioned row landed at the statement's system time.
                     bitemporal_sys_from_ms,
-                ));
+                );
+                match image {
+                    Ok(image) => write_set.push(image),
+                    // This row committed above, so it counts as landed.
+                    Err(e) => {
+                        let code = refusal_after_rows(affected + 1, e);
+                        return Err(self.refusal_with_landed_rows(task, code, write_set));
+                    }
+                }
                 write_set.extend(write_hook::target_write_set(&target_writes));
                 self.doc_cache.put(
                     database_id,

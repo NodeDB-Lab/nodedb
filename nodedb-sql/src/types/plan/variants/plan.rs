@@ -3,7 +3,6 @@
 //! The `SqlPlan` enum — top-level plan produced by the SQL planner. Larger
 //! payloads live in per-family structs beside it.
 
-use crate::fts_types::FtsQuery;
 use crate::temporal::TemporalScope;
 use crate::types_expr::{SqlExpr, SqlPayloadAtom, SqlValue};
 pub use nodedb_types::vector_distance::DistanceMetric;
@@ -27,6 +26,7 @@ use super::index_reads::{DocumentIndexLookupPlan, RangeScanPlan};
 use super::lateral::{LateralLoopPlan, LateralTopKPlan};
 use super::merge::MergePlan;
 use super::recursive::{RecursiveScanPlan, RecursiveValuePlan};
+use super::text::TextSearchPlan;
 use super::timeseries::{TimeseriesIngestPlan, TimeseriesScanPlan};
 use super::vector_primary::{
     VectorPrimaryDeletePlan, VectorPrimaryInsertPlan, VectorPrimaryTruncatePlan,
@@ -237,6 +237,11 @@ pub enum SqlPlan {
         /// the resulting bitmap with the HNSW candidate set via the
         /// per-collection `PayloadIndexSet::pre_filter`.
         payload_filters: Vec<SqlPayloadAtom>,
+        /// Primary keys a top-level `WHERE pk = v` / `pk IN (...)` conjunct
+        /// names. The search ranks only those rows: the convert layer lowers
+        /// the keys to the candidate bitmap the index search honors. `None`:
+        /// no key restriction. `Some(empty)`: no row is a candidate.
+        pk_prefilter: Option<Vec<SqlValue>>,
         /// Resolved SELECT target list, for output-schema derivation.
         projection: Vec<Projection>,
     },
@@ -264,28 +269,9 @@ pub enum SqlPlan {
         /// Resolved SELECT target list, for output-schema derivation.
         projection: Vec<Projection>,
     },
-    TextSearch {
-        collection: String,
-        /// Column named as the first argument of `text_match(field, q)` or
-        /// `bm25_score(field, q)`. `None` searches every text column.
-        field: Option<String>,
-        /// Structured FTS query.  Use `FtsQuery::Plain { text, fuzzy }` for
-        /// simple keyword search.  `FtsQuery::And/Or/Prefix` are supported;
-        /// `FtsQuery::Phrase` and `FtsQuery::Not` are represented but rejected
-        /// by the executor with `Unsupported`.
-        query: FtsQuery,
-        top_k: usize,
-        filters: Vec<Filter>,
-        /// When set, the SELECT list contains `bm25_score(field, term)` and the
-        /// caller wants a full-collection scan with the score injected under this
-        /// alias. The converter emits `TextOp::BM25ScoreScan` instead of
-        /// `TextOp::Search` so that all documents — including non-matching ones —
-        /// appear in the response with `null` for the score when they do not
-        /// contain the term.
-        score_alias: Option<String>,
-        /// Resolved SELECT target list, for output-schema derivation.
-        projection: Vec<Projection>,
-    },
+    /// Full-text search: `WHERE text_match(...)` matches, or a
+    /// `bm25_score(...)` score scan over every row the filters admit.
+    TextSearch(TextSearchPlan),
     HybridSearch(HybridSearchPlan),
 
     /// Three-source hybrid search: vector + BM25 text + graph BFS, fused via weighted RRF.

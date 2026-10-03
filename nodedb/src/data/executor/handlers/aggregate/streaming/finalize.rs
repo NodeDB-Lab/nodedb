@@ -104,7 +104,7 @@ impl CoreLoop {
                 }
             }
 
-            for (alias, val) in state.finalize(aggregates) {
+            for (alias, val) in state.finalize(aggregates)? {
                 let json_val: serde_json::Value = val.into();
                 row.insert(alias, json_val);
             }
@@ -120,7 +120,7 @@ impl CoreLoop {
                             sub_row.insert(field.clone(), val);
                         }
                     }
-                    for (alias, val) in sub_state.finalize(sub_aggregates) {
+                    for (alias, val) in sub_state.finalize(sub_aggregates)? {
                         let json_val: serde_json::Value = val.into();
                         sub_row.insert(alias, json_val);
                     }

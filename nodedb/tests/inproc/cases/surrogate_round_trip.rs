@@ -622,7 +622,7 @@ fn surrogate_round_trip_all_engines() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::Hop {
             start_nodes: vec!["n10".into()],
-            edge_label: Some("REACH".into()),
+            edge_labels: vec!["REACH".into()],
             direction: Direction::Out,
             depth: 1,
             options: Default::default(),
@@ -644,7 +644,7 @@ fn surrogate_round_trip_all_engines() {
         &mut rx,
         PhysicalPlan::Graph(GraphOp::Hop {
             start_nodes: vec!["n10".into()],
-            edge_label: Some("REACH".into()),
+            edge_labels: vec!["REACH".into()],
             direction: Direction::Out,
             depth: 1,
             options: Default::default(),

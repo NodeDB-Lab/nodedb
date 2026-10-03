@@ -70,11 +70,13 @@ pub async fn tree_children(
             collection: None,
             database_id,
             start_nodes: vec![root_id],
-            edge_label: Some(graph_index),
+            edge_labels: std::slice::from_ref(&graph_index),
             direction: dir,
             max_depth,
             options: &GraphTraversalOptions::default(),
             linearizable,
+            // A tree aggregate carries no session transaction.
+            txn_id: None,
         },
     )
     .await

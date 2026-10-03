@@ -6,6 +6,19 @@
 
 use crate::Value;
 
+/// A JSON number as the `Value` that keeps its exact number: an `i64` as an
+/// `Integer`, a larger `u64` through [`Value::from_u64`], anything else as a
+/// `Float`.
+fn json_number(n: &serde_json::Number) -> Value {
+    if let Some(i) = n.as_i64() {
+        Value::Integer(i)
+    } else if let Some(u) = n.as_u64() {
+        Value::from_u64(u)
+    } else {
+        n.as_f64().map_or(Value::Null, Value::Float)
+    }
+}
+
 /// Convert a `serde_json::Value` to a `Value` by consuming ownership.
 ///
 /// Nested objects are preserved as `Value::Object`.
@@ -13,13 +26,7 @@ pub fn json_to_value(v: serde_json::Value) -> Value {
     match v {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Integer(i)
-            } else {
-                Value::Float(n.as_f64().unwrap_or(0.0))
-            }
-        }
+        serde_json::Value::Number(n) => json_number(&n),
         serde_json::Value::String(s) => Value::String(s),
         serde_json::Value::Array(arr) => Value::Array(arr.into_iter().map(json_to_value).collect()),
         serde_json::Value::Object(obj) => Value::Object(
@@ -50,13 +57,7 @@ pub fn json_to_value_ref(v: &serde_json::Value) -> Value {
     match v {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Integer(i)
-            } else {
-                Value::Float(n.as_f64().unwrap_or(0.0))
-            }
-        }
+        serde_json::Value::Number(n) => json_number(n),
         serde_json::Value::String(s) => Value::String(s.clone()),
         serde_json::Value::Array(arr) => Value::Array(arr.iter().map(json_to_value_ref).collect()),
         serde_json::Value::Object(map) => Value::Object(
@@ -111,6 +112,10 @@ mod tests {
             Value::Bool(true)
         );
         assert_eq!(json_to_value(serde_json::json!(42)), Value::Integer(42));
+        let max = serde_json::json!(u64::MAX);
+        let exact = Value::Decimal(rust_decimal::Decimal::from(u64::MAX));
+        assert_eq!(json_to_value_ref(&max), exact);
+        assert_eq!(json_to_value(max), exact);
         assert_eq!(
             json_to_value(serde_json::json!("hello")),
             Value::String("hello".into())

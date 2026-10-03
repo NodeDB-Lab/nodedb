@@ -12,7 +12,7 @@ use nodedb_types::Value;
 
 use crate::expr::{EvalError, SqlExpr};
 use crate::msgpack_scan::field::extract_field;
-use crate::msgpack_scan::reader::{read_f64, read_str, read_value};
+use crate::msgpack_scan::reader::{read_f64, read_numeric, read_str, read_value};
 use crate::value_ops;
 
 // ── Expression evaluator ───────────────────────────────────────────────────
@@ -54,6 +54,27 @@ pub fn extract_f64(
         return Ok(None);
     };
     Ok(read_f64(doc, start))
+}
+
+/// Extract the SUM / AVG input of `field`, or of `expr` if provided, as the
+/// number it contributes (`Integer`, `Float`, or `Decimal`). A raw field
+/// contributes when it is a msgpack integer or float, read exactly. An
+/// expression result contributes per [`crate::numeric_sum::sum_input`].
+/// Returns `Ok(None)` when nothing contributes, and
+/// `Err(EvalError::DivisionByZero)` when `expr` divides/mods by zero.
+#[inline]
+pub fn extract_sum_value(
+    doc: &[u8],
+    field: &str,
+    expr: Option<&SqlExpr>,
+) -> Result<Option<Value>, EvalError> {
+    if let Some(expr) = expr {
+        return Ok(eval_expr(doc, expr)?.and_then(|v| crate::numeric_sum::sum_input(&v)));
+    }
+    let Some((start, _end)) = extract_field(doc, 0, field) else {
+        return Ok(None);
+    };
+    Ok(read_numeric(doc, start).map(crate::numeric_sum::numeric_to_value))
 }
 
 /// Extract a display string from `field`, or evaluate `expr` if provided.

@@ -89,7 +89,7 @@ mod tests {
     use futures::future::BoxFuture;
     use nodedb_physical::physical_plan::{KvOp, TimeseriesOp};
     use nodedb_physical::physical_task::PhysicalTask;
-    use nodedb_sql::types::{EngineType, SqlExpr, SqlPlan, SqlValue};
+    use nodedb_sql::types::{EngineType, SqlExpr, SqlPlan, SqlValue, TimeseriesIngestPlan};
     use nodedb_types::{CollectionKey, Surrogate};
 
     use super::{convert_bound, convert_resolving_misses};
@@ -135,11 +135,11 @@ mod tests {
     }
 
     fn timeseries_ingest(rows: usize) -> Vec<SqlPlan> {
-        vec![SqlPlan::TimeseriesIngest {
+        vec![SqlPlan::TimeseriesIngest(TimeseriesIngestPlan {
             collection: "metrics".to_string(),
             rows: vec![vec![("value".to_string(), SqlValue::Int(1))]; rows],
             volatile_defaults: false,
-        }]
+        })]
     }
 
     fn ingest_surrogates(tasks: &[PhysicalTask]) -> Vec<u32> {

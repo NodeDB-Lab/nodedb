@@ -16,9 +16,10 @@ use nodedb_physical::physical_plan::*;
 use super::super::convert::ConvertContext;
 use super::super::value::{assignments_to_update_values, row_to_msgpack, rows_to_msgpack_array};
 use super::insert::{
-    build_schema_bytes, columnar_row_surrogates, declared_primary_key_name, is_auto_rowid_pk,
-    resolve_doc_identity_with_declared,
+    build_schema_bytes, columnar_row_surrogates, declared_primary_key_name, doc_identity_keys,
+    is_auto_rowid_pk, resolve_doc_identity_with_declared,
 };
+use super::key_assignment::check_assignments_keep_key;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 /// Bundled arguments for [`convert_upsert`].
@@ -97,6 +98,13 @@ pub(in super::super) fn convert_upsert(
                     declared_pk.as_deref(),
                     row,
                 )?;
+                // The conflicting row stays stored under `doc_id`.
+                check_assignments_keep_key(
+                    collection,
+                    declared_pk.as_deref().unwrap_or(primary_key),
+                    on_conflict_updates,
+                    &doc_id,
+                )?;
                 let plan = if is_crdt {
                     PhysicalPlan::Crdt(CrdtOp::DocUpsert {
                         collection: qualified_collection.clone(),
@@ -141,6 +149,16 @@ pub(in super::super) fn convert_upsert(
     }
 
     if !columnar_rows.is_empty() {
+        // A columnar row's key is read from its merged values, and the write
+        // deletes only the row stored under that key. A merge that moves the
+        // key leaves the conflicting row in place and inserts a second row
+        // under the conflicting row's surrogate. An assignment to the key
+        // column must name the key it keeps. A row that names no key mints a
+        // fresh one, so it never conflicts.
+        let key_column = declared_pk.as_deref().unwrap_or(primary_key);
+        for doc_id in doc_identity_keys(primary_key, declared_pk.as_deref(), &columnar_rows) {
+            check_assignments_keep_key(collection, key_column, on_conflict_updates, &doc_id)?;
+        }
         let payload = rows_to_msgpack_array(&columnar_rows)?;
         let surrogates = columnar_row_surrogates(
             ctx,

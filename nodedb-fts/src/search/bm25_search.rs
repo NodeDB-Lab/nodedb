@@ -1,41 +1,44 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! BM25 search over the FtsIndex with AND-first OR-fallback, phrase boost,
-//! and NOT-term exclusion.
+//! BM25 search over the FtsIndex with AND-first OR-fallback and NOT-term
+//! exclusion.
 //!
 //! ## AND-first / OR-fallback
 //!
-//! A multi-term query `rust programming` first attempts AND (all terms must
-//! match). If no document satisfies all terms, results fall back to OR with
-//! coverage-penalised scores.
+//! A multi-word query `rust programming` in AND mode matches documents
+//! holding every word (a word matches through any of its synonyms). The
+//! top-k is the true top-k of those documents, whatever `top_k` is. When no
+//! admitted document holds every word, the query falls back to OR with
+//! coverage-scaled scores.
 //!
 //! ## NOT operator
 //!
 //! `rust NOT python` and `rust -python` are equivalent. The query parser
 //! splits the input into positive and negative term lists. BM25 scoring runs
-//! on positive terms only; a bitmap of doc IDs that match **any** negative
-//! term is built separately and used to filter final results. Negative terms
-//! do not affect BM25 scores.
+//! on positive terms only. A document holding any negative term is excluded
+//! before scoring, so the top-k cut counts only surviving documents.
+//! Negative terms do not affect BM25 scores.
 //!
 //! Synonym expansion applies to both positive and negative term lists, so
 //! `rust NOT db` also excludes documents that contain synonym expansions of
 //! `db` (e.g. `database`, `datastore`).
 
-use std::collections::HashMap;
-
-use nodedb_types::{Surrogate, SurrogateBitmap};
+use nodedb_types::SurrogateBitmap;
 
 use crate::backend::FtsBackend;
-use crate::bm25::bm25_score;
 use crate::index::FtsIndex;
 use crate::index::error::FtsIndexError;
-use crate::posting::{Posting, QueryMode, TextSearchResult};
-use crate::search::phrase;
+use crate::posting::{QueryMode, TextSearchResult};
+use crate::scope::IndexScope;
+use crate::search::bmw::scorer::{BmwInput, bmw_score};
+use crate::search::match_mode::staged_candidates;
 use crate::search::query_parser::parse_query;
+use crate::search::query_terms::TextQuery;
+use crate::search::staged::StagedView;
 
 /// Query and tuning parameters for a BM25 search.
 ///
-/// The `(database_id, tid, collection)` scope is passed separately so the
+/// The `(database_id, tid, index)` scope is passed separately so the
 /// same struct can be shared by callers that hold the tenant id as either a
 /// raw `u64` (this crate) or a strongly-typed `TenantId` (the Origin wrapper).
 pub struct FtsSearchParams<'a> {
@@ -51,30 +54,40 @@ pub struct FtsSearchParams<'a> {
     pub prefilter: Option<&'a SurrogateBitmap>,
 }
 
-/// Inputs to the AND-mode post-filter that drops BMW candidates which do not
-/// match at least `num_terms` of the analyzed query tokens.
-struct FilterAndModeParams<'a> {
-    database_id: u64,
-    tid: u64,
-    collection: &'a str,
-    query_tokens: &'a [String],
-    candidates: &'a [TextSearchResult],
-    num_terms: usize,
-}
-
 impl<B: FtsBackend> FtsIndex<B> {
-    /// Search the index with explicit boolean mode, fuzzy, and optional prefilter.
+    /// Search one index with explicit boolean mode, fuzzy, and optional prefilter.
+    ///
+    /// Analyzer, fuzzy default, and synonyms come from the index's
+    /// collection. Postings and BM25 stats come from the index itself.
     ///
     /// Supports `NOT <term>` and `-<term>` negation in the query string.
     /// Returns `Err(FtsIndexError::InvalidQuery)` for ill-formed queries such
     /// as NOT-only queries or unsupported parenthesised groups.
-    pub fn search(
+    pub fn search<'a>(
         &self,
         database_id: u64,
         tid: u64,
-        collection: &str,
+        index: impl Into<IndexScope<'a>>,
         params: FtsSearchParams<'_>,
     ) -> Result<Vec<TextSearchResult>, FtsIndexError<B::Error>> {
+        self.search_staged(database_id, tid, index, params, None)
+    }
+
+    /// [`Self::search`] inside an open transaction: indexed documents the
+    /// transaction hides do not match, and its staged documents compete in
+    /// the same ranking under the same query semantics. `prefilter` bounds
+    /// staged documents too.
+    ///
+    /// Results are ordered by score descending, then surrogate ascending.
+    pub fn search_staged<'a>(
+        &self,
+        database_id: u64,
+        tid: u64,
+        index: impl Into<IndexScope<'a>>,
+        params: FtsSearchParams<'_>,
+        staged: Option<&StagedView>,
+    ) -> Result<Vec<TextSearchResult>, FtsIndexError<B::Error>> {
+        let index = index.into();
         let FtsSearchParams {
             query,
             top_k,
@@ -82,392 +95,74 @@ impl<B: FtsBackend> FtsIndex<B> {
             mode,
             prefilter,
         } = params;
-        // A collection configured with `FUZZY true` falls back to fuzzy
-        // matching even when the query did not ask for it — that is what
-        // makes it an index property rather than a per-query flag. Resolved
-        // here, at the one point every search path funnels through, so no
-        // caller can be wired up without it.
-        let fuzzy_enabled = fuzzy_enabled
-            || self
-                .get_collection_fuzzy(database_id, tid, collection)
-                .map_err(FtsIndexError::backend)?;
-
-        // Parse the query for NOT / - negation operators before analysis.
-        let parsed = parse_query(query)?;
-
-        // Reconstruct the positive-only query string for the existing analyzer path.
-        // Each raw positive token is passed to the analyzer individually rather than
-        // joining them, because some analyzers are sensitive to token boundaries.
-        // Joining with a space is safe for the standard/language analyzers.
-        let positive_raw = parsed.positive.join(" ");
-        let negative_raw_terms = parsed.negative;
-
-        let base_tokens = self
-            .analyze_for_collection(database_id, tid, collection, &positive_raw)
-            .map_err(FtsIndexError::backend)?;
-        if base_tokens.is_empty() {
+        if top_k == 0 {
+            // The query is still parsed: an ill-formed one is an error at
+            // any limit.
+            parse_query(query)?;
             return Ok(Vec::new());
         }
-
-        let base_token_count = base_tokens.len();
-        let query_tokens = self
-            .expand_query_with_synonyms(database_id, tid, base_tokens)
-            .map_err(FtsIndexError::backend)?;
-        let num_query_terms = query_tokens.len();
-        let and_threshold = base_token_count;
-
-        let raw_tokens = if fuzzy_enabled {
-            self.tokenize_raw_for_collection(database_id, tid, collection, &positive_raw)
-                .map_err(FtsIndexError::backend)?
-        } else {
-            Vec::new()
-        };
-
-        let (total_docs, avg_doc_len) = self
-            .index_stats(database_id, tid, collection)
-            .map_err(FtsIndexError::backend)?;
-        if total_docs == 0 {
-            return Ok(Vec::new());
-        }
-
-        // Build the negative-term exclusion set before scoring.
-        // Negative terms are analyzed and synonym-expanded just like positive
-        // terms. The result is a set of doc IDs that match any negative term.
-        let negative_set =
-            self.build_negative_set(database_id, tid, collection, &negative_raw_terms)?;
-
-        let bmw_params = super::bmw::query::BmwParams {
-            query_tokens: &query_tokens,
-            raw_tokens: &raw_tokens,
+        let text_query = TextQuery {
+            query,
             fuzzy_enabled,
-            top_k: if mode == QueryMode::And && and_threshold > 1 {
-                top_k.saturating_mul(3).max(20)
-            } else {
-                top_k
-            },
-            total_docs,
-            avg_doc_len,
-            bm25: &self.bm25_params,
-            prefilter,
+            mode,
         };
-        if let Ok(Some(bmw_results)) =
-            super::bmw::query::bmw_search(self, database_id, tid, collection, &bmw_params)
-        {
-            if mode == QueryMode::Or || and_threshold == 1 {
-                let mut results: Vec<TextSearchResult> = bmw_results
-                    .into_iter()
-                    .filter(|r| !negative_set.contains(&r.doc_id))
-                    .take(top_k)
-                    .collect();
-                results.truncate(top_k);
-                return Ok(results);
+        let Some(resolved) =
+            self.resolve_query(database_id, tid, index, text_query, staged)?
+        else {
+            return Ok(Vec::new());
+        };
+
+        let mut deny = resolved.negated.clone();
+        if let Some(view) = staged {
+            deny.union_in_place(view.hidden());
+        }
+        let index_visible = staged.is_none_or(|view| !view.hides_all());
+        let staged_docs = staged_candidates(&resolved, staged, prefilter, &self.bm25_params);
+        let match_mode = resolved.match_mode(index_visible, prefilter, &deny, &staged_docs);
+        let allow = match &match_mode {
+            super::match_mode::MatchMode::All(docs) => Some(docs),
+            super::match_mode::MatchMode::Coverage | super::match_mode::MatchMode::Any => {
+                prefilter
             }
+        };
 
-            let and_results = self
-                .filter_and_mode(FilterAndModeParams {
-                    database_id,
-                    tid,
-                    collection,
-                    query_tokens: &query_tokens,
-                    candidates: &bmw_results,
-                    num_terms: and_threshold,
-                })
-                .map_err(FtsIndexError::backend)?;
-
-            if !and_results.is_empty() {
-                let filtered: Vec<TextSearchResult> = and_results
-                    .into_iter()
-                    .filter(|r| !negative_set.contains(&r.doc_id))
-                    .take(top_k)
-                    .collect();
-                return Ok(filtered);
-            }
-
-            let penalized: Vec<TextSearchResult> = bmw_results
-                .into_iter()
-                .filter(|r| !negative_set.contains(&r.doc_id))
-                .map(|mut r| {
-                    let matched = self.count_term_matches(
-                        database_id,
-                        tid,
-                        collection,
-                        &query_tokens,
-                        r.doc_id,
-                    );
-                    let coverage = matched as f32 / and_threshold as f32;
-                    r.score *= coverage;
-                    r
-                })
-                .collect();
-            let mut sorted = penalized;
-            sorted.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+        let mut hits: Vec<TextSearchResult> = Vec::new();
+        if index_visible {
+            let heap = bmw_score(&BmwInput {
+                terms: &resolved.blocks,
+                term_groups: &resolved.term_groups,
+                groups: resolved.groups,
+                total_docs: resolved.total_docs,
+                avg_doc_len: resolved.avg_doc_len,
+                params: &self.bm25_params,
+                top_k,
+                allow,
+                deny: Some(&deny),
+                combine: match_mode.combine(),
             });
-            sorted.truncate(top_k);
-            return Ok(sorted);
+            hits.extend(heap.into_sorted().into_iter().map(|doc| TextSearchResult {
+                doc_id: doc.doc_id,
+                score: doc.score,
+                fuzzy: resolved.fuzzy,
+            }));
         }
-
-        // Fallback: exhaustive BM25 scoring reading directly from the backend.
-        let term_postings_memory = crate::mem_scope::fts_scope(&self.governor, database_id, tid);
-        let term_postings_bytes =
-            num_query_terms * (std::mem::size_of::<Vec<Posting>>() + std::mem::size_of::<bool>());
-        let _term_postings_guard = term_postings_memory.reserve(term_postings_bytes).ok();
-        let mut term_postings: Vec<(Vec<Posting>, bool)> = Vec::with_capacity(num_query_terms);
-        for (i, token) in query_tokens.iter().enumerate() {
-            let postings = self
-                .backend
-                .read_postings(database_id, tid, collection, token)
-                .map_err(FtsIndexError::backend)?;
-            if !postings.is_empty() {
-                term_postings.push((postings, false));
-            } else if fuzzy_enabled {
-                let raw = raw_tokens
-                    .get(i)
-                    .map(String::as_str)
-                    .unwrap_or(token.as_str());
-                let (fuzzy_posts, is_fuzzy) = self
-                    .fuzzy_lookup(database_id, tid, collection, raw)
-                    .map_err(FtsIndexError::backend)?;
-                term_postings.push((fuzzy_posts, is_fuzzy));
-            } else {
-                term_postings.push((Vec::new(), false));
+        for (doc_id, contributions) in &staged_docs {
+            if let Some(score) = match_mode.score(&resolved, contributions) {
+                hits.push(TextSearchResult {
+                    doc_id: *doc_id,
+                    score,
+                    fuzzy: resolved.fuzzy,
+                });
             }
         }
-
-        let mut doc_scores: HashMap<Surrogate, (f32, bool, usize)> = HashMap::new();
-
-        for (token_idx, (postings, is_fuzzy)) in term_postings.iter().enumerate() {
-            if postings.is_empty() {
-                continue;
-            }
-            let df = postings.len() as u32;
-
-            for posting in postings {
-                // Prefilter: skip surrogates not present in the bitmap.
-                if let Some(bm) = prefilter
-                    && !bm.contains(posting.doc_id)
-                {
-                    continue;
-                }
-
-                let doc_len = self
-                    .backend
-                    .read_doc_length(database_id, tid, collection, posting.doc_id)
-                    .map_err(FtsIndexError::backend)?
-                    .unwrap_or(1);
-
-                let mut score = bm25_score(
-                    posting.term_freq,
-                    df,
-                    doc_len,
-                    total_docs,
-                    avg_doc_len,
-                    &self.bm25_params,
-                );
-
-                if *is_fuzzy {
-                    score *= crate::fuzzy::fuzzy_discount(1);
-                }
-
-                let entry = doc_scores.entry(posting.doc_id).or_insert((0.0, false, 0));
-                entry.0 += score;
-                if *is_fuzzy {
-                    entry.1 = true;
-                }
-                entry.2 += 1;
-            }
-            let _ = token_idx;
-        }
-
-        if num_query_terms >= 2 {
-            let doc_postings_map = phrase::collect_doc_postings(&query_tokens, &term_postings);
-            for (doc_id, token_postings) in &doc_postings_map {
-                if let Some(entry) = doc_scores.get_mut(doc_id) {
-                    let boost = phrase::phrase_boost(&query_tokens, token_postings);
-                    entry.0 *= boost;
-                }
-            }
-        }
-
-        if mode == QueryMode::And && and_threshold > 1 {
-            let and_results: HashMap<Surrogate, (f32, bool, usize)> = doc_scores
-                .iter()
-                .filter(|(_, (_, _, match_count))| *match_count >= and_threshold)
-                .map(|(k, v)| (*k, *v))
-                .collect();
-
-            if !and_results.is_empty() {
-                let filtered = and_results
-                    .into_iter()
-                    .filter(|(doc_id, _)| !negative_set.contains(doc_id))
-                    .collect();
-                return Ok(Self::to_sorted_results(filtered, top_k));
-            }
-
-            for (score, _, match_count) in doc_scores.values_mut() {
-                let coverage = *match_count as f32 / and_threshold as f32;
-                *score *= coverage;
-            }
-        }
-
-        // Apply negative filter to final fallback results.
-        let filtered: HashMap<Surrogate, (f32, bool, usize)> = doc_scores
-            .into_iter()
-            .filter(|(doc_id, _)| !negative_set.contains(doc_id))
-            .collect();
-
-        Ok(Self::to_sorted_results(filtered, top_k))
-    }
-
-    /// Build a set of doc IDs that match any of the given raw negative terms.
-    ///
-    /// Each raw negative term is analyzed and synonym-expanded before posting
-    /// lookup, matching the same pipeline as positive terms.
-    fn build_negative_set(
-        &self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
-        raw_negative_terms: &[String],
-    ) -> Result<std::collections::HashSet<Surrogate>, FtsIndexError<B::Error>> {
-        if raw_negative_terms.is_empty() {
-            return Ok(std::collections::HashSet::new());
-        }
-
-        // Analyze all negative terms together (join is safe for standard analyzer).
-        let neg_raw = raw_negative_terms.join(" ");
-        let neg_base_tokens = self
-            .analyze_for_collection(database_id, tid, collection, &neg_raw)
-            .map_err(FtsIndexError::backend)?;
-
-        if neg_base_tokens.is_empty() {
-            return Ok(std::collections::HashSet::new());
-        }
-
-        // Synonym-expand negative tokens so negating 'db' also excludes 'database'.
-        let neg_tokens = self
-            .expand_query_with_synonyms(database_id, tid, neg_base_tokens)
-            .map_err(FtsIndexError::backend)?;
-
-        let mut excluded: std::collections::HashSet<Surrogate> = std::collections::HashSet::new();
-
-        // Collect postings from memtable + segments for each negative token.
-        let term_blocks = crate::lsm::query::collect_merged_term_blocks(
-            &self.backend,
-            database_id,
-            tid,
-            collection,
-            self.memtable(),
-            &neg_tokens,
-            &self.governor,
-        )
-        .map_err(FtsIndexError::backend)?;
-
-        for tb in &term_blocks {
-            for block in &tb.blocks {
-                for doc_id in &block.doc_ids {
-                    excluded.insert(*doc_id);
-                }
-            }
-        }
-
-        // Also check the backend postings directly (covers the exhaustive path).
-        for token in &neg_tokens {
-            let postings = self
-                .backend
-                .read_postings(database_id, tid, collection, token)
-                .map_err(FtsIndexError::backend)?;
-            for posting in postings {
-                excluded.insert(posting.doc_id);
-            }
-        }
-
-        Ok(excluded)
-    }
-
-    fn filter_and_mode(
-        &self,
-        params: FilterAndModeParams<'_>,
-    ) -> Result<Vec<TextSearchResult>, B::Error> {
-        let FilterAndModeParams {
-            database_id,
-            tid,
-            collection,
-            query_tokens,
-            candidates,
-            num_terms,
-        } = params;
-        let term_blocks = crate::lsm::query::collect_merged_term_blocks(
-            &self.backend,
-            database_id,
-            tid,
-            collection,
-            self.memtable(),
-            query_tokens,
-            &self.governor,
-        )?;
-
-        let mut results = Vec::new();
-        for candidate in candidates {
-            let surrogate = candidate.doc_id;
-            let matched = term_blocks
-                .iter()
-                .filter(|tb| tb.blocks.iter().any(|b| b.doc_ids.contains(&surrogate)))
-                .count();
-            if matched >= num_terms {
-                results.push(candidate.clone());
-            }
-        }
-        Ok(results)
-    }
-
-    fn count_term_matches(
-        &self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
-        query_tokens: &[String],
-        doc_id: Surrogate,
-    ) -> usize {
-        let term_blocks = match crate::lsm::query::collect_merged_term_blocks(
-            &self.backend,
-            database_id,
-            tid,
-            collection,
-            self.memtable(),
-            query_tokens,
-            &self.governor,
-        ) {
-            Ok(tb) => tb,
-            Err(_) => return 0,
-        };
-        term_blocks
-            .iter()
-            .filter(|tb| tb.blocks.iter().any(|b| b.doc_ids.contains(&doc_id)))
-            .count()
-    }
-
-    fn to_sorted_results(
-        doc_scores: HashMap<Surrogate, (f32, bool, usize)>,
-        top_k: usize,
-    ) -> Vec<TextSearchResult> {
-        let mut results: Vec<TextSearchResult> = doc_scores
-            .into_iter()
-            .map(|(doc_id, (score, fuzzy_flag, _))| TextSearchResult {
-                doc_id,
-                score,
-                fuzzy: fuzzy_flag,
-            })
-            .collect();
-        results.sort_by(|a, b| {
+        hits.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.doc_id.cmp(&b.doc_id))
         });
-        results.truncate(top_k);
-        results
+        hits.truncate(top_k);
+        Ok(hits)
     }
 }
 
@@ -481,6 +176,7 @@ mod tests {
     use crate::index::error::FtsIndexError;
     use crate::posting::QueryMode;
     use crate::search::query_parser::InvalidQuery;
+    use crate::search::staged::StagedDoc;
     use crate::test_support::test_governor;
 
     const DB: u64 = 0;
@@ -1124,5 +820,166 @@ mod tests {
             ),
             "expected InvalidQuery(ParenthesesNotSupported), got {err:?}"
         );
+    }
+
+    // ── top-k semantics ───────────────────────────────────────────────────────
+
+    fn ranked(
+        idx: &FtsIndex<MemoryBackend>,
+        query: &str,
+        top_k: usize,
+        mode: QueryMode,
+        prefilter: Option<&SurrogateBitmap>,
+        staged: Option<&super::StagedView>,
+    ) -> Vec<Surrogate> {
+        idx.search_staged(
+            DB,
+            T,
+            "docs",
+            FtsSearchParams {
+                query,
+                top_k,
+                fuzzy_enabled: false,
+                mode,
+                prefilter,
+            },
+            staged,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|r| r.doc_id)
+        .collect()
+    }
+
+    /// The best `rust` documents hold `python`. Negation drops them before
+    /// the cut, so `LIMIT 1` still returns the surviving document.
+    #[test]
+    fn not_terms_are_excluded_before_the_limit() {
+        let idx = FtsIndex::new(MemoryBackend::new(), test_governor());
+        idx.index_document(DB, T, "docs", D1, "rust rust rust python")
+            .unwrap();
+        idx.index_document(DB, T, "docs", D2, "rust rust rust python")
+            .unwrap();
+        idx.index_document(DB, T, "docs", D3, "rust golang compiler toolchain")
+            .unwrap();
+        assert_eq!(ranked(&idx, "rust -python", 1, QueryMode::And, None, None), vec![D3]);
+        assert_eq!(ranked(&idx, "rust -python", 2, QueryMode::Or, None, None), vec![D3]);
+    }
+
+    /// Many documents out-score the single AND match on one word. The AND
+    /// match is found whatever the limit, and the query does not fall back.
+    #[test]
+    fn and_match_is_found_past_many_single_word_out_scorers() {
+        let idx = FtsIndex::new(MemoryBackend::new(), test_governor());
+        for i in 1..=40u32 {
+            idx.index_document(DB, T, "docs", Surrogate(i), "alpha alpha alpha alpha")
+                .unwrap();
+        }
+        for i in 41..=80u32 {
+            idx.index_document(DB, T, "docs", Surrogate(i), "bravo bravo bravo bravo")
+                .unwrap();
+        }
+        let both = Surrogate(81);
+        idx.index_document(DB, T, "docs", both, "alpha bravo filler words here")
+            .unwrap();
+        for limit in [1, 3, 10, usize::MAX] {
+            assert_eq!(
+                ranked(&idx, "alpha bravo", limit, QueryMode::And, None, None),
+                vec![both],
+                "limit {limit}"
+            );
+        }
+    }
+
+    /// The AND decision reads only the admitted rows. An AND match outside
+    /// the prefilter does not stop the fallback inside it, and an AND match
+    /// inside it keeps AND semantics.
+    #[test]
+    fn and_mode_inside_a_prefilter() {
+        let idx = FtsIndex::new(MemoryBackend::new(), test_governor());
+        idx.index_document(DB, T, "docs", D1, "alpha bravo").unwrap();
+        idx.index_document(DB, T, "docs", D2, "alpha charlie").unwrap();
+        idx.index_document(DB, T, "docs", D3, "bravo delta").unwrap();
+
+        let mut without_match = SurrogateBitmap::new();
+        without_match.insert(D2);
+        without_match.insert(D3);
+        let mut fallback = ranked(&idx, "alpha bravo", 10, QueryMode::And, Some(&without_match), None);
+        fallback.sort();
+        assert_eq!(fallback, vec![D2, D3], "no admitted AND match: OR fallback");
+
+        let mut with_match = without_match.clone();
+        with_match.insert(D1);
+        assert_eq!(
+            ranked(&idx, "alpha bravo", 10, QueryMode::And, Some(&with_match), None),
+            vec![D1],
+            "an admitted AND match keeps AND semantics"
+        );
+    }
+
+    /// A staged update that removes the best hit leaves the limit filled by
+    /// the next document, and a staged document competes in the ranking.
+    #[test]
+    fn staged_rows_are_ranked_before_the_cut() {
+        let idx = FtsIndex::new(MemoryBackend::new(), test_governor());
+        idx.index_document(DB, T, "docs", D1, "rust rust rust rust").unwrap();
+        idx.index_document(DB, T, "docs", D2, "rust rust lang").unwrap();
+        idx.index_document(DB, T, "docs", D3, "rust tooling compiler words").unwrap();
+
+        let mut hidden = SurrogateBitmap::new();
+        hidden.insert(D1);
+        let removed_top = super::StagedView::new(
+            hidden,
+            false,
+            vec![StagedDoc {
+                doc_id: D1,
+                tokens: vec!["python".into()],
+            }],
+        );
+        assert_eq!(
+            ranked(&idx, "rust", 2, QueryMode::And, None, Some(&removed_top)),
+            vec![D2, D3]
+        );
+
+        let new_best = super::StagedView::new(
+            SurrogateBitmap::new(),
+            false,
+            vec![StagedDoc {
+                doc_id: Surrogate(9),
+                tokens: vec!["rust".into(); 6],
+            }],
+        );
+        assert_eq!(
+            ranked(&idx, "rust", 1, QueryMode::And, None, Some(&new_best))[0],
+            Surrogate(9)
+        );
+    }
+
+    /// A staged document is scored with AND semantics: holding one of two
+    /// words does not match while an AND match exists.
+    #[test]
+    fn staged_rows_use_and_semantics() {
+        let idx = FtsIndex::new(MemoryBackend::new(), test_governor());
+        idx.index_document(DB, T, "docs", D1, "alpha bravo").unwrap();
+        let view = super::StagedView::new(
+            SurrogateBitmap::new(),
+            false,
+            vec![
+                StagedDoc {
+                    doc_id: Surrogate(8),
+                    tokens: vec!["alpha".into(), "alpha".into()],
+                },
+                StagedDoc {
+                    doc_id: Surrogate(9),
+                    tokens: vec!["alpha".into(), "bravo".into()],
+                },
+            ],
+        );
+        let mut hits = ranked(&idx, "alpha bravo", 10, QueryMode::And, None, Some(&view));
+        hits.sort();
+        assert_eq!(hits, vec![D1, Surrogate(9)]);
+
+        let negated = ranked(&idx, "alpha -bravo", 10, QueryMode::And, None, Some(&view));
+        assert_eq!(negated, vec![Surrogate(8)]);
     }
 }

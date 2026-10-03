@@ -224,6 +224,12 @@ pub struct WriteEvent {
     /// event rebuilt from a WAL record, which the record's commit HLC dates,
     /// and for a heartbeat.
     pub commit_hlc: Option<u64>,
+
+    /// The row image the Data Plane could not render: a stored strict row
+    /// that does not decode. The named image slot is `None`. Delivery
+    /// dead-letters the event instead of running its side effects. `None`
+    /// for every event whose images rendered.
+    pub image_fault: Option<crate::event::image_fault::ImageFault>,
 }
 
 /// Where an event sits in the WAL record it reproduces.
@@ -613,6 +619,7 @@ mod tests {
             user_id: None,
             statement_digest: None,
             commit_hlc: Some(crate::event::test_utils::test_commit_hlc()),
+            image_fault: None,
         };
         assert_eq!(event.sequence, 1);
         assert_eq!(event.op, WriteOp::Insert);

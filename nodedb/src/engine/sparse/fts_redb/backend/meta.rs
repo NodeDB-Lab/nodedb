@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Opaque metadata blobs (docmap, fieldnorms, analyzer, language)
-//! against `INDEX_META` keyed by `(database_id, tenant_id, collection, subkey)`.
+//! Opaque metadata blobs (fieldnorms, analyzer, language, fuzzy) against
+//! `INDEX_META` keyed by `(database_id, tenant_id, collection, field, subkey)`.
 
 use super::core::RedbFtsBackend;
 use super::shared::redb_err;
+use crate::engine::sparse::fts_redb::keys::meta_key;
 use crate::engine::sparse::fts_redb::tables::INDEX_META;
+use nodedb_fts::IndexScope;
 use redb::{ReadableDatabase, ReadableTable};
 
 pub(super) fn read(
     backend: &RedbFtsBackend,
     database_id: u64,
     tid: u64,
-    collection: &str,
+    index: IndexScope<'_>,
     subkey: &str,
 ) -> crate::Result<Option<Vec<u8>>> {
     let read_txn = backend
@@ -22,7 +24,7 @@ pub(super) fn read(
     let table = read_txn
         .open_table(INDEX_META)
         .map_err(|e| redb_err("open index_meta", e))?;
-    match table.get((database_id, tid, collection, subkey)) {
+    match table.get(meta_key(database_id, tid, index, subkey)) {
         Ok(Some(val)) => Ok(Some(val.value().to_vec())),
         Ok(None) => Ok(None),
         Err(e) => Err(redb_err("get meta", e)),
@@ -33,7 +35,7 @@ pub(super) fn write(
     backend: &RedbFtsBackend,
     database_id: u64,
     tid: u64,
-    collection: &str,
+    index: IndexScope<'_>,
     subkey: &str,
     value: &[u8],
 ) -> crate::Result<()> {
@@ -46,7 +48,7 @@ pub(super) fn write(
             .open_table(INDEX_META)
             .map_err(|e| redb_err("open index_meta", e))?;
         table
-            .insert((database_id, tid, collection, subkey), value)
+            .insert(meta_key(database_id, tid, index, subkey), value)
             .map_err(|e| redb_err("insert meta", e))?;
     }
     write_txn.commit().map_err(|e| redb_err("commit", e))?;

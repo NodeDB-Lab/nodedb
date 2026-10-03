@@ -72,6 +72,7 @@ impl CoreLoop {
                 row_id: crate::event::types::RowId::row(identity),
                 new_value: new_row.as_deref(),
                 old_value: old_row.as_deref(),
+                image_fault: None,
             },
         );
     }
@@ -137,6 +138,7 @@ impl CoreLoop {
                 row_id: crate::event::types::RowId::row(identity),
                 new_value,
                 old_value,
+                image_fault: None,
             },
         );
     }

@@ -10,114 +10,123 @@ use crate::control::server::response_shape::schema::{OutputColumn, OutputSchema}
 use crate::control::server::response_shape::types::DdlColType;
 use nodedb_query::agg_key::canonical_agg_key;
 use nodedb_sql::catalog::SqlCatalog;
-use nodedb_sql::types::query::AggOutputSlot;
-use nodedb_sql::types::{SqlPlan, TimeseriesScanPlan};
+use nodedb_sql::types::SqlPlan;
+use nodedb_sql::types::query::{AggOutputSlot, AggregateExpr};
+use nodedb_sql::types_expr::SqlExpr;
 use std::collections::HashMap;
 
-pub(super) fn build_aggregate_schema<C: SqlCatalog + ?Sized>(
-    plan: &SqlPlan,
+/// The grouped (non-`time_bucket`) timeseries scan schema: GROUP BY keys
+/// typed from the catalog, then aggregates as `Text`.
+pub(super) fn timeseries_group_schema<C: SqlCatalog + ?Sized>(
     catalog: &C,
     database_id: nodedb_types::DatabaseId,
+    collection: &str,
+    group_by: &[String],
+    aggregates: &[AggregateExpr],
 ) -> OutputSchema {
-    match plan {
-        SqlPlan::TimeseriesScan(TimeseriesScanPlan {
-            collection,
-            group_by,
-            aggregates,
-            bucket_interval_ms,
-            ..
-        }) if !group_by.is_empty() && *bucket_interval_ms == 0 => {
-            let types = column_types_for(catalog, database_id, collection);
-            let mut columns = Vec::with_capacity(group_by.len() + aggregates.len());
-            for key in group_by {
-                columns.push(OutputColumn {
-                    display_name: key.clone(),
-                    lookup_key: key.clone(),
-                    ty: types.get(key).copied().unwrap_or(DdlColType::Text),
-                });
-            }
-            for agg in aggregates {
-                let (function, field) = agg_expr_to_pair(agg);
-                let key = canonical_agg_key(&function, &field);
-                columns.push(OutputColumn {
-                    display_name: key.clone(),
-                    lookup_key: key,
-                    ty: DdlColType::Text,
-                });
-            }
-            OutputSchema {
-                columns,
-                is_star: false,
-                cp_computed: Vec::new(),
+    let types = column_types_for(catalog, database_id, collection);
+    let mut columns = Vec::with_capacity(group_by.len() + aggregates.len());
+    for key in group_by {
+        columns.push(OutputColumn {
+            display_name: key.clone(),
+            lookup_key: key.clone(),
+            ty: types.get(key).copied().unwrap_or(DdlColType::Text),
+        });
+    }
+    for agg in aggregates {
+        let (function, field) = agg_expr_to_pair(agg);
+        let key = canonical_agg_key(&function, &field);
+        columns.push(OutputColumn {
+            display_name: key.clone(),
+            lookup_key: key,
+            ty: DdlColType::Text,
+        });
+    }
+    OutputSchema {
+        columns,
+        is_star: false,
+        cp_computed: Vec::new(),
+    }
+}
+
+/// The fields of an `SqlPlan::Aggregate` that shape its output.
+pub(super) struct AggregateShape<'a> {
+    pub input: &'a SqlPlan,
+    pub group_by: &'a [SqlExpr],
+    pub group_by_aliases: &'a [Option<String>],
+    pub output_order: &'a [AggOutputSlot],
+    pub aggregates: &'a [AggregateExpr],
+}
+
+/// The schema of an `SqlPlan::Aggregate`, in SELECT-list order.
+pub(super) fn aggregate_schema<C: SqlCatalog + ?Sized>(
+    catalog: &C,
+    database_id: nodedb_types::DatabaseId,
+    shape: AggregateShape<'_>,
+) -> OutputSchema {
+    let AggregateShape {
+        input,
+        group_by,
+        group_by_aliases,
+        output_order,
+        aggregates,
+    } = shape;
+    // Catalog types of the aggregate's underlying columns, resolved from
+    // the input plan's single source collection when it has one (Scan /
+    // point-get style). GROUP BY bare keys and MIN/MAX/SUM/AVG argument
+    // columns are typed against this; anything unresolvable stays Text.
+    let types = match collection_name_from_plan(input) {
+        Some(collection) => column_types_for(catalog, database_id, &collection),
+        None => HashMap::new(),
+    };
+    // Derives the `OutputColumn` for one GROUP BY key: `group_by_aliases`
+    // is parallel to `group_by` when populated, but may be empty when the
+    // plan was built without a projection in scope — treat a
+    // missing/`None` entry as "no alias".
+    let key_column = |index: usize| {
+        group_by.get(index).map(|key| {
+            let alias = group_by_aliases.get(index).and_then(|a| a.as_deref());
+            group_by_key_column(key, index, alias, &types)
+        })
+    };
+    // Derives the `OutputColumn` for one aggregate. `AggregateExpr::alias`
+    // is always populated by the planner: either the user's explicit
+    // alias, or (for unnamed projections) the lowercased unparsed
+    // expression text — e.g. `count(*)` — matching this module's own
+    // lowercasing of non-column expressions. So the alias is already the
+    // canonical name; no separate derivation needed. The result type is
+    // inferred conservatively (COUNT -> Int8, MIN/MAX preserve the input
+    // column type, SUM/AVG of a float -> Float8, else Text).
+    let agg_column = |index: usize| {
+        aggregates.get(index).map(|agg| OutputColumn {
+            display_name: agg.alias.clone(),
+            lookup_key: agg.alias.clone(),
+            ty: infer_aggregate_type(agg, &types),
+        })
+    };
+    let mut columns = Vec::with_capacity(group_by.len() + aggregates.len());
+    if output_order.is_empty() {
+        // Built without a projection in scope: fall back to
+        // group-keys-first, then aggregates.
+        for index in 0..group_by.len() {
+            columns.extend(key_column(index));
+        }
+        for index in 0..aggregates.len() {
+            columns.extend(agg_column(index));
+        }
+    } else {
+        // Emit columns in the recorded SELECT-list order.
+        for slot in output_order {
+            match slot {
+                AggOutputSlot::GroupKey(index) => columns.extend(key_column(*index)),
+                AggOutputSlot::Aggregate(index) => columns.extend(agg_column(*index)),
             }
         }
-        SqlPlan::Aggregate {
-            input,
-            group_by,
-            group_by_aliases,
-            output_order,
-            aggregates,
-            ..
-        } => {
-            // Catalog types of the aggregate's underlying columns, resolved from
-            // the input plan's single source collection when it has one (Scan /
-            // point-get style). GROUP BY bare keys and MIN/MAX/SUM/AVG argument
-            // columns are typed against this; anything unresolvable stays Text.
-            let types = match collection_name_from_plan(input) {
-                Some(collection) => column_types_for(catalog, database_id, &collection),
-                None => HashMap::new(),
-            };
-            // Derives the `OutputColumn` for one GROUP BY key: `group_by_aliases`
-            // is parallel to `group_by` when populated, but may be empty when the
-            // plan was built without a projection in scope — treat a
-            // missing/`None` entry as "no alias".
-            let key_column = |index: usize| {
-                group_by.get(index).map(|key| {
-                    let alias = group_by_aliases.get(index).and_then(|a| a.as_deref());
-                    group_by_key_column(key, index, alias, &types)
-                })
-            };
-            // Derives the `OutputColumn` for one aggregate. `AggregateExpr::alias`
-            // is always populated by the planner: either the user's explicit
-            // alias, or (for unnamed projections) the lowercased unparsed
-            // expression text — e.g. `count(*)` — matching this module's own
-            // lowercasing of non-column expressions. So the alias is already the
-            // canonical name; no separate derivation needed. The result type is
-            // inferred conservatively (COUNT -> Int8, MIN/MAX preserve the input
-            // column type, SUM/AVG of a float -> Float8, else Text).
-            let agg_column = |index: usize| {
-                aggregates.get(index).map(|agg| OutputColumn {
-                    display_name: agg.alias.clone(),
-                    lookup_key: agg.alias.clone(),
-                    ty: infer_aggregate_type(agg, &types),
-                })
-            };
-            let mut columns = Vec::with_capacity(group_by.len() + aggregates.len());
-            if output_order.is_empty() {
-                // Built without a projection in scope: fall back to
-                // group-keys-first, then aggregates.
-                for index in 0..group_by.len() {
-                    columns.extend(key_column(index));
-                }
-                for index in 0..aggregates.len() {
-                    columns.extend(agg_column(index));
-                }
-            } else {
-                // Emit columns in the recorded SELECT-list order.
-                for slot in output_order {
-                    match slot {
-                        AggOutputSlot::GroupKey(index) => columns.extend(key_column(*index)),
-                        AggOutputSlot::Aggregate(index) => columns.extend(agg_column(*index)),
-                    }
-                }
-            }
-            OutputSchema {
-                columns,
-                is_star: false,
-                cp_computed: Vec::new(),
-            }
-        }
-        _ => OutputSchema::default(),
+    }
+    OutputSchema {
+        columns,
+        is_star: false,
+        cp_computed: Vec::new(),
     }
 }
 

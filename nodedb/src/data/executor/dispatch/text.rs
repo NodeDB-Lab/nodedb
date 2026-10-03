@@ -8,6 +8,7 @@ use nodedb_physical::physical_plan::TextOp;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::text_search::TextSearchParams;
 use crate::data::executor::handlers::text_search_hybrid::HybridSearchParams;
+use crate::data::executor::handlers::text_search_scan::{PhraseSearchParams, ScoreScanParams};
 use crate::data::executor::handlers::text_search_triple::HybridSearchTripleParams;
 use crate::data::executor::task::ExecutionTask;
 
@@ -17,58 +18,84 @@ impl CoreLoop {
         match op {
             TextOp::Search {
                 collection,
+                field,
                 query,
                 top_k,
+                mode,
                 fuzzy,
                 prefilter,
+                filters,
                 rls_filters,
+                scores,
             } => self.execute_text_search(
                 task,
                 TextSearchParams {
                     tid,
                     collection: collection.as_str(),
+                    field: field.as_deref(),
                     query,
                     top_k: *top_k,
+                    mode: *mode,
                     fuzzy: *fuzzy,
                     prefilter: prefilter.as_ref(),
+                    filters,
                     rls_filters,
+                    scores,
                 },
             ),
 
             TextOp::BM25ScoreScan {
                 collection,
-                query,
-                score_alias,
-                fuzzy,
+                filters,
+                rls_filters,
+                scores,
+                bound,
             } => self.execute_bm25_score_scan(
                 task,
-                tid,
-                collection.as_str(),
-                query,
-                score_alias,
-                *fuzzy,
+                ScoreScanParams {
+                    tid,
+                    collection: collection.as_str(),
+                    filters,
+                    rls_filters,
+                    scores,
+                    bound: bound.as_ref(),
+                },
             ),
 
             TextOp::PhraseSearch {
                 collection,
+                field,
                 terms,
                 top_k,
                 prefilter,
+                filters,
+                rls_filters,
+                scores,
             } => self.execute_phrase_search(
                 task,
-                tid,
-                collection.as_str(),
-                terms,
-                *top_k,
-                prefilter.as_ref(),
+                PhraseSearchParams {
+                    tid,
+                    collection: collection.as_str(),
+                    field: field.as_deref(),
+                    terms,
+                    top_k: *top_k,
+                    prefilter: prefilter.as_ref(),
+                    filters,
+                    rls_filters,
+                    scores,
+                },
             ),
 
             TextOp::HybridSearch {
                 collection,
+                vector_field,
                 query_vector,
+                text_field,
                 query_text,
+                filters,
                 top_k,
                 ef_search,
+                mode,
                 fuzzy,
                 vector_weight,
                 filter_bitmap,
@@ -79,10 +106,14 @@ impl CoreLoop {
                 HybridSearchParams {
                     tid,
                     collection: collection.as_str(),
+                    vector_field,
                     query_vector,
+                    text_field: text_field.as_deref(),
                     query_text,
+                    filters,
                     top_k: *top_k,
                     ef_search: *ef_search,
+                    mode: *mode,
                     fuzzy: *fuzzy,
                     vector_weight: *vector_weight,
                     filter_bitmap: filter_bitmap.as_ref(),
@@ -94,14 +125,14 @@ impl CoreLoop {
             TextOp::FtsIndexDoc {
                 collection,
                 surrogate,
-                text,
+                fields,
                 provenance,
             } => self.execute_fts_index_doc(
                 task,
                 tid,
                 collection.as_str(),
                 *surrogate,
-                text,
+                fields,
                 provenance.as_ref(),
             ),
 
@@ -119,13 +150,17 @@ impl CoreLoop {
 
             TextOp::HybridSearchTriple {
                 collection,
+                vector_field,
                 query_vector,
+                text_field,
                 query_text,
+                filters,
                 graph_seed_id,
                 graph_depth,
                 graph_edge_label,
                 top_k,
                 ef_search,
+                mode,
                 fuzzy,
                 rrf_k,
                 filter_bitmap,
@@ -136,13 +171,17 @@ impl CoreLoop {
                 HybridSearchTripleParams {
                     tid,
                     collection: collection.as_str(),
+                    vector_field,
                     query_vector,
+                    text_field: text_field.as_deref(),
                     query_text,
+                    filters,
                     graph_seed_id,
                     graph_depth: *graph_depth,
                     graph_edge_label: graph_edge_label.as_deref(),
                     top_k: *top_k,
                     ef_search: *ef_search,
+                    mode: *mode,
                     fuzzy: *fuzzy,
                     rrf_k: *rrf_k,
                     filter_bitmap: filter_bitmap.as_ref(),

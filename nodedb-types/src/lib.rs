@@ -137,7 +137,7 @@ pub use temporal::{
     MAX_POSITIONS_PER_EPOCH, NANOS_PER_MS, OPEN_UPPER, OrdinalClock, SystemTimeScope,
     ValidTimePredicate, calvin_txn_ordinal, ms_to_ordinal_upper, ordinal_to_ms,
 };
-pub use text_search::{Bm25Params, QueryMode, TextSearchParams};
+pub use text_search::{Bm25Params, QueryMode, TextColumnFault, TextSearchParams};
 pub use trace::{SpanId, TraceId};
 pub use typeguard::TypeGuardFieldDef;
 pub use value::{NotScalar, Value, scalar_to_raw_bytes};

@@ -23,7 +23,7 @@ pub use array_staged::{ArrayTxnOverlay, StagedCellPut};
 pub(in crate::data::executor) use columnar_merge::{
     ColumnarMatchedRow, ColumnarOverlayMergeParams, decode_staged_row,
 };
-pub(in crate::data::executor) use fts_merge::FtsMergeParams;
+pub(in crate::data::executor) use fts_merge::staged_phrase_hits;
 pub use graph_staged::{GraphCollKey, GraphTxnOverlay, NodeLabelDelta};
 pub(in crate::data::executor) use merge::IndexOverlayMergeParams;
 pub use row_tags::BodyWrites;

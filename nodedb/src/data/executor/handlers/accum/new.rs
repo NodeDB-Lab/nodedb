@@ -12,9 +12,7 @@ impl AggAccum {
         match agg.function.as_str() {
             "count" => AggAccum::Count { n: 0 },
             "sum" | "avg" => AggAccum::SumAvg {
-                sum: 0.0,
-                comp: 0.0,
-                n: 0,
+                sum: nodedb_query::ExactSum::new(),
             },
             "sum_distinct" | "avg_distinct" => AggAccum::SumAvgDistinct {
                 seen: HashMap::new(),

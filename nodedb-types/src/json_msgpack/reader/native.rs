@@ -64,7 +64,7 @@ pub(crate) fn read_native_value<'de, R: Read<'de>>(reader: &mut R) -> zerompk::R
         }
         0xC2 | 0xC3 => Ok(Value::Bool(reader.read_boolean()?)),
         0x00..=0x7F | 0xE0..=0xFF | 0xD0..=0xD3 => Ok(Value::Integer(reader.read_i64()?)),
-        0xCC..=0xCF => Ok(Value::Integer(reader.read_u64()? as i64)),
+        0xCC..=0xCF => Ok(Value::from_u64(reader.read_u64()?)),
         0xCA => Ok(Value::Float(f64::from(reader.read_f32()?))),
         0xCB => Ok(Value::Float(reader.read_f64()?)),
         0xA0..=0xBF | 0xD9..=0xDB => Ok(Value::String(reader.read_string()?.into_owned())),
@@ -211,6 +211,40 @@ mod tests {
         let bytes = [0xCF, 0, 0, 0, 0, 0, 0, 0x01, 0x00];
         assert_eq!(through_cell(&bytes).unwrap(), Value::Integer(256));
         assert_eq!(value_from_msgpack(&bytes).unwrap(), Value::Integer(256));
+    }
+
+    #[test]
+    fn unsigned_64_above_i64_max_keeps_its_number() {
+        let bytes = [0xCF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+        let expected = Value::Decimal(rust_decimal::Decimal::from(u64::MAX));
+        assert_eq!(through_cell(&bytes).unwrap(), expected);
+        assert_eq!(value_from_msgpack(&bytes).unwrap(), expected);
+    }
+
+    /// A `u64` above `i64::MAX` writes as `uint64` and reads back as the same
+    /// `Decimal`. Every other decimal stays text.
+    #[test]
+    fn wide_u64_decimal_round_trips_as_uint64() {
+        let wide = Value::from_u64(u64::MAX);
+        let bytes = value_to_msgpack(&wide).unwrap();
+        assert_eq!(bytes, [0xCF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(value_from_msgpack(&bytes).unwrap(), wide);
+        assert_eq!(msgpack_to_json_string(&bytes).unwrap(), "18446744073709551615");
+
+        let just_above = Value::from_u64(i64::MAX as u64 + 1);
+        let bytes = value_to_msgpack(&just_above).unwrap();
+        assert_eq!(bytes[0], 0xCF);
+        assert_eq!(value_from_msgpack(&bytes).unwrap(), just_above);
+
+        for text in ["5", "18446744073709551615.0", "18446744073709551616", "-1"] {
+            let d = Value::Decimal(rust_decimal::Decimal::from_str_exact(text).unwrap());
+            let bytes = value_to_msgpack(&d).unwrap();
+            assert_eq!(
+                value_from_msgpack(&bytes).unwrap(),
+                Value::String(text.to_string()),
+                "{text} stays text"
+            );
+        }
     }
 
     #[test]

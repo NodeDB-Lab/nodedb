@@ -879,7 +879,7 @@ mod tests {
                     tid,
                     "docs",
                     nodedb_types::Surrogate::new(7),
-                    "quick brown fox",
+                    &crate::engine::sparse::inverted::test_support::body("quick brown fox"),
                 )
                 .expect("index a document");
         }

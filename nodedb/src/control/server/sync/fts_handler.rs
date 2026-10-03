@@ -28,14 +28,15 @@ use crate::types::{DatabaseId, TenantId, VShardId};
 /// [`SyncAckResult`] for gate status propagation to the Lite client.
 #[async_trait]
 pub trait FtsDispatcher: Send + Sync {
-    /// Index a document's text on the Data Plane.
+    /// Index a document's `(field, text)` pairs on the Data Plane. Empty
+    /// `fields` remove the document from every index.
     async fn dispatch_index(
         &self,
         tenant_id: TenantId,
         vshard: VShardId,
         collection: String,
         surrogate: Surrogate,
-        text: String,
+        fields: Vec<(String, String)>,
         provenance: nodedb_types::sync::wire::SyncProvenance,
     ) -> crate::Result<Vec<u8>>;
 
@@ -88,7 +89,7 @@ impl<'a> FtsDispatcher for SharedStateFtsDispatcher<'a> {
         vshard: VShardId,
         collection: String,
         surrogate: Surrogate,
-        text: String,
+        fields: Vec<(String, String)>,
         provenance: nodedb_types::sync::wire::SyncProvenance,
     ) -> crate::Result<Vec<u8>> {
         use crate::bridge::envelope::PhysicalPlan;
@@ -112,7 +113,7 @@ impl<'a> FtsDispatcher for SharedStateFtsDispatcher<'a> {
         let plan = PhysicalPlan::Text(TextOp::FtsIndexDoc {
             collection: nodedb_types::QualifiedCollection::new(database_id, &collection),
             surrogate,
-            text,
+            fields,
             provenance: Some(prov),
         });
 
@@ -202,7 +203,7 @@ impl FtsDispatcher for NoOpFtsDispatcher {
         _vshard: VShardId,
         _collection: String,
         _surrogate: Surrogate,
-        _text: String,
+        _fields: Vec<(String, String)>,
         _provenance: nodedb_types::sync::wire::SyncProvenance,
     ) -> crate::Result<Vec<u8>> {
         Err(super::raft_dispatch::noop_dispatch_error("FTS index"))
@@ -254,7 +255,7 @@ mod tests {
     use super::super::wire::*;
     use super::*;
 
-    type MockCallLog = Arc<Mutex<Vec<(TenantId, String, String)>>>;
+    type MockCallLog = Arc<Mutex<Vec<(TenantId, String, Vec<(String, String)>)>>>;
 
     struct MockDispatcher {
         index_calls: MockCallLog,
@@ -308,14 +309,14 @@ mod tests {
             _vshard: VShardId,
             collection: String,
             _surrogate: Surrogate,
-            _text: String,
+            fields: Vec<(String, String)>,
             provenance: nodedb_types::sync::wire::SyncProvenance,
         ) -> crate::Result<Vec<u8>> {
             let seq = provenance.seq;
             self.index_calls
                 .lock()
                 .unwrap()
-                .push((tenant_id, collection, String::new()));
+                .push((tenant_id, collection, fields));
             super::super::test_support::mock_applied_ack(&self.result, seq)
         }
 
@@ -332,7 +333,7 @@ mod tests {
             self.delete_calls
                 .lock()
                 .unwrap()
-                .push((tenant_id, collection, String::new()));
+                .push((tenant_id, collection, Vec::new()));
             super::super::test_support::mock_applied_ack(&self.result, seq)
         }
 
@@ -362,12 +363,19 @@ mod tests {
         SyncSession::new("test-fts-session".to_string())
     }
 
+    /// An index message whose only field is `body`; empty `text` carries no
+    /// fields at all.
     fn make_index_msg(collection: &str, doc_id: &str, text: &str) -> FtsIndexMsg {
+        let fields = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![("body".to_string(), text.to_string())]
+        };
         FtsIndexMsg {
             lite_id: "lite-test".to_string(),
             collection: collection.to_string(),
             doc_id: doc_id.to_string(),
-            text: text.to_string(),
+            fields,
             batch_id: 1,
             producer_id: 0,
             epoch: 0,
@@ -412,11 +420,19 @@ mod tests {
         let ack: FtsIndexAckMsg = frame.unwrap().decode_body().unwrap();
         assert!(ack.accepted);
         assert_eq!(ack.doc_id, "d1");
-        assert_eq!(indexes.lock().unwrap().len(), 1);
+        let calls = indexes.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].2,
+            vec![("body".to_string(), "hello world".to_string())],
+            "the message's fields reach the Data Plane unchanged"
+        );
     }
 
+    /// Empty fields are an update that stripped every string field: they
+    /// dispatch, so the Data Plane removes the document's prior postings.
     #[tokio::test]
-    async fn empty_text_acks_without_dispatch() {
+    async fn empty_fields_dispatch_as_a_removal() {
         let mut session = make_session();
         session.authenticated = true;
         let (mock, indexes, _) = MockDispatcher::ok();
@@ -425,7 +441,10 @@ mod tests {
         let frame = session.handle_fts_index(&msg, &mock).await;
         let ack: FtsIndexAckMsg = frame.unwrap().decode_body().unwrap();
         assert!(ack.accepted);
-        assert!(indexes.lock().unwrap().is_empty());
+        let calls = indexes.lock().unwrap();
+        assert_eq!(calls.len(), 1, "empty fields must reach the Data Plane");
+        assert!(calls[0].2.is_empty());
+        assert_eq!(*mock.assigned.lock().unwrap(), vec!["d1".to_string()]);
     }
 
     #[tokio::test]

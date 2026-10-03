@@ -231,7 +231,11 @@ pub(super) fn execute_grouping_sets(
             }
 
             // Real aggregate results.
-            for (alias, val) in state.finalize(&real_agg_slice) {
+            let finalized = match state.finalize(&real_agg_slice) {
+                Ok(finalized) => finalized,
+                Err(e) => return core.response_error(task, ErrorCode::from(e)),
+            };
+            for (alias, val) in finalized {
                 row.insert(alias, val.into());
             }
 

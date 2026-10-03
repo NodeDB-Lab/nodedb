@@ -316,7 +316,17 @@ pub(super) fn convert_subquery(
     } = args;
 
     // The body is ONE relation, already gathered when sharded.
-    let child = convert_body_to_single_plan(input, tenant_id, ctx)?;
+    let mut child = convert_body_to_single_plan(input, tenant_id, ctx)?;
+    // A score scan body takes the LIMIT when the tail only cuts rows.
+    super::scan::bound_score_scan(
+        &mut child,
+        &super::scan::ScoreScanTail {
+            sort_keys,
+            limit,
+            offset,
+            reads_past_cut: !filters.is_empty() || distinct || !window_functions.is_empty(),
+        },
+    );
 
     // A join / lateral body emits ONE merged document per output row whose
     // columns keep their table prefix (`a.attnum`), which is why the response

@@ -7,6 +7,7 @@
 //! that level are merged into a single segment at the next level.
 
 use crate::backend::FtsBackend;
+use crate::scope::IndexScope;
 
 use super::merge;
 use super::segment::{reader::SegmentReader, writer};
@@ -94,7 +95,7 @@ impl<E> CompactError<E> {
 
 /// Inputs to [`compact_level`].
 ///
-/// Groups the backend handle, the `(database_id, tid, collection)` scope, the
+/// Groups the backend handle, the `(database_id, tid, index)` scope, the
 /// candidate segment list, the target level, and the optional memory governor.
 pub struct CompactLevelParams<'a, B: FtsBackend> {
     /// Backend the source segments are read from.
@@ -103,9 +104,9 @@ pub struct CompactLevelParams<'a, B: FtsBackend> {
     pub database_id: u64,
     /// Owning tenant id.
     pub tid: u64,
-    /// Collection whose segments are being compacted.
-    pub collection: &'a str,
-    /// All known segments for the collection (filtered to `level` internally).
+    /// Index whose segments are being compacted.
+    pub index: IndexScope<'a>,
+    /// All known segments of the index (filtered to `level` internally).
     pub segments: &'a [SegmentMeta],
     /// Level whose segments are merged into `level + 1`.
     pub level: u32,
@@ -128,7 +129,7 @@ pub fn compact_level<B: FtsBackend>(
         backend,
         database_id,
         tid,
-        collection,
+        index,
         segments,
         level,
         governor,
@@ -152,7 +153,7 @@ pub fn compact_level<B: FtsBackend>(
 
     for meta in &to_merge {
         if let Some(data) = backend
-            .read_segment(database_id, tid, collection, &meta.segment_id)
+            .read_segment(database_id, tid, index, &meta.segment_id)
             .map_err(CompactError::backend)?
             && let Ok(reader) = SegmentReader::open(data)
         {

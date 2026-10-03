@@ -66,6 +66,16 @@ pub enum SqlError {
     #[error("unknown column '{column}' in table '{table}'")]
     UnknownColumn { table: String, column: String },
 
+    /// The column argument of `text_match` / `bm25_score` cannot serve a
+    /// full-text search. `fault` names why and carries the SQLSTATE.
+    #[error("{function}(): column '{column}' of collection '{collection}' {fault}")]
+    TextColumn {
+        function: String,
+        collection: String,
+        column: String,
+        fault: nodedb_types::text_search::TextColumnFault,
+    },
+
     #[error("ambiguous column '{column}' — qualify with table name")]
     AmbiguousColumn { column: String },
 
@@ -101,6 +111,13 @@ pub enum SqlError {
     /// [`SqlError::DivisionByZero`].
     #[error("arithmetic overflow evaluating a constant expression: {detail}")]
     ConstantOverflow { detail: String },
+
+    /// An integer literal past the exact numeric range (the 96-bit
+    /// `Decimal` mantissa). Rounding it to a float would store another
+    /// number than the one written. PostgreSQL rejects an out-of-range
+    /// numeric with SQLSTATE `22003`.
+    #[error("numeric literal {literal} is out of range")]
+    NumericLiteralOutOfRange { literal: String },
 
     /// A write supplied an integer wider than the column's declared type.
     ///

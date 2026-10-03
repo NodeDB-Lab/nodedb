@@ -13,6 +13,7 @@ mod decode_stored;
 pub(in crate::data::executor) mod deferred;
 mod doc_config_seed;
 pub(in crate::data::executor) mod event_emit;
+pub(in crate::data::executor) mod event_image;
 mod event_emit_engines;
 pub(in crate::data::executor) mod event_outlet;
 pub(in crate::data::executor) use event_emit_engines::KvWriteEvent;
