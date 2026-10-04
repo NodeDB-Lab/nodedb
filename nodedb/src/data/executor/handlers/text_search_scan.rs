@@ -256,8 +256,7 @@ impl CoreLoop {
         {
             for (surrogate, staged) in overlay.iter_for_collection(&coll_key) {
                 if let Staged::Put(body) = staged
-                    && emit(&StorageKey::for_surrogate(Surrogate::new(surrogate)), body)?
-                        .is_break()
+                    && emit(&StorageKey::for_surrogate(Surrogate::new(surrogate)), body)?.is_break()
                 {
                     break;
                 }

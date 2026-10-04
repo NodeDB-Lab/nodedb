@@ -969,7 +969,11 @@ mod tests {
             } => assert_eq!(field, "email"),
             other => panic!("expected DeadLetterRefused(DlqFull), got {other:?}"),
         }
-        assert_eq!(engine.dlq_len(), capacity, "the refused entry is not queued");
+        assert_eq!(
+            engine.dlq_len(),
+            capacity,
+            "the refused entry is not queued"
+        );
         assert!(engine.read_row("users", "b").is_none());
         assert!(
             engine.bind_dead_letter_source(12).is_none(),

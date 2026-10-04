@@ -12,19 +12,22 @@ use async_trait::async_trait;
 use pgwire::api::results::{FieldFormat, FieldInfo};
 use pgwire::api::stmt::QueryParser;
 use pgwire::api::{ClientInfo, Type};
-use pgwire::error::PgWireResult;
+use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::config::auth::AuthMode;
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::server::response_shape::types::DdlColType;
 use crate::control::server::shared::authorization::{authorize_database, authorize_task_set};
 use crate::control::server::shared::returning;
-use crate::control::server::shared::session::{SessionId, SessionStore};
+use crate::control::server::shared::session::{SessionId, SessionStore, TransactionState};
 use crate::control::state::SharedState;
 
 use super::super::auth::{pgwire_authorization_error, resolve_session_identity};
 use super::statement::ParsedStatement;
-use parser_schema::{count_placeholders, is_dsl_statement, substitute_placeholders_with_null};
+use parser_schema::{
+    count_placeholders, is_dsl_statement, is_transaction_control_sql,
+    substitute_placeholders_with_null,
+};
 
 #[path = "parser_schema.rs"]
 mod parser_schema;
@@ -381,6 +384,18 @@ impl QueryParser for NodeDbQueryParser {
             client,
             &self.session_id,
         )?;
+        // An aborted block refuses a Parse before planning or authorization,
+        // as PostgreSQL does. Only transaction control can end the block.
+        if self.sessions.transaction_state(self.session_id) == TransactionState::Failed
+            && !is_transaction_control_sql(sql)
+        {
+            return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
+                "ERROR".to_owned(),
+                "25P02".to_owned(),
+                "current transaction is aborted, commands ignored until end of transaction block"
+                    .to_owned(),
+            ))));
+        }
         let database_id = self
             .sessions
             .get_current_database(self.session_id)

@@ -17,15 +17,16 @@ use nodedb_types::filter::MetadataFilter;
 use nodedb_types::value::Value;
 
 use crate::remote_parse::format_vector_array;
+use crate::row_decode::search_hit::{DISTANCE_COLUMN, ID_COLUMN};
 use crate::sql_escape::{quote_identifier, quote_string_literal};
 
 /// Build the SQL for a vector search.
 ///
 /// Always emits the canonical
-/// `SELECT * FROM <coll>[ WHERE <pred>] ORDER BY vector_distance(ARRAY[...]) LIMIT <k>`
-/// shape so the optional `WHERE` clause precedes `ORDER BY` (the SEARCH
-/// preprocessor's "trailing append" form would have placed `WHERE` after
-/// `ORDER BY`, which is invalid SQL).
+/// `SELECT id, vector_distance(ARRAY[...]) AS distance FROM <coll>[ WHERE <pred>]
+/// ORDER BY vector_distance(ARRAY[...]) LIMIT <k>` shape. The optional
+/// `WHERE` clause precedes `ORDER BY`. The projection names the two columns
+/// a hit decodes from.
 ///
 /// `allowed_ids` adds a top-level `id IN (...)` conjunct. The server lowers
 /// that key conjunct to the candidate bitmap the index search honors, so the
@@ -56,9 +57,10 @@ pub(super) fn build_vector_search_sql(
     } else {
         format!(" WHERE {}", conjuncts.join(" AND "))
     };
+    let query = format_vector_array(query);
     Ok(format!(
-        "SELECT * FROM {collection}{where_clause} ORDER BY vector_distance({}) LIMIT {k}",
-        format_vector_array(query),
+        "SELECT {ID_COLUMN}, vector_distance({query}) AS {DISTANCE_COLUMN} \
+         FROM {collection}{where_clause} ORDER BY vector_distance({query}) LIMIT {k}",
     ))
 }
 
@@ -201,18 +203,12 @@ mod tests {
 
     #[test]
     fn vector_search_sql_without_filter_renders_basic_form() {
-        // No-filter path: SELECT * FROM <coll> ORDER BY vector_distance(ARRAY[..]) LIMIT k.
-        let sql =
-            build_vector_search_sql("docs", &[0.1, 0.2, 0.3], 5, None, None)
-                .expect("no-filter is fine");
-        assert!(sql.contains("SELECT"));
-        assert!(sql.contains("docs"));
-        assert!(sql.contains("vector_distance"));
-        assert!(sql.contains("ARRAY[0.1,0.2,0.3]"));
-        assert!(sql.contains("LIMIT 5"));
-        assert!(
-            !sql.contains(" WHERE "),
-            "no-filter SQL must not have WHERE; got: {sql}"
+        let sql = build_vector_search_sql("docs", &[0.1, 0.2, 0.3], 5, None, None)
+            .expect("no-filter is fine");
+        assert_eq!(
+            sql,
+            "SELECT id, vector_distance(ARRAY[0.1,0.2,0.3]) AS distance FROM \"docs\" \
+             ORDER BY vector_distance(ARRAY[0.1,0.2,0.3]) LIMIT 5"
         );
     }
 

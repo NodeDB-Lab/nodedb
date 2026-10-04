@@ -120,12 +120,15 @@ impl CoreLoop {
         };
 
         // 1. Vector search.
-        let index_key = self.resolve_vector_index_key(
+        let index_key = match self.resolve_vector_index_key(
             task.request.database_id.as_u64(),
             tid,
             collection,
             vector_field,
-        );
+        ) {
+            Ok(key) => key,
+            Err(e) => return self.response_error(task, e),
+        };
         let vector_collection = self.vector_collections.get(&index_key);
         let vector_results = match vector_collection {
             Some(index) => {

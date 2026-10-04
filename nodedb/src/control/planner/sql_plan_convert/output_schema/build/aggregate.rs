@@ -15,8 +15,8 @@ use nodedb_sql::types::query::{AggOutputSlot, AggregateExpr};
 use nodedb_sql::types_expr::SqlExpr;
 use std::collections::HashMap;
 
-/// The grouped (non-`time_bucket`) timeseries scan schema: GROUP BY keys
-/// typed from the catalog, then aggregates as `Text`.
+/// The aggregating (non-`time_bucket`) timeseries scan schema, grouped or
+/// not: GROUP BY keys typed from the catalog, then aggregates as `Text`.
 pub(super) fn timeseries_group_schema<C: SqlCatalog + ?Sized>(
     catalog: &C,
     database_id: nodedb_types::DatabaseId,

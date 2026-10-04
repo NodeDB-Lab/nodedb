@@ -35,7 +35,8 @@ impl CoreLoop {
         let Some(doc) = self.decode_indexed_body(config_key, body)? else {
             return Ok(None);
         };
-        let text = extract_fts_fields(&doc).text_of(index);
+        let fields = extract_fts_fields(&doc);
+        let text = fields.text_of(index);
         if text.is_empty() {
             return Ok(None);
         }

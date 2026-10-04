@@ -129,44 +129,13 @@ impl CoreLoop {
         self.events.producer = Some(producer);
     }
 
-    /// Emit a write event for one row to the Event Plane.
-    ///
-    /// Called after a successful write (PointPut, PointDelete, PointUpdate,
-    /// BatchInsert, BulkDelete, atomic KV ops, etc.). The Data Plane NEVER
-    /// blocks here — if the ring buffer is full, the event is dropped and
-    /// the Event Plane will detect the gap via sequence numbers and replay
-    /// from WAL.
-    ///
-    /// Prefer [`CoreLoop::emit_put_event`] for any handler that performs a
-    /// put-style mutation against a document engine — it derives the
-    /// Insert/Update tag from the prior bytes returned by storage so the
-    /// emit site cannot disagree with what the row actually did. This
-    /// lower-level entry point stays for paths where the op is structurally
-    /// determined by the operation itself (kv-atomic increment, CAS, plain
-    /// delete) rather than by inspecting pre/post state.
-    pub(in crate::data::executor) fn emit_write_event(
-        &mut self,
-        task: &super::super::task::ExecutionTask,
-        collection: &str,
-        op: crate::event::WriteOp,
-        identity: crate::engine::document::store::RowIdentity,
-        new_value: Option<&[u8]>,
-        old_value: Option<&[u8]>,
-    ) {
-        self.emit_event_with_row_id(
-            task,
-            collection,
-            op,
-            crate::event::types::RowId::row(identity),
-            new_value,
-            old_value,
-        );
-    }
-
     /// Emit a write event carrying any [`crate::event::types::RowId`].
     ///
-    /// [`Self::emit_write_event`] is the entry point for single rows. Edge
-    /// events name an `(src, label, dst)` triple and call this directly.
+    /// Called after a successful write. The Data Plane never blocks here: if
+    /// the ring buffer is full, the event is dropped and the Event Plane
+    /// detects the gap by sequence number and replays from the WAL. Document
+    /// puts and deletes use [`CoreLoop::emit_put_event`] and
+    /// [`CoreLoop::emit_document_delete_event`], which render the row image.
     pub(in crate::data::executor) fn emit_event_with_row_id(
         &mut self,
         task: &super::super::task::ExecutionTask,

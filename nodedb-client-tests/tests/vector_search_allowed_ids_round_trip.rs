@@ -91,6 +91,11 @@ async fn vector_search_ranks_only_within_allowed_ids() {
         .await
         .expect("remote unrestricted vector_search");
     assert_eq!(ids(&open), vec!["near1", "near2"]);
+    let open = native
+        .vector_search("allowed_ids_vecs", &[0.0, 0.0], 2, None, None)
+        .await
+        .expect("native unrestricted vector_search");
+    assert_eq!(ids(&open), vec!["near1", "near2"], "native unrestricted");
 
     let hits = remote
         .vector_search("allowed_ids_vecs", &[0.0, 0.0], 2, None, Some(&allowed))

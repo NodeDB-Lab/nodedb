@@ -104,7 +104,10 @@ mod tests {
             .expect("a tuple converts");
         let value = nodedb_types::value_from_msgpack(&image).expect("image is msgpack");
         assert_eq!(
-            value.as_object().and_then(|o| o.get("name")).and_then(|v| v.as_str()),
+            value
+                .as_object()
+                .and_then(|o| o.get("name"))
+                .and_then(|v| v.as_str()),
             Some("alice")
         );
     }

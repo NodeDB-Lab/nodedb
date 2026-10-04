@@ -94,6 +94,12 @@ pub(super) fn is_dsl_statement(sql: &str) -> bool {
         || upper.starts_with("DROP SPARSE INDEX ")
 }
 
+/// Return true if `sql` is transaction control. An aborted block admits a
+/// Parse only for these: their session handlers own the aborted state.
+pub(super) fn is_transaction_control_sql(sql: &str) -> bool {
+    is_transaction_control(&sql.trim().to_uppercase())
+}
+
 /// Return true if `upper` (trimmed, upper-cased SQL) is a statement the
 /// transaction-command arms of `execute_sql` handle: BEGIN, COMMIT, ROLLBACK,
 /// SAVEPOINT, RELEASE and ROLLBACK TO.
@@ -170,7 +176,10 @@ mod tests {
             "ROLLBACK TO SAVEPOINT s1",
             "rollback to s1",
         ] {
-            assert!(is_dsl_statement(sql), "{sql} must route through execute_sql");
+            assert!(
+                is_dsl_statement(sql),
+                "{sql} must route through execute_sql"
+            );
         }
         assert!(!is_dsl_statement("SELECT 1"));
         assert!(!is_dsl_statement("BEGINNING"));

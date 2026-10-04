@@ -17,7 +17,9 @@
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BooleanArray, Decimal128Array, Float64Array, Int64Array, StringArray};
+use arrow::array::{
+    ArrayRef, BooleanArray, Decimal128Array, Float64Array, Int64Array, StringArray,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use nodedb_types::Value;
@@ -180,8 +182,8 @@ pub fn mv_state_to_record_batch(mv_state: &MvState) -> crate::Result<Option<Reco
 mod tests {
     use super::*;
     use crate::event::streaming_mv::state::AggInput;
-    use arrow::array::Array;
     use crate::event::streaming_mv::types::{AggDef, AggFunction};
+    use arrow::array::Array;
 
     fn agg(output_name: &str, function: AggFunction) -> AggDef {
         AggDef {
@@ -246,7 +248,10 @@ mod tests {
         let d = Value::from_u64(u64::MAX);
         let f = Value::Float(0.5);
         let s = Value::String("x".into());
-        assert_eq!(column_kind([&i, &Value::Null].into_iter()), ColumnKind::Int64);
+        assert_eq!(
+            column_kind([&i, &Value::Null].into_iter()),
+            ColumnKind::Int64
+        );
         assert_eq!(column_kind([&i, &d].into_iter()), ColumnKind::Decimal);
         assert_eq!(column_kind([&d, &f].into_iter()), ColumnKind::Float64);
         assert_eq!(column_kind([&f, &s].into_iter()), ColumnKind::Utf8);

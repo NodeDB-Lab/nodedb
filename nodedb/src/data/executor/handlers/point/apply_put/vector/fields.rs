@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Which fields of a collection carry vectors: strict-schema `Vector(dim)`
-//! columns and schemaless fields registered via `vector_params`.
+//! columns, schemaless fields registered via `vector_params`, and the
+//! declared `VECTOR(n)` columns of a schemaless collection.
 
 use crate::data::executor::core_loop::CoreLoop;
+
+/// The field a collection-level vector index (no field name) covers.
+pub(super) const DEFAULT_VECTOR_FIELD: &str = "embedding";
 
 impl CoreLoop {
     /// Strict-schema `Vector(dim)` column names + dims declared on
@@ -54,11 +58,11 @@ impl CoreLoop {
             .unwrap_or_default()
     }
 
-    /// Schemaless vector field names registered via `vector_params` for
-    /// `collection` (named-field entries `"{collection}:{field}"`, plus the
-    /// bare `"{collection}"` key defaulting to `"embedding"`). Shared by the
-    /// put path's schemaless indexing branch and the delete cleanup's exact
-    /// key construction.
+    /// Schemaless vector field names of `collection`: the named-field
+    /// `vector_params` entries `"{collection}:{field}"`, the bare
+    /// `"{collection}"` key defaulting to `"embedding"`, and the collection's
+    /// declared `VECTOR(n)` columns. Shared by the put path's schemaless
+    /// indexing branch and the delete cleanup's exact key construction.
     pub(in crate::data::executor) fn schemaless_vector_field_names(
         &self,
         database_id: u64,
@@ -79,13 +83,43 @@ impl CoreLoop {
             .map(|k| k.2[field_prefix.len()..].to_string())
             .collect();
         if names.is_empty() && self.vector_params.contains_key(&bare_key) {
-            names.push("embedding".to_string());
+            names.push(DEFAULT_VECTOR_FIELD.to_string());
+        }
+        if let Some(config) = self.doc_configs.get(&bare_key) {
+            for (field, _dim) in &config.vector_fields {
+                if !names.contains(field) {
+                    names.push(field.clone());
+                }
+            }
         }
         names
     }
 
+    /// The width of `field` when `collection` declares it a `VECTOR(n)`
+    /// column of a schemaless collection, else `None`.
+    pub(in crate::data::executor) fn declared_schemaless_vector_dim(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        field: &str,
+    ) -> Option<usize> {
+        let config_key = (
+            nodedb_types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
+        self.doc_configs
+            .get(&config_key)?
+            .vector_fields
+            .iter()
+            .find(|(name, _dim)| name == field)
+            .map(|(_name, dim)| *dim)
+    }
+
     /// Whether `collection` has any vector fields — strict-schema `Vector(dim)`
-    /// columns OR schemaless fields registered via `vector_params`. Combines
+    /// columns OR schemaless fields registered via `vector_params` or declared
+    /// as `VECTOR(n)` columns. Combines
     /// `strict_vector_fields` + `schemaless_vector_field_names` into the single
     /// gate check callers need before deciding whether to pay for HNSW
     /// maintenance at all. Callers that loop over many rows (bulk update/

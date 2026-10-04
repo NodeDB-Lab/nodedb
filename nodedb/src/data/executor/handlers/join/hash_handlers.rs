@@ -258,23 +258,21 @@ impl CoreLoop {
             // Vec, which would silently return a zero-row join.
             // The prefiltered scan carries no predicate slot of its own,
             // so both of this side's filter sets apply to its rows here.
-            let rows = match crate::data::executor::response_codec::decode_response_to_docs(&resp)
-            {
+            let rows = match crate::data::executor::response_codec::decode_response_to_docs(&resp) {
                 Some(d) => d,
                 None => return resp,
             };
-            let docs =
-                match self.retain_join_side_rows(rows, left_rls_filters, left_scan_filters) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        return self.response_error(
-                            join.task,
-                            ErrorCode::Internal {
-                                detail: e.to_string(),
-                            },
-                        );
-                    }
-                };
+            let docs = match self.retain_join_side_rows(rows, left_rls_filters, left_scan_filters) {
+                Ok(d) => d,
+                Err(e) => {
+                    return self.response_error(
+                        join.task,
+                        ErrorCode::Internal {
+                            detail: e.to_string(),
+                        },
+                    );
+                }
+            };
             let keys = join.on.iter().map(|(l, _)| l.clone()).collect();
             (docs, keys)
         } else {
@@ -332,8 +330,7 @@ impl CoreLoop {
             // Vec, which would silently return a zero-row join.
             // The prefiltered scan carries no predicate slot of its own,
             // so both of this side's filter sets apply to its rows here.
-            let rows = match crate::data::executor::response_codec::decode_response_to_docs(&resp)
-            {
+            let rows = match crate::data::executor::response_codec::decode_response_to_docs(&resp) {
                 Some(d) => d,
                 None => return resp,
             };

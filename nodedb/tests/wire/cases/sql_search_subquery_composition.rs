@@ -546,9 +546,9 @@ async fn a_sparse_where_comparison_is_refused_at_plan_time() {
     );
 }
 
-/// A one-argument `vector_distance` does not route to a search
-/// (`order_by/triggers.rs` returns `Ok(None)` below two arguments), so no
-/// cell is declared and `s.distance` must refuse `42703`.
+/// A one-argument `vector_distance` whose argument is a column names no query
+/// vector, so no signature matches the call and the planner refuses it with
+/// `42883` before any search routes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_single_argument_order_by_refuses_the_distance_cell() {
     let server = TestServer::start().await;

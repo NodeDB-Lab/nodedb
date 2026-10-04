@@ -176,27 +176,27 @@ impl CoreLoop {
                 );
                 if let Some((start, end)) = nodedb_query::msgpack_scan::extract_field(&mp, 0, field)
                 {
-                    let value_str =
-                        if let Some(s) = nodedb_query::msgpack_scan::read_str(&mp, start) {
-                            s.to_string()
-                        } else if let Some(i) = nodedb_query::msgpack_scan::read_integer(&mp, start)
-                        {
-                            i.to_string()
-                        } else if let Some(f) = nodedb_query::msgpack_scan::read_f64(&mp, start) {
-                            f.to_string()
-                        } else if let Some(b) = nodedb_query::msgpack_scan::read_bool(&mp, start) {
-                            b.to_string()
-                        } else if nodedb_query::msgpack_scan::read_null(&mp, start) {
-                            continue;
-                        } else {
-                            // Complex value — stringify via transcoder.
-                            nodedb_types::msgpack_to_json_string(&mp[start..end]).map_err(|e| {
-                                crate::Error::Serialization {
-                                    format: "msgpack".to_string(),
-                                    detail: format!("facet value of '{field}' in {key}: {e}"),
-                                }
-                            })?
-                        };
+                    let value_str = if let Some(s) =
+                        nodedb_query::msgpack_scan::read_str(&mp, start)
+                    {
+                        s.to_string()
+                    } else if let Some(i) = nodedb_query::msgpack_scan::read_integer(&mp, start) {
+                        i.to_string()
+                    } else if let Some(f) = nodedb_query::msgpack_scan::read_f64(&mp, start) {
+                        f.to_string()
+                    } else if let Some(b) = nodedb_query::msgpack_scan::read_bool(&mp, start) {
+                        b.to_string()
+                    } else if nodedb_query::msgpack_scan::read_null(&mp, start) {
+                        continue;
+                    } else {
+                        // Complex value — stringify via transcoder.
+                        nodedb_types::msgpack_to_json_string(&mp[start..end]).map_err(|e| {
+                            crate::Error::Serialization {
+                                format: "msgpack".to_string(),
+                                detail: format!("facet value of '{field}' in {key}: {e}"),
+                            }
+                        })?
+                    };
                     *counts.entry(value_str).or_default() += 1;
                 }
             }

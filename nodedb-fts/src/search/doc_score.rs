@@ -21,8 +21,8 @@ pub(crate) fn term_score(
     let doc_len = smallfloat::decode(fieldnorm).max(1);
     let tf_f = tf as f32;
     let dl = doc_len as f32;
-    let tf_norm =
-        (tf_f * (params.k1 + 1.0)) / (tf_f + params.k1 * (1.0 - params.b + params.b * dl / avg_doc_len));
+    let tf_norm = (tf_f * (params.k1 + 1.0))
+        / (tf_f + params.k1 * (1.0 - params.b + params.b * dl / avg_doc_len));
     idf * tf_norm
 }
 
@@ -100,7 +100,8 @@ mod tests {
         let params = Bm25Params::default();
         let fieldnorm = smallfloat::encode(10);
         let idf = crate::bm25::idf(3, 100);
-        let expected = crate::bm25::bm25_score(2, 3, smallfloat::decode(fieldnorm), 100, 10.0, &params);
+        let expected =
+            crate::bm25::bm25_score(2, 3, smallfloat::decode(fieldnorm), 100, 10.0, &params);
         let got = term_score(idf, 2, fieldnorm, 10.0, &params);
         assert!((expected - got).abs() < 1e-6);
     }

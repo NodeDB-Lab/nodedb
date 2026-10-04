@@ -51,11 +51,13 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
     };
 
     match plan {
-        // A grouped timeseries scan announces the columns its aggregate
-        // encoder emits, in that encoder's order: each GROUP BY key, then
-        // each aggregate. A GROUP BY key carries its own catalog type, so one
-        // stored instant renders the same grouped as it does through a plain
-        // `SELECT`. An aggregate result stays `Text`: the timeseries plan
+        // A grouped or aggregating timeseries scan announces the columns its
+        // aggregate encoder emits, in that encoder's order: each GROUP BY key,
+        // then each aggregate. An ungrouped aggregate takes this arm too: the
+        // raw-scan arm below announces no column for it, and its cells then
+        // lose the SELECT-list order. A GROUP BY key carries its own catalog
+        // type, so one stored instant renders the same grouped as it does
+        // through a plain `SELECT`. An aggregate result stays `Text`: the timeseries plan
         // carries no SELECT-list alias for it, so its type cannot be resolved
         // with certainty.
         //
@@ -68,7 +70,7 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
             aggregates,
             bucket_interval_ms,
             ..
-        }) if !group_by.is_empty() && *bucket_interval_ms == 0 => {
+        }) if (!group_by.is_empty() || !aggregates.is_empty()) && *bucket_interval_ms == 0 => {
             timeseries_group_schema(catalog, database_id, collection, group_by, aggregates)
         }
         SqlPlan::Scan {

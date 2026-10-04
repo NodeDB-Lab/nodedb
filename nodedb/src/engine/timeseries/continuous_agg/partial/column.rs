@@ -73,13 +73,23 @@ impl ColumnPartial {
         self.sum.add_i64(v);
         // Distinct integers hash apart even above 2^53, where their `f64`
         // readings collide.
-        self.add_cell(ts, Value::Integer(v), fnv1a_hash(&v.to_le_bytes()), v as f64);
+        self.add_cell(
+            ts,
+            Value::Integer(v),
+            fnv1a_hash(&v.to_le_bytes()),
+            v as f64,
+        );
     }
 
     /// Add one float cell at timestamp `ts`.
     pub fn add_float(&mut self, ts: i64, v: f64) {
         self.sum.add_f64(v);
-        self.add_cell(ts, Value::Float(v), fnv1a_hash(&v.to_bits().to_le_bytes()), v);
+        self.add_cell(
+            ts,
+            Value::Float(v),
+            fnv1a_hash(&v.to_bits().to_le_bytes()),
+            v,
+        );
     }
 
     /// Feed the sketches and the extremes with a cell already added to the
@@ -161,8 +171,14 @@ mod tests {
         assert_eq!(c.sum.sum().unwrap(), Value::Integer(ABOVE + AT));
         assert_eq!(c.min, Some(Value::Integer(AT)));
         assert_eq!(c.max, Some(Value::Integer(ABOVE)));
-        assert_eq!(c.first.as_ref().map(|f| &f.value), Some(&Value::Integer(AT)));
-        assert_eq!(c.last.as_ref().map(|l| &l.value), Some(&Value::Integer(ABOVE)));
+        assert_eq!(
+            c.first.as_ref().map(|f| &f.value),
+            Some(&Value::Integer(AT))
+        );
+        assert_eq!(
+            c.last.as_ref().map(|l| &l.value),
+            Some(&Value::Integer(ABOVE))
+        );
     }
 
     #[test]

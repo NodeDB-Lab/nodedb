@@ -160,7 +160,11 @@ mod tests {
     fn an_identity_newly_written_to_an_id_less_body_is_refused() {
         let updates = set("id");
         let snapshot = IdentitySnapshot::capture(None, None, &updates, &json!({"v": 1}));
-        assert!(snapshot.check_unchanged("docs", &json!({"id": "b", "v": 1})).is_err());
+        assert!(
+            snapshot
+                .check_unchanged("docs", &json!({"id": "b", "v": 1}))
+                .is_err()
+        );
     }
 
     #[test]
@@ -176,8 +180,7 @@ mod tests {
     fn a_null_declared_key_is_left_to_the_not_null_rule() {
         let schema = strict();
         let updates = set("k");
-        let snapshot =
-            IdentitySnapshot::capture(Some(&schema), None, &updates, &json!({"k": "a"}));
+        let snapshot = IdentitySnapshot::capture(Some(&schema), None, &updates, &json!({"k": "a"}));
         snapshot
             .check_unchanged("docs", &json!({"k": null}))
             .expect("the NOT NULL rule owns a NULL declared key");

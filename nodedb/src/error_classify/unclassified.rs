@@ -86,6 +86,7 @@ pub(crate) fn is_unclassified_failure(e: &Error) -> bool {
         | Error::UnknownStrictField { .. }
         | Error::DivisionByZero
         | Error::DataException { .. }
+        | Error::NumericValueOutOfRange { .. }
         | Error::InvalidLimitValue { .. }
         | Error::RetryableSchemaChanged { .. }
         | Error::RetryableLeaderChange { .. }

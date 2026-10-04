@@ -114,6 +114,9 @@ impl CoreLoop {
                 None
             }
         });
+        // A `DECIMAL` sort key orders by value: its cells are text and wide
+        // integers side by side.
+        let decimal_keys = sort::decimal_sort_keys(sort_keys, strict_schema.as_ref());
 
         // Fetch stage: the ONLY part that differs between a current-time read
         // and a bitemporal `AS OF` / all-versions audit read. It returns the
@@ -293,12 +296,17 @@ impl CoreLoop {
                     let mut v = filtered;
                     // Propagate the typed error: a zero divisor in a sort key
                     // is a `22012` statement failure, not an internal fault.
-                    if let Err(e) = sort::sort_rows(&mut v, sort_keys) {
+                    if let Err(e) = sort::sort_rows(&mut v, sort_keys, &decimal_keys) {
                         return self.response_error(task, e);
                     }
                     v
                 } else {
-                    match self.external_sort(filtered, sort_keys, limit.saturating_add(offset)) {
+                    match self.external_sort(
+                        filtered,
+                        sort_keys,
+                        &decimal_keys,
+                        limit.saturating_add(offset),
+                    ) {
                         Ok(merged) => merged,
                         Err(e) => {
                             warn!(core = self.core_id, error = %e, "external sort failed");
@@ -369,10 +377,11 @@ impl CoreLoop {
                     ) {
                         return self.response_error(task, crate::Error::from(e));
                     }
-                    let decoded_rows = match sort::sort_decoded_rows(decoded_rows, sort_keys) {
-                        Ok(rows) => rows,
-                        Err(e) => return self.response_error(task, e),
-                    };
+                    let decoded_rows =
+                        match sort::sort_decoded_rows(decoded_rows, sort_keys, &decimal_keys) {
+                            Ok(rows) => rows,
+                            Err(e) => return self.response_error(task, e),
+                        };
 
                     // Project first, then dedupe on the projected JSON value
                     // so `SELECT DISTINCT col` honours SQL semantics.

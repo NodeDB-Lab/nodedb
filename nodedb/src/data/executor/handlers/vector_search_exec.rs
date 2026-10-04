@@ -142,7 +142,11 @@ impl CoreLoop {
         let database_id = task.request.database_id.as_u64();
         // Every index type is one `VectorCollection`: an IVF-PQ collection
         // answers from its exact buffer or its trained IVF-PQ index.
-        let effective_key = self.resolve_vector_index_key(database_id, tid, collection, field_name);
+        let effective_key =
+            match self.resolve_vector_index_key(database_id, tid, collection, field_name) {
+                Ok(key) => key,
+                Err(e) => return self.response_error(task, e),
+            };
         // An index with no base rows still answers a transaction's own staged
         // rows: the merge ranks them over an empty base result.
         let staged_only = |core: &Self, txn_id| {

@@ -8,6 +8,7 @@
 //! - A strict collection indexes every `VECTOR(n)` column.
 //! - Any other collection indexes each field that has its own vector index.
 //!   When no field has one, a default-field vector index covers `embedding`.
+//! - A schemaless collection also indexes every declared `VECTOR(n)` column.
 //!
 //! The `{ ... }` handler also sends a vector insert for numeric-array
 //! fields, so a field no index covers is still searchable. It skips the
@@ -70,6 +71,29 @@ pub(super) fn indexed_vector_fields(
     }
     if named.is_empty() && has_default {
         named.insert(DEFAULT_VECTOR_FIELD.to_string());
+    }
+    if collection_type.is_some_and(CollectionType::is_schemaless) {
+        let stored = state
+            .credentials
+            .catalog()
+            .get_collection(database_id, tenant_id, collection)
+            .map_err(|e| {
+                DdlError::from_error_in_context(
+                    &format!("read declared columns of \"{collection}\" for INSERT"),
+                    &e,
+                )
+            })?;
+        if let Some(stored) = stored
+            && stored.vector_primary.is_none()
+        {
+            named.extend(
+                crate::control::server::shared::ddl::schema_validation::extract_vector_fields(
+                    &stored.fields,
+                )
+                .into_iter()
+                .map(|(field, _dim, _metric)| field),
+            );
+        }
     }
     Ok(named)
 }

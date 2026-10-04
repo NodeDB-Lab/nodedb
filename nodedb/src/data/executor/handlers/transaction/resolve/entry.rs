@@ -3195,7 +3195,9 @@ mod tests {
         let (mut src, _src_dir) = make_core();
         let task = make_task();
         let txn = TxnId::new(44);
-        let line = r"cpu\,load,host\ name=west\,1 count=18446744073709551615u 1700000000000000001";
+        // The unsigned field is the largest an `Int64` column holds: a larger
+        // one refuses the line at ingest rather than wrapping negative.
+        let line = r"cpu\,load,host\ name=west\,1 count=9223372036854775807u 1700000000000000001";
         let payload =
             zerompk::to_msgpack_vec(&vec![line.to_string()]).expect("encode canonical ILP lines");
         let plan = PhysicalPlan::Timeseries(TimeseriesOp::Ingest {

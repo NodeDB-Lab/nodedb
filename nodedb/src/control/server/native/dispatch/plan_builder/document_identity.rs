@@ -177,8 +177,7 @@ mod tests {
 
     #[test]
     fn a_u64_above_i64_max_keeps_its_number() {
-        let body =
-            identified_body(br#"{"big":18446744073709551615}"#, "d1").expect("json object");
+        let body = identified_body(br#"{"big":18446744073709551615}"#, "d1").expect("json object");
         assert_eq!(
             field(&decoded(&body), "big"),
             Some(&Value::Decimal(rust_decimal::Decimal::from(u64::MAX)))

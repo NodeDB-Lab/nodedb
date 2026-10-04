@@ -58,8 +58,10 @@ pub fn extract_f64(
 
 /// Extract the SUM / AVG input of `field`, or of `expr` if provided, as the
 /// number it contributes (`Integer`, `Float`, or `Decimal`). A raw field
-/// contributes when it is a msgpack integer or float, read exactly. An
-/// expression result contributes per [`crate::numeric_sum::sum_input`].
+/// and an expression result contribute by the same rule,
+/// [`crate::numeric_sum::sum_input`]: a msgpack number read exactly, or a
+/// numeric string read per [`crate::numeric_sum::numeric_text`] (a
+/// `DECIMAL` cell is stored as its text).
 /// Returns `Ok(None)` when nothing contributes, and
 /// `Err(EvalError::DivisionByZero)` when `expr` divides/mods by zero.
 #[inline]
@@ -74,7 +76,10 @@ pub fn extract_sum_value(
     let Some((start, _end)) = extract_field(doc, 0, field) else {
         return Ok(None);
     };
-    Ok(read_numeric(doc, start).map(crate::numeric_sum::numeric_to_value))
+    Ok(match read_numeric(doc, start) {
+        Some(n) => Some(crate::numeric_sum::numeric_to_value(n)),
+        None => read_str(doc, start).and_then(crate::numeric_sum::numeric_text),
+    })
 }
 
 /// Extract a display string from `field`, or evaluate `expr` if provided.

@@ -179,6 +179,7 @@ pub(in crate::data::executor) fn map_enforcement_error(e: ErrorCode) -> crate::E
         | ErrorCode::DivisionByZero
         | ErrorCode::UndefinedFunction { .. }
         | ErrorCode::DataException { .. }
+        | ErrorCode::NumericValueOutOfRange { .. }
         | ErrorCode::DispatchCapacity { .. }
         | ErrorCode::ExpiredBeforeExecution
         | ErrorCode::BadRequest { .. }

@@ -9,6 +9,7 @@
 pub mod aggregate;
 pub mod aggregate_helpers;
 pub mod compare;
+pub mod compare_decimal;
 pub mod field;
 pub mod filter;
 pub mod group_key;
@@ -21,6 +22,7 @@ pub mod writer;
 
 pub use aggregate::compute_aggregate_binary;
 pub use compare::{compare_field_bytes, hash_field_bytes};
+pub use compare_decimal::{compare_decimal_field_bytes, decimal_reading};
 pub use field::{extract_field, extract_path};
 pub use group_key::build_group_key;
 pub use index::FieldIndex;

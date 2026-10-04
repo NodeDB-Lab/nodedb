@@ -3,8 +3,8 @@
 //! Vector engine plan builders.
 
 use nodedb_types::protocol::TextFields;
-use nodedb_types::{QualifiedCollection, SurrogateBitmap};
 use nodedb_types::vector_distance::DistanceMetric;
+use nodedb_types::{QualifiedCollection, SurrogateBitmap};
 
 use super::super::DispatchCtx;
 use crate::bridge::envelope::PhysicalPlan;
@@ -30,7 +30,12 @@ pub(crate) async fn build_search(
         Some(ids) => {
             let pks: Vec<&[u8]> = ids.iter().map(|id| id.as_bytes()).collect();
             let surrogates = super::helpers::existing_surrogates(ctx, collection, &pks).await?;
-            Some(surrogates.into_iter().flatten().collect::<SurrogateBitmap>())
+            Some(
+                surrogates
+                    .into_iter()
+                    .flatten()
+                    .collect::<SurrogateBitmap>(),
+            )
         }
         None => None,
     };

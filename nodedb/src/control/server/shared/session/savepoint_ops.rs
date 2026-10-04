@@ -387,8 +387,14 @@ mod tests {
         store.begin(addr, Lsn::new(1), 0).unwrap();
         assert!(store.buffer_write(addr, staged_task(3)));
 
-        let result =
-            run_savepoint(&store, SessionId::from(&addr), TenantId::new(1), &FailingDp, "s1").await;
+        let result = run_savepoint(
+            &store,
+            SessionId::from(&addr),
+            TenantId::new(1),
+            &FailingDp,
+            "s1",
+        )
+        .await;
         assert!(matches!(
             result,
             Err(SavepointError::OverlayDispatch { .. })

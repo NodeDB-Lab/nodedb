@@ -321,7 +321,11 @@ mod tests {
 
     /// Feed `docs_a` and `docs_b` into one accumulator, and separately into
     /// two partials merged after; return both finalized results.
-    fn single_and_merged(spec: &AggregateSpec, docs_a: &[Vec<u8>], docs_b: &[Vec<u8>]) -> [Value; 2] {
+    fn single_and_merged(
+        spec: &AggregateSpec,
+        docs_a: &[Vec<u8>],
+        docs_b: &[Vec<u8>],
+    ) -> [Value; 2] {
         let mut combined = AggAccum::new(spec);
         for d in docs_a.iter().chain(docs_b) {
             combined.feed(spec, d).unwrap();
@@ -501,10 +505,10 @@ mod tests {
         }
         a.merge_from(b);
 
-        let Value::Float(cv) = combined.finalize(&spec) else {
+        let Value::Float(cv) = combined.finalize(&spec).expect("finalize") else {
             panic!("expected float");
         };
-        let Value::Float(mv) = a.finalize(&spec) else {
+        let Value::Float(mv) = a.finalize(&spec).expect("finalize") else {
             panic!("expected float");
         };
         let rel = (cv - mv).abs() / cv.abs().max(1e-12);
@@ -572,10 +576,10 @@ mod tests {
         }
         a.merge_from(b);
 
-        let Value::Integer(cv) = combined.finalize(&spec) else {
+        let Value::Integer(cv) = combined.finalize(&spec).expect("finalize") else {
             panic!("expected int");
         };
-        let Value::Integer(mv) = a.finalize(&spec) else {
+        let Value::Integer(mv) = a.finalize(&spec).expect("finalize") else {
             panic!("expected int");
         };
         // HLL is approximate; require within 5% of expected 1000.
@@ -601,7 +605,7 @@ mod tests {
         a.merge_from(b);
 
         // p50 of 0..200 should be close to 100.
-        let Value::Float(p50) = a.finalize(&spec) else {
+        let Value::Float(p50) = a.finalize(&spec).expect("finalize") else {
             panic!("expected float");
         };
         assert!((50.0..150.0).contains(&p50), "TDigest merge p50={p50}");
@@ -624,7 +628,7 @@ mod tests {
         }
         a.merge_from(b);
 
-        let Value::Array(arr) = a.finalize(&spec) else {
+        let Value::Array(arr) = a.finalize(&spec).expect("finalize") else {
             panic!("expected array");
         };
         assert_eq!(arr.len(), 3, "TopK should return k=3 items");

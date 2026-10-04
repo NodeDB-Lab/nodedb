@@ -213,6 +213,7 @@ pub(crate) fn error_samples() -> Vec<crate::Error> {
         },
         E::DivisionByZero,
         E::DataException { detail: text() },
+        E::NumericValueOutOfRange { detail: text() },
         E::InvalidLimitValue {
             clause: "LIMIT",
             value: "-1".into(),

@@ -188,7 +188,10 @@ async fn streaming_mv_integer_aggregates_equal_ad_hoc() {
         .unwrap();
 
     let groups: [(&str, &[i64]); 2] = [
-        ("big", &[9_007_199_254_740_993, 9_007_199_254_740_992, i64::MAX]),
+        (
+            "big",
+            &[9_007_199_254_740_993, 9_007_199_254_740_992, i64::MAX],
+        ),
         (
             "nanos",
             &[
@@ -229,7 +232,10 @@ async fn streaming_mv_integer_aggregates_equal_ad_hoc() {
         }
         let view_avg = cells[4].as_f64().expect("AVG is a float");
         let ad_hoc_avg: f64 = ad_hoc[4].parse().expect("ad-hoc AVG is numeric");
-        assert_eq!(view_avg, ad_hoc_avg, "{g}: view AVG must equal the ad-hoc AVG");
+        assert_eq!(
+            view_avg, ad_hoc_avg,
+            "{g}: view AVG must equal the ad-hoc AVG"
+        );
     }
 
     // The SUM past `i64::MAX` is exact, not rounded or wrapped.

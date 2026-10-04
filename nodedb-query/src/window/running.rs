@@ -72,9 +72,7 @@ pub(super) fn running_aggregate(
                 "sum" => serde_json::Value::from(running_sum.sum()?),
                 "count" => serde_json::json!(running_count),
                 "avg" => serde_json::Value::from(running_sum.avg()?),
-                "min" | "max" => running_extreme
-                    .clone()
-                    .unwrap_or(serde_json::Value::Null),
+                "min" | "max" => running_extreme.clone().unwrap_or(serde_json::Value::Null),
                 "first_value" => arg_at(arg_values, 0),
                 "last_value" => arg_at(arg_values, pos),
                 _ => serde_json::Value::Null,

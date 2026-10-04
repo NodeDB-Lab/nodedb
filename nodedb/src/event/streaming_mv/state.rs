@@ -308,7 +308,11 @@ mod tests {
             ],
         );
         for v in [ABOVE, AT, i64::MAX] {
-            state.update_with_time("", &[AggInput::Event, value(v), value(v), value(v), value(v)], 0);
+            state.update_with_time(
+                "",
+                &[AggInput::Event, value(v), value(v), value(v), value(v)],
+                0,
+            );
         }
         let rows = state.read_results().unwrap();
         let row: Vec<Value> = rows[0].1.iter().map(|(_, v)| v.clone()).collect();
@@ -330,7 +334,10 @@ mod tests {
     fn absent_and_non_numeric_inputs_do_not_count() {
         let mut gs = GroupState::default();
         assert!(!gs.update(AggFunction::Sum, &AggInput::Absent));
-        assert!(!gs.update(AggFunction::Sum, &AggInput::Value(Value::String("x".into()))));
+        assert!(!gs.update(
+            AggFunction::Sum,
+            &AggInput::Value(Value::String("x".into()))
+        ));
         assert_eq!(gs.count, 0);
         assert_eq!(gs.compute(AggFunction::Sum).unwrap(), Value::Null);
         assert_eq!(gs.compute(AggFunction::Avg).unwrap(), Value::Null);

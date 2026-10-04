@@ -225,6 +225,11 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             format!("function {name}() does not exist"),
         ),
         ErrorCode::DataException { detail } => ("ERROR", sqlstate::DATA_EXCEPTION, detail.clone()),
+        ErrorCode::NumericValueOutOfRange { detail } => (
+            "ERROR",
+            sqlstate::NUMERIC_VALUE_OUT_OF_RANGE,
+            detail.clone(),
+        ),
         // The same SQLSTATE the Control Plane gives `crate::Error::BadRequest`.
         ErrorCode::BadRequest { detail } => ("ERROR", sqlstate::SYNTAX_ERROR, detail.clone()),
         ErrorCode::TransactionRollback { detail } => {

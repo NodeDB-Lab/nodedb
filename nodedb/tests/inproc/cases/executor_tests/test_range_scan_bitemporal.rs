@@ -45,6 +45,7 @@ fn register_schemaless_bitemporal(ctx: &mut TestCtx, collection: &str) {
             conflict_policy: None,
             timeseries: None,
             vector_primary: None,
+            vector_fields: Vec::new(),
         }),
     );
     assert_eq!(resp.status, Status::Ok, "register schemaless bitemporal");
@@ -78,6 +79,7 @@ fn register_strict_bitemporal(ctx: &mut TestCtx, collection: &str) {
             conflict_policy: None,
             timeseries: None,
             vector_primary: None,
+            vector_fields: Vec::new(),
         }),
     );
     assert_eq!(resp.status, Status::Ok, "register strict bitemporal");

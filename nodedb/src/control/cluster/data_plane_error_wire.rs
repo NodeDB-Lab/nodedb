@@ -113,6 +113,7 @@ pub(crate) fn execution_error_to_typed(err: crate::Error) -> TypedClusterError {
         | crate::Error::UnknownStrictField { .. }
         | crate::Error::DivisionByZero
         | crate::Error::DataException { .. }
+        | crate::Error::NumericValueOutOfRange { .. }
         | crate::Error::InvalidLimitValue { .. }
         | crate::Error::RetryableLeaderChange { .. }
         | crate::Error::CommittedResultUnavailable { .. }
@@ -302,6 +303,7 @@ impl From<ErrorCode> for DataPlaneErrorCode {
             ErrorCode::DivisionByZero => Self::DivisionByZero,
             ErrorCode::UndefinedFunction { name } => Self::UndefinedFunction { name },
             ErrorCode::DataException { detail } => Self::DataException { detail },
+            ErrorCode::NumericValueOutOfRange { detail } => Self::NumericValueOutOfRange { detail },
             ErrorCode::DispatchCapacity { reason } => Self::DispatchCapacity { reason },
             ErrorCode::ExpiredBeforeExecution => Self::ExpiredBeforeExecution,
             ErrorCode::BadRequest { detail } => Self::BadRequest { detail },
@@ -445,6 +447,9 @@ impl From<DataPlaneErrorCode> for ErrorCode {
             DataPlaneErrorCode::DivisionByZero => Self::DivisionByZero,
             DataPlaneErrorCode::UndefinedFunction { name } => Self::UndefinedFunction { name },
             DataPlaneErrorCode::DataException { detail } => Self::DataException { detail },
+            DataPlaneErrorCode::NumericValueOutOfRange { detail } => {
+                Self::NumericValueOutOfRange { detail }
+            }
             DataPlaneErrorCode::DispatchCapacity { reason } => Self::DispatchCapacity { reason },
             DataPlaneErrorCode::ExpiredBeforeExecution => Self::ExpiredBeforeExecution,
             DataPlaneErrorCode::BadRequest { detail } => Self::BadRequest { detail },

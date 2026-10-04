@@ -36,9 +36,17 @@ impl MatchMode {
     }
 
     /// A document's score under this mode, or `None` when it does not match.
-    pub(crate) fn score(&self, query: &ResolvedQuery, contributions: &[Option<f32>]) -> Option<f32> {
-        let (score, matched) =
-            combine(contributions, &query.term_groups, query.groups, self.combine())?;
+    pub(crate) fn score(
+        &self,
+        query: &ResolvedQuery,
+        contributions: &[Option<f32>],
+    ) -> Option<f32> {
+        let (score, matched) = combine(
+            contributions,
+            &query.term_groups,
+            query.groups,
+            self.combine(),
+        )?;
         match self {
             MatchMode::All(_) if matched < query.groups => None,
             MatchMode::All(_) | MatchMode::Coverage | MatchMode::Any => Some(score),
@@ -61,7 +69,8 @@ pub(crate) fn staged_candidates(
         .iter()
         .filter(|doc| allow.is_none_or(|bm| bm.contains(doc.doc_id)))
         .filter_map(|doc| {
-            staged_contributions(query, doc, params).map(|contributions| (doc.doc_id, contributions))
+            staged_contributions(query, doc, params)
+                .map(|contributions| (doc.doc_id, contributions))
         })
         .collect()
 }
@@ -129,7 +138,7 @@ impl ResolvedQuery {
                 break;
             }
         }
-        let mut docs = result.unwrap_or_else(SurrogateBitmap::new);
+        let mut docs = result.unwrap_or_default();
         if let Some(allow) = allow {
             docs.intersect_in_place(allow);
         }

@@ -210,7 +210,10 @@ pub(super) fn strip_postings_many(
     database_id: u64,
     tid: u64,
     index: IndexScope<'_>,
-    removals: &std::collections::BTreeMap<String, std::collections::HashSet<nodedb_types::Surrogate>>,
+    removals: &std::collections::BTreeMap<
+        String,
+        std::collections::HashSet<nodedb_types::Surrogate>,
+    >,
 ) -> crate::Result<()> {
     let mut table = txn
         .open_table(POSTINGS)

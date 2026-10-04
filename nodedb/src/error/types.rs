@@ -367,6 +367,13 @@ pub enum Error {
     #[error("{detail}")]
     DataException { detail: String },
 
+    /// A value does not fit its numeric type: an integer past a column's
+    /// declared width, a float that overflows `REAL`, a literal past the exact
+    /// numeric range, or arithmetic that overflows. Rendered as SQLSTATE
+    /// `22003` (numeric_value_out_of_range) at the pgwire layer.
+    #[error("{detail}")]
+    NumericValueOutOfRange { detail: String },
+
     /// A LIMIT/OFFSET/FETCH bound did not resolve to `[0, usize::MAX]`.
     /// The pgwire layer renders it as SQLSTATE `2201W`.
     #[error("invalid {clause} value: {value}")]

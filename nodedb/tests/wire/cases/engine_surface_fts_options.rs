@@ -19,9 +19,11 @@ async fn mode_docs(srv: &TestServer, coll: &str) {
         ("m2", "machine shop tools"),
         ("m3", "garden flowers"),
     ] {
-        srv.exec(&format!("INSERT INTO {coll} {{ id: '{id}', body: '{body}' }}"))
-            .await
-            .unwrap();
+        srv.exec(&format!(
+            "INSERT INTO {coll} {{ id: '{id}', body: '{body}' }}"
+        ))
+        .await
+        .unwrap();
     }
 }
 
@@ -41,7 +43,11 @@ async fn mode_or_and_mode_and_return_different_rows() {
         )
         .await
         .unwrap();
-    assert_eq!(ids(&and_rows), vec!["m1"], "And keeps the row with both terms");
+    assert_eq!(
+        ids(&and_rows),
+        vec!["m1"],
+        "And keeps the row with both terms"
+    );
 
     let or_rows = srv
         .query_rows(
@@ -50,7 +56,11 @@ async fn mode_or_and_mode_and_return_different_rows() {
         )
         .await
         .unwrap();
-    assert_eq!(ids(&or_rows), vec!["m1", "m2"], "Or keeps a row with any term");
+    assert_eq!(
+        ids(&or_rows),
+        vec!["m1", "m2"],
+        "Or keeps a row with any term"
+    );
 
     // No option runs the default mode, `or`.
     let default_rows = srv
@@ -79,10 +89,16 @@ async fn bm25_score_mode_scores_a_partial_match_only_under_or() {
             .iter()
             .find(|r| r[0] == id)
             .unwrap_or_else(|| panic!("row {id} missing: {rows:?}"));
-        row[1].parse().unwrap_or_else(|e| panic!("score {:?}: {e}", row[1]))
+        row[1]
+            .parse()
+            .unwrap_or_else(|e| panic!("score {:?}: {e}", row[1]))
     };
     assert!(score(&rows, "m1") > 0.0, "{rows:?}");
-    assert_eq!(score(&rows, "m2"), 0.0, "And does not score a partial match");
+    assert_eq!(
+        score(&rows, "m2"),
+        0.0,
+        "And does not score a partial match"
+    );
 
     let rows = srv
         .query_rows(
@@ -91,7 +107,10 @@ async fn bm25_score_mode_scores_a_partial_match_only_under_or() {
         )
         .await
         .unwrap();
-    assert!(score(&rows, "m2") > 0.0, "Or scores a partial match: {rows:?}");
+    assert!(
+        score(&rows, "m2") > 0.0,
+        "Or scores a partial match: {rows:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -26,8 +26,10 @@ impl From<nodedb_query::EvalError> for Error {
             nodedb_query::EvalError::UnknownFunction { name } => Self::UndefinedFunction { name },
             e @ (nodedb_query::EvalError::VectorDimensionMismatch { .. }
             | nodedb_query::EvalError::ArgumentType { .. }
-            | nodedb_query::EvalError::InvalidJsonPath { .. }
-            | nodedb_query::EvalError::NumericOverflow { .. }) => Self::DataException {
+            | nodedb_query::EvalError::InvalidJsonPath { .. }) => Self::DataException {
+                detail: e.to_string(),
+            },
+            e @ nodedb_query::EvalError::NumericOverflow { .. } => Self::NumericValueOutOfRange {
                 detail: e.to_string(),
             },
         }
@@ -393,6 +395,7 @@ impl From<Error> for nodedb_cluster::rpc_codec::TypedClusterError {
             | Error::UnknownStrictField { .. }
             | Error::DivisionByZero
             | Error::DataException { .. }
+            | Error::NumericValueOutOfRange { .. }
             | Error::InvalidLimitValue { .. }
             | Error::RetryableLeaderChange { .. }
             | Error::CommittedResultUnavailable { .. }

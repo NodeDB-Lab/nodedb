@@ -181,9 +181,10 @@ mod tests {
         let removed: Vec<Surrogate> = (1..=5u32).map(Surrogate::new).collect();
         idx.remove_documents(DB, T, "docs", &removed).unwrap();
 
-        assert_eq!(hits(&idx, IndexScope::document("docs"), "rust"), vec![
-            Surrogate::new(6)
-        ]);
+        assert_eq!(
+            hits(&idx, IndexScope::document("docs"), "rust"),
+            vec![Surrogate::new(6)]
+        );
         assert!(hits(&idx, IndexScope::document("docs"), "shared").is_empty());
         let title = IndexScope::field("docs", "title").unwrap();
         assert!(hits(&idx, title, "rust").is_empty());

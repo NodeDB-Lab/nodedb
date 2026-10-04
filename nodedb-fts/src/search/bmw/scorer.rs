@@ -412,7 +412,10 @@ mod tests {
         let term = make_term(&[1, 2, 3, 4, 5], 1);
         let mut allow = SurrogateBitmap::new();
         allow.insert(Surrogate(4));
-        assert_eq!(run(&[term], 100, 10, Some(&allow), None), vec![Surrogate(4)]);
+        assert_eq!(
+            run(&[term], 100, 10, Some(&allow), None),
+            vec![Surrogate(4)]
+        );
     }
 
     /// The document both terms occur in outranks every single-term document,

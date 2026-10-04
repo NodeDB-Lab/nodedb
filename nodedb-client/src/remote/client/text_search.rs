@@ -11,19 +11,18 @@
 //! runs that default for an omitted option. A phrase query (`"..."`) takes no
 //! option on the server, so a default-params phrase search renders none.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use nodedb_types::error::{NodeDbError, NodeDbResult};
+use nodedb_types::error::NodeDbResult;
 use nodedb_types::result::SearchResult;
 use nodedb_types::text_search::TextSearchParams;
-use nodedb_types::value::Value;
 
+use crate::row_decode::search_hit::ID_COLUMN;
+use crate::row_decode::{HitSource, decode_search_hits};
 use crate::sql_escape::{quote_identifier, quote_string_literal};
 
 use super::core::NodeDbRemote;
 
-/// Output column holding the document id.
-const ID_COLUMN: &str = "id";
 /// Output column holding the BM25 score.
 const SCORE_COLUMN: &str = "score";
 
@@ -42,7 +41,16 @@ impl NodeDbRemote {
         }
         let sql = text_search_sql(collection, field, query, top_k, &params, allowed_ids);
         let (columns, rows) = self.simple_query_raw(&sql).await?;
-        decode_hits(collection, &columns, rows)
+        decode_search_hits(&text_hit_source(collection), &columns, &rows)
+    }
+}
+
+/// The hit rows of a text search of `collection`.
+fn text_hit_source(collection: &str) -> HitSource<'_> {
+    HitSource {
+        op: "text_search",
+        collection,
+        score_column: SCORE_COLUMN,
     }
 }
 
@@ -102,77 +110,11 @@ fn text_search_target(field: &str) -> String {
     }
 }
 
-/// Each row as a hit. A missing column, id, or score is an error.
-fn decode_hits(
-    collection: &str,
-    columns: &[String],
-    rows: Vec<Vec<Value>>,
-) -> NodeDbResult<Vec<SearchResult>> {
-    let position = |name: &str| {
-        columns.iter().position(|c| c == name).ok_or_else(|| {
-            NodeDbError::serialization(
-                "pgwire",
-                format!(
-                    "text_search '{collection}': result has no '{name}' column; \
-                     columns are {columns:?}"
-                ),
-            )
-        })
-    };
-    let id_idx = position(ID_COLUMN)?;
-    let score_idx = position(SCORE_COLUMN)?;
-    let mut hits = Vec::with_capacity(rows.len());
-    for (row_idx, row) in rows.into_iter().enumerate() {
-        let id = match row.get(id_idx) {
-            Some(Value::String(id)) => id.clone(),
-            other => {
-                return Err(NodeDbError::serialization(
-                    "pgwire",
-                    format!(
-                        "text_search '{collection}': row {row_idx} has id {other:?}, \
-                         expected text"
-                    ),
-                ));
-            }
-        };
-        let score = match row.get(score_idx) {
-            Some(Value::String(text)) => text.parse::<f32>().map_err(|e| {
-                NodeDbError::serialization(
-                    "pgwire",
-                    format!(
-                        "text_search '{collection}': row {row_idx} ('{id}') score \
-                         '{text}' is not a number: {e}"
-                    ),
-                )
-            })?,
-            other => {
-                return Err(NodeDbError::serialization(
-                    "pgwire",
-                    format!(
-                        "text_search '{collection}': row {row_idx} ('{id}') has score \
-                         {other:?}, expected a number"
-                    ),
-                ));
-            }
-        };
-        hits.push(SearchResult {
-            id,
-            node_id: None,
-            distance: score,
-            metadata: HashMap::new(),
-        });
-    }
-    Ok(hits)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use nodedb_types::text_search::QueryMode;
-
-    fn columns() -> Vec<String> {
-        vec!["id".to_string(), "score".to_string()]
-    }
+    use nodedb_types::value::Value;
 
     #[test]
     fn an_empty_field_searches_the_whole_document() {
@@ -247,32 +189,17 @@ mod tests {
     }
 
     #[test]
-    fn hits_decode_by_column_name() {
+    fn hits_decode_from_the_score_column() {
         let rows = vec![vec![
             Value::String("0.5".into()),
             Value::String("d1".into()),
         ]];
         let names = vec!["score".to_string(), "id".to_string()];
-        let hits = decode_hits("c", &names, rows).expect("decode");
+        let hits = decode_search_hits(&text_hit_source("c"), &names, &rows).expect("decode");
         assert_eq!(hits[0].id, "d1");
         assert_eq!(hits[0].distance, 0.5);
-    }
-
-    #[test]
-    fn a_missing_column_is_an_error() {
-        let err = decode_hits("c", &["id".to_string()], Vec::new()).expect_err("no score");
+        let err = decode_search_hits(&text_hit_source("c"), &names[1..], &rows)
+            .expect_err("no score column");
         assert!(err.to_string().contains("'score'"), "{err}");
-    }
-
-    #[test]
-    fn a_null_id_or_bad_score_is_an_error() {
-        let null_id = vec![vec![Value::Null, Value::String("1".into())]];
-        let err = decode_hits("c", &columns(), null_id).expect_err("null id");
-        assert!(err.to_string().contains("row 0"), "{err}");
-        let bad_score = vec![vec![Value::String("d1".into()), Value::String("x".into())]];
-        let err = decode_hits("c", &columns(), bad_score).expect_err("bad score");
-        assert!(err.to_string().contains("d1"), "{err}");
-        let null_score = vec![vec![Value::String("d1".into()), Value::Null]];
-        assert!(decode_hits("c", &columns(), null_score).is_err());
     }
 }

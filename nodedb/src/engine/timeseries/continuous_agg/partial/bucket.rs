@@ -190,7 +190,10 @@ mod tests {
 
     #[test]
     fn merge_mapped_takes_matching_columns() {
-        let up_layout = layout(vec![expr(AggFunction::Sum, "a"), expr(AggFunction::Sum, "b")]);
+        let up_layout = layout(vec![
+            expr(AggFunction::Sum, "a"),
+            expr(AggFunction::Sum, "b"),
+        ]);
         let down_layout = layout(vec![expr(AggFunction::Sum, "b")]);
         let mut up = PartialAggregate::new(0, Vec::new(), &up_layout);
         up.count = 1;

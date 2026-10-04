@@ -6,15 +6,21 @@
 //!
 //! - An integer input adds exactly into an `i128`. A `u64` above `i64::MAX`
 //!   and an integral `Decimal` are integer inputs.
-//! - A float input adds into a Kahan-compensated `f64`. A fractional
-//!   `Decimal` is a float input.
+//! - A fractional `Decimal` adds exactly into a `Decimal`.
+//! - A float input adds into a Kahan-compensated `f64`.
+//! - A numeric string is the number it spells: an integer, or a `Decimal`
+//!   when it has a fraction. A `DECIMAL` cell is stored as its text, so this
+//!   keeps a `DECIMAL` column exact.
 //! - SUM with only integer inputs is an `Integer` when the total fits `i64`.
-//!   A larger total is a `Decimal`. A total past the `Decimal` range is
+//!   A larger total is a `Decimal`.
+//! - SUM with a fractional `Decimal` input and no float input is a
+//!   `Decimal`: the exact integer part plus the exact decimal part.
+//! - An exact total past the `Decimal` range is
 //!   [`EvalError::NumericOverflow`].
-//! - SUM with at least one float input is a `Float`: the exact integer part
-//!   plus the float part.
-//! - AVG is a `Float`. With only integer inputs it divides the exact `i128`
-//!   total by the count, with no rounding of the total first.
+//! - SUM with at least one float input is a `Float`: the exact parts plus
+//!   the float part.
+//! - AVG is a `Float`. With no float input it divides the exact total by the
+//!   count, with no rounding of the total first.
 //! - SUM and AVG over no input are NULL.
 //! - Two partial accumulators merge without loss: the integer parts add
 //!   exactly, so a shard or spill merge gives the single-pass result.
@@ -34,8 +40,12 @@ pub struct ExactSum {
     /// Exact total of the integer inputs.
     #[serde(with = "i128_text")]
     int: i128,
-    /// The integer total left the `i128` range.
-    int_overflow: bool,
+    /// Exact total of the fractional `Decimal` inputs.
+    frac: Decimal,
+    /// At least one fractional `Decimal` input was added.
+    has_decimal: bool,
+    /// An exact total (`int` or `frac`) left its range.
+    exact_overflow: bool,
     /// Kahan-compensated total of the float inputs.
     float: f64,
     /// Kahan compensation term of `float`.
@@ -76,13 +86,30 @@ impl ExactSum {
     /// Add a numeric `Value`: `Integer`, `Float`, or `Decimal`. Any other
     /// value adds nothing. Returns whether the value was added.
     pub fn add_value(&mut self, v: &Value) -> bool {
-        match value_reading(v) {
-            Some(n) => {
-                self.add_reading(n);
-                true
-            }
-            None => false,
+        match v {
+            Value::Integer(i) => self.add_i64(*i),
+            Value::Float(f) => self.add_f64(*f),
+            Value::Decimal(d) => self.add_decimal(*d),
+            _ => return false,
         }
+        true
+    }
+
+    /// Add one `Decimal` input: an integral one into the integer total, any
+    /// other into the exact decimal total.
+    pub fn add_decimal(&mut self, d: Decimal) {
+        if d.fract().is_zero()
+            && let Some(i) = d.to_i128()
+        {
+            self.add_int(i);
+            return;
+        }
+        match self.frac.checked_add(d) {
+            Some(total) => self.frac = total,
+            None => self.exact_overflow = true,
+        }
+        self.has_decimal = true;
+        self.count += 1;
     }
 
     /// Add a JSON number or numeric string. Any other value adds nothing.
@@ -98,7 +125,7 @@ impl ExactSum {
                     n.as_f64().map(Numeric::Float)
                 }
             }
-            serde_json::Value::String(s) => parse_numeric_str(s),
+            serde_json::Value::String(s) => return self.add_value_opt(numeric_text(s)),
             _ => None,
         };
         match reading {
@@ -110,13 +137,22 @@ impl ExactSum {
         }
     }
 
+    fn add_value_opt(&mut self, v: Option<Value>) -> bool {
+        v.is_some_and(|v| self.add_value(&v))
+    }
+
     /// Fold another partial accumulator into this one without loss.
     pub fn merge(&mut self, other: &ExactSum) {
         match self.int.checked_add(other.int) {
             Some(total) => self.int = total,
-            None => self.int_overflow = true,
+            None => self.exact_overflow = true,
         }
-        self.int_overflow |= other.int_overflow;
+        match self.frac.checked_add(other.frac) {
+            Some(total) => self.frac = total,
+            None => self.exact_overflow = true,
+        }
+        self.exact_overflow |= other.exact_overflow;
+        self.has_decimal |= other.has_decimal;
         self.kahan_add(other.float);
         self.kahan_add(-other.comp);
         self.has_float |= other.has_float;
@@ -128,11 +164,17 @@ impl ExactSum {
         if self.count == 0 {
             return Ok(Value::Null);
         }
-        if self.int_overflow {
+        if self.exact_overflow {
             return Err(EvalError::NumericOverflow { function: "sum" });
         }
         if self.has_float {
             return Ok(Value::Float(self.sum_f64()));
+        }
+        if self.has_decimal {
+            return self
+                .exact_decimal_total()
+                .map(Value::Decimal)
+                .ok_or(EvalError::NumericOverflow { function: "sum" });
         }
         if let Ok(i) = i64::try_from(self.int) {
             return Ok(Value::Integer(i));
@@ -143,10 +185,18 @@ impl ExactSum {
     }
 
     /// The total read as an `f64`, for a float-typed result. Rounds an
-    /// integer total above 2^53; [`Self::sum`] keeps it exact. `0.0` for no
+    /// exact total above 2^53; [`Self::sum`] keeps it exact. `0.0` for no
     /// input.
     pub fn sum_f64(&self) -> f64 {
-        self.int as f64 + (self.float - self.comp)
+        self.int as f64 + self.frac.to_f64().unwrap_or(0.0) + (self.float - self.comp)
+    }
+
+    /// The integer and decimal totals as one `Decimal`. `None` past the
+    /// `Decimal` range.
+    fn exact_decimal_total(&self) -> Option<Decimal> {
+        Decimal::try_from_i128_with_scale(self.int, 0)
+            .ok()?
+            .checked_add(self.frac)
     }
 
     /// AVG of the inputs as a `Float`. NULL for no input.
@@ -162,12 +212,22 @@ impl ExactSum {
         if self.count == 0 {
             return Ok(None);
         }
-        if self.int_overflow {
+        if self.exact_overflow {
             return Err(EvalError::NumericOverflow { function: "avg" });
         }
         let n = i128::from(self.count);
         let avg = if self.has_float {
             self.sum_f64() / self.count as f64
+        } else if self.has_decimal {
+            // The exact total divides as a `Decimal`, so only the quotient
+            // rounds.
+            let total = self
+                .exact_decimal_total()
+                .ok_or(EvalError::NumericOverflow { function: "avg" })?;
+            total
+                .checked_div(Decimal::from(self.count))
+                .and_then(|avg| avg.to_f64())
+                .ok_or(EvalError::NumericOverflow { function: "avg" })?
         } else {
             // Quotient and remainder keep the exact total: no rounding of a
             // total above 2^53 before the division.
@@ -186,7 +246,7 @@ impl ExactSum {
     fn add_int(&mut self, v: i128) {
         match self.int.checked_add(v) {
             Some(total) => self.int = total,
-            None => self.int_overflow = true,
+            None => self.exact_overflow = true,
         }
         self.count += 1;
     }
@@ -200,13 +260,27 @@ impl ExactSum {
 }
 
 /// A SUM / AVG argument value as the number it contributes: a number as
-/// itself, a numeric string as the number it spells (an integer string
-/// stays exact). `None` for any other value, which contributes nothing.
+/// itself, a numeric string as the number it spells (see [`numeric_text`]).
+/// `None` for any other value, which contributes nothing.
 pub fn sum_input(v: &Value) -> Option<Value> {
     match v {
         Value::Integer(_) | Value::Float(_) | Value::Decimal(_) => Some(v.clone()),
-        Value::String(s) => parse_numeric_str(s).map(numeric_to_value),
+        Value::String(s) => numeric_text(s),
         _ => None,
+    }
+}
+
+/// The number a numeric string spells, exactly where it can be: an integer
+/// as [`numeric_to_value`] gives it, a fraction in decimal notation as a
+/// `Decimal`, and any other numeric text (an exponent, a fraction past the
+/// `Decimal` precision) as a `Float`. `None` for non-numeric text.
+pub fn numeric_text(s: &str) -> Option<Value> {
+    match parse_numeric_str(s)? {
+        Numeric::Int(i) => Some(numeric_to_value(Numeric::Int(i))),
+        Numeric::Float(f) => Some(match Decimal::from_str_exact(s.trim()) {
+            Ok(d) => Value::Decimal(d),
+            Err(_) => Value::Float(f),
+        }),
     }
 }
 
@@ -225,17 +299,6 @@ pub(crate) fn numeric_to_value(n: Numeric) -> Value {
     }
 }
 
-/// The SUM input reading of a numeric `Value`. An integral `Decimal` is an
-/// exact integer.
-fn value_reading(v: &Value) -> Option<Numeric> {
-    match v {
-        Value::Integer(i) => Some(Numeric::Int(i128::from(*i))),
-        Value::Float(f) => Some(Numeric::Float(*f)),
-        Value::Decimal(d) => decimal_reading(d),
-        _ => None,
-    }
-}
-
 /// An integral `Decimal` as an exact integer, any other as a float.
 pub(crate) fn decimal_reading(d: &Decimal) -> Option<Numeric> {
     if d.fract().is_zero()
@@ -246,17 +309,20 @@ pub(crate) fn decimal_reading(d: &Decimal) -> Option<Numeric> {
     d.to_f64().map(Numeric::Float)
 }
 
-/// Element count of the MessagePack form: the array `[int_hi, int_lo,
-/// int_overflow, float, comp, has_float, count]`. The `i128` total is split
-/// into its high `i64` and low `u64` halves, so it round-trips exactly.
-const MSGPACK_FIELDS: usize = 7;
+/// Element count of the MessagePack form: the array `[int_hi, int_lo, frac,
+/// has_decimal, exact_overflow, float, comp, has_float, count]`. The `i128`
+/// total is split into its high `i64` and low `u64` halves, and `frac` is
+/// the 16-byte `Decimal` serialization, so both round-trip exactly.
+const MSGPACK_FIELDS: usize = 9;
 
 impl zerompk::ToMessagePack for ExactSum {
     fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
         writer.write_array_len(MSGPACK_FIELDS)?;
         writer.write_i64((self.int >> 64) as i64)?;
         writer.write_u64(self.int as u64)?;
-        writer.write_boolean(self.int_overflow)?;
+        writer.write_binary(&self.frac.serialize())?;
+        writer.write_boolean(self.has_decimal)?;
+        writer.write_boolean(self.exact_overflow)?;
         writer.write_f64(self.float)?;
         writer.write_f64(self.comp)?;
         writer.write_boolean(self.has_float)?;
@@ -269,9 +335,16 @@ impl<'a> zerompk::FromMessagePack<'a> for ExactSum {
         reader.check_array_len(MSGPACK_FIELDS)?;
         let hi = reader.read_i64()?;
         let lo = reader.read_u64()?;
+        let frac_bytes = reader.read_binary()?;
+        let frac_bytes: [u8; 16] = frac_bytes
+            .as_ref()
+            .try_into()
+            .map_err(|_| zerompk::Error::BufferTooSmall)?;
         Ok(Self {
             int: (i128::from(hi) << 64) | i128::from(lo),
-            int_overflow: reader.read_boolean()?,
+            frac: Decimal::deserialize(frac_bytes),
+            has_decimal: reader.read_boolean()?,
+            exact_overflow: reader.read_boolean()?,
             float: reader.read_f64()?,
             comp: reader.read_f64()?,
             has_float: reader.read_boolean()?,
@@ -333,10 +406,7 @@ mod tests {
         let total = sum_of(&[Value::Integer(i64::MAX), Value::Integer(i64::MAX)]).unwrap();
         assert_eq!(
             total,
-            Value::Decimal(Decimal::from_i128_with_scale(
-                2 * i128::from(i64::MAX),
-                0
-            ))
+            Value::Decimal(Decimal::from_i128_with_scale(2 * i128::from(i64::MAX), 0))
         );
     }
 
@@ -353,10 +423,7 @@ mod tests {
         small.add_u64(u64::MAX);
         small.add_i64(-1);
         small.add_i64(i64::MIN);
-        assert_eq!(
-            small.sum().unwrap(),
-            Value::Integer(i64::MAX - 1)
-        );
+        assert_eq!(small.sum().unwrap(), Value::Integer(i64::MAX - 1));
     }
 
     #[test]
@@ -488,6 +555,79 @@ mod tests {
         );
         assert_eq!(sum_input(&Value::String("x".into())), None);
         assert_eq!(sum_input(&Value::Bool(true)), None);
+    }
+
+    fn dec(text: &str) -> Decimal {
+        Decimal::from_str_exact(text).unwrap()
+    }
+
+    #[test]
+    fn fractional_decimals_sum_exactly() {
+        let tenths = vec![Value::Decimal(dec("0.1")); 3];
+        assert_eq!(sum_of(&tenths).unwrap(), Value::Decimal(dec("0.3")));
+        let mixed = [Value::Decimal(dec("0.25")), Value::Integer(i64::MAX)];
+        assert_eq!(
+            sum_of(&mixed).unwrap(),
+            Value::Decimal(Decimal::from(i64::MAX) + dec("0.25"))
+        );
+        let with_float = [Value::Decimal(dec("0.5")), Value::Float(0.25)];
+        assert_eq!(sum_of(&with_float).unwrap(), Value::Float(0.75));
+    }
+
+    #[test]
+    fn decimal_avg_divides_the_exact_total() {
+        let mut acc = ExactSum::new();
+        acc.add_value(&Value::Decimal(dec("0.1")));
+        acc.add_value(&Value::Decimal(dec("0.2")));
+        assert_eq!(acc.avg().unwrap(), Value::Float(0.15));
+    }
+
+    #[test]
+    fn a_decimal_total_past_the_range_is_overflow_error() {
+        let mut acc = ExactSum::new();
+        acc.add_value(&Value::Decimal(Decimal::MAX - dec("0.5")));
+        acc.add_value(&Value::Decimal(Decimal::MAX - dec("0.5")));
+        assert_eq!(
+            acc.sum(),
+            Err(EvalError::NumericOverflow { function: "sum" })
+        );
+        let mut joined = ExactSum::new();
+        joined.add_value(&Value::Decimal(Decimal::MAX));
+        joined.add_value(&Value::Decimal(dec("0.5")));
+        assert_eq!(
+            joined.sum(),
+            Err(EvalError::NumericOverflow { function: "sum" })
+        );
+    }
+
+    #[test]
+    fn numeric_text_is_exact_where_it_can_be() {
+        assert_eq!(numeric_text("12"), Some(Value::Integer(12)));
+        assert_eq!(numeric_text("0.1"), Some(Value::Decimal(dec("0.1"))));
+        assert_eq!(numeric_text("1e3"), Some(Value::Float(1000.0)));
+        assert_eq!(numeric_text("x"), None);
+        let mut acc = ExactSum::new();
+        for text in ["0.1", "0.2"] {
+            assert!(acc.add_value(&sum_input(&Value::String(text.into())).unwrap()));
+        }
+        assert_eq!(acc.sum().unwrap(), Value::Decimal(dec("0.3")));
+    }
+
+    #[test]
+    fn decimal_parts_merge_and_round_trip() {
+        let mut a = ExactSum::new();
+        a.add_value(&Value::Decimal(dec("0.1")));
+        let mut b = ExactSum::new();
+        b.add_value(&Value::Decimal(dec("0.2")));
+        b.add_i64(1);
+        a.merge(&b);
+        assert_eq!(a.sum().unwrap(), Value::Decimal(dec("1.3")));
+        let bytes = zerompk::to_msgpack_vec(&a).unwrap();
+        let back: ExactSum = zerompk::from_msgpack(&bytes).unwrap();
+        assert_eq!(back, a);
+        let text = sonic_rs::to_string(&a).unwrap();
+        let back: ExactSum = sonic_rs::from_str(&text).unwrap();
+        assert_eq!(back, a);
     }
 
     #[test]

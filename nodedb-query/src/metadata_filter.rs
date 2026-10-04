@@ -481,8 +481,8 @@ mod tests {
 
     /// `{"score": 9}` with the value's tag replaced by the reserved `0xc1`.
     fn corrupt_score_map() -> Vec<u8> {
-        let mut bytes = nodedb_types::json_msgpack::json_to_msgpack(&json!({"score": 9}))
-            .expect("encode");
+        let mut bytes =
+            nodedb_types::json_msgpack::json_to_msgpack(&json!({"score": 9})).expect("encode");
         let last = bytes.len() - 1;
         bytes[last] = 0xc1;
         bytes
@@ -579,18 +579,30 @@ mod tests {
                 Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into()),
             ),
         ]);
-        assert!(matches_metadata_fields(&fields, &gt("n", Value::Integer(9))));
+        assert!(matches_metadata_fields(
+            &fields,
+            &gt("n", Value::Integer(9))
+        ));
         assert!(matches_metadata_fields(
             &fields,
             &MetadataFilter::eq("n", Value::Integer(10))
         ));
-        assert!(matches_metadata_fields(&fields, &gt("flag", Value::Integer(0))));
+        assert!(matches_metadata_fields(
+            &fields,
+            &gt("flag", Value::Integer(0))
+        ));
         assert!(matches_metadata_fields(
             &fields,
             &MetadataFilter::eq("flag", Value::Integer(1))
         ));
-        assert!(matches_metadata_fields(&fields, &gt("name", Value::from("alice"))));
-        assert!(matches_metadata_fields(&fields, &lt("name", Value::from("carol"))));
+        assert!(matches_metadata_fields(
+            &fields,
+            &gt("name", Value::from("alice"))
+        ));
+        assert!(matches_metadata_fields(
+            &fields,
+            &lt("name", Value::from("carol"))
+        ));
         let id = Value::from("550e8400-e29b-41d4-a716-446655440000");
         assert!(matches_metadata_fields(
             &fields,
@@ -607,8 +619,8 @@ mod tests {
 
     #[test]
     fn a_non_numeric_string_fails_a_numeric_order_over_msgpack() {
-        let bytes = nodedb_types::json_msgpack::json_to_msgpack(&json!({"score": "n/a"}))
-            .expect("encode");
+        let bytes =
+            nodedb_types::json_msgpack::json_to_msgpack(&json!({"score": "n/a"})).expect("encode");
         assert_eq!(
             matches_all_msgpack(&bytes, &[gt("score", Value::Integer(5))]),
             Ok(false)

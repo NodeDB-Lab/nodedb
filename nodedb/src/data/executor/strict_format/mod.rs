@@ -14,8 +14,8 @@ pub(crate) use decode::{
     binary_tuple_to_json, binary_tuple_to_msgpack, binary_tuple_to_row_value,
     binary_tuple_to_value, undecodable_strict_row,
 };
-pub(crate) use render::{StrictImageFault, strict_row_to_msgpack};
 pub(super) use encode::{
     bytes_to_binary_tuple, bytes_to_binary_tuple_bitemporal, value_to_binary_tuple,
     value_to_binary_tuple_bitemporal,
 };
+pub(crate) use render::strict_row_to_msgpack;

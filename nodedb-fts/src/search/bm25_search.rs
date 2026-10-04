@@ -106,8 +106,7 @@ impl<B: FtsBackend> FtsIndex<B> {
             fuzzy_enabled,
             mode,
         };
-        let Some(resolved) =
-            self.resolve_query(database_id, tid, index, text_query, staged)?
+        let Some(resolved) = self.resolve_query(database_id, tid, index, text_query, staged)?
         else {
             return Ok(Vec::new());
         };
@@ -121,9 +120,7 @@ impl<B: FtsBackend> FtsIndex<B> {
         let match_mode = resolved.match_mode(index_visible, prefilter, &deny, &staged_docs);
         let allow = match &match_mode {
             super::match_mode::MatchMode::All(docs) => Some(docs),
-            super::match_mode::MatchMode::Coverage | super::match_mode::MatchMode::Any => {
-                prefilter
-            }
+            super::match_mode::MatchMode::Coverage | super::match_mode::MatchMode::Any => prefilter,
         };
 
         let mut hits: Vec<TextSearchResult> = Vec::new();
@@ -862,8 +859,14 @@ mod tests {
             .unwrap();
         idx.index_document(DB, T, "docs", D3, "rust golang compiler toolchain")
             .unwrap();
-        assert_eq!(ranked(&idx, "rust -python", 1, QueryMode::And, None, None), vec![D3]);
-        assert_eq!(ranked(&idx, "rust -python", 2, QueryMode::Or, None, None), vec![D3]);
+        assert_eq!(
+            ranked(&idx, "rust -python", 1, QueryMode::And, None, None),
+            vec![D3]
+        );
+        assert_eq!(
+            ranked(&idx, "rust -python", 2, QueryMode::Or, None, None),
+            vec![D3]
+        );
     }
 
     /// Many documents out-score the single AND match on one word. The AND
@@ -897,21 +900,38 @@ mod tests {
     #[test]
     fn and_mode_inside_a_prefilter() {
         let idx = FtsIndex::new(MemoryBackend::new(), test_governor());
-        idx.index_document(DB, T, "docs", D1, "alpha bravo").unwrap();
-        idx.index_document(DB, T, "docs", D2, "alpha charlie").unwrap();
-        idx.index_document(DB, T, "docs", D3, "bravo delta").unwrap();
+        idx.index_document(DB, T, "docs", D1, "alpha bravo")
+            .unwrap();
+        idx.index_document(DB, T, "docs", D2, "alpha charlie")
+            .unwrap();
+        idx.index_document(DB, T, "docs", D3, "bravo delta")
+            .unwrap();
 
         let mut without_match = SurrogateBitmap::new();
         without_match.insert(D2);
         without_match.insert(D3);
-        let mut fallback = ranked(&idx, "alpha bravo", 10, QueryMode::And, Some(&without_match), None);
+        let mut fallback = ranked(
+            &idx,
+            "alpha bravo",
+            10,
+            QueryMode::And,
+            Some(&without_match),
+            None,
+        );
         fallback.sort();
         assert_eq!(fallback, vec![D2, D3], "no admitted AND match: OR fallback");
 
         let mut with_match = without_match.clone();
         with_match.insert(D1);
         assert_eq!(
-            ranked(&idx, "alpha bravo", 10, QueryMode::And, Some(&with_match), None),
+            ranked(
+                &idx,
+                "alpha bravo",
+                10,
+                QueryMode::And,
+                Some(&with_match),
+                None
+            ),
             vec![D1],
             "an admitted AND match keeps AND semantics"
         );
@@ -922,9 +942,12 @@ mod tests {
     #[test]
     fn staged_rows_are_ranked_before_the_cut() {
         let idx = FtsIndex::new(MemoryBackend::new(), test_governor());
-        idx.index_document(DB, T, "docs", D1, "rust rust rust rust").unwrap();
-        idx.index_document(DB, T, "docs", D2, "rust rust lang").unwrap();
-        idx.index_document(DB, T, "docs", D3, "rust tooling compiler words").unwrap();
+        idx.index_document(DB, T, "docs", D1, "rust rust rust rust")
+            .unwrap();
+        idx.index_document(DB, T, "docs", D2, "rust rust lang")
+            .unwrap();
+        idx.index_document(DB, T, "docs", D3, "rust tooling compiler words")
+            .unwrap();
 
         let mut hidden = SurrogateBitmap::new();
         hidden.insert(D1);
@@ -960,7 +983,8 @@ mod tests {
     #[test]
     fn staged_rows_use_and_semantics() {
         let idx = FtsIndex::new(MemoryBackend::new(), test_governor());
-        idx.index_document(DB, T, "docs", D1, "alpha bravo").unwrap();
+        idx.index_document(DB, T, "docs", D1, "alpha bravo")
+            .unwrap();
         let view = super::StagedView::new(
             SurrogateBitmap::new(),
             false,

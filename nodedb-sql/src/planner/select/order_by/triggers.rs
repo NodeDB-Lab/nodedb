@@ -61,6 +61,15 @@ fn default_vector_field(function: &str, table: Option<&ResolvedTable>) -> Result
     }
 }
 
+/// `function(column)`: the call names the searched column but no query
+/// vector. The one-argument signature takes a query vector, so no signature
+/// matches: PostgreSQL reports this as `undefined_function` (`42883`).
+fn no_query_vector_error(function: &str) -> SqlError {
+    SqlError::UndefinedFunction {
+        name: function.to_owned(),
+    }
+}
+
 /// A search plan an ORDER BY trigger produced.
 pub(super) enum SortSearch {
     /// The plan returns its rows in the order the ORDER BY asked for.
@@ -137,6 +146,11 @@ pub(super) fn try_extract_sort_search(
         SearchTrigger::VectorSearch => {
             let (field, query_arg) = match args.as_slice() {
                 [] => return Ok(None),
+                // A lone column is the searched field with no query vector:
+                // no signature takes it, as PostgreSQL reports `42883`.
+                [ast::Expr::Identifier(_) | ast::Expr::CompoundIdentifier(_)] => {
+                    return Err(no_query_vector_error(&name));
+                }
                 // `vector_distance(query)` (the `SEARCH c USING VECTOR(q, k)`
                 // form) searches the collection's default vector column.
                 [query] => (default_vector_field(&name, table)?, query),

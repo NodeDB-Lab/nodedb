@@ -30,7 +30,9 @@ pub(in crate::diag) use catalog::{
 };
 pub(in crate::diag) use continuous_agg::ContinuousAggregateNotApplied;
 pub(in crate::diag) use crdt::{CrdtDeadLetterNotEnqueued, HistoryCompactionNotApplied};
-pub(in crate::diag) use crdt_dead_letter_store::{CrdtDeadLetterNotRestored, CrdtDeadLetterNotStored};
+pub(in crate::diag) use crdt_dead_letter_store::{
+    CrdtDeadLetterNotRestored, CrdtDeadLetterNotStored,
+};
 pub use data_plane::LostResponseWrite;
 pub(in crate::diag) use data_plane::{
     CalvinApplyHalted, CalvinCompletionTimeout, CoreFailStopped, DataPlaneResponseLost,

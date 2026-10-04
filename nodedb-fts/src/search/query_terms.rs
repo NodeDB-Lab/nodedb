@@ -187,7 +187,12 @@ impl<B: FtsBackend> FtsIndex<B> {
             return Ok((HashSet::new(), negated));
         }
         let base = self
-            .analyze_for_collection(database_id, tid, index.collection(), &raw_negative.join(" "))
+            .analyze_for_collection(
+                database_id,
+                tid,
+                index.collection(),
+                &raw_negative.join(" "),
+            )
             .map_err(FtsIndexError::backend)?;
         if base.is_empty() {
             return Ok((HashSet::new(), negated));

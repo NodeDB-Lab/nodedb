@@ -16,11 +16,91 @@
 //! in a sort key fails the statement with SQLSTATE `22012` rather than
 //! returning the rows in storage order under a sort the client asked for.
 
+use std::str::FromStr;
+
 use nodedb_physical::physical_plan::SortKeySpec;
 use nodedb_query::{compare_json, eval_expr_on_json, msgpack_scan};
+use nodedb_types::columnar::{ColumnType, StrictSchema};
+use rust_decimal::Decimal;
 
 /// One row's evaluated sort keys, positionally aligned with the ORDER BY list.
 pub(in crate::data::executor) type SortValues = Vec<serde_json::Value>;
+
+/// Per ORDER BY key, whether it is a bare column `schema` declares `DECIMAL`.
+///
+/// A `DECIMAL` cell is text, or a `uint64` past `i64::MAX`, so the generic
+/// comparators order such a column by type rank and by bytes. A flagged key
+/// compares by value instead. A collection with no strict schema flags none.
+pub(in crate::data::executor) fn decimal_sort_keys(
+    sort_keys: &[SortKeySpec],
+    schema: Option<&StrictSchema>,
+) -> Vec<bool> {
+    let Some(schema) = schema else {
+        return Vec::new();
+    };
+    sort_keys
+        .iter()
+        .map(|key| {
+            key.as_column().is_some_and(|field| {
+                schema.columns.iter().any(|column| {
+                    column.name == field && matches!(column.column_type, ColumnType::Decimal { .. })
+                })
+            })
+        })
+        .collect()
+}
+
+/// Whether key `idx` is flagged `DECIMAL` in `decimal_keys`.
+pub(in crate::data::executor) fn is_decimal_key(decimal_keys: &[bool], idx: usize) -> bool {
+    decimal_keys.get(idx).copied().unwrap_or(false)
+}
+
+/// The decimal an evaluated sort value stands for: a decimal string or a
+/// number. `None` for any other value.
+fn json_decimal(value: &serde_json::Value) -> Option<Decimal> {
+    match value {
+        serde_json::Value::String(text) => Decimal::from_str(text.trim())
+            .or_else(|_| Decimal::from_scientific(text.trim()))
+            .ok(),
+        serde_json::Value::Number(number) => {
+            if let Some(i) = number.as_i64() {
+                Some(Decimal::from(i))
+            } else if let Some(u) = number.as_u64() {
+                Some(Decimal::from(u))
+            } else {
+                number.as_f64().and_then(|f| Decimal::try_from(f).ok())
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Order two evaluated sort values, by value when the key is `DECIMAL`.
+fn compare_key_values(
+    a: &serde_json::Value,
+    b: &serde_json::Value,
+    decimal: bool,
+) -> std::cmp::Ordering {
+    if decimal && let (Some(da), Some(db)) = (json_decimal(a), json_decimal(b)) {
+        return da.cmp(&db);
+    }
+    compare_json(a, b)
+}
+
+/// Order two stored cells, by value when the key is `DECIMAL`.
+pub(in crate::data::executor) fn compare_cells(
+    a_bytes: &[u8],
+    a_range: (usize, usize),
+    b_bytes: &[u8],
+    b_range: (usize, usize),
+    decimal: bool,
+) -> std::cmp::Ordering {
+    if decimal {
+        msgpack_scan::compare_decimal_field_bytes(a_bytes, a_range, b_bytes, b_range)
+    } else {
+        msgpack_scan::compare_field_bytes(a_bytes, a_range, b_bytes, b_range)
+    }
+}
 
 /// True when every key is a bare stored column, so the zero-decode binary
 /// comparator can be used.
@@ -52,11 +132,13 @@ pub(in crate::data::executor) fn eval_sort_values(
         .collect()
 }
 
-/// Compare two rows by their pre-evaluated sort values.
+/// Compare two rows by their pre-evaluated sort values. `decimal_keys` flags
+/// the keys [`decimal_sort_keys`] found `DECIMAL`.
 pub(in crate::data::executor) fn compare_sort_values(
     a: &[serde_json::Value],
     b: &[serde_json::Value],
     sort_keys: &[SortKeySpec],
+    decimal_keys: &[bool],
 ) -> std::cmp::Ordering {
     for (idx, key) in sort_keys.iter().enumerate() {
         let (Some(va), Some(vb)) = (a.get(idx), b.get(idx)) else {
@@ -66,7 +148,11 @@ pub(in crate::data::executor) fn compare_sort_values(
         // is never flipped by the sort direction.
         let ord = match key.order_nulls(va.is_null(), vb.is_null()) {
             Some(ord) => ord,
-            None => key.direct(compare_json(va, vb)),
+            None => key.direct(compare_key_values(
+                va,
+                vb,
+                is_decimal_key(decimal_keys, idx),
+            )),
         };
         if ord != std::cmp::Ordering::Equal {
             return ord;
@@ -78,13 +164,15 @@ pub(in crate::data::executor) fn compare_sort_values(
 /// Compare two raw msgpack documents by column-only sort keys.
 ///
 /// Uses binary field extraction — no decode. Shared by the in-memory sort and
-/// the external merge so both order rows identically.
+/// the external merge so both order rows identically. `decimal_keys` flags
+/// the keys [`decimal_sort_keys`] found `DECIMAL`.
 pub(in crate::data::executor) fn compare_docs_by_keys_binary(
     a_bytes: &[u8],
     b_bytes: &[u8],
     sort_keys: &[SortKeySpec],
+    decimal_keys: &[bool],
 ) -> std::cmp::Ordering {
-    for key in sort_keys {
+    for (idx, key) in sort_keys.iter().enumerate() {
         // Column-only callers guarantee `as_column`; a computed key has no
         // field to extract and compares equal here, which is why the caller
         // routes those rows through `compare_sort_values` instead.
@@ -102,9 +190,13 @@ pub(in crate::data::executor) fn compare_docs_by_keys_binary(
         ) {
             Some(ord) => ord,
             None => match (a_range, b_range) {
-                (Some(ar), Some(br)) => {
-                    key.direct(msgpack_scan::compare_field_bytes(a_bytes, ar, b_bytes, br))
-                }
+                (Some(ar), Some(br)) => key.direct(compare_cells(
+                    a_bytes,
+                    ar,
+                    b_bytes,
+                    br,
+                    is_decimal_key(decimal_keys, idx),
+                )),
                 _ => std::cmp::Ordering::Equal,
             },
         };

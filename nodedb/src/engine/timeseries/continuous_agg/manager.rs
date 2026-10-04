@@ -803,11 +803,20 @@ mod tests {
         mgr.on_flush(0, "metrics", &int_drain(&rows[5..]), T0);
         mgr.on_flush(0, "metrics", &int_drain(&rows[..3]), T0);
 
-        assert!(mgr.get_watermark(0, "v_1m").unwrap().o3_watermark_ts.is_some());
+        assert!(
+            mgr.get_watermark(0, "v_1m")
+                .unwrap()
+                .o3_watermark_ts
+                .is_some()
+        );
         let got = materialized(&mgr, "v_1m");
         assert_eq!(got, ad_hoc(&rows, 60_000));
         // The second bucket's total left `i64`: an exact Decimal.
-        assert!(matches!(got[1].1[1], Value::Decimal(_)), "{:?}", got[1].1[1]);
+        assert!(
+            matches!(got[1].1[1], Value::Decimal(_)),
+            "{:?}",
+            got[1].1[1]
+        );
     }
 
     #[test]

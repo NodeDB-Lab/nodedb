@@ -62,8 +62,8 @@ impl CoreLoop {
     /// the surrogate's old embedding before inserting the new one, since
     /// `insert_with_surrogate` appends rather than replaces).
     ///
-    /// Candidate fields come from the same strict-schema / `vector_params`
-    /// enumeration the put path uses, so each `vector_doc_map` entry is looked
+    /// Candidate fields come from the same strict-schema / `vector_params` /
+    /// declared-column enumeration the put path uses, so each `vector_doc_map` entry is looked
     /// up by its exact key (via `remove_document_vector_index_field`) instead
     /// of scanning the whole map. Returns the removed `(index_key, vector_id)`
     /// deltas so a transactional caller can push `UndoEntry::DeleteVector`

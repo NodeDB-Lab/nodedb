@@ -8,7 +8,7 @@ use nodedb_types::sync::wire::SyncProvenance;
 use crate::bridge::envelope::{CounterFault, ErrorCode, SyncHold};
 
 /// The number of `ErrorCode` variants [`variant_index`] numbers.
-pub(super) const VARIANT_COUNT: usize = 44;
+pub(super) const VARIANT_COUNT: usize = 45;
 
 /// A dense index per variant. Exhaustive, so a new variant fails to compile
 /// here until it gets an index, and [`every_variant_has_a_sample`] then fails
@@ -59,6 +59,7 @@ pub(super) fn variant_index(code: &ErrorCode) -> usize {
         ErrorCode::ActiveSqlTransaction { .. } => 42,
         ErrorCode::DependentObjectsExist { .. } => 10,
         ErrorCode::TextColumn { .. } => 43,
+        ErrorCode::NumericValueOutOfRange { .. } => 44,
     }
 }
 
@@ -181,6 +182,7 @@ pub(super) fn samples() -> Vec<ErrorCode> {
         ErrorCode::DivisionByZero,
         ErrorCode::UndefinedFunction { name: "f".into() },
         ErrorCode::DataException { detail: text() },
+        ErrorCode::NumericValueOutOfRange { detail: text() },
         ErrorCode::DispatchCapacity { reason: text() },
         ErrorCode::ExpiredBeforeExecution,
         ErrorCode::BadRequest { detail: text() },

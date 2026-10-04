@@ -62,7 +62,10 @@ pub fn value_replaces(candidate: &Value, current: Option<&Value>, want_max: bool
     };
     replaces(
         crate::value_ops::numeric_order(candidate, current),
-        matches!(crate::value_ops::numeric_order(current, current), Some(None)),
+        matches!(
+            crate::value_ops::numeric_order(current, current),
+            Some(None)
+        ),
         || crate::value_ops::compare_values(candidate, current),
         want_max,
     )

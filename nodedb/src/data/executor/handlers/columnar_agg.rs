@@ -394,8 +394,14 @@ fn build_results_from_groups(
                 "count" => serde_json::json!(accum.count),
                 "sum" => serde_json::Value::from(accum.sum.sum()?),
                 "avg" => serde_json::Value::from(accum.sum.avg()?),
-                "min" => accum.min.clone().map_or(serde_json::Value::Null, Into::into),
-                "max" => accum.max.clone().map_or(serde_json::Value::Null, Into::into),
+                "min" => accum
+                    .min
+                    .clone()
+                    .map_or(serde_json::Value::Null, Into::into),
+                "max" => accum
+                    .max
+                    .clone()
+                    .map_or(serde_json::Value::Null, Into::into),
                 _ => serde_json::Value::Null,
             };
             row.insert(agg_key, val);
@@ -666,7 +672,11 @@ mod tests {
             1_700_000_000_000_000_001,
             1_700_000_000_000_000_003,
         ];
-        let mt = int_memtable(&[(t[0], 0, 0.0, "a"), (t[1], 0, 0.0, "a"), (t[2], 0, 0.0, "a")]);
+        let mt = int_memtable(&[
+            (t[0], 0, 0.0, "a"),
+            (t[1], 0, 0.0, "a"),
+            (t[2], 0, 0.0, "a"),
+        ]);
         let a = aggs(&[("min", "timestamp"), ("max", "timestamp")]);
         let rows = run(&mt, &[], &a, 1_000_000, "nanos").unwrap();
         assert_eq!(rows[0]["min(timestamp)"], serde_json::json!(t[1]));

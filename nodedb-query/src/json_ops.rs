@@ -113,10 +113,7 @@ pub fn compare_json_numbers(a: &serde_json::Number, b: &serde_json::Number) -> O
 /// Numeric order of `a` and `b` when both have a numeric reading (number,
 /// numeric string, bool). Outer `None`: at least one side is not numeric.
 /// Inner `None`: the pair has no order (a NaN).
-pub fn numeric_order(
-    a: &serde_json::Value,
-    b: &serde_json::Value,
-) -> Option<Option<Ordering>> {
+pub fn numeric_order(a: &serde_json::Value, b: &serde_json::Value) -> Option<Option<Ordering>> {
     let (na, nb) = (numeric_reading(a)?, numeric_reading(b)?);
     Some(cmp_numeric(na, nb))
 }

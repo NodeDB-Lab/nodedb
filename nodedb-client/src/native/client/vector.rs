@@ -10,9 +10,10 @@ use nodedb_types::filter::MetadataFilter;
 use nodedb_types::protocol::{OpCode, TextFields};
 use nodedb_types::result::SearchResult;
 
-use super::super::response_parse::parse_search_results;
 use super::core::NativeClient;
 use crate::native::connection::check_error;
+use crate::row_decode::search_hit::DISTANCE_COLUMN;
+use crate::row_decode::{HitSource, decode_search_hits};
 use crate::sql_escape::{quote_identifier, quote_string_literal};
 
 impl NativeClient {
@@ -34,7 +35,15 @@ impl NativeClient {
         // An error frame carries no rows; parsed unchecked it would read as
         // "the search matched nothing".
         check_error(&resp)?;
-        parse_search_results(&resp)
+        decode_search_hits(
+            &HitSource {
+                op: "vector_search",
+                collection,
+                score_column: DISTANCE_COLUMN,
+            },
+            resp.columns.as_deref().unwrap_or_default(),
+            resp.rows.as_deref().unwrap_or_default(),
+        )
     }
 
     pub(super) async fn vector_insert_impl(

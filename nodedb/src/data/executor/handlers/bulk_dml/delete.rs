@@ -287,13 +287,13 @@ impl CoreLoop {
                                 Err(e) => {
                                     let code = refusal_after_rows(affected, e);
                                     return self.bulk_delete_refusal(
-                        task,
-                        tid,
-                        collection,
-                        code,
-                        &mut pending_text,
-                        write_set,
-                    );
+                                        task,
+                                        tid,
+                                        collection,
+                                        code,
+                                        &mut pending_text,
+                                        write_set,
+                                    );
                                 }
                             }
                         }
@@ -360,13 +360,13 @@ impl CoreLoop {
                     Err(e) => {
                         let code = refusal_after_rows(affected, e);
                         return self.bulk_delete_refusal(
-                        task,
-                        tid,
-                        collection,
-                        code,
-                        &mut pending_text,
-                        write_set,
-                    );
+                            task,
+                            tid,
+                            collection,
+                            code,
+                            &mut pending_text,
+                            write_set,
+                        );
                     }
                 }
             }
@@ -378,13 +378,13 @@ impl CoreLoop {
                     },
                 );
                 return self.bulk_delete_refusal(
-                        task,
-                        tid,
-                        collection,
-                        code,
-                        &mut pending_text,
-                        write_set,
-                    );
+                    task,
+                    tid,
+                    collection,
+                    code,
+                    &mut pending_text,
+                    write_set,
+                );
             }
             // One durable redo entry per debited target row, naming the TARGET
             // collection: this statement's own redo describes the removed source

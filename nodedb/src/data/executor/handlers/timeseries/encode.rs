@@ -280,7 +280,11 @@ mod tests {
     }
 
     fn cell<'a>(cells: &'a [(String, rmpv::Value)], key: &str) -> &'a rmpv::Value {
-        &cells.iter().find(|(k, _)| k == key).expect("aggregate cell").1
+        &cells
+            .iter()
+            .find(|(k, _)| k == key)
+            .expect("aggregate cell")
+            .1
     }
 
     #[test]
@@ -292,10 +296,16 @@ mod tests {
             a.feed_int(ABOVE);
             a.feed_int(AT);
         });
-        assert_eq!(*cell(&cells, "sum(v)"), rmpv::Value::Integer((ABOVE + AT).into()));
+        assert_eq!(
+            *cell(&cells, "sum(v)"),
+            rmpv::Value::Integer((ABOVE + AT).into())
+        );
         assert_eq!(*cell(&cells, "min(v)"), rmpv::Value::Integer(AT.into()));
         assert_eq!(*cell(&cells, "max(v)"), rmpv::Value::Integer(ABOVE.into()));
-        assert_eq!(*cell(&cells, "first(v)"), rmpv::Value::Integer(ABOVE.into()));
+        assert_eq!(
+            *cell(&cells, "first(v)"),
+            rmpv::Value::Integer(ABOVE.into())
+        );
         assert_eq!(*cell(&cells, "last(v)"), rmpv::Value::Integer(AT.into()));
         assert_eq!(*cell(&cells, "avg(v)"), rmpv::Value::F64(AT as f64));
     }
@@ -317,7 +327,10 @@ mod tests {
             *cell(&cells, "min(v)"),
             rmpv::Value::Integer(1_700_000_000_000_000_001_i64.into())
         );
-        assert_eq!(*cell(&cells, "max(v)"), rmpv::Value::Integer(i64::MAX.into()));
+        assert_eq!(
+            *cell(&cells, "max(v)"),
+            rmpv::Value::Integer(i64::MAX.into())
+        );
     }
 
     #[test]
@@ -357,10 +370,7 @@ mod tests {
             a.max(),
             Some(&nodedb_types::Value::Integer(9_007_199_254_740_993))
         );
-        assert_eq!(
-            a.last(),
-            Some(&nodedb_types::Value::Integer(1))
-        );
+        assert_eq!(a.last(), Some(&nodedb_types::Value::Integer(1)));
     }
 
     #[test]

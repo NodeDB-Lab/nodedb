@@ -261,7 +261,11 @@ mod tests {
             .iter()
             .find(|entry| entry.detail.contains("event dead-lettered"))
             .expect("the dead-lettered event is audited");
-        assert!(entry.detail.contains("old image of row 'row-1' in 'events' at LSN 9"));
+        assert!(
+            entry
+                .detail
+                .contains("old image of row 'row-1' in 'events' at LSN 9")
+        );
         assert!(
             cdc_router.stream_buffers().is_empty(),
             "no change stream receives the write"

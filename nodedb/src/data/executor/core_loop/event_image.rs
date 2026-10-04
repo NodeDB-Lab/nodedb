@@ -234,8 +234,14 @@ mod tests {
         let event = &emitted[0];
         assert_eq!(event.op, WriteOp::Update);
         assert_eq!(event.image_fault, Some(ImageFault::Old));
-        assert!(event.old_value.is_none(), "raw bytes never reach the Event Plane");
-        assert_eq!(name_of(event.new_value.as_deref().expect("new image")), "bob");
+        assert!(
+            event.old_value.is_none(),
+            "raw bytes never reach the Event Plane"
+        );
+        assert_eq!(
+            name_of(event.new_value.as_deref().expect("new image")),
+            "bob"
+        );
     }
 
     #[test]

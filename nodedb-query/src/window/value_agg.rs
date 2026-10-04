@@ -534,11 +534,19 @@ mod tests {
         let vals = [9_007_199_254_740_993, 9_007_199_254_740_992];
 
         let mut rows = rows_v(&vals);
-        run_agg(&mut rows, &cols, &agg_spec("min", whole_partition(), vec![]));
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("min", whole_partition(), vec![]),
+        );
         assert_eq!(rows[0][1], Value::Integer(9_007_199_254_740_992));
 
         let mut rows = rows_v(&vals);
-        run_agg(&mut rows, &cols, &agg_spec("max", whole_partition(), vec![]));
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("max", whole_partition(), vec![]),
+        );
         assert_eq!(rows[0][1], Value::Integer(9_007_199_254_740_993));
     }
 
@@ -548,7 +556,11 @@ mod tests {
         let vals = [9_007_199_254_740_993, 9_007_199_254_740_992];
 
         let mut rows = rows_v(&vals);
-        run_agg(&mut rows, &cols, &agg_spec("sum", whole_partition(), vec![]));
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("sum", whole_partition(), vec![]),
+        );
         assert_eq!(rows[0][1], Value::Integer(18_014_398_509_481_985));
 
         let mut rows = rows_v(&[9_007_199_254_740_993, 1]);
@@ -558,7 +570,11 @@ mod tests {
         assert_eq!(rows[1][1], Value::Integer(9_007_199_254_740_994));
 
         let mut rows = rows_v(&vals);
-        run_agg(&mut rows, &cols, &agg_spec("avg", whole_partition(), vec![]));
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("avg", whole_partition(), vec![]),
+        );
         assert_eq!(rows[0][1], Value::Float(9_007_199_254_740_992.0));
     }
 
@@ -569,7 +585,11 @@ mod tests {
             vec![Value::Integer(i64::MAX)],
             vec![Value::from_u64(u64::MAX)],
         ];
-        run_agg(&mut rows, &cols, &agg_spec("sum", whole_partition(), vec![]));
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("sum", whole_partition(), vec![]),
+        );
         assert_eq!(
             rows[0][1],
             Value::Decimal(rust_decimal::Decimal::from_i128_with_scale(
@@ -582,7 +602,11 @@ mod tests {
             vec![Value::Integer(i64::MAX)],
             vec![Value::from_u64(u64::MAX)],
         ];
-        run_agg(&mut rows, &cols, &agg_spec("max", whole_partition(), vec![]));
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("max", whole_partition(), vec![]),
+        );
         assert_eq!(rows[0][1], Value::from_u64(u64::MAX));
     }
 
@@ -591,7 +615,11 @@ mod tests {
         let cols = ci(&["v"]);
         let mixed = || vec![vec![Value::Integer(2)], vec![Value::Float(0.5)]];
         let mut rows = mixed();
-        run_agg(&mut rows, &cols, &agg_spec("sum", whole_partition(), vec![]));
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("sum", whole_partition(), vec![]),
+        );
         assert_eq!(rows[0][1], Value::Float(2.5));
 
         let with_nan = || {
@@ -602,10 +630,18 @@ mod tests {
             ]
         };
         let mut rows = with_nan();
-        run_agg(&mut rows, &cols, &agg_spec("min", whole_partition(), vec![]));
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("min", whole_partition(), vec![]),
+        );
         assert_eq!(rows[0][1], Value::Integer(4));
         let mut rows = with_nan();
-        run_agg(&mut rows, &cols, &agg_spec("max", whole_partition(), vec![]));
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("max", whole_partition(), vec![]),
+        );
         assert_eq!(rows[0][1], Value::Integer(9));
     }
 
@@ -619,11 +655,19 @@ mod tests {
         ];
 
         let mut rows = rows_v(&ts);
-        run_agg(&mut rows, &cols, &agg_spec("min", whole_partition(), vec![]));
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("min", whole_partition(), vec![]),
+        );
         assert_eq!(rows[1][1], Value::Integer(1_700_000_000_000_000_001));
 
         let mut rows = rows_v(&ts);
-        run_agg(&mut rows, &cols, &agg_spec("max", whole_partition(), vec![]));
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("max", whole_partition(), vec![]),
+        );
         assert_eq!(rows[1][1], Value::Integer(1_700_000_000_000_000_003));
     }
 
@@ -640,11 +684,19 @@ mod tests {
         };
 
         let mut rows = mixed();
-        run_agg(&mut rows, &cols, &agg_spec("min", whole_partition(), vec![]));
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("min", whole_partition(), vec![]),
+        );
         assert_eq!(rows[0][1], Value::Float(1.5));
 
         let mut rows = mixed();
-        run_agg(&mut rows, &cols, &agg_spec("max", whole_partition(), vec![]));
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("max", whole_partition(), vec![]),
+        );
         assert_eq!(rows[0][1], Value::Integer(9_007_199_254_740_993));
     }
 
@@ -678,7 +730,11 @@ mod tests {
         );
 
         let mut rows = keyed();
-        run_agg(&mut rows, &cols, &agg_spec("max", WindowFrame::default(), order));
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("max", WindowFrame::default(), order),
+        );
         let maxes: Vec<Value> = rows.iter().map(|r| r[2].clone()).collect();
         assert_eq!(
             maxes,
@@ -702,7 +758,11 @@ mod tests {
         };
 
         let mut rows = rows_with_null();
-        run_agg(&mut rows, &cols, &agg_spec("count", whole_partition(), vec![]));
+        run_agg(
+            &mut rows,
+            &cols,
+            &agg_spec("count", whole_partition(), vec![]),
+        );
         assert_eq!(rows[0][1], Value::Integer(2));
 
         let mut rows = rows_with_null();

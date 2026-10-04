@@ -5,6 +5,7 @@
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::vector_string::floats_from_value;
 
+use super::fields::DEFAULT_VECTOR_FIELD;
 use super::types::{VectorFieldInsert, VectorIndexDelta, VectorIndexPutParams};
 
 /// A document vector field whose width differs from its index: the
@@ -21,7 +22,8 @@ fn field_dimension_mismatch(field_name: &str, expected: usize, got: usize) -> cr
 impl CoreLoop {
     /// HNSW vector indexing side-effect: index declared strict-schema
     /// `Vector(dim)` columns, or (schemaless) fields matched by registered
-    /// `vector_params`, into the corresponding `VectorCollection`.
+    /// `vector_params` and declared `VECTOR(n)` columns, into the
+    /// corresponding `VectorCollection`.
     ///
     /// Returns the `(index_key, vector_id)` pairs inserted so a transactional
     /// caller can push `UndoEntry::InsertVector` reversals. Each inserted
@@ -36,9 +38,10 @@ impl CoreLoop {
     /// this LSN is skipped rather than re-appended as a duplicate HNSW node.
     ///
     /// Fails when a vector's width disagrees with the index it would land in —
-    /// either the width declared by `CREATE VECTOR INDEX ... DIM <n>` or the
-    /// width an already-materialized index carries. The write is refused
-    /// rather than the field skipped: a document that silently loses its
+    /// the width declared by `CREATE VECTOR INDEX ... DIM <n>`, the width of a
+    /// declared `VECTOR(n)` column, or the width an already-materialized index
+    /// carries. The write is refused rather than the field skipped: a
+    /// document that silently loses its
     /// embedding is indistinguishable, at query time, from one that was never
     /// similar to anything.
     pub(in crate::data::executor) fn apply_point_put_vector_indexes(
@@ -119,9 +122,10 @@ impl CoreLoop {
             let bare_key = (db_key, tid_key, collection.to_string());
             let field_names = self.schemaless_vector_field_names(database_id, tid, collection);
 
-            // Each field name maps back to its `vector_params` map key: either
-            // the field-qualified key (if one was registered) or the bare key
-            // (single default-"embedding" field, no per-field registration).
+            // Each field name maps back to its `vector_params` map key: the
+            // field-qualified key (if one was registered), the bare key for
+            // the default "embedding" field, or the field-qualified key of a
+            // declared column with no registration (default parameters).
             let schemaless_keys: Vec<(
                 (nodedb_types::DatabaseId, crate::types::TenantId, String),
                 String,
@@ -129,7 +133,9 @@ impl CoreLoop {
                 .into_iter()
                 .map(|field| {
                     let qualified = (db_key, tid_key, format!("{field_prefix}{field}"));
-                    let params_key = if self.vector_params.contains_key(&qualified) {
+                    let params_key = if self.vector_params.contains_key(&qualified)
+                        || field != DEFAULT_VECTOR_FIELD
+                    {
                         qualified
                     } else {
                         bare_key.clone()
@@ -154,6 +160,17 @@ impl CoreLoop {
                     let store_key =
                         Self::vector_index_key(database_id, tid, collection, field_name);
                     self.check_vector_width(&store_key, field_name, floats.len())?;
+                    // A declared `VECTOR(n)` column refuses another width, as
+                    // a strict schema's vector column does.
+                    if let Some(declared) = self.declared_schemaless_vector_dim(
+                        database_id,
+                        tid,
+                        collection,
+                        field_name,
+                    ) && declared != floats.len()
+                    {
+                        return Err(field_dimension_mismatch(field_name, declared, floats.len()));
+                    }
                     let dim = floats.len();
                     // Same stamp gate as the strict arm above.
                     let skip = wal_lsn != 0 && self.vector_replay_skips(wal_lsn);

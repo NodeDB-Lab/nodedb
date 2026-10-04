@@ -17,7 +17,10 @@ use crate::types::*;
 
 /// Move the primary-key conjuncts of a `VectorSearch` plan's filters into its
 /// `pk_prefilter`. Other plans are untouched.
-pub(super) fn apply_vector_pk_prefilter(plan: &mut SqlPlan, catalog: &dyn SqlCatalog) -> Result<()> {
+pub(super) fn apply_vector_pk_prefilter(
+    plan: &mut SqlPlan,
+    catalog: &dyn SqlCatalog,
+) -> Result<()> {
     let SqlPlan::VectorSearch {
         collection,
         filters,
@@ -95,11 +98,13 @@ fn split_conjuncts(expr: SqlExpr) -> Vec<SqlExpr> {
 
 /// `AND` of `conjuncts`, or `None` when there are none.
 fn join_conjuncts(conjuncts: Vec<SqlExpr>) -> Option<SqlExpr> {
-    conjuncts.into_iter().reduce(|left, right| SqlExpr::BinaryOp {
-        left: Box::new(left),
-        op: BinaryOp::And,
-        right: Box::new(right),
-    })
+    conjuncts
+        .into_iter()
+        .reduce(|left, right| SqlExpr::BinaryOp {
+            left: Box::new(left),
+            op: BinaryOp::And,
+            right: Box::new(right),
+        })
 }
 
 /// The keys of `pk = literal` or `pk IN (literal, ...)`. `None` for any other
@@ -211,7 +216,10 @@ mod tests {
         else {
             panic!("expected VectorSearch, got {plan:?}");
         };
-        assert_eq!(field, "", "no declared vector column: the collection-level index");
+        assert_eq!(
+            field, "",
+            "no declared vector column: the collection-level index"
+        );
         assert_eq!(pk_prefilter, Some(vec![SqlValue::String("a".into())]));
         assert_eq!(top_k, 2);
     }

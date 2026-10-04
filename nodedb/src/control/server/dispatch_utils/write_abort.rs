@@ -90,6 +90,7 @@ fn is_transient_verdict(code: &ErrorCode) -> bool {
         | ErrorCode::DivisionByZero
         | ErrorCode::UndefinedFunction { .. }
         | ErrorCode::DataException { .. }
+        | ErrorCode::NumericValueOutOfRange { .. }
         | ErrorCode::BadRequest { .. } => false,
     }
 }
@@ -157,6 +158,7 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         | ErrorCode::DivisionByZero
         | ErrorCode::UndefinedFunction { .. }
         | ErrorCode::DataException { .. }
+        | ErrorCode::NumericValueOutOfRange { .. }
         | ErrorCode::UndefinedColumn { .. }
         // A full-text read refused the field before ranking.
         | ErrorCode::TextColumn { .. } => true,

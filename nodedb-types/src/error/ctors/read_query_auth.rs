@@ -214,6 +214,21 @@ impl NodeDbError {
         }
     }
 
+    /// A value does not fit its numeric type: an integer past a column's
+    /// declared width, or arithmetic that overflows. SQLSTATE `22003`
+    /// (`numeric_value_out_of_range`). The error names no collection.
+    /// `detail` is the full message.
+    pub fn numeric_value_out_of_range(detail: impl Into<String>) -> Self {
+        Self {
+            code: ErrorCode::OVERFLOW,
+            message: detail.into(),
+            details: ErrorDetails::Overflow {
+                collection: String::new(),
+            },
+            cause: None,
+        }
+    }
+
     /// A statement exceeded a server limit on its own size or depth: a
     /// recursion depth, a per-transaction staging budget. SQLSTATE `54000`
     /// (`program_limit_exceeded`). `detail` is the full message.

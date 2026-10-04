@@ -182,12 +182,8 @@ impl CoreLoop {
                 })?,
             };
 
-        let identity = IdentitySnapshot::capture(
-            strict_schema.as_ref(),
-            declared_primary_key,
-            updates,
-            &doc,
-        );
+        let identity =
+            IdentitySnapshot::capture(strict_schema.as_ref(), declared_primary_key, updates, &doc);
 
         // Expressions evaluate against the pre-update snapshot (PostgreSQL
         // semantics): a later assignment observing a column updated earlier in

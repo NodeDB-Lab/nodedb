@@ -2,7 +2,7 @@
 
 //! Vector operation implementations for `NodeDbRemote`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use nodedb_types::document::Document;
 use nodedb_types::error::{NodeDbError, NodeDbResult};
@@ -10,9 +10,10 @@ use nodedb_types::filter::MetadataFilter;
 use nodedb_types::result::SearchResult;
 
 use crate::remote_parse::format_vector_array;
+use crate::row_decode::search_hit::{DISTANCE_COLUMN, ID_COLUMN};
+use crate::row_decode::{HitSource, decode_search_hits};
 use crate::sql_escape::quote_identifier;
 
-use super::super::parse::parse_vector_search_json;
 use super::super::sql::{build_vector_search_sql, render_metadata_filter_public};
 use super::core::NodeDbRemote;
 
@@ -32,39 +33,15 @@ impl NodeDbRemote {
         let sql = build_vector_search_sql(collection, query, k, filter, allowed_ids)?;
 
         let (columns, rows) = self.query_raw(&sql, &[]).await?;
-
-        // The DSL path returns JSON in a single "result" column.
-        if columns.len() == 1 && columns[0] == "result" {
-            if let Some(row) = rows.first()
-                && let Some(nodedb_types::value::Value::String(json_text)) = row.first()
-            {
-                return parse_vector_search_json(json_text);
-            }
-            return Ok(Vec::new());
-        }
-
-        // Structured result set: id, distance columns.
-        let mut results = Vec::with_capacity(rows.len());
-        let id_idx = columns.iter().position(|c| c == "id").unwrap_or(0);
-        let dist_idx = columns.iter().position(|c| c == "distance").unwrap_or(1);
-
-        for row in &rows {
-            let id = row
-                .get(id_idx)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let distance = row.get(dist_idx).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-
-            results.push(SearchResult {
-                id,
-                node_id: None,
-                distance,
-                metadata: HashMap::new(),
-            });
-        }
-
-        Ok(results)
+        decode_search_hits(
+            &HitSource {
+                op: "vector_search",
+                collection,
+                score_column: DISTANCE_COLUMN,
+            },
+            &columns,
+            &rows,
+        )
     }
 
     pub(super) async fn vector_insert_field_impl(
@@ -123,32 +100,22 @@ impl NodeDbRemote {
             None => String::new(),
         };
         let sql = format!(
-            "SELECT id, vector_distance({field}, {vec_lit}) AS distance \
+            "SELECT {ID_COLUMN}, vector_distance({field}, {vec_lit}) AS {DISTANCE_COLUMN} \
              FROM {coll}{where_clause} \
              ORDER BY vector_distance({field}, {vec_lit}) \
              LIMIT {k}"
         );
 
         let (columns, rows) = self.query_raw(&sql, &[]).await?;
-        let id_idx = columns.iter().position(|c| c == "id").unwrap_or(0);
-        let dist_idx = columns.iter().position(|c| c == "distance").unwrap_or(1);
-
-        let mut results = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let id = row
-                .get(id_idx)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let distance = row.get(dist_idx).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-            results.push(SearchResult {
-                id,
-                node_id: None,
-                distance,
-                metadata: HashMap::new(),
-            });
-        }
-        Ok(results)
+        decode_search_hits(
+            &HitSource {
+                op: "vector_search_field",
+                collection,
+                score_column: DISTANCE_COLUMN,
+            },
+            &columns,
+            &rows,
+        )
     }
 
     pub(super) async fn vector_insert_impl(

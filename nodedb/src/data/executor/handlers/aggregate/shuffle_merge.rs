@@ -270,7 +270,16 @@ mod tests {
                 .expect("feed");
         }
         map.into_iter()
-            .map(|(k, s)| (k, s.finalize(specs).into_iter().map(|(_, v)| v).collect()))
+            .map(|(k, s)| {
+                (
+                    k,
+                    s.finalize(specs)
+                        .expect("finalize")
+                        .into_iter()
+                        .map(|(_, v)| v)
+                        .collect(),
+                )
+            })
             .collect()
     }
 
@@ -332,7 +341,16 @@ mod tests {
         let merged = merge_state_frames(&combined, &group_by, &specs).expect("merge");
         let got: HashMap<String, Vec<Value>> = merged
             .into_iter()
-            .map(|(k, s)| (k, s.finalize(&specs).into_iter().map(|(_, v)| v).collect()))
+            .map(|(k, s)| {
+                (
+                    k,
+                    s.finalize(&specs)
+                        .expect("finalize")
+                        .into_iter()
+                        .map(|(_, v)| v)
+                        .collect(),
+                )
+            })
             .collect();
 
         // Reference: single pass over the union of both doc sets.

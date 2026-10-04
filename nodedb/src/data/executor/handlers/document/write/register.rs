@@ -32,6 +32,9 @@ pub(in crate::data::executor) struct RegisterDocumentCollectionParams<'a> {
     /// The read path decodes this collection's sparse rows as `zerompk`
     /// TAGGED sidecars solely on the strength of this marker.
     pub vector_primary: Option<&'a nodedb_types::VectorPrimaryConfig>,
+    /// Declared `VECTOR(n)` columns of a schemaless collection, as
+    /// `(column, n)`. Empty for every other collection.
+    pub vector_fields: &'a [(String, usize)],
 }
 
 impl CoreLoop {
@@ -56,6 +59,7 @@ impl CoreLoop {
             conflict_policy,
             timeseries,
             vector_primary,
+            vector_fields,
         } = params;
         let mode_label = match storage_mode {
             nodedb_physical::physical_plan::StorageMode::Schemaless => "document_schemaless",
@@ -90,6 +94,7 @@ impl CoreLoop {
             conflict_policy: conflict_policy.map(str::to_string),
             timeseries: timeseries.map(|ts| Box::new(ts.clone())),
             vector_primary: vector_primary.map(|vp| Box::new(vp.clone())),
+            vector_fields: vector_fields.to_vec(),
         };
 
         let config_key = (

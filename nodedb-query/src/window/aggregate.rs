@@ -369,7 +369,10 @@ mod tests {
     }
 
     fn whole() -> WindowFrame {
-        rows_frame(FrameBound::UnboundedPreceding, FrameBound::UnboundedFollowing)
+        rows_frame(
+            FrameBound::UnboundedPreceding,
+            FrameBound::UnboundedFollowing,
+        )
     }
 
     #[test]

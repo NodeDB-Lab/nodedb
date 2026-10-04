@@ -143,9 +143,12 @@ async fn vector_primary_on_conflict_update_refuses_a_new_key() {
         "a refused key change writes nothing"
     );
     assert!(
-        query(&server, "SELECT owner FROM pk_conflict_vp WHERE id = 'moved'")
-            .await
-            .is_empty()
+        query(
+            &server,
+            "SELECT owner FROM pk_conflict_vp WHERE id = 'moved'"
+        )
+        .await
+        .is_empty()
     );
 
     server

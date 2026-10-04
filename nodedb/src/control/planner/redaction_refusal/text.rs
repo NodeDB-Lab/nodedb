@@ -58,9 +58,9 @@ fn refuse_scores(
     collection: &QualifiedCollection,
     scores: &[TextScoreSpec],
 ) -> crate::Result<()> {
-    scores
-        .iter()
-        .try_for_each(|spec| refuse_text_field(ctx, collection, spec.field.as_deref(), "bm25_score"))
+    scores.iter().try_for_each(|spec| {
+        refuse_text_field(ctx, collection, spec.field.as_deref(), "bm25_score")
+    })
 }
 
 /// Refuse when `field` is redacted, or when `field` is `None` (the
@@ -163,7 +163,8 @@ mod tests {
             field: field.map(str::to_string),
             query: "123".into(),
             top_k: 10,
-            mode: nodedb_types::text_search::QueryMode::And, fuzzy: false,
+            mode: nodedb_types::text_search::QueryMode::And,
+            fuzzy: false,
             prefilter: None,
             filters: Vec::new(),
             rls_filters: Vec::new(),
@@ -175,7 +176,8 @@ mod tests {
         TextScoreSpec {
             field: field.map(str::to_string),
             query: "123".into(),
-            mode: nodedb_types::text_search::QueryMode::And, fuzzy: false,
+            mode: nodedb_types::text_search::QueryMode::And,
+            fuzzy: false,
             alias: "s".into(),
         }
     }
@@ -200,7 +202,10 @@ mod tests {
     #[test]
     fn bm25_score_on_a_redacted_column_is_refused() {
         let store = store_with_rule("users", "support", "ssn");
-        assert_refused(check(&search(Some("bio"), vec![score(Some("ssn"))]), &store));
+        assert_refused(check(
+            &search(Some("bio"), vec![score(Some("ssn"))]),
+            &store,
+        ));
         let scan = PhysicalPlan::Text(TextOp::BM25ScoreScan {
             collection: users(),
             filters: Vec::new(),

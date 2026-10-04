@@ -44,7 +44,10 @@ pub fn rollup_delta(
         let bucket = time_bucket::time_bucket(downstream.bucket_interval_ms, partial.bucket_ts);
         let key: Vec<u32> = key_map
             .iter()
-            .map(|pos| pos.and_then(|p| partial.group_key.get(p).copied()).unwrap_or(0))
+            .map(|pos| {
+                pos.and_then(|p| partial.group_key.get(p).copied())
+                    .unwrap_or(0)
+            })
             .collect();
         out.entry((bucket, key))
             .or_insert_with_key(|(bucket, key)| {

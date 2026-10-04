@@ -41,6 +41,11 @@ pub struct CollectionConfig {
     /// MessagePack maps with the same header byte, so byte sniffing silently
     /// returns tag arrays to the client.
     pub vector_primary: Option<Box<nodedb_types::VectorPrimaryConfig>>,
+    /// Declared `VECTOR(n)` columns of a schemaless collection, as
+    /// `(column, n)`. A document write indexes each one into its field's
+    /// vector index. Empty for every other collection: a strict schema
+    /// carries its vector columns in `storage_mode`.
+    pub vector_fields: Vec<(String, usize)>,
 }
 
 impl CollectionConfig {
@@ -55,6 +60,7 @@ impl CollectionConfig {
             conflict_policy: None,
             timeseries: None,
             vector_primary: None,
+            vector_fields: Vec::new(),
         }
     }
 

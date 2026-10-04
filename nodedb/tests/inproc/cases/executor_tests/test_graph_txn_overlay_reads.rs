@@ -183,8 +183,15 @@ fn a_walk_hop_reads_a_staged_edge_with_its_staged_properties() {
         ],
         "the predicate admits the staged c and rejects the staged d"
     );
-    let outside = read_rows(&mut core, None, walk_hop("a", Direction::Out, score_above(5), true));
-    assert_eq!(outside, vec![with("a", "b", serde_json::json!({"score": 9}))]);
+    let outside = read_rows(
+        &mut core,
+        None,
+        walk_hop("a", Direction::Out, score_above(5), true),
+    );
+    assert_eq!(
+        outside,
+        vec![with("a", "b", serde_json::json!({"score": 9}))]
+    );
 
     // The incoming pass of `c` finds the staged edge in its physical shape.
     let incoming = read_rows(&mut core, Some(txn_id), plain_hop("c", Direction::In));
@@ -199,8 +206,16 @@ fn a_walk_hop_drops_a_staged_delete() {
         ("e", "L", "a", Vec::new()),
     ]);
     let txn_id = TxnId::new(12);
-    stage(&mut core, txn_id, stage_edge_delete(COLLECTION, "a", "L", "b"));
-    stage(&mut core, txn_id, stage_edge_delete(COLLECTION, "e", "L", "a"));
+    stage(
+        &mut core,
+        txn_id,
+        stage_edge_delete(COLLECTION, "a", "L", "b"),
+    );
+    stage(
+        &mut core,
+        txn_id,
+        stage_edge_delete(COLLECTION, "e", "L", "a"),
+    );
 
     let inside = read_rows(&mut core, Some(txn_id), plain_hop("a", Direction::Both));
     assert_eq!(inside, vec![bare("a", "c")]);
@@ -210,7 +225,10 @@ fn a_walk_hop_drops_a_staged_delete() {
         vec![bare("a", "b"), bare("a", "c"), bare("a", "e")]
     );
     let reverse = read_rows(&mut core, Some(txn_id), plain_hop("b", Direction::In));
-    assert!(reverse.is_empty(), "the deleted edge is gone from b: {reverse:?}");
+    assert!(
+        reverse.is_empty(),
+        "the deleted edge is gone from b: {reverse:?}"
+    );
 }
 
 #[test]
@@ -234,11 +252,21 @@ fn a_walk_hop_tests_and_returns_a_staged_property_change() {
         Some(txn_id),
         walk_hop("a", Direction::Out, score_above(5), false),
     );
-    assert!(filtered.is_empty(), "the staged score 1 fails score > 5: {filtered:?}");
+    assert!(
+        filtered.is_empty(),
+        "the staged score 1 fails score > 5: {filtered:?}"
+    );
     let with_properties = walk_hop("a", Direction::Out, Vec::new(), true);
     let returned = read_rows(&mut core, Some(txn_id), with_properties);
-    assert_eq!(returned, vec![with("a", "b", serde_json::json!({"score": 1}))]);
-    let outside = read_rows(&mut core, None, walk_hop("a", Direction::Out, score_above(5), false));
+    assert_eq!(
+        returned,
+        vec![with("a", "b", serde_json::json!({"score": 1}))]
+    );
+    let outside = read_rows(
+        &mut core,
+        None,
+        walk_hop("a", Direction::Out, score_above(5), false),
+    );
     assert_eq!(outside, vec![bare("a", "b")]);
 }
 
@@ -248,7 +276,11 @@ fn a_label_only_walk_hop_reads_staged_edges() {
     let mut core = core_with(&[("a", "L", "b", Vec::new())]);
     let txn_id = TxnId::new(14);
     stage(&mut core, txn_id, stage_edge_put(COLLECTION, "a", "L", "c"));
-    stage(&mut core, txn_id, stage_edge_delete(COLLECTION, "a", "L", "b"));
+    stage(
+        &mut core,
+        txn_id,
+        stage_edge_delete(COLLECTION, "a", "L", "b"),
+    );
 
     let plan = PhysicalPlan::Graph(GraphOp::NeighborsMulti {
         collection: None,
@@ -260,7 +292,10 @@ fn a_label_only_walk_hop_reads_staged_edges() {
         edge_predicate: Vec::new(),
         with_properties: false,
     });
-    assert_eq!(read_rows(&mut core, Some(txn_id), plan), vec![bare("a", "c")]);
+    assert_eq!(
+        read_rows(&mut core, Some(txn_id), plan),
+        vec![bare("a", "c")]
+    );
 }
 
 fn hop_nodes(payload: &[u8]) -> Vec<String> {
@@ -293,7 +328,11 @@ fn staged_edge_under_second_listed_label_is_read_back() {
         ("c", "works", "d"),
         ("a", "likes", "x"),
     ] {
-        stage(&mut core, txn_id, stage_edge_put(COLLECTION, src, label, dst));
+        stage(
+            &mut core,
+            txn_id,
+            stage_edge_put(COLLECTION, src, label, dst),
+        );
     }
     let (core, tx, rx, _dir) = &mut core;
 

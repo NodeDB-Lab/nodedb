@@ -101,7 +101,12 @@ impl CoreLoop {
             // delta. A record its writer cannot produce halts replay: skipping
             // it drops a committed delta.
             if let Err(detail) = signed_record_metadata(&payload) {
-                self.replay_record_unapplied("crdt", "signing_metadata", record.header.lsn, &detail);
+                self.replay_record_unapplied(
+                    "crdt",
+                    "signing_metadata",
+                    record.header.lsn,
+                    &detail,
+                );
                 continue;
             }
             if let Some(expected) = payload.expected_frontier_digest {
@@ -740,7 +745,11 @@ mod crdt_replay_tests {
         provenance.seq = 12;
         let mut h = make_core(0);
         h.core.replay_crdt_wal(
-            &[signed_record(tid, Some(provenance), signing(42, [7; 32], true))],
+            &[signed_record(
+                tid,
+                Some(provenance),
+                signing(42, [7; 32], true),
+            )],
             1,
             &nodedb_wal::TombstoneSet::new(),
         );
@@ -796,6 +805,94 @@ mod crdt_replay_tests {
             h.core
                 .sync_hwm_value(provenance.producer_id, provenance.stream_id),
             provenance.seq
+        );
+    }
+
+    /// An unsigned `secure_notes/doc` record at LSN 5 that carries `delta`
+    /// under the session's provenance.
+    fn provenance_record(tid: TenantId, delta: Vec<u8>) -> nodedb_wal::WalRecord {
+        let payload = crate::wal::CrdtDeltaWalPayload::new(
+            delta,
+            "secure_notes".into(),
+            Some(session_provenance()),
+            None,
+            document_target("doc", 1),
+        );
+        nodedb_wal::WalRecord::new(nodedb_wal::WalRecordArgs {
+            record_type: RecordType::CrdtDelta as u32,
+            lsn: 5,
+            tenant_id: tid.as_u64(),
+            vshard_id: 0,
+            database_id: DatabaseId::DEFAULT.as_u64(),
+            payload: payload.encode().expect("encode"),
+            encryption_key: None,
+            preamble_bytes: None,
+        })
+        .expect("record")
+    }
+
+    /// Delta bytes that do not decode made the live apply refuse the delta
+    /// as malformed and advance the mark. Replay reaches the same refusal:
+    /// nothing applies, the mark advances, and replay continues.
+    #[test]
+    fn a_malformed_delta_replays_as_its_live_refusal() {
+        let tid = TenantId::new(25);
+        let provenance = session_provenance();
+        let mut h = make_core(0);
+        h.core.replay_crdt_wal(
+            &[provenance_record(tid, b"not a loro delta".to_vec())],
+            1,
+            &nodedb_wal::TombstoneSet::new(),
+        );
+        assert!(!h.core.is_fail_stopped());
+        assert!(!doc_replayed(&mut h, tid));
+        assert_eq!(
+            h.core
+                .sync_hwm_value(provenance.producer_id, provenance.stream_id),
+            provenance.seq
+        );
+    }
+
+    /// A delta whose predecessors were absent made the live apply hold the
+    /// mark for the sender's re-push. Replay in LSN order meets the same
+    /// absence: nothing applies, the mark holds, and replay continues. The
+    /// re-push lands at a later LSN once the predecessors arrived.
+    #[test]
+    fn a_delta_missing_its_predecessors_replays_as_its_live_hold() {
+        let tid = TenantId::new(26);
+        let source = nodedb_crdt::state::CrdtState::new(77).expect("state");
+        source
+            .upsert(
+                "secure_notes",
+                "doc",
+                &[("body", LoroValue::String("base".into()))],
+            )
+            .expect("base write");
+        let base_vv = source.oplog_version_vector();
+        source
+            .upsert(
+                "secure_notes",
+                "doc",
+                &[("body", LoroValue::String("next".into()))],
+            )
+            .expect("next write");
+        let dependent = source
+            .export_updates_since(&base_vv)
+            .expect("dependent delta");
+        let provenance = session_provenance();
+        let mut h = make_core(0);
+        h.core.replay_crdt_wal(
+            &[provenance_record(tid, dependent)],
+            1,
+            &nodedb_wal::TombstoneSet::new(),
+        );
+        assert!(!h.core.is_fail_stopped(), "a held delta is no halt");
+        assert!(!doc_replayed(&mut h, tid));
+        assert_eq!(
+            h.core
+                .sync_hwm_value(provenance.producer_id, provenance.stream_id),
+            0,
+            "the mark stays where the live apply held it"
         );
     }
 
@@ -1125,18 +1222,19 @@ mod crdt_replay_tests {
                 kind: nodedb_crdt::ConstraintKind::Unique,
             }],
         ));
-        engine.set_collection_policy_typed("users", nodedb_crdt::policy::CollectionPolicy::strict());
+        engine
+            .set_collection_policy_typed("users", nodedb_crdt::policy::CollectionPolicy::strict());
         h
     }
 
     fn users_write_lsn(h: &CoreHarness, tid: TenantId) -> Option<crate::types::Lsn> {
-        h.core
-            .write_index
-            .collection_write_lsn(&crate::data::executor::core_loop::write_index::CollKey {
+        h.core.write_index.collection_write_lsn(
+            &crate::data::executor::core_loop::write_index::CollKey {
                 db: DatabaseId::DEFAULT,
                 tenant: tid,
                 collection: Box::from("users"),
-            })
+            },
+        )
     }
 
     /// A replayed rejection the full queue refuses stops replay at its
@@ -1253,6 +1351,10 @@ mod crdt_replay_tests {
             .replay_crdt_wal(&[record], 1, &nodedb_wal::TombstoneSet::new());
 
         assert!(h.core.replay_halt_error().is_some(), "replay stopped");
-        assert!(!h.core.crdt_engines.contains_key(&(DatabaseId::DEFAULT, tid)));
+        assert!(
+            !h.core
+                .crdt_engines
+                .contains_key(&(DatabaseId::DEFAULT, tid))
+        );
     }
 }

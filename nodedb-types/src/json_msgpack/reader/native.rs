@@ -227,9 +227,15 @@ mod tests {
     fn wide_u64_decimal_round_trips_as_uint64() {
         let wide = Value::from_u64(u64::MAX);
         let bytes = value_to_msgpack(&wide).unwrap();
-        assert_eq!(bytes, [0xCF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(
+            bytes,
+            [0xCF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+        );
         assert_eq!(value_from_msgpack(&bytes).unwrap(), wide);
-        assert_eq!(msgpack_to_json_string(&bytes).unwrap(), "18446744073709551615");
+        assert_eq!(
+            msgpack_to_json_string(&bytes).unwrap(),
+            "18446744073709551615"
+        );
 
         let just_above = Value::from_u64(i64::MAX as u64 + 1);
         let bytes = value_to_msgpack(&just_above).unwrap();

@@ -46,7 +46,11 @@ async fn check(srv: &TestServer, collection: &str) {
         "{collection}: i64::MAX + 1 reads back exactly"
     );
     assert_eq!(
-        column(srv, &format!("SELECT id FROM {collection} WHERE v = {U64_MAX}")).await,
+        column(
+            srv,
+            &format!("SELECT id FROM {collection} WHERE v = {U64_MAX}")
+        )
+        .await,
         vec!["max".to_string()],
         "{collection}: WHERE equality finds u64::MAX"
     );
@@ -107,7 +111,11 @@ async fn negated_literal_reaches_i64_min() {
         .await
         .unwrap();
     assert_eq!(
-        column(&srv, "SELECT v FROM i64_min_doc WHERE v = -9223372036854775808").await,
+        column(
+            &srv,
+            "SELECT v FROM i64_min_doc WHERE v = -9223372036854775808"
+        )
+        .await,
         vec!["-9223372036854775808".to_string()]
     );
 }

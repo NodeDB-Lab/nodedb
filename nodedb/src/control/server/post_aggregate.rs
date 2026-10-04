@@ -235,14 +235,8 @@ mod tests {
             json!(1_700_000_000_000_000_002_i64),
             json!(1_700_000_000_000_000_001_i64),
         ];
-        assert_eq!(
-            agg("min", &vals),
-            Value::Integer(1_700_000_000_000_000_001)
-        );
-        assert_eq!(
-            agg("sum", &vals),
-            Value::Integer(3_400_000_000_000_000_003)
-        );
+        assert_eq!(agg("min", &vals), Value::Integer(1_700_000_000_000_000_001));
+        assert_eq!(agg("sum", &vals), Value::Integer(3_400_000_000_000_000_003));
     }
 
     #[test]

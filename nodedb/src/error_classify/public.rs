@@ -192,6 +192,9 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::UnknownStrictField { column, .. } => NodeDbError::undefined_column(column.clone()),
         Error::DivisionByZero => NodeDbError::division_by_zero(),
         Error::DataException { detail } => NodeDbError::data_exception(detail.clone()),
+        Error::NumericValueOutOfRange { detail } => {
+            NodeDbError::numeric_value_out_of_range(detail.clone())
+        }
         Error::InvalidLimitValue { clause, value } => {
             NodeDbError::invalid_limit_value(*clause, value.clone())
         }

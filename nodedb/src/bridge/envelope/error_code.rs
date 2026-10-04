@@ -163,6 +163,10 @@ pub enum ErrorCode {
     /// different dimensions, an argument of the wrong type, a malformed
     /// JSONPath. Surfaces as SQLSTATE `22000` (`data_exception`).
     DataException { detail: String },
+    /// A computed value lies outside the range of its result type, such as
+    /// an exact integer SUM past the decimal range. SQLSTATE `22003`
+    /// (`numeric_value_out_of_range`).
+    NumericValueOutOfRange { detail: String },
     /// The bridge dispatcher refused the request at a capacity limit, so
     /// nothing was enqueued or applied. Transient: the same request succeeds
     /// once capacity frees. `reason` names the limit and its counts.
@@ -199,8 +203,10 @@ impl From<nodedb_query::EvalError> for ErrorCode {
             nodedb_query::EvalError::UnknownFunction { name } => Self::UndefinedFunction { name },
             e @ (nodedb_query::EvalError::VectorDimensionMismatch { .. }
             | nodedb_query::EvalError::ArgumentType { .. }
-            | nodedb_query::EvalError::InvalidJsonPath { .. }
-            | nodedb_query::EvalError::NumericOverflow { .. }) => Self::DataException {
+            | nodedb_query::EvalError::InvalidJsonPath { .. }) => Self::DataException {
+                detail: e.to_string(),
+            },
+            e @ nodedb_query::EvalError::NumericOverflow { .. } => Self::NumericValueOutOfRange {
                 detail: e.to_string(),
             },
         }
@@ -345,6 +351,10 @@ impl From<crate::Error> for ErrorCode {
             | crate::Error::InvalidLimitValue { .. }) => Self::DataException {
                 detail: e.to_string(),
             },
+            // `22003`, as the Control Plane gives it.
+            crate::Error::NumericValueOutOfRange { detail } => {
+                Self::NumericValueOutOfRange { detail }
+            }
             // `40000`, as the Control Plane gives it.
             e @ crate::Error::CalvinParticipantError => Self::TransactionRollback {
                 detail: e.to_string(),

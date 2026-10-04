@@ -285,8 +285,7 @@ pub(in crate::data::executor) fn merge_staged_hop_pass<'o>(
         collection,
         edge_labels,
     } = *scope;
-    let coll_key: Option<GraphCollKey> =
-        collection.map(|c| (database_id, tenant, c.to_owned()));
+    let coll_key: Option<GraphCollKey> = collection.map(|c| (database_id, tenant, c.to_owned()));
     let mut merged: Vec<StagedNeighbor<'o>> = Vec::with_capacity(durable.len());
     for (label, other) in durable {
         let (src, dst) = pass.endpoints(node, &other);

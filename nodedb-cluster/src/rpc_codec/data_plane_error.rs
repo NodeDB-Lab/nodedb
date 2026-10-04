@@ -182,6 +182,11 @@ pub enum DataPlaneErrorCode {
         column: String,
         fault: DataPlaneTextColumnFault,
     },
+    /// A computed value lies outside the range of its result type (SQLSTATE
+    /// `22003`).
+    NumericValueOutOfRange {
+        detail: String,
+    },
 }
 
 /// Wire mirror of `nodedb_types::text_search::TextColumnFault`.

@@ -32,16 +32,16 @@ impl CoreLoop {
         stored: &[u8],
         sys_from_ms: Option<i64>,
     ) -> crate::Result<WriteSetEntry> {
-        let body = match self.resolve_event_payload(row.database_id, row.tid, row.collection, stored)
-        {
-            StoredImage::Converted(converted) => converted,
-            StoredImage::AsStored => stored.to_vec(),
-            StoredImage::Undecodable => {
-                let error = undecodable_strict_row(row.collection, row.identity.as_str());
-                self.fail_stop_core(FailStopCause::WriteSetUnpersisted, &error.to_string());
-                return Err(error);
-            }
-        };
+        let body =
+            match self.resolve_event_payload(row.database_id, row.tid, row.collection, stored) {
+                StoredImage::Converted(converted) => converted,
+                StoredImage::AsStored => stored.to_vec(),
+                StoredImage::Undecodable => {
+                    let error = undecodable_strict_row(row.collection, row.identity.as_str());
+                    self.fail_stop_core(FailStopCause::WriteSetUnpersisted, &error.to_string());
+                    return Err(error);
+                }
+            };
         Ok(WriteSetEntry::put(row.surrogate, row.identity, body)
             .versioned(sys_from_ms.map(RowVersion::open)))
     }

@@ -146,11 +146,20 @@ mod tests {
             )
             .unwrap()
         };
-        assert!(search("docs").is_empty(), "the cleared collection holds no text");
-        assert_eq!(search("other").len(), 1, "another collection keeps its text");
+        assert!(
+            search("docs").is_empty(),
+            "the cleared collection holds no text"
+        );
+        assert_eq!(
+            search("other").len(),
+            1,
+            "another collection keeps its text"
+        );
         assert_eq!(idx.corpus_stats(DB, t, "docs").unwrap().0, 0);
         assert!(
-            idx.inner.get_collection_fuzzy(DB, t.as_u64(), "docs").unwrap(),
+            idx.inner
+                .get_collection_fuzzy(DB, t.as_u64(), "docs")
+                .unwrap(),
             "the fuzzy configuration survives"
         );
     }

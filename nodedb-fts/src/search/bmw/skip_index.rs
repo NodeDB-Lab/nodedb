@@ -172,10 +172,7 @@ mod tests {
     fn lookup_finds_postings_across_blocks() {
         let ids: Vec<u32> = (0..300).map(|i| i * 2).collect();
         let tb = make_term_blocks(&ids, 3);
-        assert_eq!(
-            tb.lookup(Surrogate(0)),
-            Some((3, smallfloat::encode(100)))
-        );
+        assert_eq!(tb.lookup(Surrogate(0)), Some((3, smallfloat::encode(100))));
         assert_eq!(
             tb.lookup(Surrogate(400)),
             Some((3, smallfloat::encode(100)))

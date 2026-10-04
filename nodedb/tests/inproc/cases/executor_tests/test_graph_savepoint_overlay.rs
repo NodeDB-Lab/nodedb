@@ -47,12 +47,7 @@ pub(super) fn send_txn(
     resp_rx.try_pop().unwrap().inner
 }
 
-pub(super) fn stage_edge_put(
-    collection: &str,
-    src: &str,
-    label: &str,
-    dst: &str,
-) -> PhysicalPlan {
+pub(super) fn stage_edge_put(collection: &str, src: &str, label: &str, dst: &str) -> PhysicalPlan {
     stage_edge_put_with(collection, src, label, dst, Vec::new())
 }
 
@@ -80,7 +75,12 @@ pub(super) fn stage_edge_put_with(
     })
 }
 
-pub(super) fn stage_edge_delete(collection: &str, src: &str, label: &str, dst: &str) -> PhysicalPlan {
+pub(super) fn stage_edge_delete(
+    collection: &str,
+    src: &str,
+    label: &str,
+    dst: &str,
+) -> PhysicalPlan {
     PhysicalPlan::Meta(MetaOp::StageWrite {
         plan: Box::new(PhysicalPlan::Graph(GraphOp::EdgeDelete {
             collection: nodedb_types::QualifiedCollection::new(

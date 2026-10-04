@@ -185,7 +185,8 @@ impl CoreLoop {
                     Ok(outcome) => target_writes = outcome.target_writes,
                     Err(e) => {
                         let code = refusal_after_rows(truncated, e);
-                        return self.truncate_refusal(task, tid, collection, code, &removed, write_set);
+                        return self
+                            .truncate_refusal(task, tid, collection, code, &removed, write_set);
                     }
                 }
             }
@@ -267,10 +268,11 @@ impl CoreLoop {
 
         // Every row is removed: empty the collection's inverted index in one
         // purge. Its analyzer, language, and fuzzy configuration stay.
-        if let Err(e) =
-            self.inverted
-                .clear_collection(database_id, crate::types::TenantId::new(tid), collection)
-        {
+        if let Err(e) = self.inverted.clear_collection(
+            database_id,
+            crate::types::TenantId::new(tid),
+            collection,
+        ) {
             let code = refusal_after_rows(
                 truncated,
                 ErrorCode::Internal {

@@ -75,9 +75,9 @@ impl CoreLoop {
     ) -> crate::Result<Vec<String>> {
         let mut canonical = Vec::with_capacity(terms.len());
         for term in terms {
-            let tokens = self
-                .inverted
-                .analyze_for_collection(database_id, tid, collection, term)?;
+            let tokens =
+                self.inverted
+                    .analyze_for_collection(database_id, tid, collection, term)?;
             canonical.push(tokens.into_iter().next().unwrap_or_else(|| term.clone()));
         }
         Ok(canonical)

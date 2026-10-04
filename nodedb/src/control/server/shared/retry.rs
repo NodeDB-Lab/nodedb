@@ -121,6 +121,7 @@ impl RetryableSchemaChange for Error {
             | Error::UnknownStrictField { .. }
             | Error::DivisionByZero
             | Error::DataException { .. }
+            | Error::NumericValueOutOfRange { .. }
             | Error::InvalidLimitValue { .. }
             | Error::RetryableLeaderChange { .. }
             | Error::CommittedResultUnavailable { .. }

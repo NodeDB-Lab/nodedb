@@ -142,7 +142,11 @@ async fn document_schemaless_mixed_int_float() {
         .await
         .unwrap();
     assert_eq!(rows.len(), 1, "one aggregate row, got {rows:?}");
-    assert_eq!(rows[0][0].parse::<f64>().unwrap(), 0.5, "MIN keeps the float");
+    assert_eq!(
+        rows[0][0].parse::<f64>().unwrap(),
+        0.5,
+        "MIN keeps the float"
+    );
     assert_eq!(
         rows[0][1].parse::<i128>().unwrap(),
         i128::from(ABOVE),
@@ -153,4 +157,55 @@ async fn document_schemaless_mixed_int_float() {
         (ABOVE + 2) as f64 + 0.5,
         "SUM with a float input is a float"
     );
+}
+
+/// A SUM whose exact total lies past the decimal range is refused as
+/// `numeric_value_out_of_range`, the code a Control-Plane overflow carries.
+/// Each input fits the decimal range, so the overflow is in the aggregate
+/// itself.
+#[tokio::test]
+async fn document_schemaless_sum_past_decimal_range_is_22003() {
+    let srv = TestServer::start().await;
+    srv.exec("CREATE COLLECTION huge WITH (engine='document_schemaless')")
+        .await
+        .unwrap();
+    srv.exec(
+        "INSERT INTO huge (id, v) VALUES \
+         ('a', 50000000000000000000000000000), ('b', 50000000000000000000000000000)",
+    )
+    .await
+    .unwrap();
+    srv.expect_error("SELECT SUM(v) FROM huge", "SQLSTATE 22003")
+        .await;
+}
+
+/// SUM over a `DECIMAL` column with fractions is the exact decimal total.
+/// `0.1 + 0.2 + 0.3` through `f64` is `0.6000000000000001`.
+#[tokio::test]
+async fn decimal_column_sums_exactly() {
+    let srv = TestServer::start().await;
+    for (name, create) in [
+        (
+            "dec_strict",
+            "CREATE COLLECTION dec_strict (id TEXT PRIMARY KEY, v DECIMAL) \
+             WITH (engine='document_strict')",
+        ),
+        (
+            "dec_columnar",
+            "CREATE COLLECTION dec_columnar COLUMNS (id TEXT, v DECIMAL) \
+             WITH (engine='columnar')",
+        ),
+    ] {
+        srv.exec(create).await.unwrap();
+        srv.exec(&format!(
+            "INSERT INTO {name} (id, v) VALUES ('a', 0.1), ('b', 0.2), ('c', 0.3)"
+        ))
+        .await
+        .unwrap();
+        let rows = srv
+            .query_rows(&format!("SELECT SUM(v) FROM {name}"))
+            .await
+            .unwrap();
+        assert_eq!(rows, vec![vec!["0.6".to_string()]], "{name}");
+    }
 }

@@ -66,7 +66,13 @@ async fn negated_terms_are_excluded_before_the_limit() {
     let srv = TestServer::start().await;
     create(&srv, "fts_not_limit").await;
     for i in 0..4 {
-        insert(&srv, "fts_not_limit", &format!("p{i}"), "body: 'rust rust rust python'").await;
+        insert(
+            &srv,
+            "fts_not_limit",
+            &format!("p{i}"),
+            "body: 'rust rust rust python'",
+        )
+        .await;
     }
     insert(&srv, "fts_not_limit", "k1", "body: 'rust tooling'").await;
     insert(&srv, "fts_not_limit", "k2", "body: 'rust compiler'").await;
@@ -77,7 +83,11 @@ async fn negated_terms_are_excluded_before_the_limit() {
         .unwrap();
     let mut got = ids(&rows);
     got.sort_unstable();
-    assert_eq!(got, vec!["k1", "k2"], "two rows survive the negation: {rows:?}");
+    assert_eq!(
+        got,
+        vec!["k1", "k2"],
+        "two rows survive the negation: {rows:?}"
+    );
 }
 
 /// Many rows out-score the single AND match on one word. The AND match is
@@ -87,10 +97,28 @@ async fn an_and_match_is_found_past_single_word_out_scorers() {
     let srv = TestServer::start().await;
     create(&srv, "fts_and_limit").await;
     for i in 0..30 {
-        insert(&srv, "fts_and_limit", &format!("a{i}"), "body: 'alpha alpha alpha'").await;
-        insert(&srv, "fts_and_limit", &format!("b{i}"), "body: 'bravo bravo bravo'").await;
+        insert(
+            &srv,
+            "fts_and_limit",
+            &format!("a{i}"),
+            "body: 'alpha alpha alpha'",
+        )
+        .await;
+        insert(
+            &srv,
+            "fts_and_limit",
+            &format!("b{i}"),
+            "body: 'bravo bravo bravo'",
+        )
+        .await;
     }
-    insert(&srv, "fts_and_limit", "both", "body: 'alpha bravo and more words'").await;
+    insert(
+        &srv,
+        "fts_and_limit",
+        "both",
+        "body: 'alpha bravo and more words'",
+    )
+    .await;
 
     let rows = srv
         .query_rows(
@@ -113,12 +141,19 @@ async fn rls_restricts_matches_before_the_limit() {
         let owner = if i % 2 == 0 { user } else { "other" };
         // The rows the policy hides hold the term more often, so they would
         // fill the limit if the policy ran after ranking.
-        let body = if i % 2 == 0 { "widget" } else { "widget widget widget" };
+        let body = if i % 2 == 0 {
+            "widget"
+        } else {
+            "widget widget widget"
+        };
         insert(
             &srv,
             "fts_rls_limit",
             &format!("w{i}"),
-            &format!("owner: '{owner}', tag: '{}', body: '{body}'", if i < 4 { "x" } else { "y" }),
+            &format!(
+                "owner: '{owner}', tag: '{}', body: '{body}'",
+                if i < 4 { "x" } else { "y" }
+            ),
         )
         .await;
     }
@@ -139,7 +174,10 @@ async fn rls_restricts_matches_before_the_limit() {
     .unwrap();
     assert_eq!(rows.len(), 3, "three admitted matches exist: {rows:?}");
     for id in &rows {
-        assert!(["w0", "w2", "w4", "w6"].contains(&id.as_str()), "{id} is admitted: {rows:?}");
+        assert!(
+            ["w0", "w2", "w4", "w6"].contains(&id.as_str()),
+            "{id} is admitted: {rows:?}"
+        );
     }
 
     // With a residual filter too, both restrict the candidates.
@@ -163,7 +201,13 @@ async fn staged_rows_are_ranked_before_the_limit() {
     create(&srv, "fts_txn_limit").await;
     insert(&srv, "fts_txn_limit", "top", "body: 'rust rust rust rust'").await;
     insert(&srv, "fts_txn_limit", "mid", "body: 'rust rust lang'").await;
-    insert(&srv, "fts_txn_limit", "low", "body: 'rust tooling compiler words'").await;
+    insert(
+        &srv,
+        "fts_txn_limit",
+        "low",
+        "body: 'rust tooling compiler words'",
+    )
+    .await;
 
     srv.exec("BEGIN").await.unwrap();
     srv.exec("UPDATE fts_txn_limit SET body = 'golang only' WHERE id = 'top'")
@@ -190,7 +234,11 @@ async fn staged_rows_are_ranked_before_the_limit() {
         )
         .await
         .unwrap();
-    assert_eq!(ids(&rows), vec!["both", "mid"], "AND matches only: {rows:?}");
+    assert_eq!(
+        ids(&rows),
+        vec!["both", "mid"],
+        "AND matches only: {rows:?}"
+    );
     srv.exec("ROLLBACK").await.unwrap();
 }
 
@@ -221,7 +269,11 @@ async fn an_id_filter_matches_a_key_only_row() {
         ))
         .await
         .unwrap();
-    assert_eq!(ids(&rows), vec![id.as_str()], "the id filter admits it: {rows:?}");
+    assert_eq!(
+        ids(&rows),
+        vec![id.as_str()],
+        "the id filter admits it: {rows:?}"
+    );
 }
 
 /// A redacted column cannot be matched or scored: both are computed over
@@ -298,7 +350,13 @@ async fn truncate_empties_the_text_index() {
     let srv = TestServer::start().await;
     create(&srv, "fts_truncate").await;
     for i in 0..5 {
-        insert(&srv, "fts_truncate", &format!("t{i}"), "body: 'basalt column'").await;
+        insert(
+            &srv,
+            "fts_truncate",
+            &format!("t{i}"),
+            "body: 'basalt column'",
+        )
+        .await;
     }
     srv.exec("TRUNCATE fts_truncate").await.unwrap();
 
@@ -313,5 +371,9 @@ async fn truncate_empties_the_text_index() {
         .query_rows("SELECT id FROM fts_truncate WHERE text_match(body, 'basalt')")
         .await
         .unwrap();
-    assert_eq!(ids(&rows), vec!["n1"], "new text indexes after TRUNCATE: {rows:?}");
+    assert_eq!(
+        ids(&rows),
+        vec!["n1"],
+        "new text indexes after TRUNCATE: {rows:?}"
+    );
 }

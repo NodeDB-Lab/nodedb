@@ -97,9 +97,7 @@ fn check_columns(expr: &SqlExpr, scope: &TableScope) -> Result<()> {
 mod tests {
     use super::*;
     use crate::catalog::SqlCatalogError;
-    use crate::types::{
-        BinaryOp, CollectionInfo, ColumnInfo, EngineType, SqlDataType, SqlValue,
-    };
+    use crate::types::{BinaryOp, CollectionInfo, ColumnInfo, EngineType, SqlDataType, SqlValue};
 
     struct OneCollection;
 

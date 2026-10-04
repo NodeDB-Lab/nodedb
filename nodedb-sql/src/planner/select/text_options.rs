@@ -31,10 +31,7 @@ pub(super) struct TextOptions {
 
 /// Parse the named options of `function`'s argument list. The first two
 /// positional arguments (column, query) are skipped.
-pub(super) fn parse_text_options(
-    function: &str,
-    args: &[ast::FunctionArg],
-) -> Result<TextOptions> {
+pub(super) fn parse_text_options(function: &str, args: &[ast::FunctionArg]) -> Result<TextOptions> {
     let mut params = TextSearchParams::default();
     let mut mode_seen = false;
     let mut fuzzy_seen = false;
@@ -151,9 +148,7 @@ fn parse_mode(function: &str, value: &ast::Expr) -> Result<QueryMode> {
     };
     text.and_then(QueryMode::parse)
         .ok_or_else(|| SqlError::Unsupported {
-            detail: format!(
-                "{function}(): option 'mode' expects 'or' or 'and', got {value}"
-            ),
+            detail: format!("{function}(): option 'mode' expects 'or' or 'and', got {value}"),
         })
 }
 

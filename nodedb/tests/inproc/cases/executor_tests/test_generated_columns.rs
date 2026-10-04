@@ -44,6 +44,7 @@ fn register_with_generated(
             conflict_policy: None,
             timeseries: None,
             vector_primary: None,
+            vector_fields: Vec::new(),
         }),
     );
 }

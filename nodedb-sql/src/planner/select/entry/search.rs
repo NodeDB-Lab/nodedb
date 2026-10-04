@@ -239,6 +239,25 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_column_argument_matches_no_vector_distance_signature() {
+        let err = try_plan_select_sql(
+            "SELECT id FROM embeddings ORDER BY vector_distance(embedding) LIMIT 5",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            SqlError::UndefinedFunction {
+                name: "vector_distance".into()
+            }
+        );
+        // The one-argument query-vector form still plans a search.
+        let plan = plan_select_sql(
+            "SELECT id FROM embeddings ORDER BY vector_distance(ARRAY[1.0, 0.0]) LIMIT 5",
+        );
+        assert!(matches!(plan, SqlPlan::VectorSearch { .. }));
+    }
+
+    #[test]
     fn cosine_distance_operator_yields_cosine_metric() {
         // The <=> operator rewrites to vector_cosine_distance(...).
         let plan = plan_select_sql(
@@ -572,9 +591,8 @@ mod tests {
 
     #[test]
     fn text_match_mode_option_reaches_the_plan() {
-        let plan = plan_select_sql(
-            "SELECT id FROM docs WHERE text_match(body, 'rust db', mode => 'and')",
-        );
+        let plan =
+            plan_select_sql("SELECT id FROM docs WHERE text_match(body, 'rust db', mode => 'and')");
         assert_eq!(match_options(text_plan(&plan)), (QueryMode::And, false));
         let plan =
             plan_select_sql("SELECT id FROM docs WHERE text_match(body, 'rust db', mode => 'or')");
@@ -628,11 +646,17 @@ mod tests {
     fn an_unknown_text_option_is_refused() {
         let detail =
             unsupported_detail("SELECT id FROM docs WHERE text_match(body, 'x', boost => 2)");
-        assert!(detail.contains("unknown text-search option 'boost'"), "{detail}");
+        assert!(
+            detail.contains("unknown text-search option 'boost'"),
+            "{detail}"
+        );
         let detail = unsupported_detail(
             "SELECT id FROM docs ORDER BY bm25_score(body, 'x', slop => 1) LIMIT 5",
         );
-        assert!(detail.contains("unknown text-search option 'slop'"), "{detail}");
+        assert!(
+            detail.contains("unknown text-search option 'slop'"),
+            "{detail}"
+        );
     }
 
     #[test]
@@ -644,12 +668,10 @@ mod tests {
 
     #[test]
     fn a_positional_third_text_argument_is_refused() {
-        let detail =
-            unsupported_detail("SELECT id FROM docs WHERE text_match(body, 'x', 'fuzzy')");
+        let detail = unsupported_detail("SELECT id FROM docs WHERE text_match(body, 'x', 'fuzzy')");
         assert!(detail.contains("third positional argument"), "{detail}");
-        let detail = unsupported_detail(
-            "SELECT id FROM docs WHERE text_match(body, 'x', { fuzzy: true })",
-        );
+        let detail =
+            unsupported_detail("SELECT id FROM docs WHERE text_match(body, 'x', { fuzzy: true })");
         assert!(detail.contains("third positional argument"), "{detail}");
     }
 

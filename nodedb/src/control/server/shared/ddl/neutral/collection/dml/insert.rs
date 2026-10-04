@@ -365,7 +365,8 @@ async fn insert_parsed(
 
 /// The `(field, sql_type)` pairs a schemaless write contributes to the
 /// collection's inferred projection. `id` is the document key, never a
-/// projected column.
+/// projected column. An integer infers `BIGINT`: the value is an `i64`, and
+/// `INT` declares the 32-bit width that range-checks every later write.
 fn inferred_field_types(
     fields: &std::collections::HashMap<String, nodedb_types::Value>,
 ) -> Vec<(String, String)> {
@@ -375,7 +376,7 @@ fn inferred_field_types(
         .map(|(name, value)| {
             let sql_type = match value {
                 nodedb_types::Value::Float(_) => "FLOAT",
-                nodedb_types::Value::Integer(_) => "INT",
+                nodedb_types::Value::Integer(_) => "BIGINT",
                 nodedb_types::Value::Bool(_) => "BOOL",
                 _ => "TEXT",
             };

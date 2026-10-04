@@ -58,7 +58,11 @@ async fn assert_rows_unchanged(server: &TestServer, name: &str) {
         .query_text(&format!("SELECT v FROM {name} WHERE id = 'k1'"))
         .await
         .expect("point read");
-    assert_eq!(by_key, vec!["one".to_string()], "k1 stays addressable by its key");
+    assert_eq!(
+        by_key,
+        vec!["one".to_string()],
+        "k1 stays addressable by its key"
+    );
 }
 
 const SHAPES: [&str; 3] = [

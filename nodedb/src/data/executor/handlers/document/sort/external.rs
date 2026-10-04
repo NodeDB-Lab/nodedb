@@ -44,10 +44,13 @@ impl CoreLoop {
     /// not by tempfile auto-delete. The merge reads each run back incrementally
     /// via [`UringSeqReader`] — one row at a time — so peak read memory is one
     /// refill buffer per run, not the whole run.
+    ///
+    /// `decimal_keys` flags the keys `decimal_sort_keys` found `DECIMAL`.
     pub(in crate::data::executor) fn external_sort(
         &self,
         rows: Vec<(String, Vec<u8>)>,
         sort_keys: &[SortKeySpec],
+        decimal_keys: &[bool],
         output_limit: usize,
     ) -> crate::Result<Vec<(String, Vec<u8>)>> {
         // Spill directory for the named sort run files. `create_dir_all` is a
@@ -73,7 +76,7 @@ impl CoreLoop {
 
         for (run_idx, chunk) in rows.chunks(self.query_tuning.sort_run_size).enumerate() {
             let mut run: Vec<(String, Vec<u8>)> = chunk.to_vec();
-            sort_rows(&mut run, sort_keys)?;
+            sort_rows(&mut run, sort_keys, decimal_keys)?;
 
             // Build the framed run into one buffer and write it in a single
             // pass. Writing each tiny frame field separately would be hundreds
@@ -121,6 +124,7 @@ impl CoreLoop {
                     record,
                     run_idx: reader.run_idx,
                     sort_keys: sort_keys.to_vec(),
+                    decimal_keys: decimal_keys.to_vec(),
                 }));
             }
         }
@@ -137,6 +141,7 @@ impl CoreLoop {
                     record: next,
                     run_idx,
                     sort_keys: sort_keys.to_vec(),
+                    decimal_keys: decimal_keys.to_vec(),
                 }));
             }
         }
@@ -284,6 +289,7 @@ struct MergeEntry {
     record: SortRecord,
     run_idx: usize,
     sort_keys: Vec<SortKeySpec>,
+    decimal_keys: Vec<bool>,
 }
 
 impl PartialEq for MergeEntry {
@@ -305,9 +311,19 @@ impl Ord for MergeEntry {
         // Rows spilled with evaluated keys are merged by those keys; a
         // column-only sort carries none and compares straight from the bytes.
         if self.record.keys.is_empty() && other.record.keys.is_empty() {
-            compare_docs_by_keys_binary(&self.record.doc, &other.record.doc, &self.sort_keys)
+            compare_docs_by_keys_binary(
+                &self.record.doc,
+                &other.record.doc,
+                &self.sort_keys,
+                &self.decimal_keys,
+            )
         } else {
-            compare_sort_values(&self.record.keys, &other.record.keys, &self.sort_keys)
+            compare_sort_values(
+                &self.record.keys,
+                &other.record.keys,
+                &self.sort_keys,
+                &self.decimal_keys,
+            )
         }
     }
 }
@@ -372,6 +388,7 @@ mod tests {
                     record: r,
                     run_idx: reader.run_idx,
                     sort_keys: sort_keys.clone(),
+                    decimal_keys: Vec::new(),
                 }));
             }
         }
@@ -385,6 +402,7 @@ mod tests {
                     record: next,
                     run_idx,
                     sort_keys: sort_keys.clone(),
+                    decimal_keys: Vec::new(),
                 }));
             }
         }

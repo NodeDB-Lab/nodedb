@@ -191,7 +191,16 @@ mod tests {
                 .unwrap();
         }
         map.into_iter()
-            .map(|(k, s)| (k, s.finalize(specs).into_iter().map(|(_, v)| v).collect()))
+            .map(|(k, s)| {
+                (
+                    k,
+                    s.finalize(specs)
+                        .expect("finalize")
+                        .into_iter()
+                        .map(|(_, v)| v)
+                        .collect(),
+                )
+            })
             .collect()
     }
 
@@ -201,7 +210,16 @@ mod tests {
     ) -> HashMap<String, Vec<Value>> {
         result
             .into_iter()
-            .map(|(k, s)| (k, s.finalize(specs).into_iter().map(|(_, v)| v).collect()))
+            .map(|(k, s)| {
+                (
+                    k,
+                    s.finalize(specs)
+                        .expect("finalize")
+                        .into_iter()
+                        .map(|(_, v)| v)
+                        .collect(),
+                )
+            })
             .collect()
     }
 

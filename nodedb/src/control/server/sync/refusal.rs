@@ -62,6 +62,7 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
             | ErrorCode::DivisionByZero
             | ErrorCode::UndefinedFunction { .. }
             | ErrorCode::DataException { .. }
+            | ErrorCode::NumericValueOutOfRange { .. }
             | ErrorCode::DispatchCapacity { .. }
             | ErrorCode::ExpiredBeforeExecution
             | ErrorCode::BadRequest { .. }
@@ -122,6 +123,7 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
         | crate::Error::UnknownStrictField { .. }
         | crate::Error::DivisionByZero
         | crate::Error::DataException { .. }
+        | crate::Error::NumericValueOutOfRange { .. }
         | crate::Error::InvalidLimitValue { .. }
         | crate::Error::RetryableSchemaChanged { .. }
         | crate::Error::RetryableLeaderChange { .. }
@@ -278,6 +280,7 @@ fn is_indeterminate(error: &crate::Error) -> bool {
         | crate::Error::UnknownStrictField { .. }
         | crate::Error::DivisionByZero
         | crate::Error::DataException { .. }
+        | crate::Error::NumericValueOutOfRange { .. }
         | crate::Error::InvalidLimitValue { .. }
         | crate::Error::ExecutionLimitExceeded { .. }
         | crate::Error::LimitExceeded { .. }
@@ -372,6 +375,7 @@ fn is_indeterminate_code(code: &ErrorCode) -> bool {
         | ErrorCode::DivisionByZero
         | ErrorCode::UndefinedFunction { .. }
         | ErrorCode::DataException { .. }
+        | ErrorCode::NumericValueOutOfRange { .. }
         | ErrorCode::BadRequest { .. }
         | ErrorCode::ActiveSqlTransaction { .. }
         | ErrorCode::DependentObjectsExist { .. } => false,

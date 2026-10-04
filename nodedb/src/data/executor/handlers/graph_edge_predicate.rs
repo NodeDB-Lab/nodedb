@@ -101,10 +101,13 @@ impl<'a> HopEdgeProperties<'a> {
             Some(bytes) => Cow::Borrowed(bytes),
             None => Cow::Owned(self.stored(src, label, dst)?),
         };
-        let admitted = nodedb_query::metadata_filter::matches_all_msgpack(&properties, self.filters)
-            .map_err(|e| crate::Error::Codec {
-                detail: format!("edge ({src})-[{label}]->({dst}) properties do not decode: {e}"),
-            })?;
+        let admitted = nodedb_query::metadata_filter::matches_all_msgpack(
+            &properties,
+            self.filters,
+        )
+        .map_err(|e| crate::Error::Codec {
+            detail: format!("edge ({src})-[{label}]->({dst}) properties do not decode: {e}"),
+        })?;
         if !admitted {
             return Ok(EdgeCrossing::Rejected);
         }
@@ -344,7 +347,10 @@ mod tests {
             hop.cross("a", "L", "b", Some(&staged)).unwrap(),
             EdgeCrossing::Rejected
         ));
-        assert!(hop.reader.is_none(), "a staged map reads nothing from the store");
+        assert!(
+            hop.reader.is_none(),
+            "a staged map reads nothing from the store"
+        );
         let fresh = nodedb_types::json_msgpack::json_to_msgpack(&serde_json::json!({"score": 7}))
             .expect("encode");
         match hop.cross("a", "L", "new", Some(&fresh)).unwrap() {

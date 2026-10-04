@@ -393,7 +393,10 @@ mod tests {
                 "INSERT".to_string(),
                 vec![state_of(AggFunction::Sum, &[10, 20, 30, 40])],
             ),
-            ("UPDATE".to_string(), vec![state_of(AggFunction::Sum, &[5, 15])]),
+            (
+                "UPDATE".to_string(),
+                vec![state_of(AggFunction::Sum, &[5, 15])],
+            ),
         ];
 
         persist

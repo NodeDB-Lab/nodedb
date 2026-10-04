@@ -199,11 +199,22 @@ impl CoreLoop {
             );
             match scan_result {
                 Ok(mut docs) => {
+                    let sort_keys = [nodedb_physical::physical_plan::SortKeySpec::column(
+                        field, true,
+                    )];
+                    let strict_schema = self.strict_schema_for(
+                        task.request.database_id,
+                        crate::types::TenantId::new(tid),
+                        collection,
+                    );
+                    let decimal_keys = super::super::document::sort::decimal_sort_keys(
+                        &sort_keys,
+                        strict_schema.as_ref(),
+                    );
                     if let Err(e) = super::super::document::sort::sort_rows(
                         &mut docs,
-                        &[nodedb_physical::physical_plan::SortKeySpec::column(
-                            field, true,
-                        )],
+                        &sort_keys,
+                        &decimal_keys,
                     ) {
                         return self.response_error(
                             task,

@@ -108,7 +108,10 @@ mod tests {
     fn integer_decimal_past_64_bits_keeps_exact_digits() {
         let big = rust_decimal::Decimal::from_i128_with_scale(2 * i128::from(u64::MAX), 0);
         let json = serde_json::Value::from(Value::Decimal(big));
-        assert_eq!(json, serde_json::Value::String("36893488147419103230".into()));
+        assert_eq!(
+            json,
+            serde_json::Value::String("36893488147419103230".into())
+        );
         let max = serde_json::Value::from(Value::Decimal(rust_decimal::Decimal::from(u64::MAX)));
         assert_eq!(max, serde_json::json!(u64::MAX));
     }

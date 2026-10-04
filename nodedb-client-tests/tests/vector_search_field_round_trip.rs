@@ -27,13 +27,8 @@ async fn vector_search_field_must_not_silently_delegate_to_unfielded() {
 
     // Provision a vector-primary collection with an explicit
     // `body_embedding` column and seed it so the search has real data
-    // to return. `primary='vector'` is the server contract that wires
-    // the named-field HNSW index — `vector_distance(body_embedding,
-    // ARRAY[...])` resolves through it. Plain `engine='vector'`
-    // without `primary='vector'` would store the row only in the
-    // document body and the named-field HNSW index would never get
-    // populated, masking a broken trait default behind an empty result
-    // set.
+    // to return. `primary='vector'` wires the named-field HNSW index —
+    // `vector_distance(body_embedding, ARRAY[...])` resolves through it.
     remote
         .execute_sql(
             "CREATE COLLECTION embeddings_multi \

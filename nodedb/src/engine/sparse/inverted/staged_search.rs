@@ -5,9 +5,7 @@
 //! score columns read by point lookups.
 
 use nodedb_fts::posting::TextSearchResult;
-use nodedb_fts::{
-    DocScore, DocScorer, FtsSearchParams, IndexScope, StagedView, TextQuery,
-};
+use nodedb_fts::{DocScore, DocScorer, FtsSearchParams, IndexScope, StagedView, TextQuery};
 use nodedb_types::{Surrogate, SurrogateBitmap, TenantId};
 
 use super::core::InvertedIndex;

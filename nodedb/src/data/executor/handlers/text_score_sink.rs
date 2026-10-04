@@ -82,7 +82,10 @@ impl Ord for Ranked {
 /// Where scored rows go.
 enum Target {
     /// Every row, in arrival order. `limit` stops the scan once reached.
-    All { rows: Vec<DocumentRow>, limit: Option<usize> },
+    All {
+        rows: Vec<DocumentRow>,
+        limit: Option<usize>,
+    },
     /// The first `limit` rows in `order`.
     Top {
         heap: BinaryHeap<Ranked>,

@@ -9,6 +9,8 @@
 //! system-catalog column layout changes.
 
 pub(crate) mod dropped_collection;
+pub(crate) mod search_hit;
 pub(crate) mod value;
 
 pub(crate) use dropped_collection::parse_dropped_collection_rows;
+pub(crate) use search_hit::{HitSource, decode_search_hits};

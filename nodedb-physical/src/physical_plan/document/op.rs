@@ -268,6 +268,11 @@ pub enum DocumentOp {
         /// `WITH (primary='vector')`. Both plain and vector-primary rows are
         /// legal MessagePack maps — this is the only way to tell them apart.
         vector_primary: Option<Box<nodedb_types::VectorPrimaryConfig>>,
+        /// Declared `VECTOR(n)` columns of a schemaless collection, as
+        /// `(column, n)`. A document write indexes each one into its
+        /// field's vector index, as a strict schema's vector columns are.
+        /// Empty for every other collection.
+        vector_fields: Vec<(String, usize)>,
     },
 
     /// Lookup documents by secondary index value.

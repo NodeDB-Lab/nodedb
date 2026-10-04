@@ -33,7 +33,10 @@ pub(in crate::data::executor) struct TextRowGate {
 
 impl TextRowGate {
     /// Decode the serialized `Vec<ScanFilter>` of both predicate sets.
-    pub(in crate::data::executor) fn new(filters: &[u8], rls_filters: &[u8]) -> crate::Result<Self> {
+    pub(in crate::data::executor) fn new(
+        filters: &[u8],
+        rls_filters: &[u8],
+    ) -> crate::Result<Self> {
         Ok(Self {
             filters: decode_scan_filters(filters, "text search filters")?,
             rls: decode_scan_filters(rls_filters, "text search RLS filters")?,

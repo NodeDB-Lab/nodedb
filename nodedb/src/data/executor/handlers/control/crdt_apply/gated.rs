@@ -308,8 +308,11 @@ impl CoreLoop {
             // Holding the mark keeps it on the sender, and the store recorded
             // the refusal in the black box.
             GateOutcome::Applied(ValidatedApplyOutcome::Rejected(vt)) => {
-                match self.store_crdt_dead_letter(task.request.database_id, tenant_id, task.wal_lsn())
-                {
+                match self.store_crdt_dead_letter(
+                    task.request.database_id,
+                    tenant_id,
+                    task.wal_lsn(),
+                ) {
                     Ok(()) => GateDisposition::Terminal(vt),
                     Err(error) => {
                         warn!(

@@ -117,7 +117,14 @@ async fn text_search_returns_real_matches() {
 
     // A typo matches only through the fuzzy fallback.
     let exact = remote
-        .text_search("docs", "body", "machime", 10, TextSearchParams::default(), None)
+        .text_search(
+            "docs",
+            "body",
+            "machime",
+            10,
+            TextSearchParams::default(),
+            None,
+        )
         .await
         .expect("non-fuzzy text_search");
     assert!(exact.is_empty(), "no exact match for a typo; got {exact:?}");

@@ -84,7 +84,8 @@ mod tests {
             scores: vec![TextScoreSpec {
                 field: None,
                 query: "q".into(),
-                mode: nodedb_types::text_search::QueryMode::And, fuzzy: false,
+                mode: nodedb_types::text_search::QueryMode::And,
+                fuzzy: false,
                 alias: "s".into(),
             }],
             bound: None,

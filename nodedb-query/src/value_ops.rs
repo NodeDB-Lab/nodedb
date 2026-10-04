@@ -215,7 +215,10 @@ mod tests {
         let above = Value::Integer(9_007_199_254_740_993);
         let float = Value::Float(9_007_199_254_740_992.0);
         assert!(!coerced_eq(&above, &float));
-        assert_eq!(partial_compare_values(&above, &float), Some(Ordering::Greater));
+        assert_eq!(
+            partial_compare_values(&above, &float),
+            Some(Ordering::Greater)
+        );
         assert_eq!(partial_compare_values(&float, &above), Some(Ordering::Less));
         assert_eq!(
             partial_compare_values(&Value::Integer(2), &Value::Float(2.5)),

@@ -43,7 +43,11 @@ pub(in crate::data::executor) struct TextFlush<'a> {
 
 impl<'a> TextFlush<'a> {
     /// Flush once a full batch is pending.
-    pub(in crate::data::executor) fn full_batch(tid: u64, collection: &'a str, affected: u64) -> Self {
+    pub(in crate::data::executor) fn full_batch(
+        tid: u64,
+        collection: &'a str,
+        affected: u64,
+    ) -> Self {
         Self {
             tid,
             collection,
@@ -53,7 +57,11 @@ impl<'a> TextFlush<'a> {
     }
 
     /// Flush whatever is pending: the statement's last batch.
-    pub(in crate::data::executor) fn remainder(tid: u64, collection: &'a str, affected: u64) -> Self {
+    pub(in crate::data::executor) fn remainder(
+        tid: u64,
+        collection: &'a str,
+        affected: u64,
+    ) -> Self {
         Self {
             tid,
             collection,

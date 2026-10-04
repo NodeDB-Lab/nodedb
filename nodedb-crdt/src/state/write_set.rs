@@ -359,9 +359,16 @@ fn place_of_container(doc: &LoroDoc, container: &ContainerID) -> ContainerPlace 
             }
             ContainerPlace::Row(name.to_string(), row_id.to_string())
         }
-        [(root @ ContainerID::Root { name, container_type }, _), ..]
-            if *container_type != ContainerType::Map && !root.is_mergeable() =>
-        {
+        [
+            (
+                root @ ContainerID::Root {
+                    name,
+                    container_type,
+                },
+                _,
+            ),
+            ..,
+        ] if *container_type != ContainerType::Map && !root.is_mergeable() => {
             ContainerPlace::Misplaced(ShapeFault::NonMapRoot {
                 container: name.to_string(),
                 container_type: format!("{container_type:?}"),
@@ -798,7 +805,9 @@ mod tests {
         winner.import(&loser.export_snapshot().unwrap()).unwrap();
 
         let loser_before = loser.oplog_version_vector();
-        row_map(&loser, "users", "u1").insert("name", s("lose")).unwrap();
+        row_map(&loser, "users", "u1")
+            .insert("name", s("lose"))
+            .unwrap();
         row_map(&winner, "users", "u1")
             .insert("name", s("win"))
             .unwrap();
@@ -827,7 +836,9 @@ mod tests {
         dst.import(&src.export_snapshot().unwrap()).unwrap();
 
         let before = src.oplog_version_vector();
-        row_map(&src, "pages", "p1").insert("title", s("u")).unwrap();
+        row_map(&src, "pages", "p1")
+            .insert("title", s("u"))
+            .unwrap();
         src.delete("pages", "p1").unwrap();
         let delta = src.export_updates_since(&before).unwrap();
 

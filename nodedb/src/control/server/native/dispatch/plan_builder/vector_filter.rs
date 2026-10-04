@@ -144,7 +144,10 @@ mod tests {
     use super::*;
 
     fn lowered(filter: &MetadataFilter) -> String {
-        format!("{:?}", metadata_filter_predicate(filter).expect("filter lowers"))
+        format!(
+            "{:?}",
+            metadata_filter_predicate(filter).expect("filter lowers")
+        )
     }
 
     #[test]

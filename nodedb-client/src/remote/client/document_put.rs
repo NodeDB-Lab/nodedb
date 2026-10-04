@@ -157,9 +157,8 @@ async fn close_scope(
             .await
             .map_err(|e| target.error("commit", &e)),
         (PutScope::Savepoint, Err(cause)) => {
-            let undo = format!(
-                "ROLLBACK TO SAVEPOINT {PUT_SAVEPOINT}; RELEASE SAVEPOINT {PUT_SAVEPOINT}"
-            );
+            let undo =
+                format!("ROLLBACK TO SAVEPOINT {PUT_SAVEPOINT}; RELEASE SAVEPOINT {PUT_SAVEPOINT}");
             match client.batch_execute(&undo).await {
                 Ok(()) => Err(cause),
                 Err(e) => Err(target.undo_error(&cause, "rollback to savepoint", &e)),

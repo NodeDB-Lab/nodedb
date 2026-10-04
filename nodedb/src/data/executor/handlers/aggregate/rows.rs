@@ -140,7 +140,10 @@ mod tests {
             json!({"g": "neg", "v": i64::MIN}),
         ];
         let asc = sorted(rows, SortKeySpec::column("v", true));
-        assert_eq!(column(&asc, "g"), vec![json!("neg"), json!("i"), json!("u")]);
+        assert_eq!(
+            column(&asc, "g"),
+            vec![json!("neg"), json!("i"), json!("u")]
+        );
     }
 
     #[test]

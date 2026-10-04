@@ -18,7 +18,8 @@ use nodedb_types::value::Value;
 /// (pgwire simple-query path, which returns every column as text).
 pub(crate) fn value_as_u64(v: &Value) -> NodeDbResult<u64> {
     match v {
-        Value::Integer(i) => Ok(*i as u64),
+        Value::Integer(i) => u64::try_from(*i)
+            .map_err(|_| NodeDbError::storage(format!("expected u64 column, got negative {i}"))),
         Value::String(s) => s
             .parse::<u64>()
             .map_err(|e| NodeDbError::storage(format!("parse u64 from '{s}': {e}"))),
@@ -48,6 +49,12 @@ mod tests {
     #[test]
     fn value_as_u64_accepts_integer() {
         assert_eq!(value_as_u64(&Value::Integer(42)).unwrap(), 42u64);
+    }
+
+    #[test]
+    fn value_as_u64_rejects_a_negative_integer() {
+        let err = value_as_u64(&Value::Integer(-1)).unwrap_err();
+        assert!(err.to_string().contains("negative -1"), "{err}");
     }
 
     #[test]

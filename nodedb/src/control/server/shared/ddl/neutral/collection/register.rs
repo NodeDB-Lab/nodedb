@@ -235,6 +235,22 @@ fn build_timeseries_schema(
     }))
 }
 
+/// The declared `VECTOR(n)` columns of a schemaless collection, as
+/// `(column, n)`.
+///
+/// Empty for every other collection. A strict schema carries its vector
+/// columns in its storage mode. A vector-primary collection keeps its vector
+/// in the index and never in the stored row.
+fn declared_vector_fields(coll: &StoredCollection) -> Vec<(String, usize)> {
+    if !coll.collection_type.is_schemaless() || coll.vector_primary.is_some() {
+        return Vec::new();
+    }
+    crate::control::server::shared::ddl::schema_validation::extract_vector_fields(&coll.fields)
+        .into_iter()
+        .map(|(name, dim, _metric)| (name, dim))
+        .collect()
+}
+
 /// Build the `CollectionConfig` a `DocumentOp::Register` will install in
 /// `doc_configs`, straight from the durable catalog — storage mode,
 /// enforcement options, generated columns, and secondary indexes.
@@ -334,6 +350,7 @@ pub(crate) fn build_doc_config_from_stored<S: CollectionSource + ?Sized>(
         conflict_policy: coll.conflict_policy.clone(),
         timeseries: build_timeseries_schema(coll),
         vector_primary: coll.vector_primary.clone().map(Box::new),
+        vector_fields: declared_vector_fields(coll),
     }
 }
 
@@ -357,6 +374,7 @@ async fn dispatch_register_from_stored_inner(
             conflict_policy: config.conflict_policy.clone(),
             timeseries: config.timeseries.clone(),
             vector_primary: config.vector_primary.clone(),
+            vector_fields: config.vector_fields.clone(),
         },
     );
 
