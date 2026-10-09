@@ -141,11 +141,6 @@ impl MintedRecords {
         self.sent.store(true, Ordering::Release);
     }
 
-    /// The highest LSN appended under this window, `None` before any append.
-    pub(crate) fn last_lsn(&self) -> Option<Lsn> {
-        self.recorded().iter().map(|record| record.lsn).max()
-    }
-
     /// Every appended LSN, in append order.
     #[cfg(test)]
     pub(crate) fn lsns(&self) -> Vec<Lsn> {

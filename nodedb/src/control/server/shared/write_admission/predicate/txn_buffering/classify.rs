@@ -359,7 +359,6 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::DropTxnOverlay { .. }
             | MetaOp::MarkSavepoint { .. }
             | MetaOp::RollbackToSavepoint { .. }
-            | MetaOp::RecordCalvinWriteVersions { .. }
             | MetaOp::CalvinFlush { .. }
             | MetaOp::CalvinDrop { .. }
             | MetaOp::CalvinResolve { .. }
@@ -1916,7 +1915,6 @@ mod tests {
                 tenant_id: tenant(),
                 plans: Vec::new(),
                 epoch_system_ms: 0,
-                is_group_leader: false,
                 versioned_reads: vec![VersionedReadEntry {
                     engine: EngineTag::Kv,
                     collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c").to_string(),
@@ -1945,7 +1943,6 @@ mod tests {
                 plans: Vec::new(),
                 injected_reads: BTreeMap::new(),
                 epoch_system_ms: 0,
-                is_group_leader: false,
             }),
             PhysicalPlan::Meta(MetaOp::RebuildIndex {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1973,10 +1970,6 @@ mod tests {
             PhysicalPlan::Meta(MetaOp::RollbackToSavepoint {
                 txn_id: TxnId::new(1),
                 savepoint: 1,
-            }),
-            PhysicalPlan::Meta(MetaOp::RecordCalvinWriteVersions {
-                tenant_id: tenant(),
-                plans: Vec::new(),
             }),
             PhysicalPlan::Meta(MetaOp::CalvinFlush {
                 epoch: 0,

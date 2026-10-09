@@ -330,6 +330,7 @@ mod tests {
             PhysicalPlan::Meta(MetaOp::WalAppend {
                 payload: Vec::new(),
             }),
+            None,
         );
         let response = restored.execute_multi_vector_delete(&task, 7, "docs", "emb", one_vector);
         assert_eq!(response.status, Status::Ok);

@@ -102,6 +102,17 @@ pub(super) async fn build_hooks(
             .applied
             .install(vshard_id, state.fully_applied_epoch, state.applied_tail);
     }
+    // A chunk stream of an applied position installs nothing more: a copy
+    // of the position's redo installed already.
+    shared
+        .redo_chunks
+        .drop_applied_calvin_streams(|vshard_id, epoch, position| {
+            shared
+                .calvin
+                .applied
+                .get(vshard_id)
+                .is_some_and(|ledger| ledger.is_applied(epoch, position))
+        });
 
     // Per-group snapshot builder for the SEND path: on the leader, build the
     // real serialized engine state for a lagging follower's group vshards

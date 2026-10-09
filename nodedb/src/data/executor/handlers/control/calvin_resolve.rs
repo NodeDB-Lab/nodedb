@@ -143,7 +143,7 @@ mod tests {
     /// A minimal `ExecutionTask` homing to vShard 0, tenant 1, database
     /// DEFAULT, matching what the Calvin scheduler dispatches with (see
     /// `dispatch.rs`'s `DatabaseId::DEFAULT` for `CalvinExecuteStatic` /
-    /// `CalvinFlush` / `CalvinDrop`; `CalvinResolve` must match).
+    /// `CalvinDrop`; `CalvinResolve` must match).
     fn make_task() -> ExecutionTask {
         let plan = PhysicalPlan::Document(DocumentOp::PointGet {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "x"),
@@ -297,7 +297,6 @@ mod tests {
             epoch,
             position,
             epoch_system_ms: 0,
-            is_group_leader: true,
         };
         let resp =
             core.execute_calvin_execute_static(task, ctx, &TenantId::new(1), plans, &[], &[]);
@@ -489,7 +488,6 @@ mod tests {
             epoch: 6,
             position: 0,
             epoch_system_ms: 0,
-            is_group_leader: true,
         };
         let resp = core.execute_calvin_execute_static(
             &task,
@@ -631,7 +629,6 @@ mod tests {
                 epoch: 8,
                 position: 3,
                 epoch_system_ms: EPOCH_MS,
-                is_group_leader: true,
             };
             let staged = core.execute_calvin_execute_static(
                 &task,

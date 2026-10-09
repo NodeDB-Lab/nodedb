@@ -49,10 +49,12 @@ pub struct Scheduler {
     /// Shared control-plane state used for dispatch, response tracking, WAL,
     /// and request-id allocation.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) shared: Arc<SharedState>,
-    /// Handle to MultiRaft for the data-group leader check and the catch-up
-    /// read of the sequencer log.
+    /// Handle to MultiRaft for the data-group role, the redo proposals, and
+    /// the catch-up read of the sequencer log.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) multi_raft:
         Arc<Mutex<MultiRaft>>,
+    /// This node's role in the vShard's data group. See [`super::role`].
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) role: super::role::StageGate,
     /// Hands sequencer entries to the sequencer group, locally on its leader
     /// and by forward from any other node.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) sequencer_proposer:
@@ -79,11 +81,20 @@ pub struct Scheduler {
     /// for the brief probe the gate takes.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) lock_manager:
         Arc<Mutex<LockManager>>,
-    /// In-flight static/active transactions awaiting executor response,
-    /// including those whose request waits in `deferred` for capacity.
-    /// `BTreeMap` ensures deterministic iteration order.
+    /// Granted transactions that have not finished: staged ones on the
+    /// leader, held ones on a follower, including those whose request waits
+    /// in `deferred` for capacity. `BTreeMap` ensures deterministic
+    /// iteration order.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) pending:
         BTreeMap<TxnId, PendingTxn>,
+    /// Installs the apply loop reported for txns still waiting for their
+    /// locks. Each completes when its locks are granted.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) early_applied:
+        BTreeMap<TxnId, super::redo_applied::AppliedRedo>,
+    /// This scheduler's registered inbox: how the data-group apply loop
+    /// concluded each stamped redo of the vShard.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) inbox:
+        crate::control::cluster::calvin::scheduler::InboxHandle,
     /// Blocked transactions awaiting lock release.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) blocked:
         BTreeMap<TxnId, BlockedTxn>,
@@ -183,7 +194,7 @@ pub struct Scheduler {
     /// staged yet. See [`super::parts`].
     pub(in crate::control::cluster::calvin::scheduler::driver::core) parts:
         super::parts::PartsState,
-    /// Orders flushes against the data group's snapshots. See
+    /// The vShard base this scheduler started under. See
     /// [`super::install_gate`].
     pub(in crate::control::cluster::calvin::scheduler::driver::core) install_gate:
         super::install_gate::InstallGate,
@@ -259,6 +270,10 @@ impl Scheduler {
         // A backup's cut waits on every scheduler this node runs.
         shared.calvin.cuts.register(vshard_id);
         let install_gate = super::install_gate::InstallGate::new(&shared, vshard_id);
+        let inbox = shared
+            .calvin
+            .inboxes
+            .register(vshard_id, config.max_inflight_backlog);
 
         let capacity_freed = shared
             .dispatcher
@@ -271,11 +286,14 @@ impl Scheduler {
             receiver,
             shared,
             multi_raft,
+            role: super::role::StageGate::default(),
             sequencer_proposer,
             owed: OwedEntries::new(),
             sequencer_state_machine,
             lock_manager,
             pending: BTreeMap::new(),
+            early_applied: BTreeMap::new(),
+            inbox,
             blocked: BTreeMap::new(),
             dependent_barrier: BTreeMap::new(),
             read_result_rx,

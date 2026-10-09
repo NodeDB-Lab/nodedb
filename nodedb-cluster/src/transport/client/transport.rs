@@ -442,7 +442,8 @@ pub(super) mod tests {
     /// The group `EchoHandler` does not host.
     const UNHOSTED_GROUP: u64 = 404;
 
-    /// The group whose vote requests `EchoHandler` answers after [`STALL`].
+    /// The group whose vote and snapshot requests `EchoHandler` answers
+    /// after [`STALL`].
     pub(crate) const STALLED_GROUP: u64 = 503;
 
     /// How long `EchoHandler` holds a vote request of [`STALLED_GROUP`].
@@ -484,6 +485,12 @@ pub(super) mod tests {
                     Ok(RaftRpc::RequestVoteResponse(RequestVoteResponse {
                         term: req.term,
                         vote_granted: true,
+                    }))
+                }
+                RaftRpc::InstallSnapshotRequest(req) if req.group_id == STALLED_GROUP => {
+                    tokio::time::sleep(STALL).await;
+                    Ok(RaftRpc::InstallSnapshotResponse(InstallSnapshotResponse {
+                        term: req.term,
                     }))
                 }
                 RaftRpc::InstallSnapshotRequest(req) => {
@@ -1033,5 +1040,37 @@ pub(super) mod tests {
         assert!(matches!(reply, RaftRpc::Pong(_)), "{reply:?}");
         assert_eq!(breaker.state(1), CircuitState::Closed);
         assert_eq!(breaker.failure_count(1), 0);
+    }
+
+    /// A node that shuts down while its handler runs a request leaves the
+    /// request unanswered. The handler can have run it, so the sender never
+    /// reads it as a refusal and never resends it.
+    #[tokio::test]
+    async fn a_request_whose_node_shuts_down_mid_handler_ends_unanswered() {
+        let (_server, client, shutdown) = serve_echo().await;
+        let req = RaftRpc::InstallSnapshotRequest(InstallSnapshotRequest {
+            term: 7,
+            leader_id: 2,
+            last_included_index: 500,
+            last_included_term: 6,
+            offset: 0,
+            data: Vec::new(),
+            done: true,
+            group_id: STALLED_GROUP,
+            total_size: 0,
+            voters: Vec::new(),
+            learners: Vec::new(),
+        });
+        assert!(!req.resend_safe());
+        let send = tokio::spawn(async move { client.send_rpc(1, req).await });
+        tokio::time::sleep(STALL / 4).await;
+        shutdown.send(true).expect("signal shutdown");
+
+        let err = send.await.expect("send task").unwrap_err();
+
+        assert!(
+            matches!(err, ClusterError::Unanswered { node_id: 1, .. }),
+            "{err:?}"
+        );
     }
 }

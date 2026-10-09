@@ -38,6 +38,18 @@ pub struct TransactionRedoPayload {
     pub calvin: Option<CalvinRedoMeta>,
 }
 
+/// What a committed Calvin slice's redo carries beside its record, derived
+/// from the slice's local plans when it stages.
+#[derive(Debug, Clone)]
+pub struct CalvinSlice {
+    pub collections: Vec<String>,
+    pub sum_targets: Vec<RedoSumTargets>,
+    pub identities: Vec<CarriedIdentity>,
+    pub event_source: EventSource,
+    pub origin: RedoOrigin,
+    pub meta: CalvinRedoMeta,
+}
+
 impl TransactionRedoPayload {
     /// The payload for a commit whose buffered write plans are `plans` and
     /// whose resolved redo is `redo`, built on the node that resolved it.
@@ -63,6 +75,29 @@ impl TransactionRedoPayload {
             origin: RedoOrigin::Commit,
             calvin: None,
         })
+    }
+
+    /// The payload of a committed Calvin slice whose resolved redo is `redo`,
+    /// built on the vShard's data-group leader. The record's `calvin_stamp`
+    /// must name the slice's `(epoch, position)`.
+    pub fn from_calvin(redo: RedoRecord, slice: CalvinSlice) -> Self {
+        let CalvinSlice {
+            collections,
+            sum_targets,
+            identities,
+            event_source,
+            origin,
+            meta,
+        } = slice;
+        Self {
+            redo,
+            collections,
+            sum_targets,
+            identities,
+            event_source,
+            origin,
+            calvin: Some(meta),
+        }
     }
 
     /// The Data-Plane plan that applies this redo.
@@ -97,6 +132,7 @@ impl TransactionRedoPayload {
             position: stamp.position,
             epoch_system_ms: meta.epoch_system_ms,
             reply: meta.reply.clone(),
+            user_write: meta.user_write,
         }))
     }
 }
@@ -135,6 +171,8 @@ mod tests {
             epoch_system_ms: 1_700,
             reply: CalvinReplySpec::Count(vec![7]),
             primary_write: true,
+            user_write: true,
+            returning: false,
         }
     }
 
@@ -157,8 +195,6 @@ mod tests {
             epoch: 9,
             position: 4,
             vshard_id: 2,
-            collections: Vec::new(),
-            sum_targets: Vec::new(),
         };
         let calvin = payload(Some(stamp), Some(meta()));
         assert_eq!(
@@ -168,6 +204,7 @@ mod tests {
                 position: 4,
                 epoch_system_ms: 1_700,
                 reply: CalvinReplySpec::Count(vec![7]),
+                user_write: true,
             })
         );
     }

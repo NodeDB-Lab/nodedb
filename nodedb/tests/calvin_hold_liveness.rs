@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! A held Calvin flush never stalls replicated writes to other collections.
+//! A held Calvin redo proposal never stalls replicated writes to other
+//! collections.
 //!
 //! Transaction A writes two collections on two vShards, so it commits
-//! through the Calvin scheduler. Its flush on one vShard is held at a fail
-//! point, so A stays staged: its rows are owned until the flush. A replicated
-//! autocommit write to a third collection shares no row and no collection
-//! with A. It must apply and be acknowledged while A's flush is held.
+//! through the Calvin scheduler. The redo proposal of its slice on one vShard
+//! is held at a fail point, so A stays staged and holds its locks. A
+//! replicated autocommit write to a third collection shares no row and no
+//! collection with A. It must apply and be acknowledged while A's redo is
+//! held.
 //!
 //! Requires `--features failpoints`.
 
@@ -23,27 +25,27 @@ use crash_harness::vshards::names_on_distinct_vshards;
 /// How long the Calvin sequencer may take to elect its leader after a boot.
 const CALVIN_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long the test waits for A's flush to be held.
+/// How long the test waits for A's redo proposal to be held.
 const HOLD_DEADLINE: Duration = Duration::from_secs(30);
 
 /// How long the unrelated write may take. Well under the 30s request
-/// deadline a write parked behind A would wait out.
+/// deadline a write waiting behind A would wait out.
 const UNRELATED_WRITE_BUDGET: Duration = Duration::from_secs(10);
 
-/// The scheduler's log line for a flush held at the fail point.
-const FLUSH_HELD: &str = "calvin: flush held at a fail point";
+/// The scheduler's log line for a redo proposal held at the fail point.
+const REDO_HELD: &str = "calvin: redo proposal held at a fail point";
 
 const LOG_DIRECTIVES: &str = "warn,nodedb::control::cluster::calvin::scheduler::driver::core=info";
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_replicated_write_to_an_unrelated_collection_applies_while_a_calvin_flush_is_held() {
+async fn a_replicated_write_to_an_unrelated_collection_applies_while_a_calvin_redo_is_held() {
     let [held, peer, other] = names_on_distinct_vshards(["hold_held", "hold_peer", "hold_other"]);
     let h = CrashHarness::new();
-    let release = h.data_dir().join("release-held-flush");
+    let release = h.data_dir().join("release-held-redo");
     let mut h = h.with_env("RUST_LOG", LOG_DIRECTIVES).with_env(
         "NODEDB_FAILPOINTS",
         &format!(
-            "calvin::before_flush::{held}=wait_file({})",
+            "calvin::before_redo_propose::{held}=wait_file({})",
             release.display()
         ),
     );
@@ -58,7 +60,7 @@ async fn a_replicated_write_to_an_unrelated_collection_applies_while_a_calvin_fl
     }
 
     // Transaction A, on its own connection: its COMMIT waits for the held
-    // flush.
+    // redo.
     let conn_str = h.pgwire_conn_str();
     let statements = [
         "BEGIN".to_string(),
@@ -81,10 +83,10 @@ async fn a_replicated_write_to_an_unrelated_collection_applies_while_a_calvin_fl
     });
 
     let deadline = Instant::now() + HOLD_DEADLINE;
-    while count_lines(&boot_section(&h.server_log(), 1), &[FLUSH_HELD]) == 0 {
+    while count_lines(&boot_section(&h.server_log(), 1), &[REDO_HELD]) == 0 {
         assert!(
             Instant::now() < deadline && !txn.is_finished(),
-            "transaction A's flush was never held (A finished: {}).{}\n{}",
+            "transaction A's redo was never held (A finished: {}).{}\n{}",
             txn.is_finished(),
             h.keep_data_dir_note(),
             crash_harness::diagnostics::log_tail_section(&h.server_log())
@@ -99,7 +101,7 @@ async fn a_replicated_write_to_an_unrelated_collection_applies_while_a_calvin_fl
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "a replicated write to {other} stalled behind transaction A's held flush, \
+            "a replicated write to {other} stalled behind transaction A's held redo, \
              though it shares no row and no collection with A"
         )
     });

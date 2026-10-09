@@ -10,15 +10,11 @@
 //! refusal halts the scheduler (see [`super::halt`]).
 
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
-
-use nodedb_physical::physical_plan::PhysicalPlan;
-use nodedb_physical::physical_plan::meta::MetaOp;
 
 use super::halt::{HaltReason, HaltStep};
 use super::scheduler::Scheduler;
-use crate::bridge::dispatch::{DispatchRefusal, JournalGroup};
+use crate::bridge::dispatch::DispatchRefusal;
 use crate::bridge::envelope::Request;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::types::RequestId;
@@ -32,12 +28,23 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum DispatchSt
     StageActive,
     /// `CalvinResolve` of a committed staged txn.
     Resolve,
-    /// `CalvinFlush` of a committed staged txn.
-    Flush,
-    /// `CalvinDrop` of an aborted staged txn.
+    /// `CalvinDrop` of a staged txn that ends with no log entry. The txn
+    /// completes on its answer.
     Drop,
-    /// One-way `RecordCalvinWriteVersions` of a committed txn.
-    WriteVersionRecord,
+    /// `CalvinDrop` of staged state the txn no longer needs: a demoted
+    /// leader's, or a restaged slice whose redo applied. Its answer is
+    /// drained and read by nothing.
+    Discard,
+}
+
+impl DispatchStep {
+    /// Whether the txn waits for this step's answer.
+    fn is_awaited(self) -> bool {
+        match self {
+            Self::StageStatic | Self::StageActive | Self::Resolve | Self::Drop => true,
+            Self::Discard => false,
+        }
+    }
 }
 
 /// Result of [`Scheduler::dispatch_sequenced`].
@@ -57,8 +64,6 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) struct Deferred
     txn_id: TxnId,
     step: DispatchStep,
     request: Request,
-    /// The record group the request's write set journals into.
-    journal: Option<JournalGroup>,
 }
 
 /// FIFO of requests refused at capacity, in refusal order.
@@ -77,6 +82,9 @@ impl Scheduler {
     /// Register `request` in the tracker, dispatch it, and cancel the
     /// registration on refusal.
     ///
+    /// An awaited step records the request on the txn's pending entry, so
+    /// only this request's answer drives the txn.
+    ///
     /// A capacity refusal appends the request to the deferred FIFO and
     /// returns [`DispatchOutcome::Deferred`]. The caller keeps the txn in
     /// flight. Any other refusal returns [`DispatchOutcome::Failed`], and the
@@ -87,19 +95,12 @@ impl Scheduler {
         step: DispatchStep,
         request: Request,
     ) -> DispatchOutcome {
-        self.dispatch_sequenced_journalled(txn_id, step, request, None)
-    }
-
-    /// [`Self::dispatch_sequenced`] for a request whose write set journals
-    /// into `journal`.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn dispatch_sequenced_journalled(
-        &mut self,
-        txn_id: TxnId,
-        step: DispatchStep,
-        request: Request,
-        journal: Option<JournalGroup>,
-    ) -> DispatchOutcome {
-        match self.send_once(txn_id, step, request, journal) {
+        if step.is_awaited()
+            && let Some(pending) = self.pending.get_mut(&txn_id)
+        {
+            pending.awaiting = Some(request.request_id);
+        }
+        match self.send_once(txn_id, step, request) {
             Attempt::Sent => DispatchOutcome::Sent,
             Attempt::Capacity(parked) => {
                 self.deferred.push_back(*parked);
@@ -126,14 +127,6 @@ impl Scheduler {
         self.has_deferred_dispatch() && !self.is_apply_halted()
     }
 
-    /// Whether a refused request of `txn_id` waits for capacity.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn has_parked_dispatch(
-        &self,
-        txn_id: TxnId,
-    ) -> bool {
-        self.deferred.iter().any(|parked| parked.txn_id == txn_id)
-    }
-
     /// Number of refused requests waiting for capacity.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn deferred_dispatch_len(
         &self,
@@ -146,6 +139,10 @@ impl Scheduler {
     /// Stops at the first capacity refusal, which goes back to the FIFO
     /// front. A terminal refusal runs the step's terminal handling, and stops
     /// the pass once the scheduler halted.
+    ///
+    /// A request of a txn that left `pending`, or that waits for another
+    /// request now, is dropped. A discard still goes out: it clears staged
+    /// state the txn left on its core.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn redispatch_deferred(
         &mut self,
     ) {
@@ -154,25 +151,20 @@ impl Scheduler {
                 txn_id,
                 step,
                 mut request,
-                journal,
             } = parked;
-            if !self.pending.contains_key(&txn_id) {
-                tracing::error!(
+            if step.is_awaited() && !self.awaits(txn_id, request.request_id) {
+                tracing::debug!(
                     vshard_id = self.vshard_id,
                     epoch = txn_id.epoch,
                     position = txn_id.position,
                     ?step,
-                    "calvin: parked dispatch for a txn no longer pending; one step per txn is broken, discarding"
+                    "calvin: parked dispatch of a step the txn left; discarding"
                 );
                 continue;
             }
-            self.refresh_deferred_request(step, &mut request);
-            match self.send_once(txn_id, step, request, journal) {
-                Attempt::Sent => {
-                    if step == DispatchStep::WriteVersionRecord {
-                        self.complete_after_version_record(txn_id);
-                    }
-                }
+            request.deadline = self.request_deadline();
+            match self.send_once(txn_id, step, request) {
+                Attempt::Sent => {}
                 Attempt::Capacity(parked) => {
                     self.deferred.push_front(*parked);
                     break;
@@ -189,13 +181,23 @@ impl Scheduler {
             .set_dispatch_deferred_depth(self.deferred.len());
     }
 
+    /// Whether `txn_id` is pending and waits for the answer to `request_id`.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn awaits(
+        &self,
+        txn_id: TxnId,
+        request_id: RequestId,
+    ) -> bool {
+        self.pending
+            .get(&txn_id)
+            .is_some_and(|pending| pending.awaiting == Some(request_id))
+    }
+
     /// Run the terminal handling of a dispatch the dispatcher refused for a
     /// reason other than capacity.
     ///
     /// Every refusal halts the scheduler: the txn keeps its `pending` entry
     /// and locks, and its position stays unapplied. A refusal during shutdown
-    /// holds the txn the same way. A lost write-version record halts too:
-    /// read-set validation reads those versions.
+    /// holds the txn the same way.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn fail_dispatch_step(
         &mut self,
         txn_id: TxnId,
@@ -205,9 +207,7 @@ impl Scheduler {
         let halt_step = match step {
             DispatchStep::StageStatic | DispatchStep::StageActive => HaltStep::Stage,
             DispatchStep::Resolve => HaltStep::Resolve,
-            DispatchStep::Flush => HaltStep::Flush,
-            DispatchStep::Drop => HaltStep::Drop,
-            DispatchStep::WriteVersionRecord => HaltStep::WriteVersionRecord,
+            DispatchStep::Drop | DispatchStep::Discard => HaltStep::Drop,
         };
         self.halt_apply(
             txn_id,
@@ -218,38 +218,12 @@ impl Scheduler {
     }
 
     /// One send attempt: register, dispatch, and cancel on refusal.
-    fn send_once(
-        &mut self,
-        txn_id: TxnId,
-        step: DispatchStep,
-        request: Request,
-        journal: Option<JournalGroup>,
-    ) -> Attempt {
-        // A crash test holds one collection's flush here: the redo record is
-        // appended and no core holds the flush. The flush waits in the
-        // re-send queue, as at capacity, so the scheduler keeps running.
-        #[cfg(feature = "failpoints")]
-        if step == DispatchStep::Flush && crate::control::fail_gate::holds_flush(&request.plan) {
-            tracing::info!(
-                vshard_id = self.vshard_id,
-                epoch = txn_id.epoch,
-                position = txn_id.position,
-                "calvin: flush held at a fail point"
-            );
-            return Attempt::Capacity(Box::new(DeferredDispatch {
-                txn_id,
-                step,
-                request,
-                journal,
-            }));
-        }
+    fn send_once(&mut self, txn_id: TxnId, step: DispatchStep, request: Request) -> Attempt {
         let request_id = request.request_id;
         let resp_rx = self.shared.tracker.register(request_id);
         let result = match self.shared.dispatcher.lock() {
-            Ok(mut dispatcher) => dispatcher.try_dispatch_journalled(request, journal.clone()),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .try_dispatch_journalled(request, journal.clone()),
+            Ok(mut dispatcher) => dispatcher.try_dispatch(request),
+            Err(poisoned) => poisoned.into_inner().try_dispatch(request),
         };
         let refusal = match result {
             Ok(()) => {
@@ -275,7 +249,6 @@ impl Scheduler {
                     txn_id,
                     step,
                     request,
-                    journal,
                 }))
             }
             other => Attempt::Failed(other),
@@ -299,44 +272,16 @@ impl Scheduler {
                 }
                 self.spawn_response_bridge(txn_id, request_id, resp_rx);
             }
-            DispatchStep::Resolve | DispatchStep::Flush | DispatchStep::Drop => {
+            DispatchStep::Resolve | DispatchStep::Drop => {
                 self.spawn_response_bridge(txn_id, request_id, resp_rx);
             }
-            DispatchStep::WriteVersionRecord => {
-                // One-way record: drain the response so it routes to a live
-                // receiver, then discard it.
+            DispatchStep::Discard => {
+                // Drain the answer so it routes to a live receiver.
                 tokio::spawn(async move {
                     let mut rx = resp_rx;
                     let _ = rx.recv().await;
                 });
-                self.shared
-                    .calvin
-                    .counters
-                    .write_versions_recorded
-                    .fetch_add(1, Ordering::Relaxed);
             }
-        }
-    }
-
-    /// Refresh the dispatch-time fields of a parked request before a re-send.
-    ///
-    /// The deadline restarts from now. A stage request re-reads group
-    /// leadership, which the Data Plane uses to gate OLLP verification.
-    fn refresh_deferred_request(&self, step: DispatchStep, request: &mut Request) {
-        request.deadline = self.request_deadline();
-        if !matches!(step, DispatchStep::StageStatic | DispatchStep::StageActive) {
-            return;
-        }
-        if let PhysicalPlan::Meta(
-            MetaOp::CalvinExecuteStatic {
-                is_group_leader, ..
-            }
-            | MetaOp::CalvinExecuteActive {
-                is_group_leader, ..
-            },
-        ) = &mut request.plan
-        {
-            *is_group_leader = self.is_group_leader();
         }
     }
 }
@@ -352,6 +297,7 @@ mod tests {
     use super::*;
     use crate::control::cluster::calvin::scheduler::driver::core::halt::HaltReason;
     use crate::control::cluster::calvin::scheduler::driver::core::intake::IntakeClosure;
+    use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::lead_data_group;
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
         begin_data_plane_drain, build_test_scheduler_with_data_side, fill_tenant_inflight,
         make_validate_only_txn, test_coll_vshard,
@@ -365,6 +311,7 @@ mod tests {
         let registry = CalvinCompletionRegistry::new_detached();
         let (mut scheduler, _dir, _data_side) =
             build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        lead_data_group(&mut scheduler);
         begin_data_plane_drain(&scheduler.shared);
         let txn_id = TxnId::new(3, 0);
 
@@ -403,6 +350,7 @@ mod tests {
         let registry = CalvinCompletionRegistry::new_detached();
         let (mut scheduler, _dir, mut data_side) =
             build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        lead_data_group(&mut scheduler);
         let shared = Arc::clone(&scheduler.shared);
         fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
         let txn_id = TxnId::new(3, 0);

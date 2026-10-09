@@ -25,6 +25,10 @@ pub enum ErrorCode {
     /// a retry channel can tell a retry apart from a permanent refusal instead
     /// of collapsing both into a terminal rejection.
     RetryableRefusal { reason: String },
+    /// The core fail-stopped: its state is unknown until a restart rebuilds
+    /// it from the WAL. It refused the request and applied nothing. Another
+    /// replica, or this one after its restart, serves the request.
+    CoreFailStopped { core_id: usize, detail: String },
     /// A sync frame the validator refused for good. Nothing applied. The
     /// stream's high-water mark advanced to `provenance`, so the frame is
     /// never admitted again, and `applied_seq` is the mark after the refusal.

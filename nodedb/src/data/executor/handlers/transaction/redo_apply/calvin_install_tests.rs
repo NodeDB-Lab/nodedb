@@ -55,7 +55,6 @@ fn stage_and_resolve(core: &mut CoreLoop, plans: &[PhysicalPlan]) -> CalvinResol
         epoch: 1,
         position: 0,
         epoch_system_ms: 0,
-        is_group_leader: true,
     };
     let staged =
         core.execute_calvin_execute_static(&task, ctx, &TenantId::new(TID), plans, &[], &[]);
@@ -83,6 +82,7 @@ fn install_plan(
             position: 0,
             epoch_system_ms: 0,
             reply,
+            user_write: true,
         }),
     })
 }

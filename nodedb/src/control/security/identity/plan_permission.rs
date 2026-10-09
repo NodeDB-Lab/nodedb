@@ -394,7 +394,6 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             MetaOp::CalvinExecuteStatic { .. }
             | MetaOp::CalvinExecutePassive { .. }
             | MetaOp::CalvinExecuteActive { .. }
-            | MetaOp::RecordCalvinWriteVersions { .. }
             | MetaOp::CalvinFlush { .. }
             | MetaOp::CalvinDrop { .. },
         ) => Permission::Write,

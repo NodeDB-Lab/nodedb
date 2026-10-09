@@ -148,6 +148,7 @@ impl<S: LogStorage> RaftNode<S> {
         self.last_quorum_contact = None;
         self.quorum_window.clear();
         self.leader_since = None;
+        self.term_start_index = None;
         self.persist_hard_state();
         self.reset_election_timeout();
 
@@ -198,7 +199,9 @@ impl<S: LogStorage> RaftNode<S> {
             index: self.log.last_index() + 1,
             data: Vec::new(),
         };
+        let noop_index = noop.index;
         let _ = self.log.append(noop);
+        self.term_start_index = Some(noop_index);
 
         // Single-voter cluster: the no-op commits once it is durable here.
         if self.config.cluster_size() == 1 {
@@ -523,6 +526,25 @@ mod tests {
             indices.windows(2).all(|pair| pair[0] < pair[1]),
             "queued indices must be strictly increasing: {indices:?}"
         );
+    }
+
+    /// A leader names the index of the no-op it appended when it won its
+    /// term. Later proposals leave it unchanged, and a step-down clears it.
+    #[test]
+    fn a_leader_names_its_term_start_index() {
+        let mut node = RaftNode::new(test_config(1, vec![]), MemStorage::new());
+        assert_eq!(node.term_start_index(), None, "a follower names none");
+        force_election(&mut node);
+        let noop = node.last_log_index();
+        assert_eq!(node.term_start_index(), Some(noop));
+
+        node.propose(b"write".to_vec())
+            .expect("single voter commits immediately");
+        assert_eq!(node.term_start_index(), Some(noop));
+
+        let term = node.current_term();
+        node.become_follower(term + 1);
+        assert_eq!(node.term_start_index(), None);
     }
 
     /// A committed range below the log's first available index is a hard

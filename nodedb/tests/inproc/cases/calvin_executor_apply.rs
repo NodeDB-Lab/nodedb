@@ -3,9 +3,10 @@
 //! Data Plane apply and rollback coverage for a committed Calvin transaction.
 //!
 //! These drive the participant's Data Plane steps directly: stage
-//! (`CalvinExecuteStatic`), resolve (`CalvinResolve`) and flush the resolved
-//! redo record at its LSN (`CalvinFlush`) — the steps the scheduler dispatches
-//! once the global verdict is commit.
+//! (`CalvinExecuteStatic`), resolve (`CalvinResolve`), and the stamped install
+//! of the resolved redo record at its LSN (`ApplyTransactionRedo` with a
+//! `CalvinInstall`), which the data group's apply runs once the leader
+//! proposed the slice's stamped redo.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,7 +17,9 @@ use nodedb::data::executor::core_loop::CoreLoop;
 use nodedb::types::*;
 use nodedb::wal::{RedoRecord, RedoSubRecord};
 use nodedb_bridge::buffer::{Consumer, Producer, RingBuffer};
-use nodedb_physical::physical_plan::{KvOp, MetaOp, PhysicalPlan};
+use nodedb_physical::physical_plan::{
+    CalvinInstall, CalvinReplySpec, CalvinResolved, KvOp, MetaOp, PhysicalPlan, RedoOrigin,
+};
 use nodedb_types::{OrdinalClock, QualifiedCollection};
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -117,14 +120,14 @@ fn kv_get(coll: &str, key: &[u8]) -> PhysicalPlan {
 }
 
 /// Stage `plans` as the Calvin transaction at `(epoch, 0)` and resolve it.
-/// Returns the resolved redo record.
+/// Returns the resolved redo record and the slice's reply spec.
 fn stage_and_resolve(
     core: &mut CoreLoop,
     tx: &mut Producer<BridgeRequest>,
     rx: &mut Consumer<BridgeResponse>,
     epoch: u64,
     plans: Vec<PhysicalPlan>,
-) -> RedoRecord {
+) -> (RedoRecord, CalvinReplySpec) {
     send_ok(
         core,
         tx,
@@ -135,7 +138,6 @@ fn stage_and_resolve(
             tenant_id: TenantId::new(1),
             plans,
             epoch_system_ms: 0,
-            is_group_leader: true,
             versioned_reads: Vec::new(),
             body_plans: Vec::new(),
         }),
@@ -146,27 +148,33 @@ fn stage_and_resolve(
         rx,
         PhysicalPlan::Meta(MetaOp::CalvinResolve { epoch, position: 0 }),
     );
-    let answer: nodedb_physical::physical_plan::CalvinResolved =
-        zerompk::from_msgpack(&redo).expect("decode resolved answer");
-    RedoRecord::from_bytes(&answer.redo).expect("decode resolved redo")
+    let answer: CalvinResolved = zerompk::from_msgpack(&redo).expect("decode resolved answer");
+    let record = RedoRecord::from_bytes(&answer.redo).expect("decode resolved redo");
+    (record, answer.reply)
 }
 
-/// Flush `redo` as the Calvin transaction at `(epoch, 0)` with its record at
+/// Install `redo` as the stamped slice at `(epoch, 0)` with its record at
 /// `lsn`.
-fn flush(
+fn install(
     core: &mut CoreLoop,
     tx: &mut Producer<BridgeRequest>,
     rx: &mut Consumer<BridgeResponse>,
     epoch: u64,
-    redo: &RedoRecord,
+    (redo, reply): &(RedoRecord, CalvinReplySpec),
     lsn: u64,
 ) -> nodedb::bridge::envelope::Response {
-    let mut request = make_request(PhysicalPlan::Meta(MetaOp::CalvinFlush {
-        epoch,
-        position: 0,
+    let mut request = make_request(PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
         redo: redo.to_bytes().expect("encode redo"),
         collections: vec!["orders".into(), "rollback_coll".into()],
         sum_targets: Vec::new(),
+        origin: RedoOrigin::Commit,
+        calvin: Some(CalvinInstall {
+            epoch,
+            position: 0,
+            epoch_system_ms: 0,
+            reply: reply.clone(),
+            user_write: true,
+        }),
     }));
     request.wal_lsn = Some(Lsn::new(lsn));
     tx.try_push(BridgeRequest::unfloored(request)).unwrap();
@@ -197,9 +205,9 @@ fn failing_install_sub_record() -> RedoSubRecord {
     }
 }
 
-// ── Test 1: successful Calvin flush ──────────────────────────────────────────
+// ── Test 1: successful Calvin install ────────────────────────────────────────
 
-/// A committed Calvin transaction installs its redo record at the flush. The
+/// A committed Calvin transaction installs its stamped redo record. The
 /// written key is readable after it.
 #[test]
 fn calvin_static_apply_success() {
@@ -212,24 +220,24 @@ fn calvin_static_apply_success() {
         1,
         vec![kv_put("orders", b"k1", b"v1")],
     );
-    let resp = flush(&mut core, &mut tx, &mut rx, 1, &redo, 10);
+    let resp = install(&mut core, &mut tx, &mut rx, 1, &redo, 10);
     assert_eq!(
         resp.status,
         Status::Ok,
-        "Calvin flush must succeed; got {:?}",
+        "Calvin install must succeed; got {:?}",
         resp.error_code
     );
 
     let payload = send_ok(&mut core, &mut tx, &mut rx, kv_get("orders", b"k1"));
     assert!(
         !payload.is_empty(),
-        "row must exist after a successful Calvin flush"
+        "row must exist after a successful Calvin install"
     );
 }
 
 // ── Test 2: failing install → error without RollbackFailed ───────────────────
 
-/// When a sub-record of the redo record fails while it installs, the flush
+/// When a sub-record of the redo record fails while it installs, the install
 /// rolls every write back. The response is `Status::Error` and is NOT
 /// `RollbackFailed` (the rollback itself succeeded), and the transaction's
 /// write is gone.
@@ -244,13 +252,13 @@ fn calvin_static_apply_failure_rolls_back_cleanly() {
         2,
         vec![kv_put("rollback_coll", b"should_be_gone", b"present")],
     );
-    redo.ops.push(failing_install_sub_record());
-    let resp = flush(&mut core, &mut tx, &mut rx, 2, &redo, 20);
+    redo.0.ops.push(failing_install_sub_record());
+    let resp = install(&mut core, &mut tx, &mut rx, 2, &redo, 20);
 
     assert_eq!(
         resp.status,
         Status::Error,
-        "a failing sub-record must fail the flush; got {:?}",
+        "a failing sub-record must fail the install; got {:?}",
         resp.error_code
     );
     assert!(

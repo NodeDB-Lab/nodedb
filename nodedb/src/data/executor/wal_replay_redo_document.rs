@@ -94,14 +94,6 @@
 //! their targets and link their hash chain, exactly as replication does (see
 //! `handlers::transaction::redo_apply`). With no scope open this arm is plain
 //! restart replay.
-//!
-//! ### Calvin records in restart replay
-//!
-//! A Calvin redo record's stamp carries the sum targets its slice folds, and
-//! no later record carries the target rows. Restart replay runs its document
-//! rows through the committed path, which folds them at the record's LSN.
-//! The fold subtracts the row's prior image, so a row that already holds its
-//! post-image folds nothing.
 
 use nodedb_types::Surrogate;
 use nodedb_types::sync::wire::SyncProvenance;
@@ -236,7 +228,7 @@ impl CoreLoop {
                     self.observe_bitemporal_stamp(s.sys_from_ms);
                     self.apply_scope.bitemporal_stamps.insert(surrogate_u32, s);
                 }
-                let folds = self.redo_folds_at(record_lsn, &collection);
+                let folds = self.redo_folds();
                 let applied = if folds {
                     self.apply_committed_document_put(
                         CommittedDocWrite {
@@ -335,7 +327,7 @@ impl CoreLoop {
                         },
                     );
                 }
-                let folds = self.redo_folds_at(record_lsn, &collection);
+                let folds = self.redo_folds();
                 let removed = if folds {
                     self.apply_committed_document_delete(CommittedDocWrite {
                         database_id,
@@ -380,18 +372,11 @@ impl CoreLoop {
         }
     }
 
-    /// Whether a document write at `record_lsn` to `collection` runs the
-    /// committed path, which folds materialized sums: always under a
-    /// committed-redo apply, and in restart replay when the record's Calvin
-    /// stamp names sum targets for `collection`. Folding reads the row's
-    /// prior image, so a replay over a row that already holds the post-image
-    /// folds nothing.
-    fn redo_folds_at(&self, record_lsn: u64, collection: &str) -> bool {
+    /// Whether a document write runs the committed path, which folds
+    /// materialized sums: only under a committed-redo apply. Restart replay
+    /// applies the fold target rows from the parts the apply journalled.
+    fn redo_folds(&self) -> bool {
         self.redo_apply.scope.is_some()
-            || self
-                .redo_apply
-                .replay_folds_for(record_lsn, collection)
-                .is_some()
     }
 }
 

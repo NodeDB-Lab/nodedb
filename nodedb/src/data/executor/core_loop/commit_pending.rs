@@ -7,14 +7,14 @@ use crate::types::TenantId;
 use nodedb_physical::physical_plan::PhysicalPlan;
 
 /// A Calvin transaction staged for commit, held between the
-/// validate-and-stage step and the verdict-driven flush-or-drop.
+/// validate-and-stage step and its install or drop.
 ///
 /// `CalvinExecuteStatic` and `CalvinExecuteActive` stage the plans into the
 /// synthetic overlay and insert this entry WITHOUT mutating base or firing
 /// side effects. `CalvinResolve` resolves the overlay into the transaction's
-/// redo record. A verdict-driven `CalvinFlush` installs that record and
-/// answers with `reply`. A `CalvinDrop` discards the entry.
-/// Nothing here is observable in the base engines until a flush.
+/// redo record. The install of the slice's stamped redo entry consumes the
+/// entry and answers with `reply`. A `CalvinDrop` discards the entry.
+/// Nothing here is observable in the base engines until the install.
 pub(in crate::data::executor) struct PendingCommit {
     /// The staged write plans `CalvinResolve` resolves against the overlay.
     pub plans: Vec<PhysicalPlan>,

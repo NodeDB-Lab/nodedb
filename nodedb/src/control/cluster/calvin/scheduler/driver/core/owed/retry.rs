@@ -235,22 +235,14 @@ mod tests {
     #[tokio::test]
     async fn completion_ack_is_reproposed_until_the_registry_records_it() {
         let txn_id = TxnId::new(21, 0);
-        let (mut scheduler, _dir) = scheduler_with_pending(
-            txn_id,
-            CommitState::AwaitingResolve {
-                committed: false,
-                redo_lsn: None,
-            },
-        );
+        let (mut scheduler, _dir) = scheduler_with_pending(txn_id, CommitState::AwaitingDrop);
         let proposer = CapturingProposer::failing_first(1);
         scheduler.sequencer_proposer = proposer.clone();
         // Only the vShard's group leader proposes the ack.
         elect_data_group_leader(&scheduler);
         scheduler.registry.seed_expected(cluster_txn_id(txn_id), 2);
 
-        scheduler
-            .finish_resolved_commit(txn_id, staged_response(Status::Ok, None), false, None)
-            .await;
+        scheduler.finish_drop(txn_id, &staged_response(Status::Ok, None));
         assert!(!scheduler.pending.contains_key(&txn_id));
         assert_eq!(proposer.attempt_count(), 1, "the first proposal is refused");
 
@@ -338,40 +330,6 @@ mod tests {
         elect_data_group_leader(&scheduler);
         scheduler.retry_owed_sequencer_entries();
         assert_eq!(proposer.attempt_count(), 1);
-    }
-
-    /// A follower that staged a txn owes an abort vote. It proposes the vote
-    /// only once it leads the vShard's group and no vote has applied, so the
-    /// txn ends in a retryable abort instead of waiting on a lost leader.
-    #[tokio::test]
-    async fn a_follower_that_comes_to_lead_votes_abort_for_its_staged_txn() {
-        let (mut scheduler, _dir) = build_test_scheduler(VSHARD);
-        let proposer = CapturingProposer::accepting();
-        scheduler.sequencer_proposer = proposer.clone();
-        let txn_id = TxnId::new(26, 0);
-        scheduler.registry.seed_expected(cluster_txn_id(txn_id), 2);
-        scheduler
-            .pending
-            .insert(txn_id, staged_pending(make_sequenced_txn(26, 0), txn_id));
-
-        scheduler.resolve_staged_commit(
-            txn_id,
-            &staged_response(Status::Ok, Some(StageVote::Commit)),
-        );
-        scheduler.retry_owed_sequencer_entries();
-        assert_eq!(proposer.attempt_count(), 0, "a follower casts no vote");
-
-        elect_data_group_leader(&scheduler);
-        scheduler.retry_owed_sequencer_entries();
-        assert_eq!(
-            proposer.accepted(),
-            vec![SequencerEntry::AbortVote {
-                epoch: 26,
-                position: 0,
-                vshard: VSHARD,
-                reason: nodedb_cluster::calvin::AbortReason::SerializationConflict,
-            }]
-        );
     }
 
     /// A txn this node never seeded keeps its entry owed: a missing registry

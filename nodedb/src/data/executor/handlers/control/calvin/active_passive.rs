@@ -107,7 +107,6 @@ impl CoreLoop {
             epoch,
             position,
             epoch_system_ms,
-            is_group_leader,
         } = ctx;
         let vshard_id = task.request.vshard_id.as_u32();
         debug!(
@@ -116,7 +115,6 @@ impl CoreLoop {
             position,
             epoch_system_ms,
             vshard_id,
-            is_group_leader,
             plan_count = plans.len(),
             injected_count = injected_reads.len(),
             "calvin execute active"
@@ -133,13 +131,8 @@ impl CoreLoop {
 
         // OLLP verification runs HERE, before staging, so a predicate-drift
         // mismatch surfaces on THIS stage response (where the scheduler releases
-        // locks and re-recons) and nothing is staged, resolved, or WAL-appended.
-        // Scoped to this replica's staged leadership for the check, then the
-        // resting (authoritative) state is restored.
-        let prev_group_leader = self.calvin.ollp_is_group_leader;
-        self.calvin.ollp_is_group_leader = is_group_leader;
+        // locks and re-recons) and nothing is staged or resolved.
         let verified = self.verify_calvin_active_ollp(task, tenant_id.as_u64(), plans);
-        self.calvin.ollp_is_group_leader = prev_group_leader;
         match verified {
             Ok(true) => {}
             Ok(false) => return self.calvin_stage_refusal(task, ErrorCode::OllpRetryRequired),
@@ -243,7 +236,6 @@ mod tests {
             epoch: 1,
             position: 0,
             epoch_system_ms: 0,
-            is_group_leader: true,
         };
         let injected = BTreeMap::new();
 
@@ -304,7 +296,6 @@ mod tests {
             epoch: 1,
             position: 0,
             epoch_system_ms: 0,
-            is_group_leader: true,
         };
         let injected = BTreeMap::new();
 
@@ -340,7 +331,6 @@ mod tests {
             epoch: epoch_outside_synthetic_range,
             position: 0,
             epoch_system_ms: 0,
-            is_group_leader: true,
         };
 
         let resp = core.execute_calvin_execute_active(

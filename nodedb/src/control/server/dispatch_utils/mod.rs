@@ -13,10 +13,7 @@ mod types;
 mod unlogged_dispatch;
 mod write_abort;
 
-pub(crate) use change_events::{
-    CalvinApply, WriteChangeSet, publish_calvin_change_sets, publish_settled_changes,
-    redo_change_set,
-};
+pub(crate) use change_events::publish_settled_changes;
 pub use dispatch::{dispatch_authorized_autocommit_write, dispatch_authorized_to_data_plane};
 pub(crate) use dispatch::{
     dispatch_autocommit_write, dispatch_replayed_write_to_data_plane, dispatch_to_data_plane,

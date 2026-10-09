@@ -63,14 +63,3 @@ pub enum RedoBody {
         len: u64,
     },
 }
-
-impl RedoBody {
-    /// Whether the body is a committed Calvin slice's. Its scheduler holds
-    /// its locks.
-    pub fn is_calvin(&self) -> bool {
-        match self {
-            Self::Inline(content) => content.redo.calvin_stamp.is_some(),
-            Self::Chunked { stream, .. } => matches!(stream, RedoStreamId::Calvin { .. }),
-        }
-    }
-}

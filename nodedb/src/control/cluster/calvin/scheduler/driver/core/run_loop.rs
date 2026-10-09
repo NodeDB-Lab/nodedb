@@ -10,6 +10,10 @@ use super::catch_up::CatchUpDrain;
 use super::scheduler::Scheduler;
 use crate::control::shutdown::ShutdownReceiver;
 
+/// How often a new data-group leader checks whether its term's no-op
+/// applied, while its stage gate is closed.
+const ROLE_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
 impl Scheduler {
     /// Run the scheduler event loop until shutdown is signaled.
     pub async fn run(mut self, mut shutdown: ShutdownReceiver) {
@@ -30,6 +34,8 @@ impl Scheduler {
 
         // Woken when a routed Data-Plane response frees dispatcher capacity.
         let capacity_freed = Arc::clone(&self.capacity_freed);
+        // Woken when the data-group apply loop concludes a stamped redo.
+        let inbox = Arc::clone(self.inbox.inbox());
         // Set when a tick left armed catch-up unreplayed. The next open-gate
         // pass fires the tick at once to resume it.
         let mut catch_up_resume = false;
@@ -45,6 +51,10 @@ impl Scheduler {
                 self.redispatch_deferred();
             }
 
+            // Every pass reads the role first: a promotion stages held txns,
+            // a demotion stops staging.
+            self.refresh_role();
+            self.drain_inbox();
             self.check_dependent_barrier_timeouts();
             self.check_awaiting_verdict_stalls();
             self.resume_metadata_hold();
@@ -74,10 +84,14 @@ impl Scheduler {
                         self.log_superseded("completion");
                         break;
                     };
-                    // Awaited in the arm: the loop takes no other input
-                    // until this completion, its durability wait included,
-                    // is fully handled.
-                    self.handle_completion(txn_id, request_id, resp_opt).await;
+                    self.handle_completion(txn_id, request_id, resp_opt);
+                }
+
+                // The apply loop concluded a stamped redo. Drained in every
+                // state, halted included, so the apply loop never waits on
+                // this scheduler.
+                () = inbox.ready() => {
+                    self.drain_inbox();
                 }
 
                 maybe_verdict = self.verdict_rx.recv() => {
@@ -86,7 +100,7 @@ impl Scheduler {
                         break;
                     };
                     // A durable global verdict landed: resume the matching
-                    // parked txn into its flush (commit) or drop (abort).
+                    // txn.
                     self.handle_verdict_signal(signal);
                 }
 
@@ -116,15 +130,14 @@ impl Scheduler {
                     // The next loop pass re-checks the held txn's floor.
                 }
 
+                _ = tokio::time::sleep(ROLE_POLL), if self.role.awaits_term_start() => {
+                    // The next loop pass checks whether the term's no-op
+                    // applied, and stages the held txns once it has.
+                }
+
                 _ = &mut capacity_notified, if self.resends_deferred() => {
                     // Capacity freed: the next loop pass re-sends deferred
                     // requests in FIFO order.
-                }
-
-                _ = self.install_gate.released(), if self.install_gate.is_waiting() => {
-                    // A snapshot released a group's gate: the waiting flush
-                    // tries again.
-                    self.pump_flush_turn();
                 }
 
                 maybe_txn = self.receiver.recv(), if intake_open => {
@@ -150,6 +163,11 @@ impl Scheduler {
                         !intake_open || self.drain_catch_up() == CatchUpDrain::Remaining;
                     // Propose again every owed sequencer entry not yet applied.
                     self.retry_owed_sequencer_entries();
+                    // Propose again every committed slice's redo that is not
+                    // in the log. Apply events are drained first, so an
+                    // install already reported is never proposed again.
+                    self.drain_inbox();
+                    self.retry_redo_proposals();
                     // The top-of-loop check_awaiting_verdict_stalls /
                     // check_dependent_barrier_timeouts and the deferred re-send
                     // pass run on every wake; this arm guarantees the loop wakes
@@ -157,8 +175,6 @@ impl Scheduler {
                 }
             }
         }
-        // Every txn still pending stays unapplied on this replica.
-        self.hold_all_redo_records();
     }
 
     /// Log that a scheduler channel closed and the loop exits.

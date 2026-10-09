@@ -149,6 +149,7 @@ pub(in crate::data::executor) fn map_enforcement_error(e: ErrorCode) -> crate::E
         | ErrorCode::RejectedConstraint { .. }
         | ErrorCode::RejectedPrevalidation { .. }
         | ErrorCode::RetryableRefusal { .. }
+        | ErrorCode::CoreFailStopped { .. }
         | ErrorCode::SyncRejected { .. }
         | ErrorCode::SyncNotApplied { .. }
         | ErrorCode::NotFound

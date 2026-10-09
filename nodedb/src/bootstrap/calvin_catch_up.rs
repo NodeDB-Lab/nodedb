@@ -118,9 +118,9 @@ mod tests {
             vshard_id,
             epoch: 9,
             position: 1,
-            reason: "flush_failed",
-            step: "flush",
-            error: "flush returned Error".to_string(),
+            reason: "redo_apply_failed",
+            step: "redo_apply",
+            error: "redo install did not become durable".to_string(),
         }
     }
 

@@ -109,9 +109,9 @@ pub(in crate::diag) struct CalvinApplyHalted<'a> {
     pub vshard_id: u32,
     pub epoch: u64,
     pub position: u32,
-    /// Halt reason label (`dispatch_refused`, `flush_failed`, ...).
+    /// Halt reason label (`dispatch_refused`, `redo_apply_failed`, ...).
     pub reason: &'a str,
-    /// Sub-operation of the txn that failed (`stage`, `flush`, ...).
+    /// Sub-operation of the txn that failed (`stage`, `redo_propose`, ...).
     pub step: &'a str,
     pub error: &'a str,
 }

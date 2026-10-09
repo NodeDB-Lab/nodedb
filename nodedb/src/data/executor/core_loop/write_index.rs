@@ -131,6 +131,18 @@ impl WriteVersionIndex {
         self.coll_write_lsn.get(key).copied()
     }
 
+    /// Every recorded per-key version.
+    #[cfg(test)]
+    pub(crate) fn recorded_keys(&self) -> impl Iterator<Item = (&WriteKey, Lsn)> {
+        self.last_write_lsn.iter().map(|(key, lsn)| (key, *lsn))
+    }
+
+    /// Every recorded per-collection floor.
+    #[cfg(test)]
+    pub(crate) fn recorded_collections(&self) -> impl Iterator<Item = (&CollKey, Lsn)> {
+        self.coll_write_lsn.iter().map(|(key, lsn)| (key, *lsn))
+    }
+
     /// Whether a previously observed read is still current against this
     /// core's recorded write versions.
     ///

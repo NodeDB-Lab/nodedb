@@ -29,10 +29,9 @@ impl CoreLoop {
     /// against the per-core write versions, then STAGES the write plans into
     /// the synthetic overlay and the commit-pending buffer keyed by
     /// `(epoch, position)`. It performs NO base mutation and fires NO side
-    /// effects — nothing is observable until a subsequent
-    /// [`CoreLoop::execute_calvin_flush`] installs the transaction's redo
-    /// record (or [`CoreLoop::execute_calvin_drop`] discards the staged
-    /// state). The response carries the vote on `stage_vote`. Staging runs
+    /// effects. Nothing is observable until the apply of the slice's stamped
+    /// redo entry installs it, or [`CoreLoop::execute_calvin_drop`] discards
+    /// the staged state. The response carries the vote on `stage_vote`. Staging runs
     /// under the epoch's deterministic time anchor, which the pending entry
     /// keeps for resolve. `body_plans` indexes the plans a trigger body
     /// buffered: they stage under `Trigger`, so their rows fire no trigger.
@@ -49,7 +48,6 @@ impl CoreLoop {
             epoch,
             position,
             epoch_system_ms,
-            is_group_leader,
         } = ctx;
         let vshard_id = task.request.vshard_id.as_u32();
         debug!(
@@ -58,7 +56,6 @@ impl CoreLoop {
             position,
             epoch_system_ms,
             vshard_id,
-            is_group_leader,
             plan_count = plans.len(),
             read_count = versioned_reads.len(),
             "calvin stage for commit"
@@ -215,7 +212,6 @@ mod tests {
             epoch: 1,
             position: 0,
             epoch_system_ms: 0,
-            is_group_leader: true,
         };
 
         let resp = core.execute_calvin_execute_static(&task, ctx, &tenant_id, &plans, &[], &[]);
@@ -274,7 +270,6 @@ mod tests {
             epoch: 3,
             position: 0,
             epoch_system_ms: 0,
-            is_group_leader: true,
         };
 
         let resp = core.execute_calvin_execute_static(
@@ -310,7 +305,6 @@ mod tests {
             epoch: 3,
             position: 1,
             epoch_system_ms: 0,
-            is_group_leader: true,
         };
 
         let resp = core.execute_calvin_execute_static(
@@ -340,7 +334,6 @@ mod tests {
                 epoch: epoch_outside_synthetic_range,
                 position: 0,
                 epoch_system_ms: 0,
-                is_group_leader: true,
             },
             &tenant_id,
             &[point_insert_plan("orders", "o1", 7)],
@@ -373,7 +366,6 @@ mod tests {
             epoch: 9,
             position: 3,
             epoch_system_ms: 0,
-            is_group_leader: true,
         };
         let vshard = task.request.vshard_id.as_u32();
         let synthetic = calvin_synthetic_txn_id(9, 3, vshard).unwrap();
@@ -422,7 +414,6 @@ mod tests {
                 epoch: 9,
                 position: 5,
                 epoch_system_ms: 0,
-                is_group_leader: true,
             },
             &tenant_id,
             &[bulk_delete_plan("orders", None)],
@@ -453,7 +444,6 @@ mod tests {
             epoch: 9,
             position: 4,
             epoch_system_ms: 0,
-            is_group_leader: true,
         };
         let vshard = task.request.vshard_id.as_u32();
         let synthetic = calvin_synthetic_txn_id(9, 4, vshard).unwrap();
@@ -515,7 +505,6 @@ mod tests {
                 epoch: 21,
                 position: 1,
                 epoch_system_ms: 0,
-                is_group_leader: true,
             },
             &tenant,
             &[malformed],
@@ -537,7 +526,6 @@ mod tests {
                 epoch: 21,
                 position: 1,
                 epoch_system_ms: 0,
-                is_group_leader: true,
             },
             &tenant,
             &[valid],
@@ -559,7 +547,6 @@ mod tests {
                 epoch: 21,
                 position: 2,
                 epoch_system_ms: 0,
-                is_group_leader: true,
             },
             &tenant,
             &[mismatch],
@@ -583,7 +570,6 @@ mod tests {
                 epoch: 21,
                 position: 3,
                 epoch_system_ms: 0,
-                is_group_leader: true,
             },
             &tenant,
             &[overflow],

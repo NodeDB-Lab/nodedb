@@ -23,6 +23,8 @@
 //!   collects.
 //! - [`calvin_read_result`]: forwards a committed `CalvinReadResult` entry to
 //!   the local Calvin scheduler.
+//! - [`calvin_redo`]: claims a stamped Calvin redo's position in the applied
+//!   ledger and reports its install to the vShard's scheduler.
 //! - [`write_dispatch`]: the generic decode + write-funnel enqueue path.
 //! - [`transaction_redo`]: a committed transaction's redo, stamped with its
 //!   Raft entry and applied through the WAL replay arms.
@@ -47,6 +49,7 @@
 mod array_cell_route;
 mod bookkeeping;
 mod calvin_read_result;
+mod calvin_redo;
 mod collection_route;
 mod context;
 mod driver;

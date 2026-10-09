@@ -58,14 +58,10 @@ impl CoreLoop {
         };
         self.io_metrics.record_wait(tier, wait_ns);
 
-        // A write to a row a staged Calvin transaction owns waits for it.
         // A plain REINDEX starts its rebuilds and waits for their cutovers.
-        if let Some(task) = self.park_if_calvin_owned(qt.task)
-            && let Some(task) = self.hold_plain_reindex(task)
-        {
+        if let Some(task) = self.hold_plain_reindex(qt.task) {
             self.run_task(task);
         }
-        self.release_resolved_calvin_owners();
         true
     }
 
@@ -184,7 +180,6 @@ impl CoreLoop {
         // Adjust SPSC read depth based on current memory pressure.
         self.apply_spsc_pressure();
         self.drain_requests();
-        self.expire_calvin_parked();
         let mut processed = 0;
         while !self.task_queue.is_empty() {
             // A fail-stopped core serves nothing, including the rest of the
@@ -337,7 +332,7 @@ mod tests {
             assert!(
                 matches!(
                     resp.inner.error_code.as_deref(),
-                    Some(ErrorCode::RetryableRefusal { .. })
+                    Some(ErrorCode::CoreFailStopped { .. })
                 ),
                 "{:?}",
                 resp.inner.error_code

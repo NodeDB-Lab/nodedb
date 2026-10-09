@@ -55,6 +55,12 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
             PublicCode::WRITE_CONFLICT,
             format!("write refused without applying, retry: {reason}"),
         ),
+        // The core applied nothing, and another replica or a restart serves
+        // the request: the retriable class.
+        ErrorCode::CoreFailStopped { core_id, detail } => NodeDbError::from_wire(
+            PublicCode::WRITE_CONFLICT,
+            format!("core {core_id} is fail-stopped and applied nothing, retry: {detail}"),
+        ),
         // The Data Plane cannot distinguish an absent collection from an
         // absent row through this code, and `document_not_found` is the
         // narrower of the two claims: it never asserts the collection is

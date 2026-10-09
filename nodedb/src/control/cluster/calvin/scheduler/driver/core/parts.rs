@@ -23,7 +23,7 @@
 //!   every replica alike.
 //! - A txn whose locks are granted before its parts arrived waits in
 //!   `awaiting`, holding its locks. It counts as unfinished, so every later
-//!   txn's flush on this vShard waits for it.
+//!   whole-collection resolve on this vShard waits for it.
 //! - Once every part that targets this vShard arrived, the txn stages as a
 //!   single-entry txn whose plans are its local tasks. Its manifest keeps
 //!   the whole-transaction facts the dispatch reads.
@@ -234,6 +234,18 @@ impl PartsState {
         &self,
     ) -> Option<TxnId> {
         self.awaiting.keys().next().copied()
+    }
+
+    /// Stop waiting for the parts of `txn_id`, which finished without them:
+    /// its redo installed from another replica's stage. Returns the owner of
+    /// the locks it holds.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn release_awaiting(
+        &mut self,
+        txn_id: TxnId,
+    ) -> Option<TxnId> {
+        let awaiting = self.awaiting.remove(&txn_id)?;
+        self.assemblies.remove(&txn_id);
+        Some(awaiting.lock_owner)
     }
 }
 
@@ -446,7 +458,7 @@ mod tests {
     use crate::bridge::envelope::Status;
     use crate::control::cluster::calvin::scheduler::driver::core::owed::OwedKind;
     use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::{
-        CapturingProposer, elect_data_group_leader,
+        CapturingProposer, lead_data_group,
     };
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
         build_test_scheduler_with_data_side, make_local_write_txn, staged_response,
@@ -542,7 +554,7 @@ mod tests {
         );
         let proposer = CapturingProposer::accepting();
         scheduler.sequencer_proposer = proposer.clone();
-        elect_data_group_leader(&scheduler);
+        lead_data_group(&mut scheduler);
         (scheduler, dir, data_side, proposer)
     }
 
@@ -598,10 +610,7 @@ mod tests {
         scheduler.resume_on_verdict(txn_id, false);
         assert_eq!(
             scheduler.pending.get(&txn_id).map(|p| p.commit_state),
-            Some(CommitState::AwaitingResolve {
-                committed: false,
-                redo_lsn: None
-            })
+            Some(CommitState::AwaitingDrop)
         );
         assert!(
             !truncate_reached_data_plane(data_side),
@@ -609,9 +618,7 @@ mod tests {
         );
         assert!(!scheduler.applied.is_applied(txn_id.epoch, txn_id.position));
 
-        scheduler
-            .finish_resolved_commit(txn_id, staged_response(Status::Ok, None), false, None)
-            .await;
+        scheduler.finish_drop(txn_id, &staged_response(Status::Ok, None));
         assert!(!scheduler.pending.contains_key(&txn_id));
         assert!(scheduler.applied.is_applied(txn_id.epoch, txn_id.position));
         assert!(

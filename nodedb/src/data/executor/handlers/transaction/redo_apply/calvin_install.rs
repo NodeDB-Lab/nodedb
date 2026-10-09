@@ -47,6 +47,8 @@ impl CoreLoop {
             position,
             epoch_system_ms,
             reply,
+            // The Control Plane raises the write mark; the install writes rows.
+            user_write: _,
         } = install;
         let (epoch, position, epoch_system_ms) = (*epoch, *position, *epoch_system_ms);
         let vshard_id = task.request.vshard_id.as_u32();
@@ -73,11 +75,10 @@ impl CoreLoop {
             return response;
         }
         // The record installed: a staged entry of the slice and its overlay
-        // are spent. Writes waiting on the rows the entry owned run next.
-        let key = (epoch, position, vshard_id);
-        if self.calvin.commit_pending.remove(&key).is_some() {
-            self.calvin.fence.note_resolved(key, task.wal_lsn());
-        }
+        // are spent.
+        self.calvin
+            .commit_pending
+            .remove(&(epoch, position, vshard_id));
         self.drop_calvin_synthetic_overlay(epoch, position, vshard_id);
 
         let prev_epoch_ms = self.epoch_system_ms;

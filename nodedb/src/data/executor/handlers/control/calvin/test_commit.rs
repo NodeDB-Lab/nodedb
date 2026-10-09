@@ -47,7 +47,6 @@ impl CoreLoop {
             epoch,
             position: 0,
             epoch_system_ms,
-            is_group_leader: true,
         };
         let staged =
             self.execute_calvin_execute_static(task, ctx, &TenantId::new(tid), plans, &[], &[]);

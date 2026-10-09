@@ -27,6 +27,15 @@ impl MultiRaft {
             .map(|node| node.current_term())
     }
 
+    /// Index of the no-op this node appended when it won its current term in
+    /// `group_id`, while it leads the group, else `None`. Every entry of an
+    /// earlier term in its log sits below it and commits with it.
+    pub fn term_start_index(&self, group_id: u64) -> Option<u64> {
+        self.groups
+            .get(&group_id)
+            .and_then(|node| node.term_start_index())
+    }
+
     /// Whether this node heard from the leader of `group_id` within
     /// `window`. The leader itself always has. Unlike a staleness bound, a
     /// replica that is merely behind on apply still counts as in contact.

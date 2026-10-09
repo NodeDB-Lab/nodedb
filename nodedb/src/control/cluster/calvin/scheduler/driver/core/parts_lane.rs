@@ -7,7 +7,8 @@
 //! of the backlog, though, finishes only on input:
 //!
 //! - A multi-part txn that holds its locks finishes only once its parts
-//!   arrive, and every later flush on this vShard waits for it.
+//!   arrive, and every later whole-collection resolve on this vShard waits
+//!   for it.
 //! - A blocked txn below it can wait on a reservation release.
 //!
 //! While the gate is closed for the backlog, the lane lets exactly those
@@ -41,7 +42,7 @@
 //! parts and any abandonment of it follow its header in the log. They sit
 //! in the channel or in the log past the armed start, and the lane reaches
 //! both. So does a release a blocked txn waits on. The txn then stages,
-//! flushes, and the backlog behind it drains, which opens the gate.
+//! applies, and the backlog behind it drains, which opens the gate.
 
 use std::collections::VecDeque;
 

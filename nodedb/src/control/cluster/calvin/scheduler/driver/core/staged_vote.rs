@@ -5,7 +5,7 @@
 
 use nodedb_cluster::calvin::AbortReason;
 
-use crate::bridge::envelope::{Response, StageVote, Status};
+use crate::bridge::envelope::{ErrorCode, Response, StageVote, Status};
 
 /// A participant's local verdict on its staged slice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,18 +57,27 @@ pub(super) enum StageVoteError {
     /// A stage response that did not succeed carries a commit vote.
     #[error("stage returned {status:?} with a commit stage vote")]
     CommitWithoutSuccess { status: Status },
+    /// The vShard's core fail-stopped and refused the stage. It refuses
+    /// every later request too, the committed install included, so no vote
+    /// this replica casts can be kept.
+    #[error("stage refused by fail-stopped core {core_id}")]
+    CoreFailStopped { core_id: usize },
 }
 
 /// Read the local vote of a staged slice from its stage response.
 ///
 /// The response's stage vote maps 1:1. An error response with no vote never
 /// reached a stage path: the request expired, or its core is gone or
-/// drained. That slice never staged, so it votes `ParticipantError`.
+/// drained. That slice never staged, so it votes `ParticipantError`. A
+/// fail-stopped core's refusal is the exception: it is refused.
 ///
 /// A response that did not fail and carries no vote is refused, and so is a
 /// commit vote on a response that did not succeed. Neither counts as a commit.
 pub(super) fn staged_commit_vote(response: &Response) -> Result<StagedVote, StageVoteError> {
     let status = response.status;
+    if let Some(ErrorCode::CoreFailStopped { core_id, .. }) = response.error_code.as_deref() {
+        return Err(StageVoteError::CoreFailStopped { core_id: *core_id });
+    }
     match (response.stage_vote, status) {
         (Some(StageVote::Commit), Status::Ok) => Ok(StagedVote::Commit),
         (Some(StageVote::Commit), Status::Partial | Status::Error) => {
@@ -90,7 +99,7 @@ pub(super) fn staged_commit_vote(response: &Response) -> Result<StagedVote, Stag
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::envelope::{ErrorCode, Payload};
+    use crate::bridge::envelope::Payload;
     use crate::types::{Lsn, RequestId};
 
     fn staged_response(status: Status, stage_vote: Option<StageVote>) -> Response {
@@ -181,6 +190,21 @@ mod tests {
         assert_eq!(
             staged_commit_vote(&response),
             Ok(StagedVote::ParticipantError)
+        );
+    }
+
+    /// A fail-stopped core's refusal is no vote: the core refuses the
+    /// committed install too.
+    #[test]
+    fn a_fail_stopped_core_refusal_is_refused() {
+        let mut response = staged_response(Status::Error, None);
+        response.error_code = Some(Box::new(ErrorCode::CoreFailStopped {
+            core_id: 2,
+            detail: "rollback failed".into(),
+        }));
+        assert_eq!(
+            staged_commit_vote(&response),
+            Err(StageVoteError::CoreFailStopped { core_id: 2 })
         );
     }
 

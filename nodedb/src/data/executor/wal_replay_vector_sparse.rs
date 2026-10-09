@@ -100,6 +100,7 @@ impl CoreLoop {
                 doc_id: doc_id.clone(),
                 entries: entries.clone(),
             }),
+            Self::replay_record_lsn(record_lsn),
         );
         let response = self.execute_sparse_insert(
             &task,
@@ -170,6 +171,7 @@ impl CoreLoop {
                 field_name: field_name.clone(),
                 doc_id: doc_id.clone(),
             }),
+            Self::replay_record_lsn(record_lsn),
         );
         // An absent document yields NotFound; that is an expected idempotent
         // no-op on replay, not a failure.

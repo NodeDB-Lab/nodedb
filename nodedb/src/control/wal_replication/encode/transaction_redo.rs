@@ -10,8 +10,8 @@
 
 use super::super::transaction_redo::TransactionRedoPayload;
 use super::super::types::{
-    RedoBody, RedoContent, ReplicatedEntry, ReplicatedEventSource, ReplicatedIdentity,
-    ReplicatedWrite,
+    CollectionIncarnation, RedoBody, RedoContent, ReplicatedEntry, ReplicatedEventSource,
+    ReplicatedIdentity, ReplicatedWrite,
 };
 use crate::types::{DatabaseId, TenantId, VShardId};
 use crate::wal::RedoStreamId;
@@ -80,6 +80,7 @@ fn redo_entry(
             collections: payload.collections.clone(),
             event_source: ReplicatedEventSource::from(payload.event_source),
             origin: payload.origin,
+            calvin: payload.calvin.clone(),
         },
     )
     .with_event_source(payload.event_source)
@@ -112,6 +113,70 @@ pub fn session_redo_proposal(
     payload: &TransactionRedoPayload,
     max_entry_bytes: usize,
 ) -> crate::Result<RedoProposal> {
+    redo_proposal(target, payload, max_entry_bytes, |last| {
+        RedoStreamId::Session {
+            vshard: target.vshard_id.as_u32(),
+            idempotency_key: last.idempotency_key,
+        }
+    })
+}
+
+/// What the leader stamps on a committed Calvin slice's final entry. Every
+/// re-proposal of the slice carries the same stamps.
+#[derive(Debug, Clone)]
+pub struct CalvinEntryStamps {
+    /// The slice's commit HLC: every replica records it on the tenant's
+    /// write mark.
+    pub write_hlc: u64,
+    /// The RESTORE that re-issued the slice, `0` for any other.
+    pub restore_id: u64,
+    /// The metadata index the coordinator planned the transaction against.
+    pub metadata_floor: u64,
+    /// The incarnation the coordinator planned against for each collection
+    /// the slice writes.
+    pub incarnations: Vec<CollectionIncarnation>,
+}
+
+/// The entries of a committed Calvin slice's redo, for one proposal
+/// attempt. The redo travels inline when its entry fits `max_entry_bytes`,
+/// else chunked under `stream`.
+pub fn calvin_redo_proposal(
+    target: RedoEntryTarget,
+    payload: &TransactionRedoPayload,
+    stamps: &CalvinEntryStamps,
+    stream: RedoStreamId,
+    max_entry_bytes: usize,
+) -> crate::Result<RedoProposal> {
+    let proposal = redo_proposal(target, payload, max_entry_bytes, |_| stream)?;
+    let stamp = |mut last: ReplicatedEntry| {
+        last.write_hlc = stamps.write_hlc;
+        last.restore_id = stamps.restore_id;
+        last.metadata_floor = stamps.metadata_floor;
+        last.incarnations = stamps.incarnations.clone();
+        last
+    };
+    Ok(match proposal {
+        RedoProposal::Inline(last) => RedoProposal::Inline(stamp(last)),
+        RedoProposal::Chunked {
+            stream,
+            chunks,
+            last,
+        } => RedoProposal::Chunked {
+            stream,
+            chunks,
+            last: stamp(last),
+        },
+    })
+}
+
+/// The entries of `payload`: inline when its entry fits `max_entry_bytes`,
+/// else chunks under the stream `stream_of` names for the final entry.
+fn redo_proposal(
+    target: RedoEntryTarget,
+    payload: &TransactionRedoPayload,
+    max_entry_bytes: usize,
+    stream_of: impl FnOnce(&ReplicatedEntry) -> RedoStreamId,
+) -> crate::Result<RedoProposal> {
     let content = content_of(payload);
     let bytes = content.to_bytes()?;
     // The entry around the content: the collections it names twice, once in
@@ -126,10 +191,7 @@ pub fn session_redo_proposal(
     if bytes.len().saturating_add(envelope) <= max_entry_bytes {
         return Ok(RedoProposal::Inline(last));
     }
-    let stream = RedoStreamId::Session {
-        vshard: target.vshard_id.as_u32(),
-        idempotency_key: last.idempotency_key,
-    };
+    let stream = stream_of(&last);
     let chunks = chunk_entries(
         target,
         stream,
@@ -152,6 +214,7 @@ pub fn session_redo_proposal(
         collections: payload.collections.clone(),
         event_source: ReplicatedEventSource::from(payload.event_source),
         origin: payload.origin,
+        calvin: payload.calvin.clone(),
     };
     Ok(RedoProposal::Chunked {
         stream,
@@ -244,6 +307,95 @@ mod tests {
             database_id: DatabaseId::DEFAULT,
             vshard_id: VShardId::new(3),
         }
+    }
+
+    /// The payload of a committed Calvin slice.
+    fn calvin_payload(op_bytes: usize) -> TransactionRedoPayload {
+        let mut payload = payload(op_bytes);
+        payload.calvin = Some(super::super::super::types::CalvinRedoMeta {
+            epoch_system_ms: 7,
+            reply: nodedb_physical::physical_plan::CalvinReplySpec::Count(Vec::new()),
+            primary_write: true,
+            user_write: true,
+            returning: false,
+        });
+        payload
+    }
+
+    fn calvin_stamps() -> CalvinEntryStamps {
+        CalvinEntryStamps {
+            write_hlc: 41,
+            restore_id: 0,
+            metadata_floor: 9,
+            incarnations: vec![CollectionIncarnation {
+                collection: "orders".into(),
+                incarnation: nodedb_types::Hlc::ZERO,
+            }],
+        }
+    }
+
+    fn calvin_stream() -> RedoStreamId {
+        RedoStreamId::Calvin {
+            vshard: 3,
+            epoch: 5,
+            position: 1,
+            attempt: 2,
+        }
+    }
+
+    /// The final entry of a Calvin slice's redo carries the leader's stamps
+    /// and the slice's meta, inline or chunked. Chunks carry no stamp.
+    #[test]
+    fn a_calvin_proposal_stamps_its_final_entry() {
+        let inline = calvin_redo_proposal(
+            target(),
+            &calvin_payload(100),
+            &calvin_stamps(),
+            calvin_stream(),
+            64 * 1024,
+        )
+        .expect("build");
+        let RedoProposal::Inline(last) = inline else {
+            panic!("a small redo travels inline");
+        };
+        assert_eq!(last.write_hlc, 41);
+        assert_eq!(last.metadata_floor, 9);
+        assert_eq!(last.incarnations, calvin_stamps().incarnations);
+        assert!(matches!(
+            last.write,
+            ReplicatedWrite::TransactionRedo {
+                calvin: Some(_),
+                ..
+            }
+        ));
+
+        let chunked = calvin_redo_proposal(
+            target(),
+            &calvin_payload(300_000),
+            &calvin_stamps(),
+            calvin_stream(),
+            64 * 1024,
+        )
+        .expect("build");
+        let RedoProposal::Chunked {
+            stream,
+            chunks,
+            last,
+        } = chunked
+        else {
+            panic!("a 300 KB redo travels chunked");
+        };
+        assert_eq!(stream, calvin_stream(), "the attempt names its stream");
+        assert_eq!(last.write_hlc, 41);
+        assert!(chunks.iter().all(|chunk| chunk.write_hlc == 0));
+        assert!(matches!(
+            last.write,
+            ReplicatedWrite::TransactionRedo {
+                body: RedoBody::Chunked { stream: named, .. },
+                calvin: Some(_),
+                ..
+            } if named == calvin_stream()
+        ));
     }
 
     #[test]

@@ -94,6 +94,7 @@ impl CoreLoop {
                 response_payload: Vec::new(),
                 rls_write_check: rls_write_check.clone(),
             }),
+            Self::replay_record_lsn(record_lsn),
         );
         let index = VectorResolvedIndexSpec {
             collection: &collection,

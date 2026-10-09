@@ -26,4 +26,5 @@ pub mod reindex;
 pub mod snapshot;
 pub mod synonym_group;
 
+#[cfg(test)]
 pub(in crate::data::executor) use calvin_txn_id::calvin_synthetic_txn_id;

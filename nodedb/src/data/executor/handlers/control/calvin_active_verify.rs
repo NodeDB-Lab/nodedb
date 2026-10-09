@@ -16,8 +16,8 @@ use crate::data::executor::handlers::bulk_dml::scan::{
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
-    /// Leader-only OLLP verification of every predicate-DML plan in a
-    /// dependent-read ACTIVE Calvin txn, before staging. `Ok(false)` means a
+    /// OLLP verification of every predicate-DML plan in a dependent-read
+    /// ACTIVE Calvin txn, before staging. Only the data-group leader stages. `Ok(false)` means a
     /// prediction drifted; caller returns `OllpRetryRequired`, stages nothing.
     pub(in crate::data::executor) fn verify_calvin_active_ollp(
         &self,
@@ -25,9 +25,6 @@ impl CoreLoop {
         tid: u64,
         plans: &[PhysicalPlan],
     ) -> crate::Result<bool> {
-        if !self.calvin.ollp_is_group_leader {
-            return Ok(true);
-        }
         let database_id = task.request.database_id.as_u64();
         for plan in plans {
             // Only the document engine carries an OLLP prediction; exhaustive

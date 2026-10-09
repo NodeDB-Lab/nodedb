@@ -189,9 +189,11 @@ fn entry_scope(write: &ReplicatedWrite, database_id: crate::types::DatabaseId) -
         // scheduler holds its locks. A session transaction's redo writes
         // every collection it names.
         ReplicatedWrite::TransactionRedo {
-            body, collections, ..
+            collections,
+            calvin,
+            ..
         } => {
-            if body.is_calvin() {
+            if calvin.is_some() {
                 EntryScope::Exempt
             } else {
                 EntryScope::Collections(collections.clone())

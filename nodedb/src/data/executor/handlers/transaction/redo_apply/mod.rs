@@ -15,8 +15,8 @@
 //! - [`test_commit`]: a test driver for a session commit on one core.
 //! - [`install_refusal_tests`]: one committed and one refused install per
 //!   engine kind.
-//! - [`calvin_fold_tests`]: a Calvin record folds the same live and in
-//!   restart replay.
+//! - [`calvin_fold_tests`]: a Calvin record's fold rows journal as parts,
+//!   and restart replay applies them.
 //! - [`calvin_install_tests`]: a Calvin slice installs from its stamped
 //!   redo entry.
 //! - [`unique_handover_tests`]: UNIQUE judged on a record's post-state.

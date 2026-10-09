@@ -38,6 +38,10 @@ impl From<ErrorCode> for DataPlaneErrorCode {
             }
             ErrorCode::RejectedPrevalidation { reason } => Self::RejectedPrevalidation { reason },
             ErrorCode::RetryableRefusal { reason } => Self::RetryableRefusal { reason },
+            ErrorCode::CoreFailStopped { core_id, detail } => Self::CoreFailStopped {
+                core_id: to_wire_count(core_id),
+                detail,
+            },
             ErrorCode::SyncRejected {
                 violation,
                 applied_seq,
@@ -186,6 +190,10 @@ impl From<DataPlaneErrorCode> for ErrorCode {
                 Self::RejectedPrevalidation { reason }
             }
             DataPlaneErrorCode::RetryableRefusal { reason } => Self::RetryableRefusal { reason },
+            DataPlaneErrorCode::CoreFailStopped { core_id, detail } => Self::CoreFailStopped {
+                core_id: from_wire_count(core_id),
+                detail,
+            },
             DataPlaneErrorCode::SyncRejected {
                 violation,
                 applied_seq,
@@ -371,6 +379,16 @@ mod tests {
             let wire = DataPlaneErrorCode::from(original.clone());
             assert_eq!(ErrorCode::from(wire), original);
         }
+    }
+
+    #[test]
+    fn a_core_fail_stop_roundtrips_verbatim() {
+        let original = ErrorCode::CoreFailStopped {
+            core_id: 3,
+            detail: "rollback failed".into(),
+        };
+        let wire = DataPlaneErrorCode::from(original.clone());
+        assert_eq!(ErrorCode::from(wire), original);
     }
 
     #[test]

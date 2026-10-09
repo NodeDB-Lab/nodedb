@@ -496,6 +496,7 @@ mod tests {
             PhysicalPlan::Meta(MetaOp::WalAppend {
                 payload: Vec::new(),
             }),
+            None,
         );
 
         let response = core.execute_restore_tenant_snapshot(
@@ -568,6 +569,7 @@ mod tests {
             PhysicalPlan::Meta(MetaOp::WalAppend {
                 payload: Vec::new(),
             }),
+            None,
         );
         (bytes, task)
     }
@@ -653,6 +655,7 @@ mod tests {
             PhysicalPlan::Meta(MetaOp::WalAppend {
                 payload: Vec::new(),
             }),
+            None,
         );
         let response = core.execute_restore_tenant_snapshot(&task, 0, &bytes, true, &[], &[]);
         assert_eq!(response.status, Status::Ok, "restore must succeed");

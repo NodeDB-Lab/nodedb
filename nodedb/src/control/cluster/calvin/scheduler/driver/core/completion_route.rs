@@ -5,10 +5,9 @@
 //! [`Scheduler::handle_completion`] is the `completion_rx` arm of the main
 //! `select!` loop: it classifies each executor response (disconnect, or the
 //! txn's commit-resolution state) and routes it to the matching handler.
-//! Every txn threads through the commit-barrier states in
-//! [`super::commit_resolve`]; a txn parked in
-//! [`CommitState::AwaitingVerdict`] has no outstanding bridge, so a completion
-//! for it is a no-op that keeps it parked.
+//! Only the answer to the request a txn waits for drives it. An answer to a
+//! step the txn left, after a demotion or an install from another copy, is
+//! ignored.
 
 use super::super::types::CommitState;
 use super::halt::{HaltReason, HaltStep};
@@ -21,24 +20,28 @@ impl Scheduler {
     /// Process a completed executor response (or disconnected channel).
     ///
     /// Called from the `completion_rx` arm of the main `select!` loop.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) async fn handle_completion(
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn handle_completion(
         &mut self,
         txn_id: TxnId,
         request_id: RequestId,
         resp_opt: Option<Response>,
     ) {
-        let Some(commit_state) = self.pending.get(&txn_id).map(|p| p.commit_state) else {
-            // A response bridge exists only for a pending txn, and the txn
-            // leaves `pending` only after its last response.
-            tracing::error!(
+        if !self.awaits(txn_id, request_id) {
+            tracing::debug!(
                 vshard_id = self.vshard_id,
                 request_id = request_id.as_u64(),
                 epoch = txn_id.epoch,
                 position = txn_id.position,
-                "calvin: executor completion for a txn with no pending entry; ignoring"
+                "calvin: executor answer to a step the txn left; ignoring"
             );
             return;
+        }
+        let Some(commit_state) = self.pending.get(&txn_id).map(|p| p.commit_state) else {
+            return;
         };
+        if let Some(pending) = self.pending.get_mut(&txn_id) {
+            pending.awaiting = None;
+        }
         let response = match resp_opt {
             Some(r) => r,
             None => {
@@ -66,10 +69,6 @@ impl Scheduler {
             .unwrap_or(0);
         self.metrics.record_executor_txn_duration_ms(elapsed_ms);
 
-        // A txn resolves through its commit-barrier state, OLLP answer
-        // included. The flush installs a resolved redo record and runs no
-        // OLLP check, so an OLLP answer under a later state is a failed step
-        // that halts and holds. It never settles as a retry.
         match commit_state {
             CommitState::Staged => {
                 // Stage failures remain participants in the barrier:
@@ -81,18 +80,15 @@ impl Scheduler {
             CommitState::AwaitingRedoResolve => {
                 self.finish_redo_resolve(txn_id, response);
             }
-            CommitState::AwaitingResolve {
-                committed,
-                redo_lsn,
-            } => {
-                self.finish_resolved_commit(txn_id, response, committed, redo_lsn)
-                    .await;
+            CommitState::AwaitingDrop => {
+                self.finish_drop(txn_id, &response);
             }
-            CommitState::AwaitingFlushTurn { .. }
+            CommitState::Following
+            | CommitState::AwaitingVerdict
             | CommitState::AwaitingResolveTurn
-            | CommitState::AwaitingVersionRecord => {
-                // A txn waiting for its flush or resolve turn has no request
-                // out. A write-version record drains its own response.
+            | CommitState::AwaitingRedoApply { .. } => {
+                // A txn in these states sends no request it waits for. A
+                // recorded request names a step it left.
                 tracing::warn!(
                     vshard_id = self.vshard_id,
                     request_id = request_id.as_u64(),
@@ -100,22 +96,6 @@ impl Scheduler {
                     position = txn_id.position,
                     ?commit_state,
                     "calvin: executor completion for a txn with no request out; ignoring"
-                );
-            }
-            CommitState::AwaitingVerdict => {
-                // A parked txn dispatched no executor request (it is waiting on
-                // the cross-shard verdict, not the Data Plane), so no response
-                // bridge is outstanding for it — a completion here indicates a
-                // logic error, not a real Data-Plane reply. Do NOT run the commit
-                // tail or release locks (that can tear the transaction);
-                // remain parked and let the verdict path resume it.
-                tracing::warn!(
-                    vshard_id = self.vshard_id,
-                    request_id = request_id.as_u64(),
-                    epoch = txn_id.epoch,
-                    position = txn_id.position,
-                    "calvin: executor completion for a txn parked on the commit barrier; \
-                     ignoring (no bridge is outstanding while AwaitingVerdict)"
                 );
             }
         }
@@ -136,20 +116,13 @@ mod tests {
     /// A response channel that closes before a response leaves the txn's
     /// outcome unknown: the txn stays pending and unapplied, the scheduler
     /// halts, and the node marker names the txn.
-    #[tokio::test]
-    async fn disconnected_response_holds_txn_unapplied_and_sets_node_marker() {
+    #[test]
+    fn disconnected_response_holds_txn_unapplied_and_sets_node_marker() {
         let txn_id = TxnId::new(5, 1);
-        let (mut scheduler, _dir) = scheduler_with_pending(
-            txn_id,
-            CommitState::AwaitingResolve {
-                committed: true,
-                redo_lsn: None,
-            },
-        );
+        let (mut scheduler, _dir) =
+            scheduler_with_pending(txn_id, CommitState::AwaitingRedoResolve);
 
-        scheduler
-            .handle_completion(txn_id, RequestId::new(9), None)
-            .await;
+        scheduler.handle_completion(txn_id, RequestId::new(9), None);
 
         assert!(
             !scheduler.applied.is_applied(5, 1),
@@ -163,7 +136,7 @@ mod tests {
         let marker = scheduler.shared.sequencer_halt.apply_halt().report();
         assert_eq!(
             marker.map(|h| (h.vshard_id, h.epoch, h.position, h.step)),
-            Some((7, 5, 1, "flush"))
+            Some((7, 5, 1, "resolve"))
         );
         assert_eq!(scheduler.metrics.apply_halted.load(Ordering::Relaxed), 1);
         assert_eq!(
@@ -173,21 +146,18 @@ mod tests {
     }
 
     /// A second disconnect keeps the first cause and holds its txn too.
-    #[tokio::test]
-    async fn second_halt_keeps_the_first_cause() {
+    #[test]
+    fn second_halt_keeps_the_first_cause() {
         let first = TxnId::new(5, 1);
         let second = TxnId::new(6, 0);
         let (mut scheduler, _dir) = scheduler_with_pending(first, CommitState::Staged);
         let mut pending = staged_pending(make_sequenced_txn(6, 0), second);
         pending.commit_state = CommitState::AwaitingRedoResolve;
+        pending.awaiting = Some(RequestId::new(10));
         scheduler.pending.insert(second, pending);
 
-        scheduler
-            .handle_completion(first, RequestId::new(9), None)
-            .await;
-        scheduler
-            .handle_completion(second, RequestId::new(10), None)
-            .await;
+        scheduler.handle_completion(first, RequestId::new(9), None);
+        scheduler.handle_completion(second, RequestId::new(10), None);
 
         assert!(!scheduler.applied.is_applied(6, 0));
         assert!(scheduler.pending.contains_key(&second));
@@ -198,29 +168,22 @@ mod tests {
         );
     }
 
-    /// A committed flush that answers `OllpRetryRequired` wrote nothing on
-    /// this replica. The txn stays pending and unapplied, its redo records
-    /// stay open, and the scheduler halts on the flush.
-    #[tokio::test]
-    async fn an_ollp_answer_to_a_committed_flush_halts_and_holds() {
+    /// A refused resolve of a committed txn leaves no redo to propose. The
+    /// txn stays pending and unapplied, and the scheduler halts on the
+    /// resolve.
+    #[test]
+    fn a_refused_resolve_of_a_committed_txn_halts_and_holds() {
         let txn_id = TxnId::new(5, 1);
-        let (mut scheduler, _dir) = scheduler_with_pending(
-            txn_id,
-            CommitState::AwaitingResolve {
-                committed: true,
-                redo_lsn: None,
-            },
-        );
+        let (mut scheduler, _dir) =
+            scheduler_with_pending(txn_id, CommitState::AwaitingRedoResolve);
 
-        scheduler
-            .handle_completion(
-                txn_id,
-                RequestId::new(9),
-                Some(error_response(
-                    crate::bridge::envelope::ErrorCode::OllpRetryRequired,
-                )),
-            )
-            .await;
+        scheduler.handle_completion(
+            txn_id,
+            RequestId::new(9),
+            Some(error_response(
+                crate::bridge::envelope::ErrorCode::OllpRetryRequired,
+            )),
+        );
 
         assert!(!scheduler.applied.is_applied(5, 1));
         assert!(
@@ -229,7 +192,28 @@ mod tests {
         );
         assert_eq!(
             scheduler.apply_halt().map(|h| h.reason),
-            Some(HaltReason::FlushFailed)
+            Some(HaltReason::ResolveFailed)
+        );
+    }
+
+    /// An answer to a request the txn no longer waits for, as after a
+    /// demotion, changes nothing.
+    #[test]
+    fn an_answer_to_a_step_the_txn_left_is_ignored() {
+        let txn_id = TxnId::new(5, 1);
+        let (mut scheduler, _dir) =
+            scheduler_with_pending(txn_id, CommitState::AwaitingRedoResolve);
+
+        scheduler.handle_completion(txn_id, RequestId::new(8), None);
+
+        assert!(scheduler.apply_halt().is_none());
+        assert_eq!(
+            scheduler.pending.get(&txn_id).map(|p| p.commit_state),
+            Some(CommitState::AwaitingRedoResolve)
+        );
+        assert_eq!(
+            scheduler.pending.get(&txn_id).and_then(|p| p.awaiting),
+            Some(RequestId::new(9))
         );
     }
 }

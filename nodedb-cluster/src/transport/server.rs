@@ -50,6 +50,7 @@ use crate::transport::rpc_handler::RaftRpcHandler;
 use crate::wire_version::handshake_io::{local_version_range, perform_version_handshake_server};
 
 use super::frame_io::{finish_stream, read_envelope, reply_and_finish, write_rpc_frame};
+use super::reply_stream::ReplyStream;
 use super::shuffle_drain::drain_shuffle_push;
 use super::stream_dispatch;
 use super::stream_identity::{reject_peer_identity, verify_stream_identity};
@@ -220,9 +221,10 @@ struct StreamContext<H: RaftRpcHandler, S: PeerIdentityStore + ?Sized> {
 /// module docstring for the rationale.
 async fn handle_stream<H: RaftRpcHandler, S: PeerIdentityStore + ?Sized>(
     ctx: StreamContext<H, S>,
-    mut send: quinn::SendStream,
+    send: quinn::SendStream,
     mut recv: quinn::RecvStream,
 ) -> Result<()> {
+    let mut send = ReplyStream::new(send);
     let StreamContext {
         handler,
         auth,
@@ -279,6 +281,9 @@ async fn handle_stream<H: RaftRpcHandler, S: PeerIdentityStore + ?Sized>(
             fields.from_node_id,
             &request,
         )?;
+        // The handler can run the request from here on. A stream that ends
+        // without an answer is reset, so the sender never resends it.
+        send.arm();
 
         // 4b. Streaming path: an `ExecuteStreamRequest` produces a multi-frame
         //     response — N `RPC_EXECUTE_STREAM_CHUNK` envelopes (each written
@@ -338,11 +343,15 @@ async fn handle_stream<H: RaftRpcHandler, S: PeerIdentityStore + ?Sized>(
         reply_and_finish(&mut send, &auth, &response, "response").await
     };
 
-    tokio::select! {
+    let outcome = tokio::select! {
         biased;
-        _ = shutdown.changed() => Ok(()),
-        result = work => result,
+        _ = shutdown.changed() => Ok(false),
+        result = work => result.map(|()| true),
+    };
+    if let Ok(true) = outcome {
+        send.answered();
     }
+    outcome.map(|_| ())
 }
 
 /// The frame that answers a one-shot request: the handler's response, or a

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! `KvOp` write-version recording, split out of `write_version.rs` to keep
-//! that file under the size limit. Same contract: no-op with no WAL LSN,
-//! one `note_write_lsn` per key a committed KV write touched.
+//! `KvOp` write versions for the parity oracle in `write_version.rs`. Same
+//! contract: no-op with no WAL LSN, one `note_write_lsn` per key a committed
+//! KV write touched.
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::write_index::KeyRepr;

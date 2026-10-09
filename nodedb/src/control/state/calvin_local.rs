@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::control::cluster::calvin::scheduler::lock::HotKeyTable;
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
 use crate::control::cluster::calvin::scheduler::{
-    CalvinAppliedLedgers, CaughtUpRegistry, SequencerProposer,
+    CalvinAppliedLedgers, CalvinInboxes, CaughtUpRegistry, SequencerProposer,
 };
 use crate::control::server::shared::write_admission::AdmissionHolds;
 
@@ -92,6 +92,9 @@ pub struct CalvinLocalState {
     /// Whether each running scheduler reached its rebuild target. Startup
     /// reads it before it opens the client gateway.
     pub caught_up: CaughtUpRegistry,
+    /// The inbox of each running scheduler: the data-group apply loop tells
+    /// it how each stamped Calvin redo concluded.
+    pub inboxes: CalvinInboxes,
 }
 
 impl CalvinLocalState {
@@ -116,6 +119,7 @@ impl CalvinLocalState {
             sequencer_proposer: OnceLock::new(),
             applied: CalvinAppliedLedgers::default(),
             caught_up: CaughtUpRegistry::default(),
+            inboxes: CalvinInboxes::default(),
         }
     }
 }

@@ -108,7 +108,7 @@ mod tests {
     use super::*;
     use crate::control::cluster::calvin::scheduler::driver::barrier::PendingDependentBarrier;
     use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::{
-        CapturingProposer, elect_data_group_leader,
+        CapturingProposer, lead_data_group,
     };
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
         build_test_scheduler_with_data_side, make_sequenced_txn,
@@ -127,7 +127,7 @@ mod tests {
             build_test_scheduler_with_data_side(VSHARD, std::sync::Arc::clone(&registry));
         let proposer = CapturingProposer::accepting();
         scheduler.sequencer_proposer = proposer.clone();
-        elect_data_group_leader(&scheduler);
+        lead_data_group(&mut scheduler);
         let txn_id = TxnId::new(40, 0);
         let cluster_txn = nodedb_cluster::calvin::TxnId::new(40, 0);
         registry.seed_expected(cluster_txn, 1);
@@ -179,10 +179,7 @@ mod tests {
         scheduler.resume_on_verdict(txn_id, false);
         assert_eq!(
             scheduler.pending.get(&txn_id).map(|p| p.commit_state),
-            Some(CommitState::AwaitingResolve {
-                committed: false,
-                redo_lsn: None
-            })
+            Some(CommitState::AwaitingDrop)
         );
         assert!(!scheduler.applied.is_applied(40, 0));
     }

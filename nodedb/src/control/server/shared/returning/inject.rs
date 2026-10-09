@@ -413,7 +413,6 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | MetaOp::DropTxnOverlay { .. }
             | MetaOp::MarkSavepoint { .. }
             | MetaOp::RollbackToSavepoint { .. }
-            | MetaOp::RecordCalvinWriteVersions { .. }
             | MetaOp::CalvinFlush { .. }
             | MetaOp::CalvinDrop { .. }
             | MetaOp::ResolveTxn { .. }

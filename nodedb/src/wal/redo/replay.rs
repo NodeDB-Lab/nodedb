@@ -43,7 +43,9 @@
 //! `replay_graph_redo` arms in `crate::data::executor`).
 //!
 //! `calvin_stamp` is ignored here: the Calvin recovery scan reads it, and it
-//! does not gate engine replay.
+//! does not gate engine replay. A Calvin slice's materialized-sum fold rows
+//! journal as parts of the record's group, so replay applies them like any
+//! other write's rows.
 //!
 //! The committed-redo apply (`handlers::transaction::redo_apply`) drives this
 //! same entry point with a one-record slice for every committed transaction,
@@ -85,20 +87,12 @@ use crate::data::executor::core_loop::CoreLoop;
 /// on its core. Replay then applies a write's rows at the write's place in
 /// the order, wherever its parts sit in the WAL: a part boot journals at the
 /// tail never lands over a later write to the same row.
-///
-/// Also returns the materialized-sum targets every Calvin record's stamp
-/// carries, keyed by the record's LSN.
-fn reconstitute_with_folds(records: &[WalRecord]) -> crate::Result<Reconstituted> {
-    let mut out = Reconstituted::default();
+fn reconstitute_redo_records(records: &[WalRecord]) -> crate::Result<Vec<WalRecord>> {
+    let mut out = Vec::new();
     for record in records {
         let (lsn, ops) = match RecordType::from_raw(record.logical_record_type()) {
             Some(RecordType::TransactionRedo) => {
                 let redo = RedoRecord::from_bytes(&record.payload)?;
-                if let Some(stamp) = redo.calvin_stamp
-                    && !stamp.sum_targets.is_empty()
-                {
-                    out.folds.insert(record.header.lsn, stamp.sum_targets);
-                }
                 (record.header.lsn, redo.ops)
             }
             Some(RecordType::WriteGroup) => {
@@ -108,7 +102,7 @@ fn reconstitute_with_folds(records: &[WalRecord]) -> crate::Result<Reconstituted
             _ => continue,
         };
         for sub in ops {
-            out.ops.push(WalRecord::new(WalRecordArgs {
+            out.push(WalRecord::new(WalRecordArgs {
                 record_type: sub.record_type,
                 lsn,
                 tenant_id: record.header.tenant_id,
@@ -122,18 +116,6 @@ fn reconstitute_with_folds(records: &[WalRecord]) -> crate::Result<Reconstituted
     }
     Ok(out)
 }
-
-/// What [`reconstitute_with_folds`] rebuilt from a stream.
-#[derive(Default)]
-struct Reconstituted {
-    /// Every sub-record, at its enclosing record's header identity.
-    ops: Vec<WalRecord>,
-    folds: RedoFolds,
-}
-
-/// Materialized-sum targets per redo record LSN.
-type RedoFolds =
-    std::collections::HashMap<u64, Vec<nodedb_physical::physical_plan::RedoSumTargets>>;
 
 /// Merge the standalone records with the reconstituted redo sub-records into
 /// one LSN-ordered sequence.
@@ -198,25 +180,15 @@ impl CoreLoop {
         num_cores: usize,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> crate::Result<()> {
-        let Reconstituted {
-            ops: redo_ops,
-            folds,
-        } = reconstitute_with_folds(records)?;
+        let redo_ops = reconstitute_redo_records(records)?;
         let ordered = merge_by_lsn(records, &redo_ops);
-        // A committed-redo apply folds from its open scope. Restart replay
-        // folds from each Calvin record's stamp.
-        let restart = self.begin_replay_folds(folds);
 
         self.replay_vector_wal(&ordered, num_cores, tombstones);
         crate::fail_point!("replay::between_engine_passes");
         self.replay_vector_extended_wal(&ordered, num_cores, tombstones);
         // Every document row the WAL names, standalone and redo alike, in LSN
-        // order. A Calvin record's rows fold into their sum targets at the
-        // record's LSN, so the fold scope closes right after this arm.
+        // order.
         self.replay_document_redo(&ordered, num_cores, tombstones);
-        if restart {
-            self.end_replay_folds();
-        }
         self.replay_kv_wal(&ordered, num_cores, tombstones);
         self.replay_timeseries_wal(&ordered, num_cores, tombstones);
         self.replay_array_wal(&ordered, num_cores, tombstones);
@@ -270,11 +242,6 @@ impl CoreLoop {
 mod tests {
     use super::*;
     use crate::wal::{RedoRecord, RedoSubRecord};
-
-    /// The reconstituted records alone, without the fold targets.
-    fn reconstitute_redo_records(records: &[WalRecord]) -> crate::Result<Vec<WalRecord>> {
-        Ok(super::reconstitute_with_folds(records)?.ops)
-    }
 
     fn redo_wal_record(lsn: u64, tenant_id: u64, vshard_id: u32, record: &RedoRecord) -> WalRecord {
         WalRecord::new(WalRecordArgs {

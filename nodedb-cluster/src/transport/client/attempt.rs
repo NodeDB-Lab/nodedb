@@ -225,7 +225,8 @@ impl NexarTransport {
     /// The outer error is a link failure. The inner result is the peer's
     /// reply. A stream the peer finished without a reply is an inner error:
     /// the peer refused the request before its handler, and a resend gets
-    /// the same answer.
+    /// the same answer. The peer resets a stream whose handler started and
+    /// sent no answer, and that reset is a link failure of a written request.
     async fn try_send_once(
         &self,
         target: u64,

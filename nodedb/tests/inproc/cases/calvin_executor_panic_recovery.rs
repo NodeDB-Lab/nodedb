@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Executor panic-recovery test for a committed Calvin transaction's flush.
+//! Executor panic-recovery test for a committed Calvin slice's stamped install.
 //!
-//! Compiled only with `--features failpoints`. Tests the flush's
-//! panic-recovery path: when a panic fires while the flush installs the
-//! transaction's redo record (`replay::between_standalone_and_redo`, after
+//! Compiled only with `--features failpoints`. Tests the install's
+//! panic-recovery path: when a panic fires while the stamped install writes
+//! the transaction's redo record (`replay::between_standalone_and_redo`, after
 //! the KV writes landed), the install must:
 //!
 //! - Catch the panic and roll back every write the install made.
@@ -13,12 +13,12 @@
 //!
 //! ## Failure model alignment
 //!
-//! Per the Calvin failure model: a panic while the flush installs causes the
-//! shard to return `Status::Error`. The lock-manager invariant ("locks NOT
-//! released on a failed flush") is enforced by the scheduler layer, which
-//! halts. The executor's contract is:
+//! Per the Calvin failure model: a panic while the stamped install writes
+//! causes the shard to return `Status::Error`. The apply loop reports the
+//! refusal, and the scheduler halts with the txn's locks held. The executor's
+//! contract is:
 //!
-//!   1. Rolled-back writes are not visible after the failed flush.
+//!   1. Rolled-back writes are not visible after the failed install.
 //!   2. The error response is a retryable refusal naming the panic.
 //!   3. Subsequent operations on the same `CoreLoop` succeed (no state
 //!      corruption from the unwind).
@@ -43,7 +43,9 @@ use nodedb::bridge::envelope::{ErrorCode, Status};
 #[cfg(feature = "failpoints")]
 use nodedb::fail_point::{FailAction, FailGuard};
 #[cfg(feature = "failpoints")]
-use nodedb_physical::physical_plan::{KvOp, MetaOp, PhysicalPlan};
+use nodedb_physical::physical_plan::{
+    CalvinInstall, CalvinResolved, KvOp, MetaOp, PhysicalPlan, RedoOrigin,
+};
 #[cfg(feature = "failpoints")]
 use nodedb_types::TenantId as NodedbTenantId;
 #[cfg(feature = "failpoints")]
@@ -60,7 +62,6 @@ fn calvin_static(epoch: u64, plans: Vec<PhysicalPlan>) -> PhysicalPlan {
         tenant_id: NodedbTenantId::new(1),
         plans,
         epoch_system_ms: 1_700_000_000_000,
-        is_group_leader: true,
         versioned_reads: vec![],
         body_plans: vec![],
     })
@@ -71,11 +72,11 @@ fn calvin_static(epoch: u64, plans: Vec<PhysicalPlan>) -> PhysicalPlan {
 const INSTALL_FAIL_POINT: &str = "replay::between_standalone_and_redo";
 
 /// Stage a static Calvin transaction (validate + stage), resolve it into its
-/// redo record, and flush the record at `lsn`, returning the flush response
-/// (where any install-time panic surfaces). The stage and resolve steps must
-/// always return `Status::Ok`.
+/// redo record, and install the stamped record at `epoch * 10`, returning the
+/// install response (where any install-time panic surfaces). The stage and
+/// resolve steps must always return `Status::Ok`.
 #[cfg(feature = "failpoints")]
-fn stage_then_flush(
+fn stage_then_install(
     core: &mut nodedb::data::executor::core_loop::CoreLoop,
     tx: &mut nodedb_bridge::buffer::Producer<BridgeRequest>,
     rx: &mut nodedb_bridge::buffer::Consumer<nodedb::bridge::dispatch::BridgeResponse>,
@@ -101,16 +102,20 @@ fn stage_then_flush(
         "resolve must succeed; got {:?}",
         resolved.error_code
     );
-    let mut request = make_request(PhysicalPlan::Meta(MetaOp::CalvinFlush {
-        epoch,
-        position: 0,
-        redo: zerompk::from_msgpack::<nodedb_physical::physical_plan::CalvinResolved>(
-            resolved.payload.as_bytes(),
-        )
-        .expect("decode resolved answer")
-        .redo,
+    let answer: CalvinResolved =
+        zerompk::from_msgpack(resolved.payload.as_bytes()).expect("decode resolved answer");
+    let mut request = make_request(PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
+        redo: answer.redo,
         collections: Vec::new(),
         sum_targets: Vec::new(),
+        origin: RedoOrigin::Commit,
+        calvin: Some(CalvinInstall {
+            epoch,
+            position: 0,
+            epoch_system_ms: 1_700_000_000_000,
+            reply: answer.reply,
+            user_write: true,
+        }),
     }));
     request.wal_lsn = Some(nodedb::types::Lsn::new(epoch * 10));
     tx.try_push(BridgeRequest::unfloored(request)).unwrap();
@@ -161,7 +166,8 @@ fn kv_get_in(coll: &str, key: &[u8]) -> PhysicalPlan {
 
 // ── Test 1: install panic caught, typed response returned ─────────────────────
 
-/// Panic injected while the flush installs the transaction's redo record.
+/// Panic injected while the stamped install writes the transaction's redo
+/// record.
 ///
 /// The record carries two KV puts, which land before the fail point fires.
 /// The install must catch the unwind, roll both writes back, and answer with
@@ -173,8 +179,8 @@ fn calvin_static_panic_returns_internal_error() {
 
     let _guard = FailGuard::install(INSTALL_FAIL_POINT, FailAction::Panic);
 
-    // Stage and resolve write nothing; the panic fires in the flush's install.
-    let resp = stage_then_flush(
+    // Stage and resolve write nothing; the panic fires in the install.
+    let resp = stage_then_install(
         &mut core,
         &mut tx,
         &mut rx,
@@ -189,7 +195,7 @@ fn calvin_static_panic_returns_internal_error() {
 
 // ── Test 2: rolled-back writes not visible after Calvin panic ─────────────────
 
-/// After a Calvin executor panic, writes from the failed flush must not be
+/// After a Calvin executor panic, writes from the failed install must not be
 /// visible. The CoreLoop remains functional for subsequent requests.
 #[cfg(feature = "failpoints")]
 #[test]
@@ -207,7 +213,7 @@ fn calvin_static_panic_rollback_not_visible() {
     // Inject a panic on the second sub-apply.
     let _guard = FailGuard::install(INSTALL_FAIL_POINT, FailAction::Panic);
 
-    let resp = stage_then_flush(
+    let resp = stage_then_install(
         &mut core,
         &mut tx,
         &mut rx,
@@ -220,7 +226,7 @@ fn calvin_static_panic_rollback_not_visible() {
     assert_eq!(
         resp.status,
         Status::Error,
-        "a panicking flush must return Error; got {:?}",
+        "a panicking install must return Error; got {:?}",
         resp.status
     );
 
@@ -264,16 +270,16 @@ fn calvin_static_panic_rollback_not_visible() {
 
 /// After clearing the fail point, Calvin transactions must commit
 /// successfully. This confirms there is no state corruption from the earlier
-/// panicking flush.
+/// panicking install.
 #[cfg(feature = "failpoints")]
 #[test]
 fn calvin_static_normal_operation_resumes_after_panic() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
-    // Trigger a panicking flush.
+    // Trigger a panicking install.
     {
         let _guard = FailGuard::install(INSTALL_FAIL_POINT, FailAction::Panic);
-        let resp = stage_then_flush(
+        let resp = stage_then_install(
             &mut core,
             &mut tx,
             &mut rx,
@@ -286,14 +292,14 @@ fn calvin_static_normal_operation_resumes_after_panic() {
         assert_eq!(
             resp.status,
             Status::Error,
-            "a panicking flush must return Error; got {:?}",
+            "a panicking install must return Error; got {:?}",
             resp.status
         );
         // Guard drops here, clearing the fail point.
     }
 
     // A normal Calvin transaction after the fail point is cleared.
-    let success_resp = stage_then_flush(
+    let success_resp = stage_then_install(
         &mut core,
         &mut tx,
         &mut rx,
@@ -303,7 +309,7 @@ fn calvin_static_normal_operation_resumes_after_panic() {
     assert_eq!(
         success_resp.status,
         Status::Ok,
-        "a Calvin flush after the fail point is cleared must succeed; got {:?}",
+        "a Calvin install after the fail point is cleared must succeed; got {:?}",
         success_resp.error_code
     );
 
@@ -328,13 +334,13 @@ fn calvin_static_normal_operation_resumes_after_panic() {
 
 // ── Test 4: WAL replay correctness — fresh CoreLoop sees only committed data ──
 
-/// After a panicking Calvin flush, create a fresh `CoreLoop` at the same data
-/// directory. The fresh core must see only data that was committed before the
-/// panicking flush — the rolled-back writes must not appear after replay.
+/// After a panicking Calvin install, create a fresh `CoreLoop` at the same
+/// data directory. The fresh core must see only data that was committed before
+/// the panicking install — the rolled-back writes must not appear after replay.
 ///
 /// The install rolled its writes back before the response returned, so a
 /// fresh core opened over the same directory holds none of them. The redo
-/// record itself lives in the WAL the scheduler appends, which this
+/// record itself lives in the WAL the data group's apply appends, which this
 /// core-level test does not write.
 #[cfg(feature = "failpoints")]
 #[test]
@@ -364,36 +370,17 @@ fn calvin_static_replay_sees_only_committed_data() {
         (core, req_tx, resp_rx)
     };
 
-    // Commit a reference write before the panicking flush.
+    // Commit a reference write before the panicking install.
     {
-        use nodedb::bridge::dispatch::BridgeRequest;
-        use nodedb::bridge::envelope::{Priority, Request};
+        use nodedb::bridge::envelope::Request;
         use nodedb_physical::physical_plan::PhysicalPlan;
-        use std::time::{Duration, Instant};
 
         let make_req = |plan: PhysicalPlan| Request {
             request_id: nodedb::types::RequestId::new(42),
-            tenant_id: nodedb::types::TenantId::new(1),
-            vshard_id: nodedb::types::VShardId::new(0),
-            database_id: nodedb::types::DatabaseId::DEFAULT,
-            plan,
-            deadline: Instant::now() + Duration::from_secs(5),
-            priority: Priority::Normal,
-            trace_id: nodedb_types::TraceId::ZERO,
-            consistency: nodedb::types::ReadConsistency::Strong,
-            idempotency_key: None,
-            event_source: nodedb::event::EventSource::User,
-            user_roles: Vec::new(),
-            user_id: None,
-            statement_digest: None,
-            txn_id: None,
-            wal_lsn: None,
-            resolved_now_ms: None,
-            commit_hlc: None,
-            admission: nodedb::bridge::envelope::Admission::Admitted,
+            ..make_request(plan)
         };
 
-        // Commit a value before the panicking flush.
+        // Commit a value before the panicking install.
         tx.try_push(BridgeRequest::unfloored(make_req(kv_put_in(
             "replay_coll",
             b"pre_commit",
@@ -410,9 +397,9 @@ fn calvin_static_replay_sees_only_committed_data() {
         );
 
         // Panicking install — writes must not persist. Stage and resolve
-        // write nothing; the panic fires while the flush installs.
+        // write nothing; the panic fires while the install writes.
         let _guard = FailGuard::install(INSTALL_FAIL_POINT, FailAction::Panic);
-        let panic_resp = stage_then_flush(
+        let panic_resp = stage_then_install(
             &mut core,
             &mut tx,
             &mut rx,
@@ -447,33 +434,15 @@ fn calvin_static_replay_sees_only_committed_data() {
         (core, req_tx, resp_rx)
     };
 
-    use nodedb::bridge::dispatch::BridgeRequest;
-    use nodedb::bridge::envelope::{Priority, Request};
+    use nodedb::bridge::envelope::Request;
     use nodedb_physical::physical_plan::PhysicalPlan;
-    use std::time::{Duration, Instant};
 
     let make_req2 = |plan: PhysicalPlan| Request {
         request_id: nodedb::types::RequestId::new(43),
-        tenant_id: nodedb::types::TenantId::new(1),
-        vshard_id: nodedb::types::VShardId::new(0),
-        database_id: nodedb::types::DatabaseId::DEFAULT,
-        plan,
-        deadline: Instant::now() + Duration::from_secs(5),
-        priority: Priority::Normal,
-        trace_id: nodedb_types::TraceId::ZERO,
-        consistency: nodedb::types::ReadConsistency::Strong,
-        idempotency_key: None,
-        event_source: nodedb::event::EventSource::User,
-        user_roles: Vec::new(),
-        user_id: None,
-        statement_digest: None,
-        txn_id: None,
-        wal_lsn: None,
-        resolved_now_ms: None,
-        commit_hlc: None,
         admission: nodedb::bridge::envelope::Admission::Exempt(
             nodedb::bridge::envelope::ExemptReason::Read,
         ),
+        ..make_request(plan)
     };
 
     // Note: this test does NOT assert that the pre-panic committed value is
@@ -482,7 +451,7 @@ fn calvin_static_replay_sees_only_committed_data() {
     // on a single-CoreLoop reopen. WAL-driven KV state recovery is a property
     // of the cluster apply path (replicated entries → applier → engine), not
     // of CoreLoop::open. The meaningful invariant exercised below is that the
-    // rolled-back writes from the panicking flush do NOT appear, which holds
+    // rolled-back writes from the panicking install do NOT appear, which holds
     // trivially under empty-replay state and confirms the panic-rollback path
     // never let the bad writes reach durable storage.
 

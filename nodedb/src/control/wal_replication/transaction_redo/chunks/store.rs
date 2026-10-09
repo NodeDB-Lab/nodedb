@@ -361,6 +361,24 @@ impl RedoChunkStore {
         });
         self.note_open(&state);
     }
+
+    /// Drop every Calvin stream whose position `applied` names. Boot calls
+    /// it once the applied ledgers recovered: a position that applied
+    /// through one copy installs no other.
+    pub fn drop_applied_calvin_streams(&self, applied: impl Fn(u32, u64, u32) -> bool) {
+        if self.open_streams() == 0 {
+            return;
+        }
+        let mut state = self.lock();
+        state.streams.retain(|stream, _| {
+            !matches!(
+                stream,
+                RedoStreamId::Calvin { vshard, epoch, position, .. }
+                    if applied(*vshard, *epoch, *position)
+            )
+        });
+        self.note_open(&state);
+    }
 }
 
 #[cfg(test)]
@@ -542,5 +560,38 @@ pub(super) mod tests {
         }
         store.drop_calvin_position(2, 5, 1);
         assert_eq!(store.open_streams(), 0);
+    }
+
+    /// Boot drops the streams of every position its ledgers hold applied,
+    /// and keeps the rest.
+    #[tokio::test]
+    async fn boot_drops_the_streams_of_applied_calvin_positions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = RedoChunkStore::new(wal(&dir), limits(1 << 20));
+        let calvin = |position| RedoStreamId::Calvin {
+            vshard: 2,
+            epoch: 5,
+            position,
+            attempt: 0,
+        };
+        for position in [1, 2] {
+            store
+                .apply_chunk(chunk(calvin(position), 0, 2, b"ab"))
+                .await
+                .expect("chunk");
+        }
+        store
+            .apply_chunk(chunk(session(7), 0, 2, b"ab"))
+            .await
+            .expect("chunk");
+
+        store.drop_applied_calvin_streams(|vshard, epoch, position| {
+            (vshard, epoch, position) == (2, 5, 1)
+        });
+
+        assert_eq!(store.open_streams(), 2);
+        assert!(store.take_for_final(&calvin(1)).is_none());
+        assert!(store.take_for_final(&calvin(2)).is_some());
+        assert!(store.take_for_final(&session(7)).is_some());
     }
 }

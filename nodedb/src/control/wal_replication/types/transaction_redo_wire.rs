@@ -24,8 +24,15 @@ pub struct CalvinRedoMeta {
     /// its install.
     pub reply: CalvinReplySpec,
     /// Whether the slice writes a row the statement names, not only a
-    /// derived row.
+    /// derived row. Only a primary slice deposits the statement's reply.
     pub primary_write: bool,
+    /// Whether the install raises the tenant's write mark: a primary write
+    /// that changes a tenant row. A slice that only installs schema raises
+    /// none.
+    pub user_write: bool,
+    /// Whether the slice answers rows (a RETURNING write), not a count.
+    /// Every replica reads it to build the same `CompletionAck` result.
+    pub returning: bool,
 }
 
 /// One `(collection, primary key) → surrogate` identity a committed

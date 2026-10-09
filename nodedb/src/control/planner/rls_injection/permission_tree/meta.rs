@@ -57,7 +57,6 @@ pub(super) fn apply_meta(ctx: &PermCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         MetaOp::TransactionBatch { plans, .. }
         | MetaOp::CalvinExecuteStatic { plans, .. }
         | MetaOp::CalvinExecuteActive { plans, .. }
-        | MetaOp::RecordCalvinWriteVersions { plans, .. }
         | MetaOp::ResolveTxn { plans, .. } => {
             for plan in plans.iter_mut() {
                 walk(ctx, plan)?;

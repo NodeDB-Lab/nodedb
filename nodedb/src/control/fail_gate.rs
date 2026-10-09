@@ -73,20 +73,33 @@ pub(crate) async fn after_calvin_stamp(tx_class: &nodedb_cluster::calvin::types:
     }
 }
 
-/// The Calvin scheduler's flush gate: after a committed transaction's redo
-/// record is appended and before its flush reaches a core. Named per
-/// collection, `calvin::before_flush::<collection>`.
+/// The Calvin scheduler's redo gate: after a committed slice's redo is
+/// resolved and before the data-group leader proposes it. Named per
+/// collection, `calvin::before_redo_propose::<collection>`.
 ///
 /// The scheduler cannot park on a timer, so the gate answers without waiting:
-/// `true` while the file armed for one of the flush's collections is absent.
-/// The scheduler then keeps the flush in its re-send queue and asks again on
-/// its next pass.
-pub(crate) fn holds_flush(plan: &PhysicalPlan) -> bool {
-    plan.named_collections().iter().any(|collection| {
-        matches!(
-            lookup(&format!("calvin::before_flush::{collection}")),
-            Some(FailAction::WaitForFile(path)) if !path.exists()
-        )
+/// `true` while the file armed for one of `collections` is absent. The
+/// scheduler then keeps the slice unproposed and asks again on its next stall
+/// tick. On its first hold the gate creates `<path>.parked`, so a test can
+/// wait until the slice is held.
+pub(crate) fn holds_redo_propose(collections: &[String]) -> bool {
+    collections.iter().any(|collection| {
+        let name = format!("calvin::before_redo_propose::{collection}");
+        let Some(FailAction::WaitForFile(path)) = lookup(&name) else {
+            return false;
+        };
+        if path.exists() {
+            return false;
+        }
+        let mut parked = path.into_os_string();
+        parked.push(".parked");
+        let parked = std::path::PathBuf::from(parked);
+        if !parked.exists()
+            && let Err(e) = std::fs::write(&parked, &name)
+        {
+            tracing::warn!(gate = %name, error = %e, "fail gate parked marker not created");
+        }
+        true
     })
 }
 

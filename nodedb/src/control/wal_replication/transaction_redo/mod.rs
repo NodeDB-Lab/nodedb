@@ -22,5 +22,5 @@ pub(crate) use abandon::spawn_redo_abandoner;
 pub use apply::RedoTarget;
 pub(crate) use apply::{enqueue_transaction_redo, record_cross_shard_key};
 pub use chunks::{RedoChunkError, RedoChunkStore};
-pub use payload::TransactionRedoPayload;
+pub use payload::{CalvinSlice, TransactionRedoPayload};
 pub(crate) use propose::propose_transaction_redo;

@@ -167,7 +167,6 @@ impl CoreLoop {
                 tenant_id,
                 plans,
                 epoch_system_ms,
-                is_group_leader,
                 versioned_reads,
                 body_plans,
             } => self.execute_calvin_execute_static(
@@ -176,7 +175,6 @@ impl CoreLoop {
                     epoch: *epoch,
                     position: *position,
                     epoch_system_ms: *epoch_system_ms,
-                    is_group_leader: *is_group_leader,
                 },
                 tenant_id,
                 plans,
@@ -204,14 +202,12 @@ impl CoreLoop {
                 plans,
                 injected_reads,
                 epoch_system_ms,
-                is_group_leader,
             } => self.execute_calvin_execute_active(
                 task,
                 CalvinExecCtx {
                     epoch: *epoch,
                     position: *position,
                     epoch_system_ms: *epoch_system_ms,
-                    is_group_leader: *is_group_leader,
                 },
                 tenant_id,
                 plans,
@@ -234,16 +230,6 @@ impl CoreLoop {
 
             MetaOp::DeleteSynonymGroup { tenant_id, name } => {
                 self.execute_delete_synonym_group(task, *tenant_id, name)
-            }
-
-            MetaOp::RecordCalvinWriteVersions { tenant_id, plans } => {
-                // The Calvin apply already committed; this records the write
-                // version of every key it wrote at the applied WAL LSN the
-                // scheduler threaded onto the request envelope. A no-op when
-                // the envelope carries no LSN. The install recorded the
-                // index-value versions of its document rows itself.
-                self.record_batch_write_versions(task, tenant_id.as_u64(), plans);
-                self.response_ok(task)
             }
 
             MetaOp::CalvinFlush {

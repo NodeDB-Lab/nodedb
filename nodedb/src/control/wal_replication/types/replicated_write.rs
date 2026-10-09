@@ -1034,9 +1034,8 @@ pub enum ReplicatedWrite {
     /// Every replica, the proposer included, appends the body's redo to its
     /// own WAL and applies it through the WAL replay arms, in Raft log order.
     /// The record is resolved once, on the proposer; no replica re-derives
-    /// it. The redo's `calvin_stamp` names the Calvin `(epoch, position)` the
-    /// record applies, when a Calvin slice produced it. A chunked body
-    /// assembles from the `RedoChunk` entries of its stream.
+    /// it. A chunked body assembles from the `RedoChunk` entries of its
+    /// stream.
     TransactionRedo {
         body: RedoBody,
         /// Every collection the transaction wrote, for the collection-floor
@@ -1045,6 +1044,9 @@ pub enum ReplicatedWrite {
         event_source: ReplicatedEventSource,
         /// Which commit-boundary checks every replica's apply runs.
         origin: nodedb_physical::physical_plan::RedoOrigin,
+        /// Set for a committed Calvin slice. The redo's `calvin_stamp` names
+        /// its `(epoch, position)`, and the slice's scheduler holds its locks.
+        calvin: Option<super::transaction_redo_wire::CalvinRedoMeta>,
     },
     /// A backup's consistent cut through this group's log. It writes no
     /// data. Every entry before it applies before the backup snapshots, and

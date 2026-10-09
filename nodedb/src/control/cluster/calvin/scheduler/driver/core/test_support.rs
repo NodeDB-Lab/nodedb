@@ -28,7 +28,9 @@ use crate::control::cluster::calvin::scheduler::driver::core::scheduler::{
     Scheduler, SchedulerParams,
 };
 use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::CapturingProposer;
-use crate::control::cluster::calvin::scheduler::driver::types::{CommitState, PendingTxn};
+use crate::control::cluster::calvin::scheduler::driver::types::{
+    CommitState, PendingTxn, SliceScope,
+};
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
 use crate::control::cluster::calvin::scheduler::metrics::SchedulerMetrics;
 use crate::control::shutdown::ShutdownWatch;
@@ -428,26 +430,49 @@ pub(super) fn spawn_scheduler_loop(mut scheduler: Scheduler) -> RunningScheduler
     }
 }
 
-/// A `PendingTxn` staged and parked awaiting the cross-shard commit verdict.
+/// A `PendingTxn` staged on the leader, its stage answer awaited. Its slice
+/// writes `test_coll`.
 pub(super) fn staged_pending(txn: SequencedTxn, txn_id: TxnId) -> PendingTxn {
+    let mut scope = SliceScope::of_plans(&[]);
+    scope.writes = true;
+    scope.collections = vec!["test_coll".to_string()];
     PendingTxn {
         txn,
         lock_owner: txn_id,
         // no-determinism: test-only dispatch timestamp for a fabricated PendingTxn fixture.
         dispatch_time: Instant::now(),
         has_primary_write: true,
+        raises_write_mark: true,
         has_returning: false,
-        change_sets: Vec::new(),
         commit_state: CommitState::Staged,
+        awaiting: None,
         verdict_deadline: None,
         stage_error: None,
-        redo_records: None,
-        flush_scope: crate::control::cluster::calvin::scheduler::driver::types::FlushScope::default(
-        ),
+        scope,
+        redo: None,
         superseded: false,
         gates: Vec::new(),
         ungated: false,
-        install_permit: None,
+    }
+}
+
+/// A `PendingTxn` a follower holds for its verdict and its redo.
+pub(super) fn following_pending(txn: SequencedTxn, txn_id: TxnId) -> PendingTxn {
+    let mut pending = staged_pending(txn, txn_id);
+    pending.commit_state = CommitState::Following;
+    pending.has_primary_write = false;
+    pending.raises_write_mark = false;
+    pending
+}
+
+/// The answer the apply loop reports for an installed slice.
+pub(super) fn redo_applied(
+    reply: Response,
+) -> crate::control::cluster::calvin::scheduler::CalvinApplyEvent {
+    crate::control::cluster::calvin::scheduler::CalvinApplyEvent::RedoApplied {
+        reply,
+        primary_write: true,
+        returning: false,
     }
 }
 
@@ -484,7 +509,8 @@ pub(super) fn begin_data_plane_drain(shared: &SharedState) {
         .begin_data_plane_drain();
 }
 
-/// A scheduler on vShard 7 with `txn_id` pending in `state`.
+/// A scheduler on vShard 7 with `txn_id` pending in `state`, its answer to
+/// request 9 awaited.
 pub(super) fn scheduler_with_pending(
     txn_id: TxnId,
     state: CommitState,
@@ -492,6 +518,7 @@ pub(super) fn scheduler_with_pending(
     let (mut scheduler, dir) = build_test_scheduler(7);
     let mut pending = staged_pending(make_sequenced_txn(txn_id.epoch, txn_id.position), txn_id);
     pending.commit_state = state;
+    pending.awaiting = Some(RequestId::new(9));
     scheduler.pending.insert(txn_id, pending);
     (scheduler, dir)
 }

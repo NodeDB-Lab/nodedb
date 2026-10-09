@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Records the per-core last-write-LSN version for every key a committed
-//! transaction batch wrote. Runs once, after commit, over the buffered
-//! sub-plans, covering both the fast-path commit and every Calvin apply.
+//! The per-key write versions a committed batch of plans implies, read off
+//! the plans. The redo install records versions through its replay arms.
+//! The parity tests check the install against this oracle, engine by engine.
 //! One WAL LSN applies to every key in the batch.
 
 use crate::bridge::envelope::PhysicalPlan;
@@ -19,7 +19,7 @@ impl CoreLoop {
     /// Record the version of every key written by a committed transaction
     /// batch. No-op with no WAL LSN. Per-key engines record `KeyRepr`;
     /// engines with internal per-key identity record only the collection floor.
-    pub(in crate::data::executor) fn record_batch_write_versions(
+    pub(super) fn record_batch_write_versions(
         &mut self,
         task: &ExecutionTask,
         tid: u64,

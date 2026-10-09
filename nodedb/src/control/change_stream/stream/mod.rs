@@ -12,7 +12,7 @@ pub mod types;
 pub use bus::ChangeStream;
 pub use cursor::{ChangeCursor, ChangePartition, CursorParseError, CursorStep};
 pub use error::ChangeStreamError;
-pub(crate) use ring::{ChangeRun, PositionedChange};
+pub(crate) use ring::PositionedChange;
 pub use ring::{ReplayError, ReplaySnapshot, ReplayStart, ReplayedChange};
 pub use subscription::Subscription;
 pub use types::{ChangeEvent, ChangeOperation, SequencedChangeEvent};

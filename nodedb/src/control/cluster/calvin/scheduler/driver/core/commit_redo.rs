@@ -1,39 +1,41 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Redo-record resolution for a committed staged static Calvin transaction.
+//! Redo resolution for a committed Calvin slice on the data-group leader.
 //!
-//! A committed static Calvin dispatch stages its transaction on the Data
-//! Plane (validate the read-set + buffer the plans, no base mutation). Once
-//! the local commit vote is known (`resolve_staged_commit`), this module
-//! drives the resolve step: dispatch `MetaOp::CalvinResolve` to reconstitute
-//! the staged post-images as one replayable `RedoRecord`, WAL-append that
-//! record (restoring restart durability for this vShard's slice of the
-//! commit), then queue the flush for its sequencer-order turn
-//! ([`super::flush_turn`]); `finish_resolved_commit` / `commit_apply_tail`
-//! complete it.
+//! Once the global verdict is COMMIT, the leader dispatches
+//! `MetaOp::CalvinResolve` to reconstitute the staged post-images as one
+//! replayable `RedoRecord`. It stamps the record with the slice's sequencer
+//! position, attaches the transaction's messages and dedup key on the
+//! participant that carries them, and proposes the record to the vShard's
+//! data group (see [`super::redo_propose`]). Every replica, this one
+//! included, installs it from the log.
 
-use super::deferred::{DispatchOutcome, DispatchStep};
-use super::halt::{HaltReason, HaltStep, error_response_text};
-use super::scheduler::Scheduler;
-use crate::bridge::envelope::{Response, Status};
-use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
-use crate::control::server::dispatch_utils::MintedRecords;
-use crate::types::VShardId;
-use crate::wal::{CalvinStamp, RedoRecord};
 use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_physical::physical_plan::meta::MetaOp;
 
+use super::super::types::CommitState;
+use super::deferred::{DispatchOutcome, DispatchStep};
+use super::halt::{HaltReason, HaltStep, error_response_text};
+use super::redo_propose::OwedRedo;
+use super::scheduler::Scheduler;
+use crate::bridge::envelope::{Response, Status};
+use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
+use crate::control::wal_replication::CollectionIncarnation;
+use crate::control::wal_replication::encode::{CalvinEntryStamps, RedoEntryTarget};
+use crate::control::wal_replication::transaction_redo::{CalvinSlice, TransactionRedoPayload};
+use crate::control::wal_replication::types::CalvinRedoMeta;
+use crate::types::VShardId;
+use crate::wal::{CalvinStamp, RedoRecord};
+
 impl Scheduler {
     /// Handle the `MetaOp::CalvinResolve` response: decode the resolved
-    /// `RedoRecord`, attach the transaction's messages on the participant that
-    /// carries them, WAL-append it (unless it holds no op and no message),
-    /// then dispatch the flush that installs it, stamped with that record's
-    /// LSN.
+    /// `RedoRecord`, stamp it, attach the transaction's messages and dedup
+    /// key on the participant that carries them, and propose it.
     ///
-    /// The verdict is already COMMIT, so a skipped resolve will tear the
-    /// committed txn on this replica. A non-`Ok` response, a decode failure,
-    /// or a WAL-append failure halts the scheduler: the txn keeps its
-    /// `pending` entry and locks, and its position stays unapplied.
+    /// The verdict is already COMMIT, so a skipped resolve tears the
+    /// committed txn. A non-`Ok` response or a record that cannot be read
+    /// halts the scheduler: the txn keeps its `pending` entry and locks, and
+    /// its position stays unapplied.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn finish_redo_resolve(
         &mut self,
         txn_id: TxnId,
@@ -48,226 +50,134 @@ impl Scheduler {
             );
             return;
         }
+        match self.owed_redo(txn_id, &response) {
+            Ok(owed) => {
+                if let Some(pending) = self.pending.get_mut(&txn_id) {
+                    pending.redo = Some(owed);
+                    pending.commit_state = CommitState::AwaitingRedoApply { proposed: None };
+                }
+                self.propose_calvin_redo(txn_id);
+            }
+            Err(error) => self.halt_apply(
+                txn_id,
+                HaltReason::ResolveFailed,
+                HaltStep::Resolve,
+                error.to_string(),
+            ),
+        }
+    }
 
-        // The answer carries the slice's staged reply beside the record. The
-        // flush renders the reply from the core's staged entry.
+    /// The stamped redo the committed slice `txn_id` proposes, from its
+    /// resolve answer `response`.
+    fn owed_redo(&self, txn_id: TxnId, response: &Response) -> crate::Result<OwedRedo> {
+        // The answer carries the slice's staged reply beside the record. Every
+        // replica renders the reply after its install.
         let resolved = zerompk::from_msgpack::<nodedb_physical::physical_plan::CalvinResolved>(
             response.payload.as_bytes(),
-        );
-        let decoded = match resolved {
-            Ok(resolved) => RedoRecord::from_bytes(&resolved.redo),
-            Err(e) => Err(crate::Error::Serialization {
-                format: "msgpack".into(),
-                detail: format!("CalvinResolve answer: {e}"),
-            }),
-        };
-        let mut redo = match decoded {
-            Ok(r) => r,
-            Err(e) => {
-                self.halt_apply(
-                    txn_id,
-                    HaltReason::ResolveFailed,
-                    HaltStep::Resolve,
-                    format!("CalvinResolve redo record decode failed: {e}"),
-                );
-                return;
-            }
-        };
-        let Some(pending) = self.pending.get(&txn_id) else {
-            // Txn state was reclaimed out from under us (must not happen —
-            // locks are held until `on_txn_complete`); complete defensively.
-            self.metrics.record_completed();
-            self.on_txn_complete(txn_id);
-            return;
-        };
-        let tenant_id = pending.txn.tx_class.tenant_id;
-        let database_id = pending.txn.tx_class.database_id;
-        let event_source =
-            super::request::slice_event_source(&pending.txn.tx_class, &pending.flush_scope);
-        let commit_hlc = self
-            .cut_floors
-            .commit_hlc(pending.txn.epoch, pending.txn.epoch_system_ms);
-        // The stamp carries what the slice folds, so the live install and
-        // restart replay fold at this record's LSN.
+        )
+        .map_err(|e| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("CalvinResolve answer: {e}"),
+        })?;
+        let mut redo = RedoRecord::from_bytes(&resolved.redo)?;
+        let pending = self
+            .pending
+            .get(&txn_id)
+            .ok_or_else(|| missing_pending_error(txn_id))?;
+        let tx_class = &pending.txn.tx_class;
+        // The stamp names the position every replica claims at install.
         redo.calvin_stamp = Some(CalvinStamp {
             epoch: txn_id.epoch,
             position: txn_id.position,
             vshard_id: self.vshard_id,
-            collections: pending.flush_scope.collections.clone(),
-            sum_targets: pending.flush_scope.sum_targets.clone(),
         });
         // The participants whose records carry the messages and the applied
-        // key. A class whose write vShards cannot be derived halts the resolve.
-        let tx_class = &pending.txn.tx_class;
-        let homes = tx_class
+        // key. A class whose write vShards cannot be derived fails.
+        let publish_home = tx_class
             .publish_vshard()
-            .and_then(|publish| Ok((publish, tx_class.applied_key_home()?)));
-        let (publish_home, applied_key_home) = match homes {
-            Ok(homes) => homes,
-            Err(e) => {
-                self.halt_apply(
-                    txn_id,
-                    HaltReason::ResolveFailed,
-                    HaltStep::Resolve,
-                    format!("Calvin transaction write vShards underivable: {e}"),
-                );
-                return;
-            }
-        };
+            .map_err(|e| crate::Error::Internal {
+                detail: format!("Calvin transaction write vShards underivable: {e}"),
+            })?;
+        let applied_key_home = tx_class
+            .applied_key_home()
+            .map_err(|e| crate::Error::Internal {
+                detail: format!("Calvin transaction write vShards underivable: {e}"),
+            })?;
         // One participant's record carries the messages the transaction's
         // trigger bodies published, so they commit once, with its writes.
+        // Every replica stamps their position from the entry's log place.
         if publish_home == Some(self.vshard_id) {
-            match crate::wal::RedoPublish::decode_all(&pending.txn.tx_class.publishes) {
-                Ok(mut publishes) => {
-                    // Named by the transaction's sequencer position on its
-                    // vShard's Calvin partition, the same on every replica.
-                    crate::wal::RedoPublish::stamp_all(
-                        &mut publishes,
-                        crate::wal::PublishPosition {
-                            partition: crate::event::cdc::position::calvin_partition(
-                                self.vshard_id,
-                            ),
-                            epoch: 0,
-                            index: txn_id.epoch,
-                            base: u64::from(txn_id.position),
-                        },
-                    );
-                    redo.publishes = publishes;
-                }
-                Err(e) => {
-                    self.halt_apply(
-                        txn_id,
-                        HaltReason::ResolveFailed,
-                        HaltStep::Resolve,
-                        format!("Calvin transaction publishes decode failed: {e}"),
-                    );
-                    return;
-                }
-            }
+            redo.publishes = crate::wal::RedoPublish::decode_all(&tx_class.publishes)?;
         }
         // One participant's record carries the dedup key of the cross-shard
         // request the transaction applies, so the key is durable exactly when
         // the request's writes are.
         if applied_key_home == Some(self.vshard_id) {
-            match zerompk::from_msgpack::<crate::wal::CrossShardAppliedKey>(
-                &pending.txn.tx_class.applied_key,
-            ) {
-                Ok(key) => redo.cross_shard_applied = Some(key),
-                Err(e) => {
-                    self.halt_apply(
-                        txn_id,
-                        HaltReason::ResolveFailed,
-                        HaltStep::Resolve,
-                        format!("Calvin transaction applied key decode failed: {e}"),
-                    );
-                    return;
-                }
-            }
+            let key =
+                zerompk::from_msgpack::<crate::wal::CrossShardAppliedKey>(&tx_class.applied_key)
+                    .map_err(|e| crate::Error::Serialization {
+                        format: "msgpack".into(),
+                        detail: format!("Calvin transaction applied key: {e}"),
+                    })?;
+            redo.cross_shard_applied = Some(key);
         }
-        let installs_nothing =
-            redo.ops.is_empty() && redo.publishes.is_empty() && redo.cross_shard_applied.is_none();
-
-        // The flush installs these exact bytes, the payload of the record
-        // appended below.
-        let redo_bytes = if installs_nothing {
-            Vec::new()
-        } else {
-            match redo.to_bytes() {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    self.halt_apply(
-                        txn_id,
-                        HaltReason::ResolveFailed,
-                        HaltStep::Resolve,
-                        format!("CalvinResolve redo record encode failed: {e}"),
-                    );
-                    return;
-                }
-            }
-        };
-
-        // The record's outcome-floor window opens before the append. It stays
-        // with the pending txn until the flush completes.
-        let (redo_lsn, redo_records) = if installs_nothing {
-            (None, None)
-        } else {
-            let records = MintedRecords::open(&self.shared.outcome_floor);
-            // The flush reports no rows beyond the record's own: restart
-            // replay folds the sum targets from the record's stamp. The record
-            // is therefore whole at append, and no part follows it.
-            let appended = records
-                .appender(&self.shared.wal, crate::wal::manager::NO_APPLY_KEY)
-                .with_event_source(event_source)
-                .with_commit_hlc(commit_hlc)
-                .append_whole_transaction_redo(
-                    tenant_id,
-                    VShardId::new(self.vshard_id),
-                    database_id,
-                    &redo,
-                );
-            match appended {
-                Ok(lsn) => {
-                    // The txn committed, so its redo record is never
-                    // cancelled. The flush closes it from its outcome.
-                    records.mark_sent();
-                    // Before the flush, so the position exists before any of
-                    // the txn's change events reach the Event Plane.
-                    self.shared.cdc_router.positions().record_calvin(
-                        lsn.as_u64(),
-                        crate::event::cdc::position::CalvinPosition {
-                            sequencer_epoch: txn_id.epoch,
-                            position: txn_id.position,
-                        },
-                    );
-                    self.shared
-                        .cdc_router
-                        .positions()
-                        .record_commit_hlc(lsn.as_u64(), commit_hlc);
-                    (Some(lsn), Some(records))
-                }
-                Err(e) => {
-                    // The txn stays pending and unapplied, and a failed append
-                    // leaves no record for restart replay to reach.
-                    records.settle();
-                    self.halt_apply(
-                        txn_id,
-                        HaltReason::WalAppendFailed,
-                        HaltStep::RedoAppend,
-                        format!("TransactionRedo WAL append failed: {e}"),
-                    );
-                    return;
-                }
-            }
-        };
-        if let Some(pending) = self.pending.get_mut(&txn_id) {
-            pending.redo_records = redo_records;
-            // The commit publishes the rows its redo installs, as a
-            // data-group `TransactionRedo` apply does. A rolled-back
-            // transaction never resolves, so it publishes nothing.
-            pending.change_sets = if redo_bytes.is_empty() {
-                Vec::new()
-            } else {
-                vec![crate::control::server::dispatch_utils::redo_change_set(
-                    &redo_bytes,
-                )]
-            };
-            pending.flush_scope.redo = redo_bytes;
-        }
-
-        // The flush runs in sequencer order, once every lower txn finished.
-        self.queue_flush(txn_id, redo_lsn);
+        let scope = &pending.scope;
+        let payload = TransactionRedoPayload::from_calvin(
+            redo,
+            CalvinSlice {
+                collections: scope.collections.clone(),
+                sum_targets: scope.sum_targets.clone(),
+                identities: scope.identities.clone(),
+                event_source: super::request::slice_event_source(tx_class, scope),
+                origin: scope.origin,
+                meta: CalvinRedoMeta {
+                    epoch_system_ms: pending.txn.epoch_system_ms,
+                    reply: resolved.reply,
+                    primary_write: pending.has_primary_write,
+                    user_write: pending.raises_write_mark,
+                    returning: pending.has_returning,
+                },
+            },
+        );
+        let incarnations = scope
+            .collections
+            .iter()
+            .map(|collection| CollectionIncarnation {
+                collection: collection.clone(),
+                incarnation: tx_class
+                    .incarnations
+                    .iter()
+                    .find(|named| named.collection == *collection)
+                    .map_or(nodedb_types::Hlc::ZERO, |named| named.incarnation),
+            })
+            .collect();
+        Ok(OwedRedo {
+            payload,
+            stamps: CalvinEntryStamps {
+                write_hlc: self
+                    .cut_floors
+                    .commit_hlc(pending.txn.epoch, pending.txn.epoch_system_ms),
+                restore_id: tx_class.restore_id,
+                metadata_floor: tx_class.metadata_floor,
+                incarnations,
+            },
+            target: RedoEntryTarget {
+                tenant_id: tx_class.tenant_id,
+                database_id: tx_class.database_id,
+                vshard_id: VShardId::new(self.vshard_id),
+            },
+            attempts: 0,
+        })
     }
 
     /// Dispatch `MetaOp::CalvinResolve` to this vShard's core, registering a
     /// response bridge so the resolve response re-enters the completion loop
     /// under `CommitState::AwaitingRedoResolve`.
     ///
-    /// Mirrors `dispatch_commit_resolution`'s exempt, no-WAL-LSN dispatch
-    /// shape — a resolve reads the staged overlay and writes nothing.
-    ///
-    /// A capacity refusal returns [`DispatchOutcome::Deferred`]: the resolve
-    /// is parked for re-send and the txn stays in flight. A txn with no
-    /// `pending` entry returns [`DispatchOutcome::Failed`].
+    /// A resolve reads the staged overlay and writes nothing, so no WAL LSN
+    /// rides on it. A capacity refusal returns [`DispatchOutcome::Deferred`]:
+    /// the resolve is parked for re-send and the txn stays in flight. A txn
+    /// with no `pending` entry returns [`DispatchOutcome::Failed`].
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn dispatch_calvin_resolve(
         &mut self,
         txn_id: TxnId,
@@ -277,23 +187,18 @@ impl Scheduler {
         };
         let tenant_id = pending.txn.tx_class.tenant_id;
         let database_id = pending.txn.tx_class.database_id;
-        let epoch = txn_id.epoch;
-        let position = txn_id.position;
-
         let request_id = self.next_request_id();
-        let plan = PhysicalPlan::Meta(MetaOp::CalvinResolve { epoch, position });
-        // A resolve reads the staged overlay only; it writes no WAL record
-        // itself, so no committed LSN rides on this envelope.
-        let request = self.build_exempt_request(request_id, tenant_id, database_id, plan, None);
-
-        // The resolve response re-enters the completion loop under the SAME
-        // txn_id, now in `AwaitingRedoResolve`, where `finish_redo_resolve` runs.
+        let plan = PhysicalPlan::Meta(MetaOp::CalvinResolve {
+            epoch: txn_id.epoch,
+            position: txn_id.position,
+        });
+        let request = self.build_exempt_request(request_id, tenant_id, database_id, plan);
         self.dispatch_sequenced(txn_id, DispatchStep::Resolve, request)
     }
 }
 
-/// The terminal error for a commit-resolution dispatch whose txn has no
-/// `pending` entry to build the request from.
+/// The terminal error for a dispatch whose txn has no `pending` entry to
+/// build the request from.
 pub(in crate::control::cluster::calvin::scheduler::driver::core) fn missing_pending_error(
     txn_id: TxnId,
 ) -> crate::Error {
@@ -359,7 +264,7 @@ mod tests {
         assert_eq!(
             scheduler.pending.get(&txn_id).map(|p| p.commit_state),
             Some(CommitState::AwaitingRedoResolve),
-            "no flush is dispatched"
+            "no redo is proposed"
         );
     }
 }

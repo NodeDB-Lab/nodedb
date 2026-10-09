@@ -14,6 +14,7 @@ mod bitemporal_array_cluster;
 mod calvin_cdc_net_kinds;
 mod calvin_cluster_pgwire_e2e;
 mod calvin_joiner_after_sequencer_compaction;
+mod calvin_leader_change_mid_txn;
 mod calvin_multi_shard_bitemporal_best_effort_restart;
 mod calvin_multi_shard_bitemporal_restart;
 mod calvin_multi_shard_redo_restart;

@@ -44,11 +44,9 @@ impl CoreLoop {
     /// WITHOUT writing.
     ///
     /// The apply set is the carried surrogate prediction when there is one, NOT
-    /// the local scan: that is the determinism anchor for multi-replica OLLP —
-    /// every replica, leader and follower, mutates exactly the leader's verified
-    /// set, so all replicas mutate identical state. With no prediction (the
-    /// single-shard / non-OLLP path) the local scan stands as the apply set,
-    /// unchanged.
+    /// the local scan. The prediction is checked against the scan first. With
+    /// no prediction (the single-shard / non-OLLP path) the local scan stands
+    /// as the apply set, unchanged.
     pub(in crate::data::executor) fn admit_bulk_predicate_write(
         &self,
         database_id: u64,
@@ -59,9 +57,7 @@ impl CoreLoop {
         let apply_ids: Vec<StorageKey> = match admission.predicted_surrogates {
             Some(predicted) => {
                 // The set comparison is deterministic: both sides are sorted.
-                if self.calvin.ollp_is_group_leader
-                    && !super::scan::ollp_surrogates_match(&matching_ids, predicted)
-                {
+                if !super::scan::ollp_surrogates_match(&matching_ids, predicted) {
                     return Err(ErrorCode::OllpRetryRequired);
                 }
                 super::scan::ollp_predicted_doc_ids(predicted)
@@ -77,9 +73,7 @@ impl CoreLoop {
         // surrogate-set check above cannot see this: the surrogate set is
         // unchanged. This runs BEFORE any write, so `sparse.get` still returns
         // pre-mutation content.
-        if let Some(predicted) = admission.predicted_edges
-            && self.calvin.ollp_is_group_leader
-        {
+        if let Some(predicted) = admission.predicted_edges {
             let actual = self.ollp_actual_edges(database_id, tid, admission.collection, &apply_ids);
             if !super::scan::ollp_edges_match(actual, predicted) {
                 return Err(ErrorCode::OllpRetryRequired);

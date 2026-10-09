@@ -117,8 +117,6 @@ impl CoreLoop {
             .map(|pending| pending.reply)
             .unwrap_or_default();
         self.drop_calvin_synthetic_overlay(epoch, position, vshard_id);
-        // Writes waiting on the rows this transaction owned run next.
-        self.calvin.fence.note_resolved(key, task.wal_lsn());
         let prev_epoch_ms = self.epoch_system_ms;
         self.epoch_system_ms = Some(epoch_system_ms);
         let rendered = self.calvin_reply_payload(task, tenant_id.as_u64(), reply, &ts_installs);
@@ -169,7 +167,6 @@ mod tests {
         epoch: 1,
         position: 0,
         epoch_system_ms: 0,
-        is_group_leader: true,
     };
 
     /// Stage `plans` at `(1, 0)`, resolve them, and return the redo bytes.
@@ -399,127 +396,5 @@ mod tests {
         );
         assert!(base_row(&core, "orders", 7).is_some());
         assert!(!core.calvin.commit_pending.contains_key(&(1, 0, vshard_id)));
-    }
-    /// An autocommit put of row `surrogate` in "orders" at `wal_lsn`.
-    fn autocommit_put(surrogate: u32, value: &str, wal_lsn: u64) -> ExecutionTask {
-        let mut task = make_task();
-        task.request.plan = PhysicalPlan::Document(DocumentOp::PointPut {
-            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "orders"),
-            document_id: "o1".to_string(),
-            value: doc_value("a", value),
-            surrogate: Surrogate::new(surrogate),
-            pk_bytes: Vec::new(),
-            returning: None,
-            rls_filters: Vec::new(),
-            resolved_sum_targets: Vec::new(),
-        });
-        task.wal_lsn = Some(Lsn::new(wal_lsn));
-        task
-    }
-
-    /// The flush of the transaction staged at `(1, 0)`, as a queued task.
-    fn flush_task(redo: Vec<u8>, lsn: u64) -> ExecutionTask {
-        let mut task = make_task();
-        task.request.plan =
-            PhysicalPlan::Meta(nodedb_physical::physical_plan::MetaOp::CalvinFlush {
-                epoch: 1,
-                position: 0,
-                redo,
-                collections: vec!["orders".to_string()],
-                sum_targets: Vec::new(),
-            });
-        task.wal_lsn = Some(Lsn::new(lsn));
-        task
-    }
-
-    fn holds(core: &CoreLoop, needle: &[u8]) -> bool {
-        base_row(core, "orders", 7)
-            .is_some_and(|row| row.windows(needle.len()).any(|w| w == needle))
-    }
-
-    /// An autocommit write to a row a staged Calvin transaction owns waits
-    /// for the flush, then applies on top of it.
-    #[test]
-    fn a_write_to_an_owned_row_applies_after_the_flush() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let redo = stage_and_resolve(&mut core, &[point_insert_plan("orders", "o1", 7)]);
-
-        core.task_queue.push(autocommit_put(7, "autocommit", 60));
-        core.tick();
-        assert_eq!(core.calvin.fence.len(), 1, "the write waits for the owner");
-        assert!(base_row(&core, "orders", 7).is_none());
-
-        core.task_queue.push(flush_task(redo, 50));
-        core.tick();
-
-        assert_eq!(core.calvin.fence.len(), 0);
-        assert!(
-            holds(&core, b"autocommit"),
-            "the waiting write applies after the flush and is not lost"
-        );
-    }
-
-    /// A waiting write whose record sits below the flush's redo record is
-    /// refused: restart replay would apply it before the flush.
-    #[test]
-    fn a_waiting_write_below_the_flush_lsn_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let redo = stage_and_resolve(&mut core, &[point_insert_plan("orders", "o1", 7)]);
-
-        core.task_queue.push(autocommit_put(7, "autocommit", 40));
-        core.task_queue.push(flush_task(redo, 50));
-        core.tick();
-
-        assert_eq!(core.calvin.fence.len(), 0);
-        assert!(base_row(&core, "orders", 7).is_some());
-        assert!(
-            !holds(&core, b"autocommit"),
-            "the refused write never applies"
-        );
-    }
-
-    /// A constraint-set install on a collection a staged transaction writes
-    /// runs at once. It writes no row the flush installs, and a parked
-    /// install holds its data group's apply loop behind the flush.
-    #[test]
-    fn a_constraint_install_on_an_owned_collection_does_not_wait() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        stage_and_resolve(&mut core, &[point_insert_plan("orders", "o1", 7)]);
-
-        let mut install = make_task();
-        install.request.plan =
-            PhysicalPlan::Crdt(nodedb_physical::physical_plan::CrdtOp::SetConstraints {
-                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "orders"),
-                constraint_version: 1,
-                constraints: Vec::new(),
-            });
-        install.request.admission = crate::bridge::envelope::Admission::Exempt(
-            crate::bridge::envelope::ExemptReason::AlreadyOrdered,
-        );
-        core.task_queue.push(install);
-        core.tick();
-
-        assert_eq!(
-            core.calvin.fence.len(),
-            0,
-            "a constraint install never waits for a Calvin flush"
-        );
-    }
-
-    /// A write to a row the staged transaction does not own runs at once.
-    #[test]
-    fn a_write_to_an_unowned_row_does_not_wait() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        stage_and_resolve(&mut core, &[point_insert_plan("orders", "o1", 7)]);
-
-        core.task_queue.push(autocommit_put(8, "autocommit", 60));
-        core.tick();
-
-        assert_eq!(core.calvin.fence.len(), 0);
-        assert!(base_row(&core, "orders", 8).is_some());
     }
 }

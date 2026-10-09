@@ -314,10 +314,12 @@ pub enum MetaOp {
     ///
     /// The Calvin scheduler dispatches this variant after lock acquisition for
     /// transactions whose read/write set is fully known at submission time (the
-    /// common case). The Data Plane handler validates the read-set and stages
-    /// `plans` without mutating base. Once the global verdict is commit, the
-    /// scheduler resolves the staged plans into a redo record, appends it, and
-    /// flushes it (`CalvinResolve`, `CalvinFlush`).
+    /// common case). Only the vShard's data-group leader dispatches it. The
+    /// Data Plane handler validates the read-set and stages `plans` without
+    /// mutating base. Once the global verdict is commit, the scheduler
+    /// resolves the staged plans into a redo record (`CalvinResolve`) and
+    /// proposes it to the data group. Every replica installs it from the log
+    /// (`ApplyTransactionRedo`).
     ///
     /// NOTE: This variant occupies the same msgpack positional tag as the
     /// original `CalvinExecute` variant it replaces, preserving wire
@@ -337,13 +339,6 @@ pub enum MetaOp {
         /// the wall clock independently. Wire-additive: defaults to 0 on decode
         /// of older entries.
         epoch_system_ms: i64,
-        /// Whether THIS node is the leader of the data-group owning this vshard,
-        /// stamped by the dispatching scheduler. OLLP verification (`actual !=
-        /// predicted` → `OllpRetryRequired`) is leader-only; followers apply the
-        /// carried `ollp_predicted_surrogates` verbatim so every replica mutates
-        /// the identical set (Calvin determinism). Per-node, never replicated.
-        /// Wire-additive: defaults to `false` on decode of older entries.
-        is_group_leader: bool,
         /// The transaction's LSN-versioned read-set from the replicated `TxClass`.
         /// Each participant checks its own vShard's reads at apply and records
         /// whether they were still current, without gating apply. Wire-additive:
@@ -405,13 +400,6 @@ pub enum MetaOp {
         /// Wall-clock ms read once on the sequencer leader at epoch creation.
         /// Same semantics as `CalvinExecuteStatic::epoch_system_ms`.
         epoch_system_ms: i64,
-        /// Whether THIS node is the leader of the data-group owning this
-        /// vshard. Same semantics as `CalvinExecuteStatic::is_group_leader`:
-        /// gates the LEADER-ONLY OLLP verification + `OllpRetryRequired`; every
-        /// replica applies the carried `ollp_predicted_surrogates` set verbatim
-        /// for determinism. Per-node, non-replicated; wire-additive (defaults to
-        /// `false`).
-        is_group_leader: bool,
     },
 
     /// Rebuild a collection's indexes (HNSW, full-text, graph CSR) on
@@ -505,22 +493,6 @@ pub enum MetaOp {
         savepoint: u64,
     },
 
-    /// Record the per-key write versions of a committed Calvin transaction's
-    /// locally-applied write plans.
-    ///
-    /// The scheduler stamps the transaction's committed LSN onto this op's
-    /// `wal_lsn` and dispatches it back to the same core once the flush
-    /// completes. The core funnels `plans` through the shared write-version
-    /// recorder at that LSN — the same shard-local WAL-LSN space the
-    /// single-shard fast path and read watermarks use. Records only: no base
-    /// mutation, no WAL append, no event emission.
-    RecordCalvinWriteVersions {
-        /// Tenant scope for all plans.
-        tenant_id: TenantId,
-        /// The locally-applied write plans whose keys' versions are recorded.
-        plans: Vec<super::PhysicalPlan>,
-    },
-
     /// Install a committed Calvin transaction's redo record on base storage.
     ///
     /// `CalvinExecuteStatic` STAGES the transaction's plans without mutating
@@ -544,10 +516,11 @@ pub enum MetaOp {
 
     /// Discard the staged writes of a Calvin transaction.
     ///
-    /// Dispatched by the scheduler when the local commit vote resolves to abort.
-    /// The handler removes the staged plans keyed by `(epoch, position)` and
-    /// fires nothing — no base mutation, no side effects. Absent key is an
-    /// idempotent no-op.
+    /// Dispatched by the leader's scheduler when the slice ends with no log
+    /// entry (an abort verdict, or a COMMIT for a slice with no write), and
+    /// by a demoted leader for state it staged. The handler removes the
+    /// staged plans keyed by `(epoch, position)` and fires nothing — no base
+    /// mutation, no side effects. Absent key is an idempotent no-op.
     CalvinDrop { epoch: u64, position: u32 },
 
     /// Resolve a committing transaction's staged writes into ONE replayable

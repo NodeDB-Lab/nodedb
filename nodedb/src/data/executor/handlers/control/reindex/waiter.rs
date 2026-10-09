@@ -4,10 +4,9 @@
 //!
 //! The rebuilds run exactly as for REINDEX CONCURRENTLY: off the core, with
 //! the core serving every other request meanwhile. Only the answer waits.
-//! The core holds the request's task here and answers it from the tick,
-//! the way it holds a write parked behind a staged Calvin transaction
-//! (`core_loop::calvin_fence`): the held task builds the response, the
-//! response ring carries it, and the task's deadline bounds the wait.
+//! The core holds the request's task here and answers it from the tick:
+//! the held task builds the response, the response ring carries it, and the
+//! task's deadline bounds the wait.
 //!
 //! - Every rebuild cut over: `Ok`.
 //! - A rebuild was discarded, or an HNSW segment rebuild failed: the first

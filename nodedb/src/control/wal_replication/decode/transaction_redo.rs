@@ -11,7 +11,9 @@ use nodedb_physical::physical_plan::RedoOrigin;
 use nodedb_types::Surrogate;
 
 use super::super::transaction_redo::TransactionRedoPayload;
-use super::super::types::{RedoBody, RedoContent, ReplicatedEventSource, ReplicatedWrite};
+use super::super::types::{
+    CalvinRedoMeta, RedoBody, RedoContent, ReplicatedEventSource, ReplicatedWrite,
+};
 use crate::control::surrogate::CarriedIdentity;
 use crate::wal::RedoStreamId;
 
@@ -36,17 +38,29 @@ pub struct ChunkedRedo {
     collections: Vec<String>,
     event_source: ReplicatedEventSource,
     origin: RedoOrigin,
+    calvin: Option<CalvinRedoMeta>,
 }
 
 impl ChunkedRedo {
     /// The payload of the stream's assembled `content`.
     pub fn payload(&self, content: RedoContent) -> TransactionRedoPayload {
-        payload_of(content, &self.collections, self.event_source, self.origin)
+        payload_of(
+            content,
+            &self.collections,
+            self.event_source,
+            self.origin,
+            self.calvin.clone(),
+        )
     }
 
     /// Every collection the transaction wrote.
     pub fn collections(&self) -> &[String] {
         &self.collections
+    }
+
+    /// The Calvin meta of a committed Calvin slice's redo.
+    pub fn calvin(&self) -> Option<&CalvinRedoMeta> {
+        self.calvin.as_ref()
     }
 }
 
@@ -55,6 +69,7 @@ fn payload_of(
     collections: &[String],
     event_source: ReplicatedEventSource,
     origin: RedoOrigin,
+    calvin: Option<CalvinRedoMeta>,
 ) -> TransactionRedoPayload {
     TransactionRedoPayload {
         redo: content.redo,
@@ -71,8 +86,7 @@ fn payload_of(
             .collect(),
         event_source: event_source.into(),
         origin,
-        // The wire entry carries no Calvin meta.
-        calvin: None,
+        calvin,
     }
 }
 
@@ -83,6 +97,7 @@ pub fn decode_transaction_redo(write: &ReplicatedWrite) -> crate::Result<Decoded
         collections,
         event_source,
         origin,
+        calvin,
     } = write
     else {
         return Err(crate::Error::Internal {
@@ -96,6 +111,7 @@ pub fn decode_transaction_redo(write: &ReplicatedWrite) -> crate::Result<Decoded
             collections,
             *event_source,
             *origin,
+            calvin.clone(),
         ))),
         RedoBody::Chunked { stream, count, len } => DecodedTransactionRedo::Chunked(ChunkedRedo {
             stream: *stream,
@@ -104,6 +120,7 @@ pub fn decode_transaction_redo(write: &ReplicatedWrite) -> crate::Result<Decoded
             collections: collections.clone(),
             event_source: *event_source,
             origin: *origin,
+            calvin: calvin.clone(),
         }),
     })
 }
@@ -132,8 +149,6 @@ mod tests {
                     epoch: 11,
                     position: 2,
                     vshard_id: 7,
-                    collections: Vec::new(),
-                    sum_targets: Vec::new(),
                 }),
                 cross_shard_applied: None,
                 row_sources: Vec::new(),
@@ -204,6 +219,32 @@ mod tests {
             .map(|named| named.collection.as_str())
             .collect();
         assert_eq!(named, vec!["accounts", "entries"]);
+    }
+
+    /// A committed Calvin slice's meta travels unchanged through the entry,
+    /// so every replica renders the same reply.
+    #[test]
+    fn a_calvin_slice_meta_round_trips_through_the_raft_bytes() {
+        let mut original = payload();
+        let meta = CalvinRedoMeta {
+            epoch_system_ms: 1_700_000_000_000,
+            reply: nodedb_physical::physical_plan::CalvinReplySpec::Count(vec![1, 2]),
+            primary_write: true,
+            user_write: true,
+            returning: true,
+        };
+        original.calvin = Some(meta.clone());
+        let entry = transaction_redo_entry(
+            TenantId::new(1),
+            DatabaseId::new(5),
+            VShardId::new(7),
+            &original,
+        );
+        let decoded_entry = ReplicatedEntry::from_bytes(&entry.to_bytes()).expect("entry decodes");
+
+        let decoded = inline(&decoded_entry.write);
+        assert_eq!(decoded.calvin, Some(meta));
+        assert_eq!(decoded.redo.calvin_stamp, original.redo.calvin_stamp);
     }
 
     #[test]

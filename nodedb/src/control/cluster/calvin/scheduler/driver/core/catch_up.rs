@@ -253,6 +253,7 @@ mod tests {
     use nodedb_types::TenantId;
     use nodedb_types::id::DatabaseId;
 
+    use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::lead_data_group;
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
         build_test_scheduler, build_test_scheduler_with_data_side, fill_tenant_inflight,
         make_sequenced_txn, make_validate_only_txn, test_coll_vshard,
@@ -578,6 +579,7 @@ mod tests {
         let registry = CalvinCompletionRegistry::new_detached();
         let (mut scheduler, _dir, mut data_side) =
             build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        lead_data_group(&mut scheduler);
         arm_two_dropped_stage_batches(&scheduler);
         let shared = std::sync::Arc::clone(&scheduler.shared);
         fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
@@ -602,6 +604,7 @@ mod tests {
         let registry = CalvinCompletionRegistry::new_detached();
         let (mut scheduler, _dir, mut data_side) =
             build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        lead_data_group(&mut scheduler);
         let (_idx0, idx1) = arm_two_dropped_stage_batches(&scheduler);
         let shared = std::sync::Arc::clone(&scheduler.shared);
         fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));

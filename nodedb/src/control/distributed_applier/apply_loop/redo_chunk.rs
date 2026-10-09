@@ -26,10 +26,14 @@ use crate::types::{DatabaseId, TenantId, VShardId};
 use crate::wal::RedoStreamId;
 use crate::wal::manager::RedoChunkPlacement;
 
+use super::calvin_redo::{ClaimOutcome, claim_chunked};
 use super::context::{ApplyContext, FinishedApply};
 use super::proposal_gate::{EntryOutcome, ledger_outcome};
 use super::start::Prepared;
-use super::transaction_redo::{conclude_held, enqueue_payload};
+use super::transaction_redo::{
+    RedoApply, conclude_held, conclude_held_claimed, conclude_installed_copy, enqueue_payload,
+    report_then_conclude,
+};
 
 /// Prepare a committed `RedoChunk` or `RedoAbandon` entry of term `term`.
 pub(super) fn prepare_stream_entry<'a>(
@@ -202,7 +206,16 @@ pub(super) fn prepare_chunked_final<'a>(
     chunked: ChunkedRedo,
     incarnations: Vec<CollectionIncarnation>,
 ) -> Prepared<'a> {
+    let claim = claim_chunked(ctx.state, chunked.calvin(), &chunked.stream);
     let taken = ctx.state.redo_chunks.take_for_final(&chunked.stream);
+    let calvin = match claim {
+        ClaimOutcome::NotCalvin => None,
+        ClaimOutcome::Claimed(claim) => Some(claim),
+        // Another copy of the position installed, or installs now: this
+        // copy's stream drops.
+        ClaimOutcome::Refused => return conclude_installed_copy(ctx, pos, taken),
+        ClaimOutcome::Malformed(error) => return conclude_held(ctx, pos, error, taken),
+    };
     // Every chunk is durable and the final entry committed; nothing of the
     // final entry applied yet.
     crate::fail_point!("redo_chunk::before_final_install");
@@ -216,9 +229,14 @@ pub(super) fn prepare_chunked_final<'a>(
         Ok(bytes) => bytes,
         Err(refusal) if ctx.state.redo_chunks.owes_snapshot(pos.group_id) => {
             let error = stream_lost_here(pos, chunked.stream, LostEntry::Final, &refusal);
-            return conclude_held(ctx, pos, error, taken);
+            return match calvin {
+                Some(claim) => conclude_held_claimed(ctx, pos, error, taken, claim),
+                None => conclude_held(ctx, pos, error, taken),
+            };
         }
         Err(refusal) => {
+            // Every replica refuses the final entry alike. The claim stays,
+            // and the scheduler hears the refusal once the entry starts.
             let result = Err(crate::Error::from(refusal));
             let outcome = EntryOutcome::Applied {
                 durable: true,
@@ -226,7 +244,18 @@ pub(super) fn prepare_chunked_final<'a>(
             };
             ctx.tracker
                 .complete(pos.group_id, pos.log_index, pos.applied_key, result);
-            return Prepared::Concluded(outcome);
+            return match calvin {
+                Some(claim) => {
+                    let event =
+                        crate::control::cluster::calvin::scheduler::CalvinApplyEvent::RedoRefused {
+                            error: "the final entry's chunk stream does not hold the chunks it \
+                                    names"
+                                .into(),
+                        };
+                    report_then_conclude(ctx, pos, claim, event, outcome)
+                }
+                None => Prepared::Concluded(outcome),
+            };
         }
     };
     match RedoContent::from_bytes(&bytes) {
@@ -234,11 +263,17 @@ pub(super) fn prepare_chunked_final<'a>(
             ctx,
             pos,
             target,
-            chunked.payload(content),
-            incarnations,
-            taken,
+            RedoApply {
+                payload: chunked.payload(content),
+                incarnations,
+                stream: taken,
+                calvin,
+            },
         )),
-        Err(error) => conclude_held(ctx, pos, error, taken),
+        Err(error) => match calvin {
+            Some(claim) => conclude_held_claimed(ctx, pos, error, taken, claim),
+            None => conclude_held(ctx, pos, error, taken),
+        },
     }
 }
 
@@ -300,6 +335,7 @@ mod tests {
             collections: Vec::new(),
             event_source: ReplicatedEventSource::User,
             origin: RedoOrigin::Commit,
+            calvin: None,
         };
         match decode_transaction_redo(&write).expect("decode") {
             DecodedTransactionRedo::Chunked(chunked) => chunked,

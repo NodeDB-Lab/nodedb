@@ -5,13 +5,10 @@
 //! no version at all (fast-path writes and reads already do).
 //!
 //! The version index itself lives on the `!Send` Data-Plane core and its
-//! readers are test-only, so this asserts the recording FIRED via the
-//! node-global `calvin.counters.write_versions_recorded` counter, which the per-vShard
-//! scheduler increments once per committed Calvin apply for which it dispatched
-//! a write-version record op (at the CalvinApplied WAL LSN). The counter is the
-//! standalone-observable proof that a cross-shard-committed write now advances
-//! the version index; the end-to-end serializability regression (via read-set
-//! validation) is covered separately once validation is enforcing.
+//! readers are test-only, so this asserts the recording fired via the
+//! node-global `calvin.counters.write_versions_recorded` counter. The data
+//! group's apply loop increments it once per committed slice whose stamped
+//! redo installed, and the install records the slice's write versions.
 
 use crate::common;
 

@@ -253,6 +253,7 @@ impl CoreLoop {
                 on_conflict_updates: on_conflict_updates.clone(),
                 rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
             }),
+            Self::replay_record_lsn(record_lsn),
         );
         let response = self.execute_vector_direct_upsert(
             crate::data::executor::handlers::vector_upsert::VectorDirectUpsertParams {
@@ -351,6 +352,7 @@ impl CoreLoop {
                 count,
                 dim,
             }),
+            Self::replay_record_lsn(record_lsn),
         );
         let response = self.execute_multi_vector_insert(
             crate::data::executor::handlers::vector_multi::MultiVectorInsertParams {
@@ -440,6 +442,7 @@ impl CoreLoop {
                 field_name: field_name.clone(),
                 document_surrogate,
             }),
+            Self::replay_record_lsn(record_lsn),
         );
         // The delete is idempotent: an already-absent document answers Ok.
         // Advance the watermark regardless so a later checkpoint records the

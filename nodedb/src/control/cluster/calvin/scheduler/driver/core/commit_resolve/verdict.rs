@@ -1,42 +1,46 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Resume-on-verdict, verdict-signal handling, and the stall re-probe sweep
-//! for a staged Calvin transaction parked on the cross-shard commit barrier.
+//! for a granted Calvin transaction waiting on the cross-shard commit
+//! barrier.
 
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use nodedb_cluster::calvin::VerdictSignal;
 
-use crate::control::cluster::calvin::scheduler::driver::core::commit_resolution_dispatch::CommitResolution;
 use crate::control::cluster::calvin::scheduler::driver::core::deferred::{
     DispatchOutcome, DispatchStep,
 };
 use crate::control::cluster::calvin::scheduler::driver::core::halt::{HaltReason, HaltStep};
+use crate::control::cluster::calvin::scheduler::driver::core::owed::SchedulerProposal;
+use crate::control::cluster::calvin::scheduler::driver::core::process::LedgerMark;
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 
 impl Scheduler {
-    /// Resume a txn parked in [`CommitState::AwaitingVerdict`] once the durable
-    /// GLOBAL verdict is known: dispatch its flush (commit) or drop (abort).
+    /// Act on the durable GLOBAL verdict of `txn_id`.
     ///
-    /// `committed` is the authoritative cross-shard verdict — NOT this shard's
-    /// local vote. On commit, dispatches `MetaOp::CalvinResolve` and moves the
-    /// txn to [`CommitState::AwaitingRedoResolve`] (the resolved redo is
-    /// WAL-appended and the flush dispatched from [`Self::finish_redo_resolve`]).
-    /// On abort, dispatches the drop directly and moves the txn to
-    /// [`CommitState::AwaitingResolve`]. Bumps the flushed / dropped counter. The
-    /// commit tail runs later in [`Self::finish_resolved_commit`], once the
-    /// flush/drop response arrives.
+    /// `committed` is the authoritative cross-shard verdict, never this
+    /// shard's local vote.
     ///
-    /// Double-resume guard: the verdict push and the probe-on-park (and the
-    /// stall re-probe sweep) can all fire for one txn, so this first confirms the
-    /// txn is still `Some(AwaitingVerdict)` — if it already transitioned out
-    /// (resolve/drop dispatched, or completed), this is a no-op. This guarantees
-    /// the flush/drop is dispatched exactly once.
+    /// A leader's txn parked in [`CommitState::AwaitingVerdict`]:
+    /// - abort: dispatch the drop of its staged state;
+    /// - COMMIT for a slice with no write: drop the staged state too, since
+    ///   nothing installs;
+    /// - COMMIT for a write slice: resolve its staged post-images, at once,
+    ///   or at its turn for a whole-collection resolve. The resolved redo is
+    ///   proposed from [`Self::finish_redo_resolve`].
     ///
-    /// A COMMIT verdict for a txn this replica failed to stage halts the
+    /// A follower's [`CommitState::Following`] txn completes at an abort or
+    /// at a COMMIT for a slice with no write: no log entry follows either.
+    /// A COMMIT for a write slice waits for the slice's redo to apply.
+    ///
+    /// Any other state already left the barrier, so a duplicate push, probe
+    /// or sweep is a no-op.
+    ///
+    /// A COMMIT verdict for a txn this leader failed to stage halts the
     /// scheduler: the txn stays parked with its locks, its stall deadline
     /// cleared, and its position unapplied.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn resume_on_verdict(
@@ -44,15 +48,30 @@ impl Scheduler {
         txn_id: TxnId,
         committed: bool,
     ) {
-        // Guard: only a still-parked txn resumes. Mirrors `handle_completion`'s
-        // state-match so a duplicate push/probe/timeout is idempotent.
-        if !matches!(
-            self.pending.get(&txn_id).map(|p| p.commit_state),
-            Some(CommitState::AwaitingVerdict)
-        ) {
+        let Some((state, writes)) = self
+            .pending
+            .get(&txn_id)
+            .map(|p| (p.commit_state, p.scope.writes))
+        else {
             return;
+        };
+        match state {
+            CommitState::Following => {
+                if !committed || !writes {
+                    self.complete_without_entry(txn_id);
+                }
+            }
+            CommitState::AwaitingVerdict => self.resume_parked(txn_id, committed, writes),
+            CommitState::Staged
+            | CommitState::AwaitingResolveTurn
+            | CommitState::AwaitingRedoResolve
+            | CommitState::AwaitingRedoApply { .. }
+            | CommitState::AwaitingDrop => {}
         }
+    }
 
+    /// Resume a leader's txn parked on the barrier.
+    fn resume_parked(&mut self, txn_id: TxnId, committed: bool, writes: bool) {
         if committed
             && let Some(pending) = self.pending.get_mut(&txn_id)
             && let Some(stage_error) = pending.stage_error.clone()
@@ -62,87 +81,89 @@ impl Scheduler {
                 txn_id,
                 HaltReason::LocalStageFailed,
                 HaltStep::Stage,
-                format!("COMMIT verdict for a txn this replica did not stage: {stage_error}"),
+                format!("COMMIT verdict for a txn this leader did not stage: {stage_error}"),
             );
             return;
         }
-
-        // A slice that truncates rows resolves at its turn, once every lower
-        // txn of this vShard finished.
-        if committed
-            && let Some(pending) = self.pending.get_mut(&txn_id)
-            && pending.flush_scope.resolve_at_turn
-        {
-            pending.commit_state = CommitState::AwaitingResolveTurn;
-            pending.verdict_deadline = None;
-            self.shared
-                .calvin
-                .counters
-                .commits_flushed
-                .fetch_add(1, Ordering::Relaxed);
-            self.pump_flush_turn();
-            return;
-        }
-
-        let (outcome, step) = if committed {
-            // Resolve the staged post-images into a replayable `RedoRecord`
-            // first; the redo is WAL-appended (in `finish_redo_resolve`) before
-            // the flush is dispatched, restoring restart durability for this
-            // vShard's slice of a multi-shard Calvin commit.
-            (self.dispatch_calvin_resolve(txn_id), DispatchStep::Resolve)
-        } else {
-            (
-                self.dispatch_commit_resolution(txn_id, CommitResolution::Drop),
-                DispatchStep::Drop,
-            )
-        };
-        if let DispatchOutcome::Failed(error) = outcome {
-            // Terminal resolve/drop refusal: the scheduler halts and holds
-            // the txn parked with its locks and staged buffer. The cleared
-            // deadline keeps the stall sweep from re-sending it.
-            if let Some(pending) = self.pending.get_mut(&txn_id) {
-                pending.verdict_deadline = None;
-            }
-            self.fail_dispatch_step(txn_id, step, error);
-            return;
-        }
-
-        // Sent or parked for re-send at capacity: either way the txn awaits
-        // this step's response, so a duplicate verdict push or probe is a
-        // no-op under the guard above.
         if let Some(pending) = self.pending.get_mut(&txn_id) {
-            pending.commit_state = if committed {
-                CommitState::AwaitingRedoResolve
-            } else {
-                CommitState::AwaitingResolve {
-                    committed: false,
-                    redo_lsn: None,
-                }
-            };
             // No longer parked: clear the stall deadline.
             pending.verdict_deadline = None;
         }
-
-        if committed {
-            self.shared
-                .calvin
-                .counters
-                .commits_flushed
-                .fetch_add(1, Ordering::Relaxed);
+        let counter = if committed {
+            &self.shared.calvin.counters.commits_flushed
         } else {
-            self.shared
-                .calvin
-                .counters
-                .commits_dropped
-                .fetch_add(1, Ordering::Relaxed);
+            &self.shared.calvin.counters.commits_dropped
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+
+        if !committed || !writes {
+            self.drop_staged_slice(txn_id);
+            return;
         }
+        // A slice that truncates rows resolves at its turn, once every lower
+        // txn of this vShard finished.
+        let at_turn = self
+            .pending
+            .get(&txn_id)
+            .is_some_and(|pending| pending.scope.resolve_at_turn);
+        if at_turn {
+            if let Some(pending) = self.pending.get_mut(&txn_id) {
+                pending.commit_state = CommitState::AwaitingResolveTurn;
+            }
+            self.pump_resolve_turn();
+            return;
+        }
+        self.start_resolve(txn_id);
+    }
+
+    /// Dispatch the resolve of a committed slice, and wait for its answer.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn start_resolve(
+        &mut self,
+        txn_id: TxnId,
+    ) {
+        if let Some(pending) = self.pending.get_mut(&txn_id) {
+            pending.commit_state = CommitState::AwaitingRedoResolve;
+        }
+        // Sent or parked for re-send at capacity: either way the txn awaits
+        // the resolve's answer.
+        if let DispatchOutcome::Failed(error) = self.dispatch_calvin_resolve(txn_id) {
+            self.fail_dispatch_step(txn_id, DispatchStep::Resolve, error);
+        }
+    }
+
+    /// Dispatch the drop of a staged slice that ends with no log entry, and
+    /// wait for its answer.
+    fn drop_staged_slice(&mut self, txn_id: TxnId) {
+        if let Some(pending) = self.pending.get_mut(&txn_id) {
+            pending.commit_state = CommitState::AwaitingDrop;
+        }
+        if let DispatchOutcome::Failed(error) = self.dispatch_drop(txn_id, DispatchStep::Drop) {
+            // Terminal refusal: the scheduler halts and holds the txn with
+            // its locks and staged buffer.
+            self.fail_dispatch_step(txn_id, DispatchStep::Drop, error);
+        }
+    }
+
+    /// Complete `txn_id`, which ends with no log entry on this vShard. It
+    /// owes an empty `CompletionAck`: the coordinator's outcome waits for
+    /// every participant's.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn complete_without_entry(
+        &mut self,
+        txn_id: TxnId,
+    ) {
+        self.propose_sequencer_entry(
+            txn_id,
+            SchedulerProposal::CompletionAck { result: Vec::new() },
+        );
+        self.metrics.record_completed();
+        self.on_txn_complete(txn_id, LedgerMark::Terminal);
     }
 
     /// Handle a pushed [`VerdictSignal`] from this node's completion registry.
     ///
-    /// Matches the signal to the parked txn by `(epoch, position)` and resumes
-    /// it. A signal for a txn this scheduler does not host, or one that already
-    /// resumed, is a harmless no-op (the double-resume guard covers the latter).
+    /// Matches the signal to the txn by `(epoch, position)` and resumes it. A
+    /// signal for a txn this scheduler does not host, or one that already
+    /// resumed, is a harmless no-op.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn handle_verdict_signal(
         &mut self,
         signal: VerdictSignal,
@@ -159,7 +180,7 @@ impl Scheduler {
     /// emit a stall metric + warning, and re-arm the deadline so the warning is
     /// rate-limited rather than per-iteration. It NEVER releases locks and NEVER
     /// unilaterally aborts: a participant cannot know whether a peer already
-    /// flushed a COMMIT, so aborting one side while a peer committed will tear
+    /// committed, so aborting one side while a peer committed will tear
     /// the transaction. The verdict is guaranteed to arrive eventually — a
     /// post-failover leader re-aggregates the replicated votes (seeded on every
     /// replica) into the same verdict — so waiting is always the safe action.
@@ -202,7 +223,7 @@ impl Scheduler {
                 vote_owed,
                 "calvin: staged txn still awaiting the cross-shard verdict past its stall \
                  deadline; HOLDING locks and waiting (never aborting — a peer may have already \
-                 flushed a commit). The verdict is guaranteed to arrive."
+                 committed). The verdict is guaranteed to arrive."
             );
             if let Some(pending) = self.pending.get_mut(&txn_id) {
                 pending.verdict_deadline = Some(now + self.config.verdict_stall_warn());
@@ -227,10 +248,11 @@ mod tests {
     use crate::bridge::envelope::ErrorCode;
     use crate::bridge::envelope::{Payload, StageVote, Status};
     use crate::control::cluster::calvin::scheduler::driver::core::halt::HaltReason;
+    use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::lead_data_group;
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
-        await_data_plane_request, build_test_scheduler_with_data_side, error_response,
-        fill_tenant_inflight, make_sequenced_txn, release_filler, spawn_scheduler_loop,
-        staged_pending, staged_response,
+        await_data_plane_request, build_test_scheduler, build_test_scheduler_with_data_side,
+        error_response, fill_tenant_inflight, following_pending, make_sequenced_txn,
+        release_filler, spawn_scheduler_loop, staged_pending, staged_response,
     };
     use crate::control::state::SharedState;
     use crate::types::RequestId;
@@ -264,8 +286,7 @@ mod tests {
         }
     }
 
-    /// An Ok resolve response whose redo record carries no ops, so the flush
-    /// dispatch follows at once with no WAL append.
+    /// An Ok resolve response whose redo record carries no ops.
     fn empty_redo_response() -> crate::bridge::envelope::Response {
         let redo = RedoRecord {
             version: 1,
@@ -306,24 +327,28 @@ mod tests {
         );
     }
 
-    /// A refused flush dispatch after the redo resolves does not complete the
-    /// txn: its position stays unapplied and its pending entry stays.
+    /// A resolved redo is proposed to the data group, and the txn waits for
+    /// its apply: its position stays unapplied and its pending entry stays.
     #[tokio::test]
-    async fn resolved_redo_flush_refused_at_capacity_does_not_complete_txn() {
+    async fn a_resolved_redo_is_proposed_and_waits_for_its_apply() {
         let txn_id = TxnId::new(14, 2);
-        let mut parked = parked_at_capacity(txn_id, CommitState::AwaitingRedoResolve);
-        let scheduler = &mut parked.scheduler;
+        let (mut scheduler, _dir) = build_test_scheduler(7);
+        lead_data_group(&mut scheduler);
+        let mut pending = staged_pending(make_sequenced_txn(14, 2), txn_id);
+        pending.commit_state = CommitState::AwaitingRedoResolve;
+        scheduler.pending.insert(txn_id, pending);
 
         scheduler.finish_redo_resolve(txn_id, empty_redo_response());
 
+        assert!(matches!(
+            scheduler.pending.get(&txn_id).map(|p| p.commit_state),
+            Some(CommitState::AwaitingRedoApply { proposed: Some(_) })
+        ));
         assert!(
             !scheduler.applied.is_applied(14, 2),
-            "a refused flush must not mark the position applied"
+            "a proposed redo must not mark the position applied"
         );
-        assert!(
-            scheduler.pending.contains_key(&txn_id),
-            "a refused flush must keep the txn's pending entry"
-        );
+        assert!(!scheduler.is_apply_halted());
     }
 
     /// Under an ABORT verdict, a refused drop dispatch does not complete the
@@ -381,10 +406,10 @@ mod tests {
         );
     }
 
-    /// Once a Data Plane response frees tenant capacity, a refused flush
+    /// Once a Data Plane response frees tenant capacity, a refused drop
     /// reaches the Data Plane.
     #[tokio::test]
-    async fn refused_flush_reaches_data_plane_after_capacity_frees() {
+    async fn refused_drop_reaches_data_plane_after_capacity_frees() {
         let txn_id = TxnId::new(14, 2);
         let ParkedAtCapacity {
             mut scheduler,
@@ -392,19 +417,18 @@ mod tests {
             mut data_side,
             shared,
             fillers,
-        } = parked_at_capacity(txn_id, CommitState::AwaitingRedoResolve);
+        } = parked_at_capacity(txn_id, CommitState::AwaitingVerdict);
 
-        scheduler.finish_redo_resolve(txn_id, empty_redo_response());
+        scheduler.resume_on_verdict(txn_id, false);
         let running = spawn_scheduler_loop(scheduler);
         release_filler(&shared, &mut data_side, fillers[0]);
 
         let arrived = await_data_plane_request(&mut data_side, |plan| {
             matches!(
                 plan,
-                PhysicalPlan::Meta(MetaOp::CalvinFlush {
+                PhysicalPlan::Meta(MetaOp::CalvinDrop {
                     epoch: 14,
                     position: 2,
-                    ..
                 })
             )
         })
@@ -413,14 +437,14 @@ mod tests {
 
         assert!(
             arrived,
-            "the refused flush must reach the Data Plane once capacity frees"
+            "the refused drop must reach the Data Plane once capacity frees"
         );
     }
 
     /// A false vote from either participant makes the only global verdict abort;
     /// applying that durable verdict broadcasts the abort to every parked local
     /// participant. The scheduler's `resume_on_verdict(false)` then dispatches a
-    /// drop, never a resolve/flush, on each recipient.
+    /// drop, never a resolve, on each recipient.
     #[tokio::test]
     async fn two_participant_false_vote_broadcasts_global_abort_to_every_scheduler() {
         let registry = CalvinCompletionRegistry::new_detached();
@@ -501,10 +525,7 @@ mod tests {
                     .pending
                     .get(&txn_id)
                     .map(|pending| pending.commit_state),
-                Some(CommitState::AwaitingResolve {
-                    committed: false,
-                    redo_lsn: None
-                })
+                Some(CommitState::AwaitingDrop)
             ));
             let request = data_side
                 .request_rx
@@ -521,16 +542,12 @@ mod tests {
         }
     }
 
-    /// A follower scheduler whose stage failed, parked on the verdict barrier.
-    fn follower_with_failed_stage(
+    /// A leader scheduler whose stage failed, parked on the verdict barrier.
+    fn leader_with_failed_stage(
         txn_id: TxnId,
     ) -> (Scheduler, tempfile::TempDir, CoreChannelDataSide) {
         let registry = CalvinCompletionRegistry::new_detached();
         let (mut scheduler, dir, data_side) = build_test_scheduler_with_data_side(7, registry);
-        assert!(
-            !scheduler.is_group_leader(),
-            "the fixture hosts no data group"
-        );
         scheduler.pending.insert(
             txn_id,
             staged_pending(make_sequenced_txn(txn_id.epoch, txn_id.position), txn_id),
@@ -544,13 +561,14 @@ mod tests {
         (scheduler, dir, data_side)
     }
 
-    /// A COMMIT verdict for a txn this follower failed to stage halts the
-    /// scheduler: the leader staged and voted commit, so this replica cannot
-    /// apply it. No resolve is dispatched, and the stall sweep stops.
+    /// A COMMIT verdict for a txn this leader failed to stage halts the
+    /// scheduler: an earlier leader staged and voted commit, so this leader
+    /// holds nothing to resolve. No resolve is dispatched, and the stall
+    /// sweep stops.
     #[tokio::test]
     async fn commit_verdict_after_local_stage_error_halts_unapplied() {
         let txn_id = TxnId::new(14, 2);
-        let (mut scheduler, _dir, mut data_side) = follower_with_failed_stage(txn_id);
+        let (mut scheduler, _dir, mut data_side) = leader_with_failed_stage(txn_id);
 
         scheduler.resume_on_verdict(txn_id, true);
 
@@ -571,12 +589,12 @@ mod tests {
         );
     }
 
-    /// An abort verdict for a txn this replica failed to stage drops it as
+    /// An abort verdict for a txn this leader failed to stage drops it as
     /// usual: every replica reaches the same abort.
     #[tokio::test]
     async fn abort_verdict_after_local_stage_error_drops_without_halting() {
         let txn_id = TxnId::new(14, 2);
-        let (mut scheduler, _dir, mut data_side) = follower_with_failed_stage(txn_id);
+        let (mut scheduler, _dir, mut data_side) = leader_with_failed_stage(txn_id);
 
         scheduler.resume_on_verdict(txn_id, false);
 
@@ -592,5 +610,39 @@ mod tests {
                 position: 2
             })
         ));
+    }
+
+    /// A follower's txn completes at an abort verdict with no log entry: it
+    /// owes its ack and marks its position applied. A COMMIT verdict for a
+    /// write slice leaves it waiting for its redo.
+    #[tokio::test]
+    async fn a_following_txn_completes_at_an_abort_and_waits_at_a_commit() {
+        use crate::control::cluster::calvin::scheduler::driver::core::owed::OwedKind;
+        let (mut scheduler, _dir) = build_test_scheduler(7);
+        let aborted = TxnId::new(14, 2);
+        let committed = TxnId::new(15, 0);
+        for txn_id in [aborted, committed] {
+            scheduler.pending.insert(
+                txn_id,
+                following_pending(make_sequenced_txn(txn_id.epoch, txn_id.position), txn_id),
+            );
+        }
+
+        scheduler.resume_on_verdict(aborted, false);
+        scheduler.resume_on_verdict(committed, true);
+
+        assert!(!scheduler.pending.contains_key(&aborted));
+        assert!(scheduler.applied.is_applied(14, 2));
+        assert!(
+            scheduler
+                .owed
+                .contains_key(&(aborted, OwedKind::CompletionAck))
+        );
+        assert_eq!(
+            scheduler.pending.get(&committed).map(|p| p.commit_state),
+            Some(CommitState::Following),
+            "a committed write slice waits for its redo"
+        );
+        assert!(!scheduler.applied.is_applied(15, 0));
     }
 }

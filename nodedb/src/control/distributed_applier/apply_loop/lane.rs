@@ -18,6 +18,7 @@ use crate::control::distributed_applier::applied_index::AppliedPrefix;
 use crate::control::distributed_applier::propose_tracker::{ApplyingEntry, ProposeTracker};
 use crate::control::server::shared::write_admission::plan_writes_user_data;
 use crate::control::state::tenant_marks::{MarkSite, TenantMarks};
+use crate::control::wal_replication::types::CalvinRedoMeta;
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite, decode_replicated_entry};
 
 use super::proposal_gate::PrefixStep;
@@ -53,8 +54,9 @@ impl QueuedEntry {
 
     /// `(tenant_id, write_hlc, restore_id)` of an entry that writes a
     /// tenant's data. A cut barrier, a Calvin read result and a surrogate
-    /// bind write no data, and an entry with no proposer stamp has no commit
-    /// HLC to record.
+    /// bind write no data, a Calvin slice that raises no write mark writes
+    /// only derived rows or schema, and an entry with no proposer stamp has
+    /// no commit HLC to record.
     pub fn write_stamp(&self) -> Option<(u64, u64, u64)> {
         let decoded = self.decoded.as_ref()?;
         if decoded.write_hlc == 0
@@ -65,6 +67,13 @@ impl QueuedEntry {
                     | ReplicatedWrite::SurrogateBind { .. }
                     | ReplicatedWrite::RedoChunk { .. }
                     | ReplicatedWrite::RedoAbandon { .. }
+                    | ReplicatedWrite::TransactionRedo {
+                        calvin: Some(CalvinRedoMeta {
+                            user_write: false,
+                            ..
+                        }),
+                        ..
+                    }
             )
         {
             return None;
@@ -79,11 +88,13 @@ impl QueuedEntry {
         let Some(decoded) = self.decoded.as_ref() else {
             return false;
         };
-        match decoded.write {
+        match &decoded.write {
+            ReplicatedWrite::TransactionRedo { calvin, .. } => {
+                calvin.as_ref().is_none_or(|meta| meta.user_write)
+            }
             ReplicatedWrite::ArrayOp { .. }
             | ReplicatedWrite::ArrayCellPut { .. }
-            | ReplicatedWrite::ArrayCellDelete { .. }
-            | ReplicatedWrite::TransactionRedo { .. } => true,
+            | ReplicatedWrite::ArrayCellDelete { .. } => true,
             ReplicatedWrite::ArraySchema { .. }
             | ReplicatedWrite::CutBarrier { .. }
             | ReplicatedWrite::CalvinReadResult { .. }
@@ -565,5 +576,56 @@ mod tests {
         assert!(lane.conclude(1, true, |_| PrefixStep::Record(true)));
         lane.settle(&tracker, &TenantMarks::default());
         assert!(matches!(barrier.try_recv(), Ok(Ok(_))));
+    }
+
+    /// The stamped redo entry of a Calvin slice that raises the write mark
+    /// when `user_write` holds, proposed with commit HLC 77.
+    fn calvin_redo_entry(user_write: bool) -> QueuedEntry {
+        let payload = crate::control::wal_replication::transaction_redo::TransactionRedoPayload {
+            redo: crate::wal::RedoRecord {
+                version: 1,
+                ops: Vec::new(),
+                calvin_stamp: None,
+                cross_shard_applied: None,
+                row_sources: Vec::new(),
+                publishes: Vec::new(),
+                row_changes: Vec::new(),
+            },
+            collections: vec!["orders".into()],
+            sum_targets: Vec::new(),
+            identities: Vec::new(),
+            event_source: crate::event::EventSource::User,
+            origin: nodedb_physical::physical_plan::RedoOrigin::Commit,
+            calvin: Some(CalvinRedoMeta {
+                epoch_system_ms: 0,
+                reply: nodedb_physical::physical_plan::CalvinReplySpec::Count(Vec::new()),
+                primary_write: true,
+                user_write,
+                returning: false,
+            }),
+        };
+        let mut entry = crate::control::wal_replication::encode::transaction_redo_entry(
+            crate::types::TenantId::new(4),
+            crate::types::DatabaseId::DEFAULT,
+            crate::types::VShardId::new(2),
+            &payload,
+        );
+        entry.write_hlc = 77;
+        QueuedEntry::new(LogEntry {
+            term: 1,
+            index: 9,
+            data: entry.to_bytes(),
+        })
+    }
+
+    /// A Calvin slice that writes only derived rows or schema raises no write
+    /// mark, even as the slice that deposits the reply. A slice that changes
+    /// a tenant row raises its commit HLC.
+    #[test]
+    fn only_a_calvin_slice_that_changes_a_row_carries_a_write_stamp() {
+        assert_eq!(calvin_redo_entry(true).write_stamp(), Some((4, 77, 0)));
+        assert_eq!(calvin_redo_entry(false).write_stamp(), None);
+        assert!(calvin_redo_entry(true).plan_writes_user_data());
+        assert!(!calvin_redo_entry(false).plan_writes_user_data());
     }
 }

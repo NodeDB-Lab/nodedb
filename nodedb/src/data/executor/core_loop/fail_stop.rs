@@ -16,8 +16,9 @@
 //! records the node-wide marker that
 //! `/healthz`, the native `STATUS` and the `nodedb_data_plane_core_fail_stopped`
 //! gauge read, and latches the core. A latched core refuses every request it
-//! dequeues with `RetryableRefusal`: it applied nothing, so the funnel
+//! dequeues with `CoreFailStopped`: it applied nothing, so the funnel
 //! cancels the request's record and another replica or a restart serves it.
+//! A Calvin scheduler reads the code and halts instead of voting.
 //! The latch never clears.
 
 use tracing::{error, warn};
@@ -140,7 +141,7 @@ impl CoreLoop {
         let Some((cause, _)) = self.fail_stop.cause() else {
             return 0;
         };
-        let reason = format!(
+        let detail = format!(
             "core {} is fail-stopped ({}): its state is unknown until restart",
             self.core_id,
             cause.label()
@@ -150,8 +151,9 @@ impl CoreLoop {
             self.drop_journal_group(task.request_id().as_u64());
             let response = self.response_error(
                 &task,
-                ErrorCode::RetryableRefusal {
-                    reason: reason.clone(),
+                ErrorCode::CoreFailStopped {
+                    core_id: self.core_id,
+                    detail: detail.clone(),
                 },
             );
             if let Err(e) = self

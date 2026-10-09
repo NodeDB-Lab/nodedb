@@ -50,9 +50,7 @@ pub use quota::{
     quota_row_invalid, quota_row_undecodable, quota_row_write_failed, quota_scope_purge_incomplete,
     quota_scope_replay_aborted, scope_quota_not_installed,
 };
-pub use raft_apply::{
-    raft_entries_reapplied, raft_entry_reapplied, replicated_write_parked, replicated_writes_parked,
-};
+pub use raft_apply::{raft_entries_reapplied, raft_entry_reapplied};
 pub use recovery::{
     batch_insert_without_surrogates, fts_index_update_failed, orphaned_index_entry_after_delete,
     replay_record_unapplied, strict_row_undecodable, wal_archival_failed_truncation_held,

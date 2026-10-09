@@ -10,17 +10,17 @@
 //!
 //! A halted scheduler:
 //! - keeps the stuck txn unapplied, with its locks and its `pending` entry;
-//! - releases the collection gates of every txn with no flush in flight, so a
-//!   purge never waits on it. Such a txn checks its incarnations again, and
-//!   takes its gates back, before a later flush;
+//! - releases the collection gates of every txn, so a purge never waits on
+//!   it. A leader's txn checks its incarnations again, and takes its gates
+//!   back, before it proposes its redo;
 //! - closes intake with [`IntakeClosure::ApplyHalted`]. The fan-out then drops
 //!   new input and arms catch-up, which keeps the sequencer log retained;
 //! - stops the deferred re-send and the catch-up drain;
-//! - keeps routing responses, verdicts, and promotions for other in-flight
-//!   txns. Each one holds locks disjoint from the stuck txn, so its outcome
-//!   does not depend on it. Peer vShards wait on its votes, and the per-position
-//!   applied gate keeps restart replay exact. A later infrastructure error on
-//!   another txn holds that txn the same way.
+//! - keeps routing responses, verdicts, promotions, and apply events for
+//!   other in-flight txns. Each one holds locks disjoint from the stuck txn,
+//!   so its outcome does not depend on it. Peer vShards wait on its votes,
+//!   and the per-position applied gate keeps restart replay exact. A later
+//!   infrastructure error on another txn holds that txn the same way.
 //!
 //! The first cause wins. It logs one `error!` line, sets the
 //! `nodedb_calvin_apply_halted` gauge, and records the node-wide
@@ -51,22 +51,26 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum HaltReason
     ResponseDisconnected,
     /// The resolve of a committed txn failed or returned an undecodable record.
     ResolveFailed,
-    /// The flush of a committed txn returned an error.
-    FlushFailed,
-    /// This replica failed to stage a txn whose verdict is COMMIT.
+    /// This leader failed to stage a txn whose verdict is COMMIT.
     LocalStageFailed,
     /// The surrogate catalog refused a coordinator-assigned identity.
     IdentityBindFailed,
-    /// A redo or `CalvinApplied` WAL append failed.
-    WalAppendFailed,
     /// The metadata group left this node before its apply reached a held
     /// txn's floor.
     MetadataGroupGone,
-    /// A committed txn's write-version record cannot be built. Read-set
-    /// validation reads these versions, so a lost record reports false-valid reads.
-    WriteVersionRecordFailed,
     /// A stage response carries no vote the scheduler can read.
     StageVoteInvalid,
+    /// A committed slice's redo entry cannot be built. The verdict is
+    /// COMMIT, so the txn cannot drop.
+    RedoProposeFailed,
+    /// The vShard's data group applied a committed slice's redo and refused
+    /// it for good. Every replica refuses the same entry.
+    RedoInstallRefused,
+    /// A committed slice's redo did not become durable on this replica.
+    RedoApplyFailed,
+    /// The vShard's core fail-stopped. It refuses every later request, the
+    /// committed install included.
+    CoreFailStopped,
 }
 
 impl HaltReason {
@@ -77,13 +81,14 @@ impl HaltReason {
             Self::DispatchRefused => apply_halt_reason::DISPATCH_REFUSED,
             Self::ResponseDisconnected => apply_halt_reason::RESPONSE_DISCONNECTED,
             Self::ResolveFailed => apply_halt_reason::RESOLVE_FAILED,
-            Self::FlushFailed => apply_halt_reason::FLUSH_FAILED,
             Self::LocalStageFailed => apply_halt_reason::LOCAL_STAGE_FAILED,
             Self::IdentityBindFailed => apply_halt_reason::IDENTITY_BIND_FAILED,
-            Self::WalAppendFailed => apply_halt_reason::WAL_APPEND_FAILED,
             Self::MetadataGroupGone => apply_halt_reason::METADATA_GROUP_GONE,
-            Self::WriteVersionRecordFailed => apply_halt_reason::WRITE_VERSION_RECORD_FAILED,
             Self::StageVoteInvalid => apply_halt_reason::STAGE_VOTE_INVALID,
+            Self::RedoProposeFailed => apply_halt_reason::REDO_PROPOSE_FAILED,
+            Self::RedoInstallRefused => apply_halt_reason::REDO_INSTALL_REFUSED,
+            Self::RedoApplyFailed => apply_halt_reason::REDO_APPLY_FAILED,
+            Self::CoreFailStopped => apply_halt_reason::CORE_FAIL_STOPPED,
         }
     }
 
@@ -102,16 +107,12 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum HaltStep {
     Stage,
     /// The resolve request of a committed txn.
     Resolve,
-    /// The flush request of a committed txn.
-    Flush,
-    /// The drop request of an aborted txn.
+    /// The proposal of a committed slice's redo.
+    RedoPropose,
+    /// The install of a committed slice's redo, from the data-group log.
+    RedoApply,
+    /// The drop request of a txn that ends with no log entry.
     Drop,
-    /// The write-version record of a committed txn.
-    WriteVersionRecord,
-    /// The `TransactionRedo` WAL append.
-    RedoAppend,
-    /// The `CalvinApplied` WAL append.
-    AppliedMarker,
     /// The surrogate identity binding before the stage dispatch.
     IdentityBind,
     /// The wait for this node's metadata apply to reach the txn's floor.
@@ -126,11 +127,9 @@ impl HaltStep {
         match self {
             Self::Stage => "stage",
             Self::Resolve => "resolve",
-            Self::Flush => "flush",
+            Self::RedoPropose => "redo_propose",
+            Self::RedoApply => "redo_apply",
             Self::Drop => "drop",
-            Self::WriteVersionRecord => "write_version_record",
-            Self::RedoAppend => "redo_append",
-            Self::AppliedMarker => "applied_marker",
             Self::IdentityBind => "identity_bind",
             Self::MetadataHold => "metadata_hold",
         }
@@ -143,14 +142,8 @@ impl HaltStep {
         match state {
             CommitState::Staged | CommitState::AwaitingVerdict => Self::Stage,
             CommitState::AwaitingRedoResolve | CommitState::AwaitingResolveTurn => Self::Resolve,
-            CommitState::AwaitingFlushTurn { .. } => Self::Flush,
-            CommitState::AwaitingResolve {
-                committed: true, ..
-            } => Self::Flush,
-            CommitState::AwaitingResolve {
-                committed: false, ..
-            } => Self::Drop,
-            CommitState::AwaitingVersionRecord => Self::WriteVersionRecord,
+            CommitState::AwaitingRedoApply { .. } | CommitState::Following => Self::RedoApply,
+            CommitState::AwaitingDrop => Self::Drop,
         }
     }
 }
@@ -210,9 +203,6 @@ impl Scheduler {
         step: HaltStep,
         error: String,
     ) {
-        // The txn stays unapplied here, so restart replay must reach its redo
-        // record.
-        self.hold_redo_records(txn_id);
         let reason = if self.node_shutting_down() {
             HaltReason::Draining
         } else {
@@ -241,7 +231,7 @@ impl Scheduler {
                     "calvin scheduler: apply halted; holding another txn unapplied"
                 );
             }
-            self.release_gates_on_halt(txn_id);
+            self.release_gates_on_halt();
             return;
         }
 
@@ -288,7 +278,7 @@ impl Scheduler {
                 .record(report.clone());
         }
         self.halt.first = Some(ApplyHalt { reason, report });
-        self.release_gates_on_halt(txn_id);
+        self.release_gates_on_halt();
     }
 
     /// Whether the node shuts down: the shutdown watch fired, or the

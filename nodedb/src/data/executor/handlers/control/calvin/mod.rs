@@ -8,9 +8,9 @@
 //!   (the common case). It VALIDATES the read-set to compute the local commit
 //!   vote and STAGES the transaction's plans into the synthetic overlay and
 //!   the commit-pending buffer WITHOUT mutating base or firing side effects,
-//!   then returns the vote. `CoreLoop::execute_calvin_flush` later installs
-//!   the transaction's committed redo record, or
-//!   `CoreLoop::execute_calvin_drop` discards the staged state.
+//!   then returns the vote. The data group's apply of the slice's stamped
+//!   redo entry later installs it and consumes the staged state, or
+//!   `CoreLoop::execute_calvin_drop` discards it.
 //!
 //! - `CoreLoop::execute_calvin_execute_passive`: passive participant for a
 //!   dependent-read txn. Reads each declared key from the local engine and
@@ -26,9 +26,8 @@
 //!   returns `OllpRetryRequired` and stages nothing. The OLLP orchestrator on
 //!   the Control Plane retries via `Inbox::submit`.
 //!
-//! The scheduler appends the transaction's `TransactionRedo` record, or a
-//! `CalvinApplied` marker when the transaction wrote nothing here, on the
-//! Control Plane. The Data Plane writes no WAL record.
+//! The data-group leader's scheduler proposes the slice's stamped redo entry
+//! to the data group. The Data Plane writes no WAL record for a slice.
 
 mod active_passive;
 mod discard;

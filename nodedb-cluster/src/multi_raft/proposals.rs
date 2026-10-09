@@ -30,10 +30,8 @@ impl MultiRaft {
     /// Maps the vshard to its Raft group via the routing table and reuses the
     /// existing local leader-role check — no new election. Returns `false` when
     /// the vshard has no group mapping or this node is a follower/learner for
-    /// the owning group. Used by the Calvin scheduler to stamp the per-node,
-    /// non-replicated `is_group_leader` dispatch flag so the OLLP optimistic-lock
-    /// verification runs only on the leader while every replica applies the same
-    /// predicted write-set (determinism).
+    /// the owning group. The Calvin scheduler proposes its owed sequencer
+    /// entries only while this holds.
     pub fn vshard_role_is_leader(&self, vshard_id: u32) -> bool {
         match self
             .routing

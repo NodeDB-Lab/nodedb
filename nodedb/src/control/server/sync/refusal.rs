@@ -25,6 +25,8 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
         crate::Error::RetryableRefusal { reason } => Some(reason),
         crate::Error::DataPlane(code) => match code {
             ErrorCode::RetryableRefusal { reason } => Some(reason),
+            // The fail-stopped core applied nothing: a restart serves the frame.
+            ErrorCode::CoreFailStopped { detail, .. } => Some(detail),
             ErrorCode::DeadlineExceeded
             | ErrorCode::RejectedConstraint { .. }
             | ErrorCode::RejectedPrevalidation { .. }
@@ -353,6 +355,7 @@ fn is_indeterminate_code(code: &ErrorCode) -> bool {
         | ErrorCode::DispatchCapacity { .. }
         | ErrorCode::ConflictRetry
         | ErrorCode::RetryableRefusal { .. }
+        | ErrorCode::CoreFailStopped { .. }
         | ErrorCode::OllpRetryRequired
         | ErrorCode::CrdtFrontierMismatch { .. }
         | ErrorCode::CollectionDraining { .. }

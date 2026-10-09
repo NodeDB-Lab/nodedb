@@ -16,7 +16,6 @@ pub(in crate::data::executor) struct CalvinExecCtx {
     pub epoch: u64,
     pub position: u32,
     pub epoch_system_ms: i64,
-    pub is_group_leader: bool,
 }
 
 impl CoreLoop {
@@ -48,9 +47,6 @@ impl CoreLoop {
             .commit_pending
             .remove(&(epoch, position, vshard_id));
         self.drop_calvin_synthetic_overlay(epoch, position, vshard_id);
-        self.calvin
-            .fence
-            .note_resolved((epoch, position, vshard_id), None);
         // The scheduler proposes this abort vote and waits for the global
         // verdict before it drops anything.
         self.calvin_stage_refusal(task, error.into())

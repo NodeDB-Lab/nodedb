@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use super::scheduler::Scheduler;
 use crate::bridge::envelope::{Admission, ExemptReason, Priority, Request};
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
-use crate::types::{DatabaseId, Lsn, ReadConsistency, RequestId, TenantId, VShardId};
+use crate::types::{DatabaseId, ReadConsistency, RequestId, TenantId, VShardId};
 use nodedb_physical::physical_plan::PhysicalPlan;
 
 /// The event source a Calvin sub-operation runs with when its transaction
@@ -15,9 +15,9 @@ use nodedb_physical::physical_plan::PhysicalPlan;
 pub(in crate::control::cluster::calvin::scheduler::driver::core) const CALVIN_EVENT_SOURCE:
     crate::event::EventSource = crate::event::EventSource::User;
 
-/// The event source a sequenced transaction's writes carry. Its redo record
-/// and its flush both carry it, so WAL replay rebuilds the events the flush
-/// emits, and a server-run body's writes fire no triggers.
+/// The event source a sequenced transaction's writes carry. Its redo entry
+/// carries it, so every replica's install and WAL replay emit the same
+/// events, and a server-run body's writes fire no triggers.
 pub(in crate::control::cluster::calvin::scheduler::driver::core) fn txn_event_source(
     tx_class: &nodedb_cluster::calvin::types::TxClass,
 ) -> crate::event::EventSource {
@@ -27,14 +27,14 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) fn txn_event_so
 /// The event source this vShard's slice of a sequenced transaction commits
 /// under. A slice only trigger bodies wrote, in a transaction a client also
 /// wrote, takes the source a body's row takes in one overlay. Every other
-/// slice takes the transaction's source. The stage, the resolve, the redo
-/// record and the flush all carry it.
+/// slice takes the transaction's source. The stage and the redo entry both
+/// carry it.
 pub(in crate::control::cluster::calvin::scheduler::driver::core) fn slice_event_source(
     tx_class: &nodedb_cluster::calvin::types::TxClass,
-    flush_scope: &super::super::types::FlushScope,
+    scope: &super::super::types::SliceScope,
 ) -> crate::event::EventSource {
     let source = txn_event_source(tx_class);
-    if flush_scope.body_only {
+    if scope.body_only {
         source.committed_row_override(crate::event::EventSource::Trigger)
     } else {
         source
@@ -46,17 +46,16 @@ impl Scheduler {
     ///
     /// Calvin has already globally ordered the transaction, so the request is
     /// admitted `Exempt(AlreadyOrdered)` — it bypasses admission control. Only
-    /// `request_id`, `tenant_id`, `plan`, and `wal_lsn` vary between call sites;
-    /// everything else (vshard, deadline, and the fixed metadata constants) is
-    /// derived from `&self` or constant. `wal_lsn` is `Some` only when the caller
-    /// has already durably appended the record this request applies.
+    /// `request_id`, `tenant_id`, `database_id` and `plan` vary between call
+    /// sites; everything else (vshard, deadline, and the fixed metadata
+    /// constants) is derived from `&self` or constant. No scheduler request
+    /// writes a WAL record, so none carries a WAL LSN.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn build_exempt_request(
         &self,
         request_id: RequestId,
         tenant_id: TenantId,
         database_id: DatabaseId,
         plan: PhysicalPlan,
-        wal_lsn: Option<Lsn>,
     ) -> Request {
         Request {
             request_id,
@@ -74,7 +73,7 @@ impl Scheduler {
             user_id: None,
             statement_digest: None,
             txn_id: None,
-            wal_lsn,
+            wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
             admission: Admission::Exempt(ExemptReason::AlreadyOrdered),

@@ -7,9 +7,8 @@
 use std::sync::Arc;
 
 use crate::bridge::envelope::{PhysicalPlan, Response};
-use crate::control::change_stream::{ChangeEvent, ChangePartition, ChangeRun, PositionedChange};
+use crate::control::change_stream::{ChangeEvent, ChangePartition};
 use crate::control::state::SharedState;
-use crate::event::cdc::CdcOffset;
 use crate::types::{DatabaseId, TenantId};
 
 use super::extract::{WriteChangeMeta, extract_write_metadata};
@@ -111,15 +110,6 @@ pub(crate) fn extract_write_change_set(plan: &PhysicalPlan, tenant_id: TenantId)
     }
 }
 
-/// The change events of a committed transaction's redo record `redo`: one per
-/// row it installs. A Calvin commit publishes these, as the data-group apply
-/// of a `TransactionRedo` entry does.
-pub(crate) fn redo_change_set(redo: &[u8]) -> WriteChangeSet {
-    WriteChangeSet {
-        metas: super::redo::redo_change_meta(redo),
-    }
-}
-
 fn change_events(
     shared: &SharedState,
     tenant_id: TenantId,
@@ -215,63 +205,4 @@ pub(crate) fn publish_settled_changes(
     shared
         .change_stream
         .forward(shared, ChangePartition::Group(group_id));
-}
-
-/// Publish the changes of the Calvin transaction at `(sequencer_epoch,
-/// position)` that vShard `vshard` applied, and forward them when this node
-/// leads the vShard's data group.
-///
-/// Every replica's scheduler applies the vShard's transactions in sequencer
-/// order, so every replica publishes them at the same positions.
-pub(crate) fn publish_calvin_change_sets(
-    shared: &Arc<SharedState>,
-    calvin: CalvinApply,
-    change_sets: Vec<WriteChangeSet>,
-    lsn: nodedb_types::Lsn,
-) {
-    let CalvinApply {
-        tenant_id,
-        database_id,
-        vshard,
-        sequencer_epoch,
-        position,
-        commit_hlc,
-    } = calvin;
-    let base = u64::from(position);
-    let changes: Vec<PositionedChange> = change_sets
-        .into_iter()
-        .flat_map(|change_set| {
-            change_events(shared, tenant_id, database_id, change_set, lsn, commit_hlc)
-        })
-        .enumerate()
-        .map(|(ordinal, event)| PositionedChange {
-            position: CdcOffset::data_event_in(0, sequencer_epoch, base, ordinal as u64 + 1),
-            database_id,
-            event,
-        })
-        .collect();
-    if changes.is_empty() {
-        return;
-    }
-    shared.change_stream.publish_run(ChangeRun {
-        partition: ChangePartition::Calvin(vshard),
-        after: None,
-        through: CdcOffset::data_event_in(0, sequencer_epoch, base, u64::MAX).correction(),
-        changes,
-    });
-    shared
-        .change_stream
-        .forward(shared, ChangePartition::Calvin(vshard));
-}
-
-/// The Calvin transaction a published change set belongs to.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct CalvinApply {
-    pub tenant_id: TenantId,
-    pub database_id: DatabaseId,
-    pub vshard: u32,
-    pub sequencer_epoch: u64,
-    pub position: u32,
-    /// The transaction's commit HLC, which every replica derives alike.
-    pub commit_hlc: u64,
 }

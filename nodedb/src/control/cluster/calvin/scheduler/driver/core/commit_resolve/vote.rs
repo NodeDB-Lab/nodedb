@@ -12,22 +12,22 @@ use crate::control::cluster::calvin::scheduler::driver::core::halt::{
 use crate::control::cluster::calvin::scheduler::driver::core::owed::SchedulerProposal;
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::driver::core::staged_vote::{
-    StagedVote, staged_commit_vote,
+    StageVoteError, StagedVote, staged_commit_vote,
 };
 use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 
 impl Scheduler {
-    /// Cast this participant's local commit vote for a staged transaction, then
-    /// PARK it on the cross-shard commit barrier awaiting the durable GLOBAL
-    /// verdict — it does NOT self-decide flush-or-drop on its local vote.
+    /// Cast this leader's commit vote for a staged transaction, then PARK it
+    /// on the cross-shard commit barrier awaiting the durable GLOBAL verdict.
+    /// It never self-decides commit or abort on its local vote.
     ///
     /// The staged executor response is validate-only: its `stage_vote` is this
     /// shard's local commit vote, read by [`staged_commit_vote`]. A stage
     /// response the scheduler cannot read a vote from halts apply. It never
-    /// counts as a commit. The leader proposes that vote via the sequencer
-    /// Raft group. The sequencer aggregates all participants' votes into a
-    /// single authoritative `SequencerEntry::Verdict`, applied on every replica.
+    /// counts as a commit. The vote travels through the sequencer Raft group,
+    /// which aggregates every participant's vote into one authoritative
+    /// `SequencerEntry::Verdict`, applied on every replica.
     ///
     /// This method moves the txn to [`CommitState::AwaitingVerdict`] WITHOUT
     /// dispatching a resolve or drop, then immediately probes
@@ -35,9 +35,7 @@ impl Scheduler {
     /// push we raced) it resumes at once via [`Self::resume_on_verdict`];
     /// otherwise it stays parked, holding locks and its staged buffer, until the
     /// verdict push, a later probe, or the stall re-probe sweep delivers the
-    /// verdict. Resuming (in `resume_on_verdict`) is where the flush/drop is
-    /// dispatched and the flushed/dropped counters bump — using the GLOBAL
-    /// verdict, never the local vote.
+    /// verdict.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn resolve_staged_commit(
         &mut self,
         txn_id: TxnId,
@@ -45,7 +43,7 @@ impl Scheduler {
     ) {
         // A staged error is always an abort vote. A response with no readable
         // vote halts: counting it as a commit will let a failed participant
-        // flush after its peers received a global commit verdict.
+        // commit after its peers received a global commit verdict.
         let superseded = self
             .pending
             .get(&txn_id)
@@ -62,9 +60,16 @@ impl Scheduler {
                 Ok(vote) => vote,
                 Err(error) => {
                     self.metrics.record_executor_error();
+                    let reason = match error {
+                        StageVoteError::CoreFailStopped { .. } => HaltReason::CoreFailStopped,
+                        StageVoteError::Missing { .. }
+                        | StageVoteError::CommitWithoutSuccess { .. } => {
+                            HaltReason::StageVoteInvalid
+                        }
+                    };
                     self.halt_apply(
                         txn_id,
-                        HaltReason::StageVoteInvalid,
+                        reason,
                         HaltStep::Stage,
                         format!("{error}: {}", error_response_text("stage", staged_response)),
                     );
@@ -73,26 +78,20 @@ impl Scheduler {
             }
         };
 
-        // Durably propose this participant's commit vote via the sequencer
-        // Raft group, leader-guarded: only the data-group leader ran
-        // read-set validation, so only a leader's vote is
-        // authoritative. The sequencer aggregates every participant's vote into
-        // the single global verdict this txn parks on below. An abort travels as
+        // Durably propose this leader's commit vote via the sequencer Raft
+        // group. Only the leader stages, so its vote is the vShard's. The
+        // sequencer aggregates every participant's vote into the single
+        // global verdict this txn parks on below. An abort travels as
         // `AbortVote` so its cause survives to the coordinator. The vote stays
         // owed until the tally holds it, so a refused or dropped proposal is
-        // proposed again rather than lost.
-        //
-        // A follower owes an abort vote and proposes it only if it comes to
-        // lead before any vote of this vShard applies: the previous leader
-        // lost its leadership, or its scheduler cannot run. A follower ran
-        // none of the leader-only checks, so abort is the only vote it can
-        // cast. The txn fails with a retryable conflict and never hangs.
-        let abort = if self.is_group_leader() {
-            vote.abort_reason()
-        } else {
-            Some(nodedb_cluster::calvin::AbortReason::SerializationConflict)
-        };
-        self.propose_sequencer_entry(txn_id, SchedulerProposal::Vote { abort });
+        // proposed again rather than lost. A promoted leader's vote for a
+        // txn whose vote applied already changes nothing: the first counts.
+        self.propose_sequencer_entry(
+            txn_id,
+            SchedulerProposal::Vote {
+                abort: vote.abort_reason(),
+            },
+        );
 
         if vote == StagedVote::SerializationConflict {
             // The staged slice's read-set was no longer current: observe it on
@@ -110,14 +109,14 @@ impl Scheduler {
         // this local vote, decides. If the txn already vanished (torn down
         // elsewhere), there is nothing to park.
         //
-        // A stage error parks too. A deterministic error fails on every
-        // replica, the leader votes abort, and every replica drops. A local
-        // error on a follower leaves the leader's commit vote standing:
-        // `resume_on_verdict` halts on that COMMIT verdict.
+        // A stage error parks too. The leader votes abort, and every
+        // participant drops at the abort verdict. A COMMIT verdict for it
+        // can follow only a vote an earlier leader cast: `resume_on_verdict`
+        // halts on it.
         match self.pending.get_mut(&txn_id) {
             Some(pending) => {
                 pending.commit_state = CommitState::AwaitingVerdict;
-                // A superseded slice cannot flush here: its collection is gone.
+                // A superseded slice cannot commit here: its collection is gone.
                 pending.stage_error = match vote {
                     StagedVote::ParticipantError | StagedVote::PredictionDrift => {
                         Some(error_response_text("stage", staged_response))
@@ -169,12 +168,14 @@ mod tests {
     use nodedb_cluster::calvin::{AbortReason, SequencerEntry};
 
     use super::*;
+    use crate::bridge::envelope::ErrorCode;
     use crate::bridge::envelope::{StageVote, Status};
+    use crate::control::cluster::calvin::scheduler::driver::core::owed::OwedKind;
     use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::{
-        CapturingProposer, elect_data_group_leader,
+        CapturingProposer, lead_data_group,
     };
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
-        build_test_scheduler, make_sequenced_txn, staged_pending, staged_response,
+        build_test_scheduler, error_response, make_sequenced_txn, staged_pending, staged_response,
     };
 
     const VSHARD: u32 = 7;
@@ -191,7 +192,7 @@ mod tests {
         let (mut scheduler, dir) = build_test_scheduler(VSHARD);
         let proposer = CapturingProposer::accepting();
         scheduler.sequencer_proposer = proposer.clone();
-        elect_data_group_leader(&scheduler);
+        lead_data_group(&mut scheduler);
         scheduler.pending.insert(
             txn_id,
             staged_pending(make_sequenced_txn(txn_id.epoch, txn_id.position), txn_id),
@@ -282,6 +283,63 @@ mod tests {
         assert_eq!(
             scheduler.apply_halt().map(|h| h.reason),
             Some(HaltReason::StageVoteInvalid)
+        );
+    }
+
+    /// A fail-stopped core refuses the stage and every later request. The
+    /// leader halts on it and votes nothing.
+    #[tokio::test]
+    async fn a_fail_stopped_core_halts_the_stage_and_never_votes() {
+        let txn_id = TxnId::new(33, 0);
+        let (mut scheduler, _dir, proposer) = staged_leader(txn_id);
+
+        scheduler.resolve_staged_commit(
+            txn_id,
+            &error_response(ErrorCode::CoreFailStopped {
+                core_id: 0,
+                detail: "rollback failed".to_string(),
+            }),
+        );
+
+        assert_eq!(proposer.attempt_count(), 0, "no vote is proposed");
+        assert_eq!(
+            scheduler.apply_halt().map(|h| h.reason),
+            Some(HaltReason::CoreFailStopped)
+        );
+        assert!(!scheduler.applied.is_applied(33, 0));
+    }
+
+    /// The leader's vote is its real one, never a forced abort. A node that
+    /// lost its Raft leadership after it staged keeps the vote owed and
+    /// proposes nothing.
+    #[tokio::test]
+    async fn a_vote_is_proposed_only_while_this_node_leads() {
+        let txn_id = TxnId::new(34, 0);
+        let (mut scheduler, _dir) = build_test_scheduler(VSHARD);
+        let proposer = CapturingProposer::accepting();
+        scheduler.sequencer_proposer = proposer.clone();
+        scheduler.pending.insert(
+            txn_id,
+            staged_pending(make_sequenced_txn(txn_id.epoch, txn_id.position), txn_id),
+        );
+
+        scheduler.resolve_staged_commit(
+            txn_id,
+            &staged_response(Status::Ok, Some(StageVote::Commit)),
+        );
+
+        assert_eq!(proposer.attempt_count(), 0, "a non-leader proposes nothing");
+        assert!(scheduler.owed.contains_key(&(txn_id, OwedKind::Vote)));
+        lead_data_group(&mut scheduler);
+        scheduler.retry_owed_sequencer_entries();
+        assert_eq!(
+            proposer.accepted(),
+            vec![SequencerEntry::Vote {
+                epoch: 34,
+                position: 0,
+                vshard: VSHARD,
+            }],
+            "the vote is the stage's commit, not a forced abort"
         );
     }
 }

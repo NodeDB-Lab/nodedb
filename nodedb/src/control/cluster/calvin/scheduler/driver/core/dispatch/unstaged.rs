@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! A transaction this vShard cannot stage: its plans are rejected, or its
+//! A transaction the leader cannot stage: its plans are rejected, or its
 //! dependent reads never arrived.
 //!
 //! The txn still takes the commit barrier. It enters `pending`, holds its
 //! locks, and owes an abort vote. At the abort verdict it drops like any
 //! staged txn: it proposes its `CompletionAck`, releases its locks, and only
-//! then marks its position applied.
+//! then marks its position applied. A follower rejects the same plans and
+//! holds the txn `Following` for the same verdict.
 
 use std::time::Instant;
 
@@ -18,7 +19,7 @@ use nodedb_cluster::calvin::types::SequencedTxn;
 use super::super::owed::SchedulerProposal;
 use super::super::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::driver::types::{
-    CommitState, FlushScope, PendingTxn,
+    CommitState, PendingTxn, SliceScope,
 };
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 
@@ -26,8 +27,9 @@ impl Scheduler {
     /// Park `txn` with an abort vote for plans this vShard rejects.
     ///
     /// Plan decode, part assembly, and plan routing read only replicated
-    /// input. So every replica rejects the same plans, and every replica
-    /// votes `PlanRejected`.
+    /// input. So every replica rejects the same plans, and the leader votes
+    /// `PlanRejected`. A follower owes no vote: it holds the txn for the
+    /// abort verdict.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn reject_plan(
         &mut self,
         txn: SequencedTxn,
@@ -35,6 +37,10 @@ impl Scheduler {
         lock_owner: TxnId,
         error: &crate::Error,
     ) {
+        if !self.role.is_leader() {
+            self.follow(txn, txn_id, lock_owner);
+            return;
+        }
         error!(
             vshard_id = self.vshard_id,
             epoch = txn_id.epoch,
@@ -55,8 +61,8 @@ impl Scheduler {
     /// with an abort vote for `reason`.
     ///
     /// `stage_error` stays on the pending entry. A COMMIT verdict for the
-    /// txn then halts the scheduler, because this replica holds nothing to
-    /// flush.
+    /// txn then halts the scheduler, because this leader holds nothing to
+    /// resolve.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn park_unstaged(
         &mut self,
         txn: SequencedTxn,
@@ -74,17 +80,17 @@ impl Scheduler {
                 lock_owner,
                 dispatch_time: now,
                 has_primary_write: false,
+                raises_write_mark: false,
                 has_returning: false,
-                change_sets: Vec::new(),
                 commit_state: CommitState::AwaitingVerdict,
+                awaiting: None,
                 verdict_deadline: Some(now + self.config.verdict_stall_warn()),
                 stage_error: Some(stage_error),
-                redo_records: None,
-                flush_scope: FlushScope::default(),
+                scope: SliceScope::of_plans(&[]),
+                redo: None,
                 superseded: false,
                 gates: Vec::new(),
                 ungated: false,
-                install_permit: None,
             },
         );
         self.propose_sequencer_entry(
@@ -117,7 +123,7 @@ mod tests {
     use crate::bridge::dispatch::CoreChannelDataSide;
     use crate::bridge::envelope::{StageVote, Status};
     use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::{
-        CapturingProposer, elect_data_group_leader,
+        CapturingProposer, lead_data_group,
     };
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
         build_test_scheduler_with_data_side, make_sequenced_txn, staged_pending, staged_response,
@@ -141,7 +147,7 @@ mod tests {
             build_test_scheduler_with_data_side(vshard, Arc::clone(registry));
         let proposer = CapturingProposer::accepting();
         scheduler.sequencer_proposer = proposer.clone();
-        elect_data_group_leader(&scheduler);
+        lead_data_group(&mut scheduler);
         (scheduler, dir, data_side, proposer)
     }
 
@@ -239,16 +245,11 @@ mod tests {
             scheduler.resume_on_verdict(txn_id, false);
             assert_eq!(
                 scheduler.pending.get(&txn_id).map(|p| p.commit_state),
-                Some(CommitState::AwaitingResolve {
-                    committed: false,
-                    redo_lsn: None
-                }),
+                Some(CommitState::AwaitingDrop),
                 "vShard {vshard} leaves AwaitingVerdict for its drop"
             );
             assert!(!scheduler.applied.is_applied(30, 0));
-            scheduler
-                .finish_resolved_commit(txn_id, staged_response(Status::Ok, None), false, None)
-                .await;
+            scheduler.finish_drop(txn_id, &staged_response(Status::Ok, None));
             assert!(!scheduler.pending.contains_key(&txn_id));
             assert!(scheduler.applied.is_applied(30, 0));
             registry.note_completion_ack(cluster_txn, vshard);
@@ -279,10 +280,7 @@ mod tests {
         scheduler.dispatch_txn(undecodable_txn(32, 0), txn_id, txn_id);
         assert_eq!(
             scheduler.pending.get(&txn_id).map(|p| p.commit_state),
-            Some(CommitState::AwaitingResolve {
-                committed: false,
-                redo_lsn: None
-            })
+            Some(CommitState::AwaitingDrop)
         );
     }
 }

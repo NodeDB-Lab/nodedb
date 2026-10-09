@@ -125,6 +125,9 @@ pub struct CalvinInstall {
     pub epoch_system_ms: i64,
     /// The reply the install answers with.
     pub reply: CalvinReplySpec,
+    /// Whether the install raises the tenant's write mark. A slice that only
+    /// installs schema raises none.
+    pub user_write: bool,
 }
 
 /// The answer of `MetaOp::CalvinResolve`: the slice's resolved redo record
