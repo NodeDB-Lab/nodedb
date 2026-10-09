@@ -62,7 +62,7 @@ pub(crate) fn wire_shutdown_bus(
 
     // Final WAL fsync. Every append before this phase is buffered until an
     // fsync covers it, and a write whose caller never awaited durability
-    // (a Calvin applied marker, a background maintenance record) has only
+    // (a background maintenance record) has only
     // this fsync between it and a graceful exit. Registered at startup so the
     // bus cannot pass `WalFsync` without it.
     spawn_wal_fsync_barrier(Arc::clone(shared), &shutdown_bus);

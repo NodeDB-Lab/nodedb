@@ -439,7 +439,7 @@ mod tests {
         );
     }
 
-    /// A greenfield node with NO Calvin history at all: `read_applied_recovery`
+    /// A greenfield node with NO Calvin history at all: `recover_all_applied`
     /// seeds `max_applied_epoch` (hence `rebuild_target_epoch`) to
     /// `NOT_YET_APPLIED_EPOCH` too (see `recovery.rs`'s
     /// `greenfield_returns_sentinel_and_empty_tail` test) — this is distinct from

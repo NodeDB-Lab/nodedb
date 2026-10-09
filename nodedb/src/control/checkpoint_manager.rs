@@ -174,7 +174,8 @@ pub struct CheckpointCycleInputs<'a> {
     /// When present, the tombstone set is GC'd to the new truncation point.
     pub catalog: Option<&'a crate::control::security::catalog::SystemCatalog>,
     /// The Calvin applied ledger of every vShard on this node. Saved in
-    /// `catalog` before truncation deletes the applied markers it came from.
+    /// `catalog` before truncation deletes the stamped redo records it came
+    /// from.
     pub calvin_ledgers:
         Option<&'a crate::control::cluster::calvin::scheduler::CalvinAppliedLedgers>,
 }
@@ -403,7 +404,7 @@ pub async fn run_checkpoint_cycle(inputs: CheckpointCycleInputs<'_>) -> Option<L
     crate::fail_point!("checkpoint::after_marker_before_truncate");
 
     // Save every Calvin scheduler's applied state before any segment holding
-    // an applied marker is deleted. The sequencer log delivers those entries
+    // a stamped redo record is deleted. The sequencer log delivers those entries
     // again after a restart, and the saved state is what tells the scheduler
     // they already applied. A save that fails holds the truncation back.
     if let Some(states) = calvin_states

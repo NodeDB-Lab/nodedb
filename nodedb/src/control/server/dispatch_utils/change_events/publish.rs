@@ -204,5 +204,5 @@ pub(crate) fn publish_settled_changes(
     shared.change_stream.settle_group(group_id, first, last);
     shared
         .change_stream
-        .forward(shared, ChangePartition::Group(group_id));
+        .forward(shared, ChangePartition(group_id));
 }

@@ -80,14 +80,14 @@ impl CoreLoop {
     /// mutation and fires NO side effects. It stages each write plan into
     /// `txn_overlays` under the synthetic `TxnId` and buffers the plans in
     /// `commit_pending`, so a subsequent `CalvinResolve` builds one redo record
-    /// and [`CoreLoop::execute_calvin_flush`] installs it.
+    /// and [`CoreLoop::install_calvin_redo`] installs it.
     ///
     /// The one divergence from the static path: OLLP predicate verification
     /// (leader-only) runs HERE, before staging, via
     /// [`CoreLoop::verify_calvin_active_ollp`]. The dependent-read path has no
     /// LSN-versioned read-set to vote on; its conflict detector is the OLLP
     /// `actual != predicted` re-check. A mismatch returns `OllpRetryRequired`
-    /// and stages nothing, so no redo record is appended for it. The Control
+    /// and stages nothing, so no redo entry exists for it. The Control
     /// Plane scheduler releases locks and re-recons on `OllpRetryRequired`.
     ///
     /// `injected_reads` is retained on the wire for future plan variants that
@@ -222,7 +222,7 @@ mod tests {
     /// The dependent-read ACTIVE path STAGES its writes (into `commit_pending` +
     /// the synthetic overlay) instead of applying them to base directly, so a
     /// Calvin-committed dependent-read write reaches the WAL as a redo record.
-    /// Staging routes it through the same resolve → redo → flush the static
+    /// Staging routes it through the same resolve → redo → install the static
     /// path uses.
     #[test]
     fn calvin_execute_active_stages_point_insert_into_overlay() {
@@ -245,13 +245,13 @@ mod tests {
 
         let vshard_id = task.request.vshard_id.as_u32();
 
-        // STAGED, not applied: the plans are buffered for the flush replay.
+        // STAGED, not applied: the plans are buffered for the resolve.
         assert!(
             core.calvin.commit_pending.contains_key(&(1, 0, vshard_id)),
             "active-path write must be STAGED into commit_pending, not applied directly"
         );
 
-        // No base mutation at stage time — the row appears only after flush.
+        // No base mutation at stage time — the row appears only after install.
         let doc_id = nodedb_types::StorageKey::for_surrogate(Surrogate::new(7));
         assert!(
             core.sparse
@@ -279,7 +279,7 @@ mod tests {
     /// predicted set no longer matches live state returns `OllpRetryRequired`
     /// BEFORE staging anything — so no stale redo is WAL-appended and the
     /// coordinator can re-recon under a fresh attempt. Verifying at stage time
-    /// (not flush) is the one divergence from the static path.
+    /// (not install) is the one divergence from the static path.
     #[test]
     fn calvin_execute_active_ollp_drift_returns_retry_and_stages_nothing() {
         let dir = tempfile::tempdir().unwrap();

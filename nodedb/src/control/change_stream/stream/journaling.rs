@@ -30,7 +30,7 @@ impl ChangeStream {
     /// feeds and are journaled with the next batch of their feed.
     pub fn attach_journal(&self, journal: Arc<ChangeJournal>) -> crate::Result<()> {
         let feeds = journal.load()?;
-        let early_runs = {
+        {
             let mut state = self.lock();
             let (early_events, early_feeds) = state.ring.drain();
             for feed in feeds {
@@ -41,7 +41,6 @@ impl ChangeStream {
                     changes: feed.changes,
                 });
             }
-            let mut early_runs = Vec::new();
             for (partition, floor, through) in early_feeds {
                 let changes = early_events
                     .iter()
@@ -58,25 +57,19 @@ impl ChangeStream {
                     through,
                     changes,
                 });
-                match partition {
-                    ChangePartition::Group(group_id) => state
-                        .group_pending
-                        .entry(group_id)
-                        .or_default()
-                        .extend(appended.events),
-                    ChangePartition::Calvin(_) => early_runs.push(appended),
-                }
+                let ChangePartition(group_id) = partition;
+                state
+                    .group_pending
+                    .entry(group_id)
+                    .or_default()
+                    .extend(appended.events);
             }
-            early_runs
-        };
+        }
         self.journal
             .set(journal)
             .map_err(|_| crate::Error::Internal {
                 detail: "the change-feed journal was already attached".into(),
             })?;
-        for run in &early_runs {
-            self.journal_run(run);
-        }
         Ok(())
     }
 
@@ -98,7 +91,7 @@ impl ChangeStream {
     /// covers then has its changes on disk.
     pub(crate) fn journal_group(&self, group_id: u64, floor: u64) {
         let through = CdcOffset::whole_index(floor);
-        let partition = ChangePartition::Group(group_id);
+        let partition = ChangePartition(group_id);
         let batch = {
             let mut state = self.lock();
             if self.journal.get().is_none() {
@@ -120,8 +113,8 @@ impl ChangeStream {
         self.persist(batch);
     }
 
-    /// Journal a run a Calvin transaction or a forwarding leader produced,
-    /// before its publisher acknowledges it.
+    /// Journal a run a forwarding leader produced, before its publisher
+    /// acknowledges it.
     pub(super) fn journal_run(&self, run: &AppendedRun) {
         if self.journal.get().is_none() {
             return;

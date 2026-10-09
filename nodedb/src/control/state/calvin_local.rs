@@ -32,7 +32,7 @@ pub struct CalvinLocalState {
     /// session reads. 0 until a scheduler applies an epoch.
     pub last_applied_epoch: Arc<AtomicU64>,
     /// Node-global Calvin observability counters (write versions recorded,
-    /// read-set validation failures, commits flushed/dropped).
+    /// read-set validation failures, commits installed/dropped).
     pub counters: CalvinCounters,
     /// Local, in-process sidecar carrying the applied Data-Plane
     /// [`Response`](crate::bridge::envelope::Response) (affected-count and any

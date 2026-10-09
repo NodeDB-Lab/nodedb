@@ -349,7 +349,6 @@ mod tests {
             partition: PARTITION,
             epoch: 0,
             index,
-            base: 0,
         });
         message
     }

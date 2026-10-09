@@ -78,7 +78,7 @@ pub(super) fn build_test_scheduler(vshard_id: u32) -> (Scheduler, tempfile::Temp
         sequencer_proposer: CapturingProposer::accepting(),
         sequencer_state_machine,
         // A freshly-built scheduler has applied nothing, so its ledger holds the
-        // not-yet-applied sentinel (matching `read_applied_recovery` for a clean
+        // not-yet-applied sentinel (matching `recover_all_applied` for a clean
         // node). A watermark of `0` will instead claim epoch 0 is fully applied,
         // making the exactly-once gate (`AppliedGate::is_applied`) short-circuit
         // every epoch-0 replay before it reaches the lock table — silently

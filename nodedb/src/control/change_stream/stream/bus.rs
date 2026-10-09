@@ -193,7 +193,7 @@ impl ChangeStream {
             }
         }
         let run = ChangeRun {
-            partition: ChangePartition::Group(group_id),
+            partition: ChangePartition(group_id),
             after: Some(CdcOffset::whole_index(first.saturating_sub(1))),
             through: CdcOffset::whole_index(last),
             changes,
@@ -213,7 +213,7 @@ impl ChangeStream {
             .staged
             .retain(|&(group, index), _| group != group_id || index > last_included_index);
         state.ring.raise_floor(
-            ChangePartition::Group(group_id),
+            ChangePartition(group_id),
             CdcOffset::whole_index(last_included_index),
         );
     }
@@ -597,7 +597,7 @@ mod tests {
         let outsider = ChangeStream::new(16);
         let mut live = outsider.subscribe(None, Some(TenantId::new(1)));
         let mut cursor = live.start_cursor().clone();
-        let group = ChangePartition::Group(3);
+        let group = ChangePartition(3);
         let deliver = |run: &AppendedRun| {
             outsider.deliver_remote_notify(&NotifyBroadcastMsg::from_run(1, run))
         };
@@ -642,7 +642,7 @@ mod tests {
         let outsider = ChangeStream::new(16);
         let mut live = outsider.subscribe(None, Some(TenantId::new(1)));
         let mut cursor = live.start_cursor().clone();
-        let group = ChangePartition::Group(5);
+        let group = ChangePartition(5);
         let deliver = |run: &AppendedRun| {
             outsider.deliver_remote_notify(&NotifyBroadcastMsg::from_run(1, run))
         };

@@ -18,17 +18,14 @@ pub(super) const ROW_KEY_LEN: usize = PARTITION_KEY_LEN + POSITION_LEN;
 const FEED_LEN: usize = 2 * POSITION_LEN + 8;
 
 const TAG_GROUP: u8 = 0;
-const TAG_CALVIN: u8 = 1;
 
 fn word(bytes: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_be_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
 }
 
 pub(super) fn partition_key(partition: ChangePartition) -> [u8; PARTITION_KEY_LEN] {
-    let (tag, id) = match partition {
-        ChangePartition::Group(group) => (TAG_GROUP, group),
-        ChangePartition::Calvin(vshard) => (TAG_CALVIN, u64::from(vshard)),
-    };
+    let ChangePartition(group) = partition;
+    let (tag, id) = (TAG_GROUP, group);
     let mut out = [0u8; PARTITION_KEY_LEN];
     out[0] = tag;
     out[1..].copy_from_slice(&id.to_be_bytes());
@@ -38,8 +35,7 @@ pub(super) fn partition_key(partition: ChangePartition) -> [u8; PARTITION_KEY_LE
 pub(super) fn decode_partition(bytes: &[u8]) -> Option<ChangePartition> {
     let id = word(bytes, 1)?;
     match *bytes.first()? {
-        TAG_GROUP => Some(ChangePartition::Group(id)),
-        TAG_CALVIN => u32::try_from(id).ok().map(ChangePartition::Calvin),
+        TAG_GROUP => Some(ChangePartition(id)),
         _ => None,
     }
 }
@@ -159,7 +155,7 @@ mod tests {
 
     #[test]
     fn keys_and_feeds_round_trip_and_sort_by_position() {
-        for partition in [ChangePartition::Group(7), ChangePartition::Calvin(3)] {
+        for partition in [ChangePartition(7), ChangePartition(3)] {
             assert_eq!(decode_partition(&partition_key(partition)), Some(partition));
             let low = row_key(partition, CdcOffset::data_event(0, 5, 1));
             let high = row_key(partition, CdcOffset::data_event(0, 5, 2));

@@ -31,11 +31,11 @@
 
 mod active_passive;
 mod discard;
-mod flush;
 mod shared;
 mod static_stage;
 #[cfg(test)]
 mod test_commit;
 
-pub(in crate::data::executor) use flush::CalvinFlushRedo;
 pub(in crate::data::executor) use shared::CalvinExecCtx;
+#[cfg(test)]
+pub(in crate::data::executor) use shared::test_support;

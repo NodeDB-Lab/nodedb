@@ -429,7 +429,7 @@ pub struct CoreLoop {
     ///
     /// Set to `Some(ms)` by `execute_calvin_execute_static`,
     /// `execute_calvin_execute_active` and `execute_calvin_resolve` while they
-    /// stage or resolve a transaction's plans, and by `execute_calvin_flush`
+    /// stage or resolve a transaction's plans, and by `install_calvin_redo`
     /// while it renders the reply, then restored immediately after. Engine handlers that need "current time" (bitemporal sys_from,
     /// KV TTL expire_at, timeseries system_ms) call
     /// `self.epoch_system_ms.unwrap_or_else(<wall_clock_read>)` so that

@@ -2,7 +2,7 @@
 
 //! Stage-time OLLP predicate verification for the dependent-read ACTIVE Calvin
 //! path, which carries no versioned read-set. The leader-only `actual !=
-//! predicted` re-check must run HERE, before staging — at flush time a
+//! predicted` re-check must run HERE, before staging — at install time a
 //! mismatch is swallowed as a degraded shard instead. Mirrors the
 //! `BulkDelete`/`BulkUpdate` arms of [`CoreLoop::stage_calvin_overlay`].
 

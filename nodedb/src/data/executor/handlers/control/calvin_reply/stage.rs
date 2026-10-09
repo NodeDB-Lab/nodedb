@@ -2,8 +2,8 @@
 
 //! Stage one Calvin plan and fold its reply into the transaction's reply.
 //!
-//! A Calvin flush installs the transaction's redo record, and a redo record
-//! carries no reply. Each plan therefore decides its reply when it stages.
+//! A Calvin slice installs from its redo record, and a redo record carries no
+//! reply. Each plan therefore decides its reply when it stages.
 //!
 //! - A plan without `RETURNING` answers its staging handler's reply: the
 //!   affected count against BASE ∪ OVERLAY.
@@ -12,8 +12,7 @@
 //!   taken from BASE ∪ OVERLAY, so a row an earlier plan of the same
 //!   transaction wrote is reported as that plan left it.
 //! - A delete reports each removed row's image from before the plan.
-//! - A document or CRDT write reports each row as the flush's install
-//!   stored it, read back from base after the install. The install can
+//! - A document or CRDT write reports each row as the install stored it, read back from base after the install. The install can
 //!   rewrite a body, as hash chaining does.
 //! - A KV, vector-primary or columnar write reports the rows it staged,
 //!   which are the exact bytes the install stores.
@@ -58,7 +57,7 @@ impl CoreLoop {
     ) -> Result<(), ErrorCode> {
         let tid = tenant_id.as_u64();
         // Every timeseries ingest becomes one redo sub-record, in plan order,
-        // so its position among them names its install at the flush.
+        // so its position among them names its install.
         let ts_ordinal = staging.ts_ingests;
         if matches!(plan, PhysicalPlan::Timeseries(TimeseriesOp::Ingest { .. })) {
             staging.ts_ingests += 1;
@@ -75,7 +74,7 @@ impl CoreLoop {
         let reply = &mut staging.reply;
         match returning_target(plan) {
             // A resolved ingest's install decides which rows land and how
-            // they read, so the flush renders them from its own install.
+            // they read, so the reply renders them from that install.
             Some(target) if is_resolved_ingest(plan) => {
                 *reply = CalvinReply::InstalledTimeseries(InstalledTimeseries {
                     spec: target.spec.clone(),
@@ -491,7 +490,7 @@ mod tests {
     }
 
     /// Commit `plans` as one Calvin transaction on a fresh core prepared by
-    /// `setup`, and return the flush's reply.
+    /// `setup`, and return the install's reply.
     fn commit(plans: &[PhysicalPlan], setup: impl FnOnce(&mut CoreLoop)) -> Response {
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());

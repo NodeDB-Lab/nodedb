@@ -273,7 +273,7 @@ async fn shuffle_join_commits_when_neither_side_concurrently_written() {
     )
     .await;
 
-    // Both committed writes become visible (Calvin flush lands asynchronously).
+    // Both committed writes become visible (the redo install lands asynchronously).
     wait_for_async(
         "both committed writes visible after COMMIT",
         Duration::from_secs(10),

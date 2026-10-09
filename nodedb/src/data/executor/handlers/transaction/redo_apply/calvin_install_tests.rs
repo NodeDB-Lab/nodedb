@@ -10,13 +10,20 @@ use nodedb_physical::physical_plan::{
 use nodedb_types::{QualifiedCollection, StorageKey, Surrogate};
 
 use super::calvin_fold_tests::{TARGET, TID, balance, calvin_redo, core_with_sum, sum_targets};
-use crate::bridge::envelope::{Response, Status};
+use super::test_commit::failing_install_sub_record;
+use crate::bridge::envelope::{ErrorCode, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
 use crate::data::executor::handlers::control::calvin::CalvinExecCtx;
+use crate::data::executor::handlers::control::calvin::test_support::{
+    bulk_delete_plan, point_insert_plan, seed_row,
+};
+use crate::data::executor::handlers::control::calvin_reply::CalvinReply;
 use crate::data::executor::handlers::control::calvin_synthetic_txn_id;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::{CollectionConfig, IndexPath};
 use crate::types::{DatabaseId, Lsn, TenantId};
+use crate::wal::RedoRecord;
 
 const ORDERS: &str = "orders";
 /// The vShard `make_default_task` homes to.
@@ -208,4 +215,170 @@ fn a_calvin_install_keeps_fold_rows_in_the_write_set() {
         "the folded target row stays in the write set for the funnel to journal: {:?}",
         installed.write_set
     );
+}
+
+/// The install applies the resolved record, not a replay of the staged
+/// plans. A row that joins the bulk delete's predicate after the stage
+/// stays, and the predicted row goes.
+#[test]
+fn a_calvin_install_applies_the_resolved_record_not_a_replay_of_the_plans() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+    seed_row(&mut core, ORDERS, 1);
+    let resolved = stage_and_resolve(&mut core, &[bulk_delete_plan(ORDERS, Some(vec![1]))]);
+    seed_row(&mut core, ORDERS, 2);
+
+    let plan = install_plan(
+        resolved.redo,
+        vec![ORDERS.to_string()],
+        Vec::new(),
+        1,
+        resolved.reply,
+    );
+    let installed = run_at(&mut core, &plan, 41);
+
+    assert_eq!(installed.status, Status::Ok, "{:?}", installed.error_code);
+    assert!(base_row(&core, 1).is_none());
+    assert!(base_row(&core, 2).is_some());
+}
+
+/// The install notes the index values of every document row at the
+/// record's LSN.
+#[test]
+fn a_calvin_install_notes_index_values_at_the_redo_lsn() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+    let mut config = CollectionConfig::new(ORDERS);
+    config.index_paths.push(IndexPath::new("a"));
+    core.doc_configs.insert(
+        (DatabaseId::DEFAULT, TenantId::new(TID), ORDERS.to_string()),
+        config,
+    );
+    let resolved = stage_and_resolve(&mut core, &[point_insert_plan(ORDERS, "o1", 7)]);
+
+    let plan = install_plan(
+        resolved.redo,
+        vec![ORDERS.to_string()],
+        Vec::new(),
+        1,
+        resolved.reply,
+    );
+    let installed = run_at(&mut core, &plan, 43);
+
+    assert_eq!(installed.status, Status::Ok, "{:?}", installed.error_code);
+    assert_eq!(
+        core.write_index.index_values.value_lsn(
+            DatabaseId::DEFAULT,
+            TenantId::new(TID),
+            ORDERS,
+            "a",
+            "1"
+        ),
+        Some(Lsn::new(43)),
+        "the install records the row's index value at the redo LSN"
+    );
+}
+
+/// An install whose record cannot decode answers an error and leaves
+/// nothing of the record in base.
+#[test]
+fn a_calvin_install_whose_record_cannot_decode_answers_an_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+    let resolved = stage_and_resolve(&mut core, &[point_insert_plan(ORDERS, "o1", 7)]);
+
+    let plan = install_plan(
+        vec![0xff, 0x00],
+        vec![ORDERS.to_string()],
+        Vec::new(),
+        1,
+        resolved.reply,
+    );
+    let installed = run_at(&mut core, &plan, 44);
+
+    assert_eq!(installed.status, Status::Error);
+    assert!(!matches!(
+        installed.error_code.as_deref(),
+        Some(ErrorCode::OllpRetryRequired)
+    ));
+    assert!(base_row(&core, 7).is_none());
+}
+
+/// A refused install keeps the staged entry and its overlay, so a later
+/// install of the record consumes them.
+#[test]
+fn a_refused_calvin_install_keeps_the_staged_entry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+    let resolved = stage_and_resolve(&mut core, &[point_insert_plan(ORDERS, "o1", 7)]);
+    let mut failing = RedoRecord::from_bytes(&resolved.redo).expect("decode redo");
+    failing.ops.push(failing_install_sub_record());
+    let failing = failing.to_bytes().expect("encode redo");
+    let synthetic = calvin_synthetic_txn_id(1, 0, VSHARD).expect("synthetic id");
+
+    let refused_plan = install_plan(
+        failing,
+        vec![ORDERS.to_string()],
+        Vec::new(),
+        1,
+        resolved.reply.clone(),
+    );
+    let refused = run_at(&mut core, &refused_plan, 45);
+
+    assert!(
+        matches!(
+            refused.error_code.as_deref(),
+            Some(ErrorCode::RetryableRefusal { .. })
+        ),
+        "{:?}",
+        refused.error_code
+    );
+    assert!(core.calvin.commit_pending.contains_key(&(1, 0, VSHARD)));
+    assert!(core.txn_overlays.contains_key(&synthetic));
+    assert!(base_row(&core, 7).is_none());
+
+    let plan = install_plan(
+        resolved.redo,
+        vec![ORDERS.to_string()],
+        Vec::new(),
+        1,
+        resolved.reply,
+    );
+    let installed = run_at(&mut core, &plan, 46);
+
+    assert_eq!(installed.status, Status::Ok, "{:?}", installed.error_code);
+    assert!(base_row(&core, 7).is_some());
+    assert!(!core.calvin.commit_pending.contains_key(&(1, 0, VSHARD)));
+    assert!(!core.txn_overlays.contains_key(&synthetic));
+}
+
+/// A reply that fails to render after a successful install leaves the
+/// install `Ok` and carries the render error for the statement.
+#[test]
+fn a_reply_render_error_leaves_the_calvin_install_ok() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+    let resolved = stage_and_resolve(&mut core, &[point_insert_plan(ORDERS, "o1", 7)]);
+    let unrenderable = CalvinReplySpec::from(&CalvinReply::unrenderable_for_test(ORDERS));
+
+    let plan = install_plan(
+        resolved.redo,
+        vec![ORDERS.to_string()],
+        Vec::new(),
+        1,
+        unrenderable,
+    );
+    let installed = run_at(&mut core, &plan, 47);
+
+    assert_eq!(installed.status, Status::Ok);
+    assert!(
+        matches!(
+            installed.error_code.as_deref(),
+            Some(ErrorCode::Internal { .. })
+        ),
+        "{:?}",
+        installed.error_code
+    );
+    assert!(base_row(&core, 7).is_some());
+    assert!(!core.calvin.commit_pending.contains_key(&(1, 0, VSHARD)));
 }

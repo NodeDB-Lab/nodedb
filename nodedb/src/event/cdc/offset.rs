@@ -11,13 +11,12 @@
 //!   metadata entry is the one event that raises it. No path proposes one, so
 //!   every position has epoch `0`.
 //! - `index` names the write that produced the event. In a cluster it is the
-//!   Raft log index of the data-group entry, or the Calvin sequencer epoch of a
-//!   Calvin transaction. On a single node it is the WAL LSN of the write's
-//!   record. On a durable topic it is the message's log position.
-//! - `sequence` orders the events of one write. Its low 32 bits carry
-//!   `2 × ordinal` for a data event and `2 × ordinal + 1` for that event's
-//!   late-data correction. Its high 32 bits carry the Calvin transaction's
-//!   position within its sequencer epoch, `0` for every other write.
+//!   Raft log index of the data-group entry. On a single node it is the WAL
+//!   LSN of the write's record. On a durable topic it is the message's log
+//!   position.
+//! - `sequence` orders the events of one write. It carries `2 × ordinal` for
+//!   a data event and `2 × ordinal + 1` for that event's late-data
+//!   correction.
 //!
 //! Every replica applies a write at the same position, so a cursor from one
 //! node is valid on every node.
@@ -29,6 +28,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bits of `sequence` that carry the ordinal and correction flag.
 const ORDINAL_BITS: u32 = 32;
+/// The largest sequence a data event or its correction takes.
 const ORDINAL_MASK: u64 = (1 << ORDINAL_BITS) - 1;
 
 /// A lossless position in a CDC stream partition.
@@ -104,25 +104,14 @@ impl CdcOffset {
     }
 
     /// The position of the data event with ordinal `ordinal` (1-based) in the
-    /// write at `(epoch, index)`, whose sequence carries `base` in its high
-    /// bits.
-    pub const fn data_event_in(epoch: u64, index: u64, base: u64, ordinal: u64) -> Self {
-        let low = if ordinal > (ORDINAL_MASK >> 1) {
+    /// write at `(epoch, index)`.
+    pub const fn data_event(epoch: u64, index: u64, ordinal: u64) -> Self {
+        let sequence = if ordinal > (ORDINAL_MASK >> 1) {
             ORDINAL_MASK - 1
         } else {
             ordinal * 2
         };
-        Self::at(epoch, index, (base << ORDINAL_BITS) | low)
-    }
-
-    /// [`Self::data_event_in`] with base `0`.
-    pub const fn data_event(epoch: u64, index: u64, ordinal: u64) -> Self {
-        Self::data_event_in(epoch, index, 0, ordinal)
-    }
-
-    /// The high bits of the sequence: the Calvin position, `0` otherwise.
-    pub const fn base(self) -> u64 {
-        self.sequence >> ORDINAL_BITS
+        Self::at(epoch, index, sequence)
     }
 
     /// The ordinal of the data event this position belongs to. A correction
@@ -209,16 +198,6 @@ mod tests {
         assert!(first.correction() < second);
         assert_eq!(first.correction().ordinal(), first.ordinal());
         assert_eq!(second.ordinal(), 2);
-    }
-
-    #[test]
-    fn calvin_positions_order_by_transaction_then_ordinal() {
-        let early = CdcOffset::data_event_in(0, 7, 3, 9);
-        let late = CdcOffset::data_event_in(0, 7, 4, 1);
-        assert!(early < late);
-        assert_eq!(late.base(), 4);
-        assert_eq!(late.ordinal(), 1);
-        assert!(early.correction() < late);
     }
 
     #[test]

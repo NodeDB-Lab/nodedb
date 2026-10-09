@@ -158,15 +158,14 @@ impl PhysicalPlan {
     /// Every user collection this plan names: each collection a committed
     /// redo install writes, or else the one [`Self::collection`] reports.
     ///
-    /// A committed-redo apply and a Calvin flush install one record that can
-    /// write several collections, so [`Self::collection`] reports none for
-    /// them. A caller that keys on a collection name uses this instead.
+    /// A committed-redo apply installs one record that can write several
+    /// collections, so [`Self::collection`] reports none for it. A caller that
+    /// keys on a collection name uses this instead.
     pub fn named_collections(&self) -> Vec<&str> {
         match self {
-            PhysicalPlan::Meta(
-                MetaOp::ApplyTransactionRedo { collections, .. }
-                | MetaOp::CalvinFlush { collections, .. },
-            ) => collections.iter().map(String::as_str).collect(),
+            PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo { collections, .. }) => {
+                collections.iter().map(String::as_str).collect()
+            }
             PhysicalPlan::Meta(MetaOp::RestoreRedo(batch)) => {
                 batch.collections.iter().map(String::as_str).collect()
             }
@@ -187,22 +186,13 @@ mod tests {
         let collections = vec!["a".to_string(), "b".to_string()];
         let redo = PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
             redo: Vec::new(),
-            collections: collections.clone(),
+            collections,
             sum_targets: Vec::new(),
             origin: crate::physical_plan::RedoOrigin::Commit,
             calvin: None,
         });
-        let flush = PhysicalPlan::Meta(MetaOp::CalvinFlush {
-            epoch: 1,
-            position: 0,
-            redo: Vec::new(),
-            collections,
-            sum_targets: Vec::new(),
-        });
-        for plan in [redo, flush] {
-            assert_eq!(plan.collection(), None);
-            assert_eq!(plan.named_collections(), vec!["a", "b"]);
-        }
+        assert_eq!(redo.collection(), None);
+        assert_eq!(redo.named_collections(), vec!["a", "b"]);
     }
 
     #[test]

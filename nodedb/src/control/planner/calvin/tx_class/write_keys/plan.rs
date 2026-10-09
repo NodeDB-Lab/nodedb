@@ -201,7 +201,7 @@ mod tests {
 
     /// An upsert binds and stores `x` at a lower position. A delete planned
     /// while `x` was unbound names it absent and carries an unbound delete.
-    /// Its guard must run after the upsert flushed, see `x` stored, and
+    /// Its guard must run after the upsert installed, see `x` stored, and
     /// retry; before, it ran first and the delete was lost.
     #[test]
     fn a_crdt_delete_of_an_unbound_document_waits_for_its_upsert() {

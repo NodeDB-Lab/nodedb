@@ -355,7 +355,7 @@ async fn cross_shard_read_occ_commits_when_read_still_current() {
     )
     .await;
 
-    // Both committed writes become visible (the Calvin flush lands asynchronously
+    // Both committed writes become visible (the redo install lands asynchronously
     // after the completion ack, so poll).
     wait_for_async(
         "both committed writes visible after COMMIT",

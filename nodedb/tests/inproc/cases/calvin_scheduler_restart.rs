@@ -3,10 +3,11 @@
 //! Calvin scheduler restart idempotency tests.
 //!
 //! Covers the WAL-recovery layer: after N epochs, a freshly-opened
-//! `WalManager` reads back the correct applied `(epoch, position)` markers,
-//! including out-of-order writes, vshard isolation, the greenfield sentinel,
-//! and — critically — a MULTI-POSITION epoch where only some positions
-//! committed before the crash (a torn transaction must be re-applied, not lost).
+//! `WalManager` reads back the correct applied `(epoch, position)` pairs from
+//! the stamped `TransactionRedo` records, including out-of-order writes,
+//! vshard isolation, the greenfield sentinel, and — critically — a
+//! MULTI-POSITION epoch where only some positions committed before the crash
+//! (a torn transaction must be re-applied, not lost).
 //!
 //! End-to-end scheduler rebuild via `MultiRaft::read_committed_entries`
 //! is covered by `nodedb-cluster/tests/calvin_3node_shard_failover.rs::
@@ -14,9 +15,14 @@
 
 use tempfile::TempDir;
 
-use nodedb::control::cluster::calvin::scheduler::{NOT_YET_APPLIED_EPOCH, read_applied_recovery};
-use nodedb::types::VShardId;
+use nodedb::control::cluster::calvin::scheduler::{
+    AppliedRecovery, NOT_YET_APPLIED_EPOCH, recover_all_applied,
+};
+use nodedb::control::security::catalog::SystemCatalog;
+use nodedb::event::EventSource;
+use nodedb::types::{DatabaseId, TenantId, VShardId};
 use nodedb::wal::manager::{NO_APPLY_KEY, WalManager};
+use nodedb::wal::{CalvinStamp, RedoRecord};
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 
@@ -24,11 +30,53 @@ fn open_wal(dir: &TempDir) -> WalManager {
     WalManager::open_for_testing(dir.path()).expect("open wal")
 }
 
+/// Append the stamped redo record of the Calvin slice at `(epoch, position)`
+/// on `vshard_id`: the WAL record a committed slice's install writes.
+fn append_stamped(wal: &WalManager, vshard_id: u32, epoch: u64, position: u32) {
+    let record = RedoRecord {
+        version: 1,
+        ops: Vec::new(),
+        calvin_stamp: Some(CalvinStamp {
+            epoch,
+            position,
+            vshard_id,
+        }),
+        cross_shard_applied: None,
+        row_sources: Vec::new(),
+        publishes: Vec::new(),
+        row_changes: Vec::new(),
+    };
+    wal.appender(NO_APPLY_KEY)
+        .with_event_source(EventSource::User)
+        .append_transaction_redo(
+            TenantId::new(0),
+            VShardId::new(vshard_id),
+            DatabaseId::DEFAULT,
+            &record,
+        )
+        .expect("append stamped redo");
+}
+
+/// The recovered state of `vshard_id` from a catalog with nothing saved. A
+/// vShard with no stamped redo record recovers as the greenfield state: the
+/// `NOT_YET_APPLIED_EPOCH` sentinel and an empty tail.
+fn recover_vshard(wal: &WalManager, vshard_id: u32) -> AppliedRecovery {
+    let catalog = SystemCatalog::open_in_memory().expect("in-memory catalog");
+    recover_all_applied(wal, &catalog, &|_| None)
+        .expect("recovery scan should succeed")
+        .remove(&vshard_id)
+        .unwrap_or(AppliedRecovery {
+            fully_applied_epoch: NOT_YET_APPLIED_EPOCH,
+            applied_tail: Default::default(),
+            max_applied_epoch: NOT_YET_APPLIED_EPOCH,
+        })
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-/// Simulating 5 epochs (each with a single position 0): append CalvinApplied
+/// Simulating 5 epochs (each with a single position 0): append stamped redo
 /// records, sync, then verify that a freshly-opened WalManager reads back all
-/// five markers and a max-applied epoch of 5.
+/// five positions and a max-applied epoch of 5.
 #[test]
 fn scheduler_restart_reads_applied_markers_after_five_epochs() {
     let dir = TempDir::new().unwrap();
@@ -37,16 +85,14 @@ fn scheduler_restart_reads_applied_markers_after_five_epochs() {
     {
         let wal = open_wal(&dir);
         for epoch in 1u64..=5 {
-            wal.appender(NO_APPLY_KEY)
-                .append_calvin_applied(VShardId::new(vshard_id), epoch, 0)
-                .unwrap();
+            append_stamped(&wal, vshard_id, epoch, 0);
         }
         wal.sync().unwrap();
     }
 
     {
         let wal = open_wal(&dir);
-        let rec = read_applied_recovery(&wal, vshard_id).expect("recovery scan should succeed");
+        let rec = recover_vshard(&wal, vshard_id);
         assert_eq!(rec.max_applied_epoch, 5, "max applied epoch should be 5");
         for epoch in 1u64..=5 {
             assert!(
@@ -66,24 +112,15 @@ fn scheduler_restart_reports_max_and_all_positions_regardless_of_order() {
 
     {
         let wal = open_wal(&dir);
-        wal.appender(NO_APPLY_KEY)
-            .append_calvin_applied(VShardId::new(vshard_id), 3, 0)
-            .unwrap();
-        wal.appender(NO_APPLY_KEY)
-            .append_calvin_applied(VShardId::new(vshard_id), 1, 0)
-            .unwrap();
-        wal.appender(NO_APPLY_KEY)
-            .append_calvin_applied(VShardId::new(vshard_id), 5, 0)
-            .unwrap();
-        wal.appender(NO_APPLY_KEY)
-            .append_calvin_applied(VShardId::new(vshard_id), 2, 0)
-            .unwrap();
+        for epoch in [3u64, 1, 5, 2] {
+            append_stamped(&wal, vshard_id, epoch, 0);
+        }
         wal.sync().unwrap();
     }
 
     {
         let wal = open_wal(&dir);
-        let rec = read_applied_recovery(&wal, vshard_id).unwrap();
+        let rec = recover_vshard(&wal, vshard_id);
         assert_eq!(
             rec.max_applied_epoch, 5,
             "max should be 5, not last-written 2"
@@ -112,19 +149,15 @@ fn scheduler_restart_multi_position_epoch_does_not_lose_uncommitted_position() {
     {
         let wal = open_wal(&dir);
         // Prior epoch fully applied.
-        wal.appender(NO_APPLY_KEY)
-            .append_calvin_applied(VShardId::new(vshard_id), 8, 0)
-            .unwrap();
+        append_stamped(&wal, vshard_id, 8, 0);
         // Torn epoch: position 0 committed, position 1 did NOT (crash between).
-        wal.appender(NO_APPLY_KEY)
-            .append_calvin_applied(VShardId::new(vshard_id), torn_epoch, 0)
-            .unwrap();
+        append_stamped(&wal, vshard_id, torn_epoch, 0);
         wal.sync().unwrap();
     }
 
     {
         let wal = open_wal(&dir);
-        let rec = read_applied_recovery(&wal, vshard_id).unwrap();
+        let rec = recover_vshard(&wal, vshard_id);
         assert!(
             rec.applied_tail.contains(&(torn_epoch, 0)),
             "committed position 0 must stay applied (not re-applied on restart)"
@@ -134,8 +167,7 @@ fn scheduler_restart_multi_position_epoch_does_not_lose_uncommitted_position() {
             "uncommitted position 1 must be reported NOT applied so it is \
              re-delivered and applied on restart — else a lost/torn transaction"
         );
-        // The fully-applied watermark stays below the torn epoch: the per-epoch
-        // collapse that caused the bug is gone.
+        // The fully-applied watermark stays below the torn epoch.
         assert!(
             rec.fully_applied_epoch == NOT_YET_APPLIED_EPOCH
                 || rec.fully_applied_epoch < torn_epoch,
@@ -144,7 +176,7 @@ fn scheduler_restart_multi_position_epoch_does_not_lose_uncommitted_position() {
     }
 }
 
-/// Greenfield: a WAL with no CalvinApplied records returns the
+/// Greenfield: a WAL with no stamped redo record returns the
 /// `NOT_YET_APPLIED_EPOCH` sentinel and an empty tail. Epoch 0 is a valid real
 /// epoch, so a distinct sentinel distinguishes "never applied" from "applied
 /// epoch 0".
@@ -152,35 +184,29 @@ fn scheduler_restart_multi_position_epoch_does_not_lose_uncommitted_position() {
 fn scheduler_restart_greenfield_returns_sentinel() {
     let dir = TempDir::new().unwrap();
     let wal = open_wal(&dir);
-    let rec = read_applied_recovery(&wal, 1).unwrap();
+    let rec = recover_vshard(&wal, 1);
     assert_eq!(rec.fully_applied_epoch, NOT_YET_APPLIED_EPOCH);
     assert_eq!(rec.max_applied_epoch, NOT_YET_APPLIED_EPOCH);
     assert!(rec.applied_tail.is_empty());
 }
 
-/// Multiple vshards: recovery for one vshard must not see another's markers.
+/// Multiple vshards: recovery for one vshard must not see another's records.
 #[test]
 fn scheduler_restart_vshard_isolation() {
     let dir = TempDir::new().unwrap();
 
     {
         let wal = open_wal(&dir);
-        wal.appender(NO_APPLY_KEY)
-            .append_calvin_applied(VShardId::new(1), 10, 0)
-            .unwrap();
-        wal.appender(NO_APPLY_KEY)
-            .append_calvin_applied(VShardId::new(2), 99, 0)
-            .unwrap();
-        wal.appender(NO_APPLY_KEY)
-            .append_calvin_applied(VShardId::new(1), 20, 0)
-            .unwrap();
+        append_stamped(&wal, 1, 10, 0);
+        append_stamped(&wal, 2, 99, 0);
+        append_stamped(&wal, 1, 20, 0);
         wal.sync().unwrap();
     }
 
     {
         let wal = open_wal(&dir);
-        let r1 = read_applied_recovery(&wal, 1).unwrap();
-        let r2 = read_applied_recovery(&wal, 2).unwrap();
+        let r1 = recover_vshard(&wal, 1);
+        let r2 = recover_vshard(&wal, 2);
         assert_eq!(r1.max_applied_epoch, 20, "vshard 1 max is 20");
         assert!(r1.applied_tail.contains(&(10, 0)) && r1.applied_tail.contains(&(20, 0)));
         assert!(!r1.applied_tail.contains(&(99, 0)), "must not see vshard 2");

@@ -87,7 +87,6 @@ pub(crate) async fn enqueue_transaction_redo(
                     partition: target.vshard_id.as_u32(),
                     epoch: position.epoch,
                     index: position.log_index,
-                    base: 0,
                 },
             );
             stamped.apply_plan()?

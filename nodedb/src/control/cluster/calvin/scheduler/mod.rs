@@ -24,6 +24,4 @@ pub use lock::{AcquireOutcome, HotKeyTable, LockKey, LockManager, LockMode, TxnI
 // keep that path stable via an alias while the module lives under `lock/`.
 pub use lock as lock_manager;
 pub use metrics::SchedulerMetrics;
-pub use recovery::{
-    AppliedRecovery, NOT_YET_APPLIED_EPOCH, read_applied_recovery, recover_all_applied,
-};
+pub use recovery::{AppliedRecovery, NOT_YET_APPLIED_EPOCH, recover_all_applied};

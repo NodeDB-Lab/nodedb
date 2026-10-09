@@ -5,8 +5,6 @@ pub mod aborted;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod anchor;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod calvin;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod fts_spatial;
 pub mod header;
 #[cfg(not(target_arch = "wasm32"))]
@@ -26,8 +24,6 @@ pub mod wal_record;
 pub use aborted::{WRITE_ABORTED_PAYLOAD_SIZE, WriteAbortedPayload};
 #[cfg(not(target_arch = "wasm32"))]
 pub use anchor::{TIME_ANCHOR_PAYLOAD_SIZE, TimeAnchorPayload};
-#[cfg(not(target_arch = "wasm32"))]
-pub use calvin::CalvinAppliedPayload;
 #[cfg(not(target_arch = "wasm32"))]
 pub use fts_spatial::{FtsDeletePayload, FtsIndexPayload, SpatialDeletePayload, SpatialPutPayload};
 pub use header::{

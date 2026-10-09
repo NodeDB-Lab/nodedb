@@ -32,7 +32,7 @@ pub enum MetaOp {
     /// A transaction's plans as one batch. An embedded (Lite) engine executes
     /// the sub-plans atomically. An Origin core refuses it: a committed
     /// transaction installs there only through its redo record
-    /// (`ApplyTransactionRedo`, `CalvinFlush`).
+    /// (`ApplyTransactionRedo`).
     ///
     /// `txn_id` identifies the committing session transaction whose staging
     /// overlay holds the resolve-time bitemporal stamps an install must reuse.
@@ -493,27 +493,6 @@ pub enum MetaOp {
         savepoint: u64,
     },
 
-    /// Install a committed Calvin transaction's redo record on base storage.
-    ///
-    /// `CalvinExecuteStatic` STAGES the transaction's plans without mutating
-    /// base, and `CalvinResolve` resolves them into one redo record, which the
-    /// scheduler appends to the WAL as a `TransactionRedo` record. This op
-    /// carries that record's bytes, and the request carries its LSN. The core
-    /// installs it through the same passes restart replay drives: validate,
-    /// install with undo, then settle and cover. It then drops the staged
-    /// state keyed by `(epoch, position)`.
-    ///
-    /// `redo` is empty when the transaction wrote nothing. `collections` names
-    /// every collection the transaction wrote. `sum_targets` is the
-    /// materialized-sum resolution its document writes fold into.
-    CalvinFlush {
-        epoch: u64,
-        position: u32,
-        redo: Vec<u8>,
-        collections: Vec<String>,
-        sum_targets: Vec<super::RedoSumTargets>,
-    },
-
     /// Discard the staged writes of a Calvin transaction.
     ///
     /// Dispatched by the leader's scheduler when the slice ends with no log
@@ -554,8 +533,10 @@ pub enum MetaOp {
     /// `commit_pending` under `(epoch, position, vshard)` and the per-core
     /// staging overlay written under the corresponding synthetic `TxnId`
     /// (see `calvin_synthetic_txn_id`). Dispatched by the scheduler once the
-    /// global verdict is commit, ahead of `CalvinFlush`, which installs the
-    /// record this op returns. No base engine is touched during resolve.
+    /// global verdict is commit. The scheduler proposes the record this op
+    /// returns as a stamped `TransactionRedo` entry, and
+    /// `ApplyTransactionRedo` installs it. No base engine is touched during
+    /// resolve.
     ///
     /// The response payload is a zerompk-encoded [`super::CalvinResolved`]:
     /// the redo record and the reply the staged plans decided.

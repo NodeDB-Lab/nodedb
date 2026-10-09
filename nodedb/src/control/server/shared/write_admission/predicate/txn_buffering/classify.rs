@@ -359,7 +359,6 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::DropTxnOverlay { .. }
             | MetaOp::MarkSavepoint { .. }
             | MetaOp::RollbackToSavepoint { .. }
-            | MetaOp::CalvinFlush { .. }
             | MetaOp::CalvinDrop { .. }
             | MetaOp::CalvinResolve { .. }
             | MetaOp::ResolveTxn { .. }
@@ -1970,13 +1969,6 @@ mod tests {
             PhysicalPlan::Meta(MetaOp::RollbackToSavepoint {
                 txn_id: TxnId::new(1),
                 savepoint: 1,
-            }),
-            PhysicalPlan::Meta(MetaOp::CalvinFlush {
-                epoch: 0,
-                position: 0,
-                redo: Vec::new(),
-                collections: Vec::new(),
-                sum_targets: Vec::new(),
             }),
             PhysicalPlan::Meta(MetaOp::CalvinDrop {
                 epoch: 0,

@@ -18,7 +18,6 @@ use std::time::Duration;
 
 use crate::control::state::SharedState;
 use crate::event::cdc::CdcOffset;
-use crate::event::cdc::position::calvin_partition;
 use crate::event::topic::committed::cursor::{delivered_through, raise_delivered_here};
 use crate::event::topic::types::PublishOrigin;
 use crate::types::snapshot::{GroupEventLane, HeldAtPosition, PartitionCursor};
@@ -35,13 +34,9 @@ fn lane_error(detail: impl std::fmt::Display) -> crate::Error {
     }
 }
 
-/// Every partition of `vshards`: each vShard's Raft partition and its Calvin
-/// partition, in order.
+/// Every partition of `vshards`, in order: each vShard is one partition.
 fn partitions_of(vshards: &HashSet<u32>) -> Vec<u32> {
-    let mut partitions: Vec<u32> = vshards
-        .iter()
-        .flat_map(|vshard| [*vshard, calvin_partition(*vshard)])
-        .collect();
+    let mut partitions: Vec<u32> = vshards.iter().copied().collect();
     partitions.sort_unstable();
     partitions
 }
@@ -104,10 +99,8 @@ pub async fn capture(state: &SharedState, vshards: &HashSet<u32>) -> crate::Resu
 
 /// Install `lane`, a snapshot of `vshards` cut at `cut_index`, on this node.
 ///
-/// A Raft partition's rows at or below the cut are the builder's: this node
-/// never applies those entries. A Calvin partition's rows join this node's,
-/// since its Calvin applies continue apart from the data group. Each cursor
-/// rises to the builder's.
+/// A partition's rows at or below the cut are the builder's: this node never
+/// applies those entries. Each cursor rises to the builder's.
 pub fn install(
     state: &SharedState,
     vshards: &HashSet<u32>,
@@ -131,13 +124,11 @@ pub fn install(
                 (CdcOffset::at(*epoch, *index, *sequence), bytes.clone())
             })
             .collect();
-        let through = vshards
-            .contains(&partition)
-            .then_some(CdcOffset::whole_write(0, cut_index));
-        ledgers
-            .actions
-            .ledger
-            .replace_through(partition, through, &rows)?;
+        ledgers.actions.ledger.replace_through(
+            partition,
+            Some(CdcOffset::whole_write(0, cut_index)),
+            &rows,
+        )?;
     }
     for (partition, epoch, index, sequence, bytes) in held_publishes {
         let publish: RedoPublish = zerompk::from_msgpack(&bytes).map_err(lane_error)?;
@@ -162,12 +153,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_group_covers_the_raft_and_calvin_partitions_of_its_vshards() {
+    fn a_group_covers_the_partitions_of_its_vshards_in_order() {
         let vshards: HashSet<u32> = [3, 1].into_iter().collect();
-        assert_eq!(
-            partitions_of(&vshards),
-            vec![1, 3, calvin_partition(1), calvin_partition(3)]
-        );
+        assert_eq!(partitions_of(&vshards), vec![1, 3]);
     }
 
     #[test]

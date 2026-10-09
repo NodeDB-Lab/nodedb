@@ -19,7 +19,6 @@ use crate::control::server::shared::ddl::neutral::consumer_group::identity::cano
 use crate::control::state::SharedState;
 use crate::event::cdc::event::CdcEvent;
 use crate::event::cdc::offset::CdcOffset;
-use crate::event::cdc::position::vshard_of_partition;
 
 use super::error::ConsumeError;
 use super::params::{ConsumeParams, ConsumeResult, batch_tails};
@@ -133,7 +132,7 @@ fn partition_members(
         .as_ref()
         .ok_or(ConsumeError::NoClusterRouting)?;
     let routing = routing_lock.read().unwrap_or_else(|p| p.into_inner());
-    let Ok(group_id) = routing.group_for_vshard(vshard_of_partition(partition_id)) else {
+    let Ok(group_id) = routing.group_for_vshard(partition_id) else {
         return Ok(None);
     };
     Ok(routing.group_info(group_id).map(|group| PartitionMembers {

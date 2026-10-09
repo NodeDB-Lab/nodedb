@@ -109,10 +109,8 @@ pub struct RedoPublish {
 }
 
 /// The replicated position of the record that carries a committed message:
-/// its change-feed partition, and `(epoch, index, base)` as the partition
-/// orders writes. A Raft-applied record takes its entry's `(epoch, log
-/// index)` with base `0`. A Calvin record takes its sequencer epoch as the
-/// index and its batch position as the base.
+/// its change-feed partition (the vShard), and its data-group entry's
+/// `(epoch, log index)`.
 #[derive(
     Debug,
     Clone,
@@ -129,7 +127,6 @@ pub struct PublishPosition {
     pub partition: u32,
     pub epoch: u64,
     pub index: u64,
-    pub base: u64,
 }
 
 /// Identity of one cross-shard trigger request: the source write's position
@@ -177,8 +174,7 @@ pub struct RedoSubRecord {
 
 /// Calvin sequencer coordinates a [`RedoRecord`] carries when it installs a
 /// committed Calvin slice. The record doubles as the position's applied
-/// marker: boot recovery reads the stamp. Mirrors
-/// `nodedb_wal::CalvinAppliedPayload` in its coordinates.
+/// marker: boot recovery reads the stamp.
 #[derive(
     Debug,
     Clone,
@@ -427,7 +423,6 @@ mod tests {
                     partition: 3,
                     epoch: 0,
                     index: 41,
-                    base: 0,
                 }),
             }],
             row_changes: Vec::new(),

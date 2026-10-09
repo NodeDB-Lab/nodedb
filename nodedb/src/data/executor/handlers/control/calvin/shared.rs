@@ -54,7 +54,7 @@ impl CoreLoop {
 }
 
 #[cfg(test)]
-pub(in crate::data::executor::handlers::control::calvin) mod test_support {
+pub(in crate::data::executor) mod test_support {
     use std::time::{Duration, Instant};
 
     use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan, TimeseriesOp};
@@ -112,7 +112,7 @@ pub(in crate::data::executor::handlers::control::calvin) mod test_support {
         nodedb_types::value_to_msgpack(&Value::Object(obj)).unwrap()
     }
 
-    pub(in crate::data::executor::handlers::control::calvin) fn point_insert_plan(
+    pub(in crate::data::executor) fn point_insert_plan(
         collection: &str,
         document_id: &str,
         surrogate: u32,
@@ -148,7 +148,7 @@ pub(in crate::data::executor::handlers::control::calvin) mod test_support {
         })
     }
 
-    pub(in crate::data::executor::handlers::control::calvin) fn bulk_delete_plan(
+    pub(in crate::data::executor) fn bulk_delete_plan(
         collection: &str,
         predicted: Option<Vec<u32>>,
     ) -> PhysicalPlan {
@@ -167,7 +167,7 @@ pub(in crate::data::executor::handlers::control::calvin) mod test_support {
 
     /// Seed a row directly into base storage (bypassing Calvin staging), the
     /// pre-existing state the active-path OLLP verifier scans against.
-    pub(in crate::data::executor::handlers::control::calvin) fn seed_row(
+    pub(in crate::data::executor) fn seed_row(
         core: &mut CoreLoop,
         collection: &str,
         surrogate: u32,

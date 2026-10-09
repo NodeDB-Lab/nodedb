@@ -180,7 +180,7 @@ async fn calvin_multi_shard_write_in_explicit_block_commits_and_survives_restart
     .await;
 
     // Pre-restart: both rows are visible and the vector is in the live HNSW.
-    // The Calvin flush lands asynchronously after the completion ack, so poll.
+    // The redo install lands asynchronously after the completion ack, so poll.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         let kv_v = read_once_a_leader_exists(

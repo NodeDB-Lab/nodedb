@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The payload a flushed Calvin transaction answers with.
+//! The payload an installed Calvin slice answers with.
 
 use super::images::{RowLocation, StoredRow};
 use super::reply::{CalvinReply, InstalledTimeseries};
@@ -14,8 +14,8 @@ use crate::engine::timeseries::install_counts::TsInstallCounts;
 use crate::util::rmpv_value::rmpv_to_value;
 
 impl CoreLoop {
-    /// The payload `reply` answers with once the flush has installed the
-    /// transaction. Post-images are read from base after the install, so each row is what
+    /// The payload `reply` answers with once the redo install has written
+    /// the slice. Post-images are read from base after the install, so each row is what
     /// the install stored.
     ///
     /// A row the plan wrote that base does not hold after the install is an
@@ -93,7 +93,7 @@ fn installed_timeseries_rows(
         return Err(ErrorCode::Internal {
             detail: format!(
                 "calvin RETURNING: the install of timeseries ingest {} into '{}' is absent \
-                 from the flushed record",
+                 from the installed record",
                 installed.ordinal, installed.collection
             ),
         });

@@ -43,7 +43,7 @@ async fn cross_shard_transaction_commit_reports_commit_and_rows_land() {
     assert_eq!(
         tags(&mut conn, "COMMIT").await,
         vec!["COMMIT"],
-        "the Calvin flush answers exactly one COMMIT tag"
+        "the Calvin commit answers exactly one COMMIT tag"
     );
 
     fx.converge().await;

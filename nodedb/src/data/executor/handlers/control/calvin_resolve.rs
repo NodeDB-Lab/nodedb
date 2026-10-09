@@ -34,7 +34,7 @@ impl CoreLoop {
     /// Errors (rather than silently dropping data or producing an empty
     /// record) when no `commit_pending` entry exists for
     /// `(epoch, position, vshard)` — the transaction was never staged (or was
-    /// already flushed/dropped), and there is nothing to resolve.
+    /// already installed/dropped), and there is nothing to resolve.
     ///
     /// `DocumentOp::BulkUpdate` / `BulkDelete` plans are staged into the
     /// overlay by `stage_calvin_overlay` (via the predicted-surrogate-set
@@ -406,7 +406,7 @@ mod tests {
         // them -- if staging re-derived the row set via a live scan instead
         // of trusting the predicted set, the redo would carry 3 deletes, not
         // 2. This is the determinism proof: staging must key off the
-        // predicted set the flush applies, not a fresh predicate scan.
+        // predicted set the install applies, not a fresh predicate scan.
         seed_row(&mut core, "orders", 20, "a", "1");
         seed_row(&mut core, "orders", 21, "a", "1");
         seed_row(&mut core, "orders", 22, "a", "1");

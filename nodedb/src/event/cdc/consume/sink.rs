@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use crate::control::state::SharedState;
 use crate::event::cdc::event::CdcEvent;
-use crate::event::cdc::position::vshard_of_partition;
 
 use super::error::ConsumeError;
 use super::local::consume_stream;
@@ -76,9 +75,9 @@ impl ReadPlan {
         }
     }
 
-    /// The data group of `partition`.
+    /// The data group of `partition`, a vShard.
     fn group_of(&self, partition: u32) -> Option<u64> {
-        let vshard = usize::try_from(vshard_of_partition(partition)).ok()?;
+        let vshard = usize::try_from(partition).ok()?;
         self.vshard_group.get(vshard).copied()
     }
 
@@ -238,7 +237,6 @@ fn empty() -> ConsumeResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::cdc::position::calvin_partition;
 
     fn event(partition: u32) -> CdcEvent {
         CdcEvent {
@@ -278,9 +276,8 @@ mod tests {
         assert!(plan.keeps(&plan.local, &event(0)));
         assert!(!plan.keeps(&plan.local, &event(1)));
         assert!(plan.keeps(&plan.remote[&2], &event(1)));
-        // A Calvin partition belongs to its vShard's group.
-        assert!(plan.keeps(&plan.remote[&3], &event(calvin_partition(2))));
-        assert!(!plan.keeps(&plan.remote[&2], &event(calvin_partition(2))));
+        assert!(plan.keeps(&plan.remote[&3], &event(2)));
+        assert!(!plan.keeps(&plan.remote[&2], &event(2)));
     }
 
     #[test]

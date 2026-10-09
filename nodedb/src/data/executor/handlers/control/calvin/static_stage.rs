@@ -585,7 +585,7 @@ mod tests {
         ));
         assert!(
             !core.calvin.commit_pending.contains_key(&(21, 3, vshard)),
-            "a rejected stage cannot reach the TransactionRedo-producing flush path"
+            "a rejected stage cannot reach the TransactionRedo-producing resolve path"
         );
         assert!(!core.txn_overlays.contains_key(&overflow_id));
     }

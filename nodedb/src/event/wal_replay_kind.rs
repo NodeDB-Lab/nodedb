@@ -48,12 +48,6 @@ pub(super) fn row_kind(record_type: RecordType) -> Option<RowRecord> {
         // the same events. A columnar insert rides the same record type and
         // rebuilds none: its forward path emits no WriteEvent.
         RecordType::TimeseriesBatch => Some(RowRecord::Timeseries),
-        // `CalvinApplied` is a payload-free applied-marker: it records that a
-        // sequencer `(epoch, position)` was applied, but carries no writes. Its
-        // base writes, if any, ride a separate `TransactionRedo`; a pure-read or
-        // CRDT-only commit has no base WriteEvents at all (CRDT effects ride
-        // `CrdtDelta` records). Nothing to emit.
-        RecordType::CalvinApplied => None,
         // The records below carry NO forward-path Data-Plane WriteEvent, so
         // there is nothing for replay to reconstruct. `record_to_events`
         // reconstructs exactly the forward WriteEvent stream the Data Plane

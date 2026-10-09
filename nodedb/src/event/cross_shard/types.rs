@@ -96,9 +96,9 @@ impl CrossShardWriteResponse {
 pub struct NotifyBroadcastMsg {
     /// The forwarding node.
     pub source_node: u64,
-    /// [`NOTIFY_PARTITION_GROUP`] or [`NOTIFY_PARTITION_CALVIN`].
+    /// [`NOTIFY_PARTITION_GROUP`]. A receiver drops a run of any other kind.
     pub partition_kind: u8,
-    /// The data group, or the Calvin vShard.
+    /// The data group.
     pub partition_id: u64,
     pub after: crate::event::cdc::CdcOffset,
     pub through: crate::event::cdc::CdcOffset,
@@ -107,8 +107,6 @@ pub struct NotifyBroadcastMsg {
 
 /// `NotifyBroadcastMsg::partition_kind` of a data group's feed.
 pub const NOTIFY_PARTITION_GROUP: u8 = 0;
-/// `NotifyBroadcastMsg::partition_kind` of a vShard's Calvin feed.
-pub const NOTIFY_PARTITION_CALVIN: u8 = 1;
 
 /// One forwarded change at its position.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]

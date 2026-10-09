@@ -24,9 +24,8 @@ use crate::event::cdc::offset::CdcOffset;
 /// Where the position of an event comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexSource {
-    /// A replicated write: a Raft entry at `(epoch, index)`, or a Calvin
-    /// transaction at sequencer epoch `index` and batch position `base`.
-    Replicated { epoch: u64, index: u64, base: u64 },
+    /// A replicated write: a Raft entry at `(epoch, index)`.
+    Replicated { epoch: u64, index: u64 },
     /// The event's write has no known replicated position on a node that
     /// positions by it. The event joins the partition's current write.
     Unmapped,
@@ -73,28 +72,25 @@ impl PositionSequencer {
             })
         });
         let last = tail.position;
-        let (epoch, index, base, continues) = match source {
-            IndexSource::Replicated { epoch, index, base } => (
+        let (epoch, index, continues) = match source {
+            IndexSource::Replicated { epoch, index } => (
                 epoch,
                 index,
-                base,
-                (epoch, index, base) == (last.epoch, last.index, last.base())
-                    && record_lsn == tail.record_lsn,
+                (epoch, index) == (last.epoch, last.index) && record_lsn == tail.record_lsn,
             ),
             IndexSource::Local(index) => (
                 0,
                 index,
-                0,
                 (0, index) == (last.epoch, last.index) && record_lsn == tail.record_lsn,
             ),
-            IndexSource::Unmapped => (last.epoch, last.index, last.base(), true),
+            IndexSource::Unmapped => (last.epoch, last.index, true),
         };
         let ordinal = if continues {
             last.ordinal().saturating_add(1)
         } else {
             1
         };
-        let position = CdcOffset::data_event_in(epoch, index, base, ordinal);
+        let position = CdcOffset::data_event(epoch, index, ordinal);
         *tail = PartitionTail {
             position,
             record_lsn,
@@ -111,46 +107,23 @@ mod tests {
         None
     }
 
+    fn entry(index: u64) -> IndexSource {
+        IndexSource::Replicated { epoch: 0, index }
+    }
+
     #[test]
     fn events_of_one_write_take_consecutive_ordinals() {
         let sequencer = PositionSequencer::new();
         assert_eq!(
-            sequencer.next(
-                0,
-                IndexSource::Replicated {
-                    epoch: 0,
-                    index: 7,
-                    base: 0
-                },
-                70,
-                none
-            ),
+            sequencer.next(0, entry(7), 70, none),
             CdcOffset::data_event(0, 7, 1)
         );
         assert_eq!(
-            sequencer.next(
-                0,
-                IndexSource::Replicated {
-                    epoch: 0,
-                    index: 7,
-                    base: 0
-                },
-                70,
-                none
-            ),
+            sequencer.next(0, entry(7), 70, none),
             CdcOffset::data_event(0, 7, 2)
         );
         assert_eq!(
-            sequencer.next(
-                0,
-                IndexSource::Replicated {
-                    epoch: 0,
-                    index: 8,
-                    base: 0
-                },
-                71,
-                none
-            ),
+            sequencer.next(0, entry(8), 71, none),
             CdcOffset::data_event(0, 8, 1)
         );
     }
@@ -158,27 +131,9 @@ mod tests {
     #[test]
     fn partitions_number_independently() {
         let sequencer = PositionSequencer::new();
-        sequencer.next(
-            0,
-            IndexSource::Replicated {
-                epoch: 0,
-                index: 7,
-                base: 0,
-            },
-            70,
-            none,
-        );
+        sequencer.next(0, entry(7), 70, none);
         assert_eq!(
-            sequencer.next(
-                1,
-                IndexSource::Replicated {
-                    epoch: 0,
-                    index: 7,
-                    base: 0
-                },
-                70,
-                none
-            ),
+            sequencer.next(1, entry(7), 70, none),
             CdcOffset::data_event(0, 7, 1)
         );
     }
@@ -186,16 +141,7 @@ mod tests {
     #[test]
     fn an_unmapped_event_joins_the_current_write() {
         let sequencer = PositionSequencer::new();
-        sequencer.next(
-            0,
-            IndexSource::Replicated {
-                epoch: 0,
-                index: 9,
-                base: 0,
-            },
-            90,
-            none,
-        );
+        sequencer.next(0, entry(9), 90, none);
         assert_eq!(
             sequencer.next(0, IndexSource::Unmapped, 95, none),
             CdcOffset::data_event(0, 9, 2)
@@ -214,16 +160,7 @@ mod tests {
             })
         };
         assert_eq!(
-            sequencer.next(
-                0,
-                IndexSource::Replicated {
-                    epoch: 0,
-                    index: 12,
-                    base: 0
-                },
-                500,
-                seed
-            ),
+            sequencer.next(0, entry(12), 500, seed),
             CdcOffset::data_event(0, 12, 3)
         );
     }
@@ -239,29 +176,11 @@ mod tests {
         };
         // Entry 12 applied again after a restart writes record 900.
         assert_eq!(
-            sequencer.next(
-                0,
-                IndexSource::Replicated {
-                    epoch: 0,
-                    index: 12,
-                    base: 0
-                },
-                900,
-                seed
-            ),
+            sequencer.next(0, entry(12), 900, seed),
             CdcOffset::data_event(0, 12, 1)
         );
         assert_eq!(
-            sequencer.next(
-                0,
-                IndexSource::Replicated {
-                    epoch: 0,
-                    index: 12,
-                    base: 0
-                },
-                900,
-                none
-            ),
+            sequencer.next(0, entry(12), 900, none),
             CdcOffset::data_event(0, 12, 2)
         );
     }
@@ -275,26 +194,8 @@ mod tests {
             for _ in 0..events {
                 // Each replica holds the entry at its own local WAL LSN.
                 assert_eq!(
-                    leader.next(
-                        2,
-                        IndexSource::Replicated {
-                            epoch: 0,
-                            index,
-                            base: 0
-                        },
-                        index * 10,
-                        none
-                    ),
-                    follower.next(
-                        2,
-                        IndexSource::Replicated {
-                            epoch: 0,
-                            index,
-                            base: 0
-                        },
-                        index * 1_000,
-                        none
-                    )
+                    leader.next(2, entry(index), index * 10, none),
+                    follower.next(2, entry(index), index * 1_000, none)
                 );
             }
         }
@@ -303,41 +204,18 @@ mod tests {
     #[test]
     fn a_group_move_never_makes_positions_go_backwards() {
         let sequencer = PositionSequencer::new();
-        let old_group = |index| IndexSource::Replicated {
-            epoch: 0,
-            index,
-            base: 0,
-        };
-        let before = sequencer.next(4, old_group(9_000), 1, none);
+        let before = sequencer.next(4, entry(9_000), 1, none);
         // The new group numbers its log from a low index, in a higher epoch.
         let after = sequencer.next(
             4,
             IndexSource::Replicated {
                 epoch: 55,
                 index: 3,
-                base: 0,
             },
             2,
             none,
         );
         assert!(after > before);
         assert_eq!(after, CdcOffset::data_event(55, 3, 1));
-    }
-
-    #[test]
-    fn calvin_transactions_of_one_epoch_number_by_position() {
-        let sequencer = PositionSequencer::new();
-        let calvin = |position| IndexSource::Replicated {
-            epoch: 0,
-            index: 12,
-            base: position,
-        };
-        let first = sequencer.next(9, calvin(0), 100, none);
-        let second = sequencer.next(9, calvin(0), 100, none);
-        let next_txn = sequencer.next(9, calvin(1), 101, none);
-        assert_eq!(first, CdcOffset::data_event_in(0, 12, 0, 1));
-        assert_eq!(second, CdcOffset::data_event_in(0, 12, 0, 2));
-        assert_eq!(next_txn, CdcOffset::data_event_in(0, 12, 1, 1));
-        assert!(first < second && second < next_txn);
     }
 }

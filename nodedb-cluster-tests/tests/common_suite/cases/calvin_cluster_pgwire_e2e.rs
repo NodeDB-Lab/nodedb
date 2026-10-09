@@ -165,7 +165,7 @@ async fn calvin_multishard_write_in_explicit_block_commits() {
          before={admitted_before} after={admitted_after}"
     );
 
-    // Both rows are readable after the commit applied. The Calvin flush lands
+    // Both rows are readable after the commit applied. The redo install lands
     // asynchronously after the completion ack, so poll for visibility.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {

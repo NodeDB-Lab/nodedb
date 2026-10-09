@@ -23,7 +23,7 @@ impl CoreLoop {
             MetaOp::Cancel { target_request_id } => self.execute_cancel(task, *target_request_id),
 
             // A committed transaction installs only through its redo record
-            // (`ApplyTransactionRedo`, `CalvinFlush`). A plan batch carries no
+            // (`ApplyTransactionRedo`). A plan batch carries no
             // record restart replay reads, so an Origin core refuses it.
             MetaOp::TransactionBatch { .. } => self.response_error(
                 task,
@@ -231,23 +231,6 @@ impl CoreLoop {
             MetaOp::DeleteSynonymGroup { tenant_id, name } => {
                 self.execute_delete_synonym_group(task, *tenant_id, name)
             }
-
-            MetaOp::CalvinFlush {
-                epoch,
-                position,
-                redo,
-                collections,
-                sum_targets,
-            } => self.execute_calvin_flush(
-                task,
-                crate::data::executor::handlers::control::calvin::CalvinFlushRedo {
-                    epoch: *epoch,
-                    position: *position,
-                    redo,
-                    collections,
-                    sum_targets,
-                },
-            ),
 
             MetaOp::CalvinDrop { epoch, position } => {
                 self.execute_calvin_drop(task, *epoch, *position)

@@ -288,7 +288,7 @@ async fn fire_partition(
         if delivery_lease(state, partition) != Some(lease) {
             break;
         }
-        let event = match action.to_event(partition, position) {
+        let event = match action.to_event(position) {
             Ok(event) => event,
             // A held event that does not rebuild fires nothing on any owner.
             Err(error) => {

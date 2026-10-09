@@ -23,7 +23,7 @@ pub const ACK_ROWS_FRAME_BUDGET: u64 = (nodedb_cluster::rpc_codec::MAX_RPC_PAYLO
 /// The `RETURNING` answer of a participant's slice.
 #[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub enum AckReturning {
-    /// The encoded rows, as the flush answered them.
+    /// The encoded rows, as the install answered them.
     Rows { rows: Vec<u8> },
     /// The rows took `bytes`, past `limit`.
     OverLimit { bytes: u64, limit: u64 },
@@ -52,7 +52,7 @@ pub struct CalvinAckResult {
 /// The plain answer of a primary-write slice.
 #[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub enum AckReply {
-    /// The encoded answer, as the flush answered it.
+    /// The encoded answer, as the install answered it.
     Payload { payload: Vec<u8> },
     /// The install stored the writes, and rendering the answer failed.
     Failed { detail: String },
@@ -68,7 +68,7 @@ pub struct AckSlice {
 }
 
 impl CalvinAckResult {
-    /// The report of a flush that answered `response` for `slice`. `limit`
+    /// The report of an install that answered `response` for `slice`. `limit`
     /// bounds the rows it carries.
     ///
     /// A primary-write slice always reports its answer: its rows, or its

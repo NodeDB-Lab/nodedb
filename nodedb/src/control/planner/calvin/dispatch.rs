@@ -489,7 +489,7 @@ mod tests {
         // them (`session::commit::run_commit`).
         //
         // WHY this must stay `MultiShard`: only the `MultiShard` branch of COMMIT
-        // flushes through the Calvin barrier (`run_commit_calvin`), which validates
+        // commits through the Calvin barrier (`run_commit_calvin`), which validates
         // B's read slice on B's OWNING node using the real per-shard `read_lsn`. If a
         // foreign read failed to widen the class, COMMIT will take the `SingleShard`
         // branch and run only the local-WAL `si_conflict_abort`, which never sees a

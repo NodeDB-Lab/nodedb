@@ -9,9 +9,8 @@
 //! - A data group's changes are journaled when the apply loop saves the
 //!   group's applied floor, before the floor: every entry at or below a
 //!   saved floor has its changes on disk. Entries above it are delivered
-//!   again after a restart and publish again.
-//! - A Calvin transaction's changes are journaled before its applied marker
-//!   is durable.
+//!   again after a restart and publish again. A committed Calvin slice
+//!   installs from a data-group entry, so its changes follow this rule.
 //! - A forwarded run is journaled before the receiver acks it.
 //!
 //! Each partition keeps `after`, the position above which it holds every
@@ -199,7 +198,7 @@ mod tests {
     use crate::control::change_stream::{ChangeEvent, ChangeOperation};
     use crate::types::{DatabaseId, Lsn, TenantId};
 
-    const GROUP: ChangePartition = ChangePartition::Group(2);
+    const GROUP: ChangePartition = ChangePartition(2);
 
     fn event(index: u64) -> SequencedChangeEvent {
         SequencedChangeEvent::new(

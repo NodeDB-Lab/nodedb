@@ -431,9 +431,9 @@ mod tests {
                 vshard_id: 12,
                 epoch: 40,
                 position: 3,
-                reason: "flush_failed",
-                step: "flush",
-                error: "CalvinFlush returned Error".to_string(),
+                reason: "redo_apply_failed",
+                step: "redo_apply",
+                error: "the stamped redo install returned Error".to_string(),
             });
 
         let (status, body) = healthz_body(state).await;
@@ -444,8 +444,8 @@ mod tests {
         assert_eq!(body["vshard_id"], 12);
         assert_eq!(body["epoch"], 40);
         assert_eq!(body["position"], 3);
-        assert_eq!(body["halt_reason"], "flush_failed");
-        assert_eq!(body["step"], "flush");
+        assert_eq!(body["halt_reason"], "redo_apply_failed");
+        assert_eq!(body["step"], "redo_apply");
     }
 
     #[tokio::test]

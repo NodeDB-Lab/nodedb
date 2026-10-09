@@ -104,7 +104,6 @@ pub(super) fn is_calvin_apply(plan: &PhysicalPlan) -> bool {
             MetaOp::CalvinExecuteStatic { .. }
                 | MetaOp::CalvinExecutePassive { .. }
                 | MetaOp::CalvinExecuteActive { .. }
-                | MetaOp::CalvinFlush { .. }
                 | MetaOp::CalvinDrop { .. }
                 | MetaOp::CalvinResolve { .. }
         )

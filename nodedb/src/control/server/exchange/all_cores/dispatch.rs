@@ -195,7 +195,6 @@ pub(crate) async fn execute_plan_all_local_cores(
             | MetaOp::RebuildIndex { .. }
             | MetaOp::PutSynonymGroup { .. }
             | MetaOp::DeleteSynonymGroup { .. }
-            | MetaOp::CalvinFlush { .. }
             | MetaOp::CalvinDrop { .. } => {
                 generic_gather(state, tenant_id, database_id, plan, trace_id, txn_id).await
             }

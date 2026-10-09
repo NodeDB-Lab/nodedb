@@ -472,7 +472,7 @@ mod tests {
         let mut live = LiveSubscription::new("live_orders".into(), subscription);
         let event = |index, floor| {
             SequencedChangeEvent::new(
-                ChangePartition::Group(2),
+                ChangePartition(2),
                 CdcOffset::data_event(0, index, 1),
                 floor,
                 DatabaseId::DEFAULT,

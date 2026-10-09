@@ -23,7 +23,6 @@ use super::lag_warner::{CdcLagWarner, DEFAULT_THRESHOLD};
 use super::offset::CdcOffset;
 use super::position::{
     AvailabilityFloors, ChangePositionLedger, IndexSource, PartitionTail, PositionSequencer,
-    WritePosition, calvin_partition,
 };
 use super::registry::StreamRegistry;
 use super::stream_def::{ChangeStreamDef, LateDataPolicy};
@@ -254,24 +253,15 @@ impl CdcRouter {
 
     /// The partition and position source of a write of `vshard` at local
     /// record `record_lsn`: the replicated position the record applies, when
-    /// the ledger knows it. A Calvin transaction goes to the vShard's Calvin
-    /// partition. The trigger action lane positions its events by it too.
+    /// the ledger knows it. The partition is the vShard. The trigger action
+    /// lane positions its events by it too.
     pub(crate) fn index_source(&self, vshard: u32, record_lsn: u64) -> (u32, IndexSource) {
         match self.positions.get(record_lsn) {
-            Some(WritePosition::Raft(position)) => (
+            Some(position) => (
                 vshard,
                 IndexSource::Replicated {
                     epoch: position.epoch,
                     index: position.log_index,
-                    base: 0,
-                },
-            ),
-            Some(WritePosition::Calvin(position)) => (
-                calvin_partition(vshard),
-                IndexSource::Replicated {
-                    epoch: 0,
-                    index: position.sequencer_epoch,
-                    base: u64::from(position.position),
                 },
             ),
             None if self.positions.is_replicated() => (vshard, IndexSource::Unmapped),
@@ -713,45 +703,6 @@ mod tests {
             ]
         );
         assert_eq!(positions(&leader, "s"), positions(&follower, "s"));
-    }
-
-    #[test]
-    fn replicas_number_a_calvin_transaction_alike_in_its_own_partition() {
-        use crate::event::cdc::position::{CalvinPosition, calvin_partition};
-        let replica = || {
-            let registry = Arc::new(StreamRegistry::new());
-            registry.register(sample_def("s", "orders"));
-            CdcRouter::new(registry)
-        };
-        let leader = replica();
-        let follower = replica();
-        let wt = test_tracker();
-        let txn = CalvinPosition {
-            sequencer_epoch: 31,
-            position: 2,
-        };
-        for (router, local_lsn) in [(&leader, 300), (&follower, 8_000)] {
-            router.positions().record_calvin(local_lsn, txn);
-            router.route_event(&write_at(local_lsn, 1), &wt);
-            router.route_event(&write_at(local_lsn, 2), &wt);
-        }
-        let seen = |router: &CdcRouter| {
-            router
-                .get_buffer(DatabaseId::new(7), 1, "s")
-                .expect("buffer")
-                .read_from(CdcOffset::ZERO, 16)
-                .iter()
-                .map(|event| (event.partition, event.position()))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            seen(&leader),
-            vec![
-                (calvin_partition(0), CdcOffset::data_event_in(0, 31, 2, 1)),
-                (calvin_partition(0), CdcOffset::data_event_in(0, 31, 2, 2)),
-            ]
-        );
-        assert_eq!(seen(&leader), seen(&follower));
     }
 
     #[test]

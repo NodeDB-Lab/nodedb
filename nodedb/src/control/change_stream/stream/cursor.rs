@@ -3,11 +3,9 @@
 //! Resumable positions in the Control-Plane change stream.
 //!
 //! The stream is a set of partitions. Each partition is one totally ordered
-//! feed that every node numbers alike:
-//!
-//! - `Group(g)`: the writes of data group `g`, at their Raft log index.
-//! - `Calvin(v)`: the Calvin transactions vShard `v` applied, at their
-//!   sequencer position.
+//! feed that every node numbers alike. `ChangePartition(g)` holds the writes
+//! of data group `g`, at their Raft log index. A committed Calvin slice is one
+//! of them: it installs from a data-group entry.
 //!
 //! A cursor holds, per partition, the position of the last event it
 //! consumed. A cursor taken on one node therefore resumes on any node that
@@ -22,8 +20,7 @@ use crate::event::cdc::CdcOffset;
 use super::SequencedChangeEvent;
 
 const TOKEN_PREFIX: &str = "v2:";
-/// Partitions one cursor holds at most: every data group and every vShard's
-/// Calvin feed of a large cluster.
+/// Partitions one cursor holds at most: every data group of a large cluster.
 const MAX_ENTRIES: usize = 8192;
 /// Upper bound on one entry's text: a tag, a 20-digit id, and three
 /// 20-digit numbers with their separators.
@@ -32,12 +29,10 @@ const MAX_TOKEN_LEN: usize = TOKEN_PREFIX.len() + MAX_ENTRIES * (MAX_ENTRY_LEN +
 
 /// One totally ordered feed of the change stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ChangePartition {
-    /// A data group's writes, at their Raft log index.
-    Group(u64),
-    /// A vShard's Calvin transactions, at their sequencer position.
-    Calvin(u32),
-}
+pub struct ChangePartition(
+    /// The data group whose writes the partition holds, at their Raft log index.
+    pub u64,
+);
 
 /// What a consumer does with the next live event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,10 +107,8 @@ impl fmt::Display for ChangeCursor {
             if index > 0 {
                 formatter.write_str(",")?;
             }
-            match partition {
-                ChangePartition::Group(group) => write!(formatter, "g{group}")?,
-                ChangePartition::Calvin(vshard) => write!(formatter, "c{vshard}")?,
-            }
+            let ChangePartition(group) = partition;
+            write!(formatter, "g{group}")?;
             write!(
                 formatter,
                 "@{}.{}.{}",
@@ -167,10 +160,7 @@ impl FromStr for ChangeCursor {
 fn parse_entry(entry: &str) -> Result<(ChangePartition, CdcOffset), CursorParseError> {
     let (partition, position) = entry.split_once('@').ok_or(CursorParseError)?;
     let partition = match partition.as_bytes().first() {
-        Some(b'g') => ChangePartition::Group(number(&partition[1..])?),
-        Some(b'c') => ChangePartition::Calvin(
-            u32::try_from(number(&partition[1..])?).map_err(|_| CursorParseError)?,
-        ),
+        Some(b'g') => ChangePartition(number(&partition[1..])?),
         _ => return Err(CursorParseError),
     };
     let mut parts = position.split('.');
@@ -228,11 +218,8 @@ mod tests {
     #[test]
     fn token_round_trips_and_is_strict() {
         let mut cursor = ChangeCursor::default();
-        cursor.raise(ChangePartition::Group(3), CdcOffset::data_event(0, 42, 1));
-        cursor.raise(
-            ChangePartition::Calvin(7),
-            CdcOffset::data_event_in(0, 9, 2, 1),
-        );
+        cursor.raise(ChangePartition(3), CdcOffset::data_event(0, 42, 1));
+        cursor.raise(ChangePartition(7), CdcOffset::data_event(0, 9, 1));
         let token = cursor.to_string();
         assert!(token.starts_with("v2:"));
         assert_eq!(token.parse::<ChangeCursor>(), Ok(cursor));
@@ -245,7 +232,7 @@ mod tests {
             "v2:x1@0.1.2",
             "v2:l@0.1.2",
             "v2:l7@0.1.2",
-            "v2:c99999999999@0.1.2",
+            "v2:c1@0.1.2",
             "v2:g1@0.-1.2",
         ] {
             assert!(invalid.parse::<ChangeCursor>().is_err(), "{invalid}");
@@ -254,7 +241,7 @@ mod tests {
 
     #[test]
     fn accept_delivers_new_events_and_skips_covered_ones() {
-        let group = ChangePartition::Group(1);
+        let group = ChangePartition(1);
         let mut cursor = ChangeCursor::default();
         let first = event(group, CdcOffset::data_event(0, 5, 1), CdcOffset::ZERO);
         let second = event(group, CdcOffset::data_event(0, 6, 1), CdcOffset::ZERO);
@@ -264,7 +251,7 @@ mod tests {
         assert!(cursor.covers(&second));
         // Another partition's positions never compare with this one.
         let other = event(
-            ChangePartition::Group(2),
+            ChangePartition(2),
             CdcOffset::data_event(0, 1, 1),
             CdcOffset::ZERO,
         );
@@ -273,7 +260,7 @@ mod tests {
 
     #[test]
     fn a_hole_above_the_cursor_resets() {
-        let group = ChangePartition::Group(1);
+        let group = ChangePartition(1);
         let mut cursor = ChangeCursor::default();
         cursor.raise(group, CdcOffset::whole_index(10));
         let past_hole = event(

@@ -196,10 +196,9 @@ pub(crate) async fn enqueue_write(
     };
 
     // Write-admission gate: every write-class plan whose ordering is not already
-    // final passes here. On the Calvin route the deterministic scheduler applies
-    // the write, emits its own WriteEvents, and owns durability (the sequenced
-    // TxClass plus its own `CalvinApplied` WAL record), so no local WAL append or
-    // enqueue happens. A plain write with no RETURNING rows yields `None`,
+    // final passes here. On the Calvin route the deterministic scheduler owns
+    // the write: the sequenced TxClass, then the stamped redo entry the data
+    // group applies. No local WAL append or enqueue happens. A plain write with no RETURNING rows yields `None`,
     // synthesized into a bare `Ok`.
     let target = AdmissionTarget {
         tenant_id,
