@@ -116,6 +116,9 @@ pub struct RaftNode<S: LogStorage> {
     /// Per-voter highest lease round acknowledged in the current term, and
     /// when the latest answer arrived. Cleared on step-down.
     pub(super) quorum_window: Vec<super::quorum_contact::VoterAck>,
+    /// When this node won its current leadership term. `None` off the
+    /// leader path. A voter not yet heard this term counts as last seen here.
+    pub(super) leader_since: Option<Instant>,
     /// Leader-lease rounds and anchor (see [`super::leader_lease`]).
     pub(super) lease: LeaseState,
     /// Until this instant the node refuses every vote but a transfer vote.
@@ -178,6 +181,7 @@ impl<S: LogStorage> RaftNode<S> {
             leader_contact: None,
             last_quorum_contact: None,
             quorum_window: Vec::new(),
+            leader_since: None,
             lease: LeaseState::new(),
             boot_vote_fence: now + config.election_timeout_max,
             compaction_ceiling: None,

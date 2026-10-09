@@ -438,7 +438,7 @@ pub(super) fn staged_pending(txn: SequencedTxn, txn_id: TxnId) -> PendingTxn {
         has_primary_write: true,
         has_returning: false,
         change_sets: Vec::new(),
-        commit_state: Some(CommitState::Staged),
+        commit_state: CommitState::Staged,
         verdict_deadline: None,
         stage_error: None,
         redo_records: None,
@@ -491,7 +491,7 @@ pub(super) fn scheduler_with_pending(
 ) -> (Scheduler, tempfile::TempDir) {
     let (mut scheduler, dir) = build_test_scheduler(7);
     let mut pending = staged_pending(make_sequenced_txn(txn_id.epoch, txn_id.position), txn_id);
-    pending.commit_state = Some(state);
+    pending.commit_state = state;
     scheduler.pending.insert(txn_id, pending);
     (scheduler, dir)
 }

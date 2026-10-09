@@ -99,21 +99,6 @@ impl SequencerStateMachine {
                 from_node,
                 result,
             ),
-            // Broadcast the OLLP predicate-mismatch signal to ALL replicas so the
-            // coordinator's registry fires wherever it lives (including remote nodes).
-            SequencerEntry::OllpMismatch { epoch, position } => self
-                .completion_registry
-                .note_ollp_mismatch(TxnId::new(epoch, position)),
-            // Broadcast the terminal routing-failure signal to ALL replicas so
-            // the coordinator's registry fires wherever it lives (including
-            // remote nodes), mirroring `OllpMismatch`.
-            SequencerEntry::TxnRoutingFailed {
-                epoch,
-                position,
-                detail,
-            } => self
-                .completion_registry
-                .note_routing_failed(TxnId::new(epoch, position), detail),
             // Durable per-participant votes for a staged cross-shard txn. The
             // registry tallies them per vshard. Once every participant voted,
             // the leader aggregates them into the global verdict that gates the
@@ -940,33 +925,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_txn_routing_failed_dispatches_to_completion_registry() {
-        let registry = CalvinCompletionRegistry::new_detached();
-        let mut sm = SequencerStateMachine::new(HashMap::new(), Arc::clone(&registry));
-
-        let data = encode_entry(&SequencerEntry::TxnRoutingFailed {
-            epoch: 5,
-            position: 2,
-            detail: "unroutable plan".to_owned(),
-        });
-        sm.apply(1, &data);
-
-        // The registry's waiter (registered AFTER apply) must still observe
-        // the failure — `note_routing_failed` persists it on the entry.
-        let rx = registry.register_completion(crate::calvin::TxnId::new(5, 2), 1);
-        let outcome = rx.await.expect("routing failure fires");
-        assert_eq!(
-            outcome,
-            crate::calvin::AttemptOutcome::Failed {
-                detail: "unroutable plan".to_owned()
-            }
-        );
-        // TxnRoutingFailed is not an EpochBatch, so it must not perturb the
-        // epoch counter (mirrors OllpMismatch's non-effect on last_applied_epoch).
-        assert_eq!(sm.last_applied_epoch(), None);
-    }
-
-    #[tokio::test]
     async fn apply_verdict_stores_decision_without_perturbing_epoch() {
         let registry = CalvinCompletionRegistry::new_detached();
         let mut sm = SequencerStateMachine::new(HashMap::new(), Arc::clone(&registry));
@@ -980,8 +938,7 @@ mod tests {
 
         // The verdict is stored authoritatively on every replica.
         assert_eq!(registry.verdict(txn), Some(true));
-        // Verdict is not an EpochBatch, so it must not perturb the epoch counter
-        // (mirrors OllpMismatch/TxnRoutingFailed's non-effect).
+        // Verdict is not an EpochBatch, so it must not perturb the epoch counter.
         assert_eq!(sm.last_applied_epoch(), None);
     }
 

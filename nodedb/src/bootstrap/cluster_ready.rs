@@ -161,6 +161,15 @@ pub async fn await_cluster_ready(
         return Err(e);
     }
 
+    // A replayed data group says nothing about Calvin: each scheduler still
+    // re-applies epochs from the sequencer log up to the highest epoch it had
+    // applied before the restart. Hold the gateway until every scheduler on
+    // this node reaches that target. Fail closed, like the wait above.
+    if let Err(e) = crate::bootstrap::calvin_catch_up::await_calvin_catch_up(shared).await {
+        data_groups_gate.fail(format!("calvin scheduler catch-up failed: {e}"));
+        return Err(e);
+    }
+
     // Retry every owed reclaim before the gateway opens. A row that does not
     // reclaim keeps the drain hold its retry took, so a same-name CREATE waits
     // for the worker's retry and never opens over storage the retry erases.

@@ -10,7 +10,6 @@ use crate::bridge::envelope::{ErrorCode, Payload, Status};
 use crate::types::{Lsn, RequestId};
 
 use super::dispatcher::Dispatcher;
-use super::enqueue::release_inflight_slot;
 
 impl Dispatcher {
     /// Poll responses from all Data Plane cores.
@@ -21,7 +20,7 @@ impl Dispatcher {
     /// everything dispatched earlier that it never answered. Those travel back
     /// with the real responses so the single completion loop in the caller
     /// finishes each waiter, and the loop below releases each request's
-    /// `tenant_inflight` slot exactly as a real response would — without which
+    /// tenant in-flight slot exactly as a real response would — without which
     /// one dead core ratchets the tenant's in-flight count until the tenant is
     /// rejected on healthy cores too.
     ///
@@ -43,11 +42,7 @@ impl Dispatcher {
                 if !br.inner.partial {
                     channel.outstanding.remove(&rid);
                     self.dispatched_lsns.settle(rid);
-                    freed |= release_inflight_slot(
-                        &mut self.request_tenant,
-                        &mut self.tenant_inflight,
-                        rid,
-                    );
+                    freed |= self.tenants.release(rid);
                 }
                 responses.push(br.inner);
             }
@@ -85,8 +80,7 @@ impl Dispatcher {
             for rid in lost {
                 // A dead core never publishes a watermark again.
                 self.dispatched_lsns.settle(rid);
-                freed |=
-                    release_inflight_slot(&mut self.request_tenant, &mut self.tenant_inflight, rid);
+                freed |= self.tenants.release(rid);
                 responses.push(envelope::Response {
                     request_id: RequestId::new(rid),
                     status: Status::Error,
@@ -196,7 +190,7 @@ mod tests {
     // When a Data Plane core's consumer/producer is dropped (the core thread
     // died), `Dispatcher` must synthesize an error `Response` for every
     // request it knows is outstanding on that core, rather than dropping the
-    // request silently and leaking the caller's waiter + `tenant_inflight`
+    // request silently and leaking the caller's waiter + tenant in-flight
     // slot forever. Dropping one element of the `data_sides` vector handed
     // back by `Dispatcher::new`/`with_resolver` simulates that core thread
     // dying, matching how `dispatch_routes_to_correct_core` and
@@ -236,7 +230,7 @@ mod tests {
 
     #[test]
     fn dead_core_synthesized_response_resets_tenant_inflight() {
-        // The ratchet: `tenant_inflight` is incremented on dispatch and must
+        // The ratchet: the tenant in-flight count is incremented on dispatch and must
         // return to its pre-dispatch value once the synthesized response for
         // the lost request is drained through `poll_responses` — otherwise it
         // climbs forever and eventually starves the tenant on healthy cores.
@@ -247,31 +241,23 @@ mod tests {
         let request = make_request_for_db(0, 1, 1);
         let tenant_id = request.tenant_id.as_u64();
 
-        let before = dispatcher
-            .tenant_inflight
-            .get(&tenant_id)
-            .copied()
-            .unwrap_or(0);
+        let before = dispatcher.tenants.inflight(tenant_id);
 
         dispatcher.dispatch_to_core(dead_core, request).unwrap();
         assert_eq!(
-            dispatcher.tenant_inflight.get(&tenant_id).copied(),
-            Some(before + 1),
-            "dispatch must still increment tenant_inflight even though the core is dead"
+            dispatcher.tenants.inflight(tenant_id),
+            before + 1,
+            "dispatch must still increment the tenant in-flight count even though the core is dead"
         );
 
         let responses = dispatcher.poll_responses();
         assert_eq!(responses.len(), 1);
         assert_eq!(
-            dispatcher
-                .tenant_inflight
-                .get(&tenant_id)
-                .copied()
-                .unwrap_or(0),
+            dispatcher.tenants.inflight(tenant_id),
             before,
-            "tenant_inflight must return to its pre-dispatch value, not ratchet upward"
+            "the tenant in-flight count must return to its pre-dispatch value, not ratchet upward"
         );
-        assert!(!dispatcher.request_tenant.contains_key(&1));
+        assert_eq!(dispatcher.tenants.tenant_of(1), None);
     }
 
     #[test]

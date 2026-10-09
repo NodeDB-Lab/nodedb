@@ -46,13 +46,12 @@ pub(super) struct PendingTxn {
     /// Participant-local Control-Plane change manifests. Consumed once after
     /// durable COMMIT apply; graph dual-home replicas are excluded at capture.
     pub change_sets: Vec<crate::control::server::dispatch_utils::WriteChangeSet>,
-    /// Commit-resolution state for a static-set Calvin txn.
+    /// Commit-resolution state of the txn.
     ///
-    /// `Some(CommitState::Staged)` for a txn dispatched, or parked for re-send,
-    /// via the validate-and-stage path: its first executor response carries the local
-    /// commit vote and drives a flush-or-drop before the commit tail runs.
-    /// `None` for dependent/active txns, which apply directly.
-    pub commit_state: Option<CommitState>,
+    /// Every dispatch stages the txn and starts in [`CommitState::Staged`].
+    /// The first executor response carries the local commit vote. It drives a
+    /// flush-or-drop before the commit tail runs.
+    pub commit_state: CommitState,
     /// Stall deadline for a txn parked in [`CommitState::AwaitingVerdict`].
     ///
     /// `Some(instant)` only while parked: if the deadline passes with the
@@ -213,6 +212,10 @@ pub(in crate::control::cluster::calvin::scheduler::driver) enum CommitState {
         committed: bool,
         redo_lsn: Option<crate::types::Lsn>,
     },
+    /// The commit tail ran, and the write-version record waits for capacity.
+    /// The txn completes once the record is sent. Its locks hold until then,
+    /// so no later txn validates a read against the missing versions.
+    AwaitingVersionRecord,
 }
 
 /// A transaction that is blocked on lock acquisition.

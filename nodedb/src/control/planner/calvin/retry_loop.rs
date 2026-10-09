@@ -4,10 +4,10 @@
 //!
 //! The retry loop for dependent-read (OLLP) Calvin transactions is owned by the
 //! coordinator (the pgwire handler), not the per-vshard scheduler. On a
-//! post-exec predicate-drift mismatch the loop runs a FRESH pre-execution
+//! `PredictionDrift` abort verdict the loop runs a FRESH pre-execution
 //! reconnaissance before resubmitting — a stale prediction can never converge
-//! under predicate drift. The scheduler's only job on mismatch is to release the
-//! aborted attempt's locks and signal the completion registry so this loop wakes.
+//! under predicate drift. A participant that finds drift votes abort, drops
+//! its slice at the verdict, and acks, which wakes this loop.
 
 use nodedb_cluster::calvin::{AbortReason, AttemptOutcome, CalvinCompletionRegistry, TxnId};
 
@@ -53,9 +53,9 @@ pub enum DependentOutcome {
 /// per attempt.
 ///
 /// This is the single owner of the submit → await-assignment → await-completion
-/// → (mismatch ? re-scan : done) loop for dependent-read Calvin transactions.
-/// On a POST-EXEC predicate-drift mismatch (the executor released the aborted
-/// attempt's locks and the scheduler signalled the registry), the loop runs the
+/// → (drift ? re-scan : done) loop for dependent-read Calvin transactions.
+/// On a `PredictionDrift` abort verdict (every participant dropped the attempt
+/// and released its locks before it acked), the loop runs the
 /// injected `rescan` closure to produce a FRESH prediction and resubmits — a
 /// stale prediction can never converge under predicate drift. On a PRE-ADMISSION
 /// failure (`OllpError` from the circuit-breaker / sequencer / tenant budget),
@@ -156,31 +156,21 @@ where
             // for a reason a fresh reconnaissance cannot change, so surface it
             // to the client immediately instead of burning retries. The
             // verdict's reason picks the error: a stale read-set is SQLSTATE
-            // 40001, a participant error is not. `PredictionDrift` and
-            // `PartsLost` retry, in the arm below: a multi-part transaction
-            // whose parts a leader change lost staged nothing anywhere.
+            // 40001, a participant error is not, and rejected plans are an
+            // internal error. `PredictionDrift` and `PartsLost` retry, in the
+            // arm below: a multi-part transaction whose parts a leader change
+            // lost staged nothing anywhere.
             AttemptOutcome::Aborted { reason }
                 if reason != AbortReason::PredictionDrift && reason != AbortReason::PartsLost =>
             {
                 return Err(calvin_abort_error(reason));
             }
-            // Terminal, NON-retryable: the scheduler rejected the transaction's
-            // local plan routing and broadcast `TxnRoutingFailed`. A fresh
-            // reconnaissance can never fix a routing rejection, so surface it
-            // to the caller immediately instead of burning retries.
-            AttemptOutcome::Failed { detail } => {
-                return Err(Error::Internal {
-                    detail: format!("calvin transaction routing failed: {detail}"),
-                });
-            }
-            AttemptOutcome::Mismatch | AttemptOutcome::Aborted { .. } => {
-                // POST-EXEC predicate drift: an OLLP mismatch, or an abort
-                // verdict because a participant found state other than the
-                // reconnaissance predicted and wrote nothing. The scheduler
-                // already released the aborted attempt's locks before
-                // signalling the registry, so a FRESH reconnaissance is safe —
-                // and necessary, since the stale prediction can never converge
-                // under drift.
+            AttemptOutcome::Aborted { .. } => {
+                // A participant found state other than the reconnaissance
+                // predicted and wrote nothing, or the parts were lost. Every
+                // participant released the attempt's locks before it acked,
+                // so a FRESH reconnaissance is safe — and necessary, since the
+                // stale prediction can never converge under drift.
                 if retry >= ollp_max_retries {
                     return Err(Error::OllpExhausted {
                         retries: ollp_max_retries.min(u8::MAX as u32) as u8,
@@ -206,18 +196,18 @@ mod tests {
     //! returns a `RoutedAssignment` carrying a deterministic `(epoch, position)` —
     //! exactly the `(epoch, position)` the loop feeds to
     //! `register_completion_report(TxnId::new(epoch, position))`. The closure also forwards
-    //! that same `TxnId` to the fake over an mpsc channel; the fake then either calls
-    //! `note_ollp_mismatch(txn)` (first K submissions → `Mismatch`) or
-    //! `note_completion_ack(txn, 1)` (submission K+1, 1 participant → fires
-    //! `Completed`). The `rescan` closure increments a counter and returns a fresh
-    //! prediction vec.
+    //! that same `TxnId` to the fake over an mpsc channel; the fake stores a
+    //! verdict, `Abort(PredictionDrift)` for the first K submissions and
+    //! `Commit` after, then calls `note_completion_ack(txn, 1)` (1 participant →
+    //! fires the outcome). The `rescan` closure increments a counter and returns a
+    //! fresh prediction vec.
     //!
     //! The routed `submit` returns the assignment itself (the leader
     //! assigns and replies with `(epoch, position)`), so the loop never calls
     //! `register_submission` and the fake needs no `note_assigned`. The
     //! `(epoch, position)` source is deterministic on the test side: `epoch =
     //! inbox_seq`, `position = 0`. Both the `RoutedAssignment` returned by `submit`
-    //! AND the fake's `note_completion_ack` / `note_ollp_mismatch` use that same
+    //! AND the fake's `note_verdict` / `note_completion_ack` use that same
     //! `TxnId`, so they always match.
     //!
     //! Determinism: a current-thread runtime plus a bounded fake channel with enough
@@ -230,6 +220,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
     use crate::control::cluster::calvin::executor::ollp::config::OllpConfig;
+    use nodedb_cluster::calvin::VerdictOutcome;
     use nodedb_cluster::calvin::sequencer::error::SequencerError;
 
     /// Build an orchestrator with zero backoff so the retry loop runs instantly.
@@ -242,24 +233,26 @@ mod tests {
     }
 
     /// Spawn the fake scheduler. It reads `TxnId` events (the same `TxnId` the loop
-    /// registers for completion) and, for the first `mismatch_count` events, signals
-    /// an OLLP mismatch; on the next event it acks completion with a single
-    /// participant (which fires `Completed`). The loop never calls
-    /// `register_submission`, so `note_assigned` is not needed.
+    /// registers for completion). For the first `drift_count` events it stores an
+    /// `Abort(PredictionDrift)` verdict, and a `Commit` verdict after. Each event
+    /// then acks with a single participant, which fires the outcome. The loop
+    /// never calls `register_submission`, so `note_assigned` is not needed.
     fn spawn_fake_scheduler(
         registry: Arc<CalvinCompletionRegistry>,
         mut rx: tokio::sync::mpsc::Receiver<TxnId>,
-        mismatch_count: u32,
+        drift_count: u32,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut seen: u32 = 0;
             while let Some(txn) = rx.recv().await {
-                if seen < mismatch_count {
-                    registry.note_ollp_mismatch(txn);
+                let verdict = if seen < drift_count {
+                    VerdictOutcome::Abort(AbortReason::PredictionDrift)
                 } else {
-                    // 1 participant so a single ack completes the attempt.
-                    registry.note_completion_ack(txn, 1);
-                }
+                    VerdictOutcome::Commit
+                };
+                registry.note_verdict(txn, verdict);
+                // 1 participant so a single ack completes the attempt.
+                registry.note_completion_ack(txn, 1);
                 seen += 1;
             }
         })
@@ -278,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn converges_after_two_mismatches() {
+    fn converges_after_two_drift_aborts() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -337,12 +330,12 @@ mod tests {
             assert_eq!(
                 submit_calls.load(Ordering::SeqCst),
                 3,
-                "two mismatches + one success → three submits"
+                "two drift aborts + one success → three submits"
             );
             assert_eq!(
                 rescan_calls.load(Ordering::SeqCst),
                 2,
-                "fresh re-scan runs once per mismatch"
+                "fresh re-scan runs once per drift abort"
             );
             drop(tx);
             let _ = fake.await;
@@ -350,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn exhausts_on_persistent_mismatch() {
+    fn exhausts_on_persistent_drift() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -359,7 +352,7 @@ mod tests {
             let registry = CalvinCompletionRegistry::new_detached();
             let orchestrator = zero_backoff_orchestrator();
 
-            // Mismatch on every attempt (large count → never acks).
+            // Drift on every attempt (large count → never commits).
             let (tx, rx) = tokio::sync::mpsc::channel::<TxnId>(16);
             let fake = spawn_fake_scheduler(Arc::clone(&registry), rx, u32::MAX);
 
@@ -425,8 +418,8 @@ mod tests {
             let registry = CalvinCompletionRegistry::new_detached();
             let orchestrator = zero_backoff_orchestrator();
 
-            // No mismatch path needed: the first two submits fail pre-admission, the
-            // third admits and the fake immediately acks completion.
+            // No drift path needed: the first two submits fail pre-admission, the
+            // third admits and the fake immediately commits it.
             let (tx, rx) = tokio::sync::mpsc::channel::<TxnId>(16);
             let fake = spawn_fake_scheduler(Arc::clone(&registry), rx, 0);
 
@@ -652,13 +645,13 @@ mod tests {
                 tokio::spawn(async move {
                     let mut first = true;
                     while let Some(txn) = rx.recv().await {
-                        if first {
-                            registry.note_verdict(
-                                txn,
-                                nodedb_cluster::calvin::VerdictOutcome::Abort(reason),
-                            );
-                            first = false;
-                        }
+                        let verdict = if first {
+                            VerdictOutcome::Abort(reason)
+                        } else {
+                            VerdictOutcome::Commit
+                        };
+                        first = false;
+                        registry.note_verdict(txn, verdict);
                         registry.note_completion_ack(txn, 1);
                     }
                 })
@@ -719,6 +712,17 @@ mod tests {
         );
         assert_eq!(submits, 2, "one drift abort + one commit → two submits");
         assert_eq!(rescans, 1, "the drift abort reads again once");
+    }
+
+    #[test]
+    fn a_plan_rejected_abort_is_terminal() {
+        let (result, submits, rescans) = run_with_first_abort(AbortReason::PlanRejected);
+        assert!(
+            matches!(result, Err(Error::Internal { .. })),
+            "expected an internal error, got {result:?}"
+        );
+        assert_eq!(submits, 1);
+        assert_eq!(rescans, 0);
     }
 
     #[test]

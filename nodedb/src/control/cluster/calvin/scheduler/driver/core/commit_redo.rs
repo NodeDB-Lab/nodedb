@@ -345,7 +345,7 @@ mod tests {
             Some(HaltReason::ResolveFailed)
         );
         assert_eq!(
-            scheduler.pending.get(&txn_id).and_then(|p| p.commit_state),
+            scheduler.pending.get(&txn_id).map(|p| p.commit_state),
             Some(CommitState::AwaitingRedoResolve),
             "no flush is dispatched"
         );

@@ -434,6 +434,45 @@ mod tests {
         assert!(msg.contains("tuning.wal.write_buffer_size"), "{msg}");
     }
 
+    #[test]
+    fn from_file_rejects_a_zero_calvin_backlog() {
+        let path = write_temp_config(
+            "nodedb-domain-calvin-backlog.toml",
+            "[tuning.calvin]\nmax_inflight_backlog = 0\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(msg.contains("tuning.calvin.max_inflight_backlog"), "{msg}");
+        assert!(msg.contains("positive integer"), "{msg}");
+    }
+
+    #[test]
+    fn from_file_rejects_a_calvin_stall_warning_below_the_floor() {
+        let path = write_temp_config(
+            "nodedb-domain-calvin-stall.toml",
+            "[tuning.calvin]\nverdict_stall_warn_ms = 3\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(msg.contains("tuning.calvin.verdict_stall_warn_ms"), "{msg}");
+        assert!(msg.contains("at least 4 milliseconds"), "{msg}");
+    }
+
+    #[test]
+    fn from_file_reads_the_calvin_section() {
+        let path = write_temp_config(
+            "nodedb-domain-calvin-ok.toml",
+            "[tuning.calvin]\nmax_inflight_backlog = 256\ncatch_up_window = 64\n",
+        );
+        let cfg = ServerConfig::from_file(&path).expect("valid calvin section");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(cfg.tuning.calvin.max_inflight_backlog, 256);
+        assert_eq!(cfg.tuning.calvin.catch_up_window, 64);
+        assert_eq!(cfg.tuning.calvin.channel_capacity, 512);
+    }
+
     /// Every shipped default satisfies every bound the gate enforces.
     #[test]
     fn the_compiled_defaults_are_in_domain() {

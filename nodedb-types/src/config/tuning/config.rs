@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::bitemporal::BitemporalTuning;
+use super::calvin::CalvinTuning;
 use super::data_plane::{DataPlaneTuning, QueryTuning};
 use super::engines::{GraphTuning, KvTuning, SparseTuning, TimeseriesToning, VectorTuning};
 use super::maintenance::MaintenanceTuning;
@@ -51,6 +52,8 @@ pub struct TuningConfig {
     pub bitemporal: BitemporalTuning,
     #[serde(default)]
     pub maintenance: MaintenanceTuning,
+    #[serde(default)]
+    pub calvin: CalvinTuning,
 }
 
 impl TuningConfig {
@@ -112,6 +115,18 @@ mod tests {
         assert_eq!(parsed.memory.doc_cache_entries, 4096);
         assert_eq!(parsed.shutdown.deadline_ms, 900);
         assert_eq!(parsed.maintenance.auto_analyze_min_mutations, 1000);
+        assert_eq!(parsed.calvin, CalvinTuning::default());
+    }
+
+    #[test]
+    fn calvin_section_overrides_the_scheduler_backlog() {
+        let toml_str = r#"
+[calvin]
+max_inflight_backlog = 256
+"#;
+        let cfg: TuningConfig = toml::from_str(toml_str).expect("deserialize");
+        assert_eq!(cfg.calvin.max_inflight_backlog, 256);
+        assert_eq!(cfg.calvin.channel_capacity, 512);
     }
 
     #[test]

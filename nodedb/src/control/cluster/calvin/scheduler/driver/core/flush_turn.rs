@@ -32,7 +32,7 @@ impl Scheduler {
         redo_lsn: Option<crate::types::Lsn>,
     ) {
         if let Some(pending) = self.pending.get_mut(&txn_id) {
-            pending.commit_state = Some(CommitState::AwaitingFlushTurn { redo_lsn });
+            pending.commit_state = CommitState::AwaitingFlushTurn { redo_lsn };
         }
         self.pump_flush_turn();
     }
@@ -46,7 +46,7 @@ impl Scheduler {
         let resolve_turn = self
             .pending
             .get(&lowest)
-            .is_some_and(|pending| pending.commit_state == Some(CommitState::AwaitingResolveTurn));
+            .is_some_and(|pending| pending.commit_state == CommitState::AwaitingResolveTurn);
         if resolve_turn {
             self.dispatch_resolve_turn(lowest);
             return;
@@ -55,7 +55,7 @@ impl Scheduler {
             self.pending
                 .get(&lowest)
                 .and_then(|pending| match pending.commit_state {
-                    Some(CommitState::AwaitingFlushTurn { redo_lsn }) => Some(redo_lsn),
+                    CommitState::AwaitingFlushTurn { redo_lsn } => Some(redo_lsn),
                     _ => None,
                 })
         else {
@@ -79,10 +79,10 @@ impl Scheduler {
             return;
         }
         if let Some(pending) = self.pending.get_mut(&lowest) {
-            pending.commit_state = Some(CommitState::AwaitingResolve {
+            pending.commit_state = CommitState::AwaitingResolve {
                 committed: true,
                 redo_lsn,
-            });
+            };
         }
     }
 
@@ -94,7 +94,7 @@ impl Scheduler {
             return;
         }
         if let Some(pending) = self.pending.get_mut(&txn_id) {
-            pending.commit_state = Some(CommitState::AwaitingRedoResolve);
+            pending.commit_state = CommitState::AwaitingRedoResolve;
         }
     }
 
@@ -143,7 +143,7 @@ mod tests {
 
         scheduler.queue_flush(high, None);
         assert_eq!(
-            scheduler.pending.get(&high).and_then(|p| p.commit_state),
+            scheduler.pending.get(&high).map(|p| p.commit_state),
             Some(CommitState::AwaitingFlushTurn { redo_lsn: None }),
             "the lower txn is unfinished, so the higher flush waits"
         );
@@ -151,7 +151,7 @@ mod tests {
         scheduler.pending.remove(&low);
         scheduler.pump_flush_turn();
         assert_eq!(
-            scheduler.pending.get(&high).and_then(|p| p.commit_state),
+            scheduler.pending.get(&high).map(|p| p.commit_state),
             Some(CommitState::AwaitingResolve {
                 committed: true,
                 redo_lsn: None,
@@ -177,15 +177,12 @@ mod tests {
         }
         if let Some(pending) = scheduler.pending.get_mut(&truncate) {
             pending.flush_scope.resolve_at_turn = true;
-            pending.commit_state = Some(CommitState::AwaitingResolveTurn);
+            pending.commit_state = CommitState::AwaitingResolveTurn;
         }
 
         scheduler.pump_flush_turn();
         assert_eq!(
-            scheduler
-                .pending
-                .get(&truncate)
-                .and_then(|p| p.commit_state),
+            scheduler.pending.get(&truncate).map(|p| p.commit_state),
             Some(CommitState::AwaitingResolveTurn),
             "the lower txn is unfinished, so the resolve waits"
         );
@@ -193,10 +190,7 @@ mod tests {
         scheduler.pending.remove(&low);
         scheduler.pump_flush_turn();
         assert_eq!(
-            scheduler
-                .pending
-                .get(&truncate)
-                .and_then(|p| p.commit_state),
+            scheduler.pending.get(&truncate).map(|p| p.commit_state),
             Some(CommitState::AwaitingRedoResolve),
             "with the lower txn finished, the resolve dispatches"
         );

@@ -147,6 +147,7 @@ impl<S: LogStorage> RaftNode<S> {
         // The contact window belongs to a leader term; it means nothing here.
         self.last_quorum_contact = None;
         self.quorum_window.clear();
+        self.leader_since = None;
         self.persist_hard_state();
         self.reset_election_timeout();
 

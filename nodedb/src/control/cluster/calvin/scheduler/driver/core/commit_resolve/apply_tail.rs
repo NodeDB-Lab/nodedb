@@ -14,6 +14,8 @@ use crate::control::cluster::calvin::scheduler::driver::core::halt::{
 };
 use crate::control::cluster::calvin::scheduler::driver::core::owed::SchedulerProposal;
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::Scheduler;
+use crate::control::cluster::calvin::scheduler::driver::core::write_version_record::VersionRecord;
+use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::control::cluster::calvin::scheduler::metrics::infra_abort_reason;
 
@@ -68,23 +70,22 @@ impl Scheduler {
             self.metrics.record_executor_error();
             self.metrics
                 .record_infra_abort(infra_abort_reason::IO_ERROR);
-            self.metrics.record_completed();
-            self.on_txn_complete(txn_id);
-            return;
         }
 
         let completed = if committed {
             self.commit_apply_tail(txn_id, response, redo_lsn).await
         } else {
             // A dropped txn installed nothing, so its ack reports nothing.
+            // The coordinator's outcome waits for this ack, whatever the
+            // drop response said.
             self.propose_sequencer_entry(
                 txn_id,
                 SchedulerProposal::CompletionAck { result: Vec::new() },
             );
             true
         };
-        // `false` means the commit tail halted the scheduler: the txn stays
-        // pending and unapplied.
+        // `false` means the txn stays pending and unapplied: the commit tail
+        // halted the scheduler, or its write-version record waits for capacity.
         if completed {
             self.metrics.record_completed();
             self.on_txn_complete(txn_id);
@@ -132,20 +133,18 @@ impl Scheduler {
     /// Deposit the applied result, durably mark the apply, record the apply's
     /// write versions, and propose the `CompletionAck`.
     ///
-    /// Shared by the flush-completion path and the direct-apply (dependent /
-    /// active) apply path.
-    ///
-    /// Returns `false` once a failed `CalvinApplied` WAL append halted the
-    /// scheduler: the position must not be marked applied without its marker,
-    /// so the caller leaves the txn pending.
+    /// Returns `true` when the caller completes the txn. Returns `false` when
+    /// the txn stays pending, with its position unapplied:
+    /// - a WAL append, its fsync, or the write-version record failed, and the
+    ///   scheduler halted;
+    /// - the write-version record waits for capacity. The txn then moves to
+    ///   [`CommitState::AwaitingVersionRecord`] and completes once the record is sent.
     ///
     /// `redo_lsn` is `Some(lsn)` when a `TransactionRedo` record was already
     /// WAL-appended for this commit's non-empty write set (`finish_redo_resolve`)
     /// — that record already IS the durable applied marker, so only write
-    /// versions are recorded at it. `None` (a drop, an empty-ops staged commit,
-    /// or the direct-apply dependent/active path, which carries no redo record)
-    /// falls back to appending a `CalvinApplied` marker here, exactly as before
-    /// this record existed.
+    /// versions are recorded at it. `None` (an empty-ops staged commit, which
+    /// carries no redo record) appends a `CalvinApplied` marker here.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) async fn commit_apply_tail(
         &mut self,
         txn_id: TxnId,
@@ -254,10 +253,7 @@ impl Scheduler {
             // SAME shard-local WAL-LSN space fast-path writes and read
             // watermarks use. Record the apply's per-key write versions at it;
             // no second (CalvinApplied) marker is written.
-            Some(lsn) => {
-                self.record_calvin_write_versions(txn_id, lsn);
-                Some(lsn)
-            }
+            Some(lsn) => Some((lsn, self.record_calvin_write_versions(txn_id, lsn))),
             None => match self
                 .shared
                 .wal
@@ -272,10 +268,10 @@ impl Scheduler {
                 // apply — the SAME shard-local WAL-LSN space fast-path writes and
                 // read watermarks use. Record the apply's per-key write versions
                 // at it once it exists; it does not exist yet at dispatch time.
-                Ok(applied_lsn) => {
-                    self.record_calvin_write_versions(txn_id, applied_lsn);
-                    Some(applied_lsn)
-                }
+                Ok(applied_lsn) => Some((
+                    applied_lsn,
+                    self.record_calvin_write_versions(txn_id, applied_lsn),
+                )),
                 Err(e) => {
                     self.halt_apply(
                         txn_id,
@@ -287,13 +283,18 @@ impl Scheduler {
                 }
             },
         };
-        let Some(lsn) = applied_lsn else {
+        let Some((lsn, version_record)) = applied_lsn else {
             // The apply cannot be acknowledged without a durable participant
             // LSN: CDC and write-version consumers will otherwise observe a
             // successful commit with no authoritative ordering point. The
             // scheduler halted above.
             return false;
         };
+        if version_record == VersionRecord::Halted {
+            // Read-set validation reads the lost versions. The scheduler
+            // halted, and the txn stays pending and unapplied.
+            return false;
+        }
         // The record is whole at append: the flush reports no rows, so no
         // part follows it. A record split over the WAL record limit is
         // durable once its last continuation is.
@@ -354,6 +355,14 @@ impl Scheduler {
             txn_id,
             SchedulerProposal::CompletionAck { result: ack_result },
         );
+        if version_record == VersionRecord::Parked {
+            // The txn keeps its locks until the record is sent, so no later
+            // txn validates a read before the versions land.
+            if let Some(pending) = self.pending.get_mut(&txn_id) {
+                pending.commit_state = CommitState::AwaitingVersionRecord;
+            }
+            return false;
+        }
         true
     }
 }
@@ -545,7 +554,7 @@ mod tests {
     }
 
     /// A drop that returns an error under an abort verdict still completes
-    /// the txn: no replica writes an aborted txn.
+    /// the txn and owes its ack: no replica writes an aborted txn.
     #[tokio::test]
     async fn drop_error_response_under_abort_completes_txn() {
         let txn_id = TxnId::new(9, 2);
@@ -564,6 +573,10 @@ mod tests {
         assert!(scheduler.applied.is_applied(9, 2));
         assert!(!scheduler.pending.contains_key(&txn_id));
         assert!(!scheduler.is_apply_halted());
+        assert!(scheduler.owed.contains_key(&(
+            txn_id,
+            crate::control::cluster::calvin::scheduler::driver::core::owed::OwedKind::CompletionAck
+        )));
     }
     fn retryable_refusal() -> Response {
         error_response(ErrorCode::RetryableRefusal {
@@ -586,10 +599,10 @@ mod tests {
         let registry = nodedb_cluster::calvin::CalvinCompletionRegistry::new_detached();
         let (mut scheduler, _dir, mut data_side) = build_test_scheduler_with_data_side(7, registry);
         let mut pending = staged_pending(make_sequenced_txn(9, 2), txn_id);
-        pending.commit_state = Some(CommitState::AwaitingResolve {
+        pending.commit_state = CommitState::AwaitingResolve {
             committed: true,
             redo_lsn: None,
-        });
+        };
         pending.flush_scope.redo = vec![7, 7, 7];
         pending.flush_scope.sends = 1;
         scheduler.pending.insert(txn_id, pending);

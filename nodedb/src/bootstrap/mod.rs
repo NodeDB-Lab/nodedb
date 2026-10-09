@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 pub mod background_loops;
+pub mod calvin_catch_up;
 pub mod catalog_open;
 pub mod cluster_ready;
 pub mod constraint_reconcile;

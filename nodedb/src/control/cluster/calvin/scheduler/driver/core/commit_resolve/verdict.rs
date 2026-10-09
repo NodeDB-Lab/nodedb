@@ -47,7 +47,7 @@ impl Scheduler {
         // Guard: only a still-parked txn resumes. Mirrors `handle_completion`'s
         // state-match so a duplicate push/probe/timeout is idempotent.
         if !matches!(
-            self.pending.get(&txn_id).and_then(|p| p.commit_state),
+            self.pending.get(&txn_id).map(|p| p.commit_state),
             Some(CommitState::AwaitingVerdict)
         ) {
             return;
@@ -73,7 +73,7 @@ impl Scheduler {
             && let Some(pending) = self.pending.get_mut(&txn_id)
             && pending.flush_scope.resolve_at_turn
         {
-            pending.commit_state = Some(CommitState::AwaitingResolveTurn);
+            pending.commit_state = CommitState::AwaitingResolveTurn;
             pending.verdict_deadline = None;
             self.shared
                 .calvin
@@ -111,14 +111,14 @@ impl Scheduler {
         // this step's response, so a duplicate verdict push or probe is a
         // no-op under the guard above.
         if let Some(pending) = self.pending.get_mut(&txn_id) {
-            pending.commit_state = Some(if committed {
+            pending.commit_state = if committed {
                 CommitState::AwaitingRedoResolve
             } else {
                 CommitState::AwaitingResolve {
                     committed: false,
                     redo_lsn: None,
                 }
-            });
+            };
             // No longer parked: clear the stall deadline.
             pending.verdict_deadline = None;
         }
@@ -163,6 +163,10 @@ impl Scheduler {
     /// the transaction. The verdict is guaranteed to arrive eventually — a
     /// post-failover leader re-aggregates the replicated votes (seeded on every
     /// replica) into the same verdict — so waiting is always the safe action.
+    ///
+    /// The same stall tick re-proposes this vShard's vote while it is owed
+    /// (`retry_owed_sequencer_entries`). The warning names whether the vote is
+    /// still owed, so a stall that waits on another participant shows apart.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn check_awaiting_verdict_stalls(
         &mut self,
     ) {
@@ -171,7 +175,7 @@ impl Scheduler {
         let stalled: Vec<TxnId> = self
             .pending
             .iter()
-            .filter(|(_, p)| matches!(p.commit_state, Some(CommitState::AwaitingVerdict)))
+            .filter(|(_, p)| p.commit_state == CommitState::AwaitingVerdict)
             .filter(|(_, p)| p.verdict_deadline.is_some_and(|d| now >= d))
             .map(|(id, _)| *id)
             .collect();
@@ -187,10 +191,15 @@ impl Scheduler {
 
             // Verdict still unknown: keep waiting, hold locks, never abort.
             self.metrics.record_verdict_stall();
+            let vote_owed = self.owed.contains_key(&(
+                txn_id,
+                crate::control::cluster::calvin::scheduler::driver::core::owed::OwedKind::Vote,
+            ));
             tracing::warn!(
                 vshard_id = self.vshard_id,
                 epoch = txn_id.epoch,
                 position = txn_id.position,
+                vote_owed,
                 "calvin: staged txn still awaiting the cross-shard verdict past its stall \
                  deadline; HOLDING locks and waiting (never aborting — a peer may have already \
                  flushed a commit). The verdict is guaranteed to arrive."
@@ -242,7 +251,7 @@ mod tests {
         let registry = CalvinCompletionRegistry::new_detached();
         let (mut scheduler, dir, mut data_side) = build_test_scheduler_with_data_side(7, registry);
         let mut pending = staged_pending(make_sequenced_txn(txn_id.epoch, txn_id.position), txn_id);
-        pending.commit_state = Some(state);
+        pending.commit_state = state;
         scheduler.pending.insert(txn_id, pending);
         let shared = Arc::clone(&scheduler.shared);
         let fillers = fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
@@ -435,7 +444,7 @@ mod tests {
                 scheduler
                     .pending
                     .get(&txn_id)
-                    .and_then(|pending| pending.commit_state),
+                    .map(|pending| pending.commit_state),
                 Some(CommitState::AwaitingVerdict)
             ));
             assert!(data_side.request_rx.try_pop().is_err());
@@ -483,7 +492,7 @@ mod tests {
                 scheduler
                     .pending
                     .get(&txn_id)
-                    .and_then(|pending| pending.commit_state),
+                    .map(|pending| pending.commit_state),
                 Some(CommitState::AwaitingResolve {
                     committed: false,
                     redo_lsn: None
@@ -542,7 +551,7 @@ mod tests {
             .pending
             .get(&txn_id)
             .expect("the txn stays pending");
-        assert_eq!(pending.commit_state, Some(CommitState::AwaitingVerdict));
+        assert_eq!(pending.commit_state, CommitState::AwaitingVerdict);
         assert_eq!(pending.verdict_deadline, None);
         assert_eq!(
             scheduler.apply_halt().map(|h| h.reason),

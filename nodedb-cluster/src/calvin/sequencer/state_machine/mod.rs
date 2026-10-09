@@ -3,6 +3,7 @@
 pub mod apply;
 pub mod core;
 pub mod counters;
+pub mod history;
 pub mod parts;
 pub mod restore;
 pub mod snapshot;
@@ -14,4 +15,5 @@ pub use self::core::{
     CutInstantHook, RestorePointHook, SequencerRestorePoint, SequencerStateMachine,
 };
 pub use counters::StateMachineMetrics;
+pub use history::HistoryOrigin;
 pub use snapshot::SequencerSnapshot;

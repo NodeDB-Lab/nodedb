@@ -102,6 +102,8 @@ pub struct SequencerStateMachine {
     /// `Txn` inputs this node's schedulers received and may not have made
     /// durable (see [`super::undurable`]). Local to this replica.
     pub(super) undurable: super::undurable::UndurableInputs,
+    /// Where the history this state holds begins (see [`super::history`]).
+    pub(super) history: super::history::HistoryOrigin,
 }
 
 pub(super) const NOT_YET_APPLIED: u64 = u64::MAX;
@@ -151,6 +153,7 @@ impl SequencerStateMachine {
             completion_registry,
             open_parts: super::parts::OpenParts::default(),
             undurable: super::undurable::UndurableInputs::default(),
+            history: super::history::HistoryOrigin::LogStart,
         }
     }
 

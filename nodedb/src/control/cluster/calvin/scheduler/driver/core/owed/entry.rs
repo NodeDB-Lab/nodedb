@@ -25,10 +25,6 @@ pub enum SchedulerProposal {
     /// the coordinator reads: the timeseries install counts of the apply.
     /// Empty when there are none.
     CompletionAck { result: Vec<u8> },
-    /// The active executor saw its OLLP prediction drift.
-    OllpMismatch,
-    /// The txn's local plan routing failed for good.
-    RoutingFailed { detail: String },
 }
 
 impl SchedulerProposal {
@@ -37,8 +33,6 @@ impl SchedulerProposal {
         match self {
             Self::Vote { .. } => OwedKind::Vote,
             Self::CompletionAck { .. } => OwedKind::CompletionAck,
-            Self::OllpMismatch => OwedKind::OllpMismatch,
-            Self::RoutingFailed { .. } => OwedKind::RoutingFailed,
         }
     }
 
@@ -67,12 +61,6 @@ impl SchedulerProposal {
                 result: result.clone(),
                 from_node: node_id,
             },
-            Self::OllpMismatch => SequencerEntry::OllpMismatch { epoch, position },
-            Self::RoutingFailed { detail } => SequencerEntry::TxnRoutingFailed {
-                epoch,
-                position,
-                detail: detail.clone(),
-            },
         }
     }
 }
@@ -82,8 +70,6 @@ impl SchedulerProposal {
 pub enum OwedKind {
     Vote,
     CompletionAck,
-    OllpMismatch,
-    RoutingFailed,
 }
 
 impl OwedKind {
@@ -97,24 +83,17 @@ impl OwedKind {
         match self {
             Self::Vote => sequencer_propose_kind::VOTE,
             Self::CompletionAck => sequencer_propose_kind::COMPLETION_ACK,
-            Self::OllpMismatch => sequencer_propose_kind::OLLP_MISMATCH,
-            Self::RoutingFailed => sequencer_propose_kind::ROUTING_FAILED,
         }
-    }
-
-    /// Whether only the vShard's data-group leader proposes this kind.
-    pub fn leader_only(self) -> bool {
-        matches!(self, Self::Vote | Self::CompletionAck)
     }
 
     /// Whether this node applied the entry of this kind.
     ///
     /// `progress` is the registry's view of the txn for the scheduler's
     /// vShard. `entry_seen` is whether the registry held an entry for the
-    /// txn at an earlier check. The registry removes an entry only once the
-    /// txn's outcome fired, and a txn with a fired outcome needs no entry of
-    /// any kind. A missing entry that was never seen means this node has not
-    /// seeded the txn, so the entry is still owed.
+    /// txn at an earlier check. The registry evicts only a terminal entry:
+    /// its verdict is stored and every participant acked, so the txn needs
+    /// no entry of any kind. A missing entry that was never seen means this
+    /// node has not seeded the txn, so the entry is still owed.
     ///
     /// A stored verdict also settles a vote: the verdict forms only once
     /// every participant's vote is in the tally.
@@ -125,8 +104,6 @@ impl OwedKind {
         match self {
             Self::Vote => p.voted || p.has_verdict,
             Self::CompletionAck => p.acked,
-            Self::OllpMismatch => p.mismatched,
-            Self::RoutingFailed => p.routing_failed,
         }
     }
 }
@@ -146,8 +123,8 @@ pub struct OwedEntry {
 /// Owed entries keyed by txn and kind, in deterministic order.
 ///
 /// Bounded: it holds at most one entry per (txn, kind), and a txn owes at
-/// most two kinds (a vote and a completion ack, or a single terminal
-/// signal). An entry leaves once this node applies it. Entries pile up only
+/// most two kinds, a vote and a completion ack. An entry leaves once this
+/// node applies it. Entries pile up only
 /// while no sequencer leader is reachable, and then the sequencer admits no
 /// new txns either.
 pub type OwedEntries = BTreeMap<(TxnId, OwedKind), OwedEntry>;
@@ -161,17 +138,10 @@ mod tests {
             voted: false,
             acked: false,
             has_verdict: false,
-            mismatched: false,
-            routing_failed: false,
         }
     }
 
-    const ALL_KINDS: [OwedKind; 4] = [
-        OwedKind::Vote,
-        OwedKind::CompletionAck,
-        OwedKind::OllpMismatch,
-        OwedKind::RoutingFailed,
-    ];
+    const ALL_KINDS: [OwedKind; 2] = [OwedKind::Vote, OwedKind::CompletionAck];
 
     #[test]
     fn nothing_is_applied_while_the_registry_shows_no_effect() {
@@ -190,20 +160,10 @@ mod tests {
             acked: true,
             ..progress()
         };
-        let mismatched = ParticipantProgress {
-            mismatched: true,
-            ..progress()
-        };
-        let routing_failed = ParticipantProgress {
-            routing_failed: true,
-            ..progress()
-        };
         assert!(OwedKind::Vote.is_applied(Some(voted), false));
         assert!(!OwedKind::CompletionAck.is_applied(Some(voted), false));
         assert!(OwedKind::CompletionAck.is_applied(Some(acked), false));
         assert!(!OwedKind::Vote.is_applied(Some(acked), false));
-        assert!(OwedKind::OllpMismatch.is_applied(Some(mismatched), false));
-        assert!(OwedKind::RoutingFailed.is_applied(Some(routing_failed), false));
     }
 
     #[test]
@@ -245,6 +205,16 @@ mod tests {
                 position: 4,
                 vshard: 9,
                 reason: AbortReason::SerializationConflict
+            }
+        ));
+        assert!(matches!(
+            SchedulerProposal::Vote {
+                abort: Some(AbortReason::PlanRejected)
+            }
+            .entry(txn, 9, 1),
+            SequencerEntry::AbortVote {
+                reason: AbortReason::PlanRejected,
+                ..
             }
         ));
     }

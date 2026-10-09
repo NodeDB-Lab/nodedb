@@ -79,7 +79,7 @@ pub struct SchedulerMetrics {
     /// Owed sequencer entries re-proposed because their effect was not yet
     /// applied, by kind. Indexes are the constants in
     /// [`sequencer_propose_kind`].
-    pub sequencer_propose_retry_counts: [AtomicU64; 4],
+    pub sequencer_propose_retry_counts: [AtomicU64; sequencer_propose_kind::LABELS.len()],
 }
 
 /// Reason codes for `nodedb_calvin_infra_abort_total`.
@@ -127,6 +127,7 @@ pub mod apply_halt_reason {
     pub const IDENTITY_BIND_FAILED: usize = 6;
     pub const WAL_APPEND_FAILED: usize = 7;
     pub const METADATA_GROUP_GONE: usize = 8;
+    pub const WRITE_VERSION_RECORD_FAILED: usize = 9;
 
     pub const LABELS: &[&str] = &[
         "draining",
@@ -138,6 +139,7 @@ pub mod apply_halt_reason {
         "identity_bind_failed",
         "wal_append_failed",
         "metadata_group_gone",
+        "write_version_record_failed",
     ];
 }
 
@@ -145,10 +147,8 @@ pub mod apply_halt_reason {
 pub mod sequencer_propose_kind {
     pub const VOTE: usize = 0;
     pub const COMPLETION_ACK: usize = 1;
-    pub const OLLP_MISMATCH: usize = 2;
-    pub const ROUTING_FAILED: usize = 3;
 
-    pub const LABELS: &[&str] = &["vote", "completion_ack", "ollp_mismatch", "routing_failed"];
+    pub const LABELS: &[&str] = &["vote", "completion_ack"];
 }
 
 impl SchedulerMetrics {

@@ -12,7 +12,6 @@ use nodedb_raft::message::{
 };
 
 use super::super::loop_core::{CommitApplier, RaftLoop};
-use super::membership::TOPOLOGY_GROUP_ID;
 
 impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
     /// The leader counts a successful answer as this node holding the
@@ -165,9 +164,9 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             {
                 Ok(crate::install_snapshot::ChunkOutcome::Committed(committed)) => {
                     // The watcher means "state visible through N". It moves
-                    // only when the host state machine holds the snapshot.
-                    // Data-group watchers are bumped by the host apply loop.
-                    if group_id == TOPOLOGY_GROUP_ID && committed.state_installed {
+                    // only when the host state machine holds the snapshot,
+                    // for every group kind. Later entries move it on apply.
+                    if committed.state_installed {
                         self.group_watchers.bump(group_id, last_included_index);
                     }
                     // The leader resumes replication after the snapshot index

@@ -150,14 +150,14 @@ impl Scheduler {
 }
 
 /// Whether a txn in `state` can have a write in the Data Plane's hands: a
-/// committed flush, or a direct apply.
-fn writes_in_flight(state: Option<CommitState>) -> bool {
+/// committed flush.
+fn writes_in_flight(state: CommitState) -> bool {
     matches!(
         state,
-        None | Some(CommitState::AwaitingResolve {
+        CommitState::AwaitingResolve {
             committed: true,
             ..
-        })
+        }
     )
 }
 
@@ -243,7 +243,7 @@ mod tests {
         }
         scheduler.resolve_staged_commit(txn_id, &staged_response(Status::Ok, Some(true)));
         let pending = scheduler.pending.get(&txn_id).expect("still parked");
-        assert_eq!(pending.commit_state, Some(CommitState::AwaitingVerdict));
+        assert_eq!(pending.commit_state, CommitState::AwaitingVerdict);
         assert!(pending.stage_error.is_some(), "a COMMIT verdict halts it");
     }
 

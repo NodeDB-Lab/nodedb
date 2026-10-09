@@ -134,7 +134,7 @@ pub fn is_edge_recon_plan(plan: &nodedb_physical::physical_plan::PhysicalPlan) -
 ///    `submit_calvin_routed_assign`) that mirrors the doc write together with
 ///    the derived EdgeDelete/EdgePut tasks, ATOMICALLY. A delete adds one
 ///    `NodeEdgeGuard` per node and one `EdgeDelete` per incident edge.
-/// 4. On a POST-EXEC predicate-drift mismatch or a guard's drift abort,
+/// 4. On a `PredictionDrift` abort verdict, from a participant or a guard,
 ///    re-scans (FRESH reconnaissance) and resubmits, via
 ///    [`run_dependent_with_retry`].
 ///
@@ -213,7 +213,7 @@ async fn dispatch_dependent_edge_recon_inner(
 
     // OLLP path: the coordinator owns the retry loop. `run_dependent_with_retry`
     // submits + awaits the assignment/completion via the local registry and, on
-    // a post-exec predicate-drift mismatch, runs a FRESH pre-execution scan
+    // a `PredictionDrift` abort verdict, runs a FRESH pre-execution scan
     // (`rescan`) before resubmitting with the fresh prediction.
     let dep_task = tasks
         .iter()
@@ -406,7 +406,7 @@ async fn dispatch_dependent_edge_recon_inner(
         }
     };
 
-    // `rescan`: FRESH reconnaissance on each post-exec mismatch or drift.
+    // `rescan`: FRESH reconnaissance on each drift abort.
     let rescan = || {
         reconnoitre(
             state,

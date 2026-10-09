@@ -3,8 +3,7 @@
 //! The completion registry's side of a multi-part transaction that lost its
 //! parts.
 
-use super::completion::{AttemptOutcome, CalvinCompletionRegistry, TxnId, VerdictOutcome};
-use super::completion_entry::PendingCompletion;
+use super::completion::{CalvinCompletionRegistry, TxnId, VerdictOutcome};
 use super::completion_verdict::VerdictSignal;
 use super::sequencer::AbortReason;
 
@@ -19,20 +18,16 @@ impl CalvinCompletionRegistry {
     ///   waits for no ack: no participant staged the whole transaction, and
     ///   no verdict can ever commit it.
     ///
-    /// Idempotent. A later ack of `txn` finds no entry for its outcome and
-    /// parks as a waiterless one.
+    /// Idempotent. A later ack of `txn` lands on the terminal entry, which
+    /// the waiterless sweep removes.
     pub fn note_parts_abandoned(&self, txn: TxnId) {
         let verdict = VerdictOutcome::Abort(AbortReason::PartsLost);
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let waiter = {
-            let entry = inner
-                .completions
-                .entry(txn)
-                .or_insert_with(|| PendingCompletion::new(0));
+        {
+            let entry = inner.entry_mut(txn);
             entry.abandoned = true;
             entry.verdict = Some(verdict);
-            entry.completion_tx.take()
-        };
+        }
         let signal = VerdictSignal {
             epoch: txn.epoch,
             position: txn.position,
@@ -43,31 +38,14 @@ impl CalvinCompletionRegistry {
         }
         // The entry stays: a participant that staged every part targeting
         // it probes the stored verdict when it parks, after this.
-        if let Some(waiter) = waiter {
-            send_parts_lost(txn, waiter);
-        }
-        inner.settle_waiterless(txn);
-    }
-}
-
-/// Answer `waiter` with `Aborted { PartsLost }`, keeping `txn`'s entry and
-/// its stored verdict for the participants that still probe it.
-pub(crate) fn send_parts_lost(txn: TxnId, waiter: super::completion_waiter::CompletionWaiter) {
-    let outcome = AttemptOutcome::Aborted {
-        reason: AbortReason::PartsLost,
-    };
-    if !waiter.send(outcome, Vec::new()) {
-        tracing::warn!(
-            epoch = txn.epoch,
-            position = txn.position,
-            "calvin completion receiver dropped before its parts-lost outcome fired"
-        );
+        inner.settle(txn);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::calvin::AttemptOutcome;
 
     #[tokio::test]
     async fn lost_parts_abort_a_registered_waiter_without_acks() {

@@ -12,10 +12,14 @@
 //! The mirror keeps the same shape as the gate: a fully-applied watermark and
 //! the applied positions above it. The tail is pruned as the watermark
 //! advances, so it stays as small as the gate's.
+//!
+//! [`AppliedMirrors`] also holds each running scheduler's caught-up state,
+//! which startup reads before it opens the client gateway.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
+use super::caught_up::CaughtUpRegistry;
 use super::recovery::NOT_YET_APPLIED_EPOCH;
 use crate::control::security::catalog::calvin_applied::StoredCalvinApplied;
 
@@ -87,9 +91,16 @@ impl AppliedMirror {
 #[derive(Debug, Default)]
 pub struct AppliedMirrors {
     by_vshard: Mutex<HashMap<u32, Arc<AppliedMirror>>>,
+    /// Whether each running scheduler reached its rebuild target.
+    caught_up: CaughtUpRegistry,
 }
 
 impl AppliedMirrors {
+    /// Caught-up state of every running scheduler on this node.
+    pub fn caught_up(&self) -> &CaughtUpRegistry {
+        &self.caught_up
+    }
+
     /// Register the mirror of a scheduler starting for `vshard_id`. A
     /// restarted scheduler replaces its predecessor's mirror.
     pub fn register(

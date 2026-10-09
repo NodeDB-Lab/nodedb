@@ -18,6 +18,10 @@ pub(super) const MIN_WAL_WRITE_BUFFER_BYTES: usize = 64 * 1024;
 /// shorter sweep costs more than the resolution it buys.
 pub(super) const MIN_SCOPE_EXPIRY_SECS: u64 = 10;
 
+/// Smallest Calvin verdict stall warning interval. The scheduler's idle sweep
+/// ticks at a quarter of it, and a zero-length tick panics the timer.
+pub(super) const MIN_CALVIN_VERDICT_STALL_WARN_MS: u64 = 4;
+
 /// Rejects an endpoint that carries no `http://` or `https://` host.
 pub(super) fn otlp_endpoint_has_host(raw: &str) -> bool {
     raw.strip_prefix("http://")
@@ -103,6 +107,8 @@ pub(super) fn validate_domain(config: &ServerConfig) -> crate::Result<()> {
         ));
     }
 
+    validate_calvin(config)?;
+
     if let Some(cluster) = config.cluster.as_ref() {
         positive_u64(
             u64::from(cluster.join_retry_max_attempts),
@@ -128,4 +134,31 @@ pub(super) fn validate_domain(config: &ServerConfig) -> crate::Result<()> {
     }
 
     Ok(())
+}
+
+/// Checks `[tuning.calvin]`. A zero channel capacity panics the channel
+/// constructor, and a zero bound stalls every scheduler.
+fn validate_calvin(config: &ServerConfig) -> crate::Result<()> {
+    let calvin = &config.tuning.calvin;
+    positive_usize(calvin.channel_capacity, "tuning.calvin.channel_capacity")?;
+    positive_u64(
+        u64::from(calvin.txn_deadline_multiplier),
+        "tuning.calvin.txn_deadline_multiplier",
+    )?;
+    positive_u64(
+        calvin.dependent_read_passive_timeout_ms,
+        "tuning.calvin.dependent_read_passive_timeout_ms",
+    )?;
+    if calvin.verdict_stall_warn_ms < MIN_CALVIN_VERDICT_STALL_WARN_MS {
+        return Err(reject(
+            "tuning.calvin.verdict_stall_warn_ms",
+            calvin.verdict_stall_warn_ms,
+            "an interval of at least 4 milliseconds",
+        ));
+    }
+    positive_usize(
+        calvin.max_inflight_backlog,
+        "tuning.calvin.max_inflight_backlog",
+    )?;
+    positive_u64(calvin.catch_up_window, "tuning.calvin.catch_up_window")
 }

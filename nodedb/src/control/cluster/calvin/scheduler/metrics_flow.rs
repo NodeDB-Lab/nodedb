@@ -128,8 +128,5 @@ mod tests {
         assert!(out.contains(
             "nodedb_calvin_sequencer_propose_retry_total{vshard=\"3\",kind=\"completion_ack\"} 1"
         ));
-        assert!(out.contains(
-            "nodedb_calvin_sequencer_propose_retry_total{vshard=\"3\",kind=\"routing_failed\"} 0"
-        ));
     }
 }

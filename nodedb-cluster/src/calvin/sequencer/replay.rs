@@ -216,8 +216,6 @@ impl SequencerStateMachine {
                 // scheduler input; they are re-derived via live `apply` on every
                 // replica's completion registry, not replayed to a scheduler.
                 SequencerEntry::CompletionAck { .. } => {}
-                SequencerEntry::OllpMismatch { .. } => {}
-                SequencerEntry::TxnRoutingFailed { .. } => {}
                 SequencerEntry::Vote { .. } => {}
                 SequencerEntry::Verdict { .. } => {}
                 SequencerEntry::AbortVote { .. } => {}

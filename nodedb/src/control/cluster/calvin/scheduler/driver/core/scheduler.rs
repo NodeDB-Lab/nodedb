@@ -116,6 +116,10 @@ pub struct Scheduler {
     /// Shared mirror of `applied`, read by authorization coverage.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) applied_mirror:
         Arc<crate::control::cluster::calvin::scheduler::AppliedMirror>,
+    /// This scheduler's caught-up entry, read by the startup readiness gate.
+    /// Set once the watermark reaches `rebuild_target_epoch`.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) caught_up:
+        crate::control::cluster::calvin::scheduler::CaughtUpHandle,
     /// Scheduler configuration.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) config: SchedulerConfig,
     /// Metrics.
@@ -248,11 +252,9 @@ impl Scheduler {
         let completion_cap = config.channel_capacity;
         let (completion_tx, completion_rx) = mpsc::channel(completion_cap);
 
-        let applied_mirror = shared.authorization_fence.calvin_mirrors().register(
-            vshard_id,
-            fully_applied_epoch,
-            &applied_tail,
-        );
+        let mirrors = shared.authorization_fence.calvin_mirrors();
+        let applied_mirror = mirrors.register(vshard_id, fully_applied_epoch, &applied_tail);
+        let caught_up = mirrors.caught_up().register(vshard_id);
 
         // A backup's cut waits on every scheduler this node runs.
         shared.calvin.cuts.register(vshard_id);
@@ -264,7 +266,7 @@ impl Scheduler {
             .unwrap_or_else(|p| p.into_inner())
             .capacity_freed();
 
-        Self {
+        let scheduler = Self {
             vshard_id,
             receiver,
             shared,
@@ -280,6 +282,7 @@ impl Scheduler {
             applied: AppliedGate::new(fully_applied_epoch, applied_tail),
             cut_floors: Default::default(),
             applied_mirror,
+            caught_up,
             rebuild_target_epoch,
             max_input_epoch: 0,
             config,
@@ -296,7 +299,10 @@ impl Scheduler {
             metadata_hold: None,
             parts: Default::default(),
             install_gate,
-        }
+        };
+        // A scheduler with nothing to rebuild reports caught up at once.
+        scheduler.publish_caught_up();
+        scheduler
     }
 
     /// Whether the scheduler has caught up to the rebuild target epoch.
@@ -329,6 +335,21 @@ impl Scheduler {
         fully_applied >= self.rebuild_target_epoch
     }
 
+    /// Report this scheduler caught up to the readiness gate, once
+    /// [`Self::is_caught_up`] holds.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn publish_caught_up(&self) {
+        if self.caught_up.is_caught_up() || !self.is_caught_up() {
+            return;
+        }
+        self.caught_up.mark_caught_up();
+        tracing::info!(
+            vshard_id = self.vshard_id,
+            rebuild_target_epoch = self.rebuild_target_epoch,
+            fully_applied_epoch = self.applied.fully_applied_epoch(),
+            "calvin scheduler caught up to its rebuild target"
+        );
+    }
+
     /// Publish an advanced fully-applied watermark to the metrics gauge and the
     /// shared cross-shard snapshot anchor.
     ///
@@ -349,6 +370,7 @@ impl Scheduler {
             .fetch_max(watermark, std::sync::atomic::Ordering::Release);
         // A marker passes once every epoch delivered before it folded.
         self.report_passed_cuts();
+        self.publish_caught_up();
     }
 }
 
@@ -421,6 +443,59 @@ mod tests {
         assert!(
             scheduler.is_caught_up(),
             "no rebuild target (greenfield node) must report caught-up"
+        );
+    }
+
+    fn lagging(scheduler: &Scheduler) -> Vec<u32> {
+        scheduler
+            .shared
+            .authorization_fence
+            .calvin_mirrors()
+            .caught_up()
+            .lagging()
+    }
+
+    /// A scheduler with a real rebuild target holds the readiness gate until
+    /// its published watermark reaches that target.
+    #[tokio::test]
+    async fn a_scheduler_lags_until_its_watermark_reaches_the_rebuild_target() {
+        let (mut scheduler, _dir) = build_test_scheduler(4);
+        scheduler.rebuild_target_epoch = 3;
+        assert_eq!(lagging(&scheduler), vec![4]);
+
+        scheduler.applied = AppliedGate::new(2, BTreeSet::new());
+        scheduler.publish_watermark(2);
+        assert_eq!(lagging(&scheduler), vec![4], "epoch 2 is below the target");
+
+        scheduler.applied = AppliedGate::new(3, BTreeSet::new());
+        scheduler.publish_watermark(3);
+        assert!(lagging(&scheduler).is_empty());
+    }
+
+    /// With no Calvin history there is nothing to rebuild, so the scheduler
+    /// reports caught up without a watermark.
+    #[tokio::test]
+    async fn a_scheduler_with_nothing_to_rebuild_reports_caught_up() {
+        let (mut scheduler, _dir) = build_test_scheduler(4);
+        scheduler.rebuild_target_epoch = NOT_YET_APPLIED_EPOCH;
+        scheduler.publish_caught_up();
+        assert!(lagging(&scheduler).is_empty());
+    }
+
+    /// A stopped scheduler no longer holds the readiness gate.
+    #[tokio::test]
+    async fn a_dropped_scheduler_leaves_the_readiness_registry() {
+        let (scheduler, _dir) = build_test_scheduler(4);
+        let shared = Arc::clone(&scheduler.shared);
+        assert_eq!(lagging(&scheduler), vec![4]);
+        drop(scheduler);
+        assert!(
+            shared
+                .authorization_fence
+                .calvin_mirrors()
+                .caught_up()
+                .lagging()
+                .is_empty()
         );
     }
 }

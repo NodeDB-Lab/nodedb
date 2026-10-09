@@ -84,10 +84,9 @@ impl Scheduler {
         self.propose_sequencer_entry(txn_id, SchedulerProposal::Vote { abort });
 
         if vote == StagedVote::SerializationConflict {
-            // The staged slice's read-set was no longer current: observe it, the
-            // same node-global signal the direct-apply path records. A
-            // participant error never validated a read-set, so it must not count
-            // here.
+            // The staged slice's read-set was no longer current: observe it on
+            // the node-global counter. A participant error never validated a
+            // read-set, so it must not count here.
             self.shared
                 .calvin
                 .counters
@@ -106,7 +105,7 @@ impl Scheduler {
         // `resume_on_verdict` halts on that COMMIT verdict.
         match self.pending.get_mut(&txn_id) {
             Some(pending) => {
-                pending.commit_state = Some(CommitState::AwaitingVerdict);
+                pending.commit_state = CommitState::AwaitingVerdict;
                 // A superseded slice cannot flush here: its collection is gone.
                 pending.stage_error = match vote {
                     StagedVote::ParticipantError | StagedVote::PredictionDrift => {

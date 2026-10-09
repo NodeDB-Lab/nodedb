@@ -6,8 +6,6 @@
 //! A capacity limit refuses with [`crate::Error::DispatchCapacity`] and hands
 //! the request back. Every other refusal is terminal.
 
-use std::collections::HashMap;
-
 use tracing::warn;
 
 use crate::DispatchCapacityScope;
@@ -18,6 +16,7 @@ use crate::types::{Lsn, VShardId};
 use super::dispatcher::Dispatcher;
 use super::journal::JournalGroup;
 use super::refusal::DispatchRefusal;
+use super::tenant_inflight::TenantAtCap;
 
 impl Dispatcher {
     /// Dispatch a request to the correct Data Plane core.
@@ -58,19 +57,16 @@ impl Dispatcher {
         let wal_lsn = request.wal_lsn;
 
         // Per-tenant fairness: refuse while the tenant holds its in-flight cap.
-        if self.max_per_tenant_inflight > 0 {
-            let inflight = self.tenant_inflight.get(&tenant_id).copied().unwrap_or(0);
-            if inflight >= self.max_per_tenant_inflight {
-                let scope = DispatchCapacityScope::TenantInflight {
-                    tenant_id: request.tenant_id,
-                    inflight,
-                    cap: self.max_per_tenant_inflight,
-                };
-                return Err(DispatchRefusal::boxed(
-                    crate::Error::DispatchCapacity { scope },
-                    request,
-                ));
-            }
+        if let Some(TenantAtCap { inflight, cap }) = self.tenants.at_cap(tenant_id) {
+            let scope = DispatchCapacityScope::TenantInflight {
+                tenant_id: request.tenant_id,
+                inflight,
+                cap,
+            };
+            return Err(DispatchRefusal::boxed(
+                crate::Error::DispatchCapacity { scope },
+                request,
+            ));
         }
 
         let Some(core_id) = self.router.resolve(request.vshard_id) else {
@@ -167,14 +163,6 @@ impl Dispatcher {
         Ok(())
     }
 
-    /// Recalculate the per-tenant in-flight limit based on active tenants.
-    pub fn recalculate_tenant_limits(&mut self) {
-        let active = self.tenant_inflight.len().max(1) as u32;
-        let total_capacity: u32 = self.cores.len() as u32 * self.per_core_capacity;
-        self.max_per_tenant_inflight = (total_capacity / active).max(2);
-        self.tenant_inflight.retain(|_, count| *count > 0);
-    }
-
     /// Bookkeeping once a request sits in `core_id`'s weighted-fair queue:
     /// hold the outcome floor below its WAL LSN, flush it toward the ring,
     /// record pressure, track it as outstanding and in flight for its tenant,
@@ -217,34 +205,12 @@ impl Dispatcher {
         channel.outstanding.insert(req_id);
 
         // Track per-tenant in-flight + request→tenant mapping for response routing.
-        *self.tenant_inflight.entry(tenant_id).or_insert(0) += 1;
-        self.request_tenant.insert(req_id, tenant_id);
+        self.tenants.admit(tenant_id, req_id);
 
         // Wake the Data Plane core via eventfd.
         if let Some(ref notifier) = self.cores[core_id].wake_notifier {
             notifier.notify();
         }
-    }
-}
-
-/// Release the in-flight slot `request_id` holds for its tenant.
-///
-/// Returns `true` when a slot was freed. A free function over the two maps,
-/// so a caller can release while it holds a borrow of one core's channel.
-pub(super) fn release_inflight_slot(
-    request_tenant: &mut HashMap<u64, u64>,
-    tenant_inflight: &mut HashMap<u64, u32>,
-    request_id: u64,
-) -> bool {
-    let Some(tenant_id) = request_tenant.remove(&request_id) else {
-        return false;
-    };
-    match tenant_inflight.get_mut(&tenant_id) {
-        Some(count) if *count > 0 => {
-            *count -= 1;
-            true
-        }
-        _ => false,
     }
 }
 
@@ -306,6 +272,72 @@ mod tests {
         );
     }
 
+    /// Dispatch a request of `tenant` with id and database `id`, then pop it
+    /// off the ring so the ring and the weighted-fair queue stay empty.
+    fn dispatch_popped(
+        dispatcher: &mut Dispatcher,
+        data_side: &mut crate::bridge::dispatch::CoreChannelDataSide,
+        tenant: u64,
+        id: u64,
+    ) -> crate::Result<()> {
+        let mut request = make_request_for_db(0, id, id);
+        request.tenant_id = TenantId::new(tenant);
+        dispatcher.dispatch(request)?;
+        while data_side.request_rx.try_pop().is_ok() {}
+        Ok(())
+    }
+
+    fn tenant_cap_of(error: crate::Error) -> u32 {
+        match error {
+            crate::Error::DispatchCapacity {
+                scope: DispatchCapacityScope::TenantInflight { cap, .. },
+            } => cap,
+            other => panic!("expected a tenant-cap refusal, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn two_active_tenants_split_the_capacity_and_an_idle_one_returns_its_share() {
+        let (mut dispatcher, mut data_sides) = Dispatcher::new(1, 8);
+        let data_side = &mut data_sides[0];
+
+        // Tenant 2 holds one request, so tenant 1 gets half of the eight slots.
+        dispatch_popped(&mut dispatcher, data_side, 2, 100).expect("tenant 2 admitted");
+        for id in 1..=4u64 {
+            dispatch_popped(&mut dispatcher, data_side, 1, id).expect("within half the capacity");
+        }
+        let refused = dispatch_popped(&mut dispatcher, data_side, 1, 5)
+            .expect_err("tenant 1 is at half the capacity");
+        assert_eq!(tenant_cap_of(refused), 4);
+
+        // Tenant 2's only request completes, so tenant 1 is the sole tenant.
+        data_side
+            .response_tx
+            .try_push(BridgeResponse {
+                inner: envelope::Response {
+                    request_id: RequestId::new(100),
+                    status: Status::Ok,
+                    attempt: 1,
+                    partial: false,
+                    payload: Payload::empty(),
+                    watermark_lsn: Lsn::ZERO,
+                    error_code: None,
+                    read_set_valid: None,
+                    read_version_lsn: Lsn::ZERO,
+                    write_set: Vec::new(),
+                },
+            })
+            .expect("response ring has room");
+        assert_eq!(dispatcher.poll_responses().len(), 1);
+
+        for id in 5..=8u64 {
+            dispatch_popped(&mut dispatcher, data_side, 1, id).expect("the full capacity is back");
+        }
+        let refused = dispatch_popped(&mut dispatcher, data_side, 1, 9)
+            .expect_err("tenant 1 is at the full capacity");
+        assert_eq!(tenant_cap_of(refused), 8);
+    }
+
     #[test]
     fn full_weighted_fair_queue_is_refused_with_queue_full_scope() {
         // Distinct tenants and databases keep the tenant cap and the per-DB
@@ -339,8 +371,8 @@ mod tests {
 
         dispatcher.dispatch_to_core(1, request).unwrap();
 
-        assert_eq!(dispatcher.tenant_inflight.get(&tenant_id), Some(&1));
-        assert_eq!(dispatcher.request_tenant.get(&request_id), Some(&tenant_id));
+        assert_eq!(dispatcher.tenants.inflight(tenant_id), 1);
+        assert_eq!(dispatcher.tenants.tenant_of(request_id), Some(tenant_id));
         assert_eq!(data_sides[1].request_rx.len(), 1);
 
         let _req = data_sides[1].request_rx.try_pop().unwrap();
@@ -364,8 +396,8 @@ mod tests {
 
         let responses = dispatcher.poll_responses();
         assert_eq!(responses.len(), 1);
-        assert_eq!(dispatcher.tenant_inflight.get(&tenant_id), Some(&0));
-        assert!(!dispatcher.request_tenant.contains_key(&request_id));
+        assert_eq!(dispatcher.tenants.inflight(tenant_id), 0);
+        assert_eq!(dispatcher.tenants.tenant_of(request_id), None);
     }
 
     #[test]

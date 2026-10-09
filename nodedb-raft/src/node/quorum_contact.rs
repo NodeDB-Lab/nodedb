@@ -66,8 +66,22 @@ impl<S: LogStorage> RaftNode<S> {
     /// grant does not make a voter refuse other candidates.
     pub(super) fn arm_quorum_window(&mut self, now: Instant) {
         self.last_quorum_contact = Some(now);
+        self.leader_since = Some(now);
         self.quorum_window.clear();
         self.lease.begin_term();
+    }
+
+    /// Whether voter `peer` answered this leader within the check-quorum
+    /// window at `now`. A voter not yet heard this term counts from the
+    /// election win. Always false off the leader path.
+    pub(super) fn voter_heard_within_window(&self, peer: u64, now: Instant) -> bool {
+        let last_seen = match self.voter_ack(peer) {
+            Some(ack) => Some(ack.arrived),
+            None => self.leader_since,
+        };
+        last_seen.is_some_and(|seen| {
+            now.saturating_duration_since(seen) < self.config.election_timeout_max
+        })
     }
 
     /// Move contact up to the latest instant by which a quorum of voters

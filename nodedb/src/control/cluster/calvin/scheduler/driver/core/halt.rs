@@ -62,6 +62,9 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum HaltReason
     /// The metadata group left this node before its apply reached a held
     /// txn's floor.
     MetadataGroupGone,
+    /// A committed txn's write-version record cannot be built. Read-set
+    /// validation reads these versions, so a lost record reports false-valid reads.
+    WriteVersionRecordFailed,
 }
 
 impl HaltReason {
@@ -77,6 +80,7 @@ impl HaltReason {
             Self::IdentityBindFailed => apply_halt_reason::IDENTITY_BIND_FAILED,
             Self::WalAppendFailed => apply_halt_reason::WAL_APPEND_FAILED,
             Self::MetadataGroupGone => apply_halt_reason::METADATA_GROUP_GONE,
+            Self::WriteVersionRecordFailed => apply_halt_reason::WRITE_VERSION_RECORD_FAILED,
         }
     }
 
@@ -99,8 +103,8 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum HaltStep {
     Flush,
     /// The drop request of an aborted txn.
     Drop,
-    /// The direct apply of a txn with no commit state.
-    Apply,
+    /// The write-version record of a committed txn.
+    WriteVersionRecord,
     /// The `TransactionRedo` WAL append.
     RedoAppend,
     /// The `CalvinApplied` WAL append.
@@ -121,7 +125,7 @@ impl HaltStep {
             Self::Resolve => "resolve",
             Self::Flush => "flush",
             Self::Drop => "drop",
-            Self::Apply => "apply",
+            Self::WriteVersionRecord => "write_version_record",
             Self::RedoAppend => "redo_append",
             Self::AppliedMarker => "applied_marker",
             Self::IdentityBind => "identity_bind",
@@ -131,21 +135,19 @@ impl HaltStep {
 
     /// The request a txn in `state` awaits a response for.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn awaited_by(
-        state: Option<CommitState>,
+        state: CommitState,
     ) -> Self {
         match state {
-            Some(CommitState::Staged | CommitState::AwaitingVerdict) => Self::Stage,
-            Some(CommitState::AwaitingRedoResolve | CommitState::AwaitingResolveTurn) => {
-                Self::Resolve
-            }
-            Some(CommitState::AwaitingFlushTurn { .. }) => Self::Flush,
-            Some(CommitState::AwaitingResolve {
+            CommitState::Staged | CommitState::AwaitingVerdict => Self::Stage,
+            CommitState::AwaitingRedoResolve | CommitState::AwaitingResolveTurn => Self::Resolve,
+            CommitState::AwaitingFlushTurn { .. } => Self::Flush,
+            CommitState::AwaitingResolve {
                 committed: true, ..
-            }) => Self::Flush,
-            Some(CommitState::AwaitingResolve {
+            } => Self::Flush,
+            CommitState::AwaitingResolve {
                 committed: false, ..
-            }) => Self::Drop,
-            None => Self::Apply,
+            } => Self::Drop,
+            CommitState::AwaitingVersionRecord => Self::WriteVersionRecord,
         }
     }
 }

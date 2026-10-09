@@ -24,6 +24,7 @@ use super::core_channel::{CoreChannel, CoreChannelDataSide};
 use super::dispatched_lsns::DispatchedLsns;
 use super::journal::WriteSetJournal;
 use super::outcome_floor::OutcomeFloor;
+use super::tenant_inflight::TenantInflight;
 
 /// Per-core request queue capacity of the server's bridge dispatcher.
 ///
@@ -104,16 +105,11 @@ pub struct Dispatcher {
     /// Routes vShards to core IDs.
     pub(super) router: VShardRouter,
 
-    /// Per-tenant in-flight request count across all cores.
-    pub(super) tenant_inflight: HashMap<u64, u32>,
+    /// Per-tenant in-flight counts across all cores and the fair-share cap
+    /// they derive.
+    pub(super) tenants: TenantInflight,
 
-    /// Maps request_id → tenant_id for in-flight requests.
-    pub(super) request_tenant: HashMap<u64, u64>,
-
-    /// Maximum in-flight requests per tenant (0 = unlimited).
-    pub(super) max_per_tenant_inflight: u32,
-
-    /// Per-core queue capacity (used in tenant fairness recalculation).
+    /// Per-core queue capacity.
     pub(super) per_core_capacity: u32,
 
     /// Resolves priority class for a database_id (consulted on enqueue).
@@ -184,9 +180,7 @@ impl Dispatcher {
             Self {
                 cores,
                 router,
-                tenant_inflight: HashMap::new(),
-                request_tenant: HashMap::new(),
-                max_per_tenant_inflight: total_capacity as u32,
+                tenants: TenantInflight::new(u32::try_from(total_capacity).unwrap_or(u32::MAX)),
                 per_core_capacity: queue_capacity as u32,
                 priority_resolver,
                 data_plane_draining: false,

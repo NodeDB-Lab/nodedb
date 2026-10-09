@@ -12,7 +12,6 @@ use tokio::sync::mpsc;
 
 use super::TxnId;
 use super::completion::{CalvinCompletionRegistry, ParticipantVote, VerdictOutcome};
-use super::completion_entry::PendingCompletion;
 use super::sequencer::AbortReason;
 
 /// Push notification that a staged cross-shard txn's authoritative global
@@ -72,10 +71,7 @@ impl CalvinCompletionRegistry {
     /// no-op (max with the existing value).
     pub fn seed_expected(&self, txn: TxnId, expected: usize) {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let entry = inner
-            .completions
-            .entry(txn)
-            .or_insert_with(|| PendingCompletion::new(0));
+        let entry = inner.sequenced_entry_mut(txn);
         entry.expected_participants = entry.expected_participants.max(expected);
     }
 
@@ -88,10 +84,7 @@ impl CalvinCompletionRegistry {
     /// each parked participant's flush (commit) or drop (abort).
     pub fn note_vote(&self, txn_id: TxnId, vshard: u32, vote: ParticipantVote) {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let entry = inner
-            .completions
-            .entry(txn_id)
-            .or_insert_with(|| PendingCompletion::new(0));
+        let entry = inner.entry_mut(txn_id);
         entry.votes.insert(vshard, vote);
 
         // On the transition to a complete tally, emit the aggregated verdict
@@ -164,10 +157,7 @@ impl CalvinCompletionRegistry {
     pub fn note_verdict(&self, txn: TxnId, verdict: VerdictOutcome) {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         {
-            let entry = inner
-                .completions
-                .entry(txn)
-                .or_insert_with(|| PendingCompletion::new(0));
+            let entry = inner.entry_mut(txn);
             match entry.verdict {
                 Some(existing) if existing.is_commit() != verdict.is_commit() => {
                     tracing::warn!(
@@ -196,6 +186,8 @@ impl CalvinCompletionRegistry {
         for tx in inner.verdict_signal_senders.values() {
             let _ = tx.try_send(signal);
         }
+        // A waiter fires here when every ack is in already.
+        inner.settle(txn);
     }
 
     /// The parked scheduler's flush/drop gate: `Some(true)` commit, `Some(false)`
@@ -228,16 +220,18 @@ impl CalvinCompletionRegistry {
 /// commit, otherwise abort with the highest-precedence reason.
 ///
 /// Precedence: `PartsLost` outranks everything, since no participant holds
-/// the whole transaction. `ParticipantError` outranks `CollectionSuperseded`, which
-/// outranks `PredictionDrift`, which outranks `SerializationConflict`. A peer
-/// that never staged makes every other verdict unverifiable, a superseded
-/// collection makes a retry against the same read-set pointless, and a
-/// drifted prediction retries with a fresh reconnaissance. The tally is
+/// the whole transaction. `PlanRejected` outranks `ParticipantError`, which
+/// outranks `CollectionSuperseded`, which outranks `PredictionDrift`, which
+/// outranks `SerializationConflict`. Rejected plans fail the same way on every
+/// resubmit, a peer that never staged makes every other verdict unverifiable,
+/// a superseded collection makes a retry against the same read-set pointless,
+/// and a drifted prediction retries with a fresh reconnaissance. The tally is
 /// order-independent.
 fn tally_verdict(votes: &BTreeMap<u32, ParticipantVote>) -> VerdictOutcome {
     fn rank(reason: AbortReason) -> u8 {
         match reason {
-            AbortReason::PartsLost => 4,
+            AbortReason::PartsLost => 5,
+            AbortReason::PlanRejected => 4,
             AbortReason::ParticipantError => 3,
             AbortReason::CollectionSuperseded => 2,
             AbortReason::PredictionDrift => 1,
@@ -405,6 +399,36 @@ mod tests {
         }
         for votes in [[&superseded, &errored], [&errored, &superseded]] {
             assert_eq!(tally(votes), aborted(AbortReason::ParticipantError));
+        }
+    }
+
+    /// A rejected plan outranks every staged abort cause, in any vote order.
+    #[test]
+    fn plan_rejected_outranks_staged_abort_causes() {
+        let rejected = ParticipantVote::Abort(AbortReason::PlanRejected);
+        let tally = |votes: [&ParticipantVote; 2]| {
+            let votes: BTreeMap<u32, ParticipantVote> =
+                (1..).zip(votes.into_iter().copied()).collect();
+            tally_verdict(&votes)
+        };
+        for other in [
+            AbortReason::SerializationConflict,
+            AbortReason::PredictionDrift,
+            AbortReason::CollectionSuperseded,
+            AbortReason::ParticipantError,
+        ] {
+            let other = ParticipantVote::Abort(other);
+            for votes in [[&rejected, &other], [&other, &rejected]] {
+                assert_eq!(
+                    tally(votes),
+                    VerdictOutcome::Abort(AbortReason::PlanRejected),
+                    "{other:?}"
+                );
+            }
+        }
+        let lost = ParticipantVote::Abort(AbortReason::PartsLost);
+        for votes in [[&rejected, &lost], [&lost, &rejected]] {
+            assert_eq!(tally(votes), VerdictOutcome::Abort(AbortReason::PartsLost));
         }
     }
 

@@ -589,6 +589,37 @@ a crashed node's descriptor leases block DDL until they expire.
 All three must be positive. `scope_expiry_interval_secs` has a floor of `10`.
 Below that the sweep costs more than the resolution it buys.
 
+**Calvin scheduler settings** (config file only):
+
+| Config field                                     | Default |
+| ------------------------------------------------ | ------- |
+| `tuning.calvin.channel_capacity`                 | `512`   |
+| `tuning.calvin.txn_deadline_multiplier`          | `3`     |
+| `tuning.calvin.dependent_read_passive_timeout_ms` | `60`    |
+| `tuning.calvin.verdict_stall_warn_ms`            | `5000`  |
+| `tuning.calvin.max_inflight_backlog`             | `1024`  |
+| `tuning.calvin.catch_up_window`                  | `512`   |
+
+Each hosted vShard runs one Calvin scheduler with these settings.
+
+- `channel_capacity` sizes each scheduler's bounded input and completion
+  channels.
+- `txn_deadline_multiplier` sets a transaction deadline in sequencer epochs.
+- `dependent_read_passive_timeout_ms` bounds the wait for passive read results.
+- `verdict_stall_warn_ms` spaces the stall warnings of a transaction waiting
+  on its global verdict. The transaction keeps waiting and never aborts.
+- `max_inflight_backlog` is the in-flight backlog at which a scheduler stops
+  taking new input.
+- `catch_up_window` is the most sequencer log entries one catch-up pass
+  replays.
+
+Every value must be positive. `verdict_stall_warn_ms` has a floor of `4`.
+
+After a restart, a scheduler re-applies epochs up to the highest epoch it
+applied before. The client gateway opens only after every scheduler on the
+node reaches that epoch. The wait shares the data-group recovery bound, and
+startup fails when the bound expires.
+
 **Observability settings:**
 
 | Config field                                      | Environment variable              | Default        |

@@ -156,7 +156,7 @@ impl Scheduler {
                 mut request,
                 journal,
             } = parked;
-            if step != DispatchStep::WriteVersionRecord && !self.pending.contains_key(&txn_id) {
+            if !self.pending.contains_key(&txn_id) {
                 tracing::error!(
                     vshard_id = self.vshard_id,
                     epoch = txn_id.epoch,
@@ -168,7 +168,11 @@ impl Scheduler {
             }
             self.refresh_deferred_request(step, &mut request);
             match self.send_once(txn_id, step, request, journal) {
-                Attempt::Sent => {}
+                Attempt::Sent => {
+                    if step == DispatchStep::WriteVersionRecord {
+                        self.complete_after_version_record(txn_id);
+                    }
+                }
                 Attempt::Capacity(parked) => {
                     self.deferred.push_front(*parked);
                     break;
@@ -188,11 +192,10 @@ impl Scheduler {
     /// Run the terminal handling of a dispatch the dispatcher refused for a
     /// reason other than capacity.
     ///
-    /// A stage, resolve, flush, or drop refusal halts the scheduler: the txn
-    /// keeps its `pending` entry and locks, and its position stays unapplied.
-    /// A refusal during shutdown holds the txn the same way. A write-version
-    /// record is dropped with a warning, because the commit does not depend on
-    /// it.
+    /// Every refusal halts the scheduler: the txn keeps its `pending` entry
+    /// and locks, and its position stays unapplied. A refusal during shutdown
+    /// holds the txn the same way. A lost write-version record halts too:
+    /// read-set validation reads those versions.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn fail_dispatch_step(
         &mut self,
         txn_id: TxnId,
@@ -204,16 +207,7 @@ impl Scheduler {
             DispatchStep::Resolve => HaltStep::Resolve,
             DispatchStep::Flush => HaltStep::Flush,
             DispatchStep::Drop => HaltStep::Drop,
-            DispatchStep::WriteVersionRecord => {
-                tracing::warn!(
-                    vshard_id = self.vshard_id,
-                    epoch = txn_id.epoch,
-                    position = txn_id.position,
-                    %error,
-                    "calvin: write-version record dispatch failed"
-                );
-                return;
-            }
+            DispatchStep::WriteVersionRecord => HaltStep::WriteVersionRecord,
         };
         self.halt_apply(
             txn_id,

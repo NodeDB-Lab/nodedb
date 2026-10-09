@@ -52,6 +52,10 @@ impl Scheduler {
     }
 
     /// Check all pending dependent barriers for timeout.
+    ///
+    /// A timed-out txn never staged here. It parks on the commit barrier
+    /// with a `ParticipantError` abort vote and keeps its locks. Its position
+    /// is marked applied only once the abort verdict drops it.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn check_dependent_barrier_timeouts(
         &mut self,
     ) {
@@ -70,16 +74,116 @@ impl Scheduler {
                     epoch = txn_id.epoch,
                     position = txn_id.position,
                     still_waiting = ?barrier.waiting_for,
-                    "calvin: dependent-read barrier timed out; releasing locks"
+                    "calvin: dependent-read barrier timed out; voting abort"
                 );
                 self.metrics.record_executor_error();
                 self.metrics.record_infra_abort(
                     crate::control::cluster::calvin::scheduler::metrics::infra_abort_reason::PASSIVE_PARTICIPANT_TIMEOUT,
                 );
-                // A barrier txn never entered `pending`: release its locks
-                // under the owner the barrier recorded.
-                self.on_unpending_txn_complete(txn_id, barrier.lock_owner);
+                let stage_error = format!(
+                    "dependent-read barrier timed out waiting for passive vShards {:?}",
+                    barrier.waiting_for
+                );
+                self.park_unstaged(
+                    barrier.txn,
+                    txn_id,
+                    barrier.lock_owner,
+                    nodedb_cluster::calvin::AbortReason::ParticipantError,
+                    stage_error,
+                );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::time::{Duration, Instant};
+
+    use nodedb_cluster::calvin::{
+        AbortReason, CalvinCompletionRegistry, ParticipantVote, SequencerEntry, VerdictOutcome,
+    };
+
+    use super::*;
+    use crate::control::cluster::calvin::scheduler::driver::barrier::PendingDependentBarrier;
+    use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::{
+        CapturingProposer, elect_data_group_leader,
+    };
+    use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
+        build_test_scheduler_with_data_side, make_sequenced_txn,
+    };
+    use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
+
+    const VSHARD: u32 = 7;
+
+    /// A timed-out barrier votes abort and parks. Its vote completes the
+    /// tally into an abort verdict, and the position stays unapplied until
+    /// that verdict drops the txn.
+    #[tokio::test]
+    async fn a_timed_out_barrier_votes_a_complete_abort_tally() {
+        let registry = CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, _data_side) =
+            build_test_scheduler_with_data_side(VSHARD, std::sync::Arc::clone(&registry));
+        let proposer = CapturingProposer::accepting();
+        scheduler.sequencer_proposer = proposer.clone();
+        elect_data_group_leader(&scheduler);
+        let txn_id = TxnId::new(40, 0);
+        let cluster_txn = nodedb_cluster::calvin::TxnId::new(40, 0);
+        registry.seed_expected(cluster_txn, 1);
+        scheduler.dependent_barrier.insert(
+            txn_id,
+            PendingDependentBarrier {
+                txn: make_sequenced_txn(40, 0),
+                lock_owner: txn_id,
+                waiting_for: BTreeSet::from([9]),
+                received: BTreeMap::new(),
+                // no-determinism: test-only deadline already passed.
+                timeout_at: Instant::now() - Duration::from_millis(1),
+            },
+        );
+
+        scheduler.check_dependent_barrier_timeouts();
+        assert!(scheduler.dependent_barrier.is_empty());
+        assert_eq!(
+            scheduler.pending.get(&txn_id).map(|p| p.commit_state),
+            Some(CommitState::AwaitingVerdict)
+        );
+        assert!(!scheduler.applied.is_applied(40, 0));
+        assert_eq!(
+            proposer.accepted(),
+            vec![SequencerEntry::AbortVote {
+                epoch: 40,
+                position: 0,
+                vshard: VSHARD,
+                reason: AbortReason::ParticipantError,
+            }]
+        );
+
+        registry.note_vote(
+            cluster_txn,
+            VSHARD,
+            ParticipantVote::Abort(AbortReason::ParticipantError),
+        );
+        assert_eq!(
+            registry.drain_unproposed_verdicts(),
+            vec![(
+                cluster_txn,
+                VerdictOutcome::Abort(AbortReason::ParticipantError)
+            )]
+        );
+        registry.note_verdict(
+            cluster_txn,
+            VerdictOutcome::Abort(AbortReason::ParticipantError),
+        );
+        scheduler.resume_on_verdict(txn_id, false);
+        assert_eq!(
+            scheduler.pending.get(&txn_id).map(|p| p.commit_state),
+            Some(CommitState::AwaitingResolve {
+                committed: false,
+                redo_lsn: None
+            })
+        );
+        assert!(!scheduler.applied.is_applied(40, 0));
     }
 }

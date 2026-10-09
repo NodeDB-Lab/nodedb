@@ -54,7 +54,8 @@ pub(super) async fn build_hooks(
     // The sequencer group's snapshot: its state machine, captured on the
     // send path and kept durably on the receive path. A node whose sequencer
     // log starts right after an installed snapshot restores the state
-    // machine from it before any entry applies.
+    // machine from it before any entry applies. A log that starts above its
+    // first entry with no usable snapshot marks the history unknown.
     let sequencer_snapshots = Arc::new(
         crate::control::cluster::sequencer_snapshot::SequencerSnapshotStore::new(
             Arc::clone(sequencer_state_machine),

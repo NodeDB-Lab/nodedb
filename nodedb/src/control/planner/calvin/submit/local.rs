@@ -236,34 +236,11 @@ pub(crate) async fn submit_prepared_and_await(
         .map_err(|_| Error::Internal {
             detail: "Calvin completion channel closed".to_owned(),
         })?;
-    let outcome = report.outcome;
-    // Terminal, NON-retryable: the scheduler rejected the transaction's local
-    // plan routing and broadcast `TxnRoutingFailed`. Surface it immediately —
-    // falling through to the RETURNING-drain below will silently report
-    // `Ok(None)` for a transaction that never applied.
-    if let AttemptOutcome::Failed { detail } = &outcome {
-        return Err(Error::Internal {
-            detail: format!("calvin transaction routing failed: {detail}"),
-        });
-    }
-    // Terminal, NON-retryable: the global cross-shard verdict was ABORT and the
-    // writes were dropped. This is a fall-through chain, NOT a match — without
-    // this explicit check `Aborted` will fall through to the RETURNING drain
-    // below and silently return `Ok(None)`, reporting COMMIT SUCCESS for a
-    // transaction that never applied. The verdict's reason picks the error the
-    // client retries on.
-    if let AttemptOutcome::Aborted { reason } = &outcome {
-        return Err(calvin_abort_error(*reason));
-    }
-    // The static (non-dependent) Calvin path never produces an OLLP mismatch —
-    // `note_ollp_mismatch` only fires on the dependent-predicate retry path — so
-    // this branch is unreachable at runtime today. It is kept as a typed error
-    // (never a panic) so any future mismatch signal on this channel surfaces
-    // deterministically instead of crashing.
-    if outcome == AttemptOutcome::Mismatch {
-        return Err(Error::Internal {
-            detail: "OLLP mismatch outcome on non-dependent Calvin path".to_owned(),
-        });
+    // The global cross-shard verdict was ABORT and the writes were dropped.
+    // The verdict's reason picks the error the client sees.
+    match report.outcome {
+        AttemptOutcome::Completed => {}
+        AttemptOutcome::Aborted { reason } => return Err(calvin_abort_error(reason)),
     }
     if binds_authorization {
         crate::control::security::auth_lease::calvin_write_barrier(state).await?;

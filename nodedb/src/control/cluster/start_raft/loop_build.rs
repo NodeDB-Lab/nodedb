@@ -185,6 +185,8 @@ pub(super) async fn build_raft_loop(
         .map_err(|e| crate::Error::Config {
             detail: e.to_string(),
         })?;
+    // Each scheduler runs on the epoch duration of the sequencer feeding it.
+    let scheduler_config = SchedulerConfig::from_tuning(&shared.tuning.calvin, &sequencer_config);
     let (sequencer_inbox, sequencer_inbox_rx) = new_inbox(10_000, &sequencer_config);
     let (reservation_inbox, reservation_inbox_rx) = new_reservation_inbox(10_000);
     let ollp_orchestrator = Arc::new(OllpOrchestrator::new(OllpConfig::default()));
@@ -208,7 +210,6 @@ pub(super) async fn build_raft_loop(
     );
     let sequencer_metrics = Arc::clone(&sequencer_service.metrics);
 
-    let scheduler_config = SchedulerConfig::default();
     spawn_vshard_schedulers(SpawnVshardSchedulersParams {
         handle,
         shared,

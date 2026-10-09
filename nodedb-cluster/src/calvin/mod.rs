@@ -18,8 +18,8 @@ pub use completion::{
 pub use completion_verdict::VerdictSignal;
 pub use completion_waiter::CompletionReport;
 pub use sequencer::{
-    AbortReason, AdmittedTx, ConflictKey, CutInstantHook, EpochCheck, Inbox, InboxReceiver,
-    PartsIntake, PartsOffer, PartsOfferStatus, RejectedTx, ReservationInbox,
+    AbortReason, AdmittedTx, ConflictKey, CutInstantHook, EpochCheck, HistoryOrigin, Inbox,
+    InboxReceiver, PartsIntake, PartsOffer, PartsOfferStatus, RejectedTx, ReservationInbox,
     ReservationInboxReceiver, ReservationRequest, RestorePointHook, SEQUENCER_GROUP_ID,
     SequencerConfig, SequencerEntry, SequencerError, SequencerHalt, SequencerMetrics,
     SequencerReceivers, SequencerRestorePoint, SequencerService, SequencerSnapshot,

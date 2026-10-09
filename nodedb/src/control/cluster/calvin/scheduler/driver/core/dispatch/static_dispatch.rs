@@ -5,14 +5,11 @@
 
 use std::time::Instant;
 
-use tracing::error;
-
 use nodedb_cluster::calvin::types::SequencedTxn;
 use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_physical::physical_plan::meta::MetaOp;
 
 use super::super::deferred::{DispatchOutcome, DispatchStep};
-use super::super::owed::SchedulerProposal;
 use super::super::routing::PlanRouting;
 use super::super::scheduler::Scheduler;
 use super::primary_write::{
@@ -51,27 +48,6 @@ impl Scheduler {
             Err(poisoned) => poisoned.into_inner(),
         };
         mr.vshard_role_is_leader(self.vshard_id)
-    }
-
-    /// Broadcast a terminal, NON-retryable routing-failure signal via the
-    /// sequencer-group Raft so every replica's `CalvinCompletionRegistry`
-    /// fires `note_routing_failed`, waking the coordinator's completion
-    /// waiter immediately with the reason instead of leaving it to burn the
-    /// full deadline and report a generic timeout. Mirrors the OllpMismatch
-    /// broadcast in `handle_executor_response`. Shared by `dispatch_txn` and
-    /// `dispatch_active_txn`, and by a multi-part transaction whose part
-    /// fails to decode.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn propose_routing_failure(
-        &mut self,
-        txn_id: TxnId,
-        err: &crate::Error,
-    ) {
-        self.propose_sequencer_entry(
-            txn_id,
-            SchedulerProposal::RoutingFailed {
-                detail: err.to_string(),
-            },
-        );
     }
 
     /// Filter a transaction's write plans down to the slice that homes to this
@@ -147,14 +123,7 @@ impl Scheduler {
         let plans = match super::super::super::helpers::decode_plans(&txn.tx_class.plans) {
             Ok(p) => p,
             Err(e) => {
-                error!(
-                    vshard_id = self.vshard_id,
-                    epoch,
-                    position,
-                    error = %e,
-                    "calvin scheduler: plan decode failed; releasing locks and skipping txn"
-                );
-                self.on_unpending_txn_complete(txn_id, lock_owner);
+                self.reject_plan(txn, txn_id, lock_owner, &e);
                 return;
             }
         };
@@ -176,15 +145,7 @@ impl Scheduler {
             match self.local_calvin_plans(plans, txn.tx_class.database_id, epoch, position) {
                 Ok(p) => p,
                 Err(e) => {
-                    error!(
-                        vshard_id = self.vshard_id,
-                        epoch,
-                        position,
-                        error = %e,
-                        "calvin scheduler: static txn routing failed; releasing locks"
-                    );
-                    self.propose_routing_failure(txn_id, &e);
-                    self.on_unpending_txn_complete(txn_id, lock_owner);
+                    self.reject_plan(txn, txn_id, lock_owner, &e);
                     return;
                 }
             };
@@ -196,7 +157,7 @@ impl Scheduler {
         // participant — writes home elsewhere, but a read homes HERE, so it must
         // still validate its slice of the read-set and cast a real commit/abort
         // vote — or a routing bug (neither writes nor reads home here). Only the
-        // latter is an error; the former stages a validate-only task below.
+        // latter rejects the plans; the former stages a validate-only task below.
         if local.is_empty()
             && !super::super::routing::homes_versioned_read(
                 &txn.tx_class.versioned_reads,
@@ -211,15 +172,7 @@ impl Scheduler {
                     self.vshard_id
                 ),
             };
-            error!(
-                vshard_id = self.vshard_id,
-                epoch,
-                position,
-                error = %e,
-                "calvin scheduler: static txn homes no local work; releasing locks"
-            );
-            self.propose_routing_failure(txn_id, &e);
-            self.on_unpending_txn_complete(txn_id, lock_owner);
+            self.reject_plan(txn, txn_id, lock_owner, &e);
             return;
         }
 
@@ -349,7 +302,7 @@ impl Scheduler {
                 // This dispatch STAGES the txn (validate + buffer, no apply);
                 // its response carries the local commit vote that drives the
                 // subsequent flush-or-drop.
-                commit_state: Some(super::super::super::types::CommitState::Staged),
+                commit_state: super::super::super::types::CommitState::Staged,
                 // Set only once the txn parks in `AwaitingVerdict`.
                 verdict_deadline: None,
                 stage_error: None,

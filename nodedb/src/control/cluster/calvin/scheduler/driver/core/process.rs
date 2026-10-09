@@ -271,8 +271,9 @@ impl Scheduler {
     ///
     /// Releases the lock-table owner recorded in its `pending` entry. A txn
     /// with no `pending` entry has already completed, so this logs and
-    /// releases nothing. A txn that fails before it enters `pending` uses
-    /// [`Self::on_unpending_txn_complete`] instead.
+    /// releases nothing. A multi-part txn whose parts the sequencer abandoned
+    /// never enters `pending`, and uses [`Self::on_unpending_txn_complete`]
+    /// instead.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn on_txn_complete(
         &mut self,
         txn_id: TxnId,
@@ -293,8 +294,9 @@ impl Scheduler {
         self.release_and_mark_applied(txn_id, pending.lock_owner);
     }
 
-    /// Complete a txn that failed before it entered `pending`, releasing the
-    /// locks held under `lock_owner`.
+    /// Complete a txn that never entered `pending`, releasing the locks held
+    /// under `lock_owner`. Only a txn whose stored verdict is already
+    /// `Abort(PartsLost)` completes this way.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn on_unpending_txn_complete(
         &mut self,
         txn_id: TxnId,

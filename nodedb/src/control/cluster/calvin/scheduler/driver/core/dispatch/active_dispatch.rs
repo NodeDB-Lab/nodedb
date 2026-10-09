@@ -5,8 +5,6 @@
 
 use std::time::Instant;
 
-use tracing::error;
-
 use nodedb_cluster::calvin::types::SequencedTxn;
 use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_physical::physical_plan::meta::MetaOp;
@@ -38,14 +36,7 @@ impl Scheduler {
         let plans = match super::super::super::helpers::decode_plans(&txn.tx_class.plans) {
             Ok(p) => p,
             Err(e) => {
-                error!(
-                    vshard_id = self.vshard_id,
-                    epoch,
-                    position,
-                    error = %e,
-                    "calvin scheduler: active plan decode failed; releasing locks"
-                );
-                self.on_unpending_txn_complete(txn_id, lock_owner);
+                self.reject_plan(txn, txn_id, lock_owner, &e);
                 return;
             }
         };
@@ -62,9 +53,9 @@ impl Scheduler {
                     // A dependent-read active txn dispatched here always carries a
                     // local write slice (the OLLP orchestrator only routes the write
                     // participant through this path). An empty local slice is a
-                    // routing bug, not a read-only participant — surface it as a
-                    // terminal routing failure rather than dispatching an
-                    // active task with nothing to apply.
+                    // routing bug, not a read-only participant, so it rejects the
+                    // plans rather than dispatching an active task with nothing
+                    // to apply.
                     let e = crate::Error::Internal {
                         detail: format!(
                             "calvin active txn {epoch}/{position} homes no local write plans \
@@ -72,27 +63,11 @@ impl Scheduler {
                             self.vshard_id
                         ),
                     };
-                    error!(
-                        vshard_id = self.vshard_id,
-                        epoch,
-                        position,
-                        error = %e,
-                        "calvin scheduler: active txn homes no local writes; releasing locks"
-                    );
-                    self.propose_routing_failure(txn_id, &e);
-                    self.on_unpending_txn_complete(txn_id, lock_owner);
+                    self.reject_plan(txn, txn_id, lock_owner, &e);
                     return;
                 }
                 Err(e) => {
-                    error!(
-                        vshard_id = self.vshard_id,
-                        epoch,
-                        position,
-                        error = %e,
-                        "calvin scheduler: active txn routing failed; releasing locks"
-                    );
-                    self.propose_routing_failure(txn_id, &e);
-                    self.on_unpending_txn_complete(txn_id, lock_owner);
+                    self.reject_plan(txn, txn_id, lock_owner, &e);
                     return;
                 }
             };
@@ -138,7 +113,7 @@ impl Scheduler {
                 // resolve → redo → flush as the static path, for
                 // WAL-only-restart durability. `resolve_staged_commit` reads the
                 // `read_set_valid: None` the active handler returns as "commit".
-                commit_state: Some(super::super::super::types::CommitState::Staged),
+                commit_state: super::super::super::types::CommitState::Staged,
                 // Set only once the txn parks in `AwaitingVerdict`.
                 verdict_deadline: None,
                 stage_error: None,
