@@ -18,6 +18,10 @@
 //!   sequencer log, and then keeps the base (see [`may_start`]).
 //! - The sequencer log keeps the range a waiting vShard will replay (see
 //!   [`crate::control::state::CalvinBases::replay_floor`]).
+//!
+//! A data group whose chunked redo streams this node dropped when it left
+//! the group requires a snapshot too, until one installs (see
+//! `wal_replication::transaction_redo::chunks::owed`).
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, RwLock};
@@ -27,8 +31,9 @@ use nodedb_cluster::multi_raft::MultiRaft;
 use crate::control::security::catalog::calvin_base::CalvinBase;
 use crate::control::state::SharedState;
 
-/// Load this node's Calvin bases and install the data-group snapshot
-/// requirement on `multi_raft`, before its data groups take entries.
+/// Load this node's Calvin bases and owed redo snapshots, and install the
+/// data-group snapshot requirement on `multi_raft`, before its data groups
+/// take entries.
 pub fn install_snapshot_requirement(
     shared: &Arc<SharedState>,
     routing: Arc<RwLock<nodedb_cluster::RoutingTable>>,
@@ -39,6 +44,9 @@ pub fn install_snapshot_requirement(
         catalog.load_calvin_bases()?,
         catalog.load_calvin_sequencer_install()?,
     );
+    shared
+        .redo_chunks
+        .load_owed(catalog.load_redo_snapshot_owed()?);
     let weak = Arc::downgrade(shared);
     multi_raft.set_snapshot_requirement(Arc::new(move |group_id, sequencer_first| {
         let Some(shared) = weak.upgrade() else {
@@ -48,7 +56,9 @@ pub fn install_snapshot_requirement(
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .vshards_for_group(group_id);
-        !shared.calvin.bases.group_reaches(&vshards, sequencer_first)
+        // Evaluated first and always: it registers the vShards as waiting.
+        let reaches = shared.calvin.bases.group_reaches(&vshards, sequencer_first);
+        !reaches || shared.redo_chunks.owes_snapshot(group_id)
     }));
     Ok(())
 }
@@ -161,7 +171,6 @@ pub fn forget_left(shared: &SharedState, vshards: &[u32]) {
         return;
     }
     let catalog = shared.credentials.catalog();
-    let mirrors = shared.authorization_fence.calvin_mirrors();
     let resets: Vec<crate::control::security::catalog::calvin_applied::StoredCalvinApplied> =
         vshards
             .iter()
@@ -175,7 +184,7 @@ pub fn forget_left(shared: &SharedState, vshards: &[u32]) {
             })
             .collect();
     for &vshard_id in vshards {
-        mirrors.remove(vshard_id);
+        shared.calvin.applied.remove(vshard_id);
     }
     let forgotten = catalog
         .replace_calvin_applied(&resets)

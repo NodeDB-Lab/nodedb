@@ -3,7 +3,7 @@
 //! Test driver for a committed Calvin transaction on one core: stage the
 //! plans, resolve them into the redo record, and flush it.
 
-use nodedb_physical::physical_plan::PhysicalPlan;
+use nodedb_physical::physical_plan::{CalvinResolved, PhysicalPlan};
 
 use crate::bridge::envelope::{Response, Status};
 use crate::control::wal_replication::transaction_redo::collections::written_collections;
@@ -58,7 +58,17 @@ impl CoreLoop {
         if resolved.status != Status::Ok {
             return resolved;
         }
-        let redo = resolved.payload.as_bytes().to_vec();
+        let redo = match zerompk::from_msgpack::<CalvinResolved>(resolved.payload.as_bytes()) {
+            Ok(answer) => answer.redo,
+            Err(error) => {
+                return self.response_error(
+                    task,
+                    crate::bridge::envelope::ErrorCode::Internal {
+                        detail: format!("decode the resolved answer: {error}"),
+                    },
+                );
+            }
+        };
         let mut request = task.request.clone();
         request.wal_lsn = Some(Lsn::new(lsn));
         let flush_task = ExecutionTask::new(request);

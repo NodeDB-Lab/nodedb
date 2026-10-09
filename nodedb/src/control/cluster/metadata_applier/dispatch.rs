@@ -261,7 +261,8 @@ impl MetadataCommitApplier {
         }
         self.apply_host_side_effects(entry, raft_index).await?;
         shared
-            .metadata_ddl_applied_token
+            .metadata_ddl
+            .applied_token
             .store(token, std::sync::atomic::Ordering::Release);
         Ok(())
     }
@@ -509,7 +510,7 @@ mod tests {
     /// `DdlPrepareAcquire` does. A pending propose and finalize apply only
     /// under the owner's token.
     fn own_ddl_lease(state: &SharedState, token: u64) {
-        *state.metadata_ddl_owner.lock().unwrap() =
+        *state.metadata_ddl.owner.lock().unwrap() =
             Some(crate::control::metadata_proposer::DdlPrepareOwner {
                 token,
                 node_id: state.node_id,
@@ -564,7 +565,8 @@ mod tests {
         }
         assert_ne!(
             state
-                .metadata_ddl_applied_token
+                .metadata_ddl
+                .applied_token
                 .load(std::sync::atomic::Ordering::Acquire),
             dead,
             "the dead owner's proposer must see its entries superseded"

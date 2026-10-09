@@ -2,7 +2,7 @@
 
 //! Shared test fixtures for the Calvin scheduler driver's `core` unit tests.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,7 @@ use crate::bridge::dispatch::{BridgeResponse, CoreChannelDataSide, Dispatcher};
 use crate::bridge::envelope::{
     Admission, ErrorCode, ExemptReason, Payload, Priority, Request, Response, StageVote, Status,
 };
+use crate::control::cluster::calvin::scheduler::SchedulerConfig;
 use crate::control::cluster::calvin::scheduler::driver::barrier::ReadResultEvent;
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::{
     Scheduler, SchedulerParams,
@@ -30,7 +31,6 @@ use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::Cap
 use crate::control::cluster::calvin::scheduler::driver::types::{CommitState, PendingTxn};
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
 use crate::control::cluster::calvin::scheduler::metrics::SchedulerMetrics;
-use crate::control::cluster::calvin::scheduler::{NOT_YET_APPLIED_EPOCH, SchedulerConfig};
 use crate::control::shutdown::ShutdownWatch;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, Lsn, ReadConsistency, RequestId, VShardId};
@@ -50,6 +50,7 @@ pub(super) fn build_test_scheduler(vshard_id: u32) -> (Scheduler, tempfile::Temp
         .pop()
         .expect("one configured core has one data side");
     let shared = SharedState::new(dispatcher, wal).unwrap();
+    let ledger = shared.calvin.applied.get_or_create(vshard_id);
 
     let rt = RoutingTable::uniform(1, &[1], 1);
     let multi_raft = Arc::new(Mutex::new(MultiRaft::new(1, rt, dir.path().to_path_buf())));
@@ -74,14 +75,13 @@ pub(super) fn build_test_scheduler(vshard_id: u32) -> (Scheduler, tempfile::Temp
         multi_raft,
         sequencer_proposer: CapturingProposer::accepting(),
         sequencer_state_machine,
-        // A freshly-built scheduler has applied nothing, so its watermark is the
+        // A freshly-built scheduler has applied nothing, so its ledger holds the
         // not-yet-applied sentinel (matching `read_applied_recovery` for a clean
-        // node). Hardcoding `0` here will instead claim epoch 0 is fully applied,
+        // node). A watermark of `0` will instead claim epoch 0 is fully applied,
         // making the exactly-once gate (`AppliedGate::is_applied`) short-circuit
         // every epoch-0 replay before it reaches the lock table — silently
         // defeating the end-to-end drain tests below.
-        fully_applied_epoch: NOT_YET_APPLIED_EPOCH,
-        applied_tail: BTreeSet::new(),
+        ledger,
         rebuild_target_epoch: 0,
         config: SchedulerConfig::default(),
         metrics: SchedulerMetrics::new(),
@@ -109,6 +109,7 @@ pub(super) fn build_test_scheduler_with_data_side(
         .pop()
         .expect("one configured core has one data side");
     let shared = SharedState::new(dispatcher, wal).unwrap();
+    let ledger = shared.calvin.applied.get_or_create(vshard_id);
 
     let rt = RoutingTable::uniform(1, &[1], 1);
     let multi_raft = Arc::new(Mutex::new(MultiRaft::new(1, rt, dir.path().to_path_buf())));
@@ -133,8 +134,7 @@ pub(super) fn build_test_scheduler_with_data_side(
         multi_raft,
         sequencer_proposer: CapturingProposer::accepting(),
         sequencer_state_machine,
-        fully_applied_epoch: NOT_YET_APPLIED_EPOCH,
-        applied_tail: BTreeSet::new(),
+        ledger,
         rebuild_target_epoch: 0,
         config: SchedulerConfig::default(),
         metrics: SchedulerMetrics::new(),

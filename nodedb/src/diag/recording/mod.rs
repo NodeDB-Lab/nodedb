@@ -21,6 +21,7 @@ mod outcome_floor;
 mod quota;
 mod raft_apply;
 mod recovery;
+mod redo_stream;
 mod retention;
 mod shared;
 mod vector;
@@ -56,6 +57,9 @@ pub use recovery::{
     batch_insert_without_surrogates, fts_index_update_failed, orphaned_index_entry_after_delete,
     replay_record_unapplied, strict_row_undecodable, wal_archival_failed_truncation_held,
     write_acked_without_durability,
+};
+pub use redo_stream::{
+    redo_abandon_given_up, redo_snapshot_debt_not_recorded, redo_stream_lost_here,
 };
 pub use retention::retention_autowire_orphaned;
 pub use shared::entry_kind;

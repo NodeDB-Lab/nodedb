@@ -26,6 +26,8 @@
 //! - [`write_dispatch`]: the generic decode + write-funnel enqueue path.
 //! - [`transaction_redo`]: a committed transaction's redo, stamped with its
 //!   Raft entry and applied through the WAL replay arms.
+//! - [`redo_chunk`]: the chunks, the abandon and the final entry of a
+//!   chunked redo stream.
 //! - [`topic_publish`]: a committed durable-topic publication, appended to
 //!   this replica's topic log at the entry's position.
 //! - [`proposal_gate`]: skips a second committed copy of an applied proposal
@@ -54,6 +56,7 @@ mod lane;
 mod metadata_floor;
 mod pipeline;
 mod proposal_gate;
+mod redo_chunk;
 mod snapshot_gate;
 mod start;
 mod surrogate_bind;

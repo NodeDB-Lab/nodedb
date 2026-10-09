@@ -10,15 +10,15 @@
 //! its own scheduler applied that transaction too.
 //!
 //! The sequencer state machine records each ack it applies. This tracker
-//! takes them in log order and settles each against the local scheduler's
-//! applied mirror. The first unsettled ack bounds the coverage.
+//! takes them in log order and settles each against the vShard's applied
+//! ledger on this node. The first unsettled ack bounds the coverage.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use nodedb_cluster::calvin::{AppliedCompletionAck, CalvinCompletionRegistry};
 
-use crate::control::cluster::calvin::scheduler::AppliedMirrors;
+use crate::control::cluster::calvin::scheduler::CalvinAppliedLedgers;
 
 /// Acks taken from the sequencer log and not yet settled.
 #[derive(Debug, Default)]
@@ -36,7 +36,7 @@ impl CalvinAckCoverage {
     pub fn covered_through(
         &self,
         registry: &CalvinCompletionRegistry,
-        mirrors: &AppliedMirrors,
+        ledgers: &CalvinAppliedLedgers,
         applied: u64,
         replicates: impl Fn(u32) -> bool,
     ) -> u64 {
@@ -44,9 +44,9 @@ impl CalvinAckCoverage {
         pending.extend(registry.applied_acks.drain());
         while let Some(ack) = pending.front() {
             let settled = !replicates(ack.vshard_id)
-                || mirrors
+                || ledgers
                     .get(ack.vshard_id)
-                    .is_some_and(|mirror| mirror.is_applied(ack.txn.epoch, ack.txn.position));
+                    .is_some_and(|ledger| ledger.is_applied(ack.txn.epoch, ack.txn.position));
             if !settled {
                 break;
             }
@@ -80,8 +80,8 @@ mod tests {
     fn an_ack_the_local_replica_has_not_applied_bounds_the_coverage() {
         let registry = CalvinCompletionRegistry::new_detached();
         registry.applied_acks.enable();
-        let mirrors = AppliedMirrors::default();
-        let mirror = mirrors.register(7, NOT_YET_APPLIED_EPOCH, &BTreeSet::new());
+        let ledgers = CalvinAppliedLedgers::default();
+        let ledger = ledgers.install(7, NOT_YET_APPLIED_EPOCH, BTreeSet::new());
         let coverage = CalvinAckCoverage::default();
 
         registry.applied_acks.record(ack(4, 1, 7));
@@ -89,38 +89,38 @@ mod tests {
         // vShard 7 is replicated here and its scheduler has not applied epoch 1.
         let replicates = |vshard: u32| vshard == 7;
         assert_eq!(
-            coverage.covered_through(&registry, &mirrors, 8, replicates),
+            coverage.covered_through(&registry, &ledgers, 8, replicates),
             3
         );
 
-        mirror.mark(1, 0);
+        ledger.mark_applied(1, 0);
         // The ack for vShard 9 settles at once: it is not replicated here.
         assert_eq!(
-            coverage.covered_through(&registry, &mirrors, 8, replicates),
+            coverage.covered_through(&registry, &ledgers, 8, replicates),
             8
         );
     }
 
     #[test]
-    fn a_replicated_vshard_without_a_scheduler_yet_is_unsettled() {
+    fn a_replicated_vshard_without_a_ledger_is_unsettled() {
         let registry = CalvinCompletionRegistry::new_detached();
         registry.applied_acks.enable();
-        let mirrors = AppliedMirrors::default();
+        let ledgers = CalvinAppliedLedgers::default();
         let coverage = CalvinAckCoverage::default();
         registry.applied_acks.record(ack(2, 1, 5));
         assert_eq!(
-            coverage.covered_through(&registry, &mirrors, 3, |_| true),
+            coverage.covered_through(&registry, &ledgers, 3, |_| true),
             1
         );
     }
 
-    /// A restart loses the in-memory mirror and, after a checkpoint, the WAL
-    /// markers of transactions applied before it. The mirror rebuilt from the
+    /// A restart loses the in-memory ledger and, after a checkpoint, the WAL
+    /// markers of transactions applied before it. The ledger rebuilt from the
     /// state the checkpoint saved settles every ack the sequencer log replays,
     /// so the coverage reaches the sequencer log's applied index.
     #[test]
-    fn a_mirror_rebuilt_from_saved_state_settles_replayed_acks() {
-        use crate::control::cluster::calvin::scheduler::recover_applied;
+    fn a_ledger_rebuilt_from_saved_state_settles_replayed_acks() {
+        use crate::control::cluster::calvin::scheduler::recover_all_applied;
         use crate::control::security::catalog::SystemCatalog;
         use crate::control::security::catalog::calvin_applied::StoredCalvinApplied;
 
@@ -138,9 +138,10 @@ mod tests {
             }])
             .expect("save");
 
-        let recovered = recover_applied(&wal, &catalog, 7, None).expect("recover");
-        let mirrors = AppliedMirrors::default();
-        mirrors.register(7, recovered.fully_applied_epoch, &recovered.applied_tail);
+        let mut recovered = recover_all_applied(&wal, &catalog, &|_| None).expect("recover");
+        let recovered = recovered.remove(&7).expect("vShard 7 recovered");
+        let ledgers = CalvinAppliedLedgers::default();
+        ledgers.install(7, recovered.fully_applied_epoch, recovered.applied_tail);
 
         let registry = CalvinCompletionRegistry::new_detached();
         registry.applied_acks.enable();
@@ -156,9 +157,9 @@ mod tests {
         });
         let coverage = CalvinAckCoverage::default();
         assert_eq!(
-            coverage.covered_through(&registry, &mirrors, 19, |_| true),
+            coverage.covered_through(&registry, &ledgers, 19, |_| true),
             19,
-            "every replayed ack settles against the rebuilt mirror"
+            "every replayed ack settles against the rebuilt ledger"
         );
     }
 }

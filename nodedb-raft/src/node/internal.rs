@@ -256,7 +256,11 @@ impl<S: LogStorage> RaftNode<S> {
         };
 
         let entries = if next_index <= self.log.last_index() {
-            match self.log.entries_range(next_index, self.log.last_index()) {
+            match self.log.entries_within(
+                next_index,
+                self.log.last_index(),
+                crate::log::MAX_APPEND_BATCH_BYTES,
+            ) {
                 Ok(slice) => slice.to_vec(),
                 Err(RaftError::LogCompacted { .. }) => {
                     debug!(
@@ -346,7 +350,11 @@ impl<S: LogStorage> RaftNode<S> {
         };
 
         let entries = if next_index <= self.log.last_index() {
-            match self.log.entries_range(next_index, self.log.last_index()) {
+            match self.log.entries_within(
+                next_index,
+                self.log.last_index(),
+                crate::log::MAX_APPEND_BATCH_BYTES,
+            ) {
                 Ok(slice) => slice.to_vec(),
                 Err(crate::error::RaftError::LogCompacted { .. }) => {
                     debug!(

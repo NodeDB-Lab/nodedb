@@ -282,22 +282,28 @@ impl CoreLoop {
             }
 
             // Install a committed transaction's redo record through the WAL
-            // replay arms, on every replica, in Raft log order.
+            // replay arms, on every replica, in Raft log order. A committed
+            // Calvin slice also ends its staged state and answers its reply.
             MetaOp::ApplyTransactionRedo {
                 redo,
                 collections,
                 sum_targets,
                 origin,
-            } => self.install_redo(
-                task,
-                tid,
-                crate::data::executor::handlers::transaction::redo_apply::CommittedRedo {
-                    redo,
-                    collections,
-                    sum_targets,
-                },
-                *origin,
-            ),
+                calvin,
+            } => {
+                let committed =
+                    crate::data::executor::handlers::transaction::redo_apply::CommittedRedo {
+                        redo,
+                        collections,
+                        sum_targets,
+                    };
+                match calvin {
+                    Some(install) => {
+                        self.install_calvin_redo(task, tid, committed, *origin, install)
+                    }
+                    None => self.install_redo(task, tid, committed, *origin),
+                }
+            }
 
             // A RESTORE batch installs only inside its Calvin transaction:
             // its resolve appends the batch to the transaction's redo record.

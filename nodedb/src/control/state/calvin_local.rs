@@ -7,9 +7,11 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::control::cluster::calvin::scheduler::SequencerProposer;
 use crate::control::cluster::calvin::scheduler::lock::HotKeyTable;
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
+use crate::control::cluster::calvin::scheduler::{
+    CalvinAppliedLedgers, CaughtUpRegistry, SequencerProposer,
+};
 use crate::control::server::shared::write_admission::AdmissionHolds;
 
 use super::calvin_apply_sidecar::CalvinApplySidecar;
@@ -84,6 +86,12 @@ pub struct CalvinLocalState {
     /// Hands this node's sequencer entries to the sequencer Raft group. Set
     /// once the schedulers start; unset on a node that runs none.
     pub sequencer_proposer: OnceLock<Arc<dyn SequencerProposer>>,
+    /// Which Calvin positions this node's replica of each vShard applied.
+    /// Boot recovery fills it before the data-group apply loop starts.
+    pub applied: CalvinAppliedLedgers,
+    /// Whether each running scheduler reached its rebuild target. Startup
+    /// reads it before it opens the client gateway.
+    pub caught_up: CaughtUpRegistry,
 }
 
 impl CalvinLocalState {
@@ -106,6 +114,8 @@ impl CalvinLocalState {
             cuts: CalvinCuts::default(),
             bases: CalvinBases::default(),
             sequencer_proposer: OnceLock::new(),
+            applied: CalvinAppliedLedgers::default(),
+            caught_up: CaughtUpRegistry::default(),
         }
     }
 }

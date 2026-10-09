@@ -423,6 +423,16 @@ pub enum RecordType {
     ///
     /// Required: skipping it leaves every truncated edge live after replay.
     GraphEdgeCut = 68 | 0x8000,
+
+    /// One piece of a chunk of a chunked transaction redo stream, or the
+    /// close of such a stream. Payload: a `RedoChunkRecord`. A chunk past the
+    /// WAL record limit spans several pieces, and only its last piece carries
+    /// the chunk entry's apply key. Boot rebuilds every open stream from these
+    /// records. Never replayed into any engine.
+    ///
+    /// Required: skipping it loses the bytes an open stream holds, and the
+    /// stream's final entry then refuses on this replica alone.
+    RedoChunk = 69 | 0x8000,
 }
 
 impl RecordType {
@@ -484,6 +494,7 @@ impl RecordType {
             x if x == 66 | 0x8000 => Some(Self::SnapshotInstalled),
             x if x == 67 | 0x8000 => Some(Self::WriteGroup),
             x if x == 68 | 0x8000 => Some(Self::GraphEdgeCut),
+            x if x == 69 | 0x8000 => Some(Self::RedoChunk),
             _ => None,
         }
     }
@@ -521,6 +532,7 @@ mod tests {
         // Without the flag an older reader skips the abort marker and replays
         // the refused write it names — the exact bug it exists to prevent.
         assert!(RecordType::is_required(RecordType::WriteAborted as u32));
+        assert!(RecordType::is_required(RecordType::RedoChunk as u32));
     }
 
     #[test]
@@ -576,6 +588,7 @@ mod tests {
             RecordType::SnapshotInstalled,
             RecordType::WriteGroup,
             RecordType::GraphEdgeCut,
+            RecordType::RedoChunk,
         ] {
             assert_eq!(RecordType::from_raw(ty as u32), Some(ty));
         }

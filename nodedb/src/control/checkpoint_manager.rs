@@ -173,16 +173,17 @@ pub struct CheckpointCycleInputs<'a> {
     pub archiver: Option<&'a mut WalArchiver>,
     /// When present, the tombstone set is GC'd to the new truncation point.
     pub catalog: Option<&'a crate::control::security::catalog::SystemCatalog>,
-    /// The applied state of every Calvin scheduler on this node. Saved in
+    /// The Calvin applied ledger of every vShard on this node. Saved in
     /// `catalog` before truncation deletes the applied markers it came from.
-    pub calvin_mirrors: Option<&'a crate::control::cluster::calvin::scheduler::AppliedMirrors>,
+    pub calvin_ledgers:
+        Option<&'a crate::control::cluster::calvin::scheduler::CalvinAppliedLedgers>,
 }
 
-/// The applied state of every mirror, as the catalog stores it.
+/// The applied state of every ledger, as the catalog stores it.
 fn calvin_applied_states(
-    mirrors: &crate::control::cluster::calvin::scheduler::AppliedMirrors,
+    ledgers: &crate::control::cluster::calvin::scheduler::CalvinAppliedLedgers,
 ) -> Vec<crate::control::security::catalog::calvin_applied::StoredCalvinApplied> {
-    mirrors.snapshot_all()
+    ledgers.snapshot_all()
 }
 
 /// Save `states` in `catalog`.
@@ -215,7 +216,7 @@ pub async fn run_checkpoint_cycle(inputs: CheckpointCycleInputs<'_>) -> Option<L
         timeout,
         archiver,
         catalog,
-        calvin_mirrors,
+        calvin_ledgers,
     } = inputs;
 
     if num_cores == 0 {
@@ -366,7 +367,7 @@ pub async fn run_checkpoint_cycle(inputs: CheckpointCycleInputs<'_>) -> Option<L
     // Read the Calvin applied state before the WAL sync below. A scheduler
     // marks a position applied only after the position's records were
     // appended, so the sync makes every record behind this state durable.
-    let calvin_states = calvin_mirrors.map(calvin_applied_states);
+    let calvin_states = calvin_ledgers.map(calvin_applied_states);
 
     // 5. Write checkpoint marker to WAL.
     match wal

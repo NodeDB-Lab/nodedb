@@ -81,6 +81,7 @@ pub(super) const BOOTSTRAP_TABLES: &[BootstrapTable] = bootstrap_tables![
     "calvin_applied" => super::calvin_applied::CALVIN_APPLIED,
     "calvin_base" => super::calvin_base::CALVIN_BASE,
     "calvin_sequencer_install" => super::calvin_base::CALVIN_SEQUENCER_INSTALL,
+    "redo_snapshot_owed" => super::redo_snapshot_owed::REDO_SNAPSHOT_OWED,
     "l2_cleanup_queue" => L2_CLEANUP_QUEUE,
     "pending_reclaim" => PENDING_RECLAIM,
     // ── Metadata-group host state ──

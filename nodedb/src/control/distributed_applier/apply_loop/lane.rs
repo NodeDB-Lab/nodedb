@@ -63,6 +63,8 @@ impl QueuedEntry {
                 ReplicatedWrite::CutBarrier { .. }
                     | ReplicatedWrite::CalvinReadResult { .. }
                     | ReplicatedWrite::SurrogateBind { .. }
+                    | ReplicatedWrite::RedoChunk { .. }
+                    | ReplicatedWrite::RedoAbandon { .. }
             )
         {
             return None;
@@ -85,7 +87,9 @@ impl QueuedEntry {
             ReplicatedWrite::ArraySchema { .. }
             | ReplicatedWrite::CutBarrier { .. }
             | ReplicatedWrite::CalvinReadResult { .. }
-            | ReplicatedWrite::SurrogateBind { .. } => false,
+            | ReplicatedWrite::SurrogateBind { .. }
+            | ReplicatedWrite::RedoChunk { .. }
+            | ReplicatedWrite::RedoAbandon { .. } => false,
             _ => matches!(
                 decode_replicated_entry(&self.entry.data),
                 Ok(Some((_, _, plan, _))) if plan_writes_user_data(&plan)
@@ -99,7 +103,8 @@ impl QueuedEntry {
     /// and a schema import must follow every earlier entry's apply. A topic
     /// publication awaits its proposal marker's fsync. A cut barrier
     /// persists its floor, and a capturing one snapshots its tenants, after
-    /// every earlier entry and before every later one.
+    /// every earlier entry and before every later one. A redo chunk or
+    /// abandon changes the stream a later entry of its group reads.
     pub fn is_exclusive(&self) -> bool {
         self.decoded.as_ref().is_some_and(|e| {
             matches!(
@@ -110,6 +115,8 @@ impl QueuedEntry {
                     | ReplicatedWrite::ArrayCellDelete { .. }
                     | ReplicatedWrite::TopicPublish { .. }
                     | ReplicatedWrite::CutBarrier { .. }
+                    | ReplicatedWrite::RedoChunk { .. }
+                    | ReplicatedWrite::RedoAbandon { .. }
             )
         })
     }
@@ -153,8 +160,8 @@ pub(super) struct Lane {
     /// runs, or an exclusive entry that runs.
     pub blocking: Option<u64>,
     /// The durable prefix over every entry this process settled for the
-    /// group. A break holds for the life of the process: an index saved past
-    /// a non-durable entry lets the next boot skip it.
+    /// group. A break holds until a snapshot install covers it: an index
+    /// saved past a non-durable entry lets the next boot skip it.
     prefix: AppliedPrefix,
     /// The floor last saved for the group.
     saved_floor: Option<u64>,
@@ -326,6 +333,17 @@ impl Lane {
         settled
     }
 
+    /// Count every entry of the group through `installed_through` durable.
+    /// An installed snapshot holds their state, so a break at or below it
+    /// heals.
+    ///
+    /// The caller passes the index it read under the group's apply gate,
+    /// before it admits an entry. Every entry above the index reaches the
+    /// lane after the install, so none settles before this call.
+    pub fn cover_through(&mut self, installed_through: u64) {
+        self.prefix.cover_through(installed_through);
+    }
+
     /// Whether the durable floor moved past the floor last saved.
     pub fn floor_pending(&self) -> bool {
         self.prefix
@@ -407,6 +425,48 @@ mod tests {
             lane.take_floor_to_save(),
             None,
             "a floor past entry 2 would let the next boot skip it"
+        );
+    }
+
+    #[test]
+    fn a_covering_snapshot_lets_the_floor_pass_a_held_entry() {
+        let tracker = ProposeTracker::new();
+        let marks = TenantMarks::default();
+        let mut lane = Lane::new(1);
+        lane.push(slot(1, SlotState::Concluded(PrefixStep::Record(true))));
+        lane.push(slot(2, SlotState::Concluded(PrefixStep::Record(false))));
+        lane.push(slot(3, SlotState::Running));
+        lane.settle(&tracker, &marks);
+        assert_eq!(lane.take_floor_to_save(), Some(1));
+
+        // A snapshot at index 4 installs while entry 3 still runs.
+        lane.cover_through(4);
+        assert_eq!(lane.take_floor_to_save(), Some(4));
+
+        assert!(lane.conclude(3, false, |_| PrefixStep::Record(false)));
+        lane.push(slot(5, SlotState::Concluded(PrefixStep::Record(true))));
+        lane.settle(&tracker, &marks);
+        assert_eq!(
+            lane.take_floor_to_save(),
+            Some(5),
+            "the snapshot holds entries 2 and 3"
+        );
+    }
+
+    #[test]
+    fn a_held_entry_above_the_snapshot_still_holds_the_floor() {
+        let tracker = ProposeTracker::new();
+        let marks = TenantMarks::default();
+        let mut lane = Lane::new(1);
+        lane.cover_through(4);
+        lane.push(slot(5, SlotState::Concluded(PrefixStep::Record(false))));
+        lane.push(slot(6, SlotState::Concluded(PrefixStep::Record(true))));
+        lane.settle(&tracker, &marks);
+        assert_eq!(lane.take_floor_to_save(), Some(4));
+        assert_eq!(
+            lane.take_floor_to_save(),
+            None,
+            "a floor past entry 5 would let the next boot skip it"
         );
     }
 

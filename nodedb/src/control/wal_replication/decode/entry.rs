@@ -229,5 +229,12 @@ fn to_physical_plan(
         ReplicatedWrite::SurrogateBind { .. } => Err(crate::Error::Internal {
             detail: "SurrogateBind reached to_physical_plan (should have been intercepted)".into(),
         }),
+        // The apply loop holds a redo stream's chunks itself; they reach no core.
+        ReplicatedWrite::RedoChunk { .. } => Err(crate::Error::Internal {
+            detail: "RedoChunk reached to_physical_plan (should have been intercepted)".into(),
+        }),
+        ReplicatedWrite::RedoAbandon { .. } => Err(crate::Error::Internal {
+            detail: "RedoAbandon reached to_physical_plan (should have been intercepted)".into(),
+        }),
     }
 }

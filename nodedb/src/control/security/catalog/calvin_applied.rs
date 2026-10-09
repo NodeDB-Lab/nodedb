@@ -75,30 +75,29 @@ fn decode_tail(bytes: &[u8]) -> crate::Result<BTreeSet<(u64, u32)>> {
 }
 
 impl SystemCatalog {
-    /// The saved applied state of `vshard_id`, if any.
-    pub fn load_calvin_applied(
-        &self,
-        vshard_id: u32,
-    ) -> crate::Result<Option<StoredCalvinApplied>> {
+    /// The saved applied state of every vShard.
+    pub fn load_all_calvin_applied(&self) -> crate::Result<Vec<StoredCalvinApplied>> {
         let read_txn = self
             .db
             .begin_read()
-            .map_err(|e| catalog_err("load_calvin_applied read txn", e))?;
+            .map_err(|e| catalog_err("load_all_calvin_applied read txn", e))?;
         let table = read_txn
             .open_table(CALVIN_APPLIED)
             .map_err(|e| catalog_err("open calvin_applied", e))?;
-        let Some(row) = table
-            .get(vshard_id)
-            .map_err(|e| catalog_err("get calvin_applied", e))?
-        else {
-            return Ok(None);
-        };
-        let (fully_applied_epoch, tail) = row.value();
-        Ok(Some(StoredCalvinApplied {
-            vshard_id,
-            fully_applied_epoch,
-            tail: decode_tail(tail)?,
-        }))
+        let mut out = Vec::new();
+        for row in table
+            .iter()
+            .map_err(|e| catalog_err("iter calvin_applied", e))?
+        {
+            let (vshard, value) = row.map_err(|e| catalog_err("read calvin_applied", e))?;
+            let (fully_applied_epoch, tail) = value.value();
+            out.push(StoredCalvinApplied {
+                vshard_id: vshard.value(),
+                fully_applied_epoch,
+                tail: decode_tail(tail)?,
+            });
+        }
+        Ok(out)
     }
 
     /// Replace the saved state of each vShard in `states` with the given one.
@@ -198,7 +197,7 @@ mod tests {
     fn saved_state_reloads_and_only_grows() {
         let dir = tempfile::tempdir().expect("tempdir");
         let catalog = SystemCatalog::open(&dir.path().join("system.redb")).expect("catalog");
-        assert_eq!(catalog.load_calvin_applied(3).expect("load"), None);
+        assert!(catalog.load_all_calvin_applied().expect("load").is_empty());
 
         catalog
             .save_calvin_applied(vec![state(3, NONE_FULLY_APPLIED, &[(0, 0), (2, 1)])])
@@ -207,8 +206,8 @@ mod tests {
             .save_calvin_applied(vec![state(3, 1, &[(4, 0)])])
             .expect("save");
         assert_eq!(
-            catalog.load_calvin_applied(3).expect("load"),
-            Some(state(3, 1, &[(2, 1), (4, 0)]))
+            catalog.load_all_calvin_applied().expect("load"),
+            vec![state(3, 1, &[(2, 1), (4, 0)])]
         );
     }
 }

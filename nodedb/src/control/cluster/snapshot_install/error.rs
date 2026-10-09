@@ -16,6 +16,8 @@ pub enum SettleStep {
     EventLane,
     /// Replacing the group vShards' Calvin applied state and base.
     CalvinState,
+    /// Replacing the group's open chunked redo streams.
+    RedoStreams,
 }
 
 impl std::fmt::Display for SettleStep {
@@ -26,6 +28,7 @@ impl std::fmt::Display for SettleStep {
             Self::ProposalKeys => "proposal-key persist",
             Self::EventLane => "event lane install",
             Self::CalvinState => "Calvin state install",
+            Self::RedoStreams => "redo stream install",
         })
     }
 }

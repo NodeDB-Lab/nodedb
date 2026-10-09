@@ -193,7 +193,13 @@ impl<'a> Pipeline<'a> {
             let log_index = queued.entry.index;
             let proposal_key = queued.proposal_key();
             let covered_through = self.ctx.tracker.covered_through(group_id);
-            let permit = match admit_entry(gates, group_id, log_index, covered_through) {
+            let admission = admit_entry(gates, group_id, log_index, covered_through);
+            // Before the entry joins the lane: no entry above the installed
+            // index settles before the lane covers it.
+            if let Some(lane) = self.lanes.get_mut(&group_id) {
+                lane.cover_through(admission.installed_through);
+            }
+            let permit = match admission.decision {
                 EntryAdmission::Installing => {
                     if let Some(lane) = self.lanes.get_mut(&group_id) {
                         lane.backlog.push_front(queued);
@@ -256,6 +262,11 @@ impl<'a> Pipeline<'a> {
                 proposal_key,
                 metadata_floor: queued.metadata_floor(),
             };
+            // An entry of a later term ends every earlier term of the group:
+            // no earlier term adds a chunk or a final entry after it.
+            shared
+                .redo_chunks
+                .end_terms_before(group_id, queued.entry.term);
             let prepared = hold_for_metadata(
                 self.ctx.state,
                 self.ctx.tracker,

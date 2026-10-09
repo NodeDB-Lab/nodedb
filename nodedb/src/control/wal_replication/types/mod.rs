@@ -17,8 +17,10 @@
 //! - [`replicated_write`]: the [`ReplicatedWrite`] enum itself.
 //! - [`replicated_entry`]: [`ReplicatedEntry`] (routing envelope) + (de)serialization.
 //! - [`transaction_redo_wire`]: wire types of the committed-transaction redo entry.
+//! - [`redo_chunk_wire`]: a redo body, inline or chunked across entries.
 
 mod aliases;
+mod redo_chunk_wire;
 mod replicated_entry;
 mod replicated_write;
 mod transaction_redo_wire;
@@ -28,9 +30,10 @@ pub use aliases::{
     AppliedWait, AsyncRaftProposer, AsyncRaftSubmit, ProposedAt, ProposedWrite,
     RaftAppliedIndexSink, RaftCompactor, RaftProposer,
 };
+pub use redo_chunk_wire::{RedoBody, RedoContent};
 pub use replicated_entry::{CollectionIncarnation, ReplicatedEntry};
 pub use replicated_write::ReplicatedWrite;
-pub use transaction_redo_wire::{ReplicatedEventSource, ReplicatedIdentity};
+pub use transaction_redo_wire::{CalvinRedoMeta, ReplicatedEventSource, ReplicatedIdentity};
 pub use wire_shapes::{
     BalanceDeltaFields, ColumnarResolvedRow, ConstraintChangeOp, DocumentResolvedMutationWire,
     KvResolvedMutationWire, ReplicatedBatchEdge, ReplicatedSumTarget,

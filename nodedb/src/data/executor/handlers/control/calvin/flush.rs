@@ -180,7 +180,9 @@ mod tests {
         assert_eq!(staged.status, Status::Ok, "{:?}", staged.error_code);
         let resolved = core.execute_calvin_resolve(&task, 1, 0);
         assert_eq!(resolved.status, Status::Ok, "{:?}", resolved.error_code);
-        resolved.payload.as_bytes().to_vec()
+        let answer: nodedb_physical::physical_plan::CalvinResolved =
+            zerompk::from_msgpack(resolved.payload.as_bytes()).expect("decode resolved answer");
+        answer.redo
     }
 
     fn flush_at(core: &mut CoreLoop, lsn: u64, redo: &[u8], collections: &[String]) -> Response {

@@ -167,6 +167,7 @@ impl DataPlaneSnapshotApplier {
             cut_index,
             event_lane,
             calvin,
+            redo_streams,
         } = split_by_core(group_id, snap, &cores)?;
         // Refused before any core changes: storage installed without its
         // Calvin cut will hold Calvin transactions no applied state names.
@@ -214,6 +215,17 @@ impl DataPlaneSnapshotApplier {
             &group_vshards,
             calvin,
         )?;
+        // After the install marker too: boot drops the group's earlier streams
+        // there and rebuilds these.
+        self.shared
+            .redo_chunks
+            .install_group(group_id, redo_streams)
+            .await
+            .map_err(|source| SnapshotInstallError::Settle {
+                group_id,
+                step: SettleStep::RedoStreams,
+                source: source.into(),
+            })?;
         crate::control::pitr::force_base_after_install(&self.shared);
         self.settle(
             group_id,
@@ -243,6 +255,17 @@ impl DataPlaneSnapshotApplier {
         if let Some(tracker) = self.shared.propose_tracker.get() {
             tracker.cover_through(group_id, cut_index);
         }
+        // Last: the group's streams here are the snapshot's now, so a
+        // snapshot this node owed the group is paid. An install that fails
+        // earlier leaves the debt, and the group keeps requiring one.
+        self.shared
+            .redo_chunks
+            .settle_owed(self.shared.credentials.catalog(), group_id)
+            .map_err(|source| SnapshotInstallError::Settle {
+                group_id,
+                step: SettleStep::RedoStreams,
+                source,
+            })?;
         Ok(())
     }
 

@@ -169,6 +169,7 @@ mod query_function_engine_gate;
 mod quota_bitemporal_composition;
 mod quota_sieve_routing_composition;
 mod redaction_policy_database_scope;
+mod redo_chunked_session_commit;
 mod reindex_concurrent;
 mod restart_refused_write_not_resurrected;
 mod rls_policy_database_scope;

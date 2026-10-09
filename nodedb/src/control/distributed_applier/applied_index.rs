@@ -83,7 +83,13 @@ pub fn save_applied_index(state: &Arc<SharedState>, group_id: u64, applied_index
 #[derive(Debug, Default)]
 pub struct AppliedPrefix {
     floor: Option<u64>,
-    broken: bool,
+    /// `(first, last)` non-durable entries above `covered_through`, when any.
+    /// `first` can sit below the true first break, never above it.
+    breaks: Option<(u64, u64)>,
+    /// The highest index recorded above `covered_through`.
+    last_recorded: Option<u64>,
+    /// An installed snapshot holds every entry at or below this index.
+    covered_through: u64,
 }
 
 impl AppliedPrefix {
@@ -96,16 +102,52 @@ impl AppliedPrefix {
     ///
     /// A failure breaks the prefix permanently for this batch: every later
     /// entry, successful or not, is past the gap and can no longer be covered
-    /// by the floor. Call this ONLY for entries whose success means "this
-    /// entry's redo record is WAL-fsync-durable" — branches that apply no
+    /// by the floor. Only [`Self::cover_through`] heals a break. Call this
+    /// ONLY for entries whose success means "this entry's redo record is
+    /// WAL-fsync-durable" — branches that apply no
     /// durable state must not call it at all (see [`Self::skip`]).
     pub fn record(&mut self, index: u64, applied_ok: bool) {
-        if !applied_ok {
-            self.broken = true;
+        // The installed snapshot holds the entry's state, whatever its apply did.
+        if index <= self.covered_through {
             return;
         }
-        if !self.broken {
+        self.last_recorded = Some(index);
+        if !applied_ok {
+            self.breaks = Some(match self.breaks {
+                None => (index, index),
+                Some((first, _)) => (first, index),
+            });
+            return;
+        }
+        if self.breaks.is_none() {
             self.floor = Some(index);
+        }
+    }
+
+    /// Count every entry through `index` durable: an installed snapshot holds
+    /// their state.
+    ///
+    /// A break at or below `index` heals. A break above it stays. A later
+    /// record at or below `index` changes nothing.
+    pub fn cover_through(&mut self, index: u64) {
+        if index <= self.covered_through {
+            return;
+        }
+        self.covered_through = index;
+        self.breaks = match self.breaks {
+            Some((_, last)) if last <= index => None,
+            // The breaks above `index` start no lower than `index + 1`.
+            Some((first, last)) if first <= index => Some((index.saturating_add(1), last)),
+            unchanged => unchanged,
+        };
+        // Every record above `index` came after the last healed break, so
+        // each one was durable when no break remains.
+        let reach = match self.breaks {
+            None => self.last_recorded.map_or(index, |last| last.max(index)),
+            Some(_) => index,
+        };
+        if self.floor.is_none_or(|floor| floor < reach) {
+            self.floor = Some(reach);
         }
     }
 
@@ -187,5 +229,52 @@ mod tests {
         broken.skip();
         broken.record(4, true);
         assert_eq!(broken.floor(), Some(1));
+    }
+
+    #[test]
+    fn a_covering_snapshot_heals_a_break_at_or_below_it() {
+        let mut prefix = AppliedPrefix::new();
+        prefix.record(1, true);
+        prefix.record(2, false);
+        prefix.record(3, true);
+        assert_eq!(prefix.floor(), Some(1));
+
+        prefix.cover_through(5);
+        assert_eq!(prefix.floor(), Some(5));
+        prefix.record(4, false);
+        assert_eq!(prefix.floor(), Some(5), "a covered entry cannot break");
+        prefix.record(6, true);
+        assert_eq!(prefix.floor(), Some(6));
+    }
+
+    #[test]
+    fn a_break_above_the_snapshot_still_holds_the_floor() {
+        let mut prefix = AppliedPrefix::new();
+        prefix.record(1, true);
+        prefix.record(7, false);
+        prefix.cover_through(5);
+        assert_eq!(prefix.floor(), Some(5));
+        prefix.record(8, true);
+        assert_eq!(prefix.floor(), Some(5), "entry 7 is not durable");
+
+        // Breaks on both sides: the one above the snapshot still holds.
+        let mut split = AppliedPrefix::new();
+        split.record(2, false);
+        split.record(9, false);
+        split.cover_through(5);
+        split.record(10, true);
+        assert_eq!(split.floor(), Some(5));
+        split.cover_through(9);
+        assert_eq!(split.floor(), Some(10), "entry 10 settled durable");
+    }
+
+    #[test]
+    fn a_lower_cover_changes_nothing() {
+        let mut prefix = AppliedPrefix::new();
+        prefix.cover_through(5);
+        prefix.record(6, false);
+        prefix.cover_through(4);
+        prefix.record(7, true);
+        assert_eq!(prefix.floor(), Some(5));
     }
 }

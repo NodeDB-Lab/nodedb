@@ -49,7 +49,19 @@ impl Scheduler {
             return;
         }
 
-        let mut redo = match RedoRecord::from_bytes(response.payload.as_bytes()) {
+        // The answer carries the slice's staged reply beside the record. The
+        // flush renders the reply from the core's staged entry.
+        let resolved = zerompk::from_msgpack::<nodedb_physical::physical_plan::CalvinResolved>(
+            response.payload.as_bytes(),
+        );
+        let decoded = match resolved {
+            Ok(resolved) => RedoRecord::from_bytes(&resolved.redo),
+            Err(e) => Err(crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("CalvinResolve answer: {e}"),
+            }),
+        };
+        let mut redo = match decoded {
             Ok(r) => r,
             Err(e) => {
                 self.halt_apply(

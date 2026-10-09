@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Post-`SharedState::open` catalog steps: fire the catalog-open gate,
-//! replay the surrogate WAL, read back the cut barriers, and bootstrap the
-//! superuser credential.
+//! replay the surrogate WAL, rebuild the open redo streams, read back the cut
+//! barriers, and bootstrap the superuser credential.
 
 use std::sync::Arc;
 
@@ -25,6 +25,16 @@ pub(crate) async fn run(
 
     // Replay surrogate WAL records into the in-memory registry.
     bootstrap::credentials::replay_surrogate_wal(shared, wal_records, replay_tombstones);
+
+    // Open chunked redo streams, before any data group applies an entry.
+    let streams = shared.redo_chunks.rebuild(wal_records)?;
+    if streams.open > 0 {
+        tracing::info!(
+            open = streams.open,
+            closed = streams.closed,
+            "chunked redo streams rebuilt from the WAL"
+        );
+    }
 
     // Cut barriers, for the apply loop's commit HLC floors.
     shared

@@ -80,6 +80,29 @@ pub(super) async fn build_hooks(
         multi_raft,
     )?;
 
+    // Every vShard's Calvin applied ledger, from one WAL pass and the state
+    // the last checkpoint saved. The data-group apply loop and the
+    // schedulers read the ledgers, so they fill before either starts. A
+    // boot completion of a snapshot install below replaces its group's.
+    let vshard_to_group = handle
+        .routing
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .vshard_to_group()
+        .to_vec();
+    let group_of = |vshard_id: u32| vshard_to_group.get(vshard_id as usize).copied();
+    let recovered = crate::control::cluster::calvin::scheduler::recover_all_applied(
+        &shared.wal,
+        shared.credentials.catalog(),
+        &group_of,
+    )?;
+    for (vshard_id, state) in recovered {
+        shared
+            .calvin
+            .applied
+            .install(vshard_id, state.fully_applied_epoch, state.applied_tail);
+    }
+
     // Per-group snapshot builder for the SEND path: on the leader, build the
     // real serialized engine state for a lagging follower's group vshards
     // (replacing the prior empty stub bytes).

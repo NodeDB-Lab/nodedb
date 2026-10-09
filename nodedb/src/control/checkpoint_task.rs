@@ -104,7 +104,7 @@ pub fn spawn_checkpoint_task(
                     timeout: budget,
                     archiver: archiver.as_mut(),
                     catalog: Some(shared.credentials.catalog()),
-                    calvin_mirrors: Some(shared.authorization_fence.calvin_mirrors()),
+                    calvin_ledgers: Some(&shared.calvin.applied),
                 });
                 if tokio::time::timeout(budget, cycle).await.is_err() {
                     warn!(
@@ -127,7 +127,7 @@ pub fn spawn_checkpoint_task(
                 timeout: config.core_timeout(),
                 archiver: archiver.as_mut(),
                 catalog: Some(shared.credentials.catalog()),
-                calvin_mirrors: Some(shared.authorization_fence.calvin_mirrors()),
+                calvin_ledgers: Some(&shared.calvin.applied),
             })
             .await;
         }

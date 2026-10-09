@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 pub mod applied_gate;
-pub mod applied_mirror;
+pub mod applied_ledger;
 pub mod caught_up;
 pub mod cut_floor;
 pub mod driver;
@@ -11,7 +11,7 @@ mod metrics_flow;
 pub mod recovery;
 
 pub use applied_gate::AppliedGate;
-pub use applied_mirror::{AppliedMirror, AppliedMirrors};
+pub use applied_ledger::{CalvinAppliedLedger, CalvinAppliedLedgers, ClaimRefusal};
 pub use caught_up::{CaughtUpHandle, CaughtUpRegistry};
 pub use driver::{
     CalvinReadResultProposal, RaftSequencerProposer, ReadResultEvent, Scheduler, SchedulerConfig,
@@ -23,5 +23,5 @@ pub use lock::{AcquireOutcome, HotKeyTable, LockKey, LockManager, LockMode, TxnI
 pub use lock as lock_manager;
 pub use metrics::SchedulerMetrics;
 pub use recovery::{
-    AppliedRecovery, NOT_YET_APPLIED_EPOCH, read_applied_recovery, recover_applied,
+    AppliedRecovery, NOT_YET_APPLIED_EPOCH, read_applied_recovery, recover_all_applied,
 };

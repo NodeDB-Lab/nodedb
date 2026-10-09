@@ -221,6 +221,9 @@ fn prepare_replicated<'a>(
         ReplicatedWrite::TransactionRedo { .. } => {
             prepare_transaction_redo_entry(ctx, pos, &replicated, scope.incarnations)
         }
+        ReplicatedWrite::RedoChunk { .. } | ReplicatedWrite::RedoAbandon { .. } => {
+            super::redo_chunk::prepare_stream_entry(ctx, pos, log_term, replicated)
+        }
         ReplicatedWrite::SurrogateBind { ref identities } => {
             Prepared::Concluded(super::surrogate_bind::apply_surrogate_bind(
                 ctx,

@@ -534,6 +534,7 @@ mod tests {
                 collections: vec![],
                 sum_targets: vec![],
                 origin: nodedb_physical::physical_plan::RedoOrigin::Commit,
+                calvin: None,
             }),
         ] {
             for table in [None, Some(single_node_table())] {

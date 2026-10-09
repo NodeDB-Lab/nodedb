@@ -24,4 +24,7 @@ mod transaction_redo;
 mod vector;
 
 pub use entry::to_replicated_entry;
-pub use transaction_redo::transaction_redo_entry;
+pub use transaction_redo::{
+    CHUNK_ENTRY_ENVELOPE_BYTES, RedoEntryTarget, RedoProposal, chunk_entries, redo_abandon_entry,
+    session_redo_proposal, transaction_redo_entry,
+};

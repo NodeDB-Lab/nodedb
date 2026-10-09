@@ -22,6 +22,18 @@ pub(super) const MIN_SCOPE_EXPIRY_SECS: u64 = 10;
 /// ticks at a quarter of it, and a zero-length tick panics the timer.
 pub(super) const MIN_CALVIN_VERDICT_STALL_WARN_MS: u64 = 4;
 
+/// Smallest redo entry size. A chunk entry carries its stream header beside
+/// its bytes, so a smaller entry leaves too little room for the bytes.
+pub(super) const MIN_REDO_ENTRY_BYTES: usize = 64 * 1024;
+
+/// Room a redo entry leaves in one RPC frame for the frame header, the
+/// AppendEntries envelope, and the entry's own routing fields.
+pub(super) const REDO_ENTRY_ENVELOPE_BYTES: usize = 1024 * 1024;
+
+/// Largest redo entry size: one entry and its envelope fit one RPC frame.
+pub(super) const MAX_REDO_ENTRY_BYTES: usize =
+    nodedb_cluster::rpc_codec::MAX_RPC_PAYLOAD_SIZE as usize - REDO_ENTRY_ENVELOPE_BYTES;
+
 /// Rejects an endpoint that carries no `http://` or `https://` host.
 pub(super) fn otlp_endpoint_has_host(raw: &str) -> bool {
     raw.strip_prefix("http://")
@@ -160,5 +172,30 @@ fn validate_calvin(config: &ServerConfig) -> crate::Result<()> {
         calvin.max_inflight_backlog,
         "tuning.calvin.max_inflight_backlog",
     )?;
-    positive_u64(calvin.catch_up_window, "tuning.calvin.catch_up_window")
+    positive_u64(calvin.catch_up_window, "tuning.calvin.catch_up_window")?;
+    validate_redo_sizes(calvin)
+}
+
+/// Checks the redo entry size against one RPC frame, and the open-stream
+/// cap against one entry.
+fn validate_redo_sizes(calvin: &nodedb_types::config::tuning::CalvinTuning) -> crate::Result<()> {
+    let entry = calvin.max_redo_entry_bytes;
+    if !(MIN_REDO_ENTRY_BYTES..=MAX_REDO_ENTRY_BYTES).contains(&entry) {
+        return Err(reject(
+            "tuning.calvin.max_redo_entry_bytes",
+            entry,
+            &format!(
+                "a size of at least {MIN_REDO_ENTRY_BYTES} bytes and at most \
+                 {MAX_REDO_ENTRY_BYTES} bytes, the RPC frame limit less its envelope"
+            ),
+        ));
+    }
+    if calvin.max_open_redo_bytes < entry as u64 {
+        return Err(reject(
+            "tuning.calvin.max_open_redo_bytes",
+            calvin.max_open_redo_bytes,
+            "a size of at least tuning.calvin.max_redo_entry_bytes",
+        ));
+    }
+    Ok(())
 }

@@ -2,7 +2,31 @@
 
 //! Wire shapes carried by [`super::ReplicatedWrite::TransactionRedo`].
 
+use nodedb_physical::physical_plan::CalvinReplySpec;
+
 use crate::event::EventSource;
+
+/// What a committed Calvin slice's redo carries beyond the redo record.
+/// The record's `calvin_stamp` names the slice's `(epoch, position)`.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub struct CalvinRedoMeta {
+    /// The epoch's deterministic instant.
+    pub epoch_system_ms: i64,
+    /// The reply the leader's stage decided. Every replica renders it after
+    /// its install.
+    pub reply: CalvinReplySpec,
+    /// Whether the slice writes a row the statement names, not only a
+    /// derived row.
+    pub primary_write: bool,
+}
 
 /// One `(collection, primary key) → surrogate` identity a committed
 /// transaction's writes carry. Every replica binds it into its own catalog

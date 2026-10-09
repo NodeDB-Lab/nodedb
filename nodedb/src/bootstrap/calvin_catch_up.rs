@@ -69,7 +69,7 @@ fn describe_lagging(lagging: &[u32]) -> String {
 /// Hold startup until every Calvin scheduler on this node reaches its rebuild
 /// target.
 pub async fn await_calvin_catch_up(shared: &Arc<SharedState>) -> anyhow::Result<()> {
-    let registry = shared.authorization_fence.calvin_mirrors().caught_up();
+    let registry = &shared.calvin.caught_up;
     let deadline = Instant::now() + DATA_GROUP_RECOVERY_TIMEOUT;
 
     loop {

@@ -113,10 +113,17 @@ fn resolved_flush(
     PhysicalPlan::Meta(MetaOp::CalvinFlush {
         epoch,
         position: 0,
-        redo: resolved.payload.to_vec(),
+        redo: resolved_redo(&resolved),
         collections: Vec::new(),
         sum_targets: Vec::new(),
     })
+}
+
+/// The redo record a `CalvinResolve` answered with.
+fn resolved_redo(resolved: &Response) -> Vec<u8> {
+    let answer: nodedb_physical::physical_plan::CalvinResolved =
+        zerompk::from_msgpack(resolved.payload.as_bytes()).expect("decode resolved answer");
+    answer.redo
 }
 
 /// A write committed through the Calvin path to seed a write version.
@@ -175,7 +182,7 @@ fn commit_calvin(
         PhysicalPlan::Meta(MetaOp::CalvinFlush {
             epoch: seed.epoch,
             position: 0,
-            redo: resolved.payload.to_vec(),
+            redo: resolved_redo(&resolved),
             collections: vec![seed.collection.to_string()],
             sum_targets: Vec::new(),
         }),

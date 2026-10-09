@@ -162,6 +162,36 @@ impl TestServer {
         (server, dir)
     }
 
+    /// Spawn a single-core NodeDB server with a lowered redo entry limit, so
+    /// a commit of a few hundred kilobytes travels as a chunked redo.
+    pub async fn start_with_max_redo_entry_bytes(bytes: usize) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::max_redo_entry_bytes(bytes),
+            1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
+    /// Reopen `dir` with the lowered redo entry limit a server started by
+    /// [`Self::start_with_max_redo_entry_bytes`] used.
+    pub async fn open_on_path_with_max_redo_entry_bytes(
+        dir: TestDataDir,
+        bytes: usize,
+    ) -> (Self, TestDataDir) {
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::max_redo_entry_bytes(bytes),
+            1,
+        );
+        let placeholder = tempfile::tempdir().expect("placeholder tempdir");
+        let server = Self::connect_and_build(spawned, placeholder, AuthMode::Trust).await;
+        (server, dir)
+    }
+
     /// Open a server backed by an existing data directory, reopened in place
     /// so a previous server's data is visible after boot. `dir` is not
     /// consumed — ownership stays with the caller.

@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex, RwLock};
 use nodedb_cluster::calvin::{CalvinCompletionRegistry, SequencerStateMachine};
 
 use crate::control::cluster::calvin::scheduler::metrics::SchedulerMetrics;
-use crate::control::cluster::calvin::scheduler::recover_applied;
 use crate::control::cluster::calvin::{
     RaftSequencerProposer, ReadResultEvent, Scheduler, SchedulerConfig, SchedulerParams,
     SequencerProposer,
@@ -159,6 +158,10 @@ fn reconcile_vshard_schedulers(params: ReconcileSchedulersParams<'_>) -> crate::
         calvin_completion_registry,
     );
     calvin_snapshot::retain_mounted(shared, raft_loop_handle, routing);
+    crate::control::cluster::redo_stream_membership::reconcile_redo_streams(
+        shared,
+        raft_loop_handle,
+    );
     let mut spawned = 0usize;
     let mut kept = Vec::new();
     for vshard_id in hosted {
@@ -198,28 +201,11 @@ fn reconcile_vshard_schedulers(params: ReconcileSchedulersParams<'_>) -> crate::
             continue;
         };
 
-        // The applied state the last checkpoint saved, with the markers the
-        // WAL still holds: a checkpoint deletes the segments that held older
-        // markers, and the sequencer log delivers their entries again.
-        // A failed read leaves the vShard for the next pass. The pass goes
-        // on, so the schedulers it started keep their bases.
-        let recovery = match recover_applied(
-            &shared.wal,
-            shared.credentials.catalog(),
-            vshard_id,
-            group_id,
-        ) {
-            Ok(recovery) => recovery,
-            Err(error) => {
-                tracing::warn!(
-                    vshard_id,
-                    %error,
-                    "calvin: the vShard's applied state did not load; its scheduler starts \
-                     on a later pass"
-                );
-                continue;
-            }
-        };
+        // The vShard's applied ledger: boot recovery or a snapshot install
+        // filled it, and a vShard with no Calvin history here gets an empty
+        // one. The scheduler rebuilds up to its highest applied epoch.
+        let ledger = shared.calvin.applied.get_or_create(vshard_id);
+        let rebuild_target_epoch = ledger.max_applied_epoch();
         let (sequenced_tx, sequenced_rx) =
             tokio::sync::mpsc::channel(scheduler_config.channel_capacity);
 
@@ -299,9 +285,8 @@ fn reconcile_vshard_schedulers(params: ReconcileSchedulersParams<'_>) -> crate::
             multi_raft: raft_loop_handle.clone(),
             sequencer_proposer: Arc::clone(sequencer_proposer),
             sequencer_state_machine: Arc::clone(sequencer_state_machine),
-            fully_applied_epoch: recovery.fully_applied_epoch,
-            applied_tail: recovery.applied_tail,
-            rebuild_target_epoch: recovery.max_applied_epoch,
+            ledger,
+            rebuild_target_epoch,
             config: scheduler_config.clone(),
             metrics: SchedulerMetrics::new(),
             read_result_rx,
@@ -368,7 +353,9 @@ pub(super) struct SpawnVshardSchedulersParams<'a> {
 /// (covers the bootstrap node, which already sees its membership) and then
 /// spawns a background task that re-reconciles on a short interval until
 /// shutdown. Reconcile is idempotent: it starts schedulers for vShards this
-/// node gained and stops those of vShards it left.
+/// node gained and stops those of vShards it left. Each pass also runs the
+/// membership pass over this node's chunked redo streams (see
+/// [`crate::control::cluster::redo_stream_membership`]).
 pub(super) fn spawn_vshard_schedulers(
     params: SpawnVshardSchedulersParams<'_>,
 ) -> crate::Result<()> {

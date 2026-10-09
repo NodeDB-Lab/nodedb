@@ -117,23 +117,12 @@ pub struct SharedState {
     >,
     /// Per-Raft-group apply watermark registry for commit-wait and drain paths.
     pub group_watchers: Arc<nodedb_cluster::GroupAppliedWatchers>,
-    /// Serializes this node's attempts to acquire the replicated descriptor
-    /// preparation lease, and a local DDL through its post-apply. An async
-    /// proposer holds it across the post-apply, so it is a tokio mutex.
-    pub metadata_ddl_lock: tokio::sync::Mutex<()>,
-    /// Replicated preparation owner: its token, its node, and the local
-    /// monotonic apply time. The token and node are persisted in
-    /// `SystemCatalog` and seeded at boot.
-    pub metadata_ddl_owner: Mutex<Option<crate::control::metadata_proposer::DdlPrepareOwner>>,
-    /// Most recent fenced DDL token applied while its owner remained current.
-    /// Starts at 0 on boot.
-    pub metadata_ddl_applied_token: AtomicU64,
+    /// This node's state of the replicated descriptor preparation lease.
+    pub metadata_ddl: super::metadata_ddl::MetadataDdlState,
     /// Apply-progress steps this node made on metadata entries: each batch
     /// sub-entry and each purge-reclaim step (a core acknowledgement, a closed
     /// scan). A proposer on a long apply reads it to tell slow from stalled.
     pub metadata_apply_progress: AtomicU64,
-    /// Per-node uniqueness component for descriptor-preparation lease tokens.
-    pub metadata_ddl_token_seq: AtomicU64,
     /// Node-local table of in-flight `DdlPendingPropose` records. Persisted in
     /// `SystemCatalog` and seeded at boot.
     pub pending_ddl: crate::control::pending_ddl::PendingDdlTable,
@@ -294,6 +283,9 @@ pub struct SharedState {
     /// setup. Every committed redo that carries a cross-shard key records it
     /// here as it applies.
     pub cross_shard_dedup: OnceLock<Arc<crate::event::cross_shard::CrossShardDedup>>,
+    /// Open chunked redo streams: the chunks every data-group apply holds
+    /// until each stream's final entry.
+    pub redo_chunks: Arc<crate::control::wal_replication::transaction_redo::RedoChunkStore>,
     /// Kafka bridge producer manager.
     pub kafka_manager: crate::event::kafka::KafkaManager,
     /// Definition sync fanout: broadcasts `DefinitionSync` (0x70) frames to

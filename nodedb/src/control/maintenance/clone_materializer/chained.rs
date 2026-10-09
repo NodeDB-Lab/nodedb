@@ -22,9 +22,9 @@ use crate::control::planner::sql_plan_convert::convert::db_qualified;
 use crate::control::security::catalog::{StoredCollection, SystemCatalog};
 use crate::control::state::SharedState;
 use crate::control::surrogate::CarriedIdentity;
-use crate::control::wal_replication::encode::transaction_redo_entry;
-use crate::control::wal_replication::propose_replicated_entry;
-use crate::control::wal_replication::transaction_redo::{RedoTarget, TransactionRedoPayload};
+use crate::control::wal_replication::transaction_redo::{
+    RedoTarget, TransactionRedoPayload, propose_transaction_redo,
+};
 use crate::event::EventSource;
 use crate::types::hash_chain::CHAIN_SEQ_FIELD;
 use crate::types::{HomedRecord, RecordHomes};
@@ -249,6 +249,7 @@ fn relink_payload(
         // a copy fires no AFTER trigger.
         event_source: EventSource::Restore,
         origin: RedoOrigin::Restore,
+        calvin: None,
     })
 }
 
@@ -258,14 +259,7 @@ async fn commit_relink(
     target: RedoTarget,
     payload: &TransactionRedoPayload,
 ) -> crate::Result<()> {
-    let proposer = state.async_raft_proposer()?;
-    let entry = transaction_redo_entry(
-        target.tenant_id,
-        target.database_id,
-        target.vshard_id,
-        payload,
-    );
     let deadline = crate::control::wal_replication::statement_propose_deadline(state);
-    propose_replicated_entry(state, proposer, entry, deadline).await?;
+    propose_transaction_redo(state, target, payload, deadline).await?;
     Ok(())
 }

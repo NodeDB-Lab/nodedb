@@ -139,6 +139,9 @@ pub(super) fn row_kind(record_type: RecordType) -> Option<RowRecord> {
         // emits no per-edge event, so replay rebuilds none.
         | RecordType::GraphEdgeCut
         // A snapshot install marker writes no row.
-        | RecordType::SnapshotInstalled => None,
+        | RecordType::SnapshotInstalled
+        // A redo chunk holds bytes of a redo stream. The stream's final
+        // record carries the rows and their events.
+        | RecordType::RedoChunk => None,
     }
 }

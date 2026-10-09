@@ -73,7 +73,7 @@ async fn propose_reversals(
         entry: Box::new(MetadataEntry::Batch { entries }),
     };
     let log_index = propose_and_await(state, handle, &prepared).await?;
-    if state.metadata_ddl_applied_token.load(Ordering::Acquire) != token {
+    if state.metadata_ddl.applied_token.load(Ordering::Acquire) != token {
         return Err(crate::Error::Config {
             detail: "commit compensation: DDL preparation ownership was superseded before apply"
                 .into(),

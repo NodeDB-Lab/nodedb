@@ -49,6 +49,9 @@ pub(super) struct TuningOverrides {
     /// Overrides `[tuning.vector] seal_threshold` so a test can observe HNSW
     /// segment builds on a few hundred vectors.
     pub(super) vector_seal_threshold: Option<usize>,
+    /// Overrides `[tuning.calvin] max_redo_entry_bytes` so a test can drive
+    /// chunked redo with a commit of a few hundred kilobytes.
+    pub(super) max_redo_entry_bytes: Option<usize>,
 }
 
 impl TuningOverrides {
@@ -85,6 +88,14 @@ impl TuningOverrides {
     pub(super) fn timeseries_memtable_budget(bytes: usize) -> Self {
         Self {
             timeseries_memtable_budget_bytes: Some(bytes),
+            ..Self::default()
+        }
+    }
+
+    /// Boot with a lowered redo entry limit.
+    pub(super) fn max_redo_entry_bytes(bytes: usize) -> Self {
+        Self {
+            max_redo_entry_bytes: Some(bytes),
             ..Self::default()
         }
     }
@@ -140,6 +151,11 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
     }
     if let Some(vectors) = tuning.vector_seal_threshold {
         toml.push_str(&format!("\n[tuning.vector]\nseal_threshold = {vectors}\n"));
+    }
+    if let Some(bytes) = tuning.max_redo_entry_bytes {
+        toml.push_str(&format!(
+            "\n[tuning.calvin]\nmax_redo_entry_bytes = {bytes}\n"
+        ));
     }
     toml.push_str(&format!(
         "\n[backup_encryption]\nkey_path = {}\n",

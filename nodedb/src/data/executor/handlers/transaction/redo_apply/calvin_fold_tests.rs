@@ -19,18 +19,18 @@ use crate::types::Lsn;
 use crate::wal::{CalvinStamp, RedoRecord};
 
 const DB: u64 = 0;
-const TID: u64 = 1;
+pub(super) const TID: u64 = 1;
 /// Source and target share a vShard, so the inline fold writes the target
 /// on this core.
-const SOURCE: &str = "local_charges";
-const TARGET: &str = "local_balances";
+pub(super) const SOURCE: &str = "local_charges";
+pub(super) const TARGET: &str = "local_balances";
 const ACCOUNT: &str = "a1";
-const TARGET_SURROGATE: Surrogate = Surrogate(4242);
+pub(super) const TARGET_SURROGATE: Surrogate = Surrogate(4242);
 const LSN: u64 = 70;
 
 /// A core whose source collection folds `amount` into the target's
 /// `balance`, with the target row seeded at 100.
-fn core_with_sum(dir: &std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>) {
+pub(super) fn core_with_sum(dir: &std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>) {
     let (mut core, req, resp) = make_core_with_dir(dir);
     core.doc_configs.insert(
         (DatabaseId::DEFAULT, TenantId::new(TID), TARGET.to_string()),
@@ -61,7 +61,7 @@ fn core_with_sum(dir: &std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>) {
     (core, Box::new((req, resp)))
 }
 
-fn sum_targets() -> Vec<RedoSumTargets> {
+pub(super) fn sum_targets() -> Vec<RedoSumTargets> {
     vec![RedoSumTargets {
         collection: SOURCE.to_string(),
         resolved: vec![ResolvedSumTarget::new(TARGET, ACCOUNT, TARGET_SURROGATE)],
@@ -70,7 +70,7 @@ fn sum_targets() -> Vec<RedoSumTargets> {
 }
 
 /// A Calvin redo record writing one source row of `amount` 25.
-fn calvin_redo() -> Vec<u8> {
+pub(super) fn calvin_redo() -> Vec<u8> {
     let body = doc_format::encode_to_msgpack(&serde_json::json!({
         "account_id": ACCOUNT,
         "amount": 25,
@@ -94,7 +94,7 @@ fn calvin_redo() -> Vec<u8> {
     .expect("encode redo")
 }
 
-fn balance(core: &CoreLoop) -> Option<String> {
+pub(super) fn balance(core: &CoreLoop) -> Option<String> {
     let stored = core
         .sparse
         .get(

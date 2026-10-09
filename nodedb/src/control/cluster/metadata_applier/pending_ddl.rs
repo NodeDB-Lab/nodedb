@@ -78,7 +78,7 @@ impl MetadataCommitApplier {
     /// for the next re-delivery instead of silently skipping the rest.
     ///
     /// Applies only while `token` owns the preparation lease. A finalize
-    /// that applies records `token` in `metadata_ddl_applied_token`, which
+    /// that applies records `token` in `metadata_ddl.applied_token`, which
     /// is how its proposer learns the objects landed.
     pub(super) async fn apply_ddl_pending_finalize(
         &self,
@@ -104,7 +104,8 @@ impl MetadataCommitApplier {
         self.credentials.catalog().remove_pending_ddl(token)?;
         shared.pending_ddl.take(token);
         shared
-            .metadata_ddl_applied_token
+            .metadata_ddl
+            .applied_token
             .store(token, std::sync::atomic::Ordering::Release);
         Ok(())
     }

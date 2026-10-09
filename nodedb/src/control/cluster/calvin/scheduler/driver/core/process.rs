@@ -287,11 +287,16 @@ impl Scheduler {
             );
             return;
         };
-        // The flush applied the txn's redo record.
-        if let Some(records) = pending.redo_records {
-            records.settle();
-        }
-        self.release_and_mark_applied(txn_id, pending.lock_owner);
+        // The flush applied the txn's redo record. A txn with no record
+        // finished without an install on this vShard.
+        let installed = match pending.redo_records {
+            Some(records) => {
+                records.settle();
+                true
+            }
+            None => false,
+        };
+        self.release_and_mark_applied(txn_id, pending.lock_owner, installed);
     }
 
     /// Complete a txn that never entered `pending`, releasing the locks held
@@ -302,12 +307,13 @@ impl Scheduler {
         txn_id: TxnId,
         lock_owner: TxnId,
     ) {
-        self.release_and_mark_applied(txn_id, lock_owner);
+        self.release_and_mark_applied(txn_id, lock_owner, false);
     }
 
     /// Release `lock_owner`'s locks, dispatch the promoted waiters, and mark
-    /// `txn_id`'s position applied.
-    fn release_and_mark_applied(&mut self, txn_id: TxnId, lock_owner: TxnId) {
+    /// `txn_id`'s position applied. `installed` says whether a durable redo
+    /// install finished the position.
+    fn release_and_mark_applied(&mut self, txn_id: TxnId, lock_owner: TxnId, installed: bool) {
         // Release this txn's locks. `release` promotes any waiter queued behind
         // each freed key to holder (moving it pending -> held) and returns the
         // fully-promoted ids. Those ids are already holders in the table the
@@ -326,7 +332,11 @@ impl Scheduler {
         // so any advertised watermark reflects a FULLY-applied epoch — the value
         // `BEGIN` needs for a torn-free cross-shard snapshot anchor.
         let folded = self.applied.mark_applied(txn_id.epoch, txn_id.position);
-        self.applied_mirror.mark(txn_id.epoch, txn_id.position);
+        if installed {
+            self.ledger.mark_applied(txn_id.epoch, txn_id.position);
+        } else {
+            self.ledger.mark_terminal(txn_id.epoch, txn_id.position);
+        }
         if let Some(watermark) = folded {
             self.publish_watermark(watermark);
         }

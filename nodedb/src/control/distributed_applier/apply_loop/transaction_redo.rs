@@ -9,6 +9,9 @@
 //! entry re-delivered after a restart is recognised by the proposal ledger and
 //! skipped before it reaches here.
 //!
+//! A chunked body assembles from the `RedoChunk` entries of its stream
+//! (see [`super::redo_chunk`]) and then applies like an inline one.
+//!
 //! A refusal the Data Plane proves applied nothing (a constraint verdict) is
 //! final: every replica reaches it at the same log position against the same
 //! state, and the funnel cancels the record in the WAL before it returns. The
@@ -20,14 +23,15 @@ use crate::bridge::envelope::Status;
 use crate::control::array_sync::raft_apply::AppliedPosition;
 use crate::control::distributed_applier::propose_tracker::{AppliedWrite, ProposeTracker};
 use crate::control::server::dispatch_utils::{ChangeFeedOwner, SubmitOutcome, refusal_is_final};
-use crate::control::wal_replication::decode::transaction_redo_payload;
+use crate::control::wal_replication::decode::{DecodedTransactionRedo, decode_transaction_redo};
+use crate::control::wal_replication::transaction_redo::chunks::OpenStream;
 use crate::control::wal_replication::transaction_redo::{
-    RedoTarget, enqueue_transaction_redo, record_cross_shard_key,
+    RedoTarget, TransactionRedoPayload, enqueue_transaction_redo, record_cross_shard_key,
 };
 use crate::control::wal_replication::{CollectionIncarnation, ReplicatedEntry};
 use crate::types::{DatabaseId, TenantId, VShardId};
 
-use super::context::{ApplyContext, FinishedApply, Started, StartedEntry};
+use super::context::{ApplyContext, EnqueueFuture, FinishedApply, Started, StartedEntry};
 use super::helpers::committed_response_result;
 use super::proposal_gate::{EntryOutcome, ledger_outcome};
 use super::start::Prepared;
@@ -35,7 +39,8 @@ use super::start::Prepared;
 /// Prepare one committed `TransactionRedo` entry. Its enqueue appends the
 /// record and hands it to its core. The apply that follows resolves the
 /// propose waiter. Its outcome says whether the entry's effect is durable on
-/// this node, which is what the group's applied prefix records.
+/// this node, which is what the group's applied prefix records. A chunked
+/// body assembles from its stream first.
 ///
 /// `incarnations` are the entry's collection incarnations, moved out of the
 /// decoded entry.
@@ -45,26 +50,74 @@ pub(super) fn prepare_transaction_redo_entry<'a>(
     entry: &ReplicatedEntry,
     incarnations: Vec<CollectionIncarnation>,
 ) -> Prepared<'a> {
-    let ApplyContext { state, tracker, .. } = ctx;
-    let payload = match transaction_redo_payload(&entry.write) {
-        Ok(payload) => payload,
-        Err(error) => {
-            tracker.complete(pos.group_id, pos.log_index, pos.applied_key, Err(error));
-            // The entry's own bytes are malformed; a re-delivery decodes the
-            // same bytes and fails the same way, so it holds the floor rather
-            // than skipping a committed transaction.
-            return Prepared::Concluded(EntryOutcome::Applied {
-                durable: false,
-                result: None,
-            });
-        }
+    let decoded = match decode_transaction_redo(&entry.write) {
+        Ok(decoded) => decoded,
+        Err(error) => return conclude_held(ctx, pos, error, None),
     };
     let target = RedoTarget {
         tenant_id: TenantId::new(entry.tenant_id),
         database_id: DatabaseId::new(entry.database_id),
         vshard_id: VShardId::new(entry.vshard_id),
     };
-    Prepared::Enqueue(Box::pin(async move {
+    match decoded {
+        DecodedTransactionRedo::Inline(payload) => Prepared::Enqueue(enqueue_payload(
+            ctx,
+            pos,
+            target,
+            *payload,
+            incarnations,
+            None,
+        )),
+        DecodedTransactionRedo::Chunked(chunked) => {
+            super::redo_chunk::prepare_chunked_final(ctx, pos, target, chunked, incarnations)
+        }
+    }
+}
+
+/// Conclude an entry this replica cannot apply as the other replicas do:
+/// its own bytes are malformed, or its stream here is not the one the log
+/// built. It holds the floor rather than skipping a committed transaction.
+/// A taken stream stays on disk for it.
+pub(super) fn conclude_held<'a>(
+    ctx: ApplyContext<'a>,
+    pos: AppliedPosition,
+    error: crate::Error,
+    stream: Option<OpenStream>,
+) -> Prepared<'a> {
+    ctx.tracker
+        .complete(pos.group_id, pos.log_index, pos.applied_key, Err(error));
+    let outcome = EntryOutcome::Applied {
+        durable: false,
+        result: None,
+    };
+    settle_stream(ctx, stream, &outcome);
+    Prepared::Concluded(outcome)
+}
+
+/// Release a taken stream once its final entry concluded. A durable outcome
+/// drops it. Any other keeps its records on disk, so the next boot rebuilds
+/// the stream for the entry's re-apply.
+fn settle_stream(ctx: ApplyContext<'_>, stream: Option<OpenStream>, outcome: &EntryOutcome) {
+    let Some(stream) = stream else {
+        return;
+    };
+    if matches!(outcome, EntryOutcome::Applied { durable: false, .. }) {
+        ctx.state.redo_chunks.park(stream);
+    }
+}
+
+/// Route `payload` to its collections, append it, and enqueue it on its
+/// core. `stream` is the chunked stream the payload assembled from.
+pub(super) fn enqueue_payload<'a>(
+    ctx: ApplyContext<'a>,
+    pos: AppliedPosition,
+    target: RedoTarget,
+    payload: TransactionRedoPayload,
+    incarnations: Vec<CollectionIncarnation>,
+    stream: Option<OpenStream>,
+) -> EnqueueFuture<'a> {
+    let ApplyContext { state, tracker, .. } = ctx;
+    Box::pin(async move {
         let collection = payload.collections.first().cloned();
         // A redo for a collection incarnation this node no longer holds has
         // nothing to mutate. The gates stay held until the redo is enqueued.
@@ -86,17 +139,21 @@ pub(super) fn prepare_transaction_redo_entry<'a>(
                         crate::bridge::envelope::ErrorCode::NotFound,
                     )),
                 );
-                return StartedEntry::concluded(EntryOutcome::Applied {
+                let outcome = EntryOutcome::Applied {
                     durable: true,
                     result: None,
-                });
+                };
+                settle_stream(ctx, stream, &outcome);
+                return StartedEntry::concluded(outcome);
             }
             Err(error) => {
                 tracker.complete(pos.group_id, pos.log_index, pos.applied_key, Err(error));
-                return StartedEntry::concluded(EntryOutcome::Applied {
+                let outcome = EntryOutcome::Applied {
                     durable: false,
                     result: None,
-                });
+                };
+                settle_stream(ctx, stream, &outcome);
+                return StartedEntry::concluded(outcome);
             }
         };
         let enqueued = enqueue_transaction_redo(
@@ -120,13 +177,19 @@ pub(super) fn prepare_transaction_redo_entry<'a>(
                 if let Ok(outcome) = &submitted {
                     record_cross_shard_key(state, &payload, outcome);
                 }
+                let outcome = conclude_transaction_redo(tracker, pos, submitted);
+                settle_stream(ctx, stream, &outcome);
                 FinishedApply {
                     group_id: pos.group_id,
                     log_index: pos.log_index,
-                    outcome: conclude_transaction_redo(tracker, pos, submitted),
+                    outcome,
                 }
             })),
-            Err(error) => Started::Concluded(conclude_transaction_redo(tracker, pos, Err(error))),
+            Err(error) => {
+                let outcome = conclude_transaction_redo(tracker, pos, Err(error));
+                settle_stream(ctx, stream, &outcome);
+                Started::Concluded(outcome)
+            }
         };
         // A committed transaction's redo carries the rows it wrote.
         StartedEntry {
@@ -134,7 +197,7 @@ pub(super) fn prepare_transaction_redo_entry<'a>(
             collection,
             user_write: true,
         }
-    }))
+    })
 }
 
 /// Resolve a transaction redo's waiter from what the funnel returned.

@@ -137,7 +137,8 @@ pub fn replay_sync_hwm_records(
             | RecordType::GraphNodeCascade
             | RecordType::GraphEdgeCut
             | RecordType::SnapshotInstalled
-            | RecordType::WriteGroup => {}
+            | RecordType::WriteGroup
+            | RecordType::RedoChunk => {}
         }
     }
 

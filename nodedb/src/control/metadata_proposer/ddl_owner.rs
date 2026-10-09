@@ -80,7 +80,8 @@ pub(crate) fn reclaim_cause(shared: &SharedState, owner: &DdlPrepareOwner) -> Op
 /// Whether `token` owns the preparation lease on this replica.
 pub(crate) fn owns_ddl_lease(shared: &SharedState, token: u64) -> bool {
     shared
-        .metadata_ddl_owner
+        .metadata_ddl
+        .owner
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .is_some_and(|owner| owner.token == token)
@@ -89,7 +90,8 @@ pub(crate) fn owns_ddl_lease(shared: &SharedState, token: u64) -> bool {
 /// The current owner on this replica, if the lease is held.
 pub(crate) fn current_owner(shared: &SharedState) -> Option<DdlPrepareOwner> {
     *shared
-        .metadata_ddl_owner
+        .metadata_ddl
+        .owner
         .lock()
         .unwrap_or_else(|p| p.into_inner())
 }

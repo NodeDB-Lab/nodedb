@@ -287,6 +287,14 @@ pub struct TenantDataSnapshot {
     #[msgpack(default)]
     #[serde(default)]
     pub group_calvin: Option<super::snapshot_calvin::GroupCalvinCut>,
+
+    /// The open chunked redo streams of a Raft group snapshot's group. A
+    /// follower caught up by the snapshot never applies the chunks it covers,
+    /// so it holds them from here for each stream's final entry. Empty in a
+    /// backup and a per-core part.
+    #[msgpack(default)]
+    #[serde(default)]
+    pub group_redo_streams: Vec<crate::wal::CarriedRedoStream>,
 }
 
 /// One `(partition, epoch, index, sequence)` position with its held row.

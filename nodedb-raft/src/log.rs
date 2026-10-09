@@ -4,6 +4,11 @@ use crate::error::{RaftError, Result};
 use crate::message::LogEntry;
 use crate::storage::LogStorage;
 
+/// Most entry data one AppendEntries request carries. Half the 64 MiB RPC
+/// frame limit, so a batch and its envelope fit one frame. A single entry
+/// larger than this ships alone, and the host bounds an entry's size.
+pub const MAX_APPEND_BATCH_BYTES: usize = 32 * 1024 * 1024;
+
 /// In-memory Raft log backed by a pluggable `LogStorage`.
 ///
 /// The log is 1-indexed. Index 0 is a sentinel (term 0, empty data).
@@ -76,6 +81,23 @@ impl<S: LogStorage> RaftLog<S> {
         }
         let offset = (index - self.snapshot_index - 1) as usize;
         self.entries.get(offset)
+    }
+
+    /// Entries from `lo` up to `hi` inclusive whose data sums to at most
+    /// `max_bytes`. The first entry is always included, so an entry larger
+    /// than `max_bytes` still ships, alone.
+    pub fn entries_within(&self, lo: u64, hi: u64, max_bytes: usize) -> Result<&[LogEntry]> {
+        let range = self.entries_range(lo, hi)?;
+        let mut total = 0usize;
+        let mut end = 0usize;
+        for entry in range {
+            total = total.saturating_add(entry.data.len());
+            if end > 0 && total > max_bytes {
+                break;
+            }
+            end += 1;
+        }
+        Ok(&range[..end])
     }
 
     /// Get entries in range [lo, hi] inclusive.
@@ -263,6 +285,24 @@ mod tests {
         assert_eq!(range.len(), 3);
         assert_eq!(range[0].index, 2);
         assert_eq!(range[2].index, 4);
+    }
+
+    #[test]
+    fn entries_within_stops_at_the_byte_budget_and_keeps_one_entry() {
+        let mut log = RaftLog::new(MemStorage::new());
+        for i in 1..=4 {
+            log.append(LogEntry {
+                term: 1,
+                index: i,
+                data: vec![0; 10],
+            })
+            .unwrap();
+        }
+        assert_eq!(log.entries_within(1, 4, 25).unwrap().len(), 2);
+        assert_eq!(log.entries_within(1, 4, 40).unwrap().len(), 4);
+        // An entry past the budget ships alone.
+        assert_eq!(log.entries_within(2, 4, 5).unwrap().len(), 1);
+        assert!(log.entries_within(5, 4, 5).unwrap().is_empty());
     }
 
     #[test]

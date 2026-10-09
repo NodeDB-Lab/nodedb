@@ -13,8 +13,13 @@
 //! [`CoreLoop::stage_calvin_overlay`][super::calvin_overlay_stage]). Reusing
 //! `execute_resolve_txn` directly means the redo serialization logic itself is
 //! never duplicated.
+//!
+//! The answer is a [`CalvinResolved`]: the redo record and the reply the
+//! staged plans decided, as a [`nodedb_physical::physical_plan::CalvinReplySpec`].
 
-use crate::bridge::envelope::Response;
+use nodedb_physical::physical_plan::{CalvinReplySpec, CalvinResolved};
+
+use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 
@@ -22,8 +27,9 @@ use super::calvin_txn_id::calvin_synthetic_txn_id;
 
 impl CoreLoop {
     /// Resolve the Calvin transaction staged under `(epoch, position)` on
-    /// this vshard into a [`RedoRecord`][crate::wal::RedoRecord] and return
-    /// its encoded bytes, without touching any base engine.
+    /// this vshard into a [`RedoRecord`][crate::wal::RedoRecord], without
+    /// touching any base engine. Answers a [`CalvinResolved`] with the
+    /// record's encoded bytes and the staged reply.
     ///
     /// Errors (rather than silently dropping data or producing an empty
     /// record) when no `commit_pending` entry exists for
@@ -48,11 +54,11 @@ impl CoreLoop {
             Err(e) => return self.response_error(task, e),
         };
 
-        // Clone the staged plans (and the deterministic epoch anchor) out of
-        // `commit_pending` so the `&mut self` resolve call — which assigns
-        // bitemporal stamps into the overlay — does not overlap the immutable
-        // borrow of the pending buffer.
-        let (tid, plans, epoch_system_ms) = match self
+        // Clone the staged plans, the deterministic epoch anchor, and the
+        // staged reply out of `commit_pending` so the `&mut self` resolve
+        // call — which assigns bitemporal stamps into the overlay — does not
+        // overlap the immutable borrow of the pending buffer.
+        let (tid, plans, epoch_system_ms, reply) = match self
             .calvin
             .commit_pending
             .get(&(epoch, position, vshard_id))
@@ -61,6 +67,7 @@ impl CoreLoop {
                 pending.tenant_id.as_u64(),
                 pending.plans.clone(),
                 pending.epoch_system_ms,
+                CalvinReplySpec::from(&pending.reply),
             ),
             None => {
                 return self.response_error(
@@ -89,10 +96,31 @@ impl CoreLoop {
         let prev_epoch_ms = self.epoch_system_ms;
         self.epoch_system_ms = Some(epoch_system_ms);
         self.apply_scope.calvin_txn_ordinal = Some(txn_ordinal);
-        let resp = self.execute_resolve_txn(task, tid, synthetic_txn_id, &plans);
+        let mut resp = self.execute_resolve_txn(task, tid, synthetic_txn_id, &plans);
         self.apply_scope.calvin_txn_ordinal = None;
         self.epoch_system_ms = prev_epoch_ms;
-        resp
+        if resp.status != Status::Ok {
+            return resp;
+        }
+        let resolved = CalvinResolved {
+            redo: resp.payload.as_bytes().to_vec(),
+            reply,
+        };
+        match zerompk::to_msgpack_vec(&resolved) {
+            Ok(bytes) => {
+                resp.payload = Payload::from_vec(bytes);
+                resp
+            }
+            Err(error) => self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: format!(
+                        "calvin resolve: encode the resolved answer of epoch={epoch} \
+                         position={position} vshard={vshard_id}: {error}"
+                    ),
+                },
+            ),
+        }
     }
 }
 
@@ -219,6 +247,45 @@ mod tests {
             .expect("seed row");
     }
 
+    /// The redo record a resolve answered with.
+    fn resolved_record(resp: &Response) -> RedoRecord {
+        let resolved: CalvinResolved =
+            zerompk::from_msgpack(resp.payload.as_bytes()).expect("decode resolved answer");
+        RedoRecord::from_bytes(&resolved.redo).expect("decode redo record")
+    }
+
+    /// The resolve answers the reply the stage decided, beside the record.
+    #[test]
+    fn a_resolve_answers_the_staged_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let task = make_task();
+        stage(
+            &mut core,
+            &task,
+            2,
+            0,
+            &[point_insert_plan("orders", "o1", 7)],
+        );
+        let vshard_id = task.request.vshard_id.as_u32();
+        let staged = CalvinReplySpec::from(
+            &core
+                .calvin
+                .commit_pending
+                .get(&(2, 0, vshard_id))
+                .expect("staged commit")
+                .reply,
+        );
+
+        let resp = core.execute_calvin_resolve(&task, 2, 0);
+
+        assert_eq!(resp.status, Status::Ok, "resolve must succeed: {resp:?}");
+        let resolved: CalvinResolved =
+            zerompk::from_msgpack(resp.payload.as_bytes()).expect("decode resolved answer");
+        assert_eq!(resolved.reply, staged);
+        assert_eq!(resolved_record(&resp).ops.len(), 1);
+    }
+
     fn stage(
         core: &mut CoreLoop,
         task: &ExecutionTask,
@@ -254,7 +321,7 @@ mod tests {
         let resp = core.execute_calvin_resolve(&task, 1, 0);
         assert_eq!(resp.status, Status::Ok, "resolve must succeed: {resp:?}");
 
-        let record = RedoRecord::from_bytes(resp.payload.as_bytes()).expect("decode redo record");
+        let record = resolved_record(&resp);
         assert!(
             record.calvin_stamp.is_none(),
             "calvin_stamp is filled in by a later unit, not resolve itself"
@@ -320,7 +387,7 @@ mod tests {
 
         let resp = core.execute_calvin_resolve(&task, 3, 0);
         assert_eq!(resp.status, Status::Ok, "resolve must succeed: {resp:?}");
-        let record = RedoRecord::from_bytes(resp.payload.as_bytes()).expect("decode redo record");
+        let record = resolved_record(&resp);
         assert_eq!(
             record.ops.len(),
             2,
@@ -355,7 +422,7 @@ mod tests {
 
         let resp = core.execute_calvin_resolve(&task, 4, 0);
         assert_eq!(resp.status, Status::Ok, "resolve must succeed: {resp:?}");
-        let record = RedoRecord::from_bytes(resp.payload.as_bytes()).expect("decode redo record");
+        let record = resolved_record(&resp);
         assert_eq!(
             record.ops.len(),
             2,
@@ -387,7 +454,7 @@ mod tests {
 
         let resp = core.execute_calvin_resolve(&task, 5, 0);
         assert_eq!(resp.status, Status::Ok, "resolve must succeed: {resp:?}");
-        let record = RedoRecord::from_bytes(resp.payload.as_bytes()).expect("decode redo record");
+        let record = resolved_record(&resp);
         assert_eq!(record.ops.len(), 2, "one Put sub-record per predicted row");
 
         // The expected post-image is the exact same decode -> apply -> encode
@@ -507,7 +574,7 @@ mod tests {
 
         let resp = core.execute_calvin_resolve(&task, 6, 0);
         assert_eq!(resp.status, Status::Ok, "resolve must succeed: {resp:?}");
-        let record = RedoRecord::from_bytes(resp.payload.as_bytes()).expect("decode redo");
+        let record = resolved_record(&resp);
         let image = record
             .ops
             .iter()
@@ -581,7 +648,7 @@ mod tests {
                 core.apply_scope.calvin_txn_ordinal, None,
                 "the resolve clears the transaction ordinal"
             );
-            let record = RedoRecord::from_bytes(resp.payload.as_bytes()).expect("decode redo");
+            let record = resolved_record(&resp);
             let put = record
                 .ops
                 .iter()

@@ -373,7 +373,8 @@ async fn finalize_reserved(
     // cancels the record first, so a finalize that found nothing applied
     // nothing.
     if state
-        .metadata_ddl_applied_token
+        .metadata_ddl
+        .applied_token
         .load(std::sync::atomic::Ordering::Acquire)
         != token
     {
@@ -713,7 +714,8 @@ mod tests {
         );
         assert!(
             state
-                .metadata_ddl_owner
+                .metadata_ddl
+                .owner
                 .lock()
                 .expect("owner lock")
                 .is_none(),

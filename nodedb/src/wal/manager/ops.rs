@@ -15,9 +15,18 @@ impl WalManager {
         &self,
         checkpoint_lsn: Lsn,
     ) -> crate::Result<nodedb_wal::segment::TruncateResult> {
+        // A held floor keeps every record a holder reads back at boot.
+        let bound = self.floor_holds.clamp(checkpoint_lsn);
+        if bound < checkpoint_lsn {
+            tracing::debug!(
+                checkpoint_lsn = checkpoint_lsn.as_u64(),
+                held_lsn = bound.as_u64(),
+                "WAL truncation held below the checkpoint"
+            );
+        }
         let wal = self.wal.lock().unwrap_or_else(|p| p.into_inner());
         let result = wal
-            .truncate_before(checkpoint_lsn.as_u64())
+            .truncate_before(bound.as_u64())
             .map_err(crate::Error::Wal)?;
 
         if result.segments_deleted > 0 {

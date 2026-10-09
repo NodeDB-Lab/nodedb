@@ -104,7 +104,11 @@ fn stage_then_flush(
     let mut request = make_request(PhysicalPlan::Meta(MetaOp::CalvinFlush {
         epoch,
         position: 0,
-        redo: resolved.payload.to_vec(),
+        redo: zerompk::from_msgpack::<nodedb_physical::physical_plan::CalvinResolved>(
+            resolved.payload.as_bytes(),
+        )
+        .expect("decode resolved answer")
+        .redo,
         collections: Vec::new(),
         sum_targets: Vec::new(),
     }));

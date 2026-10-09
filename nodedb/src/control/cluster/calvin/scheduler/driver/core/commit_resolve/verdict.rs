@@ -277,7 +277,12 @@ mod tests {
             row_changes: Vec::new(),
         };
         let mut response = staged_response(Status::Ok, None);
-        response.payload = Payload::from_vec(redo.to_bytes().expect("encode empty redo record"));
+        let resolved = nodedb_physical::physical_plan::CalvinResolved {
+            redo: redo.to_bytes().expect("encode empty redo record"),
+            reply: nodedb_physical::physical_plan::CalvinReplySpec::Count(Vec::new()),
+        };
+        response.payload =
+            Payload::from_vec(zerompk::to_msgpack_vec(&resolved).expect("encode resolved answer"));
         response
     }
 

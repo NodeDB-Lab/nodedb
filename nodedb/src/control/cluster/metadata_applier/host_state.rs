@@ -32,7 +32,8 @@ impl MetadataCommitApplier {
     ) -> Result<(), crate::Error> {
         let shared = self.shared_state()?;
         let mut owner = shared
-            .metadata_ddl_owner
+            .metadata_ddl
+            .owner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if owner.is_none() {
@@ -53,7 +54,8 @@ impl MetadataCommitApplier {
     pub(super) fn apply_ddl_prepare_release(&self, token: u64) -> Result<(), crate::Error> {
         let shared = self.shared_state()?;
         let mut owner = shared
-            .metadata_ddl_owner
+            .metadata_ddl
+            .owner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if owner.is_some_and(|current| current.token == token) {

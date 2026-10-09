@@ -583,6 +583,9 @@ pub enum MetaOp {
     /// (see `calvin_synthetic_txn_id`). Dispatched by the scheduler once the
     /// global verdict is commit, ahead of `CalvinFlush`, which installs the
     /// record this op returns. No base engine is touched during resolve.
+    ///
+    /// The response payload is a zerompk-encoded [`super::CalvinResolved`]:
+    /// the redo record and the reply the staged plans decided.
     CalvinResolve { epoch: u64, position: u32 },
 
     /// Apply one committed transaction's resolved redo record on the core that
@@ -598,11 +601,17 @@ pub enum MetaOp {
     /// version at the record's LSN. `sum_targets` is the materialized-sum
     /// resolution the transaction's document writes fold into their targets.
     /// `origin` decides which commit-boundary checks the apply runs.
+    ///
+    /// `calvin` is set when the record is a committed Calvin slice. The
+    /// install then stamps the slice's ordinal on the core clock, consumes
+    /// the slice's staged state when this core staged it, and answers the
+    /// reply `calvin.reply` describes.
     ApplyTransactionRedo {
         redo: Vec<u8>,
         collections: Vec<String>,
         sum_targets: Vec<super::RedoSumTargets>,
         origin: super::RedoOrigin,
+        calvin: Option<super::CalvinInstall>,
     },
 
     /// Install one batch of a RESTORE as part of a Calvin transaction, on

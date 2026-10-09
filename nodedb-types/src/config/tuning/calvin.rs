@@ -37,6 +37,17 @@ fn default_catch_up_window() -> u64 {
     512
 }
 
+fn default_max_redo_entry_bytes() -> usize {
+    // Well below the 64 MiB RPC frame limit, so one entry and the frame
+    // around it always fit.
+    8 * 1024 * 1024
+}
+
+fn default_max_open_redo_bytes() -> u64 {
+    // Sixty-four streams of the default entry size.
+    512 * 1024 * 1024
+}
+
 /// Tuning knobs for the Calvin scheduler that runs per hosted vShard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CalvinTuning {
@@ -69,6 +80,17 @@ pub struct CalvinTuning {
     /// Most sequencer log entries one catch-up drain reads and replays.
     #[serde(default = "default_catch_up_window")]
     pub catch_up_window: u64,
+
+    /// Largest encoded redo entry a proposer puts in a data-group log. A
+    /// committed redo past it travels as chunk entries and a final entry.
+    #[serde(default = "default_max_redo_entry_bytes")]
+    pub max_redo_entry_bytes: usize,
+
+    /// Most bytes of chunked redo streams a node holds open. A group leader
+    /// refuses a new stream that would pass it on the leader's node. A node
+    /// holds at most this much per data group it hosts.
+    #[serde(default = "default_max_open_redo_bytes")]
+    pub max_open_redo_bytes: u64,
 }
 
 impl Default for CalvinTuning {
@@ -80,6 +102,8 @@ impl Default for CalvinTuning {
             verdict_stall_warn_ms: default_verdict_stall_warn_ms(),
             max_inflight_backlog: default_max_inflight_backlog(),
             catch_up_window: default_catch_up_window(),
+            max_redo_entry_bytes: default_max_redo_entry_bytes(),
+            max_open_redo_bytes: default_max_open_redo_bytes(),
         }
     }
 }
@@ -97,6 +121,8 @@ mod tests {
         assert_eq!(t.verdict_stall_warn_ms, 5_000);
         assert_eq!(t.max_inflight_backlog, 1_024);
         assert_eq!(t.catch_up_window, 512);
+        assert_eq!(t.max_redo_entry_bytes, 8 * 1024 * 1024);
+        assert_eq!(t.max_open_redo_bytes, 512 * 1024 * 1024);
     }
 
     #[test]

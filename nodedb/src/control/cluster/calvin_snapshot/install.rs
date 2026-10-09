@@ -5,11 +5,11 @@
 //! The snapshot replaced the storage of the group's vShards with the
 //! leader's, which holds exactly the Calvin positions the cut names. So
 //! each vShard's applied state here becomes the cut's: in the applied
-//! mirror, which a checkpoint saves from, and in the catalog, which a
-//! scheduler starts from. Its base becomes the cut's sequencer index, which
-//! moves its generation: a scheduler started before the install installs
-//! nothing more, and the next scheduler reconcile starts it again from the
-//! installed state.
+//! ledger, which a scheduler starts from and a checkpoint saves from, and
+//! in the catalog, which boot recovery reads. Its base becomes the cut's
+//! sequencer index, which moves its generation: a scheduler started before
+//! the install installs nothing more, and the next scheduler reconcile
+//! starts it again from the installed state.
 //!
 //! A WAL `SnapshotInstalled` record of the group, written before this runs,
 //! makes boot recovery drop the vShards' applied markers from before it.
@@ -52,9 +52,12 @@ pub fn install_calvin_cut(
         })
         .collect();
 
-    let mirrors = shared.authorization_fence.calvin_mirrors();
     for state in &states {
-        mirrors.register(state.vshard_id, state.fully_applied_epoch, &state.tail);
+        shared.calvin.applied.install(
+            state.vshard_id,
+            state.fully_applied_epoch,
+            state.tail.clone(),
+        );
     }
     let catalog = shared.credentials.catalog();
     let settle_error = |source| SnapshotInstallError::Settle {

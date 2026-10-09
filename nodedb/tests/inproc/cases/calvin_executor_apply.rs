@@ -146,7 +146,9 @@ fn stage_and_resolve(
         rx,
         PhysicalPlan::Meta(MetaOp::CalvinResolve { epoch, position: 0 }),
     );
-    RedoRecord::from_bytes(&redo).expect("decode resolved redo")
+    let answer: nodedb_physical::physical_plan::CalvinResolved =
+        zerompk::from_msgpack(&redo).expect("decode resolved answer");
+    RedoRecord::from_bytes(&answer.redo).expect("decode resolved redo")
 }
 
 /// Flush `redo` as the Calvin transaction at `(epoch, 0)` with its record at

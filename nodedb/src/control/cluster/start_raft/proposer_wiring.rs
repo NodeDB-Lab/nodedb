@@ -116,13 +116,13 @@ fn install_compactor(
                         .ok_or_else(|| crate::Error::Internal {
                             detail: "raft log compaction: shared state dropped".into(),
                         })?;
-                let mirrors = shared.authorization_fence.calvin_mirrors();
+                let ledgers = &shared.calvin.applied;
                 let mut sm = sm_for_compact.lock().unwrap_or_else(|p| p.into_inner());
                 let undurable = sm.undurable_floor(|vshard, epoch, position| {
-                    // A vShard with no scheduler here holds no state to lose.
-                    mirrors
+                    // A vShard with no ledger here holds no state to lose.
+                    ledgers
                         .get(vshard)
-                        .is_none_or(|mirror| mirror.is_applied(epoch, position))
+                        .is_none_or(|ledger| ledger.is_applied(epoch, position))
                 });
                 let floor = [
                     sm.min_catch_up_from(),

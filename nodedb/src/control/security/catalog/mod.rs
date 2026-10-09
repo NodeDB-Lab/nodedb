@@ -59,6 +59,7 @@ pub mod procedure_types;
 pub mod procedures;
 pub mod read_only;
 pub mod redaction;
+pub mod redo_snapshot_owed;
 pub mod replicated_image;
 pub mod replicated_image_merge;
 pub mod restore_points;

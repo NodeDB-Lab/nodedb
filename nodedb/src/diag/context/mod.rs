@@ -20,6 +20,7 @@ mod outcome_floor;
 mod quota;
 mod raft_apply;
 mod recovery;
+mod redo_stream;
 mod retention;
 mod vector;
 mod vector_build;
@@ -52,6 +53,9 @@ pub(in crate::diag) use quota::{
 };
 pub(in crate::diag) use raft_apply::{RaftEntryReapplied, ReplicatedWriteParked};
 pub(in crate::diag) use recovery::{ReplayRecordUnapplied, WalArchivalFailedTruncationHeld};
+pub(in crate::diag) use redo_stream::{
+    RedoAbandonGivenUp, RedoSnapshotDebtNotRecorded, RedoStreamLostHere,
+};
 pub(in crate::diag) use retention::RetentionAutowireOrphaned;
 pub(in crate::diag) use vector::VectorIndexNotApplied;
 pub(in crate::diag) use vector_build::{VectorBuildNotInstalled, VectorBuilderUnavailable};

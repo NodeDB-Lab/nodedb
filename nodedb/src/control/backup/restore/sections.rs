@@ -108,6 +108,8 @@ pub(in crate::control::backup) fn append_snapshot(
         // A backup carries no Calvin cut: the restore re-applies its rows
         // as new writes on the destination.
         group_calvin: _,
+        // A backup carries no redo stream: its rows restore as new writes.
+        group_redo_streams: _,
         // A backup carries visible edge versions only. The restore re-applies
         // them at its own ordinal, so the source's cuts, hidden versions and
         // applied ordinals never reach the destination.

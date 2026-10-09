@@ -129,7 +129,10 @@ pub fn replay_surrogate_records(
             | RecordType::SnapshotInstalled
             // A write group carries row images, whose surrogates were bound
             // before the write that stored them.
-            | RecordType::WriteGroup => {}
+            | RecordType::WriteGroup
+            // A redo chunk holds stream bytes; its final record binds nothing
+            // the carried identities did not bind first.
+            | RecordType::RedoChunk => {}
         }
     }
     Ok(stats)

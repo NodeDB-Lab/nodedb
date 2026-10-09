@@ -473,6 +473,55 @@ mod tests {
         assert_eq!(cfg.tuning.calvin.channel_capacity, 512);
     }
 
+    #[test]
+    fn from_file_rejects_a_redo_entry_size_past_the_rpc_frame() {
+        let path = write_temp_config(
+            "nodedb-domain-redo-entry-large.toml",
+            "[tuning.calvin]\nmax_redo_entry_bytes = 67108864\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(msg.contains("tuning.calvin.max_redo_entry_bytes"), "{msg}");
+        assert!(msg.contains("RPC frame limit"), "{msg}");
+    }
+
+    #[test]
+    fn from_file_rejects_a_zero_redo_entry_size() {
+        let path = write_temp_config(
+            "nodedb-domain-redo-entry-zero.toml",
+            "[tuning.calvin]\nmax_redo_entry_bytes = 0\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(msg.contains("tuning.calvin.max_redo_entry_bytes"), "{msg}");
+    }
+
+    #[test]
+    fn from_file_rejects_an_open_redo_cap_below_one_entry() {
+        let path = write_temp_config(
+            "nodedb-domain-redo-open-cap.toml",
+            "[tuning.calvin]\nmax_redo_entry_bytes = 1048576\nmax_open_redo_bytes = 65536\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(msg.contains("tuning.calvin.max_open_redo_bytes"), "{msg}");
+    }
+
+    #[test]
+    fn from_file_reads_the_redo_sizes() {
+        let path = write_temp_config(
+            "nodedb-domain-redo-ok.toml",
+            "[tuning.calvin]\nmax_redo_entry_bytes = 65536\nmax_open_redo_bytes = 1048576\n",
+        );
+        let cfg = ServerConfig::from_file(&path).expect("valid redo sizes");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(cfg.tuning.calvin.max_redo_entry_bytes, 65_536);
+        assert_eq!(cfg.tuning.calvin.max_open_redo_bytes, 1_048_576);
+    }
+
     /// Every shipped default satisfies every bound the gate enforces.
     #[test]
     fn the_compiled_defaults_are_in_domain() {

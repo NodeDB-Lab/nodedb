@@ -109,13 +109,13 @@ pub fn capture_calvin_cut(
     group_vshards: &HashSet<u32>,
     through: u64,
 ) -> GroupCalvinCut {
-    let mirrors = shared.authorization_fence.calvin_mirrors();
+    let ledgers = &shared.calvin.applied;
     let mut ids: Vec<u32> = group_vshards.iter().copied().collect();
     ids.sort_unstable();
     let vshards = ids
         .into_iter()
         .filter_map(|vshard_id| {
-            let (fully_applied_epoch, tail) = mirrors.get(vshard_id)?.snapshot();
+            let (fully_applied_epoch, tail) = ledgers.get(vshard_id)?.snapshot();
             Some(VShardCalvinState {
                 vshard_id,
                 fully_applied_epoch,

@@ -3,6 +3,7 @@
 mod flush_read;
 mod images;
 mod reply;
+mod spec;
 mod stage;
 mod target;
 

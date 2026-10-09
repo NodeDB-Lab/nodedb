@@ -20,6 +20,7 @@ pub use recording::{
     index_rebuild_not_installed, metadata_apply_wedged, orphaned_index_entry_after_delete,
     quota_row_invalid, quota_row_undecodable, quota_row_write_failed, quota_scope_purge_incomplete,
     quota_scope_replay_aborted, raft_entries_reapplied, raft_entry_reapplied,
+    redo_abandon_given_up, redo_snapshot_debt_not_recorded, redo_stream_lost_here,
     replay_record_unapplied, replicated_write_parked, replicated_writes_parked,
     retention_autowire_orphaned, scope_quota_not_installed, strict_row_image_unrendered,
     strict_row_undecodable, synonym_group_not_applied, timeseries_partition_unreadable,

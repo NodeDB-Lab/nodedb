@@ -61,7 +61,12 @@ impl DataProposeGate for LeaderWriteGate {
             return Ok(None);
         };
         let vshard = VShardId::new(vshard_id);
-        let guard = match admit_entry(&state, vshard, entry).map_err(gate_error)? {
+        // Bytes that are not a replicated entry apply as nothing on any replica.
+        let Some(entry) = ReplicatedEntry::from_bytes(entry) else {
+            return Ok(None);
+        };
+        admit_redo_stream(&state, &entry, deadline).map_err(gate_error)?;
+        let guard = match admit_entry(&state, vshard, &entry).map_err(gate_error)? {
             WriteAdmission::ExemptRead
             | WriteAdmission::FastPath { guard: None }
             // No scheduler runs for the vShard here: the log alone orders
@@ -112,22 +117,41 @@ enum EntryScope {
     Plan,
 }
 
-/// Admit the encoded entry `entry`, proposed to `vshard`'s group.
+/// Admit the first chunk of a chunked redo stream against this node's open
+/// stream bytes. Every replica takes the chunks the log holds, so the leader
+/// is the one place a stream is refused for memory. Any other entry passes.
+fn admit_redo_stream(
+    state: &SharedState,
+    entry: &ReplicatedEntry,
+    deadline: tokio::time::Instant,
+) -> crate::Result<()> {
+    let ReplicatedWrite::RedoChunk {
+        stream,
+        index: 0,
+        len,
+        ..
+    } = &entry.write
+    else {
+        return Ok(());
+    };
+    state
+        .redo_chunks
+        .admit_stream(*stream, *len, deadline.into_std())
+        .map_err(crate::Error::from)
+}
+
+/// Admit `entry`, proposed to `vshard`'s group.
 pub(crate) fn admit_entry(
     state: &SharedState,
     vshard: VShardId,
-    entry: &[u8],
+    entry: &ReplicatedEntry,
 ) -> crate::Result<WriteAdmission> {
-    // Bytes that are not a replicated entry apply as nothing on any replica.
-    let Some(entry) = ReplicatedEntry::from_bytes(entry) else {
-        return Ok(WriteAdmission::ExemptRead);
-    };
     let database_id = crate::types::DatabaseId::new(entry.database_id);
     match entry_scope(&entry.write, database_id) {
         EntryScope::Exempt => Ok(WriteAdmission::ExemptRead),
         EntryScope::Collections(collections) => Ok(admit_collections(state, vshard, &collections)),
         EntryScope::Plan => {
-            let Some((_, (tenant_id, _, plan, _))) = decode_parsed_entry(&entry)? else {
+            let Some((_, (tenant_id, _, plan, _))) = decode_parsed_entry(entry)? else {
                 return Ok(WriteAdmission::ExemptRead);
             };
             // An entry the scheduler cannot apply as proposed waits for its
@@ -165,11 +189,19 @@ fn entry_scope(write: &ReplicatedWrite, database_id: crate::types::DatabaseId) -
         // scheduler holds its locks. A session transaction's redo writes
         // every collection it names.
         ReplicatedWrite::TransactionRedo {
-            redo, collections, ..
-        } => match redo.calvin_stamp {
-            Some(_) => EntryScope::Exempt,
-            None => EntryScope::Collections(collections.clone()),
-        },
+            body, collections, ..
+        } => {
+            if body.is_calvin() {
+                EntryScope::Exempt
+            } else {
+                EntryScope::Collections(collections.clone())
+            }
+        }
+        // A redo chunk and an abandon write no row: the stream's final entry
+        // takes the locks.
+        ReplicatedWrite::RedoChunk { .. } | ReplicatedWrite::RedoAbandon { .. } => {
+            EntryScope::Exempt
+        }
         ReplicatedWrite::ArrayOp { array, .. } => EntryScope::Collections(vec![
             QualifiedCollection::new(database_id, array)
                 .as_str()
