@@ -31,6 +31,7 @@
 //! schedulers; this module never does storage I/O or io_uring directly.
 
 pub mod assign;
+pub mod budget;
 pub mod edge_slices;
 pub mod local;
 pub mod parts;

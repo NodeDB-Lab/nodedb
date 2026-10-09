@@ -66,8 +66,7 @@ const SIDE_PRODUCER: u8 = 0;
 /// SINGLE-SIDED aggregate sibling of [`RegistryShuffleConsumer`]. Holds the
 /// node's [`SharedState`] so it can reach the shuffle receiver registry (for the
 /// staged inbox), the SPSC dispatcher + request tracker (to run the merge +
-/// finalize on the Data Plane), and the network tuning (deadline / result-byte
-/// ceilings).
+/// finalize on the Data Plane), and the network tuning (result-byte ceiling).
 pub struct RegistryShuffleAggregator {
     state: Arc<SharedState>,
 }
@@ -107,6 +106,7 @@ impl RegistryShuffleAggregator {
         //    deadline; on expiry surface a deterministic DeadlineExceeded rather
         //    than hanging.
         let deadline_ms = req.deadline_remaining_ms.max(1);
+        let hop_deadline = Instant::now() + Duration::from_millis(deadline_ms);
         if tokio::time::timeout(Duration::from_millis(deadline_ms), inbox.wait_finalized())
             .await
             .is_err()
@@ -160,9 +160,9 @@ impl RegistryShuffleAggregator {
         //    bounded-collect path the join consume hook uses; the plan is built
         //    locally (node-local path, never wire-encoded), so we build the
         //    `Request` directly rather than round-tripping through `plan_bytes`.
-        let deadline = Duration::from_millis(deadline_ms).min(Duration::from_secs(
-            self.state.tuning.network.default_deadline_secs,
-        ));
+        //    The hop runs on what is left of the budget the coordinator sent.
+        //    This node's default is no ceiling on it.
+        let deadline = hop_deadline.saturating_duration_since(Instant::now());
 
         let request_id = self.state.next_request_id();
         let request = Request {
@@ -171,7 +171,7 @@ impl RegistryShuffleAggregator {
             database_id: DatabaseId::from(req.database_id),
             vshard_id: crate::types::VShardId::new(0),
             plan,
-            deadline: Instant::now() + deadline,
+            deadline: hop_deadline,
             priority: Priority::Normal,
             trace_id: nodedb_types::TraceId(req.trace_id),
             consistency: ReadConsistency::Strong,

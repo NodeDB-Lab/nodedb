@@ -4,12 +4,12 @@
 //! VShardEnvelope routing RPC bodies.
 
 use crate::calvin::SEQUENCER_GROUP_ID;
-use crate::error::{ClusterError, Result};
+use crate::error::{CalvinError, ClusterError, Result};
 use crate::forward::{ChunkSink, PlanExecutor};
 use crate::multi_raft::MultiRaft;
 use crate::rpc_codec::{
     DataProposeRequest, DataProposeResponse, ExecuteRequest, MetadataProposeRequest, ProposeTarget,
-    RaftRpc, TypedClusterError, VShardRefusal,
+    RaftRpc, TypedClusterError, VShardRefusal, forwarded_deadline,
 };
 
 use super::super::loop_core::{CommitApplier, RaftLoop};
@@ -48,11 +48,29 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
 
     // Data-group and sequencer-group proposal forwarding — apply locally if
     // we lead the target group, otherwise return NotLeader with a hint so the
-    // forwarder can chase the redirect.
-    pub(super) fn handle_data_propose_rpc(&self, req: DataProposeRequest) -> Result<RaftRpc> {
-        let resp = {
-            let mut mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
-            propose_forwarded(&mut mr, req)
+    // forwarder can chase the redirect. A data-group entry passes this
+    // leader's write gate first, exactly as a local proposal does.
+    pub(super) async fn handle_data_propose_rpc(&self, req: DataProposeRequest) -> Result<RaftRpc> {
+        let resp = match req.target {
+            ProposeTarget::VShard {
+                vshard_id,
+                deadline_remaining_ms,
+            } => match forwarded_deadline(deadline_remaining_ms) {
+                // The proposer stopped waiting: the entry is refused unproposed.
+                None => DataProposeResponse::refused(&ClusterError::Calvin(
+                    CalvinError::AdmissionTimedOut,
+                )),
+                Some(deadline) => {
+                    match self.propose_admitted(vshard_id, &req.bytes, deadline).await {
+                        Ok((group_id, log_index)) => DataProposeResponse::ok(group_id, log_index),
+                        Err(error) => DataProposeResponse::refused(&error),
+                    }
+                }
+            },
+            ProposeTarget::Sequencer => {
+                let mut mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
+                propose_to_sequencer(&mut mr, req.bytes)
+            }
         };
         Ok(RaftRpc::DataProposeResponse(resp))
     }
@@ -92,19 +110,13 @@ fn vshard_answer(result: Result<Vec<u8>>) -> RaftRpc {
     }
 }
 
-/// Propose a forwarded entry to its target group on this node.
+/// Propose a forwarded sequencer entry to the sequencer group on this node.
 ///
 /// Answers `not leader` with the known leader as a hint when this node does
-/// not lead the target group.
-fn propose_forwarded(mr: &mut MultiRaft, req: DataProposeRequest) -> DataProposeResponse {
-    let proposed = match req.target {
-        ProposeTarget::VShard(vshard_id) => mr.propose(vshard_id, req.bytes),
-        ProposeTarget::Sequencer => mr
-            .propose_to_group(SEQUENCER_GROUP_ID, req.bytes)
-            .map(|log_index| (SEQUENCER_GROUP_ID, log_index)),
-    };
-    match proposed {
-        Ok((group_id, log_index)) => DataProposeResponse::ok(group_id, log_index),
+/// not lead the sequencer group.
+fn propose_to_sequencer(mr: &mut MultiRaft, bytes: Vec<u8>) -> DataProposeResponse {
+    match mr.propose_to_group(SEQUENCER_GROUP_ID, bytes) {
+        Ok(log_index) => DataProposeResponse::ok(SEQUENCER_GROUP_ID, log_index),
         Err(error) => DataProposeResponse::refused(&error),
     }
 }
@@ -178,7 +190,7 @@ mod tests {
         elect_sequencer_leader(&mut mr);
         let before = mr.last_log_index(SEQUENCER_GROUP_ID).unwrap_or(0);
 
-        let resp = propose_forwarded(&mut mr, sequencer_request());
+        let resp = propose_to_sequencer(&mut mr, sequencer_request().bytes);
 
         assert!(resp.success, "{}", resp.error_message);
         assert_eq!(resp.group_id, SEQUENCER_GROUP_ID);
@@ -191,7 +203,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut mr = multi_raft_with_sequencer(dir.path());
 
-        let resp = propose_forwarded(&mut mr, sequencer_request());
+        let resp = propose_to_sequencer(&mut mr, sequencer_request().bytes);
 
         assert!(!resp.success);
         assert_eq!(

@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Point-write lock-key extraction for the write-admission fast path.
+//! Point-write key extraction for the per-vShard write order.
 //!
-//! [`plan_lock_keys`] maps a plan to the deterministic lock keys the fast path
-//! must hold. Returns `Some` only for single-vShard, single-identity point
-//! writes; predicate/bulk/multi-home writes route to Calvin instead.
+//! [`plan_lock_keys`] maps a single-vShard, single-identity point write to
+//! the keys that name its row. The write-order fence reads them to decide
+//! whether admission's guard already orders the row. [`plan_row_key`] names
+//! the key the keyed order lock serializes on when no Calvin scheduler runs.
+//! The gate's own lock request comes from `admission_keys`.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -15,9 +17,8 @@ use crate::control::cluster::calvin::scheduler::lock_manager::LockKey;
 use crate::types::VShardId;
 use nodedb_physical::physical_plan::{DocumentOp, GraphOp, KvOp, VectorOp, VectorWriteTargets};
 
-/// The vShard and exact lock-key set a POINT write must hold on the fast path.
-/// Returns `None` (routes to Calvin) for any plan that isn't a single-home,
-/// single-identity point write.
+/// The vShard and the row keys of a POINT write. `None` for any plan that
+/// isn't a single-home, single-identity point write.
 pub(crate) fn plan_lock_keys(plan: &PhysicalPlan) -> Option<(VShardId, BTreeSet<LockKey>)> {
     // `plan_vshard` returns two vShards for a cross-home graph edge, which has no
     // single `(vShard, keys)` representation and is ineligible for the fast path.

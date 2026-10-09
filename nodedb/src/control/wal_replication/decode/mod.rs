@@ -38,6 +38,6 @@ mod transaction_redo;
 mod vector;
 mod vector_direct;
 
-pub use entry::{decode_replicated_entry, from_replicated_entry};
+pub use entry::{decode_parsed_entry, decode_replicated_entry, from_replicated_entry};
 pub use entry_graph::edge_write_plan;
 pub use transaction_redo::transaction_redo_payload;

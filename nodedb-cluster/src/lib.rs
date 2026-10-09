@@ -118,10 +118,10 @@ pub use migration_executor::{
 pub use multi_raft::{GroupStatus, MultiRaft};
 pub use raft_loop::{
     ApplyPermit, AssignRemoteSurrogate, AuthLeaseService, BuiltGroupSnapshot, CalvinSubmit,
-    CalvinSubmitInbox, CommitApplier, GroupApplyGates, InstallPermit, MetadataSnapshotCapture,
-    RaftLoop, ReleaseReservation, ReserveRead, ShuffleAggregator, ShuffleConsumer, ShuffleProducer,
-    ShuffleReceiver, SnapshotApplier, SnapshotBuilder, SnapshotQuarantineHook,
-    VShardEnvelopeHandler,
+    CalvinSubmitInbox, CommitApplier, DataProposeGate, GroupApplyGates, InstallPermit,
+    MetadataSnapshotCapture, ProposeHold, RaftLoop, ReleaseReservation, ReserveRead,
+    ShuffleAggregator, ShuffleConsumer, ShuffleProducer, ShuffleReceiver, SnapshotApplier,
+    SnapshotBuilder, SnapshotQuarantineHook, VShardEnvelopeHandler,
 };
 pub use reachability::{
     NoopProber, ReachabilityDriver, ReachabilityDriverConfig, ReachabilityProber, TransportProber,

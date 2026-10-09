@@ -238,14 +238,23 @@ fn install_async_proposer(
                     detail: "raft propose (async): cluster not running".into(),
                 })?;
                 // The attempt gets only what remains of the caller's deadline.
+                // A deadline that passed before the propose refuses the write.
                 if tokio::time::Instant::now() >= deadline {
-                    return Err(propose_deadline_exceeded());
+                    return Err(super::propose_error::expired_before_propose());
                 }
-                let (group_id, log_index) =
-                    tokio::time::timeout_at(deadline, rl.propose_via_data_leader(vshard_id, data))
-                        .await
-                        .map_err(|_| propose_deadline_exceeded())?
-                        .map_err(|e| async_propose_error(vshard_id, e))?;
+                // The leader's write gate stops at `deadline`. The call waits
+                // a bounded margin past it for the leader's verdict. An
+                // unproposed write then reports a refusal, not an unknown outcome.
+                let proposed = rl.propose_via_data_leader(vshard_id, &data, deadline).await;
+                let (group_id, log_index) = match proposed {
+                    Ok(at) => at,
+                    // The leader's write gate found a key of the write held.
+                    // The Calvin sequencer orders it behind the holder.
+                    Err(nodedb_cluster::ClusterError::Calvin(
+                        nodedb_cluster::CalvinError::RouteToSequencer,
+                    )) => return Ok(super::sequencer_route::routed_write(&state_weak, data)),
+                    Err(e) => return Err(async_propose_error(vshard_id, e)),
+                };
 
                 // Register the waiter with the proposer's idempotency
                 // key. The apply path compares against the committed

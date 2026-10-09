@@ -33,6 +33,9 @@ impl LockManager {
             entry.waiters.retain(|(w, _)| *w != txn);
             self.promote_waiters(key, &mut newly_promoted);
         }
+        if !keys.is_empty() {
+            self.released.notify_waiters();
+        }
         newly_promoted.into_iter().collect()
     }
 
@@ -154,6 +157,22 @@ mod tests {
             lm.is_ready(scheduler_txn, &keyset(&["k"])),
             "the promoted scheduler txn is now holder of the freed key"
         );
+    }
+
+    /// A release wakes a waiter that enabled the release signal before it.
+    #[tokio::test]
+    async fn release_wakes_the_release_signal() {
+        let mut lm = LockManager::new();
+        let holder = txn(1, 0);
+        assert_eq!(lm.acquire(holder, keyset(&["k"])), AcquireOutcome::Ready);
+        let signal = lm.release_signal();
+        let notified = signal.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        lm.release(holder);
+        tokio::time::timeout(std::time::Duration::from_secs(5), notified)
+            .await
+            .expect("a release wakes the release signal");
     }
 
     #[test]

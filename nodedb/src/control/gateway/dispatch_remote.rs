@@ -16,6 +16,7 @@ use nodedb_cluster::rpc_codec::{ExecuteRequest, RaftRpc};
 use tracing::debug;
 
 use crate::Error;
+use crate::control::security::identity::{Permission, required_permission};
 use crate::control::server::result_stream::{ResultStream, RowBatch};
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, Lsn, TenantId, TraceId, TxnId, VShardId};
@@ -133,6 +134,10 @@ pub(super) async fn dispatch_remote(
         }
     };
 
+    // A read can be sent again after a lost answer. Any other plan can have
+    // run on the target, so a lost answer is an unknown outcome.
+    let resend_safe = required_permission(&plan) == Permission::Read;
+
     // Encode the plan.
     let plan_bytes = plan_wire::encode(&plan).map_err(|e| Error::Internal {
         detail: format!("gateway: plan encode failed: {e}"),
@@ -169,20 +174,10 @@ pub(super) async fn dispatch_remote(
         "gateway: dispatching ExecuteRequest to remote node"
     );
 
-    let resp_rpc = transport.send_rpc(node_id, req).await.map_err(|e| {
-        // Transport failure means the target node is unreachable —
-        // we do NOT know who the new leader is. Use leader_node = 0
-        // so the retry loop does NOT re-entrench the unreachable node
-        // as leader in the routing table. The next retry will route
-        // locally (leader == 0 → local) and let the local Raft state
-        // resolve to the actual leader.
-        Error::NotLeader {
-            vshard_id: VShardId::new((vshard_id % VShardId::COUNT as u64) as u32),
-            leader_node: 0,
-            leader_addr: format!("node-{node_id} (transport error: {e})"),
-            leader_term: 0,
-        }
-    })?;
+    let resp_rpc = transport
+        .send_rpc(node_id, req)
+        .await
+        .map_err(|e| send_error(e, resend_safe, node_id, vshard_id))?;
 
     match resp_rpc {
         RaftRpc::ExecuteResponse(resp) => {
@@ -394,6 +389,7 @@ fn map_stream_cluster_error(err: ClusterError, vshard_id: u64) -> Error {
         | ClusterError::GhostNotFound { .. }
         | ClusterError::Transport { .. }
         | ClusterError::ShardTimeout { .. }
+        | ClusterError::Unanswered { .. }
         | ClusterError::Storage { .. }
         | ClusterError::Codec { .. }
         | ClusterError::UnsupportedWireVersion { .. }
@@ -451,10 +447,72 @@ fn scoped_vshard(
     Ok(Some(VShardId::new(raw)))
 }
 
+/// The error of a failed `ExecuteRequest` send.
+///
+/// A request the target never received, and a lost answer to a read, retry as
+/// `NotLeader` with `leader_node = 0`. The unreachable node is then not kept as
+/// leader, and the next try routes locally to the real leader. A lost answer
+/// to any other plan is an unknown outcome: the plan can have run, and a
+/// second send would run it again.
+fn send_error(e: ClusterError, resend_safe: bool, node_id: u64, vshard_id: u64) -> Error {
+    let outcome_unknown = matches!(
+        e,
+        ClusterError::Unanswered { .. } | ClusterError::ShardTimeout { .. }
+    );
+    if outcome_unknown && !resend_safe {
+        return Error::DeadlineExceeded {
+            request_id: crate::types::RequestId::new(0),
+        };
+    }
+    Error::NotLeader {
+        vshard_id: VShardId::new((vshard_id % VShardId::COUNT as u64) as u32),
+        leader_node: 0,
+        leader_addr: format!("node-{node_id} (transport error: {e})"),
+        leader_term: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use nodedb_physical::physical_plan::{MetaOp, PhysicalPlan};
+
+    fn unanswered() -> ClusterError {
+        ClusterError::Unanswered {
+            node_id: 2,
+            detail: "stream reset".into(),
+        }
+    }
+
+    /// A write whose answer was lost can have applied: it is never sent again.
+    #[test]
+    fn a_lost_answer_to_a_write_is_an_unknown_outcome() {
+        assert!(matches!(
+            send_error(unanswered(), false, 2, 7),
+            Error::DeadlineExceeded { .. }
+        ));
+    }
+
+    /// A read whose answer was lost retries through the leader lookup.
+    #[test]
+    fn a_lost_answer_to_a_read_retries() {
+        assert!(matches!(
+            send_error(unanswered(), true, 2, 7),
+            Error::NotLeader { leader_node: 0, .. }
+        ));
+    }
+
+    /// A request that never reached the target retries, read or write.
+    #[test]
+    fn an_unsent_request_retries() {
+        let unsent = ClusterError::Transport {
+            detail: "connect refused".into(),
+        };
+        assert!(matches!(
+            send_error(unsent, false, 2, 7),
+            Error::NotLeader { leader_node: 0, .. }
+        ));
+    }
 
     #[test]
     fn a_transaction_meta_op_carries_its_route_vshard() {

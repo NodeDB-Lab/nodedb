@@ -249,6 +249,8 @@ impl LocalPlanExecutor {
                         &self.state,
                         proposer,
                         entry,
+                        // The coordinator's remaining budget bounds this hop.
+                        tokio::time::Instant::now() + deadline,
                     )
                     .await
                     {

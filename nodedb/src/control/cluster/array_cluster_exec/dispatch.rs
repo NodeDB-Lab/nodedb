@@ -135,8 +135,11 @@ impl NexarArrayDispatch {
             self.transport.send_rpc(node_id, rpc),
         )
         .await
-        .map_err(|_| nodedb_cluster::error::ClusterError::Transport {
-            detail: format!("array shard RPC timeout ({timeout_ms}ms) to node {node_id}"),
+        // The request can have reached the shard, so a timeout is never
+        // resent: `call` retries only a `Transport` error.
+        .map_err(|_| nodedb_cluster::error::ClusterError::ShardTimeout {
+            vshard_id: req.vshard_id,
+            elapsed_ms: timeout_ms,
         })??;
 
         match resp_rpc {

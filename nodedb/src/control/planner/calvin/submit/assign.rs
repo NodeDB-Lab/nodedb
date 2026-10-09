@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use nodedb_cluster::calvin::SEQUENCER_GROUP_ID;
 use nodedb_cluster::calvin::types::TxClass;
-use nodedb_cluster::{RaftRpc, SubmitCalvinInboxRequest, SubmitCalvinInboxResponse};
+use nodedb_cluster::{ClusterError, RaftRpc, SubmitCalvinInboxRequest, SubmitCalvinInboxResponse};
 
 use super::stream::{PartStream, StreamTarget, stream_parts};
 use crate::Error;
@@ -122,7 +122,6 @@ pub async fn submit_calvin_routed_assign(
     super::local::stamp_incarnations(state, &mut tx_class)?;
     super::unique_claims::stamp_unique_claims(state, &mut tx_class)?;
     let stream = super::parts::split_into_parts(state, &mut tx_class)?;
-    let local_timeout = Duration::from_secs(state.tuning.network.default_deadline_secs);
 
     // Every running server has a cluster transport, the synthesized one-node
     // cluster included. Without one, `start_raft` never ran here.
@@ -153,6 +152,7 @@ pub async fn submit_calvin_routed_assign(
     // Leader is self: submit-and-assign locally (a self-RPC will be a pointless
     // extra hop and the local registry is the one that gets the assignment).
     if leader == state.node_id {
+        let local_timeout = super::budget::statement_budget(state)?;
         return assign_prepared(state, tx_class, stream, local_timeout).await;
     }
 
@@ -167,12 +167,8 @@ pub async fn submit_calvin_routed_assign(
         detail: format!("failed to encode TxClass for routed Calvin inbox submit: {e}"),
     })?;
 
-    let deadline_remaining_ms = state
-        .tuning
-        .network
-        .default_deadline_secs
-        .saturating_mul(1000)
-        .max(1);
+    // The leader works on the transaction only as long as the statement waits.
+    let deadline_remaining_ms = super::budget::statement_budget_ms(state)?;
     let req = SubmitCalvinInboxRequest {
         tx_class_bytes,
         deadline_remaining_ms,
@@ -211,6 +207,13 @@ pub async fn submit_calvin_routed_assign(
         Ok(other) => {
             return Err(Error::Internal {
                 detail: format!("calvin-inbox: unexpected reply from node {leader}: {other:?}"),
+            });
+        }
+        // The submit went out and its answer was lost. The leader can have
+        // assigned it, so its outcome is unknown.
+        Err(ClusterError::Unanswered { .. }) => {
+            return Err(Error::DeadlineExceeded {
+                request_id: crate::types::RequestId::new(0),
             });
         }
         Err(e) => {

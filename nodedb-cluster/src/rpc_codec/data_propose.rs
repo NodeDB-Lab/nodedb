@@ -15,12 +15,40 @@ use crate::error::{ClusterError, Result};
 /// The Raft group a forwarded proposal is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum ProposeTarget {
-    /// The data group that owns this vShard. The bytes are a serialized
+    /// The data group that owns `vshard_id`. The bytes are a serialized
     /// `ReplicatedEntry`.
-    VShard(u32),
+    ///
+    /// `deadline_remaining_ms` is what remains of the proposer's deadline
+    /// when it sends the request. The leader's write gate stops waiting for
+    /// the entry's keys once this budget runs out. `0` means the deadline
+    /// passed, and the leader refuses the entry unproposed.
+    VShard {
+        vshard_id: u32,
+        deadline_remaining_ms: u64,
+    },
     /// The Calvin sequencer group. The bytes are a msgpack-encoded
     /// `SequencerEntry`.
     Sequencer,
+}
+
+/// The budget a forward carries for `deadline`: the milliseconds left now.
+/// `0` when the deadline passed.
+pub fn remaining_budget_ms(deadline: tokio::time::Instant) -> u64 {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The leader's deadline for a forward that carries `deadline_remaining_ms`.
+/// `None` when the budget is spent.
+///
+/// The budget is used as it arrived. The proposer resolved it once, from the
+/// statement's own timeout or its node default. Re-deciding it against the
+/// leader's default gives one statement two budgets.
+pub fn forwarded_deadline(deadline_remaining_ms: u64) -> Option<tokio::time::Instant> {
+    match deadline_remaining_ms {
+        0 => None,
+        ms => Some(tokio::time::Instant::now() + std::time::Duration::from_millis(ms)),
+    }
 }
 
 /// Forward an opaque proposal payload to the leader of its target group.
@@ -39,6 +67,12 @@ pub enum ForwardedProposeRefusal {
     NotLeader,
     /// A leadership transfer of the target group is in flight.
     LeadershipTransferInProgress,
+    /// The leader's write gate routes the write through the Calvin
+    /// sequencer.
+    RouteToSequencer,
+    /// The proposer's deadline passed before the leader's write gate
+    /// admitted the write. The leader did not propose it.
+    AdmissionTimedOut,
     /// Any other failure; `error_message` describes it.
     Failed,
 }
@@ -82,6 +116,12 @@ impl DataProposeResponse {
                 None,
                 0,
             ),
+            ClusterError::Calvin(crate::error::CalvinError::RouteToSequencer) => {
+                (ForwardedProposeRefusal::RouteToSequencer, None, 0)
+            }
+            ClusterError::Calvin(crate::error::CalvinError::AdmissionTimedOut) => {
+                (ForwardedProposeRefusal::AdmissionTimedOut, None, 0)
+            }
             // A refusal with no retry contract. The forwarding node reads it
             // as a transport error carrying the leader's message.
             ClusterError::Raft(
@@ -105,6 +145,7 @@ impl DataProposeResponse {
             | ClusterError::GhostNotFound { .. }
             | ClusterError::Transport { .. }
             | ClusterError::ShardTimeout { .. }
+            | ClusterError::Unanswered { .. }
             | ClusterError::StreamTerminal { .. }
             | ClusterError::Storage { .. }
             | ClusterError::DataPlane { .. }
@@ -147,8 +188,9 @@ impl DataProposeResponse {
     }
 
     /// The typed error a refused response stands for on the forwarding node.
-    /// A refusal the leader typed keeps its Raft error; any other stays a
-    /// transport error carrying the leader's message.
+    /// A refusal the leader typed keeps its Raft error. Any other becomes
+    /// `ClusterError::RemoteUntyped` with the leader's message. The leader
+    /// answered, so it is never a link failure.
     pub fn refusal_error(&self) -> ClusterError {
         match self.refusal {
             Some(ForwardedProposeRefusal::NotLeader) => {
@@ -160,8 +202,14 @@ impl DataProposeResponse {
             Some(ForwardedProposeRefusal::LeadershipTransferInProgress) => {
                 ClusterError::Raft(nodedb_raft::RaftError::LeadershipTransferInProgress)
             }
-            Some(ForwardedProposeRefusal::Failed) | None => ClusterError::Transport {
-                detail: format!("data propose forward failed: {}", self.error_message),
+            Some(ForwardedProposeRefusal::RouteToSequencer) => {
+                ClusterError::Calvin(crate::error::CalvinError::RouteToSequencer)
+            }
+            Some(ForwardedProposeRefusal::AdmissionTimedOut) => {
+                ClusterError::Calvin(crate::error::CalvinError::AdmissionTimedOut)
+            }
+            Some(ForwardedProposeRefusal::Failed) | None => ClusterError::RemoteUntyped {
+                detail: format!("data propose forward refused: {}", self.error_message),
             },
         }
     }
@@ -235,10 +283,41 @@ mod tests {
         assert_eq!(req.bytes, vec![1, 2, 3]);
     }
 
+    /// The vShard target keeps the proposer's remaining budget.
     #[test]
-    fn vshard_target_survives_the_wire() {
-        let req = roundtrip(ProposeTarget::VShard(42));
-        assert_eq!(req.target, ProposeTarget::VShard(42));
+    fn vshard_target_keeps_its_deadline_across_the_wire() {
+        let target = ProposeTarget::VShard {
+            vshard_id: 42,
+            deadline_remaining_ms: 1_500,
+        };
+        let req = roundtrip(target);
+        assert_eq!(req.target, target);
+    }
+
+    /// A spent budget gives the leader no deadline, so it proposes nothing.
+    #[test]
+    fn a_spent_budget_has_no_leader_deadline() {
+        assert_eq!(forwarded_deadline(0), None);
+    }
+
+    /// The leader's deadline ends no later than the budget the forward
+    /// carries.
+    #[test]
+    fn the_leader_deadline_ends_within_the_forwarded_budget() {
+        let budget = std::time::Duration::from_millis(50);
+        let latest = tokio::time::Instant::now() + budget;
+        let deadline = forwarded_deadline(50).expect("a live budget");
+        let received = tokio::time::Instant::now() + budget;
+        assert!(deadline <= received);
+        assert!(deadline >= latest);
+    }
+
+    /// A passed deadline leaves no budget to forward.
+    #[test]
+    fn a_passed_deadline_leaves_no_budget() {
+        assert_eq!(remaining_budget_ms(tokio::time::Instant::now()), 0);
+        let live = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        assert!(remaining_budget_ms(live) > 9_000);
     }
 
     fn refusal_across_the_wire(error: ClusterError) -> ClusterError {
@@ -281,9 +360,30 @@ mod tests {
         ));
     }
 
+    /// A write-gate refusal keeps its Calvin error across the wire, so the
+    /// forwarding node routes the write or reports the deadline.
     #[test]
-    fn any_other_refusal_stays_a_transport_error() {
+    fn a_write_gate_refusal_keeps_its_calvin_error_across_the_wire() {
+        let routed = refusal_across_the_wire(ClusterError::Calvin(
+            crate::error::CalvinError::RouteToSequencer,
+        ));
+        assert!(matches!(
+            routed,
+            ClusterError::Calvin(crate::error::CalvinError::RouteToSequencer)
+        ));
+        let timed_out = refusal_across_the_wire(ClusterError::Calvin(
+            crate::error::CalvinError::AdmissionTimedOut,
+        ));
+        assert!(matches!(
+            timed_out,
+            ClusterError::Calvin(crate::error::CalvinError::AdmissionTimedOut)
+        ));
+    }
+
+    #[test]
+    fn any_other_refusal_is_an_untyped_answer() {
         let error = refusal_across_the_wire(ClusterError::VShardNotMapped { vshard_id: 7 });
-        assert!(matches!(error, ClusterError::Transport { .. }));
+        assert!(matches!(error, ClusterError::RemoteUntyped { .. }));
+        assert!(!error.is_link_failure());
     }
 }

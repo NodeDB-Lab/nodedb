@@ -2,32 +2,45 @@
 
 //! The write-admission gate.
 //!
-//! Every write-class `PhysicalPlan` — regardless of transport or path — passes
-//! through [`admit`] before it is enqueued to a Data-Plane core. The gate
-//! decides one of four outcomes per write:
+//! Every write-class `PhysicalPlan` passes through [`admit`] before it is
+//! ordered: an autocommit write that applies on this node alone before its
+//! enqueue, and a replicated write on its data-group leader before its
+//! propose (see `leader_gate`). The gate decides one of five outcomes:
 //!
-//! - [`WriteAdmission::FastPath`] — an uncontended POINT write whose exact
-//!   deterministic lock keys were acquired here. It carries a RAII
-//!   [`WriteAdmissionGuard`] the caller holds across the enqueue + response; the
-//!   guard releases the keys on drop. This is the normal autocommit path.
+//! - [`WriteAdmission::FastPath`] — every lock key of the write was free and
+//!   is held now by the RAII [`WriteAdmissionGuard`]. A local write holds it
+//!   across its enqueue. A replicated write holds it until its leader starts
+//!   the entry's apply. The guard releases the keys on drop.
 //! - [`WriteAdmission::FastPathBlocking`] — a single-node POINT write for a
 //!   vShard with no Calvin scheduler. There is no lock table to fence against,
 //!   so the caller awaits a FIFO-fair per-key async order-lock before the WAL
 //!   append + enqueue, serializing concurrent same-key writes in arrival order.
-//! - [`WriteAdmission::RouteToCalvin`] — a point write whose keys are currently
-//!   held by a pending commit (acquire returned `Blocked`), OR any predicate /
-//!   bulk / multi-home write. The caller submits it through the deterministic
-//!   scheduler, which queues it FIFO behind the holder and applies it in order.
+//! - [`WriteAdmission::RouteToCalvin`] — a key is held, and a Calvin
+//!   transaction can sequence the write, or the write homes on several
+//!   vShards. The caller submits it through the deterministic scheduler, which
+//!   queues it FIFO behind the holder and applies it in order.
+//! - [`WriteAdmission::Wait`] — a key is held, and no Calvin transaction can
+//!   sequence the write. The caller awaits [`AdmissionWait::acquire`].
 //! - [`WriteAdmission::ExemptRead`] — a non-write (read / meta op), or a
 //!   Calvin-scheduled apply that already holds its locks.
 //!
-//! The fence holds because the fast path and the scheduler share the SAME
+//! Every write shape has a lock request (see `admission_keys`): its row keys
+//! `Exclusive` plus its collection `Intent`, or its collection `Exclusive`.
+//!
+//! The fence holds because the gate and the scheduler share the SAME
 //! `Arc<Mutex<LockManager>>` (via [`CalvinLocalState::lock_managers`]): a
 //! commit's lock validation calls `acquire` on the same key, is `Blocked`, and
 //! waits; whoever takes the OS mutex first wins, with no time-of-check /
 //! time-of-use gap.
 //!
+//! The gate cannot deadlock with a Calvin transaction. It takes a write's keys
+//! all at once with `try_acquire`, or none of them. A contended write routes
+//! to the scheduler, which orders it by sequencer position, or waits holding
+//! no key. A write that holds keys waits only for its own enqueue, which
+//! never waits for a lock.
+//!
 //! [`CalvinLocalState::lock_managers`]: crate::control::state::CalvinLocalState::lock_managers
+//! [`AdmissionWait::acquire`]: super::wait::AdmissionWait::acquire
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,20 +49,18 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::cluster::calvin::scheduler::driver::core::routing::{PlanRouting, plan_vshard};
-use crate::control::cluster::calvin::scheduler::lock_manager::{
-    LockKey, LockManager, LockMode, TxnId,
-};
-use crate::control::planner::calvin::is_dependent_predicate;
+use crate::control::cluster::calvin::scheduler::lock_manager::{LockKey, LockManager, TxnId};
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, VShardId};
-use nodedb_physical::physical_plan::MetaOp;
 
-use super::lock_keys::{plan_lock_keys, plan_row_key};
+use super::admission_keys::{AdmissionKeys, is_calvin_apply, plan_admission_keys};
+use super::lock_keys::plan_row_key;
 use super::predicate::plan_is_write;
+use super::wait::AdmissionWait;
 use super::write_order_lock::KeyedWriteOrderLock;
 
 /// Count of writes the gate routed to the deterministic scheduler instead of
-/// the fast path (either a `Blocked` point write or a non-point write). Read by
+/// the fast path (a contended write, or a write on several vShards). Read by
 /// the fence tests.
 static ROUTED_TO_CALVIN: AtomicU64 = AtomicU64::new(0);
 
@@ -73,11 +84,11 @@ pub struct WriteTarget<'a> {
 
 /// The gate's decision for one write. See the module docs.
 pub enum WriteAdmission {
-    /// Uncontended point write admitted to the fast path. `guard` is `Some` when
-    /// real keys were acquired (a scheduler is active for the vShard) and `None`
-    /// when no lock manager is registered and the write carries no single point
-    /// key to serialize on (predicate / bulk / uncovered shapes — left unordered
-    /// for now). Either way the caller holds it across enqueue + response.
+    /// Uncontended write admitted to the fast path. `guard` is `Some` when
+    /// its keys were acquired. It is `None` when no Calvin scheduler runs for
+    /// the vShard and the write has no point key, or when the write names no
+    /// lock key. No Calvin transaction can then conflict with it, and the
+    /// vShard's write-order fence orders it against other writes.
     FastPath { guard: Option<WriteAdmissionGuard> },
     /// POINT write on a vShard with no Calvin scheduler registered. There is no
     /// lock table to fence against, but concurrent same-key writes must still
@@ -93,6 +104,9 @@ pub enum WriteAdmission {
     },
     /// Submit the write through the deterministic Calvin scheduler.
     RouteToCalvin,
+    /// A key is held, and no Calvin transaction can sequence the write. The
+    /// caller awaits [`AdmissionWait::acquire`] before it orders the write.
+    Wait(AdmissionWait),
     /// A non-write, or an already-locked Calvin apply — no fence needed.
     ExemptRead,
 }
@@ -125,6 +139,21 @@ pub struct WriteAdmissionGuard {
     promotion_sender: Option<UnboundedSender<Vec<TxnId>>>,
 }
 
+impl WriteAdmissionGuard {
+    /// The guard of the keys `txn` holds on `lock_manager`.
+    pub(super) fn new(
+        lock_manager: Arc<Mutex<LockManager>>,
+        txn: TxnId,
+        promotion_sender: Option<UnboundedSender<Vec<TxnId>>>,
+    ) -> Self {
+        Self {
+            lock_manager,
+            txn,
+            promotion_sender,
+        }
+    }
+}
+
 impl Drop for WriteAdmissionGuard {
     fn drop(&mut self) {
         // Ordering is load-bearing: take the lock-manager mutex, release the
@@ -154,94 +183,72 @@ impl Drop for WriteAdmissionGuard {
     }
 }
 
-/// Admit a plan destined for a Data-Plane core.
+/// Admit a write-class plan.
 ///
 /// Synchronous: never awaits and never parks — it only *chooses* the outcome;
-/// any per-key await happens in the caller. `RouteToCalvin` is returned ONLY
-/// when a deterministic scheduler is actually registered for the write's vShard.
-/// With no scheduler (single-node / no-Calvin — the common case) a point write
-/// returns `FastPathBlocking` carrying the global keyed order-lock so concurrent
-/// same-key writes still serialize; every other shape fast-paths unfenced.
-pub fn admit(shared: &SharedState, target: &WriteTarget<'_>) -> WriteAdmission {
+/// any await happens in the caller. `RouteToCalvin` and `Wait` are returned
+/// only when a deterministic scheduler is registered for the write's vShard.
+/// With no scheduler (single-node / no-Calvin) a point write returns
+/// `FastPathBlocking` carrying the global keyed order-lock so concurrent
+/// same-key writes still serialize, and every other shape takes the fast path
+/// with no key: no Calvin transaction runs to conflict with it.
+pub fn admit(shared: &SharedState, target: &WriteTarget<'_>) -> crate::Result<WriteAdmission> {
+    admit_routed(shared, target, true)
+}
+
+/// [`admit`], where `may_route` says whether a contended write may run
+/// through the scheduler (see `calvin_route_keeps`). A contended write that
+/// may not waits for its keys instead.
+pub(crate) fn admit_routed(
+    shared: &SharedState,
+    target: &WriteTarget<'_>,
+    may_route: bool,
+) -> crate::Result<WriteAdmission> {
     // A Calvin-scheduled apply already holds its locks (acquired by the
-    // scheduler); it must never re-acquire at the gate. Defensive — these ops
-    // do not normally reach the gate.
-    if matches!(
-        target.plan,
-        PhysicalPlan::Meta(
-            MetaOp::CalvinExecuteStatic { .. }
-                | MetaOp::CalvinExecuteActive { .. }
-                | MetaOp::CalvinFlush { .. }
-                | MetaOp::CalvinDrop { .. }
-                | MetaOp::CalvinResolve { .. }
-        )
-    ) {
-        return WriteAdmission::ExemptRead;
+    // scheduler); it must never re-acquire at the gate.
+    if is_calvin_apply(target.plan) || !plan_is_write(target.plan) {
+        return Ok(WriteAdmission::ExemptRead);
     }
 
-    if !plan_is_write(target.plan) {
-        return WriteAdmission::ExemptRead;
-    }
-
-    // Only two write shapes participate in the fence: a single-home POINT write
-    // (Document / KV / Vector / single-home graph edge — a statically-known
-    // deterministic key) and a single-shard PREDICATE write (BulkUpdate /
-    // BulkDelete — its write set discovered by scheduler reconnaissance). Every
-    // other write — batch, INSERT..SELECT, upsert, CRDT, columnar / timeseries /
-    // spatial / array, and cross-home edges — has no Calvin lock representation
-    // and fast-paths unchanged.
-    let point_keys = plan_lock_keys(target.plan);
-    let is_predicate = is_dependent_predicate(target.plan);
-    let vshard = match &point_keys {
-        Some((v, _)) => *v,
-        None if is_predicate => match plan_vshard(target.plan) {
-            PlanRouting::Vshards(v) => match v.as_slice() {
-                [v] => *v,
-                _ => return WriteAdmission::FastPath { guard: None },
-            },
-            PlanRouting::ControlPlaneOnly | PlanRouting::NotAWrite | PlanRouting::Unroutable(_) => {
-                return WriteAdmission::FastPath { guard: None };
-            }
+    let vshard = match plan_vshard(target.plan) {
+        PlanRouting::Vshards(homes) => match homes.as_slice() {
+            [home] => *home,
+            // Only the scheduler takes keys on several lock tables as one
+            // request, in sequencer order.
+            homes => return Ok(admit_multi_home(shared, homes)),
         },
-        None => return WriteAdmission::FastPath { guard: None },
+        // A write whose plan names no home orders on the vShard it targets.
+        PlanRouting::ControlPlaneOnly | PlanRouting::NotAWrite | PlanRouting::Unroutable(_) => {
+            target.vshard_id
+        }
     };
 
-    // Availability gate: with no scheduler registered for this vShard there is no
-    // Calvin lock table to fence against. A POINT write still needs per-key
-    // arrival-order serialization so WAL-LSN order equals Data-Plane apply order
-    // per key — hand it the global keyed order-lock, on which concurrent same-key
-    // writers queue FIFO while distinct keys never contend. A predicate write has
-    // no single static point key here, so it stays unordered on the fast path
-    // (widening that coverage is a later unit).
-    let Some(lock_manager) = shared
-        .calvin
-        .lock_managers
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .get(&vshard.as_u32())
-        .map(Arc::clone)
-    else {
-        return match point_keys.and_then(|_| plan_row_key(target.plan)) {
+    let Some(lock_manager) = lock_manager_of(shared, vshard) else {
+        return Ok(match plan_row_key(target.plan) {
             Some(key) => WriteAdmission::FastPathBlocking {
                 key,
                 keyed_lock: Arc::clone(&shared.write_order_locks),
             },
             None => WriteAdmission::FastPath { guard: None },
-        };
+        });
     };
 
-    // Calvin IS running for this vShard. A predicate write has no static point
-    // key to acquire; the scheduler discovers its write set, so route it.
-    let Some((_v, keys)) = point_keys else {
-        ROUTED_TO_CALVIN.fetch_add(1, Ordering::Relaxed);
-        return WriteAdmission::RouteToCalvin;
-    };
+    let mut request =
+        plan_admission_keys(shared, target.tenant_id, target.database_id, target.plan)?;
+    request.sequenced &= may_route;
+    Ok(admit_request(shared, vshard, lock_manager, request))
+}
 
-    // Point write: mint a holder id in the reserved band so it never collides
-    // with a real Calvin schedule position, then probe the exact keys WITHOUT
-    // blocking. `try_acquire` never enqueues a waiter on the contended path, so a
-    // routed write leaves no orphaned autocommit holder that a later `release`
-    // can promote to an unowned (never-released) lock.
+/// Admit the lock request `request` on `vshard`, whose lock table is
+/// `lock_manager`.
+pub(crate) fn admit_request(
+    shared: &SharedState,
+    vshard: VShardId,
+    lock_manager: Arc<Mutex<LockManager>>,
+    request: AdmissionKeys,
+) -> WriteAdmission {
+    // A holder id in the reserved band never collides with a real Calvin
+    // schedule position.
     let txn = TxnId::new(
         TxnId::AUTOCOMMIT_EPOCH,
         shared
@@ -249,39 +256,227 @@ pub fn admit(shared: &SharedState, target: &WriteTarget<'_>) -> WriteAdmission {
             .autocommit_lock_seq
             .fetch_add(1, Ordering::Relaxed),
     );
-    let acquired = {
-        let mut lm = lock_manager.lock().unwrap_or_else(|p| p.into_inner());
-        lm.try_acquire(
-            txn,
-            keys.into_iter()
-                .map(|key| (key, LockMode::Exclusive))
-                .collect(),
-        )
-    };
-    if acquired {
-        // Look up this vShard's promotion channel so the guard can hand any
-        // scheduler waiter it promotes on drop back to the scheduler for
-        // dispatch. `None` only if no scheduler is registered — but a registered
-        // lock manager without a promotion sender must not happen, since both
-        // are inserted together per vShard.
-        let promotion_sender = shared
-            .calvin
-            .promotion_senders
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&vshard.as_u32())
-            .cloned();
-        WriteAdmission::FastPath {
-            guard: Some(WriteAdmissionGuard {
+    // Every guard hands the scheduler waiters it promotes on drop back to
+    // the scheduler for dispatch. A lock manager and its promotion sender
+    // are registered together per vShard.
+    let promotion_sender = shared
+        .calvin
+        .promotion_senders
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&vshard.as_u32())
+        .cloned();
+    let admission = probe(lock_manager, txn, request, promotion_sender);
+    if matches!(admission, WriteAdmission::RouteToCalvin) {
+        ROUTED_TO_CALVIN.fetch_add(1, Ordering::Relaxed);
+    }
+    admission
+}
+
+/// Probe `lock_manager` for every key of `request` at once, WITHOUT
+/// blocking. `try_acquire` never enqueues a waiter on the contended path, so
+/// a routed or waiting write leaves no orphaned holder that a later `release`
+/// can promote to an unowned lock.
+fn probe(
+    lock_manager: Arc<Mutex<LockManager>>,
+    txn: TxnId,
+    request: AdmissionKeys,
+    promotion_sender: Option<UnboundedSender<Vec<TxnId>>>,
+) -> WriteAdmission {
+    let AdmissionKeys { keys, sequenced } = request;
+    if keys.is_empty() {
+        return WriteAdmission::FastPath { guard: None };
+    }
+    // A write that waits probes again with the same request.
+    let retry_keys = (!sequenced).then(|| keys.clone());
+    let acquired = lock_manager
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .try_acquire(txn, keys);
+    match (acquired, retry_keys) {
+        (true, _) => WriteAdmission::FastPath {
+            guard: Some(WriteAdmissionGuard::new(
                 lock_manager,
                 txn,
                 promotion_sender,
-            }),
-        }
-    } else {
-        // A pending commit (or another fast-path write) holds a key: route behind
-        // it via the scheduler. Nothing was acquired or enqueued here.
+            )),
+        },
+        // A holder or an earlier waiter has a key: the scheduler queues the
+        // write FIFO behind it.
+        (false, None) => WriteAdmission::RouteToCalvin,
+        (false, Some(keys)) => WriteAdmission::Wait(AdmissionWait::new(
+            lock_manager,
+            txn,
+            keys,
+            promotion_sender,
+        )),
+    }
+}
+
+/// Admit a write homed on several vShards: the scheduler sequences it when
+/// any home runs one. With no scheduler on any home, no Calvin transaction
+/// conflicts with it.
+fn admit_multi_home(shared: &SharedState, homes: &[VShardId]) -> WriteAdmission {
+    if homes
+        .iter()
+        .any(|home| lock_manager_of(shared, *home).is_some())
+    {
         ROUTED_TO_CALVIN.fetch_add(1, Ordering::Relaxed);
         WriteAdmission::RouteToCalvin
+    } else {
+        WriteAdmission::FastPath { guard: None }
+    }
+}
+
+/// The lock table of `vshard`'s Calvin scheduler on this node, if one runs.
+pub(crate) fn lock_manager_of(
+    shared: &SharedState,
+    vshard: VShardId,
+) -> Option<Arc<Mutex<LockManager>>> {
+    shared
+        .calvin
+        .lock_managers
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&vshard.as_u32())
+        .map(Arc::clone)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::control::cluster::calvin::scheduler::lock_manager::{AcquireOutcome, LockMode};
+
+    fn coll() -> LockKey {
+        LockKey::Collection {
+            collection: Arc::from("c"),
+        }
+    }
+
+    fn row(surrogate: u32) -> LockKey {
+        LockKey::Surrogate {
+            collection: Arc::from("c"),
+            surrogate,
+        }
+    }
+
+    fn row_write(surrogate: u32) -> BTreeMap<LockKey, LockMode> {
+        BTreeMap::from([
+            (row(surrogate), LockMode::Exclusive),
+            (coll(), LockMode::Intent),
+        ])
+    }
+
+    fn request(keys: BTreeMap<LockKey, LockMode>, sequenced: bool) -> AdmissionKeys {
+        AdmissionKeys { keys, sequenced }
+    }
+
+    fn autocommit(position: u32) -> TxnId {
+        TxnId::new(TxnId::AUTOCOMMIT_EPOCH, position)
+    }
+
+    /// Two row writes of distinct rows hold the collection `Intent` together.
+    /// The guard passes each key in its own mode.
+    #[test]
+    fn row_writes_of_distinct_rows_admit_together() {
+        let lock_manager = Arc::new(Mutex::new(LockManager::new()));
+        let first = probe(
+            Arc::clone(&lock_manager),
+            autocommit(0),
+            request(row_write(1), true),
+            None,
+        );
+        let second = probe(
+            Arc::clone(&lock_manager),
+            autocommit(1),
+            request(row_write(2), true),
+            None,
+        );
+        assert!(matches!(first, WriteAdmission::FastPath { guard: Some(_) }));
+        assert!(matches!(
+            second,
+            WriteAdmission::FastPath { guard: Some(_) }
+        ));
+        drop((first, second));
+        assert_eq!(lock_manager.lock().expect("table").lock_count(), 0);
+    }
+
+    /// A Calvin truncate holds the collection `Exclusive`. A sequenced row
+    /// write routes to the scheduler, and an unsequenced one waits.
+    #[test]
+    fn a_contended_write_routes_when_sequenced_and_waits_otherwise() {
+        let lock_manager = Arc::new(Mutex::new(LockManager::new()));
+        let truncate = TxnId::new(3, 0);
+        assert_eq!(
+            lock_manager
+                .lock()
+                .expect("table")
+                .acquire(truncate, BTreeMap::from([(coll(), LockMode::Exclusive)])),
+            AcquireOutcome::Ready
+        );
+        let routed = probe(
+            Arc::clone(&lock_manager),
+            autocommit(0),
+            request(row_write(1), true),
+            None,
+        );
+        assert!(matches!(routed, WriteAdmission::RouteToCalvin));
+        let waits = probe(
+            Arc::clone(&lock_manager),
+            autocommit(1),
+            request(row_write(1), false),
+            None,
+        );
+        assert!(matches!(waits, WriteAdmission::Wait(_)));
+        assert_eq!(
+            lock_manager.lock().expect("table").holder_count(),
+            1,
+            "a refused probe takes no key"
+        );
+    }
+
+    /// A Calvin transaction that needs a key a fast-path write holds waits
+    /// for the guard's drop, which promotes it.
+    #[test]
+    fn a_calvin_writer_waits_for_the_fast_path_guard() {
+        let lock_manager = Arc::new(Mutex::new(LockManager::new()));
+        let admitted = probe(
+            Arc::clone(&lock_manager),
+            autocommit(0),
+            request(row_write(1), true),
+            None,
+        );
+        assert!(matches!(
+            admitted,
+            WriteAdmission::FastPath { guard: Some(_) }
+        ));
+        let truncate = TxnId::new(3, 0);
+        assert_eq!(
+            lock_manager
+                .lock()
+                .expect("table")
+                .acquire(truncate, BTreeMap::from([(coll(), LockMode::Exclusive)])),
+            AcquireOutcome::Blocked
+        );
+        drop(admitted);
+        assert!(
+            lock_manager
+                .lock()
+                .expect("table")
+                .is_ready(truncate, &BTreeMap::from([(coll(), LockMode::Exclusive)]))
+        );
+    }
+
+    /// A write that names no lock key takes the fast path with no guard.
+    #[test]
+    fn a_write_with_no_keys_takes_no_guard() {
+        let lock_manager = Arc::new(Mutex::new(LockManager::new()));
+        let admission = probe(lock_manager, autocommit(0), AdmissionKeys::default(), None);
+        assert!(matches!(
+            admission,
+            WriteAdmission::FastPath { guard: None }
+        ));
     }
 }

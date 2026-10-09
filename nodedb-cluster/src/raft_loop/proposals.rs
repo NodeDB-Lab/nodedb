@@ -9,6 +9,11 @@ use crate::error::Result;
 use super::loop_core::{CommitApplier, RaftLoop};
 use crate::forward::PlanExecutor;
 
+/// How long a forwarded data propose waits for the leader's reply past the
+/// proposer's deadline. The leader's gate stops at that deadline, so the
+/// margin covers the round trip and the leader's verdict arrives.
+const FORWARD_REPLY_MARGIN: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
     /// Propose a command to the Raft group owning the given vShard.
     ///
@@ -223,15 +228,30 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
     /// a `DataProposeRequest` over QUIC. The receiving leader applies the
     /// proposal locally and returns `(group_id, log_index)`.
     ///
+    /// The leader admits the entry through its write gate before the entry
+    /// enters its log (see [`super::propose_gate`]). A gate refusal returns
+    /// as `ClusterError::Calvin`. The gate waits no later than `deadline`,
+    /// the caller's deadline. A forward carries what remains of it.
+    ///
+    /// The call ends no later than `deadline` plus [`FORWARD_REPLY_MARGIN`].
+    /// `CalvinError::AdmissionTimedOut` means the entry was not proposed.
+    /// `ClusterError::ShardTimeout` means the leader's reply never came, so
+    /// the leader can have proposed the entry. `ClusterError::Unanswered`
+    /// means the request was written and its stream failed, with the same
+    /// unknown outcome. The transport never resends a written forward. A
+    /// `ClusterError::Transport` from the send means the request never went
+    /// out whole, so nothing was proposed.
+    ///
     /// On `NotLeader { leader_hint: None, .. }` (election in progress) the
     /// call returns the original `NotLeader` error so the caller can retry.
     pub async fn propose_via_data_leader(
         &self,
         vshard_id: u32,
-        data: Vec<u8>,
+        data: &[u8],
+        deadline: tokio::time::Instant,
     ) -> Result<(u64, u64)> {
         // First, try a local propose.
-        match self.propose(vshard_id, data.clone()) {
+        match self.propose_admitted(vshard_id, data, deadline).await {
             Ok(pair) => Ok(pair),
             Err(crate::error::ClusterError::Raft(nodedb_raft::RaftError::NotLeader {
                 leader_hint,
@@ -254,19 +274,30 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
                     ));
                 }
                 // Otherwise forward to the hinted leader.
-                self.forward_data_propose(leader_id, vshard_id, data).await
+                self.forward_data_propose(leader_id, vshard_id, data.to_vec(), deadline)
+                    .await
             }
             Err(other) => Err(other),
         }
     }
 
-    /// Send a `DataProposeRequest` to `leader_id`.
+    /// Send a `DataProposeRequest` carrying the budget left to `deadline` to
+    /// `leader_id`, and wait for its verdict until `deadline` plus
+    /// [`FORWARD_REPLY_MARGIN`].
     async fn forward_data_propose(
         &self,
         leader_id: u64,
         vshard_id: u32,
         data: Vec<u8>,
+        deadline: tokio::time::Instant,
     ) -> Result<(u64, u64)> {
+        let deadline_remaining_ms = crate::rpc_codec::remaining_budget_ms(deadline);
+        // The deadline passed before the forward left: nothing is proposed.
+        if deadline_remaining_ms == 0 {
+            return Err(crate::error::ClusterError::Calvin(
+                crate::error::CalvinError::AdmissionTimedOut,
+            ));
+        }
         {
             let topo = self.topology.read().unwrap_or_else(|p| p.into_inner());
             let Some(node) = topo.get_node(leader_id) else {
@@ -289,10 +320,32 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
 
         let req =
             crate::rpc_codec::RaftRpc::DataProposeRequest(crate::rpc_codec::DataProposeRequest {
-                target: crate::rpc_codec::ProposeTarget::VShard(vshard_id),
+                target: crate::rpc_codec::ProposeTarget::VShard {
+                    vshard_id,
+                    deadline_remaining_ms,
+                },
                 bytes: data,
             });
-        let resp = self.transport.send_rpc(leader_id, req).await?;
+        // The generic short RPC timeout ends the call before a contended
+        // write's gate wait does. The reply wait follows the forwarded budget.
+        let reply_budget =
+            std::time::Duration::from_millis(deadline_remaining_ms) + FORWARD_REPLY_MARGIN;
+        let sent = tokio::time::timeout(
+            reply_budget,
+            self.transport
+                .send_rpc_with_read_timeout(leader_id, req, reply_budget),
+        )
+        .await;
+        let resp = match sent {
+            Ok(answer) => answer?,
+            // The leader can have proposed the entry: its outcome is unknown.
+            Err(_) => {
+                return Err(crate::error::ClusterError::ShardTimeout {
+                    vshard_id,
+                    elapsed_ms: u64::try_from(reply_budget.as_millis()).unwrap_or(u64::MAX),
+                });
+            }
+        };
         match resp {
             crate::rpc_codec::RaftRpc::DataProposeResponse(r) => {
                 if r.success {
@@ -312,7 +365,7 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
                     Err(r.refusal_error())
                 }
             }
-            other => Err(crate::error::ClusterError::Transport {
+            other => Err(crate::error::ClusterError::Codec {
                 detail: format!("data propose forward: unexpected response variant {other:?}"),
             }),
         }

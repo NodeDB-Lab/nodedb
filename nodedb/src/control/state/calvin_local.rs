@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::control::cluster::calvin::scheduler::SequencerProposer;
 use crate::control::cluster::calvin::scheduler::lock::HotKeyTable;
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
+use crate::control::server::shared::write_admission::AdmissionHolds;
 
 use super::calvin_apply_sidecar::CalvinApplySidecar;
 use super::calvin_bases::CalvinBases;
@@ -73,6 +74,9 @@ pub struct CalvinLocalState {
     /// with [`TxnId::AUTOCOMMIT_EPOCH`] to mint holder identities that never
     /// collide with a real Calvin `(epoch, position)` schedule position.
     pub autocommit_lock_seq: AtomicU32,
+    /// The lock keys replicated writes hold on this data-group leader, from
+    /// their propose until the apply loop starts their entries.
+    pub admission_holds: AdmissionHolds,
     /// The backup cut markers each local scheduler passed.
     pub cuts: CalvinCuts,
     /// Where this node's Calvin state of each vShard is whole from.
@@ -98,6 +102,7 @@ impl CalvinLocalState {
             hot_key_table: Arc::new(Mutex::new(HotKeyTable::new())),
             promotion_senders: Arc::new(Mutex::new(BTreeMap::new())),
             autocommit_lock_seq: AtomicU32::new(0),
+            admission_holds: AdmissionHolds::new(),
             cuts: CalvinCuts::default(),
             bases: CalvinBases::default(),
             sequencer_proposer: OnceLock::new(),

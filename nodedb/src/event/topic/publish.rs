@@ -100,15 +100,19 @@ async fn publish_replicated(
     entry: ReplicatedEntry,
     topic_name: &str,
 ) -> Result<u64, PublishError> {
-    let (payload, _) =
-        crate::control::wal_replication::propose_replicated_entry(state, proposer, entry)
-            .await
-            .map_err(|error| match error {
-                crate::Error::UndefinedObject { kind: "topic", .. } => {
-                    PublishError::TopicNotFound(topic_name.to_string())
-                }
-                other => PublishError::Persistence(other.to_string()),
-            })?;
+    let (payload, _) = crate::control::wal_replication::propose_replicated_entry(
+        state,
+        proposer,
+        entry,
+        crate::control::wal_replication::statement_propose_deadline(state),
+    )
+    .await
+    .map_err(|error| match error {
+        crate::Error::UndefinedObject { kind: "topic", .. } => {
+            PublishError::TopicNotFound(topic_name.to_string())
+        }
+        other => PublishError::Persistence(other.to_string()),
+    })?;
     zerompk::from_msgpack::<u64>(&payload)
         .map_err(|error| PublishError::Persistence(format!("publish result: {error}")))
 }

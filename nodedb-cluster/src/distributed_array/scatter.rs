@@ -94,7 +94,7 @@ fn counts_against_breaker(err: &ClusterError) -> bool {
         | ClusterError::StreamTerminal { .. } => false,
         // An unresponsive peer is exactly what the breaker exists to shed
         // load from, so a shard timeout counts like any other liveness failure.
-        ClusterError::ShardTimeout { .. } => true,
+        ClusterError::ShardTimeout { .. } | ClusterError::Unanswered { .. } => true,
         ClusterError::Raft(_)
         | ClusterError::VShardNotMapped { .. }
         | ClusterError::GroupNotFound { .. }

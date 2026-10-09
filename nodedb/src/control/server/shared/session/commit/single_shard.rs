@@ -213,7 +213,8 @@ async fn commit_redo(
         target.vshard_id,
         payload,
     );
-    match propose_replicated_entry(state, proposer, entry).await {
+    let deadline = crate::control::wal_replication::statement_propose_deadline(state);
+    match propose_replicated_entry(state, proposer, entry, deadline).await {
         Ok((applied, _)) => Ok(super::ts_rejections::applied_rejected_by_collection(
             &applied,
         )),

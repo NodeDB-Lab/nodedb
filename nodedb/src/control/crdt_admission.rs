@@ -582,7 +582,12 @@ async fn apply_fenced(
     .with_event_source(workflow.event_source);
     let outcome = tokio::time::timeout(
         workflow.timeout,
-        crate::control::wal_replication::propose_replicated_entry(workflow.state, raw, entry),
+        crate::control::wal_replication::propose_replicated_entry(
+            workflow.state,
+            raw,
+            entry,
+            tokio::time::Instant::now() + workflow.timeout,
+        ),
     )
     .await
     .map_err(|_| crate::Error::CrdtAdmissionTimeout {

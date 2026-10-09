@@ -79,6 +79,18 @@ pub(crate) fn expand_rw_set(txn: &SequencedTxn) -> BTreeMap<LockKey, LockMode> {
     keys
 }
 
+/// Expand write key sets alone into the moded lock request a transaction of
+/// those writes takes, by the rules of [`expand_rw_set`]. The
+/// write-admission gate locks an autocommit write with it, so the write and
+/// a Calvin transaction of the same plan take the same keys.
+pub(crate) fn expand_write_key_sets(sets: &[EngineKeySet]) -> BTreeMap<LockKey, LockMode> {
+    let mut keys = BTreeMap::new();
+    for ks in sets {
+        add_key_set(&mut keys, ks, LockMode::Exclusive);
+    }
+    keys
+}
+
 /// Add the keys of `ks` to `keys`. `row_mode` is `Shared` for a read set and
 /// `Exclusive` for a write set.
 fn add_key_set(keys: &mut BTreeMap<LockKey, LockMode>, ks: &EngineKeySet, row_mode: LockMode) {

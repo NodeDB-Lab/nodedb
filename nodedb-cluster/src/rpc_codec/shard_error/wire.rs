@@ -123,4 +123,8 @@ pub enum ShardErrorWire {
         error: TypedClusterError,
         detail: String,
     },
+    Unanswered {
+        node_id: u64,
+        detail: String,
+    },
 }

@@ -322,7 +322,13 @@ impl CellWrite<'_> {
         })?
         .with_event_source(EventSource::Restore)
         .with_restore_id(self.target.restore_id);
-        crate::control::wal_replication::propose_replicated_entry(state, proposer, entry).await?;
+        crate::control::wal_replication::propose_replicated_entry(
+            state,
+            proposer,
+            entry,
+            crate::control::wal_replication::statement_propose_deadline(state),
+        )
+        .await?;
         Ok(())
     }
 }

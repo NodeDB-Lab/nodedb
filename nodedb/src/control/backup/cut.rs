@@ -144,6 +144,7 @@ async fn cut_data_groups(
     capture: Option<&CutCaptureRequest>,
 ) -> Result<(), Error> {
     let proposer = state.async_raft_proposer()?;
+    let deadline = crate::control::wal_replication::statement_propose_deadline(state);
     let barriers = futures::future::join_all(barrier_vshards(state).into_iter().map(
         |(group_id, vshard_id)| {
             // The barrier orders every entry of its group, whatever database
@@ -160,7 +161,7 @@ async fn cut_data_groups(
                 },
             );
             async move {
-                propose_replicated_entry(state, proposer, entry)
+                propose_replicated_entry(state, proposer, entry, deadline)
                     .await
                     .map_err(|error| (group_id, error))
             }

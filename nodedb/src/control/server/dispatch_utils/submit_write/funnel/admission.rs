@@ -5,13 +5,26 @@
 use tokio::sync::OwnedMutexGuard;
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::control::server::shared::write_admission::gate::admit_routed;
 use crate::control::server::shared::write_admission::{
-    WriteAdmission, WriteAdmissionGuard, WriteTarget, admit,
+    WriteAdmission, WriteAdmissionGuard, WriteTarget,
 };
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, VShardId};
 
 use super::super::params::WriteOrdering;
+
+/// The write the admission phase admits.
+pub(super) struct AdmissionTarget<'a> {
+    pub tenant_id: TenantId,
+    pub database_id: DatabaseId,
+    pub vshard_id: VShardId,
+    pub plan: &'a PhysicalPlan,
+    /// Whether a contended write may run through the scheduler, which
+    /// applies it as a client write. A write of another event source waits
+    /// for its keys instead.
+    pub may_route: bool,
+}
 
 /// Outcome of the write-admission phase.
 pub(super) enum AdmissionOutcome {
@@ -26,25 +39,33 @@ pub(super) enum AdmissionOutcome {
 }
 
 /// Write-admission gate: every write-class plan whose ordering is not already
-/// final passes here. An uncontended point write takes the fast path holding
-/// its per-vShard deterministic locks; a contended or bulk write is submitted
-/// through the deterministic scheduler and its applied response is surfaced
-/// here; reads / control ops are `Exempt`.
+/// final passes here. An uncontended write takes the fast path holding its
+/// per-vShard deterministic locks; a contended write is submitted through the
+/// deterministic scheduler and its applied response is surfaced here; reads /
+/// control ops are `Exempt`.
 ///
 /// Ordering (fast path): the guard is acquired FIRST, then — for a write that
 /// owns its durability (`AppendHere`) — the WAL append happens after this
 /// call returns, under the guard, minting the LSN just before the enqueue.
 /// The guard is released immediately after the enqueue (not across the
 /// response await).
+///
+/// A contended write no Calvin transaction can sequence waits for its keys
+/// until `deadline`, holding none meanwhile.
 pub(super) async fn admit_write(
     shared: &SharedState,
-    tenant_id: TenantId,
-    database_id: DatabaseId,
-    vshard_id: VShardId,
-    plan: &PhysicalPlan,
+    target: AdmissionTarget<'_>,
     ordering: WriteOrdering,
-) -> AdmissionOutcome {
-    match ordering {
+    deadline: std::time::Instant,
+) -> crate::Result<AdmissionOutcome> {
+    let AdmissionTarget {
+        tenant_id,
+        database_id,
+        vshard_id,
+        plan,
+        may_route,
+    } = target;
+    Ok(match ordering {
         WriteOrdering::AlreadyOrdered => AdmissionOutcome::Proceed {
             admission: crate::bridge::envelope::Admission::Exempt(
                 crate::bridge::envelope::ExemptReason::AlreadyOrdered,
@@ -52,7 +73,7 @@ pub(super) async fn admit_write(
             admission_guard: None,
             order_guard: None,
         },
-        WriteOrdering::Gate => match admit(
+        WriteOrdering::Gate => match admit_routed(
             shared,
             &WriteTarget {
                 tenant_id,
@@ -60,7 +81,8 @@ pub(super) async fn admit_write(
                 vshard_id,
                 plan,
             },
-        ) {
+            may_route,
+        )? {
             WriteAdmission::ExemptRead => AdmissionOutcome::Proceed {
                 admission: crate::bridge::envelope::Admission::Exempt(
                     crate::bridge::envelope::ExemptReason::Read,
@@ -89,6 +111,14 @@ pub(super) async fn admit_write(
                 }
             }
             WriteAdmission::RouteToCalvin => AdmissionOutcome::RouteToCalvin,
+            WriteAdmission::Wait(wait) => AdmissionOutcome::Proceed {
+                admission: crate::bridge::envelope::Admission::Admitted,
+                admission_guard: Some(
+                    wait.acquire(tokio::time::Instant::from_std(deadline))
+                        .await?,
+                ),
+                order_guard: None,
+            },
         },
-    }
+    })
 }

@@ -4,6 +4,9 @@
 //! acquire/release paths share.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use tokio::sync::Notify;
 
 use crate::control::cluster::calvin::scheduler::lock::lock_entry::{LockEntry, LockMode};
 use crate::control::cluster::calvin::scheduler::lock::lock_key::{LockKey, TxnId};
@@ -36,6 +39,9 @@ pub struct LockManager {
     /// key is granted on the promotion path inside `release`.
     pub(in crate::control::cluster::calvin::scheduler::lock) pending_keys:
         BTreeMap<TxnId, BTreeMap<LockKey, LockMode>>,
+    /// Woken on every release. A write-admission waiter that holds no key
+    /// probes the table again after each wake.
+    pub(in crate::control::cluster::calvin::scheduler::lock) released: Arc<Notify>,
 }
 
 /// How a requester resolves a request that conflicts on at least one key.
@@ -56,7 +62,15 @@ impl LockManager {
             table: BTreeMap::new(),
             held_locks: BTreeMap::new(),
             pending_keys: BTreeMap::new(),
+            released: Arc::new(Notify::new()),
         }
+    }
+
+    /// The signal every release wakes. A waiter enables its `notified()`
+    /// future before it probes the table, so no release between the probe
+    /// and the wait goes unseen.
+    pub fn release_signal(&self) -> Arc<Notify> {
+        Arc::clone(&self.released)
     }
 }
 

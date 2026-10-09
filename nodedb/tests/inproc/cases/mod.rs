@@ -214,4 +214,5 @@ mod wal_catchup;
 mod warm_storage_object_store;
 mod wire_server_version;
 mod write_admission_fence;
+mod write_admission_leader_gate;
 mod ws_live_lifecycle;

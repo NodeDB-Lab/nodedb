@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use nodedb_cluster::calvin::SEQUENCER_GROUP_ID;
 use nodedb_cluster::calvin::types::TxClass;
-use nodedb_cluster::{RaftRpc, SubmitCalvinTxnRequest, SubmitCalvinTxnResponse, TypedClusterError};
+use nodedb_cluster::{
+    ClusterError, RaftRpc, SubmitCalvinTxnRequest, SubmitCalvinTxnResponse, TypedClusterError,
+};
 
 use crate::Error;
 use crate::bridge::envelope::Response;
@@ -120,7 +122,7 @@ pub async fn submit_calvin_routed(
     // Leader is self: submit-and-await locally (a self-RPC will be a pointless
     // extra hop and the local registry is the one that completes).
     if leader == state.node_id {
-        let timeout = Duration::from_secs(state.tuning.network.default_deadline_secs);
+        let timeout = super::budget::statement_budget(state)?;
         return submit_prepared_and_await(state, tx_class, stream, timeout).await;
     }
 
@@ -135,12 +137,8 @@ pub async fn submit_calvin_routed(
         detail: format!("failed to encode TxClass for routed Calvin submit: {e}"),
     })?;
 
-    let deadline_remaining_ms = state
-        .tuning
-        .network
-        .default_deadline_secs
-        .saturating_mul(1000)
-        .max(1);
+    // The leader works on the transaction only as long as the statement waits.
+    let deadline_remaining_ms = super::budget::statement_budget_ms(state)?;
     let req = SubmitCalvinTxnRequest {
         tx_class_bytes,
         deadline_remaining_ms,
@@ -203,6 +201,11 @@ pub async fn submit_calvin_routed(
         })) => Err(Error::from(e)),
         Ok(other) => Err(Error::Internal {
             detail: format!("calvin-submit: unexpected reply from node {leader}: {other:?}"),
+        }),
+        // The submit went out and its answer was lost. The leader can have
+        // sequenced it, so its outcome is unknown.
+        Err(ClusterError::Unanswered { .. }) => Err(Error::DeadlineExceeded {
+            request_id: crate::types::RequestId::new(0),
         }),
         Err(e) => Err(Error::Internal {
             detail: format!("calvin-submit RPC to sequencer leader node {leader} failed: {e}"),

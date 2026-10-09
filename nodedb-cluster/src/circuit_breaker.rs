@@ -349,6 +349,8 @@ impl RetryPolicy {
             // A timed-out send may still have reached the peer, so resending
             // it can apply the request twice.
             ClusterError::ShardTimeout { .. } => false,
+            // The request was written, so the peer can have run it.
+            ClusterError::Unanswered { .. } => false,
             ClusterError::Raft(_)
             | ClusterError::VShardNotMapped { .. }
             | ClusterError::GroupNotFound { .. }

@@ -124,6 +124,9 @@ impl<'a> Pipeline<'a> {
                 (finished.group_id, finished.log_index, handled)
             }
         };
+        // The entry's enqueue returned, or its exclusive apply finished:
+        // every entry of the group through it reached its core.
+        release_admission_holds(self.ctx.state, group_id, log_index);
         if !handled {
             // Every enqueue and apply the pipeline runs has a slot in its
             // group's lane in the matching state: the pump pushes both
@@ -261,6 +264,7 @@ impl<'a> Pipeline<'a> {
             );
             let (state, blocks, user_write) = match prepared {
                 Prepared::Concluded(outcome) => {
+                    release_admission_holds(shared, group_id, log_index);
                     let user_write = matches!(outcome, EntryOutcome::Repeat) && repeat_writes;
                     (
                         SlotState::Concluded(self.gate.conclude(proposal_key, false, outcome)),
@@ -268,7 +272,10 @@ impl<'a> Pipeline<'a> {
                         user_write,
                     )
                 }
-                Prepared::Barrier => (SlotState::Barrier, false, false),
+                Prepared::Barrier => {
+                    release_admission_holds(shared, group_id, log_index);
+                    (SlotState::Barrier, false, false)
+                }
                 Prepared::Enqueue(enqueue) => {
                     self.gate.open(proposal_key);
                     self.ctx.tracker.note_dispatched(group_id, log_index);
@@ -319,6 +326,7 @@ impl<'a> Pipeline<'a> {
         outcome: EntryOutcome,
     ) -> bool {
         self.ctx.tracker.note_started(group_id, log_index);
+        release_admission_holds(self.ctx.state, group_id, log_index);
         self.ctx
             .tracker
             .complete_covered(group_id, log_index, proposal_key);
@@ -402,6 +410,15 @@ impl<'a> Pipeline<'a> {
             }
         }
     }
+}
+
+/// Release the lock keys this node's write gate holds for entries of
+/// `group_id` through `log_index`: their applies started, in log order.
+fn release_admission_holds(state: &SharedState, group_id: u64, log_index: u64) {
+    state
+        .calvin
+        .admission_holds
+        .release_through(group_id, log_index);
 }
 
 fn finished_event(apply: ApplyFuture<'_>) -> LoopFuture<'_> {

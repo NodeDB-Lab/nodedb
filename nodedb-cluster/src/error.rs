@@ -25,6 +25,20 @@ pub enum CalvinError {
     /// for the full variant set.
     #[error("sequencer error: {0}")]
     Sequencer(#[from] crate::calvin::sequencer::error::SequencerError),
+
+    /// The data-group leader's write gate found a key of the proposed write
+    /// held, and a Calvin transaction can sequence the write. The proposer
+    /// submits the write to the Calvin sequencer instead.
+    #[error(
+        "a lock key of the proposed write is held on the data-group leader; \
+         submit the write through the Calvin sequencer"
+    )]
+    RouteToSequencer,
+
+    /// The data-group leader's write gate waited for the proposed write's
+    /// lock keys until its admission deadline.
+    #[error("the lock keys of the proposed write stayed held past the leader's admission deadline")]
+    AdmissionTimedOut,
 }
 
 /// Error emitted when applying or validating a `MigrationCheckpoint` entry.
@@ -102,6 +116,14 @@ pub enum ClusterError {
     /// connection-level failures suggesting the peer is gone.
     #[error("shard {vshard_id} RPC timed out after {elapsed_ms}ms")]
     ShardTimeout { vshard_id: u32, elapsed_ms: u64 },
+
+    /// A request reached the wire to `node_id`, and no answer came back.
+    ///
+    /// The stream or connection failed, or the read timed out, after the
+    /// request was written. The peer can have run it, so its outcome is
+    /// unknown. A resend can run it twice.
+    #[error("request to node {node_id} was sent and got no answer: {detail}")]
+    Unanswered { node_id: u64, detail: String },
 
     /// Terminal error carried by a streaming `ExecuteStreamEnd` frame.
     ///
@@ -258,7 +280,10 @@ impl ClusterError {
     pub fn is_link_failure(&self) -> bool {
         matches!(
             self,
-            Self::Transport { .. } | Self::CircuitOpen { .. } | Self::NodeUnreachable { .. }
+            Self::Transport { .. }
+                | Self::Unanswered { .. }
+                | Self::CircuitOpen { .. }
+                | Self::NodeUnreachable { .. }
         )
     }
 }

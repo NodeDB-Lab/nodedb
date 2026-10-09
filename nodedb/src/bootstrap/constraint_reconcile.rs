@@ -169,7 +169,8 @@ pub async fn reconcile_once(
             },
         );
 
-        match propose_replicated_entry(shared, &proposer, entry).await {
+        let deadline = crate::control::wal_replication::statement_propose_deadline(shared);
+        match propose_replicated_entry(shared, &proposer, entry, deadline).await {
             Ok(_) => {
                 // Record only on commit. A transient / NotLeader error
                 // leaves the map untouched so the next tick retries.

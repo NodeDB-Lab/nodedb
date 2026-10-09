@@ -51,7 +51,9 @@ async fn reissue_crdt_collection(
     })?
     .with_event_source(EventSource::Restore)
     .with_restore_id(target.restore_id);
-    crate::control::wal_replication::propose_replicated_entry(state, proposer, entry).await?;
+    let deadline = crate::control::wal_replication::statement_propose_deadline(state);
+    crate::control::wal_replication::propose_replicated_entry(state, proposer, entry, deadline)
+        .await?;
     Ok(())
 }
 

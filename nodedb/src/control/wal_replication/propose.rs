@@ -19,6 +19,14 @@ const FIRST_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
 /// Longest wait between two re-proposals.
 const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// The deadline a proposal made now carries: the running statement's
+/// deadline, or the node default outside a statement.
+pub(crate) fn statement_propose_deadline(state: &SharedState) -> tokio::time::Instant {
+    tokio::time::Instant::from_std(crate::control::server::shared::session::statement_deadline(
+        state.tuning.network.default_deadline_secs,
+    ))
+}
+
 /// Stamp this node's metadata floor on `entry`: the catalog the write was
 /// planned against, including the batch being applied now (see
 /// `AppliedIndexWatcher::floor`). Every replica applies the entry only once
@@ -58,8 +66,11 @@ pub(crate) fn stamp_collection_incarnations(
 /// (`planner::calvin::edge_sequencing`), and its applied payload and read
 /// version come back the same way.
 ///
-/// Re-proposes the same payload until the statement deadline while the group
-/// has no leader to take it:
+/// `deadline` is the caller's deadline. Every attempt, each attempt's wait at
+/// the leader's write gate, and each wait for the local apply end at it.
+///
+/// Re-proposes the same payload until `deadline` while the group has no
+/// leader to take it:
 /// - [`crate::Error::RetryableLeaderChange`]: a new leader's election no-op
 ///   overwrote the previous leader's entry;
 /// - [`crate::Error::NoLeader`]: the group is electing, or a leadership
@@ -73,6 +84,7 @@ pub(crate) async fn propose_replicated_entry(
     state: &SharedState,
     proposer: &Arc<AsyncRaftProposer>,
     mut entry: ReplicatedEntry,
+    deadline: tokio::time::Instant,
 ) -> crate::Result<(Vec<u8>, crate::types::Lsn)> {
     // An edge write runs as a Calvin transaction, never as a data-group
     // entry, so every edge version of a collection takes a Calvin ordinal.
@@ -91,10 +103,6 @@ pub(crate) async fn propose_replicated_entry(
     let data = entry.encode()?;
     let vshard_id = entry.vshard_id;
 
-    // The statement deadline. Every attempt, and each attempt's wait for the
-    // local apply, ends at this one instant.
-    let deadline = tokio::time::Instant::now()
-        + std::time::Duration::from_secs(state.tuning.network.default_deadline_secs);
     let mut backoff = FIRST_BACKOFF;
     let mut attempt: u32 = 0;
     let payload = loop {

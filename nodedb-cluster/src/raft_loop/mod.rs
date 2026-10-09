@@ -32,6 +32,7 @@ pub mod loop_core;
 mod membership_convergence;
 mod placement_reconcile;
 pub mod proposals;
+pub mod propose_gate;
 mod read_index;
 mod routing_persist;
 mod run;
@@ -48,3 +49,4 @@ pub use hooks::{
 };
 pub use in_flight_snapshots::{InFlightSnapshotGuard, InFlightSnapshots};
 pub use loop_core::{CommitApplier, RaftLoop, VShardEnvelopeHandler};
+pub use propose_gate::{DataProposeGate, ProposeHold};

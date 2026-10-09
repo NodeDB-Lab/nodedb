@@ -118,6 +118,7 @@ fn refusal_of(error: ClusterError) -> ReadIndexRefusal {
         | ClusterError::GhostNotFound { .. }
         | ClusterError::Transport { .. }
         | ClusterError::ShardTimeout { .. }
+        | ClusterError::Unanswered { .. }
         | ClusterError::StreamTerminal { .. }
         | ClusterError::Storage { .. }
         | ClusterError::DataPlane { .. }

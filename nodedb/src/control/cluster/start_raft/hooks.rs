@@ -28,6 +28,8 @@ pub(super) struct Hooks {
     pub(super) calvin_submit_inbox: Arc<dyn nodedb_cluster::CalvinSubmitInbox>,
     pub(super) reserve_read: Arc<dyn nodedb_cluster::ReserveRead>,
     pub(super) release_reservation: Arc<dyn nodedb_cluster::ReleaseReservation>,
+    /// The write gate a data-group leader runs on every proposal to its group.
+    pub(super) data_propose_gate: Arc<dyn nodedb_cluster::DataProposeGate>,
     /// The sequencer group's kept snapshot, which its own compaction writes.
     pub(super) sequencer_snapshots:
         Arc<crate::control::cluster::sequencer_snapshot::SequencerSnapshotStore>,
@@ -182,6 +184,12 @@ pub(super) async fn build_hooks(
         crate::control::server::reservation::RegistryReleaseReservation::new(shared.clone()),
     );
 
+    // Leader write gate: when this node leads a data group, every proposal
+    // to it, local or forwarded, takes its lock keys on the vShard's Calvin
+    // lock table before the entry enters the log.
+    let data_propose_gate: Arc<dyn nodedb_cluster::DataProposeGate> =
+        Arc::new(crate::control::server::shared::write_admission::LeaderWriteGate::new(shared));
+
     Ok(Hooks {
         quarantine_hook,
         snapshot_builder,
@@ -195,6 +203,7 @@ pub(super) async fn build_hooks(
         calvin_submit_inbox,
         reserve_read,
         release_reservation,
+        data_propose_gate,
         sequencer_snapshots,
     })
 }

@@ -163,3 +163,4 @@ mod vshard_names;
 mod webhook_sink_partial_replication;
 mod webhook_sink_single_owner;
 mod write_admission_concurrent_same_key_replay;
+mod write_admission_leader_gate_cluster;

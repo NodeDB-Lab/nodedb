@@ -55,6 +55,15 @@ fn decode_with_database(data: &[u8]) -> crate::Result<Option<(DatabaseId, Decode
         Some(e) => e,
         None => return Ok(None),
     };
+    decode_parsed_entry(&entry)
+}
+
+/// Decodes an entry already parsed from its bytes into its database and its
+/// plan, without binding any identity. `None` for an array CRDT op or array
+/// schema, which the distributed applier handles before any plan exists.
+pub fn decode_parsed_entry(
+    entry: &ReplicatedEntry,
+) -> crate::Result<Option<(DatabaseId, DecodedEntry)>> {
     // Array CRDT variants are handled by the distributed applier before this call.
     match &entry.write {
         ReplicatedWrite::ArrayOp { .. } | ReplicatedWrite::ArraySchema { .. } => {

@@ -215,7 +215,9 @@ async fn propose_if_replicable(
         return Ok(None);
     };
     let entry = entry.with_event_source(event_source);
-    let (payload, write_version) = propose_replicated_entry(shared, proposer, entry).await?;
+    let deadline = crate::control::wal_replication::statement_propose_deadline(shared);
+    let (payload, write_version) =
+        propose_replicated_entry(shared, proposer, entry, deadline).await?;
     Ok(Some(replicated_write_response(
         shared,
         payload,

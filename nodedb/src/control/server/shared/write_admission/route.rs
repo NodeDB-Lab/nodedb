@@ -3,17 +3,18 @@
 //! Submit a gate-rejected write through the deterministic Calvin scheduler.
 //!
 //! When [`admit`](super::admit) returns [`WriteAdmission::RouteToCalvin`](super::WriteAdmission),
-//! the caller hands the single write here. Two shapes reach this path, each
-//! routed through the existing Calvin entry point that builds a VALID write set
-//! for it:
+//! the caller hands the single write here. A data-group leader's gate routes a
+//! replicated write here too, through its proposer. Two shapes reach this
+//! path, each routed through the existing Calvin entry point that builds a
+//! VALID write set for it:
 //!
-//! - A **point write** whose key a pending commit holds (Document / KV / Vector /
-//!   single-home edge): submitted as a single-vshard
-//!   [`build_single_vshard_tx_class`] + [`submit_calvin_routed`]. Because it
-//!   targets one vshard, it uses the single-vshard opt-in rather than the strict
-//!   multi-vshard builder. The scheduler acquires its key on the SAME lock
-//!   table the gate probed, queues FIFO behind the holder, and applies it once
-//!   released.
+//! - A **write with a static write set** whose key a pending commit holds (a
+//!   row write, a collection-wide write, an edge on several homes): submitted
+//!   as a single-vshard [`build_single_vshard_tx_class`] +
+//!   [`submit_calvin_routed`]. A write on one vshard uses the single-vshard
+//!   opt-in rather than the strict multi-vshard builder. The scheduler
+//!   acquires its keys on the SAME lock table the gate probed, queues FIFO
+//!   behind the holder, and applies it once released.
 //! - A **predicate write** (`BulkUpdate` / `BulkDelete` on a SINGLE
 //!   collection): its write set is not statically known, so it goes through
 //!   [`dispatch_dependent_edge_recon`], which runs the pre-exec
@@ -42,6 +43,7 @@ use crate::control::planner::calvin::{
     submit_calvin_routed,
 };
 use crate::control::state::SharedState;
+use crate::event::EventSource;
 use crate::types::{DatabaseId, RequestId, TenantId, VShardId};
 use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
@@ -65,9 +67,22 @@ pub fn bare_ok_response(request_id: RequestId) -> Response {
     }
 }
 
+/// Whether the scheduler applies `plan` exactly as its writer asked when the
+/// gate routes it. A static write set carries `event_source`. The
+/// reconnaissance of a predicate write applies it as a client write. No
+/// route carries a restore id. A write the route cannot keep waits for its
+/// keys at the gate instead.
+pub fn calvin_route_keeps(plan: &PhysicalPlan, event_source: EventSource, restore_id: u64) -> bool {
+    restore_id == 0 && (matches!(event_source, EventSource::User) || !is_dependent_predicate(plan))
+}
+
 /// Route one write to the deterministic scheduler and return the applied
 /// `Response`. `None` for a plain write with no RETURNING rows — the caller then
 /// synthesizes its normal command-tag response.
+///
+/// A static write set applies under `event_source` on every replica. The
+/// gate routes a predicate write only when it is a client's (see
+/// [`calvin_route_keeps`]).
 ///
 /// Returns a boxed future (rather than an `async fn`) to break the async
 /// recursion cycle described in the module docs.
@@ -77,6 +92,7 @@ pub fn route_write_to_calvin<'a>(
     database_id: DatabaseId,
     vshard_id: VShardId,
     plan: PhysicalPlan,
+    event_source: EventSource,
 ) -> Pin<Box<dyn Future<Output = crate::Result<Option<Response>>> + Send + 'a>> {
     Box::pin(async move {
         let task = PhysicalTask {
@@ -101,11 +117,11 @@ pub fn route_write_to_calvin<'a>(
             return Ok(recon.apply_result);
         }
 
-        // Point write: its key is known, so build a static TxClass and submit it.
+        // A static write set: build a static TxClass and submit it.
         //
-        // This write reaches here ONLY because `admit` returned `RouteToCalvin`:
-        // a pending commit already holds its key. A point write targets a single
-        // vshard, so it must be built with the single-vshard opt-in — it sequences
+        // This write reaches here ONLY because a gate returned `RouteToCalvin`:
+        // a pending commit already holds one of its keys. A write on a single
+        // vshard must be built with the single-vshard opt-in — it sequences
         // through the scheduler to serialize on the SAME shared per-vShard
         // `LockManager` the holder is on, rather than being rejected as a
         // (spuriously) single-vshard multi-shard dispatch.
@@ -124,7 +140,8 @@ pub fn route_write_to_calvin<'a>(
             Some(task) => crate::control::write_resolve::resolved_ingest_counts(&task.plan)?,
             None => None,
         };
-        let tx_class = build_single_vshard_tx_class(&tasks, tenant_id, &[])?;
+        let mut tx_class = build_single_vshard_tx_class(&tasks, tenant_id, &[])?;
+        tx_class.set_event_source(event_source.wal_code());
         let applied = submit_calvin_routed(shared, tx_class).await?;
         Ok(with_ingest_counts(applied, counts))
     })

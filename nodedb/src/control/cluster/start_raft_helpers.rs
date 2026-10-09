@@ -102,6 +102,11 @@ fn retire_vshard_schedulers(
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&vshard);
+        // The write gate's holds on the stopped lock table order nothing.
+        shared
+            .calvin
+            .admission_holds
+            .release_vshard(crate::types::VShardId::new(vshard));
         calvin_completion_registry.unregister_verdict_signal_sender(vshard);
         // A cut on this node waits only on the schedulers it runs.
         shared.calvin.cuts.unregister(vshard);

@@ -30,9 +30,13 @@ impl NodeDbPgHandler {
 
         // `write_version` is the post-write `coll_write_lsn`, surfaced so the session
         // can floor a later read-set at it (read-your-writes for cross-shard OCC).
-        let (payload, write_version) =
-            crate::control::wal_replication::propose_replicated_entry(&self.state, proposer, entry)
-                .await?;
+        let (payload, write_version) = crate::control::wal_replication::propose_replicated_entry(
+            &self.state,
+            proposer,
+            entry,
+            crate::control::wal_replication::statement_propose_deadline(&self.state),
+        )
+        .await?;
 
         let response = Response {
             request_id,

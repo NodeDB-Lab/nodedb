@@ -55,10 +55,31 @@ pub(crate) fn stamp_unique_claims(
                 detail: format!("calvin unique claims: plan decode: {e}"),
             }
         })?;
+    let sets = catalog_unique_claim_sets(
+        state,
+        tx_class.database_id,
+        tx_class.tenant_id.as_u64(),
+        &plans,
+    )?;
+    for set in sets {
+        if !tx_class.write_set.0.contains(&set) {
+            tx_class.write_set.0.push(set);
+        }
+    }
+    Ok(())
+}
+
+/// The UNIQUE claim key sets of `plans`, with each collection's UNIQUE
+/// indexes read from this node's catalog. A Calvin transaction and an
+/// autocommit write at the write-admission gate both claim through it.
+pub(crate) fn catalog_unique_claim_sets(
+    state: &SharedState,
+    database_id: nodedb_types::DatabaseId,
+    tenant_id: u64,
+    plans: &[PhysicalPlan],
+) -> crate::Result<Vec<EngineKeySet>> {
     let catalog = state.credentials.catalog();
-    let database_id = tx_class.database_id;
-    let tenant_id = tx_class.tenant_id.as_u64();
-    let sets = unique_claim_sets(&plans, |collection| {
+    unique_claim_sets(plans, |collection| {
         let key = nodedb_types::CollectionKey::from_qualified_str(database_id, collection)
             .unwrap_or_else(|_| nodedb_types::CollectionKey::from_bare(database_id, collection));
         let stored = catalog.get_collection(key.database_id(), tenant_id, key.name())?;
@@ -79,13 +100,7 @@ pub(crate) fn stamp_unique_claims(
                 })
                 .collect()
         }))
-    })?;
-    for set in sets {
-        if !tx_class.write_set.0.contains(&set) {
-            tx_class.write_set.0.push(set);
-        }
-    }
-    Ok(())
+    })
 }
 
 /// The UNIQUE claim key sets of `plans`. `unique_paths` names the UNIQUE

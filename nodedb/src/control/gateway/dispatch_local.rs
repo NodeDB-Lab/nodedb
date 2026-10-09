@@ -94,9 +94,13 @@ pub(super) async fn dispatch_local(
         )?
     {
         let proposer = shared.async_raft_proposer()?;
-        let (payload, write_version) =
-            crate::control::wal_replication::propose_replicated_entry(shared, proposer, entry)
-                .await?;
+        let (payload, write_version) = crate::control::wal_replication::propose_replicated_entry(
+            shared,
+            proposer,
+            entry,
+            crate::control::wal_replication::statement_propose_deadline(shared),
+        )
+        .await?;
         return Ok(DispatchOutcome {
             payloads: vec![payload],
             // A write carries no read watermark (Lsn::ZERO); its post-write

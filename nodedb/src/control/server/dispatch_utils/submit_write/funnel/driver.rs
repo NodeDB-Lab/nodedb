@@ -16,7 +16,7 @@ use crate::control::server::dispatch_utils::minted::{
 };
 use crate::control::server::shared::session::statement_deadline;
 use crate::control::server::shared::write_admission::{
-    bare_ok_response, order_row_write, route_write_to_calvin,
+    bare_ok_response, calvin_route_keeps, order_row_write, route_write_to_calvin,
 };
 use crate::control::server::wal_dispatch;
 use crate::control::state::SharedState;
@@ -25,7 +25,7 @@ use crate::engine::timeseries::resolved_ingest::TsDriftPolicy;
 use super::super::params::{
     ChangeFeedOwner, SubmitOutcome, SubmitWrite, WalDurability, WriteOrdering,
 };
-use super::admission::{AdmissionOutcome, admit_write};
+use super::admission::{AdmissionOutcome, AdmissionTarget, admit_write};
 use super::answer::Answer;
 use super::dispatch::{DispatchTarget, HeldGuards, dispatch_to_data_plane};
 use super::late_parts::LateParts;
@@ -201,32 +201,55 @@ pub(crate) async fn enqueue_write(
     // TxClass plus its own `CalvinApplied` WAL record), so no local WAL append or
     // enqueue happens. A plain write with no RETURNING rows yields `None`,
     // synthesized into a bare `Ok`.
-    let (admission, admission_guard, order_guard) =
-        match admit_write(shared, tenant_id, database_id, vshard_id, &plan, ordering).await {
-            AdmissionOutcome::Proceed {
-                admission,
-                admission_guard,
-                order_guard,
-            } => (admission, admission_guard, order_guard),
-            AdmissionOutcome::RouteToCalvin => {
-                // The scheduler journals the write in its own sequenced record.
-                // The scheduler applies the write from its own records, so
-                // the caller's records never apply.
-                let superseded = caller_minted.map(|minted| {
-                    minted.supersede(std::sync::Arc::clone(&shared.wal), owner, "calvin_route")
-                });
-                let routed =
-                    route_write_to_calvin(shared, tenant_id, database_id, vshard_id, plan).await;
-                if let Some(superseded) = superseded {
-                    superseded.finish().await;
-                }
-                let routed = routed?;
-                return Ok(PendingWrite::done(SubmitOutcome {
-                    response: routed
-                        .unwrap_or_else(|| bare_ok_response(crate::types::RequestId::new(0))),
-                }));
+    let target = AdmissionTarget {
+        tenant_id,
+        database_id,
+        vshard_id,
+        plan: &plan,
+        may_route: calvin_route_keeps(&plan, event_source, 0),
+    };
+    let admitted = match admit_write(shared, target, ordering, deadline).await {
+        Ok(admitted) => admitted,
+        Err(error) => {
+            // No record of this write reaches a core.
+            if let Some(minted) = caller_minted {
+                minted.cancel(&shared.wal, owner, 0).await?;
             }
-        };
+            return Err(error);
+        }
+    };
+    let (admission, admission_guard, order_guard) = match admitted {
+        AdmissionOutcome::Proceed {
+            admission,
+            admission_guard,
+            order_guard,
+        } => (admission, admission_guard, order_guard),
+        AdmissionOutcome::RouteToCalvin => {
+            // The scheduler journals the write in its own sequenced record.
+            // The scheduler applies the write from its own records, so
+            // the caller's records never apply.
+            let superseded = caller_minted.map(|minted| {
+                minted.supersede(std::sync::Arc::clone(&shared.wal), owner, "calvin_route")
+            });
+            let routed = route_write_to_calvin(
+                shared,
+                tenant_id,
+                database_id,
+                vshard_id,
+                plan,
+                event_source,
+            )
+            .await;
+            if let Some(superseded) = superseded {
+                superseded.finish().await;
+            }
+            let routed = routed?;
+            return Ok(PendingWrite::done(SubmitOutcome {
+                response: routed
+                    .unwrap_or_else(|| bare_ok_response(crate::types::RequestId::new(0))),
+            }));
+        }
+    };
 
     // Order this write's row records (document rows and edges) against every
     // other row write of its vShard, from before the append below through its

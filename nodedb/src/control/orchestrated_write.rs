@@ -49,7 +49,8 @@ pub(crate) async fn apply_orchestrated_write(
             }
         })?;
     let request_id = RequestId::new(state.request_id_counter.fetch_add(1, Ordering::Relaxed));
-    match propose_replicated_entry(state, proposer, entry).await {
+    let deadline = crate::control::wal_replication::statement_propose_deadline(state);
+    match propose_replicated_entry(state, proposer, entry, deadline).await {
         Ok((payload, write_version)) => {
             let response = Response {
                 request_id,

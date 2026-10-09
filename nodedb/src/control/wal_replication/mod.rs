@@ -19,6 +19,7 @@ pub use decode::{decode_replicated_entry, from_replicated_entry};
 pub use encode::to_replicated_entry;
 pub(crate) use propose::{
     propose_replicated_entry, stamp_collection_incarnations, stamp_metadata_floor,
+    statement_propose_deadline,
 };
 pub use replicable_write::ReplicableWrite;
 pub use types::{
