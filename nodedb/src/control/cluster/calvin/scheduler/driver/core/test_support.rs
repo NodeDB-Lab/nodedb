@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::bridge::dispatch::{BridgeResponse, CoreChannelDataSide, Dispatcher};
 use crate::bridge::envelope::{
-    Admission, ErrorCode, ExemptReason, Payload, Priority, Request, Response, Status,
+    Admission, ErrorCode, ExemptReason, Payload, Priority, Request, Response, StageVote, Status,
 };
 use crate::control::cluster::calvin::scheduler::driver::barrier::ReadResultEvent;
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::{
@@ -451,8 +451,8 @@ pub(super) fn staged_pending(txn: SequencedTxn, txn_id: TxnId) -> PendingTxn {
     }
 }
 
-/// A staged executor `Response` carrying the given status and read-set vote.
-pub(super) fn staged_response(status: Status, read_set_valid: Option<bool>) -> Response {
+/// An executor `Response` carrying the given status and stage vote.
+pub(super) fn staged_response(status: Status, stage_vote: Option<StageVote>) -> Response {
     Response {
         request_id: RequestId::new(1),
         status,
@@ -461,7 +461,7 @@ pub(super) fn staged_response(status: Status, read_set_valid: Option<bool>) -> R
         payload: Payload::empty(),
         watermark_lsn: Lsn::ZERO,
         error_code: None,
-        read_set_valid,
+        stage_vote,
         read_version_lsn: Lsn::ZERO,
         write_set: Vec::new(),
     }

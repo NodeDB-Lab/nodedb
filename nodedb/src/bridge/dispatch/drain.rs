@@ -168,7 +168,7 @@ impl Dispatcher {
                              shutdown drain deadline"
                         ),
                     })),
-                    read_set_valid: None,
+                    stage_vote: None,
                     read_version_lsn: Lsn::ZERO,
                     write_set: Vec::new(),
                 });

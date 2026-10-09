@@ -49,6 +49,7 @@ pub(crate) async fn submit_local_assign(
 ) -> crate::Result<RoutedAssignment> {
     super::local::raise_metadata_floor(state, &mut tx_class);
     super::local::stamp_incarnations(state, &mut tx_class)?;
+    super::unique_claims::stamp_unique_claims(state, &mut tx_class)?;
     let stream = super::parts::split_into_parts(state, &mut tx_class)?;
     assign_prepared(state, tx_class, stream, timeout).await
 }
@@ -119,6 +120,7 @@ pub async fn submit_calvin_routed_assign(
 ) -> crate::Result<RoutedAssignment> {
     super::local::raise_metadata_floor(state, &mut tx_class);
     super::local::stamp_incarnations(state, &mut tx_class)?;
+    super::unique_claims::stamp_unique_claims(state, &mut tx_class)?;
     let stream = super::parts::split_into_parts(state, &mut tx_class)?;
     let local_timeout = Duration::from_secs(state.tuning.network.default_deadline_secs);
 

@@ -234,7 +234,7 @@ impl Scheduler {
     /// the validate-only read path (`plans` empty). Both carry the txn's FULL
     /// `versioned_reads` to the apply core, which validates the LOCAL slice of
     /// the read-set — whether or not `plans` is empty — and returns the commit
-    /// vote on `read_set_valid`. A validate-only task has `has_primary_write ==
+    /// vote on `stage_vote`. A validate-only task has `has_primary_write ==
     /// false`, so it deposits no result sidecar entry, exactly as intended.
     ///
     /// The txn enters `pending` before the dispatch, so a stage refused at

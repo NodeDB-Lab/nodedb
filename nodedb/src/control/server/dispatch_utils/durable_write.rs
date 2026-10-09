@@ -241,7 +241,7 @@ fn replicated_write_response(
         payload: payload.into(),
         watermark_lsn: write_version,
         error_code: None,
-        read_set_valid: None,
+        stage_vote: None,
         read_version_lsn: write_version,
         write_set: Vec::new(),
     }

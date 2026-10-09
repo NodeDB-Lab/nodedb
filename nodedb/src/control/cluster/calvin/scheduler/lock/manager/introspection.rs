@@ -3,8 +3,9 @@
 //! Read-only inspection of lock manager state — readiness checks and the
 //! test-only counters used to assert on table/holder sizes.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
+use crate::control::cluster::calvin::scheduler::lock::lock_entry::LockMode;
 use crate::control::cluster::calvin::scheduler::lock::lock_key::{LockKey, TxnId};
 
 use super::types::LockManager;
@@ -15,14 +16,14 @@ impl LockManager {
     /// A transaction is ready when for every key in its key set, the key is
     /// either:
     /// - Not present in the lock table (free), or
-    /// - Present in the lock table with `txn` among the current holders
-    ///   (shared or exclusive).
+    /// - Present in the lock table with `txn` among the current holders, in
+    ///   any mode.
     ///
     /// This is called after `release` returns `txn_id` in the unblocked set.
-    /// If `is_ready` returns `true`, the caller calls `acquire` again which
-    /// will succeed on the all-available path (because the waiter was promoted).
-    pub fn is_ready(&self, txn: TxnId, keys: &BTreeSet<LockKey>) -> bool {
-        keys.iter().all(|key| {
+    /// If `is_ready` returns `true`, the caller calls `acquire` again, which
+    /// grants nothing new because the waiter was promoted.
+    pub fn is_ready(&self, txn: TxnId, keys: &BTreeMap<LockKey, LockMode>) -> bool {
+        keys.keys().all(|key| {
             match self.table.get(key) {
                 None => true,                                // key is free
                 Some(entry) => entry.holders.contains(&txn), // txn is a current holder
@@ -69,8 +70,11 @@ mod tests {
         }
     }
 
-    fn keyset(names: &[&str]) -> BTreeSet<LockKey> {
-        names.iter().map(|n| key(n)).collect()
+    fn keyset(names: &[&str]) -> BTreeMap<LockKey, LockMode> {
+        names
+            .iter()
+            .map(|n| (key(n), LockMode::Exclusive))
+            .collect()
     }
 
     fn txn(epoch: u64, pos: u32) -> TxnId {

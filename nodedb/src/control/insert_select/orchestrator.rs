@@ -222,7 +222,7 @@ pub(crate) async fn run_insert_select(
         payload: Payload::from_vec(payload),
         watermark_lsn: max_lsn,
         error_code: None,
-        read_set_valid: None,
+        stage_vote: None,
         read_version_lsn: crate::types::Lsn::ZERO,
         write_set: Vec::new(),
     })

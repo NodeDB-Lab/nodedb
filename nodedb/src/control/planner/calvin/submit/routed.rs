@@ -70,6 +70,7 @@ pub async fn submit_calvin_routed(
 ) -> crate::Result<Option<Response>> {
     super::local::raise_metadata_floor(state, &mut tx_class);
     super::local::stamp_incarnations(state, &mut tx_class)?;
+    super::unique_claims::stamp_unique_claims(state, &mut tx_class)?;
     let stream = super::parts::split_into_parts(state, &mut tx_class)?;
     // Every running server has a cluster transport, the synthesized one-node
     // cluster included. Without one, `start_raft` never ran here.

@@ -65,6 +65,8 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum HaltReason
     /// A committed txn's write-version record cannot be built. Read-set
     /// validation reads these versions, so a lost record reports false-valid reads.
     WriteVersionRecordFailed,
+    /// A stage response carries no vote the scheduler can read.
+    StageVoteInvalid,
 }
 
 impl HaltReason {
@@ -81,6 +83,7 @@ impl HaltReason {
             Self::WalAppendFailed => apply_halt_reason::WAL_APPEND_FAILED,
             Self::MetadataGroupGone => apply_halt_reason::METADATA_GROUP_GONE,
             Self::WriteVersionRecordFailed => apply_halt_reason::WRITE_VERSION_RECORD_FAILED,
+            Self::StageVoteInvalid => apply_halt_reason::STAGE_VOTE_INVALID,
         }
     }
 

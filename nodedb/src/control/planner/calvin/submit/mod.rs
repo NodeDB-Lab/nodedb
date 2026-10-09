@@ -36,6 +36,7 @@ pub mod local;
 pub mod parts;
 pub mod routed;
 pub mod stream;
+pub mod unique_claims;
 
 pub(crate) use assign::submit_local_assign;
 pub use assign::{RoutedAssignment, submit_calvin_routed_assign};

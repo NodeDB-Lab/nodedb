@@ -178,7 +178,7 @@ async fn dispatch_external_crdt_apply(
         payload: Payload::from_vec(outcome.payload),
         watermark_lsn: Lsn::ZERO,
         error_code: None,
-        read_set_valid: None,
+        stage_vote: None,
         read_version_lsn: outcome.write_version,
         write_set: Vec::new(),
     })

@@ -489,7 +489,7 @@ fn staged_rows_response(rows: Vec<u8>) -> crate::bridge::envelope::Response {
         payload: crate::bridge::envelope::Payload::from_vec(rows),
         watermark_lsn: crate::types::Lsn::ZERO,
         error_code: None,
-        read_set_valid: None,
+        stage_vote: None,
         read_version_lsn: crate::types::Lsn::ZERO,
         write_set: Vec::new(),
     }

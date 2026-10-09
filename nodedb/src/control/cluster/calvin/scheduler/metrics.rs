@@ -128,6 +128,7 @@ pub mod apply_halt_reason {
     pub const WAL_APPEND_FAILED: usize = 7;
     pub const METADATA_GROUP_GONE: usize = 8;
     pub const WRITE_VERSION_RECORD_FAILED: usize = 9;
+    pub const STAGE_VOTE_INVALID: usize = 10;
 
     pub const LABELS: &[&str] = &[
         "draining",
@@ -140,6 +141,7 @@ pub mod apply_halt_reason {
         "wal_append_failed",
         "metadata_group_gone",
         "write_version_record_failed",
+        "stage_vote_invalid",
     ];
 }
 

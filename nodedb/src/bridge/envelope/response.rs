@@ -4,6 +4,7 @@
 
 use super::error_code::ErrorCode;
 use super::payload::Payload;
+use super::stage_vote::StageVote;
 use super::status::Status;
 use crate::types::{Lsn, RequestId};
 use nodedb_types::RowIdentity;
@@ -206,18 +207,11 @@ pub struct Response {
     /// Error code if status is not Ok.
     pub error_code: Option<Box<ErrorCode>>,
 
-    /// Whether this response's originating transaction found its slice of the
-    /// versioned read-set still current against the local write versions.
-    /// `Some(true)` = still current (or no reads observed for this slice);
-    /// `Some(false)` = at least one read was superseded; `None` = the response
-    /// did not carry a read-set check (reads, control ops, and every
-    /// non-transaction response).
+    /// The local commit vote of a Calvin stage response.
     ///
-    /// For the direct-apply (dependent/active, fast-path) path this is reporting
-    /// only — the apply commits regardless. For a staged static Calvin
-    /// transaction it is the LOCAL COMMIT VOTE: the scheduler flushes the staged
-    /// buffer to base on `Some(true)` and drops it on `Some(false)`.
-    pub read_set_valid: Option<bool>,
+    /// Every Calvin stage path sets it. `None` means the response is not a
+    /// Calvin stage outcome. It never means an unknown vote.
+    pub stage_vote: Option<StageVote>,
 
     /// Row-level effects the Control Plane turns into durable redo records
     /// *after* the Data Plane applied them (see [`WriteSetEntry`]). Empty for
@@ -239,7 +233,7 @@ mod tests {
             payload: Payload::from_vec(b"result".to_vec()),
             watermark_lsn: Lsn::new(42),
             error_code: None,
-            read_set_valid: None,
+            stage_vote: None,
             read_version_lsn: Lsn::ZERO,
             write_set: Vec::new(),
         };
@@ -258,7 +252,7 @@ mod tests {
             payload: Payload::empty(),
             watermark_lsn: Lsn::ZERO,
             error_code: Some(Box::new(ErrorCode::DeadlineExceeded)),
-            read_set_valid: None,
+            stage_vote: None,
             read_version_lsn: Lsn::ZERO,
             write_set: Vec::new(),
         };

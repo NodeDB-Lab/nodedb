@@ -14,4 +14,4 @@ pub mod set;
 pub mod vector;
 
 pub use plan::{add_plan_write_keys, task_write_keys};
-pub use set::{COLLECTION_KEY, WriteKeys, row_id_key};
+pub use set::{WriteKeys, row_id_key};

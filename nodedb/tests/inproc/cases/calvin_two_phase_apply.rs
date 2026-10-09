@@ -3,7 +3,7 @@
 //! Staged Calvin apply on the Data Plane: `MetaOp::CalvinExecuteStatic`
 //! VALIDATES + STAGES a transaction's write plans into the commit-pending
 //! buffer WITHOUT mutating base, returning the local commit vote on
-//! `read_set_valid`. `MetaOp::CalvinResolve` then resolves the staged plans
+//! `stage_vote`. `MetaOp::CalvinResolve` then resolves the staged plans
 //! into the transaction's redo record, and `MetaOp::CalvinFlush` installs it
 //! at its LSN (making the write visible), or `MetaOp::CalvinDrop` discards
 //! the staged state (leaving base unchanged).
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nodedb::bridge::dispatch::{BridgeRequest, BridgeResponse};
-use nodedb::bridge::envelope::{Priority, Request, Response, Status};
+use nodedb::bridge::envelope::{Priority, Request, Response, StageVote, Status};
 use nodedb::data::executor::core_loop::CoreLoop;
 use nodedb::types::*;
 use nodedb_bridge::buffer::{Consumer, Producer, RingBuffer};
@@ -264,8 +264,8 @@ fn flush_makes_staged_calvin_write_visible() {
     );
     assert_eq!(staged.status, Status::Ok, "stage must succeed");
     assert_eq!(
-        staged.read_set_valid,
-        Some(true),
+        staged.stage_vote,
+        Some(StageVote::Commit),
         "empty read-set is vacuously current → commit vote"
     );
 
@@ -373,8 +373,8 @@ fn drop_discards_invalid_staged_calvin_write() {
         "stage must succeed even on abort vote"
     );
     assert_eq!(
-        staged.read_set_valid,
-        Some(false),
+        staged.stage_vote,
+        Some(StageVote::SerializationConflict),
         "stale read-set must produce an abort vote"
     );
 
@@ -474,8 +474,8 @@ fn point_read_at_write_lsn_commits_and_flush_applies() {
     );
     assert_eq!(staged.status, Status::Ok, "stage must succeed: {staged:?}");
     assert_eq!(
-        staged.read_set_valid,
-        Some(true),
+        staged.stage_vote,
+        Some(StageVote::Commit),
         "a read at or after the last write LSN must be current -> commit vote"
     );
 
@@ -563,8 +563,8 @@ fn stale_point_read_of_kv_key_aborts_stage_and_drop_discards() {
         "stage must succeed even on abort vote"
     );
     assert_eq!(
-        staged.read_set_valid,
-        Some(false),
+        staged.stage_vote,
+        Some(StageVote::SerializationConflict),
         "a stale Point read (write after read_lsn) must produce an abort vote"
     );
 
@@ -677,8 +677,8 @@ fn absent_kv_key_phantom_insert_causes_abort() {
     );
     assert_eq!(staged.status, Status::Ok, "stage must succeed: {staged:?}");
     assert_eq!(
-        staged.read_set_valid,
-        Some(false),
+        staged.stage_vote,
+        Some(StageVote::SerializationConflict),
         "a phantom insert into a key observed absent must abort the stage vote"
     );
 }
@@ -757,8 +757,8 @@ fn absent_document_phantom_insert_is_caught() {
     );
     assert_eq!(staged.status, Status::Ok, "stage must succeed: {staged:?}");
     assert_eq!(
-        staged.read_set_valid,
-        Some(false),
+        staged.stage_vote,
+        Some(StageVote::SerializationConflict),
         "a phantom insert into a collection observed absent must abort the stage \
          vote via the collection floor"
     );
@@ -825,8 +825,8 @@ fn absent_document_read_without_matching_insert_still_commits() {
     );
     assert_eq!(staged.status, Status::Ok, "stage must succeed: {staged:?}");
     assert_eq!(
-        staged.read_set_valid,
-        Some(true),
+        staged.stage_vote,
+        Some(StageVote::Commit),
         "an absent-document read must NOT over-abort when no insert lands in its \
          collection"
     );
@@ -871,7 +871,7 @@ fn already_ordered_stage_and_flush_run_past_their_deadline() {
         )),
     );
     assert_eq!(staged.status, Status::Ok, "late stage must run: {staged:?}");
-    assert_eq!(staged.read_set_valid, Some(true));
+    assert_eq!(staged.stage_vote, Some(StageVote::Commit));
 
     let flush_plan = resolved_flush(&mut core, &mut tx, &mut rx, 9, 0);
     let flush = send_request(

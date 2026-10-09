@@ -164,7 +164,7 @@ mod tests {
             payload: crate::bridge::envelope::Payload::from_vec(payload),
             watermark_lsn: crate::types::Lsn::ZERO,
             error_code: None,
-            read_set_valid: None,
+            stage_vote: None,
             read_version_lsn: crate::types::Lsn::ZERO,
             write_set: Vec::new(),
         }

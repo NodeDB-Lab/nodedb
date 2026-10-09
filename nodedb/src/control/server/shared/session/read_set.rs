@@ -376,6 +376,18 @@ fn lock_key_to_wire(key: &LockKey) -> LockKeyWire {
             src: *src,
             dst: *dst,
         },
+        LockKey::Collection { collection } => LockKeyWire::Collection {
+            collection: collection.to_string(),
+        },
+        LockKey::Unique {
+            collection,
+            index,
+            value,
+        } => LockKeyWire::Unique {
+            collection: collection.to_string(),
+            index: index.to_string(),
+            value: value.to_vec(),
+        },
     }
 }
 

@@ -19,8 +19,8 @@
 //!
 //! # Conflict handling (read-aware)
 //!
-//! The commit lockset is all-exclusive over each txn's read ∪ write keys, so
-//! same-key transactions serialize by `position`. Per-key last-write-LSN
+//! The scheduler locks a txn's write keys exclusive and its read keys shared,
+//! so a reader and a writer of one key serialize by `position`. Per-key last-write-LSN
 //! validation means a reader `R` of key `K` aborts at commit only if a
 //! *lower-position* writer `W` of `K` committed first (its write LSN exceeds
 //! `R`'s read version). Giving `R` a lower position than `W` converts that
@@ -63,7 +63,8 @@ type KeyId = (u8, String, Vec<u8>);
 /// A single flattened key drawn from one transaction's read or write set.
 #[derive(Debug)]
 struct FlatKey {
-    /// Discriminant tag for the engine variant (Document=0, Vector=1, Kv=2, Edge=3).
+    /// Discriminant tag for the key-set variant (Document=0, Vector=1, Kv=2,
+    /// Edge=3, Array=4, Collection=5, Unique=6).
     discriminant: u8,
     /// Static engine name used when building conflict-context keys.
     engine_name: &'static str,
@@ -150,6 +151,34 @@ fn flatten_set(set: &ReadWriteSet) -> Vec<FlatKey> {
                         engine_name: "array",
                         collection: collection.clone(),
                         key_bytes: vshard.to_le_bytes().to_vec(),
+                    });
+                }
+            }
+            // The whole collection: one key with no row bytes.
+            EngineKeySet::Collection { collection, .. } => {
+                out.push(FlatKey {
+                    discriminant: 5,
+                    engine_name: "collection",
+                    collection: collection.clone(),
+                    key_bytes: Vec::new(),
+                });
+            }
+            // One key per claimed value: the index name, a zero byte, the value.
+            EngineKeySet::Unique {
+                collection,
+                index,
+                values,
+            } => {
+                for value in values.as_slice() {
+                    let mut key_bytes = Vec::with_capacity(index.len() + 1 + value.len());
+                    key_bytes.extend_from_slice(index.as_bytes());
+                    key_bytes.push(0);
+                    key_bytes.extend_from_slice(value);
+                    out.push(FlatKey {
+                        discriminant: 6,
+                        engine_name: "unique",
+                        collection: collection.clone(),
+                        key_bytes,
                     });
                 }
             }

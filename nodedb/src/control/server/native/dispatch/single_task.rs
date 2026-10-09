@@ -122,7 +122,7 @@ pub(super) async fn dispatch_single_task(
                 payload: Payload::from_vec(outcome.payload),
                 watermark_lsn: Lsn::new(0),
                 error_code: None,
-                read_set_valid: None,
+                stage_vote: None,
                 read_version_lsn: crate::types::Lsn::ZERO,
                 write_set: Vec::new(),
             };

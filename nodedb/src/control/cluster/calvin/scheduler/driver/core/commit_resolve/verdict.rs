@@ -225,7 +225,7 @@ mod tests {
     use super::*;
     use crate::bridge::dispatch::CoreChannelDataSide;
     use crate::bridge::envelope::ErrorCode;
-    use crate::bridge::envelope::{Payload, Status};
+    use crate::bridge::envelope::{Payload, StageVote, Status};
     use crate::control::cluster::calvin::scheduler::driver::core::halt::HaltReason;
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
         await_data_plane_request, build_test_scheduler_with_data_side, error_response,
@@ -434,7 +434,10 @@ mod tests {
 
         // Local staging votes only park their own staged slices; neither the
         // affirmative nor the failed participant can resolve or drop unilaterally.
-        first_scheduler.resolve_staged_commit(txn_id, &staged_response(Status::Ok, Some(true)));
+        first_scheduler.resolve_staged_commit(
+            txn_id,
+            &staged_response(Status::Ok, Some(StageVote::Commit)),
+        );
         second_scheduler.resolve_staged_commit(txn_id, &staged_response(Status::Error, None));
         for (scheduler, data_side) in [
             (&first_scheduler, &mut first_data),

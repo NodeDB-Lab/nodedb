@@ -44,7 +44,7 @@ impl CoreLoop {
             watermark_lsn: self.watermark,
             read_version_lsn: self.read_version_lsn(task),
             error_code: None,
-            read_set_valid: None,
+            stage_vote: None,
             write_set: Vec::new(),
         }
     }
@@ -63,7 +63,7 @@ impl CoreLoop {
             watermark_lsn: self.watermark,
             read_version_lsn: self.read_version_lsn(task),
             error_code: None,
-            read_set_valid: None,
+            stage_vote: None,
             write_set: Vec::new(),
         }
     }
@@ -108,7 +108,7 @@ impl CoreLoop {
             watermark_lsn: self.watermark,
             read_version_lsn: self.read_version_lsn(task),
             error_code: None,
-            read_set_valid: None,
+            stage_vote: None,
             write_set: Vec::new(),
         }
     }
@@ -165,7 +165,7 @@ impl CoreLoop {
             watermark_lsn: self.watermark,
             read_version_lsn: crate::types::Lsn::ZERO,
             error_code: Some(Box::new(error_code.into())),
-            read_set_valid: None,
+            stage_vote: None,
             write_set: Vec::new(),
         }
     }

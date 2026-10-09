@@ -121,6 +121,27 @@ pub enum EngineKeySet {
         collection: String,
         vshards: SortedVec<u32>,
     },
+    /// A whole collection on each vShard in `vshards`, or on the
+    /// collection's own vShard when `vshards` is empty.
+    ///
+    /// In a write set the transaction locks the collection exclusively: a
+    /// truncate, bulk, predicate, or identity-less write. In a read set it
+    /// locks the collection shared: a predicate, scan, or index read. A read
+    /// that observed the collection on named vShards, such as a cross-shard
+    /// graph read, names them in `vshards`.
+    Collection {
+        collection: String,
+        vshards: SortedVec<u32>,
+    },
+    /// UNIQUE values a write claims in one index of `collection`.
+    ///
+    /// Each value is the canonical index value the Data Plane judges. Two
+    /// transactions that claim one value lock one key, so they serialize.
+    Unique {
+        collection: String,
+        index: String,
+        values: SortedVec<Vec<u8>>,
+    },
 }
 
 impl EngineKeySet {
@@ -142,6 +163,15 @@ impl EngineKeySet {
             Self::Edge { edges, .. } => edges.len() * 8,
             // Array: one u32 vShard each.
             Self::Array { vshards, .. } => vshards.len() * 4,
+            // Collection: the name plus one u32 vShard each.
+            Self::Collection {
+                collection,
+                vshards,
+            } => collection.len() + vshards.len() * 4,
+            // Unique: the index name plus each value's bytes.
+            Self::Unique { index, values, .. } => {
+                index.len() + values.iter().map(|v| v.len()).sum::<usize>()
+            }
         }
     }
 
@@ -152,7 +182,9 @@ impl EngineKeySet {
             | Self::Vector { collection, .. }
             | Self::Kv { collection, .. }
             | Self::Edge { collection, .. }
-            | Self::Array { collection, .. } => collection,
+            | Self::Array { collection, .. }
+            | Self::Collection { collection, .. }
+            | Self::Unique { collection, .. } => collection,
         }
     }
 
@@ -164,6 +196,8 @@ impl EngineKeySet {
             Self::Kv { keys, .. } => keys.is_empty(),
             Self::Edge { edges, .. } => edges.is_empty(),
             Self::Array { vshards, .. } => vshards.is_empty(),
+            Self::Collection { .. } => false,
+            Self::Unique { values, .. } => values.is_empty(),
         }
     }
 }
@@ -309,7 +343,7 @@ pub struct VersionedReadEntry {
 /// accumulate no session read-set). Populated at commit time from the neutral
 /// session read-set, and validated per-participant against the local
 /// write-version index at Calvin stage time (the commit vote on
-/// `read_set_valid`).
+/// a stage response).
 #[derive(
     Debug,
     Clone,

@@ -152,7 +152,7 @@ mod tests {
     use nodedb_cluster::calvin::{ParticipantVote, SequencerEntry};
 
     use super::*;
-    use crate::bridge::envelope::Status;
+    use crate::bridge::envelope::{StageVote, Status};
     use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::{
         CapturingProposer, elect_data_group_leader,
     };
@@ -183,7 +183,10 @@ mod tests {
             .pending
             .insert(txn_id, staged_pending(make_sequenced_txn(20, 1), txn_id));
 
-        scheduler.resolve_staged_commit(txn_id, &staged_response(Status::Ok, Some(true)));
+        scheduler.resolve_staged_commit(
+            txn_id,
+            &staged_response(Status::Ok, Some(StageVote::Commit)),
+        );
         assert_eq!(proposer.attempt_count(), 1, "the first proposal is refused");
 
         scheduler.retry_owed_sequencer_entries();
@@ -351,7 +354,10 @@ mod tests {
             .pending
             .insert(txn_id, staged_pending(make_sequenced_txn(26, 0), txn_id));
 
-        scheduler.resolve_staged_commit(txn_id, &staged_response(Status::Ok, Some(true)));
+        scheduler.resolve_staged_commit(
+            txn_id,
+            &staged_response(Status::Ok, Some(StageVote::Commit)),
+        );
         scheduler.retry_owed_sequencer_entries();
         assert_eq!(proposer.attempt_count(), 0, "a follower casts no vote");
 

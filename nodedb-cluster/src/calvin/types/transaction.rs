@@ -75,7 +75,7 @@ pub struct TxClass {
     /// Each entry carries the responding shard's write-LSN watermark at read
     /// time plus the point/predicate identity, so a participant can validate
     /// the read at the commit serialization point (the local commit vote on
-    /// `read_set_valid`). Empty for pure-write and autocommit transactions.
+    /// a stage response). Empty for pure-write and autocommit transactions.
     #[serde(default)]
     #[msgpack(default)]
     pub versioned_reads: VersionedReadSet,

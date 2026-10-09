@@ -101,7 +101,7 @@ impl CoreLoop {
                 watermark_lsn: self.watermark,
                 // The task never started, so nothing it would write ran.
                 error_code: Some(Box::new(ErrorCode::ExpiredBeforeExecution)),
-                read_set_valid: None,
+                stage_vote: None,
                 read_version_lsn: crate::types::Lsn::ZERO,
                 write_set: Vec::new(),
             }

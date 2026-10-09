@@ -36,7 +36,9 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::cluster::calvin::scheduler::driver::core::routing::{PlanRouting, plan_vshard};
-use crate::control::cluster::calvin::scheduler::lock_manager::{LockKey, LockManager, TxnId};
+use crate::control::cluster::calvin::scheduler::lock_manager::{
+    LockKey, LockManager, LockMode, TxnId,
+};
 use crate::control::planner::calvin::is_dependent_predicate;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, VShardId};
@@ -249,7 +251,12 @@ pub fn admit(shared: &SharedState, target: &WriteTarget<'_>) -> WriteAdmission {
     );
     let acquired = {
         let mut lm = lock_manager.lock().unwrap_or_else(|p| p.into_inner());
-        lm.try_acquire(txn, keys)
+        lm.try_acquire(
+            txn,
+            keys.into_iter()
+                .map(|key| (key, LockMode::Exclusive))
+                .collect(),
+        )
     };
     if acquired {
         // Look up this vShard's promotion channel so the guard can hand any

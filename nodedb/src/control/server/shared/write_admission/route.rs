@@ -59,7 +59,7 @@ pub fn bare_ok_response(request_id: RequestId) -> Response {
         payload: crate::bridge::envelope::Payload::from_vec(Vec::new()),
         watermark_lsn: crate::types::Lsn::ZERO,
         error_code: None,
-        read_set_valid: None,
+        stage_vote: None,
         read_version_lsn: crate::types::Lsn::ZERO,
         write_set: Vec::new(),
     }

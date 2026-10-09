@@ -43,10 +43,9 @@ pub(super) fn add_keys(keys: &mut WriteKeys, op: &DocumentOp) -> crate::Result<(
             surrogate,
             ..
         } => keys.rows(collection.as_str(), [surrogate.as_u32()]),
-        // A key unbound in its database names no row yet: it takes the
-        // collection key and its row id. The row id orders it after an
-        // insert that binds the key, so its rebind at dispatch finds that
-        // binding on every replica.
+        // A key unbound in its database names no row yet: it locks only its
+        // row id. The row id orders it after an insert that binds the key, so
+        // its rebind at dispatch finds that binding on every replica.
         DocumentOp::PointDelete {
             collection,
             document_id,
@@ -59,14 +58,12 @@ pub(super) fn add_keys(keys: &mut WriteKeys, op: &DocumentOp) -> crate::Result<(
             surrogate,
             ..
         } => {
-            match surrogate {
-                Some(surrogate) => keys.rows(collection.as_str(), [surrogate.as_u32()]),
-                None => keys.whole_collection(collection.as_str()),
+            if let Some(surrogate) = surrogate {
+                keys.rows(collection.as_str(), [surrogate.as_u32()]);
             }
             keys.row_id(collection.as_str(), document_id);
         }
-        // Every row it inserts, by surrogate and row id, and the collection
-        // key a multi-row write holds.
+        // Every row it inserts, by surrogate and row id.
         DocumentOp::BatchInsert {
             collection,
             documents,
@@ -77,7 +74,6 @@ pub(super) fn add_keys(keys: &mut WriteKeys, op: &DocumentOp) -> crate::Result<(
             for (document_id, _) in documents {
                 keys.row_id(collection.as_str(), document_id);
             }
-            keys.whole_collection(collection.as_str());
         }
         DocumentOp::InsertSelect {
             target_collection, ..

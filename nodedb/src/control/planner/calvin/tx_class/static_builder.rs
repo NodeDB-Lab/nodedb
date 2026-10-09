@@ -361,6 +361,88 @@ mod tests {
         }
     }
 
+    /// The lock request the scheduler takes for `tx_class` at `position`.
+    fn locks(
+        tx_class: TxClass,
+        position: u32,
+    ) -> std::collections::BTreeMap<
+        crate::control::cluster::calvin::scheduler::LockKey,
+        crate::control::cluster::calvin::scheduler::LockMode,
+    > {
+        crate::control::cluster::calvin::scheduler::driver::helpers::expand_rw_set(
+            &nodedb_cluster::calvin::types::SequencedTxn {
+                epoch: 1,
+                position,
+                tx_class,
+                epoch_system_ms: 1_700_000_000_000,
+                epoch_vshard_txn_count: 2,
+                lock_owner: None,
+            },
+        )
+    }
+
+    /// A predicate read locks its whole collection `Shared`. A later row
+    /// writer of that collection takes `Intent` on it, so it waits until the
+    /// reader releases. A point read locks only its row.
+    #[test]
+    fn a_predicate_read_blocks_a_later_writer_until_released() {
+        use crate::control::cluster::calvin::scheduler::LockMode;
+        use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
+        use crate::control::cluster::calvin::scheduler::{AcquireOutcome, LockKey, LockManager};
+
+        let (col_a, col_b) = two_distinct_collections();
+        let tasks = vec![point_insert_task(&col_a, 1), point_insert_task(&col_b, 2)];
+        let reads = vec![
+            read_entry("scan_col", ReadKey::Predicate, 11),
+            read_entry(
+                "read_col",
+                ReadKey::Point {
+                    repr: KeyRepr::Surrogate(9),
+                },
+                10,
+            ),
+        ];
+        let reader = build_static_tx_class(&tasks, TenantId::new(1), &reads)
+            .expect("valid multi-vShard TxClass");
+        let reader_locks = locks(reader, 0);
+        assert_eq!(
+            reader_locks.get(&LockKey::Collection {
+                collection: std::sync::Arc::from("scan_col"),
+            }),
+            Some(&LockMode::Shared)
+        );
+        assert_eq!(
+            reader_locks.get(&LockKey::Surrogate {
+                collection: std::sync::Arc::from("read_col"),
+                surrogate: 9,
+            }),
+            Some(&LockMode::Shared)
+        );
+        assert!(
+            !reader_locks.contains_key(&LockKey::Collection {
+                collection: std::sync::Arc::from("read_col"),
+            }),
+            "a point read locks nothing collection-wide"
+        );
+
+        let writer = build_single_vshard_tx_class(
+            &[point_insert_task("scan_col", 5)],
+            TenantId::new(1),
+            &[],
+        )
+        .expect("writer TxClass");
+
+        let (first, second) = (TxnId::new(1, 0), TxnId::new(1, 1));
+        let mut table = LockManager::new();
+        assert_eq!(table.acquire(first, reader_locks), AcquireOutcome::Ready);
+        assert_eq!(
+            table.acquire(second, locks(writer, 1)),
+            AcquireOutcome::Blocked,
+            "a row writer waits for the predicate reader of its collection"
+        );
+        assert_eq!(table.release(first), vec![second]);
+    }
+
     #[test]
     fn empty_read_set_yields_empty_read_and_versioned_reads() {
         let (col_a, col_b) = two_distinct_collections();

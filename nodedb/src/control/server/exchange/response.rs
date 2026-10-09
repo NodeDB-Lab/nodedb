@@ -43,7 +43,7 @@ pub(super) fn outcome_to_response(
         payload: crate::bridge::envelope::Payload::from_vec(merged_array),
         watermark_lsn,
         error_code: None,
-        read_set_valid: None,
+        stage_vote: None,
         read_version_lsn,
         write_set: Vec::new(),
     }

@@ -73,9 +73,9 @@ impl Scheduler {
         match commit_state {
             CommitState::Staged => {
                 // Stage failures remain participants in the barrier:
-                // `resolve_staged_commit` turns any `Status::Error` into an
-                // explicit false vote, parks locally, and waits for the
-                // durable global verdict before issuing a drop.
+                // `resolve_staged_commit` proposes the response's abort vote,
+                // parks locally, and waits for the durable global verdict
+                // before it issues a drop.
                 self.resolve_staged_commit(txn_id, &response);
             }
             CommitState::AwaitingRedoResolve => {

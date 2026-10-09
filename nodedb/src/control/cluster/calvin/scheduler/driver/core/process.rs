@@ -413,7 +413,6 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
     use std::sync::atomic::Ordering;
 
     use nodedb_cluster::calvin::CalvinCompletionRegistry;
@@ -540,7 +539,7 @@ mod tests {
             txn_id,
             crate::control::cluster::calvin::scheduler::driver::types::BlockedTxn {
                 txn: txn.clone(),
-                keys: BTreeSet::new(),
+                keys: BTreeMap::new(),
                 // no-determinism: test-only blocked_at timestamp for a fabricated BlockedTxn fixture.
                 blocked_at: Instant::now(),
             },

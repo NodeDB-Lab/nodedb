@@ -169,7 +169,7 @@ mod collect_budget_tests {
             payload: Payload::from_vec(array_payload(n)),
             watermark_lsn: Lsn::ZERO,
             error_code: None,
-            read_set_valid: None,
+            stage_vote: None,
             read_version_lsn: crate::types::Lsn::ZERO,
             write_set: Vec::new(),
         }
@@ -184,7 +184,7 @@ mod collect_budget_tests {
             payload: Payload::from_vec(array_payload(n)),
             watermark_lsn: Lsn::ZERO,
             error_code: None,
-            read_set_valid: None,
+            stage_vote: None,
             read_version_lsn: crate::types::Lsn::ZERO,
             write_set: Vec::new(),
         }
@@ -200,7 +200,7 @@ mod collect_budget_tests {
             payload: Payload::from_vec(vec![0u8; bytes]),
             watermark_lsn: Lsn::ZERO,
             error_code: None,
-            read_set_valid: None,
+            stage_vote: None,
             read_version_lsn: crate::types::Lsn::ZERO,
             write_set: Vec::new(),
         }
@@ -215,7 +215,7 @@ mod collect_budget_tests {
             payload: Payload::from_vec(vec![0u8; bytes]),
             watermark_lsn: Lsn::ZERO,
             error_code: None,
-            read_set_valid: None,
+            stage_vote: None,
             read_version_lsn: crate::types::Lsn::ZERO,
             write_set: Vec::new(),
         }

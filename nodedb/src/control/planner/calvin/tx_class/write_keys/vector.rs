@@ -46,8 +46,8 @@ pub(super) fn add_keys(keys: &mut WriteKeys, op: &VectorOp) -> crate::Result<()>
             document_surrogate,
             ..
         } => keys.vector_rows(collection.as_str(), [document_surrogate.as_u32()]),
-        // A key unbound in its database names no row: it takes the
-        // collection key.
+        // A key unbound in its database names no row: it locks the whole
+        // collection.
         VectorOp::DeleteBySurrogate {
             collection,
             surrogate,

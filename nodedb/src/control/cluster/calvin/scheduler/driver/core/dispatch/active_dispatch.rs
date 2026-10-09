@@ -112,7 +112,7 @@ impl Scheduler {
                 // buffer, no base apply); its response drives the same
                 // resolve → redo → flush as the static path, for
                 // WAL-only-restart durability. `resolve_staged_commit` reads the
-                // `read_set_valid: None` the active handler returns as "commit".
+                // `stage_vote` the active handler sets.
                 commit_state: super::super::super::types::CommitState::Staged,
                 // Set only once the txn parks in `AwaitingVerdict`.
                 verdict_deadline: None,

@@ -4,7 +4,7 @@
 //!
 //! A static Calvin dispatch STAGES its transaction on the Data Plane (validate
 //! the read-set + buffer the plans, no base mutation). Its executor response
-//! carries the local commit vote on `read_set_valid`. This module drives the
+//! carries the local commit vote on `stage_vote`. This module drives the
 //! final step: dispatch a flush (commit, after `commit_redo` has WAL-appended
 //! the resolved `TransactionRedo`) or drop (abort) of the staged buffer, wait
 //! for its response, then run the commit tail (deposit applied result, record

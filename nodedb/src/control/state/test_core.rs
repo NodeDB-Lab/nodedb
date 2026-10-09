@@ -29,7 +29,7 @@ pub(crate) async fn acknowledge_every_request(
                         payload: Payload::empty(),
                         watermark_lsn: Lsn::ZERO,
                         error_code: None,
-                        read_set_valid: None,
+                        stage_vote: None,
                         read_version_lsn: Lsn::ZERO,
                         write_set: Vec::new(),
                     },

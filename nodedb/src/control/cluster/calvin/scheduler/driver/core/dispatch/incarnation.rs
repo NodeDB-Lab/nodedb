@@ -170,7 +170,7 @@ mod tests {
         make_sequenced_txn, scheduler_with_pending, staged_response,
     };
     use super::*;
-    use crate::bridge::envelope::Status;
+    use crate::bridge::envelope::{StageVote, Status};
     use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
     use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
     use crate::control::security::catalog::StoredCollection;
@@ -241,7 +241,10 @@ mod tests {
         if let Some(pending) = scheduler.pending.get_mut(&txn_id) {
             pending.superseded = true;
         }
-        scheduler.resolve_staged_commit(txn_id, &staged_response(Status::Ok, Some(true)));
+        scheduler.resolve_staged_commit(
+            txn_id,
+            &staged_response(Status::Ok, Some(StageVote::Commit)),
+        );
         let pending = scheduler.pending.get(&txn_id).expect("still parked");
         assert_eq!(pending.commit_state, CommitState::AwaitingVerdict);
         assert!(pending.stage_error.is_some(), "a COMMIT verdict halts it");

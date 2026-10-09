@@ -24,9 +24,9 @@ pub fn task_write_keys(tasks: &[PhysicalTask]) -> crate::Result<WriteKeys> {
 /// Add the Calvin write keys of `plan` to `keys`.
 ///
 /// Every write op of every engine is matched by name. A write with row
-/// identity locks its rows. A write without one locks
-/// [`super::COLLECTION_KEY`] of its collection. A graph write locks its
-/// edges and nodes on their key homes.
+/// identity locks its rows, and the scheduler adds an `Intent` lock on their
+/// collection. A write without one locks its whole collection. A graph write
+/// locks its edges and nodes on their key homes.
 ///
 /// A write no single transaction can sequence, and a plan that writes
 /// nothing, is refused with a typed error. The caller never builds a
@@ -75,7 +75,7 @@ pub(super) fn unsequenced(reason: &str) -> crate::Error {
 /// guard is sound only when the higher transaction waits for the lower one.
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::BTreeMap;
 
     use nodedb_cluster::calvin::types::SequencedTxn;
     use nodedb_physical::physical_plan::{
@@ -86,7 +86,9 @@ mod tests {
 
     use super::*;
     use crate::control::cluster::calvin::scheduler::driver::helpers::expand_rw_set;
-    use crate::control::cluster::calvin::scheduler::{AcquireOutcome, LockKey, LockManager, TxnId};
+    use crate::control::cluster::calvin::scheduler::{
+        AcquireOutcome, LockKey, LockManager, LockMode, TxnId,
+    };
     use crate::control::planner::calvin::tx_class::build_single_vshard_tx_class;
     use crate::types::{DatabaseId, RecordHomes, TenantId, VShardId};
 
@@ -110,7 +112,7 @@ mod tests {
     }
 
     /// The lock keys the scheduler takes for a transaction of `plans`.
-    fn locks(plans: Vec<PhysicalPlan>, position: u32) -> BTreeSet<LockKey> {
+    fn locks(plans: Vec<PhysicalPlan>, position: u32) -> BTreeMap<LockKey, LockMode> {
         let tasks: Vec<PhysicalTask> = plans.into_iter().map(task).collect();
         let tx_class = build_single_vshard_tx_class(&tasks, TenantId::new(1), &[])
             .expect("a valid transaction class");
@@ -299,9 +301,9 @@ mod tests {
 
     /// An insert binds and stores `x` at a lower position. A delete or
     /// update planned while `x` was unbound must wait for it: its rebind at
-    /// dispatch then finds the binding on every replica. Before, it locked
-    /// only the collection key and can dispatch first on one replica and
-    /// second on another.
+    /// dispatch then finds the binding on every replica. Its row id lock
+    /// orders it, so it never dispatches first on one replica and second on
+    /// another.
     #[test]
     fn an_unbound_document_delete_or_update_waits_for_an_insert_of_its_id() {
         assert!(higher_waits(
@@ -322,6 +324,45 @@ mod tests {
             deferred_sum_targets: Vec::new(),
         });
         assert!(higher_waits(vec![batch], vec![doc_delete("x", None)]));
+    }
+
+    fn doc_truncate() -> PhysicalPlan {
+        PhysicalPlan::Document(DocumentOp::Truncate {
+            collection: qualified(DOCS),
+            restart_identity: false,
+            resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
+        })
+    }
+
+    /// A truncate locks its collection `Exclusive`, and a point write takes
+    /// `Intent` on it. So they serialize in sequencer order, whichever comes
+    /// first.
+    #[test]
+    fn a_truncate_and_a_point_write_serialize_in_sequence_order() {
+        assert!(higher_waits(
+            vec![doc_truncate()],
+            vec![doc_insert("x", 17)]
+        ));
+        assert!(higher_waits(
+            vec![doc_insert("x", 17)],
+            vec![doc_truncate()]
+        ));
+        assert!(higher_waits(
+            vec![doc_delete("x", None)],
+            vec![doc_truncate()]
+        ));
+        let collection_key = LockKey::Collection {
+            collection: std::sync::Arc::from(DOCS),
+        };
+        assert_eq!(
+            locks(vec![doc_truncate()], 0).get(&collection_key),
+            Some(&LockMode::Exclusive)
+        );
+        assert_eq!(
+            locks(vec![doc_insert("x", 17)], 0).get(&collection_key),
+            Some(&LockMode::Intent)
+        );
     }
 
     /// Every point writer of one document id serializes, bound or not, and

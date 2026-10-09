@@ -147,7 +147,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
@@ -189,7 +189,7 @@ mod tests {
     fn blocked_fixture(epoch: u64) -> BlockedTxn {
         BlockedTxn {
             txn: make_sequenced_txn(epoch, 0),
-            keys: BTreeSet::new(),
+            keys: BTreeMap::new(),
             // no-determinism: test-only blocked_at timestamp for a fabricated BlockedTxn fixture.
             blocked_at: Instant::now(),
         }

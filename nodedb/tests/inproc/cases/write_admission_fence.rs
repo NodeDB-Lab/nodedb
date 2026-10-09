@@ -18,12 +18,12 @@
 //! test suite); these tests assert the gate's fence DECISION, which is the piece
 //! this change introduces.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use nodedb::bridge::dispatch::Dispatcher;
 use nodedb::control::cluster::calvin::scheduler::lock_manager::{
-    AcquireOutcome, LockKey, LockManager, TxnId,
+    AcquireOutcome, LockKey, LockManager, LockMode, TxnId,
 };
 use nodedb::control::server::shared::write_admission::{
     WriteAdmission, WriteTarget, admit, cp_routed_to_calvin,
@@ -120,7 +120,7 @@ async fn fence_write_blocks_behind_held_commit_lock() {
 
     // A pending commit (a normal Calvin-band txn) holds the fence on key K.
     let commit_txn = TxnId::new(5, 0);
-    let held: BTreeSet<LockKey> = [kv_lock_key(coll, b"K")].into();
+    let held: BTreeMap<LockKey, LockMode> = [(kv_lock_key(coll, b"K"), LockMode::Exclusive)].into();
     assert_eq!(
         lm.lock().expect("lm").acquire(commit_txn, held),
         AcquireOutcome::Ready,
@@ -290,7 +290,7 @@ async fn fast_path_drop_delivers_promoted_scheduler_txn() {
     // K and queues behind the fast-path holder (Blocked) — the exact contention
     // the old "fast-path keys are never contended" assumption ignored.
     let scheduler_txn = TxnId::new(7, 0);
-    let want: BTreeSet<LockKey> = [kv_lock_key(coll, b"K")].into();
+    let want: BTreeMap<LockKey, LockMode> = [(kv_lock_key(coll, b"K"), LockMode::Exclusive)].into();
     assert_eq!(
         lm.lock().expect("lm").acquire(scheduler_txn, want.clone()),
         AcquireOutcome::Blocked,

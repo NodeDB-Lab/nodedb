@@ -1,153 +1,95 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Exclusive lock acquisition and waiter queueing.
+//! Moded lock acquisition and FIFO waiter queueing.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeMap;
 
-use smallvec::smallvec;
-
-use crate::control::cluster::calvin::scheduler::lock::lock_entry::{
-    AcquireOutcome, LockEntry, LockMode,
-};
+use crate::control::cluster::calvin::scheduler::lock::lock_entry::{AcquireOutcome, LockMode};
 use crate::control::cluster::calvin::scheduler::lock::lock_key::{LockKey, TxnId};
 
-use super::types::{ExclusiveWait, LockManager};
+use super::classify::KeyState;
+use super::types::{ConflictResolution, LockManager};
 
 impl LockManager {
-    /// Attempt to acquire **exclusive** locks on all keys for `txn`.
+    /// Acquire every key of `keys` for `txn`, each in its own mode.
     ///
-    /// If every key is free, already held exclusively by `txn` (promoted from
-    /// waiter), or held **shared solely by `txn`** (a reservation this txn placed
-    /// earlier, now upgraded in place to exclusive), records `txn` as sole holder
-    /// of each key and returns [`AcquireOutcome::Ready`].
+    /// The request merges with any request `txn` already waits on. A key the
+    /// txn names twice takes the merged mode (see [`LockMode::merge`]).
     ///
-    /// Otherwise the whole key set is classified under the WOUND-WAIT discipline
-    /// (see [`Self::wound_or_block`]).  `TxnId` order (`(epoch, position)`) is
-    /// the replicated total order, so "older" means a smaller id and the
-    /// decision is a pure function of the lock table plus the replicated ids —
-    /// every replica computes it identically:
-    /// - Any conflicting holder is **exclusive** → `txn` waits (an exclusive
-    ///   holder is executing/applied work and is never wounded).
-    /// - All conflicting holders are **shared** reservations and `txn` is older
-    ///   than every one of them → **wound** them all (revoke to plain OCC, no
-    ///   notification) and take every key. Wounding is silent.
-    /// - Otherwise (`txn` younger than some conflicting shared holder) → wait.
+    /// When no key conflicts, `txn` takes every key and the call returns
+    /// [`AcquireOutcome::Ready`]. A key conflicts when an incompatible holder
+    /// holds it, or when an earlier waiter queues on it.
     ///
-    /// On the wait path `txn` is enqueued as an exclusive waiter on every
-    /// conflicting key and holds none; its key set is stored in `pending_keys`
-    /// so `release` can promote it atomically when all keys become available.
-    /// The whole key set is evaluated before any mutation, so acquisition stays
-    /// all-keys-or-none — the manager never partially wounds and then blocks.
-    pub fn acquire(&mut self, txn: TxnId, keys: BTreeSet<LockKey>) -> AcquireOutcome {
-        // First pass: determine whether any key is held by a *different* txn.
-        // A key already held exclusively by `txn` (promoted via release) or held
-        // shared solely by `txn` (an earlier reservation) counts as available —
-        // the former is a no-op re-acquire, the latter a self-upgrade to exclusive.
-        let all_available = keys.iter().all(|k| {
-            self.table.get(k).is_none_or(|entry| {
-                entry.held_exclusively_by(txn) || entry.held_shared_solely_by(txn)
-            })
-        });
-
-        if all_available {
-            // Acquire all keys.  For keys not yet in the table (free), insert a
-            // new exclusive entry.  For keys already held by this txn (promoted
-            // waiter), leave the entry unchanged — the waiter queue is intact.
-            for key in &keys {
-                match self.table.get_mut(key) {
-                    None => {
-                        self.table.insert(
-                            key.clone(),
-                            LockEntry {
-                                mode: LockMode::Exclusive,
-                                holders: smallvec![txn],
-                                waiters: VecDeque::new(),
-                            },
-                        );
-                    }
-                    Some(entry) => {
-                        // A key this txn already holds shared-solely is upgraded
-                        // to exclusive in place (holders is exactly `[txn]`, so no
-                        // holder change and any waiter queue stays intact). A key
-                        // already held exclusively by `txn` is left unchanged.
-                        if entry.held_shared_solely_by(txn) {
-                            entry.mode = LockMode::Exclusive;
-                        }
-                    }
-                }
-            }
-            // Move out of pending (if the txn was previously blocked on this
-            // same key set) and into held_locks.
-            self.pending_keys.remove(&txn);
-            self.held_locks.insert(txn, keys);
-            return AcquireOutcome::Ready;
+    /// A conflicting request is resolved under WOUND-WAIT (see
+    /// [`Self::resolve_conflict`]). `TxnId` order is the replicated total
+    /// order, so the decision is identical on every replica:
+    /// - Every conflicting holder is a younger read reservation in `Shared`
+    ///   mode, and nobody waits on a conflicting key: `txn` revokes those
+    ///   reservations and takes every key.
+    /// - Otherwise `txn` takes every key it can take now and waits FIFO on the
+    ///   rest. Calls arrive in sequencer order, so every key grants its
+    ///   requesters in sequencer order, whatever order earlier holders
+    ///   release in.
+    pub fn acquire(&mut self, txn: TxnId, keys: BTreeMap<LockKey, LockMode>) -> AcquireOutcome {
+        let mut request = self.pending_keys.remove(&txn).unwrap_or_default();
+        for (key, mode) in keys {
+            request
+                .entry(key)
+                .and_modify(|held| *held = held.merge(mode))
+                .or_insert(mode);
         }
+        let states: Vec<KeyState> = request
+            .iter()
+            .map(|(key, mode)| self.classify(txn, key, *mode))
+            .collect();
 
-        // A conflict exists. Classify the WHOLE key set before mutating so the
-        // wound / block decision is atomic (never partially wound then block).
-        match self.wound_or_block(txn, &keys) {
-            ExclusiveWait::Wound => {
-                // Take every key exclusively. A conflicting shared entry has its
-                // holders revoked (the wounded readers, all younger than `txn`,
-                // degrade to plain OCC); `txn` becomes the sole holder while any
-                // existing waiters remain queued behind it.
-                for key in &keys {
-                    match self.table.get_mut(key) {
-                        Some(entry) => {
-                            entry.mode = LockMode::Exclusive;
-                            entry.holders.clear();
-                            entry.holders.push(txn);
-                        }
-                        None => {
-                            self.table.insert(
-                                key.clone(),
-                                LockEntry {
-                                    mode: LockMode::Exclusive,
-                                    holders: smallvec![txn],
-                                    waiters: VecDeque::new(),
-                                },
-                            );
-                        }
-                    }
+        let resolution = if states.contains(&KeyState::Conflict) {
+            Some(self.resolve_conflict(txn, &request, &states))
+        } else {
+            None
+        };
+
+        match resolution {
+            None => {
+                for (key, mode) in &request {
+                    self.grant(txn, key, *mode);
                 }
-                self.pending_keys.remove(&txn);
-                self.held_locks.insert(txn, keys);
+                self.finish_ready(txn, request);
                 AcquireOutcome::Ready
             }
-            ExclusiveWait::Block => {
-                // Enqueue as an exclusive waiter on every key held by a
-                // different txn.
-                for key in &keys {
-                    if let Some(entry) = self.table.get_mut(key) {
-                        // No conflict on this key means it is held solely by `txn`
-                        // (a shared reservation to be upgraded, or an exclusive
-                        // re-acquire) — leave it untouched; `txn` keeps the key and
-                        // upgrades it once its conflicting keys are free. Same
-                        // predicate as the `all_available` check above.
-                        if entry.held_exclusively_by(txn) || entry.held_shared_solely_by(txn) {
-                            continue;
-                        }
-                        // Real conflict on this key. If `txn` also holds it shared
-                        // (an upgrade that must wait behind an OLDER shared holder),
-                        // drop its own shared hold — degrading that read to plain
-                        // OCC, never worse than today — so the key can drain to
-                        // empty and normal promotion can grant `txn` the exclusive
-                        // lock later. Without this, `txn` would occupy the key
-                        // forever and its own exclusive request could never fire.
-                        entry.holders.retain(|h| *h != txn);
-                        if !entry.has_waiter(txn) {
-                            entry.waiters.push_back((txn, LockMode::Exclusive));
+            Some(ConflictResolution::Wound) => {
+                for ((key, mode), state) in request.iter().zip(&states) {
+                    match state {
+                        KeyState::Conflict => self.wound(txn, key, *mode),
+                        KeyState::Free | KeyState::Held | KeyState::Join => {
+                            self.grant(txn, key, *mode)
                         }
                     }
-                    // Free keys: no entry exists; the txn acquires them on the
-                    // re-acquire path after all conflicting keys are released.
                 }
-                // Store the full key set so that release can promote this txn
-                // atomically once all its keys become available.
-                self.pending_keys.insert(txn, keys);
+                self.finish_ready(txn, request);
+                AcquireOutcome::Ready
+            }
+            Some(ConflictResolution::Block) => {
+                for ((key, mode), state) in request.iter().zip(&states) {
+                    match state {
+                        KeyState::Conflict => self.enqueue(txn, key, *mode),
+                        KeyState::Free | KeyState::Held | KeyState::Join => {
+                            self.grant(txn, key, *mode)
+                        }
+                    }
+                }
+                self.pending_keys.insert(txn, request);
                 AcquireOutcome::Blocked
             }
         }
+    }
+
+    /// Record `txn` as holder of every key of `request`.
+    pub(super) fn finish_ready(&mut self, txn: TxnId, request: BTreeMap<LockKey, LockMode>) {
+        self.held_locks
+            .entry(txn)
+            .or_default()
+            .extend(request.into_keys());
     }
 }
 
@@ -155,6 +97,7 @@ impl LockManager {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use super::*;
@@ -166,8 +109,21 @@ mod tests {
         }
     }
 
-    fn keyset(names: &[&str]) -> BTreeSet<LockKey> {
-        names.iter().map(|n| key(n)).collect()
+    fn coll(name: &str) -> LockKey {
+        LockKey::Collection {
+            collection: Arc::from(name),
+        }
+    }
+
+    fn exclusive(names: &[&str]) -> BTreeMap<LockKey, LockMode> {
+        names
+            .iter()
+            .map(|n| (key(n), LockMode::Exclusive))
+            .collect()
+    }
+
+    fn one(key: LockKey, mode: LockMode) -> BTreeMap<LockKey, LockMode> {
+        BTreeMap::from([(key, mode)])
     }
 
     fn txn(epoch: u64, pos: u32) -> TxnId {
@@ -177,8 +133,7 @@ mod tests {
     #[test]
     fn acquire_free_keys_returns_ready() {
         let mut lm = LockManager::new();
-        let t = txn(1, 0);
-        let outcome = lm.acquire(t, keyset(&["a", "b"]));
+        let outcome = lm.acquire(txn(1, 0), exclusive(&["a", "b"]));
         assert_eq!(outcome, AcquireOutcome::Ready);
         assert_eq!(lm.lock_count(), 2);
     }
@@ -186,26 +141,174 @@ mod tests {
     #[test]
     fn acquire_held_key_returns_blocked_and_enqueues_waiter() {
         let mut lm = LockManager::new();
-        let t1 = txn(1, 0);
-        let t2 = txn(1, 1);
-        lm.acquire(t1, keyset(&["x"]));
+        let (t1, t2) = (txn(1, 0), txn(1, 1));
+        lm.acquire(t1, exclusive(&["x"]));
 
-        let outcome = lm.acquire(t2, keyset(&["x"]));
-        assert_eq!(outcome, AcquireOutcome::Blocked);
-
-        // t2 should be in the waiter queue for "x".
+        assert_eq!(lm.acquire(t2, exclusive(&["x"])), AcquireOutcome::Blocked);
         assert!(lm.table.get(&key("x")).unwrap().has_waiter(t2));
     }
 
     #[test]
-    fn exclusive_waits_on_exclusive() {
+    fn intent_intent_compatible() {
         let mut lm = LockManager::new();
-        let t1 = txn(1, 0);
-        let t2 = txn(1, 1);
+        let (t1, t2) = (txn(1, 0), txn(1, 1));
+        assert_eq!(
+            lm.acquire(t1, one(coll("c"), LockMode::Intent)),
+            AcquireOutcome::Ready
+        );
+        assert_eq!(
+            lm.acquire(t2, one(coll("c"), LockMode::Intent)),
+            AcquireOutcome::Ready,
+            "two row writers of one collection hold its key together"
+        );
+        let entry = lm.table.get(&coll("c")).unwrap();
+        assert_eq!(entry.mode, LockMode::Intent);
+        assert_eq!(entry.holders.as_slice(), &[t1, t2]);
+    }
 
-        assert_eq!(lm.acquire(t1, keyset(&["k"])), AcquireOutcome::Ready);
-        assert_eq!(lm.acquire(t2, keyset(&["k"])), AcquireOutcome::Blocked);
-        assert!(lm.table.get(&key("k")).unwrap().has_waiter(t2));
+    #[test]
+    fn intent_blocks_against_exclusive_and_shared() {
+        for other in [LockMode::Exclusive, LockMode::Shared] {
+            // Intent held, the other mode requested.
+            let mut lm = LockManager::new();
+            let (t1, t2) = (txn(1, 0), txn(1, 1));
+            assert_eq!(
+                lm.acquire(t1, one(coll("c"), LockMode::Intent)),
+                AcquireOutcome::Ready
+            );
+            assert_eq!(
+                lm.acquire(t2, one(coll("c"), other)),
+                AcquireOutcome::Blocked,
+                "{other:?} waits behind an Intent holder"
+            );
+            assert_eq!(lm.release(t1), vec![t2]);
+
+            // The other mode held, Intent requested.
+            let mut lm = LockManager::new();
+            assert_eq!(lm.acquire(t1, one(coll("c"), other)), AcquireOutcome::Ready);
+            assert_eq!(
+                lm.acquire(t2, one(coll("c"), LockMode::Intent)),
+                AcquireOutcome::Blocked,
+                "Intent waits behind a {other:?} holder"
+            );
+            assert_eq!(lm.release(t1), vec![t2]);
+        }
+    }
+
+    #[test]
+    fn a_compatible_request_queues_behind_an_earlier_waiter() {
+        let mut lm = LockManager::new();
+        let (reader, truncate, writer) = (txn(1, 0), txn(1, 1), txn(1, 2));
+        assert_eq!(
+            lm.acquire(reader, one(coll("c"), LockMode::Shared)),
+            AcquireOutcome::Ready
+        );
+        assert_eq!(
+            lm.acquire(truncate, one(coll("c"), LockMode::Exclusive)),
+            AcquireOutcome::Blocked
+        );
+        // A later reader is compatible with the holder, yet it must not pass
+        // the truncate sequenced before it.
+        let late_reader = txn(1, 3);
+        assert_eq!(
+            lm.acquire(late_reader, one(coll("c"), LockMode::Shared)),
+            AcquireOutcome::Blocked
+        );
+        assert_eq!(
+            lm.acquire(writer, one(coll("c"), LockMode::Intent)),
+            AcquireOutcome::Blocked
+        );
+        assert_eq!(lm.release(reader), vec![truncate]);
+        assert_eq!(lm.release(truncate), vec![late_reader]);
+        assert_eq!(lm.release(late_reader), vec![writer]);
+    }
+
+    #[test]
+    fn a_blocked_txn_takes_its_free_keys_so_a_later_txn_queues_behind_it() {
+        let mut lm = LockManager::new();
+        let (first, second, third) = (txn(1, 0), txn(1, 1), txn(1, 2));
+        assert_eq!(lm.acquire(first, exclusive(&["a"])), AcquireOutcome::Ready);
+        assert_eq!(
+            lm.acquire(second, exclusive(&["a", "b"])),
+            AcquireOutcome::Blocked
+        );
+        // `b` is free at `second`'s request, so `second` holds it now. A
+        // later txn on `b` waits for `second`, whatever order releases run in.
+        assert_eq!(
+            lm.acquire(third, exclusive(&["b"])),
+            AcquireOutcome::Blocked
+        );
+        assert_eq!(lm.release(first), vec![second]);
+        assert_eq!(lm.release(second), vec![third]);
+    }
+
+    #[test]
+    fn the_strongest_mode_wins_within_one_request() {
+        let mut lm = LockManager::new();
+        let t = txn(1, 0);
+        assert_eq!(
+            lm.acquire(t, one(coll("c"), LockMode::Shared)),
+            AcquireOutcome::Ready
+        );
+        // The same txn now writes a row: Shared plus Intent merges to
+        // Exclusive, held in place by the sole holder.
+        assert_eq!(
+            lm.acquire(t, one(coll("c"), LockMode::Intent)),
+            AcquireOutcome::Ready
+        );
+        assert_eq!(lm.table.get(&coll("c")).unwrap().mode, LockMode::Exclusive);
+        let other = txn(1, 1);
+        assert_eq!(
+            lm.acquire(other, one(coll("c"), LockMode::Shared)),
+            AcquireOutcome::Blocked
+        );
+    }
+
+    #[test]
+    fn grant_order_is_identical_for_the_same_input_sequence() {
+        // Every input of the sequence, applied in order: an acquire or a release.
+        enum Step {
+            Acquire(TxnId, BTreeMap<LockKey, LockMode>),
+            Release(TxnId),
+        }
+        let steps = || {
+            let row = |n: &str| (key(n), LockMode::Exclusive);
+            let intent = (coll("c"), LockMode::Intent);
+            vec![
+                Step::Acquire(txn(1, 0), BTreeMap::from([intent.clone(), row("a")])),
+                Step::Acquire(txn(1, 1), one(coll("c"), LockMode::Exclusive)),
+                Step::Acquire(txn(1, 2), BTreeMap::from([intent.clone(), row("b")])),
+                Step::Acquire(txn(1, 3), one(coll("c"), LockMode::Shared)),
+                Step::Acquire(txn(2, 0), BTreeMap::from([intent, row("a")])),
+                Step::Release(txn(1, 0)),
+                Step::Release(txn(1, 1)),
+                Step::Release(txn(1, 2)),
+                Step::Release(txn(1, 3)),
+                Step::Release(txn(2, 0)),
+            ]
+        };
+        let run = || {
+            let mut lm = LockManager::new();
+            let mut granted = Vec::new();
+            for step in steps() {
+                match step {
+                    Step::Acquire(t, keys) => {
+                        if lm.acquire(t, keys) == AcquireOutcome::Ready {
+                            granted.push(t);
+                        }
+                    }
+                    Step::Release(t) => granted.extend(lm.release(t)),
+                }
+            }
+            granted
+        };
+        let first = run();
+        assert_eq!(first, run());
+        assert_eq!(
+            first,
+            vec![txn(1, 0), txn(1, 1), txn(1, 2), txn(1, 3), txn(2, 0),],
+            "every txn is granted in sequencer order"
+        );
     }
 
     #[test]
@@ -214,70 +317,15 @@ mod tests {
         let t = txn(1, 0);
 
         assert_eq!(lm.acquire_shared(t, key("k")), AcquireOutcome::Ready);
-        // The txn re-acquires its own shared reservation exclusively — this must
-        // NOT self-deadlock by blocking on its own held key.
         assert_eq!(
-            lm.acquire(t, keyset(&["k"])),
+            lm.acquire(t, exclusive(&["k"])),
             AcquireOutcome::Ready,
             "self-upgrade from shared to exclusive must not block"
         );
 
         let entry = lm.table.get(&key("k")).unwrap();
         assert_eq!(entry.mode, LockMode::Exclusive);
-        assert_eq!(entry.holders.len(), 1);
-        assert_eq!(entry.holders[0], t);
-    }
-
-    #[test]
-    fn self_upgrade_with_other_shared_holder_blocks_or_wounds() {
-        // T_old is older than T_young: T_old's self-upgrade must wound T_young.
-        let mut lm = LockManager::new();
-        let t_old = txn(1, 0);
-        let t_young = txn(1, 1);
-
-        assert_eq!(lm.acquire_shared(t_old, key("k")), AcquireOutcome::Ready);
-        assert_eq!(lm.acquire_shared(t_young, key("k")), AcquireOutcome::Ready);
-
-        assert_eq!(
-            lm.acquire(t_old, keyset(&["k"])),
-            AcquireOutcome::Ready,
-            "the older self-upgrader wounds the younger shared holder"
-        );
-        let entry = lm.table.get(&key("k")).unwrap();
-        assert_eq!(entry.mode, LockMode::Exclusive);
-        assert_eq!(entry.holders.len(), 1);
-        assert_eq!(entry.holders[0], t_old);
-
-        // Symmetric case: the YOUNGER of the two self-upgrades and must block.
-        let mut lm = LockManager::new();
-        let t_old = txn(1, 0);
-        let t_young = txn(1, 1);
-
-        assert_eq!(lm.acquire_shared(t_old, key("k")), AcquireOutcome::Ready);
-        assert_eq!(lm.acquire_shared(t_young, key("k")), AcquireOutcome::Ready);
-
-        assert_eq!(
-            lm.acquire(t_young, keyset(&["k"])),
-            AcquireOutcome::Blocked,
-            "the younger self-upgrader must wait behind the older shared holder"
-        );
-        // t_young drops its own shared hold (degrading to plain OCC) so the key
-        // can drain to empty and its exclusive request can later be promoted;
-        // t_old remains the sole shared holder, and t_young is enqueued as an
-        // exclusive waiter rather than left stuck as a non-waiting holder.
-        let entry = lm.table.get(&key("k")).unwrap();
-        assert_eq!(entry.mode, LockMode::Shared);
-        assert!(entry.holders.contains(&t_old));
-        assert!(!entry.holders.contains(&t_young));
-        assert!(entry.has_waiter(t_young));
-
-        // Once t_old releases, t_young is promoted to sole exclusive holder.
-        let unblocked = lm.release(t_old);
-        assert!(unblocked.contains(&t_young));
-        let entry = lm.table.get(&key("k")).unwrap();
-        assert_eq!(entry.mode, LockMode::Exclusive);
-        assert_eq!(entry.holders.len(), 1);
-        assert_eq!(entry.holders[0], t_young);
+        assert_eq!(entry.holders.as_slice(), &[t]);
     }
 
     #[test]
@@ -286,62 +334,26 @@ mod tests {
         let t = txn(1, 0);
         let u = txn(1, 1);
 
-        // T reserves K1 shared; U holds K2 exclusively.
         assert_eq!(lm.acquire_shared(t, key("k1")), AcquireOutcome::Ready);
-        assert_eq!(lm.acquire(u, keyset(&["k2"])), AcquireOutcome::Ready);
+        assert_eq!(lm.acquire(u, exclusive(&["k2"])), AcquireOutcome::Ready);
 
-        // T tries to take both keys exclusively: K2 conflicts with U, so T must
-        // block on the whole set — and critically must NOT self-deadlock on K1.
         assert_eq!(
-            lm.acquire(t, keyset(&["k1", "k2"])),
+            lm.acquire(t, exclusive(&["k1", "k2"])),
             AcquireOutcome::Blocked,
             "conflict on k2 blocks the whole set"
         );
 
-        // After U releases K2, T's re-acquire succeeds and upgrades K1 in place.
-        lm.release(u);
+        assert_eq!(lm.release(u), vec![t]);
         assert_eq!(
-            lm.acquire(t, keyset(&["k1", "k2"])),
+            lm.acquire(t, exclusive(&["k1", "k2"])),
             AcquireOutcome::Ready,
-            "once k2 frees up, t acquires both keys exclusively"
+            "the promoted txn re-acquires its keys as a no-op"
         );
-        let k1 = lm.table.get(&key("k1")).unwrap();
-        assert_eq!(k1.mode, LockMode::Exclusive);
-        assert_eq!(k1.holders.len(), 1);
-        assert_eq!(k1.holders[0], t);
-        let k2 = lm.table.get(&key("k2")).unwrap();
-        assert_eq!(k2.mode, LockMode::Exclusive);
-        assert_eq!(k2.holders.len(), 1);
-        assert_eq!(k2.holders[0], t);
-    }
-
-    #[test]
-    fn two_non_conflicting_both_dispatch_immediately() {
-        let mut lm = LockManager::new();
-
-        let txn1 = TxnId::new(1, 0);
-        let txn2 = TxnId::new(1, 1);
-
-        let keys1: BTreeSet<LockKey> = [LockKey::Surrogate {
-            collection: Arc::from("coll"),
-            surrogate: 1,
-        }]
-        .into();
-        let keys2: BTreeSet<LockKey> = [LockKey::Surrogate {
-            collection: Arc::from("coll"),
-            surrogate: 2,
-        }]
-        .into();
-
-        let o1 = lm.acquire(txn1, keys1);
-        let o2 = lm.acquire(txn2, keys2);
-
-        assert_eq!(o1, AcquireOutcome::Ready, "txn1 should be ready");
-        assert_eq!(
-            o2,
-            AcquireOutcome::Ready,
-            "txn2 should be ready (disjoint keys)"
-        );
+        for k in ["k1", "k2"] {
+            let entry = lm.table.get(&key(k)).unwrap();
+            assert_eq!(entry.mode, LockMode::Exclusive);
+            assert_eq!(entry.holders.as_slice(), &[t]);
+        }
     }
 
     #[test]
@@ -352,27 +364,20 @@ mod tests {
         let pairs = [(2, 0), (1, 1), (3, 0), (1, 0), (2, 1)];
         for (epoch, pos) in pairs {
             let tid = TxnId::new(epoch, pos);
-            let keys: BTreeSet<LockKey> = [LockKey::Surrogate {
-                collection: Arc::from(format!("c_{epoch}_{pos}")),
-                surrogate: epoch as u32 * 10 + pos,
-            }]
-            .into();
-            let outcome = lm.acquire(tid, keys);
-            if outcome == AcquireOutcome::Ready {
+            let keys = one(
+                LockKey::Surrogate {
+                    collection: Arc::from(format!("c_{epoch}_{pos}")),
+                    surrogate: epoch as u32 * 10 + pos,
+                },
+                LockMode::Exclusive,
+            );
+            if lm.acquire(tid, keys) == AcquireOutcome::Ready {
                 dispatched.push(tid);
             }
         }
 
-        assert_eq!(
-            dispatched.len(),
-            5,
-            "all non-conflicting txns should be ready"
-        );
-
-        let mut expected = pairs.map(|(e, p)| TxnId::new(e, p)).to_vec();
-        expected.sort();
-        let mut sorted_dispatched = dispatched.clone();
-        sorted_dispatched.sort();
-        assert_eq!(sorted_dispatched, expected);
+        let expected: BTreeSet<TxnId> = pairs.map(|(e, p)| TxnId::new(e, p)).into();
+        let got: BTreeSet<TxnId> = dispatched.into_iter().collect();
+        assert_eq!(got, expected, "all non-conflicting txns are ready");
     }
 }

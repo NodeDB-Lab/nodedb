@@ -2,12 +2,12 @@
 
 //! In-flight transaction types for the Calvin scheduler driver.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use nodedb_cluster::calvin::types::SequencedTxn;
 
-use super::super::lock_manager::{LockKey, TxnId};
+use super::super::lock_manager::{LockKey, LockMode, TxnId};
 
 /// An in-flight transaction that has been dispatched and is awaiting a
 /// Data Plane response.
@@ -170,7 +170,7 @@ fn reads_whole_collection_at_resolve(plan: &nodedb_physical::physical_plan::Phys
 /// Commit-resolution state of a staged static Calvin transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::control::cluster::calvin::scheduler::driver) enum CommitState {
-    /// Awaiting the validate-and-stage response, whose `read_set_valid` carries
+    /// Awaiting the validate-and-stage response, whose `stage_vote` carries
     /// the local commit vote that drives the flush-or-drop decision.
     Staged,
     /// The staged txn has cast its local vote and PARKED, awaiting the durable
@@ -221,7 +221,8 @@ pub(in crate::control::cluster::calvin::scheduler::driver) enum CommitState {
 /// A transaction that is blocked on lock acquisition.
 pub(super) struct BlockedTxn {
     pub txn: SequencedTxn,
-    pub keys: BTreeSet<LockKey>,
+    /// The moded lock request the txn waits on.
+    pub keys: BTreeMap<LockKey, LockMode>,
     /// Wall-clock time at first block (for latency metrics).
     ///
     /// `Instant::now()` used for observability only.

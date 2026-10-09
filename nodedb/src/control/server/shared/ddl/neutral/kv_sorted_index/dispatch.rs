@@ -155,7 +155,7 @@ fn verdict_response(code: ErrorCode) -> Response {
         payload: crate::bridge::envelope::Payload::empty(),
         watermark_lsn: crate::types::Lsn::ZERO,
         error_code: Some(Box::new(code)),
-        read_set_valid: None,
+        stage_vote: None,
         read_version_lsn: crate::types::Lsn::ZERO,
         write_set: Vec::new(),
     }

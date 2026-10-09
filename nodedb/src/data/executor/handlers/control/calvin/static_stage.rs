@@ -8,7 +8,7 @@ use tracing::{debug, info_span};
 
 use nodedb_types::calvin::VersionedReadEntry;
 
-use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
+use crate::bridge::envelope::{ErrorCode, Payload, Response, StageVote, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::commit_pending::PendingCommit;
 use crate::data::executor::handlers::control::calvin_reply::{CalvinReply, CalvinStaging};
@@ -32,7 +32,7 @@ impl CoreLoop {
     /// effects — nothing is observable until a subsequent
     /// [`CoreLoop::execute_calvin_flush`] installs the transaction's redo
     /// record (or [`CoreLoop::execute_calvin_drop`] discards the staged
-    /// state). The response carries the vote on `read_set_valid`. Staging runs
+    /// state). The response carries the vote on `stage_vote`. Staging runs
     /// under the epoch's deterministic time anchor, which the pending entry
     /// keeps for resolve. `body_plans` indexes the plans a trigger body
     /// buffered: they stage under `Trigger`, so their rows fire no trigger.
@@ -125,7 +125,11 @@ impl CoreLoop {
         // current against the local write versions? Empty read-set is vacuously
         // current. Read-only — no base mutation here. A stale-read false vote
         // retains the fully staged state until the durable global verdict.
-        let vote = self.read_set_still_current(task, tenant_id.as_u64(), versioned_reads);
+        let vote = StageVote::of_read_set(self.read_set_still_current(
+            task,
+            tenant_id.as_u64(),
+            versioned_reads,
+        ));
 
         // Publish only a fully staged transaction. Resolve reads these plans
         // against the overlay; a global abort drops both.
@@ -147,7 +151,7 @@ impl CoreLoop {
             payload: Payload::empty(),
             watermark_lsn: self.watermark,
             error_code: None,
-            read_set_valid: Some(vote),
+            stage_vote: Some(vote),
             read_version_lsn: crate::types::Lsn::ZERO,
             write_set: Vec::new(),
         }
@@ -216,6 +220,8 @@ mod tests {
 
         let resp = core.execute_calvin_execute_static(&task, ctx, &tenant_id, &plans, &[], &[]);
         assert_eq!(resp.status, Status::Ok);
+        // An empty read-set is current.
+        assert_eq!(resp.stage_vote, Some(StageVote::Commit));
 
         let vshard_id = task.request.vshard_id.as_u32();
 
@@ -237,6 +243,87 @@ mod tests {
             Some(&Staged::Put(expected_body)),
             "the Calvin write plan must be staged into the synthetic-TxnId overlay"
         );
+    }
+
+    /// A predicate read of `collection` on vShard 0, taken at `read_lsn`.
+    fn homed_read(collection: &str, read_lsn: u64) -> VersionedReadEntry {
+        VersionedReadEntry {
+            engine: nodedb_types::calvin::EngineTag::Document,
+            collection: collection.to_string(),
+            key: nodedb_types::calvin::ReadKeyIdent::Predicate,
+            read_lsn: crate::types::Lsn::new(read_lsn),
+            home_vshard: Some(0),
+            served_by: 0,
+        }
+    }
+
+    #[test]
+    fn static_stage_with_a_superseded_read_votes_serialization_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        core.note_write_lsn(
+            DatabaseId::DEFAULT,
+            TenantId::new(1),
+            "orders",
+            None,
+            crate::types::Lsn::new(20),
+        );
+        let task = make_task();
+        let tenant_id = TenantId::new(1);
+        let ctx = CalvinExecCtx {
+            epoch: 3,
+            position: 0,
+            epoch_system_ms: 0,
+            is_group_leader: true,
+        };
+
+        let resp = core.execute_calvin_execute_static(
+            &task,
+            ctx,
+            &tenant_id,
+            &[point_insert_plan("orders", "o1", 7)],
+            &[homed_read("orders", 10)],
+            &[],
+        );
+
+        assert_eq!(resp.status, Status::Ok);
+        assert_eq!(resp.stage_vote, Some(StageVote::SerializationConflict));
+        // A stale slice stays staged until the global verdict drops it.
+        let vshard = task.request.vshard_id.as_u32();
+        assert!(core.calvin.commit_pending.contains_key(&(3, 0, vshard)));
+    }
+
+    #[test]
+    fn static_stage_with_a_current_read_votes_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        core.note_write_lsn(
+            DatabaseId::DEFAULT,
+            TenantId::new(1),
+            "orders",
+            None,
+            crate::types::Lsn::new(20),
+        );
+        let task = make_task();
+        let tenant_id = TenantId::new(1);
+        let ctx = CalvinExecCtx {
+            epoch: 3,
+            position: 1,
+            epoch_system_ms: 0,
+            is_group_leader: true,
+        };
+
+        let resp = core.execute_calvin_execute_static(
+            &task,
+            ctx,
+            &tenant_id,
+            &[point_insert_plan("orders", "o1", 7)],
+            &[homed_read("orders", 20)],
+            &[],
+        );
+
+        assert_eq!(resp.status, Status::Ok);
+        assert_eq!(resp.stage_vote, Some(StageVote::Commit));
     }
 
     #[test]
@@ -262,7 +349,7 @@ mod tests {
         );
 
         assert_eq!(response.status, Status::Error);
-        assert_eq!(response.read_set_valid, Some(false));
+        assert_eq!(response.stage_vote, Some(StageVote::ParticipantError));
         assert!(core.calvin.commit_pending.is_empty());
         assert!(core.txn_overlays.is_empty());
         assert!(core.graph_txn_overlays.is_empty());
@@ -306,7 +393,7 @@ mod tests {
         let response = core.execute_calvin_execute_static(&task, ctx, &tenant_id, &plans, &[], &[]);
 
         assert_eq!(response.status, Status::Error);
-        assert_eq!(response.read_set_valid, Some(false));
+        assert_eq!(response.stage_vote, Some(StageVote::ParticipantError));
         assert!(!core.calvin.commit_pending.contains_key(&(9, 3, vshard)));
         assert!(!core.txn_overlays.contains_key(&synthetic));
         assert!(!core.graph_txn_overlays.contains_key(&synthetic));
@@ -343,7 +430,7 @@ mod tests {
             &[],
         );
 
-        assert_eq!(response.read_set_valid, Some(false));
+        assert_eq!(response.stage_vote, Some(StageVote::ParticipantError));
         assert!(!core.graph_txn_overlays.contains_key(&synthetic));
     }
 
@@ -391,7 +478,7 @@ mod tests {
         );
 
         assert_eq!(response.status, Status::Error);
-        assert_eq!(response.read_set_valid, Some(false));
+        assert_eq!(response.stage_vote, Some(StageVote::ParticipantError));
         assert!(!core.calvin.commit_pending.contains_key(&(9, 4, vshard)));
         assert!(!core.txn_overlays.contains_key(&synthetic));
         assert!(!core.graph_txn_overlays.contains_key(&synthetic));
@@ -435,7 +522,7 @@ mod tests {
             &[],
             &[],
         );
-        assert_eq!(failed.read_set_valid, Some(false));
+        assert_eq!(failed.stage_vote, Some(StageVote::ParticipantError));
         assert!(matches!(
             failed.error_code.as_deref(),
             Some(ErrorCode::RejectedPrevalidation { .. })
@@ -457,7 +544,7 @@ mod tests {
             &[],
             &[],
         );
-        assert_eq!(staged.read_set_valid, Some(true));
+        assert_eq!(staged.stage_vote, Some(StageVote::Commit));
         assert_eq!(
             core.txn_overlays
                 .get(&synthetic)
@@ -480,7 +567,7 @@ mod tests {
             &[],
         );
         let mismatch_id = calvin_synthetic_txn_id(21, 2, vshard).expect("synthetic transaction id");
-        assert_eq!(failed.read_set_valid, Some(false));
+        assert_eq!(failed.stage_vote, Some(StageVote::ParticipantError));
         assert!(!core.calvin.commit_pending.contains_key(&(21, 2, vshard)));
         assert!(!core.txn_overlays.contains_key(&mismatch_id));
 
@@ -505,7 +592,7 @@ mod tests {
         );
         let overflow_id = calvin_synthetic_txn_id(21, 3, vshard).expect("synthetic transaction id");
         assert_eq!(failed.status, Status::Error);
-        assert_eq!(failed.read_set_valid, Some(false));
+        assert_eq!(failed.stage_vote, Some(StageVote::ParticipantError));
         assert!(matches!(
             failed.error_code.as_deref(),
             Some(ErrorCode::RejectedPrevalidation { .. })

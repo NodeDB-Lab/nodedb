@@ -1,113 +1,82 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Lock release and FIFO/shared waiter promotion.
+//! Lock release and FIFO, mode-aware waiter promotion.
 
 use std::collections::BTreeSet;
 
-use crate::control::cluster::calvin::scheduler::lock::lock_entry::LockMode;
 use crate::control::cluster::calvin::scheduler::lock::lock_key::{LockKey, TxnId};
 
-use super::types::{LockManager, Promotion};
+use super::types::LockManager;
 
 impl LockManager {
-    /// Release all locks held by `txn`.
+    /// Release every lock `txn` holds and every wait it queues.
     ///
-    /// `txn` is removed from every entry's holder set.  When an entry's holders
-    /// drain to empty, its FIFO waiters are promoted mode-aware: a leading run
-    /// of shared waiters is promoted together, or a single leading exclusive
-    /// waiter is promoted alone.  A waiter that becomes holder on ALL its
-    /// pending keys is moved from `pending_keys` to `held_locks` immediately.
+    /// `txn` leaves the holders and the waiters of every key it held or
+    /// requested. Each such key then promotes its waiters (see
+    /// [`Self::promote_waiters`]). A waiter that now holds ALL its requested
+    /// keys moves from `pending_keys` to `held_locks`.
     ///
-    /// Returns the set of `TxnId`s that have been fully promoted (i.e. moved
-    /// into `held_locks`).  The caller may use this list to dispatch those
-    /// transactions.
+    /// Returns the fully-promoted `TxnId`s in ascending order. The caller
+    /// dispatches them.
     pub fn release(&mut self, txn: TxnId) -> Vec<TxnId> {
-        let held = match self.held_locks.remove(&txn) {
-            Some(h) => h,
-            None => return Vec::new(),
-        };
-
-        let mut newly_promoted: BTreeSet<TxnId> = BTreeSet::new();
-
-        for key in &held {
-            // Drop `txn` from this key's holders. If other (shared) holders
-            // remain, the key stays held and there is nothing to promote.
-            let now_empty = match self.table.get_mut(key) {
-                Some(entry) => {
-                    entry.holders.retain(|h| *h != txn);
-                    entry.holders.is_empty()
-                }
-                None => continue,
-            };
-            if now_empty {
-                self.promote_waiters(key, &mut newly_promoted);
-            }
+        let mut keys: BTreeSet<LockKey> = self.held_locks.remove(&txn).unwrap_or_default();
+        if let Some(pending) = self.pending_keys.remove(&txn) {
+            keys.extend(pending.into_keys());
         }
 
+        let mut newly_promoted: BTreeSet<TxnId> = BTreeSet::new();
+        for key in &keys {
+            let Some(entry) = self.table.get_mut(key) else {
+                continue;
+            };
+            entry.holders.retain(|h| *h != txn);
+            entry.waiters.retain(|(w, _)| *w != txn);
+            self.promote_waiters(key, &mut newly_promoted);
+        }
         newly_promoted.into_iter().collect()
     }
 
-    /// Promote the front of `key`'s waiter queue after its holders drained.
+    /// Grant the front of `key`'s waiter queue while it is compatible with the
+    /// current holders, in FIFO order.
     ///
-    /// A leading run of shared waiters is granted together; a single leading
-    /// exclusive waiter is granted alone; an empty queue frees the entry. Any
-    /// promoted txn that is now holder on all of its pending keys is moved into
-    /// `held_locks` and recorded in `newly_promoted`.
+    /// A key with no holders grants its first waiter in that waiter's mode,
+    /// then every following waiter compatible with it. A key with neither
+    /// holders nor waiters is removed. Any granted txn that now holds all of
+    /// its requested keys moves into `held_locks` and joins `newly_promoted`.
     fn promote_waiters(&mut self, key: &LockKey, newly_promoted: &mut BTreeSet<TxnId>) {
-        // Decide the promotion inside a scoped borrow so the readiness sweep
-        // below can re-borrow the table.
-        let decision = match self.table.get_mut(key) {
-            Some(entry) => match entry.waiters.front().map(|(_, mode)| *mode) {
-                None => Promotion::Freed,
-                Some(LockMode::Exclusive) => match entry.waiters.pop_front() {
-                    Some((next, _)) => {
-                        entry.mode = LockMode::Exclusive;
-                        entry.holders.clear();
-                        entry.holders.push(next);
-                        Promotion::Promoted(vec![next])
-                    }
-                    None => Promotion::Freed,
-                },
-                Some(LockMode::Shared) => {
-                    entry.mode = LockMode::Shared;
-                    entry.holders.clear();
-                    let mut promoted = Vec::new();
-                    while matches!(entry.waiters.front(), Some((_, LockMode::Shared))) {
-                        if let Some((next, _)) = entry.waiters.pop_front() {
-                            entry.holders.push(next);
-                            promoted.push(next);
-                        }
-                    }
-                    Promotion::Promoted(promoted)
-                }
-            },
-            None => return,
+        let mut granted: Vec<TxnId> = Vec::new();
+        let Some(entry) = self.table.get_mut(key) else {
+            return;
         };
-
-        let promoted = match decision {
-            Promotion::Freed => {
-                self.table.remove(key);
-                return;
+        while let Some(&(next, mode)) = entry.waiters.front() {
+            if !entry.holders.is_empty() && !entry.mode.compatible(mode) {
+                break;
             }
-            Promotion::Promoted(promoted) => promoted,
-        };
+            entry.waiters.pop_front();
+            if entry.holders.is_empty() {
+                entry.mode = mode;
+            }
+            entry.holders.push(next);
+            granted.push(next);
+        }
+        if entry.holders.is_empty() && entry.waiters.is_empty() {
+            self.table.remove(key);
+        }
 
-        // For each promoted txn, check whether it is now holder on ALL of its
-        // pending keys.  If so, it is fully ready — move to held_locks.  Remove
-        // first (rather than `get` + a follow-up `remove`) so there is no
-        // unwrap/expect on a "just confirmed Some" invariant: the owned
-        // `pending` set is reinserted on the not-yet-ready path.
-        for next in promoted {
-            if let Some(pending) = self.pending_keys.remove(&next) {
-                let all_held = pending
-                    .iter()
-                    .all(|k| self.table.get(k).is_none_or(|e| e.holders.contains(&next)));
-                if all_held {
-                    self.held_locks.insert(next, pending);
-                    newly_promoted.insert(next);
-                } else {
-                    self.pending_keys.insert(next, pending);
-                }
+        for next in granted {
+            let Some(pending) = self.pending_keys.remove(&next) else {
+                continue;
+            };
+            let all_held = pending.keys().all(|k| {
+                self.table
+                    .get(k)
+                    .is_some_and(|entry| entry.holders.contains(&next))
+            });
+            if all_held {
+                self.finish_ready(next, pending);
+                newly_promoted.insert(next);
+            } else {
+                self.pending_keys.insert(next, pending);
             }
         }
     }
@@ -119,8 +88,10 @@ impl LockManager {
 mod tests {
     use std::sync::Arc;
 
+    use std::collections::BTreeMap;
+
     use super::*;
-    use crate::control::cluster::calvin::scheduler::lock::lock_entry::AcquireOutcome;
+    use crate::control::cluster::calvin::scheduler::lock::lock_entry::{AcquireOutcome, LockMode};
 
     fn key(name: &str) -> LockKey {
         LockKey::Surrogate {
@@ -129,8 +100,11 @@ mod tests {
         }
     }
 
-    fn keyset(names: &[&str]) -> BTreeSet<LockKey> {
-        names.iter().map(|n| key(n)).collect()
+    fn keyset(names: &[&str]) -> BTreeMap<LockKey, LockMode> {
+        names
+            .iter()
+            .map(|n| (key(n), LockMode::Exclusive))
+            .collect()
     }
 
     fn txn(epoch: u64, pos: u32) -> TxnId {
@@ -290,10 +264,13 @@ mod tests {
 
         let txn1 = TxnId::new(1, 0);
         let txn2 = TxnId::new(1, 1);
-        let shared_key: BTreeSet<LockKey> = [LockKey::Surrogate {
-            collection: Arc::from("coll"),
-            surrogate: 42,
-        }]
+        let shared_key: BTreeMap<LockKey, LockMode> = [(
+            LockKey::Surrogate {
+                collection: Arc::from("coll"),
+                surrogate: 42,
+            },
+            LockMode::Exclusive,
+        )]
         .into();
 
         let o1 = lm.acquire(txn1, shared_key.clone());
@@ -315,10 +292,13 @@ mod tests {
         let txn_n = TxnId::new(1, 0);
         let txn_n1 = TxnId::new(2, 0);
 
-        let key_k: BTreeSet<LockKey> = [LockKey::Surrogate {
-            collection: Arc::from("orders"),
-            surrogate: 100,
-        }]
+        let key_k: BTreeMap<LockKey, LockMode> = [(
+            LockKey::Surrogate {
+                collection: Arc::from("orders"),
+                surrogate: 100,
+            },
+            LockMode::Exclusive,
+        )]
         .into();
 
         let o1 = lm.acquire(txn_n, key_k.clone());

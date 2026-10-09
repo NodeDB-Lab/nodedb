@@ -12,8 +12,8 @@ use super::set::WriteKeys;
 /// Add the write keys of columnar op `op` to `keys`.
 pub(super) fn add_columnar_keys(keys: &mut WriteKeys, op: &ColumnarOp) -> crate::Result<()> {
     match op {
-        // Every row it inserts, and the collection key a multi-row write
-        // holds.
+        // Every row it inserts, and the whole collection, so inserts append
+        // to the collection in sequencer order.
         ColumnarOp::Insert {
             collection,
             surrogates,

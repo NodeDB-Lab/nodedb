@@ -107,6 +107,9 @@ impl CoreLoop {
             // An array write is a static write: no dependent transaction
             // predicts its cells, so no passive participant reads them.
             EngineKeySet::Array { .. } => Vec::new(),
+            // A whole-collection key and a UNIQUE value key are lock keys
+            // only: no dependent transaction predicts them.
+            EngineKeySet::Collection { .. } | EngineKeySet::Unique { .. } => Vec::new(),
         }
     }
 

@@ -6,7 +6,9 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use crate::bridge::envelope::Response;
-use crate::control::cluster::calvin::scheduler::driver::core::halt::error_response_text;
+use crate::control::cluster::calvin::scheduler::driver::core::halt::{
+    HaltReason, HaltStep, error_response_text,
+};
 use crate::control::cluster::calvin::scheduler::driver::core::owed::SchedulerProposal;
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::driver::core::staged_vote::{
@@ -20,12 +22,12 @@ impl Scheduler {
     /// PARK it on the cross-shard commit barrier awaiting the durable GLOBAL
     /// verdict — it does NOT self-decide flush-or-drop on its local vote.
     ///
-    /// The staged executor response is validate-only: its `read_set_valid` is
-    /// this shard's local commit vote (`Some(true)` => commit, `Some(false)` =>
-    /// abort; a `None` from the active/dependent path is treated as commit). The
-    /// leader proposes that vote via the sequencer Raft group; the sequencer
-    /// aggregates all participants' votes into a single authoritative
-    /// `SequencerEntry::Verdict`, applied on every replica.
+    /// The staged executor response is validate-only: its `stage_vote` is this
+    /// shard's local commit vote, read by [`staged_commit_vote`]. A stage
+    /// response the scheduler cannot read a vote from halts apply. It never
+    /// counts as a commit. The leader proposes that vote via the sequencer
+    /// Raft group. The sequencer aggregates all participants' votes into a
+    /// single authoritative `SequencerEntry::Verdict`, applied on every replica.
     ///
     /// This method moves the txn to [`CommitState::AwaitingVerdict`] WITHOUT
     /// dispatching a resolve or drop, then immediately probes
@@ -41,10 +43,9 @@ impl Scheduler {
         txn_id: TxnId,
         staged_response: &Response,
     ) {
-        // A staged error is always an abort vote. Only successful staged
-        // responses can use `None` for the dependent-read path; accepting an
-        // error-plus-None as commit will let a failed participant flush after
-        // its peers received a global commit verdict.
+        // A staged error is always an abort vote. A response with no readable
+        // vote halts: counting it as a commit will let a failed participant
+        // flush after its peers received a global commit verdict.
         let superseded = self
             .pending
             .get(&txn_id)
@@ -55,10 +56,20 @@ impl Scheduler {
             match staged_commit_vote(staged_response) {
                 // A read another node served is numbered in that node's WAL:
                 // this node's versions cannot show it still current.
-                StagedVote::Commit if self.validates_read_served_elsewhere(txn_id) => {
+                Ok(StagedVote::Commit) if self.validates_read_served_elsewhere(txn_id) => {
                     StagedVote::SerializationConflict
                 }
-                vote => vote,
+                Ok(vote) => vote,
+                Err(error) => {
+                    self.metrics.record_executor_error();
+                    self.halt_apply(
+                        txn_id,
+                        HaltReason::StageVoteInvalid,
+                        HaltStep::Stage,
+                        format!("{error}: {}", error_response_text("stage", staged_response)),
+                    );
+                    return;
+                }
             }
         };
 
@@ -150,5 +161,127 @@ impl Scheduler {
                 self.vshard_id,
             ) && entry.served_by != self.shared.node_id
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_cluster::calvin::{AbortReason, SequencerEntry};
+
+    use super::*;
+    use crate::bridge::envelope::{StageVote, Status};
+    use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::{
+        CapturingProposer, elect_data_group_leader,
+    };
+    use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
+        build_test_scheduler, make_sequenced_txn, staged_pending, staged_response,
+    };
+
+    const VSHARD: u32 = 7;
+
+    /// A data-group leader holding `txn_id` staged, with a proposer that
+    /// accepts every proposal.
+    fn staged_leader(
+        txn_id: TxnId,
+    ) -> (
+        Scheduler,
+        tempfile::TempDir,
+        std::sync::Arc<CapturingProposer>,
+    ) {
+        let (mut scheduler, dir) = build_test_scheduler(VSHARD);
+        let proposer = CapturingProposer::accepting();
+        scheduler.sequencer_proposer = proposer.clone();
+        elect_data_group_leader(&scheduler);
+        scheduler.pending.insert(
+            txn_id,
+            staged_pending(make_sequenced_txn(txn_id.epoch, txn_id.position), txn_id),
+        );
+        (scheduler, dir, proposer)
+    }
+
+    #[tokio::test]
+    async fn each_stage_vote_proposes_its_own_vote() {
+        let cases = [
+            (Status::Ok, StageVote::Commit, None),
+            (
+                Status::Ok,
+                StageVote::SerializationConflict,
+                Some(AbortReason::SerializationConflict),
+            ),
+            (
+                Status::Error,
+                StageVote::PredictionDrift,
+                Some(AbortReason::PredictionDrift),
+            ),
+            (
+                Status::Error,
+                StageVote::ParticipantError,
+                Some(AbortReason::ParticipantError),
+            ),
+        ];
+        for (status, vote, abort) in cases {
+            let txn_id = TxnId::new(30, 1);
+            let (mut scheduler, _dir, proposer) = staged_leader(txn_id);
+
+            scheduler.resolve_staged_commit(txn_id, &staged_response(status, Some(vote)));
+
+            let expected = match abort {
+                None => SequencerEntry::Vote {
+                    epoch: 30,
+                    position: 1,
+                    vshard: VSHARD,
+                },
+                Some(reason) => SequencerEntry::AbortVote {
+                    epoch: 30,
+                    position: 1,
+                    vshard: VSHARD,
+                    reason,
+                },
+            };
+            assert_eq!(proposer.accepted(), vec![expected], "{vote:?}");
+            assert_eq!(
+                scheduler.pending.get(&txn_id).map(|p| p.commit_state),
+                Some(CommitState::AwaitingVerdict),
+                "{vote:?}"
+            );
+            assert!(scheduler.apply_halt().is_none(), "{vote:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_successful_stage_response_without_a_vote_halts_and_never_votes() {
+        let txn_id = TxnId::new(31, 0);
+        let (mut scheduler, _dir, proposer) = staged_leader(txn_id);
+
+        scheduler.resolve_staged_commit(txn_id, &staged_response(Status::Ok, None));
+
+        assert_eq!(proposer.attempt_count(), 0, "no vote is proposed");
+        assert_eq!(
+            scheduler.apply_halt().map(|h| h.reason),
+            Some(HaltReason::StageVoteInvalid)
+        );
+        assert_eq!(
+            scheduler.pending.get(&txn_id).map(|p| p.commit_state),
+            Some(CommitState::Staged),
+            "the txn does not park on the verdict barrier"
+        );
+        assert!(!scheduler.applied.is_applied(31, 0));
+    }
+
+    #[tokio::test]
+    async fn a_commit_vote_on_an_error_response_halts_and_never_votes() {
+        let txn_id = TxnId::new(32, 0);
+        let (mut scheduler, _dir, proposer) = staged_leader(txn_id);
+
+        scheduler.resolve_staged_commit(
+            txn_id,
+            &staged_response(Status::Error, Some(StageVote::Commit)),
+        );
+
+        assert_eq!(proposer.attempt_count(), 0, "no vote is proposed");
+        assert_eq!(
+            scheduler.apply_halt().map(|h| h.reason),
+            Some(HaltReason::StageVoteInvalid)
+        );
     }
 }

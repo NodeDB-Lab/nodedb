@@ -38,7 +38,7 @@ pub(super) fn synthetic_returning_response(payload_bytes: Vec<u8>) -> Response {
         payload: Payload::from_vec(payload_bytes),
         watermark_lsn: Lsn::ZERO,
         error_code: None,
-        read_set_valid: None,
+        stage_vote: None,
         read_version_lsn: crate::types::Lsn::ZERO,
         write_set: Vec::new(),
     }
@@ -153,6 +153,7 @@ pub async fn submit_and_await_calvin_with_timeout(
 ) -> crate::Result<Option<Response>> {
     raise_metadata_floor(state, &mut tx_class);
     stamp_incarnations(state, &mut tx_class)?;
+    super::unique_claims::stamp_unique_claims(state, &mut tx_class)?;
     let stream = super::parts::split_into_parts(state, &mut tx_class)?;
     submit_prepared_and_await(state, tx_class, stream, timeout).await
 }

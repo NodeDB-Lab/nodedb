@@ -10,7 +10,7 @@ use tracing::{debug, info_span};
 use nodedb_cluster::calvin::types::PassiveReadKey;
 use nodedb_types::Value;
 
-use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
+use crate::bridge::envelope::{ErrorCode, Payload, Response, StageVote, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::commit_pending::PendingCommit;
 use crate::data::executor::handlers::control::calvin_reply::{CalvinReply, CalvinStaging};
@@ -142,8 +142,8 @@ impl CoreLoop {
         self.calvin.ollp_is_group_leader = prev_group_leader;
         match verified {
             Ok(true) => {}
-            Ok(false) => return self.response_error(task, ErrorCode::OllpRetryRequired),
-            Err(e) => return self.response_error(task, e),
+            Ok(false) => return self.calvin_stage_refusal(task, ErrorCode::OllpRetryRequired),
+            Err(e) => return self.calvin_stage_refusal(task, e.into()),
         }
 
         let synthetic_txn_id = match calvin_synthetic_txn_id(epoch, position, vshard_id) {
@@ -203,9 +203,9 @@ impl CoreLoop {
             payload: Payload::empty(),
             watermark_lsn: self.watermark,
             error_code: None,
-            // The dependent-read path carries no versioned read-set; `None` maps
-            // to "commit" in `resolve_staged_commit` (`read_set_valid != Some(false)`).
-            read_set_valid: None,
+            // The dependent-read path carries no versioned read-set. Its OLLP
+            // check passed above, so the slice votes commit.
+            stage_vote: Some(StageVote::Commit),
             read_version_lsn: crate::types::Lsn::ZERO,
             write_set: Vec::new(),
         }
@@ -249,9 +249,7 @@ mod tests {
 
         let resp = core.execute_calvin_execute_active(&task, ctx, &tenant_id, &plans, &injected);
         assert_eq!(resp.status, Status::Ok);
-        // The dependent-read path carries no versioned read-set; `None` maps to
-        // "commit" in `resolve_staged_commit`.
-        assert_eq!(resp.read_set_valid, None);
+        assert_eq!(resp.stage_vote, Some(StageVote::Commit));
 
         let vshard_id = task.request.vshard_id.as_u32();
 
@@ -316,6 +314,7 @@ mod tests {
             resp.error_code.as_deref(),
             Some(&ErrorCode::OllpRetryRequired)
         );
+        assert_eq!(resp.stage_vote, Some(StageVote::PredictionDrift));
 
         // Drift stages NOTHING — neither the raw buffer nor the overlay.
         let vshard_id = task.request.vshard_id.as_u32();
@@ -328,5 +327,33 @@ mod tests {
             !core.txn_overlays.contains_key(&synthetic),
             "an OLLP-drift retry must not leave a staged overlay"
         );
+    }
+
+    #[test]
+    fn calvin_execute_active_stage_error_votes_participant_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let task = make_task();
+        let tenant_id = TenantId::new(1);
+        let epoch_outside_synthetic_range = 1_u64 << 33;
+        let ctx = CalvinExecCtx {
+            epoch: epoch_outside_synthetic_range,
+            position: 0,
+            epoch_system_ms: 0,
+            is_group_leader: true,
+        };
+
+        let resp = core.execute_calvin_execute_active(
+            &task,
+            ctx,
+            &tenant_id,
+            &[point_insert_plan("orders", "o1", 7)],
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(resp.status, Status::Error);
+        assert_eq!(resp.stage_vote, Some(StageVote::ParticipantError));
+        assert!(core.calvin.commit_pending.is_empty());
+        assert!(core.txn_overlays.is_empty());
     }
 }

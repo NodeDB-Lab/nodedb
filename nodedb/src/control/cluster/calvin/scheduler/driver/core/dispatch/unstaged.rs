@@ -115,7 +115,7 @@ mod tests {
 
     use super::*;
     use crate::bridge::dispatch::CoreChannelDataSide;
-    use crate::bridge::envelope::Status;
+    use crate::bridge::envelope::{StageVote, Status};
     use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::{
         CapturingProposer, elect_data_group_leader,
     };
@@ -208,7 +208,10 @@ mod tests {
 
         peer.pending
             .insert(txn_id, staged_pending(make_sequenced_txn(30, 0), txn_id));
-        peer.resolve_staged_commit(txn_id, &staged_response(Status::Ok, Some(true)));
+        peer.resolve_staged_commit(
+            txn_id,
+            &staged_response(Status::Ok, Some(StageVote::Commit)),
+        );
         assert_eq!(
             peer.pending.get(&txn_id).map(|p| p.commit_state),
             Some(CommitState::AwaitingVerdict)
