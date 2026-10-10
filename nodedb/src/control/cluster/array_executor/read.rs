@@ -76,9 +76,12 @@ impl DataPlaneArrayExecutor {
                 detail: format!("array slice response decode: {e}"),
             })?;
         let rows = split_msgpack_array_rows(&slice_resp.rows_msgpack)?;
+        // The shard's version rides back with its rows, even when it matched
+        // none, so a transaction validates the read on this vShard.
         Ok(ArraySliceExec {
             rows,
             truncated_before_horizon: slice_resp.truncated_before_horizon,
+            read_versions: resp.read_versions.to_wire(),
         })
     }
 
@@ -138,6 +141,7 @@ impl DataPlaneArrayExecutor {
             return Ok(ArrayAggExec {
                 partials: Vec::new(),
                 truncated_before_horizon: false,
+                read_versions: resp.read_versions.to_wire(),
             });
         }
 
@@ -152,6 +156,7 @@ impl DataPlaneArrayExecutor {
         Ok(ArrayAggExec {
             partials,
             truncated_before_horizon,
+            read_versions: resp.read_versions.to_wire(),
         })
     }
 

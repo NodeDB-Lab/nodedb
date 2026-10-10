@@ -146,7 +146,7 @@ struct RestoreDeltaParams<'a> {
 async fn persist_restore_delta(
     state: &SharedState,
     params: RestoreDeltaParams<'_>,
-) -> crate::Result<Option<crate::types::Lsn>> {
+) -> crate::Result<crate::types::ReadVersions> {
     let RestoreDeltaParams {
         tenant_id,
         database_id,
@@ -182,7 +182,7 @@ async fn persist_restore_delta(
         },
     )
     .await?;
-    Ok((outcome.write_version != crate::types::Lsn::ZERO).then_some(outcome.write_version))
+    Ok(outcome.write_versions)
 }
 
 /// Parse: RESTORE collection SET VERSION = 'checkpoint' WHERE id = 'doc-id'
@@ -275,7 +275,7 @@ mod tests {
 
     /// A Data Plane core for a one-node cluster that answers the restore
     /// admission: the generate returns `delta`, the preview returns a result
-    /// with `digest`, and the fenced apply echoes its WAL LSN. It answers
+    /// with `digest`, and the fenced apply echoes its write version. It answers
     /// every other request, the cluster's Raft applies included, with `Ok`.
     /// It records each restore step it sees, marking a step whose delta or
     /// digest differs from the expected one.
@@ -295,18 +295,32 @@ mod tests {
             while let Ok(request) = side.request_rx.try_pop() {
                 let request = request.inner;
                 let request_id = request.request_id;
-                let wal_lsn = request.wal_lsn.unwrap_or(Lsn::ZERO);
-                let (step, payload, read_version_lsn) = match request.plan {
-                    PhysicalPlan::Crdt(CrdtOp::RestoreToVersion { .. }) => {
-                        (Some("generate"), core.delta.clone(), Lsn::ZERO)
-                    }
+                let applied_versions = crate::types::ReadVersions::single(
+                    request.vshard_id,
+                    request
+                        .entry_version
+                        .unwrap_or(nodedb_types::WriteVersion::local_after(
+                            nodedb_types::WriteVersion::ZERO,
+                            request.wal_lsn.unwrap_or(Lsn::ZERO).as_u64(),
+                        )),
+                );
+                let (step, payload, read_versions) = match request.plan {
+                    PhysicalPlan::Crdt(CrdtOp::RestoreToVersion { .. }) => (
+                        Some("generate"),
+                        core.delta.clone(),
+                        crate::types::ReadVersions::new(),
+                    ),
                     PhysicalPlan::Crdt(CrdtOp::PreviewApply { delta, .. }) => {
                         let step = if delta == core.delta {
                             "preview"
                         } else {
                             "preview: wrong delta"
                         };
-                        (Some(step), preview.clone(), Lsn::ZERO)
+                        (
+                            Some(step),
+                            preview.clone(),
+                            crate::types::ReadVersions::new(),
+                        )
                     }
                     PhysicalPlan::Crdt(CrdtOp::Apply {
                         delta,
@@ -320,9 +334,9 @@ mod tests {
                         } else {
                             "apply: wrong delta or digest"
                         };
-                        (Some(step), Vec::new(), wal_lsn)
+                        (Some(step), Vec::new(), applied_versions)
                     }
-                    _ => (None, Vec::new(), Lsn::ZERO),
+                    _ => (None, Vec::new(), crate::types::ReadVersions::new()),
                 };
                 if let Some(step) = step {
                     core.seen
@@ -341,7 +355,7 @@ mod tests {
                             watermark_lsn: Lsn::ZERO,
                             error_code: None,
                             stage_vote: None,
-                            read_version_lsn,
+                            read_versions,
                             write_set: Vec::new(),
                         },
                     })
@@ -424,15 +438,15 @@ mod tests {
         )
         .await
         .expect("persist restore delta");
-        let lsn = outcome.map(|outcome| outcome.write_version);
+        let versions = outcome.map(|outcome| outcome.write_versions);
         assert_eq!(
             core.seen(),
             ["generate", "preview", "apply"],
             "restore admission must generate, preview, then apply"
         );
         assert!(
-            lsn.is_some(),
-            "a restore must allocate and return a durable WAL LSN"
+            versions.is_some_and(|versions| !versions.is_empty()),
+            "a restore must return the version its apply stamped"
         );
 
         state.wal.sync().expect("sync wal");

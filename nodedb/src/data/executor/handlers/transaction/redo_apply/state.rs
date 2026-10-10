@@ -19,11 +19,10 @@ use nodedb_physical::physical_plan::{RedoSumTargets, ResolvedSumTarget};
 use nodedb_types::RowIdentity;
 
 use crate::bridge::envelope::ErrorCode;
-use crate::data::executor::core_loop::write_index::KeyRepr;
+use crate::data::executor::core_loop::write_index::{KeyRepr, WriteStamp};
 use crate::data::executor::enforcement::materialized_sum::apply::TargetWrite;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::event::WriteOp;
-use crate::types::Lsn;
 
 /// Committed-redo apply state owned by one core.
 pub(in crate::data::executor) struct RedoApplyState {
@@ -123,7 +122,7 @@ pub(in crate::data::executor) struct DeferredWriteVersion {
     pub tenant: crate::types::TenantId,
     pub collection: String,
     pub key: Option<KeyRepr>,
-    pub lsn: Lsn,
+    pub stamp: WriteStamp,
 }
 
 /// `(database, tenant, collection)`.
@@ -173,7 +172,7 @@ impl RedoApplyScope {
         tenant: crate::types::TenantId,
         collection: &str,
         key: Option<KeyRepr>,
-        lsn: Lsn,
+        stamp: WriteStamp,
     ) {
         if self.pass == RedoApplyPass::Install {
             self.write_versions.push(DeferredWriteVersion {
@@ -181,7 +180,7 @@ impl RedoApplyScope {
                 tenant,
                 collection: collection.to_string(),
                 key,
-                lsn,
+                stamp,
             });
         }
     }

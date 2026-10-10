@@ -117,7 +117,7 @@ pub(super) async fn resolve_join_input(
             {
                 captures.push(DistributedReadCapture {
                     scan_plan,
-                    read_version_lsn: outcome.read_version_lsn,
+                    read_versions: outcome.read_versions.clone(),
                 });
             }
             let merged = if as_aggregate {
@@ -209,7 +209,7 @@ pub(super) async fn gather_join_build_side(
     if let Some(scan_plan) = capture_plan {
         captures.push(DistributedReadCapture {
             scan_plan,
-            read_version_lsn: outcome.read_version_lsn,
+            read_versions: outcome.read_versions.clone(),
         });
     }
 

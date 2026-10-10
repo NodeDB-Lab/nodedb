@@ -67,6 +67,10 @@ pub async fn scatter_to_graph_owners(
         let node =
             execute_plan_all_local_cores(state, tenant_id, database_id, plan, TraceId::ZERO, None)
                 .await?;
+        // This node holds every vShard, so the read observed all of them.
+        let mut reads = ShardReadLog::new();
+        reads.note(0..VShardId::COUNT, &node.read_versions);
+        reads.publish(tenant_id, database_id, collection);
         return Ok(vec![Payload::from_vec(node.payload)]);
     }
     let targets = enumerate_shards(state)?.targets;
@@ -93,17 +97,17 @@ pub async fn scatter_to_graph_owners(
                 },
             )
             .await?;
-            Ok::<_, crate::Error>((target.owned_vshards, target.node_id, read))
+            Ok::<_, crate::Error>((target.owned_vshards, read))
         }
     });
     let mut reads = ShardReadLog::new();
     let mut payloads = Vec::new();
     for leg in join_all(legs).await {
-        let (owned_vshards, node_id, read) = leg?;
-        reads.note(owned_vshards, read.watermark_lsn, node_id);
+        let (owned_vshards, read) = leg?;
+        reads.note(owned_vshards, &read.read_versions);
         payloads.push(read.payload);
     }
-    reads.publish(state, tenant_id, database_id, collection);
+    reads.publish(tenant_id, database_id, collection);
     Ok(payloads)
 }
 

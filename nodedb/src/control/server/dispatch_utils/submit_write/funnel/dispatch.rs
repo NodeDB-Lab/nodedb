@@ -43,6 +43,9 @@ pub(super) struct DispatchTarget {
     pub resolved_now_ms: Option<u64>,
     /// The write's commit HLC, which dates every event it emits.
     pub commit_hlc: u64,
+    /// The log position of the data-group entry the write applies, its
+    /// version on every replica. `None` for a write that applies no entry.
+    pub entry_version: Option<nodedb_types::WriteVersion>,
     pub admission: Admission,
     /// The record group the write journals its write set into.
     pub journal: Option<JournalGroup>,
@@ -99,6 +102,7 @@ pub(super) async fn dispatch_to_data_plane(
         wal_lsn: target.wal_lsn,
         resolved_now_ms: target.resolved_now_ms,
         commit_hlc: Some(target.commit_hlc),
+        entry_version: target.entry_version,
         admission: target.admission,
     };
 

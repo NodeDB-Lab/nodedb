@@ -23,9 +23,10 @@ pub(crate) use propose::{
 };
 pub use replicable_write::ReplicableWrite;
 pub use types::{
-    AppliedWait, AsyncRaftProposer, AsyncRaftSubmit, CollectionIncarnation, ConstraintChangeOp,
-    ProposedAt, ProposedWrite, RaftAppliedIndexSink, RaftCompactor, RaftProposer, ReplicatedEntry,
-    ReplicatedEventSource, ReplicatedIdentity, ReplicatedSumTarget, ReplicatedWrite,
+    AppliedOutput, AppliedWait, AsyncRaftProposer, AsyncRaftSubmit, CollectionIncarnation,
+    ConstraintChangeOp, ProposedAt, ProposedWrite, RaftAppliedIndexSink, RaftCompactor,
+    RaftProposer, ReplicatedEntry, ReplicatedEventSource, ReplicatedIdentity, ReplicatedSumTarget,
+    ReplicatedWrite,
 };
 
 pub use crate::control::distributed_applier::{

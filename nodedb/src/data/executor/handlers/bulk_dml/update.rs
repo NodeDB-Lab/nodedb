@@ -324,13 +324,13 @@ impl CoreLoop {
             // Published only after the commit succeeded — the same
             // ordering the reindex helper used when it owned the
             // transaction.
-            if let Some(lsn) = task.wal_lsn() {
+            if let Some(stamp) = self.task_write_stamp(task) {
                 self.note_index_write_values(
                     task.request.database_id,
                     crate::types::TenantId::new(tid),
                     collection,
                     &touched,
-                    lsn,
+                    stamp,
                 );
             }
             self.doc_cache.put(
@@ -343,7 +343,7 @@ impl CoreLoop {
             // Record the committed row's write version against its
             // surrogate + collection.
             let surrogate = storage_key.surrogate();
-            self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
+            self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
             // Re-index the row's vectors from the new body (soft-delete the
             // old HNSW node + insert the new one, keyed by the stable
             // surrogate). No-op unless the collection has a vector field

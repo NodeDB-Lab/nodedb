@@ -72,6 +72,10 @@ pub struct ArrayShardSliceResp {
     /// True when `system_as_of` is below the oldest tile version on this shard
     /// and the shard produced zero rows as a result of that horizon.
     pub truncated_before_horizon: bool,
+    /// The write versions the shard read observed, one per vShard it covers,
+    /// even when it matched no row. A transaction validates the read at
+    /// these versions.
+    pub read_versions: Vec<nodedb_types::ShardVersion>,
 }
 
 /// Scatter request: coordinator asks a shard to compute a partial aggregate.
@@ -118,6 +122,9 @@ pub struct ArrayShardAggResp {
     /// True when `system_as_of` is below the oldest tile version on this shard
     /// and the shard produced zero rows as a result of that horizon.
     pub truncated_before_horizon: bool,
+    /// The write versions the shard read observed (see
+    /// [`ArrayShardSliceResp::read_versions`]).
+    pub read_versions: Vec<nodedb_types::ShardVersion>,
 }
 
 /// Scatter request: coordinator forwards a cell write to the owning shard.

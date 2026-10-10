@@ -181,14 +181,14 @@ impl CoreLoop {
                 return 0;
             }
         }
-        self.note_replay_write_lsn(
+        self.note_replay_write(
             p.database_id,
             p.tenant_id,
             p.collection,
             Some(KeyRepr::KvKey(Box::from(p.source_key))),
             p.record_lsn,
         );
-        self.note_replay_write_lsn(
+        self.note_replay_write(
             p.database_id,
             p.tenant_id,
             p.collection,
@@ -282,14 +282,14 @@ impl CoreLoop {
             return (0, 0);
         }
 
-        self.note_replay_write_lsn(
+        self.note_replay_write(
             p.database_id,
             p.tenant_id,
             p.source_collection,
             Some(KeyRepr::KvKey(Box::from(p.item_key))),
             p.record_lsn,
         );
-        self.note_replay_write_lsn(
+        self.note_replay_write(
             p.database_id,
             p.tenant_id,
             p.dest_collection,

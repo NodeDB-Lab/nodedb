@@ -71,7 +71,7 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
                     message: "shuffle producer not configured (no ShuffleProducer installed)"
                         .into(),
                 }),
-                read_version_lsn: 0,
+                read_versions: Vec::new(),
             },
         }
     }

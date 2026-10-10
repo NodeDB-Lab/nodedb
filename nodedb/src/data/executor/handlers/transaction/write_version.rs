@@ -3,13 +3,14 @@
 //! The per-key write versions a committed batch of plans implies, read off
 //! the plans. The redo install records versions through its replay arms.
 //! The parity tests check the install against this oracle, engine by engine.
-//! One WAL LSN applies to every key in the batch.
+//! One write stamp applies to every key in the batch.
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::write_index::KeyRepr;
+use crate::data::executor::core_loop::write_index::WriteStamp;
 use crate::data::executor::task::ExecutionTask;
-use crate::types::{Lsn, TenantId};
+use crate::types::TenantId;
 use nodedb_physical::physical_plan::{
     ColumnarOp, CrdtOp, DocumentOp, GraphOp, SpatialOp, TextOp, TimeseriesOp, VectorOp,
     VectorWriteTargets,
@@ -25,13 +26,13 @@ impl CoreLoop {
         tid: u64,
         plans: &[PhysicalPlan],
     ) {
-        let Some(lsn) = task.wal_lsn() else {
+        let Some(stamp) = self.task_write_stamp(task) else {
             return;
         };
         let db = task.request.database_id;
         let tenant = TenantId::new(tid);
         for plan in plans {
-            self.record_plan_write_version(db, tenant, plan, lsn);
+            self.record_plan_write_version(db, tenant, plan, stamp);
         }
     }
 
@@ -40,13 +41,13 @@ impl CoreLoop {
         db: crate::types::DatabaseId,
         tenant: TenantId,
         plan: &PhysicalPlan,
-        lsn: Lsn,
+        stamp: WriteStamp,
     ) {
         match plan {
-            PhysicalPlan::Document(op) => self.record_document_version(db, tenant, op, lsn),
-            PhysicalPlan::Vector(op) => self.record_vector_version(db, tenant, op, lsn),
-            PhysicalPlan::Graph(op) => self.record_graph_version(db, tenant, op, lsn),
-            PhysicalPlan::Kv(op) => self.record_kv_version(db, tenant, op, lsn),
+            PhysicalPlan::Document(op) => self.record_document_version(db, tenant, op, stamp),
+            PhysicalPlan::Vector(op) => self.record_vector_version(db, tenant, op, stamp),
+            PhysicalPlan::Graph(op) => self.record_graph_version(db, tenant, op, stamp),
+            PhysicalPlan::Kv(op) => self.record_kv_version(db, tenant, op, stamp),
             // Collection-floor engines: per-key identity is engine-internal.
             PhysicalPlan::Columnar(op) => {
                 let coll = match op {
@@ -63,13 +64,13 @@ impl CoreLoop {
                     ColumnarOp::ResolveDml { .. } => None,
                 };
                 if let Some(c) = coll {
-                    self.note_write_lsn(db, tenant, c, None, lsn);
+                    self.note_write(db, tenant, c, None, stamp);
                 }
             }
             PhysicalPlan::Timeseries(
                 TimeseriesOp::Ingest { collection, .. } | TimeseriesOp::Truncate { collection, .. },
             ) => {
-                self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
+                self.note_write(db, tenant, collection.as_str(), None, stamp);
             }
             PhysicalPlan::Spatial(op) => {
                 let coll = match op {
@@ -80,7 +81,7 @@ impl CoreLoop {
                     SpatialOp::Scan { .. } => None,
                 };
                 if let Some(c) = coll {
-                    self.note_write_lsn(db, tenant, c, None, lsn);
+                    self.note_write(db, tenant, c, None, stamp);
                 }
             }
             PhysicalPlan::Text(op) => {
@@ -97,13 +98,13 @@ impl CoreLoop {
                     TextOp::SetTextConfig { .. } => None,
                 };
                 if let Some(c) = coll {
-                    self.note_write_lsn(db, tenant, c, None, lsn);
+                    self.note_write(db, tenant, c, None, stamp);
                 }
             }
             PhysicalPlan::Crdt(CrdtOp::Apply { collection, .. })
             | PhysicalPlan::Crdt(CrdtOp::DocUpsert { collection, .. })
             | PhysicalPlan::Crdt(CrdtOp::DocDelete { collection, .. }) => {
-                self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
+                self.note_write(db, tenant, collection.as_str(), None, stamp);
             }
             // No per-key/collection version recorded for reads, control ops, or
             // engines not (yet) part of the funnel (array is keyed by tile).
@@ -122,7 +123,7 @@ impl CoreLoop {
         db: crate::types::DatabaseId,
         tenant: TenantId,
         op: &DocumentOp,
-        lsn: Lsn,
+        stamp: WriteStamp,
     ) {
         let (collection, surrogate) = match op {
             DocumentOp::PointPut {
@@ -147,7 +148,7 @@ impl CoreLoop {
             // Whole-collection mutation: key set is every row, so only the
             // collection floor applies.
             DocumentOp::Truncate { collection, .. } => {
-                self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
+                self.note_write(db, tenant, collection.as_str(), None, stamp);
                 return;
             }
             // No per-key version recorded: reads, DDL/index ops, and
@@ -174,12 +175,12 @@ impl CoreLoop {
             | DocumentOp::ResolveWrite(_)
             | DocumentOp::ResolvedWrite { .. } => return,
         };
-        self.note_write_lsn(
+        self.note_write(
             db,
             tenant,
             collection,
             Some(KeyRepr::Surrogate(surrogate.as_u32())),
-            lsn,
+            stamp,
         );
     }
 
@@ -193,7 +194,7 @@ impl CoreLoop {
         db: crate::types::DatabaseId,
         tenant: TenantId,
         op: &VectorOp,
-        lsn: Lsn,
+        stamp: WriteStamp,
     ) {
         match op {
             VectorOp::Insert {
@@ -216,12 +217,12 @@ impl CoreLoop {
                 surrogate,
                 ..
             } => {
-                self.note_write_lsn(
+                self.note_write(
                     db,
                     tenant,
                     collection.as_str(),
                     Some(KeyRepr::Surrogate(surrogate.as_u32())),
-                    lsn,
+                    stamp,
                 );
             }
             // An unbound delete names no row: it records the collection
@@ -231,12 +232,12 @@ impl CoreLoop {
                 surrogate,
                 ..
             } => {
-                self.note_write_lsn(
+                self.note_write(
                     db,
                     tenant,
                     collection.as_str(),
                     surrogate.map(|s| KeyRepr::Surrogate(s.as_u32())),
-                    lsn,
+                    stamp,
                 );
             }
             VectorOp::MultiVectorInsert {
@@ -249,12 +250,12 @@ impl CoreLoop {
                 document_surrogate,
                 ..
             } => {
-                self.note_write_lsn(
+                self.note_write(
                     db,
                     tenant,
                     collection.as_str(),
                     Some(KeyRepr::Surrogate(document_surrogate.as_u32())),
-                    lsn,
+                    stamp,
                 );
             }
             VectorOp::BatchInsert {
@@ -265,21 +266,21 @@ impl CoreLoop {
                 // Every vector of a batch carries its bound surrogate. An
                 // empty batch records the collection floor only.
                 for s in surrogates {
-                    self.note_write_lsn(
+                    self.note_write(
                         db,
                         tenant,
                         collection.as_str(),
                         Some(KeyRepr::Surrogate(s.as_u32())),
-                        lsn,
+                        stamp,
                     );
                 }
                 if surrogates.is_empty() {
-                    self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
+                    self.note_write(db, tenant, collection.as_str(), None, stamp);
                 }
             }
             // Every row of the collection: the collection floor only.
             VectorOp::DirectTruncate { collection, .. } => {
-                self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
+                self.note_write(db, tenant, collection.as_str(), None, stamp);
             }
             // A point-targeted delete or update names its surrogates; a
             // predicate-targeted one resolves them on apply, so it records the
@@ -296,17 +297,17 @@ impl CoreLoop {
             } => match targets {
                 VectorWriteTargets::Surrogates(surrogates) if !surrogates.is_empty() => {
                     for s in surrogates {
-                        self.note_write_lsn(
+                        self.note_write(
                             db,
                             tenant,
                             collection.as_str(),
                             Some(KeyRepr::Surrogate(s.as_u32())),
-                            lsn,
+                            stamp,
                         );
                     }
                 }
                 VectorWriteTargets::Surrogates(_) | VectorWriteTargets::Predicate(_) => {
-                    self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
+                    self.note_write(db, tenant, collection.as_str(), None, stamp);
                 }
             },
             // Every resolved mutation names its surrogate.
@@ -316,16 +317,16 @@ impl CoreLoop {
                 ..
             } => {
                 for mutation in mutations {
-                    self.note_write_lsn(
+                    self.note_write(
                         db,
                         tenant,
                         collection.as_str(),
                         Some(KeyRepr::Surrogate(mutation.surrogate().as_u32())),
-                        lsn,
+                        stamp,
                     );
                 }
                 if mutations.is_empty() {
-                    self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
+                    self.note_write(db, tenant, collection.as_str(), None, stamp);
                 }
             }
             // Sparse (doc_id-keyed) and `Delete` (vector_id isn't the
@@ -333,7 +334,7 @@ impl CoreLoop {
             VectorOp::SparseInsert { collection, .. }
             | VectorOp::SparseDelete { collection, .. }
             | VectorOp::Delete { collection, .. } => {
-                self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
+                self.note_write(db, tenant, collection.as_str(), None, stamp);
             }
             // Read / config / query ops: nothing written, no version to record.
             // The resolve pass reads what a governed write depends on.
@@ -356,7 +357,7 @@ impl CoreLoop {
         db: crate::types::DatabaseId,
         tenant: TenantId,
         op: &GraphOp,
-        lsn: Lsn,
+        stamp: WriteStamp,
     ) {
         match op {
             GraphOp::EdgePut {
@@ -373,7 +374,7 @@ impl CoreLoop {
                 dst_id,
                 ..
             } => {
-                self.note_write_lsn(
+                self.note_write(
                     db,
                     tenant,
                     collection.as_str(),
@@ -382,12 +383,12 @@ impl CoreLoop {
                         label: Box::from(label.as_str()),
                         dst: Box::from(dst_id.as_str()),
                     }),
-                    lsn,
+                    stamp,
                 );
             }
             GraphOp::EdgePutBatch { edges } | GraphOp::EdgeDeleteBatch { edges } => {
                 for edge in edges {
-                    self.note_write_lsn(
+                    self.note_write(
                         db,
                         tenant,
                         edge.collection.as_str(),
@@ -396,7 +397,7 @@ impl CoreLoop {
                             label: Box::from(edge.label.as_str()),
                             dst: Box::from(edge.dst_id.as_str()),
                         }),
-                        lsn,
+                        stamp,
                     );
                 }
             }

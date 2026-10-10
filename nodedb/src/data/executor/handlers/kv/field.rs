@@ -201,7 +201,7 @@ impl CoreLoop {
             Some(computed.new_value.as_slice()),
             current.as_deref(),
         );
-        self.note_kv_write_lsn(task, did, tid, collection, key);
+        self.note_kv_write(task, did, tid, collection, key);
         if let Some(spec) = returning {
             // `computed.new_value` IS the stored body: the merge is persisted
             // verbatim, so projecting it is projecting the post-image.

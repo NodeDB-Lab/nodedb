@@ -62,10 +62,6 @@ pub(super) async fn export_legs(
     } = scope;
     let shared = gateway_shared(state)?;
     let decision = resolve_live_decision(state, vshard);
-    let served_by = match decision {
-        crate::control::gateway::RouteDecision::Remote { node_id, .. } => node_id,
-        _ => state.node_id,
-    };
     let route = TaskRoute {
         plan: with_stage(plan, RagStage::ExportLegs),
         decision,
@@ -83,7 +79,7 @@ pub(super) async fn export_legs(
         linearizable,
     })
     .await?;
-    reads.note_leg([vshard], &outcome.shard_watermarks, served_by);
+    reads.note([vshard], &outcome.read_versions);
     let watermark_lsn = outcome
         .shard_watermarks
         .iter()

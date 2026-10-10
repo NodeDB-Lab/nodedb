@@ -75,14 +75,23 @@ impl CoreLoop {
                 replace_mode,
                 collections_to_clear,
                 group_vshards,
-            } => self.execute_restore_tenant_snapshot(
-                task,
-                *tenant_id,
-                snapshot,
-                *replace_mode,
-                collections_to_clear,
-                group_vshards,
-            ),
+                version_floor,
+            } => {
+                let response = self.execute_restore_tenant_snapshot(
+                    task,
+                    *tenant_id,
+                    snapshot,
+                    *replace_mode,
+                    collections_to_clear,
+                    group_vshards,
+                );
+                // The installed rows carry no versions: each vShard holds
+                // every write through the snapshot's cut.
+                if response.status == crate::bridge::envelope::Status::Ok {
+                    self.install_version_floor(version_floor);
+                }
+                response
+            }
 
             MetaOp::ConvertCollection {
                 collection,
@@ -395,6 +404,7 @@ mod txn_created_columnar_engine_tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: crate::bridge::envelope::Admission::Exempt(
                 crate::bridge::envelope::ExemptReason::Read,
             ),

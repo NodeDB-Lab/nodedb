@@ -90,7 +90,7 @@ pub async fn cross_core_bfs_with_options(
         &mut presence_reads,
     )
     .await?;
-    presence_reads.publish(shared, tenant_id, database_id, None);
+    presence_reads.publish(tenant_id, database_id, None);
 
     frontier.retain(|node| present.contains(node) && visited.insert(node.clone()));
     all_discovered.extend(frontier.iter().cloned());
@@ -130,12 +130,7 @@ pub async fn cross_core_bfs_with_options(
     }
 
     // Every vShard the walk expanded joins the transaction read-set.
-    reads.publish(
-        shared,
-        tenant_id,
-        database_id,
-        collection.map(str::to_owned),
-    );
+    reads.publish(tenant_id, database_id, collection.map(str::to_owned));
     Ok(ok_response(encode_path(&all_discovered)?))
 }
 

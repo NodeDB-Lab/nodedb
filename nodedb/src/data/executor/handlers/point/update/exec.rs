@@ -242,10 +242,15 @@ impl CoreLoop {
                     bitemporal,
                     sys_from_ms: sys_from_for_encode,
                     wal_lsn: task.wal_lsn(),
+                    write_stamp: self.task_write_stamp(task),
                     resolved_sum_targets,
                 });
                 match write_result {
                     Ok(target_write_set) => {
+                        // Record the committed row's write version against
+                        // its surrogate and collection. A read of the row
+                        // from before this update then fails validation.
+                        self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
                         self.doc_cache.put(
                             task.request.database_id.as_u64(),
                             tid,

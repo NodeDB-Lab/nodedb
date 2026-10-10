@@ -52,11 +52,6 @@ impl Scheduler {
             StagedVote::CollectionSuperseded
         } else {
             match staged_commit_vote(staged_response) {
-                // A read another node served is numbered in that node's WAL:
-                // this node's versions cannot show it still current.
-                Ok(StagedVote::Commit) if self.validates_read_served_elsewhere(txn_id) => {
-                    StagedVote::SerializationConflict
-                }
                 Ok(vote) => vote,
                 Err(error) => {
                     self.metrics.record_executor_error();
@@ -144,22 +139,6 @@ impl Scheduler {
         )) {
             self.resume_on_verdict(txn_id, verdict);
         }
-    }
-
-    /// Whether a read this vShard validates for `txn_id` was served by a node
-    /// other than this one. Its `read_lsn` is a position in that node's WAL.
-    fn validates_read_served_elsewhere(&self, txn_id: TxnId) -> bool {
-        let Some(pending) = self.pending.get(&txn_id) else {
-            return false;
-        };
-        let tx_class = &pending.txn.tx_class;
-        tx_class.versioned_reads.iter().any(|entry| {
-            super::super::routing::versioned_read_homes_on(
-                entry,
-                tx_class.database_id,
-                self.vshard_id,
-            ) && entry.served_by != self.shared.node_id
-        })
     }
 }
 

@@ -512,7 +512,7 @@ pub(super) mod tests {
             // Emit three deterministic chunks then clean EOF. Exercises the
             // multi-frame chunk/end envelope path end-to-end over loopback QUIC.
             for i in 0u64..3 {
-                if let Err(_e) = sink.send_chunk(vec![i as u8; 4], i + 100, 0).await {
+                if let Err(_e) = sink.send_chunk(vec![i as u8; 4], i + 100, Vec::new()).await {
                     // Coordinator gone — stop producing, no terminal frame.
                     return None;
                 }
@@ -547,7 +547,7 @@ pub(super) mod tests {
         ) -> crate::rpc_codec::ShuffleProduceResponse {
             crate::rpc_codec::ShuffleProduceResponse {
                 error: None,
-                read_version_lsn: 0,
+                read_versions: Vec::new(),
             }
         }
 

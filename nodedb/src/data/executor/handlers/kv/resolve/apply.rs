@@ -148,7 +148,7 @@ impl CoreLoop {
                     Some(value),
                     precondition.as_deref(),
                 );
-                self.note_kv_write_lsn(task, did, tid, collection.as_str(), key);
+                self.note_kv_write(task, did, tid, collection.as_str(), key);
             }
             // The drift check confirmed the row holds `precondition`, so it is
             // present and keeps its bound identity.
@@ -183,7 +183,7 @@ impl CoreLoop {
                     Some(value),
                     Some(precondition.as_slice()),
                 );
-                self.note_kv_write_lsn(task, did, tid, collection.as_str(), key);
+                self.note_kv_write(task, did, tid, collection.as_str(), key);
             }
             KvResolvedMutation::Delete {
                 collection,
@@ -203,7 +203,7 @@ impl CoreLoop {
                     None,
                     precondition.as_deref(),
                 );
-                self.note_kv_write_lsn(task, did, tid, collection.as_str(), key);
+                self.note_kv_write(task, did, tid, collection.as_str(), key);
             }
             // No body change, so no event — matches the live handlers.
             KvResolvedMutation::Expire {
@@ -220,7 +220,7 @@ impl CoreLoop {
                     key,
                     resolved_now_ms.saturating_add(*ttl_ms),
                 );
-                self.note_kv_write_lsn(task, did, tid, collection.as_str(), key);
+                self.note_kv_write(task, did, tid, collection.as_str(), key);
             }
             KvResolvedMutation::Persist {
                 collection,
@@ -228,7 +228,7 @@ impl CoreLoop {
                 precondition: _,
             } => {
                 self.kv_engine.persist(did, tid, collection.as_str(), key);
-                self.note_kv_write_lsn(task, did, tid, collection.as_str(), key);
+                self.note_kv_write(task, did, tid, collection.as_str(), key);
             }
         }
         Ok(())

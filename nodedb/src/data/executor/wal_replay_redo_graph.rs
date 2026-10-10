@@ -442,6 +442,7 @@ impl CoreLoop {
                 wal_lsn,
                 resolved_now_ms: None,
                 commit_hlc: None,
+                entry_version: None,
                 admission: crate::bridge::envelope::Admission::Exempt(
                     crate::bridge::envelope::ExemptReason::AlreadyOrdered,
                 ),
@@ -582,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn redo_graph_edge_put_records_write_version_floor() {
+    fn redo_graph_edge_put_records_its_write_version() {
         use crate::data::executor::core_loop::write_index::{KeyRepr, WriteKey};
 
         let mut h = make_core();
@@ -596,7 +597,10 @@ mod tests {
             )
             .expect("redo replay must succeed");
 
+        // The edge applies on the vShard its record names, at the record's
+        // LSN: no registered stamp names an entry for it.
         let write_key = WriteKey {
+            vshard: crate::types::VShardId::new(record.header.vshard_id),
             db: DatabaseId::new(0),
             tenant: crate::types::TenantId::new(7),
             collection: Box::from("knows"),
@@ -607,9 +611,11 @@ mod tests {
             },
         };
         assert_eq!(
-            h.core.write_index.key_write_lsn(&write_key),
-            Some(Lsn::new(1)),
-            "graph edge redo replay must record the write-version floor at the record's LSN"
+            h.core.write_index.key_version(&write_key),
+            Some(crate::data::executor::core_loop::write_index::tests::local(
+                1
+            )),
+            "graph edge redo replay must record the write version at the record's LSN"
         );
     }
 

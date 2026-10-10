@@ -39,7 +39,7 @@ use crate::control::planner::calvin::write_class::is_write_plan;
 ///
 /// `reads` is the neutral session read-set, projected onto the `TxClass`'s
 /// routing/identity `read_set` (collection-homed) so read shards are enumerated
-/// as participants, and onto `versioned_reads` (LSN-versioned OCC validation
+/// as participants, and onto `versioned_reads` (write-versioned OCC validation
 /// set) for commit-time optimistic-concurrency validation. Autocommit paths
 /// pass an empty slice.
 ///
@@ -145,7 +145,7 @@ fn build_dependent_tx_class_impl(
         detail: format!("failed to encode PhysicalPlan vec for Calvin dependent TxClass: {e}"),
     })?;
 
-    // versioned_reads carries the LSN-versioned OCC validation set, populated
+    // versioned_reads carries the write-versioned OCC validation set, populated
     // from the same session read-set the routing `read_set` above was built
     // from.
     let versioned_reads = versioned_reads_from(reads);

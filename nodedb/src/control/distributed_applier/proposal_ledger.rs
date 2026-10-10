@@ -131,13 +131,16 @@ impl ProposalLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
+    use crate::types::{DatabaseId, TenantId, VShardId};
     use crate::wal::manager::NO_APPLY_KEY;
 
     fn applied(payload: &[u8]) -> AppliedWrite {
         AppliedWrite {
             payload: payload.to_vec(),
-            write_version: Lsn::new(9),
+            write_versions: crate::types::ReadVersions::single(
+                VShardId::new(1),
+                nodedb_types::WriteVersion::logged(0, 9),
+            ),
         }
     }
 

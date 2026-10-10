@@ -109,9 +109,9 @@ pub(crate) async fn propose_sync_write(
 
     for (attempt, backoff_ms) in BACKOFF_MS.iter().enumerate() {
         match proposer(vshard_id, idempotency_key, data.clone(), deadline).await {
-            // The committed log index rides alongside the payload; the sync-ack
-            // path only needs the payload bytes.
-            Ok((p, _committed_version)) => {
+            // The write's versions ride alongside the payload. The sync-ack
+            // path needs only the payload bytes.
+            Ok((p, _write_versions)) => {
                 payload = Some(p);
                 break;
             }

@@ -208,7 +208,7 @@ pub(crate) async fn dispatch_tasks_to_calvin(
 mod tests {
     use super::*;
     use crate::control::server::shared::session::read_set::{EngineTag, ReadKey, ReadOrigin};
-    use crate::types::{DatabaseId, KeyRepr, Lsn, VShardId};
+    use crate::types::{DatabaseId, KeyRepr, VShardId};
     use nodedb_cluster::calvin::types::TxnIdWire;
     use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan};
     use nodedb_physical::physical_task::PostSetOp;
@@ -244,11 +244,9 @@ mod tests {
             key: ReadKey::Point {
                 repr: KeyRepr::Surrogate(1),
             },
-            read_lsn: Lsn::new(1),
-            read_version_lsn: Lsn::new(1),
+            read_version: nodedb_types::WriteVersion::logged(0, 1),
             origin: ReadOrigin::Session,
             home: None,
-            home_node: 0,
         }
     }
 

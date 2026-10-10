@@ -2,8 +2,8 @@
 
 //! `INSERT INTO ARRAY` / `DELETE FROM ARRAY` lowering to `PhysicalTask`.
 
-use nodedb_array::coord::encode::encode_hilbert_prefix;
 use nodedb_array::schema::ArraySchema;
+use nodedb_array::tile::cell_tile_prefix;
 use nodedb_array::types::ArrayId;
 use nodedb_sql::types_array::{ArrayCoordLiteral, ArrayInsertRow};
 
@@ -84,8 +84,10 @@ pub(in super::super) fn convert_insert_array(
                     detail: format!("array coord pk encode: {e}"),
                 })?;
             let surrogate = ctx.surrogate_for_pk(ctx.collection_key(name), &pk_bytes)?;
+            // A cell routes by its tile's key, the key a slice's shard
+            // fan-out and each shard's tile filter use.
             let hilbert =
-                encode_hilbert_prefix(&schema, &coord).map_err(|e| crate::Error::PlanError {
+                cell_tile_prefix(&schema, &coord).map_err(|e| crate::Error::PlanError {
                     detail: format!("INSERT INTO ARRAY {name}: Hilbert prefix: {e}"),
                 })?;
             let cell = ArrayPutCell {
@@ -211,7 +213,7 @@ pub(in super::super) fn convert_delete_array(
         for row in coords {
             let typed = coerce_coords(row, &schema)?;
             let hilbert =
-                encode_hilbert_prefix(&schema, &typed).map_err(|e| crate::Error::PlanError {
+                cell_tile_prefix(&schema, &typed).map_err(|e| crate::Error::PlanError {
                     detail: format!("DELETE FROM ARRAY {name}: Hilbert prefix: {e}"),
                 })?;
             let cell = ArrayDeleteCell {

@@ -114,7 +114,7 @@ impl CoreLoop {
 
     /// Record a committed edge write's version, keyed by the edge's
     /// `(src, label, dst)` identity, if a WAL LSN was threaded onto the task.
-    pub(in crate::data::executor) fn note_edge_write_lsn(
+    pub(in crate::data::executor) fn note_edge_write(
         &mut self,
         task: &ExecutionTask,
         tid: u64,
@@ -123,10 +123,10 @@ impl CoreLoop {
         label: &str,
         dst_id: &str,
     ) {
-        let Some(lsn) = task.wal_lsn() else {
+        let Some(stamp) = self.task_write_stamp(task) else {
             return;
         };
-        self.note_write_lsn(
+        self.note_write(
             task.request.database_id,
             TenantId::new(tid),
             collection,
@@ -137,7 +137,7 @@ impl CoreLoop {
                     dst: Box::from(dst_id),
                 },
             ),
-            lsn,
+            stamp,
         );
     }
 }
@@ -210,6 +210,7 @@ pub(super) mod test_support {
             wal_lsn: Some(Lsn::new(lsn)),
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: Admission::Exempt(ExemptReason::Read),
         })
     }

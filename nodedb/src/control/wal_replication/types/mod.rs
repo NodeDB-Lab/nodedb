@@ -27,7 +27,7 @@ mod transaction_redo_wire;
 mod wire_shapes;
 
 pub use aliases::{
-    AppliedWait, AsyncRaftProposer, AsyncRaftSubmit, ProposedAt, ProposedWrite,
+    AppliedOutput, AppliedWait, AsyncRaftProposer, AsyncRaftSubmit, ProposedAt, ProposedWrite,
     RaftAppliedIndexSink, RaftCompactor, RaftProposer,
 };
 pub use redo_chunk_wire::{RedoBody, RedoContent};

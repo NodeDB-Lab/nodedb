@@ -122,7 +122,7 @@ pub(super) async fn collect_classify_and_finish(
         OwnedResponse::Answered { response, closed } => {
             // A failed cancel holds the window and fails the write here.
             closed?;
-            response
+            *response
         }
         OwnedResponse::DeadlineExceeded => {
             observe(shared);

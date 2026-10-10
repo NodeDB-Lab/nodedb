@@ -85,7 +85,7 @@ impl CoreLoop {
     /// The one divergence from the static path: OLLP predicate verification
     /// (leader-only) runs HERE, before staging, via
     /// [`CoreLoop::verify_calvin_active_ollp`]. The dependent-read path has no
-    /// LSN-versioned read-set to vote on; its conflict detector is the OLLP
+    /// write-versioned read-set to vote on; its conflict detector is the OLLP
     /// `actual != predicted` re-check. A mismatch returns `OllpRetryRequired`
     /// and stages nothing, so no redo entry exists for it. The Control
     /// Plane scheduler releases locks and re-recons on `OllpRetryRequired`.
@@ -199,7 +199,7 @@ impl CoreLoop {
             // The dependent-read path carries no versioned read-set. Its OLLP
             // check passed above, so the slice votes commit.
             stage_vote: Some(StageVote::Commit),
-            read_version_lsn: crate::types::Lsn::ZERO,
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         }
     }

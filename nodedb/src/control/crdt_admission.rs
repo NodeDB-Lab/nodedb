@@ -54,7 +54,9 @@ pub struct CrdtApplyAdmissionRequest<'a> {
 
 pub struct CrdtAdmissionOutcome {
     pub payload: Vec<u8>,
-    pub write_version: crate::types::Lsn,
+    /// The versions the apply stamped: the entry's log position on the
+    /// written vShard.
+    pub write_versions: crate::types::ReadVersions,
     /// Operations the admitted delta encoded that the target document already
     /// knew, measured by the preview that fenced this apply. Distinguishes a
     /// client whose writes land from one whose writes are being absorbed —
@@ -597,7 +599,7 @@ async fn apply_fenced(
     // This node's apply of the entry recorded its commit HLC.
     Ok(CrdtAdmissionOutcome {
         payload: outcome.0,
-        write_version: outcome.1,
+        write_versions: outcome.1,
         trimmed_ops: 0,
     })
 }
@@ -684,7 +686,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: None,
             stage_vote: None,
-            read_version_lsn: Lsn::ZERO,
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         }
     }
@@ -786,7 +788,7 @@ mod tests {
                             .expect("fences lock")
                             .push(expected_frontier_digest);
                     }
-                    Ok((Vec::new(), Lsn::ZERO))
+                    Ok((Vec::new(), crate::types::ReadVersions::new()))
                 })
             });
         crate::control::vshard_admission::install_async_raft_proposer(
@@ -885,7 +887,7 @@ mod tests {
                         }
                         other => panic!("unexpected replicated write: {other:?}"),
                     }
-                    Ok((Vec::new(), Lsn::ZERO))
+                    Ok((Vec::new(), crate::types::ReadVersions::new()))
                 })
             });
         crate::control::vshard_admission::install_async_raft_proposer(
@@ -935,7 +937,7 @@ mod tests {
                             actual: [0; 32],
                         }))
                     } else {
-                        Ok((Vec::new(), Lsn::ZERO))
+                        Ok((Vec::new(), crate::types::ReadVersions::new()))
                     }
                 })
             });
@@ -1002,7 +1004,7 @@ mod tests {
                             actual: [0; 32],
                         }))
                     } else {
-                        Ok((Vec::new(), Lsn::ZERO))
+                        Ok((Vec::new(), crate::types::ReadVersions::new()))
                     }
                 })
             })

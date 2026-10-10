@@ -5,18 +5,18 @@
 //! A transport that renders a Data-Plane `Response` gets the same shape from
 //! the gateway that local SPSC dispatch gives it. The shape keeps the error
 //! status and code of a `NotFound` verdict, the read watermark, and the
-//! read-version LSN.
+//! read versions.
 
 use crate::Error;
 use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
 use crate::control::server::shared::clone_write::CloneCheckedTask;
-use crate::types::{Lsn, RequestId, VShardId};
+use crate::types::{Lsn, ReadVersions, RequestId, VShardId};
 
 use super::core::{Gateway, QueryContext, authorized_plan_for_context};
 
-/// A gateway execution's payloads, per-shard read watermarks, and
-/// read-version LSN, as [`GatewayOutcome::into_parts`] returns them.
-pub type GatewayParts = (Vec<Vec<u8>>, Vec<(VShardId, Lsn)>, Lsn);
+/// A gateway execution's payloads, per-shard read watermarks, and read
+/// versions, as [`GatewayOutcome::into_parts`] returns them.
+pub type GatewayParts = (Vec<Vec<u8>>, Vec<(VShardId, Lsn)>, ReadVersions);
 
 /// Everything one gateway execution observed across its routes.
 pub struct GatewayOutcome {
@@ -24,8 +24,8 @@ pub struct GatewayOutcome {
     pub payloads: Vec<Vec<u8>>,
     /// One `(vshard, watermark_lsn)` per participating shard.
     pub shard_watermarks: Vec<(VShardId, Lsn)>,
-    /// Max-folded per-collection read-version LSN.
-    pub read_version_lsn: Lsn,
+    /// The read versions every route observed, one per vShard.
+    pub read_versions: ReadVersions,
     /// A single-route plan's owning core refused it with `ErrorCode::NotFound`.
     ///
     /// Always `false` for a fan-out: there it means a shard holds no slice.
@@ -33,9 +33,9 @@ pub struct GatewayOutcome {
 }
 
 impl GatewayOutcome {
-    /// Payloads, per-shard watermarks, and read-version LSN.
+    /// Payloads, per-shard watermarks, and read versions.
     pub fn into_parts(self) -> GatewayParts {
-        (self.payloads, self.shard_watermarks, self.read_version_lsn)
+        (self.payloads, self.shard_watermarks, self.read_versions)
     }
 
     /// The response local SPSC dispatch returns for the same task.
@@ -47,7 +47,7 @@ impl GatewayOutcome {
             .max()
             .unwrap_or(Lsn::ZERO);
         if self.not_found {
-            return not_found_response(watermark_lsn, self.read_version_lsn);
+            return not_found_response(watermark_lsn, self.read_versions);
         }
         let payload = self
             .payloads
@@ -55,48 +55,34 @@ impl GatewayOutcome {
             .next()
             .map(Payload::from_vec)
             .unwrap_or_else(Payload::empty);
-        response(
-            Status::Ok,
-            None,
-            payload,
-            watermark_lsn,
-            self.read_version_lsn,
-        )
+        response(Status::Ok, None, payload, watermark_lsn, self.read_versions)
     }
 }
 
 impl Gateway {
     /// Execute one authorized task and return its Data-Plane response shape.
     ///
-    /// A `NotFound` verdict returns as an error-status response, the same as
-    /// local SPSC dispatch returns it. The caller records a phantom read from
-    /// it and renders the verdict. Every other error returns as its typed
-    /// `Err`.
+    /// A `NotFound` verdict, local or remote, returns as an error-status
+    /// response carrying the versions the read observed, the same as local
+    /// SPSC dispatch returns it. The caller records a phantom read from it
+    /// and renders the verdict. Every other error returns as its typed `Err`.
     pub async fn execute_response(
         &self,
         ctx: &QueryContext,
         checked: CloneCheckedTask,
     ) -> Result<Response, Error> {
         let (plan, _lease) = authorized_plan_for_context(ctx, checked)?;
-        match self.execute_plan_outcome(ctx, plan).await {
-            Ok(outcome) => Ok(outcome.into_response()),
-            // A remote leaseholder returns its `NotFound` verdict as a typed
-            // error. It gets the same shape as a local one.
-            Err(Error::DataPlane(ErrorCode::NotFound)) => {
-                Ok(not_found_response(Lsn::ZERO, Lsn::ZERO))
-            }
-            Err(error) => Err(error),
-        }
+        Ok(self.execute_plan_outcome(ctx, plan).await?.into_response())
     }
 }
 
-fn not_found_response(watermark_lsn: Lsn, read_version_lsn: Lsn) -> Response {
+fn not_found_response(watermark_lsn: Lsn, read_versions: ReadVersions) -> Response {
     response(
         Status::Error,
         Some(ErrorCode::NotFound),
         Payload::empty(),
         watermark_lsn,
-        read_version_lsn,
+        read_versions,
     )
 }
 
@@ -105,7 +91,7 @@ fn response(
     error_code: Option<ErrorCode>,
     payload: Payload,
     watermark_lsn: Lsn,
-    read_version_lsn: Lsn,
+    read_versions: ReadVersions,
 ) -> Response {
     Response {
         request_id: RequestId::new(0),
@@ -116,7 +102,7 @@ fn response(
         watermark_lsn,
         error_code: error_code.map(Box::new),
         stage_vote: None,
-        read_version_lsn,
+        read_versions,
         write_set: Vec::new(),
     }
 }
@@ -125,6 +111,10 @@ fn response(
 mod tests {
     use super::*;
 
+    fn read_versions() -> ReadVersions {
+        ReadVersions::single(VShardId::new(3), nodedb_types::WriteVersion::logged(1, 5))
+    }
+
     fn outcome(not_found: bool) -> GatewayOutcome {
         GatewayOutcome {
             payloads: vec![vec![0x90]],
@@ -132,7 +122,7 @@ mod tests {
                 (VShardId::new(3), Lsn::new(7)),
                 (VShardId::new(4), Lsn::new(9)),
             ],
-            read_version_lsn: Lsn::new(5),
+            read_versions: read_versions(),
             not_found,
         }
     }
@@ -143,16 +133,16 @@ mod tests {
         assert_eq!(resp.status, Status::Error);
         assert_eq!(resp.error_code.as_deref(), Some(&ErrorCode::NotFound));
         assert_eq!(resp.watermark_lsn, Lsn::new(9));
-        assert_eq!(resp.read_version_lsn, Lsn::new(5));
+        assert_eq!(resp.read_versions, read_versions());
     }
 
     #[test]
-    fn a_success_keeps_its_payload_and_lsns() {
+    fn a_success_keeps_its_payload_watermark_and_read_versions() {
         let resp = outcome(false).into_response();
         assert_eq!(resp.status, Status::Ok);
         assert!(resp.error_code.is_none());
         assert_eq!(resp.payload.to_vec(), vec![0x90u8]);
         assert_eq!(resp.watermark_lsn, Lsn::new(9));
-        assert_eq!(resp.read_version_lsn, Lsn::new(5));
+        assert_eq!(resp.read_versions, read_versions());
     }
 }

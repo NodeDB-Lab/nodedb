@@ -132,6 +132,12 @@ pub enum MetaOp {
         /// their edges too.
         #[serde(default)]
         group_vshards: Vec<u32>,
+        /// The version each of the group's vShards holds once the install
+        /// lands: the log position of the snapshot's cut. The installed rows
+        /// carry no per-row versions, so a read older than the cut no longer
+        /// validates on this node. Empty = no group install.
+        #[serde(default)]
+        version_floor: Vec<nodedb_types::ShardVersion>,
     },
 
     /// Purge ALL data for a tenant across every engine and cache.

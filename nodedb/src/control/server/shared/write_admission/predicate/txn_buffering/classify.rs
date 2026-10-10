@@ -423,8 +423,7 @@ mod tests {
     use nodedb_types::timeseries::continuous_agg::{ContinuousAggregateDef, RefreshPolicy};
     use nodedb_types::vector_distance::DistanceMetric;
     use nodedb_types::{
-        DatabaseId, Lsn, QualifiedCollection, Surrogate, SystemTimeScope, TenantId,
-        VectorAnnOptions,
+        DatabaseId, QualifiedCollection, Surrogate, SystemTimeScope, TenantId, VectorAnnOptions,
     };
     use std::collections::BTreeMap;
 
@@ -1844,6 +1843,7 @@ mod tests {
                 replace_mode: false,
                 collections_to_clear: Vec::new(),
                 group_vshards: Vec::new(),
+                version_floor: Vec::new(),
             }),
             PhysicalPlan::Meta(MetaOp::PurgeTenant { tenant_id: 1 }),
             PhysicalPlan::Meta(MetaOp::UnregisterCollection {
@@ -1918,9 +1918,8 @@ mod tests {
                     engine: EngineTag::Kv,
                     collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c").to_string(),
                     key: ReadKeyIdent::Predicate,
-                    read_lsn: Lsn::ZERO,
+                    read_version: nodedb_types::WriteVersion::ZERO,
                     home_vshard: None,
-                    served_by: 0,
                 }],
                 body_plans: Vec::new(),
             }),

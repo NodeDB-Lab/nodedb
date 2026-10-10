@@ -110,9 +110,8 @@ pub(crate) async fn handle_graph_match(
         Err(error) => return error_to_native(seq, &error),
     };
 
-    // A MATCH issued inside a native transaction records a collection-scoped
-    // predicate read at the shard's watermark, identical to every other read
-    // seam. Single-shard direct op means one watermark and one entry.
+    // A MATCH issued inside a native transaction records the versions its
+    // core reported, identical to every other read seam.
     if (response.status == Status::Ok
         || response.error_code.as_deref() == Some(&crate::bridge::envelope::ErrorCode::NotFound))
         && ctx.sessions.transaction_state(ctx.peer_addr)
@@ -125,11 +124,9 @@ pub(crate) async fn handle_graph_match(
             ctx.tenant_id(),
             crate::control::server::shared::session::ResponseReads {
                 plan: &plan_for_response,
-                watermarks: &[(vshard_id, response.watermark_lsn)],
-                read_version_lsn: response.read_version_lsn,
+                read_versions: &response.read_versions,
                 found: response.status == Status::Ok,
                 distributed_reads: &[],
-                read_lsn_vshard: vshard_id,
             },
         )
         .await;
@@ -167,7 +164,7 @@ pub(crate) async fn handle_graph_match(
 /// local MATCH yields once its envelope is unwrapped. A result the scatter
 /// cannot finish is refused with `54001`, never returned partial. The
 /// scatter notes every vShard it read, and the session loop records them into
-/// the transaction read-set (`session::graph_reads`).
+/// the transaction read-set (`session::pending_shard_reads`).
 async fn match_across_shards(
     ctx: &DispatchCtx<'_>,
     seq: u64,

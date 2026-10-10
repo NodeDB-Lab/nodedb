@@ -97,8 +97,8 @@ pub(super) async fn resolve_gather(
 
     let outcome: GatherOutcome = gather_all_vshards(state, child, ctx).await?;
 
-    // Record the probe/single-collection read at its OWN observed
-    // read-version (the gathered collection's `coll_write_lsn`), scoped to
+    // Record the probe/single-collection read at its OWN observed read
+    // versions (the gathered collection's version per vShard), scoped to
     // a bare single-collection scan so the commit-time OCC validator
     // re-homes and revalidates exactly that collection's vshard. A
     // `HashJoin` plan will otherwise collapse to the left collection
@@ -114,7 +114,7 @@ pub(super) async fn resolve_gather(
     {
         captures.push(DistributedReadCapture {
             scan_plan,
-            read_version_lsn: outcome.read_version_lsn,
+            read_versions: outcome.read_versions.clone(),
         });
     }
 
@@ -124,7 +124,7 @@ pub(super) async fn resolve_gather(
         outcome.merged_array
     };
     Ok(Resolved::Gathered(
-        outcome_to_response(payload, outcome.watermark_lsn, outcome.read_version_lsn),
+        outcome_to_response(payload, outcome.watermark_lsn, outcome.read_versions),
         outcome.shard_watermarks,
         std::mem::take(captures),
     ))
@@ -143,7 +143,7 @@ pub(super) async fn resolve_broadcast(
         outcome_to_response(
             outcome.merged_array,
             outcome.watermark_lsn,
-            outcome.read_version_lsn,
+            outcome.read_versions,
         ),
         outcome.shard_watermarks,
         std::mem::take(captures),

@@ -1,29 +1,34 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Commit-time validation of a read-only transaction's homed reads.
+//! Commit-time validation of a transaction's reads on their vShards' leaders.
 //!
-//! A homed read is one vShard a cross-shard graph read observed (see
-//! `session::graph_reads`). A read-write COMMIT goes through Calvin, whose
-//! participants check it. A read-only COMMIT dispatches nothing, so this
-//! module checks it: it asks each vShard's leader for the home's current
-//! version and compares it to the recorded read version.
+//! A read-write COMMIT that goes through Calvin is validated by its
+//! participants. Every other COMMIT is validated here: a read-only one, and a
+//! single-shard one this node applies itself. Each read entry validates on one
+//! vShard: its home, else its collection's vShard. This module asks each
+//! vShard's leader for its current version and compares it with the version
+//! the read recorded.
+//!
+//! A version is the data-group log position of the write that set it. Every
+//! replica numbers a vShard's writes alike, so a read served by a follower,
+//! or by a leader that has since lost leadership, compares with the current
+//! leader's versions directly.
 //!
 //! The check sends one `MetaOp::HomeVersions` per leader node, carrying every
-//! home that node leads. The leader hands each probe to the one core that owns
-//! the probe's vShard (`exchange::all_cores::home_versions`), and that core
-//! answers:
+//! vShard that node leads. The leader hands each probe to the one core that
+//! owns the probe's vShard (`exchange::all_cores::home_versions`), and that
+//! core answers:
 //!
-//! - A read of one collection gets the collection's write floor on that core.
-//! - A read of every collection gets the core watermark.
+//! - A read of one collection gets the collection's version on the vShard.
+//! - A read of every collection gets the vShard's latest version.
 //!
-//! The leader answers a home only under its leader lease on the home's group,
-//! applied through the lease read index. A node that lost leadership refuses
-//! the home with the leader and term it knows, and the check asks that leader.
+//! The leader answers a probe only under its leader lease on the vShard's
+//! group, applied through the lease read index. A node that lost leadership
+//! refuses the probe with the leader and term it knows, and the check asks
+//! that leader.
 //!
-//! A version above the recorded read version means a write landed on that
-//! core after the read. Single-shard SI (`conflict::si_conflict_abort`)
-//! compares against this node's WAL, so it never judges a homed read: the
-//! read's watermark can come from another node's WAL.
+//! A version above the recorded read version means a write landed on the
+//! vShard after the read.
 
 use std::collections::BTreeMap;
 
@@ -39,7 +44,8 @@ use crate::control::gateway::{RouteDecision, TaskRoute};
 use crate::control::server::exchange::all_cores::execute_plan_all_local_cores;
 use crate::control::server::graph_dispatch::cluster_resolve::gateway_shared;
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, Lsn, TenantId, TraceId, VShardId};
+use crate::types::{DatabaseId, TenantId, TraceId, VShardId};
+use nodedb_types::WriteVersion;
 
 use super::super::connection::SessionId;
 use super::super::outcome::{AbortReason, CommitOutcome};
@@ -60,14 +66,13 @@ const MAX_CHECK_ROUNDS: u32 = 4;
 /// The wait before a later round, times the round number.
 const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// One home read: its tenant scope, the vShard and collection it read, and
-/// the node that served it.
+/// One validated read: its tenant scope, and the vShard and collection it
+/// read.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Home {
     database_id: u64,
     tenant_id: u64,
     probe: HomeVersionProbe,
-    served_by: u64,
 }
 
 /// One check request: every home one leader leads, in one tenant scope.
@@ -78,17 +83,23 @@ struct CheckTarget {
     tenant_id: u64,
 }
 
-/// Abort the transaction when a homed read in `read_set` is no longer
-/// current, or when a home cannot be checked. Releases the read
-/// reservations and rolls the session back before returning the outcome.
-/// `None` means every homed read still holds.
-pub(super) async fn homed_read_abort(
+/// Abort the transaction when a read in `read_set` is no longer current, or
+/// when a read cannot be checked. Releases the read reservations and rolls
+/// the session back before returning the outcome. `None` means every read
+/// still holds.
+///
+/// A session read of a collection this transaction writes is skipped. It can
+/// have read the transaction's own staged write, which moves no committed
+/// version, and the own-write exclusion of the Calvin builders drops it the
+/// same way. A plan-derivation read is always checked.
+pub(super) async fn stale_read_abort(
     state: &SharedState,
     sessions: &SessionStore,
     session_id: SessionId,
     read_set: &[ReadSetEntry],
+    written_collections: &std::collections::HashSet<String>,
 ) -> Option<CommitOutcome> {
-    let reason = match homed_reads_changed(state, read_set).await {
+    let reason = match reads_changed(state, read_set, written_collections).await {
         Ok(false) => return None,
         Ok(true) => {
             super::super::hot_key::record_read_set_aborts(state, read_set);
@@ -100,33 +111,32 @@ pub(super) async fn homed_read_abort(
     Some(CommitOutcome::Aborted { reason })
 }
 
-/// Whether any homed read in `read_set` is no longer current.
-///
-/// Entries without a home are skipped: SI validates them.
+/// Whether any checked read in `read_set` is no longer current.
 ///
 /// A read of every collection (a graph read with no collection scope) is
-/// checked against the core watermark. That is the conservative rule: any
-/// write the core took raises it, to any collection and to any vShard the core
-/// owns. Such a check can abort a transaction whose read still holds. It never
-/// misses a write that changed the read.
+/// checked against the vShard's latest version. Any write to the vShard
+/// raises it, so such a check can abort a transaction whose read still holds.
+/// It never misses a write that changed the read.
 ///
-/// A leader answers only under its leader lease. A home it refuses is asked
+/// A leader answers only under its leader lease. A probe it refuses is asked
 /// again at the leader the refusal names, or at the routing table's leader
-/// when it names none, for at most [`MAX_CHECK_ROUNDS`] rounds. A home still
+/// when it names none, for at most [`MAX_CHECK_ROUNDS`] rounds. A probe still
 /// unanswered then aborts the commit: no answer from a node that lost
 /// leadership ever lets it through.
-///
-/// A version is a position in the answering node's WAL. A home answered by a
-/// node other than the one that served the read counts as changed: its
-/// versions do not compare with the read's.
-async fn homed_reads_changed(
+async fn reads_changed(
     state: &SharedState,
     read_set: &[ReadSetEntry],
+    written_collections: &std::collections::HashSet<String>,
 ) -> crate::Result<bool> {
-    // The earliest read version per home is the one that must still hold.
-    let mut homes: BTreeMap<Home, Lsn> = BTreeMap::new();
+    // The earliest read version per probe is the one that must still hold.
+    let mut homes: BTreeMap<Home, WriteVersion> = BTreeMap::new();
     for entry in read_set {
-        let Some(vshard) = entry.home else {
+        if !entry.origin.survives_own_write_exclusion()
+            && written_collections.contains(&entry.collection)
+        {
+            continue;
+        }
+        let Some(vshard) = entry.validation_vshard() else {
             continue;
         };
         let home = Home {
@@ -136,10 +146,9 @@ async fn homed_reads_changed(
                 vshard: vshard.as_u32(),
                 collection: (!entry.collection.is_empty()).then(|| entry.collection.clone()),
             },
-            served_by: entry.home_node,
         };
-        let version = homes.entry(home).or_insert(entry.read_version_lsn);
-        *version = (*version).min(entry.read_version_lsn);
+        let version = homes.entry(home).or_insert(entry.read_version);
+        *version = (*version).min(entry.read_version);
     }
     if homes.is_empty() {
         return Ok(false);
@@ -183,10 +192,6 @@ async fn homed_reads_changed(
             }
         });
         for (target, asked, answers) in futures::future::try_join_all(checks).await? {
-            let answered_by = match target.leader {
-                Leader::Local => state.node_id,
-                Leader::Remote(node_id) => node_id,
-            };
             let by_probe: BTreeMap<HomeVersionProbe, HomeAnswer> = answers
                 .into_iter()
                 .map(|answer| (answer.probe, answer.answer))
@@ -195,19 +200,13 @@ async fn homed_reads_changed(
                 let read_version = *homes
                     .get(&home)
                     .ok_or_else(|| unasked_home(target, &home))?;
-                let answer = *by_probe
+                let answer = by_probe
                     .get(&home.probe)
+                    .copied()
                     .ok_or_else(|| unasked_home(target, &home))?;
                 match answer {
-                    // Versions are the answering node's WAL positions. Only the
-                    // node that served the read numbers them in the read's own
-                    // domain, so an answer from any other node counts as a
-                    // change.
-                    HomeAnswer::Version(_) if answered_by != home.served_by => {
-                        return Ok(true);
-                    }
                     HomeAnswer::Version(version) => {
-                        if Lsn::new(version) > read_version {
+                        if version > read_version {
                             return Ok(true);
                         }
                     }
@@ -236,7 +235,7 @@ async fn homed_reads_changed(
         return Ok(false);
     }
     Err(last_refusal.unwrap_or_else(|| crate::Error::Internal {
-        detail: "homed read check: a home stayed unanswered; retry the commit".into(),
+        detail: "read check: a vShard stayed unanswered; retry the commit".into(),
     }))
 }
 
@@ -253,7 +252,7 @@ fn leader_of(state: &SharedState, vshard: VShardId) -> crate::Result<Leader> {
         }),
         RouteDecision::Broadcast { .. } => Err(crate::Error::Internal {
             detail: format!(
-                "homed read check: vShard {} resolved to a broadcast route",
+                "read check: vShard {} resolved to a broadcast route",
                 vshard.as_u32()
             ),
         }),
@@ -310,14 +309,14 @@ async fn current_versions(
     for payload in payloads {
         let decoded: Vec<HomeVersion> =
             zerompk::from_msgpack(&payload).map_err(|e| crate::Error::Internal {
-                detail: format!("homed read check: a leader's answer does not decode: {e}"),
+                detail: format!("read check: a leader's answer does not decode: {e}"),
             })?;
         answers.extend(decoded);
     }
     if answers.len() != asked {
         return Err(crate::Error::Internal {
             detail: format!(
-                "homed read check: {:?} answered {} of {asked} homes; retry the commit",
+                "read check: {:?} answered {} of {asked} vShards; retry the commit",
                 target.leader,
                 answers.len()
             ),
@@ -329,7 +328,7 @@ async fn current_versions(
 fn unasked_home(target: CheckTarget, home: &Home) -> crate::Error {
     crate::Error::Internal {
         detail: format!(
-            "homed read check: {:?} gave no answer for vShard {} ({:?}); retry the commit",
+            "read check: {:?} gave no answer for vShard {} ({:?}); retry the commit",
             target.leader, home.probe.vshard, home.probe.collection
         ),
     }

@@ -40,7 +40,7 @@ impl CoreLoop {
     /// applied before the export and replayed again after it duplicates the
     /// row. Every columnar record that mutates an engine therefore notes its
     /// LSN after applying: `execute_columnar_insert`, `execute_columnar_update`
-    /// and `execute_columnar_delete` call `note_collection_write_lsn`, which
+    /// and `execute_columnar_delete` call `note_collection_write`, which
     /// records the LSN as applied.
     ///
     /// A record whose live execution affected ZERO rows notes no LSN and so

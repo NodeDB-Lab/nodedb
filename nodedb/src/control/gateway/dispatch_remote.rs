@@ -106,10 +106,10 @@ pub(super) async fn dispatch_remote(
                 payloads: vec![resp.payload.to_vec()],
                 shard_watermarks,
                 // Coordinator-gathered at the exchange root: the gather folded
-                // the per-collection read-version across the responding shards
-                // and stamped it on this response, so carry it through. This
-                // route did not observe a version of its own to report.
-                read_version_lsn: resp.read_version_lsn,
+                // the read versions across the responding shards and stamped
+                // them on this response, so carry them through. This route did
+                // not observe a version of its own to report.
+                read_versions: resp.read_versions,
                 not_found: false,
             });
         }
@@ -122,13 +122,13 @@ pub(super) async fn dispatch_remote(
             return Ok(DispatchOutcome {
                 payloads: vec![merged],
                 shard_watermarks: vec![(VShardId::new(vshard_id as u32), lsn)],
-                // A materialized stream reports no per-collection read-version:
-                // its frames carry per-batch watermarks only. `ZERO` is honest
-                // here rather than lossy — the streaming branch is gated on
+                // A materialized stream reports no read versions: its frames
+                // carry per-batch watermarks only. Empty is honest here rather
+                // than lossy: the streaming branch is gated on
                 // `txn_id.is_none()` (`resolve/exchange.rs`), so a stream never
                 // serves an in-transaction read and no read-set entry consumes
                 // this value.
-                read_version_lsn: Lsn::ZERO,
+                read_versions: crate::types::ReadVersions::new(),
                 not_found: false,
             });
         }
@@ -181,23 +181,29 @@ pub(super) async fn dispatch_remote(
 
     match resp_rpc {
         RaftRpc::ExecuteResponse(resp) => {
-            if let Some(err) = resp.error {
-                Err(map_typed_cluster_error(err, vshard_id))
-            } else {
-                // Key the remote's read watermark to the collection's owning
-                // vShard this route routed to (mirroring `dispatch_local`), NOT
-                // the `vshard_id % COUNT` retry hint — the read-set validator
-                // expects the true owning vShard as the entry key.
-                Ok(DispatchOutcome {
-                    shard_watermarks: vec![(
-                        VShardId::new(vshard_id as u32),
-                        Lsn::new(resp.watermark_lsn),
-                    )],
-                    payloads: resp.payloads,
-                    read_version_lsn: Lsn::new(resp.read_version_lsn),
-                    not_found: false,
-                })
-            }
+            // A read that found no row reads back like a local miss: an
+            // empty answer that keeps the `NotFound` verdict and the versions
+            // the read observed. Every other error crosses as its typed error.
+            let not_found = match resp.error {
+                None => false,
+                Some(err) => match map_typed_cluster_error(err, vshard_id) {
+                    Error::DataPlane(crate::bridge::envelope::ErrorCode::NotFound) => true,
+                    error => return Err(error),
+                },
+            };
+            // Key the remote's read watermark to the collection's owning
+            // vShard this route routed to (mirroring `dispatch_local`), NOT
+            // the `vshard_id % COUNT` retry hint — the read-set validator
+            // expects the true owning vShard as the entry key.
+            Ok(DispatchOutcome {
+                shard_watermarks: vec![(
+                    VShardId::new(vshard_id as u32),
+                    Lsn::new(resp.watermark_lsn),
+                )],
+                payloads: resp.payloads,
+                read_versions: crate::types::ReadVersions::from_wire(&resp.read_versions),
+                not_found,
+            })
         }
         other => Err(Error::Internal {
             detail: format!("gateway: unexpected RPC response variant: {other:?}"),
@@ -272,7 +278,7 @@ pub(super) async fn dispatch_remote_stream(
             let batch = RowBatch {
                 payload: resp.payload.to_vec(),
                 watermark_lsn: resp.watermark_lsn,
-                read_version_lsn: resp.read_version_lsn,
+                read_versions: resp.read_versions,
             };
             return Ok(Box::pin(futures::stream::once(async move { Ok(batch) })));
         }
@@ -336,8 +342,8 @@ pub(super) async fn dispatch_remote_stream(
             payload,
             watermark_lsn: Lsn::new(lsn),
             // The `ExecuteStream` wire chunk carries only the watermark; no
-            // per-collection read version is threaded on this remote path.
-            read_version_lsn: Lsn::ZERO,
+            // read version is threaded on this remote path.
+            read_versions: crate::types::ReadVersions::new(),
         },
         Some(Err(e)) => return Err(map_stream_cluster_error(e, vshard_id)),
         // Clean EOF with zero rows: a valid empty result. Return an empty stream.
@@ -351,7 +357,7 @@ pub(super) async fn dispatch_remote_stream(
         Ok((payload, lsn)) => Ok(RowBatch {
             payload,
             watermark_lsn: Lsn::new(lsn),
-            read_version_lsn: Lsn::ZERO,
+            read_versions: crate::types::ReadVersions::new(),
         }),
         Err(e) => Err(Error::Dispatch {
             detail: format!("remote stream terminal error: {e}"),

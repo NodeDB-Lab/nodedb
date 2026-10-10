@@ -15,13 +15,13 @@
 //!
 //! Cases bounding the fixed behavior:
 //!  * `commits_when_neither_side_concurrently_written` — clean commit MUST SUCCEED
-//!    (captures carry the sound `coll_write_lsn`, not an over-aborting watermark).
+//!    (captures carry the sound collection write version, not an over-aborting watermark).
 //!  * `occ_aborts_on_stale_probe_read` — a stale LEFT/probe read MUST abort.
 //!  * `occ_aborts_on_stale_build_read` — a stale RIGHT/build read (pgwire rival)
 //!    MUST abort: the native build-side capture hole is closed on the Gather path.
 //!  * `occ_aborts_on_native_writer_stale_read` — the build-side rival is a NATIVE
 //!    autocommit INSERT. Pre-fix the gateway leader-local autocommit path never
-//!    proposed a Raft entry nor bumped `coll_write_lsn`, so the read never went
+//!    proposed a Raft entry nor bumped the collection write version, so the read never went
 //!    stale and COMMIT silently succeeded; routing native writes through Raft
 //!    closes that lost-update cell.
 //!
@@ -177,7 +177,7 @@ async fn spawn_node_with_collections() -> (
     .await;
 
     // Seed left and right with three matching join keys so the join returns real
-    // rows AND each side's committed `coll_write_lsn` is non-zero (gives the
+    // rows AND each side's committed write version is non-zero (gives the
     // stale-read cases a real baseline version to advance past, and the
     // commits-clean case a non-zero version that must still validate).
     node.client
@@ -300,7 +300,7 @@ async fn concurrent_write_and_confirm(node: &TestClusterNode, coll: &str) {
 
 /// NATIVE concurrent writer: the rival autocommit INSERT rides a SEPARATE native
 /// client, exercising the gateway leader-local autocommit-write path that must now
-/// PROPOSE through Raft and bump `coll_write_lsn`. Confirmed visible before COMMIT.
+/// PROPOSE through Raft and bump the collection write version. Confirmed visible before COMMIT.
 async fn native_concurrent_write_and_confirm(node: &TestClusterNode, coll: &str) {
     let writer = pinned_native_client(node);
     writer
@@ -314,7 +314,7 @@ async fn native_concurrent_write_and_confirm(node: &TestClusterNode, coll: &str)
 
 /// Neither join side is concurrently written, so both recorded real read versions
 /// still validate at the barrier and COMMIT must SUCCEED. Proves the captured
-/// read-versions are the sound per-collection `coll_write_lsn` — an inflated
+/// read-versions are the sound per-collection write versions — an inflated
 /// global watermark would over-abort this clean commit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_gather_join_commits_when_neither_side_concurrently_written() {
@@ -464,7 +464,7 @@ async fn native_gather_join_occ_aborts_on_stale_build_read() {
 /// rival autocommit INSERT rides a SEPARATE native client, driving the gateway's
 /// leader-local autocommit-write path. Pre-fix that path applied the row via a
 /// leader-local SPSC dispatch that never proposed a Raft entry nor bumped the build
-/// collection's `coll_write_lsn`, so the captured build version never went stale
+/// collection's write version, so the captured build version never went stale
 /// and the COMMIT SILENTLY succeeded (undetected lost-update). Routing native
 /// autocommit writes through Raft advances the build side, so COMMIT must abort.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

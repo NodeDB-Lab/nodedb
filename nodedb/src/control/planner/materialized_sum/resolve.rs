@@ -143,8 +143,7 @@ pub async fn resolve_materialized_sum_targets(
                         source_collection: collection,
                         images: &images.images,
                         source_row: Some(scope.surrogate),
-                        read_version_lsn: images.read_version_lsn,
-                        served_by: images.served_by,
+                        read_version: images.read_version,
                     };
                     let settlement = settle_cross_shard_images(
                         &bindings,

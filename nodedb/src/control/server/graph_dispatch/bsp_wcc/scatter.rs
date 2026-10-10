@@ -28,8 +28,8 @@ use nodedb_physical::physical_plan::{GraphOp, WccSuperstepPlan, WccSuperstepResu
 pub(super) struct ShardWccResult {
     pub(super) node_id: u64,
     pub(super) result: WccSuperstepResult,
-    /// The highest watermark the node's cores served the round at.
-    pub(super) watermark_lsn: crate::types::Lsn,
+    /// The versions the node's cores reported for the round.
+    pub(super) read_versions: crate::types::ReadVersions,
 }
 
 /// The inputs of one WCC round.
@@ -100,7 +100,7 @@ pub(super) async fn scatter_wcc_round(
             Ok::<ShardWccResult, crate::Error>(ShardWccResult {
                 node_id,
                 result,
-                watermark_lsn: read.watermark_lsn,
+                read_versions: read.read_versions,
             })
         })
     });

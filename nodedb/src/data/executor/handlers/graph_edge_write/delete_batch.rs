@@ -144,7 +144,7 @@ impl CoreLoop {
                 .mark_dirty("sparse", edges.len());
         }
         for edge in edges {
-            self.note_edge_write_lsn(
+            self.note_edge_write(
                 task,
                 tid,
                 edge.collection.as_str(),

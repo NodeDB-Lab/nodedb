@@ -112,7 +112,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: None,
             stage_vote,
-            read_version_lsn: Lsn::ZERO,
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         }
     }

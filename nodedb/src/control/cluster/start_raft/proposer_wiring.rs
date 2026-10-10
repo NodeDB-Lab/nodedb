@@ -291,16 +291,9 @@ fn install_async_proposer(
                             e
                         }
                     })
-                    // Carry out the write-version the APPLY side stamped, not
-                    // `log_index`. The tracker resolves on the node that applied
-                    // the entry locally, so `write_version` is this replica's own
-                    // post-write `coll_write_lsn` — a WAL LSN, the same domain
-                    // every other feed of that map records in, and the only
-                    // domain the shard-local OCC read validator compares in. The
-                    // raft log index is a per-group counter on a different scale
-                    // entirely; publishing it here made reads validate a WAL LSN
-                    // against a log index.
-                    .map(|applied| (applied.payload, applied.write_version));
+                    // Carry out the versions the apply side stamped: the
+                    // entry's log position on every vShard the write touched.
+                    .map(|applied| (applied.payload, applied.write_versions));
                     let applied = applied?;
                     // A write to a vShard homing a permission-tree source is
                     // acknowledged only once every lease holder covers it, or its

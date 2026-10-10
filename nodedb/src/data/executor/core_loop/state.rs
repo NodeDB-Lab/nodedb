@@ -478,8 +478,8 @@ pub struct CoreLoop {
     pub(in crate::data::executor) ts_resolve_holds:
         HashMap<(DatabaseId, TenantId, String), std::collections::HashSet<crate::types::TxnId>>,
 
-    /// Per-core last-write-LSN version index (per key + per collection),
-    /// advanced by every committed write-apply. Type + GC in `write_index.rs`.
+    /// Per-core write-version index (per key + per collection, per vShard),
+    /// advanced by every committed write-apply. Type + GC in `write_index/`.
     pub(in crate::data::executor) write_index: super::write_index::WriteVersionIndex,
 
     /// The version keys the current record's apply forces.

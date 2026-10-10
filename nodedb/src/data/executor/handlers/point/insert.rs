@@ -298,7 +298,7 @@ impl CoreLoop {
 
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
-        self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
+        self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
 
         // The exact bytes storage now holds, taken before the index tuples are
         // consumed below. A `RETURNING` projection reads these rather than
@@ -308,7 +308,7 @@ impl CoreLoop {
 
         // Record the touched secondary-index values into the per-index
         // write-value substrate (added ∪ removed ∪ bitemporal tuples).
-        if let Some(lsn) = task.wal_lsn() {
+        if let Some(stamp) = self.task_write_stamp(task) {
             let mut tuples = outcome.secondary_index_added;
             tuples.extend(outcome.secondary_index_removed);
             tuples.extend(outcome.bitemporal_index_tuples);
@@ -317,7 +317,7 @@ impl CoreLoop {
                 crate::types::TenantId::new(tid),
                 collection,
                 &tuples,
-                lsn,
+                stamp,
             );
         }
 

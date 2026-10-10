@@ -15,7 +15,6 @@ use crate::control::wal_replication::encode::{
     RedoEntryTarget, RedoProposal, session_redo_proposal,
 };
 use crate::control::wal_replication::propose_replicated_entry;
-use crate::types::Lsn;
 use crate::wal::RedoStreamId;
 
 use super::abandon::propose_abandon;
@@ -30,7 +29,7 @@ pub(crate) async fn propose_transaction_redo(
     target: RedoTarget,
     payload: &TransactionRedoPayload,
     deadline: tokio::time::Instant,
-) -> crate::Result<(Vec<u8>, Lsn)> {
+) -> crate::Result<crate::control::wal_replication::AppliedOutput> {
     let proposer = state.async_raft_proposer()?;
     let entry_target = RedoEntryTarget {
         tenant_id: target.tenant_id,

@@ -300,9 +300,9 @@ impl NativeSession {
             // Crash-injection coverage verifies that a panic after a request
             // mutates transaction state still runs detached connection cleanup.
             crate::fail_point!("native_session::after_request");
-            // Cross-shard graph reads the request made join the transaction's
+            // Cross-shard reads the request made join the transaction's
             // read-set.
-            crate::control::server::shared::session::graph_reads::record_pending(
+            crate::control::server::shared::session::pending_shard_reads::record_pending(
                 &self.sessions,
                 self.peer_addr.into(),
             );

@@ -129,7 +129,7 @@ async fn run(state: &SharedState, scope: RagScope, plan: &PhysicalPlan) -> crate
     )
     .await?
     else {
-        reads.publish(state, tenant_id, database_id, Some(qualified));
+        reads.publish(tenant_id, database_id, Some(qualified));
         return Ok(not_found_response());
     };
     let legs = exported.legs;
@@ -270,7 +270,7 @@ async fn run(state: &SharedState, scope: RagScope, plan: &PhysicalPlan) -> crate
         detail: format!("{op_name} encode: {e}"),
     })?;
     // Every vShard the fusion read joins the transaction read-set.
-    reads.publish(state, tenant_id, database_id, Some(qualified));
+    reads.publish(tenant_id, database_id, Some(qualified));
     Ok(ok_payload_response(Payload::from_vec(payload)))
 }
 

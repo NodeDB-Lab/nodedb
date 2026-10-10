@@ -181,11 +181,11 @@ impl CoreLoop {
         // collection, but only when a row was actually removed — a delete that
         // matched nothing changes no state and creates no OCC conflict.
         if prior.is_some() {
-            self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
+            self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
 
             // Record the removed secondary-index values into the per-index
             // write-value substrate (plain cascade ∪ bitemporal tombstones).
-            if let Some(lsn) = task.wal_lsn() {
+            if let Some(stamp) = self.task_write_stamp(task) {
                 let mut tuples = outcome.secondary_index_tuples;
                 tuples.extend(outcome.bitemporal_index_tuples);
                 self.note_index_write_values(
@@ -193,7 +193,7 @@ impl CoreLoop {
                     crate::types::TenantId::new(tid),
                     collection,
                     &tuples,
-                    lsn,
+                    stamp,
                 );
             }
         }

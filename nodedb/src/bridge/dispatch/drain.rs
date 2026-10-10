@@ -169,7 +169,7 @@ impl Dispatcher {
                         ),
                     })),
                     stage_vote: None,
-                    read_version_lsn: Lsn::ZERO,
+                    read_versions: crate::types::ReadVersions::new(),
                     write_set: Vec::new(),
                 });
             }

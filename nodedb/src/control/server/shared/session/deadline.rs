@@ -57,8 +57,7 @@ impl Drop for StatementScope {
     }
 }
 
-/// Pin the deadline for the statement about to run, and start the
-/// statement's served-read notes empty.
+/// Pin the deadline for the statement about to run.
 ///
 /// The instant is fixed ONCE here, so every request the statement fans out into
 /// shares it and the statement is bounded end to end rather than per hop.
@@ -67,8 +66,6 @@ impl Drop for StatementScope {
 /// store is a no-op and every envelope site falls back to the node default, so
 /// installing the guard is always safe.
 pub fn enter(statement_timeout: Option<Duration>, default_deadline_secs: u64) -> StatementScope {
-    // A statement starts with no reads served (`served_reads`).
-    super::served_reads::clear();
     let previous = current();
     store(Some(
         Instant::now() + statement_budget(statement_timeout, default_deadline_secs),

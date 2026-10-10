@@ -123,7 +123,7 @@ pub(super) async fn dispatch_single_task(
                 watermark_lsn: Lsn::new(0),
                 error_code: None,
                 stage_vote: None,
-                read_version_lsn: crate::types::Lsn::ZERO,
+                read_versions: crate::types::ReadVersions::new(),
                 write_set: Vec::new(),
             };
             return data_plane_response_to_native(ctx, seq, &plan_for_staged_response, &synthetic);
@@ -178,7 +178,7 @@ pub(super) async fn dispatch_single_task(
     }
 
     let plan_for_response = task.plan.clone();
-    let task_vshard = task.vshard_id;
+    let task_database_id = task.database_id;
     match dispatch_authorized_single_task(
         ctx,
         task.tenant_id,
@@ -189,6 +189,15 @@ pub(super) async fn dispatch_single_task(
     .await
     {
         Ok(resp) => {
+            // A committed write floors the session's later reads at the
+            // versions it stamped, as on every other protocol.
+            ctx.sessions.note_own_write_response(
+                ctx.peer_addr,
+                task_database_id,
+                ctx.tenant_id(),
+                &plan_for_response,
+                &resp,
+            );
             // Track direct-op reads, including NotFound phantom observations,
             // identically to native SQL and pgwire conflict detection.
             let records_read = resp.status == Status::Ok
@@ -205,11 +214,9 @@ pub(super) async fn dispatch_single_task(
                     ctx.tenant_id(),
                     crate::control::server::shared::session::ResponseReads {
                         plan: &plan_for_response,
-                        watermarks: &[(task_vshard, resp.watermark_lsn)],
-                        read_version_lsn: resp.read_version_lsn,
+                        read_versions: &resp.read_versions,
                         found: resp.status == Status::Ok,
                         distributed_reads: &[],
-                        read_lsn_vshard: task_vshard,
                     },
                 )
                 .await;

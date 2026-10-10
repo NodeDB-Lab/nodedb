@@ -121,7 +121,7 @@ pub async fn broadcast_to_all_cores_txn(
         watermark_lsn: outcome.watermark_lsn,
         error_code: None,
         stage_vote: None,
-        read_version_lsn: crate::types::Lsn::ZERO,
+        read_versions: outcome.read_versions,
         write_set: Vec::new(),
     })
 }
@@ -192,6 +192,7 @@ pub(crate) async fn broadcast_count_to_all_cores_until(
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission,
         };
 
@@ -273,7 +274,7 @@ pub(crate) async fn broadcast_count_to_all_cores_until(
         watermark_lsn: max_lsn,
         error_code: None,
         stage_vote: None,
-        read_version_lsn: crate::types::Lsn::ZERO,
+        read_versions: crate::types::ReadVersions::new(),
         write_set: Vec::new(),
     })
 }
@@ -323,6 +324,7 @@ pub async fn broadcast_register_to_all_cores(
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission,
         };
 

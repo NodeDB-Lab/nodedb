@@ -71,6 +71,10 @@ pub(super) async fn run_dispatch_loop(
         output_schema,
         database_id,
         sequences: &sequences,
+        client_session: Some(DmlTxnCtx {
+            sessions: ctx.sessions,
+            session_id: ctx.peer_addr.into(),
+        }),
     };
     let result = statement_exec::run_statement_loop(
         &exec,
@@ -107,6 +111,10 @@ pub(super) async fn run_implicit_statement(
         output_schema,
         database_id,
         sequences: &sequences,
+        client_session: Some(DmlTxnCtx {
+            sessions: ctx.sessions,
+            session_id: ctx.peer_addr.into(),
+        }),
     };
     let client = DmlTxnCtx {
         sessions: ctx.sessions,

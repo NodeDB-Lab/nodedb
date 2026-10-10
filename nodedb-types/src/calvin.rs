@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{KeyRepr, Lsn};
+use crate::{KeyRepr, WriteVersion};
 
 /// A newtype over `Vec<T>` that guarantees sorted, deduplicated contents.
 ///
@@ -299,13 +299,13 @@ pub enum ReadKeyIdent {
     },
 }
 
-/// One LSN-versioned, predicate-aware read observed by a transaction, carried
-/// on the replicated Calvin `TxClass` so participants can validate it at the
+/// One versioned, predicate-aware read observed by a transaction, carried on
+/// the replicated Calvin `TxClass` so participants can validate it at the
 /// commit serialization point.
 ///
-/// `read_lsn` is the responding shard's write-LSN watermark at read time. The
-/// enclosing `TxClass` scopes the tenant; per-database scoping is carried by
-/// the transaction as a whole.
+/// `read_version` is a data-group log position, so any replica of the read's
+/// vShard validates it. The enclosing `TxClass` scopes the tenant;
+/// per-database scoping is carried by the transaction as a whole.
 #[derive(
     Debug,
     Clone,
@@ -323,21 +323,17 @@ pub struct VersionedReadEntry {
     pub collection: String,
     /// Point-key or collection-scoped-predicate identity of the observation.
     pub key: ReadKeyIdent,
-    /// The responding shard's write-LSN watermark at read time.
-    pub read_lsn: Lsn,
+    /// The version of what the read observed on its home vShard.
+    pub read_version: WriteVersion,
     /// The vShard whose write versions validate this read. `None` homes the
     /// read to its collection's vShard. A graph read names the key vShard it
     /// read edges on, because edges live on their endpoints' vShards. A homed
     /// read with an empty `collection` observed every collection there, so it
-    /// validates against the shard's core watermark.
+    /// validates against the vShard's latest version.
     pub home_vshard: Option<u32>,
-    /// The node that served the read. `read_lsn` is a position in that node's
-    /// WAL, so a participant on any other node treats the read as changed.
-    /// `0` when no one node is known to have served it.
-    pub served_by: u64,
 }
 
-/// The LSN-versioned read-set of a Calvin transaction.
+/// The versioned read-set of a Calvin transaction.
 ///
 /// Empty for pure-write transactions and for autocommit statements (which
 /// accumulate no session read-set). Populated at commit time from the neutral

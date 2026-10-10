@@ -193,7 +193,8 @@ pub(super) fn merge_core_snapshots(
     Ok(NodeLevelResult {
         payload,
         watermark_lsn,
-        read_version_lsn: Lsn::ZERO,
+        read_versions: crate::types::ReadVersions::new(),
+        not_found: false,
     })
 }
 

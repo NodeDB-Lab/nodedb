@@ -82,7 +82,7 @@ pub(super) async fn answer_capture_plan(
         crate::control::backup::cut_capture::collect::cut_and_reply(state, watermark, request)
             .await;
     Some(match answer {
-        Ok(payload) => ExecuteResponse::ok(vec![payload], 0, 0),
+        Ok(payload) => ExecuteResponse::ok(vec![payload], 0, Vec::new()),
         Err(error) => ExecuteResponse::err(execution_error_to_typed(error)),
     })
 }

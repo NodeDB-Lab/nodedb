@@ -90,6 +90,7 @@ pub async fn execute_sql(
         output_schema: Some(&output_schema),
         database_id,
         sequences: &sequences,
+        client_session: None,
     };
     let routed = {
         let _request = shared.tenant_request_guard(tenant_id);

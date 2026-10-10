@@ -85,7 +85,7 @@ pub async fn read_on_vshard(
                 txn_id,
             )
             .await?;
-            reads.note([vshard_id], response.watermark_lsn, state.node_id);
+            reads.note([vshard_id], &response.read_versions);
             response.payload
         }
         RouteDecision::Remote {
@@ -113,7 +113,7 @@ pub async fn read_on_vshard(
                 linearizable,
             })
             .await?;
-            reads.note_leg([vshard_id], &outcome.shard_watermarks, node_id);
+            reads.note([vshard_id], &outcome.read_versions);
             let payloads = outcome.payloads;
             Payload::from_vec(match payloads.len() {
                 1 => payloads.into_iter().next().unwrap_or_default(),
@@ -135,7 +135,7 @@ pub async fn read_on_vshard(
         }
     };
     // The node's key vShard joins the transaction read-set.
-    reads.publish(state, tenant_id, database_id, collection);
+    reads.publish(tenant_id, database_id, collection);
     Ok(payload)
 }
 

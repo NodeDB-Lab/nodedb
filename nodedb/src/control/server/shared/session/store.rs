@@ -303,7 +303,6 @@ impl SessionStore {
             session.tx_lease_scopes.clear();
             session.tx_body_tasks.clear();
             session.tx_ts_preview_rejected.clear();
-            session.tx_snapshot_lsn = None;
             session.tx_snapshot_epoch = None;
             session.tx_id = None;
             session.tx_vshards.clear();
@@ -412,13 +411,12 @@ mod tests {
         use std::sync::Arc;
 
         use crate::control::lease::QueryLeaseScope;
-        use crate::types::Lsn;
 
         let store = SessionStore::new();
         let addr: std::net::SocketAddr = "127.0.0.1:6011".parse().expect("address");
         store.ensure_session(addr);
         let scope = Arc::new(QueryLeaseScope::empty());
-        store.begin(addr, Lsn::new(1), 0).expect("begin");
+        store.begin(addr, 0).expect("begin");
         assert!(store.buffer_write(addr, task()));
         assert!(store.attach_tx_lease_scope_since(addr, 0, Arc::clone(&scope)));
         store.rollback(addr).expect("rollback");
@@ -428,7 +426,7 @@ mod tests {
             assert_eq!(session.tx_buffer.len(), session.tx_lease_scopes.len());
         });
 
-        store.begin(addr, Lsn::new(2), 0).expect("begin");
+        store.begin(addr, 0).expect("begin");
         assert!(store.buffer_write(addr, task()));
         assert!(store.attach_tx_lease_scope_since(addr, 0, scope));
         store.reset_for_database_switch(addr, DatabaseId::new(2));

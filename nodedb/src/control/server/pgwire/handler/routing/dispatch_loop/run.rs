@@ -253,7 +253,6 @@ impl NodeDbPgHandler {
             let tag_role = statement_tag.role_of(&task.plan);
             let resp_post_set_op = task.post_set_op;
             let task_database_id = task.database_id;
-            let task_vshard = task.vshard_id;
             let plan_for_response = task.plan.clone();
             // Extracted from the clone above, before dispatch — metering
             // needs the collection/engine shape after this task's dispatch
@@ -348,8 +347,8 @@ impl NodeDbPgHandler {
             let user_id: Option<std::sync::Arc<str>> =
                 Some(std::sync::Arc::from(identity.username.as_str()));
             let linearizable = strong_reads && !plan_is_write(&task.plan);
-            let (resp, shard_watermarks, distributed_reads) = self
-                .dispatch_authorized_task_with_watermarks(task, user_id, identity, linearizable)
+            let (resp, distributed_reads) = self
+                .dispatch_authorized_task_with_captures(task, user_id, identity, linearizable)
                 .await
                 .map_err(|e| {
                     let (severity, code, message) = error_to_sqlstate(&e);
@@ -366,11 +365,9 @@ impl NodeDbPgHandler {
                     client_session: session_id,
                     txn,
                     plan: &plan_for_response,
-                    vshard: task_vshard,
                     database_id: task_database_id,
                 },
                 &resp,
-                shard_watermarks,
                 &distributed_reads,
             )
             .await;
@@ -488,7 +485,7 @@ fn staged_rows_response(rows: Vec<u8>) -> crate::bridge::envelope::Response {
         watermark_lsn: crate::types::Lsn::ZERO,
         error_code: None,
         stage_vote: None,
-        read_version_lsn: crate::types::Lsn::ZERO,
+        read_versions: crate::types::ReadVersions::new(),
         write_set: Vec::new(),
     }
 }

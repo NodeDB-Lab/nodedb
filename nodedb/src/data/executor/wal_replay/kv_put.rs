@@ -119,7 +119,7 @@ impl CoreLoop {
             self.replay_record_unapplied("kv", "put_identity", record_lsn, &e.to_string());
             return Some(0);
         }
-        self.note_replay_write_lsn(
+        self.note_replay_write(
             database_id,
             tenant_id,
             &collection,
@@ -176,7 +176,7 @@ impl CoreLoop {
             },
             expire_at_ms,
         );
-        self.note_replay_write_lsn(
+        self.note_replay_write(
             database_id,
             tenant_id,
             &collection,
@@ -268,7 +268,7 @@ impl CoreLoop {
             return Some(0);
         }
         for (entry_key, _entry_value) in &entries {
-            self.note_replay_write_lsn(
+            self.note_replay_write(
                 database_id,
                 tenant_id,
                 &collection,

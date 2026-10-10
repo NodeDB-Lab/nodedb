@@ -30,7 +30,7 @@ use super::recon::recon_point_row;
 use super::resolve::lookup_join_value;
 use super::resolve_target::ResolvedTargets;
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, Lsn, TenantId, TraceId};
+use crate::types::{DatabaseId, TenantId, TraceId};
 
 /// How a point-shaped write's POST-image is formed.
 ///
@@ -82,10 +82,8 @@ pub(super) struct StoredRowScope<'a> {
 pub(super) struct StoredImages {
     /// One pair per row this write touches — at most one, for a point shape.
     pub images: Vec<(Option<serde_json::Value>, Option<serde_json::Value>)>,
-    /// The source collection's write floor at read time.
-    pub read_version_lsn: Lsn,
-    /// The node that served the read, whose WAL numbers `read_version_lsn`.
-    pub served_by: u64,
+    /// The source collection's version on its vShard at read time.
+    pub read_version: nodedb_types::WriteVersion,
 }
 
 /// The stored row an op rewrites or removes, or `None` for every op that
@@ -225,8 +223,7 @@ pub(super) async fn extend_with_stored_row(
 
     let outcome = StoredImages {
         images: images_of(scope, read.rows.as_ref())?,
-        read_version_lsn: read.read_version_lsn,
-        served_by: read.served_by,
+        read_version: read.read_version,
     };
 
     if read.rows.is_none() {

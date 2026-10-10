@@ -325,28 +325,28 @@ impl ProposeTracker {
 mod tests {
     use super::*;
     use crate::control::distributed_applier::propose_tracker::AppliedWrite;
-    use crate::types::Lsn;
 
     #[test]
     fn propose_tracker_register_and_complete() {
         let tracker = ProposeTracker::new();
         let mut rx = tracker.register(1, 5, 0xdead_beef);
 
-        // Waiter must receive both payload and coll_write_lsn — its only channel
-        // for a version minted on the apply path.
+        // The waiter receives the payload and the versions the apply stamped.
+        let version = nodedb_types::WriteVersion::logged(2, 5);
+        let vshard = crate::types::VShardId::new(3);
         assert!(tracker.complete(
             1,
             5,
             0xdead_beef,
             Ok(AppliedWrite {
                 payload: b"result".to_vec(),
-                write_version: Lsn::new(137),
+                write_versions: crate::types::ReadVersions::single(vshard, version),
             }),
         ));
 
         let result = rx.try_recv().unwrap().unwrap();
         assert_eq!(result.payload, b"result");
-        assert_eq!(result.write_version, Lsn::new(137));
+        assert_eq!(result.write_versions.of(vshard), Some(version));
     }
 
     #[test]

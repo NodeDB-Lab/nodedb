@@ -28,10 +28,6 @@ impl SystemTxnScope {
         sessions.ensure_session(addr);
         let session_id = SessionId::from(addr);
 
-        let snapshot_lsn = {
-            let next = state.wal.next_lsn();
-            crate::types::Lsn::new(next.as_u64().saturating_sub(1))
-        };
         let snapshot_epoch = state
             .calvin
             .last_applied_epoch
@@ -41,7 +37,7 @@ impl SystemTxnScope {
         // around the transaction, and COMMIT applies it with the writes.
         crate::control::server::shared::session::ddl_buffer::activate();
         sessions
-            .begin(session_id, snapshot_lsn, snapshot_epoch)
+            .begin(session_id, snapshot_epoch)
             .map_err(|detail| crate::Error::BadRequest {
                 detail: detail.to_owned(),
             })?;

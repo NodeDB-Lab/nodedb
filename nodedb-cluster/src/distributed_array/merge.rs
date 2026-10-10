@@ -101,6 +101,22 @@ pub fn any_truncated_before_horizon_agg(shard_resps: &[ArrayShardAggResp]) -> bo
     shard_resps.iter().any(|r| r.truncated_before_horizon)
 }
 
+/// The write versions every shard leg observed, one per vShard. Each leg
+/// reads its own vShard, so every leg's version is kept. Two legs that report
+/// one vShard keep the higher version.
+pub fn merge_read_versions<'a>(
+    legs: impl IntoIterator<Item = &'a [nodedb_types::ShardVersion]>,
+) -> Vec<nodedb_types::ShardVersion> {
+    let mut merged: Vec<nodedb_types::ShardVersion> = Vec::new();
+    for shard in legs.into_iter().flatten() {
+        match merged.iter_mut().find(|seen| seen.vshard == shard.vshard) {
+            Some(seen) => seen.version = seen.version.max(shard.version),
+            None => merged.push(*shard),
+        }
+    }
+    merged
+}
+
 /// Merge row batches from multiple shards into one result set.
 ///
 /// Rows are concatenated in shard-arrival order (order-independent for
@@ -232,11 +248,13 @@ mod tests {
             shard_id: 0,
             partials: vec![ArrayAggPartial::from_single(0, 10.0)],
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let resp_b = ArrayShardAggResp {
             shard_id: 1,
             partials: vec![ArrayAggPartial::from_single(0, 20.0)],
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let merged = reduce_agg_partials(&[resp_a, resp_b]);
         assert_eq!(merged.len(), 1);
@@ -253,6 +271,7 @@ mod tests {
                 ArrayAggPartial::from_single(1, 15.0),
             ],
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let merged = reduce_agg_partials(&[resp]);
         assert_eq!(merged.len(), 2);
@@ -277,12 +296,14 @@ mod tests {
             rows_msgpack: vec![vec![1u8], vec![2u8]],
             truncated: false,
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let r1 = ArrayShardSliceResp {
             shard_id: 1,
             rows_msgpack: vec![vec![3u8]],
             truncated: false,
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let rows = merge_slice_rows(&[r0, r1], 0);
         assert_eq!(rows.len(), 3);
@@ -295,6 +316,7 @@ mod tests {
             rows_msgpack: vec![vec![1u8], vec![2u8], vec![3u8], vec![4u8], vec![5u8]],
             truncated: false,
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let rows = merge_slice_rows(&[resp], 3);
         assert_eq!(rows.len(), 3);
@@ -308,11 +330,13 @@ mod tests {
             shard_id: 0,
             partials: vec![ArrayAggPartial::from_single(0, 5.0)],
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let resp_b = ArrayShardAggResp {
             shard_id: 1,
             partials: vec![ArrayAggPartial::from_single(0, 3.0)],
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let merged = reduce_agg_partials(&[resp_a, resp_b]);
         assert_eq!(merged.len(), 1);
@@ -325,11 +349,13 @@ mod tests {
             shard_id: 0,
             partials: vec![ArrayAggPartial::from_single(0, 5.0)],
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let resp_b = ArrayShardAggResp {
             shard_id: 1,
             partials: vec![ArrayAggPartial::from_single(0, 99.0)],
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let merged = reduce_agg_partials(&[resp_a, resp_b]);
         assert_eq!(merged.len(), 1);
@@ -359,6 +385,7 @@ mod tests {
                 ArrayAggPartial::from_single(1, 10.0),
             ],
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let resp_b = ArrayShardAggResp {
             shard_id: 1,
@@ -367,6 +394,7 @@ mod tests {
                 ArrayAggPartial::from_single(2, 30.0),
             ],
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let merged = reduce_agg_partials(&[resp_a, resp_b]);
         assert_eq!(merged.len(), 3);
@@ -385,12 +413,14 @@ mod tests {
             rows_msgpack: vec![],
             truncated: false,
             truncated_before_horizon: true,
+            read_versions: Vec::new(),
         };
         let r1 = ArrayShardSliceResp {
             shard_id: 1,
             rows_msgpack: vec![vec![1u8]],
             truncated: false,
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         assert!(any_truncated_before_horizon_slice(&[r0, r1]));
 
@@ -398,11 +428,13 @@ mod tests {
             shard_id: 0,
             partials: vec![],
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let a1 = ArrayShardAggResp {
             shard_id: 1,
             partials: vec![],
             truncated_before_horizon: true,
+            read_versions: Vec::new(),
         };
         assert!(any_truncated_before_horizon_agg(&[a0, a1]));
 
@@ -410,6 +442,7 @@ mod tests {
             shard_id: 2,
             partials: vec![],
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         assert!(!any_truncated_before_horizon_agg(&[a_none]));
     }
@@ -421,11 +454,13 @@ mod tests {
             shard_id: 0,
             partials: vec![ArrayAggPartial::from_single(0, 7.0)],
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let resp_b = ArrayShardAggResp {
             shard_id: 1,
             partials: vec![ArrayAggPartial::from_single(1, 13.0)],
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let merged = reduce_agg_partials(&[resp_a, resp_b]);
         assert_eq!(merged.len(), 2);
@@ -442,12 +477,14 @@ mod tests {
             rows_msgpack: vec![vec![1u8], vec![2u8]],
             truncated: false,
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let r1 = ArrayShardSliceResp {
             shard_id: 1,
             rows_msgpack: vec![vec![3u8], vec![4u8]],
             truncated: false,
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         // Total 4 rows, limit 3 → first 3.
         let rows = merge_slice_rows(&[r0, r1], 3);
@@ -476,12 +513,14 @@ mod tests {
             rows_msgpack: vec![audit_row(30, 3), audit_row(10, 1)],
             truncated: false,
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let r1 = ArrayShardSliceResp {
             shard_id: 1,
             rows_msgpack: vec![audit_row(20, 2)],
             truncated: false,
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let rows = merge_slice_rows_sorted(&[r0, r1], 0).expect("sorted merge");
         let times: Vec<i64> = rows
@@ -499,12 +538,14 @@ mod tests {
             rows_msgpack: vec![audit_row(50, 5), audit_row(10, 1)],
             truncated: false,
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let r1 = ArrayShardSliceResp {
             shard_id: 1,
             rows_msgpack: vec![audit_row(30, 3), audit_row(20, 2)],
             truncated: false,
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let rows = merge_slice_rows_sorted(&[r0, r1], 2).expect("sorted merge");
         let times: Vec<i64> = rows
@@ -523,6 +564,7 @@ mod tests {
             rows_msgpack: vec![audit_row(10, 1), vec![0xFF, 0xFF, 0xFF]],
             truncated: false,
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         assert!(merge_slice_rows_sorted(&[resp], 0).is_err());
     }
@@ -564,8 +606,30 @@ mod tests {
             rows_msgpack: (0u8..20).map(|i| vec![i]).collect(),
             truncated: false,
             truncated_before_horizon: false,
+            read_versions: Vec::new(),
         };
         let rows = merge_slice_rows(&[resp], 0);
         assert_eq!(rows.len(), 20);
+    }
+
+    fn shard_version(vshard: u32, index: u64) -> nodedb_types::ShardVersion {
+        nodedb_types::ShardVersion {
+            vshard,
+            version: nodedb_types::WriteVersion::logged(1, index),
+        }
+    }
+
+    /// Every leg's version survives the merge, a leg that matched no row
+    /// included. A vShard two legs report keeps the higher version.
+    #[test]
+    fn the_merge_keeps_every_legs_version() {
+        let legs = [
+            vec![shard_version(3, 10)],
+            Vec::new(),
+            vec![shard_version(7, 4)],
+            vec![shard_version(3, 12)],
+        ];
+        let merged = merge_read_versions(legs.iter().map(Vec::as_slice));
+        assert_eq!(merged, vec![shard_version(3, 12), shard_version(7, 4)]);
     }
 }

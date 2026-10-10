@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! A read-write transaction's read is never validated against another node's
-//! WAL.
+//! A read made before a leader change validates at the new leader.
 //!
 //! A transaction reads a row of a collection whose home group leader is `A`,
-//! so `A` serves the read and its version is a position in `A`'s WAL. `A` is
-//! then cut off from both other nodes, they elect `B`, and a write to the read
-//! row commits at `B`. The partition heals. The transaction also writes, so
-//! its COMMIT goes through Calvin, and `B` validates the read. `B`'s versions
-//! do not compare with `A`'s, so the commit must abort with a retryable
-//! serialization error.
+//! so `A` serves the read. Its version is the data-group log position of the
+//! last write to the collection, the same on every replica. `A` is then cut
+//! off from both other nodes, they elect `B`, and a write to the read row
+//! commits at `B` at a later log position. The partition heals. The
+//! transaction also writes, so its COMMIT goes through Calvin, and `B`
+//! validates the read. `B`'s version of the read row is above the read's,
+//! so the commit must abort with a retryable serialization error.
+//!
+//! The control case runs the same leader change with no write to the read
+//! row. Its commit must succeed, so the leader change alone never aborts a
+//! transaction, and the abort above comes from the write.
 
 use std::time::Duration;
 
@@ -55,8 +59,12 @@ fn link(cluster: &TestCluster, a: usize, b: usize, severed: bool) {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
-async fn a_read_served_by_a_deposed_leader_aborts_the_calvin_commit() {
+/// Read the seeded row in a transaction served by the old leader, move the
+/// group's leadership by a partition, write the read row at the new leader
+/// when `conflict` is set, heal, and return the transaction's COMMIT result.
+async fn commit_after_a_leader_change(
+    conflict: bool,
+) -> (TestCluster, nodedb_types::error::NodeDbResult<()>) {
     let cluster = TestCluster::spawn_three().await.expect("3-node cluster");
     for coll in [DOCS, LOG] {
         cluster
@@ -140,34 +148,48 @@ async fn a_read_served_by_a_deposed_leader_aborts_the_calvin_commit() {
         },
     )
     .await;
-    let conflicting = format!("UPDATE {DOCS} SET value = '2' WHERE id = 'a'");
-    wait_for_async(
-        "the conflicting write commits at the new leader",
-        Duration::from_secs(30),
-        Duration::from_millis(200),
-        || async {
-            cluster.nodes[writer]
-                .client
-                .simple_query(&conflicting)
-                .await
-                .is_ok()
-        },
-    )
-    .await;
+    if conflict {
+        let conflicting = format!("UPDATE {DOCS} SET value = '2' WHERE id = 'a'");
+        wait_for_async(
+            "the conflicting write commits at the new leader",
+            Duration::from_secs(30),
+            Duration::from_millis(200),
+            || async {
+                cluster.nodes[writer]
+                    .client
+                    .simple_query(&conflicting)
+                    .await
+                    .is_ok()
+            },
+        )
+        .await;
+    }
     link(&cluster, old, reader, false);
     link(&cluster, old, writer, false);
     cluster
         .wait_for_full_apply_convergence(Duration::from_secs(30))
         .await;
 
-    let err = driver
-        .commit()
-        .await
-        .expect_err("a read the deposed leader served must not validate at the new leader");
+    let committed = driver.commit().await;
+    (cluster, committed)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn a_write_after_the_read_aborts_the_commit_across_a_leader_change() {
+    let (cluster, committed) = commit_after_a_leader_change(true).await;
+    let err = committed
+        .expect_err("a write committed after the read must abort the commit at the new leader");
     assert!(
         err.message().contains(SERIALIZATION_ABORT),
         "expected a retryable serialization abort, got: {err}"
     );
+    cluster.shutdown().await;
+}
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn a_current_read_commits_across_a_leader_change() {
+    let (cluster, committed) = commit_after_a_leader_change(false).await;
+    committed
+        .unwrap_or_else(|e| panic!("a read no write moved commits after the leader change: {e}"));
     cluster.shutdown().await;
 }

@@ -21,9 +21,9 @@ use super::super::outcome::{AbortReason, CommitOutcome, TxnDataPlane};
 use super::super::overlay_drop::drop_txn_overlay;
 use super::super::reservation_release;
 use super::super::store::SessionStore;
-use super::conflict::si_conflict_abort;
-use super::homed_reads::homed_read_abort;
 use super::metering::meter_committed_buffered_writes;
+use super::read_split::SplitReads;
+use super::read_validation::stale_read_abort;
 use super::restart_identity::restart_truncated_identities;
 use super::single_shard::{commit_publishes, dispatch_single_shard};
 
@@ -83,9 +83,10 @@ pub async fn run_commit(
     state: &SharedState,
     dp: &impl TxnDataPlane,
 ) -> CommitOutcome {
-    // A graph read made earlier in the same request as this COMMIT is still
-    // pending in the connection scope. It joins the read-set before validation.
-    super::super::graph_reads::record_pending(sessions, session_id);
+    // A cross-shard read made earlier in the same request as this COMMIT is
+    // still pending in the connection scope. It joins the read-set before
+    // validation.
+    super::super::pending_shard_reads::record_pending(sessions, session_id);
     let read_set = sessions.take_read_set(session_id);
     // The engine side effects this transaction's index DDL deferred. They run
     // once its catalog entries landed, below. An abort before then drops them
@@ -116,7 +117,10 @@ pub async fn run_commit(
     // The interactive-COMMIT read-set widens dispatch classification: a txn that
     // writes shard X but read shard Y participates in {X, Y} and must route
     // through Calvin with Y as a participant. Autocommit has no session read-set.
-    let read_vshards = match read_vshards_of(&read_set) {
+    // A single node checks its homed cross-shard reads itself: they enlist no
+    // Calvin participant (`read_split`).
+    let split_reads = SplitReads::of(state, &read_set);
+    let read_vshards = match read_vshards_of(split_reads.enlisted()) {
         Ok(vshards) => vshards,
         Err(error) => {
             reservation_release::release_and_rollback(state, sessions, session_id).await;
@@ -140,19 +144,12 @@ pub async fn run_commit(
     // anything afterward that can fail in a way compensation will undo.
     if buffered.is_empty() {
         // Read-only interactive transaction: no writes to classify, but it can
-        // still serialization-conflict against concurrent writers. Run the
-        // single-shard SI validation only — classifying an empty buffer will
+        // still serialization-conflict against concurrent writers. Each read
+        // is checked on its vShard's leader. Classifying an empty buffer will
         // misread a lone cross-shard READ as `MultiShard` and wrongly reject it.
         if let Some(outcome) =
-            si_conflict_abort(sessions, session_id, state, &read_set, &written_collections)
+            stale_read_abort(state, sessions, session_id, &read_set, &written_collections).await
         {
-            // Release read reservations (owner still set), then roll back.
-            reservation_release::release_and_rollback(state, sessions, session_id).await;
-            return outcome;
-        }
-        // SI skips homed reads (the vShards a cross-shard graph read observed).
-        // Each is checked on its home vShard instead.
-        if let Some(outcome) = homed_read_abort(state, sessions, session_id, &read_set).await {
             return outcome;
         }
         // No buffered DML for this DDL to race, so finalize it here,
@@ -207,11 +204,17 @@ pub async fn run_commit(
         match classify_dispatch(&buffered, &read_vshards) {
             DispatchClass::MultiShard { .. } => {
                 // Flush the buffered cross-shard batch through Calvin's durable
-                // Vote/Verdict barrier (`run_commit_calvin`), leader-routed. SI is
-                // a single-shard validation and is intentionally NOT run here —
-                // Calvin performs its own cross-shard OCC over `versioned_reads`
-                // and returns a serialization abort (SQLSTATE 40001) on an ABORT
+                // Vote/Verdict barrier (`run_commit_calvin`), leader-routed.
+                // Calvin's participants validate `versioned_reads` themselves
+                // and return a serialization abort (SQLSTATE 40001) on an ABORT
                 // verdict.
+                if let Some(outcome) = split_reads
+                    .stale_here(state, sessions, session_id, &written_collections)
+                    .await
+                {
+                    compensate_finalized_ddl(state, &ddl_compensation).await;
+                    return outcome;
+                }
                 if let Some(reason) = commit_calvin::run_commit_calvin(
                     sessions,
                     session_id,
@@ -219,7 +222,7 @@ pub async fn run_commit(
                     commit_calvin::CalvinCommit {
                         buffered: &buffered,
                         tenant_id,
-                        reads: &read_set,
+                        reads: split_reads.enlisted(),
                         event_source: dp.event_source(),
                         publishes: &publishes,
                         applied_key: dp.applied_key().zip(dp.applied_key_vshard()),
@@ -250,6 +253,13 @@ pub async fn run_commit(
                     // A commit that writes an edge takes it too: every edge
                     // version takes a Calvin ordinal, so it orders against a
                     // TRUNCATE's cut on every replica.
+                    if let Some(outcome) = split_reads
+                        .stale_here(state, sessions, session_id, &written_collections)
+                        .await
+                    {
+                        compensate_finalized_ddl(state, &ddl_compensation).await;
+                        return outcome;
+                    }
                     if let Some(reason) = commit_calvin::run_commit_calvin(
                         sessions,
                         session_id,
@@ -257,7 +267,7 @@ pub async fn run_commit(
                         commit_calvin::CalvinCommit {
                             buffered: &buffered,
                             tenant_id,
-                            reads: &read_set,
+                            reads: split_reads.enlisted(),
                             event_source: dp.event_source(),
                             publishes: &publishes,
                             applied_key: dp.applied_key().zip(dp.applied_key_vshard()),
@@ -272,20 +282,14 @@ pub async fn run_commit(
                         return CommitOutcome::Aborted { reason };
                     }
                 } else {
-                    if let Some(outcome) = si_conflict_abort(
+                    if let Some(outcome) = stale_read_abort(
+                        state,
                         sessions,
                         session_id,
-                        state,
                         &read_set,
                         &written_collections,
-                    ) {
-                        compensate_finalized_ddl(state, &ddl_compensation).await;
-                        reservation_release::release_and_rollback(state, sessions, session_id)
-                            .await;
-                        return outcome;
-                    }
-                    if let Some(outcome) =
-                        homed_read_abort(state, sessions, session_id, &read_set).await
+                    )
+                    .await
                     {
                         compensate_finalized_ddl(state, &ddl_compensation).await;
                         return outcome;

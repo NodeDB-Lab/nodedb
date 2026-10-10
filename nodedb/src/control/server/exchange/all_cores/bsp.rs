@@ -60,7 +60,8 @@ pub(super) async fn fan_bsp_all_cores(
     Ok(NodeLevelResult {
         payload,
         watermark_lsn,
-        read_version_lsn: Lsn::ZERO,
+        read_versions: crate::types::ReadVersions::new(),
+        not_found: false,
     })
 }
 

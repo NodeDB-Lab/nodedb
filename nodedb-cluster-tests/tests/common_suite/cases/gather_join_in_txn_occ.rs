@@ -11,7 +11,7 @@
 //! where the left side is scanned locally, and GATHERS the RIGHT (build)
 //! collection across all vShards (`gather_join_build_side`) to inline it as a
 //! `ProviderScan`. Each of those two gathers observes its own collection's
-//! `coll_write_lsn` at read time.
+//! write version at read time.
 //!
 //! The GATHER path must not have a serializability HOLE where only the plan's
 //! collapsed left collection reaches the read-set (`extract_collection` of an
@@ -28,7 +28,7 @@
 //!  * `commits_when_neither_side_concurrently_written` — neither join side is
 //!    written during the txn, so both recorded real versions still validate and
 //!    COMMIT must SUCCEED (proves the captures carry the sound per-collection
-//!    `coll_write_lsn`, not an inflated global watermark that would over-abort).
+//!    write version, not an inflated global watermark that would over-abort).
 //!  * `occ_aborts_on_stale_probe_read` — a confirmed-visible concurrent write to
 //!    the LEFT/probe collection advances it past the captured probe version, so
 //!    COMMIT must abort with 40001.
@@ -183,7 +183,7 @@ async fn spawn_node_with_collections() -> (
     .await;
 
     // Seed left and right with three matching join keys so the join returns real
-    // rows AND each side's committed `coll_write_lsn` is non-zero (gives the
+    // rows AND each side's committed write version is non-zero (gives the
     // stale-read cases a real baseline version to advance past, and the
     // commits-clean case a non-zero version that must still validate).
     node.client
@@ -267,7 +267,7 @@ async fn begin_join_read_and_buffer_writes(
 
 /// Neither join side is concurrently written, so both recorded real read versions
 /// still validate at the barrier and COMMIT must SUCCEED. Proves the captured
-/// read-versions are the sound per-collection `coll_write_lsn` — an inflated
+/// read-versions are the sound per-collection write versions — an inflated
 /// global watermark would over-abort this clean commit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gather_join_commits_when_neither_side_concurrently_written() {

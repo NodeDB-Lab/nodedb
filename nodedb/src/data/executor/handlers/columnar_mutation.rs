@@ -143,7 +143,7 @@ impl CoreLoop {
         // re-executing it against the identical restored state matches nothing
         // again.
         if affected > 0 {
-            self.note_collection_write_lsn(task, collection);
+            self.note_collection_write(task, collection);
         }
 
         debug!(core = self.core_id, %collection, affected, "columnar update complete");
@@ -250,7 +250,7 @@ impl CoreLoop {
         // it, needlessly holding WAL segments and denying a concurrent
         // transaction the conflict it should see against the rows this removed.
         if affected > 0 {
-            self.note_collection_write_lsn(task, collection);
+            self.note_collection_write(task, collection);
         }
 
         debug!(core = self.core_id, %collection, affected, "columnar delete complete");

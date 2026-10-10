@@ -44,7 +44,7 @@ struct RoundZeroOwners {
 /// Every leg walks every vShard its node leads, so round 0 reads every vShard
 /// of the graph. A MATCH result depends on every one of them: an edge written
 /// to any vShard can add a match. The returned log notes each vShard under the
-/// leg it was dispatched to, at the watermark that leg served, from the same
+/// leg it was dispatched to, at the versions that leg reported, from the same
 /// routing snapshot that picked the legs. Later rounds read vShards round 0
 /// already noted.
 pub(super) async fn scatter_round_zero(
@@ -120,7 +120,7 @@ pub(super) async fn scatter_round_zero(
             })
             .await?;
             let mut log = ShardReadLog::new();
-            log.note_leg(leg_vshards, &outcome.shard_watermarks, node_id);
+            log.note(leg_vshards, &outcome.read_versions);
             Ok::<_, crate::Error>((collect_remote_envelopes(node_id, outcome.payloads)?, log))
         })
     });
@@ -132,7 +132,7 @@ pub(super) async fn scatter_round_zero(
     let mut out: Vec<TaggedShardResult> = Vec::new();
     let mut log = ShardReadLog::new();
     let local_outcome = local_outcome?;
-    log.note(local_vshards, local_outcome.watermark_lsn, state.node_id);
+    log.note(local_vshards, &local_outcome.read_versions);
     out.push(TaggedShardResult {
         emitting_node: state.node_id,
         rows: decode_rows(&local_outcome.rows_payload)?,

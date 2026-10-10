@@ -164,6 +164,7 @@ mod tests {
                     wal_lsn: wal_lsn.map(crate::types::Lsn::new),
                     resolved_now_ms: None,
                     commit_hlc: None,
+                    entry_version: None,
                     admission: crate::bridge::envelope::Admission::Admitted,
                 }))
                 .expect("push request");
@@ -174,7 +175,7 @@ mod tests {
         /// Ingest one ILP line through the real dispatch path, exactly as the
         /// Control Plane does. `wal_lsn` is threaded BOTH on the op (the
         /// record the partition's replay stamp names) and on the request (what
-        /// `note_collection_write_lsn` raises the watermark from).
+        /// `note_collection_write` raises the watermark from).
         fn ingest(&mut self, host: &str, value: f64, ts_ms: i64, wal_lsn: u64) {
             let line = format!("{COLL},host={host} value={value} {}\n", ts_ms * 1_000_000);
             let r = self.send(

@@ -193,16 +193,17 @@ pub struct Response {
     /// Watermark LSN at the time of read (for snapshot consistency tracking).
     pub watermark_lsn: Lsn,
 
-    /// Per-collection read-version LSN (the scanned collection's `coll_write_lsn`
-    /// at read time, a WAL LSN) — the sound comparand for cross-shard OCC read
-    /// validation. Distinct from `watermark_lsn` (core-global max, used for
-    /// snapshot/SI reporting).
+    /// The write versions the read observed, one per vShard: the read
+    /// collection's version on its home vShard, or every vShard's latest
+    /// version a graph read walked. The comparand for cross-shard OCC read
+    /// validation. Distinct from `watermark_lsn` (this core's WAL position).
     ///
     /// On a WRITE response it is the POST-write version of the written
-    /// collection (the handlers record before responding), which is how the Raft
-    /// apply path returns a committed write's own version to its proposer.
-    /// `Lsn::ZERO` when the plan names no single user collection.
-    pub read_version_lsn: Lsn,
+    /// collection on the write's vShard (the handlers record before
+    /// responding), which is how the Raft apply path returns a committed
+    /// write's own version to its proposer. Empty when the plan names no
+    /// user collection.
+    pub read_versions: crate::types::ReadVersions,
 
     /// Error code if status is not Ok.
     pub error_code: Option<Box<ErrorCode>>,
@@ -234,7 +235,7 @@ mod tests {
             watermark_lsn: Lsn::new(42),
             error_code: None,
             stage_vote: None,
-            read_version_lsn: Lsn::ZERO,
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         };
         assert_eq!(resp.status, Status::Ok);
@@ -253,7 +254,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: Some(Box::new(ErrorCode::DeadlineExceeded)),
             stage_vote: None,
-            read_version_lsn: Lsn::ZERO,
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         };
         assert_eq!(

@@ -223,7 +223,7 @@ mod tests {
     use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
     use super::super::super::store::SessionStore;
-    use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
+    use crate::types::{DatabaseId, TenantId, VShardId};
 
     fn ingest_task() -> PhysicalTask {
         PhysicalTask {
@@ -254,7 +254,7 @@ mod tests {
         let store = SessionStore::new();
         let addr: std::net::SocketAddr = "127.0.0.1:5311".parse().expect("addr");
         store.ensure_session(addr);
-        store.begin(addr, Lsn::new(1), 0).expect("begin");
+        store.begin(addr, 0).expect("begin");
 
         assert!(store.buffer_write(addr, ingest_task()));
         store.note_ts_preview_rejected(addr, 0);

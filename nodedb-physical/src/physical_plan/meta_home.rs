@@ -53,9 +53,9 @@ pub struct HomeVersion {
     zerompk::FromMessagePack,
 )]
 pub enum HomeAnswer {
-    /// The collection's write floor on the probe's core, or that core's
-    /// watermark for a probe with no collection.
-    Version(u64),
+    /// The collection's write floor on the probe's vShard, or that vShard's
+    /// latest version for a probe with no collection.
+    Version(nodedb_types::WriteVersion),
     /// The node does not hold the leader lease of the probe's group, so it
     /// cannot answer. `leader_node` is the leader its routing table names at
     /// `leader_term`, `0` when it names none.
@@ -74,7 +74,7 @@ mod tests {
                     vshard: 7,
                     collection: Some("db1.edges".into()),
                 },
-                answer: HomeAnswer::Version(42),
+                answer: HomeAnswer::Version(nodedb_types::WriteVersion::logged(3, 42)),
             },
             HomeVersion {
                 probe: HomeVersionProbe {

@@ -23,13 +23,11 @@ use crate::control::server::shared::clone_write::{
     CloneCheckedOutcome, InterceptAndAuthorizeParams, intercept_and_authorize,
 };
 use crate::control::state::SharedState;
-use crate::types::{Lsn, TraceId, VShardId};
+use crate::types::TraceId;
 
 /// One dispatched task's answer.
 pub(crate) struct DispatchedTask {
     pub(crate) response: Response,
-    /// The watermark of each shard a single-node fan gather read.
-    pub(crate) shard_watermarks: Vec<(VShardId, Lsn)>,
     /// The reads a distributed gather captured.
     pub(crate) distributed_reads: Vec<DistributedReadCapture>,
 }
@@ -38,7 +36,6 @@ impl DispatchedTask {
     fn answered(response: Response) -> Self {
         Self {
             response,
-            shard_watermarks: Vec::new(),
             distributed_reads: Vec::new(),
         }
     }
@@ -168,10 +165,9 @@ pub(crate) async fn dispatch_statement_task(
         linearizable: true,
     };
     match resolve_and_materialize(state, identity, task.plan, scope).await? {
-        Resolved::Gathered(response, shard_watermarks, distributed_reads) => {
+        Resolved::Gathered(response, _watermarks, distributed_reads) => {
             return Ok(DispatchedTask {
                 response,
-                shard_watermarks,
                 distributed_reads,
             });
         }

@@ -153,6 +153,7 @@ pub async fn query(
         output_schema: Some(&output_schema),
         database_id,
         sequences: &sequences,
+        client_session: None,
     };
     let routed = route_http_statement(
         &exec,

@@ -54,13 +54,11 @@ pub(crate) fn stamp_collection_incarnations(
     Ok(())
 }
 
-/// Propose `entry` via `proposer` and return the Data Plane apply payload bytes
-/// together with the write's per-collection version (as an
-/// [`crate::types::Lsn`]): the written collection's `coll_write_lsn` after the
-/// write, stamped by the applying replica from the WAL LSN it minted for the
-/// entry's redo record. `Lsn::ZERO` when the write's plan names no single user
-/// collection. See [`AsyncRaftProposer`] for why this is a WAL LSN and never the
-/// Raft log index.
+/// Propose `entry` via `proposer` and return the Data Plane apply payload
+/// bytes and the versions the write stamped. Each version is the data-group
+/// log position of the entry that applied the write, so it is the same on
+/// every replica. A write whose plan names no single user collection stamps
+/// none.
 ///
 /// An edge write is not proposed. It runs as a Calvin transaction
 /// (`planner::calvin::edge_sequencing`), and its applied payload and read
@@ -85,13 +83,13 @@ pub(crate) async fn propose_replicated_entry(
     proposer: &Arc<AsyncRaftProposer>,
     mut entry: ReplicatedEntry,
     deadline: tokio::time::Instant,
-) -> crate::Result<(Vec<u8>, crate::types::Lsn)> {
+) -> crate::Result<super::types::AppliedOutput> {
     // An edge write runs as a Calvin transaction, never as a data-group
     // entry, so every edge version of a collection takes a Calvin ordinal.
     if let Some(response) =
         crate::control::planner::calvin::sequence_replicated_edge_write(state, &entry).await?
     {
-        return Ok((response.payload.to_vec(), response.read_version_lsn));
+        return Ok((response.payload.to_vec(), response.read_versions));
     }
     // The write's commit instant. Stamped once, before the first propose, so
     // every re-proposal and every replica's apply carries the same value.

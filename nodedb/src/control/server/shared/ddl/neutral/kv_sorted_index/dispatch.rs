@@ -156,7 +156,7 @@ fn verdict_response(code: ErrorCode) -> Response {
         watermark_lsn: crate::types::Lsn::ZERO,
         error_code: Some(Box::new(code)),
         stage_vote: None,
-        read_version_lsn: crate::types::Lsn::ZERO,
+        read_versions: crate::types::ReadVersions::new(),
         write_set: Vec::new(),
     }
 }

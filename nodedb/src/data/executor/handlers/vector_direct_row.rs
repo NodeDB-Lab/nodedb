@@ -282,7 +282,7 @@ impl CoreLoop {
         }
         self.checkpoint_coordinator.mark_dirty("vector", 1);
         for surrogate in surrogates {
-            self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
+            self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
         }
     }
 }

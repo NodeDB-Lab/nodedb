@@ -10,7 +10,7 @@
 //! a `HashJoin`. The coordinator fans PRODUCERs to EACH side's owner: the probe
 //! (left) side scans `left_collection`, the build (right) side scans
 //! `right_collection`. Each producer reports the scanned collection's
-//! `coll_write_lsn` at read time on its `ShuffleProduceResponse`; the coordinator
+//! write version at read time on its `ShuffleProduceResponse`; the coordinator
 //! records ONE read-set entry PER SIDE, each stamped with that side's real
 //! max-folded read version.
 //!
@@ -159,7 +159,7 @@ async fn spawn_node_with_collections() -> (
     .await;
 
     // Seed left and right with three matching join keys so the join returns real
-    // rows AND each side's committed `coll_write_lsn` is non-zero (the exact
+    // rows AND each side's committed write version is non-zero (the exact
     // precondition that made the pre-fix ZERO probe read-version spuriously abort,
     // and gives the stale-read cases a real baseline version to advance past).
     node.client
@@ -239,8 +239,8 @@ async fn begin_join_read_and_buffer_writes(
 /// Neither join side is concurrently written, so both recorded real read versions
 /// still validate at the barrier and COMMIT must SUCCEED. This is the direction
 /// the fix unblocks: before it, the probe (left) side recorded read version `0`
-/// and the barrier's `coll_write_lsn(left) <= 0` check (left has committed writes,
-/// so `coll_write_lsn > 0`) spuriously aborted the COMMIT with 40001.
+/// and the barrier's `write_version(left) <= 0` check (left has committed writes,
+/// so its write version is above zero) spuriously aborted the COMMIT with 40001.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shuffle_join_commits_when_neither_side_concurrently_written() {
     let (node, _data_dir, left, right, w1, w2) = spawn_node_with_collections().await;

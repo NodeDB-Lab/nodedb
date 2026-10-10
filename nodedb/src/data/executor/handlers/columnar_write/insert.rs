@@ -201,7 +201,7 @@ impl CoreLoop {
 
         // Advance the collection floor for this committed columnar write.
         if accepted > 0 {
-            self.note_collection_write_lsn(task, collection);
+            self.note_collection_write(task, collection);
         }
 
         // On the sync path, advance the HWM and return SyncAckResult payload.
@@ -244,7 +244,7 @@ impl CoreLoop {
             watermark_lsn: self.watermark,
             error_code: None,
             stage_vote: None,
-            read_version_lsn: crate::types::Lsn::ZERO,
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         }
     }

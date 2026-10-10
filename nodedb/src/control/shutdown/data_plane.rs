@@ -274,6 +274,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: Admission::Exempt(ExemptReason::Read),
         }
     }
@@ -288,7 +289,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: None,
             stage_vote: None,
-            read_version_lsn: Lsn::ZERO,
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         }
     }

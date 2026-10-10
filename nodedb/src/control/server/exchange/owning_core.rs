@@ -27,7 +27,7 @@ use super::gather::GatherOutcome;
 /// collection's rows.
 ///
 /// The returned outcome carries that core's own `watermark_lsn` /
-/// `read_version_lsn` and exactly one `shard_watermarks` entry keyed to the
+/// `read_versions` and exactly one `shard_watermarks` entry keyed to the
 /// collection's vShard — matching the cluster `dispatch_local` path so an
 /// in-transaction read records the same OCC read-set entry the write-set uses
 /// (writes home to the same `CollectionKey` vShard). Aggregate
@@ -60,7 +60,7 @@ pub async fn gather_single_owning_core(
         raw: payload_bytes.to_vec(),
         merged_array,
         watermark_lsn: resp.watermark_lsn,
-        read_version_lsn: resp.read_version_lsn,
+        read_versions: resp.read_versions.clone(),
         shard_watermarks: vec![(vshard_id, resp.watermark_lsn)],
     })
 }

@@ -13,15 +13,9 @@ pub type RaftProposer =
 /// Type alias for the asynchronous Raft propose callback with leader forwarding.
 ///
 /// Takes `(vshard_id, idempotency_key, serialized_entry, deadline)` and returns, on
-/// success, the Data Plane apply payload bytes together with the write's
-/// per-collection version: the written collection's `coll_write_lsn` AFTER the
-/// write, as the replica that applied the entry recorded it. It is a WAL LSN,
-/// minted by the apply path's own WAL append — NOT the Raft log index, which is
-/// a per-group counter sharing no scale with the WAL LSNs the version index is
-/// otherwise fed. Callers that need the write's version (e.g. a
-/// read-your-writes floor for cross-shard OCC, which validates in the WAL-LSN
-/// domain) read it here without a second lookup; it is `Lsn::ZERO` for a write
-/// whose plan names no single user collection, which records no such version.
+/// success, an [`AppliedOutput`]: the Data Plane apply payload bytes and the
+/// write's versions. A write's version is the data-group log position of the
+/// entry that applied it, so every replica records the same version.
 /// The `idempotency_key` matches the one embedded in the
 /// serialized `ReplicatedEntry`; the proposer registers the tracker waiter with
 /// this key so apply-side mismatch detection can surface `RetryableLeaderChange`
@@ -38,12 +32,16 @@ pub type AsyncRaftProposer = dyn Fn(
         tokio::time::Instant,
     ) -> std::pin::Pin<
         Box<
-            dyn std::future::Future<
-                    Output = std::result::Result<(Vec<u8>, crate::types::Lsn), crate::Error>,
-                > + Send,
+            dyn std::future::Future<Output = std::result::Result<AppliedOutput, crate::Error>>
+                + Send,
         >,
     > + Send
     + Sync;
+
+/// What this node's apply of a proposed write returns: the Data Plane apply
+/// payload and the versions the write stamped, one per written vShard. A
+/// write that names no single user collection stamps none.
+pub type AppliedOutput = (Vec<u8>, crate::types::ReadVersions);
 
 /// Where a proposed entry landed in its data group's Raft log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,11 +53,7 @@ pub struct ProposedAt {
 /// The wait for this node's apply of a proposed entry: the result an
 /// [`AsyncRaftProposer`] returns.
 pub type AppliedWait = std::pin::Pin<
-    Box<
-        dyn std::future::Future<
-                Output = std::result::Result<(Vec<u8>, crate::types::Lsn), crate::Error>,
-            > + Send,
-    >,
+    Box<dyn std::future::Future<Output = std::result::Result<AppliedOutput, crate::Error>> + Send>,
 >;
 
 /// A proposal the group's leader accepted into its log.

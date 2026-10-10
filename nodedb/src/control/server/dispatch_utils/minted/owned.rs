@@ -49,9 +49,10 @@ pub(crate) enum OwnedResponse {
     /// A response arrived by the deadline. `closed` is the result of closing
     /// the records from it: a failed cancel returns its error and holds the
     /// window. A partial response reports `Ok` here, and the task closes the
-    /// records from the final one.
+    /// records from the final one. The response is boxed: it is far larger
+    /// than every other variant.
     Answered {
-        response: Response,
+        response: Box<Response>,
         closed: crate::Result<()>,
     },
     /// The deadline passed first. The task closes the records once the
@@ -127,7 +128,7 @@ async fn wait_and_close(
     match collected {
         Ok(Ok(response)) if response.partial => {
             let _ = report.send(OwnedResponse::Answered {
-                response,
+                response: Box::new(response),
                 closed: Ok(()),
             });
             forward(resolve_at_final(&wal, owner, final_refusal_key, rx, minted).await);
@@ -135,7 +136,10 @@ async fn wait_and_close(
         Ok(Ok(response)) => {
             let closed =
                 resolve_on_response(&wal, owner, final_refusal_key, &response, minted).await;
-            let _ = report.send(OwnedResponse::Answered { response, closed });
+            let _ = report.send(OwnedResponse::Answered {
+                response: Box::new(response),
+                closed,
+            });
         }
         Ok(Err(DispatchCollectError::OverBudget { bytes })) => {
             let _ = report.send(OwnedResponse::OverBudget { bytes });
@@ -199,7 +203,7 @@ mod tests {
                 detail: "duplicate key".into(),
             })),
             stage_vote: None,
-            read_version_lsn: Lsn::ZERO,
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         }
     }

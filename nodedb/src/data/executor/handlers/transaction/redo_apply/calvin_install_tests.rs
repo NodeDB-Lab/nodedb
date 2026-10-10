@@ -267,15 +267,20 @@ fn a_calvin_install_notes_index_values_at_the_redo_lsn() {
 
     assert_eq!(installed.status, Status::Ok, "{:?}", installed.error_code);
     assert_eq!(
-        core.write_index.index_values.value_lsn(
-            DatabaseId::DEFAULT,
-            TenantId::new(TID),
-            ORDERS,
-            "a",
+        core.write_index.index_values.value_version(
+            crate::data::executor::core_loop::index_value_versions::IndexDimRef {
+                vshard: crate::types::VShardId::new(0),
+                db: DatabaseId::DEFAULT,
+                tenant: TenantId::new(TID),
+                collection: ORDERS,
+                field: "a",
+            },
             "1"
         ),
-        Some(Lsn::new(43)),
-        "the install records the row's index value at the redo LSN"
+        Some(crate::data::executor::core_loop::write_index::tests::local(
+            43
+        )),
+        "the install records the row's index value at the redo's version"
     );
 }
 

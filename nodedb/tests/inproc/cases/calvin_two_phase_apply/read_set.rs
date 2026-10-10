@@ -16,15 +16,15 @@ use super::support::*;
 fn drop_discards_invalid_staged_calvin_write() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
-    // Seed a committed write to `dropcoll` at LSN 100 so its collection write
-    // version floor is 100. The seed carries a WAL LSN so the version records.
+    // Seed a committed write to `dropcoll` at LSN 100 on its home vShard, so
+    // its collection version there is the version of LSN 100.
     let seed = commit_calvin(
         &mut core,
         &mut tx,
         &mut rx,
         CalvinSeed {
             epoch: 1,
-            vshard: 0,
+            vshard: home_vshard("dropcoll"),
             collection: "dropcoll",
             plans: vec![kv_put("dropcoll", b"seed", b"v")],
             lsn: 100,
@@ -34,19 +34,17 @@ fn drop_discards_invalid_staged_calvin_write() {
 
     // The read entry's collection must home to the staged request's vShard for
     // the read-set check to consider it.
-    let read_vshard = nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, "dropcoll")
-        .vshard()
-        .as_u32();
+    let read_vshard = home_vshard("dropcoll");
 
-    // A read of `dropcoll` observed at LSN 50 — stale against the seed's write
-    // at LSN 100 → the read-set is no longer current → abort vote.
+    // A read of `dropcoll` observed at the version of LSN 50 — stale against
+    // the seed's write at LSN 100 → the read-set is no longer current → abort
+    // vote.
     let stale_read = VersionedReadEntry {
         engine: EngineTag::Kv,
         collection: "dropcoll".to_string(),
         key: ReadKeyIdent::Predicate,
-        read_lsn: Lsn::new(50),
+        read_version: local_version(50),
         home_vshard: None,
-        served_by: 0,
     };
 
     let staged = send(
@@ -119,10 +117,10 @@ fn drop_discards_invalid_staged_calvin_write() {
 }
 
 /// A `Point` read (not just a `Predicate` read) at or after the recorded write
-/// LSN is current → commit vote, and the stamped install applies the staged
-/// write.
+/// version is current → commit vote, and the stamped install applies the
+/// staged write.
 #[test]
-fn point_read_at_write_lsn_commits_and_the_install_applies() {
+fn point_read_at_write_version_commits_and_the_install_applies() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
 
     // Seed a committed write to key `pk` in `pointcoll` at LSN 10.
@@ -132,7 +130,7 @@ fn point_read_at_write_lsn_commits_and_the_install_applies() {
         &mut rx,
         CalvinSeed {
             epoch: 1,
-            vshard: 0,
+            vshard: home_vshard("pointcoll"),
             collection: "pointcoll",
             plans: vec![kv_put("pointcoll", b"pk", b"v1")],
             lsn: 10,
@@ -140,19 +138,16 @@ fn point_read_at_write_lsn_commits_and_the_install_applies() {
     );
     assert_eq!(seed.status, Status::Ok, "seed write must commit: {seed:?}");
 
-    let point_vshard = nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, "pointcoll")
-        .vshard()
-        .as_u32();
+    let point_vshard = home_vshard("pointcoll");
 
-    // A Point read of the exact same key observed at LSN 10 (== the write) is
+    // A Point read of the exact same key observed at the write's version is
     // still current: no write happened AFTER the read.
     let current_read = VersionedReadEntry {
         engine: EngineTag::Kv,
         collection: "pointcoll".to_string(),
         key: ReadKeyIdent::Point(KeyRepr::KvKey(Box::from(b"pk".as_slice()))),
-        read_lsn: Lsn::new(10),
+        read_version: local_version(10),
         home_vshard: None,
-        served_by: 0,
     };
 
     let staged = send(
@@ -172,7 +167,7 @@ fn point_read_at_write_lsn_commits_and_the_install_applies() {
     assert_eq!(
         staged.stage_vote,
         Some(StageVote::Commit),
-        "a read at or after the last write LSN must be current -> commit vote"
+        "a read at or after the last write's version must be current -> commit vote"
     );
 
     let install_plan = resolved_install(&mut core, &mut tx, &mut rx, 8, point_vshard);
@@ -210,7 +205,7 @@ fn point_read_at_write_lsn_commits_and_the_install_applies() {
 }
 
 /// A `Point` read of a key STALE against a later write to that same key
-/// (read_lsn=5 vs. a committed write at LSN=10) aborts the stage vote, and the
+/// (read at LSN 5 vs. a committed write at LSN 10) aborts the stage vote, and the
 /// drop discards the staged write with no base mutation — mirrors
 /// `drop_discards_invalid_staged_calvin_write` but for a Point key (not a
 /// collection-scoped Predicate).
@@ -225,7 +220,7 @@ fn stale_point_read_of_kv_key_aborts_stage_and_drop_discards() {
         &mut rx,
         CalvinSeed {
             epoch: 1,
-            vshard: 0,
+            vshard: home_vshard("stalecoll"),
             collection: "stalecoll",
             plans: vec![kv_put("stalecoll", b"pk", b"v1")],
             lsn: 10,
@@ -233,9 +228,7 @@ fn stale_point_read_of_kv_key_aborts_stage_and_drop_discards() {
     );
     assert_eq!(seed.status, Status::Ok, "seed write must commit: {seed:?}");
 
-    let stale_vshard = nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, "stalecoll")
-        .vshard()
-        .as_u32();
+    let stale_vshard = home_vshard("stalecoll");
 
     // A Point read of the exact same key observed at LSN 5 — stale against the
     // write at LSN 10 → the read-set is no longer current → abort vote.
@@ -243,9 +236,8 @@ fn stale_point_read_of_kv_key_aborts_stage_and_drop_discards() {
         engine: EngineTag::Kv,
         collection: "stalecoll".to_string(),
         key: ReadKeyIdent::Point(KeyRepr::KvKey(Box::from(b"pk".as_slice()))),
-        read_lsn: Lsn::new(5),
+        read_version: local_version(5),
         home_vshard: None,
-        served_by: 0,
     };
 
     let staged = send(
@@ -269,7 +261,7 @@ fn stale_point_read_of_kv_key_aborts_stage_and_drop_discards() {
     assert_eq!(
         staged.stage_vote,
         Some(StageVote::SerializationConflict),
-        "a stale Point read (write after read_lsn) must produce an abort vote"
+        "a stale Point read (write after the read) must produce an abort vote"
     );
 
     let before = send(

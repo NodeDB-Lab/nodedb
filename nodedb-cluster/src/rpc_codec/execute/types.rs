@@ -63,12 +63,12 @@ pub struct ExecuteResponse {
     /// writes/errors. Mirrors [`ExecuteStreamChunk::watermark_lsn`]: raw `u64`
     /// on the wire, converted to `Lsn` at the coordinator via `Lsn::new`.
     pub watermark_lsn: u64,
-    /// Per-collection read-version LSN for the scanned collection (its
-    /// `coll_write_lsn` at read time, a WAL LSN); 0 for
-    /// writes/errors. The sound comparand for cross-shard OCC read validation,
-    /// distinct from the core-global `watermark_lsn`. Raw `u64` on the wire,
-    /// converted to `Lsn` at the coordinator via `Lsn::new`.
-    pub read_version_lsn: u64,
+    /// The read versions the executing node's cores observed, one per vShard
+    /// read. A write reports the versions it recorded. Empty for errors other
+    /// than a read that found no row. The
+    /// comparand for cross-shard OCC read validation, distinct from the
+    /// core-global `watermark_lsn`.
+    pub read_versions: Vec<nodedb_types::ShardVersion>,
 }
 
 /// Typed error returned by the remote executor.
@@ -142,22 +142,42 @@ pub struct ExecuteStreamEnd {
 }
 
 impl ExecuteResponse {
-    pub fn ok(payloads: Vec<Vec<u8>>, watermark_lsn: u64, read_version_lsn: u64) -> Self {
+    pub fn ok(
+        payloads: Vec<Vec<u8>>,
+        watermark_lsn: u64,
+        read_versions: Vec<nodedb_types::ShardVersion>,
+    ) -> Self {
         Self {
             success: true,
             payloads,
             error: None,
             watermark_lsn,
-            read_version_lsn,
+            read_versions,
         }
     }
+    /// A refusal that still observed the versions a read validates: a read
+    /// that found no row.
+    pub fn refused_with_versions(
+        error: TypedClusterError,
+        watermark_lsn: u64,
+        read_versions: Vec<nodedb_types::ShardVersion>,
+    ) -> Self {
+        Self {
+            success: false,
+            payloads: vec![],
+            error: Some(error),
+            watermark_lsn,
+            read_versions,
+        }
+    }
+
     pub fn err(error: TypedClusterError) -> Self {
         Self {
             success: false,
             payloads: vec![],
             error: Some(error),
             watermark_lsn: 0,
-            read_version_lsn: 0,
+            read_versions: Vec::new(),
         }
     }
 }

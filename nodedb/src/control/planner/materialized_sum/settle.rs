@@ -75,7 +75,7 @@ use crate::control::server::shared::session::read_set::{
 };
 use crate::engine::document::store::StorageKey;
 use crate::query::{sum_target_is_co_resident, sum_target_vshard};
-use crate::types::{DatabaseId, KeyRepr, Lsn, TenantId};
+use crate::types::{DatabaseId, KeyRepr, TenantId};
 
 /// One source write's plan-time images, ready to settle.
 pub(super) struct SettleInput<'a> {
@@ -91,11 +91,8 @@ pub(super) struct SettleInput<'a> {
     /// that row. `None` for a predicate-shaped write, whose observation is the
     /// whole collection and whose entry is collection-scoped accordingly.
     pub source_row: Option<Surrogate>,
-    /// Version the images were read at.
-    pub read_version_lsn: Lsn,
-    /// The node that served the image read. `read_version_lsn` is a position
-    /// in its WAL, so only that node's commit vote can find the read current.
-    pub served_by: u64,
+    /// Version the images were read at, on the source collection's vShard.
+    pub read_version: nodedb_types::WriteVersion,
 }
 
 /// What settling produced.
@@ -274,8 +271,7 @@ fn image_read_entry(
             },
             None => ReadKey::Predicate,
         },
-        read_lsn: input.read_version_lsn,
-        read_version_lsn: input.read_version_lsn,
+        read_version: input.read_version,
         // A DERIVATION read, never a read-your-own-write. The delta shipped to
         // the target rests entirely on the image. The statement writes the
         // source collection too, so an entry marked `Session` here will be
@@ -283,7 +279,7 @@ fn image_read_entry(
         // validated against a concurrent writer.
         //
         // Inside a transaction the image is read through its staging overlay.
-        // `read_version_lsn` is still the committed write floor, because a
+        // `read_version` is still the committed version, because a
         // staged write moves no write version. So the entry aborts the commit
         // when another transaction commits a write to the row first. It never
         // aborts on this transaction's own staged writes, which the image
@@ -292,7 +288,6 @@ fn image_read_entry(
         // surrogate. A concurrent commit of that row invalidates it.
         origin: ReadOrigin::PlanDerivation,
         home: None,
-        home_node: input.served_by,
     }
 }
 
@@ -407,8 +402,7 @@ mod tests {
             source_collection: &source,
             images: &images,
             source_row: Some(Surrogate::new(11)),
-            read_version_lsn: Lsn::new(42),
-            served_by: 7,
+            read_version: nodedb_types::WriteVersion::logged(3, 42),
         };
         let settlement = settle_cross_shard_images(
             &[binding(&target)],
@@ -443,8 +437,7 @@ mod tests {
             source_collection: &source,
             images: &images,
             source_row: Some(Surrogate::new(11)),
-            read_version_lsn: Lsn::new(42),
-            served_by: 7,
+            read_version: nodedb_types::WriteVersion::logged(3, 42),
         };
         let settlement = settle_cross_shard_images(
             &[binding(&target)],
@@ -484,8 +477,7 @@ mod tests {
             source_collection: &source,
             images: &images,
             source_row: Some(Surrogate::new(11)),
-            read_version_lsn: Lsn::new(42),
-            served_by: 7,
+            read_version: nodedb_types::WriteVersion::logged(3, 42),
         };
         let settlement = settle_cross_shard_images(
             &[binding(&target)],
@@ -509,8 +501,7 @@ mod tests {
             source_collection: &source,
             images: &images,
             source_row: Some(Surrogate::new(11)),
-            read_version_lsn: Lsn::new(42),
-            served_by: 7,
+            read_version: nodedb_types::WriteVersion::logged(3, 42),
         };
         let settlement = settle_cross_shard_images(
             &[binding(&target)],
@@ -538,8 +529,7 @@ mod tests {
             source_collection: &source,
             images: &images,
             source_row: Some(Surrogate::new(11)),
-            read_version_lsn: Lsn::new(42),
-            served_by: 7,
+            read_version: nodedb_types::WriteVersion::logged(3, 42),
         };
         // A binding whose target IS the source collection is co-resident by
         // construction, whatever the hash function does.
@@ -568,8 +558,7 @@ mod tests {
             source_collection: &source,
             images: &images,
             source_row: Some(Surrogate::new(11)),
-            read_version_lsn: Lsn::new(42),
-            served_by: 7,
+            read_version: nodedb_types::WriteVersion::logged(3, 42),
         };
         let settlement = settle_cross_shard_images(
             &[binding(&target)],
@@ -588,11 +577,10 @@ mod tests {
                 repr: KeyRepr::Surrogate(11)
             }
         );
-        assert_eq!(settlement.reads[0].read_version_lsn, Lsn::new(42));
         assert_eq!(
-            settlement.reads[0].home_node, 7,
-            "the entry names the node that served the image read; `0` makes \
-             every commit vote treat the read as changed"
+            settlement.reads[0].read_version,
+            nodedb_types::WriteVersion::logged(3, 42),
+            "the entry carries the version the image read observed"
         );
     }
 
@@ -607,8 +595,7 @@ mod tests {
             source_collection: &source,
             images: &images,
             source_row: None,
-            read_version_lsn: Lsn::new(42),
-            served_by: 7,
+            read_version: nodedb_types::WriteVersion::logged(3, 42),
         };
         let settlement = settle_cross_shard_images(
             &[binding(&target)],

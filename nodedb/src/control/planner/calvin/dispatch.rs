@@ -214,7 +214,7 @@ mod tests {
     use crate::control::server::shared::session::read_set::{
         EngineTag, ReadKey, ReadOrigin, ReadSetEntry,
     };
-    use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
+    use crate::types::{DatabaseId, TenantId, VShardId};
     use nodedb_physical::physical_plan::{ColumnarOp, CrdtOp, DocumentOp, PhysicalPlan};
     use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
     use nodedb_types::QualifiedCollection;
@@ -489,13 +489,11 @@ mod tests {
         // them (`session::commit::run_commit`).
         //
         // WHY this must stay `MultiShard`: only the `MultiShard` branch of COMMIT
-        // commits through the Calvin barrier (`run_commit_calvin`), which validates
-        // B's read slice on B's OWNING node using the real per-shard `read_lsn`. If a
-        // foreign read failed to widen the class, COMMIT will take the `SingleShard`
-        // branch and run only the local-WAL `si_conflict_abort`, which never sees a
-        // stale read on the remote owner — silently committing a non-serializable
-        // cross-node transaction. This test guarantees a future refactor of
-        // `read_vshards_of` / `classify_dispatch` cannot reopen that hole.
+        // commits through the Calvin barrier (`run_commit_calvin`), which
+        // validates B's read slice on B's participants inside the barrier, in
+        // the same order as every write to B. This test guarantees a future
+        // refactor of `read_vshards_of` / `classify_dispatch` keeps a foreign
+        // read inside the barrier.
         let (write_coll, read_coll) = two_distinct_vshard_collections();
         let write_vshard = CollectionKey::from_bare(DatabaseId::DEFAULT, &write_coll)
             .vshard()
@@ -512,11 +510,9 @@ mod tests {
             tenant_id: TenantId::new(1),
             collection: read_coll.clone(),
             key: ReadKey::Predicate,
-            read_lsn: Lsn::new(1),
-            read_version_lsn: Lsn::ZERO,
+            read_version: nodedb_types::WriteVersion::logged(0, 1),
             origin: ReadOrigin::Session,
             home: None,
-            home_node: 0,
         };
 
         // The homing step under test: a foreign-collection read must home to a
@@ -538,8 +534,8 @@ mod tests {
             }
             other => panic!(
                 "expected MultiShard for write-on-{write_vshard} + foreign-read-on-{read_vshard}, \
-                 got {other:?} (a SingleShard here would route COMMIT to local-WAL \
-                 si_conflict_abort and reopen the cross-node serializability hole)"
+                 got {other:?} (a SingleShard here validates the read outside the \
+                 Calvin barrier)"
             ),
         }
     }

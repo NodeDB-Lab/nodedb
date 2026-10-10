@@ -13,14 +13,13 @@ use nodedb_cluster::calvin::types::{
 };
 use nodedb_types::KeyRepr;
 
-/// Map the neutral session read-set into the replicated, LSN-versioned
+/// Map the neutral session read-set into the replicated, versioned
 /// [`VersionedReadSet`] carried on the `TxClass`.
 ///
 /// Each [`ReadSetEntry`] becomes one [`VersionedReadEntry`], preserving
-/// engine, collection, `read_version_lsn` (the collection's write floor —
-/// the sound OCC comparand, not the core-global `read_lsn`), and the
-/// point/predicate distinction. Own-overlay exclusion already happened at
-/// capture time, so this is a faithful 1:1 projection.
+/// engine, collection, read version, home, and the point/predicate
+/// distinction. Own-overlay exclusion already happened at capture time, so
+/// this is a faithful 1:1 projection.
 pub(super) fn versioned_reads_from(reads: &[ReadSetEntry]) -> VersionedReadSet {
     VersionedReadSet::new(
         reads
@@ -41,9 +40,8 @@ pub(super) fn versioned_reads_from(reads: &[ReadSetEntry]) -> VersionedReadSet {
                         hi: hi.clone(),
                     },
                 },
-                read_lsn: entry.read_version_lsn,
+                read_version: entry.read_version,
                 home_vshard: entry.home.map(|home| home.as_u32()),
-                served_by: entry.home_node,
             })
             .collect(),
     )
@@ -51,7 +49,7 @@ pub(super) fn versioned_reads_from(reads: &[ReadSetEntry]) -> VersionedReadSet {
 
 /// Build the routing and lock `read_set` for a Calvin `TxClass` from the
 /// neutral session read-set. This is the key-IDENTITY set for participants
-/// and locks, not the LSN-versioned OCC set ([`versioned_reads_from`]).
+/// and locks, not the versioned OCC set ([`versioned_reads_from`]).
 ///
 /// Each read maps to the keys the scheduler locks `Shared`:
 /// - A point read locks its row: a surrogate, a KV key, or an edge's two

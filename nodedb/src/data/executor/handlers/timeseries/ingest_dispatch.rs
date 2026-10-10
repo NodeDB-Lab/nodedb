@@ -174,7 +174,7 @@ impl CoreLoop {
                 watermark_lsn: self.watermark,
                 error_code: None,
                 stage_vote: None,
-                read_version_lsn: crate::types::Lsn::ZERO,
+                read_versions: crate::types::ReadVersions::new(),
                 write_set: Vec::new(),
             };
         }
@@ -265,7 +265,7 @@ impl CoreLoop {
             return self.sync_ack_response(task, AckStatus::Applied, applied_seq);
         }
         if ingest_response.status == Status::Ok {
-            self.note_collection_write_lsn(task, collection);
+            self.note_collection_write(task, collection);
         }
         ingest_response
     }

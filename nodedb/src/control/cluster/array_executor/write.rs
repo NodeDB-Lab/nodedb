@@ -124,7 +124,7 @@ impl DataPlaneArrayExecutor {
             detail: format!("{op_label}: plan is not encodable as a replicated entry"),
         })?;
 
-        let (apply_payload, _write_version) =
+        let (apply_payload, _write_versions) =
             crate::control::wal_replication::propose_replicated_entry(
                 &self.state,
                 proposer,

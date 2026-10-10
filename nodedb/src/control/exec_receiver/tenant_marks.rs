@@ -63,7 +63,7 @@ pub(super) async fn answer_tenant_marks(
         Err(error) => return ExecuteResponse::err(execution_error_to_typed(error)),
     };
     match encode_marks(&marks) {
-        Ok(payload) => ExecuteResponse::ok(vec![payload], 0, 0),
+        Ok(payload) => ExecuteResponse::ok(vec![payload], 0, Vec::new()),
         Err(error) => ExecuteResponse::err(execution_error_to_typed(error)),
     }
 }

@@ -115,17 +115,17 @@ fn assert_parity(installed: &CoreLoop, plans: &[PhysicalPlan]) {
         .record_batch_write_versions(&task_at(LSN), tid(), plans);
     let floors: Vec<_> = oracle.core.write_index.recorded_collections().collect();
     assert!(!floors.is_empty(), "the oracle records the slice's writes");
-    for (key, lsn) in floors {
-        let held = installed.write_index.collection_write_lsn(key);
+    for (key, version) in floors {
+        let held = installed.write_index.collection_version(key);
         assert!(
-            held.is_some_and(|held| held >= lsn),
+            held.is_some_and(|held| held >= version),
             "the install records the collection floor of {key:?}: {held:?}"
         );
     }
-    for (key, lsn) in oracle.core.write_index.recorded_keys() {
-        let held = installed.write_index.key_write_lsn(key);
+    for (key, version) in oracle.core.write_index.recorded_keys() {
+        let held = installed.write_index.key_version(key);
         assert!(
-            held.is_some_and(|held| held >= lsn),
+            held.is_some_and(|held| held >= version),
             "the install records the version of {key:?}: {held:?}"
         );
     }

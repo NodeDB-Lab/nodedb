@@ -31,9 +31,8 @@ fn absent_kv_key_phantom_insert_causes_abort() {
         engine: EngineTag::Kv,
         collection: "phantomkv".to_string(),
         key: ReadKeyIdent::Point(KeyRepr::KvKey(Box::from(b"newkey".as_slice()))),
-        read_lsn: Lsn::new(5),
+        read_version: local_version(5),
         home_vshard: None,
-        served_by: 0,
     };
 
     // Concurrently, the exact same key is inserted and commits at LSN 8.
@@ -93,7 +92,7 @@ fn absent_kv_key_phantom_insert_causes_abort() {
 /// subsequent INSERT of that `document_id` receives, so a per-key OCC check
 /// would never catch the phantom. The capture layer therefore degrades an
 /// absent document read to `Predicate` (collection floor). A concurrent INSERT
-/// into that collection advances `coll_write_lsn` past the read_lsn, so
+/// into that collection advances the collection's version past the read's, so
 /// `WriteVersionIndex::read_is_valid` (predicate branch) judges the stale read
 /// invalid and the stage VOTES ABORT — collection-granular phantom safety.
 #[test]
@@ -105,14 +104,13 @@ fn absent_document_phantom_insert_is_caught() {
         .as_u32();
 
     // The document was absent when read: capture degraded the miss to a
-    // collection-scoped predicate on "phantomdocs" at read_lsn 5.
+    // collection-scoped predicate on "phantomdocs" at the version of LSN 5.
     let absent_doc_read = VersionedReadEntry {
         engine: EngineTag::Document,
         collection: "phantomdocs".to_string(),
         key: ReadKeyIdent::Predicate,
-        read_lsn: Lsn::new(5),
+        read_version: local_version(5),
         home_vshard: None,
-        served_by: 0,
     };
 
     // Concurrently, a document with the same document_id the read targeted is
@@ -185,9 +183,8 @@ fn absent_document_read_without_matching_insert_still_commits() {
         engine: EngineTag::Document,
         collection: "phantomdocs".to_string(),
         key: ReadKeyIdent::Predicate,
-        read_lsn: Lsn::new(5),
+        read_version: local_version(5),
         home_vshard: None,
-        served_by: 0,
     };
 
     // A concurrent insert into a DIFFERENT collection commits at LSN 8. It
@@ -212,7 +209,7 @@ fn absent_document_read_without_matching_insert_still_commits() {
     );
 
     // The predicate read on phantomdocs is still current: its collection floor
-    // never advanced past read_lsn 5, so the stage must commit.
+    // never advanced past the read's version, so the stage must commit.
     let staged = send(
         &mut core,
         &mut tx,

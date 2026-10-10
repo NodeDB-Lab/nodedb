@@ -258,7 +258,7 @@ impl CoreLoop {
                 }
                 if applied {
                     puts += 1;
-                    self.note_replay_write_lsn(
+                    self.note_replay_write(
                         database_id,
                         tenant_id,
                         &collection,
@@ -351,7 +351,7 @@ impl CoreLoop {
                 }
                 if removed {
                     deletes += 1;
-                    self.note_replay_write_lsn(
+                    self.note_replay_write(
                         database_id,
                         tenant_id,
                         &collection,
@@ -401,7 +401,7 @@ fn is_kv_put_record(payload: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{DatabaseId, Lsn, TenantId};
+    use crate::types::{DatabaseId, TenantId};
     use crate::wal::{RedoRecord, RedoSubRecord};
     use nodedb_types::Surrogate;
     use nodedb_wal::WalRecord;
@@ -721,6 +721,7 @@ mod tests {
 
     #[test]
     fn redo_replay_populates_write_version_index() {
+        use crate::data::executor::core_loop::write_index::tests::{local, replay_home};
         use crate::data::executor::core_loop::write_index::{CollKey, WriteKey};
 
         let mut h = make_core();
@@ -747,49 +748,53 @@ mod tests {
         let tenant = TenantId::new(7);
 
         let doc_key = WriteKey {
+            vshard: replay_home(db, "notes"),
             db,
             tenant,
             collection: Box::from("notes"),
             key: KeyRepr::Surrogate(surrogate),
         };
         assert_eq!(
-            h.core.write_index.key_write_lsn(&doc_key),
-            Some(Lsn::new(1)),
+            h.core.write_index.key_version(&doc_key),
+            Some(local(1)),
             "document redo put must populate the per-key write-version index"
         );
 
         let doc_coll_key = CollKey {
+            vshard: replay_home(db, "notes"),
             db,
             tenant,
             collection: Box::from("notes"),
         };
         assert_eq!(
-            h.core.write_index.collection_write_lsn(&doc_coll_key),
-            Some(Lsn::new(1)),
-            "document redo put must advance the collection write-version floor"
+            h.core.write_index.collection_version(&doc_coll_key),
+            Some(local(1)),
+            "document redo put must advance the collection write version"
         );
 
         let kv_key = WriteKey {
+            vshard: replay_home(db, "sessions"),
             db,
             tenant,
             collection: Box::from("sessions"),
             key: KeyRepr::KvKey(Box::from(b"s1".as_slice())),
         };
         assert_eq!(
-            h.core.write_index.key_write_lsn(&kv_key),
-            Some(Lsn::new(1)),
+            h.core.write_index.key_version(&kv_key),
+            Some(local(1)),
             "kv redo put must populate the per-key write-version index"
         );
 
         let kv_coll_key = CollKey {
+            vshard: replay_home(db, "sessions"),
             db,
             tenant,
             collection: Box::from("sessions"),
         };
         assert_eq!(
-            h.core.write_index.collection_write_lsn(&kv_coll_key),
-            Some(Lsn::new(1)),
-            "kv redo put must advance the collection write-version floor"
+            h.core.write_index.collection_version(&kv_coll_key),
+            Some(local(1)),
+            "kv redo put must advance the collection write version"
         );
 
         // A later delete at a higher LSN must bump the document key's write
@@ -827,8 +832,8 @@ mod tests {
             .expect("redo replay must succeed");
 
         assert_eq!(
-            h.core.write_index.key_write_lsn(&doc_key),
-            Some(Lsn::new(2)),
+            h.core.write_index.key_version(&doc_key),
+            Some(local(2)),
             "redo delete must bump the key's write-version above the prior put"
         );
     }

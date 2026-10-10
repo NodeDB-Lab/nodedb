@@ -184,12 +184,13 @@ impl CoreLoop {
     ) -> crate::Result<()> {
         if wal_lsn > 0 {
             let lsn = crate::types::Lsn::new(wal_lsn);
-            self.note_write_lsn(
+            let stamp = self.task_write_stamp_at(task, lsn);
+            self.note_write(
                 task.request.database_id,
                 task.request.tenant_id,
                 &array_id.name,
                 None,
-                lsn,
+                stamp,
             );
             self.floors.applied_prefix.note_applied(lsn);
         }
@@ -330,6 +331,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: crate::bridge::envelope::Admission::Admitted,
         }
     }

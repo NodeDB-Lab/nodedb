@@ -32,7 +32,9 @@
 use futures::future::join_all;
 
 use crate::bridge::envelope::{Payload, PhysicalPlan, Response};
-use crate::control::server::exchange::core_outcome::{classify_core_response, require_every_core};
+use crate::control::server::exchange::core_outcome::{
+    classify_core_response, reported_versions, require_every_core,
+};
 use crate::control::server::exchange::gather::eager_dispatch_to_all_cores;
 use crate::control::server::payload_merge::{encode_msgpack_array, extract_msgpack_elements};
 use crate::data::executor::handlers::graph_match::{
@@ -73,6 +75,8 @@ pub struct MatchBroadcastOutcome {
     pub partial: bool,
     /// The highest watermark any core served the MATCH at.
     pub watermark_lsn: crate::types::Lsn,
+    /// The versions every core reported, one per vShard it holds.
+    pub read_versions: crate::types::ReadVersions,
 }
 
 /// Locate a top-level map value by key in a msgpack map payload.
@@ -265,6 +269,7 @@ pub async fn broadcast_match_to_all_cores(
         });
 
     let results: Vec<crate::Result<Response>> = join_all(response_futures).await;
+    let read_versions = reported_versions(&results);
     // `NotFound` is an empty CSR slice on that core. Any other core error fails
     // the MATCH: rows from the surviving cores are not the full answer.
     let answered = require_every_core(results.into_iter().map(classify_core_response))?;
@@ -302,6 +307,7 @@ pub async fn broadcast_match_to_all_cores(
         resume,
         partial,
         watermark_lsn,
+        read_versions,
     })
 }
 

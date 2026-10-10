@@ -110,6 +110,13 @@ pub struct Request {
     /// of the WAL record they reproduce.
     pub commit_hlc: Option<u64>,
 
+    /// The log position of the data-group Raft entry this write applies. The
+    /// Data Plane records it as the version of every row the write touches,
+    /// so every replica that applies the entry records the same version.
+    /// `None` for reads, control ops, and writes that apply no entry: those
+    /// version by their WAL LSN on the core.
+    pub entry_version: Option<nodedb_types::WriteVersion>,
+
     /// Write-admission decision for this request.
     ///
     /// Every write-class [`PhysicalPlan`] MUST pass the neutral write-admission
@@ -232,6 +239,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: Admission::Exempt(ExemptReason::Read),
         }
     }
@@ -287,6 +295,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: Admission::Exempt(ExemptReason::Read),
         };
         match req.plan {

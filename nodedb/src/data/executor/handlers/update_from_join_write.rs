@@ -230,7 +230,7 @@ impl CoreLoop {
                 }
                 // Index write-versions are published only once the write they
                 // describe is durable.
-                if let Some(lsn) = task.wal_lsn()
+                if let Some(stamp) = self.task_write_stamp(task)
                     && !touched.is_empty()
                 {
                     self.note_index_write_values(
@@ -238,7 +238,7 @@ impl CoreLoop {
                         crate::types::TenantId::new(tid),
                         target_collection,
                         &touched,
-                        lsn,
+                        stamp,
                     );
                 }
                 // The identity is the one INSERT minted: the declared primary

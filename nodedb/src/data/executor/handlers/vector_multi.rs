@@ -122,7 +122,7 @@ impl CoreLoop {
         // Record this write's version keyed by the shared document surrogate
         // so cross-shard OCC read-set validation (predicate reads always
         // record the collection floor) sees this insert.
-        self.note_surrogate_write_lsn(task, tid, collection, document_surrogate.as_u32());
+        self.note_surrogate_write(task, tid, collection, document_surrogate.as_u32());
 
         match super::super::response_codec::encode_count("inserted_vectors", ids.len()) {
             Ok(bytes) => self.response_with_payload(task, bytes),
@@ -161,7 +161,7 @@ impl CoreLoop {
             // Record this write's version keyed by the shared document
             // surrogate so cross-shard OCC read-set validation sees this
             // delete.
-            self.note_surrogate_write_lsn(task, tid, collection, document_surrogate.as_u32());
+            self.note_surrogate_write(task, tid, collection, document_surrogate.as_u32());
         }
         self.response_ok(task)
     }
@@ -282,6 +282,7 @@ mod tests {
         Admission, ExemptReason, PhysicalPlan, Priority, Request, Status,
     };
     use crate::data::executor::core_loop::CoreLoop;
+    use crate::data::executor::core_loop::write_index::tests::local;
     use crate::data::executor::core_loop::write_index::{CollKey, KeyRepr, WriteKey};
     use crate::types::{DatabaseId, Lsn, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
     use nodedb_bridge::buffer::RingBuffer;
@@ -317,7 +318,7 @@ mod tests {
         }
     }
 
-    /// A task carrying `wal_lsn` so `note_surrogate_write_lsn` (gated on
+    /// A task carrying `wal_lsn` so `note_surrogate_write` (gated on
     /// `task.wal_lsn().is_some()`) actually fires, mirroring a live write
     /// dispatched with an allocated WAL LSN.
     fn make_task_with_lsn(lsn: u64) -> ExecutionTask {
@@ -353,6 +354,7 @@ mod tests {
             wal_lsn: Some(Lsn::new(lsn)),
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: Admission::Exempt(ExemptReason::Read),
         })
     }
@@ -376,26 +378,28 @@ mod tests {
         assert_eq!(response.status, Status::Ok);
 
         let key = WriteKey {
+            vshard: VShardId::new(0),
             db: DatabaseId::DEFAULT,
             tenant: TenantId::new(1),
             collection: Box::from("chunks"),
             key: KeyRepr::Surrogate(document_surrogate.as_u32()),
         };
         assert_eq!(
-            h.core.write_index.key_write_lsn(&key),
-            Some(Lsn::new(31)),
+            h.core.write_index.key_version(&key),
+            Some(local(31)),
             "multi-vector insert must populate the per-key (surrogate) write-version index"
         );
 
         let coll_key = CollKey {
+            vshard: VShardId::new(0),
             db: DatabaseId::DEFAULT,
             tenant: TenantId::new(1),
             collection: Box::from("chunks"),
         };
         assert_eq!(
-            h.core.write_index.collection_write_lsn(&coll_key),
-            Some(Lsn::new(31)),
-            "multi-vector insert must advance the collection write-version floor"
+            h.core.write_index.collection_version(&coll_key),
+            Some(local(31)),
+            "multi-vector insert must advance the collection write version"
         );
     }
 

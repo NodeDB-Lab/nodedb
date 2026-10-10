@@ -197,10 +197,9 @@ async fn submit_commit_calvin(
                 } else {
                     event_source
                 };
-                // Empty read-set: best-effort performs no cross-shard OCC (the
-                // multi-shard COMMIT path never ran `si_conflict_abort`), so each
-                // group carries no versioned reads — matching the single-vShard
-                // submit `route_write_to_calvin` uses.
+                // Empty read-set: best-effort performs no cross-shard OCC, so
+                // each group carries no versioned reads — matching the
+                // single-vShard submit `route_write_to_calvin` uses.
                 // A timeseries ingest resolves to its rows here, before it is
                 // sequenced: every replica resolves a sequenced group on its own.
                 let tasks =

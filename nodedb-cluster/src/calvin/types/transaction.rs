@@ -494,7 +494,7 @@ mod tests {
     };
     use super::*;
     use nodedb_types::id::CollectionKey;
-    use nodedb_types::{KeyRepr, Lsn};
+    use nodedb_types::{KeyRepr, WriteVersion};
 
     fn doc_set(collection: &str, surrogates: Vec<u32>) -> EngineKeySet {
         EngineKeySet::Document {
@@ -764,17 +764,15 @@ mod tests {
                 engine: EngineTag::Kv,
                 collection: "kv_col".to_owned(),
                 key: ReadKeyIdent::Point(KeyRepr::KvKey(Box::from(&b"k1"[..]))),
-                read_lsn: Lsn::new(7),
+                read_version: WriteVersion::logged(0, 7),
                 home_vshard: None,
-                served_by: 0,
             },
             VersionedReadEntry {
                 engine: EngineTag::Document,
                 collection: "doc_col".to_owned(),
                 key: ReadKeyIdent::Predicate,
-                read_lsn: Lsn::new(11),
+                read_version: WriteVersion::logged(2, 11),
                 home_vshard: None,
-                served_by: 0,
             },
         ])
     }
@@ -805,7 +803,7 @@ mod tests {
         let mut decoded: TxClass = zerompk::from_msgpack(&bytes).expect("decode TxClass");
         decoded.restore_derived().expect("restore derived");
 
-        // Every read_lsn and the Point/Predicate distinction survive exactly.
+        // Every read version and the Point/Predicate distinction survive exactly.
         assert_eq!(decoded.versioned_reads, reads);
         assert_eq!(decoded.versioned_reads.len(), 2);
         let point = decoded
@@ -813,7 +811,7 @@ mod tests {
             .iter()
             .find(|e| matches!(e.key, ReadKeyIdent::Point(_)))
             .expect("point entry");
-        assert_eq!(point.read_lsn, Lsn::new(7));
+        assert_eq!(point.read_version, WriteVersion::logged(0, 7));
         assert_eq!(
             point.key,
             ReadKeyIdent::Point(KeyRepr::KvKey(Box::from(&b"k1"[..])))
@@ -823,7 +821,7 @@ mod tests {
             .iter()
             .find(|e| matches!(e.key, ReadKeyIdent::Predicate))
             .expect("predicate entry");
-        assert_eq!(predicate.read_lsn, Lsn::new(11));
+        assert_eq!(predicate.read_version, WriteVersion::logged(2, 11));
     }
 
     /// Mirror of `TxClass`'s wire shape from BEFORE `versioned_reads` existed:

@@ -197,6 +197,7 @@ fn request(plan: PhysicalPlan, origin: GroupOrigin) -> Request {
         wal_lsn: Some(origin.lsn),
         resolved_now_ms: None,
         commit_hlc: None,
+        entry_version: None,
         admission: Admission::Admitted,
     }
 }

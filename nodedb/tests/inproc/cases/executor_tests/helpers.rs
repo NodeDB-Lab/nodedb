@@ -94,6 +94,7 @@ pub fn make_request(plan: PhysicalPlan) -> Request {
         wal_lsn: None,
         resolved_now_ms: None,
         commit_hlc: None,
+        entry_version: None,
         admission: nodedb::bridge::envelope::Admission::Admitted,
     }
 }

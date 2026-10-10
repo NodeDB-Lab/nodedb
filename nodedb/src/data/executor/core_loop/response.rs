@@ -42,7 +42,7 @@ impl CoreLoop {
             partial: false,
             payload: Payload::empty(),
             watermark_lsn: self.watermark,
-            read_version_lsn: self.read_version_lsn(task),
+            read_versions: self.read_versions(task),
             error_code: None,
             stage_vote: None,
             write_set: Vec::new(),
@@ -61,7 +61,7 @@ impl CoreLoop {
             partial: false,
             payload: Payload::from_vec(payload),
             watermark_lsn: self.watermark,
-            read_version_lsn: self.read_version_lsn(task),
+            read_versions: self.read_versions(task),
             error_code: None,
             stage_vote: None,
             write_set: Vec::new(),
@@ -106,56 +106,110 @@ impl CoreLoop {
             partial: true,
             payload: Payload::from_vec(payload),
             watermark_lsn: self.watermark,
-            read_version_lsn: self.read_version_lsn(task),
+            read_versions: self.read_versions(task),
             error_code: None,
             stage_vote: None,
             write_set: Vec::new(),
         }
     }
 
-    /// Per-collection read-version LSN for `task`'s plan (distinct from the
-    /// core-global `watermark`). A graph read scoped to one collection reports
-    /// that collection's version: its edges are the collection's rows. On a write response this is the POST-write
-    /// version. A resolved KV write's version is the max across its
-    /// mutations, which may span two collections.
-    pub(in crate::data::executor) fn read_version_lsn(
+    /// The write versions `task` observed, one per vShard (distinct from the
+    /// core-global `watermark`).
+    ///
+    /// A write reports the POST-write version of each collection it wrote, on
+    /// its own vShard. A graph read reports every vShard's latest version on
+    /// this core: its edges live on their endpoints' vShards. An array read
+    /// reports the array's version on the vShard its task covers, held or
+    /// not. Any other read reports its
+    /// collection's version on the collection's home vShard, where the read
+    /// validates. A core reports only vShards it holds versions of.
+    pub(in crate::data::executor) fn read_versions(
         &self,
         task: &ExecutionTask,
-    ) -> crate::types::Lsn {
+    ) -> crate::types::ReadVersions {
+        let mut versions = crate::types::ReadVersions::new();
+        let plan = task.plan();
+        if task.wal_lsn().is_none()
+            && let crate::bridge::envelope::PhysicalPlan::Graph(_) = plan
+        {
+            for (vshard, latest) in self.write_index.latest_by_vshard() {
+                versions.note(vshard, latest);
+            }
+            return versions;
+        }
+        if task.wal_lsn().is_none()
+            && matches!(
+                plan,
+                crate::bridge::envelope::PhysicalPlan::Array(_)
+                    | crate::bridge::envelope::PhysicalPlan::ClusterArray(_)
+            )
+            && let Some(array) = plan.collection()
+        {
+            // The task's vShard is the one the read covers: the array's own
+            // vShard, or the shard a cluster slice leg reads. It is reported
+            // even when no write of it reached this core, at the bound its
+            // state holds, so a later first write of it makes the read stale.
+            let vshard = task.request.vshard_id;
+            versions.note(
+                vshard,
+                self.write_index.collection_current(
+                    task.request.database_id,
+                    task.request.tenant_id,
+                    vshard,
+                    array,
+                ),
+            );
+            return versions;
+        }
+        let mut note = |collection: &str| {
+            let vshard = match task.wal_lsn() {
+                Some(_) => task.request.vshard_id,
+                None => match nodedb_types::CollectionKey::from_qualified_str(
+                    task.request.database_id,
+                    collection,
+                ) {
+                    Ok(key) => key.vshard(),
+                    Err(_) => return,
+                },
+            };
+            if self.write_index.holds(vshard) {
+                versions.note(
+                    vshard,
+                    self.write_index.collection_current(
+                        task.request.database_id,
+                        task.request.tenant_id,
+                        vshard,
+                        collection,
+                    ),
+                );
+            }
+        };
         if let crate::bridge::envelope::PhysicalPlan::Kv(
             nodedb_physical::physical_plan::KvOp::ResolvedWrite { mutations, .. },
-        ) = task.plan()
+        ) = plan
         {
-            return mutations
-                .iter()
-                .map(|m| self.collection_read_version(task, m.collection().as_str()))
-                .max()
-                .unwrap_or(crate::types::Lsn::ZERO);
+            for mutation in mutations {
+                note(mutation.collection().as_str());
+            }
+        } else if let Some(collection) = plan.collection() {
+            note(collection);
         }
-        task.plan()
-            .collection()
-            .or_else(|| graph_read_collection(task.plan()))
-            .map(|c| self.collection_read_version(task, c))
-            .unwrap_or(crate::types::Lsn::ZERO)
+        versions
     }
 
-    /// One collection's recorded write LSN on this core, or `Lsn::ZERO` when
-    /// it has none.
-    fn collection_read_version(&self, task: &ExecutionTask, collection: &str) -> crate::types::Lsn {
-        self.write_index
-            .collection_write_lsn(&super::write_index::CollKey {
-                db: task.request.database_id,
-                tenant: task.request.tenant_id,
-                collection: Box::from(collection),
-            })
-            .unwrap_or(crate::types::Lsn::ZERO)
-    }
-
+    /// An error answer to `task`. A `NotFound` answer is a read that found
+    /// no row, which a transaction validates, so it carries the versions the
+    /// read observed like any answered read.
     pub(in crate::data::executor) fn response_error(
         &self,
         task: &ExecutionTask,
         error_code: impl Into<ErrorCode>,
     ) -> Response {
+        let error_code = error_code.into();
+        let read_versions = match error_code {
+            ErrorCode::NotFound => self.read_versions(task),
+            _ => crate::types::ReadVersions::new(),
+        };
         Response {
             request_id: task.request_id(),
             status: Status::Error,
@@ -163,8 +217,8 @@ impl CoreLoop {
             partial: false,
             payload: Payload::empty(),
             watermark_lsn: self.watermark,
-            read_version_lsn: crate::types::Lsn::ZERO,
-            error_code: Some(Box::new(error_code.into())),
+            read_versions,
+            error_code: Some(Box::new(error_code)),
             stage_vote: None,
             write_set: Vec::new(),
         }
@@ -307,23 +361,6 @@ impl CoreLoop {
         for engine in self.crdt_engines.values_mut() {
             engine.clear_apply_candidates();
         }
-    }
-}
-
-/// The collection a collection-scoped graph read walks. Graph plans report no
-/// collection to routing (an edge homes on its endpoints), but a scoped read
-/// still observes that one collection's edges.
-fn graph_read_collection(plan: &crate::bridge::envelope::PhysicalPlan) -> Option<&str> {
-    use nodedb_physical::physical_plan::GraphOp;
-    match plan {
-        crate::bridge::envelope::PhysicalPlan::Graph(
-            GraphOp::Hop { collection, .. }
-            | GraphOp::Neighbors { collection, .. }
-            | GraphOp::NeighborsMulti { collection, .. }
-            | GraphOp::Path { collection, .. }
-            | GraphOp::Subgraph { collection, .. },
-        ) => collection.as_ref().map(|c| c.as_str()),
-        _ => None,
     }
 }
 

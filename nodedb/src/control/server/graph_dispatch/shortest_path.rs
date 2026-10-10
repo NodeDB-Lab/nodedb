@@ -109,7 +109,7 @@ pub async fn cross_core_shortest_path(
         &mut presence_reads,
     )
     .await?;
-    presence_reads.publish(shared, tenant_id, database_id, None);
+    presence_reads.publish(tenant_id, database_id, None);
     if !present.contains(&src) || !present.contains(&dst) {
         return Ok(ok_response(encode_path::<String>(&[])?));
     }
@@ -182,7 +182,7 @@ pub async fn cross_core_shortest_path(
     }
 
     // Every vShard the walk expanded joins the transaction read-set.
-    reads.publish(shared, tenant_id, database_id, collection);
+    reads.publish(tenant_id, database_id, collection);
     Ok(ok_response(encode_path(&path)?))
 }
 

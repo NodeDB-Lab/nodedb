@@ -127,7 +127,7 @@ impl CoreLoop {
                     Some(written.as_slice()),
                     None,
                 );
-                self.note_kv_write_lsn(task, did, tid, collection, key);
+                self.note_kv_write(task, did, tid, collection, key);
                 match response_codec::encode_json_as_msgpack(&serde_json::json!({ "value": value }))
                 {
                     Ok(payload) => self.response_with_payload(task, payload),
@@ -195,7 +195,7 @@ impl CoreLoop {
                     Some(written.as_slice()),
                     None,
                 );
-                self.note_kv_write_lsn(task, did, tid, collection, key);
+                self.note_kv_write(task, did, tid, collection, key);
                 match response_codec::encode_json_as_msgpack(&incr_float_reply(value, &written)) {
                     Ok(payload) => self.response_with_payload(task, payload),
                     Err(e) => self.response_error(task, ErrorCode::from(e)),
@@ -266,7 +266,7 @@ impl CoreLoop {
                 Some(written.as_slice()),
                 None,
             );
-            self.note_kv_write_lsn(task, did, tid, collection, key);
+            self.note_kv_write(task, did, tid, collection, key);
         }
 
         let current_b64 = result
@@ -345,7 +345,7 @@ impl CoreLoop {
             Some(written.as_slice()),
             old.as_deref(),
         );
-        self.note_kv_write_lsn(task, did, tid, collection, key);
+        self.note_kv_write(task, did, tid, collection, key);
 
         // A row the read policy excludes is reported exactly as an absent row,
         // the same convention `execute_kv_get` uses — the caller cannot tell it

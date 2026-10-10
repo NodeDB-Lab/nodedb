@@ -17,7 +17,7 @@
 //! durable trace a label ever existed, which is exactly why
 //! `wal_replay_graph_labels.rs` is a standalone replay pass. Yet a label write
 //! advances the core watermark (`GraphOp::SetNodeLabels` goes through
-//! `note_write_lsn` like any other write), so the periodic checkpoint reported
+//! `note_write` like any other write), so the periodic checkpoint reported
 //! it as durable and the manager truncated the segments holding the only copy.
 //! The label silently vanished on the next restart, while the edges around it
 //! came back intact — the node was still there, `MATCH (a:Person)` just stopped

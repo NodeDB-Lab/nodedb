@@ -54,6 +54,9 @@ pub(crate) struct StatementExec<'a> {
     /// The sequence access the statement's Control-Plane computed columns
     /// read: the registry, plus the session's `currval` map when it has one.
     pub(crate) sequences: &'a SessionSequenceAccess<'a>,
+    /// The client's session, which notes its own committed writes. `None`
+    /// for a transport with no session.
+    pub(crate) client_session: Option<DmlTxnCtx<'a>>,
 }
 
 impl StatementExec<'_> {
@@ -201,31 +204,32 @@ pub(crate) async fn run_statement_loop(
             continue;
         }
 
-        let task_vshard = task.vshard_id;
         let task_database_id = task.database_id;
         let DispatchedTask {
             response: task_response,
-            shard_watermarks,
             distributed_reads,
         } = dispatch_statement_task(state, exec.identity, task)
             .await
             .map_err(StatementError::Error)?;
 
-        // Track reads for snapshot-isolation / cross-shard conflict detection
-        // into the statement's transaction. Recorded BEFORE the error
-        // short-circuit so an absent-key point read (a `NotFound` from the
-        // Data Plane) is captured too: a "not found" is a validatable phantom
-        // observation. A multi-core fan read records one entry per
-        // participating shard from the gather's per-shard watermarks. A
-        // single read falls back to its one watermark.
+        // Track reads for commit-time conflict detection into the
+        // statement's transaction. Recorded BEFORE the error short-circuit so
+        // an absent-key point read (a `NotFound` from the Data Plane) is
+        // captured too: a "not found" is a validatable phantom observation.
+        // A committed write floors the session's later reads at the
+        // versions it stamped.
+        if let Some(client) = &exec.client_session {
+            client.sessions.note_own_write_response(
+                client.session_id,
+                task_database_id,
+                exec.tenant_id(),
+                &plan,
+                &task_response,
+            );
+        }
         let records_read = task_response.status == Status::Ok
             || task_response.error_code.as_deref() == Some(&ErrorCode::NotFound);
         if records_read && let Some(txn) = txn {
-            let watermarks = if shard_watermarks.is_empty() {
-                vec![(task_vshard, task_response.watermark_lsn)]
-            } else {
-                shard_watermarks
-            };
             record_reads_for_response(
                 state,
                 txn.sessions,
@@ -233,11 +237,9 @@ pub(crate) async fn run_statement_loop(
                 exec.tenant_id(),
                 ResponseReads {
                     plan: &plan,
-                    watermarks: &watermarks,
-                    read_version_lsn: task_response.read_version_lsn,
+                    read_versions: &task_response.read_versions,
                     found: task_response.status == Status::Ok,
                     distributed_reads: &distributed_reads,
-                    read_lsn_vshard: task_vshard,
                 },
             )
             .await;

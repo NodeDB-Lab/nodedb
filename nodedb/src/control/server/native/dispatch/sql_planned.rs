@@ -138,6 +138,10 @@ pub(super) async fn execute_planned(
         output_schema: Some(&output_schema),
         database_id,
         sequences: &sequences,
+        client_session: Some(DmlTxnCtx {
+            sessions: ctx.sessions,
+            session_id: ctx.peer_addr.into(),
+        }),
     };
     let routed = route_atomic_statement(
         &exec,

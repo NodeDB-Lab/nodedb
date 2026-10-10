@@ -303,7 +303,7 @@ impl CoreLoop {
                     self.kv_engine
                         .delete(database_id, tenant_id, &collection, &keys, now_ms);
                     for deleted_key in &keys {
-                        self.note_replay_write_lsn(
+                        self.note_replay_write(
                             database_id,
                             tenant_id,
                             &collection,
@@ -336,13 +336,7 @@ impl CoreLoop {
                         }]);
                     }
                     self.kv_engine.truncate(database_id, tenant_id, &collection);
-                    self.note_replay_write_lsn(
-                        database_id,
-                        tenant_id,
-                        &collection,
-                        None,
-                        record_lsn,
-                    );
+                    self.note_replay_write(database_id, tenant_id, &collection, None, record_lsn);
                     deletes += 1;
                     continue;
                 }

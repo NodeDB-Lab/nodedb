@@ -393,6 +393,11 @@ pub(crate) async fn enqueue_write(
             wal_lsn,
             resolved_now_ms,
             commit_hlc,
+            // A write that applies a data-group entry versions its rows by
+            // the entry's position, which every replica shares.
+            entry_version: wal_append_outcome.change_position.map(|position| {
+                nodedb_types::WriteVersion::logged(position.epoch, position.log_index)
+            }),
             admission,
             journal,
         },

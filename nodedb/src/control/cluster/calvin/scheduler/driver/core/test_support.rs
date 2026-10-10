@@ -199,9 +199,8 @@ pub(super) fn make_validate_only_txn(epoch: u64, position: u32) -> SequencedTxn 
         engine: EngineTag::Document,
         collection: "test_coll".to_string(),
         key: ReadKeyIdent::Point(KeyRepr::Surrogate(1)),
-        read_lsn: Lsn::ZERO,
+        read_version: nodedb_types::WriteVersion::ZERO,
         home_vshard: None,
-        served_by: 0,
     }]);
     let tx_class = TxClass::new_single_vshard(
         ReadWriteSet::new(vec![]),
@@ -297,6 +296,7 @@ fn filler_request(request_id: RequestId, tenant_id: TenantId) -> Request {
         wal_lsn: None,
         resolved_now_ms: None,
         commit_hlc: None,
+        entry_version: None,
         admission: Admission::Exempt(ExemptReason::Read),
     }
 }
@@ -487,7 +487,7 @@ pub(super) fn staged_response(status: Status, stage_vote: Option<StageVote>) -> 
         watermark_lsn: Lsn::ZERO,
         error_code: None,
         stage_vote,
-        read_version_lsn: Lsn::ZERO,
+        read_versions: crate::types::ReadVersions::new(),
         write_set: Vec::new(),
     }
 }

@@ -114,8 +114,7 @@ pub(super) async fn resolve_predicate_sum_targets(
         // observation this settlement rests on is the whole collection: a row
         // that JOINS the match set after the scan has to invalidate it too.
         source_row: None,
-        read_version_lsn: read.read_version_lsn,
-        served_by: read.served_by,
+        read_version: read.read_version,
     };
     let settlement =
         settle_cross_shard_images(&bindings, &input, &resolved, txn_id, tenant_id, database_id)?;

@@ -256,7 +256,10 @@ impl LocalPlanExecutor {
                     {
                         // Replicated writes carry no read watermark → 0: it floors a
                         // session's later reads, and this RPC seam has no session.
-                        Ok((payload, _write_version)) => ExecuteResponse::ok(vec![payload], 0, 0),
+                        // The write's versions go back to the coordinator.
+                        Ok((payload, write_versions)) => {
+                            ExecuteResponse::ok(vec![payload], 0, write_versions.to_wire())
+                        }
                         // A replicated write's apply verdict is a Data-Plane
                         // verdict: carry its code, never flatten to internal.
                         Err(e) => ExecuteResponse::err(execution_error_to_typed(e)),
@@ -287,10 +290,20 @@ impl LocalPlanExecutor {
         )
         .await
         {
+            // A read that found no row keeps its verdict and the versions it
+            // observed, so the coordinator answers and validates it as a
+            // local miss.
+            Ok(Ok(result)) if result.not_found => ExecuteResponse::refused_with_versions(
+                TypedClusterError::DataPlane {
+                    code: crate::bridge::envelope::ErrorCode::NotFound.into(),
+                },
+                result.watermark_lsn.as_u64(),
+                result.read_versions.to_wire(),
+            ),
             Ok(Ok(result)) => ExecuteResponse::ok(
                 vec![result.payload],
                 result.watermark_lsn.as_u64(),
-                result.read_version_lsn.as_u64(),
+                result.read_versions.to_wire(),
             ),
             Ok(Err(e)) => ExecuteResponse::err(execution_error_to_typed(e)),
             Err(_) => ExecuteResponse::err(TypedClusterError::DeadlineExceeded {
@@ -371,7 +384,7 @@ impl LocalPlanExecutor {
                             .send_chunk(
                                 b.payload,
                                 b.watermark_lsn.as_u64(),
-                                b.read_version_lsn.as_u64(),
+                                b.read_versions.to_wire(),
                             )
                             .await
                         {

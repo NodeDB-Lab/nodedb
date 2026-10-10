@@ -17,6 +17,20 @@ use nodedb_types::QualifiedCollection;
 use nodedb_types::Surrogate;
 use nodedb_types::calvin::VersionedReadEntry;
 
+/// The version a single-node write at WAL LSN `lsn` records: no data-group
+/// entry applied it, so its version is its LSN on top of an empty vShard.
+pub(super) fn local_version(lsn: u64) -> nodedb_types::WriteVersion {
+    nodedb_types::WriteVersion::local_after(nodedb_types::WriteVersion::ZERO, lsn)
+}
+
+/// The vShard a Calvin participant writes `collection` on: the collection's
+/// home vShard.
+pub(super) fn home_vshard(collection: &str) -> u32 {
+    nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, collection)
+        .vshard()
+        .as_u32()
+}
+
 pub(super) fn make_core() -> (
     CoreLoop,
     Producer<BridgeRequest>,
@@ -60,6 +74,7 @@ pub(super) fn make_request(plan: PhysicalPlan, vshard: u32, wal_lsn: Option<Lsn>
         wal_lsn,
         resolved_now_ms: None,
         commit_hlc: None,
+        entry_version: None,
         admission: nodedb::bridge::envelope::Admission::Admitted,
     }
 }

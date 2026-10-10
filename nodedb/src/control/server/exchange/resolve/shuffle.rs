@@ -294,23 +294,23 @@ pub async fn resolve_shuffle_join(
         probe_produce_futures.push(send_produce(transport, node, req));
     }
     // Await ALL producers (both sides CONCURRENTLY); any error fails the whole
-    // shuffle (no partial join). Max-fold each side's producers' observed
-    // per-collection read-version LSN independently: build ↔ right_collection,
-    // probe ↔ left_collection. Each side's producers scan the SAME single
-    // collection, so its max is that collection's `coll_write_lsn` at read time —
-    // the sound OCC read-version comparand recorded for that side.
+    // shuffle (no partial join). Fold each side's producers' observed read
+    // versions independently: build ↔ right_collection, probe ↔
+    // left_collection. Each side's producers scan the SAME single collection,
+    // so the fold holds that collection's version on each vShard at read time:
+    // the OCC read-version comparand recorded for that side.
     let (build_results, probe_results) = join(
         join_all(build_produce_futures),
         join_all(probe_produce_futures),
     )
     .await;
-    let mut build_rv: u64 = 0;
+    let mut build_rv = crate::types::ReadVersions::new();
     for result in build_results {
-        build_rv = build_rv.max(result?);
+        build_rv.merge(&result?);
     }
-    let mut probe_rv: u64 = 0;
+    let mut probe_rv = crate::types::ReadVersions::new();
     for result in probe_results {
-        probe_rv = probe_rv.max(result?);
+        probe_rv.merge(&result?);
     }
 
     // 8. After ALL producers succeed, dispatch consumers CONCURRENTLY — one per
@@ -364,7 +364,7 @@ pub async fn resolve_shuffle_join(
     // Two per-side read captures carry each side's REAL observed read version:
     // the probe capture (left_collection) at `probe_rv`, the build capture
     // (right_collection) at `build_rv` — folded from the producers'
-    // `ShuffleProduceResponse.read_version_lsn`. The record seam records one
+    // `ShuffleProduceResponse.read_versions`. The record seam records one
     // read-set entry per capture, re-homing and revalidating each side's vshard
     // independently, so a concurrent write to EITHER side between the in-txn read
     // and commit is detected (the build side is recorded too). The response's own scalar stays `ZERO`: the captures
@@ -374,15 +374,15 @@ pub async fn resolve_shuffle_join(
     let captures = vec![
         DistributedReadCapture {
             scan_plan: probe_scan,
-            read_version_lsn: Lsn::new(probe_rv),
+            read_versions: probe_rv,
         },
         DistributedReadCapture {
             scan_plan: build_scan,
-            read_version_lsn: Lsn::new(build_rv),
+            read_versions: build_rv,
         },
     ];
     Ok(Resolved::Gathered(
-        outcome_to_response(merged, Lsn::ZERO, Lsn::ZERO),
+        outcome_to_response(merged, Lsn::ZERO, crate::types::ReadVersions::new()),
         Vec::new(),
         captures,
     ))

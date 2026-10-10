@@ -208,15 +208,18 @@ impl ArrayStore {
         valid_at_ms: Option<i64>,
     ) -> nodedb_array::ArrayResult<nodedb_array::query::ceiling::CeilingResult> {
         use nodedb_array::query::ceiling::CeilingParams;
-        // Find the hilbert_prefix for this coord.
-        let hilbert_prefix = {
-            use nodedb_array::tile::tile_id_for_cell;
-            let tile = tile_id_for_cell(&self.schema, coord, 0).map_err(|e| {
-                nodedb_array::ArrayError::SegmentCorruption {
+        // Find the hilbert_prefix for this coord. A coordinate outside the
+        // domain has no tile: a cell write refuses it, so no cell is there.
+        let hilbert_prefix = match nodedb_array::tile::tile_id_for_cell(&self.schema, coord, 0) {
+            Ok(tile) => tile.hilbert_prefix,
+            Err(nodedb_array::ArrayError::CoordOutOfDomain { .. }) => {
+                return Ok(CeilingResult::NotFound);
+            }
+            Err(e) => {
+                return Err(nodedb_array::ArrayError::SegmentCorruption {
                     detail: format!("ceiling_for_coord: tile id: {e}"),
-                }
-            })?;
-            tile.hilbert_prefix
+                });
+            }
         };
         let versions = self.cell_versions_for_coord(hilbert_prefix, coord, system_as_of)?;
         let params = CeilingParams {

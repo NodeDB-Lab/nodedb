@@ -51,17 +51,18 @@ pub(crate) async fn apply_orchestrated_write(
     let request_id = RequestId::new(state.request_id_counter.fetch_add(1, Ordering::Relaxed));
     let deadline = crate::control::wal_replication::statement_propose_deadline(state);
     match propose_replicated_entry(state, proposer, entry, deadline).await {
-        Ok((payload, write_version)) => {
+        Ok((payload, write_versions)) => {
             let response = Response {
                 request_id,
                 status: Status::Ok,
                 attempt: 1,
                 partial: false,
                 payload: payload.into(),
-                watermark_lsn: write_version,
+                // A write carries no read watermark.
+                watermark_lsn: crate::types::Lsn::ZERO,
                 error_code: None,
                 stage_vote: None,
-                read_version_lsn: write_version,
+                read_versions: write_versions,
                 write_set: Vec::new(),
             };
             Ok(response)
@@ -82,7 +83,7 @@ fn data_plane_verdict(request_id: RequestId, code: ErrorCode) -> Response {
         watermark_lsn: crate::types::Lsn::ZERO,
         error_code: Some(Box::new(code)),
         stage_vote: None,
-        read_version_lsn: crate::types::Lsn::ZERO,
+        read_versions: crate::types::ReadVersions::new(),
         write_set: Vec::new(),
     }
 }

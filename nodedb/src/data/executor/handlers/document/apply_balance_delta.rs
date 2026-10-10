@@ -143,7 +143,7 @@ impl CoreLoop {
             );
         }
 
-        self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
+        self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
         let mut response = self.response_affected(task, 1);

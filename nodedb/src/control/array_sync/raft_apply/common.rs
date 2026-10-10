@@ -126,12 +126,18 @@ pub(super) async fn submit_array_write(
             // committed plan: the proposer's LSN is deliberately not carried on
             // the wire, and the array engine's tile state has no other
             // durability path than this record's replay.
-            // An array write emits no Data-Plane change event to position.
+            // The entry's position versions the write's rows alike on every
+            // replica, and its marker gives restart replay the same version.
             durability: WalDurability::AppendHere {
                 now_override: resolved_now_ms,
                 apply_key,
                 commit_hlc,
-                change_position: None,
+                change_position: Some(crate::event::cdc::position::entry_position(
+                    state,
+                    vshard.as_u32(),
+                    group_id,
+                    log_index,
+                )),
             },
             // Raft committed this entry at a fixed log index and every replica
             // applies it in that order; re-entering the write-admission gate
@@ -296,6 +302,7 @@ pub(super) fn build_array_request(
         wal_lsn: None,
         resolved_now_ms: None,
         commit_hlc: None,
+        entry_version: None,
         admission: crate::bridge::envelope::Admission::Exempt(
             crate::bridge::envelope::ExemptReason::AlreadyOrdered,
         ),
@@ -352,7 +359,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: code.map(Box::new),
             stage_vote: None,
-            read_version_lsn: Lsn::ZERO,
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         }
     }

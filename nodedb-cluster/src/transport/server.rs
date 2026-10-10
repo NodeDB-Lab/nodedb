@@ -72,10 +72,10 @@ impl ChunkSink for QuicChunkSink<'_> {
         &mut self,
         payload: Vec<u8>,
         watermark_lsn: u64,
-        // The `ExecuteStream` wire chunk only carries `watermark_lsn`; the
-        // per-collection read version is surfaced separately on the shuffle
-        // produce reply, not on this streaming path.
-        _read_version_lsn: u64,
+        // The `ExecuteStream` wire chunk only carries `watermark_lsn`. The
+        // read versions reach the coordinator on the shuffle produce reply,
+        // not on this streaming path.
+        _read_versions: Vec<nodedb_types::ShardVersion>,
     ) -> Result<()> {
         let rpc = RaftRpc::ExecuteStreamChunk(ExecuteStreamChunk {
             payload,

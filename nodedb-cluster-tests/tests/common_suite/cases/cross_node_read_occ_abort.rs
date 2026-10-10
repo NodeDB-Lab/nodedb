@@ -8,11 +8,10 @@
 //! An interactive transaction can WRITE several collections and READ another. To
 //! exercise the cross-shard OCC read-validation path, the transaction must go
 //! through the multi-participant Calvin barrier (`run_commit_calvin`) rather than
-//! the single-shard local-WAL `si_conflict_abort` fast path. That barrier is the
-//! only place that revalidates a read slice on its owning vShard using the real
-//! per-shard `read_lsn`, by dispatching a validate-only task to every read-only
-//! participant. If a read-only participant is never validated, a stale read
-//! commits silently — a non-serializable execution.
+//! the single-shard path. The barrier revalidates a read slice on its owning
+//! vShard at the read's real version, by dispatching a validate-only task to
+//! every read-only participant. If a read-only participant is never validated,
+//! a stale read commits silently — a non-serializable execution.
 //!
 //! ## Why a single node reproduces it
 //!
@@ -230,7 +229,7 @@ async fn cross_shard_read_occ_abort_on_stale_read() {
     // writes, leaving the transaction OPEN (no COMMIT). The two INSERTs buffer on
     // the coordinator, so at COMMIT the write set spans two vShards → participant
     // floor >= 2 → the multi-participant Calvin barrier; the SELECT registers
-    // bread's vShard as a read-only participant with a captured read_lsn.
+    // bread's vShard as a read-only participant with a captured read version.
     let block = format!(
         "BEGIN; \
          SELECT * FROM {bread}; \
@@ -284,8 +283,8 @@ async fn cross_shard_read_occ_abort_on_stale_read() {
         pg_detail(&err)
     );
 
-    // Discriminator: `si_conflict_abort`'s single-shard fast path raises this same
-    // SQLSTATE without ever admitting the batch to a sequencer epoch, so the 40001
+    // Discriminator: the single-shard commit check raises this same SQLSTATE
+    // without ever admitting the batch to a sequencer epoch, so the 40001
     // assertion above alone cannot tell "aborted by the multi-participant Calvin
     // barrier revalidating bread's read-only-participant slice" apart from "aborted
     // for some unrelated single-shard reason". Only the barrier path admits the
@@ -318,7 +317,7 @@ async fn cross_shard_read_occ_abort_on_stale_read() {
 
 /// The precision control: the SAME cross-shard shape (read `bread`, write
 /// `w1`/`w2`) with NO concurrent write to `bread` must COMMIT SUCCESSFULLY. The
-/// barrier validates `bread`'s read at its real `read_lsn` and finds it still
+/// barrier validates `bread`'s read at its real read version and finds it still
 /// current — proving the abort above is caused by the genuine version advance,
 /// not a blanket cross-shard abort.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

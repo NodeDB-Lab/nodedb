@@ -72,9 +72,10 @@ pub(crate) async fn execute_received_plan(
             )
             .await?;
             Ok(NodeLevelResult {
+                not_found: crate::control::local_dispatch::is_not_found(&resp),
                 payload: resp.payload.to_vec(),
                 watermark_lsn: resp.watermark_lsn,
-                read_version_lsn: resp.read_version_lsn,
+                read_versions: resp.read_versions,
             })
         }
         ReceivedRoute::AllCores => {

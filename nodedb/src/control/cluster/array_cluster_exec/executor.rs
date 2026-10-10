@@ -19,9 +19,11 @@ use nodedb_cluster::{NexarTransport, RoutingTable};
 use crate::control::cluster::array_cluster_helpers::{
     cluster_err, encode_err, finalize_agg_partials,
 };
+use crate::control::server::shared::session::pending_shard_reads::{ShardObservation, ShardReads};
+use crate::control::server::shared::session::read_set::EngineTag;
 use crate::control::state::SharedState;
 use crate::data::executor::response_codec;
-use crate::types::TxnId;
+use crate::types::{TxnId, VShardId};
 use nodedb_physical::physical_plan::ClusterArrayOp;
 use zerompk;
 
@@ -224,6 +226,7 @@ impl ClusterArrayExecutor {
             .coord_slice(req, limit, system_time)
             .await
             .map_err(cluster_err)?;
+        note_array_reads(array_id, &result.read_versions);
 
         // Encode rows into the structured `ArraySliceResponse` — identical to
         // the shape that `dispatch_array_slice` emits for single-node requests.
@@ -292,6 +295,7 @@ impl ClusterArrayExecutor {
             txn_id: txn_id.map(TxnId::as_u64),
         };
         let agg = coordinator.coord_agg(req).await.map_err(cluster_err)?;
+        note_array_reads(array_id, &agg.read_versions);
 
         // Decode the reducer so we know which field to finalize.
         let reducer: nodedb_physical::physical_plan::ArrayReducer =
@@ -378,4 +382,29 @@ impl ClusterArrayExecutor {
         let affected: u64 = resps.iter().map(|r| r.affected).sum();
         response_codec::encode_count("deleted", affected as usize)
     }
+}
+
+/// Note every vShard a cluster array read covered, at the version its shard
+/// leg reported, for the running request's transaction read-set. A leg that
+/// matched no row reports its vShard too. The request's protocol records the
+/// note when the request ends (`session::pending_shard_reads::record_pending`), so
+/// commit validation checks the read on each covered vShard: inside the
+/// Calvin barrier, or against each vShard's leader on a local commit.
+fn note_array_reads(
+    array_id: &nodedb_array::types::ArrayId,
+    read_versions: &[nodedb_types::ShardVersion],
+) {
+    crate::control::server::shared::session::pending_shard_reads::note(ShardReads {
+        engine: EngineTag::ClusterArray,
+        tenant_id: array_id.tenant_id,
+        database_id: array_id.database_id,
+        collection: Some(array_id.name.clone()),
+        shards: read_versions
+            .iter()
+            .map(|shard| ShardObservation {
+                vshard: VShardId::new(shard.vshard),
+                version: shard.version,
+            })
+            .collect(),
+    });
 }

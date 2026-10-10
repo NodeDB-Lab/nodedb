@@ -99,7 +99,7 @@ impl CoreLoop {
         };
         let applied = self.log_kv_incr_result(&collection, &key, delta, record_lsn, result);
         if applied > 0 {
-            self.note_replay_write_lsn(
+            self.note_replay_write(
                 database_id,
                 tenant_id,
                 &collection,

@@ -73,6 +73,7 @@ pub mod vector_index_stats;
 pub mod vector_model;
 pub mod volatility;
 pub mod wire_version;
+pub mod write_version;
 
 pub use approx::{CountMinSketch, HyperLogLog, SpaceSaving, TDigest};
 pub use array_cell::ArrayCell;
@@ -150,3 +151,4 @@ pub use vector_index_stats::{
 };
 pub use vector_model::{VectorModelEntry, VectorModelMetadata};
 pub use volatility::Volatility;
+pub use write_version::{ShardVersion, WriteVersion};

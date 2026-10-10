@@ -200,11 +200,11 @@ impl CoreLoop {
         }
 
         // Record the committed write's version against its surrogate + collection.
-        self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
+        self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
 
         // Record the touched secondary-index values into the per-index
         // write-value substrate (added ∪ removed ∪ bitemporal tuples).
-        if let Some(lsn) = task.wal_lsn() {
+        if let Some(stamp) = self.task_write_stamp(task) {
             let mut tuples = std::mem::take(&mut prior.secondary_index_added);
             tuples.append(&mut prior.secondary_index_removed);
             tuples.append(&mut prior.bitemporal_index_tuples);
@@ -213,7 +213,7 @@ impl CoreLoop {
                 crate::types::TenantId::new(tid),
                 collection,
                 &tuples,
-                lsn,
+                stamp,
             );
         }
 

@@ -225,7 +225,7 @@ pub(super) async fn materialize_child_rows(
     {
         captures.push(DistributedReadCapture {
             scan_plan,
-            read_version_lsn: outcome.read_version_lsn,
+            read_versions: outcome.read_versions.clone(),
         });
     }
 

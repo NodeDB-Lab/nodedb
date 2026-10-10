@@ -71,8 +71,8 @@ pub trait RaftRpcHandler: Send + Sync + 'static {
     /// (looping back for parts this node owns). Returns a
     /// [`ShuffleProduceResponse`] whose `error` is `None` on a clean produce or
     /// `Some(err)` if the scan failed (every part has already been `End`ed with
-    /// the same error), and whose `read_version_lsn` carries the max
-    /// per-collection read version the scan observed. The transport writes
+    /// the same error), and whose `read_versions` carry the read versions the
+    /// scan observed, one per vShard. The transport writes
     /// exactly one `ShuffleProduceResponse` carrying this outcome back to the
     /// coordinator.
     fn on_shuffle_produce(

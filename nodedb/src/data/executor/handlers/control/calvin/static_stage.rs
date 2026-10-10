@@ -25,7 +25,7 @@ impl CoreLoop {
     /// Validate a static-set Calvin transaction and stage it for commit.
     ///
     /// Computes the local commit vote by checking whether this participant's
-    /// slice of the transaction's LSN-versioned read-set is still current
+    /// slice of the transaction's versioned read-set is still current
     /// against the per-core write versions, then STAGES the write plans into
     /// the synthetic overlay and the commit-pending buffer keyed by
     /// `(epoch, position)`. It performs NO base mutation and fires NO side
@@ -149,7 +149,7 @@ impl CoreLoop {
             watermark_lsn: self.watermark,
             error_code: None,
             stage_vote: Some(vote),
-            read_version_lsn: crate::types::Lsn::ZERO,
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         }
     }
@@ -241,29 +241,39 @@ mod tests {
         );
     }
 
-    /// A predicate read of `collection` on vShard 0, taken at `read_lsn`.
-    fn homed_read(collection: &str, read_lsn: u64) -> VersionedReadEntry {
+    /// A predicate read of `collection` on vShard 0, taken after the entry at
+    /// `index`.
+    fn homed_read(collection: &str, index: u64) -> VersionedReadEntry {
         VersionedReadEntry {
             engine: nodedb_types::calvin::EngineTag::Document,
             collection: collection.to_string(),
             key: nodedb_types::calvin::ReadKeyIdent::Predicate,
-            read_lsn: crate::types::Lsn::new(read_lsn),
+            read_version: nodedb_types::WriteVersion::logged(0, index),
             home_vshard: Some(0),
-            served_by: 0,
         }
+    }
+
+    /// Record a write of `collection` applying the entry at `index` on
+    /// vShard 0.
+    fn write_at(core: &mut CoreLoop, collection: &str, index: u64) {
+        core.note_write(
+            DatabaseId::DEFAULT,
+            TenantId::new(1),
+            collection,
+            None,
+            crate::data::executor::core_loop::write_index::WriteStamp {
+                vshard: crate::types::VShardId::new(0),
+                lsn: crate::types::Lsn::new(index),
+                entry: Some(nodedb_types::WriteVersion::logged(0, index)),
+            },
+        );
     }
 
     #[test]
     fn static_stage_with_a_superseded_read_votes_serialization_conflict() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        core.note_write_lsn(
-            DatabaseId::DEFAULT,
-            TenantId::new(1),
-            "orders",
-            None,
-            crate::types::Lsn::new(20),
-        );
+        write_at(&mut core, "orders", 20);
         let task = make_task();
         let tenant_id = TenantId::new(1);
         let ctx = CalvinExecCtx {
@@ -292,13 +302,7 @@ mod tests {
     fn static_stage_with_a_current_read_votes_commit() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        core.note_write_lsn(
-            DatabaseId::DEFAULT,
-            TenantId::new(1),
-            "orders",
-            None,
-            crate::types::Lsn::new(20),
-        );
+        write_at(&mut core, "orders", 20);
         let task = make_task();
         let tenant_id = TenantId::new(1);
         let ctx = CalvinExecCtx {

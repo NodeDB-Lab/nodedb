@@ -94,7 +94,7 @@ impl Dispatcher {
                         ),
                     })),
                     stage_vote: None,
-                    read_version_lsn: Lsn::ZERO,
+                    read_versions: crate::types::ReadVersions::new(),
                     write_set: Vec::new(),
                 });
             }
@@ -134,7 +134,7 @@ mod tests {
                     watermark_lsn: Lsn::new(42),
                     error_code: None,
                     stage_vote: None,
-                    read_version_lsn: crate::types::Lsn::ZERO,
+                    read_versions: crate::types::ReadVersions::new(),
                     write_set: Vec::new(),
                 },
             })
@@ -165,7 +165,7 @@ mod tests {
                     watermark_lsn: Lsn::ZERO,
                     error_code: None,
                     stage_vote: None,
-                    read_version_lsn: Lsn::ZERO,
+                    read_versions: crate::types::ReadVersions::new(),
                     write_set: Vec::new(),
                 },
             })
@@ -294,7 +294,7 @@ mod tests {
                     watermark_lsn: Lsn::ZERO,
                     error_code: None,
                     stage_vote: None,
-                    read_version_lsn: crate::types::Lsn::ZERO,
+                    read_versions: crate::types::ReadVersions::new(),
                     write_set: Vec::new(),
                 },
             })
@@ -389,7 +389,7 @@ mod tests {
                 watermark_lsn: Lsn::ZERO,
                 error_code: None,
                 stage_vote: None,
-                read_version_lsn: Lsn::ZERO,
+                read_versions: crate::types::ReadVersions::new(),
                 write_set: Vec::new(),
             },
         }
