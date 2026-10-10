@@ -19,13 +19,17 @@
 //!   and restart replay applies them.
 //! - [`calvin_install_tests`]: a Calvin slice installs from its stamped
 //!   redo entry.
+//! - [`cross_shard_fold_tests`]: a record never folds a cross-shard sum
+//!   target on the source's core.
 //! - [`unique_handover_tests`]: UNIQUE judged on a record's post-state.
 
 #[cfg(test)]
-mod calvin_fold_tests;
+pub(in crate::data::executor) mod calvin_fold_tests;
 mod calvin_install;
 #[cfg(test)]
 mod calvin_install_tests;
+#[cfg(test)]
+mod cross_shard_fold_tests;
 mod document;
 mod entry;
 mod events;

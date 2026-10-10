@@ -17,6 +17,7 @@ use crate::control::server::response_shape::types::{
 };
 use crate::control::server::shared::session::staging_gate::{StagedTagKind, StagedWriteOutcome};
 use crate::types::DatabaseId;
+use nodedb_physical::physical_task::PhysicalTask;
 
 use super::{
     DispatchCtx, apply_dml_outcome, dml_fold_error_to_native, shape_error_to_native,
@@ -35,7 +36,6 @@ pub(super) struct FoldShape<'a> {
 }
 
 /// One statement's response, accumulated across its tasks.
-#[derive(Default)]
 pub(super) struct StatementFold {
     pub columns: Option<Vec<String>>,
     pub rows: Vec<Vec<Value>>,
@@ -45,14 +45,29 @@ pub(super) struct StatementFold {
 }
 
 impl StatementFold {
-    /// Fold one task's count-bearing outcome into the statement's tag.
+    /// An empty fold for the statement that planned `tasks`. The tag is built
+    /// over every task, so a derived write beside the user's own adds no
+    /// verb and no count.
+    pub(super) fn for_tasks(tasks: &[PhysicalTask]) -> Self {
+        Self {
+            columns: None,
+            rows: Vec::new(),
+            warnings: Vec::new(),
+            tag: StatementTag::for_plans(tasks.iter().map(|t| &t.plan)),
+            last_lsn: 0,
+        }
+    }
+
+    /// Fold the count-bearing outcome of the task that ran `plan` into the
+    /// statement's tag.
     pub(super) fn fold_dml(
         &mut self,
         seq: u64,
+        plan: &PhysicalPlan,
         outcome: DmlOutcome,
     ) -> Result<(), Box<NativeResponse>> {
         self.tag
-            .fold(outcome)
+            .fold(self.tag.role_of(plan), outcome)
             .map_err(|e| Box::new(dml_fold_error_to_native(seq, &e)))
     }
 
@@ -114,6 +129,7 @@ impl StatementFold {
         if !matches!(outcome.kind, StagedTagKind::RawPayload) {
             return self.fold_dml(
                 shape.seq,
+                plan,
                 staged_dml_outcome(outcome.kind, outcome.affected),
             );
         }

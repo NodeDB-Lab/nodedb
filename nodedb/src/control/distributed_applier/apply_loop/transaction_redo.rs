@@ -297,7 +297,9 @@ pub(super) fn enqueue_payload<'a>(
                 // so before the group's applied index passes it.
                 if let Some(claim) = &calvin {
                     let event = claim.settle(state, &submitted);
-                    claim.report(state, event).await;
+                    claim
+                        .report_install(state, event, &payload.collections)
+                        .await;
                 }
                 let outcome = conclude_transaction_redo(tracker, pos, submitted);
                 settle_stream(ctx, stream, &outcome);

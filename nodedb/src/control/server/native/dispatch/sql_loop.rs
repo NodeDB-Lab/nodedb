@@ -16,13 +16,10 @@ use std::sync::Arc;
 use nodedb_types::protocol::NativeResponse;
 
 use crate::bridge::envelope::Status;
-use crate::control::planner::calvin::write_class::{
-    plan_counts_toward_statement_tag, plans_have_user_write,
-};
 use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::response_shape::types::{
-    PlanKind, describe_plan, payload_to_dml_outcome, replaced_write_outcome,
+    PlanKind, TaskTagRole, describe_plan, payload_to_dml_outcome, replaced_write_outcome,
 };
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
@@ -92,15 +89,15 @@ pub(super) async fn run_dispatch_loop(
         txn.sessions
             .record_read_entries(txn.session_id, sum_target_reads);
     }
-    let mut fold = StatementFold::default();
+    // A derived write beside the user's own (an implicit edge, a cross-shard
+    // balance move) never answers the statement, exactly as Calvin's deposit
+    // rule has it: the fold is built over every task to decide it.
+    let mut fold = StatementFold::for_tasks(&tasks);
     // Checked once rather than per task — metering is disabled by default, so
     // this keeps the per-task extraction below (which clones the collection
     // name) a true no-op on the hot path for every deployment that hasn't
     // turned it on.
     let metering_enabled = ctx.state.metering_config.enabled;
-    // A derived implicit-edge write beside the user's own never answers the
-    // statement, exactly as Calvin's deposit rule has it.
-    let has_user_write = plans_have_user_write(tasks.iter().map(|t| &t.plan));
     // Session-scoped sequence access for the statement's Control-Plane
     // computed columns: the registry plus this connection's `currval` map.
     let session_sequences = ctx.sessions.sequence_values(ctx.peer_addr);
@@ -174,19 +171,12 @@ pub(super) async fn run_dispatch_loop(
                     ControlFlow::Break(fold.fold_staged(ctx, &shape, &plan, outcome))
                 }
                 Ok(TxnTaskOutcome::CloneHandled(clone_resp)) => ControlFlow::Break(
-                    fold_answer(
-                        ctx,
-                        &shape,
-                        &mut fold,
-                        &plan,
-                        has_user_write,
-                        clone_resp.payload.as_ref(),
-                    )
-                    .map(drop),
+                    fold_answer(ctx, &shape, &mut fold, &plan, clone_resp.payload.as_ref())
+                        .map(drop),
                 ),
                 Ok(TxnTaskOutcome::InsteadOf) => {
                     ControlFlow::Break(match replaced_write_outcome(describe_plan(&plan)) {
-                        Some(outcome) => fold.fold_dml(seq, outcome),
+                        Some(outcome) => fold.fold_dml(seq, &plan, outcome),
                         None => {
                             fold.tag.fold_opaque();
                             Ok(())
@@ -242,7 +232,7 @@ pub(super) async fn run_dispatch_loop(
                     fold.rows.extend(rows);
                 }
                 Ok(super::cluster_array::ClusterArrayOutcome::Affected(outcome)) => {
-                    if let Err(e) = fold.fold_dml(seq, outcome) {
+                    if let Err(e) = fold.fold_dml(seq, &plan, outcome) {
                         return SqlOutcome::Response(e);
                     }
                 }
@@ -310,14 +300,8 @@ pub(super) async fn run_dispatch_loop(
 
         fold.last_lsn = task_resp.watermark_lsn.as_u64();
 
-        let task_rows = match fold_answer(
-            ctx,
-            &shape,
-            &mut fold,
-            &plan,
-            has_user_write,
-            task_resp.payload.as_ref(),
-        ) {
+        let task_rows = match fold_answer(ctx, &shape, &mut fold, &plan, task_resp.payload.as_ref())
+        {
             Ok(rows) => rows,
             Err(e) => return SqlOutcome::Response(e),
         };
@@ -382,11 +366,9 @@ fn fold_answer(
     shape: &FoldShape<'_>,
     fold: &mut StatementFold,
     plan: &crate::bridge::envelope::PhysicalPlan,
-    has_user_write: bool,
     payload: &[u8],
 ) -> Result<Option<u64>, Box<NativeResponse>> {
     let plan_kind = describe_plan(plan);
-    let counts_toward_tag = plan_counts_toward_statement_tag(plan, has_user_write);
     let count_bearing = matches!(plan_kind, PlanKind::DmlResult(_) | PlanKind::DmlResultByOp);
     if payload.is_empty() && !count_bearing {
         // Not a count-bearing plan (graph / vector / index write): no count
@@ -402,14 +384,14 @@ fn fold_answer(
     // opaque execution reports neither. Counting one per dispatched task
     // instead will report a row for a delete that removed nothing and for an
     // `ON CONFLICT DO NOTHING` insert that skipped.
-    if !counts_toward_tag {
+    if fold.tag.role_of(plan) == TaskTagRole::Opaque {
         fold.tag.fold_opaque();
         return Ok(None);
     }
     match payload_to_dml_outcome(payload, plan_kind) {
         Ok(Some(outcome)) => {
             let affected = outcome.affected;
-            fold.fold_dml(shape.seq, outcome)?;
+            fold.fold_dml(shape.seq, plan, outcome)?;
             Ok(Some(affected))
         }
         Ok(None) => {

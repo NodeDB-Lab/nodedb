@@ -15,13 +15,10 @@ use std::sync::Arc;
 use pgwire::api::results::Response;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
-use crate::control::planner::calvin::write_class::{
-    plan_counts_toward_statement_tag, plans_have_user_write,
-};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::server::response_shape::redaction::QueryRedaction;
-use crate::control::server::response_shape::types::{ShapedRows, StatementTag};
+use crate::control::server::response_shape::types::{ShapedRows, StatementTag, TaskTagRole};
 use crate::control::server::shared::ddl::neutral::maintenance::auto_analyze;
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
@@ -104,8 +101,11 @@ impl NodeDbPgHandler {
         let mut returning_rows: Option<ShapedRows> = None;
         // The statement's ONE command tag, folded over its write tasks the
         // same way. `execute_sql` calls this loop once per `;`-separated
-        // statement, so the fold never crosses a statement boundary.
-        let mut statement_tag = StatementTag::default();
+        // statement, so the fold never crosses a statement boundary. Built
+        // over every task, so a derived write beside the user's own (an
+        // implicit edge, a cross-shard balance move) adds no verb and no
+        // count, in a transaction or out of one.
+        let mut statement_tag = StatementTag::for_plans(tasks.iter().map(|t| &t.plan));
         let mut responses = Vec::with_capacity(tasks.len());
         // Session-scoped sequence access for the statement's Control-Plane
         // computed columns, resolved once: every task of one statement
@@ -117,9 +117,6 @@ impl NodeDbPgHandler {
         // the collection name) a true no-op on the hot path for every
         // deployment that hasn't turned it on.
         let metering_enabled = self.state.metering_config.enabled;
-        // A derived implicit-edge write beside the user's own never answers
-        // the statement, exactly as Calvin's deposit rule has it.
-        let has_user_write = plans_have_user_write(tasks.iter().map(|t| &t.plan));
         // A strong session reads linearizably, in and out of a transaction.
         let strong_reads = self.sessions.read_consistency(session_id).requires_leader();
 
@@ -156,6 +153,7 @@ impl NodeDbPgHandler {
             // rows into the statement's one result set.
             if let Some(route) = route_ctx.as_ref() {
                 let plan = task.plan.clone();
+                let tag_role = statement_tag.role_of(&plan);
                 let task_database_id = task.database_id;
                 let hooks = execute_dml_hooks::PreDispatchContext {
                     identity,
@@ -172,7 +170,7 @@ impl NodeDbPgHandler {
                 {
                     StatementTxnOutcome::Dispatch(routed_task) => task = *routed_task,
                     StatementTxnOutcome::Write(handled) => {
-                        handled.fold_into(&mut statement_tag)?;
+                        handled.fold_into(&mut statement_tag, tag_role)?;
                         continue;
                     }
                     StatementTxnOutcome::Returning(returning) => {
@@ -182,7 +180,7 @@ impl NodeDbPgHandler {
                                     response: &staged_rows_response(rows),
                                     plan: &plan,
                                     plan_kind: PlanKind::ReturningRows,
-                                    counts_toward_tag: false,
+                                    tag_role: TaskTagRole::Opaque,
                                     projection,
                                     result_formats,
                                     session_id,
@@ -202,7 +200,7 @@ impl NodeDbPgHandler {
                         match self.clone_write_answer(hooks, &plan, &resp)? {
                             PreDispatchHandled::Rows(response) => responses.push(response),
                             PreDispatchHandled::Write(handled) => {
-                                handled.fold_into(&mut statement_tag)?;
+                                handled.fold_into(&mut statement_tag, tag_role)?;
                             }
                         }
                         continue;
@@ -245,14 +243,14 @@ impl NodeDbPgHandler {
                 {
                     ClusterArrayResult::Rows(response) => responses.push(response),
                     ClusterArrayResult::Dml(outcome) => statement_tag
-                        .fold(outcome)
+                        .fold(statement_tag.role_of(&task.plan), outcome)
                         .map_err(|e| dml_fold_error_to_pg(&e))?,
                 }
                 continue;
             }
 
             let plan_kind = describe_plan(&task.plan);
-            let counts_toward_tag = plan_counts_toward_statement_tag(&task.plan, has_user_write);
+            let tag_role = statement_tag.role_of(&task.plan);
             let resp_post_set_op = task.post_set_op;
             let task_database_id = task.database_id;
             let task_vshard = task.vshard_id;
@@ -332,7 +330,7 @@ impl NodeDbPgHandler {
                 execute_dml_hooks::PreDispatchOutcome::Handled(PreDispatchHandled::Write(
                     handled,
                 )) => {
-                    handled.fold_into(&mut statement_tag)?;
+                    handled.fold_into(&mut statement_tag, tag_role)?;
                     continue;
                 }
                 execute_dml_hooks::PreDispatchOutcome::Proceed(proceed) => {
@@ -425,7 +423,7 @@ impl NodeDbPgHandler {
                         response: &resp,
                         plan: &plan_for_response,
                         plan_kind,
-                        counts_toward_tag,
+                        tag_role,
                         projection,
                         result_formats,
                         session_id,

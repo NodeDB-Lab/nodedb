@@ -167,7 +167,6 @@ mod tests {
             sum_targets: vec![RedoSumTargets {
                 collection: "entries".into(),
                 resolved: vec![ResolvedSumTarget::new("accounts", "a1", Surrogate::new(9))],
-                deferred: vec!["audit".into()],
             }],
             identities: vec![CarriedIdentity {
                 collection: "entries".into(),

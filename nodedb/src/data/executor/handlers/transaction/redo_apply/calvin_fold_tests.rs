@@ -21,19 +21,38 @@ use crate::types::{Lsn, VShardId};
 use crate::wal::{CalvinStamp, RedoRecord, WriteGroup, WriteGroupRecord};
 
 const DB: u64 = 0;
-pub(super) const TID: u64 = 1;
+pub(in crate::data::executor) const TID: u64 = 1;
 /// Source and target share a vShard, so the inline fold writes the target
 /// on this core.
-pub(super) const SOURCE: &str = "local_charges";
-pub(super) const TARGET: &str = "local_balances";
+pub(in crate::data::executor) const SOURCE: &str = "local_charges";
+pub(in crate::data::executor) const TARGET: &str = "local_balances";
 const ACCOUNT: &str = "a1";
 pub(super) const TARGET_SURROGATE: Surrogate = Surrogate(4242);
 const LSN: u64 = 70;
 
 /// A core whose source collection folds `amount` into the target's
 /// `balance`, with the target row seeded at 100.
-pub(super) fn core_with_sum(dir: &std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>) {
+pub(in crate::data::executor) fn core_with_sum(
+    dir: &std::path::Path,
+) -> (CoreLoop, Box<dyn std::any::Any>) {
     let (mut core, req, resp) = make_core_with_dir(dir);
+    configure_sum(&mut core);
+    let seed = serde_json::json!({"id": ACCOUNT, "balance": "100"});
+    core.sparse
+        .put(
+            DB,
+            TID,
+            TARGET,
+            &nodedb_types::StorageKey::for_surrogate(TARGET_SURROGATE),
+            &doc_format::encode_to_msgpack(&seed),
+        )
+        .expect("seed target row");
+    (core, Box::new((req, resp)))
+}
+
+/// Declare on `core` that the source collection folds `amount` into the
+/// target's `balance`. The target row is left as the stores hold it.
+pub(in crate::data::executor) fn configure_sum(core: &mut CoreLoop) {
     core.doc_configs.insert(
         (DatabaseId::DEFAULT, TenantId::new(TID), TARGET.to_string()),
         CollectionConfig::new(TARGET),
@@ -50,29 +69,17 @@ pub(super) fn core_with_sum(dir: &std::path::Path) -> (CoreLoop, Box<dyn std::an
         (DatabaseId::DEFAULT, TenantId::new(TID), SOURCE.to_string()),
         source,
     );
-    let seed = serde_json::json!({"id": ACCOUNT, "balance": "100"});
-    core.sparse
-        .put(
-            DB,
-            TID,
-            TARGET,
-            &nodedb_types::StorageKey::for_surrogate(TARGET_SURROGATE),
-            &doc_format::encode_to_msgpack(&seed),
-        )
-        .expect("seed target row");
-    (core, Box::new((req, resp)))
 }
 
-pub(super) fn sum_targets() -> Vec<RedoSumTargets> {
+pub(in crate::data::executor) fn sum_targets() -> Vec<RedoSumTargets> {
     vec![RedoSumTargets {
         collection: SOURCE.to_string(),
         resolved: vec![ResolvedSumTarget::new(TARGET, ACCOUNT, TARGET_SURROGATE)],
-        deferred: Vec::new(),
     }]
 }
 
 /// A Calvin redo record writing one source row of `amount` 25.
-pub(super) fn calvin_redo() -> Vec<u8> {
+pub(in crate::data::executor) fn calvin_redo() -> Vec<u8> {
     let body = doc_format::encode_to_msgpack(&serde_json::json!({
         "account_id": ACCOUNT,
         "amount": 25,
@@ -94,7 +101,7 @@ pub(super) fn calvin_redo() -> Vec<u8> {
     .expect("encode redo")
 }
 
-pub(super) fn balance(core: &CoreLoop) -> Option<String> {
+pub(in crate::data::executor) fn balance(core: &CoreLoop) -> Option<String> {
     let stored = core
         .sparse
         .get(

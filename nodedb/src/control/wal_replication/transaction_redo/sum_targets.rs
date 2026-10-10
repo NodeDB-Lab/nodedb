@@ -9,9 +9,15 @@ use std::collections::BTreeMap;
 
 use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan, RedoSumTargets, ResolvedSumTarget};
 
-/// Every resolved and deferred sum target `plans` carry, one entry per source
-/// collection, in collection order. A target resolved by several plans is
-/// listed once.
+/// Every sum target `plans` fold on the source's own core, one entry per
+/// source collection, in collection order. A target resolved by several plans
+/// is listed once.
+///
+/// The install folds every row of a collection against this one merged
+/// table. So a target a plan defers onto its own `ApplyBalanceDelta` task
+/// never enters it. Otherwise a sibling row of the same collection, a DELETE
+/// next to an INSERT on the same account, folds that target on the source's
+/// core as well as the shipped task moving it.
 pub fn redo_sum_targets(plans: &[PhysicalPlan]) -> Vec<RedoSumTargets> {
     let mut by_collection: BTreeMap<String, RedoSumTargets> = BTreeMap::new();
     for plan in plans {
@@ -21,7 +27,11 @@ pub fn redo_sum_targets(plans: &[PhysicalPlan]) -> Vec<RedoSumTargets> {
         let Some((collection, resolved, deferred)) = document_sum_targets(op) else {
             continue;
         };
-        if resolved.is_empty() && deferred.is_empty() {
+        let mut folded = resolved
+            .iter()
+            .filter(|target| !shipped_on_own_task(target, deferred))
+            .peekable();
+        if folded.peek().is_none() {
             continue;
         }
         let entry = by_collection
@@ -29,20 +39,23 @@ pub fn redo_sum_targets(plans: &[PhysicalPlan]) -> Vec<RedoSumTargets> {
             .or_insert_with(|| RedoSumTargets {
                 collection: collection.to_string(),
                 resolved: Vec::new(),
-                deferred: Vec::new(),
             });
-        for target in resolved {
+        for target in folded {
             if !entry.resolved.contains(target) {
                 entry.resolved.push(target.clone());
             }
         }
-        for target in deferred {
-            if !entry.deferred.contains(target) {
-                entry.deferred.push(target.clone());
-            }
-        }
     }
     by_collection.into_values().collect()
+}
+
+/// Whether `target` names a target collection its plan defers onto its own
+/// `ApplyBalanceDelta` task.
+fn shipped_on_own_task(target: &ResolvedSumTarget, deferred: &[String]) -> bool {
+    target
+        .target_collection
+        .as_deref()
+        .is_some_and(|collection| deferred.iter().any(|d| d == collection))
 }
 
 type SumTargetSlots<'a> = (&'a str, &'a [ResolvedSumTarget], &'a [String]);
@@ -157,6 +170,54 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].collection, "entries");
         assert_eq!(targets[0].resolved, vec![target]);
+    }
+
+    fn insert_deferring(target: ResolvedSumTarget, deferred: &str) -> PhysicalPlan {
+        PhysicalPlan::Document(DocumentOp::PointInsert {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "entries"),
+            document_id: "e2".into(),
+            value: Vec::new(),
+            if_absent: false,
+            surrogate: Surrogate::new(2),
+            returning: None,
+            rls_filters: Vec::new(),
+            resolved_sum_targets: vec![target],
+            deferred_sum_targets: vec![deferred.to_string()],
+        })
+    }
+
+    /// An insert that ships its balance on its own task lends no resolution
+    /// to the merged table. A delete of the same account in the same
+    /// transaction ships its own balance too, and the merged table must not
+    /// tell the install to fold it on the source's core as well.
+    #[test]
+    fn a_target_shipped_on_its_own_task_is_not_folded_by_a_sibling_row() {
+        let shipped = ResolvedSumTarget::new("accounts", "a1", Surrogate::new(9));
+        let plans = vec![
+            insert_deferring(shipped, "accounts"),
+            PhysicalPlan::Document(DocumentOp::PointDelete {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "entries"),
+                document_id: "e1".into(),
+                surrogate: Some(Surrogate::new(1)),
+                pk_bytes: b"e1".to_vec(),
+                returning: None,
+                rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                resolved_sum_targets: Vec::new(),
+            }),
+        ];
+        assert!(redo_sum_targets(&plans).is_empty());
+    }
+
+    /// A deferral names one target collection. The same insert still folds a
+    /// target it does not defer.
+    #[test]
+    fn a_deferral_keeps_the_targets_it_does_not_name() {
+        let kept = ResolvedSumTarget::new("audit_totals", "a1", Surrogate::new(7));
+        let plan = insert_deferring(kept.clone(), "accounts");
+        let targets = redo_sum_targets(&[plan]);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].resolved, vec![kept]);
     }
 
     #[test]

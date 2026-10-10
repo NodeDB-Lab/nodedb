@@ -186,15 +186,16 @@ impl RedoApplyScope {
         }
     }
 
-    /// The resolved and deferred sum targets for writes to `collection`.
+    /// The sum targets writes to `collection` fold on this core. A
+    /// cross-shard target with no entry travels on its own task.
     pub(in crate::data::executor) fn sum_targets_for(
         &self,
         collection: &str,
-    ) -> (Vec<ResolvedSumTarget>, Vec<String>) {
-        match self.sum_targets.get(collection) {
-            Some(targets) => (targets.resolved.clone(), targets.deferred.clone()),
-            None => (Vec::new(), Vec::new()),
-        }
+    ) -> Vec<ResolvedSumTarget> {
+        self.sum_targets
+            .get(collection)
+            .map(|targets| targets.resolved.clone())
+            .unwrap_or_default()
     }
 
     /// Keep the first error; a later one is a consequence of it.

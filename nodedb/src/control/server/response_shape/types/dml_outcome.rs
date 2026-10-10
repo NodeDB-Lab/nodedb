@@ -7,6 +7,11 @@
 //! The payload-to-outcome readers here are the one place a Data Plane
 //! count payload becomes a [`DmlOutcome`]; pgwire and native both call them.
 
+use nodedb_physical::physical_plan::PhysicalPlan;
+
+use crate::control::planner::calvin::write_class::{
+    plan_counts_toward_statement_tag, plans_have_user_write,
+};
 use crate::control::server::shared::sql::staging_predicates::{
     StagedTagKind, extract_ingest_rejections, extract_kv_conflict_op, rejected_lines_notice,
     require_affected_count,
@@ -57,10 +62,32 @@ pub enum DmlFoldError {
 /// - Any other verb mix: [`DmlFoldError::VerbMismatch`]. Never a silent pick.
 /// - An opaque task (`PlanKind::Execution`) adds nothing when a DML outcome
 ///   is folded before or after it. Only-opaque folds render as `OK`.
-#[derive(Debug, Default)]
+/// - A task whose [`TaskTagRole`] is `Opaque` folds as an opaque task, whatever
+///   outcome it reports. A derived write beside the user's own has that role:
+///   a materialized-sum balance move or an implicit graph edge write. Its
+///   count describes a row the statement never named.
+///
+/// The tag is built over the statement's full plan set
+/// ([`Self::for_plans`]), because one task alone cannot tell a derived write
+/// beside the user's own from a statement that is only that write.
+#[derive(Debug)]
 pub struct StatementTag {
     dml: Option<DmlOutcome>,
     opaque: bool,
+    /// Whether the statement carries the user's own write. When it does, a
+    /// derived write folds as opaque.
+    has_user_write: bool,
+}
+
+/// Whether one task's outcome answers the statement. Read from
+/// [`StatementTag::role_of`] for the task's plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskTagRole {
+    /// The statement's own write: its verb and count fold into the tag.
+    Counts,
+    /// A task whose outcome adds no verb and no count: a derived write beside
+    /// the user's own, or a task whose rows answer in place of a count.
+    Opaque,
 }
 
 /// What a statement's fold produced.
@@ -72,8 +99,32 @@ pub enum FoldedTag {
 }
 
 impl StatementTag {
-    /// Fold one task's count-bearing outcome into the statement's tag.
-    pub fn fold(&mut self, outcome: DmlOutcome) -> Result<(), DmlFoldError> {
+    /// An empty tag for the statement that planned `plans`: every task the
+    /// statement dispatches, stages or buffers.
+    pub fn for_plans<'a>(plans: impl IntoIterator<Item = &'a PhysicalPlan>) -> Self {
+        Self {
+            dml: None,
+            opaque: false,
+            has_user_write: plans_have_user_write(plans),
+        }
+    }
+
+    /// The role of the task that runs `plan` in this statement.
+    pub fn role_of(&self, plan: &PhysicalPlan) -> TaskTagRole {
+        if plan_counts_toward_statement_tag(plan, self.has_user_write) {
+            TaskTagRole::Counts
+        } else {
+            TaskTagRole::Opaque
+        }
+    }
+
+    /// Fold one task's count-bearing outcome into the statement's tag. A task
+    /// whose role is [`TaskTagRole::Opaque`] folds as opaque.
+    pub fn fold(&mut self, role: TaskTagRole, outcome: DmlOutcome) -> Result<(), DmlFoldError> {
+        if role == TaskTagRole::Opaque {
+            self.fold_opaque();
+            return Ok(());
+        }
         let Some(current) = self.dml else {
             self.dml = Some(outcome);
             return Ok(());
@@ -257,43 +308,116 @@ fn merged_verb(first: &'static str, second: &'static str) -> Option<&'static str
 mod tests {
     use super::*;
 
+    use nodedb_physical::physical_plan::{DocumentOp, GraphOp};
+    use nodedb_types::{DatabaseId, QualifiedCollection, Surrogate};
+
     fn outcome(verb: &'static str, affected: u64) -> DmlOutcome {
         DmlOutcome { verb, affected }
     }
 
+    /// A tag for a statement with no plans: every task counts.
+    fn tag() -> StatementTag {
+        StatementTag::for_plans(std::iter::empty())
+    }
+
+    const COUNTS: TaskTagRole = TaskTagRole::Counts;
+
+    fn entries() -> QualifiedCollection {
+        QualifiedCollection::new(DatabaseId::DEFAULT, "entries")
+    }
+
+    /// The sum source's own insert.
+    fn source_insert() -> PhysicalPlan {
+        PhysicalPlan::Document(DocumentOp::PointInsert {
+            collection: entries(),
+            document_id: "e3".to_owned(),
+            value: Vec::new(),
+            if_absent: false,
+            surrogate: Surrogate::new(11),
+            returning: None,
+            rls_filters: Vec::new(),
+            resolved_sum_targets: Vec::new(),
+            deferred_sum_targets: vec!["accts".to_owned()],
+        })
+    }
+
+    /// The sum source's own delete.
+    fn source_delete() -> PhysicalPlan {
+        PhysicalPlan::Document(DocumentOp::PointDelete {
+            collection: entries(),
+            document_id: "e0".into(),
+            surrogate: None,
+            pk_bytes: Vec::new(),
+            returning: None,
+            rls_filters: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            resolved_sum_targets: Vec::new(),
+        })
+    }
+
+    /// The cross-shard balance move the planner appends beside a sum-source
+    /// write.
+    fn balance_delta(delta: &str) -> PhysicalPlan {
+        PhysicalPlan::Document(DocumentOp::ApplyBalanceDelta {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accts"),
+            document_id: "acc-0".to_owned(),
+            surrogate: Surrogate::new(7),
+            column: "balance".to_owned(),
+            delta: delta.to_owned(),
+            join_column: "account_id".to_owned(),
+            join_value: "acc-0".to_owned(),
+            declared_primary_key: None,
+        })
+    }
+
+    /// Fold each task's staged outcome in plan order, as the in-transaction
+    /// routes of both protocols do.
+    fn fold_staged(plans: &[(PhysicalPlan, StagedTagKind)]) -> Option<FoldedTag> {
+        let mut tag = StatementTag::for_plans(plans.iter().map(|(plan, _)| plan));
+        for (plan, kind) in plans {
+            tag.fold(tag.role_of(plan), staged_dml_outcome(*kind, 1))
+                .expect("a derived write never mixes its verb into the tag");
+        }
+        tag.finish()
+    }
+
     #[test]
     fn empty_fold_finishes_to_none() {
-        assert_eq!(StatementTag::default().finish(), None);
+        assert_eq!(tag().finish(), None);
     }
 
     #[test]
     fn same_verb_sums_affected() {
-        let mut tag = StatementTag::default();
-        tag.fold(outcome("INSERT", 1)).expect("first fold");
-        tag.fold(outcome("INSERT", 0)).expect("second fold");
-        tag.fold(outcome("INSERT", 1)).expect("third fold");
+        let mut tag = tag();
+        tag.fold(COUNTS, outcome("INSERT", 1)).expect("first fold");
+        tag.fold(COUNTS, outcome("INSERT", 0)).expect("second fold");
+        tag.fold(COUNTS, outcome("INSERT", 1)).expect("third fold");
         assert_eq!(tag.finish(), Some(FoldedTag::Dml(outcome("INSERT", 2))));
     }
 
     #[test]
     fn insert_and_update_fold_to_insert_in_either_order() {
-        let mut tag = StatementTag::default();
-        tag.fold(outcome("INSERT", 1)).expect("insert");
-        tag.fold(outcome("UPDATE", 2)).expect("update after insert");
-        assert_eq!(tag.finish(), Some(FoldedTag::Dml(outcome("INSERT", 3))));
+        let mut first = tag();
+        first.fold(COUNTS, outcome("INSERT", 1)).expect("insert");
+        first
+            .fold(COUNTS, outcome("UPDATE", 2))
+            .expect("update after insert");
+        assert_eq!(first.finish(), Some(FoldedTag::Dml(outcome("INSERT", 3))));
 
-        let mut tag = StatementTag::default();
-        tag.fold(outcome("UPDATE", 2)).expect("update");
-        tag.fold(outcome("INSERT", 1)).expect("insert after update");
-        assert_eq!(tag.finish(), Some(FoldedTag::Dml(outcome("INSERT", 3))));
+        let mut second = tag();
+        second.fold(COUNTS, outcome("UPDATE", 2)).expect("update");
+        second
+            .fold(COUNTS, outcome("INSERT", 1))
+            .expect("insert after update");
+        assert_eq!(second.finish(), Some(FoldedTag::Dml(outcome("INSERT", 3))));
     }
 
     #[test]
     fn other_verb_mix_is_an_error() {
-        let mut tag = StatementTag::default();
-        tag.fold(outcome("INSERT", 1)).expect("insert");
+        let mut tag = tag();
+        tag.fold(COUNTS, outcome("INSERT", 1)).expect("insert");
         assert_eq!(
-            tag.fold(outcome("DELETE", 1)),
+            tag.fold(COUNTS, outcome("DELETE", 1)),
             Err(DmlFoldError::VerbMismatch {
                 first: "INSERT",
                 second: "DELETE",
@@ -303,19 +427,83 @@ mod tests {
 
     #[test]
     fn opaque_never_changes_a_dml_tag() {
-        let mut tag = StatementTag::default();
+        let mut tag = tag();
         tag.fold_opaque();
-        tag.fold(outcome("DELETE", 4)).expect("delete");
+        tag.fold(COUNTS, outcome("DELETE", 4)).expect("delete");
         tag.fold_opaque();
         assert_eq!(tag.finish(), Some(FoldedTag::Dml(outcome("DELETE", 4))));
     }
 
     #[test]
     fn only_opaque_finishes_to_opaque() {
-        let mut tag = StatementTag::default();
+        let mut tag = tag();
         tag.fold_opaque();
         tag.fold_opaque();
         assert_eq!(tag.finish(), Some(FoldedTag::Opaque));
+    }
+
+    /// An opaque-role task adds no verb and no count, whatever it reports.
+    #[test]
+    fn an_opaque_role_folds_as_opaque() {
+        let mut tag = tag();
+        tag.fold(COUNTS, outcome("DELETE", 1)).expect("delete");
+        tag.fold(TaskTagRole::Opaque, outcome("UPDATE", 1))
+            .expect("an opaque role never mixes its verb");
+        assert_eq!(tag.finish(), Some(FoldedTag::Dml(outcome("DELETE", 1))));
+    }
+
+    /// A DELETE of a sum-source row in a transaction block stages the delete
+    /// and the cross-shard balance move. The balance move is a derived
+    /// write, so the statement tags `DELETE 1`, never a verb mismatch.
+    #[test]
+    fn a_staged_sum_source_delete_tags_delete_1() {
+        let folded = fold_staged(&[
+            (source_delete(), StagedTagKind::Delete),
+            (balance_delta("-4"), StagedTagKind::Update),
+        ]);
+        assert_eq!(folded, Some(FoldedTag::Dml(outcome("DELETE", 1))));
+    }
+
+    /// An INSERT of a sum-source row in a transaction block tags `INSERT 0 1`.
+    /// The balance move's row is not counted as an inserted row.
+    #[test]
+    fn a_staged_sum_source_insert_tags_insert_0_1() {
+        let folded = fold_staged(&[
+            (source_insert(), StagedTagKind::Insert),
+            (balance_delta("4"), StagedTagKind::Update),
+        ]);
+        assert_eq!(folded, Some(FoldedTag::Dml(outcome("INSERT", 1))));
+    }
+
+    /// The task order does not matter: a balance move folded first still
+    /// adds nothing.
+    #[test]
+    fn a_derived_write_folded_first_adds_nothing() {
+        let folded = fold_staged(&[
+            (balance_delta("-4"), StagedTagKind::Update),
+            (source_delete(), StagedTagKind::Delete),
+        ]);
+        assert_eq!(folded, Some(FoldedTag::Dml(outcome("DELETE", 1))));
+    }
+
+    /// An implicit graph edge write beside the user's own delete is derived
+    /// too. Its count never adds to the deleted rows.
+    #[test]
+    fn an_implicit_edge_delete_adds_no_count() {
+        let edge_cleanup = PhysicalPlan::Graph(GraphOp::EdgeDeleteBatch { edges: Vec::new() });
+        let folded = fold_staged(&[
+            (source_delete(), StagedTagKind::Delete),
+            (edge_cleanup, StagedTagKind::Delete),
+        ]);
+        assert_eq!(folded, Some(FoldedTag::Dml(outcome("DELETE", 1))));
+    }
+
+    /// A statement that is only a derived-shaped write is the user's own
+    /// write, so it counts.
+    #[test]
+    fn a_lone_derived_shaped_write_counts() {
+        let folded = fold_staged(&[(balance_delta("4"), StagedTagKind::Update)]);
+        assert_eq!(folded, Some(FoldedTag::Dml(outcome("UPDATE", 1))));
     }
 
     #[test]

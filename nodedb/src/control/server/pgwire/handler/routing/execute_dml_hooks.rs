@@ -14,7 +14,7 @@ use crate::control::security::auth_context::AuthContext;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::response_shape::types::{
-    DmlOutcome, StatementTag, payload_to_dml_outcome,
+    DmlOutcome, StatementTag, TaskTagRole, payload_to_dml_outcome,
 };
 use crate::control::server::shared::session::SessionId;
 use crate::control::trigger::dml_hook::DmlWriteInfo;
@@ -39,11 +39,16 @@ pub(super) enum HandledWrite {
 }
 
 impl HandledWrite {
-    /// Fold this contribution into the statement's tag.
-    pub(super) fn fold_into(self, statement_tag: &mut StatementTag) -> PgWireResult<()> {
+    /// Fold this contribution, made by a task whose role is `role`, into the
+    /// statement's tag.
+    pub(super) fn fold_into(
+        self,
+        statement_tag: &mut StatementTag,
+        role: TaskTagRole,
+    ) -> PgWireResult<()> {
         match self {
             HandledWrite::Dml(outcome) => statement_tag
-                .fold(outcome)
+                .fold(role, outcome)
                 .map_err(|e| dml_fold_error_to_pg(&e)),
             HandledWrite::Opaque => {
                 statement_tag.fold_opaque();

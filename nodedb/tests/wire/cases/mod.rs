@@ -127,6 +127,7 @@ mod kv_sql_select;
 mod kv_transfer_decimal;
 mod kv_write_row_level_security;
 mod kv_write_row_level_security_atomics;
+mod materialized_sum_txn_command_tag;
 mod merge_insert_atomicity;
 mod merge_insert_cross_engine_visibility;
 mod merge_insert_renamed_source_column;

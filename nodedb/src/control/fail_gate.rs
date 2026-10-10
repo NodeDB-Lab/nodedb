@@ -83,24 +83,57 @@ pub(crate) async fn after_calvin_stamp(tx_class: &nodedb_cluster::calvin::types:
 /// tick. On its first hold the gate creates `<path>.parked`, so a test can
 /// wait until the slice is held.
 pub(crate) fn holds_redo_propose(collections: &[String]) -> bool {
-    collections.iter().any(|collection| {
-        let name = format!("calvin::before_redo_propose::{collection}");
-        let Some(FailAction::WaitForFile(path)) = lookup(&name) else {
-            return false;
-        };
-        if path.exists() {
-            return false;
-        }
-        let mut parked = path.into_os_string();
-        parked.push(".parked");
-        let parked = std::path::PathBuf::from(parked);
-        if !parked.exists()
-            && let Err(e) = std::fs::write(&parked, &name)
-        {
-            tracing::warn!(gate = %name, error = %e, "fail gate parked marker not created");
-        }
-        true
-    })
+    collections
+        .iter()
+        .any(|collection| holds(&format!("calvin::before_redo_propose::{collection}")))
+}
+
+/// The Calvin install gate: after a stamped redo's install is durable and
+/// before its `RedoApplied` event reaches the vShard's scheduler. Named per
+/// collection, `calvin::before_redo_applied_push::<collection>`.
+///
+/// The apply loop cannot park here without holding the entry back. Returns
+/// the name of the gate that holds one of `collections`: its armed file is
+/// absent. The caller hands the event to its own task, which waits on
+/// [`released`]. On its first hold the gate creates `<path>.parked`.
+pub(crate) fn holds_redo_applied_push(collections: &[String]) -> Option<String> {
+    collections
+        .iter()
+        .map(|collection| format!("calvin::before_redo_applied_push::{collection}"))
+        .find(|name| holds(name))
+}
+
+/// Resolves once gate `name` stops holding: its armed file exists, or
+/// nothing is armed for it.
+pub(crate) async fn released(name: &str) {
+    while armed_and_absent(name).is_some() {
+        tokio::time::sleep(GATE_POLL).await;
+    }
+}
+
+/// The file armed for `name` with `wait_file(<path>)`, while it is absent.
+fn armed_and_absent(name: &str) -> Option<std::path::PathBuf> {
+    let Some(FailAction::WaitForFile(path)) = lookup(name) else {
+        return None;
+    };
+    (!path.exists()).then_some(path)
+}
+
+/// Whether gate `name` holds now: its armed file is absent. On its first
+/// hold it creates `<path>.parked`.
+fn holds(name: &str) -> bool {
+    let Some(path) = armed_and_absent(name) else {
+        return false;
+    };
+    let mut parked = path.into_os_string();
+    parked.push(".parked");
+    let parked = std::path::PathBuf::from(parked);
+    if !parked.exists()
+        && let Err(e) = std::fs::write(&parked, name)
+    {
+        tracing::warn!(gate = %name, error = %e, "fail gate parked marker not created");
+    }
+    true
 }
 
 /// The committed-message delivery gates of node `node_id`:
@@ -151,20 +184,5 @@ async fn delivery_gate(name: &str, mut shutdown: tokio::sync::watch::Receiver<bo
 /// On its first hold the gate creates `<path>.parked`, so a test can wait
 /// until the node's apply is held.
 pub(crate) fn holds_metadata_apply(node_id: u64) -> bool {
-    let name = crate::control::cluster::metadata_applier::metadata_apply_hold_point(node_id);
-    let Some(FailAction::WaitForFile(path)) = lookup(&name) else {
-        return false;
-    };
-    if path.exists() {
-        return false;
-    }
-    let mut parked = path.into_os_string();
-    parked.push(".parked");
-    let parked = std::path::PathBuf::from(parked);
-    if !parked.exists()
-        && let Err(e) = std::fs::write(&parked, &name)
-    {
-        tracing::warn!(gate = %name, error = %e, "fail gate parked marker not created");
-    }
-    true
+    holds(&crate::control::cluster::metadata_applier::metadata_apply_hold_point(node_id))
 }

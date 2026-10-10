@@ -117,6 +117,11 @@ fn claim(
             ledger,
         }),
         Err(refusal) => {
+            state
+                .calvin
+                .counters
+                .redo_copies_skipped
+                .fetch_add(1, Ordering::Relaxed);
             tracing::debug!(
                 vshard_id,
                 epoch,
@@ -210,6 +215,62 @@ impl CalvinClaim {
             return;
         };
         inbox.push(self.epoch, self.position, event).await;
+    }
+
+    /// Hand an install's `event` to the vShard's scheduler. `collections`
+    /// are the slice's collections.
+    ///
+    /// With fail points, the gate `calvin::before_redo_applied_push::<c>` on
+    /// one of them withholds a `RedoApplied`. The entry concludes, and its
+    /// own task pushes the event once the gate releases. Until then the
+    /// leader sees its group apply past the redo with no install heard, and
+    /// proposes the redo again.
+    pub(super) async fn report_install(
+        &self,
+        state: &SharedState,
+        event: CalvinApplyEvent,
+        collections: &[String],
+    ) {
+        #[cfg(feature = "failpoints")]
+        let Some(event) = self.withhold_applied(state, event, collections) else {
+            return;
+        };
+        #[cfg(not(feature = "failpoints"))]
+        let _ = collections;
+        self.report(state, event).await;
+    }
+
+    /// Hand a held `RedoApplied` to a task that pushes it once its gate
+    /// releases. Returns any other event, or one no gate holds.
+    #[cfg(feature = "failpoints")]
+    fn withhold_applied(
+        &self,
+        state: &SharedState,
+        event: CalvinApplyEvent,
+        collections: &[String],
+    ) -> Option<CalvinApplyEvent> {
+        if !matches!(event, CalvinApplyEvent::RedoApplied { .. }) {
+            return Some(event);
+        }
+        let Some(gate) = crate::control::fail_gate::holds_redo_applied_push(collections) else {
+            return Some(event);
+        };
+        let Some(inbox) = state.calvin.inboxes.get(self.vshard_id) else {
+            return Some(event);
+        };
+        let (epoch, position) = (self.epoch, self.position);
+        tracing::info!(
+            vshard_id = self.vshard_id,
+            epoch,
+            position,
+            gate = %gate,
+            "calvin: RedoApplied withheld at a fail point"
+        );
+        tokio::spawn(async move {
+            crate::control::fail_gate::released(&gate).await;
+            inbox.push(epoch, position, event).await;
+        });
+        None
     }
 }
 

@@ -25,4 +25,8 @@ pub struct CalvinCounters {
     /// by dispatching a drop of their commit-pending buffer, mirroring
     /// [`CalvinCounters::commits_flushed`].
     pub commits_dropped: Arc<AtomicU64>,
+    /// Count of stamped Calvin redo copies that applied on this node and
+    /// installed nothing: their position was applied, or another copy held
+    /// its claim.
+    pub redo_copies_skipped: Arc<AtomicU64>,
 }

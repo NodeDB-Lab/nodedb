@@ -68,7 +68,7 @@ impl CoreLoop {
                 continue;
             };
             let bitemporal = self.is_bitemporal(database_id, tid, collection);
-            let (resolved, _) = apply_scope.sum_targets_for(collection);
+            let resolved = apply_scope.sum_targets_for(collection);
             let scope = CollectionScope {
                 database_id,
                 tid,
