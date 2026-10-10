@@ -27,7 +27,8 @@
 //!   resolution.
 //! - [`release`]: lock release and mode-aware FIFO waiter promotion.
 //! - [`try_acquire`]: the non-blocking fast path.
-//! - [`introspection`]: readiness checks and test counters.
+//! - [`introspection`]: readiness checks, request contention and test
+//!   counters.
 
 mod acquire;
 mod classify;
@@ -37,4 +38,5 @@ mod try_acquire;
 mod types;
 mod wound_wait;
 
+pub use introspection::KeyContention;
 pub use types::LockManager;

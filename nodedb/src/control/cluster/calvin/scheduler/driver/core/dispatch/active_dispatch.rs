@@ -51,12 +51,11 @@ impl Scheduler {
             match self.local_calvin_plans(plans, txn.tx_class.database_id, epoch, position) {
                 Ok(p) if !p.is_empty() => p,
                 Ok(_) => {
-                    // A dependent-read active txn dispatched here always carries a
-                    // local write slice (the OLLP orchestrator only routes the write
-                    // participant through this path). An empty local slice is a
-                    // routing bug, not a read-only participant, so it rejects the
-                    // plans rather than dispatching an active task with nothing
-                    // to apply.
+                    // Only a vShard the write set names opens a barrier, so an
+                    // active txn dispatched here carries a local write slice. An
+                    // empty local slice means the plans and the write set
+                    // disagree, so it rejects the plans rather than dispatching
+                    // an active task with nothing to apply.
                     let e = crate::Error::Internal {
                         detail: format!(
                             "calvin active txn {epoch}/{position} homes no local write plans \

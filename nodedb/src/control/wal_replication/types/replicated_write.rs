@@ -1100,6 +1100,16 @@ pub enum ReplicatedWrite {
     RedoAbandon {
         stream: RedoStreamId,
     },
+    /// The dependent-read barrier of Calvin txn `(epoch, position)` on this
+    /// vShard waited past its timeout. The vShard's data-group leader
+    /// proposes it. Every replica applies it in log order: a read result
+    /// below it in the log counts, one above it does not. A barrier still
+    /// missing a read result at this entry votes abort on every replica.
+    CalvinReadTimeout {
+        epoch: u64,
+        position: u32,
+        tenant_id: u64,
+    },
 }
 
 #[cfg(test)]

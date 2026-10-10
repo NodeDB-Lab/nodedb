@@ -204,9 +204,16 @@ pub async fn submit_calvin_routed(
         }),
         // The submit went out and its answer was lost. The leader can have
         // sequenced it, so its outcome is unknown.
-        Err(ClusterError::Unanswered { .. }) => Err(Error::DeadlineExceeded {
-            request_id: crate::types::RequestId::new(0),
-        }),
+        Err(error @ ClusterError::Unanswered { .. }) => {
+            tracing::warn!(
+                leader,
+                %error,
+                "calvin-submit reached its deadline with no answer from the sequencer leader"
+            );
+            Err(Error::DeadlineExceeded {
+                request_id: crate::types::RequestId::new(0),
+            })
+        }
         Err(e) => Err(Error::Internal {
             detail: format!("calvin-submit RPC to sequencer leader node {leader} failed: {e}"),
         }),

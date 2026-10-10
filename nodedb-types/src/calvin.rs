@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{KeyRepr, WriteVersion};
 
+pub use crate::calvin_passive::{PassiveKey, PassiveReadKeyId};
+
 /// A newtype over `Vec<T>` that guarantees sorted, deduplicated contents.
 ///
 /// Constructed via [`SortedVec::new`], which sorts and deduplicates at
@@ -202,13 +204,12 @@ impl EngineKeySet {
     }
 }
 
-/// A single key that a passive participant must read and broadcast.
+/// A key set a passive participant reads and broadcasts.
 ///
-/// Wraps an [`EngineKeySet`]; per the dependent-read protocol each
-/// `PassiveReadKey` contains a single-element (or small) key set.  The
-/// sequencer does not enforce single-element sets; the scheduler enforces the
-/// total byte budget via `DependentReadSpec::total_bytes()` (which lives in
-/// `nodedb-cluster`).
+/// Wraps an [`EngineKeySet`]. A passive vShard reads document rows by
+/// surrogate and key-value rows by key. It refuses every other key set. The
+/// sequencer bounds the bytes a transaction reads passively through
+/// `DependentReadSpec::total_bytes()` in `nodedb-cluster`.
 #[derive(
     Debug,
     Clone,

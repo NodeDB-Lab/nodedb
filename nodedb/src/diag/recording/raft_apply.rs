@@ -4,7 +4,9 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use faultbox::{Capture, EventKind};
+use faultbox::{Capture, EventKind, error_chain_of};
+
+use super::shared::error_class;
 
 use crate::diag::context;
 
@@ -32,5 +34,29 @@ pub fn raft_entry_reapplied(group_id: u64, log_index: u64, highest_applied: u64)
     )
     .domain(&ctx)
     .with_backtrace()
+    .emit();
+}
+
+/// Report a catalog error on a vShard's stored dependent-read barrier log.
+/// Called from the sites that read and write the rows. `op` names the operation: `save`, `load` or `remove`.
+pub fn calvin_barrier_log_store_failed(
+    vshard_id: u32,
+    txn: Option<(u64, u32)>,
+    op: &'static str,
+    err: &crate::Error,
+) {
+    let class = error_class(err);
+    let ctx = context::CalvinBarrierLogStoreFailed {
+        vshard_id,
+        txn,
+        op,
+        error_class: &class,
+    };
+    let _ = Capture::new(
+        EventKind::Error,
+        "calvin dependent-read barrier log store failed",
+    )
+    .error_chain(error_chain_of(err))
+    .domain(&ctx)
     .emit();
 }

@@ -38,6 +38,21 @@ pub fn remaining_budget_ms(deadline: tokio::time::Instant) -> u64 {
     u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// How long a caller waits for a remote handler's reply past the budget the
+/// request carries. The handler stops at that budget, so the margin covers
+/// the round trip and its verdict arrives.
+pub const REPLY_MARGIN: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a caller waits for the reply to a request that carries
+/// `deadline_remaining_ms`: the request's own budget plus [`REPLY_MARGIN`].
+///
+/// A handler that can wait (a write gate, a Calvin queue) answers within the
+/// budget it received. The transport's fixed RPC timeout never bounds such a
+/// reply: a statement deadline longer than it would end early.
+pub fn reply_wait(deadline_remaining_ms: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(deadline_remaining_ms).saturating_add(REPLY_MARGIN)
+}
+
 /// The leader's deadline for a forward that carries `deadline_remaining_ms`.
 /// `None` when the budget is spent.
 ///
@@ -261,6 +276,21 @@ pub(super) fn decode_data_propose_resp(payload: &[u8]) -> Result<RaftRpc> {
 mod tests {
     use super::*;
     use crate::cluster_epoch::ClusterEpochState;
+
+    /// A reply wait follows the request's own budget, past any fixed RPC
+    /// timeout, plus the margin.
+    #[test]
+    fn a_reply_wait_follows_the_request_budget() {
+        assert_eq!(
+            reply_wait(30_000),
+            std::time::Duration::from_millis(30_000) + REPLY_MARGIN
+        );
+        assert_eq!(reply_wait(0), REPLY_MARGIN);
+        assert_eq!(
+            reply_wait(u64::MAX),
+            std::time::Duration::from_millis(u64::MAX) + REPLY_MARGIN
+        );
+    }
     use crate::rpc_codec::{decode, encode};
 
     fn roundtrip(target: ProposeTarget) -> DataProposeRequest {

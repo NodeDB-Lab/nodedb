@@ -1,16 +1,47 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Read-only inspection of lock manager state — readiness checks and the
-//! test-only counters used to assert on table/holder sizes.
+//! Read-only inspection of lock manager state: readiness checks, the keys
+//! that block a request, and the test-only counters used to assert on
+//! table and holder sizes.
 
 use std::collections::BTreeMap;
 
 use crate::control::cluster::calvin::scheduler::lock::lock_entry::LockMode;
 use crate::control::cluster::calvin::scheduler::lock::lock_key::{LockKey, TxnId};
 
+use super::classify::KeyState;
 use super::types::LockManager;
 
+/// One key of a lock request that another transaction blocks: the mode it
+/// asks, the mode its holders hold, the holders, and the waiters ahead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyContention {
+    pub key: LockKey,
+    pub requested: LockMode,
+    pub held: LockMode,
+    pub holders: Vec<TxnId>,
+    pub waiters: Vec<(TxnId, LockMode)>,
+}
+
 impl LockManager {
+    /// Every key of `keys` that `txn` cannot take now, with what blocks it.
+    /// A request [`Self::try_acquire`] refuses names at least one.
+    pub fn contention(&self, txn: TxnId, keys: &BTreeMap<LockKey, LockMode>) -> Vec<KeyContention> {
+        keys.iter()
+            .filter(|(key, mode)| self.classify(txn, key, **mode) == KeyState::Conflict)
+            .filter_map(|(key, mode)| {
+                let entry = self.table.get(key)?;
+                Some(KeyContention {
+                    key: key.clone(),
+                    requested: *mode,
+                    held: entry.mode,
+                    holders: entry.holders.to_vec(),
+                    waiters: entry.waiters.iter().copied().collect(),
+                })
+            })
+            .collect()
+    }
+
     /// Check whether a previously-blocked transaction is now ready.
     ///
     /// A transaction is ready when for every key in its key set, the key is
@@ -79,6 +110,28 @@ mod tests {
 
     fn txn(epoch: u64, pos: u32) -> TxnId {
         TxnId::new(epoch, pos)
+    }
+
+    /// A refused request names each key that blocks it, with the holders
+    /// and the waiters ahead. A free key names nothing.
+    #[test]
+    fn contention_names_the_keys_that_block_a_request() {
+        let mut lm = LockManager::new();
+        let (holder, waiter, probe) = (txn(1, 0), txn(1, 1), txn(1, 2));
+        lm.acquire(holder, keyset(&["x"]));
+        lm.acquire(waiter, keyset(&["x"]));
+        let request = keyset(&["x", "free"]);
+        assert!(!lm.try_acquire(probe, request.clone()));
+        assert_eq!(
+            lm.contention(probe, &request),
+            vec![KeyContention {
+                key: key("x"),
+                requested: LockMode::Exclusive,
+                held: LockMode::Exclusive,
+                holders: vec![holder],
+                waiters: vec![(waiter, LockMode::Exclusive)],
+            }]
+        );
     }
 
     #[test]

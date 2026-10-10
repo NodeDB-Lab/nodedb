@@ -358,7 +358,8 @@ impl nodedb_cluster::SnapshotBuilder for DataPlaneSnapshotBuilder {
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         // Read under the fence: the storage captured below holds exactly the
         // Calvin positions this names.
-        let calvin_cut = capture_calvin_cut(&self.shared, &group_vshards, calvin_through);
+        let calvin_cut = capture_calvin_cut(&self.shared, &group_vshards, calvin_through)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
         // Enumerate tenants and their databases from the system catalog — the
         // same source the backup orchestrator's catalog sections use. Every

@@ -146,6 +146,7 @@ impl Scheduler {
             });
         if held {
             tracing::info!(
+                node_id = self.shared.node_id,
                 vshard_id = self.vshard_id,
                 epoch = txn_id.epoch,
                 position = txn_id.position,
@@ -253,7 +254,8 @@ impl Scheduler {
                 | CommitState::AwaitingResolveTurn
                 | CommitState::AwaitingRedoResolve
                 | CommitState::AwaitingDrop
-                | CommitState::AwaitingRestage => None,
+                | CommitState::AwaitingRestage
+                | CommitState::ReadingPassive => None,
             })
             .collect();
         for (txn_id, proposed) in owed {

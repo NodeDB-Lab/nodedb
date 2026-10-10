@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::control::cluster::calvin::scheduler::lock::HotKeyTable;
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
 use crate::control::cluster::calvin::scheduler::{
-    CalvinAppliedLedgers, CalvinInboxes, CaughtUpRegistry, SequencerProposer,
+    CalvinAppliedLedgers, CalvinInboxes, CalvinReadResults, CaughtUpRegistry, SequencerProposer,
 };
 use crate::control::server::shared::write_admission::AdmissionHolds;
 
@@ -98,6 +98,10 @@ pub struct CalvinLocalState {
     /// The inbox of each running scheduler: the data-group apply loop tells
     /// it how each stamped Calvin redo concluded.
     pub inboxes: CalvinInboxes,
+    /// Dependent-read barrier events of each vShard that wait for its
+    /// scheduler: read results and timeouts the data-group apply loop
+    /// applied before the scheduler took them.
+    pub read_results: CalvinReadResults,
 }
 
 impl CalvinLocalState {
@@ -126,6 +130,7 @@ impl CalvinLocalState {
             applied: CalvinAppliedLedgers::default(),
             caught_up: CaughtUpRegistry::default(),
             inboxes: CalvinInboxes::default(),
+            read_results: CalvinReadResults::default(),
         }
     }
 }

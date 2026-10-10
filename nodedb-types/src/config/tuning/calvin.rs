@@ -17,8 +17,11 @@ fn default_txn_deadline_multiplier() -> u32 {
 }
 
 fn default_dependent_read_passive_timeout_ms() -> u64 {
-    // Three 20 ms sequencer epochs.
-    60
+    // A passive read crosses two data groups: its read result is proposed to
+    // each active vShard's group, often led by another node. The timeout only
+    // bounds how long a lost result holds the active vShard's locks, so it
+    // leaves room for a leader change on the way. 250 sequencer epochs.
+    5_000
 }
 
 fn default_verdict_stall_warn_ms() -> u64 {
@@ -60,8 +63,8 @@ fn default_restage_backoff_ms() -> u64 {
 /// Tuning knobs for the Calvin scheduler that runs per hosted vShard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CalvinTuning {
-    /// Capacity of each scheduler's bounded input, completion, read-result,
-    /// and verdict channels.
+    /// Capacity of each scheduler's bounded input, completion, and verdict
+    /// channels.
     #[serde(default = "default_channel_capacity")]
     pub channel_capacity: usize,
 
@@ -69,8 +72,10 @@ pub struct CalvinTuning {
     #[serde(default = "default_txn_deadline_multiplier")]
     pub txn_deadline_multiplier: u32,
 
-    /// Timeout in milliseconds for passive participant read results of a
-    /// dependent-read transaction.
+    /// Wait in milliseconds of an active vShard's dependent-read barrier for
+    /// the read results of its passive vShards. Past it, the vShard's
+    /// data-group leader proposes the barrier's timeout entry, and every
+    /// replica aborts a barrier that entry finds incomplete.
     #[serde(default = "default_dependent_read_passive_timeout_ms")]
     pub dependent_read_passive_timeout_ms: u64,
 
@@ -82,7 +87,9 @@ pub struct CalvinTuning {
 
     /// In-flight backlog at which a scheduler stops taking new sequenced
     /// input. The backlog counts pending, blocked, and dependent-barrier
-    /// transactions.
+    /// transactions. It also bounds the dependent-read barrier entries a
+    /// vShard holds in memory for transactions its scheduler has not taken
+    /// yet. Entries past it wait in the system catalog alone.
     #[serde(default = "default_max_inflight_backlog")]
     pub max_inflight_backlog: usize,
 
@@ -141,7 +148,7 @@ mod tests {
         let t = CalvinTuning::default();
         assert_eq!(t.channel_capacity, 512);
         assert_eq!(t.txn_deadline_multiplier, 3);
-        assert_eq!(t.dependent_read_passive_timeout_ms, 60);
+        assert_eq!(t.dependent_read_passive_timeout_ms, 5_000);
         assert_eq!(t.verdict_stall_warn_ms, 5_000);
         assert_eq!(t.max_inflight_backlog, 1_024);
         assert_eq!(t.catch_up_window, 512);

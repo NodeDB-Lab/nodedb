@@ -83,6 +83,9 @@ impl Scheduler {
             CommitState::AwaitingDrop => {
                 self.finish_drop(txn_id, &response);
             }
+            CommitState::ReadingPassive => {
+                self.finish_passive_read(txn_id, &response);
+            }
             CommitState::Following
             | CommitState::AwaitingVerdict
             | CommitState::AwaitingResolveTurn

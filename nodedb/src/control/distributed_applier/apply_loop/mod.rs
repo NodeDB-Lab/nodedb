@@ -23,8 +23,11 @@
 //!   restore point's place, and a database backup's capture.
 //! - [`context`]: the handles an apply borrows, and the futures the loop
 //!   collects.
-//! - [`calvin_read_result`]: forwards a committed `CalvinReadResult` entry to
-//!   the local Calvin scheduler.
+//! - [`barrier_prefold`]: folds the barrier entries of a waiting lane ahead
+//!   of their turn.
+//! - [`calvin_read_result`]: folds a committed `CalvinReadResult` or
+//!   `CalvinReadTimeout` entry into its txn's stored barrier row and its
+//!   vShard's read-result buffer.
 //! - [`calvin_redo`]: claims a stamped Calvin redo's position in the applied
 //!   ledger and reports its install to the vShard's scheduler.
 //! - [`write_dispatch`]: the generic decode + write-funnel enqueue path.
@@ -49,6 +52,7 @@
 //!   collection it names holds the incarnation its proposer planned against.
 
 mod array_cell_route;
+mod barrier_prefold;
 mod bookkeeping;
 mod calvin_read_result;
 mod calvin_redo;

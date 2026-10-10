@@ -43,6 +43,19 @@ impl SharedState {
             .ok_or_else(|| raft_not_started("the raw async raft proposer"))
     }
 
+    /// The propose phase alone: it returns once the data-group leader holds
+    /// the entry in its log, with the wait for this node's apply of it. It
+    /// takes no vShard admission slot. Calvin bookkeeping entries, which no
+    /// write admission orders, propose through it.
+    pub(in crate::control) fn async_raft_submit(
+        &self,
+    ) -> crate::Result<&Arc<crate::control::wal_replication::AsyncRaftSubmit>> {
+        self.async_raft_proposer_pair
+            .get()
+            .map(|pair| &pair.submit)
+            .ok_or_else(|| raft_not_started("the async raft submit"))
+    }
+
     /// Handle for proposing to the metadata Raft group. `start_raft`
     /// installs it before any listener opens.
     pub fn metadata_raft_handle(
@@ -70,14 +83,19 @@ impl SharedState {
         })
     }
 
-    /// Install both Raft proposal handles atomically during cluster startup.
+    /// Install the Raft proposal handles atomically during cluster startup.
     pub(in crate::control) fn install_async_raft_proposer_pair(
         &self,
         sequenced: Arc<crate::control::wal_replication::AsyncRaftProposer>,
         raw: Arc<crate::control::wal_replication::AsyncRaftProposer>,
+        submit: Arc<crate::control::wal_replication::AsyncRaftSubmit>,
     ) -> crate::Result<()> {
         self.async_raft_proposer_pair
-            .set(super::proposer_pair::AsyncRaftProposerPair { sequenced, raw })
+            .set(super::proposer_pair::AsyncRaftProposerPair {
+                sequenced,
+                raw,
+                submit,
+            })
             .map_err(|_| crate::Error::Internal {
                 detail: "async raft proposer already installed".into(),
             })

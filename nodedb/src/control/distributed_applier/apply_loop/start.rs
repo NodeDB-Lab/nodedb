@@ -18,7 +18,9 @@ use crate::control::backup::cut_order::OrderedCut;
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
 use crate::types::{DatabaseId, TenantId};
 
-use super::calvin_read_result::{CalvinReadResultFields, forward_calvin_read_result};
+use super::calvin_read_result::{
+    CalvinReadResultFields, forward_calvin_read_result, forward_calvin_read_timeout,
+};
 use super::context::{ApplyContext, ApplyFuture, EnqueueFuture, FinishedApply};
 use super::group_watch::GroupWatch;
 use super::lane::QueuedEntry;
@@ -275,28 +277,34 @@ fn prepare_replicated<'a>(
             epoch,
             position,
             passive_vshard,
-            tenant_id,
+            tenant_id: _,
             ref values,
         } => {
-            forward_calvin_read_result(
-                ctx.tracker,
-                ctx.calvin_read_result_senders,
+            // The event's stored row is its durable effect: the entry
+            // extends the applied prefix once the row holds it.
+            Prepared::Concluded(forward_calvin_read_result(
+                ctx,
                 pos,
                 CalvinReadResultFields {
                     target_vshard: replicated.vshard_id,
                     epoch,
                     position,
                     passive_vshard,
-                    tenant_id,
                     values,
                 },
-            );
-            // A read result is forwarded to an in-memory Calvin scheduler and
-            // writes nothing durable, so it neither advances the prefix nor
-            // breaks it. The epoch it belongs to does not survive a restart,
-            // so a re-delivery cannot usefully replay it.
-            Prepared::Concluded(EntryOutcome::Skipped)
+            ))
         }
+        ReplicatedWrite::CalvinReadTimeout {
+            epoch,
+            position,
+            tenant_id: _,
+        } => Prepared::Concluded(forward_calvin_read_timeout(
+            ctx,
+            pos,
+            replicated.vshard_id,
+            epoch,
+            position,
+        )),
         _ => prepare_generic_entry(ctx, pos, entry, scope, false),
     }
 }

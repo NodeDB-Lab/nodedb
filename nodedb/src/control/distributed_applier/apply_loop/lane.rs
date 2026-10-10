@@ -53,8 +53,8 @@ impl QueuedEntry {
     }
 
     /// `(tenant_id, write_hlc, restore_id)` of an entry that writes a
-    /// tenant's data. A cut barrier, a Calvin read result and a surrogate
-    /// bind write no data, a Calvin slice that raises no write mark writes
+    /// tenant's data. A cut barrier, a Calvin read result or read timeout
+    /// and a surrogate bind write no data, a Calvin slice that raises no write mark writes
     /// only derived rows or schema, and an entry with no proposer stamp has
     /// no commit HLC to record.
     pub fn write_stamp(&self) -> Option<(u64, u64, u64)> {
@@ -64,6 +64,7 @@ impl QueuedEntry {
                 decoded.write,
                 ReplicatedWrite::CutBarrier { .. }
                     | ReplicatedWrite::CalvinReadResult { .. }
+                    | ReplicatedWrite::CalvinReadTimeout { .. }
                     | ReplicatedWrite::SurrogateBind { .. }
                     | ReplicatedWrite::RedoChunk { .. }
                     | ReplicatedWrite::RedoAbandon { .. }
@@ -98,6 +99,7 @@ impl QueuedEntry {
             ReplicatedWrite::ArraySchema { .. }
             | ReplicatedWrite::CutBarrier { .. }
             | ReplicatedWrite::CalvinReadResult { .. }
+            | ReplicatedWrite::CalvinReadTimeout { .. }
             | ReplicatedWrite::SurrogateBind { .. }
             | ReplicatedWrite::RedoChunk { .. }
             | ReplicatedWrite::RedoAbandon { .. } => false,
@@ -178,6 +180,9 @@ pub(super) struct Lane {
     saved_floor: Option<u64>,
     /// The entry the last settle ended at.
     last_settled: Option<u64>,
+    /// The highest backlog index whose barrier event folded ahead of its
+    /// turn (see `barrier_prefold`).
+    pub prefolded_through: u64,
 }
 
 impl Lane {
@@ -190,6 +195,7 @@ impl Lane {
             prefix: AppliedPrefix::new(),
             saved_floor: None,
             last_settled: None,
+            prefolded_through: 0,
         }
     }
 

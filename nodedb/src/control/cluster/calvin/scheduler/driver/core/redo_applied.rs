@@ -158,11 +158,12 @@ fn holds_staged_state(state: CommitState) -> bool {
         | CommitState::AwaitingRedoResolve
         | CommitState::AwaitingDrop => true,
         // The install consumed the staged entry of a proposed slice, a
-        // follower staged nothing, and a txn awaiting its restage discarded
-        // what it staged.
+        // follower staged nothing, a txn awaiting its restage discarded what
+        // it staged, and a passive read stages nothing.
         CommitState::AwaitingRedoApply { .. }
         | CommitState::Following
-        | CommitState::AwaitingRestage => false,
+        | CommitState::AwaitingRestage
+        | CommitState::ReadingPassive => false,
     }
 }
 

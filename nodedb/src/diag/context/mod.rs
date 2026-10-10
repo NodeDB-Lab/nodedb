@@ -53,7 +53,7 @@ pub(in crate::diag) use quota::{
     QuotaRowNotInstalled, QuotaRowWriteFailed, QuotaScopePurgeIncomplete, QuotaScopeReplayAborted,
     ScopeQuotaNotInstalled,
 };
-pub(in crate::diag) use raft_apply::RaftEntryReapplied;
+pub(in crate::diag) use raft_apply::{CalvinBarrierLogStoreFailed, RaftEntryReapplied};
 pub(in crate::diag) use recovery::{ReplayRecordUnapplied, WalArchivalFailedTruncationHeld};
 pub(in crate::diag) use redo_stream::{
     RedoAbandonGivenUp, RedoSnapshotDebtNotRecorded, RedoStreamLostHere,

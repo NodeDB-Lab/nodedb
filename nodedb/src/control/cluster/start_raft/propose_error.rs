@@ -46,7 +46,12 @@ pub(super) fn async_propose_error(vshard_id: u32, error: ClusterError) -> crate:
         // deadline class, the same class the array fan-out gives it. A
         // forward whose stream failed after the request was written can
         // also have been proposed, so it takes the same class.
-        ClusterError::ShardTimeout { .. } | ClusterError::Unanswered { .. } => {
+        error @ (ClusterError::ShardTimeout { .. } | ClusterError::Unanswered { .. }) => {
+            tracing::warn!(
+                vshard_id,
+                %error,
+                "raft proposal forward reached its deadline with no answer from the leader"
+            );
             crate::Error::DeadlineExceeded {
                 request_id: crate::types::RequestId::new(0),
             }
@@ -54,7 +59,13 @@ pub(super) fn async_propose_error(vshard_id: u32, error: ClusterError) -> crate:
         ClusterError::DataPlane { code } => crate::Error::DataPlane(code.into()),
         // The leader's write gate waited for the write's lock keys until the
         // caller's deadline, and proposed nothing.
-        ClusterError::Calvin(CalvinError::AdmissionTimedOut) => expired_before_propose(),
+        ClusterError::Calvin(CalvinError::AdmissionTimedOut) => {
+            tracing::warn!(
+                vshard_id,
+                "raft proposal reached its deadline at the leader's write gate"
+            );
+            expired_before_propose()
+        }
         ClusterError::ShardExecution { error, .. } | ClusterError::StreamTerminal { error, .. } => {
             crate::Error::from(*error)
         }

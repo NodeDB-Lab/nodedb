@@ -54,8 +54,8 @@ pub use data_plane_error::{
     DataPlaneCounterFault, DataPlaneErrorCode, DataPlaneSyncHold, DataPlaneTextColumnFault,
 };
 pub use data_propose::{
-    DataProposeRequest, DataProposeResponse, ForwardedProposeRefusal, ProposeTarget,
-    forwarded_deadline, remaining_budget_ms,
+    DataProposeRequest, DataProposeResponse, ForwardedProposeRefusal, ProposeTarget, REPLY_MARGIN,
+    forwarded_deadline, remaining_budget_ms, reply_wait,
 };
 pub use execute::{
     DescriptorVersionEntry, ExecuteRequest, ExecuteResponse, ExecuteStreamChunk, ExecuteStreamEnd,

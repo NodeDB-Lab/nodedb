@@ -9,6 +9,7 @@ pub mod backup_schedule_marks;
 pub mod blacklist;
 pub mod bootstrap_tables;
 pub mod calvin_applied;
+pub mod calvin_barrier_logs;
 pub mod calvin_base;
 pub mod change_streams;
 pub mod checkpoint;

@@ -130,9 +130,13 @@ impl NexarArrayDispatch {
         // Wrap in RaftRpc and send. The remote node's handler decodes the
         // envelope bytes and dispatches to the appropriate shard handler.
         let rpc = RaftRpc::VShardEnvelope(envelope_bytes);
+        // The shard's budget bounds the reply wait, never the transport's fixed
+        // RPC timeout.
+        let reply_wait = std::time::Duration::from_millis(timeout_ms);
         let resp_rpc = tokio::time::timeout(
-            std::time::Duration::from_millis(timeout_ms),
-            self.transport.send_rpc(node_id, rpc),
+            reply_wait,
+            self.transport
+                .send_rpc_with_read_timeout(node_id, rpc, reply_wait),
         )
         .await
         // The request can have reached the shard, so a timeout is never

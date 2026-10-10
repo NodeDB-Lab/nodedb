@@ -5,12 +5,10 @@
 //! background apply loop that drains `DistributedApplier::apply_committed`
 //! into the Data Plane and notifies propose waiters.
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc;
 
-use crate::control::cluster::calvin::ReadResultEvent;
 use crate::control::distributed_applier::{ApplyBatch, ProposeTracker, run_apply_loop};
 use crate::control::state::SharedState;
 
@@ -25,7 +23,6 @@ pub(super) fn wire_proposers(
     raft_loop: &Arc<RaftLoopType>,
     tracker: Arc<ProposeTracker>,
     apply_rx: mpsc::Receiver<ApplyBatch>,
-    calvin_read_result_senders: Arc<Mutex<BTreeMap<u32, Sender<ReadResultEvent>>>>,
     sequencer_state_machine: Arc<Mutex<nodedb_cluster::calvin::SequencerStateMachine>>,
 ) -> crate::Result<()> {
     install_sync_proposer(shared, raft_loop);
@@ -33,7 +30,7 @@ pub(super) fn wire_proposers(
     install_applied_index_sink(shared, raft_loop);
     install_apply_gates(shared, raft_loop);
     install_async_proposer(shared, raft_loop, &tracker)?;
-    spawn_apply_loop(shared, tracker, apply_rx, calvin_read_result_senders);
+    spawn_apply_loop(shared, tracker, apply_rx);
     Ok(())
 }
 
@@ -332,7 +329,6 @@ fn spawn_apply_loop(
     shared: &Arc<SharedState>,
     tracker: Arc<ProposeTracker>,
     apply_rx: mpsc::Receiver<ApplyBatch>,
-    calvin_read_result_senders: Arc<Mutex<BTreeMap<u32, Sender<ReadResultEvent>>>>,
 ) {
     // Spawn the background apply loop. It reads from the mpsc channel
     // pushed by `DistributedApplier::apply_committed`, dispatches to the
@@ -344,7 +340,6 @@ fn spawn_apply_loop(
     // because its applies dispatch to the Data Plane.
     let apply_state = shared.clone();
     let apply_tracker = tracker;
-    let apply_calvin_read_result_senders = calvin_read_result_senders;
     crate::control::shutdown::spawn_loop_no_abort(
         &shared.loop_registry,
         &shared.shutdown,
@@ -357,12 +352,7 @@ fn spawn_apply_loop(
             // cuts the loop off mid-apply.
             tokio::select! {
                 biased;
-                _ = run_apply_loop(
-                    apply_rx,
-                    apply_state,
-                    apply_tracker,
-                    apply_calvin_read_result_senders,
-                ) => {}
+                _ = run_apply_loop(apply_rx, apply_state, apply_tracker) => {}
                 _ = shutdown.wait_cancelled() => {}
             }
         },
@@ -469,6 +459,7 @@ async fn await_local_apply(
             tracing::warn!(
                 group_id,
                 log_index,
+                vshard_id,
                 progress = %apply_progress(state.as_deref(), group_id),
                 oldest_unfinished = %tracker
                     .applying(group_id)

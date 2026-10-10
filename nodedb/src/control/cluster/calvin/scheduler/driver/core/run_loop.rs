@@ -36,6 +36,8 @@ impl Scheduler {
         let capacity_freed = Arc::clone(&self.capacity_freed);
         // Woken when the data-group apply loop concludes a stamped redo.
         let inbox = Arc::clone(self.inbox.inbox());
+        // Woken when the data-group apply loop buffers a barrier entry.
+        let read_results = Arc::clone(&self.read_results);
         // Woken when a cut's barrier is proposed or applied on this node.
         let shared = Arc::clone(&self.shared);
         // Set when a tick left armed catch-up unreplayed. The next open-gate
@@ -65,7 +67,8 @@ impl Scheduler {
             if self.release_cut_holds() {
                 self.retry_redo_proposals();
             }
-            self.check_dependent_barrier_timeouts();
+            self.drain_read_results();
+            self.propose_due_read_timeouts();
             self.check_awaiting_verdict_stalls();
             self.restage_due();
             self.resume_metadata_hold();
@@ -80,6 +83,10 @@ impl Scheduler {
             }
             // The backoff end of the next restage, when one waits.
             let restage_at = self.next_restage_at().map(tokio::time::Instant::from_std);
+            // When this leader next proposes a barrier's timeout entry.
+            let read_timeout_at = self
+                .next_read_timeout_due()
+                .map(tokio::time::Instant::from_std);
 
             tokio::select! {
                 biased;
@@ -117,12 +124,10 @@ impl Scheduler {
                     self.handle_verdict_signal(signal);
                 }
 
-                maybe_event = self.read_result_rx.recv() => {
-                    let Some(event) = maybe_event else {
-                        self.log_superseded("read result");
-                        break;
-                    };
-                    self.handle_read_result(event);
+                // The apply loop buffered a barrier entry. Drained in every
+                // state, so a held txn keeps every entry of its log.
+                () = read_results.pushed() => {
+                    self.drain_read_results();
                 }
 
                 maybe_promoted = self.promotion_rx.recv() => {
@@ -148,6 +153,13 @@ impl Scheduler {
                 ), if restage_at.is_some() => {
                     // The next loop pass stages again every txn whose
                     // restage backoff ended.
+                }
+
+                _ = tokio::time::sleep_until(
+                    read_timeout_at.unwrap_or_else(tokio::time::Instant::now)
+                ), if read_timeout_at.is_some() => {
+                    // The next loop pass proposes the timeout entry of every
+                    // barrier whose timeout passed.
                 }
 
                 _ = tokio::time::sleep(ROLE_POLL), if self.role.awaits_term_start() => {
@@ -193,13 +205,25 @@ impl Scheduler {
                     // install already reported is never proposed again.
                     self.drain_inbox();
                     self.retry_redo_proposals();
+                    // A barrier entry the apply loop buffered after the
+                    // scheduler finished its txn is spent.
+                    let ledger = Arc::clone(&self.ledger);
+                    self.read_results.discard_finished(|txn| {
+                        ledger.is_applied(txn.epoch, txn.position)
+                    });
+                    // So is a stored row of a finished txn its finish did
+                    // not remove.
+                    self.sweep_finished_barrier_rows();
                     // The top-of-loop check_awaiting_verdict_stalls /
-                    // check_dependent_barrier_timeouts and the deferred re-send
+                    // propose_due_read_timeouts and the deferred re-send
                     // pass run on every wake; this arm guarantees the loop wakes
                     // to run them (and the drain) when no other event arrives.
                 }
             }
         }
+        // The next scheduler of the vShard starts from the barrier entries
+        // this one took.
+        self.return_barrier_logs();
     }
 
     /// Log that a scheduler channel closed and the loop exits.

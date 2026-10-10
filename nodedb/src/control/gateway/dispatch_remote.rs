@@ -174,10 +174,29 @@ pub(super) async fn dispatch_remote(
         "gateway: dispatching ExecuteRequest to remote node"
     );
 
-    let resp_rpc = transport
-        .send_rpc(node_id, req)
-        .await
-        .map_err(|e| send_error(e, resend_safe, node_id, vshard_id))?;
+    // The remote handler works within `deadline_ms`: a write can wait at the
+    // leader's gate or in a Calvin queue for that long. The reply wait follows
+    // that budget, never the transport's fixed RPC timeout.
+    let reply_wait = nodedb_cluster::rpc_codec::reply_wait(deadline_ms);
+    let resp_rpc = match tokio::time::timeout(
+        reply_wait,
+        transport.send_rpc_with_read_timeout(node_id, req, reply_wait),
+    )
+    .await
+    {
+        Ok(answer) => answer.map_err(|e| send_error(e, resend_safe, node_id, vshard_id))?,
+        Err(_) => {
+            return Err(send_error(
+                ClusterError::ShardTimeout {
+                    vshard_id: (vshard_id % VShardId::COUNT as u64) as u32,
+                    elapsed_ms: u64::try_from(reply_wait.as_millis()).unwrap_or(u64::MAX),
+                },
+                resend_safe,
+                node_id,
+                vshard_id,
+            ));
+        }
+    };
 
     match resp_rpc {
         RaftRpc::ExecuteResponse(resp) => {
@@ -466,6 +485,12 @@ fn send_error(e: ClusterError, resend_safe: bool, node_id: u64, vshard_id: u64) 
         ClusterError::Unanswered { .. } | ClusterError::ShardTimeout { .. }
     );
     if outcome_unknown && !resend_safe {
+        tracing::warn!(
+            node_id,
+            vshard_id,
+            error = %e,
+            "gateway: a remote execute reached its deadline with no answer"
+        );
         return Error::DeadlineExceeded {
             request_id: crate::types::RequestId::new(0),
         };

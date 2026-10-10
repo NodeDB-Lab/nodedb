@@ -184,6 +184,11 @@ pub(in crate::control::cluster::calvin::scheduler::driver) enum CommitState {
     /// Awaiting the validate-and-stage response, whose `stage_vote` carries
     /// the local commit vote.
     Staged,
+    /// A dependent-read txn whose passive read this leader dispatched. The
+    /// read stages nothing. Its answer is proposed to every active vShard's
+    /// data group. A passive-only vShard then votes on it, and an active
+    /// vShard opens its barrier.
+    ReadingPassive,
     /// The staged txn has cast its local vote and PARKED, awaiting the durable
     /// authoritative GLOBAL verdict aggregated across all participant vShards.
     ///

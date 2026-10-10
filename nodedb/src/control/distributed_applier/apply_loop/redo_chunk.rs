@@ -279,8 +279,7 @@ pub(super) fn prepare_chunked_final<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use nodedb_physical::physical_plan::RedoOrigin;
 
@@ -381,11 +380,9 @@ mod tests {
         let (dispatcher, _sides) = Dispatcher::new(1, 64);
         let state = SharedState::new(dispatcher, wal).expect("shared state");
         let tracker = Arc::new(ProposeTracker::new());
-        let senders = Arc::new(Mutex::new(BTreeMap::new()));
         let ctx = ApplyContext {
             state: &state,
             tracker: &tracker,
-            calvin_read_result_senders: &senders,
         };
 
         let first = apply_chunk(ctx, pos(GROUP, 10), 0).await;
@@ -416,11 +413,9 @@ mod tests {
         let (dispatcher, _sides) = Dispatcher::new(1, 64);
         let state = SharedState::new(dispatcher, wal).expect("shared state");
         let tracker = Arc::new(ProposeTracker::new());
-        let senders = Arc::new(Mutex::new(BTreeMap::new()));
         let ctx = ApplyContext {
             state: &state,
             tracker: &tracker,
-            calvin_read_result_senders: &senders,
         };
 
         let Prepared::Concluded(outcome) =

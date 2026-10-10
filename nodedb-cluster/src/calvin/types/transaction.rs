@@ -347,26 +347,37 @@ impl TxClass {
         Ok(participants)
     }
 
-    /// Ergonomic constructor for dependent-read Calvin transactions.
+    /// Constructor for a dependent-read Calvin transaction of `database_id`.
     ///
-    /// Equivalent to `TxClass::new(read_set, write_set, plans, tenant_id,
-    /// Some(dependent_reads), versioned_reads)`.
+    /// The write set spans two or more vShards, as [`Self::new_in_database`]
+    /// requires. Every passive vShard of `dependent_reads` participates.
     pub fn new_dependent(
         read_set: ReadWriteSet,
         write_set: ReadWriteSet,
         plans: Vec<u8>,
         tenant_id: TenantId,
+        database_id: DatabaseId,
         dependent_reads: DependentReadSpec,
         versioned_reads: VersionedReadSet,
     ) -> Result<Self, CalvinError> {
-        Self::new(
+        Self::new_in_database(
             read_set,
             write_set,
             plans,
             tenant_id,
+            database_id,
             Some(dependent_reads),
             versioned_reads,
         )
+    }
+
+    /// The vShards the write set names: the active participants of a
+    /// dependent-read transaction.
+    ///
+    /// Fails when a write-set collection name lacks the qualifier of the
+    /// class's database. Construction rejects such a class.
+    pub fn active_vshards(&self) -> Result<Vec<u32>, CalvinError> {
+        self.write_vshards()
     }
 
     /// The vShards that must receive this transaction's slice.
@@ -734,6 +745,7 @@ mod tests {
                 );
                 m
             },
+            expected: std::collections::BTreeMap::new(),
         };
 
         let tc = TxClass::new(

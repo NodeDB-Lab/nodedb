@@ -13,10 +13,10 @@
 //!   `CoreLoop::execute_calvin_drop` discards it.
 //!
 //! - `CoreLoop::execute_calvin_execute_passive`: passive participant for a
-//!   dependent-read txn. Reads each declared key from the local engine and
-//!   returns a msgpack-encoded `Vec<(PassiveReadKeyId, Value)>` payload. The
-//!   Control Plane scheduler proposes a `CalvinReadResult` Raft entry after
-//!   receiving this response.
+//!   dependent-read txn. Reads each declared key from base storage and
+//!   returns a zerompk-encoded `Vec<(PassiveReadKeyId, Value)>` payload with
+//!   a commit vote. The Control Plane scheduler proposes the payload as a
+//!   `CalvinReadResult` entry to the data group of every active vShard.
 //!
 //! - `CoreLoop::execute_calvin_execute_active`: active participant for a
 //!   dependent-read txn. Stages the physical plans, with the injected read

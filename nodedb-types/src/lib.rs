@@ -19,6 +19,7 @@ pub mod ascii;
 pub mod backup_envelope;
 pub mod bbox;
 pub mod calvin;
+pub mod calvin_passive;
 pub mod clone;
 pub mod collection;
 pub mod collection_config;

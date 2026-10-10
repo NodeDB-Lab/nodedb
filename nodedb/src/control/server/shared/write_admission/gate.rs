@@ -236,8 +236,29 @@ pub(crate) fn admit_routed(
     let mut request =
         plan_admission_keys(shared, target.tenant_id, target.database_id, target.plan)?;
     request.sequenced &= may_route;
-    Ok(admit_request(shared, vshard, lock_manager, request))
+    let admission = admit_request(shared, vshard, lock_manager, request);
+    if matches!(
+        admission,
+        WriteAdmission::RouteToCalvin | WriteAdmission::Wait(_)
+    ) && tracing::enabled!(tracing::Level::DEBUG)
+    {
+        let plan: String = format!("{:?}", target.plan)
+            .chars()
+            .take(PLAN_SUMMARY_LEN)
+            .collect();
+        tracing::debug!(
+            vshard_id = vshard.as_u32(),
+            routes = matches!(admission, WriteAdmission::RouteToCalvin),
+            %plan,
+            "the write gate routes or holds a contended write"
+        );
+    }
+    Ok(admission)
 }
+
+/// How many characters of a contended write's plan the gate's debug line
+/// names.
+const PLAN_SUMMARY_LEN: usize = 240;
 
 /// Admit the lock request `request` on `vshard`, whose lock table is
 /// `lock_manager`.
@@ -289,10 +310,20 @@ fn probe(
     }
     // A write that waits probes again with the same request.
     let retry_keys = (!sequenced).then(|| keys.clone());
-    let acquired = lock_manager
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .try_acquire(txn, keys);
+    let acquired = {
+        let mut table = lock_manager.lock().unwrap_or_else(|p| p.into_inner());
+        let contention =
+            tracing::enabled!(tracing::Level::DEBUG).then(|| table.contention(txn, &keys));
+        let acquired = table.try_acquire(txn, keys);
+        if !acquired {
+            tracing::debug!(
+                sequenced,
+                ?contention,
+                "a write found its keys held at the write gate"
+            );
+        }
+        acquired
+    };
     match (acquired, retry_keys) {
         (true, _) => WriteAdmission::FastPath {
             guard: Some(WriteAdmissionGuard::new(

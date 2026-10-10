@@ -211,7 +211,13 @@ pub async fn submit_calvin_routed_assign(
         }
         // The submit went out and its answer was lost. The leader can have
         // assigned it, so its outcome is unknown.
-        Err(ClusterError::Unanswered { .. }) => {
+        Err(error @ ClusterError::Unanswered { .. }) => {
+            tracing::warn!(
+                leader,
+                %error,
+                "calvin-inbox submit reached its deadline with no answer from the sequencer \
+                 leader"
+            );
             return Err(Error::DeadlineExceeded {
                 request_id: crate::types::RequestId::new(0),
             });

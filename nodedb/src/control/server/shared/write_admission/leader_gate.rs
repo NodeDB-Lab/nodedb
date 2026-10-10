@@ -181,6 +181,7 @@ fn entry_scope(write: &ReplicatedWrite, database_id: crate::types::DatabaseId) -
         // Calvin bookkeeping, a backup cut, a topic message, a surrogate
         // binding and an array schema write no row.
         ReplicatedWrite::CalvinReadResult { .. }
+        | ReplicatedWrite::CalvinReadTimeout { .. }
         | ReplicatedWrite::CutBarrier { .. }
         | ReplicatedWrite::TopicPublish { .. }
         | ReplicatedWrite::SurrogateBind { .. }

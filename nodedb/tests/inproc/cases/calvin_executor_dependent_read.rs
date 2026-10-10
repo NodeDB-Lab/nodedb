@@ -1,37 +1,28 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Integration tests for the Calvin dependent-read path.
-//!
-//! Uses mock channels to simulate the passive → active read result flow
-//! without a real cluster.
+//! Integration tests for the Calvin dependent-read barrier's public surface:
+//! the dependent transaction class, the barrier log a vShard folds from its
+//! data-group log, and the check of the read values against the values the
+//! coordinator read.
 
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::collections::{BTreeMap, BTreeSet};
 
-use nodedb::control::cluster::calvin::scheduler::driver::barrier::{
-    PendingDependentBarrier, ReadResultEvent,
-};
-use nodedb::control::cluster::calvin::scheduler::lock_manager::TxnId;
-use nodedb_physical::physical_plan::meta::PassiveReadKeyId;
-use nodedb_types::{TenantId, Value};
-
-use std::collections::BTreeSet;
-use std::time::Instant;
-
+use nodedb::control::cluster::calvin::scheduler::driver::barrier::expected_reads_drift;
+use nodedb::control::cluster::calvin::scheduler::{BarrierEvent, BarrierLog, BarrierOutcome};
 use nodedb_cluster::calvin::types::{
-    DependentReadSpec, EngineKeySet, PassiveReadKey, ReadWriteSet, SequencedTxn, SortedVec,
-    TxClass, VersionedReadSet,
+    DependentReadSpec, EngineKeySet, PassiveReadKey, ReadWriteSet, SortedVec, TxClass,
+    VersionedReadSet,
 };
-use nodedb_types::{DatabaseId, QualifiedCollection};
+use nodedb_physical::physical_plan::meta::PassiveReadKeyId;
+use nodedb_types::{DatabaseId, QualifiedCollection, TenantId, Value};
 
 fn two_distinct_collections() -> (String, String) {
     let mut first: Option<(String, u32)> = None;
     for i in 0u32..512 {
         let name = format!("col_{i}");
-        let vshard =
-            nodedb_types::CollectionKey::from_bare(nodedb::types::DatabaseId::DEFAULT, &name)
-                .vshard()
-                .as_u32();
+        let vshard = nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, &name)
+            .vshard()
+            .as_u32();
         if let Some((ref fname, fv)) = first {
             if fv != vshard {
                 return (fname.clone(), name);
@@ -43,7 +34,24 @@ fn two_distinct_collections() -> (String, String) {
     panic!("could not find two distinct-vshard collections in 512 tries");
 }
 
-fn make_dependent_txn(passive_vshard: u32) -> SequencedTxn {
+fn row(collection: &str, surrogate: u32) -> PassiveReadKeyId {
+    PassiveReadKeyId::surrogate(
+        QualifiedCollection::new(DatabaseId::DEFAULT, collection),
+        surrogate,
+    )
+}
+
+fn read(passive_vshard: u32, collection: &str, value: &[u8]) -> BarrierEvent {
+    BarrierEvent::Read {
+        passive_vshard,
+        values: vec![(row(collection, 1), Value::Bytes(value.to_vec()))],
+    }
+}
+
+/// A dependent class names every passive vShard as a participant, and its
+/// write vShards as its active participants.
+#[test]
+fn a_dependent_class_participates_its_passive_and_active_vshards() {
     let (col_a, col_b) = two_distinct_collections();
     let write_set = ReadWriteSet::new(vec![
         EngineKeySet::Document {
@@ -55,220 +63,79 @@ fn make_dependent_txn(passive_vshard: u32) -> SequencedTxn {
             surrogates: SortedVec::new(vec![2]),
         },
     ]);
+    let passive_vshard = 977u32;
     let spec = DependentReadSpec {
-        passive_reads: {
-            let mut m = BTreeMap::new();
-            m.insert(
-                passive_vshard,
-                vec![PassiveReadKey {
-                    engine_key: EngineKeySet::Document {
-                        collection: "passive_col".to_owned(),
-                        surrogates: SortedVec::new(vec![42u32]),
-                    },
-                }],
-            );
-            m
-        },
+        passive_reads: BTreeMap::from([(
+            passive_vshard,
+            vec![PassiveReadKey {
+                engine_key: EngineKeySet::Document {
+                    collection: "passive_col".to_owned(),
+                    surrogates: SortedVec::new(vec![42u32]),
+                },
+            }],
+        )]),
+        expected: BTreeMap::from([(row("passive_col", 42), Some(b"v".to_vec()))]),
     };
     let tx_class = TxClass::new_dependent(
         ReadWriteSet::new(vec![]),
         write_set,
         vec![],
         TenantId::new(1),
+        DatabaseId::DEFAULT,
         spec,
         VersionedReadSet::default(),
     )
     .expect("valid dependent TxClass");
-    SequencedTxn {
-        epoch: 1,
-        position: 0,
-        tx_class,
-        epoch_system_ms: 0,
-        epoch_vshard_txn_count: 0,
-        lock_owner: None,
-    }
+
+    let participants: Vec<u32> = tx_class
+        .participating_vshards()
+        .iter()
+        .map(|v| v.as_u32())
+        .collect();
+    assert!(participants.contains(&passive_vshard));
+    let active = tx_class.active_vshards().expect("active vShards");
+    assert_eq!(active.len(), 2);
+    assert!(!active.contains(&passive_vshard));
 }
 
+/// The barrier completes once every passive vShard's result is in, and the
+/// values it injects are the ones the log carried.
 #[test]
-fn dependent_barrier_completes_after_passive_delivers() {
-    let txn = make_dependent_txn(7);
-    let passive_vshard = 7u32;
-
-    let mut waiting_for = BTreeSet::new();
-    waiting_for.insert(passive_vshard);
-
-    let timeout_at = Instant::now() + Duration::from_secs(30);
-
-    let mut barrier = PendingDependentBarrier {
-        txn: txn.clone(),
-        lock_owner: TxnId::new(txn.epoch, txn.position),
-        waiting_for,
-        received: BTreeMap::new(),
-        timeout_at,
-    };
-
-    assert!(!barrier.is_complete());
-
-    // Simulate the passive vshard delivering its read result.
-    let key_id = PassiveReadKeyId {
-        collection: QualifiedCollection::new(DatabaseId::DEFAULT, "passive_col"),
-        surrogate: 42,
-    };
-    let values = vec![(key_id.clone(), Value::Integer(100))];
-
-    barrier.waiting_for.remove(&passive_vshard);
-    barrier.received.insert(passive_vshard, values);
-
-    assert!(barrier.is_complete(), "barrier should be complete now");
-
-    let injected = barrier.assemble_injected_reads();
-    assert_eq!(injected.len(), 1);
-    assert_eq!(injected.get(&key_id), Some(&Value::Integer(100)));
-}
-
-#[test]
-fn dependent_barrier_not_complete_with_multiple_passives() {
-    let (col_a, col_b) = two_distinct_collections();
-    let write_set = ReadWriteSet::new(vec![
-        EngineKeySet::Document {
-            collection: col_a.clone(),
-            surrogates: SortedVec::new(vec![1]),
-        },
-        EngineKeySet::Document {
-            collection: col_b.clone(),
-            surrogates: SortedVec::new(vec![2]),
-        },
-    ]);
-
-    let spec = DependentReadSpec {
-        passive_reads: {
-            let mut m = BTreeMap::new();
-            m.insert(
-                10u32,
-                vec![PassiveReadKey {
-                    engine_key: EngineKeySet::Document {
-                        collection: "coll_10".to_owned(),
-                        surrogates: SortedVec::new(vec![1u32]),
-                    },
-                }],
-            );
-            m.insert(
-                20u32,
-                vec![PassiveReadKey {
-                    engine_key: EngineKeySet::Document {
-                        collection: "coll_20".to_owned(),
-                        surrogates: SortedVec::new(vec![2u32]),
-                    },
-                }],
-            );
-            m
-        },
-    };
-
-    let tx_class = TxClass::new_dependent(
-        ReadWriteSet::new(vec![]),
-        write_set,
-        vec![],
-        TenantId::new(1),
-        spec,
-        VersionedReadSet::default(),
-    )
-    .expect("valid");
-
-    let mut waiting_for = BTreeSet::new();
-    waiting_for.insert(10u32);
-    waiting_for.insert(20u32);
-
-    let mut barrier = PendingDependentBarrier {
-        txn: SequencedTxn {
-            epoch: 1,
-            position: 0,
-            tx_class,
-            epoch_system_ms: 0,
-            epoch_vshard_txn_count: 0,
-            lock_owner: None,
-        },
-        lock_owner: TxnId::new(1, 0),
-        waiting_for,
-        received: BTreeMap::new(),
-        timeout_at: Instant::now() + Duration::from_secs(30),
-    };
-
-    // Only one passive delivers — barrier should still be incomplete.
-    barrier.waiting_for.remove(&10u32);
-    barrier.received.insert(
-        10u32,
-        vec![(
-            PassiveReadKeyId {
-                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "coll_10"),
-                surrogate: 1,
-            },
-            Value::Integer(42),
-        )],
+fn a_barrier_completes_once_every_passive_result_is_in() {
+    let passive: BTreeSet<u32> = [10, 20].into_iter().collect();
+    let mut log = BarrierLog::default();
+    log.note(read(10, "coll_10", b"a"));
+    assert_eq!(log.outcome(&passive), BarrierOutcome::Waiting);
+    log.note(read(20, "coll_20", b"b"));
+    assert_eq!(log.outcome(&passive), BarrierOutcome::Complete);
+    let injected = log.injected_reads();
+    assert_eq!(
+        injected.get(&row("coll_10", 1)),
+        Some(&Value::Bytes(b"a".to_vec()))
     );
-
-    assert!(!barrier.is_complete(), "still waiting for vshard 20");
-
-    // Both deliver — now complete.
-    barrier.waiting_for.remove(&20u32);
-    barrier.received.insert(
-        20u32,
-        vec![(
-            PassiveReadKeyId {
-                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "coll_20"),
-                surrogate: 2,
-            },
-            Value::Integer(99),
-        )],
-    );
-
-    assert!(barrier.is_complete());
-    let injected = barrier.assemble_injected_reads();
     assert_eq!(injected.len(), 2);
 }
 
+/// A timeout entry that comes before a passive result times the barrier
+/// out, whatever arrives after it.
 #[test]
-fn dependent_barrier_timeout_detected() {
-    let txn = make_dependent_txn(7);
-    let lock_owner = TxnId::new(txn.epoch, txn.position);
-    let barrier = PendingDependentBarrier {
-        txn,
-        lock_owner,
-        waiting_for: {
-            let mut s = BTreeSet::new();
-            s.insert(7u32);
-            s
-        },
-        received: BTreeMap::new(),
-        // Timeout already in the past.
-        timeout_at: Instant::now() - Duration::from_millis(1),
-    };
-
-    assert!(
-        barrier.is_timed_out(),
-        "barrier should report timeout when timeout_at is in the past"
-    );
+fn a_logged_timeout_before_a_result_times_the_barrier_out() {
+    let passive: BTreeSet<u32> = [10].into_iter().collect();
+    let mut log = BarrierLog::default();
+    log.note(BarrierEvent::Timeout);
+    log.note(read(10, "coll_10", b"a"));
+    assert_eq!(log.outcome(&passive), BarrierOutcome::TimedOut);
 }
 
-/// Happy-path test: passive delivers, active assembles injected_reads correctly.
+/// Values that match the coordinator's read pass. A moved value drifts.
 #[test]
-fn read_result_event_assembles_correctly() {
-    let event = ReadResultEvent {
-        epoch: 5,
-        position: 2,
-        passive_vshard: 17,
-        tenant_id: TenantId::new(3),
-        values: vec![(
-            PassiveReadKeyId {
-                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "coll"),
-                surrogate: 100,
-            },
-            Value::Float(std::f64::consts::PI),
-        )],
+fn read_values_are_checked_against_the_coordinators_read() {
+    let spec = DependentReadSpec {
+        passive_reads: BTreeMap::new(),
+        expected: BTreeMap::from([(row("coll", 1), Some(b"v1".to_vec()))]),
     };
-
-    assert_eq!(event.epoch, 5);
-    assert_eq!(event.passive_vshard, 17);
-    assert_eq!(event.values.len(), 1);
-    assert_eq!(event.values[0].0.collection.as_str(), "coll");
+    let same = BTreeMap::from([(row("coll", 1), Value::Bytes(b"v1".to_vec()))]);
+    let moved = BTreeMap::from([(row("coll", 1), Value::Bytes(b"v2".to_vec()))]);
+    assert_eq!(expected_reads_drift(&spec, &same), None);
+    assert!(expected_reads_drift(&spec, &moved).is_some());
 }

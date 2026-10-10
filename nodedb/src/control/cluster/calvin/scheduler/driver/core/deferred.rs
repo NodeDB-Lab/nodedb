@@ -26,6 +26,8 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum DispatchSt
     StageStatic,
     /// `CalvinExecuteActive` stage of a dependent-read txn.
     StageActive,
+    /// `CalvinExecutePassive` read of a dependent-read txn.
+    ReadPassive,
     /// `CalvinResolve` of a committed staged txn.
     Resolve,
     /// `CalvinDrop` of a staged txn that ends with no log entry. The txn
@@ -41,7 +43,11 @@ impl DispatchStep {
     /// Whether the txn waits for this step's answer.
     fn is_awaited(self) -> bool {
         match self {
-            Self::StageStatic | Self::StageActive | Self::Resolve | Self::Drop => true,
+            Self::StageStatic
+            | Self::StageActive
+            | Self::ReadPassive
+            | Self::Resolve
+            | Self::Drop => true,
             Self::Discard => false,
         }
     }
@@ -214,6 +220,7 @@ impl Scheduler {
     ) {
         let halt_step = match step {
             DispatchStep::StageStatic | DispatchStep::StageActive => HaltStep::Stage,
+            DispatchStep::ReadPassive => HaltStep::PassiveRead,
             DispatchStep::Resolve => HaltStep::Resolve,
             DispatchStep::Drop | DispatchStep::Discard => HaltStep::Drop,
         };
@@ -280,7 +287,7 @@ impl Scheduler {
                 }
                 self.spawn_response_bridge(txn_id, request_id, resp_rx);
             }
-            DispatchStep::Resolve | DispatchStep::Drop => {
+            DispatchStep::ReadPassive | DispatchStep::Resolve | DispatchStep::Drop => {
                 self.spawn_response_bridge(txn_id, request_id, resp_rx);
             }
             DispatchStep::Discard => {

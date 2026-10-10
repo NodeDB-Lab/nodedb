@@ -14,7 +14,6 @@ use crate::bridge::envelope::{ErrorCode, Payload, Response, StageVote, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::commit_pending::PendingCommit;
 use crate::data::executor::handlers::control::calvin_reply::{CalvinReply, CalvinStaging};
-use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
 use nodedb_physical::physical_plan::PhysicalPlan;
@@ -28,14 +27,13 @@ use super::shared::CalvinExecCtx;
 impl CoreLoop {
     /// Execute a passive-participant dependent-read Calvin txn.
     ///
-    /// Reads each key from the local engine state and returns a
-    /// msgpack-encoded `Vec<(PassiveReadKeyId, Value)>` as the response
-    /// payload. The Control Plane scheduler collects these values and
-    /// proposes a `ReplicatedWrite::CalvinReadResult` entry to the
-    /// per-vshard Raft group so all replicas see the same read results.
-    ///
-    /// `Instant::now()` is intentionally absent here — this is a
-    /// synchronous Data Plane read with no timer interaction.
+    /// Reads each key from base storage and returns a zerompk-encoded
+    /// `Vec<(PassiveReadKeyId, Value)>` as the response payload. The
+    /// scheduler holds the transaction's locks on these keys, so no other
+    /// write changes them before the transaction's verdict. A successful
+    /// read votes commit: a passive participant writes nothing. The scheduler
+    /// proposes the payload as a `ReplicatedWrite::CalvinReadResult` entry
+    /// to the data group of every active vShard.
     pub(in crate::data::executor) fn execute_calvin_execute_passive(
         &mut self,
         task: &ExecutionTask,
@@ -53,18 +51,21 @@ impl CoreLoop {
             "calvin execute passive: reading keys"
         );
 
+        let database_id = task.request.database_id.as_u64();
         let mut results: Vec<(PassiveReadKeyId, Value)> = Vec::with_capacity(keys_to_read.len());
-
         for passive_key in keys_to_read {
-            // Build a PassiveReadKeyId for each surrogate in the engine key set.
-            // For this v1 handler the engine key set carries single surrogates per
-            // key (as specified in the design); we iterate all surrogates to be safe.
-            let values = self.read_passive_key(tenant_id, &passive_key.engine_key);
-            results.extend(values);
+            match self.read_passive_key(database_id, tenant_id, &passive_key.engine_key) {
+                Ok(values) => results.extend(values),
+                Err(code) => return self.response_error(task, code),
+            }
         }
 
-        match response_codec::encode_serde(&results) {
-            Ok(payload) => self.response_with_payload(task, payload),
+        match zerompk::to_msgpack_vec(&results) {
+            Ok(payload) => {
+                let mut response = self.response_with_payload(task, payload);
+                response.stage_vote = Some(StageVote::Commit);
+                response
+            }
             Err(e) => self.response_error(
                 task,
                 ErrorCode::Internal {
@@ -90,11 +91,10 @@ impl CoreLoop {
     /// and stages nothing, so no redo entry exists for it. The Control
     /// Plane scheduler releases locks and re-recons on `OllpRetryRequired`.
     ///
-    /// `injected_reads` is retained on the wire for future plan variants that
-    /// reference resolved read values by `PassiveReadKeyId`. The coordinator
-    /// bakes the read values into concrete point ops and the predicted
-    /// surrogate set at recon, so the plans are self-contained and stage
-    /// byte-identically to the static path.
+    /// The coordinator bakes the values it read into concrete point ops, so
+    /// the plans are self-contained and stage byte-identically to the static
+    /// path. The scheduler compared `injected_reads` with those values before
+    /// it dispatched this stage, and a mismatch never reaches the core.
     pub(in crate::data::executor) fn execute_calvin_execute_active(
         &mut self,
         task: &ExecutionTask,
@@ -218,6 +218,128 @@ mod tests {
     use super::super::shared::test_support::{
         bulk_delete_plan, doc_value, make_task, point_insert_plan, seed_row,
     };
+
+    fn kv_keys(collection: &str, keys: &[&[u8]]) -> PassiveReadKey {
+        PassiveReadKey {
+            engine_key: nodedb_cluster::calvin::types::EngineKeySet::Kv {
+                collection: collection.to_owned(),
+                keys: nodedb_cluster::calvin::types::SortedVec::new(
+                    keys.iter().map(|key| key.to_vec()).collect(),
+                ),
+            },
+        }
+    }
+
+    fn decode_reads(response: &Response) -> Vec<(PassiveReadKeyId, Value)> {
+        zerompk::from_msgpack(response.payload.as_ref()).expect("passive payload decodes")
+    }
+
+    /// A passive read returns each stored key-value row as its stored bytes
+    /// and an absent row as `Null`, and votes commit.
+    #[test]
+    fn calvin_execute_passive_reads_stored_kv_bytes_and_votes_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        core.kv_engine
+            .put(crate::engine::kv::KvPutParams {
+                database_id: DatabaseId::DEFAULT.as_u64(),
+                tenant_id: 1,
+                collection: "items",
+                key: b"alice:sword",
+                value: b"stored-bytes",
+                ttl_ms: 0,
+                now_ms: crate::engine::kv::current_ms(),
+                surrogate: Surrogate::new(5),
+            })
+            .expect("seed kv row");
+
+        let task = make_task();
+        let resp = core.execute_calvin_execute_passive(
+            &task,
+            1,
+            0,
+            &TenantId::new(1),
+            &[kv_keys("items", &[b"alice:sword", b"bob:sword"])],
+        );
+
+        assert_eq!(resp.status, Status::Ok);
+        assert_eq!(resp.stage_vote, Some(StageVote::Commit));
+        let collection = nodedb_types::QualifiedCollection::from_stored("items".to_owned());
+        let reads: BTreeMap<PassiveReadKeyId, Value> = decode_reads(&resp).into_iter().collect();
+        assert_eq!(
+            reads.get(&PassiveReadKeyId::kv(
+                collection.clone(),
+                b"alice:sword".to_vec()
+            )),
+            Some(&Value::Bytes(b"stored-bytes".to_vec()))
+        );
+        assert_eq!(
+            reads.get(&PassiveReadKeyId::kv(collection, b"bob:sword".to_vec())),
+            Some(&Value::Null)
+        );
+    }
+
+    /// A passive read returns a stored document row as its stored bytes.
+    #[test]
+    fn calvin_execute_passive_reads_stored_document_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        seed_row(&mut core, "orders", 11);
+        let stored = core
+            .sparse
+            .get(
+                DatabaseId::DEFAULT.as_u64(),
+                1,
+                "orders",
+                &nodedb_types::StorageKey::for_surrogate(Surrogate::new(11)),
+            )
+            .expect("read seeded row")
+            .expect("seeded row present");
+
+        let task = make_task();
+        let keys = [PassiveReadKey {
+            engine_key: nodedb_cluster::calvin::types::EngineKeySet::Document {
+                collection: "orders".to_owned(),
+                surrogates: nodedb_cluster::calvin::types::SortedVec::new(vec![11]),
+            },
+        }];
+        let resp = core.execute_calvin_execute_passive(&task, 1, 0, &TenantId::new(1), &keys);
+
+        assert_eq!(resp.status, Status::Ok);
+        assert_eq!(
+            decode_reads(&resp),
+            vec![(
+                PassiveReadKeyId::surrogate(
+                    nodedb_types::QualifiedCollection::from_stored("orders".to_owned()),
+                    11
+                ),
+                Value::Bytes(stored)
+            )]
+        );
+    }
+
+    /// A key set that names no readable row refuses the read, so the
+    /// passive participant votes abort instead of reporting a value.
+    #[test]
+    fn calvin_execute_passive_refuses_a_lock_only_key_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let task = make_task();
+        let keys = [PassiveReadKey {
+            engine_key: nodedb_cluster::calvin::types::EngineKeySet::Collection {
+                collection: "orders".to_owned(),
+                vshards: nodedb_cluster::calvin::types::SortedVec::new(Vec::new()),
+            },
+        }];
+        let resp = core.execute_calvin_execute_passive(&task, 1, 0, &TenantId::new(1), &keys);
+
+        assert_eq!(resp.status, Status::Error);
+        assert_eq!(resp.stage_vote, None);
+        assert!(matches!(
+            resp.error_code.as_deref(),
+            Some(ErrorCode::Unsupported { .. })
+        ));
+    }
 
     /// The dependent-read ACTIVE path STAGES its writes (into `commit_pending` +
     /// the synthetic overlay) instead of applying them to base directly, so a

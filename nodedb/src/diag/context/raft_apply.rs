@@ -40,3 +40,56 @@ impl DomainContext for RaftEntryReapplied {
         })
     }
 }
+
+/// The catalog refused a read or write of a vShard's stored dependent-read
+/// barrier log.
+pub(in crate::diag) struct CalvinBarrierLogStoreFailed<'a> {
+    pub vshard_id: u32,
+    /// The txn's `(epoch, position)`. A removal of every row of the vShard
+    /// names none.
+    pub txn: Option<(u64, u32)>,
+    /// What the store did: `save`, `load` or `remove`.
+    pub op: &'static str,
+    pub error_class: &'a str,
+}
+
+impl DomainContext for CalvinBarrierLogStoreFailed<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.calvin_barrier_log_store_failed"
+    }
+
+    fn grouping_key(&self) -> String {
+        // One report per vShard and operation: the txn changes per event.
+        format!(
+            "calvin_barrier_log_store_failed:{}:{}",
+            self.op, self.vshard_id
+        )
+    }
+
+    fn to_json(&self) -> Value {
+        let effect = match self.op {
+            "save" => {
+                "the barrier event stays in memory, and every later event of the \
+                       txn too. The entry does not count as durably applied, so a restart \
+                       delivers it again from the log"
+            }
+            "load" => {
+                "the scheduler keeps the txn's barrier open and reads the row \
+                       again on its next pass"
+            }
+            _ => {
+                "the row of a finished txn stays stored. The scheduler's next \
+                  stall-tick sweep removes it"
+            }
+        };
+        json!({
+            "vshard_id": self.vshard_id,
+            "txn": self.txn,
+            "op": self.op,
+            "error_class": self.error_class,
+            "effect": effect,
+            "operator_action": "check the system catalog's disk: free space, I/O errors, \
+                                and the redb file's permissions",
+        })
+    }
+}

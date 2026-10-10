@@ -134,8 +134,14 @@ impl VShardAdmissionSequencer {
         let queued = self.reserve(slot, vshard_id)?;
         let mut active = tokio::time::timeout_at(deadline, slot.active.lock())
             .await
-            .map_err(|_| crate::Error::DeadlineExceeded {
-                request_id: crate::types::RequestId::new(0),
+            .map_err(|_| {
+                tracing::warn!(
+                    vshard_id = vshard_id.as_u32(),
+                    "a write waited for its vShard's admission slot until its deadline"
+                );
+                crate::Error::DeadlineExceeded {
+                    request_id: crate::types::RequestId::new(0),
+                }
             })?;
         let proposed = submit().await?;
         if proposed.at.is_some() {
@@ -167,7 +173,7 @@ impl Default for VShardAdmissionSequencer {
 }
 
 /// Install raw and admission-sequenced proposal handles, both built from
-/// `submit`, in one atomic set.
+/// `submit`, and `submit` itself, in one atomic set.
 pub(crate) fn install_async_raft_proposer(
     shared: &SharedState,
     submit: Arc<AsyncRaftSubmit>,
@@ -176,9 +182,9 @@ pub(crate) fn install_async_raft_proposer(
         Arc::clone(&shared.vshard_admission_sequencer),
         Arc::clone(&submit),
     );
-    let raw = raw_async_raft_proposer(submit);
+    let raw = raw_async_raft_proposer(Arc::clone(&submit));
     let expected_raw = Arc::clone(&raw);
-    shared.install_async_raft_proposer_pair(sequenced, raw)?;
+    shared.install_async_raft_proposer_pair(sequenced, raw, submit)?;
     let installed_raw = shared.raw_async_raft_proposer()?;
     if !Arc::ptr_eq(installed_raw, &expected_raw) {
         return Err(crate::Error::Internal {

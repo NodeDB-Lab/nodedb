@@ -23,6 +23,8 @@
 //! - `tenant_group_marks`, `tenant_group_restore_marks`: data-group write
 //!   marks, carried by data-group snapshots.
 //! - `calvin_applied`: this node's Calvin apply ledger.
+//! - `calvin_barrier_logs`: this node's dependent-read barrier logs,
+//!   carried by data-group snapshots.
 //! - `redo_snapshot_owed`: the data-group snapshot installs this node's
 //!   replicas owe.
 //! - `l2_cleanup_queue`, `pending_reclaim`, `pending_history_compaction`:

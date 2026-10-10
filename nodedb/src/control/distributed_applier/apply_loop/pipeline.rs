@@ -183,6 +183,13 @@ impl<'a> Pipeline<'a> {
             .collect();
         for group_id in groups {
             self.pump_group(group_id);
+            // The entries left wait behind an earlier one. Their barrier
+            // events fold now: a barrier needs no catalog.
+            if !self.install_blocked
+                && let Some(lane) = self.lanes.get_mut(&group_id)
+            {
+                super::barrier_prefold::prefold_backlog(self.ctx, lane, group_id);
+            }
         }
     }
 

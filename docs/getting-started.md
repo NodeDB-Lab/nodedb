@@ -595,7 +595,7 @@ Below that the sweep costs more than the resolution it buys.
 | ------------------------------------------------ | ------- |
 | `tuning.calvin.channel_capacity`                 | `512`   |
 | `tuning.calvin.txn_deadline_multiplier`          | `3`     |
-| `tuning.calvin.dependent_read_passive_timeout_ms` | `60`    |
+| `tuning.calvin.dependent_read_passive_timeout_ms` | `5000`  |
 | `tuning.calvin.verdict_stall_warn_ms`            | `5000`  |
 | `tuning.calvin.max_inflight_backlog`             | `1024`  |
 | `tuning.calvin.catch_up_window`                  | `512`   |
@@ -607,11 +607,15 @@ Each hosted vShard runs one Calvin scheduler with these settings.
 - `channel_capacity` sizes each scheduler's bounded input and completion
   channels.
 - `txn_deadline_multiplier` sets a transaction deadline in sequencer epochs.
-- `dependent_read_passive_timeout_ms` bounds the wait for passive read results.
+- `dependent_read_passive_timeout_ms` bounds the wait of a dependent-read
+  barrier for passive read results. Past it, the vShard's data-group leader
+  proposes a timeout entry, and every replica aborts the barrier alike.
 - `verdict_stall_warn_ms` spaces the stall warnings of a transaction waiting
   on its global verdict. The transaction keeps waiting and never aborts.
 - `max_inflight_backlog` is the in-flight backlog at which a scheduler stops
-  taking new input.
+  taking new input. It also bounds the dependent-read barrier entries a
+  vShard holds in memory for transactions its scheduler has not taken yet.
+  Entries past it wait in the system catalog alone.
 - `catch_up_window` is the most sequencer log entries one catch-up pass
   replays.
 - `restage_attempts` is the most times a data-group leader stages a

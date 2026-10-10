@@ -47,6 +47,16 @@ impl Scheduler {
         txn_id: TxnId,
         committed: bool,
     ) {
+        // An abort verdict ends a txn still waiting at its barrier: it
+        // stages nothing, and its locks free at once.
+        if !committed && self.dependent_barrier.contains_key(&txn_id) {
+            self.abort_open_barrier(
+                txn_id,
+                nodedb_cluster::calvin::AbortReason::ParticipantError,
+                "an abort verdict reached the txn's open dependent-read barrier".to_owned(),
+            );
+            return;
+        }
         let Some((state, writes)) = self
             .pending
             .get(&txn_id)
@@ -62,6 +72,7 @@ impl Scheduler {
             }
             CommitState::AwaitingVerdict => self.resume_parked(txn_id, committed, writes),
             CommitState::Staged
+            | CommitState::ReadingPassive
             | CommitState::AwaitingResolveTurn
             | CommitState::AwaitingRedoResolve
             | CommitState::AwaitingRedoApply { .. }

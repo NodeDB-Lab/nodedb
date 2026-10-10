@@ -16,6 +16,7 @@ pub mod explain;
 pub mod node_delete_txn;
 pub mod predicate;
 pub mod preexec;
+pub mod read_dependent;
 pub mod reservation;
 pub mod retry_loop;
 pub mod submit;
@@ -46,7 +47,7 @@ pub use submit::{
     submit_calvin_routed, submit_calvin_routed_assign, submit_calvin_routed_write,
 };
 pub use tx_class::{
-    build_dependent_tx_class, build_single_vshard_dependent_tx_class, build_single_vshard_tx_class,
-    build_static_tx_class,
+    PassiveReads, build_predicted_tx_class, build_read_dependent_tx_class,
+    build_single_vshard_predicted_tx_class, build_single_vshard_tx_class, build_static_tx_class,
 };
 pub use types::{DispatchClass, DispatchOutcome, TxnDispatchPosition};

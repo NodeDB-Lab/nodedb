@@ -9,11 +9,6 @@ use crate::error::Result;
 use super::loop_core::{CommitApplier, RaftLoop};
 use crate::forward::PlanExecutor;
 
-/// How long a forwarded data propose waits for the leader's reply past the
-/// proposer's deadline. The leader's gate stops at that deadline, so the
-/// margin covers the round trip and the leader's verdict arrives.
-const FORWARD_REPLY_MARGIN: std::time::Duration = std::time::Duration::from_secs(2);
-
 impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
     /// Propose a command to the Raft group owning the given vShard.
     ///
@@ -233,7 +228,7 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
     /// as `ClusterError::Calvin`. The gate waits no later than `deadline`,
     /// the caller's deadline. A forward carries what remains of it.
     ///
-    /// The call ends no later than `deadline` plus [`FORWARD_REPLY_MARGIN`].
+    /// The call ends no later than `deadline` plus [`crate::rpc_codec::REPLY_MARGIN`].
     /// `CalvinError::AdmissionTimedOut` means the entry was not proposed.
     /// `ClusterError::ShardTimeout` means the leader's reply never came, so
     /// the leader can have proposed the entry. `ClusterError::Unanswered`
@@ -283,7 +278,7 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
 
     /// Send a `DataProposeRequest` carrying the budget left to `deadline` to
     /// `leader_id`, and wait for its verdict until `deadline` plus
-    /// [`FORWARD_REPLY_MARGIN`].
+    /// [`crate::rpc_codec::REPLY_MARGIN`].
     async fn forward_data_propose(
         &self,
         leader_id: u64,
@@ -328,8 +323,7 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             });
         // The generic short RPC timeout ends the call before a contended
         // write's gate wait does. The reply wait follows the forwarded budget.
-        let reply_budget =
-            std::time::Duration::from_millis(deadline_remaining_ms) + FORWARD_REPLY_MARGIN;
+        let reply_budget = crate::rpc_codec::reply_wait(deadline_remaining_ms);
         let sent = tokio::time::timeout(
             reply_budget,
             self.transport

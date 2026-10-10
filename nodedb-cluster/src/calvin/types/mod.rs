@@ -15,8 +15,8 @@ pub use multi_part::{
     MultiPartPlans, PartStreamId, PlanPart, StreamedPart, TaskChunk, VShardParts,
 };
 pub use primitives::{
-    DependentReadSpec, EngineKeySet, EngineTag, PassiveReadKey, ReadKeyIdent, SortedVec,
-    VersionedReadEntry, VersionedReadSet,
+    DependentReadSpec, EngineKeySet, EngineTag, PassiveKey, PassiveReadKey, PassiveReadKeyId,
+    ReadKeyIdent, SortedVec, VersionedReadEntry, VersionedReadSet,
 };
 pub use read_write_set::ReadWriteSet;
 pub use scheduler_input::SchedulerInput;

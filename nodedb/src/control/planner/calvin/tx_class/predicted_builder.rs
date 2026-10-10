@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! `TxClass` construction for a dependent-read (OLLP) transaction: the OLLP
+//! `TxClass` construction for a predicted (OLLP) transaction: the OLLP
 //! collection's write set comes from reconnaissance-predicted surrogates; all
 //! other tasks use static surrogate extraction.
 //!
-//! Despite the "dependent" naming (shared with the OLLP reconnaissance
-//! terminology), the `TxClass` built here carries `dependent_reads: None` —
-//! it is NOT a Calvin dependent-read-barrier transaction (see
-//! [`TxClass::new_dependent`]; that is a distinct mechanism for passive
-//! vshards to broadcast reads to active participants before they write). This
-//! builder is write-set-identity construction only, exactly like
+//! The `TxClass` built here carries `dependent_reads: None`. Its participant
+//! verifies the prediction against its own rows at stage time. A transaction
+//! whose writes depend on rows of another vShard is built by
+//! [`super::read_dependent_builder`] instead. This builder is
+//! write-set-identity construction only, exactly like
 //! `build_static_tx_class`, sourced from a pre-exec-scan surrogate
 //! prediction instead of statically-known plan fields.
 
@@ -25,7 +24,7 @@ use super::write_keys::{WriteKeys, add_plan_write_keys, task_write_keys};
 use crate::control::planner::calvin::is_dependent_predicate;
 use crate::control::planner::calvin::write_class::is_write_plan;
 
-/// Build a **multi-vshard** `TxClass` for a dependent-read (OLLP) transaction.
+/// Build a **multi-vshard** `TxClass` for a predicted (OLLP) transaction.
 ///
 /// For `BulkUpdate`/`BulkDelete` plans that have `ollp_predicted_surrogates`
 /// set, the OLLP collection's write set is built from `predicted_surrogates`.
@@ -35,7 +34,7 @@ use crate::control::planner::calvin::write_class::is_write_plan;
 /// produce a valid multi-vshard `TxClass`. A write set that collapses to a
 /// single vshard is rejected (`SingleVshardTxn`) — for the legitimate
 /// contended single-collection predicate write, use
-/// [`build_single_vshard_dependent_tx_class`].
+/// [`build_single_vshard_predicted_tx_class`].
 ///
 /// `reads` is the neutral session read-set, projected onto the `TxClass`'s
 /// routing/identity `read_set` (collection-homed) so read shards are enumerated
@@ -46,14 +45,14 @@ use crate::control::planner::calvin::write_class::is_write_plan;
 /// Returns `Ok(None)` when the batch turns out to write nothing at all — the
 /// predicate matched no rows and no other task in the batch carries a write.
 /// Returns `Err` if encoding fails or the resulting TxClass is invalid.
-pub fn build_dependent_tx_class(
+pub fn build_predicted_tx_class(
     tasks: &[PhysicalTask],
     tenant_id: TenantId,
     collection: &str,
     predicted_surrogates: &[u32],
     reads: &[ReadSetEntry],
 ) -> crate::Result<Option<TxClass>> {
-    build_dependent_tx_class_impl(
+    build_predicted_tx_class_impl(
         tasks,
         tenant_id,
         collection,
@@ -63,7 +62,7 @@ pub fn build_dependent_tx_class(
     )
 }
 
-/// Build a `TxClass` for a dependent-read (OLLP) transaction that is permitted
+/// Build a `TxClass` for a predicted (OLLP) transaction that is permitted
 /// to resolve to a **single vshard**.
 ///
 /// Used only by the contended single-collection predicate write routing path
@@ -71,19 +70,19 @@ pub fn build_dependent_tx_class(
 /// gate returned `RouteToCalvin` because a pending commit holds a key in the
 /// predicate's range, so the write must sequence through the deterministic
 /// scheduler to serialize on the SAME shared per-vShard `LockManager` the
-/// holder is on. Identical extraction to [`build_dependent_tx_class`]; only
+/// holder is on. Identical extraction to [`build_predicted_tx_class`]; only
 /// the participant floor differs (via [`TxClass::new_single_vshard`] — the
 /// SAME opt-in the point-write path uses, since this `TxClass` shape is a
 /// plain write-set-identity construction like the static builder, not a
 /// Calvin dependent-read-barrier transaction).
-pub fn build_single_vshard_dependent_tx_class(
+pub fn build_single_vshard_predicted_tx_class(
     tasks: &[PhysicalTask],
     tenant_id: TenantId,
     collection: &str,
     predicted_surrogates: &[u32],
     reads: &[ReadSetEntry],
 ) -> crate::Result<Option<TxClass>> {
-    build_dependent_tx_class_impl(
+    build_predicted_tx_class_impl(
         tasks,
         tenant_id,
         collection,
@@ -93,12 +92,12 @@ pub fn build_single_vshard_dependent_tx_class(
     )
 }
 
-/// Shared body for the dependent builders. `allow_single_vshard` selects
+/// Shared body for the predicted builders. `allow_single_vshard` selects
 /// between [`TxClass::new`] (multi-vshard, `>=2` floor) and
 /// [`TxClass::new_single_vshard`] (single-vshard opt-in) — the same pair
 /// `build_static_tx_class_impl` selects between; this builder only differs in
 /// how the write set's surrogate identity is sourced.
-fn build_dependent_tx_class_impl(
+fn build_predicted_tx_class_impl(
     tasks: &[PhysicalTask],
     tenant_id: TenantId,
     collection: &str,
@@ -142,7 +141,7 @@ fn build_dependent_tx_class_impl(
     let plans: Vec<&PhysicalPlan> = tasks.iter().map(|t| &t.plan).collect();
     let plans_bytes = zerompk::to_msgpack_vec(&plans).map_err(|e| Error::Serialization {
         format: "msgpack".to_owned(),
-        detail: format!("failed to encode PhysicalPlan vec for Calvin dependent TxClass: {e}"),
+        detail: format!("failed to encode PhysicalPlan vec for Calvin predicted TxClass: {e}"),
     })?;
 
     // versioned_reads carries the write-versioned OCC validation set, populated
@@ -172,7 +171,7 @@ fn build_dependent_tx_class_impl(
         )
     };
     result.map(Some).map_err(|e| Error::BadRequest {
-        detail: format!("invalid dependent TxClass: {e}"),
+        detail: format!("invalid predicted TxClass: {e}"),
     })
 }
 
@@ -228,16 +227,16 @@ mod tests {
             .as_u32();
 
         // Strict builder rejects the single-vshard write set.
-        let strict = build_dependent_tx_class(&tasks, TenantId::new(1), "users", &[7, 8], &[]);
+        let strict = build_predicted_tx_class(&tasks, TenantId::new(1), "users", &[7, 8], &[]);
         assert!(
             matches!(strict, Err(crate::Error::BadRequest { .. })),
-            "strict dependent builder must reject single-vshard write set"
+            "strict predicted builder must reject single-vshard write set"
         );
 
         // Single-vshard builder accepts it, with exactly one participating vshard.
         let tx =
-            build_single_vshard_dependent_tx_class(&tasks, TenantId::new(1), "users", &[7, 8], &[])
-                .expect("single-vshard dependent TxClass accepted")
+            build_single_vshard_predicted_tx_class(&tasks, TenantId::new(1), "users", &[7, 8], &[])
+                .expect("single-vshard predicted TxClass accepted")
                 .expect("non-empty write set builds a TxClass");
         assert_eq!(tx.participating_vshards().len(), 1);
         assert_eq!(tx.participating_vshards()[0].as_u32(), want_vshard);
@@ -250,7 +249,7 @@ mod tests {
         // error the retry loop will mistake for predicate drift.
         let tasks = vec![bulk_delete_task("users")];
         let built =
-            build_single_vshard_dependent_tx_class(&tasks, TenantId::new(1), "users", &[], &[])
+            build_single_vshard_predicted_tx_class(&tasks, TenantId::new(1), "users", &[], &[])
                 .expect("zero-match predicate is not an error");
         assert!(built.is_none(), "zero-match predicate builds no TxClass");
     }
@@ -284,14 +283,14 @@ mod tests {
         use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
         use crate::control::cluster::calvin::scheduler::{AcquireOutcome, LockManager};
 
-        let predicate = build_single_vshard_dependent_tx_class(
+        let predicate = build_single_vshard_predicted_tx_class(
             &[bulk_delete_task("users")],
             TenantId::new(1),
             "users",
             &[7],
             &[],
         )
-        .expect("dependent TxClass")
+        .expect("predicted TxClass")
         .expect("non-empty write set");
         let insert_task = PhysicalTask {
             tenant_id: TenantId::new(1),

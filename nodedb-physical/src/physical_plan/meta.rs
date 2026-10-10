@@ -8,7 +8,7 @@ use nodedb_types::calvin::{PassiveReadKey, VersionedReadEntry};
 use nodedb_types::timeseries::continuous_agg::ContinuousAggregateDef;
 use nodedb_types::{QualifiedCollection, TenantId, Value};
 
-pub use super::meta_calvin::PassiveReadKeyId;
+pub use super::meta_calvin::{PassiveKey, PassiveReadKeyId};
 
 /// Meta / maintenance physical operations.
 #[derive(
@@ -358,15 +358,16 @@ pub enum MetaOp {
         body_plans: Vec<u32>,
     },
 
-    /// Calvin dependent-read executor: passive participant reads keys and
-    /// returns values for broadcast.
+    /// Calvin dependent-read executor: a passive participant reads its keys
+    /// and returns their values for broadcast.
     ///
-    /// Dispatched by the scheduler to passive vshards (those holding only
-    /// read keys, not write keys) for a dependent-read Calvin transaction.
-    /// The Data Plane handler reads each key from the local engine and
-    /// returns a msgpack-encoded `Vec<(PassiveReadKeyId, Value)>` payload.
-    /// The scheduler then proposes a `ReplicatedWrite::CalvinReadResult`
-    /// to the per-vshard Raft group so all replicas see the same values.
+    /// The data-group leader of each passive vShard dispatches it once the
+    /// transaction holds its locks there. The Data Plane handler reads each
+    /// key from base storage and returns a zerompk-encoded
+    /// `Vec<(PassiveReadKeyId, Value)>`: the stored bytes as `Value::Bytes`,
+    /// `Value::Null` for an absent row. A successful read votes commit. The
+    /// scheduler proposes the payload as a `ReplicatedWrite::CalvinReadResult`
+    /// to the data group of every active vShard.
     CalvinExecutePassive {
         /// Sequencer epoch this transaction belongs to.
         epoch: u64,

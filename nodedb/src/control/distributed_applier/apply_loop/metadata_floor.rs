@@ -78,6 +78,13 @@ pub(super) fn hold_for_metadata<'a>(
 /// order it holds. It fails only when the metadata group left this node.
 async fn await_metadata_floor(state: &SharedState, held: HeldEntry) -> crate::Result<()> {
     let watcher = state.applied_index_watcher(METADATA_GROUP_ID);
+    tracing::debug!(
+        group_id = held.group_id,
+        log_index = held.log_index,
+        metadata_floor = held.metadata_floor,
+        metadata_applied = watcher.current(),
+        "a replicated write holds its group's lane for this node's metadata apply"
+    );
     loop {
         let waiting = Arc::clone(&watcher);
         let floor = held.metadata_floor;

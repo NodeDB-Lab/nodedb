@@ -98,6 +98,19 @@ impl Scheduler {
             }
             self.role.term = Some(leadership.term);
             self.role.term_start = leadership.term_start;
+            tracing::debug!(
+                node_id = self.shared.node_id,
+                vshard_id = self.vshard_id,
+                group_id = leadership.group_id,
+                term = leadership.term,
+                term_start = ?leadership.term_start,
+                applied = self
+                    .shared
+                    .applied_index_watcher(leadership.group_id)
+                    .current(),
+                "calvin scheduler: this node won the data group; staging waits for the term's \
+                 first entry to apply"
+            );
         }
         if self.role.is_leader() {
             return;
@@ -143,6 +156,7 @@ impl Scheduler {
     fn promote(&mut self) {
         self.role.role = Role::Leader;
         tracing::info!(
+            node_id = self.shared.node_id,
             vshard_id = self.vshard_id,
             term = self.role.term,
             "calvin scheduler: this node leads the vShard; staging its held txns"
@@ -169,6 +183,7 @@ impl Scheduler {
     ) {
         self.role.role = Role::Follower;
         tracing::info!(
+            node_id = self.shared.node_id,
             vshard_id = self.vshard_id,
             reason = why,
             "calvin scheduler: this node stops leading the vShard; holding its txns"
@@ -185,23 +200,36 @@ impl Scheduler {
         // Only a leader restages. A later term counts its own restages.
         self.restages.clear();
         // A barrier waits only on the leader. Its txn holds its locks and
-        // follows the log like any other. It keeps the reads it received,
-        // so a later barrier of it starts from them.
+        // follows the log like any other. Its barrier log stays, so a later
+        // barrier of it decides from the same entries.
         let barriers: Vec<TxnId> = self.dependent_barrier.keys().copied().collect();
         for txn_id in barriers {
             if let Some(barrier) = self.dependent_barrier.remove(&txn_id) {
                 self.follow(barrier.txn, txn_id, barrier.lock_owner);
-                self.hold_reads(txn_id, barrier.received);
             }
         }
     }
 
     /// Hold `txn_id` `Following`, and discard what this node staged for it.
+    ///
+    /// The txn's scope becomes its slice's own, from its plans. A leader's
+    /// step can hold a narrower one: a passive read or a parked abort vote
+    /// holds a scope that writes nothing. A follower that kept it would end a
+    /// COMMIT with no entry, mark the position applied, and then skip the
+    /// slice's redo when it applies.
     fn release_to_following(&mut self, txn_id: TxnId) {
+        let Some(scope) = self
+            .pending
+            .get(&txn_id)
+            .map(|pending| self.local_slice_scope(&pending.txn, txn_id))
+        else {
+            return;
+        };
         let Some(pending) = self.pending.get_mut(&txn_id) else {
             return;
         };
         pending.commit_state = CommitState::Following;
+        pending.scope = scope;
         pending.awaiting = None;
         pending.verdict_deadline = None;
         pending.stage_error = None;
@@ -243,7 +271,8 @@ fn leader_drives(state: CommitState) -> bool {
         | CommitState::AwaitingResolveTurn
         | CommitState::AwaitingRedoResolve
         | CommitState::AwaitingRedoApply { .. }
-        | CommitState::AwaitingRestage => true,
+        | CommitState::AwaitingRestage
+        | CommitState::ReadingPassive => true,
         // A drop ends the txn with no log entry whatever the role.
         CommitState::AwaitingDrop | CommitState::Following => false,
     }

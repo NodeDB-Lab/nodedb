@@ -114,6 +114,13 @@ pub(super) async fn build_hooks(
                 .is_some_and(|ledger| ledger.is_applied(epoch, position))
         });
 
+    // Every stored dependent-read barrier log of an unfinished txn waits in
+    // its vShard's buffer, and the rows of finished txns go. A barrier entry
+    // at or below a group's durable applied floor is never delivered again,
+    // so its row is what a barrier reads from now on. A boot completion of a
+    // snapshot install below replaces its group's rows.
+    crate::control::cluster::calvin::scheduler::barrier_store::restore_at_boot(shared)?;
+
     // Per-group snapshot builder for the SEND path: on the leader, build the
     // real serialized engine state for a lagging follower's group vshards
     // (replacing the prior empty stub bytes).

@@ -23,7 +23,6 @@ use crate::bridge::envelope::{
     Admission, ErrorCode, ExemptReason, Payload, Priority, Request, Response, StageVote, Status,
 };
 use crate::control::cluster::calvin::scheduler::SchedulerConfig;
-use crate::control::cluster::calvin::scheduler::driver::barrier::ReadResultEvent;
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::{
     Scheduler, SchedulerParams,
 };
@@ -63,7 +62,6 @@ pub(super) fn build_test_scheduler(vshard_id: u32) -> (Scheduler, tempfile::Temp
     )));
 
     let (_tx, receiver) = tokio::sync::mpsc::channel(16);
-    let (_rr_tx, read_result_rx) = tokio::sync::mpsc::channel(16);
     let (_prom_tx, promotion_rx) = tokio::sync::mpsc::unbounded_channel();
     let (verdict_tx, verdict_rx) = tokio::sync::mpsc::channel(16);
     registry.register_verdict_signal_sender(vshard_id, verdict_tx);
@@ -87,7 +85,6 @@ pub(super) fn build_test_scheduler(vshard_id: u32) -> (Scheduler, tempfile::Temp
         rebuild_target_epoch: 0,
         config: SchedulerConfig::default(),
         metrics: SchedulerMetrics::new(),
-        read_result_rx,
         lock_manager,
         promotion_rx,
         registry,
@@ -122,7 +119,6 @@ pub(super) fn build_test_scheduler_with_data_side(
     )));
 
     let (_tx, receiver) = tokio::sync::mpsc::channel(16);
-    let (_rr_tx, read_result_rx) = tokio::sync::mpsc::channel(16);
     let (_prom_tx, promotion_rx) = tokio::sync::mpsc::unbounded_channel();
     let (verdict_tx, verdict_rx) = tokio::sync::mpsc::channel(16);
     registry.register_verdict_signal_sender(vshard_id, verdict_tx);
@@ -140,7 +136,6 @@ pub(super) fn build_test_scheduler_with_data_side(
         rebuild_target_epoch: 0,
         config: SchedulerConfig::default(),
         metrics: SchedulerMetrics::new(),
-        read_result_rx,
         lock_manager,
         promotion_rx,
         registry,
@@ -379,7 +374,6 @@ pub(super) struct RunningScheduler {
     shutdown: ShutdownWatch,
     handle: tokio::task::JoinHandle<()>,
     input_tx: mpsc::Sender<SchedulerInput>,
-    _read_result_tx: mpsc::Sender<ReadResultEvent>,
     _promotion_tx: mpsc::UnboundedSender<Vec<TxnId>>,
 }
 
@@ -411,10 +405,8 @@ impl RunningScheduler {
 /// liveness tick.
 pub(super) fn spawn_scheduler_loop(mut scheduler: Scheduler) -> RunningScheduler {
     let (input_tx, input_rx) = mpsc::channel(16);
-    let (read_result_tx, read_result_rx) = mpsc::channel(16);
     let (promotion_tx, promotion_rx) = mpsc::unbounded_channel();
     scheduler.receiver = input_rx;
-    scheduler.read_result_rx = read_result_rx;
     scheduler.promotion_rx = promotion_rx;
     // The loop's liveness tick fires every quarter of this interval.
     scheduler.config.verdict_stall_warn_ms = 200;
@@ -425,7 +417,6 @@ pub(super) fn spawn_scheduler_loop(mut scheduler: Scheduler) -> RunningScheduler
         shutdown,
         handle,
         input_tx,
-        _read_result_tx: read_result_tx,
         _promotion_tx: promotion_tx,
     }
 }

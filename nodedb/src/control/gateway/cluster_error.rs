@@ -42,9 +42,15 @@ pub(super) fn map_typed_cluster_error(err: TypedClusterError, vshard_id: u64) ->
                 descriptor: collection,
             }
         }
-        TypedClusterError::DeadlineExceeded { .. } => Error::DeadlineExceeded {
-            request_id: crate::types::RequestId::new(0),
-        },
+        TypedClusterError::DeadlineExceeded { elapsed_ms } => {
+            tracing::warn!(
+                elapsed_ms,
+                "gateway: a remote node reported the request's deadline exceeded"
+            );
+            Error::DeadlineExceeded {
+                request_id: crate::types::RequestId::new(0),
+            }
+        }
         // Remote Data-Plane verdict: keep the code so the client sees the
         // SQLSTATE local execution renders, not a generic internal error.
         TypedClusterError::DataPlane { code } => Error::DataPlane(code.into()),

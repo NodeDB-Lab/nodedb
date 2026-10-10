@@ -3,7 +3,7 @@
 //! New-txn processing, dependent-read barrier setup, and txn-completion
 //! bookkeeping for the Calvin scheduler.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -257,7 +257,8 @@ impl Scheduler {
     }
 
     /// Route a granted, assembled txn: a follower holds it, the leader
-    /// stages it as a static dispatch or a dependent barrier.
+    /// stages it as a static dispatch, or routes a dependent-read txn by its
+    /// role on this vShard.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn route_granted(
         &mut self,
         txn: SequencedTxn,
@@ -268,38 +269,45 @@ impl Scheduler {
             self.follow(txn, txn_id, lock_owner);
             return;
         }
-        let is_dependent = txn.tx_class.dependent_reads.is_some();
-        if is_dependent {
-            self.insert_dependent_barrier(txn, txn_id, lock_owner);
+        if txn.tx_class.dependent_reads.is_some() {
+            self.route_dependent(txn, txn_id, lock_owner);
         } else {
             self.dispatch_txn(txn, txn_id, lock_owner);
         }
     }
 
-    /// Insert a dependent-read barrier for an active vshard.
-    fn insert_dependent_barrier(&mut self, txn: SequencedTxn, txn_id: TxnId, lock_owner: TxnId) {
-        let spec = match &txn.tx_class.dependent_reads {
-            Some(s) => s,
+    /// Open a dependent-read barrier for `txn` on this active vShard.
+    ///
+    /// The barrier waits for the read result of every passive vShard. This
+    /// leader proposes the barrier's timeout entry once it waited past
+    /// `config.passive_timeout()`.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn insert_dependent_barrier(
+        &mut self,
+        txn: SequencedTxn,
+        txn_id: TxnId,
+        lock_owner: TxnId,
+    ) {
+        let passive: BTreeSet<u32> = match &txn.tx_class.dependent_reads {
+            Some(spec) => spec.passive_vshards().collect(),
             None => {
-                // Shouldn't happen; fall through to static dispatch.
-                self.dispatch_txn(txn, txn_id, lock_owner);
+                let error = crate::Error::Internal {
+                    detail: format!(
+                        "calvin txn {}/{} reached a dependent-read barrier with no \
+                         dependent reads",
+                        txn_id.epoch, txn_id.position
+                    ),
+                };
+                self.reject_plan(txn, txn_id, lock_owner, &error);
                 return;
             }
         };
-
-        let waiting_for: std::collections::BTreeSet<u32> =
-            spec.passive_reads.keys().copied().collect();
-        // no-determinism: passive barrier timeout is scheduler observability, not Calvin WAL data
-        let timeout_at = Instant::now() + self.config.passive_timeout();
-
         let barrier = PendingDependentBarrier {
             txn,
             lock_owner,
-            waiting_for,
-            received: BTreeMap::new(),
-            timeout_at,
+            passive,
+            // no-determinism: the leader's clock decides only when it proposes the timeout entry; the entry's place in the log decides the barrier.
+            timeout_due: Instant::now() + self.config.passive_timeout(),
         };
-
         self.open_barrier(txn_id, barrier);
     }
 
@@ -347,6 +355,7 @@ impl Scheduler {
         mark: LedgerMark,
     ) {
         // The txn restages no more, and no barrier of it opens again.
+        let held_log = self.barrier_logs.contains_key(&txn_id);
         self.forget_held_state(txn_id);
         // Release this txn's locks. `release` promotes any waiter queued behind
         // each freed key to holder (moving it pending -> held) and returns the
@@ -370,6 +379,10 @@ impl Scheduler {
             LedgerMark::Terminal => self.ledger.mark_terminal(txn_id.epoch, txn_id.position),
             LedgerMark::ByApply => {}
         }
+        // The ledger holds the position now, so the apply loop buffers and
+        // stores no later barrier entry of the txn. Each one it took before
+        // is spent.
+        self.forget_barrier_entries(txn_id, held_log);
         if let Some(watermark) = folded {
             self.publish_watermark(watermark);
         }
@@ -456,6 +469,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::sync::atomic::Ordering;
 
     use nodedb_cluster::calvin::CalvinCompletionRegistry;

@@ -5,7 +5,8 @@
 //! The follower holds the txn's locks and stages nothing. It owes no vote.
 //! The txn completes on an abort verdict, on a COMMIT verdict for a slice
 //! with no local write, or once the slice's stamped redo applies from the
-//! log. A promotion stages it.
+//! log. A promotion stages it. A dependent-read txn keeps its barrier log
+//! meanwhile.
 
 use std::time::Instant;
 
@@ -25,7 +26,8 @@ impl Scheduler {
         txn_id: TxnId,
         lock_owner: TxnId,
     ) {
-        let scope = self.follow_scope(&txn, txn_id);
+        let scope = self.local_slice_scope(&txn, txn_id);
+        let dependent = txn.tx_class.dependent_reads.is_some();
         self.pending.insert(
             txn_id,
             PendingTxn {
@@ -47,6 +49,11 @@ impl Scheduler {
                 ungated: false,
             },
         );
+        // A dependent txn keeps its barrier log from its grant on, so a
+        // promotion decides its barrier from every entry the log holds.
+        if dependent {
+            self.absorb_buffered_reads(txn_id);
+        }
         if let Some(verdict) = self.registry.verdict(nodedb_cluster::calvin::TxnId::new(
             txn_id.epoch,
             txn_id.position,
@@ -55,9 +62,16 @@ impl Scheduler {
         }
     }
 
-    /// The scope of `txn`'s slice on this vShard. Plans that do not decode
-    /// or route make the leader vote abort, so they hold no write here.
-    fn follow_scope(&self, txn: &SequencedTxn, txn_id: TxnId) -> SliceScope {
+    /// The scope of `txn`'s slice on this vShard, from the txn's own plans.
+    /// A follower completes a COMMIT with no entry only when this scope
+    /// writes nothing, so it never comes from a leader's step in progress.
+    /// Plans that do not decode or route make the leader vote abort, so they
+    /// hold no write here.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn local_slice_scope(
+        &self,
+        txn: &SequencedTxn,
+        txn_id: TxnId,
+    ) -> SliceScope {
         let local =
             super::super::super::helpers::decode_plans(&txn.tx_class.plans).and_then(|plans| {
                 self.local_calvin_plans(

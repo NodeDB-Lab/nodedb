@@ -11,7 +11,7 @@ use nodedb_cluster::MultiRaft;
 use nodedb_cluster::calvin::types::SchedulerInput;
 use nodedb_cluster::calvin::{CalvinCompletionRegistry, SequencerStateMachine, VerdictSignal};
 
-use super::super::barrier::{PendingDependentBarrier, ReadResultEvent};
+use super::super::barrier::PendingDependentBarrier;
 use super::super::config::SchedulerConfig;
 use super::super::types::{BlockedTxn, PendingTxn};
 use super::deferred::DeferredQueue;
@@ -98,23 +98,23 @@ pub struct Scheduler {
     /// Blocked transactions awaiting lock release.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) blocked:
         BTreeMap<TxnId, BlockedTxn>,
-    /// Dependent-read barriers awaiting passive read results.
-    /// `BTreeMap` for determinism.
+    /// Dependent-read barriers this leader holds open. `BTreeMap` for
+    /// determinism.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) dependent_barrier:
         BTreeMap<TxnId, PendingDependentBarrier>,
-    /// Passive read results of dependent txns in `pending` that wait at no
-    /// barrier. A later barrier of the txn starts from them. Each entry
-    /// leaves when its txn completes.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) held_reads:
-        BTreeMap<TxnId, super::super::barrier::ReceivedReads>,
+    /// The barrier entries of the data-group log, folded per dependent txn
+    /// this scheduler holds: at a barrier, or in `pending`. A barrier of the
+    /// txn decides from them. Each entry leaves when its txn completes.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) barrier_logs:
+        BTreeMap<TxnId, crate::control::cluster::calvin::scheduler::BarrierLog>,
+    /// This vShard's read-result buffer: the barrier entries the apply loop
+    /// applied for txns this scheduler did not hold yet.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) read_results:
+        Arc<crate::control::cluster::calvin::scheduler::VShardReadResults>,
     /// Committed txns whose stage failed on this leader, with their
     /// restage count and backoff. See [`super::restage`].
     pub(in crate::control::cluster::calvin::scheduler::driver::core) restages:
         BTreeMap<TxnId, super::restage::Restage>,
-    /// Channel receiving `CalvinReadResult` Raft apply events from the
-    /// per-vshard data Raft apply loop. Bounded.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) read_result_rx:
-        mpsc::Receiver<ReadResultEvent>,
     /// Exactly-once applied gate: the fully-applied watermark plus the set of
     /// applied `(epoch, position)` pairs above it. Replaces a bare per-epoch
     /// counter so a multi-position epoch is never marked applied on the strength
@@ -232,7 +232,6 @@ pub struct SchedulerParams {
     pub rebuild_target_epoch: u64,
     pub config: SchedulerConfig,
     pub metrics: Arc<SchedulerMetrics>,
-    pub read_result_rx: mpsc::Receiver<ReadResultEvent>,
     /// The shared lock table for this vShard. Constructed by
     /// `reconcile_vshard_schedulers` and registered in
     /// `SharedState.calvin.lock_managers` under the SAME `Arc` passed here.
@@ -264,7 +263,6 @@ impl Scheduler {
             rebuild_target_epoch,
             config,
             metrics,
-            read_result_rx,
             lock_manager,
             promotion_rx,
             registry,
@@ -286,6 +284,7 @@ impl Scheduler {
             .calvin
             .inboxes
             .register(vshard_id, config.max_inflight_backlog);
+        let read_results = shared.calvin.read_results.vshard(vshard_id);
 
         let capacity_freed = shared
             .dispatcher
@@ -308,9 +307,9 @@ impl Scheduler {
             inbox,
             blocked: BTreeMap::new(),
             dependent_barrier: BTreeMap::new(),
-            held_reads: BTreeMap::new(),
+            barrier_logs: BTreeMap::new(),
+            read_results,
             restages: BTreeMap::new(),
-            read_result_rx,
             applied: AppliedGate::new(fully_applied_epoch, applied_tail),
             cut_floors: Default::default(),
             cut_holds: Default::default(),

@@ -75,6 +75,15 @@ impl AdmissionWait {
                 ));
             }
             if tokio::time::timeout_at(deadline, released).await.is_err() {
+                let contention = self
+                    .lock_manager
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .contention(self.txn, &self.keys);
+                tracing::warn!(
+                    ?contention,
+                    "a contended write reached its deadline waiting for its keys"
+                );
                 return Err(crate::Error::DeadlineExceeded {
                     request_id: RequestId::new(0),
                 });

@@ -161,13 +161,13 @@ impl Scheduler {
         (!self.has_deferred_for(txn_id)).then_some(at)
     }
 
-    /// Forget the restage and the held reads of `txn_id`, which finished.
+    /// Forget the restage and the barrier log of `txn_id`, which finished.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn forget_held_state(
         &mut self,
         txn_id: TxnId,
     ) {
         self.restages.remove(&txn_id);
-        self.held_reads.remove(&txn_id);
+        self.barrier_logs.remove(&txn_id);
     }
 
     /// Stage `txn_id` again through the grant path.

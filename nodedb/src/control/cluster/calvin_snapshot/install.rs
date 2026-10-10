@@ -11,11 +11,15 @@
 //! the install installs nothing more, and the next scheduler reconcile
 //! starts it again from the installed state.
 //!
+//! The stored dependent-read barrier logs of the group's vShards become the
+//! cut's too: the snapshot covers barrier entries this node never applies.
+//!
 //! A WAL `SnapshotInstalled` record of the group, written before this runs,
 //! makes boot recovery drop the vShards' applied markers from before it.
 
 use std::collections::{BTreeSet, HashSet};
 
+use crate::control::cluster::calvin::scheduler::barrier_store;
 use crate::control::cluster::snapshot_install::SnapshotInstallError;
 use crate::control::security::catalog::calvin_applied::StoredCalvinApplied;
 use crate::control::state::SharedState;
@@ -68,6 +72,10 @@ pub fn install_calvin_cut(
     catalog
         .replace_calvin_applied(&states)
         .map_err(settle_error)?;
+    // The receiver never applies the barrier entries the snapshot covers:
+    // the builder's stored logs of the unfinished txns replace this node's.
+    let vshards: BTreeSet<u32> = ids.iter().copied().collect();
+    barrier_store::install_group(shared, &vshards, cut.barrier_logs).map_err(settle_error)?;
     shared
         .calvin
         .bases

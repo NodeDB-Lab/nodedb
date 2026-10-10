@@ -66,7 +66,6 @@ pub async fn start_raft(
         &loop_build.raft_loop,
         loop_build.tracker,
         loop_build.apply_rx,
-        loop_build.calvin_read_result_senders,
         loop_build.sequencer_state_machine,
     )?;
     // The async proposer is installed: a failed redo stream abandon can be

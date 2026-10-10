@@ -19,6 +19,6 @@ pub mod dispatch;
 pub mod handlers;
 
 pub(crate) use dispatch::{
-    dispatch_and_respond, parse_function_args, single_text_col, split_args, unquote,
+    dispatch_and_respond, error_to_ddl, parse_function_args, single_text_col, split_args, unquote,
 };
 pub use handlers::{kv_cas, kv_getset, kv_incr, kv_incr_float};

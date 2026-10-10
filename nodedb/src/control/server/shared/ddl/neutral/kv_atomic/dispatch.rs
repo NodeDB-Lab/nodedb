@@ -190,7 +190,7 @@ async fn dispatch_autocommit(
 /// Map a dispatch error to the client-facing error. A Data-Plane verdict
 /// arrives here as `Error::DataPlane` on the replicated route, and it renders
 /// the same way the local route's error status does.
-fn error_to_ddl(error: &crate::Error) -> DdlError {
+pub(crate) fn error_to_ddl(error: &crate::Error) -> DdlError {
     match error {
         crate::Error::DataPlane(code) => data_plane_error(Some(code.clone())),
         other => {

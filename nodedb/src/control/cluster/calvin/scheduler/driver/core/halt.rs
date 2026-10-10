@@ -118,6 +118,8 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum HaltStep {
     IdentityBind,
     /// The wait for this node's metadata apply to reach the txn's floor.
     MetadataHold,
+    /// The passive read of a dependent-read txn.
+    PassiveRead,
 }
 
 impl HaltStep {
@@ -133,6 +135,7 @@ impl HaltStep {
             Self::Drop => "drop",
             Self::IdentityBind => "identity_bind",
             Self::MetadataHold => "metadata_hold",
+            Self::PassiveRead => "passive_read",
         }
     }
 
@@ -147,6 +150,7 @@ impl HaltStep {
             CommitState::AwaitingRedoResolve | CommitState::AwaitingResolveTurn => Self::Resolve,
             CommitState::AwaitingRedoApply { .. } | CommitState::Following => Self::RedoApply,
             CommitState::AwaitingDrop => Self::Drop,
+            CommitState::ReadingPassive => Self::PassiveRead,
         }
     }
 }

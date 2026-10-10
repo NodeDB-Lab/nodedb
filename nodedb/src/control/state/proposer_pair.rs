@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The two Raft proposal handles `start_raft` installs together.
+//! The Raft proposal handles `start_raft` installs together.
 
 use std::sync::Arc;
 
@@ -8,4 +8,6 @@ use std::sync::Arc;
 pub(super) struct AsyncRaftProposerPair {
     pub(super) sequenced: Arc<crate::control::wal_replication::AsyncRaftProposer>,
     pub(super) raw: Arc<crate::control::wal_replication::AsyncRaftProposer>,
+    /// The propose phase both proposers are built from.
+    pub(super) submit: Arc<crate::control::wal_replication::AsyncRaftSubmit>,
 }

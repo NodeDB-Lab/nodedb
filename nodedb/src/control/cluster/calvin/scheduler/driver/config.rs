@@ -23,12 +23,13 @@ pub struct SchedulerConfig {
     /// Epoch duration in milliseconds (used to compute deadlines). Equal to
     /// the sequencer's epoch duration.
     pub epoch_duration_ms: u64,
-    /// Timeout for passive participant responses in dependent-read txns.
+    /// Wait of a dependent-read barrier for its passive read results before
+    /// the data-group leader proposes the barrier's timeout entry.
     ///
-    /// Default: 60 milliseconds, three default epochs.
+    /// Default: 5000 milliseconds, 250 default epochs.
     ///
-    /// `Instant::now()` is used for barrier timeouts (observability / off-WAL
-    /// path only; never influences WAL bytes).
+    /// The leader's clock decides only when it proposes the entry. The
+    /// entry's place in the log decides the barrier.
     pub dependent_read_passive_timeout_ms: u64,
     /// Stall deadline for a staged txn parked awaiting the durable global
     /// verdict. On expiry the scheduler re-probes the registry and, if the
@@ -125,7 +126,7 @@ mod tests {
         assert_eq!(config.channel_capacity, 512);
         assert_eq!(config.txn_deadline_multiplier, 3);
         assert_eq!(config.epoch_duration_ms, 20);
-        assert_eq!(config.dependent_read_passive_timeout_ms, 60);
+        assert_eq!(config.dependent_read_passive_timeout_ms, 5_000);
         assert_eq!(config.verdict_stall_warn_ms, 5_000);
         assert_eq!(config.catch_up_window, 512);
         assert_eq!(config.restage_attempts, 5);
