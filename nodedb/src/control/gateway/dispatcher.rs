@@ -16,7 +16,8 @@ use crate::control::state::SharedState;
 use crate::types::{DatabaseId, Lsn, TenantId, TraceId, TxnId, VShardId};
 
 use super::dispatch_local::{LocalContext, dispatch_local};
-use super::dispatch_remote::{RemoteDispatchArgs, dispatch_remote, dispatch_remote_stream};
+use super::dispatch_remote::{RemoteDispatchArgs, dispatch_remote};
+use super::dispatch_remote_stream::dispatch_remote_stream;
 use super::read_leg::{confirm_local_read, linearizable_read_groups};
 use super::route::{RouteDecision, TaskRoute};
 use super::version_check::check_local_descriptor_versions;

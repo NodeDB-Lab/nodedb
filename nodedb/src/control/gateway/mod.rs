@@ -6,6 +6,7 @@ pub mod colocation_guard;
 pub mod core;
 pub mod dispatch_local;
 pub mod dispatch_remote;
+pub mod dispatch_remote_stream;
 pub mod dispatcher;
 pub mod error_map;
 pub mod fuser;
