@@ -9,6 +9,7 @@ mod memory;
 mod network;
 mod scheduler;
 mod shutdown;
+mod startup;
 
 pub use bitemporal::BitemporalTuning;
 pub use config::TuningConfig;
@@ -23,3 +24,7 @@ pub use memory::MemoryTuning;
 pub use network::{BridgeTuning, ClusterTransportTuning, NetworkTuning, WalTuning};
 pub use scheduler::SchedulerTuning;
 pub use shutdown::ShutdownTuning;
+pub use startup::{
+    DEFAULT_DATA_GROUP_RECOVERY_TIMEOUT_MS, DEFAULT_RAFT_READY_TIMEOUT_MS,
+    DataGroupRecoveryTimeout, RaftReadyTimeout, StartupTuning,
+};

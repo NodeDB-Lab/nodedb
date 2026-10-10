@@ -463,7 +463,10 @@ pub fn replay_from_limit_dir(
         // the `from_lsn` filter — continuity is a property of the log, not of
         // the caller's window into it.
         let mut last_lsn = 0u64;
-        while let Some(record) = reader.next_record()? {
+        while let Some(record) = reader
+            .next_record()
+            .map_err(|error| error.with_segment_path(&seg.path))?
+        {
             last_lsn = record.header.lsn;
             if record.header.lsn >= from_lsn {
                 records.push(record);
@@ -1168,5 +1171,40 @@ mod tests {
             Err(other) => panic!("expected SegmentOverlapsPrevious, got {other}"),
             Ok(_) => panic!("opened a WAL whose last segment reissues LSNs"),
         }
+    }
+
+    /// A newest segment whose first record has the record magic and a zeroed
+    /// version is a torn write, not a format this build cannot read. Opening
+    /// over it must succeed, and the writer must keep working, because the
+    /// writer's open is the first thing a boot does.
+    #[test]
+    fn open_accepts_a_newest_segment_with_a_zeroed_version() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut wal = SegmentedWal::open(test_config(dir.path())).unwrap();
+            wal.append(RecordType::Put as u32, 1, 0, 0, b"a").unwrap();
+            wal.sync().unwrap();
+        }
+
+        // Written after the close, so the open has to read this state back.
+        let newest = discover_segments(dir.path())
+            .unwrap()
+            .last()
+            .unwrap()
+            .first_lsn;
+        let mut bytes = vec![0u8; 64 * 1024];
+        bytes[0..4].copy_from_slice(&crate::record::WAL_MAGIC.to_le_bytes());
+        std::fs::write(segment_path(dir.path(), newest + 1_000), &bytes).unwrap();
+
+        let mut wal = SegmentedWal::open(test_config(dir.path()))
+            .expect("a torn newest segment is not a format this build cannot read");
+        let lsn = wal.append(RecordType::Put as u32, 1, 0, 0, b"b").unwrap();
+        // The torn segment holds no record, so its filename's first LSN is the
+        // floor the resumed sequence starts at.
+        assert_eq!(
+            lsn,
+            newest + 1_000,
+            "the writer has to keep working over the torn tail, not just open"
+        );
     }
 }

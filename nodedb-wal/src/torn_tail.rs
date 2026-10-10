@@ -139,6 +139,10 @@ pub fn classify(path: &Path, corruption_offset: u64, last_lsn: u64) -> Result<Ta
 
 /// Read a full record at `offset` and return its LSN if header and CRC both
 /// check out. Anything else is a coincidental magic match, not a record.
+///
+/// A format version this build cannot read is not a record either. The scan
+/// starts past a reader's stop point, which is never before the segment's
+/// first record, and a version mismatch after the first record is damage.
 fn intact_record_lsn(file: &mut File, offset: u64, file_len: u64) -> Result<Option<u64>> {
     let header_end = match offset.checked_add(HEADER_SIZE as u64) {
         Some(end) if end <= file_len => end,
@@ -300,6 +304,50 @@ mod tests {
                 3
             )
             .is_ok()
+        );
+    }
+
+    /// A record whose format version this build cannot read is damage, not a
+    /// resync point: the scan passes over it to the intact record behind it.
+    #[test]
+    fn a_version_mismatch_past_the_stop_is_not_a_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("version_mismatch.wal");
+        write_segment(&path, 4);
+
+        // Where each record starts: the reader's committed end after the one
+        // before it.
+        let mut starts = Vec::new();
+        let mut reader = crate::reader::WalReader::open_raw(&path).unwrap();
+        loop {
+            let start = reader.committed_end();
+            if reader.next_record().unwrap().is_none() {
+                break;
+            }
+            starts.push(start);
+        }
+
+        // Damage the second record, and give the third a version this build
+        // cannot read. The checksum covers the version, so it is recomputed:
+        // the third record is intact in every way except its version. The
+        // fourth stays intact.
+        smash(&path, starts[1], HEADER_SIZE);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let third = usize::try_from(starts[2]).unwrap();
+        let head: &[u8; HEADER_SIZE] = bytes[third..third + HEADER_SIZE].try_into().unwrap();
+        let mut header = RecordHeader::from_bytes(head);
+        let payload_end = third + HEADER_SIZE + header.payload_len as usize;
+        header.format_version = 1;
+        header.crc32c = header.compute_checksum(&bytes[third + HEADER_SIZE..payload_end]);
+        bytes[third..third + HEADER_SIZE].copy_from_slice(&header.to_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert_eq!(
+            classify(&path, starts[1], 1).unwrap(),
+            TailVerdict::MidFileCorruption {
+                resync_offset: starts[3],
+                resync_lsn: 4,
+            }
         );
     }
 

@@ -82,6 +82,12 @@ pub(crate) fn lease_status_of(
 
 /// Wait until this node can plan permission-checked statements, or refuse
 /// once `timeout` passes.
+///
+/// `timeout` is a hard deadline on the first lease grant, not the metadata
+/// group's stall bound. The two waits end differently: the stall bound resets
+/// every time the group applies an entry, and this one never does, so a caller
+/// that has no reason of its own passes its own constant rather than the one
+/// the group uses.
 pub async fn await_planning_admitted(state: &SharedState, timeout: Duration) -> crate::Result<()> {
     if planning_admitted_within(state, timeout).await {
         return Ok(());

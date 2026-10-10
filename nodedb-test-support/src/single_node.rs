@@ -117,9 +117,22 @@ pub async fn start(
         gateway_enable_gate: sequencer.register_gate(StartupPhase::GatewayEnable, "gateway"),
     };
     // The harness cores replay their WAL before they report ready, so no
-    // replay receiver is owed here.
-    nodedb::bootstrap::cluster_ready::await_cluster_ready(shared, ready_rx, Vec::new(), gates)
-        .await?;
+    // replay receiver is owed here. The harness runs without a config file and
+    // pins short bounds, so a stuck group fails the test in seconds. The
+    // shipped defaults wait minutes for a replay backlog this harness never has.
+    let startup = nodedb_types::config::tuning::StartupTuning {
+        raft_ready_timeout_ms: 30_000,
+        data_group_recovery_timeout_ms: 60_000,
+    };
+    nodedb::bootstrap::cluster_ready::await_cluster_ready(
+        shared,
+        ready_rx,
+        Vec::new(),
+        gates,
+        startup.raft_ready_timeout(),
+        startup.data_group_recovery_timeout(),
+    )
+    .await?;
     Ok(raft)
 }
 

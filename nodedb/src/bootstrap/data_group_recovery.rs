@@ -23,6 +23,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use nodedb_types::config::tuning::DataGroupRecoveryTimeout;
 use tracing::{debug, info};
 
 use crate::control::state::SharedState;
@@ -30,11 +31,6 @@ use crate::control::state::SharedState;
 /// How often the Raft status snapshot is re-read while waiting. Elections take
 /// seconds, so a coarse poll costs nothing and avoids a busy loop.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
-
-/// Upper bound on the whole wait. Generous relative to a randomized election
-/// timeout plus replay of a retained log, but finite: a group that cannot elect
-/// or cannot apply is a failure, not a reason to hang forever.
-pub const DATA_GROUP_RECOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// True when `group_id` names a data group whose log carries user writes that
 /// must be replayed into the Data Plane before queries are served.
@@ -170,13 +166,23 @@ fn pending_groups(statuses: Vec<nodedb_cluster::GroupStatus>) -> Vec<PendingGrou
 /// Hold startup until every locally hosted data group has replayed its retained
 /// Raft log.
 ///
+/// `timeout` bounds the whole wait: generous relative to a randomized election
+/// timeout plus replay of a retained log, but finite. A group that cannot elect
+/// or cannot apply is a failure, not a reason to hang forever.
+///
 /// Refuses when `start_raft` installed no Raft status source.
-pub async fn await_data_group_recovery(shared: &Arc<SharedState>) -> anyhow::Result<()> {
+pub async fn await_data_group_recovery(
+    shared: &Arc<SharedState>,
+    timeout: DataGroupRecoveryTimeout,
+) -> anyhow::Result<()> {
+    // Typed at the call site, plain `Duration` inside, so the timeout message
+    // keeps naming the window the caller chose.
+    let timeout = timeout.0;
     let Some(status_fn) = shared.raft_status_fn.get() else {
         anyhow::bail!("data group recovery: no Raft status source: start_raft has not run");
     };
     let status_fn = Arc::clone(status_fn);
-    let deadline = Instant::now() + DATA_GROUP_RECOVERY_TIMEOUT;
+    let deadline = Instant::now() + timeout;
 
     loop {
         let pending = pending_groups(status_fn());
@@ -192,7 +198,7 @@ pub async fn await_data_group_recovery(shared: &Arc<SharedState>) -> anyhow::Res
                 .collect::<Vec<_>>()
                 .join("; ");
             return Err(anyhow::anyhow!(
-                "data raft group recovery timeout after {DATA_GROUP_RECOVERY_TIMEOUT:?}: {detail}"
+                "data raft group recovery timeout after {timeout:?}: {detail}"
             ));
         }
 

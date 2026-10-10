@@ -31,6 +31,22 @@ pub enum WalError {
     #[error("unsupported WAL format version {version} (supported: {supported})")]
     UnsupportedVersion { version: u16, supported: u16 },
 
+    /// A segment holds records in a WAL format version this build cannot read.
+    ///
+    /// The same finding as [`WalError::UnsupportedVersion`], reported by the
+    /// callers that know which file carries it. A reader sees one header at a
+    /// time and holds no path, and a version alone does not tell an operator
+    /// which segment to act on.
+    #[error(
+        "WAL segment '{path}' holds records in WAL format version {version}; this build reads \
+         version {supported}"
+    )]
+    SegmentFormatVersion {
+        path: String,
+        version: u16,
+        supported: u16,
+    },
+
     /// Unknown required record type encountered during replay.
     /// Optional unknown record types are safely skipped.
     #[error("unknown required record type {record_type} at LSN {lsn}")]
@@ -212,6 +228,26 @@ pub enum WalError {
         retained_floor_lsn: u64,
         earliest_segment: String,
     },
+}
+
+impl WalError {
+    /// Name the segment a version gap was found in.
+    ///
+    /// A reader reports [`WalError::UnsupportedVersion`] from header validation
+    /// alone and holds no path. The callers that opened the file do, and only
+    /// they can turn the finding into something an operator can act on. Every
+    /// other error passes through unchanged.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn with_segment_path(self, path: &std::path::Path) -> Self {
+        match self {
+            Self::UnsupportedVersion { version, supported } => Self::SegmentFormatVersion {
+                path: path.display().to_string(),
+                version,
+                supported,
+            },
+            other => other,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, WalError>;

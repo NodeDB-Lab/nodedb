@@ -103,7 +103,10 @@ fn scan_segment(
     let mut reader = MmapWalReader::open(&segment.path, keys)?;
     let mut records = Vec::new();
     let mut last_lsn = 0u64;
-    while let Some(record) = reader.next_record()? {
+    while let Some(record) = reader
+        .next_record()
+        .map_err(|error| error.with_segment_path(&segment.path))?
+    {
         last_lsn = record.header.lsn;
         if record.header.lsn >= from_lsn {
             records.push(record);
@@ -211,7 +214,10 @@ pub fn replay_segments_mmap_limit(
         continuity.check(seg)?;
         let mut reader = MmapWalReader::open(&seg.path, keys)?;
         let mut last_lsn = 0u64;
-        while let Some(record) = reader.next_record()? {
+        while let Some(record) = reader
+            .next_record()
+            .map_err(|error| error.with_segment_path(&seg.path))?
+        {
             last_lsn = record.header.lsn;
             if record.header.lsn >= from_lsn {
                 records.push(record);

@@ -58,8 +58,9 @@ pub enum StopReason {
     /// The segment ended cleanly on a record boundary.
     Eof,
 
-    /// A record at this offset failed structural validation (bad magic,
-    /// unsupported version, short read, or checksum mismatch).
+    /// A record at this offset failed structural validation (bad magic, a
+    /// zeroed format version, a short read, a checksum mismatch, or a format
+    /// version this build cannot read found after the segment's first record).
     Corruption { offset: u64 },
 }
 
@@ -67,6 +68,10 @@ pub enum StopReason {
 pub struct WalReader {
     file: File,
     offset: u64,
+    /// Offset of the segment's first record, past any preamble. The format
+    /// version is judged here and nowhere else: one writer never mixes formats
+    /// inside one segment.
+    records_start: u64,
     /// Preamble read from offset 0 of this segment (present when encryption
     /// is active). The epoch is used as part of the AAD for decryption.
     segment_preamble: Option<SegmentPreamble>,
@@ -133,6 +138,7 @@ impl WalReader {
         Ok(Self {
             file,
             offset: start_offset,
+            records_start: start_offset,
             segment_preamble,
             double_write,
             stop_reason: None,
@@ -185,7 +191,10 @@ impl WalReader {
     /// Read the next record from the WAL.
     ///
     /// Returns `None` at EOF (clean end) or at the first corruption point.
-    /// Returns `Err` only for I/O errors or unknown required record types.
+    /// Returns `Err` for I/O errors, unknown required record types, an
+    /// oversized payload declaration, and a format version this build cannot
+    /// read at the segment's first record. A reader that returns `Err` for a
+    /// header has consumed that header, so a caller must stop at the `Err`.
     pub fn next_record(&mut self) -> Result<Option<WalRecord>> {
         loop {
             // Read header.
@@ -230,6 +239,22 @@ impl WalReader {
             match header.validate(header_offset) {
                 Ok(()) => {}
                 Err(error @ WalError::PayloadTooLarge { .. }) => return Err(error),
+                // The format is judged once per segment, at its first record. A
+                // mismatch there is another build's format, and the version has
+                // to travel out so the refusal can name it. A mismatch anywhere
+                // later cannot be a format gap, because a writer never mixes
+                // formats inside one segment. It is damage, and this reader
+                // stops at it for `torn_tail` to classify.
+                //
+                // A zeroed version at the first record is neither: no build
+                // writes format 0, so those are uninitialised bytes from a torn
+                // write, and the writer paths that share this reader would
+                // refuse a store whose tail is merely torn. It stays a stop.
+                Err(error @ WalError::UnsupportedVersion { version, .. })
+                    if version != 0 && header_offset == self.records_start =>
+                {
+                    return Err(error);
+                }
                 Err(_) => {
                     return self.stop(StopReason::Corruption {
                         offset: header_offset,
@@ -524,5 +549,115 @@ mod tests {
         // records are silently discarded.
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].payload, b"keep-me");
+    }
+
+    /// An unknown format version is a typed error, not a silent stop, and a
+    /// zeroed version is a stop rather than an error.
+    ///
+    /// A store written by another build is intact, so its format reaches the
+    /// caller as a version and never as damage. Version zero is the exception:
+    /// no build writes it, so it stays a corruption stop, which `torn_tail`
+    /// already bounds.
+    #[test]
+    fn an_unknown_format_version_is_an_error_and_a_zeroed_one_is_a_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let framed = dir.path().join("framed.wal");
+        {
+            let mut writer = WalWriter::open_without_direct_io(&framed).unwrap();
+            writer
+                .append(RecordType::Put as u32, 1, 0, 0, b"x")
+                .unwrap();
+            writer.sync().unwrap();
+        }
+
+        // The version field is bytes 4..6 of the record header.
+        let mut bytes = std::fs::read(&framed).unwrap();
+        bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+        let unknown = dir.path().join("unknown.wal");
+        std::fs::write(&unknown, &bytes).unwrap();
+
+        let reader = WalReader::open_raw(&unknown).unwrap();
+        match reader.records().collect::<Result<Vec<_>>>() {
+            Err(WalError::UnsupportedVersion { version, supported }) => {
+                assert_eq!(version, 1);
+                assert_eq!(supported, crate::record::WAL_FORMAT_VERSION);
+            }
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
+        }
+
+        bytes[4..6].copy_from_slice(&0u16.to_le_bytes());
+        let zeroed = dir.path().join("zeroed.wal");
+        std::fs::write(&zeroed, &bytes).unwrap();
+
+        let mut reader = WalReader::open_raw(&zeroed).unwrap();
+        let mut records = Vec::new();
+        while let Some(record) = reader
+            .next_record()
+            .expect("a zeroed version stops the stream, it does not fail it")
+        {
+            records.push(record);
+        }
+        assert!(
+            records.is_empty(),
+            "nothing before the stop is a readable record"
+        );
+        // An empty stream is also what a silent skip or a clean end would
+        // return, so the reason has to be asserted for this to prove a stop.
+        assert!(
+            matches!(reader.stop_reason(), Some(StopReason::Corruption { .. })),
+            "a zeroed version must be a corruption stop, not a quiet end: {:?}",
+            reader.stop_reason()
+        );
+    }
+
+    /// A version this build cannot read, found after the segment's first
+    /// record, is damage rather than a format gap.
+    ///
+    /// One writer never mixes formats inside one segment, so a mismatch there
+    /// can only be a broken header. The stream stops and `torn_tail` classifies
+    /// where, instead of the reader declaring a format gap the store does not
+    /// have.
+    #[test]
+    fn a_version_mismatch_after_the_first_record_is_damage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("two-records.wal");
+        {
+            let mut writer = WalWriter::open_without_direct_io(&path).unwrap();
+            writer
+                .append(RecordType::Put as u32, 1, 0, 0, b"first")
+                .unwrap();
+            writer
+                .append(RecordType::Put as u32, 1, 0, 0, b"second")
+                .unwrap();
+            writer.sync().unwrap();
+        }
+
+        let mut reader = WalReader::open_raw(&path).unwrap();
+        let first = reader
+            .next_record()
+            .unwrap()
+            .expect("the first record reads");
+        assert_eq!(first.header.lsn, 1, "records before the damage still read");
+        let second_at = reader.committed_end();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let version_at = usize::try_from(second_at).unwrap() + 4;
+        bytes[version_at..version_at + 2].copy_from_slice(&1u16.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut reader = WalReader::open_raw(&path).unwrap();
+        assert!(
+            reader.next_record().unwrap().is_some(),
+            "the first record is still readable"
+        );
+        assert!(
+            reader.next_record().unwrap().is_none(),
+            "the mismatch stops the stream instead of failing the read"
+        );
+        assert!(
+            matches!(reader.stop_reason(), Some(StopReason::Corruption { .. })),
+            "a mismatch after the first record is damage, not a format gap: {:?}",
+            reader.stop_reason()
+        );
     }
 }

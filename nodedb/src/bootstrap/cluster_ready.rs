@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use tracing::info;
 
+use nodedb_types::config::tuning::{DataGroupRecoveryTimeout, RaftReadyTimeout};
+
 use crate::bootstrap::schema_rehydrate::rehydrate_schema_registry;
 use crate::control::startup::ReadyGate;
 use crate::control::state::SharedState;
@@ -30,6 +32,8 @@ pub async fn await_cluster_ready(
     mut raft_ready_rx: tokio::sync::watch::Receiver<bool>,
     data_plane_replay_done: Vec<tokio::sync::oneshot::Receiver<crate::Result<()>>>,
     gates: ClusterReadyGates,
+    raft_ready_timeout: RaftReadyTimeout,
+    data_group_recovery_timeout: DataGroupRecoveryTimeout,
 ) -> anyhow::Result<()> {
     let ClusterReadyGates {
         raft_gate,
@@ -50,7 +54,7 @@ pub async fn await_cluster_ready(
         shared,
         &mut raft_ready_rx,
         &raft_gate,
-        RAFT_READY_STALL_TIMEOUT,
+        raft_ready_timeout,
         RAFT_READY_POLL_INTERVAL,
     )
     .await?;
@@ -156,7 +160,12 @@ pub async fn await_cluster_ready(
     // elections, so without this wait the gateway can open while a data
     // group's engines are still empty and an acknowledged write reads back as
     // if it never happened. Fail closed, like the replay wait above.
-    if let Err(e) = crate::bootstrap::data_group_recovery::await_data_group_recovery(shared).await {
+    if let Err(e) = crate::bootstrap::data_group_recovery::await_data_group_recovery(
+        shared,
+        data_group_recovery_timeout,
+    )
+    .await
+    {
         data_groups_gate.fail(format!("data raft group recovery failed: {e}"));
         return Err(e);
     }
@@ -272,7 +281,7 @@ pub async fn await_cluster_ready(
         Ok(_) => {
             crate::control::security::auth_lease::await_planning_admitted(
                 shared,
-                RAFT_READY_STALL_TIMEOUT,
+                PLANNING_ADMISSION_TIMEOUT,
             )
             .await
         }
@@ -289,13 +298,17 @@ pub async fn await_cluster_ready(
     Ok(())
 }
 
-/// How long the metadata group may make NO replay progress before the boot
-/// fails. Reset on every applied-index advance, so a large replay never trips
-/// it — only a genuinely stuck group does.
-const RAFT_READY_STALL_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// How often the stall check samples the applied index while waiting.
 const RAFT_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long boot waits for the first authorization lease before refusing to
+/// open the gateway.
+///
+/// Not the metadata group's stall bound, and not configurable with it: this is
+/// a hard deadline on one grant, and it does not reset. The lease loop runs from
+/// Raft start, so by the time boot reaches it every input of a grant is live;
+/// 30 seconds is generous for a grant that is going to arrive at all.
+const PLANNING_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Wait until the metadata raft group applies its first entry, and fail
 /// `raft_gate` when it does not. See [`raft_ready_progress`].
@@ -303,10 +316,10 @@ async fn wait_for_raft_ready(
     shared: &Arc<SharedState>,
     ready_rx: &mut tokio::sync::watch::Receiver<bool>,
     raft_gate: &ReadyGate,
-    stall_timeout: Duration,
+    stall_timeout: RaftReadyTimeout,
     poll_interval: Duration,
 ) -> anyhow::Result<()> {
-    match raft_ready_progress(shared, ready_rx, stall_timeout, poll_interval).await {
+    match raft_ready_progress(shared, ready_rx, stall_timeout.0, poll_interval).await {
         Ok(()) => {
             info!("metadata raft group ready — opening client listeners");
             Ok(())
@@ -323,14 +336,20 @@ async fn wait_for_raft_ready(
 ///
 /// The same wait boot runs before it opens a listener. An in-process host
 /// that registers no startup gate calls this before it serves requests.
+///
+/// `stall_timeout` is the caller's bound. Boot passes the configured
+/// `[tuning.startup] raft_ready_timeout_ms` into [`await_cluster_ready`]; a
+/// host with no config decides for itself rather than inheriting a value it
+/// never read.
 pub async fn await_raft_ready(
     shared: &Arc<SharedState>,
     mut ready_rx: tokio::sync::watch::Receiver<bool>,
+    stall_timeout: RaftReadyTimeout,
 ) -> crate::Result<()> {
     raft_ready_progress(
         shared,
         &mut ready_rx,
-        RAFT_READY_STALL_TIMEOUT,
+        stall_timeout.0,
         RAFT_READY_POLL_INTERVAL,
     )
     .await
@@ -378,8 +397,7 @@ async fn raft_ready_progress(
                     return Err(crate::Error::Internal {
                         detail: format!(
                             "metadata group applied no entry for {stall_timeout:?} \
-                             (applied_index stuck at {current}) — it failed to apply its \
-                             first entry"
+                             (applied_index stuck at {current})"
                         ),
                     });
                 }
@@ -433,7 +451,7 @@ mod tests {
             &shared,
             &mut ready_rx,
             &raft_gate,
-            Duration::from_millis(100),
+            RaftReadyTimeout(Duration::from_millis(100)),
             Duration::from_millis(10),
         )
         .await;
@@ -456,7 +474,7 @@ mod tests {
             &shared,
             &mut ready_rx,
             &raft_gate,
-            Duration::from_millis(100),
+            RaftReadyTimeout(Duration::from_millis(100)),
             Duration::from_millis(10),
         )
         .await
@@ -464,6 +482,29 @@ mod tests {
         assert!(
             err.to_string().contains("applied no entry"),
             "the failure must name the stall, not a generic timeout: {err}"
+        );
+    }
+
+    /// `await_raft_ready` reports the bound its caller passes, not a default.
+    ///
+    /// This pins the argument into the metadata gate only. It does not cover
+    /// the `await_cluster_ready` call in `main.rs`, where the two bounds arrive
+    /// as adjacent arguments of different types.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_bound_a_caller_passes_is_the_bound_the_failure_reports() {
+        let shared = test_shared_state();
+        let (_ready_tx, ready_rx) = tokio::sync::watch::channel(false);
+
+        let err = await_raft_ready(
+            &shared,
+            ready_rx,
+            RaftReadyTimeout(Duration::from_millis(50)),
+        )
+        .await
+        .expect_err("a group that applies nothing must fail");
+        assert!(
+            err.to_string().contains("50ms"),
+            "the failure must name the caller's bound, not the shipped default: {err}"
         );
     }
 }

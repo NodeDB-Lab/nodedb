@@ -9,6 +9,7 @@
 //! alignment padding and carry no LSN.
 
 use nodedb_types::temporal::LsnTimeAnchor;
+use nodedb_wal::WalError;
 use nodedb_wal::crypto::KeyRing;
 use nodedb_wal::preamble::{
     PREAMBLE_SIZE, SegmentPreamble, WAL_PREAMBLE_MAGIC, parse_leading_preamble,
@@ -78,7 +79,13 @@ impl Frame<'_> {
 pub(super) struct Frames<'a> {
     bytes: &'a [u8],
     offset: usize,
+    /// Where the segment's first record starts. The WAL format version is
+    /// judged here and nowhere else, as the segment reader does.
+    records_start: usize,
     done: bool,
+    /// Version and supported version of an unreadable first record. A walk
+    /// that ends here holds no records, and [`Frames::finish`] reports why.
+    refused: Option<(u16, u16)>,
 }
 
 impl<'a> Frames<'a> {
@@ -90,9 +97,27 @@ impl<'a> Frames<'a> {
             Self {
                 bytes,
                 offset,
+                records_start: offset,
                 done: false,
+                refused: None,
             },
         ))
+    }
+
+    /// Report a first record in a WAL format version this build cannot read.
+    ///
+    /// Call it after the walk. An archive from another build holds intact
+    /// records, so reading it as an empty segment would drop all of them
+    /// without an error. `key` names the segment in the error.
+    pub(super) fn finish(&self, key: &str) -> Result<(), RestoreError> {
+        match self.refused {
+            Some((version, supported)) => Err(RestoreError::Wal(WalError::SegmentFormatVersion {
+                path: key.to_string(),
+                version,
+                supported,
+            })),
+            None => Ok(()),
+        }
     }
 
     /// Byte offset where records begin: past the preamble, if any.
@@ -118,17 +143,28 @@ impl<'a> Iterator for Frames<'a> {
 }
 
 impl<'a> Frames<'a> {
-    fn read_at(&self, start: usize) -> Option<Frame<'a>> {
-        let head: &[u8; HEADER_SIZE] = self
-            .bytes
+    fn read_at(&mut self, start: usize) -> Option<Frame<'a>> {
+        let bytes: &'a [u8] = self.bytes;
+        let head: &[u8; HEADER_SIZE] = bytes
             .get(start..start.checked_add(HEADER_SIZE)?)?
             .try_into()
             .ok()?;
         let header = RecordHeader::from_bytes(head);
-        header.validate(start as u64).ok()?;
+        match header.validate(start as u64) {
+            Ok(()) => {}
+            Err(WalError::UnsupportedVersion { version, supported }) => {
+                // A zeroed version is a torn write, and a mismatch after the
+                // first record is damage. Both end the walk without an error.
+                if version != 0 && start == self.records_start {
+                    self.refused = Some((version, supported));
+                }
+                return None;
+            }
+            Err(_) => return None,
+        }
         let payload_start = start + HEADER_SIZE;
         let end = payload_start.checked_add(usize::try_from(header.payload_len).ok()?)?;
-        let payload = self.bytes.get(payload_start..end)?;
+        let payload = bytes.get(payload_start..end)?;
         (header.compute_checksum(payload) == header.crc32c).then_some(Frame {
             header,
             payload,
@@ -144,10 +180,10 @@ pub fn scan_segment(
     bytes: &[u8],
     ring: Option<&KeyRing>,
 ) -> Result<SegmentScan, RestoreError> {
-    let (preamble, frames) = Frames::open(bytes)?;
+    let (preamble, mut frames) = Frames::open(bytes)?;
     let decryptor = SegmentDecryptor::new(preamble.as_ref(), ring);
     let mut scan = SegmentScan::default();
-    for frame in frames {
+    for frame in frames.by_ref() {
         if frame.is_padding() {
             continue;
         }
@@ -188,6 +224,7 @@ pub fn scan_segment(
             _ => {}
         }
     }
+    frames.finish(key)?;
     Ok(scan)
 }
 
@@ -215,12 +252,12 @@ pub fn cut_segment(
     if !alignment.is_power_of_two() {
         return Err(RestoreError::BadAlignment { alignment });
     }
-    let (preamble, frames) = Frames::open(bytes)?;
+    let (preamble, mut frames) = Frames::open(bytes)?;
     let mut keep_end = Frames::records_start(preamble.as_ref());
     let mut last_kept: Option<u64> = None;
     let mut last_seen: Option<u64> = None;
     let mut dropped_records = 0u64;
-    for frame in frames {
+    for frame in frames.by_ref() {
         if frame.is_padding() {
             continue;
         }
@@ -233,6 +270,7 @@ pub fn cut_segment(
             dropped_records += 1;
         }
     }
+    frames.finish(key)?;
 
     let mut out = bytes
         .get(..keep_end)
@@ -485,5 +523,71 @@ mod tests {
         let scan = scan_segment("seg", &bytes, None).unwrap();
         assert_eq!(scan.last_lsn, Some(5));
         assert_eq!(scan_segment("seg", &[], None).unwrap().last_lsn, None);
+    }
+
+    /// Where each record of `bytes` starts.
+    fn record_starts(bytes: &[u8]) -> Vec<usize> {
+        let (preamble, frames) = Frames::open(bytes).unwrap();
+        let mut starts = vec![Frames::records_start(preamble.as_ref())];
+        starts.extend(frames.map(|frame| frame.end));
+        starts.pop();
+        starts
+    }
+
+    /// Declare `version` in the header of the record that starts at `start`.
+    fn set_format_version(bytes: &mut [u8], start: usize, version: u16) {
+        let head: &[u8; HEADER_SIZE] = bytes[start..start + HEADER_SIZE].try_into().unwrap();
+        let mut header = RecordHeader::from_bytes(head);
+        header.format_version = version;
+        bytes[start..start + HEADER_SIZE].copy_from_slice(&header.to_bytes());
+    }
+
+    fn assert_format_gap<T: std::fmt::Debug>(result: Result<T, RestoreError>, version: u16) {
+        match result {
+            Err(RestoreError::Wal(WalError::SegmentFormatVersion {
+                path,
+                version: found,
+                supported,
+            })) => {
+                assert_eq!(path, "seg");
+                assert_eq!(found, version);
+                assert_eq!(supported, nodedb_wal::record::WAL_FORMAT_VERSION);
+            }
+            other => panic!("expected a format gap, got {other:?}"),
+        }
+    }
+
+    /// An archive from another build holds intact records. Reading it as an
+    /// empty segment would drop all of them without an error.
+    #[test]
+    fn an_archive_in_another_format_is_refused_not_read_as_empty() {
+        let mut bytes = segment(3, None);
+        let starts = record_starts(&bytes);
+        for &start in &starts {
+            set_format_version(&mut bytes, start, 1);
+        }
+
+        assert_format_gap(scan_segment("seg", &bytes, None), 1);
+        assert_format_gap(cut_segment("seg", &bytes, 3, &[], None, ALIGN), 1);
+    }
+
+    #[test]
+    fn a_version_mismatch_after_the_first_record_stops_the_walk() {
+        let mut bytes = segment(3, None);
+        let starts = record_starts(&bytes);
+        set_format_version(&mut bytes, starts[1], 1);
+
+        let scan = scan_segment("seg", &bytes, None).unwrap();
+        assert_eq!(scan.last_lsn, Some(1));
+    }
+
+    #[test]
+    fn a_zeroed_first_version_stops_the_walk() {
+        let mut bytes = segment(3, None);
+        let starts = record_starts(&bytes);
+        set_format_version(&mut bytes, starts[0], 0);
+
+        let scan = scan_segment("seg", &bytes, None).unwrap();
+        assert_eq!(scan.last_lsn, None);
     }
 }

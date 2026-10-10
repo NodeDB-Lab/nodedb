@@ -291,6 +291,8 @@ async fn server_main() -> anyhow::Result<()> {
             health_loop_gate,
             gateway_enable_gate,
         },
+        config.tuning.startup.raft_ready_timeout(),
+        config.tuning.startup.data_group_recovery_timeout(),
     )
     .await?;
 

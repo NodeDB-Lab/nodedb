@@ -83,10 +83,10 @@ pub fn scan_cut(
     list_through: u64,
     marks_after: u64,
 ) -> Result<CutScan, RestoreError> {
-    let (_, frames) = Frames::open(bytes)?;
+    let (_, mut frames) = Frames::open(bytes)?;
     let mut scan = CutScan::default();
     let mut last = None;
-    for frame in frames {
+    for frame in frames.by_ref() {
         if frame.is_padding() {
             continue;
         }
@@ -114,6 +114,7 @@ pub fn scan_cut(
             }
         }
     }
+    frames.finish(key)?;
     Ok(scan)
 }
 
@@ -241,5 +242,29 @@ mod tests {
         let scan = scan_cut("seg", &bytes, &rule(), 9, 0).unwrap();
         assert_eq!(scan.max_kept, Some(1));
         assert!(scan.dropped.is_empty());
+    }
+
+    /// A segment whose first record is in another WAL format is refused. Read
+    /// as empty, it would report that no record of the restore point exists.
+    #[test]
+    fn a_segment_in_another_format_is_refused_not_read_as_empty() {
+        let mut bytes = segment(&[(RecordType::Put, 7, 50, b"kept".to_vec())]);
+        let head: &[u8; nodedb_wal::record::HEADER_SIZE] =
+            bytes[..nodedb_wal::record::HEADER_SIZE].try_into().unwrap();
+        let mut header = nodedb_wal::record::RecordHeader::from_bytes(head);
+        header.format_version = 1;
+        bytes[..nodedb_wal::record::HEADER_SIZE].copy_from_slice(&header.to_bytes());
+
+        match scan_cut("seg", &bytes, &rule(), 9, 0) {
+            Err(RestoreError::Wal(nodedb_wal::WalError::SegmentFormatVersion {
+                path,
+                version,
+                ..
+            })) => {
+                assert_eq!(path, "seg");
+                assert_eq!(version, 1);
+            }
+            other => panic!("expected a format gap, got {other:?}"),
+        }
     }
 }

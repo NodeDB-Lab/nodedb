@@ -589,6 +589,28 @@ a crashed node's descriptor leases block DDL until they expire.
 All three must be positive. `scope_expiry_interval_secs` has a floor of `10`.
 Below that the sweep costs more than the resolution it buys.
 
+**Startup bounds:**
+
+Boot waits for the metadata raft group to apply its first entry, and for the
+locally hosted data raft groups to replay their retained logs. Both waits are
+bounded, and both are configurable. The defaults are sized for a cold restart of
+a data dir that ran for weeks. The backlog takes minutes to apply, not seconds.
+
+| Config field                                    | Default  |
+| ----------------------------------------------- | -------- |
+| `tuning.startup.raft_ready_timeout_ms`          | `300000` |
+| `tuning.startup.data_group_recovery_timeout_ms` | `600000` |
+
+The metadata bound resets on every applied-index advance, so a large replay
+finishes. Only a group that applies nothing fails. The data-group recovery bound
+is a hard deadline. It does not reset, and a group still recovering when it
+expires fails the boot. Both accept `1` to `86400000` ms (one day). A value
+outside that range is rejected at load with the key, the value and the accepted
+range named. A bound written under `[server]` is rejected with the path that is
+read named instead. A key under `[tuning.startup]` that is not in the table is
+rejected too. Two other boot waits keep fixed bounds and do not read this
+section: Data Plane WAL replay (300 s) and the first authorization lease (30 s).
+
 **Observability settings:**
 
 | Config field                                      | Environment variable              | Default        |

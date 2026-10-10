@@ -14,12 +14,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nodedb_types::config::tuning::ClusterTransportTuning;
+use nodedb_types::config::tuning::{ClusterTransportTuning, RaftReadyTimeout};
 
 use crate::bridge::dispatch::{CoreChannelDataSide, Dispatcher};
 use crate::control::security::credential::CredentialStore;
 use crate::control::state::SharedState;
 use crate::wal::WalManager;
+
+/// The metadata-group stall bound for this harness: fail fast instead of
+/// inheriting the backlog-tolerant production default. The harness boots a
+/// bare single-voter cluster, so a stall here is a test bug, not a slow
+/// replay, and a short bound reports it sooner.
+const TEST_RAFT_READY_TIMEOUT: RaftReadyTimeout = RaftReadyTimeout(Duration::from_secs(30));
 
 /// How long each shutdown step can take.
 const SHUTDOWN_STEP: Duration = Duration::from_secs(5);
@@ -104,7 +110,7 @@ pub(crate) async fn boot_with_core(
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .take();
-    crate::bootstrap::cluster_ready::await_raft_ready(&state, ready)
+    crate::bootstrap::cluster_ready::await_raft_ready(&state, ready, TEST_RAFT_READY_TIMEOUT)
         .await
         .expect("the metadata group applies its first entry");
 

@@ -113,6 +113,10 @@ fn fadv_dontneed(fd: &std::fs::File, len: usize, path: &Path) {
 pub struct MmapWalReader {
     mmap: Mmap,
     offset: usize,
+    /// Offset of the segment's first record, past any preamble. The format
+    /// version is judged here and nowhere else: one writer never mixes formats
+    /// inside one segment.
+    records_start: usize,
     /// Preamble mapped at offset 0 of this segment (present when encryption is
     /// active). The epoch is part of the AAD used to decrypt payloads.
     segment_preamble: Option<SegmentPreamble>,
@@ -194,6 +198,7 @@ impl MmapWalReader {
         Ok(Self {
             mmap,
             offset,
+            records_start: offset,
             segment_preamble,
             file,
             path: path.to_path_buf(),
@@ -245,7 +250,9 @@ impl MmapWalReader {
 
     /// Read the next record from the mmap'd region.
     ///
-    /// Returns `None` at EOF or at the first corruption point.
+    /// Returns `None` at EOF or at the first corruption point. Returns `Err`
+    /// for a format version this build cannot read at the segment's first
+    /// record, and the caller must stop at that `Err`.
     /// Header parsing avoids extra copies, but the payload is copied out of
     /// the mmap'd region into an owned `Vec<u8>` on `WalRecord`: records must
     /// outlive the reader (they cross thread boundaries in parallel replay
@@ -299,6 +306,15 @@ impl MmapWalReader {
             match header.validate(header_offset) {
                 Ok(()) => {}
                 Err(error @ WalError::PayloadTooLarge { .. }) => return Err(error),
+                // Format is decided at the segment's first record; a mismatch
+                // later in the segment is damage, and `torn_tail` classifies
+                // the stop that records it. A zeroed version is a torn write at
+                // either offset, not a format any build wrote.
+                Err(error @ WalError::UnsupportedVersion { version, .. })
+                    if version != 0 && self.offset == self.records_start =>
+                {
+                    return Err(error);
+                }
                 Err(_) => {
                     return self.stop(StopReason::Corruption {
                         offset: header_offset,
@@ -515,6 +531,84 @@ mod tests {
             reader.next_record(),
             Err(WalError::PayloadTooLarge { .. })
         ));
+    }
+
+    /// A version this build cannot read at the segment's first record is a
+    /// typed error that names the version.
+    #[test]
+    fn an_unknown_format_version_at_the_first_record_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unknown.wal");
+        {
+            let mut writer = test_writer(&path);
+            writer
+                .append(RecordType::Put as u32, 1, 0, 0, b"x")
+                .unwrap();
+            writer.sync().unwrap();
+        }
+
+        // The version field is bytes 4..6 of the record header.
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut reader = MmapWalReader::open(&path, None).unwrap();
+        match reader.next_record() {
+            Err(WalError::UnsupportedVersion { version, supported }) => {
+                assert_eq!(version, 1);
+                assert_eq!(supported, crate::record::WAL_FORMAT_VERSION);
+            }
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
+        }
+    }
+
+    /// A version this build cannot read, found after an intact record, is
+    /// damage: the stream stops there as corruption, not as a format gap.
+    #[test]
+    fn a_version_mismatch_after_the_first_record_is_damage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("two-records.wal");
+        {
+            let mut writer = test_writer(&path);
+            writer
+                .append(RecordType::Put as u32, 1, 0, 0, b"first")
+                .unwrap();
+            writer
+                .append(RecordType::Put as u32, 1, 0, 0, b"second")
+                .unwrap();
+            writer.sync().unwrap();
+        }
+
+        let second_at = {
+            let mut reader = MmapWalReader::open(&path, None).unwrap();
+            reader
+                .next_record()
+                .unwrap()
+                .expect("the first record reads");
+            reader.offset()
+        };
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let version_at = second_at + 4;
+        bytes[version_at..version_at + 2].copy_from_slice(&1u16.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut reader = MmapWalReader::open(&path, None).unwrap();
+        let first = reader
+            .next_record()
+            .unwrap()
+            .expect("the first record is still readable");
+        assert_eq!(first.header.lsn, 1);
+        assert!(
+            reader.next_record().unwrap().is_none(),
+            "the mismatch stops the stream instead of failing the read"
+        );
+        let second_at = u64::try_from(second_at).unwrap();
+        assert_eq!(
+            reader.stop_reason(),
+            Some(StopReason::Corruption { offset: second_at }),
+            "a mismatch after the first record is damage, not a format gap"
+        );
     }
 
     #[test]

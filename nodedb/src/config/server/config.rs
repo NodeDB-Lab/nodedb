@@ -139,6 +139,30 @@ pub struct ServerConfig {
     pub scheduler: SchedulerConfig,
 }
 
+/// Rejects a startup bound written at `[server]`, where nothing reads it, and
+/// names the path that is read instead. `deny_unknown_fields` catches the key
+/// anyway, but its message lists every valid field instead of the replacement.
+fn reject_startup_bounds_at_the_server_path(content: &str) -> crate::Result<()> {
+    let Ok(doc) = toml::from_str::<toml::Table>(content) else {
+        // A malformed document fails in the real parse below; nothing to
+        // inspect here.
+        return Ok(());
+    };
+    let Some(server) = doc.get("server").and_then(|v| v.as_table()) else {
+        return Ok(());
+    };
+    for key in ["raft_ready_timeout_ms", "data_group_recovery_timeout_ms"] {
+        if server.contains_key(key) {
+            return Err(crate::Error::Config {
+                detail: format!(
+                    "`[server] {key}` is not read; set `[tuning.startup] {key}` instead"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 impl ServerConfig {
     /// Load configuration from a TOML file, falling back to defaults.
     pub fn from_file(path: &std::path::Path) -> crate::Result<Self> {
@@ -150,6 +174,7 @@ impl ServerConfig {
         // that field — this is textual substitution before parsing, not a
         // second, competing expansion.
         let content = super::env_expand::expand_env(path, &content)?;
+        reject_startup_bounds_at_the_server_path(&content)?;
         let parsed: Self = toml::from_str(&content).map_err(|e| crate::Error::Config {
             detail: format!("invalid TOML config: {e}"),
         })?;
@@ -476,5 +501,95 @@ mod tests {
             err.contains("unknown field") || err.contains("server_typo"),
             "unexpected error: {err}"
         );
+    }
+
+    /// A startup bound written at `[server]` is rejected with the path that is
+    /// read named, not serde's full valid-field list.
+    #[test]
+    fn from_file_rejects_a_startup_bound_at_the_server_path() {
+        let path = write_temp_config(
+            "nodedb-server-path-startup-bound.toml",
+            "[server]\nraft_ready_timeout_ms = 300000\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(msg.contains("tuning.startup"), "{msg}");
+        assert!(msg.contains("raft_ready_timeout_ms"), "{msg}");
+    }
+
+    /// The data-group bound is rejected at the same path.
+    #[test]
+    fn from_file_rejects_a_data_group_bound_at_the_server_path() {
+        let path = write_temp_config(
+            "nodedb-server-path-recovery-bound.toml",
+            "[server]\ndata_group_recovery_timeout_ms = 600000\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(msg.contains("tuning.startup"), "{msg}");
+        assert!(msg.contains("data_group_recovery_timeout_ms"), "{msg}");
+    }
+
+    /// Both boot bounds live under `[tuning.startup]`; the other bound keeps
+    /// its default when only one is set.
+    #[test]
+    fn from_file_reads_the_startup_bounds_from_tuning() {
+        let path = write_temp_config(
+            "nodedb-startup-tuning.toml",
+            "[tuning.startup]\ndata_group_recovery_timeout_ms = 1234000\n",
+        );
+        let cfg = ServerConfig::from_file(&path).expect("load config");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(cfg.tuning.startup.data_group_recovery_timeout_ms, 1_234_000);
+        assert_eq!(cfg.tuning.startup.raft_ready_timeout_ms, 300_000);
+    }
+
+    /// Neither bound is accepted outside the range a boot can wait for: zero
+    /// fails every boot on its first poll, `86400001` is past the stated ceiling,
+    /// and `u64::MAX` is not a bound at all. The message names the key, the value
+    /// and the range, so the operator does not have to read the source.
+    #[test]
+    fn from_file_rejects_a_startup_bound_out_of_range() {
+        for field in ["raft_ready_timeout_ms", "data_group_recovery_timeout_ms"] {
+            for value in ["0", "86400001", "18446744073709551615"] {
+                let path = write_temp_config(
+                    "nodedb-startup-bound-out-of-range.toml",
+                    &format!("[tuning.startup]\n{field} = {value}\n"),
+                );
+                let err = ServerConfig::from_file(&path).unwrap_err();
+                std::fs::remove_file(&path).ok();
+                let msg = err.to_string();
+                assert!(
+                    msg.contains(field),
+                    "the message must name the key for {field} = {value}: {msg}"
+                );
+                assert!(
+                    msg.contains(&format!(
+                        "invalid value '{value}' for tuning.startup.{field}"
+                    )),
+                    "the message must name the value and the key for {field} = {value}: {msg}"
+                );
+                assert!(
+                    msg.contains("86400000"),
+                    "the message must name the accepted range: {msg}"
+                );
+            }
+        }
+    }
+
+    /// Both ends of the accepted range load, and the value arrives intact.
+    #[test]
+    fn from_file_accepts_the_ends_of_the_startup_bound_range() {
+        for value in [1u64, 86_400_000] {
+            let path = write_temp_config(
+                "nodedb-startup-bound-in-range.toml",
+                &format!("[tuning.startup]\nraft_ready_timeout_ms = {value}\n"),
+            );
+            let cfg = ServerConfig::from_file(&path).expect("a bound in range loads");
+            std::fs::remove_file(&path).ok();
+            assert_eq!(cfg.tuning.startup.raft_ready_timeout_ms, value);
+        }
     }
 }

@@ -22,6 +22,7 @@ pub fn init_wal(
 )> {
     let wal_segment_target = config.checkpoint.wal_segment_target_bytes();
     let wal_dir = config.wal_dir();
+
     let wal = {
         let mut mgr =
             WalManager::open_with_tuning(&wal_dir, wal_segment_target, &config.tuning.wal)
@@ -37,9 +38,12 @@ pub fn init_wal(
     info!(next_lsn = %wal.next_lsn(), "WAL ready");
 
     if let Err(e) = wal.validate_for_startup() {
+        // Neutral on purpose: this wraps every validation error. The wrapped
+        // error names the cause, such as a WAL format version this build
+        // cannot read.
         tracing::error!(
             error = %e,
-            "StartupError: WAL validation failed — cannot start with corrupted WAL segments"
+            "StartupError: WAL validation failed: cannot start with these WAL segments"
         );
         std::process::exit(1);
     }
@@ -104,12 +108,27 @@ pub fn init_wal(
 /// `O_DIRECT` by design, the server will not downgrade itself to buffered
 /// writes to get past this, and the operator is the only one who can decide
 /// between the two ways out.
+///
+/// A store whose records are in a format this build cannot read gets one too.
+/// The open reaches it first, because it recovers the newest segment, and the
+/// WAL layer reports the segment and both versions; what it cannot know is which
+/// actions exist, and those belong to the server.
 fn wal_open_error(wal_dir: &std::path::Path, error: crate::Error) -> anyhow::Error {
     if let crate::Error::Wal(nodedb_wal::WalError::DirectIoUnsupported { .. }) = error {
         return anyhow::Error::new(nodedb_types::NodeDbError::wal_at(
             "open",
             direct_io_unsupported_message(wal_dir),
         ));
+    }
+    if let crate::Error::Wal(nodedb_wal::WalError::SegmentFormatVersion {
+        path,
+        version,
+        supported,
+    }) = &error
+    {
+        return anyhow::Error::new(crate::Error::VersionCompat {
+            detail: crate::wal::manager::replay::version_gap_detail(path, *version, *supported),
+        });
     }
     anyhow::Error::new(error)
 }
