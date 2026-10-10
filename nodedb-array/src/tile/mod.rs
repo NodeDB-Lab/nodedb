@@ -11,6 +11,8 @@ pub use cell_payload::{
     is_cell_gdpr_erasure, is_cell_sentinel, is_cell_tombstone,
 };
 pub use dense_tile::DenseTile;
-pub use layout::{tile_id_for_cell, tile_indices_for_cell};
+pub use layout::{
+    cell_tile_prefix, tile_id_for_cell, tile_indices_for_cell, tile_prefix, tiles_per_dim,
+};
 pub use mbr::{AttrStats, TileMBR};
 pub use sparse_tile::SparseTile;
