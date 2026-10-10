@@ -4,7 +4,7 @@
 //!
 //! The coordinator picks the cut watermark and a request id, then takes the
 //! cut with capturing barriers on its own Raft data groups, a one-node
-//! cluster's included. Every other source node receives the request, takes
+//! cluster's included. Each group's leader places the group's one barrier. Every other source node receives the request, takes
 //! the same cut on its groups, and answers with the captures it parked. Each
 //! group's capture comes from its leader at the apply of the request's first
 //! barrier. A group with no capture fails the backup with a retryable error
@@ -66,10 +66,10 @@ pub(crate) async fn capture_database(
         database_id: database_id.as_u64(),
         tenants: tenants.iter().copied().collect(),
     };
-    // The barrier names a tenant only to frame its Raft entry.
+    // The snapshot request names a tenant only to frame it.
     let framing = tenants.first().copied().unwrap_or(0);
 
-    super::super::cut::cut_with_capture(state, framing, cut, &request).await?;
+    super::super::cut::cut_with_capture(state, cut, &request).await?;
     let mut replies = take_replies(state, request.request_id);
     let remote: Vec<u64> = source_assignment(state)?
         .into_iter()
@@ -130,11 +130,10 @@ pub(crate) fn take_replies(state: &SharedState, request: u64) -> Vec<GroupReply>
 /// the encoded captures this node parked.
 pub(crate) async fn cut_and_reply(
     state: &SharedState,
-    framing: u64,
     watermark: u64,
     request: &CutCaptureRequest,
 ) -> Result<Vec<u8>, Error> {
-    super::super::cut::cut_with_capture(state, framing, watermark, request).await?;
+    super::super::cut::cut_with_capture(state, watermark, request).await?;
     zerompk::to_msgpack_vec(&take_replies(state, request.request_id)).map_err(|e| {
         Error::Serialization {
             format: "msgpack".into(),

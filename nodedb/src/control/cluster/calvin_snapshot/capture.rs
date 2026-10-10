@@ -68,6 +68,7 @@ pub async fn await_calvin_cut(
     let marker = zerompk::to_msgpack_vec(&SequencerEntry::CutMarker {
         hlc,
         restore_point: 0,
+        barrier: None,
     })
     .map_err(|error| Error::Internal {
         detail: format!("snapshot build: group {group_id}: encode the Calvin cut marker: {error}"),

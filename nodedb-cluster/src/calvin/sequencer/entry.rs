@@ -138,7 +138,16 @@ pub enum SequencerEntry {
     /// `restore_point` names the cluster restore point the cut takes, `0` for
     /// a backup's cut. Every replica records the sequencer's place at the
     /// point when it applies the marker.
-    CutMarker { hlc: u64, restore_point: u64 },
+    ///
+    /// `barrier` is set when the cut places a barrier in every data group.
+    /// Each group's leader then proposes the barrier once its schedulers
+    /// passed the marker, and holds the redo of every later transaction
+    /// until it applied the barrier. `None` for a cut with no barrier.
+    CutMarker {
+        hlc: u64,
+        restore_point: u64,
+        barrier: Option<crate::calvin::types::CutBarrierWire>,
+    },
     /// The first entry of a sequencer log a cluster restore rebuilt. It sets
     /// the next epoch the sequencer proposes to `next_epoch`, the epoch that
     /// followed the restore point, so no restored epoch is minted again. It

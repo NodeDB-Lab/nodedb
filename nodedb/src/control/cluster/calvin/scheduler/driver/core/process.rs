@@ -64,7 +64,11 @@ impl Scheduler {
             SchedulerInput::Txn(txn) => self.process_or_hold_for_metadata(*txn),
             SchedulerInput::Reserve { owner, key } => self.install_reservation(owner, key),
             SchedulerInput::Release { owner, reason } => self.release_reservation(owner, reason),
-            SchedulerInput::CutMarker { hlc } => self.receive_cut_marker(hlc),
+            SchedulerInput::CutMarker {
+                hlc,
+                restore_point,
+                barrier,
+            } => self.receive_cut_marker(hlc, restore_point, barrier),
             SchedulerInput::TxnPart {
                 txn,
                 index,

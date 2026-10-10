@@ -35,7 +35,7 @@ pub(super) async fn take_backup_cut(
     else {
         return Ok(plan);
     };
-    crate::control::backup::cut::cut_at(state, tenant_id, watermark)
+    crate::control::backup::cut::cut_at(state, watermark)
         .await
         .map_err(execution_error_to_typed)?;
     Ok(PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot {
@@ -65,7 +65,6 @@ pub(super) async fn answer_capture_plan(
     plan: &PhysicalPlan,
 ) -> Option<ExecuteResponse> {
     let PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot {
-        tenant_id,
         cut_watermark,
         cut_capture: Some(request),
         ..
@@ -79,10 +78,9 @@ pub(super) async fn answer_capture_plan(
             message: "a cut capture request carries no cut watermark".into(),
         }));
     };
-    let answer = crate::control::backup::cut_capture::collect::cut_and_reply(
-        state, *tenant_id, watermark, request,
-    )
-    .await;
+    let answer =
+        crate::control::backup::cut_capture::collect::cut_and_reply(state, watermark, request)
+            .await;
     Some(match answer {
         Ok(payload) => ExecuteResponse::ok(vec![payload], 0, 0),
         Err(error) => ExecuteResponse::err(execution_error_to_typed(error)),

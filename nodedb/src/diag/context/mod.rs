@@ -11,6 +11,7 @@ mod columnar;
 mod continuous_agg;
 mod crdt;
 mod crdt_dead_letter_store;
+mod cut_barrier;
 mod data_plane;
 mod event_image;
 mod index_rebuild;
@@ -36,6 +37,7 @@ pub(in crate::diag) use crdt::{CrdtDeadLetterNotEnqueued, HistoryCompactionNotAp
 pub(in crate::diag) use crdt_dead_letter_store::{
     CrdtDeadLetterNotRestored, CrdtDeadLetterNotStored,
 };
+pub(in crate::diag) use cut_barrier::CutBarrierNotPlaced;
 pub use data_plane::LostResponseWrite;
 pub(in crate::diag) use data_plane::{
     CalvinApplyHalted, CalvinCompletionTimeout, CoreFailStopped, DataPlaneResponseLost,

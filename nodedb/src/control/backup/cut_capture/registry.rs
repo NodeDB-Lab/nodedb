@@ -5,8 +5,9 @@
 //!
 //! Every replica of a group applies the same log, so every replica sees the
 //! same first barrier of a request in that group. Only that first barrier
-//! captures. A later barrier of the same request, proposed by another node,
-//! sits above entries the first barrier already cut away, and never captures.
+//! captures. A later barrier of the same request, a leader's second proposal
+//! of it, sits above entries the first barrier already cut away, and never
+//! captures.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

@@ -36,6 +36,8 @@ impl Scheduler {
         let capacity_freed = Arc::clone(&self.capacity_freed);
         // Woken when the data-group apply loop concludes a stamped redo.
         let inbox = Arc::clone(self.inbox.inbox());
+        // Woken when a cut's barrier is proposed or applied on this node.
+        let shared = Arc::clone(&self.shared);
         // Set when a tick left armed catch-up unreplayed. The next open-gate
         // pass fires the tick at once to resume it.
         let mut catch_up_resume = false;
@@ -50,11 +52,19 @@ impl Scheduler {
             if self.resends_deferred() {
                 self.redispatch_deferred();
             }
+            // Registered before the hold check below, for the same reason.
+            let cut_changed = shared.calvin.cut_barriers.notified();
+            tokio::pin!(cut_changed);
+            cut_changed.as_mut().enable();
 
             // Every pass reads the role first: a promotion stages held txns,
             // a demotion stops staging.
             self.refresh_role();
             self.drain_inbox();
+            // A cut's barrier applied here: propose the redo it held.
+            if self.release_cut_holds() {
+                self.retry_redo_proposals();
+            }
             self.check_dependent_barrier_timeouts();
             self.check_awaiting_verdict_stalls();
             self.restage_due();
@@ -143,6 +153,11 @@ impl Scheduler {
                 _ = tokio::time::sleep(ROLE_POLL), if self.role.awaits_term_start() => {
                     // The next loop pass checks whether the term's no-op
                     // applied, and stages the held txns once it has.
+                }
+
+                _ = &mut cut_changed, if !self.cut_holds.is_empty() => {
+                    // The next loop pass ends the hold of every cut whose
+                    // barrier applied here.
                 }
 
                 _ = &mut capacity_notified, if self.resends_deferred() => {

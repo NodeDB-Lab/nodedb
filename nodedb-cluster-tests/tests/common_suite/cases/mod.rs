@@ -11,6 +11,7 @@ mod array_vshard_migration;
 mod assign_surrogate_cross_node;
 mod backup_schedule_failover;
 mod bitemporal_array_cluster;
+mod calvin_backup_cut_order;
 mod calvin_cdc_net_kinds;
 mod calvin_cluster_pgwire_e2e;
 mod calvin_duplicate_redo_copy;

@@ -20,6 +20,7 @@
 //! | Proposed, then the group applied past the entry with no install | Propose again. |
 //! | A transient refusal | Propose again on the stall tick. |
 //! | The entry cannot be built | Halt: the verdict is COMMIT, so the txn cannot drop. |
+//! | Sequenced after an ordered cut's marker whose barrier this node has not applied | Hold. Propose once the barrier applied. |
 //!
 //! Every copy that commits installs at most once: the apply loop claims the
 //! position in the vShard's applied ledger.
@@ -73,6 +74,13 @@ impl Scheduler {
         }
         #[cfg(feature = "failpoints")]
         if self.redo_propose_held(txn_id) {
+            return;
+        }
+        // A txn sequenced after an ordered cut's marker proposes its redo
+        // only once this node applied the cut's barrier in the vShard's
+        // group, so the redo lands after the barrier. The pass that ends the
+        // hold proposes it again.
+        if self.held_for_cut(txn_id.epoch) {
             return;
         }
         // A snapshot install replaced this vShard's base since this
@@ -428,6 +436,61 @@ mod tests {
                 "each proposal names its own attempt"
             );
         }
+    }
+
+    /// A slice sequenced after an ordered cut's marker proposes nothing until
+    /// this node applied the cut's barrier in the vShard's group. Then the
+    /// pass that ends the hold proposes it.
+    #[tokio::test]
+    async fn a_slice_after_a_cut_marker_waits_for_the_barrier() {
+        use crate::control::backup::cut_order::OrderedCut;
+        use nodedb_cluster::calvin::types::SchedulerInput;
+
+        let txn_id = TxnId::new(14, 2);
+        let (mut scheduler, _dir, _data_side) = resolving_leader(txn_id);
+        let cut = OrderedCut {
+            hlc: scheduler.shared.hlc_clock.now().wall_ns,
+            restore_point: 0,
+            capture: None,
+        };
+        scheduler.process_scheduler_input(SchedulerInput::CutMarker {
+            hlc: cut.hlc,
+            restore_point: 0,
+            barrier: Some(std::sync::Arc::new(cut.to_wire())),
+        });
+
+        scheduler.finish_redo_resolve(txn_id, resolved_answer());
+        assert_eq!(proposed_at(&scheduler, txn_id), None, "the redo is held");
+        scheduler.retry_redo_proposals();
+        assert_eq!(
+            proposed_at(&scheduler, txn_id),
+            None,
+            "the stall tick keeps it held"
+        );
+
+        let group_id = {
+            let mr = scheduler
+                .multi_raft
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            mr.routing()
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .group_for_vshard(VSHARD)
+                .expect("the fixture routes every vShard")
+        };
+        scheduler
+            .shared
+            .calvin
+            .cut_barriers
+            .note_applied(&cut, group_id, 1);
+        assert!(scheduler.release_cut_holds());
+        scheduler.retry_redo_proposals();
+        assert!(
+            proposed_at(&scheduler, txn_id).is_some(),
+            "the barrier applied, so the redo is proposed"
+        );
+        assert!(!scheduler.is_apply_halted());
     }
 
     /// A proposal refused because this node no longer leads demotes the

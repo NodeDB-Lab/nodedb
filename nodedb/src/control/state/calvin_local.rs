@@ -81,6 +81,9 @@ pub struct CalvinLocalState {
     pub admission_holds: AdmissionHolds,
     /// The backup cut markers each local scheduler passed.
     pub cuts: CalvinCuts,
+    /// Each ordered cut's barrier per data group: where this node proposed
+    /// it while it led the group, and where this node applied it.
+    pub cut_barriers: crate::control::backup::cut_order::CutBarriers,
     /// Where this node's Calvin state of each vShard is whole from.
     pub bases: CalvinBases,
     /// Hands this node's sequencer entries to the sequencer Raft group. Set
@@ -117,6 +120,7 @@ impl CalvinLocalState {
             autocommit_lock_seq: AtomicU32::new(0),
             admission_holds: AdmissionHolds::new(),
             cuts: CalvinCuts::default(),
+            cut_barriers: crate::control::backup::cut_order::CutBarriers::new(),
             bases: CalvinBases::default(),
             sequencer_proposer: OnceLock::new(),
             applied: CalvinAppliedLedgers::default(),

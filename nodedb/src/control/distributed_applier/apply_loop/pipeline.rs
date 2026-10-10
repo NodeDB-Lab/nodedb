@@ -211,6 +211,7 @@ impl<'a> Pipeline<'a> {
                 // At or below the snapshot's Raft index: the installed state
                 // and the Raft boundary both hold the entry.
                 EntryAdmission::Covered => {
+                    super::cut_barrier::note_covered_barrier(shared, group_id, &queued);
                     if !self.conclude_covered(
                         group_id,
                         log_index,
@@ -226,6 +227,7 @@ impl<'a> Pipeline<'a> {
                 // applying and extends the durable prefix, so a restart never
                 // delivers it again.
                 EntryAdmission::CoveredByCut => {
+                    super::cut_barrier::note_covered_barrier(shared, group_id, &queued);
                     if !self.conclude_covered(
                         group_id,
                         log_index,

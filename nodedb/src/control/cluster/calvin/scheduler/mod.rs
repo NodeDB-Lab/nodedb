@@ -4,6 +4,7 @@ pub mod applied_gate;
 pub mod applied_ledger;
 pub mod caught_up;
 pub mod cut_floor;
+pub mod cut_hold;
 pub mod driver;
 pub mod inbox;
 pub mod lock;

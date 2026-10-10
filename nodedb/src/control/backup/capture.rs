@@ -39,7 +39,7 @@ pub async fn capture_collections(
     arrays: bool,
 ) -> Result<TenantDataSnapshot, Error> {
     let assignment = source_assignment(state)?;
-    let watermark = super::cut::consistent_cut(state, tenant_id).await?;
+    let watermark = super::cut::consistent_cut(state).await?;
 
     let per_node = join_all(
         assignment

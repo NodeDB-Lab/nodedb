@@ -161,9 +161,11 @@ impl SequencerStateMachine {
                 next_epoch,
                 epoch_system_ms,
             } => self.apply_epoch_floor(next_epoch, epoch_system_ms),
-            SequencerEntry::CutMarker { hlc, restore_point } => {
-                self.apply_cut_marker(index, hlc, restore_point)
-            }
+            SequencerEntry::CutMarker {
+                hlc,
+                restore_point,
+                barrier,
+            } => self.apply_cut_marker(index, hlc, restore_point, barrier),
             SequencerEntry::TxnPart {
                 epoch,
                 position,

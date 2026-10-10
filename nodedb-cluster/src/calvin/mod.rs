@@ -26,4 +26,7 @@ pub use sequencer::{
     SequencerStateMachine, UnrecoverableEpochHook, new_inbox, new_reservation_inbox,
     validate_batch,
 };
-pub use types::{EngineKeySet, EpochBatch, ReadWriteSet, SequencedTxn, SortedVec, TxClass};
+pub use types::{
+    CutBarrierWire, CutCaptureWire, EngineKeySet, EpochBatch, ReadWriteSet, SequencedTxn,
+    SortedVec, TxClass,
+};

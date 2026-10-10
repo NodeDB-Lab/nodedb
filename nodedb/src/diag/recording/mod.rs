@@ -12,6 +12,7 @@ mod catalog;
 mod columnar;
 mod continuous_agg;
 mod crdt;
+mod cut_barrier;
 mod data_plane;
 mod event_image;
 mod index_rebuild;
@@ -37,6 +38,7 @@ pub use crdt::{
     crdt_dead_letter_not_enqueued, crdt_dead_letter_not_restored, crdt_dead_letter_not_stored,
     history_compaction_not_applied,
 };
+pub use cut_barrier::cut_barrier_not_placed;
 pub use data_plane::{
     calvin_apply_halted, calvin_completion_timeout, data_plane_core_fail_stopped,
     data_plane_response_lost, data_plane_responses_lost,

@@ -133,6 +133,9 @@ pub struct Scheduler {
     /// set and the markers not yet reported.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) cut_floors:
         crate::control::cluster::calvin::scheduler::cut_floor::CutFloors,
+    /// Ordered cuts whose barrier this vShard's later redo waits for.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) cut_holds:
+        crate::control::cluster::calvin::scheduler::cut_hold::CutHolds,
     /// This vShard's applied ledger: the gate's seed, and the shared record
     /// of each position this scheduler finishes.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) ledger:
@@ -310,6 +313,7 @@ impl Scheduler {
             read_result_rx,
             applied: AppliedGate::new(fully_applied_epoch, applied_tail),
             cut_floors: Default::default(),
+            cut_holds: Default::default(),
             ledger,
             caught_up,
             rebuild_target_epoch,

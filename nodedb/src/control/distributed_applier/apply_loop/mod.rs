@@ -19,6 +19,8 @@
 //! - [`pipeline`]: every group's lane and the applies that run.
 //! - [`lane`]: one group's queued and started entries, settled in log order.
 //! - [`start`]: prepares one entry and routes it to its apply path.
+//! - [`cut_barrier`]: a backup cut's barrier: the group's cut floor, the
+//!   restore point's place, and a database backup's capture.
 //! - [`context`]: the handles an apply borrows, and the futures the loop
 //!   collects.
 //! - [`calvin_read_result`]: forwards a committed `CalvinReadResult` entry to
@@ -52,6 +54,7 @@ mod calvin_read_result;
 mod calvin_redo;
 mod collection_route;
 mod context;
+mod cut_barrier;
 mod driver;
 mod group_watch;
 mod helpers;
