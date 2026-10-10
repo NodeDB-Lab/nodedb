@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Prometheus rendering of the scheduler's flow metrics: deferred dispatch,
-//! the intake gate, the apply halt, and sequencer propose retries.
+//! the intake gate, the apply halt, sequencer propose retries, and restages.
 
 use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
@@ -106,6 +106,18 @@ impl SchedulerMetrics {
                 self.sequencer_propose_retry_counts[i].load(Ordering::Relaxed)
             );
         }
+
+        let _ = writeln!(
+            out,
+            "# HELP nodedb_calvin_restage_total \
+             Committed txns the leader staged again after its own stage failed."
+        );
+        let _ = writeln!(out, "# TYPE nodedb_calvin_restage_total counter");
+        let _ = writeln!(
+            out,
+            "nodedb_calvin_restage_total{{{label}}} {}",
+            self.restage_count.load(Ordering::Relaxed)
+        );
     }
 }
 
@@ -128,5 +140,13 @@ mod tests {
         assert!(out.contains(
             "nodedb_calvin_sequencer_propose_retry_total{vshard=\"3\",kind=\"completion_ack\"} 1"
         ));
+    }
+
+    #[test]
+    fn restage_counter_renders() {
+        let m = SchedulerMetrics::new();
+        m.record_restage();
+        let out = m.render_prometheus(4);
+        assert!(out.contains("nodedb_calvin_restage_total{vshard=\"4\"} 1"));
     }
 }

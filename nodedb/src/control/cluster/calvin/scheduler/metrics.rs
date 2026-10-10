@@ -80,6 +80,8 @@ pub struct SchedulerMetrics {
     /// applied, by kind. Indexes are the constants in
     /// [`sequencer_propose_kind`].
     pub sequencer_propose_retry_counts: [AtomicU64; sequencer_propose_kind::LABELS.len()],
+    /// Committed txns this leader staged again after its own stage failed.
+    pub restage_count: AtomicU64,
 }
 
 /// Reason codes for `nodedb_calvin_infra_abort_total`.
@@ -209,6 +211,11 @@ impl SchedulerMetrics {
     /// Record that the catch-up drain hit a compacted sequencer log.
     pub fn record_catch_up_log_compacted(&self) {
         self.catch_up_log_compacted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record that the leader staged a committed txn again.
+    pub fn record_restage(&self) {
+        self.restage_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record that the dispatcher refused a scheduler dispatch at capacity.
@@ -444,6 +451,7 @@ impl Default for SchedulerMetrics {
             apply_halted: AtomicU64::new(0),
             apply_halt_reason: AtomicU64::new(0),
             sequencer_propose_retry_counts: std::array::from_fn(|_| AtomicU64::new(0)),
+            restage_count: AtomicU64::new(0),
         }
     }
 }

@@ -48,6 +48,15 @@ fn default_max_open_redo_bytes() -> u64 {
     512 * 1024 * 1024
 }
 
+fn default_restage_attempts() -> u32 {
+    5
+}
+
+fn default_restage_backoff_ms() -> u64 {
+    // Five sequencer epochs of 20 ms. Five doubling waits span about 3 s.
+    100
+}
+
 /// Tuning knobs for the Calvin scheduler that runs per hosted vShard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CalvinTuning {
@@ -91,6 +100,19 @@ pub struct CalvinTuning {
     /// holds at most this much per data group it hosts.
     #[serde(default = "default_max_open_redo_bytes")]
     pub max_open_redo_bytes: u64,
+
+    /// Most times a leader stages a committed transaction again after its
+    /// own stage failed. An earlier leader's COMMIT vote decided the
+    /// transaction, so it cannot drop. The scheduler halts once the stages
+    /// run out.
+    #[serde(default = "default_restage_attempts")]
+    pub restage_attempts: u32,
+
+    /// Wait in milliseconds before the first restage of a committed
+    /// transaction. Each later restage waits twice as long as the one
+    /// before, at most 60 seconds.
+    #[serde(default = "default_restage_backoff_ms")]
+    pub restage_backoff_ms: u64,
 }
 
 impl Default for CalvinTuning {
@@ -104,6 +126,8 @@ impl Default for CalvinTuning {
             catch_up_window: default_catch_up_window(),
             max_redo_entry_bytes: default_max_redo_entry_bytes(),
             max_open_redo_bytes: default_max_open_redo_bytes(),
+            restage_attempts: default_restage_attempts(),
+            restage_backoff_ms: default_restage_backoff_ms(),
         }
     }
 }
@@ -123,6 +147,8 @@ mod tests {
         assert_eq!(t.catch_up_window, 512);
         assert_eq!(t.max_redo_entry_bytes, 8 * 1024 * 1024);
         assert_eq!(t.max_open_redo_bytes, 512 * 1024 * 1024);
+        assert_eq!(t.restage_attempts, 5);
+        assert_eq!(t.restage_backoff_ms, 100);
     }
 
     #[test]

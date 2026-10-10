@@ -296,7 +296,7 @@ impl Scheduler {
             timeout_at,
         };
 
-        self.dependent_barrier.insert(txn_id, barrier);
+        self.open_barrier(txn_id, barrier);
     }
 
     /// Complete an in-flight txn.
@@ -342,6 +342,8 @@ impl Scheduler {
         lock_owner: TxnId,
         mark: LedgerMark,
     ) {
+        // The txn restages no more, and no barrier of it opens again.
+        self.forget_held_state(txn_id);
         // Release this txn's locks. `release` promotes any waiter queued behind
         // each freed key to holder (moving it pending -> held) and returns the
         // fully-promoted ids. Those ids are already holders in the table the

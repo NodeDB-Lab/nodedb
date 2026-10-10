@@ -10,6 +10,9 @@ use std::time::Duration;
 use nodedb_cluster::calvin::SequencerConfig;
 use nodedb_types::config::tuning::CalvinTuning;
 
+/// The longest wait between two restages of one committed txn.
+pub const MAX_RESTAGE_BACKOFF: Duration = Duration::from_secs(60);
+
 /// Tuning parameters for a [`super::core::Scheduler`] instance.
 #[derive(Debug, Clone)]
 pub struct SchedulerConfig {
@@ -54,6 +57,17 @@ pub struct SchedulerConfig {
     /// the fan-out channel is full, so one window covers about one channel of
     /// missed entries. Windows run back to back while intake is open.
     pub catch_up_window: u64,
+    /// Most restages of a committed txn whose stage failed on this leader.
+    /// The scheduler halts once they run out.
+    ///
+    /// Default: 5.
+    pub restage_attempts: u32,
+    /// Wait before the first restage of a committed txn. Each later restage
+    /// waits twice as long. The wait only delays a retry of a decided
+    /// verdict, so it never changes what any replica applies.
+    ///
+    /// Default: 100 milliseconds, five default epochs.
+    pub restage_backoff_ms: u64,
 }
 
 impl Default for SchedulerConfig {
@@ -75,6 +89,8 @@ impl SchedulerConfig {
             verdict_stall_warn_ms: tuning.verdict_stall_warn_ms,
             max_inflight_backlog: tuning.max_inflight_backlog,
             catch_up_window: tuning.catch_up_window,
+            restage_attempts: tuning.restage_attempts,
+            restage_backoff_ms: tuning.restage_backoff_ms,
         }
     }
 
@@ -86,6 +102,15 @@ impl SchedulerConfig {
     /// Verdict-wait stall warning interval as a `Duration`.
     pub fn verdict_stall_warn(&self) -> Duration {
         Duration::from_millis(self.verdict_stall_warn_ms)
+    }
+
+    /// The wait before restage number `done + 1`, after `done` restages:
+    /// the base wait doubled once per restage done, at most
+    /// [`MAX_RESTAGE_BACKOFF`].
+    pub fn restage_backoff(&self, done: u32) -> Duration {
+        let factor = 1u64.checked_shl(done).unwrap_or(u64::MAX);
+        Duration::from_millis(self.restage_backoff_ms.saturating_mul(factor))
+            .min(MAX_RESTAGE_BACKOFF)
     }
 }
 
@@ -103,6 +128,20 @@ mod tests {
         assert_eq!(config.dependent_read_passive_timeout_ms, 60);
         assert_eq!(config.verdict_stall_warn_ms, 5_000);
         assert_eq!(config.catch_up_window, 512);
+        assert_eq!(config.restage_attempts, 5);
+        assert_eq!(config.restage_backoff_ms, 100);
+    }
+
+    /// Each restage waits twice as long as the one before, up to the cap.
+    /// A count past the shift width saturates instead of wrapping.
+    #[test]
+    fn the_restage_backoff_doubles_per_restage() {
+        let config = SchedulerConfig::default();
+        assert_eq!(config.restage_backoff(0), Duration::from_millis(100));
+        assert_eq!(config.restage_backoff(1), Duration::from_millis(200));
+        assert_eq!(config.restage_backoff(4), Duration::from_millis(1_600));
+        assert_eq!(config.restage_backoff(20), MAX_RESTAGE_BACKOFF);
+        assert_eq!(config.restage_backoff(64), MAX_RESTAGE_BACKOFF);
     }
 
     /// The tuning default restates the dispatcher queue capacity, which the
@@ -124,6 +163,8 @@ mod tests {
         let tuning = CalvinTuning {
             max_inflight_backlog: 128,
             verdict_stall_warn_ms: 9_000,
+            restage_attempts: 2,
+            restage_backoff_ms: 7,
             ..CalvinTuning::default()
         };
         let sequencer = SequencerConfig {
@@ -134,5 +175,7 @@ mod tests {
         assert_eq!(config.max_inflight_backlog, 128);
         assert_eq!(config.verdict_stall_warn(), Duration::from_millis(9_000));
         assert_eq!(config.epoch_duration_ms, 50);
+        assert_eq!(config.restage_attempts, 2);
+        assert_eq!(config.restage_backoff(0), Duration::from_millis(7));
     }
 }

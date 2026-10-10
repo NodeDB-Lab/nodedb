@@ -243,9 +243,10 @@ mod tests {
         drop(reclaim);
     }
 
-    /// A leader that halts on a txn it never staged gives back the gates the
-    /// txn held: a purge of its collection proceeds. The txn checks again
-    /// before a proposal and fails once the collection was recreated.
+    /// A leader that halts on a committed txn whose collection it found
+    /// superseded gives back the gates the txn held: a purge of its
+    /// collection proceeds. The txn checks again before a proposal and fails
+    /// once the collection was recreated.
     #[tokio::test]
     async fn a_halt_releases_the_gates_and_a_later_proposal_checks_again() {
         let txn_id = TxnId::new(5, 0);
@@ -270,7 +271,8 @@ mod tests {
         if let Some(pending) = scheduler.pending.get_mut(&txn_id) {
             pending.txn.tx_class = tx_class;
             pending.gates = gates;
-            pending.stage_error = Some("stage refused on this replica".into());
+            pending.superseded = true;
+            pending.stage_error = Some("a collection was superseded on this replica".into());
         }
 
         scheduler.resume_on_verdict(txn_id, true);

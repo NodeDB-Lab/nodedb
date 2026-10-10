@@ -66,8 +66,9 @@ pub(super) struct PendingTxn {
     /// Error text of a stage response that was not `Ok` on this leader.
     ///
     /// `Some` when this leader never staged the txn. An abort verdict drops
-    /// it as usual. A COMMIT verdict halts the scheduler, because the txn
-    /// cannot apply here while its peers apply it.
+    /// it as usual. A COMMIT verdict restages it, a bounded number of times.
+    /// A superseded collection or a spent bound halts the scheduler, because
+    /// the txn cannot apply here while its peers apply it.
     pub stage_error: Option<String>,
     /// What this vShard's slice writes, derived once from its local plans.
     pub scope: SliceScope,
@@ -211,6 +212,10 @@ pub(in crate::control::cluster::calvin::scheduler::driver) enum CommitState {
     /// verdict, or a COMMIT verdict for a slice with no write. The txn
     /// completes once the drop answers.
     AwaitingDrop,
+    /// The verdict is COMMIT, and this leader's stage failed. Its staged
+    /// state is discarded. The txn holds its locks and stages again once
+    /// its backoff passes.
+    AwaitingRestage,
 }
 
 /// A transaction that is blocked on lock acquisition.

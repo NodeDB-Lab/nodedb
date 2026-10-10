@@ -244,7 +244,8 @@ impl Scheduler {
                 | CommitState::AwaitingVerdict
                 | CommitState::AwaitingResolveTurn
                 | CommitState::AwaitingRedoResolve
-                | CommitState::AwaitingDrop => None,
+                | CommitState::AwaitingDrop
+                | CommitState::AwaitingRestage => None,
             })
             .collect();
         for (txn_id, proposed) in owed {

@@ -16,9 +16,9 @@
 //!   order. A txn whose verdict is already COMMIT proposes its vote again,
 //!   which changes nothing: the first vote of the vShard counts.
 //! - Demotion discards the staged state of every txn the leader drove,
-//!   drops its owed votes, and holds the txn `Following`. A redo this node
-//!   proposed can still commit in the new term: the applied ledger installs
-//!   one copy per position.
+//!   drops its owed votes and its restages, and holds the txn `Following`.
+//!   A redo this node proposed can still commit in the new term: the
+//!   applied ledger installs one copy per position.
 //!
 //! [`CommitState::Following`]: super::super::types::CommitState::Following
 
@@ -182,12 +182,16 @@ impl Scheduler {
         for txn_id in driven {
             self.release_to_following(txn_id);
         }
+        // Only a leader restages. A later term counts its own restages.
+        self.restages.clear();
         // A barrier waits only on the leader. Its txn holds its locks and
-        // follows the log like any other.
+        // follows the log like any other. It keeps the reads it received,
+        // so a later barrier of it starts from them.
         let barriers: Vec<TxnId> = self.dependent_barrier.keys().copied().collect();
         for txn_id in barriers {
             if let Some(barrier) = self.dependent_barrier.remove(&txn_id) {
                 self.follow(barrier.txn, txn_id, barrier.lock_owner);
+                self.hold_reads(txn_id, barrier.received);
             }
         }
     }
@@ -238,7 +242,8 @@ fn leader_drives(state: CommitState) -> bool {
         | CommitState::AwaitingVerdict
         | CommitState::AwaitingResolveTurn
         | CommitState::AwaitingRedoResolve
-        | CommitState::AwaitingRedoApply { .. } => true,
+        | CommitState::AwaitingRedoApply { .. }
+        | CommitState::AwaitingRestage => true,
         // A drop ends the txn with no log entry whatever the role.
         CommitState::AwaitingDrop | CommitState::Following => false,
     }

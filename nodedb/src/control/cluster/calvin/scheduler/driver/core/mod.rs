@@ -13,9 +13,9 @@
 //!
 //! All bookkeeping uses `BTreeMap`/`BTreeSet` — never `HashMap`/`HashSet` —
 //! and dispatch order is `(epoch, position)` order. `Instant::now()` is used
-//! only for lock-wait latency metrics and the dependent-read barrier
-//! `timeout_at`, both off the WAL-influencing path; every call site carries a
-//! `// no-determinism:` marker.
+//! only for lock-wait latency metrics, the dependent-read barrier
+//! `timeout_at`, and the restage backoff, all off the WAL-influencing path;
+//! every call site carries a `// no-determinism:` marker.
 
 mod apply_result;
 pub mod catch_up;
@@ -41,6 +41,7 @@ pub mod redo_applied;
 pub mod redo_propose;
 pub mod request;
 pub mod resolve_turn;
+mod restage;
 pub mod role;
 pub mod routing;
 pub mod run_loop;

@@ -51,7 +51,8 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum HaltReason
     ResponseDisconnected,
     /// The resolve of a committed txn failed or returned an undecodable record.
     ResolveFailed,
-    /// This leader failed to stage a txn whose verdict is COMMIT.
+    /// This leader cannot stage a txn whose verdict is COMMIT: its
+    /// restages ran out, or a collection it names was superseded.
     LocalStageFailed,
     /// The surrogate catalog refused a coordinator-assigned identity.
     IdentityBindFailed,
@@ -140,7 +141,9 @@ impl HaltStep {
         state: CommitState,
     ) -> Self {
         match state {
-            CommitState::Staged | CommitState::AwaitingVerdict => Self::Stage,
+            CommitState::Staged | CommitState::AwaitingVerdict | CommitState::AwaitingRestage => {
+                Self::Stage
+            }
             CommitState::AwaitingRedoResolve | CommitState::AwaitingResolveTurn => Self::Resolve,
             CommitState::AwaitingRedoApply { .. } | CommitState::Following => Self::RedoApply,
             CommitState::AwaitingDrop => Self::Drop,

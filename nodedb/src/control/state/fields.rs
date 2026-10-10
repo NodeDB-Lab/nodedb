@@ -162,6 +162,8 @@ pub struct SharedState {
     /// linearizable read, replica freshness for a bounded-staleness one.
     /// Set by `start_raft`.
     pub raft_read_gate: OnceLock<Arc<dyn crate::control::cluster::read_index::RaftReadGate>>,
+    /// This node's Raft groups, for a leadership move. Set by `start_raft`.
+    pub multi_raft: OnceLock<Arc<Mutex<nodedb_cluster::MultiRaft>>>,
     /// This node's cluster-epoch state. Set once by `start_raft`.
     pub cluster_epoch: OnceLock<Arc<nodedb_cluster::ClusterEpochState>>,
     /// Query Raft group statuses for observability. Set by `start_raft`.

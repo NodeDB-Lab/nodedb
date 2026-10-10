@@ -50,6 +50,10 @@ pub struct ReadResultEvent {
     pub values: Vec<(PassiveReadKeyId, Value)>,
 }
 
+/// Read values received from passive vShards, keyed by passive vShard.
+/// `BTreeMap` for determinism.
+pub type ReceivedReads = BTreeMap<u32, Vec<(PassiveReadKeyId, Value)>>;
+
 // ── PendingDependentBarrier ────────────────────────────────────────────────────
 
 /// A dependent-read barrier: tracks which passive vshards have delivered
@@ -66,8 +70,7 @@ pub struct PendingDependentBarrier {
     /// `BTreeSet` for determinism.
     pub waiting_for: BTreeSet<u32>,
     /// Received read values, keyed by passive vshard.
-    /// `BTreeMap` for determinism.
-    pub received: BTreeMap<u32, Vec<(PassiveReadKeyId, Value)>>,
+    pub received: ReceivedReads,
     /// Deadline for passive participant delivery.
     ///
     /// `Instant::now()` used for barrier timeout (observability / off-WAL path).

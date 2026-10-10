@@ -57,6 +57,7 @@ impl Scheduler {
             self.drain_inbox();
             self.check_dependent_barrier_timeouts();
             self.check_awaiting_verdict_stalls();
+            self.restage_due();
             self.resume_metadata_hold();
 
             // Open only once the inputs a closed gate held are processed. A
@@ -67,6 +68,8 @@ impl Scheduler {
                 catch_up_resume = false;
                 stall_tick.reset_immediately();
             }
+            // The backoff end of the next restage, when one waits.
+            let restage_at = self.next_restage_at().map(tokio::time::Instant::from_std);
 
             tokio::select! {
                 biased;
@@ -128,6 +131,13 @@ impl Scheduler {
                 _ = tokio::time::sleep(super::metadata_hold::HOLD_POLL),
                     if self.metadata_hold.is_some() => {
                     // The next loop pass re-checks the held txn's floor.
+                }
+
+                _ = tokio::time::sleep_until(
+                    restage_at.unwrap_or_else(tokio::time::Instant::now)
+                ), if restage_at.is_some() => {
+                    // The next loop pass stages again every txn whose
+                    // restage backoff ended.
                 }
 
                 _ = tokio::time::sleep(ROLE_POLL), if self.role.awaits_term_start() => {

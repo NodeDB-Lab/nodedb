@@ -29,4 +29,7 @@ pub struct CalvinCounters {
     /// installed nothing: their position was applied, or another copy held
     /// its claim.
     pub redo_copies_skipped: Arc<AtomicU64>,
+    /// Count of restages this node's leaders dispatched: a committed Calvin
+    /// slice staged again after the leader's own stage failed.
+    pub stage_restages: Arc<AtomicU64>,
 }

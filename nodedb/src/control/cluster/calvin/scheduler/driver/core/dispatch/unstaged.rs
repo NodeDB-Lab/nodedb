@@ -60,9 +60,9 @@ impl Scheduler {
     /// Park `txn`, which never staged on this replica, on the commit barrier
     /// with an abort vote for `reason`.
     ///
-    /// `stage_error` stays on the pending entry. A COMMIT verdict for the
-    /// txn then halts the scheduler, because this leader holds nothing to
-    /// resolve.
+    /// `stage_error` stays on the pending entry. This leader holds nothing
+    /// to resolve, so a COMMIT verdict restages the txn through the grant
+    /// path: the plans route again, or the barrier opens again.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn park_unstaged(
         &mut self,
         txn: SequencedTxn,

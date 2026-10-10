@@ -112,7 +112,7 @@ impl Scheduler {
         // A stage error parks too. The leader votes abort, and every
         // participant drops at the abort verdict. A COMMIT verdict for it
         // can follow only a vote an earlier leader cast: `resume_on_verdict`
-        // halts on it.
+        // restages the txn.
         match self.pending.get_mut(&txn_id) {
             Some(pending) => {
                 pending.commit_state = CommitState::AwaitingVerdict;

@@ -173,6 +173,14 @@ fn validate_calvin(config: &ServerConfig) -> crate::Result<()> {
         "tuning.calvin.max_inflight_backlog",
     )?;
     positive_u64(calvin.catch_up_window, "tuning.calvin.catch_up_window")?;
+    positive_u64(
+        u64::from(calvin.restage_attempts),
+        "tuning.calvin.restage_attempts",
+    )?;
+    positive_u64(
+        calvin.restage_backoff_ms,
+        "tuning.calvin.restage_backoff_ms",
+    )?;
     validate_redo_sizes(calvin)
 }
 

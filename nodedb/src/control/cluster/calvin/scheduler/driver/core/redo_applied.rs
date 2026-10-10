@@ -157,9 +157,12 @@ fn holds_staged_state(state: CommitState) -> bool {
         | CommitState::AwaitingResolveTurn
         | CommitState::AwaitingRedoResolve
         | CommitState::AwaitingDrop => true,
-        // The install consumed the staged entry of a proposed slice, and a
-        // follower staged nothing.
-        CommitState::AwaitingRedoApply { .. } | CommitState::Following => false,
+        // The install consumed the staged entry of a proposed slice, a
+        // follower staged nothing, and a txn awaiting its restage discarded
+        // what it staged.
+        CommitState::AwaitingRedoApply { .. }
+        | CommitState::Following
+        | CommitState::AwaitingRestage => false,
     }
 }
 

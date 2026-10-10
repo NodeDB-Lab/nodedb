@@ -102,6 +102,15 @@ pub struct Scheduler {
     /// `BTreeMap` for determinism.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) dependent_barrier:
         BTreeMap<TxnId, PendingDependentBarrier>,
+    /// Passive read results of dependent txns in `pending` that wait at no
+    /// barrier. A later barrier of the txn starts from them. Each entry
+    /// leaves when its txn completes.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) held_reads:
+        BTreeMap<TxnId, super::super::barrier::ReceivedReads>,
+    /// Committed txns whose stage failed on this leader, with their
+    /// restage count and backoff. See [`super::restage`].
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) restages:
+        BTreeMap<TxnId, super::restage::Restage>,
     /// Channel receiving `CalvinReadResult` Raft apply events from the
     /// per-vshard data Raft apply loop. Bounded.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) read_result_rx:
@@ -296,6 +305,8 @@ impl Scheduler {
             inbox,
             blocked: BTreeMap::new(),
             dependent_barrier: BTreeMap::new(),
+            held_reads: BTreeMap::new(),
+            restages: BTreeMap::new(),
             read_result_rx,
             applied: AppliedGate::new(fully_applied_epoch, applied_tail),
             cut_floors: Default::default(),

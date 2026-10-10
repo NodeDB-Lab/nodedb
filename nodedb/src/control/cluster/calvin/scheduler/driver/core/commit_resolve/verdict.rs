@@ -12,7 +12,6 @@ use nodedb_cluster::calvin::VerdictSignal;
 use crate::control::cluster::calvin::scheduler::driver::core::deferred::{
     DispatchOutcome, DispatchStep,
 };
-use crate::control::cluster::calvin::scheduler::driver::core::halt::{HaltReason, HaltStep};
 use crate::control::cluster::calvin::scheduler::driver::core::owed::SchedulerProposal;
 use crate::control::cluster::calvin::scheduler::driver::core::process::LedgerMark;
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::Scheduler;
@@ -40,9 +39,9 @@ impl Scheduler {
     /// Any other state already left the barrier, so a duplicate push, probe
     /// or sweep is a no-op.
     ///
-    /// A COMMIT verdict for a txn this leader failed to stage halts the
-    /// scheduler: the txn stays parked with its locks, its stall deadline
-    /// cleared, and its position unapplied.
+    /// A COMMIT verdict for a txn this leader failed to stage restages it
+    /// (see `super::super::restage`). The txn keeps its locks and its
+    /// position stays unapplied meanwhile.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn resume_on_verdict(
         &mut self,
         txn_id: TxnId,
@@ -66,23 +65,22 @@ impl Scheduler {
             | CommitState::AwaitingResolveTurn
             | CommitState::AwaitingRedoResolve
             | CommitState::AwaitingRedoApply { .. }
-            | CommitState::AwaitingDrop => {}
+            | CommitState::AwaitingDrop
+            | CommitState::AwaitingRestage => {}
         }
     }
 
     /// Resume a leader's txn parked on the barrier.
     fn resume_parked(&mut self, txn_id: TxnId, committed: bool, writes: bool) {
+        // An earlier leader of the vShard voted COMMIT, and this leader's
+        // stage failed: the txn cannot drop while its peers apply it.
         if committed
-            && let Some(pending) = self.pending.get_mut(&txn_id)
-            && let Some(stage_error) = pending.stage_error.clone()
+            && self
+                .pending
+                .get(&txn_id)
+                .is_some_and(|pending| pending.stage_error.is_some())
         {
-            pending.verdict_deadline = None;
-            self.halt_apply(
-                txn_id,
-                HaltReason::LocalStageFailed,
-                HaltStep::Stage,
-                format!("COMMIT verdict for a txn this leader did not stage: {stage_error}"),
-            );
+            self.restage_or_halt(txn_id);
             return;
         }
         if let Some(pending) = self.pending.get_mut(&txn_id) {
@@ -247,7 +245,6 @@ mod tests {
     use crate::bridge::dispatch::CoreChannelDataSide;
     use crate::bridge::envelope::ErrorCode;
     use crate::bridge::envelope::{Payload, StageVote, Status};
-    use crate::control::cluster::calvin::scheduler::driver::core::halt::HaltReason;
     use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::lead_data_group;
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
         await_data_plane_request, build_test_scheduler, build_test_scheduler_with_data_side,
@@ -561,12 +558,12 @@ mod tests {
         (scheduler, dir, data_side)
     }
 
-    /// A COMMIT verdict for a txn this leader failed to stage halts the
-    /// scheduler: an earlier leader staged and voted commit, so this leader
-    /// holds nothing to resolve. No resolve is dispatched, and the stall
-    /// sweep stops.
+    /// A COMMIT verdict for a txn this leader failed to stage holds it for a
+    /// restage: an earlier leader staged and voted commit, so the txn cannot
+    /// drop. The failed stage's state is discarded, no resolve is
+    /// dispatched, and the position stays unapplied.
     #[tokio::test]
-    async fn commit_verdict_after_local_stage_error_halts_unapplied() {
+    async fn commit_verdict_after_local_stage_error_awaits_a_restage() {
         let txn_id = TxnId::new(14, 2);
         let (mut scheduler, _dir, mut data_side) = leader_with_failed_stage(txn_id);
 
@@ -577,12 +574,26 @@ mod tests {
             .pending
             .get(&txn_id)
             .expect("the txn stays pending");
-        assert_eq!(pending.commit_state, CommitState::AwaitingVerdict);
+        assert_eq!(pending.commit_state, CommitState::AwaitingRestage);
         assert_eq!(pending.verdict_deadline, None);
-        assert_eq!(
-            scheduler.apply_halt().map(|h| h.reason),
-            Some(HaltReason::LocalStageFailed)
-        );
+        assert!(!scheduler.is_apply_halted());
+        let restage = scheduler
+            .restages
+            .get(&txn_id)
+            .expect("the txn waits for its first restage");
+        assert_eq!(restage.attempts, 0);
+        assert!(restage.due.is_some());
+        let request = data_side
+            .request_rx
+            .try_pop()
+            .expect("the failed stage's state is discarded");
+        assert!(matches!(
+            request.inner.plan,
+            PhysicalPlan::Meta(MetaOp::CalvinDrop {
+                epoch: 14,
+                position: 2
+            })
+        ));
         assert!(
             data_side.request_rx.try_pop().is_err(),
             "no resolve reaches the Data Plane"
@@ -599,6 +610,7 @@ mod tests {
         scheduler.resume_on_verdict(txn_id, false);
 
         assert!(!scheduler.is_apply_halted());
+        assert!(scheduler.restages.is_empty(), "an abort never restages");
         let request = data_side
             .request_rx
             .try_pop()

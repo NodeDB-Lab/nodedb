@@ -155,6 +155,7 @@ impl SharedState {
             raft_applied_index_sink: std::sync::OnceLock::new(),
             raft_apply_gates: std::sync::OnceLock::new(),
             raft_read_gate: std::sync::OnceLock::new(),
+            multi_raft: std::sync::OnceLock::new(),
             cluster_epoch: std::sync::OnceLock::new(),
             raft_status_fn: std::sync::OnceLock::new(),
             cluster_observer: std::sync::OnceLock::new(),

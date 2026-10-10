@@ -599,6 +599,8 @@ Below that the sweep costs more than the resolution it buys.
 | `tuning.calvin.verdict_stall_warn_ms`            | `5000`  |
 | `tuning.calvin.max_inflight_backlog`             | `1024`  |
 | `tuning.calvin.catch_up_window`                  | `512`   |
+| `tuning.calvin.restage_attempts`                 | `5`     |
+| `tuning.calvin.restage_backoff_ms`               | `100`   |
 
 Each hosted vShard runs one Calvin scheduler with these settings.
 
@@ -612,6 +614,11 @@ Each hosted vShard runs one Calvin scheduler with these settings.
   taking new input.
 - `catch_up_window` is the most sequencer log entries one catch-up pass
   replays.
+- `restage_attempts` is the most times a data-group leader stages a
+  committed transaction again after its own stage failed. The scheduler
+  halts once they run out.
+- `restage_backoff_ms` is the wait before the first restage. Each later
+  restage waits twice as long, at most 60 seconds.
 
 Every value must be positive. `verdict_stall_warn_ms` has a floor of `4`.
 

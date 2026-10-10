@@ -108,6 +108,7 @@ impl CalvinLocalState {
                 commits_flushed: Arc::new(AtomicU64::new(0)),
                 commits_dropped: Arc::new(AtomicU64::new(0)),
                 redo_copies_skipped: Arc::new(AtomicU64::new(0)),
+                stage_restages: Arc::new(AtomicU64::new(0)),
             },
             apply_results: CalvinApplySidecar::default(),
             lock_managers: Arc::new(Mutex::new(BTreeMap::new())),

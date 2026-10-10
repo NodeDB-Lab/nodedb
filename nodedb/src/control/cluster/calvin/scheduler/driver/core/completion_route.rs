@@ -86,7 +86,8 @@ impl Scheduler {
             CommitState::Following
             | CommitState::AwaitingVerdict
             | CommitState::AwaitingResolveTurn
-            | CommitState::AwaitingRedoApply { .. } => {
+            | CommitState::AwaitingRedoApply { .. }
+            | CommitState::AwaitingRestage => {
                 // A txn in these states sends no request it waits for. A
                 // recorded request names a step it left.
                 tracing::warn!(

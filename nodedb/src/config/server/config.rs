@@ -448,6 +448,19 @@ mod tests {
     }
 
     #[test]
+    fn from_file_rejects_a_zero_calvin_restage_bound() {
+        let path = write_temp_config(
+            "nodedb-domain-calvin-restage.toml",
+            "[tuning.calvin]\nrestage_attempts = 0\n",
+        );
+        let err = ServerConfig::from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        let msg = err.to_string();
+        assert!(msg.contains("tuning.calvin.restage_attempts"), "{msg}");
+        assert!(msg.contains("positive integer"), "{msg}");
+    }
+
+    #[test]
     fn from_file_rejects_a_calvin_stall_warning_below_the_floor() {
         let path = write_temp_config(
             "nodedb-domain-calvin-stall.toml",

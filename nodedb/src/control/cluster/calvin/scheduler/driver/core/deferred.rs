@@ -32,8 +32,8 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum DispatchSt
     /// completes on its answer.
     Drop,
     /// `CalvinDrop` of staged state the txn no longer needs: a demoted
-    /// leader's, or a restaged slice whose redo applied. Its answer is
-    /// drained and read by nothing.
+    /// leader's, a failed stage a restage replaces, or a restaged slice
+    /// whose redo applied. Its answer is drained and read by nothing.
     Discard,
 }
 
@@ -117,6 +117,14 @@ impl Scheduler {
         &self,
     ) -> bool {
         !self.deferred.is_empty()
+    }
+
+    /// Whether a refused request of `txn_id` waits for capacity.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn has_deferred_for(
+        &self,
+        txn_id: TxnId,
+    ) -> bool {
+        self.deferred.iter().any(|parked| parked.txn_id == txn_id)
     }
 
     /// Whether the run loop re-sends parked requests: some wait, and the
