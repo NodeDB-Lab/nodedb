@@ -255,6 +255,7 @@ impl Scheduler {
                 for gate in &gates {
                     crate::control::fail_gate::wait(fail_scope, gate).await;
                 }
+                // no-determinism: the proposal's retry budget is liveness only; the log order decides the result.
                 let deadline = tokio::time::Instant::now() + budget;
                 if let Err(error) = propose_calvin_read_result(state, proposal, deadline).await {
                     tracing::warn!(

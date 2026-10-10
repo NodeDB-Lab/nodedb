@@ -104,6 +104,7 @@ pub async fn propose_calvin_read_result(
                 return Ok(());
             }
             Err(error) => {
+                // no-determinism: the retry budget is liveness only; the log order decides the result.
                 if tokio::time::Instant::now() >= deadline {
                     return Err(error);
                 }
@@ -116,6 +117,7 @@ pub async fn propose_calvin_read_result(
                 );
                 tokio::time::sleep(
                     RETRY_PAUSE
+                        // no-determinism: a retry pause only.
                         .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
                 )
                 .await;

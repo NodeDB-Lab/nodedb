@@ -149,6 +149,7 @@ impl Scheduler {
                 }
 
                 _ = tokio::time::sleep_until(
+                    // no-determinism: a wake timer only; the restage reads replicated state.
                     restage_at.unwrap_or_else(tokio::time::Instant::now)
                 ), if restage_at.is_some() => {
                     // The next loop pass stages again every txn whose
@@ -156,6 +157,7 @@ impl Scheduler {
                 }
 
                 _ = tokio::time::sleep_until(
+                    // no-determinism: a wake timer only; the timeout entry's log position decides.
                     read_timeout_at.unwrap_or_else(tokio::time::Instant::now)
                 ), if read_timeout_at.is_some() => {
                     // The next loop pass proposes the timeout entry of every
