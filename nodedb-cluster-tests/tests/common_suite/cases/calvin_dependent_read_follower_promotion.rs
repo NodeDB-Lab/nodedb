@@ -24,8 +24,8 @@
 
 use std::time::Duration;
 
-use nodedb::control::cluster::metadata_applier::metadata_apply_hold_point;
-use nodedb_types::fail_point::{FailAction, FailGuard};
+use nodedb::control::cluster::metadata_applier::METADATA_APPLY_HOLD_POINT;
+use nodedb_test_support::fail_point::{FailAction, FailGuard};
 
 use super::calvin_dependent_read_fixture::{ItemMove, assert_no_apply_halt, waiting_barrier_txns};
 use super::calvin_replica_content::strict_session;
@@ -60,8 +60,9 @@ async fn a_promoted_follower_commits_the_move_without_halting() {
     let meta_dir = tempfile::tempdir().expect("metadata gate directory");
     let meta_release = meta_dir.path().join("release");
     let meta_parked = meta_dir.path().join("release.parked");
-    let _meta_hold = FailGuard::install(
-        &metadata_apply_hold_point(follower_id),
+    let _meta_hold = FailGuard::for_node(
+        follower_id,
+        METADATA_APPLY_HOLD_POINT,
         FailAction::WaitForFile(meta_release.clone()),
     );
     nodes[coordinator]

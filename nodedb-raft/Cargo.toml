@@ -14,8 +14,8 @@ categories = ["algorithms", "network-programming"]
 
 [features]
 default = []
-# Arms the commit gate (`raft::hold_commit::node<N>::group<G>`) cluster tests
-# use to keep an entry uncommitted across a leadership change.
+# Arms the node-scoped commit gate (`raft::hold_commit::group<G>`) cluster
+# tests use to keep an entry uncommitted across a leadership change.
 failpoints = ["dep:nodedb-types", "nodedb-types/failpoints"]
 
 [dependencies]

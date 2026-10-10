@@ -169,7 +169,7 @@ pub(crate) async fn submit_prepared_and_await(
     timeout: Duration,
 ) -> crate::Result<Option<Response>> {
     #[cfg(feature = "failpoints")]
-    crate::control::fail_gate::after_calvin_stamp(&tx_class).await;
+    crate::control::fail_gate::after_calvin_stamp(state.node_id, &tx_class).await;
     let fold = ReplyFold::of_tx_class(&tx_class)?;
     let inbox = state
         .sequencer_inbox

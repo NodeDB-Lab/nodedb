@@ -16,7 +16,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use nodedb_types::fail_point::FailGuard;
+use nodedb_test_support::fail_point::FailGuard;
 
 use crate::common::cluster_harness::shared_steps::{db_detail, drain_backup, try_push_restore};
 use crate::common::cluster_harness::{TestCluster, wait_for, wait_for_async};

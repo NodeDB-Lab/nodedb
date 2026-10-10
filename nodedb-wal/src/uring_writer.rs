@@ -320,7 +320,10 @@ impl UringWriter {
     fn submit_and_wait_fsync(&mut self) -> Result<()> {
         // Crash injection: the kernel reports a writeback error at the fsync.
         #[cfg(feature = "failpoints")]
-        if let Some(detail) = nodedb_types::fail_point::eval_fail("wal::fsync_failure") {
+        if let Some(detail) = nodedb_types::fail_point::eval_fail(
+            nodedb_types::fail_point::FailScope::Any,
+            "wal::fsync_failure",
+        ) {
             return Err(self.durability.poison(format!(
                 "io_uring fsync failed: failpoint wal::fsync_failure: {detail}"
             )));

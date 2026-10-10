@@ -11,8 +11,8 @@
 //! 2. The fail gate `calvin::before_redo_propose::<entries>` holds the
 //!    entries slice after its vote and resolve, on the leader `L` of the
 //!    entries group `G`. The balance slice installs meanwhile.
-//! 3. The test arms `raft::hold_commit::node<L>::group<G>`, then releases
-//!    the redo. `L` proposes it, the entry replicates to every replica, and
+//! 3. The test arms `raft::hold_commit::group<G>` on node `L` only, then
+//!    releases the redo. `L` proposes it, the entry replicates to every replica, and
 //!    `L` commits nothing.
 //! 4. The test moves `G`'s leadership to another replica `N`. The entry of
 //!    the old term commits with `N`'s first entry of the new term. `N`
@@ -30,7 +30,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use nodedb_types::fail_point::{FailAction, FailGuard};
+use nodedb_test_support::fail_point::{FailAction, FailGuard};
 
 use super::calvin_multishard_fixture::{Fixture, tags};
 use super::calvin_replica_content::{
@@ -170,8 +170,9 @@ async fn an_old_term_redo_copy_committed_by_the_new_leader_installs_once() {
             let held_status = group_status(&fx.cluster.nodes[old], group)
                 .expect("the old leader hosts the entries group");
 
-            let _commit_gate = FailGuard::install(
-                &format!("raft::hold_commit::node{old_leader}::group{group}"),
+            let _commit_gate = FailGuard::for_node(
+                old_leader,
+                &format!("raft::hold_commit::group{group}"),
                 FailAction::WaitForFile(commit_release.clone()),
             );
             std::fs::write(&propose_release, b"release").expect("release the held redo");

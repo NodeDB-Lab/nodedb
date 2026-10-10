@@ -186,6 +186,7 @@ async fn boot_node(options: BootOptions) -> Result<Node, BootError> {
     let (core_stop_tx, core_stop_rx) = std::sync::mpsc::channel::<()>();
     let core = crate::core_loop_runner::spawn_core_loop(crate::core_loop_runner::CoreLoopSpawn {
         idx: 0,
+        node_id: state.node_id,
         num_cores: 1,
         data_side,
         core_dir: dir.path().to_path_buf(),

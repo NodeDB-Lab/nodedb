@@ -21,7 +21,7 @@
 
 use std::time::Duration;
 
-use nodedb_types::fail_point::{FailAction, FailGuard};
+use nodedb_test_support::fail_point::{FailAction, FailGuard};
 
 use super::calvin_dependent_read_fixture::{
     ItemMove, assert_no_apply_halt, reads_applied, stored_barrier_rows, waiting_barrier_txns,

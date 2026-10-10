@@ -245,6 +245,7 @@ impl TestClusterNode {
             let core_handle =
                 crate::core_loop_runner::spawn_core_loop(crate::core_loop_runner::CoreLoopSpawn {
                     idx,
+                    node_id,
                     num_cores,
                     data_side,
                     core_dir: data_dir_path.clone(),

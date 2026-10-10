@@ -12,7 +12,11 @@ path = "src/lib.rs"
 
 [features]
 # Arms the in-process fail points the cluster tests park writes at.
-failpoints = ["nodedb/failpoints", "nodedb-types/failpoints"]
+failpoints = [
+  "nodedb/failpoints",
+  "nodedb-types/failpoints",
+  "nodedb-test-support/failpoints",
+]
 
 [dependencies]
 

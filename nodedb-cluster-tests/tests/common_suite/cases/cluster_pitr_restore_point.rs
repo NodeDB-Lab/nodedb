@@ -215,7 +215,7 @@ async fn a_cluster_restores_every_group_to_a_restore_point() {
 #[cfg(feature = "failpoints")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_ddl_after_the_watermark_is_absent_though_it_precedes_the_point() {
-    use nodedb_types::fail_point::{FailAction, FailGuard};
+    use nodedb_test_support::fail_point::{FailAction, FailGuard};
 
     let root = tempfile::tempdir().expect("storage root");
     let pitr = PitrStorage::create(root.path()).expect("PITR storage");

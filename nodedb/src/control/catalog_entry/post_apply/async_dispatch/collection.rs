@@ -105,12 +105,16 @@ pub(crate) async fn reclaim_collection_storage(
     // 1. Persist to redb (every node has its own catalog). A failure here
     // leaves no durable retry owner, so it is a `no_retry` failure: the caller
     // releases its lifecycle guard rather than leaking the drain.
-    crate::fail_point_err!("collection_reclaim::before_tombstone", |detail: String| {
-        ReclaimFailure::no_retry(crate::Error::Storage {
-            engine: "catalog".into(),
-            detail,
-        })
-    });
+    crate::fail_point_err!(
+        crate::fail_point::FailScope::Node(shared.node_id),
+        "collection_reclaim::before_tombstone",
+        |detail: String| {
+            ReclaimFailure::no_retry(crate::Error::Storage {
+                engine: "catalog".into(),
+                detail,
+            })
+        }
+    );
     let catalog = shared.credentials.catalog();
     catalog
         .record_wal_tombstone(database_id, tenant_id, name, purge_lsn)

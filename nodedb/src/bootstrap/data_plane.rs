@@ -327,6 +327,7 @@ pub fn spawn_data_plane_cores(
         columnar_schema_seed,
     } = resources;
     let num_cores = config.server.data_plane_cores;
+    let node_id = crate::control::cluster::configured_node_id(config);
     let compaction_cfg = CoreCompactionConfig {
         interval: config.checkpoint.compaction_interval(),
         tombstone_threshold: config.checkpoint.compaction_tombstone_threshold,
@@ -347,6 +348,7 @@ pub fn spawn_data_plane_cores(
         let (replay_done_tx, replay_done_rx) = tokio::sync::oneshot::channel();
         let (handle, notifier) = spawn_core(SpawnCoreParams {
             core_id,
+            node_id,
             request_rx: data_side.request_rx,
             response_tx: data_side.response_tx,
             data_dir: &config.server.data_dir,

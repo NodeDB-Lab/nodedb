@@ -4,8 +4,8 @@
 //! and a re-install of the same bytes converges to every row on its owning
 //! core.
 //!
-//! The fail point `snapshot_install::node<N>::core1` makes core 1 of node N
-//! report its share as failed after it installed it: the other core holds the
+//! The fail point `snapshot_install::core1`, armed for node N, makes core 1
+//! of node N report its share as failed after it installed it: the other core holds the
 //! snapshot, this one does not count as settled. The re-install clears every
 //! core before it installs, so no row lands twice or off its core.
 //!
@@ -21,7 +21,7 @@ use nodedb::control::cluster::snapshot_builder::DataPlaneSnapshotBuilder;
 use nodedb::control::cluster::snapshot_install::SnapshotInstallError;
 use nodedb::types::TenantId;
 use nodedb_cluster::SnapshotBuilder;
-use nodedb_types::fail_point::FailGuard;
+use nodedb_test_support::fail_point::{FailAction, FailGuard};
 
 use crate::common::cluster_harness::shared_steps::key_collection;
 use crate::common::cluster_harness::{TestCluster, wait_for};
@@ -97,9 +97,10 @@ async fn failed_core_install_is_retryable_and_reinstall_converges() {
 
     let applier = DataPlaneSnapshotApplier::new(target.shared.clone());
     {
-        let _fault = FailGuard::fail(
-            &format!("snapshot_install::node{}::core1", target.node_id),
-            "injected core install fault",
+        let _fault = FailGuard::for_node(
+            target.node_id,
+            "snapshot_install::core1",
+            FailAction::Fail("injected core install fault".to_string()),
         );
         let err = applier
             .install(gid, &bytes)

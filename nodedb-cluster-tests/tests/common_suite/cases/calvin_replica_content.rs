@@ -144,6 +144,43 @@ pub(super) async fn first_column(client: &tokio_postgres::Client, sql: &str) -> 
         .collect()
 }
 
+/// A served number column as `f64`.
+fn number(text: &str, what: &str) -> f64 {
+    text.parse()
+        .unwrap_or_else(|e| panic!("{what} `{text}` is not a number: {e}"))
+}
+
+/// Each of the `accounts` rows `acc-0` to `acc-{accounts - 1}` of `accts`
+/// serves a balance equal to the sum of its served `entries` amounts.
+pub(super) async fn assert_balances_match_entries(
+    client: &tokio_postgres::Client,
+    accts: &str,
+    entries: &str,
+    accounts: usize,
+) {
+    for account in 0..accounts {
+        let balances = first_column(
+            client,
+            &format!("SELECT balance FROM {accts} WHERE id = 'acc-{account}'"),
+        )
+        .await;
+        let [balance] = balances.as_slice() else {
+            panic!("acc-{account} has one row, found balances {balances:?}");
+        };
+        let amounts = first_column(
+            client,
+            &format!("SELECT amount FROM {entries} WHERE account_id = 'acc-{account}'"),
+        )
+        .await;
+        let expected: f64 = amounts.iter().map(|a| number(a, "amount")).sum();
+        assert_eq!(
+            number(balance, "balance"),
+            expected,
+            "acc-{account}'s balance is the sum of its entries {amounts:?}"
+        );
+    }
+}
+
 /// The content of each vShard `collections` home to, as `node` stores it.
 pub(super) async fn local_content(
     node: &TestClusterNode,

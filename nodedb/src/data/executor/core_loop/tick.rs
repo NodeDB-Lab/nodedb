@@ -124,7 +124,10 @@ impl CoreLoop {
             #[cfg(feature = "failpoints")]
             if task.wal_lsn().is_some() {
                 for collection in task.plan().named_collections() {
-                    crate::fail_point!(&format!("core::after_apply::{collection}"));
+                    crate::fail_point!(
+                        self.fail_scope,
+                        &format!("core::after_apply::{collection}")
+                    );
                 }
             }
             if let Some(group) = journal {
@@ -133,7 +136,10 @@ impl CoreLoop {
                 // is stored and its parts are not journalled yet.
                 #[cfg(feature = "failpoints")]
                 for collection in task.plan().named_collections() {
-                    crate::fail_point!(&format!("core::after_capture::{collection}"));
+                    crate::fail_point!(
+                        self.fail_scope,
+                        &format!("core::after_capture::{collection}")
+                    );
                 }
             }
             task.state = TaskState::Completed;

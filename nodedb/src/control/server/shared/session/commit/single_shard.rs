@@ -201,7 +201,7 @@ async fn commit_redo(
     target: RedoTarget,
     payload: &TransactionRedoPayload,
 ) -> Result<super::ts_rejections::RejectedByCollection, AbortReason> {
-    if let Err(e) = inject_commit_failure() {
+    if let Err(e) = inject_commit_failure(state.node_id) {
         return Err(AbortReason::Dispatch(e));
     }
     // The proposal forwards to the group leader and returns once the redo is
@@ -220,11 +220,13 @@ async fn commit_redo(
     }
 }
 
-/// The `commit::single_shard_redo_commit` fail point. Compiles to `Ok(())`
-/// outside the `failpoints` feature.
-fn inject_commit_failure() -> crate::Result<()> {
-    crate::fail_point_err!("commit::single_shard_redo_commit", |detail| {
-        crate::Error::Internal { detail }
-    });
+/// The `commit::single_shard_redo_commit` fail point of node `node_id`.
+/// Compiles to `Ok(())` outside the `failpoints` feature.
+fn inject_commit_failure(node_id: u64) -> crate::Result<()> {
+    crate::fail_point_err!(
+        crate::fail_point::FailScope::Node(node_id),
+        "commit::single_shard_redo_commit",
+        |detail| crate::Error::Internal { detail }
+    );
     Ok(())
 }

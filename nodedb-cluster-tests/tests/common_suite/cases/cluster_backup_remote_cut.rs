@@ -4,8 +4,8 @@
 //!
 //! The backup's coordinator snapshots every vShard from the leader of its
 //! group. The test parks a write on the collection's group leader only, at
-//! the fail gate `funnel::before_dispatch::node<N>::<collection>`, between
-//! its record and its core. The coordinator is another node, so its own
+//! the fail gate `funnel::before_dispatch::<collection>` armed for that node,
+//! between its record and its core. The coordinator is another node, so its own
 //! replica applies the write and its own cut passes. The leader must take the
 //! same cut before it snapshots: the backup waits until the parked write
 //! applies there, and the envelope holds the row. After the purge settles on
@@ -19,10 +19,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
+use nodedb_test_support::fail_point::{FailAction, FailGuard};
 use nodedb_types::backup_envelope::{
     DEFAULT_MAX_TOTAL_BYTES, DatabaseDataSection, parse_encrypted,
 };
-use nodedb_types::fail_point::{FailAction, FailGuard};
 
 use crate::common;
 use common::cluster_harness::wait::wait_for;
@@ -192,8 +192,9 @@ async fn a_backup_waits_for_a_write_held_on_a_remote_source_node() {
     // Park the write on the source node only.
     let gate_dir = tempfile::tempdir().expect("gate tempdir");
     let release = gate_dir.path().join("release-source-apply");
-    let _gate = FailGuard::install(
-        &format!("funnel::before_dispatch::node{source}::{COLLECTION}"),
+    let _gate = FailGuard::for_node(
+        source,
+        &format!("funnel::before_dispatch::{COLLECTION}"),
         FailAction::WaitForFile(release.clone()),
     );
 

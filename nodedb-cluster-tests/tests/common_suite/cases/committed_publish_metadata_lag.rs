@@ -20,10 +20,10 @@ use common::cluster_harness::{TestCluster, TestClusterNode, wait_for};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use nodedb::control::cluster::metadata_applier::metadata_apply_hold_point;
+use nodedb::control::cluster::metadata_applier::METADATA_APPLY_HOLD_POINT;
 use nodedb::event::cdc::CdcOffset;
+use nodedb_test_support::fail_point::{FailAction, FailGuard};
 use nodedb_types::DatabaseId;
-use nodedb_types::fail_point::{FailAction, FailGuard};
 
 const TOPIC: &str = "metadata_lag_feed";
 const SRC: &str = "metadata_lag_src";
@@ -141,8 +141,9 @@ async fn a_lagging_lease_holder_waits_for_the_topic_and_delivers_once() {
     let gate_dir = tempfile::tempdir().expect("gate directory");
     let release = gate_dir.path().join("release");
     let parked = gate_dir.path().join("release.parked");
-    let _hold = FailGuard::install(
-        &metadata_apply_hold_point(b_id),
+    let _hold = FailGuard::for_node(
+        b_id,
+        METADATA_APPLY_HOLD_POINT,
         FailAction::WaitForFile(release.clone()),
     );
     exec_on(&cluster.nodes[a], &format!("CREATE TOPIC {TOPIC}")).await;

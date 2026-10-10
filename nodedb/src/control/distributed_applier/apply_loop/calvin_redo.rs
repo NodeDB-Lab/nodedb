@@ -252,13 +252,16 @@ impl CalvinClaim {
         if !matches!(event, CalvinApplyEvent::RedoApplied { .. }) {
             return Some(event);
         }
-        let Some(gate) = crate::control::fail_gate::holds_redo_applied_push(collections) else {
+        let Some(gate) =
+            crate::control::fail_gate::holds_redo_applied_push(state.node_id, collections)
+        else {
             return Some(event);
         };
         let Some(inbox) = state.calvin.inboxes.get(self.vshard_id) else {
             return Some(event);
         };
         let (epoch, position) = (self.epoch, self.position);
+        let fail_scope = crate::fail_point::FailScope::Node(state.node_id);
         tracing::info!(
             vshard_id = self.vshard_id,
             epoch,
@@ -267,7 +270,7 @@ impl CalvinClaim {
             "calvin: RedoApplied withheld at a fail point"
         );
         tokio::spawn(async move {
-            crate::control::fail_gate::released(&gate).await;
+            crate::control::fail_gate::released(fail_scope, &gate).await;
             inbox.push(epoch, position, event).await;
         });
         None

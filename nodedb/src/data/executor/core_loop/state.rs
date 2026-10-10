@@ -38,7 +38,8 @@ use super::priority_queues::PriorityQueues;
 /// This type is intentionally `!Send` — pinned to a single core.
 pub struct CoreLoop {
     pub(in crate::data::executor) core_id: usize,
-
+    /// The node this core runs on: the scope its fail points evaluate in.
+    pub(in crate::data::executor) fail_scope: nodedb_types::fail_point::FailScope,
     /// SPSC channel: receives requests from Control Plane.
     pub(in crate::data::executor) request_rx: Consumer<BridgeRequest>,
 

@@ -89,12 +89,16 @@ impl MetadataCommitApplier {
             stamped,
             catalog_entry::CatalogEntry::PutBackupScheduleMark(_)
         ) {
-            nodedb_types::fail_point_err!(&backup_mark_fail_point(shared.node_id), |detail| {
-                crate::Error::Storage {
-                    engine: "catalog".into(),
-                    detail,
+            nodedb_types::fail_point_err!(
+                nodedb_types::fail_point::FailScope::Node(shared.node_id),
+                BACKUP_MARK_FAIL_POINT,
+                |detail| {
+                    crate::Error::Storage {
+                        engine: "catalog".into(),
+                        detail,
+                    }
                 }
-            });
+            );
         }
 
         // Descriptor versions (and the constraint_version /
@@ -175,8 +179,6 @@ impl MetadataCommitApplier {
     }
 }
 
-/// The fail point that holds back node `node_id`'s apply of backup schedule
-/// marks.
-pub fn backup_mark_fail_point(node_id: u64) -> String {
-    format!("backup_schedule::mark_apply::node{node_id}")
-}
+/// The fail point that holds back a node's apply of backup schedule marks.
+/// A test arms it for one node.
+pub const BACKUP_MARK_FAIL_POINT: &str = "backup_schedule::mark_apply";

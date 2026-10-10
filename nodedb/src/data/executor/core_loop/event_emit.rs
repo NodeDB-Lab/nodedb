@@ -125,8 +125,13 @@ impl CoreLoop {
     }
 
     /// Set the Event Plane producer (called after open, before event loop).
+    /// The producer's fail points take this core's scope.
     pub fn set_event_producer(&mut self, producer: crate::event::bus::EventProducer) {
         self.events.producer = Some(producer);
+        #[cfg(feature = "failpoints")]
+        if let Some(producer) = self.events.producer.as_mut() {
+            producer.set_fail_scope(self.fail_scope);
+        }
     }
 
     /// Emit a write event carrying any [`crate::event::types::RowId`].

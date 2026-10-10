@@ -184,7 +184,7 @@ impl CoreLoop {
         let ordered = merge_by_lsn(records, &redo_ops);
 
         self.replay_vector_wal(&ordered, num_cores, tombstones);
-        crate::fail_point!("replay::between_engine_passes");
+        crate::fail_point!(self.fail_scope(), "replay::between_engine_passes");
         self.replay_vector_extended_wal(&ordered, num_cores, tombstones);
         // Every document row the WAL names, standalone and redo alike, in LSN
         // order.
@@ -203,7 +203,7 @@ impl CoreLoop {
         // a WAL record is their only durable backing.
         self.replay_graph_node_label_wal(records, num_cores);
 
-        crate::fail_point!("replay::between_standalone_and_redo");
+        crate::fail_point!(self.fail_scope(), "replay::between_standalone_and_redo");
 
         // Every graph edge version the WAL names, standalone and redo alike, in
         // LSN order. The edges' CSR is rebuilt from the `EdgeStore` at open, so

@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use nodedb_types::fail_point::{FailAction, FailGuard};
+use nodedb_test_support::fail_point::{FailAction, FailGuard};
 
 use super::calvin_multishard_fixture::Fixture;
 use super::calvin_replica_content::{run_retrying, strict_session, sum_ddl, vshard_of};

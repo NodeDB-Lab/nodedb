@@ -98,7 +98,10 @@ pub(crate) fn fsync_and_track(file: &File, state: &mut DurabilityState) -> Resul
     // Crash injection: the kernel reports a writeback error at the fsync.
     // Everything already handed to the page cache is unrecoverable from here.
     #[cfg(feature = "failpoints")]
-    if let Some(detail) = nodedb_types::fail_point::eval_fail("wal::fsync_failure") {
+    if let Some(detail) = nodedb_types::fail_point::eval_fail(
+        nodedb_types::fail_point::FailScope::Any,
+        "wal::fsync_failure",
+    ) {
         return Err(state.poison(format!(
             "fsync failed: failpoint wal::fsync_failure: {detail}"
         )));

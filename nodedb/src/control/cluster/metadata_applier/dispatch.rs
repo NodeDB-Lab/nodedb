@@ -315,10 +315,9 @@ impl MetadataCommitApplier {
     }
 }
 
-/// The fail point that holds back node `node_id`'s whole metadata apply.
-pub fn metadata_apply_hold_point(node_id: u64) -> String {
-    format!("metadata_apply::hold::node{node_id}")
-}
+/// The fail point that holds back a node's whole metadata apply. A test arms
+/// it for one node.
+pub const METADATA_APPLY_HOLD_POINT: &str = "metadata_apply::hold";
 
 #[async_trait::async_trait]
 impl MetadataApplier for MetadataCommitApplier {

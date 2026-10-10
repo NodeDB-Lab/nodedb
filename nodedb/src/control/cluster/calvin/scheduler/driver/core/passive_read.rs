@@ -248,10 +248,12 @@ impl Scheduler {
             let state = Arc::downgrade(&self.shared);
             #[cfg(feature = "failpoints")]
             let gates = gates.clone();
+            #[cfg(feature = "failpoints")]
+            let fail_scope = crate::fail_point::FailScope::Node(self.shared.node_id);
             tokio::spawn(async move {
                 #[cfg(feature = "failpoints")]
                 for gate in &gates {
-                    crate::control::fail_gate::wait(gate).await;
+                    crate::control::fail_gate::wait(fail_scope, gate).await;
                 }
                 let deadline = tokio::time::Instant::now() + budget;
                 if let Err(error) = propose_calvin_read_result(state, proposal, deadline).await {

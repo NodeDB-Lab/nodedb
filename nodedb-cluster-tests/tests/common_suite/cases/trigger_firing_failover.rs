@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use nodedb::event::cdc::CdcOffset;
-use nodedb_types::fail_point::{FailAction, FailGuard};
+use nodedb_test_support::fail_point::{FailAction, FailGuard};
 
 const SRC: &str = "firing_failover_src";
 const ROWS: [&str; 3] = ["r1", "r2", "r3"];
@@ -81,8 +81,9 @@ impl Gate {
     fn install(dir: &Path, point: &str, node_id: u64) -> Self {
         let release = dir.join(format!("{point}-node{node_id}"));
         let parked = dir.join(format!("{point}-node{node_id}.parked"));
-        let guard = FailGuard::install(
-            &format!("trigger::{point}::node{node_id}"),
+        let guard = FailGuard::for_node(
+            node_id,
+            &format!("trigger::{point}"),
             FailAction::WaitForFile(release.clone()),
         );
         Self {

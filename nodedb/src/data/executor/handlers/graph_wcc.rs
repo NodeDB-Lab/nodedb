@@ -144,9 +144,10 @@ impl CoreLoop {
         // Fails this one core's round, so a test can check that the all-core
         // gather fails the query instead of merging the other cores.
         #[cfg(feature = "failpoints")]
-        if let Some(detail) =
-            crate::fail_point::eval_fail(&format!("graph::wcc_superstep::core{}", self.core_id))
-        {
+        if let Some(detail) = crate::fail_point::eval_fail(
+            self.fail_scope,
+            &format!("graph::wcc_superstep::core{}", self.core_id),
+        ) {
             return self.response_error(task, ErrorCode::Internal { detail });
         }
 

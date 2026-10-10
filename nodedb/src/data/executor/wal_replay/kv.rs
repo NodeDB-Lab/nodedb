@@ -68,7 +68,7 @@ impl CoreLoop {
             let record_lsn = record.header.lsn;
             let tombstones = &tombstones.for_database(database_id);
 
-            crate::fail_point!("replay::kv_mid_pass");
+            crate::fail_point!(self.fail_scope, "replay::kv_mid_pass");
 
             if is_put {
                 // Absolute-overwrite puts — see `kv_put.rs` for the record

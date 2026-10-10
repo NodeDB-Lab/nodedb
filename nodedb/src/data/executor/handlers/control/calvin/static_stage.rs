@@ -92,7 +92,7 @@ impl CoreLoop {
                 self.begin_calvin_plan_staging(task, synthetic_txn_id, *tenant_id, plan, body);
                 self.stage_calvin_plan(task, synthetic_txn_id, *tenant_id, plan, &mut staging)?;
                 // Test-only fault boundary after a potentially-mutating stage.
-                crate::fail_point!("calvin_static::during_overlay_stage");
+                crate::fail_point!(self.fail_scope, "calvin_static::during_overlay_stage");
             }
             Ok::<CalvinReply, ErrorCode>(staging.reply)
         }));

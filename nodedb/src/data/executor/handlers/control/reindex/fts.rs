@@ -33,11 +33,12 @@ impl CoreLoop {
             return Ok(());
         };
         let token = ticket.token();
+        let fail_scope = self.fail_scope;
         let (tx, rx) = mpsc::sync_channel::<crate::Result<FtsRebuilt>>(1);
         let spawned = std::thread::Builder::new()
             .name(format!("reindex-fts-{}", self.core_id))
             .spawn(move || {
-                hold_build(FTS_BUILD_HOLD);
+                hold_build(fail_scope, FTS_BUILD_HOLD);
                 // The receiver is gone only when the core shut down.
                 let _ = tx.send(ticket.read().map(FtsSnapshot::compact));
             });

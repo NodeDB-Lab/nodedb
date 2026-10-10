@@ -14,6 +14,9 @@ use super::config::CoreCompactionConfig;
 /// Parameters for [`spawn_core`](super::spawn_core).
 pub struct SpawnCoreParams<'a> {
     pub core_id: usize,
+    /// The node this core runs on. Its fail points evaluate in this node's
+    /// scope.
+    pub node_id: u64,
     pub request_rx: Consumer<BridgeRequest>,
     pub response_tx: Producer<BridgeResponse>,
     pub data_dir: &'a Path,

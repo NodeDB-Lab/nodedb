@@ -85,7 +85,7 @@ impl CoreLoop {
         self.write_index.record_stamps =
             super::core_loop::write_index::RecordStamps::from_wal(records);
 
-        crate::fail_point!("replay::before_engine_passes");
+        crate::fail_point!(self.fail_scope, "replay::before_engine_passes");
 
         // Every engine-bearing record class — standalone (autocommit) records
         // and the sub-records of committed `TransactionRedo` groups alike —
@@ -114,7 +114,7 @@ impl CoreLoop {
             return Err(e);
         }
 
-        crate::fail_point!("replay::before_sync_hwm_pass");
+        crate::fail_point!(self.fail_scope, "replay::before_sync_hwm_pass");
 
         // Reconstruct sync HWM maps from SyncSeqAdvance records so
         // post-restart deduplication is correct. Fatal on error —

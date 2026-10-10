@@ -33,8 +33,8 @@ use crate::common;
 use common::cluster_harness::shared_steps::{fail_stopped, sequencer_admitted};
 use common::cluster_harness::{TestCluster, TestClusterNode, wait_for};
 
+use nodedb_test_support::fail_point::{FailAction, FailGuard};
 use nodedb_test_support::native_harness::send_sql;
-use nodedb_types::fail_point::{FailAction, FailGuard};
 use nodedb_types::{DatabaseId, TenantId};
 
 use super::ts_native_ingest::{

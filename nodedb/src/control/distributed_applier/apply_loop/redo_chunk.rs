@@ -68,7 +68,10 @@ pub(super) fn prepare_stream_entry<'a>(
                 let applied = ctx.state.redo_chunks.apply_chunk(chunk).await;
                 // The chunk's records are durable here, its entry not yet
                 // concluded.
-                crate::fail_point!("redo_chunk::after_chunk_durable");
+                crate::fail_point!(
+                    crate::fail_point::FailScope::Node(ctx.state.node_id),
+                    "redo_chunk::after_chunk_durable"
+                );
                 finished(ctx, pos, stream, applied)
             }))
         }
@@ -218,7 +221,10 @@ pub(super) fn prepare_chunked_final<'a>(
     };
     // Every chunk is durable and the final entry committed; nothing of the
     // final entry applied yet.
-    crate::fail_point!("redo_chunk::before_final_install");
+    crate::fail_point!(
+        crate::fail_point::FailScope::Node(ctx.state.node_id),
+        "redo_chunk::before_final_install"
+    );
     let assembled = match &taken {
         Some(open) => open.assemble(chunked.count, chunked.len),
         None => Err(RedoChunkError::NotOpen {

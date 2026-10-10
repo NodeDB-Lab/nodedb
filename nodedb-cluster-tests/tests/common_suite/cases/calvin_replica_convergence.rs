@@ -23,8 +23,8 @@
 
 use super::calvin_multishard_fixture::{Fixture, keyed_ddl};
 use super::calvin_replica_content::{
-    first_column, names_on_distinct_vshards, run_retrying, strict_session, sum_ddl, vshard_of,
-    wait_replicas_agree,
+    assert_balances_match_entries, names_on_distinct_vshards, run_retrying, strict_session,
+    sum_ddl, vshard_of, wait_replicas_agree,
 };
 
 /// Rounds each session runs.
@@ -133,43 +133,6 @@ async fn truncating_writes(client: &tokio_postgres::Client, names: &Names) {
     }
 }
 
-/// A served number column as `f64`.
-fn number(text: &str, what: &str) -> f64 {
-    text.parse()
-        .unwrap_or_else(|e| panic!("{what} `{text}` is not a number: {e}"))
-}
-
-/// Each account's served balance equals the sum of its served entries.
-async fn assert_balances_match_entries(client: &tokio_postgres::Client, names: &Names) {
-    for account in 0..ACCOUNTS {
-        let balances = first_column(
-            client,
-            &format!(
-                "SELECT balance FROM {} WHERE id = 'acc-{account}'",
-                names.accts
-            ),
-        )
-        .await;
-        let [balance] = balances.as_slice() else {
-            panic!("acc-{account} has one row, found balances {balances:?}");
-        };
-        let amounts = first_column(
-            client,
-            &format!(
-                "SELECT amount FROM {} WHERE account_id = 'acc-{account}'",
-                names.entries
-            ),
-        )
-        .await;
-        let expected: f64 = amounts.iter().map(|a| number(a, "amount")).sum();
-        assert_eq!(
-            number(balance, "balance"),
-            expected,
-            "acc-{account}'s balance is the sum of its entries {amounts:?}"
-        );
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn replicas_converge_under_concurrent_fast_path_and_calvin_writes() {
     let [accts, entries, notes, scratch] =
@@ -241,7 +204,13 @@ async fn replicas_converge_under_concurrent_fast_path_and_calvin_writes() {
             "{collection} holds rows after the workload; equal empty replicas prove nothing"
         );
     }
-    assert_balances_match_entries(&fx.coordinator().client, &names).await;
+    assert_balances_match_entries(
+        &fx.coordinator().client,
+        &names.accts,
+        &names.entries,
+        ACCOUNTS,
+    )
+    .await;
 
     fx.cluster.shutdown().await;
 }

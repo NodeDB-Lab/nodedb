@@ -142,7 +142,10 @@ impl Scheduler {
             .get(&txn_id)
             .and_then(|pending| pending.redo.as_ref())
             .is_some_and(|owed| {
-                crate::control::fail_gate::holds_redo_propose(&owed.payload.collections)
+                crate::control::fail_gate::holds_redo_propose(
+                    self.shared.node_id,
+                    &owed.payload.collections,
+                )
             });
         if held {
             tracing::info!(

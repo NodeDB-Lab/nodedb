@@ -247,6 +247,7 @@ impl TestServer {
             let core_handle =
                 crate::core_loop_runner::spawn_core_loop(crate::core_loop_runner::CoreLoopSpawn {
                     idx,
+                    node_id: shared.node_id,
                     // Single-core harness (`Dispatcher::new(1, ..)`).
                     num_cores: 1,
                     data_side,

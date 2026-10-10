@@ -27,20 +27,6 @@ use super::types::WriteEvent;
 /// Default ring buffer capacity per core (must be power of two).
 const DEFAULT_EVENT_BUS_CAPACITY: usize = 65_536;
 
-/// Whether a test armed fail point `event::bus::drop::<collection>` for
-/// `event`'s collection. The event is then lost as a full ring loses it: its
-/// sequence is spent and the Event Plane recovers it from the WAL.
-#[cfg(feature = "failpoints")]
-fn dropped_by_fail_point(event: &WriteEvent) -> bool {
-    crate::fail_point::eval_fail(&format!("event::bus::drop::{}", event.collection)).is_some()
-}
-
-/// Without the `failpoints` feature no event is dropped here.
-#[cfg(not(feature = "failpoints"))]
-fn dropped_by_fail_point(_event: &WriteEvent) -> bool {
-    false
-}
-
 /// The producer half given to a Data Plane core.
 ///
 /// `Send` at the trait level, but **logically owned by exactly one
@@ -69,6 +55,9 @@ pub struct EventProducer {
     /// disconnect exactly once per producer instead of spamming
     /// a warning for every dropped event.
     disconnect_logged: AtomicBool,
+    /// The scope of the ring-drop fail point: the owning core's node.
+    #[cfg(feature = "failpoints")]
+    fail_scope: crate::fail_point::FailScope,
 }
 
 impl EventProducer {
@@ -84,7 +73,7 @@ impl EventProducer {
     pub fn emit(&mut self, mut event: WriteEvent) -> bool {
         self.numbering.stamp(&mut event);
         let sequence = event.sequence;
-        let pushed = if dropped_by_fail_point(&event) {
+        let pushed = if self.dropped_by_fail_point(&event) {
             false
         } else {
             self.push(event)
@@ -93,6 +82,31 @@ impl EventProducer {
         // the ring, or knows it was dropped.
         self.progress.note_emitted(sequence);
         pushed
+    }
+
+    /// Scope this producer's ring-drop fail point to the owning core's node.
+    #[cfg(feature = "failpoints")]
+    pub fn set_fail_scope(&mut self, scope: crate::fail_point::FailScope) {
+        self.fail_scope = scope;
+    }
+
+    /// Whether a test armed fail point `event::bus::drop::<collection>` for
+    /// `event`'s collection on this producer's node. The event is then lost
+    /// as a full ring loses it: its sequence is spent and the Event Plane
+    /// recovers it from the WAL.
+    #[cfg(feature = "failpoints")]
+    fn dropped_by_fail_point(&self, event: &WriteEvent) -> bool {
+        crate::fail_point::eval_fail(
+            self.fail_scope,
+            &format!("event::bus::drop::{}", event.collection),
+        )
+        .is_some()
+    }
+
+    /// Without the `failpoints` feature no event is dropped here.
+    #[cfg(not(feature = "failpoints"))]
+    fn dropped_by_fail_point(&self, _event: &WriteEvent) -> bool {
+        false
     }
 
     /// Update the backpressure state, then push `event` onto the ring.
@@ -242,6 +256,8 @@ pub fn create_event_bus_with_capacity(
             progress: Arc::clone(&progress),
             numbering: RecordNumbering::new(),
             disconnect_logged: AtomicBool::new(false),
+            #[cfg(feature = "failpoints")]
+            fail_scope: crate::fail_point::FailScope::Any,
         });
 
         consumers.push(EventConsumerRx {

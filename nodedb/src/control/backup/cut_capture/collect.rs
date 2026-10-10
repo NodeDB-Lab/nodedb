@@ -101,7 +101,11 @@ pub(crate) async fn capture_database(
     // A test parks the backup here: every capture is taken, so a write from
     // now on lies above the cut.
     #[cfg(feature = "failpoints")]
-    crate::control::fail_gate::wait("backup::database::after_cut").await;
+    crate::control::fail_gate::wait(
+        crate::fail_point::FailScope::Node(state.node_id),
+        "backup::database::after_cut",
+    )
+    .await;
     assemble(state, cut, replies)
 }
 

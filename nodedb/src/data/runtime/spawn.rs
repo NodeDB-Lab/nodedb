@@ -29,6 +29,7 @@ pub fn spawn_core(
 ) -> std::io::Result<(JoinHandle<()>, EventFdNotifier)> {
     let SpawnCoreParams {
         core_id,
+        node_id,
         request_rx,
         response_tx,
         data_dir,
@@ -77,6 +78,7 @@ pub fn spawn_core(
                 array_catalog,
             )
             .expect("failed to open CoreLoop engines");
+            core.set_fail_scope(node_id);
 
             wire_core_dependencies(
                 &mut core,

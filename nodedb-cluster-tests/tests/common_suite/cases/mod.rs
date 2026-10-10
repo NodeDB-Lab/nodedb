@@ -39,6 +39,7 @@ mod calvin_read_version_leader_move;
 mod calvin_remote_participant_report;
 mod calvin_replica_content;
 mod calvin_replica_convergence;
+mod calvin_replica_held_apply;
 mod calvin_split_leader;
 mod calvin_submit_routed_cross_node;
 mod calvin_superseded_collection_cluster;
