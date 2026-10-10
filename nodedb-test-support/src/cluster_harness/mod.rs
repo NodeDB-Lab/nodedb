@@ -22,7 +22,7 @@ pub mod retriable;
 pub mod shared_steps;
 pub mod wait;
 
-pub use cluster::{StoppedCluster, StoppedNodeInfo, TestCluster};
+pub use cluster::{GroupLeader, StoppedCluster, StoppedNodeInfo, TestCluster};
 pub use node::TestClusterNode;
 pub use pitr::PitrStorage;
 pub use retriable::{is_no_serving_leader, read_once_a_leader_exists};
