@@ -44,15 +44,78 @@ pub fn statement_fires_joined_body(state: &SharedState, tasks: &[PhysicalTask]) 
 }
 
 /// Whether a statement outside a transaction block runs in an implicit
-/// transaction. It does when it fires a joined body, and when it is a
-/// `MERGE` into a collection an edge was ever written into: the MERGE then
-/// stages each removed row with its node's edge tasks, and COMMIT applies
-/// them together.
+/// transaction. It does in three cases:
+///
+/// - It fires a joined body.
+/// - It is a `MERGE` into a collection an edge was ever written into. The
+///   MERGE then stages each removed row with its node's edge tasks, and
+///   COMMIT applies them together.
+/// - It is an `INSERT ... SELECT`, `UPDATE ... FROM` or `MERGE` that writes
+///   the source of a materialized sum whose target lives on another vShard.
+///   The expansion ships that balance on an `ApplyBalanceDelta` task homed
+///   on the target, and COMMIT applies it with the source rows.
 pub fn statement_needs_implicit_txn(state: &SharedState, tasks: &[PhysicalTask]) -> bool {
     statement_fires_joined_body(state, tasks)
         || tasks
             .iter()
-            .any(|task| merges_into_edge_bearing(state, task))
+            .any(|task| merges_into_edge_bearing(state, task) || moves_cross_shard_sum(state, task))
+}
+
+/// Whether `task` is an unexpanded `INSERT ... SELECT`, `UPDATE ... FROM` or
+/// `MERGE` whose written collection drives a materialized sum with a
+/// cross-shard target. Its orchestrator applies on the written collection's
+/// vShard alone, so it cannot move that target. A catalog read error reads
+/// as a cross-shard sum, so the statement takes the transaction.
+fn moves_cross_shard_sum(state: &SharedState, task: &PhysicalTask) -> bool {
+    let PhysicalPlan::Document(op) = &task.plan else {
+        return false;
+    };
+    let written = match op {
+        DocumentOp::InsertSelect {
+            target_collection, ..
+        }
+        | DocumentOp::UpdateFromJoin {
+            target_collection,
+            source_rows: None,
+            ..
+        }
+        | DocumentOp::Merge {
+            target_collection,
+            resolved_inserts: None,
+            ..
+        } => target_collection.as_str(),
+        DocumentOp::UpdateFromJoin { .. }
+        | DocumentOp::Merge { .. }
+        | DocumentOp::PointGet { .. }
+        | DocumentOp::PointPut { .. }
+        | DocumentOp::PointInsert { .. }
+        | DocumentOp::PointDelete { .. }
+        | DocumentOp::PointUpdate { .. }
+        | DocumentOp::Upsert { .. }
+        | DocumentOp::BatchInsert { .. }
+        | DocumentOp::BulkUpdate { .. }
+        | DocumentOp::BulkDelete { .. }
+        | DocumentOp::Truncate { .. }
+        | DocumentOp::Scan { .. }
+        | DocumentOp::RangeScan { .. }
+        | DocumentOp::Register { .. }
+        | DocumentOp::IndexLookup { .. }
+        | DocumentOp::IndexedFetch { .. }
+        | DocumentOp::DropIndex { .. }
+        | DocumentOp::BackfillIndex { .. }
+        | DocumentOp::EstimateCount { .. }
+        | DocumentOp::MaterializeScan { .. }
+        | DocumentOp::ResolveWrite(_)
+        | DocumentOp::ResolvedWrite { .. }
+        | DocumentOp::ApplyBalanceDelta { .. } => return false,
+    };
+    crate::control::planner::materialized_sum::drives_cross_shard_sum(
+        state,
+        written,
+        task.tenant_id,
+        task.database_id,
+    )
+    .unwrap_or(true)
 }
 
 /// Whether `task` is a `MERGE` into an edge-bearing collection. A catalog

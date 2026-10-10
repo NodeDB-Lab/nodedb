@@ -105,6 +105,15 @@ pub(crate) async fn run_update_from_join(
     state: &SharedState,
     args: UpdateFromJoinArgs<'_>,
 ) -> crate::Result<Response> {
+    // The write applies on the target's vShard alone, so it folds only
+    // co-resident balances.
+    crate::control::planner::materialized_sum::refuse_cross_shard_orchestration(
+        state,
+        args.target_collection,
+        args.tenant_id,
+        args.database_id,
+        "UPDATE ... FROM",
+    )?;
     // Checked once: a target driving no materialized-sum binding, declaring
     // no period lock AND carrying no write policy skips the RESOLVE round
     // trip and retry loop entirely. A write policy needs the matched

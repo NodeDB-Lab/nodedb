@@ -17,6 +17,10 @@ use super::store::SessionStore;
 use crate::bridge::envelope::{PhysicalPlan, Response};
 use crate::control::insert_select::resolve_and_emit_insert_select_ops;
 use crate::control::merge_orchestrator::resolve_and_emit_merge_ops;
+use crate::control::planner::calvin::write_class::{
+    plan_counts_toward_statement_tag, plans_have_user_write,
+};
+use crate::control::server::shared::plan_admission::append_sum_and_period_targets;
 use crate::control::state::SharedState;
 use crate::control::update_from_join_orchestrator::resolve_and_emit_update_from_join_ops;
 use nodedb_physical::physical_plan::DocumentOp;
@@ -61,7 +65,8 @@ where
 /// every other plan, and outside a transaction block.
 ///
 /// The ops are `PointInsert` for an inserted row, `PointPut` for an updated
-/// row's post-image, and `PointDelete` for a removed row.
+/// row's post-image, `PointDelete` for a removed row, and an
+/// `ApplyBalanceDelta` for each cross-shard materialized-sum balance they move.
 pub(crate) async fn expand_in_tx(
     state: &SharedState,
     sessions: &SessionStore,
@@ -72,7 +77,7 @@ pub(crate) async fn expand_in_tx(
     if sessions.transaction_state(session_id) != TransactionState::InBlock {
         return Ok(None);
     }
-    let expanded = match &task.plan {
+    let (mut ops, kind) = match &task.plan {
         PhysicalPlan::Document(DocumentOp::Merge {
             resolved_inserts: None,
             ..
@@ -105,13 +110,32 @@ pub(crate) async fn expand_in_tx(
         }
         // A `BatchInsert` page is autocommit-shaped; only point ops give an overlay
         // post-image, per-row undo, and row-level redo, so expand back to points.
-        PhysicalPlan::Document(DocumentOp::BatchInsert { .. }) => (
-            expand_batch_insert(task).map_err(StagingGateError::Dispatch)?,
-            StagedTagKind::Insert,
-        ),
+        // The page carries the statement's resolution and deferrals already.
+        PhysicalPlan::Document(DocumentOp::BatchInsert { .. }) => {
+            return Ok(Some((
+                expand_batch_insert(task).map_err(StagingGateError::Dispatch)?,
+                StagedTagKind::Insert,
+            )));
+        }
         _ => return Ok(None),
     };
-    Ok(Some(expanded))
+    // The expanded point writes never passed statement admission. They take
+    // its sum and period-lock pass here. A cross-shard balance ships on an
+    // `ApplyBalanceDelta` task homed on the target's vShard, and the source
+    // write does not fold it.
+    let reads = append_sum_and_period_targets(
+        state,
+        &mut ops,
+        task.tenant_id,
+        task.database_id,
+        crate::types::TraceId::ZERO,
+    )
+    .await
+    .map_err(StagingGateError::Dispatch)?;
+    // The images each shipped balance was settled from join the read set, so
+    // COMMIT aborts when a concurrent write moved them.
+    sessions.record_read_entries(session_id, reads);
+    Ok(Some((ops, kind)))
 }
 
 /// Expand a `BatchInsert` page into one `PointInsert` op per row. Nothing is
@@ -186,8 +210,12 @@ where
 {
     // Each `stage_write` dispatches into the overlay AND buffers the concrete op
     // for COMMIT replay — the raw Merge/UpdateFromJoin/InsertSelect is never buffered.
+    // A balance task the expansion appended stages too, but its count describes
+    // a row the statement never named.
+    let has_user_write = plans_have_user_write(ops.iter().map(|op| &op.plan));
     let mut affected = 0usize;
     for op in ops {
+        let counts = plan_counts_toward_statement_tag(&op.plan, has_user_write);
         // A removed row of an edge-bearing collection carries its node's edge
         // tasks, read before the removal stages.
         let node_delete_tasks =
@@ -199,7 +227,9 @@ where
             .await
             .map_err(StagingGateError::Dispatch)?;
         let outcome = stage_write(state, sessions, session_id, op, &dispatch).await?;
-        affected += outcome.affected;
+        if counts {
+            affected += outcome.affected;
+        }
         super::node_delete_stage::stage_node_delete_tasks(
             state,
             sessions,

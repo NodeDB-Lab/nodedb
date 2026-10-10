@@ -19,7 +19,9 @@ use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 /// Resolve one in-transaction `UpdateFromJoin` task into the concrete,
 /// surrogate-carrying `PointPut` tasks its matched target rows expand to.
-/// `task.txn_id` must be the active transaction. Caller stages + buffers each op.
+/// `task.txn_id` must be the active transaction. The ops carry no sum or
+/// period-lock resolution: the caller runs the statement pass on them, then
+/// stages + buffers each one.
 pub(crate) async fn resolve_and_emit_update_from_join_ops(
     state: &SharedState,
     tenant_id: TenantId,
@@ -72,23 +74,6 @@ pub(crate) async fn resolve_and_emit_update_from_join_ops(
     )?
     .vshard();
 
-    // A join-column rewrite debits the target left and credits the one joined —
-    // resolving post-images alone would leave the abandoned target overstated.
-    let sum_bodies: Vec<&[u8]> = resolved
-        .iter()
-        .flat_map(|(_, _, body, old_body)| [body.as_slice(), old_body.as_slice()])
-        .collect();
-    let resolved_sum_targets =
-        crate::control::planner::materialized_sum::resolve_sum_targets_for_bodies(
-            state,
-            &sum_bodies,
-            target_collection.as_str(),
-            tenant_id,
-            task.database_id,
-            crate::types::TraceId::ZERO,
-        )
-        .await?;
-
     let mut out: Vec<PhysicalTask> = Vec::with_capacity(resolved.len());
     for (_doc_id, surrogate_u32, body, _old_body) in resolved {
         // The wire surrogate is never absent: every matched `UPDATE ... FROM`
@@ -109,7 +94,10 @@ pub(crate) async fn resolve_and_emit_update_from_join_ops(
                 // The op owns the statement's projection; expanded puts answer no client.
                 returning: None,
                 rls_filters: Vec::new(),
-                resolved_sum_targets: resolved_sum_targets.clone(),
+                // Filled by the caller's sum and period-lock pass. It reads
+                // the stored row, so a join-column rewrite debits the target
+                // the row leaves as well as crediting the one it joins.
+                resolved_sum_targets: Vec::new(),
             }),
             post_set_op: PostSetOp::None,
             txn_id: task.txn_id,

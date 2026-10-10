@@ -40,13 +40,15 @@
 //! the presence of a resolved surrogate is what says "nobody else is applying
 //! this one".
 //!
-//! That leaves the Control-Plane orchestrators — `MERGE`, `UPDATE ... FROM`,
-//! `INSERT ... SELECT` and the staged-transaction expanders — untouched: they
-//! resolve their rows through
+//! The staged-transaction expanders for `MERGE`, `UPDATE ... FROM` and
+//! `INSERT ... SELECT` run this same pass on the point writes they emit. The
+//! autocommit orchestrators resolve their rows through
 //! [`resolve_sum_targets_for_bodies`](super::resolve::resolve_sum_targets_for_bodies)
-//! and dispatch through `dispatch_local` without ever reaching this pass, so
-//! every join value they resolve stays resolved and the Data Plane keeps
-//! applying their deltas exactly as before.
+//! and apply on the source's vShard alone, so they refuse a source with a
+//! cross-shard target
+//! ([`refuse_cross_shard_orchestration`](super::resolve::refuse_cross_shard_orchestration)).
+//! The SQL and native protocols run such a statement through the expanders
+//! in an implicit transaction instead.
 //!
 //! # The images are only as good as the version they were read at
 //!

@@ -181,7 +181,27 @@ pub async fn append_derived_tasks(
         trace_id,
     )
     .await?;
+    append_sum_and_period_targets(state, tasks, tenant_id, database_id, trace_id).await
+}
 
+/// Resolve every write's materialized-sum targets, append one
+/// `ApplyBalanceDelta` task per cross-shard balance, and resolve every
+/// write's period-lock reference row.
+///
+/// A plain statement runs this through [`append_derived_tasks`]. The
+/// in-transaction expanders run it on the point writes they emit. So every
+/// write that moves a sum source ships its cross-shard balance on a task
+/// homed on the target's vShard.
+///
+/// Returns the read-set entries covering the images every cross-shard
+/// balance was settled from. The caller unions them into its read set.
+pub async fn append_sum_and_period_targets(
+    state: &SharedState,
+    tasks: &mut Vec<PhysicalTask>,
+    tenant_id: crate::types::TenantId,
+    database_id: crate::types::DatabaseId,
+    trace_id: TraceId,
+) -> crate::Result<Vec<crate::control::server::shared::session::read_set::ReadSetEntry>> {
     let sum_target_reads =
         crate::control::planner::materialized_sum::resolve_materialized_sum_targets(
             state,

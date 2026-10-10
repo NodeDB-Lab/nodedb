@@ -173,8 +173,10 @@ impl NodeDbPgHandler {
             let effective_schema = Some(&effective_schema_owned);
 
             // A statement outside a transaction block whose writes fire a
-            // BEFORE, INSTEAD OF or SYNC AFTER body, or a MERGE into an
-            // edge-bearing collection, runs in an implicit transaction,
+            // BEFORE, INSTEAD OF or SYNC AFTER body, a MERGE into an
+            // edge-bearing collection, or an INSERT ... SELECT, UPDATE ... FROM
+            // or MERGE into the source of a cross-shard materialized sum,
+            // runs in an implicit transaction,
             // ahead of every autocommit route:
             // its writes stage on their vShards' leaders and commit together
             // at its end.

@@ -507,6 +507,60 @@ mod tests {
         assert!(!table.try_acquire(TxnId::new(TxnId::AUTOCOMMIT_EPOCH, 2), truncate_keys));
     }
 
+    /// A fast-path point UPDATE of a balance target row and the Calvin
+    /// transaction that moves the row's balance lock the same row key
+    /// `Exclusive`. While the transaction holds its locks, from the grant
+    /// that stages the balance's post-image to the install, the UPDATE
+    /// cannot take the key. So it lands before the stage or after the
+    /// install, and the install never overwrites it.
+    #[test]
+    fn a_point_update_of_a_balance_target_is_fenced_by_the_balance_write() {
+        let balance = PhysicalPlan::Document(DocumentOp::ApplyBalanceDelta {
+            collection: qualified("accts"),
+            document_id: "00000009".to_owned(),
+            surrogate: Surrogate::new(9),
+            column: "balance".to_owned(),
+            delta: "5".to_owned(),
+            join_column: "account_id".to_owned(),
+            join_value: "acc".to_owned(),
+            declared_primary_key: None,
+        });
+        let update = PhysicalPlan::Document(DocumentOp::PointUpdate {
+            collection: qualified("accts"),
+            document_id: "acc".to_owned(),
+            surrogate: Some(Surrogate::new(9)),
+            pk_bytes: b"acc".to_vec(),
+            updates: Vec::new(),
+            returning: None,
+            rls_filters: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            resolved_sum_targets: Vec::new(),
+            declared_primary_key: None,
+        });
+
+        // The scheduler expands a transaction's write keys by the same rule.
+        let mut calvin_keys = WriteKeys::default();
+        add_plan_write_keys(&mut calvin_keys, &balance).expect("a balance write has keys");
+        let held = expand_write_key_sets(&calvin_keys.into_key_sets());
+        let (requested, sequenced) = keys_of(&update);
+        assert!(sequenced);
+        assert_eq!(
+            held.get(&surrogate_key("accts", 9)),
+            Some(&LockMode::Exclusive)
+        );
+        assert_eq!(
+            requested.get(&surrogate_key("accts", 9)),
+            Some(&LockMode::Exclusive)
+        );
+
+        let mut table = LockManager::new();
+        assert!(table.try_acquire(TxnId::new(1, 0), held));
+        assert!(
+            !table.try_acquire(TxnId::new(TxnId::AUTOCOMMIT_EPOCH, 0), requested),
+            "the UPDATE must not take the row while the balance write holds it"
+        );
+    }
+
     /// A committed redo locks every collection it writes `Exclusive`.
     #[test]
     fn a_whole_collection_request_locks_each_collection_exclusive() {

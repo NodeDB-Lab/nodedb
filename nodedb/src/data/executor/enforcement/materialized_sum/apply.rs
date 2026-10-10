@@ -43,11 +43,12 @@
 //! ([`sum_target_is_co_resident`](crate::query::sum_target_is_co_resident))
 //! that exists so the two answers cannot differ.
 //!
-//! A cross-shard target the plan DOES resolve is still applied here: the
-//! Control-Plane orchestrators (`MERGE`, `UPDATE ... FROM`, `INSERT ... SELECT`,
-//! and the staged-transaction expanders) resolve their rows and dispatch their
-//! own concrete work without appending a sibling balance task, so for them the
-//! resolution still means "this transaction owns it".
+//! No write path hands this core a cross-shard target it must apply. Plain
+//! writes and the in-transaction expanders take the same Control-Plane pass,
+//! which ships every cross-shard balance on its own task. The autocommit
+//! orchestrators (`MERGE`, `UPDATE ... FROM`, `INSERT ... SELECT`) refuse a
+//! source that drives a cross-shard target, and the SQL and native protocols
+//! run such a statement through the expanders instead.
 //!
 //! # Identity comes from the plan, never from a store probe
 //!
@@ -174,11 +175,7 @@ impl CoreLoop {
                 // collection consults.
                 //
                 // The absence of the resolution IS the instruction; nothing is
-                // re-derived. A cross-shard target the plan DID resolve was
-                // resolved by a Control-Plane orchestrator that ships no
-                // sibling task — `MERGE`, `UPDATE ... FROM`, `INSERT ... SELECT`
-                // and the staged-transaction expanders all dispatch their own
-                // concrete work — so it is still this transaction's to apply.
+                // re-derived.
                 if !co_resident
                     && resolved_target(ctx, &binding.target_collection, &join_value).is_none()
                 {

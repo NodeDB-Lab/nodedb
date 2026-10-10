@@ -143,8 +143,9 @@ pub(super) async fn execute_planned(
     }
 
     // A statement outside a transaction block whose writes fire a BEFORE,
-    // INSTEAD OF or SYNC AFTER body, or a MERGE into an edge-bearing
-    // collection, runs in an implicit transaction ahead of every autocommit
+    // INSTEAD OF or SYNC AFTER body, a MERGE into an edge-bearing collection,
+    // or a join-expanding write into the source of a cross-shard
+    // materialized sum, runs in an implicit transaction ahead of every autocommit
     // route: its writes stage on their vShards' leaders and commit together
     // at its end.
     let in_txn_block = ctx.sessions.transaction_state(ctx.peer_addr) == TransactionState::InBlock;

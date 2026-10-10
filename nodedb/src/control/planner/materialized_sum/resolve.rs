@@ -280,12 +280,14 @@ fn set_resolved(op: &mut DocumentOp, resolved: Vec<ResolvedSumTarget>) {
 /// Resolve the materialized-sum targets for a set of row BODIES of one source
 /// collection, for a caller that holds the bodies itself rather than a plan.
 ///
-/// This is the seam the Control-Plane orchestrators use. `INSERT ... SELECT`,
-/// `MERGE` and `UPDATE ... FROM` all resolve their rows on the Control Plane and
-/// re-issue concrete work (a `BatchInsert` page, an APPLY pass, a write pass)
-/// through `dispatch_local`, which never passes through
+/// This is the seam the autocommit Control-Plane orchestrators use.
+/// `INSERT ... SELECT`, `MERGE` and `UPDATE ... FROM` resolve their rows on the
+/// Control Plane and re-issue concrete work (a `BatchInsert` page, an APPLY
+/// pass, a write pass) that never passes through
 /// [`resolve_materialized_sum_targets`]. Without this they will ship an empty
-/// resolution and the Data-Plane fold will have no target to address.
+/// resolution and the Data-Plane fold will have no target to address. Every
+/// binding they resolve is co-resident:
+/// [`refuse_cross_shard_orchestration`] refuses the others first.
 ///
 /// `source_collection` is the db-qualified name as it appears on the plan.
 /// Returns an empty vec — and issues no lookup at all — when the collection
@@ -339,6 +341,59 @@ pub fn source_drives_bindings(
         tenant_id,
         source,
     )
+}
+
+/// Whether `source_collection` drives a materialized sum whose target does not
+/// share its vShard. `source_collection` is the db-qualified plan name.
+///
+/// Such a balance cannot ride a write applied on the source's vShard alone.
+/// It ships on an `ApplyBalanceDelta` task homed on the target, so the write
+/// that moves it must run where Calvin can commit the pair together.
+pub fn drives_cross_shard_sum(
+    state: &SharedState,
+    source_collection: &str,
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+) -> crate::Result<bool> {
+    let Some(bindings) = source_drives_bindings(state, source_collection, tenant_id, database_id)?
+    else {
+        return Ok(false);
+    };
+    let source = nodedb_types::CollectionKey::from_qualified_str(database_id, source_collection)?;
+    Ok(bindings.iter().any(|binding| {
+        !crate::query::sum_target_is_co_resident(source, &binding.target_collection)
+    }))
+}
+
+/// Refuse a Control-Plane orchestrated write into `source_collection` when it
+/// drives a cross-shard materialized sum. `statement` names the statement
+/// kind for the error.
+///
+/// An orchestrator applies on the written collection's vShard alone. A
+/// cross-shard balance travels on an `ApplyBalanceDelta` task that only a
+/// transaction commits with the source rows. So the SQL and native protocols
+/// run such a statement in an implicit transaction and never reach the
+/// orchestrator with it. A route that reaches it anyway is refused here:
+/// folding the balance on the source's core writes a row that vShard does
+/// not own.
+pub fn refuse_cross_shard_orchestration(
+    state: &SharedState,
+    source_collection: &str,
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+    statement: &str,
+) -> crate::Result<()> {
+    if drives_cross_shard_sum(state, source_collection, tenant_id, database_id)? {
+        return Err(crate::Error::FeatureNotSupported {
+            detail: format!(
+                "{statement} into '{source_collection}' moves a materialized sum whose target \
+                 lives on another vShard, and this route runs it outside a transaction. Run \
+                 the statement over the SQL or native protocol, which commits the balance \
+                 with the source rows."
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Resolve one already-extracted join VALUE to its target row's surrogate.
@@ -732,5 +787,145 @@ mod tests {
             ),
             other => panic!("plan shape changed: {other:?}"),
         }
+    }
+
+    /// The fixture pair this module's cross-shard tests rest on.
+    #[test]
+    fn the_fixture_target_is_cross_shard() {
+        assert_ne!(
+            nodedb_types::CollectionKey::from_bare(DB, "entries").vshard(),
+            nodedb_types::CollectionKey::from_bare(DB, "accounts").vshard(),
+            "'accounts' must not share 'entries'' vShard"
+        );
+    }
+
+    /// A staged `INSERT ... SELECT` emits one `PointInsert` per copied row,
+    /// in the open transaction. The pass the expander runs on them ships each
+    /// cross-shard balance on a task homed on the target, in that same
+    /// transaction. The redo's fold table then names no cross-shard target,
+    /// so the install never folds one on the source's core.
+    #[tokio::test]
+    async fn expanded_inserts_ship_cross_shard_balances_and_fold_none() {
+        let (state, _directory) = test_state();
+        declare_binding(&state);
+        state
+            .surrogate_assigner
+            .assign(
+                nodedb_types::CollectionKey::from_bare(DB, "accounts"),
+                TENANT,
+                b"acc-1",
+            )
+            .await
+            .expect("bind target row");
+        let txn = Some(crate::types::TxnId::new(41));
+        let mut tasks: Vec<PhysicalTask> = (0..2)
+            .map(|_| {
+                let mut task = insert_task("entries", body("acc-1"));
+                task.txn_id = txn;
+                task
+            })
+            .collect();
+
+        let reads = crate::control::server::shared::plan_admission::append_sum_and_period_targets(
+            &state,
+            &mut tasks,
+            TENANT,
+            DB,
+            TraceId::ZERO,
+        )
+        .await
+        .expect("the pass succeeds");
+        assert!(reads.is_empty(), "an insert reads no image");
+
+        let balances: Vec<&PhysicalTask> = tasks
+            .iter()
+            .filter(|task| {
+                matches!(
+                    task.plan,
+                    PhysicalPlan::Document(DocumentOp::ApplyBalanceDelta { .. })
+                )
+            })
+            .collect();
+        assert_eq!(balances.len(), 2, "one balance per copied row");
+        for balance in balances {
+            assert_eq!(
+                balance.vshard_id,
+                crate::query::sum_target_vshard(DB, "accounts")
+            );
+            assert_eq!(balance.txn_id, txn, "the balance joins the transaction");
+            match &balance.plan {
+                PhysicalPlan::Document(DocumentOp::ApplyBalanceDelta { delta, .. }) => {
+                    assert_eq!(delta, "25");
+                }
+                other => panic!("plan shape changed: {other:?}"),
+            }
+        }
+
+        let plans: Vec<PhysicalPlan> = tasks.iter().map(|task| task.plan.clone()).collect();
+        assert!(
+            crate::control::wal_replication::transaction_redo::sum_targets::redo_sum_targets(
+                &plans
+            )
+            .is_empty(),
+            "the source core folds no cross-shard target"
+        );
+    }
+
+    /// A source that drives a cross-shard target is reported, and the
+    /// autocommit orchestrators refuse it with the statement and collection
+    /// named. A collection that drives nothing passes.
+    #[test]
+    fn a_cross_shard_source_refuses_orchestration() {
+        let (state, _directory) = test_state();
+        declare_binding(&state);
+
+        assert!(drives_cross_shard_sum(&state, "entries", TENANT, DB).expect("index probe"));
+        assert!(!drives_cross_shard_sum(&state, "unrelated", TENANT, DB).expect("index probe"));
+
+        match refuse_cross_shard_orchestration(&state, "entries", TENANT, DB, "INSERT ... SELECT") {
+            Err(crate::Error::FeatureNotSupported { detail }) => {
+                assert!(detail.contains("INSERT ... SELECT"), "{detail}");
+                assert!(detail.contains("'entries'"), "{detail}");
+            }
+            other => panic!("expected FeatureNotSupported, got {other:?}"),
+        }
+        refuse_cross_shard_orchestration(&state, "unrelated", TENANT, DB, "MERGE")
+            .expect("a collection with no binding orchestrates");
+    }
+
+    /// A source whose every target shares its vShard rides the source write,
+    /// so it neither reports a cross-shard sum nor refuses orchestration.
+    #[test]
+    fn a_co_resident_source_orchestrates() {
+        let (state, _directory) = test_state();
+        let (source, target) = ("uo_entries", "uo_accounts");
+        assert_eq!(
+            nodedb_types::CollectionKey::from_bare(DB, source).vshard(),
+            nodedb_types::CollectionKey::from_bare(DB, target).vshard(),
+            "the pair must share a vShard"
+        );
+        let catalog = state.credentials.catalog();
+        let mut stored = StoredCollection::stamped_for_test(TENANT.as_u64(), target, "tester");
+        stored.materialized_sums.push(MaterializedSumDef {
+            target_collection: target.to_string(),
+            target_column: "balance".to_string(),
+            source_collection: source.to_string(),
+            join_column: "account_id".to_string(),
+            value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+        });
+        catalog
+            .put_collection(DB, &stored)
+            .expect("persist target collection");
+        catalog
+            .put_collection(
+                DB,
+                &StoredCollection::stamped_for_test(TENANT.as_u64(), source, "tester"),
+            )
+            .expect("persist source collection");
+        state.materialized_sum_index.invalidate();
+
+        assert!(!drives_cross_shard_sum(&state, source, TENANT, DB).expect("index probe"));
+        refuse_cross_shard_orchestration(&state, source, TENANT, DB, "UPDATE ... FROM")
+            .expect("a co-resident sum orchestrates");
     }
 }

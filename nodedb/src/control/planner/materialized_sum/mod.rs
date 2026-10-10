@@ -29,6 +29,7 @@ pub use cross_shard::append_cross_shard_balance_tasks;
 pub use extract::join_value_from_body;
 pub use index::MaterializedSumIndex;
 pub use resolve::{
-    resolve_materialized_sum_targets, resolve_sum_targets_for_bodies, source_drives_bindings,
+    drives_cross_shard_sum, refuse_cross_shard_orchestration, resolve_materialized_sum_targets,
+    resolve_sum_targets_for_bodies, source_drives_bindings,
 };
 pub use resolve_target::ResolvedTargets;
