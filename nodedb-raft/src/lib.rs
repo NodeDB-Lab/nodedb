@@ -10,6 +10,8 @@
 //! catalog and the cross-engine surrogate counter).
 
 pub mod error;
+#[cfg(feature = "failpoints")]
+mod fail_gate;
 pub mod log;
 pub mod message;
 pub mod node;

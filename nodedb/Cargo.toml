@@ -188,4 +188,4 @@ io-uring = { workspace = true }
 default = []
 # Enables crash-injection points used by recovery tests. Off by default; tests
 # that exercise the framework opt in via `--features failpoints`.
-failpoints = ["nodedb-types/failpoints", "nodedb-wal/failpoints"]
+failpoints = ["nodedb-types/failpoints", "nodedb-wal/failpoints", "nodedb-cluster/failpoints"]

@@ -407,6 +407,10 @@ impl<S: LogStorage> RaftNode<S> {
     /// up for promotion) but intentionally excluded from this calculation
     /// so adding a learner never weakens the commit quorum.
     pub(super) fn try_advance_commit_index(&mut self) {
+        #[cfg(feature = "failpoints")]
+        if crate::fail_gate::holds_commit(self.config.node_id, self.config.group_id) {
+            return;
+        }
         let leader = match &self.leader_state {
             Some(ls) => ls,
             None => return,
