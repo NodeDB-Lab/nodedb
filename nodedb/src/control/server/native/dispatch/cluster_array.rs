@@ -2,9 +2,9 @@
 
 //! `ClusterArray` plan dispatch for the native protocol.
 //!
-//! `sql_loop.rs` and `single_task.rs` intercept a `PhysicalPlan::ClusterArray`
-//! task right after their own in-transaction routing gate and delegate to the
-//! shared, protocol-neutral core
+//! `single_task.rs` intercepts a `PhysicalPlan::ClusterArray` task right
+//! after its own in-transaction routing gate and delegates to the shared,
+//! protocol-neutral core
 //! (`shared::cluster_array_dispatch::execute_cluster_array`), then convert
 //! the outcome into native wire columns/rows or a count-bearing outcome. Metering
 //! is not applied on this path, matching pgwire's `ClusterArray`

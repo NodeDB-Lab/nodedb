@@ -129,6 +129,9 @@ impl<'a> StatementExecutor<'a> {
         // locks) join the statement as they do for a client statement. The
         // plan never carries a Calvin OLLP prediction or a resolved write:
         // the planner emits neither, so every task takes the staging gate.
+        // They read their source rows through the transaction this statement
+        // stages into, so they see its earlier statements.
+        let read_txn = self.read_txn().await?;
         let (tasks, planned, lease_scope, sum_target_reads) =
             crate::control::server::shared::retry::retry_on_schema_change(
                 &self.state.lease_drain,
@@ -149,6 +152,7 @@ impl<'a> StatementExecutor<'a> {
                             &mut tasks,
                             self.tenant_id,
                             self.database_id,
+                            read_txn,
                             crate::types::TraceId::ZERO,
                         )
                         .await?;
@@ -197,6 +201,20 @@ impl<'a> StatementExecutor<'a> {
         })
         .await
         .map_err(crate::Error::from)
+    }
+
+    /// The id of the transaction the next statement stages into: the open
+    /// one, else the joined statement's. `None` when neither exists yet, so
+    /// the transaction the statement opens has staged nothing.
+    async fn read_txn(&self) -> crate::Result<Option<crate::types::TxnId>> {
+        let txn = self.txn.lock().await;
+        if let Some(open) = txn.as_ref() {
+            let ctx = open.txn_ctx()?;
+            return Ok(ctx.sessions.tx_id(ctx.session_id));
+        }
+        Ok(self
+            .joined
+            .and_then(|ctx| ctx.sessions.tx_id(ctx.session_id)))
     }
 
     /// The open transaction, begun now when none is open. A joined body

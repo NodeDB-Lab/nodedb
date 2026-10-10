@@ -7,10 +7,12 @@ use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 
 use crate::control::security::audit::ArcAuditEmitter;
+use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::shared::authorization::authorize_database;
 use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
+use crate::control::server::shared::statement_exec::{AtomicStatement, StatementExec};
 
 use super::super::super::super::auth::{
     ApiError, AppState, build_request_scope, resolve_auth_parts,
@@ -18,6 +20,7 @@ use super::super::super::super::auth::{
 use super::super::super::super::peer::PeerAddr;
 use super::super::super::super::transport::ClientTransport;
 use super::super::super::super::types::{HttpQueryRequest, HttpQueryResponse};
+use super::super::super::atomic_statement::{RoutedStatement, route_http_statement};
 use super::super::super::result_shape::ddl_results_to_json;
 use super::super::{DatabaseQueryParam, resolve_database_id};
 use super::encode::ddl_error_to_api;
@@ -136,6 +139,40 @@ pub async fn query(
     // A statement admitted under a lease this node then loses ends with a
     // retryable error: a read mid-flight, a write only before dispatch.
     lease_scope.check_not_revoked().map_err(ApiError::from)?;
+
+    // The shared atomic routes run a statement whose tasks commit together:
+    // the implicit transaction, the implicit-edge gate, and a Calvin commit
+    // for a write that spans vShards.
+    // HTTP carries no session: `nextval` advances the registry, `currval`
+    // reports "not yet called in this session".
+    let sequences = SessionSequenceAccess::for_session(&state.shared, None, database_id, tenant_id);
+    let exec = StatementExec {
+        state: &state.shared,
+        identity: &identity,
+        scope: &scope,
+        output_schema: Some(&output_schema),
+        database_id,
+        sequences: &sequences,
+    };
+    let routed = route_http_statement(
+        &exec,
+        AtomicStatement {
+            tasks,
+            lease_scope,
+            sum_target_reads: admission.sum_target_reads,
+        },
+    )
+    .await
+    .map_err(ApiError::from)?;
+    let AtomicStatement {
+        tasks, lease_scope, ..
+    } = match routed {
+        RoutedStatement::Answered(rows) => {
+            return Ok((rate_limit_headers, axum::Json(HttpQueryResponse::ok(rows))));
+        }
+        RoutedStatement::PerTask(statement) => statement,
+    };
+
     let read_only = tasks
         .iter()
         .all(|task| !crate::control::server::shared::write_admission::plan_is_write(&task.plan));

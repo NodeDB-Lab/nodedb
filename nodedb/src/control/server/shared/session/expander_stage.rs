@@ -122,12 +122,15 @@ pub(crate) async fn expand_in_tx(
     // The expanded point writes never passed statement admission. They take
     // its sum and period-lock pass here. A cross-shard balance ships on an
     // `ApplyBalanceDelta` task homed on the target's vShard, and the source
-    // write does not fold it.
+    // write does not fold it. The pre-image each balance settles from is read
+    // through the transaction's staging overlay, the same view the expansion
+    // resolved its rows against.
     let reads = append_sum_and_period_targets(
         state,
         &mut ops,
         task.tenant_id,
         task.database_id,
+        sessions.tx_id(session_id),
         crate::types::TraceId::ZERO,
     )
     .await

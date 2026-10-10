@@ -89,16 +89,19 @@ pub enum ReadOrigin {
     /// began. Its observation can legitimately be superseded by the
     /// transaction's own writes, so the own-write exclusion applies.
     Session,
-    /// A read the Control Plane performed BEFORE the transaction existed, whose
-    /// observed value a value this transaction writes was computed from — a
-    /// materialized-sum settlement's pre-image is the case that exists today.
+    /// A read the Control Plane performed at plan time, whose observed value a
+    /// value this transaction writes was computed from — a materialized-sum
+    /// settlement's pre-image is the case that exists today.
     ///
-    /// This is NOT a read-your-own-write. It observed COMMITTED base state at a
-    /// point in time, and the derived value the transaction ships is only
-    /// correct if that observation still holds at apply time. Dropping it
-    /// because the transaction happens to write the same collection will
-    /// discard the one check that catches a concurrent writer moving the base
-    /// row out from under the derivation, so it survives the exclusion.
+    /// This is NOT a read-your-own-write. Its version is the COMMITTED base
+    /// state at a point in time, and the derived value the transaction ships is
+    /// only correct if that observation still holds at apply time. Inside a
+    /// transaction the read also folds the transaction's staging overlay, but
+    /// a staged write moves no committed version, so the check still compares
+    /// committed base only. Dropping it because the transaction happens to
+    /// write the same collection will discard the one check that catches a
+    /// concurrent writer moving the base row out from under the derivation, so
+    /// it survives the exclusion.
     PlanDerivation,
 }
 

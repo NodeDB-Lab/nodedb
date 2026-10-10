@@ -128,13 +128,16 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
     // The entries cover the row images every cross-shard balance this pass
     // settled was folded from. They travel on the dispatch read-set so the
     // Calvin OCC check aborts, before any row moves, if those images have been
-    // written since.
+    // written since. The source rows are read through the open transaction's
+    // staging overlay, so they include this transaction's earlier statements.
+    let read_txn = txn_ctx.sessions.tx_id(txn_ctx.session_id);
     let sum_target_reads =
         crate::control::planner::materialized_sum::resolve_materialized_sum_targets(
             state,
             &mut tasks,
             tenant_id,
             database_id,
+            read_txn,
             TraceId::ZERO,
         )
         .await
@@ -159,6 +162,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) async fn plan_a
         &mut tasks,
         tenant_id,
         database_id,
+        read_txn,
         TraceId::ZERO,
     )
     .await

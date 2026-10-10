@@ -218,6 +218,7 @@ pub(crate) async fn handle_direct_op(
                 &mut tasks,
                 tenant_id,
                 ctx.database_id(),
+                txn_id,
                 TraceId::ZERO,
             )
             .await
@@ -243,6 +244,7 @@ pub(crate) async fn handle_direct_op(
             &mut tasks,
             tenant_id,
             ctx.database_id(),
+            txn_id,
             TraceId::ZERO,
         )
         .await

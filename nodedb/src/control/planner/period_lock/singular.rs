@@ -5,7 +5,7 @@
 
 use nodedb_physical::physical_plan::{DocumentOp, ResolvedSumTarget};
 
-use super::lookup::lookup_period_surrogate;
+use super::lookup::{PeriodLockScope, lookup_period_surrogate};
 use crate::control::planner::materialized_sum::recon::recon_point_row;
 use crate::control::planner::materialized_sum::{ResolvedTargets, join_value_from_body};
 use crate::control::security::catalog::PeriodLockDef;
@@ -21,12 +21,10 @@ use crate::types::{DatabaseId, TenantId, TraceId};
 /// off its submitted body. `PointDelete` carries no body, so its value comes
 /// off the row it is about to remove.
 pub(super) async fn singular_period_value(
-    state: &SharedState,
+    scope: &PeriodLockScope<'_>,
     op: &DocumentOp,
     collection: &str,
     def: &PeriodLockDef,
-    tenant_id: TenantId,
-    database_id: DatabaseId,
 ) -> crate::Result<Option<String>> {
     match op {
         DocumentOp::PointPut { value, .. }
@@ -42,9 +40,10 @@ pub(super) async fn singular_period_value(
                 return Ok(None);
             };
             let read = recon_point_row(
-                state,
-                tenant_id,
-                database_id,
+                scope.state,
+                scope.tenant_id,
+                scope.database_id,
+                scope.read_txn,
                 collection,
                 document_id,
                 *surrogate,

@@ -4,7 +4,7 @@
 
 use crate::control::server::surrogate_exchange::lookup_surrogate_routed;
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, TenantId, TraceId};
+use crate::types::{DatabaseId, TenantId, TraceId, TxnId};
 
 /// Request scope shared by every per-row period-lock resolution call within
 /// one [`resolve_period_lock_targets`](super::resolve::resolve_period_lock_targets)
@@ -14,6 +14,11 @@ pub(super) struct PeriodLockScope<'a> {
     pub state: &'a SharedState,
     pub tenant_id: TenantId,
     pub database_id: DatabaseId,
+    /// The open transaction the statement runs in, `None` outside a
+    /// transaction block. Every stored-row read goes through its staging
+    /// overlay, so the period a write gates on is the row as this transaction
+    /// sees it.
+    pub read_txn: Option<TxnId>,
     pub trace_id: TraceId,
 }
 

@@ -58,10 +58,16 @@ struct PredicateScope {
 /// collection drives a binding — so the caller knows the op is accounted for and
 /// does not also run the body-driven pass over it. `Ok(None)` means `op` is not
 /// predicate-driven and the caller still owns it.
+///
+/// `txn_id` is the source task's own transaction, which each shipped balance
+/// task inherits. `read_txn` is the open transaction the statement runs in:
+/// the recon scan reads through its staging overlay, as the staged write
+/// itself matches rows.
 pub(super) async fn resolve_predicate_sum_targets(
     state: &SharedState,
     op: &mut DocumentOp,
     txn_id: Option<TxnId>,
+    read_txn: Option<TxnId>,
     tenant_id: TenantId,
     database_id: DatabaseId,
     trace_id: TraceId,
@@ -79,6 +85,7 @@ pub(super) async fn resolve_predicate_sum_targets(
         state,
         tenant_id,
         database_id,
+        read_txn,
         &scope.collection,
         // Cloned rather than moved: `scope` is still needed below to fold the
         // images from this same scan, and a filter blob is negligible beside the

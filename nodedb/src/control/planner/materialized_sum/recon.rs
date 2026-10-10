@@ -21,6 +21,16 @@
 //! vShard returns nothing, which will silently under-resolve and leave the
 //! write with no target to address.
 //!
+//! # Transaction view
+//!
+//! Inside a transaction block the read carries the transaction's id. The Data
+//! Plane then reads the transaction's staging overlay over committed base, as
+//! an in-transaction `SELECT` does. A statement's write applies on top of the
+//! rows the transaction's earlier statements staged, so its images are read
+//! there too. A base-only read misses a row the transaction inserted and
+//! returns the base value of a row it rewrote. The delta settled from such an
+//! image is wrong by that row's staged contribution.
+//!
 //! # Plane discipline
 //!
 //! Runs on the coordinator's Control Plane (Tokio). The scan goes through the
@@ -29,7 +39,7 @@
 use nodedb_types::{Surrogate, TenantId};
 
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, Lsn, TraceId};
+use crate::types::{DatabaseId, Lsn, TraceId, TxnId};
 use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
 
 /// What a plan-time reconnaissance read observed, and the version it observed
@@ -63,10 +73,14 @@ pub(crate) struct ReconRead<T> {
 ///
 /// Empty `filters` means "no WHERE clause" — every row, which is what `TRUNCATE`
 /// needs.
+///
+/// `txn_id` is the open transaction the statement runs in, `None` outside a
+/// transaction block. See the module's transaction view.
 pub(in crate::control::planner) async fn recon_scan_rows(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
+    txn_id: Option<TxnId>,
     collection: &str,
     filters: Vec<u8>,
 ) -> crate::Result<ReconRead<Vec<serde_json::Value>>> {
@@ -85,7 +99,7 @@ pub(in crate::control::planner) async fn recon_scan_rows(
         prefilter: None,
     });
 
-    let read = execute_read(state, tenant_id, database_id, collection, scan_plan).await?;
+    let read = execute_read(state, tenant_id, database_id, txn_id, collection, scan_plan).await?;
     let mut rows = Vec::new();
     for payload in &read.rows {
         rows.extend(decode_rows(payload.as_slice()));
@@ -111,10 +125,15 @@ pub(in crate::control::planner) async fn recon_scan_rows(
 ///
 /// Identity is the surrogate, exactly as on the write path — `document_id` is
 /// the user-facing primary key and carries no storage addressing.
+///
+/// `txn_id` is the open transaction the statement runs in, `None` outside a
+/// transaction block. A row this transaction staged reads as staged, and a row
+/// it staged a delete of reads as absent.
 pub(crate) async fn recon_point_row(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
+    txn_id: Option<TxnId>,
     collection: &str,
     document_id: &str,
     surrogate: Surrogate,
@@ -133,7 +152,7 @@ pub(crate) async fn recon_point_row(
         valid_at_ms: None,
     });
 
-    let read = execute_read(state, tenant_id, database_id, collection, get_plan).await?;
+    let read = execute_read(state, tenant_id, database_id, txn_id, collection, get_plan).await?;
     // A point get answers with the row's normalized MessagePack body, and with
     // an EMPTY payload when the row is absent.
     Ok(ReconRead {
@@ -157,10 +176,16 @@ pub(crate) async fn recon_point_row(
 /// The gateway notes the node that served each vShard it read. The read
 /// validates on `collection`'s vShard, so that vShard's note names the node
 /// whose WAL numbers `read_version_lsn`.
+///
+/// `read_version_lsn` is the collection's COMMITTED write floor whether or not
+/// `txn_id` is set: a staged write appends no WAL record and moves no write
+/// version. So an entry stamped with it still detects a concurrent commit to
+/// the rows read, and never this transaction's own staged writes.
 async fn execute_read(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
+    txn_id: Option<TxnId>,
     collection: &str,
     plan: PhysicalPlan,
 ) -> crate::Result<ReconRead<Vec<Vec<u8>>>> {
@@ -173,7 +198,9 @@ async fn execute_read(
         tenant_id,
         trace_id: TraceId::ZERO,
         database_id,
-        txn_id: None,
+        // The transaction's staging overlay over committed base, as an
+        // in-transaction read sees it.
+        txn_id,
         linearizable: true,
     };
     // A shard verdict keeps its own typed error.

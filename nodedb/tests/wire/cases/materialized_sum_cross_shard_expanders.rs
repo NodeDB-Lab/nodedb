@@ -75,7 +75,7 @@ async fn exec(server: &TestServer, sql: &str) {
 /// Start a server and create the sum pair and the feed. Accounts `acc` and
 /// `acc2` start empty. Posting `e0` puts 10 on `acc`, posting `e1` puts 5 on
 /// `acc`.
-async fn sum_fixture() -> TestServer {
+pub(super) async fn sum_fixture() -> TestServer {
     let server = TestServer::start_multicores(CORES).await;
     exec(
         &server,
@@ -137,7 +137,7 @@ async fn sum_fixture() -> TestServer {
 }
 
 /// Insert one feed row.
-async fn feed(server: &TestServer, id: &str, account: &str, amount: &str) {
+pub(super) async fn feed(server: &TestServer, id: &str, account: &str, amount: &str) {
     exec(
         server,
         &format!(
@@ -148,7 +148,7 @@ async fn feed(server: &TestServer, id: &str, account: &str, amount: &str) {
 }
 
 /// The stored balance of `account`.
-async fn balance(server: &TestServer, account: &str) -> String {
+pub(super) async fn balance(server: &TestServer, account: &str) -> String {
     let rows = server
         .query_text(&format!(
             "SELECT balance FROM {ACCOUNTS} WHERE id = '{account}'"
@@ -161,7 +161,7 @@ async fn balance(server: &TestServer, account: &str) -> String {
     }
 }
 
-const INSERT_SELECT: &str = "INSERT INTO ptv_post (id, account_id, amount) \
+pub(super) const INSERT_SELECT: &str = "INSERT INTO ptv_post (id, account_id, amount) \
                              SELECT id, account_id, amount FROM ptv_feed";
 
 /// The amount of `e0` changes in place. `e1` moves from `acc` to `acc2`.

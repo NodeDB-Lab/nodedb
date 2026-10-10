@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use nodedb_physical::physical_plan::{DocumentOp, MaterializedSumBinding, UpdateValue};
 use nodedb_types::Surrogate;
+use nodedb_types::id::TxnId;
 
 use super::recon::recon_point_row;
 use super::resolve::lookup_join_value;
@@ -69,6 +70,10 @@ pub(super) struct StoredRowScope<'a> {
     pub updates: &'a [(String, UpdateValue)],
     /// How this shape's post-image is formed.
     pub post_image: PostImage<'a>,
+    /// The open transaction the write runs in, `None` outside a transaction
+    /// block. The stored row is read through its staging overlay, so the
+    /// pre-image is the row as this transaction sees it.
+    pub txn_id: Option<TxnId>,
 }
 
 /// What reading the stored row produced: the write's pre-/post-image pairs
@@ -89,7 +94,13 @@ pub(super) struct StoredImages {
 /// `Upsert` (a join-column rewrite debits the leaving target, named only by
 /// the stored image). `PointInsert`/`BatchInsert` are absent: rows are new
 /// by construction, so there's no pre-image to read.
-pub(super) fn stored_row_scope(op: &DocumentOp) -> Option<StoredRowScope<'_>> {
+///
+/// `txn_id` is the open transaction the write runs in, `None` outside a
+/// transaction block.
+pub(super) fn stored_row_scope(
+    op: &DocumentOp,
+    txn_id: Option<TxnId>,
+) -> Option<StoredRowScope<'_>> {
     match op {
         // A key unbound in its database names no stored row.
         DocumentOp::PointUpdate {
@@ -104,6 +115,7 @@ pub(super) fn stored_row_scope(op: &DocumentOp) -> Option<StoredRowScope<'_>> {
             surrogate,
             updates: updates.as_slice(),
             post_image: PostImage::Assigned,
+            txn_id,
         }),
         // A delete assigns nothing: the row's pre-image join value is the whole
         // of what it owes.
@@ -118,6 +130,7 @@ pub(super) fn stored_row_scope(op: &DocumentOp) -> Option<StoredRowScope<'_>> {
             surrogate,
             updates: &[],
             post_image: PostImage::Removed,
+            txn_id,
         }),
         // A put replaces the row wholesale, so its post-image is the submitted
         // body — already resolved from the body — and the stored row is needed
@@ -134,6 +147,7 @@ pub(super) fn stored_row_scope(op: &DocumentOp) -> Option<StoredRowScope<'_>> {
             surrogate: *surrogate,
             updates: &[],
             post_image: PostImage::Body(value.as_slice()),
+            txn_id,
         }),
         // On the conflict branch an upsert's post-image is the stored row with
         // `on_conflict_updates` applied, so those assignments decide the target
@@ -152,6 +166,7 @@ pub(super) fn stored_row_scope(op: &DocumentOp) -> Option<StoredRowScope<'_>> {
             surrogate: *surrogate,
             updates: on_conflict_updates.as_slice(),
             post_image: PostImage::BodyOrAssigned(value.as_slice()),
+            txn_id,
         }),
         DocumentOp::PointInsert { .. }
         | DocumentOp::BatchInsert { .. }
@@ -201,6 +216,7 @@ pub(super) async fn extend_with_stored_row(
         state,
         tenant_id,
         database_id,
+        scope.txn_id,
         scope.collection,
         scope.document_id,
         scope.surrogate,
@@ -395,7 +411,7 @@ mod tests {
     #[test]
     fn every_point_shape_names_the_stored_row_it_rewrites() {
         for op in [point_delete(), point_update(), point_put(), upsert()] {
-            let scope = stored_row_scope(&op)
+            let scope = stored_row_scope(&op, None)
                 .unwrap_or_else(|| panic!("a point write must name its stored row: {op:?}"));
             assert_eq!(scope.collection, "entries");
             assert_eq!(scope.document_id, "e1");
@@ -410,7 +426,7 @@ mod tests {
     /// read and no round trip to spend learning that.
     #[test]
     fn an_insert_names_no_stored_row() {
-        assert!(stored_row_scope(&point_insert()).is_none());
+        assert!(stored_row_scope(&point_insert(), None).is_none());
     }
 
     /// The assignments travel on the scope, so a write that rewrites the join
@@ -420,7 +436,7 @@ mod tests {
     #[test]
     fn assignments_that_rewrite_the_join_column_travel_on_the_scope() {
         for op in [point_update(), upsert()] {
-            let scope = stored_row_scope(&op).expect("a point write names its stored row");
+            let scope = stored_row_scope(&op, None).expect("a point write names its stored row");
             assert_eq!(
                 scope.updates.len(),
                 1,
@@ -435,7 +451,7 @@ mod tests {
     #[test]
     fn the_shapes_without_assignments_carry_none() {
         for op in [point_delete(), point_put()] {
-            let scope = stored_row_scope(&op).expect("a point write names its stored row");
+            let scope = stored_row_scope(&op, None).expect("a point write names its stored row");
             assert!(scope.updates.is_empty(), "{op:?}");
         }
     }
@@ -486,7 +502,7 @@ mod tests {
             body("acc-1", 60),
             vec![("amount".to_string(), excluded("amount"))],
         );
-        let scope = stored_row_scope(&op).expect("an upsert names its stored row");
+        let scope = stored_row_scope(&op, None).expect("an upsert names its stored row");
         let stored = serde_json::json!({"account_id": "acc-1", "amount": 25});
         let images = images_of(&scope, Some(&stored)).expect("images");
 
@@ -501,7 +517,7 @@ mod tests {
     #[test]
     fn an_upsert_without_conflict_assignments_merges_the_body() {
         let op = upsert_with(body("acc-1", 60), Vec::new());
-        let scope = stored_row_scope(&op).expect("an upsert names its stored row");
+        let scope = stored_row_scope(&op, None).expect("an upsert names its stored row");
         let stored = serde_json::json!({"account_id": "acc-1", "amount": 25, "memo": "kept"});
         let images = images_of(&scope, Some(&stored)).expect("images");
 
@@ -529,7 +545,7 @@ mod tests {
                 ("amount".to_string(), excluded("amount")),
             ],
         );
-        let scope = stored_row_scope(&op).expect("an upsert names its stored row");
+        let scope = stored_row_scope(&op, None).expect("an upsert names its stored row");
         let stored = serde_json::json!({"account_id": "acc-1", "amount": 25});
         let images = images_of(&scope, Some(&stored)).expect("images");
 
@@ -552,7 +568,7 @@ mod tests {
             body("acc-1", 60),
             vec![("amount".to_string(), excluded("amount"))],
         );
-        let scope = stored_row_scope(&op).expect("an upsert names its stored row");
+        let scope = stored_row_scope(&op, None).expect("an upsert names its stored row");
         let images = images_of(&scope, None).expect("images");
 
         assert_eq!(images.len(), 1);
@@ -575,7 +591,7 @@ mod tests {
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),
         };
-        let scope = stored_row_scope(&op).expect("a put names its stored row");
+        let scope = stored_row_scope(&op, None).expect("a put names its stored row");
         let stored = serde_json::json!({"account_id": "acc-1", "amount": 25});
         let images = images_of(&scope, Some(&stored)).expect("images");
 

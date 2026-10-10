@@ -29,6 +29,7 @@ pub(super) async fn resolve_update_period_values(
         scope.state,
         scope.tenant_id,
         scope.database_id,
+        scope.read_txn,
         collection,
         document_id,
         surrogate,

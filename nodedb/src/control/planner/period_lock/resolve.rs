@@ -53,7 +53,7 @@ use super::point_update::resolve_update_period_values;
 use super::predicate::{PeriodLockEffect, resolve_predicate_period_values};
 use super::singular::{resolve_batch_period_values, singular_period_value};
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, TenantId, TraceId};
+use crate::types::{DatabaseId, TenantId, TraceId, TxnId};
 
 /// Resolve the period-lock reference row for every write in `tasks` that a
 /// period lock gates, appending the entry to the op's `resolved_sum_targets`
@@ -63,11 +63,15 @@ use crate::types::{DatabaseId, TenantId, TraceId};
 /// value) adds no entry: `check_period_lock` treats an absent entry as an
 /// unknown period and refuses the write, exactly as it treats a genuinely
 /// closed one.
+///
+/// `read_txn` is the open transaction the statement runs in, `None` outside a
+/// transaction block. A stored row is read through its staging overlay.
 pub async fn resolve_period_lock_targets(
     state: &SharedState,
     tasks: &mut [PhysicalTask],
     tenant_id: TenantId,
     database_id: DatabaseId,
+    read_txn: Option<TxnId>,
     trace_id: TraceId,
 ) -> crate::Result<()> {
     let catalog = state.credentials.catalog();
@@ -75,6 +79,7 @@ pub async fn resolve_period_lock_targets(
         state,
         tenant_id,
         database_id,
+        read_txn,
         trace_id,
     };
     for task in tasks.iter_mut() {
@@ -180,9 +185,7 @@ pub async fn resolve_period_lock_targets(
             continue;
         }
 
-        let Some(period_key) =
-            singular_period_value(state, op, &collection, &def, tenant_id, database_id).await?
-        else {
+        let Some(period_key) = singular_period_value(&scope, op, &collection, &def).await? else {
             continue;
         };
 

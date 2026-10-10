@@ -121,15 +121,6 @@ pub async fn run_authorized_merge(
 /// Returns the `{"affected": N}` (or RETURNING-rows) response the Data-Plane
 /// merge handler produces, so the dispatch loops render the same command tag.
 pub(crate) async fn run_merge(state: &SharedState, args: MergeArgs<'_>) -> crate::Result<Response> {
-    // The apply lands on the target's vShard alone, so it folds only
-    // co-resident balances.
-    crate::control::planner::materialized_sum::refuse_cross_shard_orchestration(
-        state,
-        args.target_collection,
-        args.tenant_id,
-        args.database_id,
-        "MERGE",
-    )?;
     let catalog = state.credentials.catalog();
     let target_bare = bare_collection_name(args.database_id, args.target_collection);
     let target = catalog

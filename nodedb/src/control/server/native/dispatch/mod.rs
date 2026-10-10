@@ -23,7 +23,6 @@ mod single_task;
 mod sorted_read_op;
 mod sql;
 mod sql_admin;
-mod sql_dispatch_task;
 mod sql_fold;
 mod sql_gateway;
 mod sql_loop;

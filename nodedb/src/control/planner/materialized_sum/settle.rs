@@ -44,11 +44,11 @@
 //! `INSERT ... SELECT` run this same pass on the point writes they emit. The
 //! autocommit orchestrators resolve their rows through
 //! [`resolve_sum_targets_for_bodies`](super::resolve::resolve_sum_targets_for_bodies)
-//! and apply on the source's vShard alone, so they refuse a source with a
-//! cross-shard target
-//! ([`refuse_cross_shard_orchestration`](super::resolve::refuse_cross_shard_orchestration)).
-//! The SQL and native protocols run such a statement through the expanders
-//! in an implicit transaction instead.
+//! and apply on the source's vShard alone, so they fold co-resident targets
+//! only. A source with a cross-shard target never reaches them: every
+//! protocol runs such a statement through the expanders in an implicit
+//! transaction
+//! ([`statement_needs_implicit_txn`](crate::control::server::shared::txn_route::statement_needs_implicit_txn)).
 //!
 //! # The images are only as good as the version they were read at
 //!
@@ -276,12 +276,20 @@ fn image_read_entry(
         },
         read_lsn: input.read_version_lsn,
         read_version_lsn: input.read_version_lsn,
-        // A DERIVATION read, never a read-your-own-write. The image was read
-        // from committed base state before this transaction existed, and the
-        // delta shipped to the target rests entirely on it; the statement writes
-        // the source collection too, so an entry marked `Session` here will be
+        // A DERIVATION read, never a read-your-own-write. The delta shipped to
+        // the target rests entirely on the image. The statement writes the
+        // source collection too, so an entry marked `Session` here will be
         // dropped by the own-write exclusion and the fold will never be
         // validated against a concurrent writer.
+        //
+        // Inside a transaction the image is read through its staging overlay.
+        // `read_version_lsn` is still the committed write floor, because a
+        // staged write moves no write version. So the entry aborts the commit
+        // when another transaction commits a write to the row first. It never
+        // aborts on this transaction's own staged writes, which the image
+        // already includes. For a row that exists only in the overlay, the
+        // entry asserts that the base still holds no committed write to that
+        // surrogate. A concurrent commit of that row invalidates it.
         origin: ReadOrigin::PlanDerivation,
         home: None,
         home_node: input.served_by,

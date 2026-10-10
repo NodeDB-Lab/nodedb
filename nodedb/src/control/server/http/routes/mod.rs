@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+mod atomic_statement;
 pub mod auth_key;
 pub mod auth_session;
 pub mod cdc;

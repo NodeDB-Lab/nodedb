@@ -17,6 +17,7 @@ pub mod retry;
 pub mod returning;
 pub mod session;
 pub mod sql;
+pub mod statement_exec;
 pub mod txn_control;
 pub mod txn_route;
 pub mod write_admission;

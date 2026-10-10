@@ -30,8 +30,8 @@ use super::{
 /// the single-shard edge loop share one code path.
 ///
 /// Routes through the same protocol-neutral in-transaction staging gate
-/// (`route_in_tx_write`) the SQL-planned dispatch loops (`sql_loop.rs`,
-/// pgwire's `execute_dml_hooks.rs`) already use. Outside a transaction block
+/// (`route_in_tx_write`) the SQL-planned dispatch loops (the shared
+/// `statement_exec` loop, pgwire's `execute_dml_hooks.rs`) already use. Outside a transaction block
 /// the task comes back unchanged (`InTxnRoute::Read`, or `Autocommit` for a
 /// write), and the gateway gives a write its durable route. Inside a
 /// transaction block, a stageable write (e.g. `KvBatchPut`)
@@ -63,7 +63,7 @@ pub(super) async fn dispatch_single_task(
     // Covers the `Read` / `Autocommit` dispatch below (reads, and writes that
     // apply now). `Staged` meters itself inside
     // `staging_gate::stage_write` — the single choke-point every `Staged`
-    // route (this file, `sql_loop.rs`, the expander's per-op staging, and
+    // route (this file, the shared `statement_exec` loop, the expander's per-op staging, and
     // pgwire's `execute_dml_hooks.rs`) dispatches through, so it is metered
     // there once rather than duplicated in every caller's closure. `Buffered`
     // performs no dispatch at all here — it is metered at COMMIT replay

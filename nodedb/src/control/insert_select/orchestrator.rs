@@ -84,15 +84,6 @@ pub(crate) async fn run_insert_select(
     database_id: DatabaseId,
     req: &CopyRequest<'_>,
 ) -> crate::Result<Response> {
-    // Each page applies on the target's vShard alone, so it folds only
-    // co-resident balances.
-    crate::control::planner::materialized_sum::refuse_cross_shard_orchestration(
-        state,
-        req.target_collection,
-        tenant_id,
-        database_id,
-        "INSERT ... SELECT",
-    )?;
     let spec = resolve_copy_spec(
         state,
         tenant_id,

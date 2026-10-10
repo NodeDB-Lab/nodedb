@@ -7,9 +7,10 @@
 //! trigger/DML machinery. Each transport's dispatch loop intercepts a
 //! `PhysicalPlan::ClusterArray` task after authorization:
 //!
-//! - pgwire and native call [`execute_cluster_array`] and render the
-//!   [`ClusterArrayShaped`] outcome in their own wire format. The adapters
-//!   live in `pgwire::handler::routing::cluster_array` and
+//! - pgwire, native and the shared statement loop
+//!   (`shared::statement_exec`) call [`execute_cluster_array`] and render the
+//!   [`ClusterArrayShaped`] outcome in their own shape. The protocol
+//!   adapters live in `pgwire::handler::routing::cluster_array` and
 //!   `native::dispatch::cluster_array`.
 //! - HTTP and WebSocket RPC call [`run_cluster_array`] and shape the raw
 //!   payload the way they shape a gateway payload.

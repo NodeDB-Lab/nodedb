@@ -45,10 +45,10 @@
 //!
 //! No write path hands this core a cross-shard target it must apply. Plain
 //! writes and the in-transaction expanders take the same Control-Plane pass,
-//! which ships every cross-shard balance on its own task. The autocommit
-//! orchestrators (`MERGE`, `UPDATE ... FROM`, `INSERT ... SELECT`) refuse a
-//! source that drives a cross-shard target, and the SQL and native protocols
-//! run such a statement through the expanders instead.
+//! which ships every cross-shard balance on its own task. A `MERGE`,
+//! `UPDATE ... FROM` or `INSERT ... SELECT` into a source that drives a
+//! cross-shard target never reaches the autocommit orchestrators: every
+//! protocol runs it through the expanders in an implicit transaction.
 //!
 //! # Identity comes from the plan, never from a store probe
 //!

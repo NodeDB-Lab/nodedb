@@ -40,6 +40,7 @@ pub(super) async fn resolve_predicate_period_values(
         scope.state,
         scope.tenant_id,
         scope.database_id,
+        scope.read_txn,
         collection,
         filters,
     )
