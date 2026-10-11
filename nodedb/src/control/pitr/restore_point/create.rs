@@ -30,7 +30,11 @@ pub async fn create_restore_point(
     // it: a test orders a metadata entry stamped at or above the watermark
     // before the point.
     #[cfg(feature = "failpoints")]
-    crate::control::fail_gate::wait("restore_point::after_watermark").await;
+    crate::control::fail_gate::wait(
+        crate::fail_point::FailScope::Node(state.node_id),
+        "restore_point::after_watermark",
+    )
+    .await;
     let created_at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))

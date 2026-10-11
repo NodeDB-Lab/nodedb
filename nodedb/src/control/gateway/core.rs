@@ -139,17 +139,16 @@ impl Gateway {
     /// Returns one `Vec<u8>` payload per vShard result. For point operations
     /// the returned Vec has exactly one element.
     ///
-    /// Thin wrapper over [`Gateway::execute_with_watermarks`] that discards the
-    /// per-shard read watermarks — for the ~5 existing callers that only need
-    /// payloads.
+    /// Thin wrapper over [`Gateway::execute_outcome`] that keeps only the
+    /// payloads — for the callers that need nothing else.
     pub async fn execute(
         &self,
         ctx: &QueryContext,
         checked: CloneCheckedTask,
     ) -> Result<Vec<Vec<u8>>, Error> {
-        self.execute_with_watermarks(ctx, checked)
+        self.execute_outcome(ctx, checked)
             .await
-            .map(|(payloads, _watermarks, _read_version)| payloads)
+            .map(|outcome| outcome.payloads)
     }
 
     /// Execute a trusted Control-Plane plan that has no external caller.
@@ -163,38 +162,35 @@ impl Gateway {
         ctx: &QueryContext,
         plan: PhysicalPlan,
     ) -> Result<Vec<Vec<u8>>, Error> {
-        self.execute_internal_with_watermarks(ctx, plan)
+        self.execute_internal_outcome(ctx, plan)
             .await
-            .map(|(payloads, _watermarks, _read_version)| payloads)
+            .map(|outcome| outcome.payloads)
     }
 
-    pub(crate) async fn execute_internal_with_watermarks(
+    /// [`Gateway::execute_outcome`] for a trusted Control-Plane plan.
+    pub(crate) async fn execute_internal_outcome(
         &self,
         ctx: &QueryContext,
         plan: PhysicalPlan,
-    ) -> Result<(Vec<Vec<u8>>, Vec<(VShardId, Lsn)>, Lsn), Error> {
-        self.execute_plan_outcome(ctx, plan)
-            .await
-            .map(GatewayOutcome::into_parts)
+    ) -> Result<GatewayOutcome, Error> {
+        self.execute_plan_outcome(ctx, plan).await
     }
 
-    /// Execute a pre-planned `PhysicalPlan`, returning both the raw payloads and
-    /// the per-shard read watermarks observed across every dispatched route.
+    /// Execute a pre-planned `PhysicalPlan`, returning the raw payloads, the
+    /// per-shard read watermarks, the read versions observed across every
+    /// dispatched route, and a single route's `NotFound` verdict.
     ///
-    /// Each `(vshard, watermark_lsn)` entry is one participating shard's real
-    /// committed LSN (local SPSC response watermark or the remote's
-    /// `ExecuteResponse.watermark_lsn`). The cross-node gather consumer folds
-    /// these into the transaction read-set so a remote-homed read records the
-    /// remote's actual LSN.
-    pub async fn execute_with_watermarks(
+    /// Each `(vshard, watermark_lsn)` entry is one participating shard's WAL
+    /// position (local SPSC response watermark or the remote's
+    /// `ExecuteResponse.watermark_lsn`). The read versions are data-group log
+    /// positions, so the transaction read-set validates them on any replica.
+    pub async fn execute_outcome(
         &self,
         ctx: &QueryContext,
         checked: CloneCheckedTask,
-    ) -> Result<(Vec<Vec<u8>>, Vec<(VShardId, Lsn)>, Lsn), Error> {
+    ) -> Result<GatewayOutcome, Error> {
         let (plan, _lease) = authorized_plan_for_context(ctx, checked)?;
-        self.execute_plan_outcome(ctx, plan)
-            .await
-            .map(GatewayOutcome::into_parts)
+        self.execute_plan_outcome(ctx, plan).await
     }
 
     /// Execute an authorized plan and keep every route's result detail.
@@ -260,10 +256,8 @@ impl Gateway {
         let max_total_bytes = shared.tuning.network.max_query_result_bytes as usize;
         let mut all_payloads: Vec<Vec<u8>> = Vec::new();
         let mut all_shard_watermarks: Vec<(VShardId, Lsn)> = Vec::new();
-        // Max-fold of the per-collection read-version across routes: a read
-        // targets one collection homed to one shard, so non-owning routes
-        // contribute `Lsn::ZERO` and the owning route's value survives.
-        let mut max_read_version = Lsn::ZERO;
+        // The read versions every route observed, one per vShard.
+        let mut read_versions = crate::types::ReadVersions::new();
         let mut accumulated_bytes: usize = 0;
 
         for route in routes {
@@ -326,9 +320,7 @@ impl Gateway {
             // read produces one read-set entry per shard.
             all_shard_watermarks.extend(outcome.shard_watermarks);
             not_found = single_route && outcome.not_found;
-            if outcome.read_version_lsn > max_read_version {
-                max_read_version = outcome.read_version_lsn;
-            }
+            read_versions.merge(&outcome.read_versions);
 
             for p in outcome.payloads {
                 accumulated_bytes = accumulated_bytes.saturating_add(p.len());
@@ -355,7 +347,7 @@ impl Gateway {
         Ok(GatewayOutcome {
             payloads,
             shard_watermarks: all_shard_watermarks,
-            read_version_lsn: max_read_version,
+            read_versions,
             not_found,
         })
     }

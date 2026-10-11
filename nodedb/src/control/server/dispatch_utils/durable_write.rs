@@ -215,23 +215,25 @@ async fn propose_if_replicable(
         return Ok(None);
     };
     let entry = entry.with_event_source(event_source);
-    let (payload, write_version) = propose_replicated_entry(shared, proposer, entry).await?;
+    let deadline = crate::control::wal_replication::statement_propose_deadline(shared);
+    let (payload, write_versions) =
+        propose_replicated_entry(shared, proposer, entry, deadline).await?;
     Ok(Some(replicated_write_response(
         shared,
         payload,
-        write_version,
+        write_versions,
     )))
 }
 
 /// The response a committed and applied replicated write answers with.
 ///
-/// `write_version` is the written collection's `coll_write_lsn` after the
-/// write. It is the watermark and the read version, so a session can floor a
-/// later read at it.
+/// `write_versions` are the versions the write stamped. A session floors its
+/// later reads of the written vShards at them. A write carries no read
+/// watermark.
 fn replicated_write_response(
     shared: &SharedState,
     payload: Vec<u8>,
-    write_version: Lsn,
+    write_versions: crate::types::ReadVersions,
 ) -> Response {
     Response {
         request_id: RequestId::new(shared.request_id_counter.fetch_add(1, Ordering::Relaxed)),
@@ -239,10 +241,10 @@ fn replicated_write_response(
         attempt: 1,
         partial: false,
         payload: payload.into(),
-        watermark_lsn: write_version,
+        watermark_lsn: Lsn::ZERO,
         error_code: None,
-        read_set_valid: None,
-        read_version_lsn: write_version,
+        stage_vote: None,
+        read_versions: write_versions,
         write_set: Vec::new(),
     }
 }

@@ -5,9 +5,7 @@
 //! Re-proposing is safe because every entry kind applies idempotently in the
 //! completion registry. A vote is stored per vShard, so a repeat overwrites
 //! it with the same value, and the verdict it completes is emitted once. An
-//! ack is a set insert per vShard, and the completion fires once. The
-//! mismatch and routing-failure signals set a flag, and each fires its
-//! waiter once.
+//! ack is a set insert per vShard, and the completion fires once.
 
 use tracing::{debug, error};
 
@@ -24,6 +22,13 @@ impl Scheduler {
     /// The entry stays owed until this node's completion registry shows it
     /// applied. [`Self::retry_owed_sequencer_entries`] proposes it again on
     /// the stall tick until then.
+    ///
+    /// A vote and a `CompletionAck` answer for the vShard on every node: the
+    /// first one the sequencer log holds counts. So only the vShard's
+    /// data-group leader proposes them. A node that left the group leads none
+    /// of it, so an entry from its stale state never enters the log. Every
+    /// other replica keeps the entry owed and proposes it if it comes to lead
+    /// before one applies. Which entry counts then depends on the log alone.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn propose_sequencer_entry(
         &mut self,
         txn_id: TxnId,
@@ -46,7 +51,7 @@ impl Scheduler {
             }
         };
         let entry_seen = self.participant_progress(txn_id).is_some();
-        let in_flight = self.may_propose(kind)
+        let in_flight = self.is_group_leader()
             && propose_owed(
                 self.sequencer_proposer.as_ref(),
                 self.vshard_id,
@@ -81,11 +86,12 @@ impl Scheduler {
             !kind.is_applied(progress, owed.entry_seen)
         });
 
+        if !leads {
+            // Every entry stays owed: this replica proposes it if it comes
+            // to lead.
+            return;
+        }
         for ((txn_id, kind), owed) in self.owed.iter_mut() {
-            if kind.leader_only() && !leads {
-                // Stays owed: this replica proposes it if it comes to lead.
-                continue;
-            }
             if owed.in_flight {
                 owed.in_flight = false;
                 continue;
@@ -100,18 +106,6 @@ impl Scheduler {
                 owed.bytes.clone(),
             );
         }
-    }
-
-    /// Whether this scheduler can propose an entry of `kind` now.
-    ///
-    /// A vote and a `CompletionAck` answer for the vShard on every node: the
-    /// first one the sequencer log holds counts. So only the vShard's
-    /// data-group leader proposes them. A node that left the group leads none
-    /// of it, so an entry from its stale state never enters the log. Every
-    /// other replica keeps the entry owed and proposes it if it comes to lead
-    /// before one applies. Which entry counts then depends on the log alone.
-    fn may_propose(&self, kind: OwedKind) -> bool {
-        !kind.leader_only() || self.is_group_leader()
     }
 
     /// The registry's view of `txn_id` for this scheduler's vShard.
@@ -158,7 +152,7 @@ mod tests {
     use nodedb_cluster::calvin::{ParticipantVote, SequencerEntry};
 
     use super::*;
-    use crate::bridge::envelope::Status;
+    use crate::bridge::envelope::{StageVote, Status};
     use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::{
         CapturingProposer, elect_data_group_leader,
     };
@@ -189,7 +183,10 @@ mod tests {
             .pending
             .insert(txn_id, staged_pending(make_sequenced_txn(20, 1), txn_id));
 
-        scheduler.resolve_staged_commit(txn_id, &staged_response(Status::Ok, Some(true)));
+        scheduler.resolve_staged_commit(
+            txn_id,
+            &staged_response(Status::Ok, Some(StageVote::Commit)),
+        );
         assert_eq!(proposer.attempt_count(), 1, "the first proposal is refused");
 
         scheduler.retry_owed_sequencer_entries();
@@ -238,22 +235,14 @@ mod tests {
     #[tokio::test]
     async fn completion_ack_is_reproposed_until_the_registry_records_it() {
         let txn_id = TxnId::new(21, 0);
-        let (mut scheduler, _dir) = scheduler_with_pending(
-            txn_id,
-            CommitState::AwaitingResolve {
-                committed: false,
-                redo_lsn: None,
-            },
-        );
+        let (mut scheduler, _dir) = scheduler_with_pending(txn_id, CommitState::AwaitingDrop);
         let proposer = CapturingProposer::failing_first(1);
         scheduler.sequencer_proposer = proposer.clone();
         // Only the vShard's group leader proposes the ack.
         elect_data_group_leader(&scheduler);
         scheduler.registry.seed_expected(cluster_txn_id(txn_id), 2);
 
-        scheduler
-            .finish_resolved_commit(txn_id, staged_response(Status::Ok, None), false, None)
-            .await;
+        scheduler.finish_drop(txn_id, &staged_response(Status::Ok, None));
         assert!(!scheduler.pending.contains_key(&txn_id));
         assert_eq!(proposer.attempt_count(), 1, "the first proposal is refused");
 
@@ -289,14 +278,15 @@ mod tests {
         );
     }
 
-    /// The registry removes a txn's entry once its outcome fired. An owed
-    /// entry for such a txn is settled, not proposed again.
+    /// The registry evicts a txn's entry once it is terminal. An owed entry
+    /// for such a txn is settled, not proposed again.
     #[tokio::test]
-    async fn entry_for_a_txn_whose_outcome_fired_is_settled() {
+    async fn entry_for_an_evicted_txn_is_settled() {
         let (mut scheduler, _dir) = build_test_scheduler(VSHARD);
         let proposer = CapturingProposer::failing_first(1);
         scheduler.sequencer_proposer = proposer.clone();
         elect_data_group_leader(&scheduler);
+        scheduler.registry.set_waiterless_ttl(Duration::ZERO);
         let txn_id = TxnId::new(22, 0);
         let _outcome = scheduler
             .registry
@@ -305,6 +295,10 @@ mod tests {
         scheduler.propose_sequencer_entry(
             txn_id,
             SchedulerProposal::CompletionAck { result: Vec::new() },
+        );
+        scheduler.registry.note_verdict(
+            cluster_txn_id(txn_id),
+            nodedb_cluster::calvin::VerdictOutcome::Commit,
         );
         scheduler
             .registry
@@ -338,37 +332,6 @@ mod tests {
         assert_eq!(proposer.attempt_count(), 1);
     }
 
-    /// A follower that staged a txn owes an abort vote. It proposes the vote
-    /// only once it leads the vShard's group and no vote has applied, so the
-    /// txn ends in a retryable abort instead of waiting on a lost leader.
-    #[tokio::test]
-    async fn a_follower_that_comes_to_lead_votes_abort_for_its_staged_txn() {
-        let (mut scheduler, _dir) = build_test_scheduler(VSHARD);
-        let proposer = CapturingProposer::accepting();
-        scheduler.sequencer_proposer = proposer.clone();
-        let txn_id = TxnId::new(26, 0);
-        scheduler.registry.seed_expected(cluster_txn_id(txn_id), 2);
-        scheduler
-            .pending
-            .insert(txn_id, staged_pending(make_sequenced_txn(26, 0), txn_id));
-
-        scheduler.resolve_staged_commit(txn_id, &staged_response(Status::Ok, Some(true)));
-        scheduler.retry_owed_sequencer_entries();
-        assert_eq!(proposer.attempt_count(), 0, "a follower casts no vote");
-
-        elect_data_group_leader(&scheduler);
-        scheduler.retry_owed_sequencer_entries();
-        assert_eq!(
-            proposer.accepted(),
-            vec![SequencerEntry::AbortVote {
-                epoch: 26,
-                position: 0,
-                vshard: VSHARD,
-                reason: nodedb_cluster::calvin::AbortReason::SerializationConflict,
-            }]
-        );
-    }
-
     /// A txn this node never seeded keeps its entry owed: a missing registry
     /// entry that was never seen does not settle it.
     #[tokio::test]
@@ -376,9 +339,15 @@ mod tests {
         let (mut scheduler, _dir) = build_test_scheduler(VSHARD);
         let proposer = CapturingProposer::accepting();
         scheduler.sequencer_proposer = proposer.clone();
+        elect_data_group_leader(&scheduler);
         let txn_id = TxnId::new(23, 0);
 
-        scheduler.propose_sequencer_entry(txn_id, SchedulerProposal::OllpMismatch);
+        scheduler.propose_sequencer_entry(
+            txn_id,
+            SchedulerProposal::Vote {
+                abort: Some(nodedb_cluster::calvin::AbortReason::PlanRejected),
+            },
+        );
         scheduler.retry_owed_sequencer_entries();
         scheduler.retry_owed_sequencer_entries();
 
@@ -392,10 +361,11 @@ mod tests {
         let (mut scheduler, _dir) = build_test_scheduler(VSHARD);
         let proposer = CapturingProposer::failing_first(1);
         scheduler.sequencer_proposer = proposer.clone();
+        elect_data_group_leader(&scheduler);
         scheduler.propose_sequencer_entry(
             TxnId::new(24, 0),
-            SchedulerProposal::RoutingFailed {
-                detail: "unroutable".to_string(),
+            SchedulerProposal::Vote {
+                abort: Some(nodedb_cluster::calvin::AbortReason::PlanRejected),
             },
         );
         assert!(proposer.accepted().is_empty());

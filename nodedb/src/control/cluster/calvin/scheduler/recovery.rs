@@ -2,16 +2,21 @@
 
 //! Calvin scheduler WAL recovery.
 //!
-//! Provides [`read_applied_recovery`] which scans the WAL for
-//! `RecordType::CalvinApplied` records AND `RecordType::TransactionRedo`
-//! records carrying a `calvin_stamp` (write-bearing Calvin transactions
-//! journal the redo record as their applied-marker instead of a standalone
-//! `CalvinApplied` marker), returning for a given vShard the union of applied
-//! `(epoch, position)` pairs together with a fully-applied watermark. The
-//! scheduler uses this on startup to seed its exactly-once applied gate
-//! (see [`super::applied_gate::AppliedGate`]).
+//! Provides [`recover_all_applied`], which scans the WAL for
+//! `RecordType::TransactionRedo` records carrying a `calvin_stamp`. A
+//! committed Calvin slice installs from a stamped redo entry, and its WAL
+//! record is the slice's applied marker. The scan returns, per vShard, the
+//! applied `(epoch, position)` pairs together with a fully-applied
+//! watermark.
 //!
-//! Each `CalvinApplied` marker is per `(epoch, position, vShard)` — one per
+//! Boot runs [`recover_all_applied`] once, before the data-group apply loop
+//! starts: one WAL pass yields every vShard's applied state, merged with the
+//! state the last checkpoint saved. It fills the node's applied ledgers (see
+//! [`super::applied_ledger::CalvinAppliedLedgers`]), and each scheduler seeds
+//! its exactly-once applied gate (see [`super::applied_gate::AppliedGate`])
+//! from its vShard's ledger.
+//!
+//! Each stamp is per `(epoch, position, vShard)` — one per
 //! independent transaction position — so the scan preserves `position` rather
 //! than collapsing an epoch to a single "applied" bit. Collapsing to the max
 //! epoch will mark a whole epoch applied on the strength of its first committed
@@ -26,10 +31,10 @@
 //! re-fan-out supplies the counts. `max_applied_epoch` is the highest epoch with
 //! any marker — the rebuild-target cursor, independent of the exact gate.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
+use nodedb_wal::WalRecord;
 use nodedb_wal::record::RecordType;
-use nodedb_wal::{CalvinAppliedPayload, WalRecord};
 use tracing::warn;
 
 use crate::wal::RedoRecord;
@@ -39,7 +44,7 @@ use crate::wal::manager::WalManager;
 /// exists for this vShard.
 pub const NOT_YET_APPLIED_EPOCH: u64 = u64::MAX;
 
-/// Result of scanning the WAL for a vShard's `CalvinApplied` markers.
+/// Result of scanning the WAL for a vShard's stamped redo records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppliedRecovery {
     /// Fully-applied watermark `W` to seed the applied gate. Conservative at
@@ -53,74 +58,70 @@ pub struct AppliedRecovery {
     pub max_applied_epoch: u64,
 }
 
-/// Scan the WAL and collect this vShard's applied `(epoch, position)` markers.
+impl AppliedRecovery {
+    /// The state of a vShard with no applied marker. The watermark stays
+    /// conservative: the applied gate advances it once the re-fan-out
+    /// supplies the per-epoch expected counts.
+    fn empty() -> Self {
+        Self {
+            fully_applied_epoch: NOT_YET_APPLIED_EPOCH,
+            applied_tail: BTreeSet::new(),
+            max_applied_epoch: NOT_YET_APPLIED_EPOCH,
+        }
+    }
+
+    /// Record one applied `(epoch, position)`.
+    fn note(&mut self, epoch: u64, position: u32) {
+        self.applied_tail.insert((epoch, position));
+        if self.max_applied_epoch == NOT_YET_APPLIED_EPOCH || epoch > self.max_applied_epoch {
+            self.max_applied_epoch = epoch;
+        }
+    }
+}
+
+/// Every vShard's applied `(epoch, position)` markers in one pass over the
+/// WAL. `group_of` names a vShard's data group: a snapshot install of the
+/// group drops the vShard's markers before it. The install replaced the
+/// vShard's storage, and the applied state it brought replaced this node's
+/// in the catalog.
 ///
-/// Returns an empty tail and the [`NOT_YET_APPLIED_EPOCH`] sentinel for a
-/// greenfield node (no `CalvinApplied` records exist).
+/// A vShard with no stamped redo record is absent from the result.
 ///
 /// Records that fail to decode are logged and skipped — a corrupt record does
 /// not abort the scan.
-pub fn read_applied_recovery(wal: &WalManager, vshard_id: u32) -> crate::Result<AppliedRecovery> {
-    scan_applied(wal, vshard_id, None)
-}
-
-/// [`read_applied_recovery`] for a vShard of data group `group_id`: a
-/// snapshot install of the group drops every marker before it. The install
-/// replaced the vShard's storage, and the applied state it brought replaced
-/// this node's in the catalog.
-fn scan_applied(
+fn scan_all(
     wal: &WalManager,
-    vshard_id: u32,
-    group_id: Option<u64>,
-) -> crate::Result<AppliedRecovery> {
+    group_of: &dyn Fn(u32) -> Option<u64>,
+) -> crate::Result<BTreeMap<u32, AppliedRecovery>> {
     let records = wal.replay()?;
-    let mut applied_tail = BTreeSet::new();
-    let mut max_applied_epoch = NOT_YET_APPLIED_EPOCH;
+    let mut scans: BTreeMap<u32, AppliedRecovery> = BTreeMap::new();
+    let note =
+        |scans: &mut BTreeMap<u32, AppliedRecovery>, vshard_id: u32, epoch: u64, position: u32| {
+            scans
+                .entry(vshard_id)
+                .or_insert_with(AppliedRecovery::empty)
+                .note(epoch, position);
+        };
 
     for record in &records {
         match record_type_of(record) {
             Some(RecordType::SnapshotInstalled) => {
-                let installed = <[u8; 8]>::try_from(record.payload.as_slice())
+                let Some(installed) = <[u8; 8]>::try_from(record.payload.as_slice())
                     .ok()
-                    .map(u64::from_le_bytes);
-                if group_id.is_some() && installed == group_id {
-                    applied_tail.clear();
-                    max_applied_epoch = NOT_YET_APPLIED_EPOCH;
-                }
-            }
-            Some(RecordType::CalvinApplied) => {
-                match CalvinAppliedPayload::from_bytes(&record.payload) {
-                    Ok(p) if p.vshard_id == vshard_id => {
-                        accumulate(
-                            &mut applied_tail,
-                            &mut max_applied_epoch,
-                            p.epoch,
-                            p.position,
-                        );
-                    }
-                    Ok(_) => {
-                        // Different vshard — skip.
-                    }
-                    Err(e) => {
-                        warn!(
-                            lsn = record.header.lsn,
-                            error = %e,
-                            "calvin recovery: failed to decode CalvinApplied payload; skipping"
-                        );
+                    .map(u64::from_le_bytes)
+                else {
+                    continue;
+                };
+                for (vshard_id, scan) in &mut scans {
+                    if group_of(*vshard_id) == Some(installed) {
+                        *scan = AppliedRecovery::empty();
                     }
                 }
             }
             Some(RecordType::TransactionRedo) => match RedoRecord::from_bytes(&record.payload) {
                 Ok(redo) => {
-                    if let Some(stamp) = redo.calvin_stamp
-                        && stamp.vshard_id == vshard_id
-                    {
-                        accumulate(
-                            &mut applied_tail,
-                            &mut max_applied_epoch,
-                            stamp.epoch,
-                            stamp.position,
-                        );
+                    if let Some(stamp) = redo.calvin_stamp {
+                        note(&mut scans, stamp.vshard_id, stamp.epoch, stamp.position);
                     }
                 }
                 Err(e) => {
@@ -134,19 +135,13 @@ fn scan_applied(
             _ => continue,
         }
     }
-
-    Ok(AppliedRecovery {
-        // Conservative: the applied gate advances the watermark once the
-        // re-fan-out supplies the per-epoch expected counts.
-        fully_applied_epoch: NOT_YET_APPLIED_EPOCH,
-        applied_tail,
-        max_applied_epoch,
-    })
+    Ok(scans)
 }
 
-/// This vShard's applied state after a restart: the state the last
-/// checkpoint saved in `catalog`, together with the markers the WAL still
-/// holds.
+/// Every vShard's applied state after a restart, in one pass over the WAL:
+/// the state the last checkpoint saved in `catalog`, together with the
+/// markers the WAL still holds. A vShard absent from the result has no
+/// Calvin history on this node.
 ///
 /// A checkpoint deletes WAL segments that hold applied markers, while the
 /// sequencer log keeps delivering their entries after a restart. Without the
@@ -154,19 +149,24 @@ fn scan_applied(
 /// one: its local stage refuses the rows it already wrote, the scheduler
 /// halts, and the transaction's completion ack never settles.
 ///
-/// `group_id` is the data group of the vShard, when known: the markers
+/// `group_of` names the data group of a vShard, when known: the markers
 /// before the group's last snapshot install no longer hold.
-pub fn recover_applied(
+pub fn recover_all_applied(
     wal: &WalManager,
     catalog: &crate::control::security::catalog::SystemCatalog,
-    vshard_id: u32,
-    group_id: Option<u64>,
-) -> crate::Result<AppliedRecovery> {
-    let from_wal = scan_applied(wal, vshard_id, group_id)?;
-    let Some(saved) = catalog.load_calvin_applied(vshard_id)? else {
-        return Ok(from_wal);
-    };
-    Ok(merge_saved(from_wal, saved.fully_applied_epoch, saved.tail))
+    group_of: &dyn Fn(u32) -> Option<u64>,
+) -> crate::Result<BTreeMap<u32, AppliedRecovery>> {
+    let mut recovered = scan_all(wal, group_of)?;
+    for saved in catalog.load_all_calvin_applied()? {
+        let from_wal = recovered
+            .remove(&saved.vshard_id)
+            .unwrap_or_else(AppliedRecovery::empty);
+        recovered.insert(
+            saved.vshard_id,
+            merge_saved(from_wal, saved.fully_applied_epoch, saved.tail),
+        );
+    }
+    Ok(recovered)
 }
 
 /// Fold a saved `(fully_applied_epoch, tail)` into a WAL scan's result.
@@ -207,37 +207,75 @@ fn record_type_of(record: &WalRecord) -> Option<RecordType> {
     RecordType::from_raw(raw_type)
 }
 
-/// Feed one applied `(epoch, position)` pair into the shared tail / watermark
-/// accumulation, used by both the `CalvinApplied` and `TransactionRedo`
-/// (`calvin_stamp`) marker sources so the two unify into one applied set.
-fn accumulate(
-    applied_tail: &mut BTreeSet<(u64, u32)>,
-    max_applied_epoch: &mut u64,
-    epoch: u64,
-    position: u32,
-) {
-    applied_tail.insert((epoch, position));
-    if *max_applied_epoch == NOT_YET_APPLIED_EPOCH || epoch > *max_applied_epoch {
-        *max_applied_epoch = epoch;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    use crate::types::{DatabaseId, TenantId, VShardId};
     use crate::wal::manager::WalManager;
+    use crate::wal::{CalvinStamp, RedoRecord, RedoSubRecord};
 
     fn open_wal(dir: &TempDir) -> WalManager {
         WalManager::open(dir.path(), false).expect("open wal")
+    }
+
+    /// A redo record with one sub-record and the Calvin stamp `stamp`.
+    fn redo_record(stamp: Option<CalvinStamp>) -> RedoRecord {
+        RedoRecord {
+            version: 1,
+            ops: vec![RedoSubRecord {
+                record_type: nodedb_wal::record::RecordType::Put as u32,
+                payload: vec![1, 2, 3],
+            }],
+            calvin_stamp: stamp,
+            cross_shard_applied: None,
+            row_sources: Vec::new(),
+            publishes: Vec::new(),
+            row_changes: Vec::new(),
+        }
+    }
+
+    fn append_redo(wal: &WalManager, vshard: u32, record: &RedoRecord) {
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
+            .append_transaction_redo(
+                TenantId::new(0),
+                VShardId::new(vshard),
+                DatabaseId::DEFAULT,
+                record,
+            )
+            .expect("append redo");
+    }
+
+    /// Append the stamped redo record of the Calvin slice at
+    /// `(epoch, position)` on `vshard`.
+    fn append_stamped(wal: &WalManager, vshard: u32, epoch: u64, position: u32) {
+        let stamp = CalvinStamp {
+            epoch,
+            position,
+            vshard_id: vshard,
+        };
+        append_redo(wal, vshard, &redo_record(Some(stamp)));
+    }
+
+    /// The recovered state of `vshard` alone, from a catalog with nothing
+    /// saved. `group_id` is the data group of `vshard`, when known. A vShard
+    /// with no marker recovers as `AppliedRecovery::empty()`.
+    fn recover_vshard(wal: &WalManager, vshard: u32, group_id: Option<u64>) -> AppliedRecovery {
+        let catalog = crate::control::security::catalog::SystemCatalog::open_in_memory().unwrap();
+        let group_of = |v: u32| if v == vshard { group_id } else { None };
+        recover_all_applied(wal, &catalog, &group_of)
+            .unwrap()
+            .remove(&vshard)
+            .unwrap_or_else(AppliedRecovery::empty)
     }
 
     #[test]
     fn greenfield_returns_sentinel_and_empty_tail() {
         let dir = TempDir::new().unwrap();
         let wal = open_wal(&dir);
-        let rec = read_applied_recovery(&wal, 1).unwrap();
+        let rec = recover_vshard(&wal, 1, None);
         assert_eq!(rec.fully_applied_epoch, NOT_YET_APPLIED_EPOCH);
         assert_eq!(rec.max_applied_epoch, NOT_YET_APPLIED_EPOCH);
         assert!(rec.applied_tail.is_empty());
@@ -248,21 +286,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let wal = open_wal(&dir);
 
-        use crate::types::VShardId;
         // Epoch 5: position 0 applied, position 1 NOT applied. Epoch 2: pos 0.
-        wal.appender(crate::wal::manager::NO_APPLY_KEY)
-            .append_calvin_applied(VShardId::new(1), 2, 0)
-            .unwrap();
-        wal.appender(crate::wal::manager::NO_APPLY_KEY)
-            .append_calvin_applied(VShardId::new(1), 5, 0)
-            .unwrap();
+        append_stamped(&wal, 1, 2, 0);
+        append_stamped(&wal, 1, 5, 0);
         // A different vshard (must be ignored).
-        wal.appender(crate::wal::manager::NO_APPLY_KEY)
-            .append_calvin_applied(VShardId::new(2), 99, 0)
-            .unwrap();
+        append_stamped(&wal, 2, 99, 0);
         wal.sync().unwrap();
 
-        let rec = read_applied_recovery(&wal, 1).unwrap();
+        let rec = recover_vshard(&wal, 1, None);
         // The recovery API reports (5,0) applied and (5,1) NOT applied — the
         // exact per-position distinction the old max-epoch collapse destroyed.
         assert!(rec.applied_tail.contains(&(5, 0)), "(5,0) is applied");
@@ -274,7 +305,7 @@ mod tests {
         assert_eq!(rec.fully_applied_epoch, NOT_YET_APPLIED_EPOCH);
         assert!(rec.fully_applied_epoch == NOT_YET_APPLIED_EPOCH || rec.fully_applied_epoch < 5);
 
-        let rec2 = read_applied_recovery(&wal, 2).unwrap();
+        let rec2 = recover_vshard(&wal, 2, None);
         assert!(rec2.applied_tail.contains(&(99, 0)));
         assert_eq!(rec2.max_applied_epoch, 99);
     }
@@ -283,17 +314,14 @@ mod tests {
     fn multi_position_epoch_is_not_collapsed() {
         let dir = TempDir::new().unwrap();
         let wal = open_wal(&dir);
-        use crate::types::VShardId;
         let vshard = 3u32;
 
         // Epoch 7 carries two independent positions on this vShard; only
         // position 0 committed before the crash.
-        wal.appender(crate::wal::manager::NO_APPLY_KEY)
-            .append_calvin_applied(VShardId::new(vshard), 7, 0)
-            .unwrap();
+        append_stamped(&wal, vshard, 7, 0);
         wal.sync().unwrap();
 
-        let rec = read_applied_recovery(&wal, vshard).unwrap();
+        let rec = recover_vshard(&wal, vshard, None);
         assert!(rec.applied_tail.contains(&(7, 0)));
         assert!(
             !rec.applied_tail.contains(&(7, 1)),
@@ -303,86 +331,20 @@ mod tests {
     }
 
     #[test]
-    fn transaction_redo_calvin_stamp_unions_with_calvin_applied() {
-        use crate::types::{DatabaseId, TenantId, VShardId};
-        use crate::wal::{CalvinStamp, RedoRecord, RedoSubRecord};
-
+    fn only_stamped_transaction_redo_records_mark_positions_applied() {
         let dir = TempDir::new().unwrap();
         let wal = open_wal(&dir);
         let vshard = 4u32;
 
-        // A pure-read/empty-ops txn still writes a standalone CalvinApplied
-        // marker at (epoch 1, position 0).
-        wal.appender(crate::wal::manager::NO_APPLY_KEY)
-            .append_calvin_applied(VShardId::new(vshard), 1, 0)
-            .unwrap();
-
-        // A write-bearing Calvin txn journals its applied-marker as a
-        // TransactionRedo record carrying a calvin_stamp at (epoch 1, position 1).
-        let write_bearing = RedoRecord {
-            version: 1,
-            ops: vec![RedoSubRecord {
-                record_type: nodedb_wal::record::RecordType::Put as u32,
-                payload: vec![1, 2, 3],
-            }],
-            calvin_stamp: Some(CalvinStamp {
-                epoch: 1,
-                position: 1,
-                vshard_id: vshard,
-                collections: Vec::new(),
-                sum_targets: Vec::new(),
-            }),
-            cross_shard_applied: None,
-            row_sources: Vec::new(),
-            publishes: Vec::new(),
-            row_changes: Vec::new(),
-        };
-        wal.appender(crate::wal::manager::NO_APPLY_KEY)
-            .with_event_source(crate::event::EventSource::User)
-            .append_transaction_redo(
-                TenantId::new(0),
-                VShardId::new(vshard),
-                DatabaseId::DEFAULT,
-                &write_bearing,
-            )
-            .unwrap();
-
-        // A single-shard TransactionRedo (calvin_stamp: None) must be ignored
-        // by Calvin recovery.
-        let single_shard = RedoRecord {
-            version: 1,
-            ops: vec![RedoSubRecord {
-                record_type: nodedb_wal::record::RecordType::Put as u32,
-                payload: vec![9, 9, 9],
-            }],
-            calvin_stamp: None,
-            cross_shard_applied: None,
-            row_sources: Vec::new(),
-            publishes: Vec::new(),
-            row_changes: Vec::new(),
-        };
-        wal.appender(crate::wal::manager::NO_APPLY_KEY)
-            .with_event_source(crate::event::EventSource::User)
-            .append_transaction_redo(
-                TenantId::new(0),
-                VShardId::new(vshard),
-                DatabaseId::DEFAULT,
-                &single_shard,
-            )
-            .unwrap();
-
+        append_stamped(&wal, vshard, 1, 0);
+        append_stamped(&wal, vshard, 1, 1);
+        // A session commit's record carries no stamp, and Calvin recovery
+        // ignores it.
+        append_redo(&wal, vshard, &redo_record(None));
         wal.sync().unwrap();
 
-        let rec = read_applied_recovery(&wal, vshard).unwrap();
-        assert!(
-            rec.applied_tail.contains(&(1, 0)),
-            "CalvinApplied marker still contributes"
-        );
-        assert!(
-            rec.applied_tail.contains(&(1, 1)),
-            "TransactionRedo calvin_stamp contributes its (epoch, position) too"
-        );
-        assert_eq!(rec.applied_tail.len(), 2);
+        let rec = recover_vshard(&wal, vshard, None);
+        assert_eq!(rec.applied_tail, [(1, 0), (1, 1)].into_iter().collect());
         assert_eq!(rec.max_applied_epoch, 1);
     }
 
@@ -390,11 +352,8 @@ mod tests {
     fn saved_state_restores_what_a_truncated_wal_lost() {
         let dir = TempDir::new().unwrap();
         let wal = open_wal(&dir);
-        use crate::types::VShardId;
-        // The WAL still holds only the marker written after the checkpoint.
-        wal.appender(crate::wal::manager::NO_APPLY_KEY)
-            .append_calvin_applied(VShardId::new(1), 6, 0)
-            .unwrap();
+        // The WAL still holds only the record written after the checkpoint.
+        append_stamped(&wal, 1, 6, 0);
         wal.sync().unwrap();
         let catalog_dir = TempDir::new().unwrap();
         let catalog = crate::control::security::catalog::SystemCatalog::open(
@@ -411,41 +370,100 @@ mod tests {
             ])
             .unwrap();
 
-        let rec = recover_applied(&wal, &catalog, 1, None).unwrap();
+        let recovered = recover_all_applied(&wal, &catalog, &|_| None).unwrap();
+        let rec = &recovered[&1];
         assert_eq!(rec.fully_applied_epoch, 2);
         assert!(rec.applied_tail.contains(&(4, 1)));
         assert!(rec.applied_tail.contains(&(6, 0)));
         assert_eq!(rec.max_applied_epoch, 6);
 
-        // A vShard with nothing saved keeps the plain WAL scan.
-        let other = recover_applied(&wal, &catalog, 9, None).unwrap();
-        assert_eq!(other, read_applied_recovery(&wal, 9).unwrap());
+        // A vShard with nothing saved and no marker has no history.
+        assert!(!recovered.contains_key(&9));
+    }
+
+    fn empty_catalog(dir: &TempDir) -> crate::control::security::catalog::SystemCatalog {
+        crate::control::security::catalog::SystemCatalog::open(&dir.path().join("system.redb"))
+            .unwrap()
+    }
+
+    /// The one boot pass yields, for every vShard, what a scan of that vShard
+    /// alone yields.
+    #[test]
+    fn one_pass_recovery_matches_per_vshard_scans() {
+        let dir = TempDir::new().unwrap();
+        let wal = open_wal(&dir);
+        let appender = || wal.appender(crate::wal::manager::NO_APPLY_KEY);
+        append_stamped(&wal, 1, 1, 0);
+        append_stamped(&wal, 2, 1, 1);
+        appender().append_snapshot_installed(10).unwrap();
+        append_stamped(&wal, 3, 4, 0);
+        append_stamped(&wal, 1, 2, 3);
+        appender().append_snapshot_installed(20).unwrap();
+        append_stamped(&wal, 2, 6, 0);
+        wal.sync().unwrap();
+        let group_of = |vshard: u32| match vshard {
+            1 => Some(10),
+            2 => Some(20),
+            _ => None,
+        };
+        let catalog_dir = TempDir::new().unwrap();
+        let catalog = empty_catalog(&catalog_dir);
+
+        let all = recover_all_applied(&wal, &catalog, &group_of).unwrap();
+
+        assert_eq!(all.keys().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+        for (vshard, recovered) in &all {
+            let alone = recover_vshard(&wal, *vshard, group_of(*vshard));
+            assert_eq!(recovered, &alone, "vShard {vshard}");
+        }
+        assert_eq!(all[&1].applied_tail, [(2, 3)].into_iter().collect());
+        assert_eq!(all[&2].applied_tail, [(6, 0)].into_iter().collect());
+        assert_eq!(all[&3].applied_tail, [(4, 0)].into_iter().collect());
+    }
+
+    /// A snapshot install record drops the markers of its own group's
+    /// vShards only.
+    #[test]
+    fn a_snapshot_install_record_clears_only_its_group() {
+        let dir = TempDir::new().unwrap();
+        let wal = open_wal(&dir);
+        append_stamped(&wal, 1, 3, 0);
+        append_stamped(&wal, 2, 3, 1);
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .append_snapshot_installed(8)
+            .unwrap();
+        append_stamped(&wal, 1, 5, 2);
+        wal.sync().unwrap();
+        let group_of = |vshard: u32| if vshard == 1 { Some(8) } else { Some(9) };
+        let catalog_dir = TempDir::new().unwrap();
+        let catalog = empty_catalog(&catalog_dir);
+
+        let all = recover_all_applied(&wal, &catalog, &group_of).unwrap();
+
+        assert_eq!(all[&1].applied_tail, [(5, 2)].into_iter().collect());
+        assert_eq!(all[&1].max_applied_epoch, 5);
+        assert_eq!(all[&2].applied_tail, [(3, 1)].into_iter().collect());
     }
 
     /// A snapshot install of the vShard's group drops every marker before
     /// it: the install replaced the storage those positions wrote.
     #[test]
     fn a_group_snapshot_install_drops_the_markers_before_it() {
-        use crate::types::VShardId;
         let dir = TempDir::new().unwrap();
         let wal = open_wal(&dir);
         let appender = || wal.appender(crate::wal::manager::NO_APPLY_KEY);
-        appender()
-            .append_calvin_applied(VShardId::new(1), 3, 0)
-            .unwrap();
+        append_stamped(&wal, 1, 3, 0);
         appender().append_snapshot_installed(8).unwrap();
-        appender()
-            .append_calvin_applied(VShardId::new(1), 5, 2)
-            .unwrap();
+        append_stamped(&wal, 1, 5, 2);
         appender().append_snapshot_installed(9).unwrap();
         wal.sync().unwrap();
 
-        let in_group = scan_applied(&wal, 1, Some(8)).unwrap();
+        let in_group = recover_vshard(&wal, 1, Some(8));
         assert_eq!(in_group.applied_tail, [(5, 2)].into_iter().collect());
         assert_eq!(in_group.max_applied_epoch, 5);
 
-        let other_group = scan_applied(&wal, 1, Some(4)).unwrap();
-        assert_eq!(other_group, read_applied_recovery(&wal, 1).unwrap());
+        let other_group = recover_vshard(&wal, 1, Some(4));
+        assert_eq!(other_group, recover_vshard(&wal, 1, None));
         assert!(other_group.applied_tail.contains(&(3, 0)));
     }
 }

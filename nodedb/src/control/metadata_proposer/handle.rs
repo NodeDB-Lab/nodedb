@@ -136,6 +136,7 @@ fn metadata_propose_error(error: ClusterError) -> Error {
         | ClusterError::GhostNotFound { .. }
         | ClusterError::Transport { .. }
         | ClusterError::ShardTimeout { .. }
+        | ClusterError::Unanswered { .. }
         | ClusterError::Storage { .. }
         | ClusterError::Codec { .. }
         | ClusterError::UnsupportedWireVersion { .. }

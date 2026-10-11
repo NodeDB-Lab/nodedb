@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The lock table struct, its internal decision enums, and the small
-//! per-entry predicates the acquire/release paths share.
+//! The lock table struct and the small per-entry predicates the
+//! acquire/release paths share.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use tokio::sync::Notify;
 
 use crate::control::cluster::calvin::scheduler::lock::lock_entry::{LockEntry, LockMode};
 use crate::control::cluster::calvin::scheduler::lock::lock_key::{LockKey, TxnId};
@@ -15,11 +18,12 @@ use crate::control::cluster::calvin::scheduler::lock::lock_key::{LockKey, TxnId}
 ///
 /// # Key sets tracked per transaction
 ///
-/// - `held_locks`: key sets for transactions that are a current holder on ALL
-///   their keys and are actively executing (i.e. dispatched to the Data Plane).
-/// - `pending_keys`: key sets for transactions that are blocked waiting for at
-///   least one key.  When `release` promotes a blocked txn to holder on every
-///   one of its keys, the entry moves from `pending_keys` to `held_locks`.
+/// - `held_locks`: keys of transactions that hold ALL their requested keys and
+///   are actively executing (i.e. dispatched to the Data Plane).
+/// - `pending_keys`: the full request of a transaction that waits for at least
+///   one key. It already holds every other key of the request. When `release`
+///   grants its last waited key, the entry moves from `pending_keys` to
+///   `held_locks`.
 pub struct LockManager {
     /// Per-key lock entries.  Uses `BTreeMap` for deterministic iteration.
     /// Visible to the whole `lock` module so the sibling `reap` module can
@@ -30,37 +34,25 @@ pub struct LockManager {
     /// Visible to the whole `lock` module — see `table`.
     pub(in crate::control::cluster::calvin::scheduler::lock) held_locks:
         BTreeMap<TxnId, BTreeSet<LockKey>>,
-    /// Key sets for **blocked** (not-yet-dispatched) txns.  Populated when
-    /// `acquire` returns `Blocked`; cleared (moved to `held_locks`) when all
-    /// keys have been acquired on the promotion path inside `release`.
-    pub(super) pending_keys: BTreeMap<TxnId, BTreeSet<LockKey>>,
+    /// Full requests of **blocked** (not-yet-dispatched) txns.  Populated when
+    /// `acquire` returns `Blocked`; moved to `held_locks` when the last waited
+    /// key is granted on the promotion path inside `release`.
+    pub(in crate::control::cluster::calvin::scheduler::lock) pending_keys:
+        BTreeMap<TxnId, BTreeMap<LockKey, LockMode>>,
+    /// Woken on every release. A write-admission waiter that holds no key
+    /// probes the table again after each wake.
+    pub(in crate::control::cluster::calvin::scheduler::lock) released: Arc<Notify>,
 }
 
-/// Outcome of inspecting a single key during [`LockManager::acquire_shared`].
-pub(super) enum SharedGrant {
-    /// The shared lock was granted (key was free or already held shared).
-    Granted,
-    /// The key is held exclusively by another txn; the request was enqueued.
-    Blocked,
-}
-
-/// The wound-wait decision for an exclusive requester that meets a conflict.
-pub(super) enum ExclusiveWait {
-    /// Every conflicting holder is a shared reservation and the requester is
-    /// older than all of them: wound (revoke) those shared holders and proceed.
+/// How a requester resolves a request that conflicts on at least one key.
+pub(super) enum ConflictResolution {
+    /// Every conflicting holder is a younger read reservation and no other
+    /// transaction waits on a conflicting key: revoke those reservations and
+    /// take every key.
     Wound,
-    /// The requester must block: a conflicting holder is exclusive, or the
-    /// requester is younger than some conflicting shared holder.
+    /// The requester waits: a conflicting holder is a transaction, an older
+    /// reservation, or an earlier waiter queues ahead of it.
     Block,
-}
-
-/// The waiters promoted off one key when its holders drained, together with the
-/// action to take on the now-empty entry.
-pub(super) enum Promotion {
-    /// No waiters remained; the entry should be removed entirely.
-    Freed,
-    /// These waiters were installed as the new holders.
-    Promoted(Vec<TxnId>),
 }
 
 impl LockManager {
@@ -70,7 +62,15 @@ impl LockManager {
             table: BTreeMap::new(),
             held_locks: BTreeMap::new(),
             pending_keys: BTreeMap::new(),
+            released: Arc::new(Notify::new()),
         }
+    }
+
+    /// The signal every release wakes. A waiter enables its `notified()`
+    /// future before it probes the table, so no release between the probe
+    /// and the wait goes unseen.
+    pub fn release_signal(&self) -> Arc<Notify> {
+        Arc::clone(&self.released)
     }
 }
 
@@ -81,17 +81,9 @@ impl Default for LockManager {
 }
 
 impl LockEntry {
-    /// Whether this entry is held exclusively by exactly `txn` (the self
-    /// re-acquire case on the exclusive path).
-    pub(super) fn held_exclusively_by(&self, txn: TxnId) -> bool {
-        self.mode == LockMode::Exclusive && self.holders.len() == 1 && self.holders[0] == txn
-    }
-
-    /// Whether this entry is held **shared** by exactly `txn` and no one else —
-    /// the self-upgrade case: `txn` may take the key exclusively because it is
-    /// the sole current holder.
-    pub(super) fn held_shared_solely_by(&self, txn: TxnId) -> bool {
-        self.mode == LockMode::Shared && self.holders.len() == 1 && self.holders[0] == txn
+    /// Whether `txn` is the only holder of this entry.
+    pub(super) fn held_solely_by(&self, txn: TxnId) -> bool {
+        self.holders.len() == 1 && self.holders[0] == txn
     }
 
     /// Whether `txn` is already enqueued as a waiter on this entry.

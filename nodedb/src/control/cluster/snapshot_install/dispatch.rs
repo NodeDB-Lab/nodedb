@@ -58,6 +58,7 @@ pub async fn install_on_every_core(
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: Admission::Exempt(ExemptReason::AlreadyOrdered),
         };
         let rx = state.tracker.register(request_id);
@@ -136,13 +137,14 @@ fn installed(resp: Response) -> crate::Result<()> {
     }
 }
 
-/// Fail point `snapshot_install::node<N>::core<C>`: core `C` of node `N`
-/// reports its share as failed after it installed it.
+/// Fail point `snapshot_install::core<C>`, scoped to node `node_id`: core
+/// `C` of the node reports its share as failed after it installed it.
 fn injected_fault(node_id: u64, core_id: usize) -> crate::Result<()> {
     #[cfg(feature = "failpoints")]
-    if let Some(detail) =
-        crate::fail_point::eval_fail(&format!("snapshot_install::node{node_id}::core{core_id}"))
-    {
+    if let Some(detail) = crate::fail_point::eval_fail(
+        crate::fail_point::FailScope::Node(node_id),
+        &format!("snapshot_install::core{core_id}"),
+    ) {
         return Err(crate::Error::DataPlane(ErrorCode::Internal { detail }));
     }
     #[cfg(not(feature = "failpoints"))]

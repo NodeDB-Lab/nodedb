@@ -23,7 +23,7 @@ impl CoreLoop {
             MetaOp::Cancel { target_request_id } => self.execute_cancel(task, *target_request_id),
 
             // A committed transaction installs only through its redo record
-            // (`ApplyTransactionRedo`, `CalvinFlush`). A plan batch carries no
+            // (`ApplyTransactionRedo`). A plan batch carries no
             // record restart replay reads, so an Origin core refuses it.
             MetaOp::TransactionBatch { .. } => self.response_error(
                 task,
@@ -75,14 +75,23 @@ impl CoreLoop {
                 replace_mode,
                 collections_to_clear,
                 group_vshards,
-            } => self.execute_restore_tenant_snapshot(
-                task,
-                *tenant_id,
-                snapshot,
-                *replace_mode,
-                collections_to_clear,
-                group_vshards,
-            ),
+                version_floor,
+            } => {
+                let response = self.execute_restore_tenant_snapshot(
+                    task,
+                    *tenant_id,
+                    snapshot,
+                    *replace_mode,
+                    collections_to_clear,
+                    group_vshards,
+                );
+                // The installed rows carry no versions: each vShard holds
+                // every write through the snapshot's cut.
+                if response.status == crate::bridge::envelope::Status::Ok {
+                    self.install_version_floor(version_floor);
+                }
+                response
+            }
 
             MetaOp::ConvertCollection {
                 collection,
@@ -167,7 +176,6 @@ impl CoreLoop {
                 tenant_id,
                 plans,
                 epoch_system_ms,
-                is_group_leader,
                 versioned_reads,
                 body_plans,
             } => self.execute_calvin_execute_static(
@@ -176,7 +184,6 @@ impl CoreLoop {
                     epoch: *epoch,
                     position: *position,
                     epoch_system_ms: *epoch_system_ms,
-                    is_group_leader: *is_group_leader,
                 },
                 tenant_id,
                 plans,
@@ -204,14 +211,12 @@ impl CoreLoop {
                 plans,
                 injected_reads,
                 epoch_system_ms,
-                is_group_leader,
             } => self.execute_calvin_execute_active(
                 task,
                 CalvinExecCtx {
                     epoch: *epoch,
                     position: *position,
                     epoch_system_ms: *epoch_system_ms,
-                    is_group_leader: *is_group_leader,
                 },
                 tenant_id,
                 plans,
@@ -236,33 +241,6 @@ impl CoreLoop {
                 self.execute_delete_synonym_group(task, *tenant_id, name)
             }
 
-            MetaOp::RecordCalvinWriteVersions { tenant_id, plans } => {
-                // The Calvin apply already committed; this records the write
-                // version of every key it wrote at the applied WAL LSN the
-                // scheduler threaded onto the request envelope. A no-op when
-                // the envelope carries no LSN. The install recorded the
-                // index-value versions of its document rows itself.
-                self.record_batch_write_versions(task, tenant_id.as_u64(), plans);
-                self.response_ok(task)
-            }
-
-            MetaOp::CalvinFlush {
-                epoch,
-                position,
-                redo,
-                collections,
-                sum_targets,
-            } => self.execute_calvin_flush(
-                task,
-                crate::data::executor::handlers::control::calvin::CalvinFlushRedo {
-                    epoch: *epoch,
-                    position: *position,
-                    redo,
-                    collections,
-                    sum_targets,
-                },
-            ),
-
             MetaOp::CalvinDrop { epoch, position } => {
                 self.execute_calvin_drop(task, *epoch, *position)
             }
@@ -282,22 +260,28 @@ impl CoreLoop {
             }
 
             // Install a committed transaction's redo record through the WAL
-            // replay arms, on every replica, in Raft log order.
+            // replay arms, on every replica, in Raft log order. A committed
+            // Calvin slice also ends its staged state and answers its reply.
             MetaOp::ApplyTransactionRedo {
                 redo,
                 collections,
                 sum_targets,
                 origin,
-            } => self.install_redo(
-                task,
-                tid,
-                crate::data::executor::handlers::transaction::redo_apply::CommittedRedo {
-                    redo,
-                    collections,
-                    sum_targets,
-                },
-                *origin,
-            ),
+                calvin,
+            } => {
+                let committed =
+                    crate::data::executor::handlers::transaction::redo_apply::CommittedRedo {
+                        redo,
+                        collections,
+                        sum_targets,
+                    };
+                match calvin {
+                    Some(install) => {
+                        self.install_calvin_redo(task, tid, committed, *origin, install)
+                    }
+                    None => self.install_redo(task, tid, committed, *origin),
+                }
+            }
 
             // A RESTORE batch installs only inside its Calvin transaction:
             // its resolve appends the batch to the transaction's redo record.
@@ -420,6 +404,7 @@ mod txn_created_columnar_engine_tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: crate::bridge::envelope::Admission::Exempt(
                 crate::bridge::envelope::ExemptReason::Read,
             ),

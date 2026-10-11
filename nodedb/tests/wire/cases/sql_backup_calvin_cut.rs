@@ -3,11 +3,12 @@
 //! A backup's consistent cut covers Calvin transactions.
 //!
 //! A transaction that writes two collections on two vShards commits through
-//! the Calvin scheduler. Its install records the transaction's commit HLC on
-//! the tenant's write mark before the COMMIT is acknowledged, so a Calvin
-//! commit after a backup refuses a restore of it. A Calvin transaction held
-//! at its flush while a backup starts was sequenced before the backup's cut,
-//! so the backup waits for its install and holds its rows.
+//! the Calvin scheduler. The data-group apply of its stamped redo records the
+//! transaction's commit HLC on the tenant's write mark before the COMMIT is
+//! acknowledged, so a Calvin commit after a backup refuses a restore of it. A
+//! Calvin transaction whose redo proposal is held while a backup starts was
+//! sequenced before the backup's cut, so the backup waits for its install and
+//! holds its rows.
 
 use super::backup_support::{drain_backup, names_on_two_vshards, push_restore};
 use crate::harness::TestServer;
@@ -65,30 +66,32 @@ async fn a_calvin_commit_after_the_backup_refuses_the_restore() {
         "expected the staleness refusal, got: {error}"
     );
     assert!(
-        error.contains("calvin flush"),
-        "the refusal must name the Calvin commit as the newer write, got: {error}"
+        error.contains("replicated apply"),
+        "the refusal must name the Calvin commit's data-group apply as the newer write, \
+         got: {error}"
     );
 }
 
 #[cfg(feature = "failpoints")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_calvin_commit_held_at_its_flush_is_in_the_backup_or_refuses_its_restore() {
+async fn a_calvin_commit_held_at_its_redo_is_in_the_backup_or_refuses_its_restore() {
     use std::time::Duration;
 
     const PARKED_FOR: Duration = Duration::from_millis(1500);
 
     let (first, second) = names_on_two_vshards("calvin_cut");
     let gate_dir = tempfile::tempdir().expect("gate tempdir");
-    let release = gate_dir.path().join("release-flush");
+    let release = gate_dir.path().join("release-redo");
     let server = TestServer::start_with_failpoints(&format!(
-        "calvin::before_flush::{first}=wait_file({})",
+        "calvin::before_redo_propose::{first}=wait_file({})",
         release.display()
     ))
     .await;
     create_kv(&server, &first).await;
     create_kv(&server, &second).await;
 
-    // Hold the Calvin transaction at its flush on `first`'s vShard.
+    // Hold the redo proposal of the Calvin transaction's slice on `first`'s
+    // vShard.
     let (committer, committer_handle) = server
         .connect_as("nodedb", "nodedb")
         .await
@@ -106,7 +109,7 @@ async fn a_calvin_commit_held_at_its_flush_is_in_the_backup_or_refuses_its_resto
     tokio::time::sleep(PARKED_FOR).await;
     assert!(
         !commit.is_finished(),
-        "the COMMIT was not held at its flush"
+        "the COMMIT was not held at its redo proposal"
     );
 
     // Back up while the transaction is sequenced but not installed.
@@ -121,7 +124,7 @@ async fn a_calvin_commit_held_at_its_flush_is_in_the_backup_or_refuses_its_resto
         "the backup snapshotted before a Calvin transaction sequenced ahead of its cut installed"
     );
 
-    std::fs::write(&release, b"release").expect("release the flush");
+    std::fs::write(&release, b"release").expect("release the redo proposal");
     commit
         .await
         .expect("commit task")

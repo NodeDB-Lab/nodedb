@@ -44,6 +44,10 @@ pub enum AbortReason {
     /// held them changed before it proposed them all. No participant staged
     /// the whole transaction, and the coordinator resubmits it.
     PartsLost,
+    /// A participant could not decode or route its slice of the plans, or
+    /// found no local work in them. Every replica rejects the same plans
+    /// alike, and a resubmit of them fails the same way.
+    PlanRejected,
 }
 
 /// An entry in the replicated sequencer log.
@@ -83,29 +87,8 @@ pub enum SequencerEntry {
         /// first ack of a vShard in log order answers for it.
         from_node: u64,
     },
-    /// OLLP predicate-mismatch signal. Proposed by the per-vShard scheduler when
-    /// the active executor returns `OllpRetryRequired`. Applied on ALL sequencer-group
-    /// replicas so every node's `CalvinCompletionRegistry` fires `note_ollp_mismatch`,
-    /// waking the coordinator's retry-loop waiter wherever it is (including remote
-    /// nodes). Mirrors `CompletionAck` — no `vshard_id` because mismatch is keyed
-    /// only by `(epoch, position)` like the registry's `TxnId`.
-    OllpMismatch { epoch: u64, position: u32 },
-    /// Local-routing failure signal. Proposed by the per-vShard scheduler when
-    /// `local_calvin_plans` rejects a plan as `Unroutable`, `ControlPlaneOnly`,
-    /// or `NotAWrite` — a scheduler-side bug or malformed plan, never a normal
-    /// retry condition. Applied on ALL sequencer-group replicas so every node's
-    /// `CalvinCompletionRegistry` fires `note_routing_failed`, waking the
-    /// coordinator's completion waiter wherever it is with the terminal,
-    /// NON-retryable `AttemptOutcome::Failed` outcome. Mirrors `OllpMismatch` —
-    /// no `vshard_id` because the failure is keyed only by `(epoch, position)`.
-    TxnRoutingFailed {
-        epoch: u64,
-        position: u32,
-        detail: String,
-    },
     /// One participant vShard's durable COMMIT vote for a staged cross-shard
-    /// txn: its read-set is valid. An abort vote is `AbortVote`. Unlike
-    /// `OllpMismatch`/`CompletionAck` which key only on `(epoch, position)`, `Vote`
+    /// txn: its read-set is valid. An abort vote is `AbortVote`. `Vote`
     /// carries `vshard` because the verdict aggregator must attribute exactly one
     /// vote per participant to know when the tally is complete.
     Vote {
@@ -155,7 +138,16 @@ pub enum SequencerEntry {
     /// `restore_point` names the cluster restore point the cut takes, `0` for
     /// a backup's cut. Every replica records the sequencer's place at the
     /// point when it applies the marker.
-    CutMarker { hlc: u64, restore_point: u64 },
+    ///
+    /// `barrier` is set when the cut places a barrier in every data group.
+    /// Each group's leader then proposes the barrier once its schedulers
+    /// passed the marker, and holds the redo of every later transaction
+    /// until it applied the barrier. `None` for a cut with no barrier.
+    CutMarker {
+        hlc: u64,
+        restore_point: u64,
+        barrier: Option<crate::calvin::types::CutBarrierWire>,
+    },
     /// The first entry of a sequencer log a cluster restore rebuilt. It sets
     /// the next epoch the sequencer proposes to `next_epoch`, the epoch that
     /// followed the restore point, so no restored epoch is minted again. It
@@ -280,28 +272,6 @@ mod tests {
         };
         assert_eq!(batch.txns.len(), 1);
         assert_eq!(batch.epoch, 7);
-    }
-
-    #[test]
-    fn txn_routing_failed_msgpack_roundtrip() {
-        let entry = SequencerEntry::TxnRoutingFailed {
-            epoch: 42,
-            position: 3,
-            detail: "unroutable plan: Vector".to_owned(),
-        };
-        let bytes = zerompk::to_msgpack_vec(&entry).expect("encode");
-        let decoded: SequencerEntry = zerompk::from_msgpack(&bytes).expect("decode");
-        let SequencerEntry::TxnRoutingFailed {
-            epoch,
-            position,
-            detail,
-        } = decoded
-        else {
-            panic!("decoded wrong sequencer entry variant");
-        };
-        assert_eq!(epoch, 42);
-        assert_eq!(position, 3);
-        assert_eq!(detail, "unroutable plan: Vector");
     }
 
     #[test]

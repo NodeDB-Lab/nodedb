@@ -13,6 +13,14 @@ use crate::Error;
 pub fn calvin_abort_error(reason: AbortReason) -> Error {
     match reason {
         AbortReason::ParticipantError => Error::CalvinParticipantError,
+        // A participant rejected the plans: they do not decode or route, or
+        // hold no work for it. A resubmit of the same plans fails the same
+        // way, so this is an internal error (`XX000`), never a retry class.
+        AbortReason::PlanRejected => Error::Internal {
+            detail: "cross-shard transaction aborted: a participant vShard rejected the \
+                     transaction's plans"
+                .to_owned(),
+        },
         // Planned against a collection a purge and a same-name create replaced.
         AbortReason::CollectionSuperseded => Error::RetryableSchemaChanged {
             descriptor: "a collection the transaction writes was dropped and recreated".into(),
@@ -36,6 +44,14 @@ mod tests {
         assert!(matches!(
             calvin_abort_error(AbortReason::ParticipantError),
             Error::CalvinParticipantError
+        ));
+    }
+
+    #[test]
+    fn a_rejected_plan_is_an_internal_error() {
+        assert!(matches!(
+            calvin_abort_error(AbortReason::PlanRejected),
+            Error::Internal { .. }
         ));
     }
 

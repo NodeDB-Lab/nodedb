@@ -7,8 +7,11 @@
 //! data group it hosts, plus the Calvin sequencer, at the point's watermark.
 //! Every replica of a group applies the cut barrier at the same log index and
 //! records it, so the group's place at the point is that index on every node.
-//! A group can hold more than one barrier for a point: every replica proposes
-//! its own. The lowest index is the group's place.
+//! The group's leader places the barrier (see
+//! `crate::control::backup::cut_order`). A group can still hold more than one
+//! barrier for a point: a leader proposes it again when a later term
+//! overwrote its proposal, and the overwritten copy can commit too. The
+//! lowest index is the group's place.
 
 use std::sync::{Arc, Weak};
 
@@ -20,12 +23,6 @@ use tracing::{error, info, warn};
 
 use crate::control::state::SharedState;
 use crate::wal::manager::NO_APPLY_KEY;
-
-/// Tenant the restore point's cut barriers are framed under. A barrier
-/// orders every entry of its group, whatever tenant writes it. No step reads
-/// the tenant of a barrier: the proposal stamps and forwards opaque bytes,
-/// the apply's barrier arms ignore it, and a barrier raises no tenant mark.
-const CUT_FRAME_TENANT: u64 = 0;
 
 /// Record one group's place at a restore point in this node's WAL, durably,
 /// and move this node's clock past the point's watermark. A data group's
@@ -107,7 +104,7 @@ pub fn sequencer_hook(shared: Weak<SharedState>) -> RestorePointHook {
 /// point's records is then sealed, so the archiver uploads it.
 pub fn spawn_node_cut(state: Arc<SharedState>, id: u64, hlc: u64) {
     tokio::spawn(async move {
-        match crate::control::backup::cut::cut_at_point(&state, CUT_FRAME_TENANT, hlc, id).await {
+        match crate::control::backup::cut::cut_at_point(&state, hlc, id).await {
             Ok(()) => info!(restore_point = id, "restore point cut taken on this node"),
             Err(e) => warn!(
                 restore_point = id,

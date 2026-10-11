@@ -49,6 +49,8 @@ pub struct WalManager {
     /// Commit-time anchors of this WAL, stamped from the node's HLC. The writer
     /// records one per fsynced batch. Replay records the persisted ones.
     pub(super) time_anchors: Arc<TimeAnchors>,
+    /// Floors truncation keeps for holders that read records back at boot.
+    pub(super) floor_holds: super::floor_holds::WalFloorHolds,
 }
 
 impl WalManager {
@@ -74,6 +76,11 @@ impl WalManager {
     /// which prevents `SIGNED_DELTAS` from being enabled.
     pub fn crdt_signing_root(&self) -> crate::Result<Option<[u8; 32]>> {
         Ok(self.crdt_signing_root)
+    }
+
+    /// The floors truncation of this WAL keeps.
+    pub fn floor_holds(&self) -> &super::floor_holds::WalFloorHolds {
+        &self.floor_holds
     }
 
     /// This WAL's commit-time anchors.
@@ -197,6 +204,7 @@ impl WalManager {
             commit_lock: tokio::sync::Mutex::new(()),
             durable_notify: tokio::sync::Notify::new(),
             time_anchors,
+            floor_holds: super::floor_holds::WalFloorHolds::default(),
         })
     }
 

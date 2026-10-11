@@ -14,6 +14,8 @@
 //!   cluster subsystems.
 //! - [`proposer_wiring`]: install the sync/async Raft proposer + compactor
 //!   closures and spawn the apply loop.
+//! - [`sequencer_route`]: run a proposal the leader's write gate refused
+//!   through the Calvin sequencer.
 //! - [`observability`]: publish observability handles and spawn the tick
 //!   loop, sequencer service, RPC server, and health monitor.
 
@@ -24,5 +26,6 @@ mod loop_build;
 mod observability;
 mod propose_error;
 mod proposer_wiring;
+mod sequencer_route;
 
 pub use core::start_raft;

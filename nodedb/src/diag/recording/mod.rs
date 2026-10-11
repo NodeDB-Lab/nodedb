@@ -12,6 +12,7 @@ mod catalog;
 mod columnar;
 mod continuous_agg;
 mod crdt;
+mod cut_barrier;
 mod data_plane;
 mod event_image;
 mod index_rebuild;
@@ -21,6 +22,7 @@ mod outcome_floor;
 mod quota;
 mod raft_apply;
 mod recovery;
+mod redo_stream;
 mod retention;
 mod shared;
 mod vector;
@@ -36,6 +38,7 @@ pub use crdt::{
     crdt_dead_letter_not_enqueued, crdt_dead_letter_not_restored, crdt_dead_letter_not_stored,
     history_compaction_not_applied,
 };
+pub use cut_barrier::cut_barrier_not_placed;
 pub use data_plane::{
     calvin_apply_halted, calvin_completion_timeout, data_plane_core_fail_stopped,
     data_plane_response_lost, data_plane_responses_lost,
@@ -50,12 +53,15 @@ pub use quota::{
     quota_scope_replay_aborted, scope_quota_not_installed,
 };
 pub use raft_apply::{
-    raft_entries_reapplied, raft_entry_reapplied, replicated_write_parked, replicated_writes_parked,
+    calvin_barrier_log_store_failed, raft_entries_reapplied, raft_entry_reapplied,
 };
 pub use recovery::{
     batch_insert_without_surrogates, fts_index_update_failed, orphaned_index_entry_after_delete,
     replay_record_unapplied, strict_row_undecodable, wal_archival_failed_truncation_held,
     write_acked_without_durability,
+};
+pub use redo_stream::{
+    redo_abandon_given_up, redo_snapshot_debt_not_recorded, redo_stream_lost_here,
 };
 pub use retention::retention_autowire_orphaned;
 pub use shared::entry_kind;

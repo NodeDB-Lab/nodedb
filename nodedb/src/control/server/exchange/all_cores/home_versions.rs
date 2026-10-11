@@ -4,9 +4,8 @@
 //! vShards it owns, under this node's leader lease on each probe's group.
 //!
 //! A write to a vShard runs on the one core the dispatcher's router assigns
-//! it, and raises that core's watermark and the collection's write floor
-//! there. So a probe is answered by that core alone. A write that another core
-//! took, to another vShard, never moves the answer.
+//! it, and raises the vShard's versions there. So a probe is answered by that
+//! core alone. A write to another vShard never moves the answer.
 //!
 //! A node that lost leadership of a group can miss writes a newer leader
 //! committed. So a probe is answered only while this node holds its group's
@@ -104,7 +103,8 @@ pub(super) async fn fan_home_versions(
     Ok(NodeLevelResult {
         payload,
         watermark_lsn,
-        read_version_lsn: Lsn::ZERO,
+        read_versions: crate::types::ReadVersions::new(),
+        not_found: false,
     })
 }
 

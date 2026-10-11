@@ -152,8 +152,8 @@ impl CoreLoop {
                         partition.set_node_surrogate(src_id, src_surrogate);
                         partition.set_node_surrogate(dst_id, dst_surrogate);
                         self.checkpoint_coordinator.mark_dirty("sparse", 1);
-                        self.note_edge_write_lsn(task, tid, collection, src_id, label, dst_id);
-                        // CDC: emit after `note_edge_write_lsn` so the core
+                        self.note_edge_write(task, tid, collection, src_id, label, dst_id);
+                        // CDC: emit after `note_edge_write` so the core
                         // watermark (the event's LSN) already reflects this
                         // edge's WAL LSN, matching the WAL-replay reconstruction.
                         self.emit_graph_edge_event(

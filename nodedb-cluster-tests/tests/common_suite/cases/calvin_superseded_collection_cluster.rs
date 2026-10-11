@@ -24,7 +24,7 @@
 
 use std::time::Duration;
 
-use nodedb_types::fail_point::{FailAction, FailGuard};
+use nodedb_test_support::fail_point::{FailAction, FailGuard};
 use tokio_postgres::error::SqlState;
 
 use super::calvin_multishard_fixture::{Fixture, keyed_ddl};

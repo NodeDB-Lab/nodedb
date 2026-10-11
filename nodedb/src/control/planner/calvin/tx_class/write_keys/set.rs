@@ -2,17 +2,12 @@
 
 //! The accumulated Calvin write keys of a task slice.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nodedb_cluster::calvin::types::{EngineKeySet, SortedVec};
 
 use super::super::shared::node_lock_pair;
 use crate::types::{RecordHomes, VShardId};
-
-/// The row surrogate a write with no single row identity locks: a
-/// predicate, bulk, truncate or multi-row write, or a point write whose key
-/// is unbound. Every such write of a collection serializes on it.
-pub const COLLECTION_KEY: u32 = 0;
 
 /// The lock key of the row `document_id` names, bound or not: the bytes its
 /// surrogate binds under (`bind_plan`).
@@ -43,6 +38,8 @@ pub struct WriteKeys {
     edges: BTreeMap<String, EdgeKeys>,
     /// Array collection to the vShards its written cells live on.
     arrays: BTreeMap<String, Vec<u32>>,
+    /// Collections a write covers whole.
+    whole: BTreeSet<String>,
 }
 
 impl WriteKeys {
@@ -55,9 +52,11 @@ impl WriteKeys {
             .extend(surrogates);
     }
 
-    /// Lock [`COLLECTION_KEY`] of `collection`.
+    /// Lock `collection` whole, exclusively: a write with no row identity,
+    /// such as a predicate, bulk, or truncate write. It orders against every
+    /// row writer and every reader of the collection.
     pub fn whole_collection(&mut self, collection: &str) {
-        self.rows(collection, [COLLECTION_KEY]);
+        self.whole.insert(collection.to_owned());
     }
 
     /// Lock the vector rows `surrogates` of `collection`. An empty list
@@ -170,6 +169,14 @@ impl WriteKeys {
                 .map(|(collection, vshards)| EngineKeySet::Array {
                     collection,
                     vshards: SortedVec::new(vshards),
+                }),
+        );
+        sets.extend(
+            self.whole
+                .into_iter()
+                .map(|collection| EngineKeySet::Collection {
+                    collection,
+                    vshards: SortedVec::new(Vec::new()),
                 }),
         );
         sets.sort_by(|a, b| a.collection().cmp(b.collection()));

@@ -35,7 +35,8 @@ const DDL_PREPARE_POLL: Duration = Duration::from_millis(10);
 /// A fresh preparation-lease token for this node.
 fn next_token(shared: &SharedState) -> u64 {
     let sequence = shared
-        .metadata_ddl_token_seq
+        .metadata_ddl
+        .token_seq
         .fetch_add(1, Ordering::Relaxed);
     shared.node_id.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ wall_now_ns().rotate_left(17) ^ sequence
 }
@@ -214,7 +215,7 @@ pub(crate) async fn acquire_ddl_prepare_lease_async<'a>(
 pub(crate) async fn lock_ddl_preparation_async(
     shared: &SharedState,
 ) -> tokio::sync::MutexGuard<'_, ()> {
-    shared.metadata_ddl_lock.lock().await
+    shared.metadata_ddl.lock.lock().await
 }
 
 #[cfg(test)]
@@ -223,7 +224,8 @@ mod tests {
 
     fn owner(shared: &SharedState) -> Option<u64> {
         let current = *shared
-            .metadata_ddl_owner
+            .metadata_ddl
+            .owner
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         current.map(|owner| owner.token)

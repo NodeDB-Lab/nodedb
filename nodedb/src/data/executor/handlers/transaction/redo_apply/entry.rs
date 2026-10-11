@@ -163,7 +163,12 @@ impl CoreLoop {
         if let Err(refusal) = self.validate_redo_pass(&target, committed.sum_targets) {
             return self.response_error(task, refusal.into_code());
         }
+        // The replay arms install the record. Each write they apply takes the
+        // record's stamp: its vShard and the entry it applies.
+        let stamp = self.task_write_stamp_at(task, lsn);
+        self.write_index.record_stamps.insert(stamp);
         let installed = self.install_redo_pass(&target, committed.sum_targets);
+        self.write_index.record_stamps.remove(lsn);
         let mut scope = match installed {
             Ok(scope) => scope,
             Err(refusal) => return self.response_error(task, refusal.into_code()),
@@ -198,7 +203,7 @@ impl CoreLoop {
                 version.tenant,
                 &version.collection,
                 version.key,
-                version.lsn,
+                version.stamp,
             );
         }
         // Events leave only once the record is settled. Every
@@ -232,7 +237,7 @@ impl CoreLoop {
 
         let tenant = TenantId::new(tid);
         for collection in committed.collections {
-            self.note_write_lsn(task.request.database_id, tenant, collection, None, lsn);
+            self.note_write(task.request.database_id, tenant, collection, None, stamp);
         }
         for write in &scope.doc_writes {
             self.note_index_write_values(
@@ -240,7 +245,7 @@ impl CoreLoop {
                 tenant,
                 &write.collection,
                 &write.index_tuples,
-                lsn,
+                stamp,
             );
         }
         let write_set = target_write_set(&scope.target_writes);

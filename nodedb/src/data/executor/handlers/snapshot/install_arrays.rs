@@ -10,8 +10,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use nodedb_array::coord::encode::encode_hilbert_prefix;
 use nodedb_array::schema::ArraySchema;
+use nodedb_array::tile::cell_tile_prefix;
 use nodedb_array::types::coord::value::CoordValue;
 use nodedb_cluster::distributed_array::array_vshard_for_tile;
 
@@ -93,7 +93,7 @@ impl CoreLoop {
             let routes = Arc::clone(&schema);
             let prefix_bits = entry.prefix_bits;
             let replaced = |coord: &[CoordValue]| {
-                encode_hilbert_prefix(&routes, coord)
+                cell_tile_prefix(&routes, coord)
                     .ok()
                     .and_then(|prefix| array_vshard_for_tile(prefix, prefix_bits).ok())
                     .is_some_and(|vshard| group.contains(&vshard))

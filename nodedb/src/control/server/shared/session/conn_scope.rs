@@ -15,7 +15,7 @@ use std::time::Instant;
 use super::audit_context::AuditCtx;
 use super::ddl_buffer::DdlBuffer;
 use super::ephemeral_sequence::EphemeralSequences;
-use super::graph_reads::GraphShardReads;
+use super::pending_shard_reads::ShardReads;
 
 /// Per-connection session slots. Each field is owned by its own module, which
 /// exposes the accessors; nothing outside reaches through this struct.
@@ -33,12 +33,9 @@ pub(super) struct ConnScope {
     /// Client-facing notices raised while the current statement ran, below
     /// the response shaper (see [`super::statement_notice`]).
     pub(super) statement_notices: RefCell<Vec<String>>,
-    /// Cross-shard graph reads the current request made, not yet recorded
-    /// into the transaction read-set (see [`super::graph_reads`]).
-    pub(super) graph_reads: RefCell<Vec<GraphShardReads>>,
-    /// The node that served each vShard the current statement read (see
-    /// [`super::served_reads`]).
-    pub(super) served_reads: RefCell<std::collections::HashMap<u32, u64>>,
+    /// Cross-shard reads the current request made, not yet recorded into the
+    /// transaction read-set (see [`super::pending_shard_reads`]).
+    pub(super) pending_shard_reads: RefCell<Vec<ShardReads>>,
 }
 
 impl ConnScope {
@@ -49,8 +46,7 @@ impl ConnScope {
             ephemeral_sequences: RefCell::new(EphemeralSequences::new()),
             statement_deadline: Cell::new(None),
             statement_notices: RefCell::new(Vec::new()),
-            graph_reads: RefCell::new(Vec::new()),
-            served_reads: super::served_reads::empty(),
+            pending_shard_reads: RefCell::new(Vec::new()),
         }
     }
 }

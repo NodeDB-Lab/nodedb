@@ -171,8 +171,8 @@ async fn calvin_multi_shard_bitemporal_commit_survives_wal_only_restart() {
 
     // ONE `simple_query` call carrying the whole transaction: the two INSERTs
     // are buffered during the block, and on COMMIT `classify_dispatch` sees
-    // the full task set spanning two vShards → MultiShard → leader-routed
-    // Calvin flush.
+    // the full task set spanning two vShards → MultiShard → one Calvin
+    // transaction.
     let txn_sql = format!(
         "BEGIN; \
          INSERT INTO {coll_a} (id, value) VALUES ('a1', 'va'); \
@@ -193,7 +193,7 @@ async fn calvin_multi_shard_bitemporal_commit_survives_wal_only_restart() {
     .await;
 
     // Pre-restart: both rows are visible and each carries exactly one
-    // system-time version. The Calvin flush lands asynchronously after the
+    // system-time version. The redo install lands asynchronously after the
     // completion ack, so poll.
     let (stamp_a, stamp_b);
     let deadline = std::time::Instant::now() + Duration::from_secs(10);

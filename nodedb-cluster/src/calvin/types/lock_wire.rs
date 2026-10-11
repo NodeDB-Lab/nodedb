@@ -57,6 +57,14 @@ pub enum LockKeyWire {
         src: u32,
         dst: u32,
     },
+    /// A whole collection.
+    Collection { collection: String },
+    /// One claimed value of one UNIQUE index.
+    Unique {
+        collection: String,
+        index: String,
+        value: Vec<u8>,
+    },
 }
 
 // ── ReleaseReason ─────────────────────────────────────────────────────────────
@@ -115,6 +123,14 @@ mod tests {
                 collection: "follows".to_owned(),
                 src: 1,
                 dst: 2,
+            },
+            LockKeyWire::Collection {
+                collection: "orders".to_owned(),
+            },
+            LockKeyWire::Unique {
+                collection: "users".to_owned(),
+                index: "users_email".to_owned(),
+                value: b"a@x".to_vec(),
             },
         ];
         for v in variants {

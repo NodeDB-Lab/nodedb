@@ -33,6 +33,10 @@ pub struct GroupCalvinCut {
     /// The applied state of each group vShard whose scheduler runs on the
     /// builder.
     pub vshards: Vec<VShardCalvinState>,
+    /// The stored dependent-read barrier log of each unfinished txn of a
+    /// group vShard. It holds every barrier entry of the group's log at or
+    /// below the snapshot's index, which the receiver never applies.
+    pub barrier_logs: Vec<CutBarrierLog>,
 }
 
 /// One vShard's applied Calvin positions in a [`GroupCalvinCut`].
@@ -55,4 +59,25 @@ pub struct VShardCalvinState {
     pub fully_applied_epoch: u64,
     /// The applied `(epoch, position)` pairs above the watermark.
     pub tail: Vec<(u64, u32)>,
+}
+
+/// One txn's stored dependent-read barrier log in a [`GroupCalvinCut`].
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+#[msgpack(map)]
+pub struct CutBarrierLog {
+    pub vshard_id: u32,
+    pub epoch: u64,
+    pub position: u32,
+    /// The encoded barrier log.
+    pub log: Vec<u8>,
 }

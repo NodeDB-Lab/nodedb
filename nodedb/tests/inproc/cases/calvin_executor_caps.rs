@@ -85,6 +85,7 @@ fn submit_rejects_dependent_read_too_large() {
             );
             m
         },
+        expected: BTreeMap::new(),
     });
 
     let err = inbox.submit(tx).expect_err("should reject: too large");
@@ -122,6 +123,7 @@ fn submit_accepts_dependent_read_within_byte_limit() {
             );
             m
         },
+        expected: BTreeMap::new(),
     });
 
     inbox.submit(tx).expect("should accept: exactly at limit");
@@ -154,6 +156,7 @@ fn submit_rejects_dependent_read_fanout_too_wide() {
             }
             m
         },
+        expected: BTreeMap::new(),
     });
 
     let err = inbox.submit(tx).expect_err("should reject: too wide");
@@ -196,6 +199,7 @@ fn submit_accepts_dependent_read_exactly_at_fanout_limit() {
             }
             m
         },
+        expected: BTreeMap::new(),
     });
 
     inbox

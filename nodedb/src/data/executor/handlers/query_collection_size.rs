@@ -79,8 +79,8 @@ impl CoreLoop {
             payload: Payload::from(payload),
             watermark_lsn: self.watermark,
             error_code: None,
-            read_set_valid: None,
-            read_version_lsn: crate::types::Lsn::ZERO,
+            stage_vote: None,
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         }
     }

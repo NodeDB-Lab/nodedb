@@ -3,7 +3,7 @@
 //! `CalvinExecCtx`, the helpers the static and active Calvin stage paths
 //! share, and the test fixtures every concern file's tests build on.
 
-use crate::bridge::envelope::{ErrorCode, Response};
+use crate::bridge::envelope::{ErrorCode, Response, StageVote};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 
@@ -16,11 +16,21 @@ pub(in crate::data::executor) struct CalvinExecCtx {
     pub epoch: u64,
     pub position: u32,
     pub epoch_system_ms: i64,
-    pub is_group_leader: bool,
 }
 
 impl CoreLoop {
-    /// Clean failed static staging and return an explicit abort vote.
+    /// Refuse a Calvin stage that staged nothing, with the vote `error` names.
+    ///
+    /// `OllpRetryRequired` votes `PredictionDrift`. Every other error votes
+    /// `ParticipantError`.
+    pub(super) fn calvin_stage_refusal(&self, task: &ExecutionTask, error: ErrorCode) -> Response {
+        let vote = StageVote::of_stage_error(&error);
+        let mut response = self.response_error(task, error);
+        response.stage_vote = Some(vote);
+        response
+    }
+
+    /// Clean failed staging and return its abort vote.
     /// Defensive removal clears document/KV and graph overlays plus their gauge.
     pub(super) fn calvin_stage_failure<E>(
         &mut self,
@@ -37,19 +47,14 @@ impl CoreLoop {
             .commit_pending
             .remove(&(epoch, position, vshard_id));
         self.drop_calvin_synthetic_overlay(epoch, position, vshard_id);
-        self.calvin
-            .fence
-            .note_resolved((epoch, position, vshard_id), None);
-        let mut response = self.response_error(task, error.into());
-        // Scheduler treats this as a durable local abort vote and still waits
-        // for the authoritative global verdict before issuing any drop.
-        response.read_set_valid = Some(false);
-        response
+        // The scheduler proposes this abort vote and waits for the global
+        // verdict before it drops anything.
+        self.calvin_stage_refusal(task, error.into())
     }
 }
 
 #[cfg(test)]
-pub(in crate::data::executor::handlers::control::calvin) mod test_support {
+pub(in crate::data::executor) mod test_support {
     use std::time::{Duration, Instant};
 
     use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan, TimeseriesOp};
@@ -93,6 +98,7 @@ pub(in crate::data::executor::handlers::control::calvin) mod test_support {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: Admission::Exempt(ExemptReason::Read),
         };
         ExecutionTask::new(request)
@@ -107,7 +113,7 @@ pub(in crate::data::executor::handlers::control::calvin) mod test_support {
         nodedb_types::value_to_msgpack(&Value::Object(obj)).unwrap()
     }
 
-    pub(in crate::data::executor::handlers::control::calvin) fn point_insert_plan(
+    pub(in crate::data::executor) fn point_insert_plan(
         collection: &str,
         document_id: &str,
         surrogate: u32,
@@ -143,7 +149,7 @@ pub(in crate::data::executor::handlers::control::calvin) mod test_support {
         })
     }
 
-    pub(in crate::data::executor::handlers::control::calvin) fn bulk_delete_plan(
+    pub(in crate::data::executor) fn bulk_delete_plan(
         collection: &str,
         predicted: Option<Vec<u32>>,
     ) -> PhysicalPlan {
@@ -162,7 +168,7 @@ pub(in crate::data::executor::handlers::control::calvin) mod test_support {
 
     /// Seed a row directly into base storage (bypassing Calvin staging), the
     /// pre-existing state the active-path OLLP verifier scans against.
-    pub(in crate::data::executor::handlers::control::calvin) fn seed_row(
+    pub(in crate::data::executor) fn seed_row(
         core: &mut CoreLoop,
         collection: &str,
         surrogate: u32,
@@ -172,5 +178,50 @@ pub(in crate::data::executor::handlers::control::calvin) mod test_support {
         core.sparse
             .put(DatabaseId::DEFAULT.as_u64(), 1, collection, &doc_id, &body)
             .expect("seed row");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::make_task;
+    use crate::bridge::envelope::{ErrorCode, StageVote, Status};
+    use crate::data::executor::core_loop::tests::make_core_with_dir;
+    use crate::data::executor::handlers::control::calvin_txn_id::calvin_synthetic_txn_id;
+
+    #[test]
+    fn a_stage_drift_refusal_votes_prediction_drift_and_drops_staged_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let task = make_task();
+        let vshard = task.request.vshard_id.as_u32();
+        let synthetic = calvin_synthetic_txn_id(4, 2, vshard).unwrap();
+        core.graph_txn_overlay_mut(synthetic);
+
+        let response = core.calvin_stage_failure(&task, 4, 2, vshard, ErrorCode::OllpRetryRequired);
+
+        assert_eq!(response.status, Status::Error);
+        assert_eq!(response.stage_vote, Some(StageVote::PredictionDrift));
+        assert_eq!(
+            response.error_code.as_deref(),
+            Some(&ErrorCode::OllpRetryRequired)
+        );
+        assert!(!core.graph_txn_overlays.contains_key(&synthetic));
+    }
+
+    #[test]
+    fn any_other_stage_refusal_votes_participant_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _tx, _rx) = make_core_with_dir(dir.path());
+        let task = make_task();
+
+        let response = core.calvin_stage_refusal(
+            &task,
+            ErrorCode::Internal {
+                detail: "stage".into(),
+            },
+        );
+
+        assert_eq!(response.status, Status::Error);
+        assert_eq!(response.stage_vote, Some(StageVote::ParticipantError));
     }
 }

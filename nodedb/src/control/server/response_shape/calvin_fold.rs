@@ -15,13 +15,10 @@ use super::redaction::QueryRedaction;
 use super::request::MaterializedShapeRequest;
 use super::schema::OutputSchema;
 use super::types::{
-    DmlFoldError, DmlOutcome, FoldedTag, PlanKind, ShapedRows, StatementTag, describe_plan,
-    dml_outcome_by_op, dml_outcome_from_payload,
+    DmlFoldError, DmlOutcome, FoldedTag, PlanKind, ShapedRows, StatementTag, TaskTagRole,
+    describe_plan, dml_outcome_by_op, dml_outcome_from_payload,
 };
 use crate::bridge::envelope::Response;
-use crate::control::planner::calvin::write_class::{
-    plan_counts_toward_statement_tag, plans_have_user_write,
-};
 use crate::control::security::auth_context::AuthContext;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId};
@@ -78,11 +75,11 @@ pub fn fold_calvin_batch(
     apply_resp: Option<&Response>,
     ctx: &CalvinFoldCtx<'_>,
 ) -> Result<CalvinBatchFold, CalvinFoldError> {
-    let has_user_write = plans_have_user_write(plans.iter().copied());
     let mut rows: Option<ShapedRows> = None;
-    let mut tag = StatementTag::default();
+    let mut tag = StatementTag::for_plans(plans.iter().copied());
     for plan in plans {
-        if !plan_counts_toward_statement_tag(plan, has_user_write) {
+        let role = tag.role_of(plan);
+        if role == TaskTagRole::Opaque {
             tag.fold_opaque();
             continue;
         }
@@ -90,7 +87,9 @@ pub fn fold_calvin_batch(
             CalvinTaskOutcome::Rows(shaped) => {
                 rows.get_or_insert(shaped);
             }
-            CalvinTaskOutcome::Dml(outcome) => tag.fold(outcome).map_err(CalvinFoldError::Verb)?,
+            CalvinTaskOutcome::Dml(outcome) => {
+                tag.fold(role, outcome).map_err(CalvinFoldError::Verb)?
+            }
             CalvinTaskOutcome::Opaque => tag.fold_opaque(),
         }
     }

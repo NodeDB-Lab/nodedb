@@ -40,6 +40,10 @@ pub(in crate::data::executor) struct PointUpdatePersist<'a> {
     pub(in crate::data::executor) bitemporal: bool,
     pub(in crate::data::executor) sys_from_ms: i64,
     pub(in crate::data::executor) wal_lsn: Option<Lsn>,
+    /// The stamp the update's index values record under, `None` without a
+    /// WAL record.
+    pub(in crate::data::executor) write_stamp:
+        Option<crate::data::executor::core_loop::write_index::WriteStamp>,
     /// `(target collection, join-key value)` → target row surrogate for every
     /// materialized-sum target this update may touch — BOTH sides when the
     /// update moves a row between targets by changing its join key. Resolved on
@@ -70,6 +74,7 @@ impl CoreLoop {
             bitemporal,
             sys_from_ms,
             wal_lsn,
+            write_stamp,
             resolved_sum_targets,
         } = params;
 
@@ -169,7 +174,7 @@ impl CoreLoop {
 
         // Index write-versions are published only once the write they describe
         // is durable.
-        if let Some(lsn) = wal_lsn
+        if let Some(stamp) = write_stamp
             && !touched.is_empty()
         {
             self.note_index_write_values(
@@ -177,7 +182,7 @@ impl CoreLoop {
                 TenantId::new(tid),
                 collection,
                 &touched,
-                lsn,
+                stamp,
             );
         }
 

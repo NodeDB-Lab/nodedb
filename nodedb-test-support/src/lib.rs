@@ -7,6 +7,8 @@ pub mod booted_state;
 pub mod catalog_fixtures;
 pub mod cluster_harness;
 pub mod core_loop_runner;
+#[cfg(feature = "failpoints")]
+pub mod fail_point;
 pub mod ilp_client;
 pub mod insert_returning_engines;
 pub mod jwks_fixture;

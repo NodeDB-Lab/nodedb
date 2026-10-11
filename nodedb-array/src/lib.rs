@@ -36,7 +36,8 @@ pub use sync::{
     SnapshotHeader, SnapshotSink, TileSnapshot,
 };
 pub use tile::{
-    AttrStats, DenseTile, SparseTile, TileMBR, tile_id_for_cell, tile_indices_for_cell,
+    AttrStats, DenseTile, SparseTile, TileMBR, cell_tile_prefix, tile_id_for_cell,
+    tile_indices_for_cell, tile_prefix, tiles_per_dim,
 };
 pub use types::{ArrayId, CellValue, Coord, Domain, TileId};
 pub use wal::ArrayWalRecord;

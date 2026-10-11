@@ -56,24 +56,4 @@ mod tests {
             other => panic!("expected PgWireError::UserError, got {other:?}"),
         }
     }
-
-    #[test]
-    fn ollp_mismatch_is_not_57014() {
-        // Verify the OLLP mismatch arm (a genuine invariant violation) stays
-        // XX000 — a distinct code path from coordinator deadline cancellation.
-        let err = PgWireError::UserError(Box::new(ErrorInfo::new(
-            "ERROR".to_owned(),
-            "XX000".to_owned(),
-            "OLLP mismatch outcome on non-dependent Calvin path".to_owned(),
-        )));
-        match err {
-            PgWireError::UserError(info) => {
-                assert_eq!(
-                    info.code, "XX000",
-                    "OLLP mismatch must stay XX000 (internal_error)"
-                );
-            }
-            other => panic!("unexpected error variant: {other:?}"),
-        }
-    }
 }

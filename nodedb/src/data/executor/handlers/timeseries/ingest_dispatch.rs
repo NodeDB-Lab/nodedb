@@ -173,8 +173,8 @@ impl CoreLoop {
                 payload: Payload::from_vec(json),
                 watermark_lsn: self.watermark,
                 error_code: None,
-                read_set_valid: None,
-                read_version_lsn: crate::types::Lsn::ZERO,
+                stage_vote: None,
+                read_versions: crate::types::ReadVersions::new(),
                 write_set: Vec::new(),
             };
         }
@@ -265,7 +265,7 @@ impl CoreLoop {
             return self.sync_ack_response(task, AckStatus::Applied, applied_seq);
         }
         if ingest_response.status == Status::Ok {
-            self.note_collection_write_lsn(task, collection);
+            self.note_collection_write(task, collection);
         }
         ingest_response
     }

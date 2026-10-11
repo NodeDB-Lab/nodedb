@@ -15,9 +15,10 @@ use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::request::MaterializedShapeRequest;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::response_shape::types::{
-    ShapedRows, StatementTag, payload_to_dml_outcome,
+    ShapedRows, StatementTag, TaskTagRole, payload_to_dml_outcome,
 };
 use crate::control::server::shared::session::SessionId;
+use nodedb_physical::physical_task::PhysicalTask;
 
 use super::super::super::command_tag::push_folded_tag;
 use super::super::super::types::{dml_fold_error_to_pg, error_to_pg, shape_error_to_pg};
@@ -47,12 +48,18 @@ pub(super) struct GatewayFold {
 }
 
 impl GatewayFold {
-    pub(super) fn with_capacity(tasks: usize) -> Self {
+    /// An empty fold for the statement that planned `tasks`.
+    pub(super) fn for_tasks(tasks: &[PhysicalTask]) -> Self {
         Self {
-            responses: Vec::with_capacity(tasks),
+            responses: Vec::with_capacity(tasks.len()),
             returning_rows: None,
-            statement_tag: StatementTag::default(),
+            statement_tag: StatementTag::for_plans(tasks.iter().map(|t| &t.plan)),
         }
+    }
+
+    /// The role of the task that runs `plan` in this statement.
+    pub(super) fn role_of(&self, plan: &PhysicalPlan) -> TaskTagRole {
+        self.statement_tag.role_of(plan)
     }
 }
 
@@ -87,8 +94,8 @@ impl NodeDbPgHandler {
     /// the fold, `RETURNING` rows accumulate into one result set, a
     /// passthrough payload folds its count and verb into the statement's
     /// tag, and an opaque execution folds as such. A task whose count does
-    /// not answer the statement (`counts_toward_tag` false: a derived
-    /// implicit-edge write beside the user's own) folds as opaque.
+    /// not answer the statement (`tag_role` is `Opaque`: a derived write
+    /// beside the user's own) folds as opaque.
     ///
     /// A row-producing payload shapes exactly as a locally dispatched one
     /// does, through `shape_response_materialized` with the task's plan. A
@@ -107,7 +114,7 @@ impl NodeDbPgHandler {
         payload: &[u8],
         plan_kind: PlanKind,
         shape_plan: Option<&PhysicalPlan>,
-        counts_toward_tag: bool,
+        tag_role: TaskTagRole,
         shaping: &GatewayShaping<'_>,
     ) -> PgWireResult<Option<u64>> {
         let outcome = match (plan_produces_rows(plan_kind), shape_plan) {
@@ -154,7 +161,7 @@ impl NodeDbPgHandler {
                 Ok(Some(rows))
             }
             ShapeOutcome::Passthrough => {
-                if !counts_toward_tag {
+                if tag_role == TaskTagRole::Opaque {
                     fold.statement_tag.fold_opaque();
                     return Ok(None);
                 }
@@ -163,7 +170,7 @@ impl NodeDbPgHandler {
                 match payload_to_dml_outcome(payload, plan_kind).map_err(|e| error_to_pg(&e))? {
                     Some(outcome) => fold
                         .statement_tag
-                        .fold(outcome)
+                        .fold(tag_role, outcome)
                         .map_err(|e| dml_fold_error_to_pg(&e))?,
                     None => fold.statement_tag.fold_opaque(),
                 }

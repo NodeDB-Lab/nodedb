@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! A cross-shard, Calvin-committed write goes through the stage/flush seam:
-//! the scheduler STAGES the transaction (validate + buffer, no base mutation),
-//! then — because the local commit vote is valid — FLUSHES the staged buffer to
-//! base. The write is durable and visible only after the flush.
+//! A cross-shard, Calvin-committed write goes through the stage/install seam:
+//! the scheduler stages the transaction (validate + buffer, no base mutation).
+//! On a COMMIT verdict the leader proposes the slice's stamped redo to the data
+//! group, and its apply installs the staged writes. The write is visible only
+//! after the install.
 //!
-//! The staged buffer + verdict-driven flush/drop live on the `!Send` Data-Plane
-//! core, so this asserts the flush FIRED via the node-global
-//! `calvin.counters.commits_flushed` counter (incremented once per staged apply the
-//! per-vShard scheduler resolved to commit) plus the functional proof that the
-//! flushed write is visible.
+//! The staged buffer lives on the `!Send` Data-Plane core, so this asserts the
+//! commit fired via the node-global `calvin.counters.commits_flushed` counter
+//! (incremented once per staged txn the scheduler resolved to commit) plus the
+//! functional proof that the installed write is visible.
 
 use crate::common;
 

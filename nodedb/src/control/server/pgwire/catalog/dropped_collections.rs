@@ -120,6 +120,7 @@ async fn query_collection_size(
         wal_lsn: None,
         resolved_now_ms: None,
         commit_hlc: None,
+        entry_version: None,
         admission: crate::bridge::envelope::Admission::Exempt(
             crate::bridge::envelope::ExemptReason::AlreadyOrdered,
         ),

@@ -19,6 +19,7 @@ pub mod ascii;
 pub mod backup_envelope;
 pub mod bbox;
 pub mod calvin;
+pub mod calvin_passive;
 pub mod clone;
 pub mod collection;
 pub mod collection_config;
@@ -73,6 +74,7 @@ pub mod vector_index_stats;
 pub mod vector_model;
 pub mod volatility;
 pub mod wire_version;
+pub mod write_version;
 
 pub use approx::{CountMinSketch, HyperLogLog, SpaceSaving, TDigest};
 pub use array_cell::ArrayCell;
@@ -150,3 +152,4 @@ pub use vector_index_stats::{
 };
 pub use vector_model::{VectorModelEntry, VectorModelMetadata};
 pub use volatility::Volatility;
+pub use write_version::{ShardVersion, WriteVersion};

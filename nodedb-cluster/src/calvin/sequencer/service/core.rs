@@ -79,15 +79,17 @@ pub struct SequencerService {
     /// The epoch `next_reservation_position` is counting within. When it lags
     /// the tick's epoch, the band counter is reset before the next mint.
     pub(super) reservation_epoch: u64,
-    /// Current epoch number, or `None` until the seed has been derived.
+    /// The next epoch to mint and the sequencer term it was seeded in, or
+    /// `None` until the seed has been derived.
     ///
     /// The leader starts at the last committed epoch + 1 and increments after
     /// each successful proposal. The seed is NOT taken at construction — see
     /// [`Self::ensure_epoch_seeded`] for why it can only be read once the
-    /// sequencer group's log has been replayed into the state machine. On
-    /// leader failover, `inbox_receiver` is simply dropped (in-flight
+    /// sequencer group's log has been replayed into the state machine. A
+    /// lost leadership clears it, and a cursor from another term is derived
+    /// again. On leader failover, `inbox_receiver` is dropped (in-flight
     /// submissions are not in the log and will be retried).
-    pub(super) current_epoch: Option<u64>,
+    pub(super) current_epoch: Option<super::epoch_seed::EpochCursor>,
     /// The `epoch_system_ms` this service last minted, or `None` before its
     /// first mint. A proposed batch applies later, so the next mint reads
     /// this as well as the state machine's applied instant.
@@ -190,7 +192,7 @@ impl SequencerService {
                     }
                 } => {
                     // Every replica's registry emits deterministically, but only
-                    // the leader proposes — same leader-gate as OllpMismatch/Vote.
+                    // the leader proposes the verdict.
                     if let Some((txn, outcome)) = verdict
                         && self.is_leader()
                         && let Err(e) = self.propose_entry(&verdict_entry(txn, outcome))
@@ -245,6 +247,8 @@ impl SequencerService {
             // Parts held here are gone with the leadership. The next leader
             // abandons their transactions.
             self.drop_part_streams();
+            // Another leader can mint epochs before this node leads again.
+            self.current_epoch = None;
             debug!(
                 node_id = self.node_id,
                 "not sequencer leader; discarding {discarded} inbox items \
@@ -376,6 +380,7 @@ pub(super) mod tests {
     use crate::calvin::sequencer::config::SequencerConfig;
     use crate::calvin::sequencer::inbox::{AdmittedTx, Inbox, new_inbox};
     use crate::calvin::sequencer::reservation_inbox::{ReservationInbox, new_reservation_inbox};
+    use crate::calvin::sequencer::service::epoch_seed::EpochCursor;
     use crate::calvin::sequencer::validator::validate_batch;
     use crate::calvin::types::{
         EngineKeySet, EpochBatch, LockKeyWire, ReadWriteSet, ReleaseReason, SequencedTxn,
@@ -624,7 +629,7 @@ pub(super) mod tests {
         }
     }
 
-    fn epoch_batch_bytes(epoch: u64) -> Vec<u8> {
+    pub(in crate::calvin::sequencer::service) fn epoch_batch_bytes(epoch: u64) -> Vec<u8> {
         let batch = EpochBatch {
             epoch,
             txns: vec![SequencedTxn {
@@ -689,9 +694,10 @@ pub(super) mod tests {
         }
         assert_eq!(seed, 3);
 
-        // Seeding is once-only: later ticks must not re-derive and walk backwards
-        // over epochs this leader has already proposed.
-        harness.service.current_epoch = Some(9);
+        // Seeding is once per term: later ticks in the same term must not
+        // re-derive and walk backwards over epochs this leader already proposed.
+        let cursor = harness.service.current_epoch.expect("seeded");
+        harness.service.current_epoch = Some(EpochCursor { next: 9, ..cursor });
         assert_eq!(harness.service.ensure_epoch_seeded(), Some(9));
     }
 
@@ -945,6 +951,13 @@ pub(super) mod tests {
             .inbox
             .submit_with(make_rw_class(&col_b, &col_a), &registry)
             .expect("submit");
+        let term = harness
+            .multi_raft
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .leader_term(SEQUENCER_GROUP_ID)
+            .expect("leader");
+        harness.service.current_epoch = Some(EpochCursor { term, next: 4 });
 
         harness.service.mint_epoch(4);
 
@@ -952,7 +965,7 @@ pub(super) mod tests {
         // Two participants: the vShard it writes and the vShard it reads.
         assert_eq!(winner.try_recv(), Ok((4, 0, 2)));
         assert_eq!(registry.pending_assignments_len(), 0);
-        assert_eq!(harness.service.current_epoch, Some(5));
+        assert_eq!(harness.service.current_epoch.map(|c| c.next), Some(5));
     }
 
     /// A batch whose proposal failed is not in the log. Its callers must fail

@@ -9,11 +9,13 @@
 //! onto an empty base (a point-in-time restore), and the settled WAL the
 //! event stream is rebuilt from.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use nodedb_physical::physical_plan::{DocumentOp, UpdateValue};
+use nodedb_physical::physical_plan::{
+    CalvinInstall, CalvinReplySpec, DocumentOp, MetaOp, RedoOrigin, UpdateValue,
+};
 use nodedb_types::{QualifiedCollection, RlsWriteCheck, Surrogate, Value};
 use nodedb_wal::{TombstoneSet, WalRecord};
 
@@ -23,11 +25,16 @@ use crate::bridge::dispatch::JournalGroup;
 use crate::bridge::envelope::{
     Admission, PhysicalPlan, Priority, Request, Response, Status, WriteSetEntry,
 };
+use crate::control::cluster::calvin::scheduler::recover_all_applied;
+use crate::control::security::catalog::SystemCatalog;
 use crate::control::server::wal_dispatch::{
     GroupOrigin, WalAppendRequest, WriteSetTarget, append_group_origin, append_group_parts,
 };
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::tests::make_core_with_dir;
+use crate::data::executor::handlers::transaction::redo_apply::calvin_fold_tests::{
+    SOURCE, balance, calvin_redo, configure_sum, core_with_sum, sum_targets,
+};
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
 use crate::wal::GroupMembership;
@@ -49,10 +56,15 @@ struct Live {
 
 impl Live {
     fn open() -> Self {
+        Self::open_with(|dir| make_core_with_dir(dir).0)
+    }
+
+    /// A live node whose core `make` builds over its store directory.
+    fn open_with(make: impl FnOnce(&Path) -> CoreLoop) -> Self {
         let wal_dir = tempfile::tempdir().expect("tempdir");
         let wal = WalManager::open_for_testing(&wal_dir.path().join("wal")).expect("open wal");
         let store_dir = tempfile::tempdir().expect("tempdir");
-        let (core, _req, _resp) = make_core_with_dir(store_dir.path());
+        let core = make(store_dir.path());
         Self {
             wal,
             wal_dir,
@@ -106,6 +118,12 @@ impl Live {
     /// `stored`, the core stores its write set. The parts are never
     /// appended: the crash comes first.
     fn journalled_until_crash(&mut self, plan: PhysicalPlan, stored: bool) -> GroupOrigin {
+        self.journalled_in(ORDERS, plan, stored)
+    }
+
+    /// [`Self::journalled_until_crash`] for a write whose group falls back
+    /// to `collection`.
+    fn journalled_in(&mut self, collection: &str, plan: PhysicalPlan, stored: bool) -> GroupOrigin {
         let origin = self.append_origin(&plan);
         let task = ExecutionTask::new(request(plan, origin));
         self.core.begin_journalled();
@@ -114,7 +132,7 @@ impl Live {
         if stored {
             let group = JournalGroup {
                 origin: origin.lsn,
-                collection: ORDERS.to_string(),
+                collection: collection.to_string(),
                 apply_key: NO_APPLY_KEY,
                 commit_hlc: None,
                 change_position: None,
@@ -179,6 +197,7 @@ fn request(plan: PhysicalPlan, origin: GroupOrigin) -> Request {
         wal_lsn: Some(origin.lsn),
         resolved_now_ms: None,
         commit_hlc: None,
+        entry_version: None,
         admission: Admission::Admitted,
     }
 }
@@ -440,5 +459,83 @@ fn a_settled_group_needs_nothing_at_boot() {
     assert!(
         !settle_against(&live.wal, &records, &stored.captures).expect("settle"),
         "a whole WAL needs no record"
+    );
+}
+
+/// The stamped install of the Calvin slice at `(3, 0)` on vShard 0. Its
+/// record writes one source row, and its sum target folds 25 into the
+/// target's balance.
+fn calvin_install() -> PhysicalPlan {
+    PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
+        redo: calvin_redo(),
+        collections: vec![SOURCE.to_string()],
+        sum_targets: sum_targets(),
+        origin: RedoOrigin::Commit,
+        calvin: Some(CalvinInstall {
+            epoch: 3,
+            position: 0,
+            epoch_system_ms: 0,
+            reply: CalvinReplySpec::Count(Vec::new()),
+            user_write: true,
+        }),
+    })
+}
+
+/// The target's balance after replaying `records` onto the stores at `dir`,
+/// on a core that declares the sum.
+fn balance_after_replay(dir: &Path, records: &[WalRecord]) -> Option<String> {
+    let (mut core, _req, _resp) = make_core_with_dir(dir);
+    configure_sum(&mut core);
+    core.replay_all_wal(records, 1, &TombstoneSet::new())
+        .expect("replay");
+    balance(&core)
+}
+
+/// The Calvin positions boot recovery finds applied on vShard 0 in `wal`.
+fn recovered_positions(wal: &WalManager) -> BTreeSet<(u64, u32)> {
+    let catalog = SystemCatalog::open_in_memory().expect("in-memory catalog");
+    recover_all_applied(wal, &catalog, &|_| None)
+        .expect("recover applied positions")
+        .remove(&0)
+        .map(|recovered| recovered.applied_tail)
+        .unwrap_or_default()
+}
+
+/// A crash cuts the origin of a stamped Calvin install from the WAL after
+/// the install folded its sum and stored its write set. Boot journals the
+/// stamped record again, then the fold rows as its parts. Recovery finds
+/// the position applied, and replay keeps the single-apply total.
+#[test]
+fn a_crash_that_cuts_a_calvin_redo_origin_journals_it_again() {
+    let mut live = Live::open_with(|dir| core_with_sum(dir).0);
+    let cut = live.wal_image();
+    live.journalled_in(SOURCE, calvin_install(), true);
+    assert_eq!(balance(&live.core).as_deref(), Some("125"), "the live fold");
+    let stores = live.crash_image();
+
+    let cut_wal = WalManager::open_for_testing(&cut.path().join("wal")).expect("open cut wal");
+    assert!(
+        recovered_positions(&cut_wal).is_empty(),
+        "the crash cuts the stamped record"
+    );
+    let records = settle(&cut_wal, stores.path());
+    assert!(
+        recovered_positions(&cut_wal).contains(&(3, 0)),
+        "recovery finds the stamp of the record boot journals"
+    );
+    assert!(
+        membership(&records).broken_through(u64::MAX).is_empty(),
+        "the journalled record's group is whole"
+    );
+    assert_eq!(
+        balance_after_replay(stores.path(), &records).as_deref(),
+        Some("125"),
+        "restart replay onto the cut stores keeps the single-apply total"
+    );
+    let base = tempfile::tempdir().expect("tempdir");
+    assert_eq!(
+        balance_after_replay(base.path(), &records).as_deref(),
+        Some("125"),
+        "a point-in-time restore reaches the single-apply total"
     );
 }

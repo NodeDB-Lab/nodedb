@@ -41,7 +41,7 @@ pub struct SchedulerMetrics {
     /// Times a staged txn parked in `AwaitingVerdict` passed its stall deadline
     /// with the durable global verdict still unknown. This is NOT an abort: the
     /// scheduler keeps waiting and holding locks (a unilateral abort while a
-    /// peer can already have flushed a commit will tear the transaction). A
+    /// peer can already have committed will tear the transaction). A
     /// non-zero, growing value flags a stuck sequencer / partitioned verdict
     /// path that needs operator attention, never a correctness action here.
     pub verdict_stall_count: AtomicU64,
@@ -79,7 +79,9 @@ pub struct SchedulerMetrics {
     /// Owed sequencer entries re-proposed because their effect was not yet
     /// applied, by kind. Indexes are the constants in
     /// [`sequencer_propose_kind`].
-    pub sequencer_propose_retry_counts: [AtomicU64; 4],
+    pub sequencer_propose_retry_counts: [AtomicU64; sequencer_propose_kind::LABELS.len()],
+    /// Committed txns this leader staged again after its own stage failed.
+    pub restage_count: AtomicU64,
 }
 
 /// Reason codes for `nodedb_calvin_infra_abort_total`.
@@ -122,22 +124,28 @@ pub mod apply_halt_reason {
     pub const DISPATCH_REFUSED: usize = 1;
     pub const RESPONSE_DISCONNECTED: usize = 2;
     pub const RESOLVE_FAILED: usize = 3;
-    pub const FLUSH_FAILED: usize = 4;
-    pub const LOCAL_STAGE_FAILED: usize = 5;
-    pub const IDENTITY_BIND_FAILED: usize = 6;
-    pub const WAL_APPEND_FAILED: usize = 7;
-    pub const METADATA_GROUP_GONE: usize = 8;
+    pub const LOCAL_STAGE_FAILED: usize = 4;
+    pub const IDENTITY_BIND_FAILED: usize = 5;
+    pub const METADATA_GROUP_GONE: usize = 6;
+    pub const STAGE_VOTE_INVALID: usize = 7;
+    pub const REDO_PROPOSE_FAILED: usize = 8;
+    pub const REDO_INSTALL_REFUSED: usize = 9;
+    pub const REDO_APPLY_FAILED: usize = 10;
+    pub const CORE_FAIL_STOPPED: usize = 11;
 
     pub const LABELS: &[&str] = &[
         "draining",
         "dispatch_refused",
         "response_disconnected",
         "resolve_failed",
-        "flush_failed",
         "local_stage_failed",
         "identity_bind_failed",
-        "wal_append_failed",
         "metadata_group_gone",
+        "stage_vote_invalid",
+        "redo_propose_failed",
+        "redo_install_refused",
+        "redo_apply_failed",
+        "core_fail_stopped",
     ];
 }
 
@@ -145,10 +153,8 @@ pub mod apply_halt_reason {
 pub mod sequencer_propose_kind {
     pub const VOTE: usize = 0;
     pub const COMPLETION_ACK: usize = 1;
-    pub const OLLP_MISMATCH: usize = 2;
-    pub const ROUTING_FAILED: usize = 3;
 
-    pub const LABELS: &[&str] = &["vote", "completion_ack", "ollp_mismatch", "routing_failed"];
+    pub const LABELS: &[&str] = &["vote", "completion_ack"];
 }
 
 impl SchedulerMetrics {
@@ -205,6 +211,11 @@ impl SchedulerMetrics {
     /// Record that the catch-up drain hit a compacted sequencer log.
     pub fn record_catch_up_log_compacted(&self) {
         self.catch_up_log_compacted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record that the leader staged a committed txn again.
+    pub fn record_restage(&self) {
+        self.restage_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record that the dispatcher refused a scheduler dispatch at capacity.
@@ -440,6 +451,7 @@ impl Default for SchedulerMetrics {
             apply_halted: AtomicU64::new(0),
             apply_halt_reason: AtomicU64::new(0),
             sequencer_propose_retry_counts: std::array::from_fn(|_| AtomicU64::new(0)),
+            restage_count: AtomicU64::new(0),
         }
     }
 }

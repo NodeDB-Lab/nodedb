@@ -36,9 +36,8 @@ use crate::bridge::envelope::ErrorCode;
 /// a redelivery here can too. That covers admission and capacity verdicts,
 /// a task that expired before it started, concurrency retries, the staging
 /// byte budget, a sync hold, which depends on the core's own stream mark,
-/// and `RetryableRefusal`,
-/// which a committed-redo apply answers with after it rolled a failed
-/// install back.
+/// `RetryableRefusal`, which a committed-redo apply answers with after it
+/// rolled a failed install back, and a fail-stopped core's refusal.
 pub(crate) fn refusal_is_final(code: &ErrorCode) -> bool {
     write_definitely_not_applied(code) && !is_transient_verdict(code)
 }
@@ -48,6 +47,7 @@ pub(crate) fn refusal_is_final(code: &ErrorCode) -> bool {
 fn is_transient_verdict(code: &ErrorCode) -> bool {
     match code {
         ErrorCode::RetryableRefusal { .. }
+        | ErrorCode::CoreFailStopped { .. }
         | ErrorCode::SyncNotApplied { .. }
         | ErrorCode::RateExceeded { .. }
         | ErrorCode::CollectionDraining { .. }
@@ -149,6 +149,8 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         // Documented as applying nothing: the identical frame is expected to be
         // re-sent, and the retry carries its own record.
         | ErrorCode::RetryableRefusal { .. }
+        // A fail-stopped core refuses every request before it runs.
+        | ErrorCode::CoreFailStopped { .. }
         // Concurrency verdicts that abort the whole attempt before install.
         | ErrorCode::ConflictRetry
         | ErrorCode::OllpRetryRequired

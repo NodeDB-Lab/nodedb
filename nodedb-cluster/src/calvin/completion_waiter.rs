@@ -32,6 +32,15 @@ pub(crate) enum CompletionWaiter {
 }
 
 impl CompletionWaiter {
+    /// Whether the receiver still listens. A coordinator that gave up
+    /// waiting dropped it.
+    pub(crate) fn is_live(&self) -> bool {
+        match self {
+            Self::Outcome(tx) => !tx.is_closed(),
+            Self::Report(tx) => !tx.is_closed(),
+        }
+    }
+
     /// Deliver `outcome` with `ack_results`. `false` when the receiver is
     /// gone.
     pub(crate) fn send(self, outcome: AttemptOutcome, ack_results: Vec<Vec<u8>>) -> bool {

@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! One transaction's completion entry in the
-//! [`super::completion::CalvinCompletionRegistry`], and the outcome it fires.
+//! [`super::completion::CalvinCompletionRegistry`].
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
-use super::completion::{AttemptOutcome, ParticipantVote, VerdictOutcome};
+use super::completion::{ParticipantVote, VerdictOutcome};
 use super::completion_waiter::CompletionWaiter;
 
 pub(crate) struct PendingCompletion {
@@ -15,15 +16,6 @@ pub(crate) struct PendingCompletion {
     /// by vShard. A participant whose ack carried none has no entry.
     pub(crate) ack_results: BTreeMap<u32, Vec<u8>>,
     pub(crate) completion_tx: Option<CompletionWaiter>,
-    /// Set when an OLLP mismatch is observed before the coordinator registers
-    /// its waiter, so the outcome is not lost across registration order (mirrors
-    /// how `acked_vshards` persists ack state regardless of registration order).
-    pub(crate) mismatched: bool,
-    /// Set when a terminal routing failure is observed before the coordinator
-    /// registers its waiter, mirroring `mismatched`. Takes precedence over both
-    /// `mismatched` and completion: a routing failure is never retried and never
-    /// falsely reported as success.
-    pub(crate) routing_failed: Option<String>,
     /// Set when the multi-part transaction lost its parts
     /// (`SequencerEntry::TxnPartsAbandoned`). Its outcome is
     /// `Aborted { PartsLost }` without waiting for acks: no participant
@@ -52,39 +44,29 @@ pub(crate) struct PendingCompletion {
     /// Queued for eviction as a terminal entry with no waiter
     /// (`completion_gc`).
     pub(crate) parked: bool,
-}
-
-/// Choose the terminal outcome for a COMPLETED entry (all expected vshards
-/// acked) by consulting the durable global verdict.
-///
-/// The verdict is applied from a replicated `SequencerEntry::Verdict` that is
-/// strictly ordered BEFORE the abort's `CompletionAck` in the sequencer Raft
-/// log, so an ABORT verdict is always stored by the time this entry's
-/// completion fires. A stored abort becomes `Aborted`, carrying the reason the
-/// verdict recorded; `None` (single-shard / no-verdict paths) and a commit
-/// verdict are `Completed`. We deliberately do NOT gate on `verdict.is_some()`
-/// — that would stall the no-verdict completion paths.
-pub(crate) fn outcome_for(entry: &PendingCompletion) -> AttemptOutcome {
-    match entry.verdict {
-        Some(VerdictOutcome::Abort(reason)) => AttemptOutcome::Aborted { reason },
-        _ => AttemptOutcome::Completed,
-    }
+    /// Set when this replica applied the `EpochBatch` that sequenced the
+    /// txn (`seed_expected`). An entry without it is an orphan: the
+    /// waiterless sweep evicts it once it outlives the window with no live
+    /// waiter (`completion_gc`).
+    pub(crate) sequenced: bool,
+    /// When this entry was created.
+    pub(crate) created: Instant,
 }
 
 impl PendingCompletion {
-    pub(crate) fn new(expected_participants: usize) -> Self {
+    pub(crate) fn new(created: Instant) -> Self {
         Self {
-            expected_participants,
+            expected_participants: 0,
             acked_vshards: BTreeSet::new(),
             ack_results: BTreeMap::new(),
             completion_tx: None,
-            mismatched: false,
-            routing_failed: None,
             abandoned: false,
             votes: BTreeMap::new(),
             verdict: None,
             verdict_proposed: false,
             parked: false,
+            sequenced: false,
+            created,
         }
     }
 
@@ -92,10 +74,20 @@ impl PendingCompletion {
         self.completion_tx.is_some()
     }
 
-    /// Whether the entry's outcome is decided: every expected participant
-    /// acked, or an OLLP mismatch or a routing failure is recorded.
+    /// Whether a waiter is registered and its receiver still listens.
+    pub(crate) fn has_live_waiter(&self) -> bool {
+        self.completion_tx
+            .as_ref()
+            .is_some_and(CompletionWaiter::is_live)
+    }
+
+    /// Whether the entry's outcome is decided: the verdict is stored and
+    /// every expected participant acked, or the transaction lost its parts.
+    ///
+    /// Acks without a verdict are never terminal. Every participant acks
+    /// only after it read the verdict.
     pub(crate) fn is_terminal(&self) -> bool {
-        self.is_complete() || self.mismatched || self.routing_failed.is_some() || self.abandoned
+        self.abandoned || (self.verdict.is_some() && self.is_complete())
     }
 
     /// Every acked participant's apply result, in vShard order.

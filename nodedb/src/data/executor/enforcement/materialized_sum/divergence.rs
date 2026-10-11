@@ -71,16 +71,13 @@ impl CoreLoop {
     /// require.
     ///
     /// `rows` are already-decoded row images. A collection that declares no
-    /// materialized-sum binding, and every replica that is not the group leader,
-    /// diverge vacuously — they return `false` without reading anything.
+    /// materialized-sum binding diverges vacuously: it returns `false` without
+    /// reading anything.
     pub(in crate::data::executor) fn sum_targets_diverged(
         &self,
         check: &SumTargetCheck<'_>,
         rows: &[serde_json::Value],
     ) -> bool {
-        if !self.calvin.ollp_is_group_leader {
-            return false;
-        }
         let key = (
             DatabaseId::new(check.database_id),
             TenantId::new(check.tid),
@@ -152,7 +149,7 @@ impl CoreLoop {
         check: &SumTargetCheck<'_>,
         doc_ids: &[nodedb_types::StorageKey],
     ) -> bool {
-        if !self.calvin.ollp_is_group_leader || !self.declares_materialized_sums(check) {
+        if !self.declares_materialized_sums(check) {
             return false;
         }
         let mut rows: Vec<serde_json::Value> = Vec::with_capacity(doc_ids.len());

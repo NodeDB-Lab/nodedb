@@ -14,9 +14,9 @@ use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 use crate::bridge::envelope::{PhysicalPlan, Status};
 use crate::control::gateway::RouteDecision;
 use crate::control::state::SharedState;
-use crate::control::wal_replication::encode::transaction_redo_entry;
-use crate::control::wal_replication::propose_replicated_entry;
-use crate::control::wal_replication::transaction_redo::{RedoTarget, TransactionRedoPayload};
+use crate::control::wal_replication::transaction_redo::{
+    RedoTarget, TransactionRedoPayload, propose_transaction_redo,
+};
 use crate::wal::RedoPublish;
 
 use super::super::outcome::{AbortReason, TxnDataPlane};
@@ -201,19 +201,14 @@ async fn commit_redo(
     target: RedoTarget,
     payload: &TransactionRedoPayload,
 ) -> Result<super::ts_rejections::RejectedByCollection, AbortReason> {
-    if let Err(e) = inject_commit_failure() {
+    if let Err(e) = inject_commit_failure(state.node_id) {
         return Err(AbortReason::Dispatch(e));
     }
-    let proposer = state.async_raft_proposer().map_err(AbortReason::Dispatch)?;
-    // The proposer forwards to the group leader and returns once the entry is
-    // committed and applied on this node by the apply loop.
-    let entry = transaction_redo_entry(
-        target.tenant_id,
-        target.database_id,
-        target.vshard_id,
-        payload,
-    );
-    match propose_replicated_entry(state, proposer, entry).await {
+    // The proposal forwards to the group leader and returns once the redo is
+    // committed and applied on this node by the apply loop. A redo past the
+    // entry limit travels as chunks, then its final entry.
+    let deadline = crate::control::wal_replication::statement_propose_deadline(state);
+    match propose_transaction_redo(state, target, payload, deadline).await {
         Ok((applied, _)) => Ok(super::ts_rejections::applied_rejected_by_collection(
             &applied,
         )),
@@ -225,11 +220,13 @@ async fn commit_redo(
     }
 }
 
-/// The `commit::single_shard_redo_commit` fail point. Compiles to `Ok(())`
-/// outside the `failpoints` feature.
-fn inject_commit_failure() -> crate::Result<()> {
-    crate::fail_point_err!("commit::single_shard_redo_commit", |detail| {
-        crate::Error::Internal { detail }
-    });
+/// The `commit::single_shard_redo_commit` fail point of node `node_id`.
+/// Compiles to `Ok(())` outside the `failpoints` feature.
+fn inject_commit_failure(node_id: u64) -> crate::Result<()> {
+    crate::fail_point_err!(
+        crate::fail_point::FailScope::Node(node_id),
+        "commit::single_shard_redo_commit",
+        |detail| crate::Error::Internal { detail }
+    );
     Ok(())
 }

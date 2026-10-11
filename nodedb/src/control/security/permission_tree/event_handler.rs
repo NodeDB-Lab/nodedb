@@ -41,7 +41,11 @@ pub async fn apply_ring_events(
     // is not acknowledged before the step applies it. The gate sits before
     // the lock, so a reload can still run.
     #[cfg(feature = "failpoints")]
-    crate::control::fail_gate::wait("permission_tree::before_apply").await;
+    crate::control::fail_gate::wait(
+        crate::fail_point::FailScope::Any,
+        "permission_tree::before_apply",
+    )
+    .await;
     {
         let mut guard = cache.write().await;
         for event in events {

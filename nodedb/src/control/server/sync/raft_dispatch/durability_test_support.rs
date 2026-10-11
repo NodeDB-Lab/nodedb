@@ -18,7 +18,7 @@ use crate::control::security::audit::NoopAuditEmitter;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::authorization::{AuthorizedTask, authorize_task_set};
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
+use crate::types::{DatabaseId, ReadVersions, TenantId, VShardId};
 use crate::wal::WalManager;
 
 pub(super) const COLLECTION: &str = "docs";
@@ -48,7 +48,7 @@ pub(super) fn fixture() -> (Arc<SharedState>, CoreChannelDataSide, tempfile::Tem
 /// answers each proposal with the payload `applied`.
 pub(super) fn applying_proposer() -> Arc<crate::control::wal_replication::AsyncRaftProposer> {
     Arc::new(|_vshard, _key, _data, _deadline| {
-        Box::pin(async { Ok((b"applied".to_vec(), Lsn::ZERO)) })
+        Box::pin(async { Ok((b"applied".to_vec(), ReadVersions::new())) })
     })
 }
 

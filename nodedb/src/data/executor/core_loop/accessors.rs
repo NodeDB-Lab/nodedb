@@ -173,6 +173,22 @@ impl CoreLoop {
         self.quarantine_registry = Some(registry);
     }
 
+    /// Scope this core's fail points to node `node_id`, and the fail points
+    /// of the event producer it holds. Called once by the server bootstrap
+    /// before the core recovers.
+    pub fn set_fail_scope(&mut self, node_id: u64) {
+        self.fail_scope = nodedb_types::fail_point::FailScope::Node(node_id);
+        #[cfg(feature = "failpoints")]
+        if let Some(producer) = self.events.producer.as_mut() {
+            producer.set_fail_scope(self.fail_scope);
+        }
+    }
+
+    /// The scope this core's fail points evaluate in.
+    pub fn fail_scope(&self) -> nodedb_types::fail_point::FailScope {
+        self.fail_scope
+    }
+
     /// Install the shared set of collections some Event Plane consumer
     /// reads. Called once by the server bootstrap before the core recovers.
     pub fn set_event_interest(&mut self, interest: Arc<crate::event::interest::EventInterest>) {

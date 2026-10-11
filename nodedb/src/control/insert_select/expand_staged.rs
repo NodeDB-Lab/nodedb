@@ -30,8 +30,9 @@ use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 ///
 /// `task.txn_id` must be set to the active transaction so the scan folds
 /// earlier-staged rows. Emitted ops carry the same `txn_id` and a recomputed
-/// target vShard (as the MERGE / `UPDATE ... FROM` expanders do). The caller
-/// stages + buffers each returned op.
+/// target vShard (as the MERGE / `UPDATE ... FROM` expanders do). The ops carry
+/// no sum or period-lock resolution: the caller runs the statement pass on
+/// them, then stages + buffers each one.
 pub(crate) async fn resolve_and_emit_insert_select_ops(
     state: &SharedState,
     tenant_id: TenantId,
@@ -76,35 +77,6 @@ pub(crate) async fn resolve_and_emit_insert_select_ops(
     )?
     .vshard();
 
-    // Resolve materialized-sum targets: these ops stage directly, bypassing
-    // statement-level resolution, so without this a bound target collection
-    // folds against an empty resolution.
-    let sum_bodies: Vec<&[u8]> = rows.iter().map(|(_, value, _)| value.as_slice()).collect();
-    let mut resolved_sum_targets =
-        crate::control::planner::materialized_sum::resolve_sum_targets_for_bodies(
-            state,
-            &sum_bodies,
-            target_collection.as_str(),
-            tenant_id,
-            task.database_id,
-            crate::types::TraceId::ZERO,
-        )
-        .await?;
-    // Period-lock target for the same rows, in the SAME slot — a target
-    // collection under a period lock reads its reference row's surrogate off
-    // `resolved_sum_targets` exactly like a materialized-sum fold does.
-    resolved_sum_targets.extend(
-        crate::control::planner::period_lock::resolve_period_lock_targets_for_bodies(
-            state,
-            &sum_bodies,
-            target_collection.as_str(),
-            tenant_id,
-            task.database_id,
-            crate::types::TraceId::ZERO,
-        )
-        .await?,
-    );
-
     let mut out: Vec<PhysicalTask> = Vec::with_capacity(rows.len());
     for (document_id, value, surrogate) in rows {
         out.push(PhysicalTask {
@@ -121,7 +93,9 @@ pub(crate) async fn resolve_and_emit_insert_select_ops(
                 // orchestrator's paged batch insert.
                 returning: None,
                 rls_filters: Vec::new(),
-                resolved_sum_targets: resolved_sum_targets.clone(),
+                // Filled by the caller's sum and period-lock pass, the one
+                // a plain INSERT takes.
+                resolved_sum_targets: Vec::new(),
                 deferred_sum_targets: Vec::new(),
             }),
             post_set_op: PostSetOp::None,

@@ -15,7 +15,7 @@ use crate::control::server::exchange::resolve::{
     DistributedReadCapture, Resolved, resolve_and_materialize,
 };
 use crate::control::server::shared::write_admission::plan_is_write;
-use crate::types::{Lsn, ReadConsistency, TraceId, VShardId};
+use crate::types::{ReadConsistency, TraceId};
 use nodedb_physical::physical_task::PhysicalTask;
 
 use super::super::core::NodeDbPgHandler;
@@ -29,7 +29,6 @@ impl NodeDbPgHandler {
         user_id: Option<Arc<str>>,
         identity: &AuthenticatedIdentity,
         linearizable: bool,
-        shard_watermarks: &mut Vec<(VShardId, Lsn)>,
         distributed_reads: &mut Vec<DistributedReadCapture>,
     ) -> crate::Result<Response> {
         use crate::control::security::identity::{Permission, required_permission};
@@ -167,8 +166,7 @@ impl NodeDbPgHandler {
             linearizable,
         };
         match resolve_and_materialize(&self.state, identity, task.plan, scope).await? {
-            Resolved::Gathered(resp, wms, caps) => {
-                *shard_watermarks = wms;
+            Resolved::Gathered(resp, _watermarks, caps) => {
                 *distributed_reads = caps;
                 return Ok(resp);
             }
@@ -243,11 +241,7 @@ impl NodeDbPgHandler {
                         txn_id: checked.txn_id(),
                         linearizable,
                     };
-                    let outcome = gateway.execute_with_watermarks(&ctx, checked).await;
-                    if let Ok((_, wms, _)) = &outcome {
-                        *shard_watermarks = wms.clone();
-                    }
-                    return owner_response(outcome);
+                    return owner_response(gateway.execute_outcome(&ctx, checked).await);
                 }
             }
         }

@@ -69,6 +69,13 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
             sqlstate::SERIALIZATION_FAILURE,
             format!("write refused without applying, retry: {reason}"),
         ),
+        // The fail-stopped core applied nothing, and another replica or a
+        // restart serves the statement: the class drivers retry on.
+        ErrorCode::CoreFailStopped { core_id, detail } => (
+            "ERROR",
+            sqlstate::SERIALIZATION_FAILURE,
+            format!("core {core_id} is fail-stopped and applied nothing, retry: {detail}"),
+        ),
         ErrorCode::NotFound => ("ERROR", sqlstate::NO_DATA, "not found".into()),
         // `resource` is what makes the denial actionable: it says whether a
         // row-level-security policy refused the row or a grant is missing, and

@@ -36,7 +36,15 @@ pub enum SchedulerInput {
     /// A backup's consistent-cut marker carrying its watermark `hlc`. Every
     /// transaction delivered before it must finish before the scheduler
     /// reports it; every transaction delivered after it commits above `hlc`.
-    CutMarker { hlc: u64 },
+    /// `restore_point` names the cluster restore point the cut takes, `0`
+    /// for none. `barrier` is set when the cut places a barrier in every data
+    /// group: the leader holds the redo of every later transaction until it
+    /// applied its group's barrier. Shared by every vShard of this node.
+    CutMarker {
+        hlc: u64,
+        restore_point: u64,
+        barrier: Option<Arc<super::cut_barrier::CutBarrierWire>>,
+    },
     /// Part `index` of the plans of the multi-part transaction `txn`, whose
     /// first task is the transaction's task `first_task`. The bytes are
     /// shared by every scheduler of this node the part targets. `chunk` is

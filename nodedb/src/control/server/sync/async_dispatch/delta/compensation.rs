@@ -195,6 +195,7 @@ fn compensation_hint_for_code(code: &ErrorCode) -> CompensationHint {
         | ErrorCode::CrdtFrontierMismatch { .. }
         | ErrorCode::CollectionDraining { .. }
         | ErrorCode::RetryableRefusal { .. }
+        | ErrorCode::CoreFailStopped { .. }
         | ErrorCode::TransactionRollback { .. } => CompensationHint::Retry { retry_after_ms: 0 },
         other @ (ErrorCode::SyncRejected { .. }
         | ErrorCode::SyncNotApplied { .. }

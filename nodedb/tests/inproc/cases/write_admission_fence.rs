@@ -18,12 +18,12 @@
 //! test suite); these tests assert the gate's fence DECISION, which is the piece
 //! this change introduces.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use nodedb::bridge::dispatch::Dispatcher;
 use nodedb::control::cluster::calvin::scheduler::lock_manager::{
-    AcquireOutcome, LockKey, LockManager, TxnId,
+    AcquireOutcome, LockKey, LockManager, LockMode, TxnId,
 };
 use nodedb::control::server::shared::write_admission::{
     WriteAdmission, WriteTarget, admit, cp_routed_to_calvin,
@@ -36,7 +36,7 @@ use nodedb_types::QualifiedCollection;
 
 /// Build a single-node `SharedState` over a throwaway WAL. The returned
 /// `TempDir` must be kept alive for the WAL's lifetime.
-fn build_shared() -> (Arc<SharedState>, tempfile::TempDir) {
+pub(super) fn build_shared() -> (Arc<SharedState>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let wal =
         Arc::new(WalManager::open_for_testing(&dir.path().join("fence.wal")).expect("open wal"));
@@ -47,7 +47,7 @@ fn build_shared() -> (Arc<SharedState>, tempfile::TempDir) {
 
 /// Register an empty lock table for `collection`'s vShard and return both the
 /// shared `Arc` and the vShard the gate will resolve the plan to.
-fn register_lock_manager(
+pub(super) fn register_lock_manager(
     shared: &SharedState,
     collection: &str,
 ) -> (Arc<Mutex<LockManager>>, VShardId) {
@@ -65,7 +65,7 @@ fn register_lock_manager(
 /// Register a promotion channel for `vshard` and return the receiver. The gate
 /// clones the sender into any fast-path guard it builds for this vShard, so the
 /// guard's drop delivers promoted scheduler waiters here.
-fn register_promotion_channel(
+pub(super) fn register_promotion_channel(
     shared: &SharedState,
     vshard: VShardId,
 ) -> tokio::sync::mpsc::UnboundedReceiver<Vec<TxnId>> {
@@ -80,7 +80,7 @@ fn register_promotion_channel(
 }
 
 /// A single-key KV point write to `collection` / `key`.
-fn kv_put(collection: &str, key: &[u8]) -> PhysicalPlan {
+pub(super) fn kv_put(collection: &str, key: &[u8]) -> PhysicalPlan {
     PhysicalPlan::Kv(KvOp::Put {
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, collection),
         key: key.to_vec(),
@@ -120,7 +120,7 @@ async fn fence_write_blocks_behind_held_commit_lock() {
 
     // A pending commit (a normal Calvin-band txn) holds the fence on key K.
     let commit_txn = TxnId::new(5, 0);
-    let held: BTreeSet<LockKey> = [kv_lock_key(coll, b"K")].into();
+    let held: BTreeMap<LockKey, LockMode> = [(kv_lock_key(coll, b"K"), LockMode::Exclusive)].into();
     assert_eq!(
         lm.lock().expect("lm").acquire(commit_txn, held),
         AcquireOutcome::Ready,
@@ -131,7 +131,7 @@ async fn fence_write_blocks_behind_held_commit_lock() {
     // holder via the scheduler's FIFO queue.
     let plan = kv_put(coll, b"K");
     let before = cp_routed_to_calvin();
-    match admit(&shared, &target(vshard, &plan)) {
+    match admit(&shared, &target(vshard, &plan)).expect("admit") {
         WriteAdmission::RouteToCalvin => {}
         _ => panic!("a point write behind a held commit lock must route to Calvin"),
     }
@@ -142,7 +142,7 @@ async fn fence_write_blocks_behind_held_commit_lock() {
 
     // The commit releases; the same write is now admitted to the fast path.
     let _ = lm.lock().expect("lm").release(commit_txn);
-    match admit(&shared, &target(vshard, &plan)) {
+    match admit(&shared, &target(vshard, &plan)).expect("admit") {
         WriteAdmission::FastPath { guard: Some(_) } => {}
         _ => panic!("after release, the point write must fast-path with a real lock guard"),
     }
@@ -159,14 +159,14 @@ async fn two_concurrent_same_key_point_writes_serialize() {
     let plan = kv_put(coll, b"K");
 
     // First write takes the fast path and holds the lock via its RAII guard.
-    let guard1 = match admit(&shared, &target(vshard, &plan)) {
+    let guard1 = match admit(&shared, &target(vshard, &plan)).expect("admit") {
         WriteAdmission::FastPath { guard: Some(g) } => g,
         _ => panic!("first same-key write must fast-path with a real lock guard"),
     };
 
     // Second write to the same key observes the held lock and is routed.
     let before = cp_routed_to_calvin();
-    match admit(&shared, &target(vshard, &plan)) {
+    match admit(&shared, &target(vshard, &plan)).expect("admit") {
         WriteAdmission::RouteToCalvin => {}
         _ => panic!("second same-key write must route to Calvin behind the first"),
     }
@@ -177,7 +177,7 @@ async fn two_concurrent_same_key_point_writes_serialize() {
 
     // First write completes (guard drops, releasing the lock); the key is free.
     drop(guard1);
-    match admit(&shared, &target(vshard, &plan)) {
+    match admit(&shared, &target(vshard, &plan)).expect("admit") {
         WriteAdmission::FastPath { guard: Some(_) } => {}
         _ => panic!("after the first write releases, the key must fast-path again"),
     }
@@ -195,7 +195,7 @@ async fn single_node_point_write_uses_global_keyed_order_lock() {
     let vshard = nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, coll).vshard();
     let plan = kv_put(coll, b"K");
 
-    let lock = match admit(&shared, &target(vshard, &plan)) {
+    let lock = match admit(&shared, &target(vshard, &plan)).expect("admit") {
         WriteAdmission::FastPathBlocking { key, keyed_lock } => {
             assert_eq!(
                 key,
@@ -222,7 +222,7 @@ async fn single_node_same_key_serializes_fifo() {
     let vshard = nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, coll).vshard();
     let plan = kv_put(coll, b"K");
 
-    let (key, lock) = match admit(&shared, &target(vshard, &plan)) {
+    let (key, lock) = match admit(&shared, &target(vshard, &plan)).expect("admit") {
         WriteAdmission::FastPathBlocking { key, keyed_lock } => (key, keyed_lock),
         _ => panic!("single-node point write must return FastPathBlocking"),
     };
@@ -281,7 +281,7 @@ async fn fast_path_drop_delivers_promoted_scheduler_txn() {
     // A fast-path point write on K takes the fence via its RAII guard (an
     // autocommit-band holder). K was uncontended at acquire time.
     let plan = kv_put(coll, b"K");
-    let guard = match admit(&shared, &target(vshard, &plan)) {
+    let guard = match admit(&shared, &target(vshard, &plan)).expect("admit") {
         WriteAdmission::FastPath { guard: Some(g) } => g,
         _ => panic!("uncontended point write must fast-path with a real lock guard"),
     };
@@ -290,7 +290,7 @@ async fn fast_path_drop_delivers_promoted_scheduler_txn() {
     // K and queues behind the fast-path holder (Blocked) — the exact contention
     // the old "fast-path keys are never contended" assumption ignored.
     let scheduler_txn = TxnId::new(7, 0);
-    let want: BTreeSet<LockKey> = [kv_lock_key(coll, b"K")].into();
+    let want: BTreeMap<LockKey, LockMode> = [(kv_lock_key(coll, b"K"), LockMode::Exclusive)].into();
     assert_eq!(
         lm.lock().expect("lm").acquire(scheduler_txn, want.clone()),
         AcquireOutcome::Blocked,
@@ -339,4 +339,94 @@ async fn single_node_distinct_keys_do_not_block() {
     // Both alive at once — proof the keys map to independent mutexes.
     drop(g_b);
     drop(g_a);
+}
+
+/// The collection lock key a truncate holds `Exclusive` and a row writer
+/// holds `Intent`.
+fn collection_lock_key(collection: &str) -> LockKey {
+    LockKey::Collection {
+        collection: Arc::from(collection),
+    }
+}
+
+/// A Calvin truncate and an autocommit point write of one collection
+/// serialize at the gate, whichever comes first. A truncate holds the
+/// collection `Exclusive`, and a point write holds it `Intent`.
+#[tokio::test]
+async fn calvin_truncate_and_autocommit_point_write_serialize() {
+    let (shared, _dir) = build_shared();
+    let coll = "truncate_coll";
+    let (lm, vshard) = register_lock_manager(&shared, coll);
+    let mut promotion_rx = register_promotion_channel(&shared, vshard);
+    let truncate_keys: BTreeMap<LockKey, LockMode> =
+        [(collection_lock_key(coll), LockMode::Exclusive)].into();
+    let plan = kv_put(coll, b"K");
+
+    // The truncate is sequenced first: the point write routes behind it.
+    let truncate = TxnId::new(9, 0);
+    assert_eq!(
+        lm.lock()
+            .expect("lm")
+            .acquire(truncate, truncate_keys.clone()),
+        AcquireOutcome::Ready
+    );
+    assert!(
+        matches!(
+            admit(&shared, &target(vshard, &plan)).expect("admit"),
+            WriteAdmission::RouteToCalvin
+        ),
+        "a point write of a collection a truncate holds must route behind it"
+    );
+    let _ = lm.lock().expect("lm").release(truncate);
+
+    // The point write is admitted first: the truncate waits for its guard.
+    let guard = match admit(&shared, &target(vshard, &plan)).expect("admit") {
+        WriteAdmission::FastPath { guard: Some(guard) } => guard,
+        _ => panic!("an uncontended point write must fast-path with a real lock guard"),
+    };
+    let later_truncate = TxnId::new(9, 1);
+    assert_eq!(
+        lm.lock()
+            .expect("lm")
+            .acquire(later_truncate, truncate_keys.clone()),
+        AcquireOutcome::Blocked,
+        "a truncate must wait for the point write's collection intent"
+    );
+    drop(guard);
+    let promoted = promotion_rx
+        .try_recv()
+        .expect("the guard's drop must deliver the promoted truncate");
+    assert!(promoted.contains(&later_truncate));
+    assert!(
+        lm.lock()
+            .expect("lm")
+            .is_ready(later_truncate, &truncate_keys)
+    );
+}
+
+/// An autocommit truncate locks its collection `Exclusive`: it routes
+/// behind a Calvin row writer of the collection.
+#[tokio::test]
+async fn autocommit_truncate_routes_behind_a_calvin_row_writer() {
+    let (shared, _dir) = build_shared();
+    let coll = "truncate_after_row";
+    let (lm, vshard) = register_lock_manager(&shared, coll);
+    let row_writer = TxnId::new(4, 0);
+    let row_keys: BTreeMap<LockKey, LockMode> = [
+        (kv_lock_key(coll, b"K"), LockMode::Exclusive),
+        (collection_lock_key(coll), LockMode::Intent),
+    ]
+    .into();
+    assert_eq!(
+        lm.lock().expect("lm").acquire(row_writer, row_keys),
+        AcquireOutcome::Ready
+    );
+    let truncate = PhysicalPlan::Kv(KvOp::Truncate {
+        collection: QualifiedCollection::new(DatabaseId::DEFAULT, coll),
+        restart_identity: false,
+    });
+    assert!(matches!(
+        admit(&shared, &target(vshard, &truncate)).expect("admit"),
+        WriteAdmission::RouteToCalvin
+    ));
 }

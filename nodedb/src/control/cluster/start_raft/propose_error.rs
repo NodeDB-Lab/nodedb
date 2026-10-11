@@ -2,10 +2,20 @@
 
 //! The error an async Raft propose returns to its statement.
 
-use nodedb_cluster::ClusterError;
+use nodedb_cluster::{CalvinError, ClusterError};
 use nodedb_raft::RaftError;
 
+use crate::bridge::envelope::ErrorCode;
 use crate::types::VShardId;
+
+/// The error of a write whose deadline passed before any leader proposed it.
+///
+/// A definite refusal: nothing entered the log, so nothing applies. A client
+/// sees the same deadline SQLSTATE as an unknown outcome. A caller that
+/// matches the code can tell the two apart.
+pub(super) fn expired_before_propose() -> crate::Error {
+    crate::Error::DataPlane(ErrorCode::ExpiredBeforeExecution)
+}
 
 /// The error an async propose returns for a cluster error.
 ///
@@ -13,9 +23,10 @@ use crate::types::VShardId;
 /// proposal once it has one, so the proposal is retried:
 /// [`crate::Error::NoLeader`]. That covers an election, a leadership transfer
 /// in flight, a leader that stepped down after this node or a forwarding node
-/// chose it, and a vShard whose owner is moving. A forwarded refusal arrives
-/// here with its typed Raft error (`DataProposeResponse::refusal_error`). A
-/// typed verdict keeps its class. Every other failure is final here.
+/// chose it, a vShard whose owner is moving, and a leader this node cannot
+/// reach. A forwarded refusal arrives here with its typed Raft error
+/// (`DataProposeResponse::refusal_error`). A typed verdict keeps its class.
+/// Every other failure is final here.
 pub(super) fn async_propose_error(vshard_id: u32, error: ClusterError) -> crate::Error {
     match error {
         ClusterError::Raft(
@@ -23,15 +34,38 @@ pub(super) fn async_propose_error(vshard_id: u32, error: ClusterError) -> crate:
         )
         | ClusterError::ReadIndexNotLeader { .. }
         | ClusterError::MigrationInProgress { .. }
-        | ClusterError::WrongOwner { .. } => crate::Error::NoLeader {
+        | ClusterError::WrongOwner { .. }
+        // The forward never reached the leader whole: the leader is not in
+        // this node's topology, or the connect, stream open or write failed.
+        // Nothing was proposed. A written forward ends as `Unanswered`.
+        | ClusterError::Transport { .. } => crate::Error::NoLeader {
             vshard_id: VShardId::new(vshard_id),
         },
-        // The forward did not answer before its timeout. The statement's
-        // deadline class, the same class the array fan-out gives it.
-        ClusterError::ShardTimeout { .. } => crate::Error::DeadlineExceeded {
-            request_id: crate::types::RequestId::new(0),
-        },
+        // The forward did not answer before its timeout. The leader can have
+        // proposed the write, so its outcome is unknown: the statement's
+        // deadline class, the same class the array fan-out gives it. A
+        // forward whose stream failed after the request was written can
+        // also have been proposed, so it takes the same class.
+        error @ (ClusterError::ShardTimeout { .. } | ClusterError::Unanswered { .. }) => {
+            tracing::warn!(
+                vshard_id,
+                %error,
+                "raft proposal forward reached its deadline with no answer from the leader"
+            );
+            crate::Error::DeadlineExceeded {
+                request_id: crate::types::RequestId::new(0),
+            }
+        }
         ClusterError::DataPlane { code } => crate::Error::DataPlane(code.into()),
+        // The leader's write gate waited for the write's lock keys until the
+        // caller's deadline, and proposed nothing.
+        ClusterError::Calvin(CalvinError::AdmissionTimedOut) => {
+            tracing::warn!(
+                vshard_id,
+                "raft proposal reached its deadline at the leader's write gate"
+            );
+            expired_before_propose()
+        }
         ClusterError::ShardExecution { error, .. } | ClusterError::StreamTerminal { error, .. } => {
             crate::Error::from(*error)
         }
@@ -53,7 +87,6 @@ pub(super) fn async_propose_error(vshard_id: u32, error: ClusterError) -> crate:
         | ClusterError::MigrationPauseBudgetExceeded { .. }
         | ClusterError::NodeUnreachable { .. }
         | ClusterError::GhostNotFound { .. }
-        | ClusterError::Transport { .. }
         | ClusterError::Storage { .. }
         | ClusterError::Codec { .. }
         | ClusterError::UnsupportedWireVersion { .. }
@@ -113,15 +146,66 @@ mod tests {
         ));
     }
 
+    /// An admission timeout proposed nothing: a definite refusal, never an
+    /// unknown outcome.
     #[test]
-    fn a_forward_timeout_is_a_deadline() {
-        let error = ClusterError::ShardTimeout {
-            vshard_id: 3,
-            elapsed_ms: 50,
+    fn an_admission_timeout_is_a_definite_refusal() {
+        let error = async_propose_error(3, ClusterError::Calvin(CalvinError::AdmissionTimedOut));
+        let crate::Error::DataPlane(code) = &error else {
+            panic!("expected a Data-Plane verdict, got {error:?}");
         };
-        assert!(matches!(
-            async_propose_error(3, error),
-            crate::Error::DeadlineExceeded { .. }
-        ));
+        assert_eq!(code, &ErrorCode::ExpiredBeforeExecution);
+        assert!(crate::control::server::dispatch_utils::write_definitely_not_applied(code));
+    }
+
+    /// A forward with no reply can have been proposed. Its timeout stays an
+    /// unknown outcome, never a definite refusal.
+    #[test]
+    fn a_forward_timeout_is_an_unknown_outcome() {
+        let error = async_propose_error(
+            3,
+            ClusterError::ShardTimeout {
+                vshard_id: 3,
+                elapsed_ms: 50,
+            },
+        );
+        assert!(matches!(error, crate::Error::DeadlineExceeded { .. }));
+        assert!(
+            !crate::control::server::dispatch_utils::write_definitely_not_applied(
+                &ErrorCode::from(error)
+            )
+        );
+    }
+
+    /// A forward whose stream failed after the request was written can have
+    /// been proposed. It is an unknown outcome, never an internal error.
+    #[test]
+    fn a_sent_forward_with_no_answer_is_an_unknown_outcome() {
+        let error = async_propose_error(
+            3,
+            ClusterError::Unanswered {
+                node_id: 2,
+                detail: "connection lost".into(),
+            },
+        );
+        assert!(matches!(error, crate::Error::DeadlineExceeded { .. }));
+        assert!(
+            !crate::control::server::dispatch_utils::write_definitely_not_applied(
+                &ErrorCode::from(error)
+            )
+        );
+    }
+
+    /// A forward that never went out proposed nothing. The proposal is
+    /// retried, never reported as an unknown outcome.
+    #[test]
+    fn an_unsent_forward_is_retried() {
+        let error = async_propose_error(
+            3,
+            ClusterError::Transport {
+                detail: "connect to node 2 refused".into(),
+            },
+        );
+        assert!(matches!(error, crate::Error::NoLeader { .. }));
     }
 }

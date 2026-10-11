@@ -23,7 +23,7 @@
 //!   every replica alike.
 //! - A txn whose locks are granted before its parts arrived waits in
 //!   `awaiting`, holding its locks. It counts as unfinished, so every later
-//!   txn's flush on this vShard waits for it.
+//!   whole-collection resolve on this vShard waits for it.
 //! - Once every part that targets this vShard arrived, the txn stages as a
 //!   single-entry txn whose plans are its local tasks. Its manifest keeps
 //!   the whole-transaction facts the dispatch reads.
@@ -35,8 +35,9 @@ use std::sync::Arc;
 
 use nodedb_cluster::calvin::types::{SequencedTxn, TaskChunk, TxnIdWire};
 use nodedb_physical::physical_plan::PhysicalPlan;
-use tracing::{error, warn};
+use tracing::warn;
 
+use super::parts_error::PartsError;
 use super::routing::{PlanRouting, plan_vshard_in_database};
 use super::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
@@ -84,12 +85,12 @@ struct Assembler {
     /// The task whose chunks are being joined.
     spanning: Option<SpanningTask>,
     /// Why a part cannot be read. The txn fails at dispatch.
-    failed: Option<String>,
+    failed: Option<PartsError>,
 }
 
 impl Assembler {
-    fn fail(&mut self, detail: impl FnOnce() -> String) {
-        self.failed.get_or_insert_with(detail);
+    fn fail(&mut self, error: impl FnOnce() -> PartsError) {
+        self.failed.get_or_insert_with(error);
     }
 
     /// Keep `plan`, the txn's task `task` from part `index`, when it routes
@@ -102,13 +103,17 @@ impl Assembler {
                 }
             }
             PlanRouting::ControlPlaneOnly => {
-                self.fail(|| format!("part {index} task {task} is a control-plane-only plan"));
+                self.fail(|| PartsError::ControlPlaneOnly { part: index, task });
             }
             PlanRouting::NotAWrite => {
-                self.fail(|| format!("part {index} task {task} is not a write"));
+                self.fail(|| PartsError::NotAWrite { part: index, task });
             }
             PlanRouting::Unroutable(reason) => {
-                self.fail(|| format!("part {index} task {task} is unroutable: {reason}"));
+                self.fail(|| PartsError::Unroutable {
+                    part: index,
+                    task,
+                    reason,
+                });
             }
         }
     }
@@ -117,7 +122,7 @@ impl Assembler {
     fn take_tasks(&mut self, index: u32, first_task: u32, plans: &[u8], vshard_id: u32) {
         if let Some(spanning) = &self.spanning {
             let task = spanning.task;
-            self.fail(|| format!("part {index} interrupts the chunks of task {task}"));
+            self.fail(|| PartsError::InterruptsChunks { part: index, task });
             return;
         }
         match super::super::helpers::decode_plans(plans) {
@@ -126,7 +131,10 @@ impl Assembler {
                     self.keep_if_local(index, task, plan, vshard_id);
                 }
             }
-            Err(error) => self.fail(|| format!("part {index} does not decode: {error}")),
+            Err(error) => self.fail(|| PartsError::PartUndecodable {
+                part: index,
+                source: Box::new(error),
+            }),
         }
     }
 
@@ -148,7 +156,7 @@ impl Assembler {
             }
         };
         if !continues {
-            self.fail(|| format!("part {index} does not continue the chunks of task {task}"));
+            self.fail(|| PartsError::BrokenChunks { part: index, task });
             self.spanning = None;
             return;
         }
@@ -166,12 +174,15 @@ impl Assembler {
             return;
         };
         if len > whole.total_len {
-            self.fail(|| format!("task {task} chunks run past its {} bytes", whole.total_len));
+            self.fail(|| PartsError::ChunksOverrun {
+                task,
+                total_len: whole.total_len,
+            });
             return;
         }
         match nodedb_physical::physical_plan::wire::decode(&whole.bytes) {
             Ok(plan) => self.keep_if_local(index, task, plan, vshard_id),
-            Err(error) => self.fail(|| format!("task {task} does not decode: {error}")),
+            Err(source) => self.fail(|| PartsError::TaskUndecodable { task, source }),
         }
     }
 }
@@ -224,6 +235,18 @@ impl PartsState {
     ) -> Option<TxnId> {
         self.awaiting.keys().next().copied()
     }
+
+    /// Stop waiting for the parts of `txn_id`, which finished without them:
+    /// its redo installed from another replica's stage. Returns the owner of
+    /// the locks it holds.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn release_awaiting(
+        &mut self,
+        txn_id: TxnId,
+    ) -> Option<TxnId> {
+        let awaiting = self.awaiting.remove(&txn_id)?;
+        self.assemblies.remove(&txn_id);
+        Some(awaiting.lock_owner)
+    }
 }
 
 impl Scheduler {
@@ -253,14 +276,15 @@ impl Scheduler {
     ///
     /// A multi-part txn with every part that targets this vShard is
     /// assembled here. One still missing parts waits with its locks. An
-    /// abandoned one, and one whose part cannot be read, completes here.
+    /// abandoned one completes here. One whose part cannot be read votes
+    /// abort on its rejected plans.
     ///
     /// Returns the txn to dispatch: a single-entry txn, or a multi-part one
     /// with every part that targets this vShard assembled. `None` means
     /// nothing dispatches: the txn waits for parts, or it completed.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn gate_on_parts(
         &mut self,
-        txn: SequencedTxn,
+        mut txn: SequencedTxn,
         txn_id: TxnId,
         lock_owner: TxnId,
     ) -> Option<SequencedTxn> {
@@ -286,11 +310,11 @@ impl Scheduler {
         }
         let vshard_id = self.vshard_id;
         let assembled = match self.parts.assemblies.remove(&txn_id) {
-            Some(assembly) => assemble(txn, assembly, vshard_id),
-            None => Err("the txn reached dispatch with no assembly of its parts".to_owned()),
+            Some(assembly) => assemble(&mut txn, assembly, vshard_id),
+            None => Err(PartsError::NoAssembly),
         };
         match assembled {
-            Ok(txn) => Some(txn),
+            Ok(()) => Some(txn),
             Err(detail) => {
                 let error = crate::Error::Internal {
                     detail: format!(
@@ -298,9 +322,7 @@ impl Scheduler {
                         txn_id.epoch, txn_id.position, self.vshard_id
                     ),
                 };
-                error!(vshard_id = self.vshard_id, %error, "calvin scheduler: part unreadable");
-                self.propose_routing_failure(txn_id, &error);
-                self.on_unpending_txn_complete(txn_id, lock_owner);
+                self.reject_plan(txn, txn_id, lock_owner, &error);
                 None
             }
         }
@@ -380,12 +402,8 @@ impl Scheduler {
 ///
 /// Reads the parts in index order, so the result depends only on their
 /// contents. Every replica that holds the same parts assembles the same
-/// plans, or fails alike.
-fn assemble(
-    mut txn: SequencedTxn,
-    assembly: Assembly,
-    vshard_id: u32,
-) -> Result<SequencedTxn, String> {
+/// plans, or fails alike. A failure leaves `txn` unchanged.
+fn assemble(txn: &mut SequencedTxn, assembly: Assembly, vshard_id: u32) -> Result<(), PartsError> {
     let mut assembler = Assembler {
         database_id: assembly.database_id,
         local: Vec::new(),
@@ -404,12 +422,11 @@ fn assemble(
         return Err(failed);
     }
     if let Some(spanning) = assembler.spanning {
-        return Err(format!(
-            "task {} stopped at byte {} of {}",
-            spanning.task,
-            spanning.bytes.len(),
-            spanning.total_len
-        ));
+        return Err(PartsError::Unfinished {
+            task: spanning.task,
+            received: spanning.bytes.len(),
+            total_len: spanning.total_len,
+        });
     }
     let mut local = assembler.local;
     local.sort_by_key(|(task, _)| *task);
@@ -419,26 +436,35 @@ fn assemble(
         .map(|(local_index, _)| local_index)
         .collect();
     let plans: Vec<&PhysicalPlan> = local.iter().map(|(_, plan)| plan).collect();
-    txn.tx_class.plans =
-        zerompk::to_msgpack_vec(&plans).map_err(|e| format!("local plans do not encode: {e}"))?;
+    let bytes = zerompk::to_msgpack_vec(&plans)
+        .map_err(|source| PartsError::PlansDoNotEncode { source })?;
+    txn.tx_class.plans = bytes;
     txn.tx_class.body_plans = body_plans;
-    Ok(txn)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use nodedb_cluster::calvin::CalvinCompletionRegistry;
     use nodedb_cluster::calvin::types::{
         MultiPartPlans, PartStreamId, SchedulerInput, VShardParts,
     };
+    use nodedb_cluster::calvin::{AbortReason, CalvinCompletionRegistry, SequencerEntry};
     use nodedb_physical::physical_plan::DocumentOp;
     use nodedb_physical::physical_plan::wire as plan_wire;
     use nodedb_types::QualifiedCollection;
 
     use super::*;
-    use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
-        build_test_scheduler_with_data_side, make_local_write_txn, test_coll_vshard,
+    use crate::bridge::dispatch::CoreChannelDataSide;
+    use crate::bridge::envelope::Status;
+    use crate::control::cluster::calvin::scheduler::driver::core::owed::OwedKind;
+    use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::{
+        CapturingProposer, lead_data_group,
     };
+    use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
+        build_test_scheduler_with_data_side, make_local_write_txn, staged_response,
+        test_coll_vshard,
+    };
+    use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
     use crate::types::DatabaseId;
 
     fn truncate_plan() -> PhysicalPlan {
@@ -512,6 +538,102 @@ mod tests {
 
     fn one_truncate() -> Vec<u8> {
         plan_wire::encode_batch(&vec![truncate_plan()]).expect("encode one truncate")
+    }
+
+    /// A scheduler on the `test_coll` vShard that leads its data group and
+    /// captures its proposals.
+    fn leading_scheduler() -> (
+        Scheduler,
+        tempfile::TempDir,
+        CoreChannelDataSide,
+        Arc<CapturingProposer>,
+    ) {
+        let (mut scheduler, dir, data_side) = build_test_scheduler_with_data_side(
+            test_coll_vshard(),
+            CalvinCompletionRegistry::new_detached(),
+        );
+        let proposer = CapturingProposer::accepting();
+        scheduler.sequencer_proposer = proposer.clone();
+        lead_data_group(&mut scheduler);
+        (scheduler, dir, data_side, proposer)
+    }
+
+    /// Whether a truncate of `test_coll` reached the Data Plane. Drains the
+    /// request ring.
+    fn truncate_reached_data_plane(data_side: &mut CoreChannelDataSide) -> bool {
+        let mut reached = false;
+        while let Ok(request) = data_side.request_rx.try_pop() {
+            reached |= request.inner.plan == truncate_plan();
+        }
+        reached
+    }
+
+    /// `txn_id` is rejected before it stages. It waits in `pending` for its
+    /// verdict with a stage error, owes a `PlanRejected` vote, and holds its
+    /// locks: `next`, on the same key, waits behind it. At the abort verdict
+    /// it drops, marks its position applied, and frees its locks, so `next`
+    /// stages.
+    async fn rejected_then_dropped_at_its_verdict(
+        scheduler: &mut Scheduler,
+        data_side: &mut CoreChannelDataSide,
+        proposer: &CapturingProposer,
+        txn_id: TxnId,
+        next: SequencedTxn,
+    ) {
+        let pending = scheduler
+            .pending
+            .get(&txn_id)
+            .expect("waits for its verdict");
+        assert_eq!(pending.commit_state, CommitState::AwaitingVerdict);
+        assert!(pending.stage_error.is_some(), "the rejection is recorded");
+        assert!(!scheduler.parts.is_awaiting(txn_id));
+        assert!(scheduler.owed.contains_key(&(txn_id, OwedKind::Vote)));
+        assert!(proposer.accepted().contains(&SequencerEntry::AbortVote {
+            epoch: txn_id.epoch,
+            position: txn_id.position,
+            vshard: test_coll_vshard(),
+            reason: AbortReason::PlanRejected,
+        }));
+        assert!(!scheduler.applied.is_applied(txn_id.epoch, txn_id.position));
+
+        let next_id = TxnId::new(next.epoch, next.position);
+        scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(next)));
+        assert!(
+            scheduler.blocked.contains_key(&next_id),
+            "the rejected txn holds its locks"
+        );
+
+        scheduler.registry.note_verdict(
+            nodedb_cluster::calvin::TxnId::new(txn_id.epoch, txn_id.position),
+            nodedb_cluster::calvin::VerdictOutcome::Abort(AbortReason::PlanRejected),
+        );
+        scheduler.resume_on_verdict(txn_id, false);
+        assert_eq!(
+            scheduler.pending.get(&txn_id).map(|p| p.commit_state),
+            Some(CommitState::AwaitingDrop)
+        );
+        assert!(
+            !truncate_reached_data_plane(data_side),
+            "no plan of the rejected txn stages"
+        );
+        assert!(!scheduler.applied.is_applied(txn_id.epoch, txn_id.position));
+
+        scheduler.finish_drop(txn_id, &staged_response(Status::Ok, None));
+        assert!(!scheduler.pending.contains_key(&txn_id));
+        assert!(scheduler.applied.is_applied(txn_id.epoch, txn_id.position));
+        assert!(
+            proposer.accepted().iter().any(|entry| matches!(
+                entry,
+                SequencerEntry::CompletionAck { epoch, position, .. }
+                    if *epoch == txn_id.epoch && *position == txn_id.position
+            )),
+            "the dropped txn acks"
+        );
+        assert!(!scheduler.blocked.contains_key(&next_id));
+        assert!(
+            scheduler.pending.contains_key(&next_id),
+            "the freed locks let the next txn stage"
+        );
     }
 
     /// A txn whose locks are granted before its parts holds them and waits.
@@ -614,13 +736,11 @@ mod tests {
         assert_eq!(plans, vec![truncate_plan()]);
     }
 
-    /// A chunk that skips bytes fails the txn: nothing stages.
+    /// A chunk that skips bytes rejects the txn before it stages. It votes
+    /// abort and drops at the verdict.
     #[tokio::test]
-    async fn a_chunk_that_skips_bytes_stages_nothing() {
-        let (mut scheduler, _dir, _data_side) = build_test_scheduler_with_data_side(
-            test_coll_vshard(),
-            CalvinCompletionRegistry::new_detached(),
-        );
+    async fn a_chunk_that_skips_bytes_is_rejected_before_it_stages() {
+        let (mut scheduler, _dir, mut data_side, proposer) = leading_scheduler();
         let txn_id = TxnId::new(8, 0);
         let task = zerompk::to_msgpack_vec(&truncate_plan()).expect("encode one task");
         let total = task.len() as u64;
@@ -628,30 +748,35 @@ mod tests {
         scheduler.process_scheduler_input(chunk_part(8, 0, 0, &task[..2], 0, total));
         scheduler.process_scheduler_input(chunk_part(8, 1, 0, &task[3..], 3, total));
 
-        assert!(!scheduler.pending.contains_key(&txn_id), "nothing staged");
-        assert!(scheduler.applied.is_applied(8, 0), "the txn completed");
+        rejected_then_dropped_at_its_verdict(
+            &mut scheduler,
+            &mut data_side,
+            &proposer,
+            txn_id,
+            plain_write(8, 1),
+        )
+        .await;
     }
 
-    /// A late part that does not decode fails the txn before it stages: the
-    /// earlier part's task never stages, and the txn's locks are released.
+    /// A late part that does not decode rejects the txn before it stages:
+    /// the earlier part's task never reaches the Data Plane. The txn votes
+    /// abort and drops at the verdict.
     #[tokio::test]
-    async fn a_late_part_that_fails_stages_nothing_of_the_earlier_parts() {
-        let (mut scheduler, _dir, _data_side) = build_test_scheduler_with_data_side(
-            test_coll_vshard(),
-            CalvinCompletionRegistry::new_detached(),
-        );
+    async fn a_late_part_that_fails_rejects_the_txn_before_the_earlier_parts_stage() {
+        let (mut scheduler, _dir, mut data_side, proposer) = leading_scheduler();
         let txn_id = TxnId::new(3, 0);
         scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(two_part_header(3, 0))));
         scheduler.process_scheduler_input(part(3, 0, 0, one_truncate()));
         scheduler.process_scheduler_input(part(3, 0, 1, vec![0xc1, 0xff, 0x00]));
 
-        assert!(!scheduler.pending.contains_key(&txn_id), "nothing staged");
-        assert!(!scheduler.parts.is_awaiting(txn_id));
-        assert!(scheduler.applied.is_applied(3, 0), "the txn completed");
-
-        // Its locks are free: the next txn on the same key stages at once.
-        scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(plain_write(3, 1))));
-        assert!(scheduler.pending.contains_key(&TxnId::new(3, 1)));
+        rejected_then_dropped_at_its_verdict(
+            &mut scheduler,
+            &mut data_side,
+            &proposer,
+            txn_id,
+            plain_write(3, 1),
+        )
+        .await;
     }
 
     /// An abandoned txn holding its locks completes at once and frees them.

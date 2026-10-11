@@ -5,12 +5,10 @@
 //! background apply loop that drains `DistributedApplier::apply_committed`
 //! into the Data Plane and notifies propose waiters.
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc;
 
-use crate::control::cluster::calvin::ReadResultEvent;
 use crate::control::distributed_applier::{ApplyBatch, ProposeTracker, run_apply_loop};
 use crate::control::state::SharedState;
 
@@ -25,7 +23,6 @@ pub(super) fn wire_proposers(
     raft_loop: &Arc<RaftLoopType>,
     tracker: Arc<ProposeTracker>,
     apply_rx: mpsc::Receiver<ApplyBatch>,
-    calvin_read_result_senders: Arc<Mutex<BTreeMap<u32, Sender<ReadResultEvent>>>>,
     sequencer_state_machine: Arc<Mutex<nodedb_cluster::calvin::SequencerStateMachine>>,
 ) -> crate::Result<()> {
     install_sync_proposer(shared, raft_loop);
@@ -33,7 +30,7 @@ pub(super) fn wire_proposers(
     install_applied_index_sink(shared, raft_loop);
     install_apply_gates(shared, raft_loop);
     install_async_proposer(shared, raft_loop, &tracker)?;
-    spawn_apply_loop(shared, tracker, apply_rx, calvin_read_result_senders);
+    spawn_apply_loop(shared, tracker, apply_rx);
     Ok(())
 }
 
@@ -116,13 +113,13 @@ fn install_compactor(
                         .ok_or_else(|| crate::Error::Internal {
                             detail: "raft log compaction: shared state dropped".into(),
                         })?;
-                let mirrors = shared.authorization_fence.calvin_mirrors();
+                let ledgers = &shared.calvin.applied;
                 let mut sm = sm_for_compact.lock().unwrap_or_else(|p| p.into_inner());
                 let undurable = sm.undurable_floor(|vshard, epoch, position| {
-                    // A vShard with no scheduler here holds no state to lose.
-                    mirrors
+                    // A vShard with no ledger here holds no state to lose.
+                    ledgers
                         .get(vshard)
-                        .is_none_or(|mirror| mirror.is_applied(epoch, position))
+                        .is_none_or(|ledger| ledger.is_applied(epoch, position))
                 });
                 let floor = [
                     sm.min_catch_up_from(),
@@ -238,14 +235,23 @@ fn install_async_proposer(
                     detail: "raft propose (async): cluster not running".into(),
                 })?;
                 // The attempt gets only what remains of the caller's deadline.
+                // A deadline that passed before the propose refuses the write.
                 if tokio::time::Instant::now() >= deadline {
-                    return Err(propose_deadline_exceeded());
+                    return Err(super::propose_error::expired_before_propose());
                 }
-                let (group_id, log_index) =
-                    tokio::time::timeout_at(deadline, rl.propose_via_data_leader(vshard_id, data))
-                        .await
-                        .map_err(|_| propose_deadline_exceeded())?
-                        .map_err(|e| async_propose_error(vshard_id, e))?;
+                // The leader's write gate stops at `deadline`. The call waits
+                // a bounded margin past it for the leader's verdict. An
+                // unproposed write then reports a refusal, not an unknown outcome.
+                let proposed = rl.propose_via_data_leader(vshard_id, &data, deadline).await;
+                let (group_id, log_index) = match proposed {
+                    Ok(at) => at,
+                    // The leader's write gate found a key of the write held.
+                    // The Calvin sequencer orders it behind the holder.
+                    Err(nodedb_cluster::ClusterError::Calvin(
+                        nodedb_cluster::CalvinError::RouteToSequencer,
+                    )) => return Ok(super::sequencer_route::routed_write(&state_weak, data)),
+                    Err(e) => return Err(async_propose_error(vshard_id, e)),
+                };
 
                 // Register the waiter with the proposer's idempotency
                 // key. The apply path compares against the committed
@@ -282,16 +288,9 @@ fn install_async_proposer(
                             e
                         }
                     })
-                    // Carry out the write-version the APPLY side stamped, not
-                    // `log_index`. The tracker resolves on the node that applied
-                    // the entry locally, so `write_version` is this replica's own
-                    // post-write `coll_write_lsn` — a WAL LSN, the same domain
-                    // every other feed of that map records in, and the only
-                    // domain the shard-local OCC read validator compares in. The
-                    // raft log index is a per-group counter on a different scale
-                    // entirely; publishing it here made reads validate a WAL LSN
-                    // against a log index.
-                    .map(|applied| (applied.payload, applied.write_version));
+                    // Carry out the versions the apply side stamped: the
+                    // entry's log position on every vShard the write touched.
+                    .map(|applied| (applied.payload, applied.write_versions));
                     let applied = applied?;
                     // A write to a vShard homing a permission-tree source is
                     // acknowledged only once every lease holder covers it, or its
@@ -330,7 +329,6 @@ fn spawn_apply_loop(
     shared: &Arc<SharedState>,
     tracker: Arc<ProposeTracker>,
     apply_rx: mpsc::Receiver<ApplyBatch>,
-    calvin_read_result_senders: Arc<Mutex<BTreeMap<u32, Sender<ReadResultEvent>>>>,
 ) {
     // Spawn the background apply loop. It reads from the mpsc channel
     // pushed by `DistributedApplier::apply_committed`, dispatches to the
@@ -342,7 +340,6 @@ fn spawn_apply_loop(
     // because its applies dispatch to the Data Plane.
     let apply_state = shared.clone();
     let apply_tracker = tracker;
-    let apply_calvin_read_result_senders = calvin_read_result_senders;
     crate::control::shutdown::spawn_loop_no_abort(
         &shared.loop_registry,
         &shared.shutdown,
@@ -355,12 +352,7 @@ fn spawn_apply_loop(
             // cuts the loop off mid-apply.
             tokio::select! {
                 biased;
-                _ = run_apply_loop(
-                    apply_rx,
-                    apply_state,
-                    apply_tracker,
-                    apply_calvin_read_result_senders,
-                ) => {}
+                _ = run_apply_loop(apply_rx, apply_state, apply_tracker) => {}
                 _ = shutdown.wait_cancelled() => {}
             }
         },
@@ -467,6 +459,7 @@ async fn await_local_apply(
             tracing::warn!(
                 group_id,
                 log_index,
+                vshard_id,
                 progress = %apply_progress(state.as_deref(), group_id),
                 oldest_unfinished = %tracker
                     .applying(group_id)

@@ -41,8 +41,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use nodedb::event::cdc::consume::{ConsumeError, ConsumeParams, consume_local};
+use nodedb_test_support::fail_point::{FailAction, FailGuard};
 use nodedb_types::DatabaseId;
-use nodedb_types::fail_point::{FailAction, FailGuard};
 
 use super::ts_native_ingest::{
     ingest_native, ingest_until_accepted, native_session, rejection_warnings,
@@ -75,8 +75,9 @@ impl ApplyGate {
     fn install(directory: &Path, node_id: u64) -> Self {
         let release = directory.join(format!("release-node{node_id}"));
         let arrival = directory.join(format!("release-node{node_id}.parked"));
-        let guard = FailGuard::install(
-            &format!("funnel::before_dispatch::node{node_id}::{COLLECTION}"),
+        let guard = FailGuard::for_node(
+            node_id,
+            &format!("funnel::before_dispatch::{COLLECTION}"),
             FailAction::WaitForFile(release.clone()),
         );
         Self {

@@ -24,9 +24,9 @@ fn partial(id: u64, data: &[u8]) -> Response {
         partial: true,
         payload: Payload::from_vec(data.to_vec()),
         watermark_lsn: Lsn::ZERO,
-        read_version_lsn: Lsn::ZERO,
+        read_versions: nodedb::types::ReadVersions::new(),
         error_code: None,
-        read_set_valid: None,
+        stage_vote: None,
         write_set: Vec::new(),
     }
 }

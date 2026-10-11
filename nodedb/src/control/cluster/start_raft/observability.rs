@@ -175,6 +175,13 @@ fn publish_raft_status(
     if shared.raft_read_gate.set(gate).is_err() {
         tracing::warn!("raft_read_gate already set — start_raft appears to have run twice");
     }
+    if shared
+        .multi_raft
+        .set(raft_loop.multi_raft_handle())
+        .is_err()
+    {
+        tracing::warn!("multi_raft already set — start_raft appears to have run twice");
+    }
 }
 
 /// Renew this node's authorization lease with the metadata leader. Its

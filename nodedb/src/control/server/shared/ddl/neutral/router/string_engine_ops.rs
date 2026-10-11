@@ -368,9 +368,7 @@ mod tests {
         };
         assert!(!crdt_apply_forbidden_in_transaction(&ctx));
 
-        sessions
-            .begin(addr, crate::types::Lsn::new(1), 0)
-            .expect("begin");
+        sessions.begin(addr, 0).expect("begin");
         assert!(crdt_apply_forbidden_in_transaction(&ctx));
         sessions.fail_transaction(addr);
         assert!(crdt_apply_forbidden_in_transaction(&ctx));

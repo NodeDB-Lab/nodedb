@@ -96,6 +96,9 @@ impl CoreLoop {
 
         Ok(Self {
             core_id,
+            // A core opened without a node fires only actions armed for every
+            // node. The server bootstrap scopes it with `set_fail_scope`.
+            fail_scope: nodedb_types::fail_point::FailScope::Any,
             request_rx,
             response_tx,
             task_queue: PriorityQueues::new(),

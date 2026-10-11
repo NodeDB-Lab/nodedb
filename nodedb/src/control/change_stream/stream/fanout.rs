@@ -25,9 +25,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tracing::{trace, warn};
 
 use crate::control::state::SharedState;
-use crate::event::cross_shard::types::{
-    NOTIFY_PARTITION_CALVIN, NOTIFY_PARTITION_GROUP, NotifyBroadcastMsg, NotifyChange,
-};
+use crate::event::cross_shard::types::{NOTIFY_PARTITION_GROUP, NotifyBroadcastMsg, NotifyChange};
 
 use super::ChangePartition;
 use super::ring::AppendedRun;
@@ -51,13 +49,7 @@ impl ChangeFanout {
             return Vec::new();
         };
         let routing = routing.read().unwrap_or_else(|p| p.into_inner());
-        let group = match partition {
-            ChangePartition::Group(group) => group,
-            ChangePartition::Calvin(vshard) => match routing.group_for_vshard(vshard) {
-                Ok(group) => group,
-                Err(_) => return Vec::new(),
-            },
-        };
+        let ChangePartition(group) = partition;
         let Some(info) = routing.group_info(group) else {
             return Vec::new();
         };
@@ -176,10 +168,8 @@ fn spawn_peer(
 impl NotifyBroadcastMsg {
     /// The wire form of `run`.
     pub(crate) fn from_run(source_node: u64, run: &AppendedRun) -> Self {
-        let (partition_kind, partition_id) = match run.partition {
-            ChangePartition::Group(group) => (NOTIFY_PARTITION_GROUP, group),
-            ChangePartition::Calvin(vshard) => (NOTIFY_PARTITION_CALVIN, u64::from(vshard)),
-        };
+        let ChangePartition(group) = run.partition;
+        let (partition_kind, partition_id) = (NOTIFY_PARTITION_GROUP, group);
         Self {
             source_node,
             partition_kind,
@@ -206,10 +196,7 @@ impl NotifyBroadcastMsg {
     /// The partition the run belongs to, `None` for an unknown kind.
     pub fn partition(&self) -> Option<ChangePartition> {
         match self.partition_kind {
-            NOTIFY_PARTITION_GROUP => Some(ChangePartition::Group(self.partition_id)),
-            NOTIFY_PARTITION_CALVIN => u32::try_from(self.partition_id)
-                .ok()
-                .map(ChangePartition::Calvin),
+            NOTIFY_PARTITION_GROUP => Some(ChangePartition(self.partition_id)),
             _ => None,
         }
     }

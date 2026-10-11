@@ -9,6 +9,7 @@ use axum::response::IntoResponse;
 use crate::control::gateway::GatewayErrorMap;
 use crate::control::gateway::core::QueryContext;
 use crate::control::security::audit::ArcAuditEmitter;
+use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::request::MaterializedShapeRequest;
 use crate::control::server::response_shape::types::describe_plan;
@@ -21,10 +22,14 @@ use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
+use crate::control::server::shared::statement_exec::{
+    AtomicStatement, StatementExec, authorize_one_task,
+};
 
 use super::super::super::auth::{ApiError, AppState, build_request_scope, resolve_auth_parts};
 use super::super::super::peer::PeerAddr;
 use super::super::super::transport::ClientTransport;
+use super::super::atomic_statement::{RoutedStatement, route_http_statement};
 use super::super::query_stream::{NdjsonBody, ndjson_body_stream, try_open_stream};
 use super::super::result_shape::{HttpShaped, passthrough_to_ndjson, shape_http_payload};
 use super::{DatabaseQueryParam, resolve_database_id};
@@ -119,13 +124,55 @@ pub async fn query_ndjson(
         Ok(admission) => admission,
         Err(error) => return ApiError::from(error).into_response(),
     };
-    let tasks = admission.tasks;
     let output_schema = admission.output_schema;
-    let mut lease_scope = Some(admission.lease_scope);
 
     let trace_id = crate::control::trace_context::generate_trace_id();
 
     let _request = state.shared.tenant_request_guard(tenant_id);
+
+    // The shared atomic routes run a statement whose tasks commit together:
+    // the implicit transaction, the implicit-edge gate, and a Calvin commit
+    // for a write that spans vShards. HTTP carries no session: `nextval`
+    // advances the registry, `currval` reports "not yet called in this
+    // session".
+    let sequences = SessionSequenceAccess::for_session(&state.shared, None, database_id, tenant_id);
+    let exec = StatementExec {
+        state: &state.shared,
+        identity: &identity,
+        scope: &scope,
+        output_schema: Some(&output_schema),
+        database_id,
+        sequences: &sequences,
+        client_session: None,
+    };
+    let routed = route_http_statement(
+        &exec,
+        AtomicStatement {
+            tasks: admission.tasks,
+            lease_scope: admission.lease_scope,
+            sum_target_reads: admission.sum_target_reads,
+        },
+    )
+    .await;
+    let (tasks, lease_scope) = match routed {
+        Ok(RoutedStatement::PerTask(statement)) => (statement.tasks, statement.lease_scope),
+        Ok(RoutedStatement::Answered(rows)) => {
+            let mut ndjson = String::new();
+            for row in rows {
+                ndjson.push_str(&row.to_string());
+                ndjson.push('\n');
+            }
+            return ndjson_response(ndjson, rate_limit_headers);
+        }
+        // A statement that stopped answers one error line, as a task that
+        // stopped in the loop below does.
+        Err(error) => {
+            let (_status, message) = GatewayErrorMap::to_http(&error);
+            let line = format!("{}\n", serde_json::json!({ "error": message }));
+            return ndjson_response(line, rate_limit_headers);
+        }
+    };
+    let mut lease_scope = Some(lease_scope);
 
     // `Body::from_stream` polls the data-plane stream under normal HTTP backpressure
     // while its captured lease scope stays alive until body completion or disconnect.
@@ -225,7 +272,7 @@ pub async fn query_ndjson(
         let dispatch = async {
             let result: crate::Result<Vec<Vec<u8>>> =
                 if crate::control::array_catalog::ddl::is_array_ddl(&task.plan) {
-                    match authorize_ndjson_task(&state.shared, &identity, &task) {
+                    match authorize_one_task(&state.shared, &identity, &task) {
                         Ok(authorized_task) => {
                             crate::control::array_catalog::ddl::run_authorized_array_ddl(
                                 &state.shared,
@@ -239,7 +286,7 @@ pub async fn query_ndjson(
                 } else if is_cluster_array(&task.plan) {
                     // This node's array coordinator routes the op to the
                     // shards that own its cells.
-                    match authorize_ndjson_task(&state.shared, &identity, &task) {
+                    match authorize_one_task(&state.shared, &identity, &task) {
                         Ok(authorized_task) => run_cluster_array(&state.shared, authorized_task)
                             .await
                             .map(|payload| vec![payload]),
@@ -251,7 +298,7 @@ pub async fn query_ndjson(
                         nodedb_physical::physical_plan::DocumentOp::InsertSelect { .. }
                     )
                 ) {
-                    match authorize_ndjson_task(&state.shared, &identity, &task) {
+                    match authorize_one_task(&state.shared, &identity, &task) {
                         Ok(authorized_task) => {
                             crate::control::insert_select::run_authorized_insert_select(
                                 &state.shared,
@@ -271,7 +318,7 @@ pub async fn query_ndjson(
                         }
                     )
                 ) {
-                    match authorize_ndjson_task(&state.shared, &identity, &task) {
+                    match authorize_one_task(&state.shared, &identity, &task) {
                         Ok(authorized_task) => {
                             crate::control::merge_orchestrator::run_authorized_merge(
                                 &state.shared,
@@ -291,7 +338,7 @@ pub async fn query_ndjson(
                         }
                     )
                 ) {
-                    match authorize_ndjson_task(&state.shared, &identity, &task) {
+                    match authorize_one_task(&state.shared, &identity, &task) {
                     Ok(authorized_task) => {
                         crate::control::update_from_join_orchestrator::run_authorized_update_from_join(
                             &state.shared,
@@ -307,7 +354,7 @@ pub async fn query_ndjson(
                 {
                     // A governed columnar predicate UPDATE/DELETE resolves to a concrete row set
                     // before proposing.
-                    match authorize_ndjson_task(&state.shared, &identity, &task) {
+                    match authorize_one_task(&state.shared, &identity, &task) {
                         Ok(authorized_task) => {
                             crate::control::write_resolve::run_authorized_write_resolve(
                                 &state.shared,
@@ -425,36 +472,18 @@ pub async fn query_ndjson(
         }
     }
 
-    let mut response = Response::builder()
+    ndjson_response(ndjson, rate_limit_headers)
+}
+
+/// A materialized NDJSON body with the request's rate-limit headers.
+fn ndjson_response(
+    ndjson: String,
+    rate_limit_headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let mut response = axum::response::Response::builder()
         .header("Content-Type", "application/x-ndjson")
         .body(axum::body::Body::from(ndjson))
         .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "encoding error").into_response());
     response.headers_mut().extend(rate_limit_headers);
     response
-}
-
-/// Authorize one task with no clone-write check — used only by the
-/// Control-Plane orchestrator branches ahead of the general dispatch tail,
-/// whose plan shapes (`InsertSelect`, `Merge`, `UpdateFromJoin`, a governed
-/// predicate resolution) are never clone-write shapes.
-fn authorize_ndjson_task(
-    shared: &crate::control::state::SharedState,
-    identity: &crate::control::security::identity::AuthenticatedIdentity,
-    task: &nodedb_physical::physical_task::PhysicalTask,
-) -> crate::Result<crate::control::server::shared::authorization::AuthorizedTask> {
-    let emitter = ArcAuditEmitter(Arc::clone(&shared.audit));
-    crate::control::server::shared::authorization::authorize_task_set(
-        identity,
-        std::slice::from_ref(task),
-        &shared.permissions,
-        &shared.roles,
-        &emitter,
-    )
-    .map_err(crate::Error::from)?
-    .into_tasks()
-    .into_iter()
-    .next()
-    .ok_or_else(|| crate::Error::Internal {
-        detail: "authorization returned an empty capability set".into(),
-    })
 }

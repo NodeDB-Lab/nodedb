@@ -105,7 +105,7 @@ impl CoreLoop {
                 Some(new_value),
                 Some(old_body),
             );
-            self.note_kv_write_lsn(task, did, tid, collection, key);
+            self.note_kv_write(task, did, tid, collection, key);
         }
 
         if let Some(spec) = returning {

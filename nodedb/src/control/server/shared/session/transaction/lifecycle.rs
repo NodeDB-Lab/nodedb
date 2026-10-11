@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use nodedb_physical::physical_task::PhysicalTask;
 
 use crate::control::lease::QueryLeaseScope;
-use crate::types::{Lsn, TxnId, VShardId};
+use crate::types::{TxnId, VShardId};
 
 use super::super::connection::SessionId;
 use super::super::state::TransactionState;
@@ -31,22 +31,19 @@ impl SessionStore {
             .unwrap_or(TransactionState::Idle)
     }
 
-    /// BEGIN — enter transaction block with snapshot isolation.
+    /// BEGIN — enter a transaction block.
     ///
-    /// Captures the current WAL LSN as the local snapshot point (single-shard
-    /// fast path) and the last globally-applied Calvin `snapshot_epoch` as the
-    /// cross-shard-valid version anchor. All reads within this transaction see
-    /// data as of this LSN.
+    /// Captures the last globally-applied Calvin `snapshot_epoch` as the
+    /// cross-shard version anchor. Commit validates each read by the write
+    /// version it observed, so BEGIN captures no WAL position.
     pub fn begin(
         &self,
         addr: impl Into<SessionId>,
-        current_lsn: Lsn,
         snapshot_epoch: u64,
     ) -> Result<(), &'static str> {
         self.write_session(addr, |session| match session.tx_state {
             TransactionState::Idle => {
                 session.tx_state = TransactionState::InBlock;
-                session.tx_snapshot_lsn = Some(current_lsn);
                 session.tx_snapshot_epoch = Some(snapshot_epoch);
                 session.tx_read_set.clear();
                 session.tx_reservation_vshards.clear();
@@ -73,11 +70,6 @@ impl SessionStore {
     pub fn is_in_transaction_block(&self, addr: impl Into<SessionId>) -> bool {
         self.read_session(addr, |s| s.tx_state == TransactionState::InBlock)
             .unwrap_or(false)
-    }
-
-    /// Get the snapshot LSN for the current transaction.
-    pub fn snapshot_lsn(&self, addr: impl Into<SessionId>) -> Option<Lsn> {
-        self.read_session(addr, |s| s.tx_snapshot_lsn)?
     }
 
     /// Get the cross-shard snapshot epoch for the current transaction.
@@ -116,7 +108,6 @@ impl SessionStore {
             session.tx_body_tasks.clear();
             session.tx_ts_preview_rejected.clear();
             session.tx_state = TransactionState::Idle;
-            session.tx_snapshot_lsn = None;
             session.tx_snapshot_epoch = None;
             session.tx_id = None;
             session.tx_vshards.clear();
@@ -147,7 +138,6 @@ impl SessionStore {
                 session.tx_ts_preview_rejected.clear();
                 session.pending_publishes.clear();
                 session.tx_state = TransactionState::Idle;
-                session.tx_snapshot_lsn = None;
                 session.tx_snapshot_epoch = None;
                 session.tx_id = None;
                 session.tx_vshards.clear();
@@ -203,13 +193,13 @@ mod tests {
 
         assert_eq!(store.transaction_state(addr), TransactionState::Idle);
 
-        store.begin(addr, Lsn::new(1), 0).unwrap();
+        store.begin(addr, 0).unwrap();
         assert_eq!(store.transaction_state(addr), TransactionState::InBlock);
 
         store.commit(addr).unwrap();
         assert_eq!(store.transaction_state(addr), TransactionState::Idle);
 
-        store.begin(addr, Lsn::new(1), 0).unwrap();
+        store.begin(addr, 0).unwrap();
         store.fail_transaction(addr);
         assert_eq!(store.transaction_state(addr), TransactionState::Failed);
 
@@ -222,7 +212,7 @@ mod tests {
         let store = SessionStore::new();
         let addr: std::net::SocketAddr = "127.0.0.1:6012".parse().expect("address");
         store.ensure_session(addr);
-        store.begin(addr, Lsn::new(1), 0).expect("begin");
+        store.begin(addr, 0).expect("begin");
 
         let scope = Arc::new(QueryLeaseScope::empty());
         assert!(store.buffer_write(addr, task()));

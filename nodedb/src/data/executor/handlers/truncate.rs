@@ -229,6 +229,9 @@ impl CoreLoop {
                     declared_primary_key,
                     *storage_key,
                 );
+                // Record the removal's version against the row's surrogate
+                // and collection, as a point delete does.
+                self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
                 // The row's text leaves the inverted index with every other
                 // row's, in one purge once the loop ends.
                 removed.push(surrogate);

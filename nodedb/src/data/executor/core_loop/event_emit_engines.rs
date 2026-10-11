@@ -90,7 +90,7 @@ impl CoreLoop {
     /// The node-label write is already durable at its WAL LSN by the time this
     /// runs (the record was appended in the Control Plane before dispatch), so we
     /// advance the core watermark to it — exactly as every other write chokepoint
-    /// does via `note_write_lsn` — before emitting. That makes the forward
+    /// does via `note_write` — before emitting. That makes the forward
     /// event's LSN equal the WAL record's LSN the Event-Plane replay uses,
     /// satisfying watermark dedup.
     pub(in crate::data::executor) fn emit_graph_label_event(
@@ -150,7 +150,7 @@ impl CoreLoop {
     /// surrogates from the plan.
     ///
     /// The caller MUST have advanced the core watermark to this edge's WAL LSN
-    /// (via `note_edge_write_lsn`) before calling, so the forward event's LSN
+    /// (via `note_edge_write`) before calling, so the forward event's LSN
     /// matches the WAL-replay reconstruction.
     pub(in crate::data::executor) fn emit_graph_edge_event(
         &mut self,

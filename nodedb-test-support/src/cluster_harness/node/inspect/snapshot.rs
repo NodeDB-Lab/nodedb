@@ -80,6 +80,7 @@ impl TestClusterNode {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: nodedb::bridge::envelope::Admission::Exempt(
                 nodedb::bridge::envelope::ExemptReason::Read,
             ),
@@ -133,6 +134,7 @@ impl TestClusterNode {
                 replace_mode: true,
                 collections_to_clear: Vec::new(),
                 group_vshards: Vec::new(),
+                version_floor: Vec::new(),
             }),
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
             priority: Priority::Normal,
@@ -147,6 +149,7 @@ impl TestClusterNode {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: nodedb::bridge::envelope::Admission::Exempt(
                 nodedb::bridge::envelope::ExemptReason::Read,
             ),

@@ -84,7 +84,7 @@ impl SequencerService {
                 rejected = rejected_count,
                 "epoch tick: all candidates rejected, no proposal"
             );
-            self.current_epoch = Some(epoch + 1);
+            self.advance_epoch(epoch + 1);
             return;
         }
 
@@ -147,7 +147,7 @@ impl SequencerService {
                     rejected = rejected_count,
                     "sequencer proposed epoch batch"
                 );
-                self.current_epoch = Some(epoch + 1);
+                self.advance_epoch(epoch + 1);
             }
             Err(e) => {
                 warn!(

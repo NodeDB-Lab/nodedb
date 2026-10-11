@@ -124,10 +124,15 @@ impl DataPlaneArrayExecutor {
             detail: format!("{op_label}: plan is not encodable as a replicated entry"),
         })?;
 
-        let (apply_payload, _write_version) =
-            crate::control::wal_replication::propose_replicated_entry(&self.state, proposer, entry)
-                .await
-                .map_err(|e| execution_error(&format!("{op_label} raft propose"), e))?;
+        let (apply_payload, _write_versions) =
+            crate::control::wal_replication::propose_replicated_entry(
+                &self.state,
+                proposer,
+                entry,
+                crate::control::wal_replication::statement_propose_deadline(&self.state),
+            )
+            .await
+            .map_err(|e| execution_error(&format!("{op_label} raft propose"), e))?;
         let affected =
             require_affected_count(&apply_payload).map_err(|e| ClusterError::Storage {
                 detail: format!("{op_label}: {e}"),

@@ -5,6 +5,7 @@
 
 pub mod graph;
 pub mod inspect;
+pub mod leadership;
 pub mod lifecycle;
 pub mod native_client;
 pub mod raw_pgwire;

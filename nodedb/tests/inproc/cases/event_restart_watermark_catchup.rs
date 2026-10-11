@@ -187,8 +187,9 @@ async fn restart_fires_held_events_the_lane_had_not_fired_once() {
     let gates = tempfile::tempdir().unwrap();
     let release = gates.path().join("before_firing");
     let parked = gates.path().join("before_firing.parked");
-    let gate = FailGuard::install(
-        &format!("trigger::before_firing::node{}", server.shared.node_id),
+    let gate = FailGuard::for_node(
+        server.shared.node_id,
+        "trigger::before_firing",
         FailAction::WaitForFile(release),
     );
     wait_until("the node's firing parks", || parked.exists()).await;

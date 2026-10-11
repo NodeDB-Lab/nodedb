@@ -6,18 +6,16 @@
 //! snapshot-transfer / replication-factor config that must be read before
 //! `pending_subsystems` is consumed.
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc;
 
 use nodedb_cluster::calvin::{
     CalvinCompletionRegistry, SEQUENCER_GROUP_ID, SequencerStateMachine, TxnId, VerdictOutcome,
 };
 
 use crate::control::cluster::array_executor::DataPlaneArrayExecutor;
-use crate::control::cluster::calvin::ReadResultEvent;
 use crate::control::cluster::handle::ClusterHandle;
 use crate::control::cluster::metadata_applier::{MetadataCommitApplier, seed_metadata_cache};
 use crate::control::cluster::spsc_applier::SpscCommitApplier;
@@ -38,7 +36,6 @@ pub(super) struct GroupSetup {
     /// vote tally completes.
     pub(super) calvin_verdict_rx: mpsc::Receiver<(TxnId, VerdictOutcome)>,
     pub(super) sequencer_state_machine: Arc<Mutex<SequencerStateMachine>>,
-    pub(super) calvin_read_result_senders: Arc<Mutex<BTreeMap<u32, Sender<ReadResultEvent>>>>,
     pub(super) metadata_applier: Arc<dyn nodedb_cluster::MetadataApplier>,
     pub(super) token_state: nodedb_cluster::SharedTokenStateMirror,
     pub(super) plan_executor: Arc<crate::control::LocalPlanExecutor>,
@@ -110,7 +107,6 @@ pub(super) fn build_group_setup(
         calvin_completion_registry: calvin.completion_registry,
         calvin_verdict_rx: calvin.verdict_rx,
         sequencer_state_machine: calvin.sequencer_state_machine,
-        calvin_read_result_senders: calvin.read_result_senders,
         metadata_applier,
         token_state,
         plan_executor,
@@ -165,7 +161,6 @@ struct CalvinState {
     completion_registry: Arc<CalvinCompletionRegistry>,
     verdict_rx: mpsc::Receiver<(TxnId, VerdictOutcome)>,
     sequencer_state_machine: Arc<Mutex<SequencerStateMachine>>,
-    read_result_senders: Arc<Mutex<BTreeMap<u32, Sender<ReadResultEvent>>>>,
 }
 
 /// Build the Calvin completion registry, its verdict channel, and the
@@ -238,12 +233,10 @@ fn build_calvin_state(handle: &ClusterHandle, shared: &Arc<SharedState>) -> Calv
             shared,
         ))),
     ));
-    let read_result_senders = Arc::new(Mutex::new(BTreeMap::<u32, Sender<ReadResultEvent>>::new()));
     CalvinState {
         completion_registry: calvin_completion_registry,
         verdict_rx: calvin_verdict_rx,
         sequencer_state_machine,
-        read_result_senders,
     }
 }
 

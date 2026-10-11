@@ -3,7 +3,6 @@
 mod accessors;
 pub(in crate::data::executor) mod apply_scope;
 mod bitemporal_time;
-pub(in crate::data::executor) mod calvin_fence;
 pub(in crate::data::executor) mod calvin_state;
 pub(in crate::data::executor) mod checkpoint_floors;
 mod columnar_schema_seed;

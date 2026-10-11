@@ -116,6 +116,12 @@ pub struct RaftNode<S: LogStorage> {
     /// Per-voter highest lease round acknowledged in the current term, and
     /// when the latest answer arrived. Cleared on step-down.
     pub(super) quorum_window: Vec<super::quorum_contact::VoterAck>,
+    /// When this node won its current leadership term. `None` off the
+    /// leader path. A voter not yet heard this term counts as last seen here.
+    pub(super) leader_since: Option<Instant>,
+    /// Index of the no-op this node appended when it won its current
+    /// leadership term. `None` off the leader path.
+    pub(super) term_start_index: Option<u64>,
     /// Leader-lease rounds and anchor (see [`super::leader_lease`]).
     pub(super) lease: LeaseState,
     /// Until this instant the node refuses every vote but a transfer vote.
@@ -178,6 +184,8 @@ impl<S: LogStorage> RaftNode<S> {
             leader_contact: None,
             last_quorum_contact: None,
             quorum_window: Vec::new(),
+            leader_since: None,
+            term_start_index: None,
             lease: LeaseState::new(),
             boot_vote_fence: now + config.election_timeout_max,
             compaction_ceiling: None,
@@ -248,6 +256,16 @@ impl<S: LogStorage> RaftNode<S> {
 
     pub fn last_log_index(&self) -> u64 {
         self.log.last_index()
+    }
+
+    /// Index of the no-op this leader appended when it won its current
+    /// term. Every entry of an earlier term in its log sits below it and
+    /// commits with it. `None` when this node does not lead.
+    pub fn term_start_index(&self) -> Option<u64> {
+        if self.role != NodeRole::Leader {
+            return None;
+        }
+        self.term_start_index
     }
 
     /// Override election deadline (for testing).

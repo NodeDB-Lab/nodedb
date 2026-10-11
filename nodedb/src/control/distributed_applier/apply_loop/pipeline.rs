@@ -124,6 +124,9 @@ impl<'a> Pipeline<'a> {
                 (finished.group_id, finished.log_index, handled)
             }
         };
+        // The entry's enqueue returned, or its exclusive apply finished:
+        // every entry of the group through it reached its core.
+        release_admission_holds(self.ctx.state, group_id, log_index);
         if !handled {
             // Every enqueue and apply the pipeline runs has a slot in its
             // group's lane in the matching state: the pump pushes both
@@ -180,6 +183,13 @@ impl<'a> Pipeline<'a> {
             .collect();
         for group_id in groups {
             self.pump_group(group_id);
+            // The entries left wait behind an earlier one. Their barrier
+            // events fold now: a barrier needs no catalog.
+            if !self.install_blocked
+                && let Some(lane) = self.lanes.get_mut(&group_id)
+            {
+                super::barrier_prefold::prefold_backlog(self.ctx, lane, group_id);
+            }
         }
     }
 
@@ -190,7 +200,13 @@ impl<'a> Pipeline<'a> {
             let log_index = queued.entry.index;
             let proposal_key = queued.proposal_key();
             let covered_through = self.ctx.tracker.covered_through(group_id);
-            let permit = match admit_entry(gates, group_id, log_index, covered_through) {
+            let admission = admit_entry(gates, group_id, log_index, covered_through);
+            // Before the entry joins the lane: no entry above the installed
+            // index settles before the lane covers it.
+            if let Some(lane) = self.lanes.get_mut(&group_id) {
+                lane.cover_through(admission.installed_through);
+            }
+            let permit = match admission.decision {
                 EntryAdmission::Installing => {
                     if let Some(lane) = self.lanes.get_mut(&group_id) {
                         lane.backlog.push_front(queued);
@@ -202,6 +218,7 @@ impl<'a> Pipeline<'a> {
                 // At or below the snapshot's Raft index: the installed state
                 // and the Raft boundary both hold the entry.
                 EntryAdmission::Covered => {
+                    super::cut_barrier::note_covered_barrier(shared, group_id, &queued);
                     if !self.conclude_covered(
                         group_id,
                         log_index,
@@ -217,6 +234,7 @@ impl<'a> Pipeline<'a> {
                 // applying and extends the durable prefix, so a restart never
                 // delivers it again.
                 EntryAdmission::CoveredByCut => {
+                    super::cut_barrier::note_covered_barrier(shared, group_id, &queued);
                     if !self.conclude_covered(
                         group_id,
                         log_index,
@@ -253,6 +271,11 @@ impl<'a> Pipeline<'a> {
                 proposal_key,
                 metadata_floor: queued.metadata_floor(),
             };
+            // An entry of a later term ends every earlier term of the group:
+            // no earlier term adds a chunk or a final entry after it.
+            shared
+                .redo_chunks
+                .end_terms_before(group_id, queued.entry.term);
             let prepared = hold_for_metadata(
                 self.ctx.state,
                 self.ctx.tracker,
@@ -261,6 +284,7 @@ impl<'a> Pipeline<'a> {
             );
             let (state, blocks, user_write) = match prepared {
                 Prepared::Concluded(outcome) => {
+                    release_admission_holds(shared, group_id, log_index);
                     let user_write = matches!(outcome, EntryOutcome::Repeat) && repeat_writes;
                     (
                         SlotState::Concluded(self.gate.conclude(proposal_key, false, outcome)),
@@ -268,7 +292,10 @@ impl<'a> Pipeline<'a> {
                         user_write,
                     )
                 }
-                Prepared::Barrier => (SlotState::Barrier, false, false),
+                Prepared::Barrier => {
+                    release_admission_holds(shared, group_id, log_index);
+                    (SlotState::Barrier, false, false)
+                }
                 Prepared::Enqueue(enqueue) => {
                     self.gate.open(proposal_key);
                     self.ctx.tracker.note_dispatched(group_id, log_index);
@@ -319,6 +346,7 @@ impl<'a> Pipeline<'a> {
         outcome: EntryOutcome,
     ) -> bool {
         self.ctx.tracker.note_started(group_id, log_index);
+        release_admission_holds(self.ctx.state, group_id, log_index);
         self.ctx
             .tracker
             .complete_covered(group_id, log_index, proposal_key);
@@ -402,6 +430,15 @@ impl<'a> Pipeline<'a> {
             }
         }
     }
+}
+
+/// Release the lock keys this node's write gate holds for entries of
+/// `group_id` through `log_index`: their applies started, in log order.
+fn release_admission_holds(state: &SharedState, group_id: u64, log_index: u64) {
+    state
+        .calvin
+        .admission_holds
+        .release_through(group_id, log_index);
 }
 
 fn finished_event(apply: ApplyFuture<'_>) -> LoopFuture<'_> {

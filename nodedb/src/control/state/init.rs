@@ -106,6 +106,14 @@ impl SharedState {
         // as the production constructor wires it.
         let stream_registry = Arc::new(crate::event::cdc::StreamRegistry::new());
 
+        let redo_chunks = Arc::new(
+            crate::control::wal_replication::transaction_redo::RedoChunkStore::new(
+                Arc::clone(&wal),
+                crate::control::wal_replication::transaction_redo::chunks::RedoChunkLimits::from_tuning(
+                    &TuningConfig::default().calvin,
+                ),
+            ),
+        );
         let hlc_clock = wal.hlc_clock();
         let state = Arc::new(Self {
             outcome_floor: dispatcher.outcome_floor(),
@@ -130,11 +138,8 @@ impl SharedState {
             )
             .0,
             group_watchers: Arc::new(nodedb_cluster::GroupAppliedWatchers::new()),
-            metadata_ddl_lock: tokio::sync::Mutex::new(()),
-            metadata_ddl_owner: std::sync::Mutex::new(None),
-            metadata_ddl_applied_token: std::sync::atomic::AtomicU64::new(0),
+            metadata_ddl: super::MetadataDdlState::new(),
             metadata_apply_progress: std::sync::atomic::AtomicU64::new(0),
-            metadata_ddl_token_seq: std::sync::atomic::AtomicU64::new(1),
             pending_ddl: crate::control::pending_ddl::PendingDdlTable::new(),
             metadata_apply_wedge: std::sync::Arc::default(),
             sequencer_halt: std::sync::Arc::default(),
@@ -150,6 +155,7 @@ impl SharedState {
             raft_applied_index_sink: std::sync::OnceLock::new(),
             raft_apply_gates: std::sync::OnceLock::new(),
             raft_read_gate: std::sync::OnceLock::new(),
+            multi_raft: std::sync::OnceLock::new(),
             cluster_epoch: std::sync::OnceLock::new(),
             raft_status_fn: std::sync::OnceLock::new(),
             cluster_observer: std::sync::OnceLock::new(),
@@ -293,6 +299,7 @@ impl SharedState {
             cross_shard_dlq: None,
             cross_shard_metrics: None,
             cross_shard_dedup: std::sync::OnceLock::new(),
+            redo_chunks,
             kafka_manager: crate::event::kafka::KafkaManager::new(shutdown.raw_receiver()),
             definition_sync_fanout: std::sync::Arc::new(
                 crate::control::server::sync::definition_fanout::DefinitionSyncFanout::new(),

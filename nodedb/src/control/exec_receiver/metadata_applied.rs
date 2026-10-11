@@ -37,7 +37,7 @@ pub(super) async fn answer_applied_plan(
         }
     };
     Some(if reached {
-        ExecuteResponse::ok(vec![Vec::new()], 0, 0)
+        ExecuteResponse::ok(vec![Vec::new()], 0, Vec::new())
     } else {
         ExecuteResponse::err(TypedClusterError::Internal {
             code: PLAN_DECODE_FAILED,

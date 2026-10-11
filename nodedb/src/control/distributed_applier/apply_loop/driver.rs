@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
 
-use crate::control::cluster::calvin::ReadResultEvent;
 use crate::control::distributed_applier::applier::ApplyBatch;
 use crate::control::distributed_applier::proposal_ledger::{
     PROPOSAL_LEDGER_CAPACITY, ProposalLedger,
@@ -27,9 +26,6 @@ pub async fn run_apply_loop(
     mut apply_rx: mpsc::Receiver<ApplyBatch>,
     state: Arc<SharedState>,
     tracker: Arc<ProposeTracker>,
-    calvin_read_result_senders: Arc<
-        std::sync::Mutex<std::collections::BTreeMap<u32, mpsc::Sender<ReadResultEvent>>>,
-    >,
 ) {
     // Proposals this node already applied, recovered from its WAL before any
     // entry is delivered: every record an entry's apply appended carries the
@@ -57,7 +53,6 @@ pub async fn run_apply_loop(
     let ctx = ApplyContext {
         state: &state,
         tracker: &tracker,
-        calvin_read_result_senders: &calvin_read_result_senders,
     };
     let mut pipeline = Pipeline::new(ctx, ledger);
     let mut install_released = state.raft_apply_gates.get().map(|g| g.subscribe_released());

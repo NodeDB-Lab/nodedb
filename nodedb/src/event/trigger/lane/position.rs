@@ -4,8 +4,8 @@
 //!
 //! The lane names an event as the CDC router does: by the change-feed
 //! partition of its write and a position in that partition. The position is
-//! the write's replicated position (a Raft entry, or a Calvin transaction)
-//! with the event's ordinal among the write's firing events. One partition's
+//! the write's replicated position (a Raft entry) with the event's ordinal
+//! among the write's firing events. One partition's
 //! events come from one Data-Plane core in apply order, so every replica
 //! numbers them alike.
 //!
@@ -13,14 +13,9 @@
 //! holds an action for its collection. The numbering then never depends on
 //! when a replica applied a trigger's DDL.
 
-use crate::event::cdc::position::{CALVIN_PARTITION_BASE, PartitionTail, PositionSequencer};
+use crate::event::cdc::position::{PartitionTail, PositionSequencer};
 use crate::event::cdc::{CdcOffset, CdcRouter};
 use crate::event::types::WriteEvent;
-
-/// The bit of an action identity's source LSN that marks a Calvin
-/// partition. A Raft log index and a Calvin sequencer epoch share one number
-/// space, so the bit keeps their events apart. Neither reaches `2^63`.
-const CALVIN_IDENTITY_BIT: u64 = 1 << 63;
 
 /// The position allocator of the lane's firing events.
 #[derive(Debug, Default)]
@@ -58,31 +53,21 @@ impl ActionPositions {
 }
 
 /// The `(source_lsn, source_sequence)` a fired action names its event by:
-/// the position's index and sequence, with the Calvin bit set for a Calvin
-/// partition. Every replica derives the same pair.
+/// the position's index and sequence. Every replica derives the same pair.
 ///
 /// Every position has epoch `0` (see `cdc::offset`), so the pair names the
 /// event within its vShard.
-pub fn action_identity(partition: u32, position: CdcOffset) -> (u64, u64) {
-    let kind = if partition >= CALVIN_PARTITION_BASE {
-        CALVIN_IDENTITY_BIT
-    } else {
-        0
-    };
-    (position.index | kind, position.sequence)
+pub fn action_identity(position: CdcOffset) -> (u64, u64) {
+    (position.index, position.sequence)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::cdc::position::calvin_partition;
 
     #[test]
-    fn a_raft_and_a_calvin_event_at_one_index_have_distinct_identities() {
+    fn an_action_identity_is_the_index_and_sequence() {
         let position = CdcOffset::data_event(0, 12, 1);
-        let raft = action_identity(3, position);
-        let calvin = action_identity(calvin_partition(3), position);
-        assert_eq!(raft, (12, position.sequence));
-        assert_ne!(raft, calvin);
+        assert_eq!(action_identity(position), (12, position.sequence));
     }
 }

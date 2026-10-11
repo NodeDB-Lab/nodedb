@@ -1,22 +1,20 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Static-set ready-transaction dispatch: local-plan routing, group-leader
-//! resolution, and the `CalvinExecuteStatic` submit/stage orchestration.
+//! Static-set ready-transaction dispatch on the data-group leader: local-plan
+//! routing and the `CalvinExecuteStatic` submit/stage orchestration.
 
 use std::time::Instant;
-
-use tracing::error;
 
 use nodedb_cluster::calvin::types::SequencedTxn;
 use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_physical::physical_plan::meta::MetaOp;
 
 use super::super::deferred::{DispatchOutcome, DispatchStep};
-use super::super::owed::SchedulerProposal;
 use super::super::routing::PlanRouting;
 use super::super::scheduler::Scheduler;
 use super::primary_write::{
-    plans_have_primary_write, plans_have_returning, txn_has_non_derived_write,
+    plans_have_primary_write, plans_have_returning, plans_raise_write_mark,
+    txn_has_non_derived_write,
 };
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::types::DatabaseId;
@@ -28,52 +26,11 @@ struct LocalSlice {
     body_plans: Vec<u32>,
     /// Every local plan is a body's, and a client plan homes elsewhere.
     body_only: bool,
+    /// The identities the local plans carry, bound in this node's catalog.
+    identities: Vec<crate::control::surrogate::CarriedIdentity>,
 }
 
 impl Scheduler {
-    /// Whether THIS node is currently the leader of the data-group owning this
-    /// scheduler's vshard.
-    ///
-    /// Stamped into the `CalvinExecute{Static,Active}` MetaOp at dispatch time
-    /// so the Data Plane runs the OLLP optimistic-lock verification (and emits
-    /// `OllpRetryRequired`) ONLY on the leader, while every replica applies the
-    /// carried predicted write-set verbatim — preserving Calvin determinism.
-    ///
-    /// Resolved via the existing routing → group-role check (no new election).
-    /// On a poisoned lock the inner guard is recovered; a momentarily-unknown
-    /// leadership (e.g. mid-election) resolves to `false`, i.e. follower-style
-    /// apply against the predicted set, which is always determinism-safe.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn is_group_leader(
-        &self,
-    ) -> bool {
-        let mr = match self.multi_raft.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        mr.vshard_role_is_leader(self.vshard_id)
-    }
-
-    /// Broadcast a terminal, NON-retryable routing-failure signal via the
-    /// sequencer-group Raft so every replica's `CalvinCompletionRegistry`
-    /// fires `note_routing_failed`, waking the coordinator's completion
-    /// waiter immediately with the reason instead of leaving it to burn the
-    /// full deadline and report a generic timeout. Mirrors the OllpMismatch
-    /// broadcast in `handle_executor_response`. Shared by `dispatch_txn` and
-    /// `dispatch_active_txn`, and by a multi-part transaction whose part
-    /// fails to decode.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn propose_routing_failure(
-        &mut self,
-        txn_id: TxnId,
-        err: &crate::Error,
-    ) {
-        self.propose_sequencer_entry(
-            txn_id,
-            SchedulerProposal::RoutingFailed {
-                detail: err.to_string(),
-            },
-        );
-    }
-
     /// Filter a transaction's write plans down to the slice that homes to this
     /// scheduler's vShard.
     ///
@@ -147,14 +104,7 @@ impl Scheduler {
         let plans = match super::super::super::helpers::decode_plans(&txn.tx_class.plans) {
             Ok(p) => p,
             Err(e) => {
-                error!(
-                    vshard_id = self.vshard_id,
-                    epoch,
-                    position,
-                    error = %e,
-                    "calvin scheduler: plan decode failed; releasing locks and skipping txn"
-                );
-                self.on_unpending_txn_complete(txn_id, lock_owner);
+                self.reject_plan(txn, txn_id, lock_owner, &e);
                 return;
             }
         };
@@ -176,27 +126,21 @@ impl Scheduler {
             match self.local_calvin_plans(plans, txn.tx_class.database_id, epoch, position) {
                 Ok(p) => p,
                 Err(e) => {
-                    error!(
-                        vshard_id = self.vshard_id,
-                        epoch,
-                        position,
-                        error = %e,
-                        "calvin scheduler: static txn routing failed; releasing locks"
-                    );
-                    self.propose_routing_failure(txn_id, &e);
-                    self.on_unpending_txn_complete(txn_id, lock_owner);
+                    self.reject_plan(txn, txn_id, lock_owner, &e);
                     return;
                 }
             };
-        if !self.bind_local_identities(&mut local, txn.tx_class.database_id, tenant_id, txn_id) {
+        let Some(identities) =
+            self.bind_local_identities(&mut local, txn.tx_class.database_id, tenant_id, txn_id)
+        else {
             return;
-        }
+        };
 
         // A participant with no local WRITE slice is either a READ-ONLY
         // participant — writes home elsewhere, but a read homes HERE, so it must
         // still validate its slice of the read-set and cast a real commit/abort
         // vote — or a routing bug (neither writes nor reads home here). Only the
-        // latter is an error; the former stages a validate-only task below.
+        // latter rejects the plans; the former stages a validate-only task below.
         if local.is_empty()
             && !super::super::routing::homes_versioned_read(
                 &txn.tx_class.versioned_reads,
@@ -211,15 +155,7 @@ impl Scheduler {
                     self.vshard_id
                 ),
             };
-            error!(
-                vshard_id = self.vshard_id,
-                epoch,
-                position,
-                error = %e,
-                "calvin scheduler: static txn homes no local work; releasing locks"
-            );
-            self.propose_routing_failure(txn_id, &e);
-            self.on_unpending_txn_complete(txn_id, lock_owner);
+            self.reject_plan(txn, txn_id, lock_owner, &e);
             return;
         }
 
@@ -238,6 +174,7 @@ impl Scheduler {
                 plans: local,
                 body_plans: local_body_plans,
                 body_only,
+                identities,
             },
             has_non_derived_write,
         );
@@ -281,7 +218,7 @@ impl Scheduler {
     /// the validate-only read path (`plans` empty). Both carry the txn's FULL
     /// `versioned_reads` to the apply core, which validates the LOCAL slice of
     /// the read-set — whether or not `plans` is empty — and returns the commit
-    /// vote on `read_set_valid`. A validate-only task has `has_primary_write ==
+    /// vote on `stage_vote`. A validate-only task has `has_primary_write ==
     /// false`, so it deposits no result sidecar entry, exactly as intended.
     ///
     /// The txn enters `pending` before the dispatch, so a stage refused at
@@ -299,6 +236,7 @@ impl Scheduler {
             plans,
             body_plans,
             body_only,
+            identities,
         } = slice;
         // The apply-slot identity (used in the CalvinExecuteStatic task and
         // error logs) is exactly `txn_id`; deriving it here keeps the two in
@@ -307,9 +245,11 @@ impl Scheduler {
         let position = txn_id.position;
         let request_id = self.next_request_id();
         let has_primary_write = plans_have_primary_write(&plans, has_non_derived_write);
+        let raises_write_mark = plans_raise_write_mark(&plans, has_primary_write);
         let has_returning = plans_have_returning(&plans);
-        let mut flush_scope = super::super::super::types::FlushScope::of_plans(&plans);
-        flush_scope.body_only = body_only;
+        let mut scope = super::super::super::types::SliceScope::of_plans(&plans);
+        scope.body_only = body_only;
+        scope.identities = identities;
         let database_id = txn.tx_class.database_id;
         let plan = PhysicalPlan::Meta(MetaOp::CalvinExecuteStatic {
             epoch,
@@ -317,7 +257,6 @@ impl Scheduler {
             tenant_id,
             plans,
             epoch_system_ms: txn.epoch_system_ms,
-            is_group_leader: self.is_group_leader(),
             // The replicated read-set travels to the apply core so each
             // participant can check, at apply, whether its slice of the reads was
             // still current. Empty for pure-write / autocommit transactions.
@@ -325,15 +264,12 @@ impl Scheduler {
             body_plans,
         });
 
-        // Calvin allocates the CalvinApplied WAL LSN post-apply (in the
-        // scheduler's response handler), so no committed LSN is known at
-        // dispatch time to stamp here.
-        let mut request = self.build_exempt_request(request_id, tenant_id, database_id, plan, None);
+        // A stage writes no WAL record, so no committed LSN rides on it.
+        let mut request = self.build_exempt_request(request_id, tenant_id, database_id, plan);
         // The stage tags the rows it stages by the slice's source.
-        request.event_source =
-            super::super::request::slice_event_source(&txn.tx_class, &flush_scope);
+        request.event_source = super::super::request::slice_event_source(&txn.tx_class, &scope);
 
-        // Every replica checks the transaction's collection incarnations.
+        // The leader checks the transaction's collection incarnations.
         let (superseded, gates) = self.check_incarnations(&txn.tx_class);
         self.pending.insert(
             txn_id,
@@ -343,24 +279,22 @@ impl Scheduler {
                 // no-determinism: dispatch_time is scheduler observability, not Calvin WAL data
                 dispatch_time: Instant::now(),
                 has_primary_write,
+                raises_write_mark,
                 has_returning,
-                // The commit's resolved redo fills them.
-                change_sets: Vec::new(),
                 // This dispatch STAGES the txn (validate + buffer, no apply);
-                // its response carries the local commit vote that drives the
-                // subsequent flush-or-drop.
-                commit_state: Some(super::super::super::types::CommitState::Staged),
+                // its response carries the local commit vote.
+                commit_state: super::super::super::types::CommitState::Staged,
+                // The dispatch below records its request.
+                awaiting: None,
                 // Set only once the txn parks in `AwaitingVerdict`.
                 verdict_deadline: None,
                 stage_error: None,
-                // Set once a committed txn appends its redo record.
-                redo_records: None,
-                flush_scope,
+                scope,
+                // Set once a committed slice resolves its redo.
+                redo: None,
                 superseded,
                 gates,
                 ungated: false,
-                // Taken when the flush dispatches.
-                install_permit: None,
             },
         );
 

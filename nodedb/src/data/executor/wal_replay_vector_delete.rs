@@ -89,6 +89,7 @@ impl CoreLoop {
                         provenance: provenance.clone(),
                     },
                 ),
+                Self::replay_record_lsn(record_lsn),
             );
             let response = self.execute_vector_delete_by_surrogate(
                 &task,

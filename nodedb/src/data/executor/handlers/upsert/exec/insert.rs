@@ -200,6 +200,22 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
 
+        // Record the committed row's version and its touched index values,
+        // as a point put does.
+        self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
+        if let Some(stamp) = self.task_write_stamp(task) {
+            let mut tuples = std::mem::take(&mut prior.secondary_index_added);
+            tuples.append(&mut prior.secondary_index_removed);
+            tuples.append(&mut prior.bitemporal_index_tuples);
+            self.note_index_write_values(
+                task.request.database_id,
+                crate::types::TenantId::new(tid),
+                collection,
+                &tuples,
+                stamp,
+            );
+        }
+
         self.emit_put_event(
             task,
             tid,

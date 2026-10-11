@@ -87,8 +87,8 @@ pub use preamble::{
 pub use reader::{StopReason, WalReader};
 #[cfg(not(target_arch = "wasm32"))]
 pub use record::{
-    CalvinAppliedPayload, FtsDeletePayload, FtsIndexPayload, RecordStamp, RecordTarget, RecordType,
-    SpatialDeletePayload, SpatialPutPayload, WalRecord, WalRecordArgs, WriteAbortedPayload,
+    FtsDeletePayload, FtsIndexPayload, RecordStamp, RecordTarget, RecordType, SpatialDeletePayload,
+    SpatialPutPayload, WalRecord, WalRecordArgs, WriteAbortedPayload,
 };
 pub use record::{NO_EVENT_SOURCE, RecordHeader};
 #[cfg(not(target_arch = "wasm32"))]

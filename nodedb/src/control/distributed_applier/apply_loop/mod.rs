@@ -19,13 +19,22 @@
 //! - [`pipeline`]: every group's lane and the applies that run.
 //! - [`lane`]: one group's queued and started entries, settled in log order.
 //! - [`start`]: prepares one entry and routes it to its apply path.
+//! - [`cut_barrier`]: a backup cut's barrier: the group's cut floor, the
+//!   restore point's place, and a database backup's capture.
 //! - [`context`]: the handles an apply borrows, and the futures the loop
 //!   collects.
-//! - [`calvin_read_result`]: forwards a committed `CalvinReadResult` entry to
-//!   the local Calvin scheduler.
+//! - [`barrier_prefold`]: folds the barrier entries of a waiting lane ahead
+//!   of their turn.
+//! - [`calvin_read_result`]: folds a committed `CalvinReadResult` or
+//!   `CalvinReadTimeout` entry into its txn's stored barrier row and its
+//!   vShard's read-result buffer.
+//! - [`calvin_redo`]: claims a stamped Calvin redo's position in the applied
+//!   ledger and reports its install to the vShard's scheduler.
 //! - [`write_dispatch`]: the generic decode + write-funnel enqueue path.
 //! - [`transaction_redo`]: a committed transaction's redo, stamped with its
 //!   Raft entry and applied through the WAL replay arms.
+//! - [`redo_chunk`]: the chunks, the abandon and the final entry of a
+//!   chunked redo stream.
 //! - [`topic_publish`]: a committed durable-topic publication, appended to
 //!   this replica's topic log at the entry's position.
 //! - [`proposal_gate`]: skips a second committed copy of an applied proposal
@@ -43,10 +52,13 @@
 //!   collection it names holds the incarnation its proposer planned against.
 
 mod array_cell_route;
+mod barrier_prefold;
 mod bookkeeping;
 mod calvin_read_result;
+mod calvin_redo;
 mod collection_route;
 mod context;
+mod cut_barrier;
 mod driver;
 mod group_watch;
 mod helpers;
@@ -54,6 +66,7 @@ mod lane;
 mod metadata_floor;
 mod pipeline;
 mod proposal_gate;
+mod redo_chunk;
 mod snapshot_gate;
 mod start;
 mod surrogate_bind;

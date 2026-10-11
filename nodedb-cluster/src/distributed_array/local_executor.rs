@@ -29,6 +29,9 @@ use crate::error::Result;
 pub struct ArraySliceExec {
     pub rows: Vec<Vec<u8>>,
     pub truncated_before_horizon: bool,
+    /// The write versions the shard read observed, one per vShard it
+    /// covers. A transaction validates the read at these versions.
+    pub read_versions: Vec<nodedb_types::ShardVersion>,
 }
 
 /// Result of a local shard partial aggregate: the per-group partial states
@@ -36,6 +39,8 @@ pub struct ArraySliceExec {
 pub struct ArrayAggExec {
     pub partials: Vec<ArrayAggPartial>,
     pub truncated_before_horizon: bool,
+    /// The write versions the shard read observed (see [`ArraySliceExec`]).
+    pub read_versions: Vec<nodedb_types::ShardVersion>,
 }
 
 /// Result of a local shard write (put or delete): the LSN the coordinator

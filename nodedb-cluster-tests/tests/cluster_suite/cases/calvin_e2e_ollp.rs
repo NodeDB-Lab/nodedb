@@ -13,7 +13,7 @@
 //!    surrogates currently matching the predicate ("predicted surrogates").
 //! 2. The TxClass is built with the predicted surrogates for the OLLP
 //!    collection and static surrogates for any additional static-key writes
-//!    in the same transaction (via `build_dependent_tx_class`), then submitted
+//!    in the same transaction (via `build_predicted_tx_class`), then submitted
 //!    to the sequencer inbox.
 //! 3. The sequencer admits the txn and fans it out to all participant vshards.
 //! 4. The Data Plane executor verifies the predicted set against the actual
@@ -71,7 +71,7 @@ fn two_distinct_vshard_collections() -> (String, String) {
 /// - An OLLP BulkUpdate on `col_ollp` with `predicted_surrogates` as the
 ///   write set (since the exact set is not known statically).
 ///
-/// This mirrors what `build_dependent_tx_class` produces on the Control Plane
+/// This mirrors what `build_predicted_tx_class` produces on the Control Plane
 /// for a cross-shard transaction that contains a value-dependent predicate write.
 fn make_ollp_tx_class(
     col_static: &str,
@@ -94,7 +94,7 @@ fn make_ollp_tx_class(
         write_set,
         // Empty plan bytes — this test exercises the sequencer admission and
         // fan-out path only. The actual BulkUpdate plan bytes are embedded by
-        // `build_dependent_tx_class` in production.
+        // `build_predicted_tx_class` in production.
         vec![],
         TenantId::new(1),
         None,

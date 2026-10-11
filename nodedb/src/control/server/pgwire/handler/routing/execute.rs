@@ -80,12 +80,16 @@ impl NodeDbPgHandler {
                 // this pass settled was folded from; they travel on the
                 // dispatch read-set so Calvin's OCC check aborts rather than
                 // committing a total folded from an image that has moved.
+                // The source rows are read through the open transaction's
+                // staging overlay, so they include its earlier statements.
+                let read_txn = self.sessions.tx_id(session_id);
                 let sum_target_reads =
                     crate::control::planner::materialized_sum::resolve_materialized_sum_targets(
                         &self.state,
                         &mut tasks,
                         tenant_id,
                         edge_database_id,
+                        read_txn,
                         crate::types::TraceId::ZERO,
                     )
                     .await
@@ -111,6 +115,7 @@ impl NodeDbPgHandler {
                     &mut tasks,
                     tenant_id,
                     edge_database_id,
+                    read_txn,
                     crate::types::TraceId::ZERO,
                 )
                 .await
@@ -173,8 +178,10 @@ impl NodeDbPgHandler {
             let effective_schema = Some(&effective_schema_owned);
 
             // A statement outside a transaction block whose writes fire a
-            // BEFORE, INSTEAD OF or SYNC AFTER body, or a MERGE into an
-            // edge-bearing collection, runs in an implicit transaction,
+            // BEFORE, INSTEAD OF or SYNC AFTER body, a MERGE into an
+            // edge-bearing collection, or an INSERT ... SELECT, UPDATE ... FROM
+            // or MERGE into the source of a cross-shard materialized sum,
+            // runs in an implicit transaction,
             // ahead of every autocommit route:
             // its writes stage on their vShards' leaders and commit together
             // at its end.

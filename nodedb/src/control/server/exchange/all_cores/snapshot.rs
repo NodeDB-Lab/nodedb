@@ -135,6 +135,7 @@ pub(super) fn merge_core_snapshots(
             // cut on the merged payload. A per-core part carries neither.
             group_event_lane: _,
             group_calvin: _,
+            group_redo_streams: _,
         } = part;
         // The group snapshot builder sets the cut on the merged payload. A
         // per-core part carries none.
@@ -192,7 +193,8 @@ pub(super) fn merge_core_snapshots(
     Ok(NodeLevelResult {
         payload,
         watermark_lsn,
-        read_version_lsn: Lsn::ZERO,
+        read_versions: crate::types::ReadVersions::new(),
+        not_found: false,
     })
 }
 

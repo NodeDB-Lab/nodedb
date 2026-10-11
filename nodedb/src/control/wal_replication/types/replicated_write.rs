@@ -5,11 +5,13 @@ use super::aliases::{
     default_columnar_ingest_format, default_columnar_insert_intent, default_ivf_cells,
     default_ivf_nprobe, default_pq_m,
 };
+use super::redo_chunk_wire::RedoBody;
 use super::transaction_redo_wire::{ReplicatedEventSource, ReplicatedIdentity};
 use super::wire_shapes::{
     ColumnarResolvedRow, ConstraintChangeOp, DocumentResolvedMutationWire, KvResolvedMutationWire,
     ReplicatedBatchEdge, ReplicatedSumTarget,
 };
+use crate::wal::RedoStreamId;
 use nodedb_physical::physical_plan::document::MergeClauseOp;
 use nodedb_physical::physical_plan::{
     ColumnarInsertIntent, CrdtWriteVerb, KvCounterShape, UpdateValue, VectorDirectWriteIntent,
@@ -1029,24 +1031,22 @@ pub enum ReplicatedWrite {
     },
     /// One committed transaction's resolved post-images for one vShard.
     ///
-    /// Every replica, the proposer included, appends `redo` to its own WAL
-    /// and applies it through the WAL replay arms, in Raft log order. The
-    /// record is resolved once, on the proposer; no replica re-derives it.
-    /// `redo.calvin_stamp` names the Calvin `(epoch, position)` the record
-    /// applies, when a Calvin flush produced it.
+    /// Every replica, the proposer included, appends the body's redo to its
+    /// own WAL and applies it through the WAL replay arms, in Raft log order.
+    /// The record is resolved once, on the proposer; no replica re-derives
+    /// it. A chunked body assembles from the `RedoChunk` entries of its
+    /// stream.
     TransactionRedo {
-        redo: crate::wal::RedoRecord,
+        body: RedoBody,
         /// Every collection the transaction wrote, for the collection-floor
         /// write versions.
         collections: Vec<String>,
-        /// Materialized-sum resolution the document writes fold into their
-        /// targets, keyed by source collection.
-        sum_targets: Vec<nodedb_physical::physical_plan::RedoSumTargets>,
-        /// Identities every replica binds before the apply.
-        identities: Vec<ReplicatedIdentity>,
         event_source: ReplicatedEventSource,
         /// Which commit-boundary checks every replica's apply runs.
         origin: nodedb_physical::physical_plan::RedoOrigin,
+        /// Set for a committed Calvin slice. The redo's `calvin_stamp` names
+        /// its `(epoch, position)`, and the slice's scheduler holds its locks.
+        calvin: Option<super::transaction_redo_wire::CalvinRedoMeta>,
     },
     /// A backup's consistent cut through this group's log. It writes no
     /// data. Every entry before it applies before the backup snapshots, and
@@ -1085,6 +1085,30 @@ pub enum ReplicatedWrite {
     /// replica, and the binding survives a change of leader.
     SurrogateBind {
         identities: Vec<ReplicatedIdentity>,
+    },
+    /// One chunk of a chunked redo's content. Every replica appends it to its
+    /// WAL and holds it until the stream's final `TransactionRedo` entry.
+    /// `len` is the byte length of the whole stream.
+    RedoChunk {
+        stream: RedoStreamId,
+        index: u32,
+        len: u64,
+        bytes: Vec<u8>,
+    },
+    /// The proposer of `stream` gave up before its final entry. Every replica
+    /// drops the stream's held chunks.
+    RedoAbandon {
+        stream: RedoStreamId,
+    },
+    /// The dependent-read barrier of Calvin txn `(epoch, position)` on this
+    /// vShard waited past its timeout. The vShard's data-group leader
+    /// proposes it. Every replica applies it in log order: a read result
+    /// below it in the log counts, one above it does not. A barrier still
+    /// missing a read result at this entry votes abort on every replica.
+    CalvinReadTimeout {
+        epoch: u64,
+        position: u32,
+        tenant_id: u64,
     },
 }
 
@@ -1234,6 +1258,23 @@ mod tests {
                 op: ConstraintChangeOp::Set,
                 constraint_version: 1,
                 constraints: vec![vec![1, 2, 3]],
+            },
+            ReplicatedWrite::RedoChunk {
+                stream: RedoStreamId::Session {
+                    vshard: 0,
+                    idempotency_key: 9,
+                },
+                index: 0,
+                len: 3,
+                bytes: vec![1, 2, 3],
+            },
+            ReplicatedWrite::RedoAbandon {
+                stream: RedoStreamId::Calvin {
+                    vshard: 0,
+                    epoch: 4,
+                    position: 1,
+                    attempt: 0,
+                },
             },
         ];
 

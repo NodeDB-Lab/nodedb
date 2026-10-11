@@ -4,8 +4,8 @@
 //! instead of rerunning the due minute.
 
 use nodedb::control::backup::schedule::envelope_name;
-use nodedb::control::cluster::metadata_applier::backup_mark_fail_point;
-use nodedb_types::fail_point::FailGuard;
+use nodedb::control::cluster::metadata_applier::BACKUP_MARK_FAIL_POINT;
+use nodedb_test_support::fail_point::{FailAction, FailGuard};
 
 use super::fixture::{DATABASE, Fixture};
 
@@ -26,9 +26,10 @@ async fn a_new_leader_whose_catalog_lags_never_reruns_the_due_minute() {
         .iter()
         .filter(|node| node.node_id != leader)
         .map(|node| {
-            FailGuard::fail(
-                &backup_mark_fail_point(node.node_id),
-                "held back by the test",
+            FailGuard::for_node(
+                node.node_id,
+                BACKUP_MARK_FAIL_POINT,
+                FailAction::Fail("held back by the test".to_string()),
             )
         })
         .collect();

@@ -13,22 +13,6 @@ pub struct ReplicatedPosition {
     pub log_index: u64,
 }
 
-/// Where a Calvin transaction sits in the sequencer log. Every replica's
-/// scheduler applies the transaction at the same value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CalvinPosition {
-    pub sequencer_epoch: u64,
-    /// Zero-based position within the sequencer epoch's batch.
-    pub position: u32,
-}
-
-/// The replicated position of one locally applied write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum WritePosition {
-    Raft(ReplicatedPosition),
-    Calvin(CalvinPosition),
-}
-
 /// Byte length of an encoded [`ChangePositionMarker`].
 pub const MARKER_LEN: usize = 32;
 

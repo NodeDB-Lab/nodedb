@@ -44,7 +44,7 @@ pub struct CoreChannel {
     /// **Lifetime**: entries are written in place and never reach a "remove"
     /// path on their own. Stale databases that no longer enqueue requests
     /// retain a `Normal` (or last-observed) entry until the surrounding
-    /// dispatcher is dropped or `recalculate_tenant_limits` rotates state.
+    /// dispatcher is dropped.
     /// The map is bounded by the universe of `database_id`s that have ever
     /// been dispatched against this core, so unbounded growth is not a
     /// concern in practice.

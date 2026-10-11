@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The incarnation check a Calvin transaction passes when a replica stages it.
+//! The incarnation check a Calvin transaction passes when the leader stages
+//! it.
 //!
 //! The coordinator stamps the incarnation of every collection the transaction
-//! names. Each replica checks all of them, not only its own slice's, against
+//! names. The leader checks all of them, not only its own slice's, against
 //! its committed catalog under the collections' gates, held shared until the
 //! transaction leaves `pending`. A mismatch makes the leader's vote an abort,
 //! and the sequencer's global verdict then aborts every participant alike: no
-//! part of the transaction applies. A follower with a mismatch under a COMMIT
-//! verdict halts rather than flush into a recreated collection.
+//! part of the transaction applies.
 //!
-//! A halt releases every gate no flush in flight needs, so a purge never waits
-//! on a halted scheduler. A txn whose gates a halt released checks again, and
-//! takes them back, before its flush.
+//! A halt releases every gate, so a purge never waits on a halted
+//! scheduler. A txn whose gates a halt released checks again, and takes them
+//! back, before it proposes its redo.
 
 use std::collections::BTreeSet;
 
@@ -20,7 +20,6 @@ use nodedb_cluster::calvin::types::TxClass;
 use nodedb_types::{CollectionKey, Hlc};
 use tracing::error;
 
-use super::super::super::types::CommitState;
 use super::super::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::control::write_gate::{self, GateKey, SharedGate};
@@ -85,40 +84,26 @@ impl Scheduler {
         (superseded, gates)
     }
 
-    /// Release the gates a halt leaves nothing to protect.
+    /// Release every gate the pending txns hold, so a purge never waits on
+    /// this halted scheduler.
     ///
-    /// A halted scheduler never re-sends a parked request, and `stuck` never
-    /// applies before restart. Only a committed flush the Data Plane already
-    /// holds can still write, and it keeps its gates until it answers. Every
-    /// other txn gives its gates back, so a purge never waits on this
-    /// scheduler.
+    /// No write of a txn is in the Data Plane's hands under these gates: a
+    /// committed slice installs from the data-group log, and the apply loop
+    /// checks the incarnations its entry carries.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn release_gates_on_halt(
         &mut self,
-        stuck: TxnId,
     ) {
-        let release: Vec<TxnId> = self
-            .pending
-            .iter()
-            .filter(|(txn_id, pending)| {
-                **txn_id == stuck
-                    || !writes_in_flight(pending.commit_state)
-                    || self.has_parked_dispatch(**txn_id)
-            })
-            .map(|(txn_id, _)| *txn_id)
-            .collect();
-        for txn_id in release {
-            if let Some(pending) = self.pending.get_mut(&txn_id)
-                && !pending.ungated
-            {
+        for pending in self.pending.values_mut() {
+            if !pending.ungated {
                 pending.gates.clear();
                 pending.ungated = true;
             }
         }
     }
 
-    /// Take back the gates of `txn_id` before its flush, when a halt released
-    /// them. Fails when a collection the txn names no longer holds its planned
-    /// incarnation: the flush cannot apply here.
+    /// Take back the gates of `txn_id` before it proposes its redo, when a
+    /// halt released them. Fails when a collection the txn names no longer
+    /// holds its planned incarnation: the redo cannot commit into it.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn regate(
         &mut self,
         txn_id: TxnId,
@@ -149,18 +134,6 @@ impl Scheduler {
     }
 }
 
-/// Whether a txn in `state` can have a write in the Data Plane's hands: a
-/// committed flush, or a direct apply.
-fn writes_in_flight(state: Option<CommitState>) -> bool {
-    matches!(
-        state,
-        None | Some(CommitState::AwaitingResolve {
-            committed: true,
-            ..
-        })
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use nodedb_cluster::calvin::types::CalvinIncarnation;
@@ -170,7 +143,7 @@ mod tests {
         make_sequenced_txn, scheduler_with_pending, staged_response,
     };
     use super::*;
-    use crate::bridge::envelope::Status;
+    use crate::bridge::envelope::{StageVote, Status};
     use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
     use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
     use crate::control::security::catalog::StoredCollection;
@@ -185,8 +158,8 @@ mod tests {
     /// A transaction staged against `orders` before a purge and a same-name
     /// create is superseded on this replica, though `ledger` is unchanged. The
     /// leader's vote is an abort, which the global verdict applies to every
-    /// participant, `ledger`'s included. A replica that staged it under a
-    /// COMMIT verdict halts instead of flushing.
+    /// participant, `ledger`'s included. A leader that staged it under a
+    /// COMMIT verdict halts instead of committing it.
     #[test]
     fn a_txn_staged_before_a_recreate_is_superseded_everywhere() {
         let txn_id = TxnId::new(3, 0);
@@ -237,13 +210,16 @@ mod tests {
         );
 
         // The staged slice votes abort, whatever its own read-set says, and
-        // cannot flush under a COMMIT verdict.
+        // cannot commit under a COMMIT verdict.
         if let Some(pending) = scheduler.pending.get_mut(&txn_id) {
             pending.superseded = true;
         }
-        scheduler.resolve_staged_commit(txn_id, &staged_response(Status::Ok, Some(true)));
+        scheduler.resolve_staged_commit(
+            txn_id,
+            &staged_response(Status::Ok, Some(StageVote::Commit)),
+        );
         let pending = scheduler.pending.get(&txn_id).expect("still parked");
-        assert_eq!(pending.commit_state, Some(CommitState::AwaitingVerdict));
+        assert_eq!(pending.commit_state, CommitState::AwaitingVerdict);
         assert!(pending.stage_error.is_some(), "a COMMIT verdict halts it");
     }
 
@@ -267,11 +243,12 @@ mod tests {
         drop(reclaim);
     }
 
-    /// A replica that halts on a txn it never staged gives back the gates the
-    /// txn held: a purge of its collection proceeds. The txn checks again
-    /// before a flush and fails once the collection was recreated.
+    /// A leader that halts on a committed txn whose collection it found
+    /// superseded gives back the gates the txn held: a purge of its
+    /// collection proceeds. The txn checks again before a proposal and fails
+    /// once the collection was recreated.
     #[tokio::test]
-    async fn a_halt_releases_the_gates_and_a_later_flush_checks_again() {
+    async fn a_halt_releases_the_gates_and_a_later_proposal_checks_again() {
         let txn_id = TxnId::new(5, 0);
         let (mut scheduler, _dir) = scheduler_with_pending(txn_id, CommitState::AwaitingVerdict);
         let shared = std::sync::Arc::clone(&scheduler.shared);
@@ -294,7 +271,8 @@ mod tests {
         if let Some(pending) = scheduler.pending.get_mut(&txn_id) {
             pending.txn.tx_class = tx_class;
             pending.gates = gates;
-            pending.stage_error = Some("stage refused on this replica".into());
+            pending.superseded = true;
+            pending.stage_error = Some("a collection was superseded on this replica".into());
         }
 
         scheduler.resume_on_verdict(txn_id, true);
@@ -321,7 +299,7 @@ mod tests {
         assert_eq!(pending.gates.len(), 1, "the check took the gate back");
         assert!(!pending.ungated);
 
-        scheduler.release_gates_on_halt(txn_id);
+        scheduler.release_gates_on_halt();
         catalog
             .delete_collection(DatabaseId::DEFAULT, 1, "orders")
             .expect("purge");
@@ -333,7 +311,7 @@ mod tests {
             .expect("recreate");
         assert!(
             scheduler.regate(txn_id).is_err(),
-            "a flush never lands in the recreated collection"
+            "a redo never commits into the recreated collection"
         );
     }
 }

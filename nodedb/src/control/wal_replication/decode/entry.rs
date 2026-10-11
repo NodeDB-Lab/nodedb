@@ -55,6 +55,15 @@ fn decode_with_database(data: &[u8]) -> crate::Result<Option<(DatabaseId, Decode
         Some(e) => e,
         None => return Ok(None),
     };
+    decode_parsed_entry(&entry)
+}
+
+/// Decodes an entry already parsed from its bytes into its database and its
+/// plan, without binding any identity. `None` for an array CRDT op or array
+/// schema, which the distributed applier handles before any plan exists.
+pub fn decode_parsed_entry(
+    entry: &ReplicatedEntry,
+) -> crate::Result<Option<(DatabaseId, DecodedEntry)>> {
     // Array CRDT variants are handled by the distributed applier before this call.
     match &entry.write {
         ReplicatedWrite::ArrayOp { .. } | ReplicatedWrite::ArraySchema { .. } => {
@@ -206,6 +215,10 @@ fn to_physical_plan(
             detail: "CalvinReadResult reached to_physical_plan (should have been intercepted)"
                 .into(),
         }),
+        ReplicatedWrite::CalvinReadTimeout { .. } => Err(crate::Error::Internal {
+            detail: "CalvinReadTimeout reached to_physical_plan (should have been intercepted)"
+                .into(),
+        }),
         // The apply loop applies these through `transaction_redo`, which stamps
         // the redo with the entry's Raft coordinates.
         ReplicatedWrite::TransactionRedo { .. } => Err(crate::Error::Internal {
@@ -219,6 +232,13 @@ fn to_physical_plan(
         // The apply loop binds the keys in the catalog; it reaches no core.
         ReplicatedWrite::SurrogateBind { .. } => Err(crate::Error::Internal {
             detail: "SurrogateBind reached to_physical_plan (should have been intercepted)".into(),
+        }),
+        // The apply loop holds a redo stream's chunks itself; they reach no core.
+        ReplicatedWrite::RedoChunk { .. } => Err(crate::Error::Internal {
+            detail: "RedoChunk reached to_physical_plan (should have been intercepted)".into(),
+        }),
+        ReplicatedWrite::RedoAbandon { .. } => Err(crate::Error::Internal {
+            detail: "RedoAbandon reached to_physical_plan (should have been intercepted)".into(),
         }),
     }
 }

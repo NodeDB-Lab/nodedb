@@ -6,8 +6,8 @@
 //!
 //! Staging is the producer side for `CalvinResolve`, which reads the overlay
 //! the same way `MetaOp::ResolveTxn` does for session transactions
-//! (`resolve/entry.rs`). The redo record it builds is what the flush
-//! installs.
+//! (`resolve/entry.rs`). The redo record it builds is what the stamped redo
+//! entry installs.
 
 use nodedb_physical::physical_plan::{
     ArrayOp, ColumnarOp, CrdtOp, DocumentOp, GraphOp, PhysicalPlan, TimeseriesOp, VectorOp,
@@ -288,7 +288,7 @@ impl CoreLoop {
             }
             // Every columnar write stages its post-image the way a session
             // write does, so the transaction's redo carries the rows the
-            // flush installs: an ON CONFLICT merge and a predicate DML's
+            // install writes: an ON CONFLICT merge and a predicate DML's
             // matched rows are resolved once, here, against the state this
             // position observes.
             PhysicalPlan::Columnar(
@@ -395,7 +395,7 @@ impl CoreLoop {
     /// own parallel overlay, same as a session transaction's
     /// `execute_stage_graph`), and `array_txn_overlays` (ARRAY cell ops,
     /// same as `execute_stage_array`). Called from both
-    /// [`CoreLoop::execute_calvin_flush`] and [`CoreLoop::execute_calvin_drop`]
+    /// [`CoreLoop::install_calvin_redo`] and [`CoreLoop::execute_calvin_drop`]
     /// so neither overlay outlives the `commit_pending` entry it shadows.
     /// Idempotent: a missing key (already removed, or the id derivation
     /// itself failing) is a silent no-op — the same shape as the
@@ -411,7 +411,7 @@ impl CoreLoop {
     ) {
         if let Ok(synthetic_txn_id) = calvin_synthetic_txn_id(epoch, position, vshard) {
             // The shared teardown also drops a columnar engine staging
-            // auto-created that the flush left empty.
+            // auto-created that the install left empty.
             self.drop_overlay_entry(synthetic_txn_id);
         }
     }

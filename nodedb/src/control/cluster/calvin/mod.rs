@@ -5,6 +5,6 @@ pub mod scheduler;
 
 pub use executor::{OllpConfig, OllpError, OllpOrchestrator};
 pub use scheduler::{
-    CalvinReadResultProposal, RaftSequencerProposer, ReadResultEvent, Scheduler, SchedulerConfig,
+    BarrierEvent, CalvinReadResultProposal, RaftSequencerProposer, Scheduler, SchedulerConfig,
     SchedulerParams, SequencerProposer, propose_calvin_read_result,
 };

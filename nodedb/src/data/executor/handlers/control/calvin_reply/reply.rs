@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The reply a staged Calvin transaction answers with when its flush
-//! installs it.
+//! The reply a staged Calvin transaction answers with when its redo record
+//! installs.
 
 use nodedb_physical::physical_plan::ReturningSpec;
 use nodedb_types::{RowIdentity, Surrogate};
 
 use super::target::RowEngine;
 
-/// The reply a Calvin transaction's flush answers with.
+/// The reply a Calvin transaction's install answers with.
 ///
 /// The transaction answers with its last `RETURNING` plan's rows, or with
 /// its last plan's affected count when no plan carries `RETURNING`. A plan
@@ -20,7 +20,7 @@ pub(in crate::data::executor) enum CalvinReply {
     Count(Vec<u8>),
     /// `RETURNING` rows, decided when the plan staged.
     Rows(Vec<u8>),
-    /// `RETURNING` rows the flush reads from base after the install, so each
+    /// `RETURNING` rows the install reads from base after it writes, so each
     /// row is exactly what a `SELECT` reads.
     PostImages(PostImages),
     /// `RETURNING` rows of a resolved timeseries ingest: the rows its install
@@ -36,7 +36,7 @@ impl Default for CalvinReply {
 }
 
 impl CalvinReply {
-    /// A reply the flush cannot render: post-images of a columnar row, which
+    /// A reply the install cannot render: post-images of a columnar row, which
     /// base keys by no surrogate.
     #[cfg(test)]
     pub(in crate::data::executor) fn unrenderable_for_test(collection: &str) -> Self {
@@ -85,7 +85,7 @@ pub(in crate::data::executor) struct CalvinStaging {
     pub(super) owned_edges: u64,
 }
 
-/// The rows of a `RETURNING` plan the flush reads after the install.
+/// The rows of a `RETURNING` plan the install reads after it writes.
 #[derive(Debug)]
 pub(in crate::data::executor) struct PostImages {
     pub(super) spec: ReturningSpec,

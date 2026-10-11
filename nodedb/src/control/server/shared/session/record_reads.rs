@@ -9,8 +9,8 @@
 //! from its own single-collection scan plan and REAL observed read-version, so
 //! the commit-time OCC validator re-homes and revalidates each collection's
 //! vshard independently — while every other read records a single
-//! collection-scoped entry from the executed plan and the responding shards'
-//! watermarks. When captures are present the default single-collection entry is
+//! collection-scoped entry from the executed plan and the versions its cores
+//! reported. When captures are present the default single-collection entry is
 //! SKIPPED, because a `HashJoin` plan collapses to the left collection via
 //! `extract_collection` and would miss the build side entirely. This module
 //! hosts that decision so all transports funnel through one implementation
@@ -19,7 +19,7 @@
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::server::exchange::DistributedReadCapture;
 use crate::control::state::SharedState;
-use crate::types::{Lsn, TenantId, VShardId};
+use crate::types::{ReadVersions, TenantId};
 
 use super::connection::SessionId;
 use super::read_set::{ReadCapture, record_read_set};
@@ -27,22 +27,15 @@ use super::store::SessionStore;
 
 /// The observed reads produced by one dispatched response.
 ///
-/// `plan` / `watermarks` / `read_version_lsn` / `found` describe the plain
-/// single-collection observation (used when `distributed_reads` is empty).
+/// `plan` / `read_versions` / `found` describe the plain single-collection
+/// observation (used when `distributed_reads` is empty).
 /// `distributed_reads`, when non-empty, carries the per-collection captures of a
 /// distributed gather/shuffle read and takes precedence over the plain fields.
-///
-/// `read_lsn_vshard` is the vshard stamped into each per-capture entry's
-/// single-shard SI `read_lsn` slot (paired with [`Lsn::ZERO`], since the sound
-/// cross-shard comparand is the capture's own `read_version_lsn`). It is
-/// consulted only on the captures branch.
 pub struct ResponseReads<'a> {
     pub plan: &'a PhysicalPlan,
-    pub watermarks: &'a [(VShardId, Lsn)],
-    pub read_version_lsn: Lsn,
+    pub read_versions: &'a ReadVersions,
     pub found: bool,
     pub distributed_reads: &'a [DistributedReadCapture],
-    pub read_lsn_vshard: VShardId,
 }
 
 /// Record a dispatched response's reads into the session transaction read-set.
@@ -68,8 +61,7 @@ pub async fn record_reads_for_response(
                 tenant_id,
                 ReadCapture {
                     plan: &cap.scan_plan,
-                    watermarks: &[(reads.read_lsn_vshard, Lsn::ZERO)],
-                    read_version_lsn: cap.read_version_lsn,
+                    read_versions: &cap.read_versions,
                     found: false,
                 },
             )
@@ -83,8 +75,7 @@ pub async fn record_reads_for_response(
             tenant_id,
             ReadCapture {
                 plan: reads.plan,
-                watermarks: reads.watermarks,
-                read_version_lsn: reads.read_version_lsn,
+                read_versions: reads.read_versions,
                 found: reads.found,
             },
         )

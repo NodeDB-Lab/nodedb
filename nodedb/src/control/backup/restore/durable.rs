@@ -67,12 +67,14 @@ pub(crate) async fn reissue_plan_durably(
     // fire again for it.
     .with_event_source(crate::event::EventSource::Restore)
     .with_restore_id(target.restore_id);
-    let (_, write_version) =
-        crate::control::wal_replication::propose_replicated_entry(state, proposer, entry).await?;
+    let deadline = crate::control::wal_replication::statement_propose_deadline(state);
+    let (_, write_versions) =
+        crate::control::wal_replication::propose_replicated_entry(state, proposer, entry, deadline)
+            .await?;
     tracing::debug!(
         collection,
         vshard_id = vshard.as_u32(),
-        write_version = write_version.as_u64(),
+        write_version = ?write_versions.of(vshard),
         "restore: re-issued write applied on this node"
     );
     Ok(())

@@ -212,18 +212,8 @@ server-process-serial = { max-threads = 1 }
 retries = { backoff = "fixed", count = 1, delay = "2s" }
 fail-fast = false
 
-# One cluster test is excluded from the CI profile ONLY. It still runs under the
-# default profile, which is what a local `cargo nextest run` uses.
-#
-# `learner_caught_up_via_real_install_snapshot` fails on CI runners about once in
-# six runs. A newly elected sequencer leader whose log was compacted refuses to
-# propose ("sequencer log was truncated below every retained epoch"), so the
-# sequencer stalls. The joining node then never catches up on the sequencer
-# group, and its authorization lease is withheld. Re-enable it once a leader can
-# seed its epoch from the installed sequencer snapshot. NEVER widen a timeout.
-default-filter = """
-not test(learner_caught_up_via_real_install_snapshot)
-"""
+# CI runs every test, including the two binaries the default profile excludes.
+default-filter = "all()"
 
 # CI-only cluster headroom. On CI runners (~2× slower per-core than a dev
 # workstation) the cluster tests' in-test `wait_for` budgets are proportionally

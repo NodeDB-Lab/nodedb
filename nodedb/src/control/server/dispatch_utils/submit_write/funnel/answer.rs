@@ -39,7 +39,7 @@ impl Answer {
                 .await;
                 Ok(match collected {
                     Ok(Ok(response)) => OwnedResponse::Answered {
-                        response,
+                        response: Box::new(response),
                         closed: Ok(()),
                     },
                     Ok(Err(DispatchCollectError::OverBudget { bytes })) => {

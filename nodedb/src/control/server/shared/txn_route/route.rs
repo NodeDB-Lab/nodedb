@@ -28,6 +28,9 @@ use nodedb_physical::physical_task::PhysicalTask;
 
 use crate::bridge::envelope::{PhysicalPlan, Response};
 use crate::control::lease::QueryLeaseScope;
+use crate::control::planner::calvin::write_class::{
+    plan_counts_toward_statement_tag, plans_have_user_write,
+};
 use crate::control::security::auth_context::AuthContext;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::response_shape::types::{PlanKind, describe_plan};
@@ -182,17 +185,26 @@ where
     F: Fn(PhysicalTask) -> Fut,
     Fut: Future<Output = crate::Result<Response>>,
 {
+    // A balance task the expansion appended stages like any op, but its count
+    // describes a row the statement never named.
+    let has_user_write = plans_have_user_write(ops.iter().map(|op| &op.plan));
     let mut affected = 0usize;
     let mut returning_rows = Vec::new();
     for op in ops {
+        let counts = plan_counts_toward_statement_tag(&op.plan, has_user_write);
         match route_point(ctx, op, expanded, dispatch).await? {
             TxnTaskOutcome::Staged(outcome) => {
-                affected += outcome.affected;
+                if counts {
+                    affected += outcome.affected;
+                }
                 returning_rows.extend(outcome.returning_rows);
             }
             TxnTaskOutcome::CloneHandled(resp) => {
-                affected += require_affected_count(resp.payload.as_ref())
+                let changed = require_affected_count(resp.payload.as_ref())
                     .map_err(StagingGateError::Dispatch)? as usize;
+                if counts {
+                    affected += changed;
+                }
             }
             TxnTaskOutcome::InsteadOf => {}
             TxnTaskOutcome::Buffered | TxnTaskOutcome::Dispatch(_) => {

@@ -19,6 +19,14 @@ const FIRST_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
 /// Longest wait between two re-proposals.
 const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// The deadline a proposal made now carries: the running statement's
+/// deadline, or the node default outside a statement.
+pub(crate) fn statement_propose_deadline(state: &SharedState) -> tokio::time::Instant {
+    tokio::time::Instant::from_std(crate::control::server::shared::session::statement_deadline(
+        state.tuning.network.default_deadline_secs,
+    ))
+}
+
 /// Stamp this node's metadata floor on `entry`: the catalog the write was
 /// planned against, including the batch being applied now (see
 /// `AppliedIndexWatcher::floor`). Every replica applies the entry only once
@@ -46,20 +54,21 @@ pub(crate) fn stamp_collection_incarnations(
     Ok(())
 }
 
-/// Propose `entry` via `proposer` and return the Data Plane apply payload bytes
-/// together with the write's per-collection version (as an
-/// [`crate::types::Lsn`]): the written collection's `coll_write_lsn` after the
-/// write, stamped by the applying replica from the WAL LSN it minted for the
-/// entry's redo record. `Lsn::ZERO` when the write's plan names no single user
-/// collection. See [`AsyncRaftProposer`] for why this is a WAL LSN and never the
-/// Raft log index.
+/// Propose `entry` via `proposer` and return the Data Plane apply payload
+/// bytes and the versions the write stamped. Each version is the data-group
+/// log position of the entry that applied the write, so it is the same on
+/// every replica. A write whose plan names no single user collection stamps
+/// none.
 ///
 /// An edge write is not proposed. It runs as a Calvin transaction
 /// (`planner::calvin::edge_sequencing`), and its applied payload and read
 /// version come back the same way.
 ///
-/// Re-proposes the same payload until the statement deadline while the group
-/// has no leader to take it:
+/// `deadline` is the caller's deadline. Every attempt, each attempt's wait at
+/// the leader's write gate, and each wait for the local apply end at it.
+///
+/// Re-proposes the same payload until `deadline` while the group has no
+/// leader to take it:
 /// - [`crate::Error::RetryableLeaderChange`]: a new leader's election no-op
 ///   overwrote the previous leader's entry;
 /// - [`crate::Error::NoLeader`]: the group is electing, or a leadership
@@ -73,13 +82,14 @@ pub(crate) async fn propose_replicated_entry(
     state: &SharedState,
     proposer: &Arc<AsyncRaftProposer>,
     mut entry: ReplicatedEntry,
-) -> crate::Result<(Vec<u8>, crate::types::Lsn)> {
+    deadline: tokio::time::Instant,
+) -> crate::Result<super::types::AppliedOutput> {
     // An edge write runs as a Calvin transaction, never as a data-group
     // entry, so every edge version of a collection takes a Calvin ordinal.
     if let Some(response) =
         crate::control::planner::calvin::sequence_replicated_edge_write(state, &entry).await?
     {
-        return Ok((response.payload.to_vec(), response.read_version_lsn));
+        return Ok((response.payload.to_vec(), response.read_versions));
     }
     // The write's commit instant. Stamped once, before the first propose, so
     // every re-proposal and every replica's apply carries the same value.
@@ -91,10 +101,6 @@ pub(crate) async fn propose_replicated_entry(
     let data = entry.encode()?;
     let vshard_id = entry.vshard_id;
 
-    // The statement deadline. Every attempt, and each attempt's wait for the
-    // local apply, ends at this one instant.
-    let deadline = tokio::time::Instant::now()
-        + std::time::Duration::from_secs(state.tuning.network.default_deadline_secs);
     let mut backoff = FIRST_BACKOFF;
     let mut attempt: u32 = 0;
     let payload = loop {

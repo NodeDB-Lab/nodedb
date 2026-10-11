@@ -38,7 +38,8 @@ use super::priority_queues::PriorityQueues;
 /// This type is intentionally `!Send` — pinned to a single core.
 pub struct CoreLoop {
     pub(in crate::data::executor) core_id: usize,
-
+    /// The node this core runs on: the scope its fail points evaluate in.
+    pub(in crate::data::executor) fail_scope: nodedb_types::fail_point::FailScope,
     /// SPSC channel: receives requests from Control Plane.
     pub(in crate::data::executor) request_rx: Consumer<BridgeRequest>,
 
@@ -429,7 +430,7 @@ pub struct CoreLoop {
     ///
     /// Set to `Some(ms)` by `execute_calvin_execute_static`,
     /// `execute_calvin_execute_active` and `execute_calvin_resolve` while they
-    /// stage or resolve a transaction's plans, and by `execute_calvin_flush`
+    /// stage or resolve a transaction's plans, and by `install_calvin_redo`
     /// while it renders the reply, then restored immediately after. Engine handlers that need "current time" (bitemporal sys_from,
     /// KV TTL expire_at, timeseries system_ms) call
     /// `self.epoch_system_ms.unwrap_or_else(<wall_clock_read>)` so that
@@ -478,8 +479,8 @@ pub struct CoreLoop {
     pub(in crate::data::executor) ts_resolve_holds:
         HashMap<(DatabaseId, TenantId, String), std::collections::HashSet<crate::types::TxnId>>,
 
-    /// Per-core last-write-LSN version index (per key + per collection),
-    /// advanced by every committed write-apply. Type + GC in `write_index.rs`.
+    /// Per-core write-version index (per key + per collection, per vShard),
+    /// advanced by every committed write-apply. Type + GC in `write_index/`.
     pub(in crate::data::executor) write_index: super::write_index::WriteVersionIndex,
 
     /// The version keys the current record's apply forces.

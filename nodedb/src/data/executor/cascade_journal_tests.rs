@@ -133,6 +133,7 @@ fn request(plan: PhysicalPlan, wal_lsn: Option<Lsn>) -> Request {
         wal_lsn,
         resolved_now_ms: None,
         commit_hlc: None,
+        entry_version: None,
         admission: Admission::Admitted,
     }
 }

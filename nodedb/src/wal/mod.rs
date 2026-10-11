@@ -21,11 +21,12 @@ pub(crate) use crdt_payload::{
 };
 pub use manager::WalManager;
 pub use redo::{
-    CalvinStamp, CapturedEntry, CascadedEdge, ContinuedRedo, CrossShardAppliedKey, EVERY_ROW,
-    EdgeCutRedo, EdgeDeleteRedo, EdgePutRedo, GroupMembership, NodeCascadeRedo, OriginAppend,
-    PublishPosition, RedoPublish, RedoRecord, RedoRowChange, RedoRowKind, RedoRowSource,
-    RedoSubRecord, RowSourceIndex, SplitRedo, WriteGroup, WriteGroupRecord, WriteSetCapture,
-    split_redo,
+    CalvinStamp, CapturedEntry, CarriedRedoStream, CascadedEdge, ContinuedRedo,
+    CrossShardAppliedKey, EVERY_ROW, EdgeCutRedo, EdgeDeleteRedo, EdgePutRedo, GroupMembership,
+    NodeCascadeRedo, OriginAppend, PublishPosition, RedoChunkHeader, RedoChunkPiece,
+    RedoChunkRecord, RedoPublish, RedoRecord, RedoRowChange, RedoRowKind, RedoRowSource,
+    RedoStreamId, RedoSubRecord, RowSourceIndex, SplitRedo, WriteGroup, WriteGroupRecord,
+    WriteSetCapture, split_redo,
 };
 pub use replay::SyncHwmReplayMaps;
 pub use replay::SyncHwmReplayStats;

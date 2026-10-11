@@ -12,9 +12,8 @@ impl CoreLoop {
     /// Discard a staged Calvin transaction.
     ///
     /// Removes the plans staged under `(epoch, position, vshard)` from the
-    /// commit-pending buffer and fires nothing — no base mutation, no side
-    /// effects. An
-    /// absent key (already flushed or dropped) is an idempotent no-op.
+    /// commit-pending buffer and fires nothing: no base mutation, no side
+    /// effects. An absent key (already installed or dropped) is a no-op.
     pub(in crate::data::executor) fn execute_calvin_drop(
         &mut self,
         task: &ExecutionTask,
@@ -30,10 +29,6 @@ impl CoreLoop {
         // Discard the synthetic overlay entry alongside the raw plan buffer;
         // idempotent no-op if it was never staged or already removed.
         self.drop_calvin_synthetic_overlay(epoch, position, vshard_id);
-        // Writes waiting on the rows this transaction owned run next.
-        self.calvin
-            .fence
-            .note_resolved((epoch, position, vshard_id), None);
         debug!(
             core = self.core_id,
             epoch, position, vshard_id, existed, "calvin drop: discarding staged commit"
@@ -64,7 +59,6 @@ mod tests {
             epoch: 1,
             position: 0,
             epoch_system_ms: 0,
-            is_group_leader: true,
         };
         let resp = core.execute_calvin_execute_static(&task, ctx, &tenant_id, &plans, &[], &[]);
         assert_eq!(resp.status, Status::Ok);

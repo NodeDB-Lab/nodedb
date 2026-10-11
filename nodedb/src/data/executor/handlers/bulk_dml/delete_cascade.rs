@@ -184,18 +184,18 @@ impl CoreLoop {
         );
         // Record the committed delete's write version against its
         // surrogate + collection.
-        self.note_surrogate_write_lsn(task, tid, collection, row_surrogate.as_u32());
+        self.note_surrogate_write(task, tid, collection, row_surrogate.as_u32());
         // Record the removed secondary-index tuples into the
         // per-index write-value substrate, recomputed from the
         // pre-delete document (see `index_paths` comment above).
-        if let (Some(lsn), Some(doc)) = (task.wal_lsn(), pre_delete_doc.as_ref()) {
+        if let (Some(stamp), Some(doc)) = (self.task_write_stamp(task), pre_delete_doc.as_ref()) {
             let tuples = self.index_tuples_for_doc(doc, index_paths);
             self.note_index_write_values(
                 task.request.database_id,
                 crate::types::TenantId::new(tid),
                 collection,
                 &tuples,
-                lsn,
+                stamp,
             );
         }
         // The removal, journalled after apply: the plan carries no

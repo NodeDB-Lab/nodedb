@@ -4,6 +4,7 @@
 //! the core that owns its vShard, through the WAL replay arms.
 //!
 //! - [`entry`]: the `MetaOp::ApplyTransactionRedo` handler.
+//! - [`calvin_install`]: the install of a committed Calvin slice.
 //! - [`validate`]: commit-boundary checks that run before any write.
 //! - [`passes`]: the validate and install passes over the replay arms.
 //! - [`settle`]: the work an install defers until every sub-record landed.
@@ -14,12 +15,21 @@
 //! - [`test_commit`]: a test driver for a session commit on one core.
 //! - [`install_refusal_tests`]: one committed and one refused install per
 //!   engine kind.
-//! - [`calvin_fold_tests`]: a Calvin record folds the same live and in
-//!   restart replay.
+//! - [`calvin_fold_tests`]: a Calvin record's fold rows journal as parts,
+//!   and restart replay applies them.
+//! - [`calvin_install_tests`]: a Calvin slice installs from its stamped
+//!   redo entry.
+//! - [`cross_shard_fold_tests`]: a record never folds a cross-shard sum
+//!   target on the source's core.
 //! - [`unique_handover_tests`]: UNIQUE judged on a record's post-state.
 
 #[cfg(test)]
-mod calvin_fold_tests;
+pub(in crate::data::executor) mod calvin_fold_tests;
+mod calvin_install;
+#[cfg(test)]
+mod calvin_install_tests;
+#[cfg(test)]
+mod cross_shard_fold_tests;
 mod document;
 mod entry;
 mod events;

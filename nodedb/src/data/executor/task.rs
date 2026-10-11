@@ -17,7 +17,7 @@ pub struct ExecutionTask {
     /// WAL LSN the Control Plane allocated for this write at wal-dispatch time,
     /// carried alongside the request so the apply chokepoint can record the
     /// per-key / per-collection write version (see
-    /// [`CoreLoop::note_write_lsn`](crate::data::executor::core_loop::CoreLoop)).
+    /// [`CoreLoop::note_write`](crate::data::executor::core_loop::CoreLoop)).
     /// `None` for reads, control ops, and writes whose LSN is not (yet) threaded
     /// — the version index is skipped rather than advanced with a wrong value.
     /// Copied from [`Request::wal_lsn`](crate::bridge::envelope::Request) in
@@ -140,6 +140,7 @@ mod tests {
             wal_lsn,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: crate::bridge::envelope::Admission::Exempt(
                 crate::bridge::envelope::ExemptReason::Read,
             ),

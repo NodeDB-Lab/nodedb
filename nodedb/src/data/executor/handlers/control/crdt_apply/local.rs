@@ -162,13 +162,13 @@ impl CoreLoop {
                     &bytes,
                 );
                 if imported_authoritative {
-                    self.note_collection_write_lsn(task, collection);
+                    self.note_collection_write(task, collection);
                 }
             }
             Ok(None) if imported_authoritative => {
                 // A headless import has no sparse projection, but still
                 // changed authoritative Loro state.
-                self.note_collection_write_lsn(task, collection);
+                self.note_collection_write(task, collection);
             }
             Ok(None) => {}
             Err(refusal) => {

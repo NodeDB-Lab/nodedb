@@ -2,73 +2,111 @@
 
 //! Per-session read-your-writes floor tracking on `SessionStore`.
 //!
-//! Records the highest committed write-version this session has observed for
-//! each `(database, tenant, collection)` it has written, so a later
-//! transaction's read-set capture can be floored at the session's OWN prior
-//! committed writes. This extends the read-your-own-write exclusion already
-//! applied to a transaction's buffered writes (see the Calvin static builder)
-//! to the session's PRIOR committed autocommit writes: without it, a
-//! cross-shard OCC validation would see the session's own committed
-//! `coll_write_lsn` exceed a read that captured a stale floor and false-abort
-//! with a serialization failure.
+//! Records the highest committed write version this session holds for each
+//! `(database, tenant, collection, vShard)` it has written. A later
+//! transaction's read-set capture is floored at it. This extends the
+//! read-your-own-write exclusion the Calvin static builder applies to buffered
+//! writes to the session's prior committed writes. Without it, OCC validation
+//! sees the session's own committed write above a read that captured an older
+//! version, and aborts the transaction on its own write.
 //!
-//! Soundness: the floor is only ever RAISED by this session's own committed
-//! writes to that exact `(database, tenant, collection)`. A concurrent
-//! OTHER-session write yields a higher `coll_write_lsn` that still exceeds the
-//! floor, so a genuine conflict still aborts — this only removes the self-abort,
-//! never a real one.
+//! Only this session's own committed writes raise the floor. A concurrent
+//! write by another session has a higher version that still exceeds the
+//! floor, so a real conflict still aborts.
+
+use nodedb_types::WriteVersion;
 
 use super::connection::SessionId;
-use crate::types::{DatabaseId, Lsn, TenantId};
+use crate::bridge::envelope::{PhysicalPlan, Response, Status};
+use crate::control::security::identity::{Permission, required_permission};
+use crate::control::server::shared::plan_util::extract_collection;
+use crate::types::{DatabaseId, ReadVersions, TenantId, VShardId};
 
 use super::store::SessionStore;
 
+/// The scope of one own-write floor: database, tenant, collection, and the
+/// vShard whose versions the floor is a position in.
+pub type OwnWriteKey = (DatabaseId, TenantId, String, VShardId);
+
 impl SessionStore {
-    /// Record a committed write-version for `(database, tenant, collection)` on
-    /// this session, keeping the maximum seen. `version` is the write's
-    /// committed per-collection version (`coll_write_lsn`), sourced from the
-    /// replicated-write response. A `Lsn::ZERO` version carries no floor and is
-    /// ignored. Persists for the life of the session.
+    /// Record the versions a dispatched write of `plan` stamped, taken from
+    /// its `response`. Every protocol calls this once per dispatched task.
+    /// A read, a failed write, or a write of no single collection records
+    /// nothing.
+    pub fn note_own_write_response(
+        &self,
+        addr: impl Into<SessionId>,
+        database_id: DatabaseId,
+        tenant_id: TenantId,
+        plan: &PhysicalPlan,
+        response: &Response,
+    ) {
+        if response.status != Status::Ok
+            || response.read_versions.is_empty()
+            || !matches!(required_permission(plan), Permission::Write)
+        {
+            return;
+        }
+        let Some(collection) = extract_collection(plan) else {
+            return;
+        };
+        self.note_own_write(
+            addr,
+            database_id,
+            tenant_id,
+            collection,
+            &response.read_versions,
+        );
+    }
+
+    /// Record the versions a committed write to `(database, tenant,
+    /// collection)` stamped, keeping the maximum per vShard. `versions` come
+    /// from the write's response. A write that stamped none sets no floor.
+    /// The floors persist for the life of the session.
     pub fn note_own_write(
         &self,
         addr: impl Into<SessionId>,
         database_id: DatabaseId,
         tenant_id: TenantId,
         collection: &str,
-        version: Lsn,
+        versions: &ReadVersions,
     ) {
-        if version == Lsn::ZERO {
+        if versions.is_empty() {
             return;
         }
         self.write_session(addr, |session| {
-            let slot = session
-                .own_write_versions
-                .entry((database_id, tenant_id, collection.to_string()))
-                .or_insert(Lsn::ZERO);
-            if version > *slot {
-                *slot = version;
+            for shard in versions.iter() {
+                let key = (
+                    database_id,
+                    tenant_id,
+                    collection.to_string(),
+                    VShardId::new(shard.vshard),
+                );
+                let slot = session.own_write_versions.entry(key).or_default();
+                *slot = (*slot).max(shard.version);
             }
         });
     }
 
-    /// Return the session's own highest committed write-version for
-    /// `(database, tenant, collection)`, or `Lsn::ZERO` if the session never
-    /// wrote that collection (no floor to apply).
+    /// The session's own highest committed write version for `(database,
+    /// tenant, collection)` on `vshard`, or `WriteVersion::ZERO` when the
+    /// session never wrote it there.
     pub fn own_write_version(
         &self,
         addr: impl Into<SessionId>,
         database_id: DatabaseId,
         tenant_id: TenantId,
         collection: &str,
-    ) -> Lsn {
+        vshard: VShardId,
+    ) -> WriteVersion {
         self.read_session(addr, |session| {
             session
                 .own_write_versions
-                .get(&(database_id, tenant_id, collection.to_string()))
+                .get(&(database_id, tenant_id, collection.to_string(), vshard))
                 .copied()
-                .unwrap_or(Lsn::ZERO)
+                .unwrap_or_default()
         })
-        .unwrap_or(Lsn::ZERO)
+        .unwrap_or_default()
     }
 }
 
@@ -77,6 +115,8 @@ mod tests {
     use std::net::SocketAddr;
 
     use super::*;
+
+    const HOME: VShardId = VShardId::new(4);
 
     fn addr() -> SocketAddr {
         "127.0.0.1:5601".parse().expect("test addr")
@@ -89,83 +129,141 @@ mod tests {
         (sessions, a)
     }
 
+    fn at(index: u64) -> ReadVersions {
+        ReadVersions::single(HOME, WriteVersion::logged(1, index))
+    }
+
+    fn floor(
+        sessions: &SessionStore,
+        a: SocketAddr,
+        tenant: u64,
+        collection: &str,
+    ) -> WriteVersion {
+        sessions.own_write_version(
+            a,
+            DatabaseId::DEFAULT,
+            TenantId::new(tenant),
+            collection,
+            HOME,
+        )
+    }
+
     #[test]
     fn absent_collection_returns_zero() {
         let (sessions, a) = store_with_session();
-        assert_eq!(
-            sessions.own_write_version(a, DatabaseId::DEFAULT, TenantId::new(1), "bread"),
-            Lsn::ZERO
-        );
+        assert_eq!(floor(&sessions, a, 1, "bread"), WriteVersion::ZERO);
     }
 
     #[test]
     fn records_and_returns_own_write_version() {
         let (sessions, a) = store_with_session();
-        sessions.note_own_write(
-            a,
-            DatabaseId::DEFAULT,
-            TenantId::new(1),
-            "bread",
-            Lsn::new(2),
-        );
-        assert_eq!(
-            sessions.own_write_version(a, DatabaseId::DEFAULT, TenantId::new(1), "bread"),
-            Lsn::new(2)
-        );
+        sessions.note_own_write(a, DatabaseId::DEFAULT, TenantId::new(1), "bread", &at(2));
+        assert_eq!(floor(&sessions, a, 1, "bread"), WriteVersion::logged(1, 2));
     }
 
     #[test]
     fn keeps_the_maximum_version() {
         let (sessions, a) = store_with_session();
-        sessions.note_own_write(
-            a,
-            DatabaseId::DEFAULT,
-            TenantId::new(1),
-            "bread",
-            Lsn::new(5),
-        );
+        sessions.note_own_write(a, DatabaseId::DEFAULT, TenantId::new(1), "bread", &at(5));
         // A lower version never lowers the floor.
-        sessions.note_own_write(
-            a,
-            DatabaseId::DEFAULT,
-            TenantId::new(1),
-            "bread",
-            Lsn::new(3),
-        );
-        assert_eq!(
-            sessions.own_write_version(a, DatabaseId::DEFAULT, TenantId::new(1), "bread"),
-            Lsn::new(5)
-        );
+        sessions.note_own_write(a, DatabaseId::DEFAULT, TenantId::new(1), "bread", &at(3));
+        assert_eq!(floor(&sessions, a, 1, "bread"), WriteVersion::logged(1, 5));
     }
 
     #[test]
-    fn zero_version_is_ignored() {
-        let (sessions, a) = store_with_session();
-        sessions.note_own_write(a, DatabaseId::DEFAULT, TenantId::new(1), "bread", Lsn::ZERO);
-        assert_eq!(
-            sessions.own_write_version(a, DatabaseId::DEFAULT, TenantId::new(1), "bread"),
-            Lsn::ZERO
-        );
-    }
-
-    #[test]
-    fn scoped_by_database_tenant_and_collection() {
+    fn a_write_with_no_versions_sets_no_floor() {
         let (sessions, a) = store_with_session();
         sessions.note_own_write(
             a,
             DatabaseId::DEFAULT,
             TenantId::new(1),
             "bread",
-            Lsn::new(7),
+            &ReadVersions::new(),
         );
-        // A different collection, tenant, or database sees no floor.
-        assert_eq!(
-            sessions.own_write_version(a, DatabaseId::DEFAULT, TenantId::new(1), "milk"),
-            Lsn::ZERO
+        assert_eq!(floor(&sessions, a, 1, "bread"), WriteVersion::ZERO);
+    }
+
+    fn kv_plan(collection: &str, write: bool) -> PhysicalPlan {
+        let collection = nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, collection);
+        PhysicalPlan::Kv(if write {
+            nodedb_physical::physical_plan::KvOp::Put {
+                collection,
+                key: b"k".to_vec(),
+                value: b"v".to_vec(),
+                ttl_ms: 0,
+                surrogate: nodedb_types::Surrogate::new(1),
+                returning: None,
+                rls_filters: Vec::new(),
+                provenance: None,
+            }
+        } else {
+            nodedb_physical::physical_plan::KvOp::Get {
+                collection,
+                key: b"k".to_vec(),
+                rls_filters: Vec::new(),
+                surrogate_ceiling: None,
+            }
+        })
+    }
+
+    fn response(status: Status, versions: ReadVersions) -> Response {
+        let mut response = crate::control::server::shared::write_admission::bare_ok_response(
+            crate::types::RequestId::new(1),
         );
+        response.status = status;
+        response.read_versions = versions;
+        response
+    }
+
+    #[test]
+    fn a_dispatched_write_response_sets_the_floor() {
+        let (sessions, a) = store_with_session();
+        sessions.note_own_write_response(
+            a,
+            DatabaseId::DEFAULT,
+            TenantId::new(1),
+            &kv_plan("bread", true),
+            &response(Status::Ok, at(9)),
+        );
+        assert_eq!(floor(&sessions, a, 1, "bread"), WriteVersion::logged(1, 9));
+    }
+
+    #[test]
+    fn a_read_or_a_failed_write_sets_no_floor() {
+        let (sessions, a) = store_with_session();
+        sessions.note_own_write_response(
+            a,
+            DatabaseId::DEFAULT,
+            TenantId::new(1),
+            &kv_plan("bread", false),
+            &response(Status::Ok, at(9)),
+        );
+        sessions.note_own_write_response(
+            a,
+            DatabaseId::DEFAULT,
+            TenantId::new(1),
+            &kv_plan("bread", true),
+            &response(Status::Error, at(9)),
+        );
+        assert_eq!(floor(&sessions, a, 1, "bread"), WriteVersion::ZERO);
+    }
+
+    #[test]
+    fn scoped_by_database_tenant_collection_and_vshard() {
+        let (sessions, a) = store_with_session();
+        sessions.note_own_write(a, DatabaseId::DEFAULT, TenantId::new(1), "bread", &at(7));
+        // A different collection, tenant, or vShard sees no floor.
+        assert_eq!(floor(&sessions, a, 1, "milk"), WriteVersion::ZERO);
+        assert_eq!(floor(&sessions, a, 2, "bread"), WriteVersion::ZERO);
         assert_eq!(
-            sessions.own_write_version(a, DatabaseId::DEFAULT, TenantId::new(2), "bread"),
-            Lsn::ZERO
+            sessions.own_write_version(
+                a,
+                DatabaseId::DEFAULT,
+                TenantId::new(1),
+                "bread",
+                VShardId::new(5),
+            ),
+            WriteVersion::ZERO
         );
     }
 }

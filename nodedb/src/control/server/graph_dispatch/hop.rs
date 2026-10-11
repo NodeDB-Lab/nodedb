@@ -80,8 +80,8 @@ pub(super) struct HopOutput {
     /// Deduplicated destination node IDs after merging local + remote
     /// expansion. Feeds the next frontier.
     pub merged_destinations: Vec<String>,
-    /// The key vShard of every frontier node, at the watermark its expansion
-    /// served.
+    /// The key vShard of every frontier node, at the version its expansion
+    /// reported.
     pub reads: ShardReadLog,
 }
 
@@ -156,12 +156,14 @@ pub(super) async fn execute_neighbor_hop(
 
     // Single-node mode: no routing table — every frontier node is local.
     if shared.cluster_routing.is_none() {
-        let (rows, _watermark) = expand_local(shared, scope, frontier).await?;
+        let (rows, versions) = expand_local(shared, scope, frontier).await?;
         let merged = dedup_destinations(&rows);
+        let mut reads = ShardReadLog::new();
+        reads.note(key_vshards(frontier), &versions);
         return Ok(HopOutput {
             rows,
             merged_destinations: merged,
-            reads: ShardReadLog::new(),
+            reads,
         });
     }
 
@@ -174,8 +176,8 @@ pub(super) async fn execute_neighbor_hop(
     let mut all_rows: Vec<NeighborRow> = if local_nodes.is_empty() {
         Vec::new()
     } else {
-        let (rows, watermark) = expand_local(shared, scope, &local_nodes).await?;
-        reads.note(key_vshards(&local_nodes), watermark, shared.node_id);
+        let (rows, versions) = expand_local(shared, scope, &local_nodes).await?;
+        reads.note(key_vshards(&local_nodes), &versions);
         rows
     };
 
@@ -307,12 +309,12 @@ impl ExpandScope<'_> {
 }
 
 /// Expand a locally-owned subset on all local Data-Plane cores. Returns the
-/// crossed edges and the highest watermark a core served them at.
+/// crossed edges and the versions the cores reported.
 async fn expand_local(
     shared: &SharedState,
     scope: ExpandScope<'_>,
     node_ids: &[String],
-) -> crate::Result<(Vec<NeighborRow>, crate::types::Lsn)> {
+) -> crate::Result<(Vec<NeighborRow>, crate::types::ReadVersions)> {
     let plan = scope.plan(node_ids.to_vec());
     // A linearizable hop confirms the groups its plan reads first.
     if scope.linearizable {
@@ -327,13 +329,13 @@ async fn expand_local(
         scope.txn_id,
     )
     .await?;
-    Ok((decode_neighbor_rows(&resp.payload)?, resp.watermark_lsn))
+    Ok((decode_neighbor_rows(&resp.payload)?, resp.read_versions))
 }
 
 /// Expand the remote-owned subsets concurrently: ship a typed
 /// `NeighborsMulti` plan to each owning node via [`dispatch_route`] and
 /// decode every returned payload with the shared `{src,label,node}` decoder.
-/// Notes each owner's vShard in `reads` at the watermark it served.
+/// Notes each owner's vShard in `reads` at the version it reported.
 async fn expand_remote(
     shared: &SharedState,
     scope: ExpandScope<'_>,
@@ -389,7 +391,7 @@ async fn expand_remote(
                 linearizable,
             })
             .await
-            .map(|outcome| (read_vshard, node_id, outcome))
+            .map(|outcome| (read_vshard, outcome))
         })
     });
 
@@ -399,8 +401,8 @@ async fn expand_remote(
     for result in results {
         // A remote dispatch error is fatal: a dropped owner means a partial
         // reachable set.
-        let (read_vshard, node_id, outcome) = result?;
-        reads.note_leg([read_vshard], &outcome.shard_watermarks, node_id);
+        let (read_vshard, outcome) = result?;
+        reads.note([read_vshard], &outcome.read_versions);
         for payload in outcome.payloads {
             rows.extend(decode_neighbor_rows(&payload)?);
         }

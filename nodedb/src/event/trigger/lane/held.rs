@@ -111,13 +111,13 @@ impl HeldAction {
     }
 
     /// The event the lane fires the actions of: this held event at
-    /// `position` of `partition`.
+    /// `position` of its partition.
     ///
     /// Its `lsn` and `sequence` carry the position's action identity, which
     /// every replica shares. The actions name their source write by them, so
     /// a body fired again by a later owner carries the same key and applies
     /// once.
-    pub fn to_event(&self, partition: u32, position: CdcOffset) -> crate::Result<WriteEvent> {
+    pub fn to_event(&self, position: CdcOffset) -> crate::Result<WriteEvent> {
         let source =
             EventSource::from_wal_code(self.source).ok_or_else(|| crate::Error::Internal {
                 detail: format!(
@@ -131,7 +131,7 @@ impl HeldAction {
                 self.collection, self.op
             ),
         })?;
-        let (source_lsn, source_sequence) = action_identity(partition, position);
+        let (source_lsn, source_sequence) = action_identity(position);
         Ok(WriteEvent {
             sequence: source_sequence,
             collection: Arc::from(self.collection.as_str()),
@@ -189,7 +189,7 @@ mod tests {
         let back = HeldAction::from_bytes(&held.to_bytes().expect("encode")).expect("decode");
         assert_eq!(back, held);
         let fired = back
-            .to_event(7, CdcOffset::data_event(0, 12, 1))
+            .to_event(CdcOffset::data_event(0, 12, 1))
             .expect("rebuild");
         assert_eq!(fired.op, WriteOp::Update);
         assert_eq!(fired.row_id.as_str(), "o-1");

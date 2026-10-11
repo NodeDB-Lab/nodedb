@@ -35,7 +35,7 @@ pub(super) fn answer_binds_plan(
     let encoded =
         local_binds(state, *tenant_id, *database_id, &vshards, collections).and_then(encode_binds);
     Some(match encoded {
-        Ok(payload) => ExecuteResponse::ok(vec![payload], 0, 0),
+        Ok(payload) => ExecuteResponse::ok(vec![payload], 0, Vec::new()),
         Err(error) => ExecuteResponse::err(execution_error_to_typed(error)),
     })
 }
@@ -57,7 +57,7 @@ pub(super) fn answer_holders_plan(
     };
     let encoded = local_holders(state, *tenant_id, *database_id, entries).and_then(encode_holders);
     Some(match encoded {
-        Ok(payload) => ExecuteResponse::ok(vec![payload], 0, 0),
+        Ok(payload) => ExecuteResponse::ok(vec![payload], 0, Vec::new()),
         Err(error) => ExecuteResponse::err(execution_error_to_typed(error)),
     })
 }

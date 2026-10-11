@@ -4,6 +4,7 @@ pub mod bind_capture;
 pub mod capture;
 pub mod cut;
 pub mod cut_capture;
+pub mod cut_order;
 pub mod database;
 pub mod detect;
 pub mod metadata;

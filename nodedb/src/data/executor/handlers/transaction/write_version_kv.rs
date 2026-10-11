@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! `KvOp` write-version recording, split out of `write_version.rs` to keep
-//! that file under the size limit. Same contract: no-op with no WAL LSN,
-//! one `note_write_lsn` per key a committed KV write touched.
+//! `KvOp` write versions for the parity oracle in `write_version.rs`. Same
+//! contract: no-op with no WAL LSN, one `note_write` per key a committed
+//! KV write touched.
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::write_index::KeyRepr;
-use crate::types::{Lsn, TenantId};
+use crate::data::executor::core_loop::write_index::WriteStamp;
+use crate::types::TenantId;
 use nodedb_physical::physical_plan::KvOp;
 
 impl CoreLoop {
@@ -15,7 +16,7 @@ impl CoreLoop {
         db: crate::types::DatabaseId,
         tenant: TenantId,
         op: &KvOp,
-        lsn: Lsn,
+        stamp: WriteStamp,
     ) {
         match op {
             KvOp::Put {
@@ -51,24 +52,24 @@ impl CoreLoop {
             | KvOp::GetSet {
                 collection, key, ..
             } => {
-                self.note_write_lsn(
+                self.note_write(
                     db,
                     tenant,
                     collection.as_str(),
                     Some(KeyRepr::KvKey(Box::from(key.as_slice()))),
-                    lsn,
+                    stamp,
                 );
             }
             KvOp::Delete {
                 collection, keys, ..
             } => {
                 for key in keys {
-                    self.note_write_lsn(
+                    self.note_write(
                         db,
                         tenant,
                         collection.as_str(),
                         Some(KeyRepr::KvKey(Box::from(key.as_slice()))),
-                        lsn,
+                        stamp,
                     );
                 }
             }
@@ -78,12 +79,12 @@ impl CoreLoop {
                 ..
             } => {
                 for (key, _value) in entries {
-                    self.note_write_lsn(
+                    self.note_write(
                         db,
                         tenant,
                         collection.as_str(),
                         Some(KeyRepr::KvKey(Box::from(key.as_slice()))),
-                        lsn,
+                        stamp,
                     );
                 }
             }
@@ -92,7 +93,7 @@ impl CoreLoop {
             KvOp::Truncate { collection, .. }
             | KvOp::PredicateUpdate { collection, .. }
             | KvOp::PredicateDelete { collection, .. } => {
-                self.note_write_lsn(db, tenant, collection.as_str(), None, lsn);
+                self.note_write(db, tenant, collection.as_str(), None, stamp);
             }
             // Read-only: nothing written, no version to record.
             KvOp::Get { .. }

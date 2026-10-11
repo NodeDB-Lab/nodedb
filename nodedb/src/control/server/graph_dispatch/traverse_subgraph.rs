@@ -210,7 +210,7 @@ pub(crate) async fn walk_subgraph(
         &mut presence_reads,
     )
     .await?;
-    presence_reads.publish(shared, tenant_id, database_id, None);
+    presence_reads.publish(tenant_id, database_id, None);
     if !present.contains(&start) {
         return Ok(SubgraphWalk {
             node_order: Vec::new(),
@@ -259,7 +259,7 @@ pub(crate) async fn walk_subgraph(
     }
 
     // Every vShard the walk expanded joins the transaction read-set.
-    reads.publish(shared, tenant_id, database_id, collection);
+    reads.publish(tenant_id, database_id, collection);
     Ok(SubgraphWalk {
         node_order,
         edges: edges.into_vec(),

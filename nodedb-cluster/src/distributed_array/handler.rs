@@ -78,6 +78,7 @@ async fn handle_slice(
         rows_msgpack: exec.rows,
         truncated,
         truncated_before_horizon: exec.truncated_before_horizon,
+        read_versions: exec.read_versions,
     };
     serialise(resp)
 }
@@ -98,6 +99,7 @@ async fn handle_agg(
         shard_id: local_vshard_id,
         partials: exec.partials,
         truncated_before_horizon: exec.truncated_before_horizon,
+        read_versions: exec.read_versions,
     };
     serialise(resp)
 }
@@ -263,6 +265,14 @@ mod tests {
     };
     use super::handle_array_shard_rpc;
 
+    /// The version a stub shard read reports for its vShard.
+    fn stub_versions(vshard: u32) -> Vec<nodedb_types::ShardVersion> {
+        vec![nodedb_types::ShardVersion {
+            vshard,
+            version: nodedb_types::WriteVersion::logged(1, 7),
+        }]
+    }
+
     /// Mock executor that returns a fixed set of row bytes for slice,
     /// a fixed bitmap for surrogate scan, fixed partials for agg, and
     /// echoes back the `wal_lsn` for put/delete.
@@ -278,12 +288,13 @@ mod tests {
     impl ArrayLocalExecutor for StubExecutor {
         async fn exec_slice(
             &self,
-            _local_vshard_id: u32,
+            local_vshard_id: u32,
             _req: &super::super::wire::ArrayShardSliceReq,
         ) -> Result<ArraySliceExec> {
             Ok(ArraySliceExec {
                 rows: self.rows.clone(),
                 truncated_before_horizon: self.truncated_before_horizon,
+                read_versions: stub_versions(local_vshard_id),
             })
         }
 
@@ -298,12 +309,13 @@ mod tests {
 
         async fn exec_agg(
             &self,
-            _local_vshard_id: u32,
+            local_vshard_id: u32,
             _req: &ArrayShardAggReq,
         ) -> Result<ArrayAggExec> {
             Ok(ArrayAggExec {
                 partials: self.partials.clone(),
                 truncated_before_horizon: self.truncated_before_horizon,
+                read_versions: stub_versions(local_vshard_id),
             })
         }
 
@@ -420,6 +432,34 @@ mod tests {
             resp.truncated_before_horizon,
             "handler must forward the executor's below-horizon flag"
         );
+    }
+
+    /// A shard leg that matched no row still reports its vShard's version,
+    /// and the version survives the response's wire encoding.
+    #[tokio::test]
+    async fn an_empty_shard_read_reports_its_version_over_the_wire() {
+        let executor: Arc<dyn ArrayLocalExecutor> = Arc::new(StubExecutor {
+            rows: vec![],
+            bitmap: vec![],
+            partials: vec![],
+            truncated_before_horizon: false,
+            affected: 0,
+        });
+        let slice =
+            handle_array_shard_rpc(ARRAY_SHARD_SLICE_REQ, 5, &make_slice_req_bytes(), &executor)
+                .await
+                .expect("slice handler should succeed");
+        let slice: ArrayShardSliceResp =
+            zerompk::from_msgpack(&slice).expect("response should deserialise");
+        assert!(slice.rows_msgpack.is_empty());
+        assert_eq!(slice.read_versions, stub_versions(5));
+
+        let agg = handle_array_shard_rpc(ARRAY_SHARD_AGG_REQ, 5, &make_agg_req_bytes(), &executor)
+            .await
+            .expect("agg handler should succeed");
+        let agg: ArrayShardAggResp =
+            zerompk::from_msgpack(&agg).expect("response should deserialise");
+        assert_eq!(agg.read_versions, stub_versions(5));
     }
 
     #[tokio::test]

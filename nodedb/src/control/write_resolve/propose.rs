@@ -42,8 +42,9 @@ pub(super) async fn propose_resolved(
             ),
         })?;
 
-    match propose_replicated_entry(state, proposer, entry).await {
-        Ok((payload, write_version)) => {
+    let deadline = crate::control::wal_replication::statement_propose_deadline(state);
+    match propose_replicated_entry(state, proposer, entry, deadline).await {
+        Ok((payload, write_versions)) => {
             let request_id =
                 RequestId::new(state.request_id_counter.fetch_add(1, Ordering::Relaxed));
             let response = Response {
@@ -52,10 +53,11 @@ pub(super) async fn propose_resolved(
                 attempt: 1,
                 partial: false,
                 payload: payload.into(),
-                watermark_lsn: write_version,
+                // A write carries no read watermark.
+                watermark_lsn: crate::types::Lsn::ZERO,
                 error_code: None,
-                read_set_valid: None,
-                read_version_lsn: write_version,
+                stage_vote: None,
+                read_versions: write_versions,
                 write_set: Vec::new(),
             };
             Ok(ProposeOutcome::Applied(response))

@@ -306,7 +306,23 @@ impl CoreLoop {
 mod tests {
     use crate::data::executor::core_loop::CoreLoop;
     use crate::data::executor::core_loop::write_index::CollKey;
-    use crate::types::{DatabaseId, Lsn, TenantId};
+    use crate::data::executor::core_loop::write_index::tests::local;
+    use crate::types::{DatabaseId, TenantId};
+
+    /// The collection key a replayed write of `collection` in database 0
+    /// records under: the collection's home vShard.
+    fn replayed_key(collection: &str) -> CollKey {
+        let vshard =
+            nodedb_types::CollectionKey::from_qualified_str(DatabaseId::new(0), collection)
+                .expect("collection key")
+                .vshard();
+        CollKey {
+            vshard,
+            db: DatabaseId::new(0),
+            tenant: TenantId::new(7),
+            collection: Box::from(collection),
+        }
+    }
     use crate::wal::{DecodedBatchRecord, decode_batch_record};
     use nodedb_types::Surrogate;
     use nodedb_types::columnar::ColumnarWalRecord;
@@ -557,14 +573,14 @@ mod tests {
     }
 
     /// WAL replay threads the record LSN into `replay_task` so
-    /// `execute_columnar_insert`'s `note_collection_write_lsn(task, ..)` call
+    /// `execute_columnar_insert`'s `note_collection_write(task, ..)` call
     /// (gated on `task.wal_lsn().is_some()`) fires during WAL replay too, not
-    /// just on live writes. This proves the collection floor in
+    /// just on live writes. This proves the collection version in
     /// `WriteVersionIndex` is populated end-to-end through
     /// `replay_timeseries_wal` -> `replay_columnar_payload` ->
     /// `execute_columnar_insert`.
     #[test]
-    fn columnar_insert_replay_populates_collection_write_lsn_floor() {
+    fn columnar_insert_replay_populates_the_collection_write_version() {
         let mut h = make_core();
         let record = columnar_wal_record("events_wv", 123, 7);
 
@@ -574,16 +590,13 @@ mod tests {
             &nodedb_wal::TombstoneSet::new(),
         );
 
-        let coll_key = CollKey {
-            db: DatabaseId::new(0),
-            tenant: TenantId::new(7),
-            collection: Box::from("events_wv"),
-        };
         assert_eq!(
-            h.core.write_index.collection_write_lsn(&coll_key),
-            Some(Lsn::new(123)),
-            "columnar insert replay must record the record LSN as the \
-             collection write-version floor"
+            h.core
+                .write_index
+                .collection_version(&replayed_key("events_wv")),
+            Some(local(123)),
+            "columnar insert replay must record the record's version as the \
+             collection write version"
         );
     }
 
@@ -630,14 +643,11 @@ mod tests {
             &nodedb_wal::TombstoneSet::new(),
         );
 
-        let coll_key = CollKey {
-            db: DatabaseId::new(0),
-            tenant: TenantId::new(7),
-            collection: Box::from("events_ungated"),
-        };
         assert_eq!(
-            h.core.write_index.collection_write_lsn(&coll_key),
-            Some(Lsn::new(150)),
+            h.core
+                .write_index
+                .collection_version(&replayed_key("events_ungated")),
+            Some(local(150)),
             "a record above the floor must be applied"
         );
     }

@@ -4,9 +4,11 @@
 //! backup or restore point takes, and the epoch floor a restored log opens
 //! with.
 
+use std::sync::Arc;
+
 use tracing::warn;
 
-use crate::calvin::types::SchedulerInput;
+use crate::calvin::types::{CutBarrierWire, SchedulerInput};
 
 use super::core::{Delivery, NOT_YET_APPLIED, SequencerRestorePoint, SequencerStateMachine};
 
@@ -29,7 +31,14 @@ impl SequencerStateMachine {
     /// out to every vShard scheduler this node hosts. Same delivery as
     /// `ReserveRead`: a marker for an armed vShard, or one dropped at a full
     /// channel, is replayed by the scheduler's catch-up drain in log order.
-    pub(super) fn apply_cut_marker(&mut self, index: u64, hlc: u64, restore_point: u64) {
+    /// Every scheduler shares one copy of the marker's `barrier`.
+    pub(super) fn apply_cut_marker(
+        &mut self,
+        index: u64,
+        hlc: u64,
+        restore_point: u64,
+        barrier: Option<CutBarrierWire>,
+    ) {
         if restore_point != 0
             && let Some(hook) = &self.restore_point_hook
         {
@@ -46,9 +55,15 @@ impl SequencerStateMachine {
         if let Some(hook) = &self.cut_instant_hook {
             hook(hlc, index, self.last_epoch_system_ms);
         }
+        let barrier = barrier.map(Arc::new);
         let vshards: Vec<u32> = self.vshard_senders.keys().copied().collect();
         for vshard in vshards {
-            match self.deliver(index, vshard, SchedulerInput::CutMarker { hlc }) {
+            let marker = SchedulerInput::CutMarker {
+                hlc,
+                restore_point,
+                barrier: barrier.clone(),
+            };
+            match self.deliver(index, vshard, marker) {
                 Delivery::NotHosted | Delivery::Sent | Delivery::Deferred => {}
                 Delivery::DroppedFull => warn!(
                     vshard,
@@ -128,6 +143,7 @@ mod tests {
             &encode(&SequencerEntry::CutMarker {
                 hlc: 900,
                 restore_point: 0,
+                barrier: None,
             }),
         );
         sm.apply(
@@ -135,6 +151,7 @@ mod tests {
             &encode(&SequencerEntry::CutMarker {
                 hlc: 1_000,
                 restore_point: 77,
+                barrier: Some(CutBarrierWire { capture: None }),
             }),
         );
 
@@ -149,10 +166,11 @@ mod tests {
             }],
             "only a restore point's marker is reported"
         );
-        for hlc in [900, 1_000] {
+        for (hlc, point, ordered) in [(900, 0, false), (1_000, 77, true)] {
             assert!(matches!(
                 rx.try_recv(),
-                Ok(SchedulerInput::CutMarker { hlc: got }) if got == hlc
+                Ok(SchedulerInput::CutMarker { hlc: got, restore_point, barrier })
+                    if got == hlc && restore_point == point && barrier.is_some() == ordered
             ));
         }
     }
@@ -172,6 +190,7 @@ mod tests {
             encode(&SequencerEntry::CutMarker {
                 hlc,
                 restore_point: 0,
+                barrier: None,
             })
         };
         sm.apply(1, &marker(10));

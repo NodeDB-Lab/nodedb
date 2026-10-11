@@ -27,6 +27,7 @@ pub mod raft_msgs;
 pub mod raft_rpc;
 pub mod read_index;
 pub mod request_refusal;
+pub mod resend;
 pub mod reservation;
 pub mod shard_error;
 pub mod shuffle;
@@ -53,7 +54,8 @@ pub use data_plane_error::{
     DataPlaneCounterFault, DataPlaneErrorCode, DataPlaneSyncHold, DataPlaneTextColumnFault,
 };
 pub use data_propose::{
-    DataProposeRequest, DataProposeResponse, ForwardedProposeRefusal, ProposeTarget,
+    DataProposeRequest, DataProposeResponse, ForwardedProposeRefusal, ProposeTarget, REPLY_MARGIN,
+    forwarded_deadline, remaining_budget_ms, reply_wait,
 };
 pub use execute::{
     DescriptorVersionEntry, ExecuteRequest, ExecuteResponse, ExecuteStreamChunk, ExecuteStreamEnd,

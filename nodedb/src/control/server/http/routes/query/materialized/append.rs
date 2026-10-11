@@ -1,16 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Per-task helpers the dispatch loop and the orchestrated plans share:
-//! authorization without the clone-write check, metering, and shaping one
-//! task's answer into the statement's JSON rows.
-
-use std::sync::Arc;
-
-use nodedb_physical::physical_task::PhysicalTask;
+//! metering, and shaping one task's answer into the statement's JSON rows.
 
 use crate::bridge::envelope::Status;
-use crate::control::security::audit::ArcAuditEmitter;
-use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::request::MaterializedShapeRequest;
@@ -24,31 +17,6 @@ use super::super::super::result_shape::{
     HttpShaped, passthrough_json_row, shape_error_to_api, shape_http_payload,
 };
 use super::encode::response_error;
-
-/// Authorize one task with no clone-write check. Used only for the
-/// Control-Plane orchestrated plans (see `orchestrated`), which are never
-/// clone-write shapes.
-pub(super) fn authorize_materialized_task(
-    shared: &crate::control::state::SharedState,
-    identity: &AuthenticatedIdentity,
-    task: &PhysicalTask,
-) -> crate::Result<crate::control::server::shared::authorization::AuthorizedTask> {
-    let emitter = ArcAuditEmitter(Arc::clone(&shared.audit));
-    crate::control::server::shared::authorization::authorize_task_set(
-        identity,
-        std::slice::from_ref(task),
-        &shared.permissions,
-        &shared.roles,
-        &emitter,
-    )
-    .map_err(crate::Error::from)?
-    .into_tasks()
-    .into_iter()
-    .next()
-    .ok_or_else(|| crate::Error::Internal {
-        detail: "authorization returned an empty capability set".into(),
-    })
-}
 
 /// Meter one task's dispatch after its rows are appended to `result_rows` —
 /// the row count is the delta since `rows_before`.

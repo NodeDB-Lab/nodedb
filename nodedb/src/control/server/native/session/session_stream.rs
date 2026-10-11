@@ -218,7 +218,7 @@ mod tests {
         Ok(RowBatch {
             payload: json_batch(start, n),
             watermark_lsn: Lsn::ZERO,
-            read_version_lsn: Lsn::ZERO,
+            read_versions: crate::types::ReadVersions::new(),
         })
     }
 
@@ -352,7 +352,7 @@ mod tests {
             vec![Ok(RowBatch {
                 payload: msgpack_empty_batch(3),
                 watermark_lsn: Lsn::ZERO,
-                read_version_lsn: Lsn::ZERO,
+                read_versions: crate::types::ReadVersions::new(),
             })],
             usize::MAX,
         )

@@ -303,12 +303,10 @@ fn conclude_generic_entry(
     // entry that failed to apply must surface to the propose waiter as a
     // failure, not as an empty success.
     let result = match submitted {
-        // The response carries this replica's post-write
-        // `coll_write_lsn` for the written collection, which the
-        // proposer needs as its read-your-writes floor: the version is
-        // minted here (the funnel's WAL append) and never travels on the
-        // wire, so the propose waiter is the only place it can be
-        // handed back.
+        // The response carries the versions the write stamped: the
+        // entry's log position on the written vShard. The proposer needs
+        // them as its read-your-writes floor, and the propose waiter is
+        // where they are handed back.
         Ok(resp) if resp.status == Status::Ok => Ok(AppliedWrite::from_response(&resp)),
         Ok(resp) => committed_response_result(&resp),
         Err(e) => {

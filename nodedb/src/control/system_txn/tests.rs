@@ -111,8 +111,8 @@ async fn answer_all(state: Arc<SharedState>, mut side: CoreChannelDataSide, stop
                 payload: Payload::empty(),
                 watermark_lsn: Lsn::ZERO,
                 error_code,
-                read_set_valid: None,
-                read_version_lsn: Lsn::ZERO,
+                stage_vote: None,
+                read_versions: crate::types::ReadVersions::new(),
                 write_set: Vec::new(),
             };
             side.response_tx
@@ -214,6 +214,7 @@ async fn a_body_plan_carries_only_stageable_forms() {
             &mut tasks,
             TenantId::new(1),
             DatabaseId::DEFAULT,
+            None,
             crate::types::TraceId::ZERO,
         )
         .await

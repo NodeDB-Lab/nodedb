@@ -153,7 +153,7 @@ NodeDB routes all DML through `EngineRules` in `nodedb-sql`. This is the single 
 
 **Integration tests** — place in `nodedb/tests/` or the relevant crate's `tests/` directory. Test public API only. Use `tests/common/mod.rs` for shared helpers (not `tests/common.rs`).
 
-**Failpoint tests** — for fault injection and panic recovery, use the `failpoints` feature flag and `FailGuard` from `nodedb::fail_point`. Compile with `--features failpoints`.
+**Failpoint tests** — for fault injection and panic recovery, use the `failpoints` feature flag and `FailGuard` from `nodedb::fail_point`. Compile with `--features failpoints`. An in-process cluster shares one fail-point registry across its nodes. Arm a point on one node with `FailGuard::for_node(node_id, name, action)`, never by putting the node in the name. A spawned server takes `NODEDB_FAILPOINTS='name=action'` for every node, or `name@node<N>=action` for node `N` only.
 
 **Cluster tests** — 3-node integration tests live in `nodedb/tests/` and are annotated with the `cluster` nextest group. They serialize automatically via `.config/nextest.toml` — don't run them with `cargo test`.
 

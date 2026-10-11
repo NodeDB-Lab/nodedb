@@ -6,9 +6,9 @@ pub mod stream;
 
 pub use journal::ChangeJournal;
 pub use live_set::LiveSubscriptionSet;
+pub(crate) use stream::PositionedChange;
 pub use stream::{
     ChangeCursor, ChangeEvent, ChangeOperation, ChangePartition, ChangeStream, ChangeStreamError,
     CursorParseError, CursorStep, ReplayError, ReplaySnapshot, ReplayStart, ReplayedChange,
     SequencedChangeEvent, Subscription,
 };
-pub(crate) use stream::{ChangeRun, PositionedChange};

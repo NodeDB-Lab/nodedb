@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use crate::Error;
-use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
+use crate::bridge::envelope::{PhysicalPlan, Response};
 use crate::control::local_dispatch::reject_data_plane_error;
 use crate::control::server::dispatch_utils::{
     AutocommitWrite, dispatch_autocommit_write, dispatch_routed_read_to_data_plane,
@@ -94,15 +94,19 @@ pub(super) async fn dispatch_local(
         )?
     {
         let proposer = shared.async_raft_proposer()?;
-        let (payload, write_version) =
-            crate::control::wal_replication::propose_replicated_entry(shared, proposer, entry)
-                .await?;
+        let (payload, write_versions) = crate::control::wal_replication::propose_replicated_entry(
+            shared,
+            proposer,
+            entry,
+            crate::control::wal_replication::statement_propose_deadline(shared),
+        )
+        .await?;
         return Ok(DispatchOutcome {
             payloads: vec![payload],
-            // A write carries no read watermark (Lsn::ZERO); its post-write
-            // `coll_write_lsn` is surfaced via `read_version_lsn` instead.
+            // A write carries no read watermark (Lsn::ZERO). Its write
+            // versions travel in `read_versions`.
             shard_watermarks: vec![(vshard_id, Lsn::ZERO)],
-            read_version_lsn: write_version,
+            read_versions: write_versions,
             not_found: false,
         });
     }
@@ -125,8 +129,8 @@ pub(super) async fn dispatch_local(
     Ok(DispatchOutcome {
         payloads: vec![resp.payload.to_vec()],
         shard_watermarks: vec![(vshard_id, resp.watermark_lsn)],
-        read_version_lsn: resp.read_version_lsn,
-        not_found: is_not_found(&resp),
+        read_versions: resp.read_versions.clone(),
+        not_found: crate::control::local_dispatch::is_not_found(&resp),
     })
 }
 
@@ -198,12 +202,4 @@ async fn dispatch_local_plan(local: LocalPlan<'_>) -> Result<Response, Error> {
         txn_id,
     )
     .await
-}
-
-/// Whether the core refused the task with `ErrorCode::NotFound`.
-///
-/// `reject_data_plane_error` passes this refusal as an empty success.
-/// The flag keeps the verdict for a caller that needs it.
-fn is_not_found(resp: &Response) -> bool {
-    resp.status == Status::Error && resp.error_code.as_deref() == Some(&ErrorCode::NotFound)
 }

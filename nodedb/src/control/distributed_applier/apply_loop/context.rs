@@ -3,28 +3,20 @@
 //! What every entry's apply borrows from the loop, and the futures the loop
 //! collects while it prepares later entries.
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use tokio::sync::mpsc;
-
-use crate::control::cluster::calvin::ReadResultEvent;
 use crate::control::distributed_applier::propose_tracker::ProposeTracker;
 use crate::control::state::SharedState;
 
 use super::proposal_gate::EntryOutcome;
-
-/// Senders to each local Calvin scheduler's read-result channel, by vShard.
-pub(super) type CalvinReadResultSenders = Arc<Mutex<BTreeMap<u32, mpsc::Sender<ReadResultEvent>>>>;
 
 /// The loop-owned handles an entry's apply borrows.
 #[derive(Clone, Copy)]
 pub(super) struct ApplyContext<'a> {
     pub state: &'a Arc<SharedState>,
     pub tracker: &'a Arc<ProposeTracker>,
-    pub calvin_read_result_senders: &'a CalvinReadResultSenders,
 }
 
 /// An entry whose apply finished: its waiter is resolved, and its outcome

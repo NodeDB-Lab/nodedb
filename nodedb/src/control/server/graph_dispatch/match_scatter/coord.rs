@@ -214,7 +214,6 @@ pub async fn scatter_match(
     let rows_payload = dedup_and_encode(&coordinator.completed)?;
     // Every vShard round 0 read joins the transaction read-set.
     reads.publish(
-        state,
         tenant_id,
         database_id,
         pattern_collection(database_id, &query_bytes),

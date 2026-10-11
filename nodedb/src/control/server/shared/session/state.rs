@@ -18,7 +18,9 @@ pub(crate) fn now_unix_ms() -> u64 {
 
 use crate::control::lease::QueryLeaseScope;
 use crate::event::cdc::CdcOffset;
-use crate::types::{DatabaseId, Lsn, TenantId, TxnId, VShardId};
+use crate::types::{DatabaseId, TenantId, TxnId, VShardId};
+
+use super::own_writes::OwnWriteKey;
 use nodedb_physical::physical_task::PhysicalTask;
 
 /// One entry on the transaction's savepoint stack.
@@ -146,10 +148,6 @@ pub struct ConnSession {
     /// rejected a line has an entry. COMMIT compares these counts with its
     /// authoritative resolve.
     pub tx_ts_preview_rejected: BTreeMap<usize, u64>,
-    /// Snapshot LSN captured at BEGIN for snapshot isolation.
-    /// All reads within the transaction see data as of this LSN.
-    /// Concurrent writes after this point are invisible to the transaction.
-    pub tx_snapshot_lsn: Option<Lsn>,
     /// Snapshot epoch captured at BEGIN: the last globally-applied Calvin epoch,
     /// read from `CalvinLocalState::last_applied_epoch`. The cross-shard-valid
     /// version anchor for the transaction (0 in single-node / no-Calvin). `None`
@@ -166,11 +164,11 @@ pub struct ConnSession {
     /// mark/rewind must fan over ALL of them. Ordered (BTree) for deterministic
     /// teardown. Empty until the first staged write.
     pub tx_vshards: BTreeSet<VShardId>,
-    /// Read-set: LSN-versioned, predicate-aware entries for write conflict
+    /// Read-set: versioned, predicate-aware entries for write conflict
     /// detection, captured on the shared read seam by every transport. At
     /// COMMIT, each entry is checked — if the entry's collection has a current
-    /// write-LSN past `read_lsn`, a concurrent write occurred and the
-    /// transaction is rejected with SERIALIZATION_FAILURE.
+    /// version past `read_version` on its vShard, a concurrent write occurred
+    /// and the transaction is rejected with SERIALIZATION_FAILURE.
     pub tx_read_set: Vec<super::read_set::ReadSetEntry>,
     /// Distinct vShards this transaction took a SHARED read reservation on. A
     /// hot-key read reserves under the transaction's single `tx_reservation_owner`
@@ -241,17 +239,14 @@ pub struct ConnSession {
     /// is idle-eligible only when this is zero — a legitimately long-running
     /// statement (in flight) must never be idle-killed.
     pub in_flight: AtomicU32,
-    /// Highest committed write-version this session has observed for each
-    /// `(database, tenant, collection)` it has written, keyed identically to
-    /// the read/write namespace. Used to floor a later transaction's captured
-    /// `read_version_lsn` at the session's OWN prior committed writes — a
-    /// read-your-writes floor that removes cross-shard OCC self-aborts on a
-    /// collection the session itself last wrote, without ever masking a
-    /// concurrent OTHER-session write (whose higher `coll_write_lsn` still
-    /// exceeds the floor). Persists for the life of the session — a prior
-    /// autocommit write must still floor a later transaction's read — and is
-    /// therefore NOT cleared at transaction boundaries.
-    pub own_write_versions: HashMap<(DatabaseId, TenantId, String), Lsn>,
+    /// Highest committed write version this session holds for each
+    /// `(database, tenant, collection, vShard)` it has written. It floors a
+    /// later transaction's captured read version at the session's own prior
+    /// committed writes, so a read never aborts on the session's own write. A
+    /// concurrent write by another session has a higher version and still
+    /// aborts. It persists for the life of the session, so a prior autocommit
+    /// write floors a later transaction's read too.
+    pub own_write_versions: HashMap<OwnWriteKey, nodedb_types::WriteVersion>,
     /// Database- and tenant-scoped connection slots this session holds.
     ///
     /// pgwire takes them during the startup handshake, once the bound database
@@ -321,7 +316,6 @@ impl ConnSession {
             tx_lease_scopes: Vec::new(),
             tx_body_tasks: BTreeSet::new(),
             tx_ts_preview_rejected: BTreeMap::new(),
-            tx_snapshot_lsn: None,
             tx_snapshot_epoch: None,
             tx_id: None,
             tx_vshards: BTreeSet::new(),

@@ -521,12 +521,17 @@ fn a_refused_install_publishes_no_write_version_and_no_watermark() {
     let point = nodedb_types::calvin::ReadKeyIdent::Point(crate::types::KeyRepr::Surrogate(41));
     let committed = run(&[document_insert()], false, |_| {});
     assert_eq!(committed.core.watermark, Lsn::new(200));
+    // The install runs on the default task's vShard 0 and applies no
+    // data-group entry, so its version is its WAL LSN there.
+    let vshard = crate::types::VShardId::new(0);
+    let before_install = crate::data::executor::core_loop::write_index::tests::local(199);
     assert!(!committed.core.write_index.read_is_valid(
         DatabaseId::DEFAULT,
         TenantId::new(TID),
+        vshard,
         "notes",
         &point,
-        Lsn::new(199),
+        before_install,
     ));
 
     let refused = run(&[document_insert()], true, |_| {});
@@ -538,9 +543,10 @@ fn a_refused_install_publishes_no_write_version_and_no_watermark() {
         refused.core.write_index.read_is_valid(
             DatabaseId::DEFAULT,
             TenantId::new(TID),
+            vshard,
             "notes",
             &point,
-            Lsn::new(199),
+            before_install,
         ),
         "the rolled-back install publishes no write version"
     );

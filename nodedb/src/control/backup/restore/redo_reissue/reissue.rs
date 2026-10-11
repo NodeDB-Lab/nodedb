@@ -53,11 +53,15 @@ pub(in crate::control::backup::restore) async fn reissue_rows_and_edges(
         stats.records += commit_collection(state, tenant, target.restore_id, collection).await?;
     }
     // Fails the re-issue after the rows committed and before any edge.
-    crate::fail_point_err!("restore::reissue::before_edges", |detail: String| {
-        crate::Error::Internal {
-            detail: format!("fail point: {detail}"),
+    crate::fail_point_err!(
+        crate::fail_point::FailScope::Node(state.node_id),
+        "restore::reissue::before_edges",
+        |detail: String| {
+            crate::Error::Internal {
+                detail: format!("fail point: {detail}"),
+            }
         }
-    });
+    );
     let (versions, edges) = edge_units(state, tenant_id, target, rows.edges).await?;
     stats.edges = versions;
     // Both homes of an edge commit in one transaction. Each version is

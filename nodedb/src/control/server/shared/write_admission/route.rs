@@ -3,17 +3,18 @@
 //! Submit a gate-rejected write through the deterministic Calvin scheduler.
 //!
 //! When [`admit`](super::admit) returns [`WriteAdmission::RouteToCalvin`](super::WriteAdmission),
-//! the caller hands the single write here. Two shapes reach this path, each
-//! routed through the existing Calvin entry point that builds a VALID write set
-//! for it:
+//! the caller hands the single write here. A data-group leader's gate routes a
+//! replicated write here too, through its proposer. Two shapes reach this
+//! path, each routed through the existing Calvin entry point that builds a
+//! VALID write set for it:
 //!
-//! - A **point write** whose key a pending commit holds (Document / KV / Vector /
-//!   single-home edge): submitted as a single-vshard
-//!   [`build_single_vshard_tx_class`] + [`submit_calvin_routed`]. Because it
-//!   targets one vshard, it uses the single-vshard opt-in rather than the strict
-//!   multi-vshard builder. The scheduler acquires its key on the SAME lock
-//!   table the gate probed, queues FIFO behind the holder, and applies it once
-//!   released.
+//! - A **write with a static write set** whose key a pending commit holds (a
+//!   row write, a collection-wide write, an edge on several homes): submitted
+//!   as a single-vshard [`build_single_vshard_tx_class`] +
+//!   [`submit_calvin_routed`]. A write on one vshard uses the single-vshard
+//!   opt-in rather than the strict multi-vshard builder. The scheduler
+//!   acquires its keys on the SAME lock table the gate probed, queues FIFO
+//!   behind the holder, and applies it once released.
 //! - A **predicate write** (`BulkUpdate` / `BulkDelete` on a SINGLE
 //!   collection): its write set is not statically known, so it goes through
 //!   [`dispatch_dependent_edge_recon`], which runs the pre-exec
@@ -42,6 +43,7 @@ use crate::control::planner::calvin::{
     submit_calvin_routed,
 };
 use crate::control::state::SharedState;
+use crate::event::EventSource;
 use crate::types::{DatabaseId, RequestId, TenantId, VShardId};
 use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
@@ -59,15 +61,28 @@ pub fn bare_ok_response(request_id: RequestId) -> Response {
         payload: crate::bridge::envelope::Payload::from_vec(Vec::new()),
         watermark_lsn: crate::types::Lsn::ZERO,
         error_code: None,
-        read_set_valid: None,
-        read_version_lsn: crate::types::Lsn::ZERO,
+        stage_vote: None,
+        read_versions: crate::types::ReadVersions::new(),
         write_set: Vec::new(),
     }
+}
+
+/// Whether the scheduler applies `plan` exactly as its writer asked when the
+/// gate routes it. A static write set carries `event_source`. The
+/// reconnaissance of a predicate write applies it as a client write. No
+/// route carries a restore id. A write the route cannot keep waits for its
+/// keys at the gate instead.
+pub fn calvin_route_keeps(plan: &PhysicalPlan, event_source: EventSource, restore_id: u64) -> bool {
+    restore_id == 0 && (matches!(event_source, EventSource::User) || !is_dependent_predicate(plan))
 }
 
 /// Route one write to the deterministic scheduler and return the applied
 /// `Response`. `None` for a plain write with no RETURNING rows — the caller then
 /// synthesizes its normal command-tag response.
+///
+/// A static write set applies under `event_source` on every replica. The
+/// gate routes a predicate write only when it is a client's (see
+/// [`calvin_route_keeps`]).
 ///
 /// Returns a boxed future (rather than an `async fn`) to break the async
 /// recursion cycle described in the module docs.
@@ -77,6 +92,7 @@ pub fn route_write_to_calvin<'a>(
     database_id: DatabaseId,
     vshard_id: VShardId,
     plan: PhysicalPlan,
+    event_source: EventSource,
 ) -> Pin<Box<dyn Future<Output = crate::Result<Option<Response>>> + Send + 'a>> {
     Box::pin(async move {
         let task = PhysicalTask {
@@ -101,131 +117,19 @@ pub fn route_write_to_calvin<'a>(
             return Ok(recon.apply_result);
         }
 
-        // Point write: its key is known, so build a static TxClass and submit it.
+        // A static write set: build a static TxClass and submit it.
         //
-        // This write reaches here ONLY because `admit` returned `RouteToCalvin`:
-        // a pending commit already holds its key. A point write targets a single
-        // vshard, so it must be built with the single-vshard opt-in — it sequences
+        // This write reaches here ONLY because a gate returned `RouteToCalvin`:
+        // a pending commit already holds one of its keys. A write on a single
+        // vshard must be built with the single-vshard opt-in — it sequences
         // through the scheduler to serialize on the SAME shared per-vShard
         // `LockManager` the holder is on, rather than being rejected as a
-        // (spuriously) single-vshard multi-shard dispatch.
-        // A timeseries ingest resolves to its rows here, before it is
-        // sequenced: every replica resolves a sequenced write on its own.
-        let resolved = crate::control::write_resolve::resolve_tasks_for_log(
-            shared,
-            std::slice::from_ref(&task),
-        )
-        .await?;
-        let tasks = resolved.unwrap_or_else(|| vec![task]);
-        // The submitter's resolve knows the rows the ingest stores and the
-        // lines it rejected. The client reads both from this answer, not
-        // from the scheduler's.
-        let counts = match tasks.first() {
-            Some(task) => crate::control::write_resolve::resolved_ingest_counts(&task.plan)?,
-            None => None,
-        };
-        let tx_class = build_single_vshard_tx_class(&tasks, tenant_id, &[])?;
-        let applied = submit_calvin_routed(shared, tx_class).await?;
-        Ok(with_ingest_counts(applied, counts))
+        // (spuriously) single-vshard multi-shard dispatch. The gate never
+        // routes an append (timeseries ingest, columnar insert), so no
+        // unresolved ingest reaches the builder.
+        let mut tx_class =
+            build_single_vshard_tx_class(std::slice::from_ref(&task), tenant_id, &[])?;
+        tx_class.set_event_source(event_source.wal_code());
+        submit_calvin_routed(shared, tx_class).await
     })
-}
-
-/// `applied`, carrying the resolved ingest's counts when there are any. The
-/// apply's counts win: its install rejected the rows that conflict with the
-/// schema at its position. The resolve's `counts` answer only when the
-/// apply's answer carries none. An error answer stays as the scheduler gave
-/// it.
-fn with_ingest_counts(applied: Option<Response>, counts: Option<Vec<u8>>) -> Option<Response> {
-    let Some(counts) = counts else {
-        return applied;
-    };
-    match applied {
-        Some(response) if response.status != crate::bridge::envelope::Status::Ok => Some(response),
-        Some(response)
-            if crate::control::write_resolve::carries_applied_ingest_counts(
-                response.payload.as_bytes(),
-            ) =>
-        {
-            Some(response)
-        }
-        Some(response) => Some(Response {
-            payload: crate::bridge::envelope::Payload::from_vec(counts),
-            ..response
-        }),
-        None => {
-            let mut response = bare_ok_response(RequestId::new(0));
-            response.payload = crate::bridge::envelope::Payload::from_vec(counts);
-            Some(response)
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn counts(accepted: u64, rejected: u64) -> Vec<u8> {
-        nodedb_types::json_to_msgpack(&serde_json::json!({
-            "accepted": accepted,
-            "rejected": rejected,
-            "collection": "metrics",
-        }))
-        .expect("encode counts")
-    }
-
-    fn decoded(response: &Response) -> serde_json::Value {
-        let json = crate::data::executor::response_codec::decode_payload_to_json(
-            response.payload.as_bytes(),
-        );
-        sonic_rs::from_str(&json).expect("decode counts")
-    }
-
-    /// A Calvin-routed timeseries ingest answers the rejected count its
-    /// submitter's resolve found, whether or not the scheduler answered.
-    #[test]
-    fn a_routed_ingest_answers_its_resolved_counts() {
-        let bare = with_ingest_counts(None, Some(counts(2, 1))).expect("an answer");
-        assert_eq!(decoded(&bare)["rejected"], serde_json::json!(1));
-
-        let applied = with_ingest_counts(
-            Some(bare_ok_response(RequestId::new(3))),
-            Some(counts(2, 1)),
-        )
-        .expect("an answer");
-        assert_eq!(applied.request_id, RequestId::new(3));
-        assert_eq!(decoded(&applied)["accepted"], serde_json::json!(2));
-        assert_eq!(decoded(&applied)["rejected"], serde_json::json!(1));
-    }
-
-    /// The Calvin completion hands back the flush's answer. When it carries
-    /// the install's counts, the client gets the apply's count: here the
-    /// install rejected one row the resolve accepted.
-    #[test]
-    fn a_routed_ingest_answers_the_apply_counts_when_the_flush_carries_them() {
-        use crate::engine::timeseries::install_counts::{TsInstallCount, TsInstallCounts};
-        let mut flushed = bare_ok_response(RequestId::new(4));
-        flushed.payload = crate::bridge::envelope::Payload::from_vec(
-            TsInstallCounts::new(vec![TsInstallCount {
-                collection: "metrics".into(),
-                accepted: 1,
-                rejected: 2,
-            }])
-            .to_bytes()
-            .expect("encode install counts"),
-        );
-        let applied = with_ingest_counts(Some(flushed), Some(counts(2, 1))).expect("an answer");
-        assert_eq!(decoded(&applied)["accepted"], serde_json::json!(1));
-        assert_eq!(decoded(&applied)["rejected"], serde_json::json!(2));
-        assert_eq!(
-            decoded(&applied)["collection"],
-            serde_json::json!("metrics")
-        );
-    }
-
-    /// A routed write that is not a resolved ingest keeps the scheduler's
-    /// answer.
-    #[test]
-    fn a_routed_non_ingest_keeps_the_scheduler_answer() {
-        assert!(with_ingest_counts(None, None).is_none());
-    }
 }

@@ -13,9 +13,6 @@ use pgwire::api::results::Response;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::control::gateway::GatewayErrorMap;
-use crate::control::planner::calvin::write_class::{
-    plan_counts_toward_statement_tag, plans_have_user_write,
-};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::server::response_shape::redaction::QueryRedaction;
@@ -128,16 +125,15 @@ impl NodeDbPgHandler {
             linearizable: self.sessions.read_consistency(session_id).requires_leader(),
         };
 
-        // A derived implicit-edge write beside the user's own never answers
-        // the statement, exactly as Calvin's deposit rule has it.
-        let has_user_write = plans_have_user_write(tasks.iter().map(|t| &t.plan));
-        let mut fold = GatewayFold::with_capacity(tasks.len());
+        // A derived write beside the user's own never answers the statement,
+        // exactly as Calvin's deposit rule has it.
+        let mut fold = GatewayFold::for_tasks(&tasks);
         for task in tasks {
             let plan_kind = describe_plan(&task.plan);
             // The task moves into authorization below; a row-producing task
             // keeps its plan for shaping the rows it answers with.
             let shape_plan = plan_produces_rows(plan_kind).then(|| task.plan.clone());
-            let counts_toward_tag = plan_counts_toward_statement_tag(&task.plan, has_user_write);
+            let tag_role = fold.role_of(&task.plan);
             let metering_info = PlanMeteringInfo::extract(&task.plan);
             let emitter = crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(
                 &self.state.audit,
@@ -175,7 +171,7 @@ impl NodeDbPgHandler {
                             resp.payload.as_ref(),
                             plan_kind,
                             shape_plan.as_ref(),
-                            counts_toward_tag,
+                            tag_role,
                             &shaping,
                         )?;
                         meter_gateway_task(
@@ -213,7 +209,7 @@ impl NodeDbPgHandler {
                     &[],
                     plan_kind,
                     shape_plan.as_ref(),
-                    counts_toward_tag,
+                    tag_role,
                     &shaping,
                 )?;
             }
@@ -223,7 +219,7 @@ impl NodeDbPgHandler {
                     payload,
                     plan_kind,
                     shape_plan.as_ref(),
-                    counts_toward_tag,
+                    tag_role,
                     &shaping,
                 )? {
                     task_rows = Some(task_rows.unwrap_or(0) + rows);

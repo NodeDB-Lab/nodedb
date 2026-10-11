@@ -8,16 +8,16 @@
 //! An interactive transaction can WRITE several collections and READ another via
 //! a distributed GROUP BY that the planner lowers to `Exchange{ShuffleAggregate}`.
 //! The coordinator fans partial-state PRODUCERs to the source collection's
-//! owner(s); each producer scans the collection and — with the producer-side
-//! read-version fix — reports the scanned collection's `coll_write_lsn` at read
-//! time back on its `ShuffleProduceResponse`. The coordinator max-folds those and
-//! records the aggregate's read-set entry with that version.
+//! owner(s); each producer scans the collection and reports the scanned
+//! collection's write version at read time back on its
+//! `ShuffleProduceResponse`. The coordinator max-folds those and records the
+//! aggregate's read-set entry with that version.
 //!
-//! The shuffle-aggregate resolver must not record `Lsn::ZERO` as the
+//! The shuffle-aggregate resolver must not record `WriteVersion::ZERO` as the
 //! read version. At the cross-shard COMMIT barrier the read-only participant is
-//! revalidated with `coll_write_lsn(coll) <= read_version`; with `read_version =
-//! 0` and any prior write to the collection (`coll_write_lsn > 0`) the comparison
-//! is `>0 <= 0` → false → a SPURIOUS serialization abort (SQLSTATE 40001) for a
+//! revalidated with `write_version(coll) <= read_version`. With a zero read
+//! version and any prior write to the collection, the write version is above
+//! zero, so the comparison is false → a SPURIOUS serialization abort (SQLSTATE 40001) for a
 //! read that was never concurrently written. This suite bounds the behavior from
 //! BOTH sides:
 //!
@@ -148,7 +148,7 @@ async fn spawn_node_with_collections()
     .await;
 
     // Seed metrics with committed low-cardinality GROUP BY rows so the aggregate
-    // read observes real data AND metrics' committed `coll_write_lsn` is non-zero
+    // read observes real data AND metrics' committed write version is non-zero
     // (the exact precondition that made the pre-fix ZERO read-version abort).
     node.client
         .simple_query(&format!(
@@ -197,8 +197,8 @@ async fn spawn_node_with_collections()
 /// version still validates at the barrier and COMMIT must SUCCEED. This is the
 /// direction the producer-side ZERO→real read-version fix unblocks: before it,
 /// the shuffle-aggregate recorded read version `0`, and the barrier's
-/// `coll_write_lsn(metrics) <= 0` check (metrics has committed writes, so
-/// `coll_write_lsn > 0`) spuriously aborted the COMMIT with 40001.
+/// `write_version(metrics) <= 0` check (metrics has committed writes, so its
+/// write version is above zero) spuriously aborted the COMMIT with 40001.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shuffle_aggregate_read_commits_when_not_concurrently_written() {
     let (node, _data_dir, metrics, w1, w2) = spawn_node_with_collections().await;
@@ -246,7 +246,7 @@ async fn shuffle_aggregate_read_commits_when_not_concurrently_written() {
     )
     .await;
 
-    // Both committed writes become visible (Calvin flush lands asynchronously).
+    // Both committed writes become visible (the redo install lands asynchronously).
     wait_for_async(
         "both committed writes visible after COMMIT",
         Duration::from_secs(10),
@@ -273,7 +273,7 @@ async fn shuffle_aggregate_read_commits_when_not_concurrently_written() {
 /// The precision control: the SAME shape, but a confirmed-visible concurrent write
 /// advances `metrics` past the captured aggregate read version. COMMIT must STILL
 /// abort with SQLSTATE 40001 — the barrier revalidates metrics' read-only slice
-/// at its real `read_lsn` and finds it stale. Guards the fix against becoming a
+/// at its real read version and finds it stale. Guards the fix against becoming a
 /// blanket "always valid".
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shuffle_aggregate_read_occ_aborts_on_stale_read() {

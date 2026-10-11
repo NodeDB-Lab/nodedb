@@ -39,8 +39,8 @@ pub fn spawn_checkpoint_task(
     );
     tokio::spawn(async move {
         // Boot recovery reads the WAL on disk until the gateway opens: data
-        // groups replay their Raft logs against it, and each Calvin scheduler
-        // scans it for applied markers. A replayed core reports its floor at
+        // groups replay their Raft logs against it, and Calvin boot recovery
+        // scans it for stamped redo records. A replayed core reports its floor at
         // once, so a cycle in that window can delete segments those readers
         // still need. The first cycle waits for the gateway.
         let started = tokio::select! {
@@ -104,7 +104,7 @@ pub fn spawn_checkpoint_task(
                     timeout: budget,
                     archiver: archiver.as_mut(),
                     catalog: Some(shared.credentials.catalog()),
-                    calvin_mirrors: Some(shared.authorization_fence.calvin_mirrors()),
+                    calvin_ledgers: Some(&shared.calvin.applied),
                 });
                 if tokio::time::timeout(budget, cycle).await.is_err() {
                     warn!(
@@ -127,7 +127,7 @@ pub fn spawn_checkpoint_task(
                 timeout: config.core_timeout(),
                 archiver: archiver.as_mut(),
                 catalog: Some(shared.credentials.catalog()),
-                calvin_mirrors: Some(shared.authorization_fence.calvin_mirrors()),
+                calvin_ledgers: Some(&shared.calvin.applied),
             })
             .await;
         }

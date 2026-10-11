@@ -7,6 +7,7 @@
 //! isolated.
 
 pub mod array;
+pub mod calvin_reply;
 pub mod cluster_array;
 pub mod cluster_event;
 pub mod collection;
@@ -37,6 +38,10 @@ pub mod vector;
 pub mod wire;
 
 pub use array::{ArrayBinaryOp, ArrayOp, ArrayReducer};
+pub use calvin_reply::{
+    CalvinInstall, CalvinInstalledTimeseriesSpec, CalvinPostImagesSpec, CalvinReplyRow,
+    CalvinReplySpec, CalvinResolved, CalvinRowEngine,
+};
 pub use cluster_array::ClusterArrayOp;
 pub use cluster_event::{ClusterEventOp, MAX_REMOTE_CDC_COMMITTED_OFFSETS};
 pub use columnar::{ColumnarInsertIntent, ColumnarOp};

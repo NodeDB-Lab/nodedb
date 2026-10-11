@@ -195,8 +195,9 @@ pub enum RecordType {
     /// uses, so replay reconstitutes a `WalRecord` per sub-op and feeds it to
     /// that engine's existing replay path — no tag loss, no re-encoding.
     ///
-    /// May also carry a Calvin stamp so a cross-shard transaction's durable
-    /// record doubles as its sequencer applied-marker.
+    /// May also carry a Calvin stamp. A stamped record marks its Calvin slice
+    /// applied on its vShard.
+    ///
     /// Payload: zerompk-encoded `RedoRecord` (see the `wal::redo` module).
     ///
     /// Required: skipping this record on replay would drop a committed
@@ -257,21 +258,6 @@ pub enum RecordType {
     /// Required: a replay that skipped this record would leave purged
     /// versions resurrected and diverge from the leader's state.
     TemporalPurge = 103 | 0x8000,
-
-    /// Calvin scheduler: marks a sequenced transaction as applied on this
-    /// vshard.
-    ///
-    /// Written by the Calvin executor after a `MetaOp::CalvinExecute` batch
-    /// commits successfully. The scheduler's rebuild path scans the WAL for
-    /// these records to determine `last_applied_epoch` on restart.
-    ///
-    /// Payload: zerompk-encoded `CalvinAppliedPayload { epoch: u64,
-    /// position: u32, vshard_id: u32 }`.
-    ///
-    /// Required: a replay that skipped this record would leave the scheduler
-    /// believing the transaction was not applied and re-dispatch it after
-    /// restart, causing double-application.
-    CalvinApplied = 110 | 0x8000,
 
     /// Sync idempotency watermark — advances the durable per-stream
     /// high-watermark for a given producer so the receiver can safely
@@ -423,6 +409,16 @@ pub enum RecordType {
     ///
     /// Required: skipping it leaves every truncated edge live after replay.
     GraphEdgeCut = 68 | 0x8000,
+
+    /// One piece of a chunk of a chunked transaction redo stream, or the
+    /// close of such a stream. Payload: a `RedoChunkRecord`. A chunk past the
+    /// WAL record limit spans several pieces, and only its last piece carries
+    /// the chunk entry's apply key. Boot rebuilds every open stream from these
+    /// records. Never replayed into any engine.
+    ///
+    /// Required: skipping it loses the bytes an open stream holds, and the
+    /// stream's final entry then refuses on this replica alone.
+    RedoChunk = 69 | 0x8000,
 }
 
 impl RecordType {
@@ -468,7 +464,6 @@ impl RecordType {
             x if x == 101 | 0x8000 => Some(Self::CollectionTombstoned),
             102 => Some(Self::TimeAnchor),
             x if x == 103 | 0x8000 => Some(Self::TemporalPurge),
-            x if x == 110 | 0x8000 => Some(Self::CalvinApplied),
             x if x == 53 | 0x8000 => Some(Self::SyncSeqAdvance),
             x if x == 54 | 0x8000 => Some(Self::FtsIndex),
             x if x == 55 | 0x8000 => Some(Self::FtsDelete),
@@ -484,6 +479,7 @@ impl RecordType {
             x if x == 66 | 0x8000 => Some(Self::SnapshotInstalled),
             x if x == 67 | 0x8000 => Some(Self::WriteGroup),
             x if x == 68 | 0x8000 => Some(Self::GraphEdgeCut),
+            x if x == 69 | 0x8000 => Some(Self::RedoChunk),
             _ => None,
         }
     }
@@ -521,6 +517,7 @@ mod tests {
         // Without the flag an older reader skips the abort marker and replays
         // the refused write it names — the exact bug it exists to prevent.
         assert!(RecordType::is_required(RecordType::WriteAborted as u32));
+        assert!(RecordType::is_required(RecordType::RedoChunk as u32));
     }
 
     #[test]
@@ -560,7 +557,6 @@ mod tests {
             RecordType::CollectionTombstoned,
             RecordType::TimeAnchor,
             RecordType::TemporalPurge,
-            RecordType::CalvinApplied,
             RecordType::SyncSeqAdvance,
             RecordType::FtsIndex,
             RecordType::FtsDelete,
@@ -576,6 +572,7 @@ mod tests {
             RecordType::SnapshotInstalled,
             RecordType::WriteGroup,
             RecordType::GraphEdgeCut,
+            RecordType::RedoChunk,
         ] {
             assert_eq!(RecordType::from_raw(ty as u32), Some(ty));
         }

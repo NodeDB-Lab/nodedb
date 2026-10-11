@@ -23,7 +23,7 @@ use crate::Error;
 use crate::control::cluster::calvin::executor::ollp::error::OllpError;
 use crate::control::planner::calvin::preexec::PreexecScan;
 use crate::control::planner::calvin::{
-    DependentOutcome, DependentRetryArgs, build_single_vshard_dependent_tx_class,
+    DependentOutcome, DependentRetryArgs, build_single_vshard_predicted_tx_class,
     is_dependent_predicate, predicate_class_for_filters, run_dependent_with_retry,
     submit_calvin_routed_assign,
 };
@@ -134,7 +134,7 @@ pub fn is_edge_recon_plan(plan: &nodedb_physical::physical_plan::PhysicalPlan) -
 ///    `submit_calvin_routed_assign`) that mirrors the doc write together with
 ///    the derived EdgeDelete/EdgePut tasks, ATOMICALLY. A delete adds one
 ///    `NodeEdgeGuard` per node and one `EdgeDelete` per incident edge.
-/// 4. On a POST-EXEC predicate-drift mismatch or a guard's drift abort,
+/// 4. On a `PredictionDrift` abort verdict, from a participant or a guard,
 ///    re-scans (FRESH reconnaissance) and resubmits, via
 ///    [`run_dependent_with_retry`].
 ///
@@ -146,7 +146,7 @@ pub fn is_edge_recon_plan(plan: &nodedb_physical::physical_plan::PhysicalPlan) -
 /// [`plan_needs_implicit_edge_recon`]) so it does not have to be re-derived.
 ///
 /// The `TxClass` this builds accepts a write set on one vShard
-/// ([`build_single_vshard_dependent_tx_class`]). A delete whose row, node
+/// ([`build_single_vshard_predicted_tx_class`]). A delete whose row, node
 /// guard and edges all home on one vShard is a legitimate one-vShard
 /// transaction, and so is a contended single-collection predicate write
 /// routed here by the write-admission gate.
@@ -213,7 +213,7 @@ async fn dispatch_dependent_edge_recon_inner(
 
     // OLLP path: the coordinator owns the retry loop. `run_dependent_with_retry`
     // submits + awaits the assignment/completion via the local registry and, on
-    // a post-exec predicate-drift mismatch, runs a FRESH pre-execution scan
+    // a `PredictionDrift` abort verdict, runs a FRESH pre-execution scan
     // (`rescan`) before resubmitting with the fresh prediction.
     let dep_task = tasks
         .iter()
@@ -384,7 +384,7 @@ async fn dispatch_dependent_edge_recon_inner(
                             t
                         })
                         .collect();
-                    let tx_class = build_single_vshard_dependent_tx_class(
+                    let tx_class = build_single_vshard_predicted_tx_class(
                         &modified_tasks,
                         tenant_id,
                         dep_collection,
@@ -406,7 +406,7 @@ async fn dispatch_dependent_edge_recon_inner(
         }
     };
 
-    // `rescan`: FRESH reconnaissance on each post-exec mismatch or drift.
+    // `rescan`: FRESH reconnaissance on each drift abort.
     let rescan = || {
         reconnoitre(
             state,

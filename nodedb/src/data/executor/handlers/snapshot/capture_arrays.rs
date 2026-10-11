@@ -3,15 +3,15 @@
 //! Tenant snapshot capture of the array engine.
 //!
 //! Every cell version of each of the tenant's arrays in the snapshot's
-//! database is exported, grouped by the vShard its Hilbert prefix routes to.
+//! database is exported, grouped by the vShard its tile's key routes to.
 //! A backup keeps each group on the source node of that vShard, so every
 //! version is captured once.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use nodedb_array::coord::encode::encode_hilbert_prefix;
 use nodedb_array::schema::ArraySchema;
+use nodedb_array::tile::cell_tile_prefix;
 use nodedb_cluster::distributed_array::array_vshard_for_tile;
 
 use crate::data::executor::core_loop::CoreLoop;
@@ -81,7 +81,7 @@ fn by_vshard(
 ) -> crate::Result<BTreeMap<u32, Vec<ArrayCellVersion>>> {
     let mut grouped: BTreeMap<u32, Vec<ArrayCellVersion>> = BTreeMap::new();
     for version in versions {
-        let prefix = match encode_hilbert_prefix(schema, &version.coord) {
+        let prefix = match cell_tile_prefix(schema, &version.coord) {
             Ok(prefix) => prefix,
             Err(_) if version.payload.is_none() => continue,
             Err(e) => {
@@ -152,7 +152,7 @@ mod tests {
         );
         for (vshard, cells) in &grouped {
             for cell in cells {
-                let prefix = encode_hilbert_prefix(&s, &cell.coord).expect("prefix");
+                let prefix = cell_tile_prefix(&s, &cell.coord).expect("prefix");
                 assert_eq!(array_vshard_for_tile(prefix, 8).expect("route"), *vshard);
             }
         }

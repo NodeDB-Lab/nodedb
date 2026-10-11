@@ -8,10 +8,9 @@
 //! version applied below it. So on every replica, and under any clock skew,
 //! a TRUNCATE hides exactly the versions sequenced before it.
 //!
-//! A data-group Raft entry cannot give that. Each replica stamps it from its
-//! own clock, and each replica applies it at its own point among the Calvin
-//! flushes. It also takes no Calvin lock, so a node delete's guard does not
-//! order against it.
+//! A plain data-group Raft entry cannot give that. It carries no Calvin
+//! ordinal, so its edge versions order against no TRUNCATE cut. It also
+//! takes no Calvin lock, so a node delete's guard does not order against it.
 //!
 //! The Raft propose seams (`propose_replicated_entry`, `propose_sync_write`)
 //! hand every edge write here. A session COMMIT that buffered an edge write

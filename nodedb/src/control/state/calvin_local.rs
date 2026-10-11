@@ -7,9 +7,12 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::control::cluster::calvin::scheduler::SequencerProposer;
 use crate::control::cluster::calvin::scheduler::lock::HotKeyTable;
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
+use crate::control::cluster::calvin::scheduler::{
+    CalvinAppliedLedgers, CalvinInboxes, CalvinReadResults, CaughtUpRegistry, SequencerProposer,
+};
+use crate::control::server::shared::write_admission::AdmissionHolds;
 
 use super::calvin_apply_sidecar::CalvinApplySidecar;
 use super::calvin_bases::CalvinBases;
@@ -29,7 +32,7 @@ pub struct CalvinLocalState {
     /// session reads. 0 until a scheduler applies an epoch.
     pub last_applied_epoch: Arc<AtomicU64>,
     /// Node-global Calvin observability counters (write versions recorded,
-    /// read-set validation failures, commits flushed/dropped).
+    /// read-set validation failures, commits installed/dropped).
     pub counters: CalvinCounters,
     /// Local, in-process sidecar carrying the applied Data-Plane
     /// [`Response`](crate::bridge::envelope::Response) (affected-count and any
@@ -73,13 +76,32 @@ pub struct CalvinLocalState {
     /// with [`TxnId::AUTOCOMMIT_EPOCH`] to mint holder identities that never
     /// collide with a real Calvin `(epoch, position)` schedule position.
     pub autocommit_lock_seq: AtomicU32,
+    /// The lock keys replicated writes hold on this data-group leader, from
+    /// their propose until the apply loop starts their entries.
+    pub admission_holds: AdmissionHolds,
     /// The backup cut markers each local scheduler passed.
     pub cuts: CalvinCuts,
+    /// Each ordered cut's barrier per data group: where this node proposed
+    /// it while it led the group, and where this node applied it.
+    pub cut_barriers: crate::control::backup::cut_order::CutBarriers,
     /// Where this node's Calvin state of each vShard is whole from.
     pub bases: CalvinBases,
     /// Hands this node's sequencer entries to the sequencer Raft group. Set
     /// once the schedulers start; unset on a node that runs none.
     pub sequencer_proposer: OnceLock<Arc<dyn SequencerProposer>>,
+    /// Which Calvin positions this node's replica of each vShard applied.
+    /// Boot recovery fills it before the data-group apply loop starts.
+    pub applied: CalvinAppliedLedgers,
+    /// Whether each running scheduler reached its rebuild target. Startup
+    /// reads it before it opens the client gateway.
+    pub caught_up: CaughtUpRegistry,
+    /// The inbox of each running scheduler: the data-group apply loop tells
+    /// it how each stamped Calvin redo concluded.
+    pub inboxes: CalvinInboxes,
+    /// Dependent-read barrier events of each vShard that wait for its
+    /// scheduler: read results and timeouts the data-group apply loop
+    /// applied before the scheduler took them.
+    pub read_results: CalvinReadResults,
 }
 
 impl CalvinLocalState {
@@ -92,15 +114,23 @@ impl CalvinLocalState {
                 read_set_validation_failures: Arc::new(AtomicU64::new(0)),
                 commits_flushed: Arc::new(AtomicU64::new(0)),
                 commits_dropped: Arc::new(AtomicU64::new(0)),
+                redo_copies_skipped: Arc::new(AtomicU64::new(0)),
+                stage_restages: Arc::new(AtomicU64::new(0)),
             },
             apply_results: CalvinApplySidecar::default(),
             lock_managers: Arc::new(Mutex::new(BTreeMap::new())),
             hot_key_table: Arc::new(Mutex::new(HotKeyTable::new())),
             promotion_senders: Arc::new(Mutex::new(BTreeMap::new())),
             autocommit_lock_seq: AtomicU32::new(0),
+            admission_holds: AdmissionHolds::new(),
             cuts: CalvinCuts::default(),
+            cut_barriers: crate::control::backup::cut_order::CutBarriers::new(),
             bases: CalvinBases::default(),
             sequencer_proposer: OnceLock::new(),
+            applied: CalvinAppliedLedgers::default(),
+            caught_up: CaughtUpRegistry::default(),
+            inboxes: CalvinInboxes::default(),
+            read_results: CalvinReadResults::default(),
         }
     }
 }

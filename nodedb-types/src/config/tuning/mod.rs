@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod bitemporal;
+mod calvin;
 mod config;
 mod data_plane;
 mod engines;
@@ -11,6 +12,7 @@ mod scheduler;
 mod shutdown;
 
 pub use bitemporal::BitemporalTuning;
+pub use calvin::CalvinTuning;
 pub use config::TuningConfig;
 pub use data_plane::{DataPlaneTuning, QueryTuning};
 pub use engines::{

@@ -257,13 +257,13 @@ pub async fn resolve_shuffle_aggregate(
         produce_futures.push(send_produce(transport, node, req));
     }
     // Await ALL producers; any error fails the whole shuffle (no partial result).
-    // Max-fold every producer's observed per-collection read-version LSN: the
-    // producers all scan the SAME single source collection, so the max is that
-    // collection's `coll_write_lsn` at read time — the sound comparand the
-    // coordinator records for cross-shard OCC read validation of this aggregate.
-    let mut max_read_version_lsn: u64 = 0;
+    // Fold every producer's observed read versions: the producers all scan the
+    // SAME single source collection, so the fold holds that collection's
+    // version on each vShard at read time: the comparand the coordinator
+    // records for cross-shard OCC read validation of this aggregate.
+    let mut read_versions = crate::types::ReadVersions::new();
     for result in join_all(produce_futures).await {
-        max_read_version_lsn = max_read_version_lsn.max(result?);
+        read_versions.merge(&result?);
     }
 
     // 7. After ALL producers succeed, dispatch consumers CONCURRENTLY — one per
@@ -332,16 +332,16 @@ pub async fn resolve_shuffle_aggregate(
     }
     let merged = encode_msgpack_array(&elements);
 
-    // The producers report the source collection's `coll_write_lsn` at read time
-    // on their `ShuffleProduceResponse`; the max-fold above is the read version
-    // this aggregate observed. Pass it as the OCC read-version comparand so an
+    // The producers report the source collection's versions at read time on
+    // their `ShuffleProduceResponse`; the fold above is what this aggregate
+    // observed. Pass it as the OCC read-version comparand so an
     // in-transaction distributed aggregate records a sound read-set entry (the
     // aggregate is single-collection, so `record_read_set` attributes it to the
     // right collection). The core-global `watermark_lsn` is NOT threaded through
     // the shuffle transport and stays `ZERO`; using it as the read version will
     // skip required aborts (it advances on writes to ANY collection).
     Ok(Resolved::Gathered(
-        outcome_to_response(merged, Lsn::ZERO, Lsn::new(max_read_version_lsn)),
+        outcome_to_response(merged, Lsn::ZERO, read_versions),
         Vec::new(),
         Vec::new(),
     ))

@@ -18,10 +18,13 @@ use super::wcc::fan_wcc_all_cores;
 pub struct NodeLevelResult {
     pub payload: Vec<u8>,
     pub watermark_lsn: Lsn,
-    /// Max per-collection read-version LSN of the fanned read. `Lsn::ZERO` for
-    /// non-read results. Distinct from `watermark_lsn` — the comparand for
+    /// The read versions the fanned read observed, one per vShard. Empty for
+    /// non-read results. Distinct from `watermark_lsn`: the comparand for
     /// cross-shard OCC read validation.
-    pub read_version_lsn: Lsn,
+    pub read_versions: crate::types::ReadVersions,
+    /// The plan's one owning core refused it with `NotFound`: a read that
+    /// found no row. `read_versions` holds the versions it observed.
+    pub not_found: bool,
 }
 
 /// Fan `plan` across all local Data-Plane cores, merge per-core payloads, and
@@ -77,7 +80,8 @@ pub(crate) async fn execute_plan_all_local_cores(
                 Ok(NodeLevelResult {
                     payload: envelope,
                     watermark_lsn: outcome.watermark_lsn,
-                    read_version_lsn: Lsn::ZERO,
+                    read_versions: outcome.read_versions,
+                    not_found: false,
                 })
             }
 
@@ -195,8 +199,6 @@ pub(crate) async fn execute_plan_all_local_cores(
             | MetaOp::RebuildIndex { .. }
             | MetaOp::PutSynonymGroup { .. }
             | MetaOp::DeleteSynonymGroup { .. }
-            | MetaOp::RecordCalvinWriteVersions { .. }
-            | MetaOp::CalvinFlush { .. }
             | MetaOp::CalvinDrop { .. } => {
                 generic_gather(state, tenant_id, database_id, plan, trace_id, txn_id).await
             }
@@ -263,16 +265,18 @@ async fn generic_gather(
         )
         .await?;
         return Ok(NodeLevelResult {
+            not_found: crate::control::local_dispatch::is_not_found(&resp),
             payload: resp.payload.to_vec(),
             watermark_lsn: resp.watermark_lsn,
-            read_version_lsn: resp.read_version_lsn,
+            read_versions: resp.read_versions,
         });
     }
     let outcome = gather_all_cores(state, tenant_id, database_id, plan, trace_id, txn_id).await?;
     Ok(NodeLevelResult {
         payload: outcome.merged_array,
         watermark_lsn: outcome.watermark_lsn,
-        read_version_lsn: outcome.read_version_lsn,
+        read_versions: outcome.read_versions,
+        not_found: false,
     })
 }
 
@@ -302,22 +306,21 @@ async fn single_blob_gather(
         gather_every_core(state, tenant_id, database_id, plan, trace_id, "single-blob").await?;
 
     let mut watermark_lsn = Lsn::ZERO;
-    let mut read_version_lsn = Lsn::ZERO;
+    let mut read_versions = crate::types::ReadVersions::new();
     let mut payloads: Vec<Vec<u8>> = Vec::with_capacity(responses.len());
     for resp in responses {
         if resp.watermark_lsn > watermark_lsn {
             watermark_lsn = resp.watermark_lsn;
         }
-        if resp.read_version_lsn > read_version_lsn {
-            read_version_lsn = resp.read_version_lsn;
-        }
+        read_versions.merge(&resp.read_versions);
         payloads.push(resp.payload.as_ref().to_vec());
     }
 
     Ok(NodeLevelResult {
         payload: pick_single_blob(payloads, op)?,
         watermark_lsn,
-        read_version_lsn,
+        read_versions,
+        not_found: false,
     })
 }
 

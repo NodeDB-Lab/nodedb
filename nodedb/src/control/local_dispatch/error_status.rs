@@ -8,6 +8,13 @@
 
 use crate::bridge::envelope::{ErrorCode, Response, Status};
 
+/// Whether the core refused the task with `ErrorCode::NotFound`: a read
+/// that found no row. [`reject_data_plane_error`] passes it as an empty
+/// success, and the flag keeps the verdict for a caller that needs it.
+pub(crate) fn is_not_found(resp: &Response) -> bool {
+    resp.status == Status::Error && resp.error_code.as_deref() == Some(&ErrorCode::NotFound)
+}
+
 /// Reject a Data-Plane error response, keeping its typed code.
 ///
 /// `NotFound` passes: it means the shard holds no slice of the collection,
@@ -55,8 +62,8 @@ mod tests {
             payload: Payload::empty(),
             watermark_lsn: Lsn::ZERO,
             error_code: Some(Box::new(code)),
-            read_set_valid: None,
-            read_version_lsn: Lsn::ZERO,
+            stage_vote: None,
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         }
     }

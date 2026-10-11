@@ -10,7 +10,9 @@
 //!   mints an epoch or an instant at or below a committed one;
 //! - every open multi-part transaction, with the parts already applied, so
 //!   the follower closes it on the same entry as every other replica, and
-//!   never abandons one the others committed.
+//!   never abandons one the others committed;
+//! - whether the captured state holds every committed entry's effect, so a
+//!   follower seeds its epoch from it only when it does.
 //!
 //! The leader captures the snapshot at its applied index, on the Raft tick
 //! thread between apply batches, so it holds exactly the entries through
@@ -20,6 +22,7 @@ use crate::calvin::TxnId;
 use crate::error::ClusterError;
 
 use super::core::{NOT_YET_APPLIED, SequencerStateMachine};
+use super::history::HistoryOrigin;
 
 /// The state the sequencer log built through `applied_index`.
 #[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
@@ -29,6 +32,7 @@ pub struct SequencerSnapshot {
     last_applied_epoch: Option<u64>,
     last_epoch_system_ms: Option<i64>,
     open_txns: Vec<OpenTxnImage>,
+    history_known: bool,
 }
 
 /// One open multi-part transaction in a [`SequencerSnapshot`].
@@ -83,16 +87,27 @@ impl SequencerStateMachine {
             last_applied_epoch: self.last_applied_epoch(),
             last_epoch_system_ms: self.last_epoch_system_ms,
             open_txns: self.open_parts.images(),
+            history_known: self.history.is_known(),
         }
     }
 
     /// Replace the state the log built with `snapshot`, installed as the
     /// group's log boundary. Entries after the snapshot apply on top.
+    ///
+    /// The history origin becomes the snapshot, or stays unknown when the
+    /// capturing replica's history was unknown.
     pub fn restore_snapshot(&mut self, snapshot: SequencerSnapshot) {
         self.last_applied_epoch = snapshot.last_applied_epoch.unwrap_or(NOT_YET_APPLIED);
         self.last_epoch_system_ms = snapshot.last_epoch_system_ms;
         self.last_committed_index = snapshot.applied_index;
         self.open_parts = super::parts::OpenParts::from_images(snapshot.open_txns);
+        self.history = if snapshot.history_known {
+            HistoryOrigin::Snapshot {
+                through: snapshot.applied_index,
+            }
+        } else {
+            HistoryOrigin::Unknown
+        };
     }
 }
 
@@ -211,6 +226,10 @@ mod tests {
         assert_eq!(follower.min_open_parts_index(), Some(1));
         assert_eq!(follower.last_applied_epoch(), Some(0));
         assert_eq!(follower.current_committed_index(), Some(3));
+        assert_eq!(
+            follower.history_origin(),
+            HistoryOrigin::Snapshot { through: 3 }
+        );
 
         follower.apply(4, &encode(&part(1, vshard)));
         assert!(
@@ -221,5 +240,20 @@ mod tests {
             rx.try_recv(),
             Ok(SchedulerInput::TxnPart { index: 1, .. })
         ));
+    }
+
+    /// A snapshot captured with unknown history restores as unknown, so the
+    /// follower never treats it as complete.
+    #[test]
+    fn a_snapshot_of_unknown_history_restores_as_unknown() {
+        let mut leader =
+            SequencerStateMachine::new(HashMap::new(), CalvinCompletionRegistry::new_detached());
+        leader.mark_history_unknown();
+        let snapshot = leader.capture_snapshot(7);
+
+        let mut follower =
+            SequencerStateMachine::new(HashMap::new(), CalvinCompletionRegistry::new_detached());
+        follower.restore_snapshot(snapshot);
+        assert_eq!(follower.history_origin(), HistoryOrigin::Unknown);
     }
 }

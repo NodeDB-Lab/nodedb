@@ -103,7 +103,7 @@ async fn a_calvin_commit_after_the_backup_refuses_the_restore_after_a_restart() 
         "expected the staleness refusal, got: {error}"
     );
     assert!(
-        error.contains("calvin flush"),
+        error.contains("replicated apply"),
         "the refusal must name the Calvin commit as the newer write, got: {error}"
     );
 }

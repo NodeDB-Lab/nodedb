@@ -2,7 +2,7 @@
 
 //! Shared test fixtures for the Calvin scheduler driver's `core` unit tests.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,17 +20,18 @@ use tokio::sync::mpsc;
 
 use crate::bridge::dispatch::{BridgeResponse, CoreChannelDataSide, Dispatcher};
 use crate::bridge::envelope::{
-    Admission, ErrorCode, ExemptReason, Payload, Priority, Request, Response, Status,
+    Admission, ErrorCode, ExemptReason, Payload, Priority, Request, Response, StageVote, Status,
 };
-use crate::control::cluster::calvin::scheduler::driver::barrier::ReadResultEvent;
+use crate::control::cluster::calvin::scheduler::SchedulerConfig;
 use crate::control::cluster::calvin::scheduler::driver::core::scheduler::{
     Scheduler, SchedulerParams,
 };
 use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::CapturingProposer;
-use crate::control::cluster::calvin::scheduler::driver::types::{CommitState, PendingTxn};
+use crate::control::cluster::calvin::scheduler::driver::types::{
+    CommitState, PendingTxn, SliceScope,
+};
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
 use crate::control::cluster::calvin::scheduler::metrics::SchedulerMetrics;
-use crate::control::cluster::calvin::scheduler::{NOT_YET_APPLIED_EPOCH, SchedulerConfig};
 use crate::control::shutdown::ShutdownWatch;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, Lsn, ReadConsistency, RequestId, VShardId};
@@ -50,6 +51,7 @@ pub(super) fn build_test_scheduler(vshard_id: u32) -> (Scheduler, tempfile::Temp
         .pop()
         .expect("one configured core has one data side");
     let shared = SharedState::new(dispatcher, wal).unwrap();
+    let ledger = shared.calvin.applied.get_or_create(vshard_id);
 
     let rt = RoutingTable::uniform(1, &[1], 1);
     let multi_raft = Arc::new(Mutex::new(MultiRaft::new(1, rt, dir.path().to_path_buf())));
@@ -60,7 +62,6 @@ pub(super) fn build_test_scheduler(vshard_id: u32) -> (Scheduler, tempfile::Temp
     )));
 
     let (_tx, receiver) = tokio::sync::mpsc::channel(16);
-    let (_rr_tx, read_result_rx) = tokio::sync::mpsc::channel(16);
     let (_prom_tx, promotion_rx) = tokio::sync::mpsc::unbounded_channel();
     let (verdict_tx, verdict_rx) = tokio::sync::mpsc::channel(16);
     registry.register_verdict_signal_sender(vshard_id, verdict_tx);
@@ -74,18 +75,16 @@ pub(super) fn build_test_scheduler(vshard_id: u32) -> (Scheduler, tempfile::Temp
         multi_raft,
         sequencer_proposer: CapturingProposer::accepting(),
         sequencer_state_machine,
-        // A freshly-built scheduler has applied nothing, so its watermark is the
-        // not-yet-applied sentinel (matching `read_applied_recovery` for a clean
-        // node). Hardcoding `0` here will instead claim epoch 0 is fully applied,
+        // A freshly-built scheduler has applied nothing, so its ledger holds the
+        // not-yet-applied sentinel (matching `recover_all_applied` for a clean
+        // node). A watermark of `0` will instead claim epoch 0 is fully applied,
         // making the exactly-once gate (`AppliedGate::is_applied`) short-circuit
         // every epoch-0 replay before it reaches the lock table — silently
         // defeating the end-to-end drain tests below.
-        fully_applied_epoch: NOT_YET_APPLIED_EPOCH,
-        applied_tail: BTreeSet::new(),
+        ledger,
         rebuild_target_epoch: 0,
         config: SchedulerConfig::default(),
         metrics: SchedulerMetrics::new(),
-        read_result_rx,
         lock_manager,
         promotion_rx,
         registry,
@@ -109,6 +108,7 @@ pub(super) fn build_test_scheduler_with_data_side(
         .pop()
         .expect("one configured core has one data side");
     let shared = SharedState::new(dispatcher, wal).unwrap();
+    let ledger = shared.calvin.applied.get_or_create(vshard_id);
 
     let rt = RoutingTable::uniform(1, &[1], 1);
     let multi_raft = Arc::new(Mutex::new(MultiRaft::new(1, rt, dir.path().to_path_buf())));
@@ -119,7 +119,6 @@ pub(super) fn build_test_scheduler_with_data_side(
     )));
 
     let (_tx, receiver) = tokio::sync::mpsc::channel(16);
-    let (_rr_tx, read_result_rx) = tokio::sync::mpsc::channel(16);
     let (_prom_tx, promotion_rx) = tokio::sync::mpsc::unbounded_channel();
     let (verdict_tx, verdict_rx) = tokio::sync::mpsc::channel(16);
     registry.register_verdict_signal_sender(vshard_id, verdict_tx);
@@ -133,12 +132,10 @@ pub(super) fn build_test_scheduler_with_data_side(
         multi_raft,
         sequencer_proposer: CapturingProposer::accepting(),
         sequencer_state_machine,
-        fully_applied_epoch: NOT_YET_APPLIED_EPOCH,
-        applied_tail: BTreeSet::new(),
+        ledger,
         rebuild_target_epoch: 0,
         config: SchedulerConfig::default(),
         metrics: SchedulerMetrics::new(),
-        read_result_rx,
         lock_manager,
         promotion_rx,
         registry,
@@ -197,9 +194,8 @@ pub(super) fn make_validate_only_txn(epoch: u64, position: u32) -> SequencedTxn 
         engine: EngineTag::Document,
         collection: "test_coll".to_string(),
         key: ReadKeyIdent::Point(KeyRepr::Surrogate(1)),
-        read_lsn: Lsn::ZERO,
+        read_version: nodedb_types::WriteVersion::ZERO,
         home_vshard: None,
-        served_by: 0,
     }]);
     let tx_class = TxClass::new_single_vshard(
         ReadWriteSet::new(vec![]),
@@ -295,6 +291,7 @@ fn filler_request(request_id: RequestId, tenant_id: TenantId) -> Request {
         wal_lsn: None,
         resolved_now_ms: None,
         commit_hlc: None,
+        entry_version: None,
         admission: Admission::Exempt(ExemptReason::Read),
     }
 }
@@ -377,7 +374,6 @@ pub(super) struct RunningScheduler {
     shutdown: ShutdownWatch,
     handle: tokio::task::JoinHandle<()>,
     input_tx: mpsc::Sender<SchedulerInput>,
-    _read_result_tx: mpsc::Sender<ReadResultEvent>,
     _promotion_tx: mpsc::UnboundedSender<Vec<TxnId>>,
 }
 
@@ -409,10 +405,8 @@ impl RunningScheduler {
 /// liveness tick.
 pub(super) fn spawn_scheduler_loop(mut scheduler: Scheduler) -> RunningScheduler {
     let (input_tx, input_rx) = mpsc::channel(16);
-    let (read_result_tx, read_result_rx) = mpsc::channel(16);
     let (promotion_tx, promotion_rx) = mpsc::unbounded_channel();
     scheduler.receiver = input_rx;
-    scheduler.read_result_rx = read_result_rx;
     scheduler.promotion_rx = promotion_rx;
     // The loop's liveness tick fires every quarter of this interval.
     scheduler.config.verdict_stall_warn_ms = 200;
@@ -423,36 +417,58 @@ pub(super) fn spawn_scheduler_loop(mut scheduler: Scheduler) -> RunningScheduler
         shutdown,
         handle,
         input_tx,
-        _read_result_tx: read_result_tx,
         _promotion_tx: promotion_tx,
     }
 }
 
-/// A `PendingTxn` staged and parked awaiting the cross-shard commit verdict.
+/// A `PendingTxn` staged on the leader, its stage answer awaited. Its slice
+/// writes `test_coll`.
 pub(super) fn staged_pending(txn: SequencedTxn, txn_id: TxnId) -> PendingTxn {
+    let mut scope = SliceScope::of_plans(&[]);
+    scope.writes = true;
+    scope.collections = vec!["test_coll".to_string()];
     PendingTxn {
         txn,
         lock_owner: txn_id,
         // no-determinism: test-only dispatch timestamp for a fabricated PendingTxn fixture.
         dispatch_time: Instant::now(),
         has_primary_write: true,
+        raises_write_mark: true,
         has_returning: false,
-        change_sets: Vec::new(),
-        commit_state: Some(CommitState::Staged),
+        commit_state: CommitState::Staged,
+        awaiting: None,
         verdict_deadline: None,
         stage_error: None,
-        redo_records: None,
-        flush_scope: crate::control::cluster::calvin::scheduler::driver::types::FlushScope::default(
-        ),
+        scope,
+        redo: None,
         superseded: false,
         gates: Vec::new(),
         ungated: false,
-        install_permit: None,
     }
 }
 
-/// A staged executor `Response` carrying the given status and read-set vote.
-pub(super) fn staged_response(status: Status, read_set_valid: Option<bool>) -> Response {
+/// A `PendingTxn` a follower holds for its verdict and its redo.
+pub(super) fn following_pending(txn: SequencedTxn, txn_id: TxnId) -> PendingTxn {
+    let mut pending = staged_pending(txn, txn_id);
+    pending.commit_state = CommitState::Following;
+    pending.has_primary_write = false;
+    pending.raises_write_mark = false;
+    pending
+}
+
+/// The answer the apply loop reports for an installed slice.
+pub(super) fn redo_applied(
+    reply: Response,
+) -> crate::control::cluster::calvin::scheduler::CalvinApplyEvent {
+    crate::control::cluster::calvin::scheduler::CalvinApplyEvent::RedoApplied {
+        reply,
+        primary_write: true,
+        returning: false,
+    }
+}
+
+/// An executor `Response` carrying the given status and stage vote.
+pub(super) fn staged_response(status: Status, stage_vote: Option<StageVote>) -> Response {
     Response {
         request_id: RequestId::new(1),
         status,
@@ -461,8 +477,8 @@ pub(super) fn staged_response(status: Status, read_set_valid: Option<bool>) -> R
         payload: Payload::empty(),
         watermark_lsn: Lsn::ZERO,
         error_code: None,
-        read_set_valid,
-        read_version_lsn: Lsn::ZERO,
+        stage_vote,
+        read_versions: crate::types::ReadVersions::new(),
         write_set: Vec::new(),
     }
 }
@@ -484,14 +500,16 @@ pub(super) fn begin_data_plane_drain(shared: &SharedState) {
         .begin_data_plane_drain();
 }
 
-/// A scheduler on vShard 7 with `txn_id` pending in `state`.
+/// A scheduler on vShard 7 with `txn_id` pending in `state`, its answer to
+/// request 9 awaited.
 pub(super) fn scheduler_with_pending(
     txn_id: TxnId,
     state: CommitState,
 ) -> (Scheduler, tempfile::TempDir) {
     let (mut scheduler, dir) = build_test_scheduler(7);
     let mut pending = staged_pending(make_sequenced_txn(txn_id.epoch, txn_id.position), txn_id);
-    pending.commit_state = Some(state);
+    pending.commit_state = state;
+    pending.awaiting = Some(RequestId::new(9));
     scheduler.pending.insert(txn_id, pending);
     (scheduler, dir)
 }

@@ -201,8 +201,8 @@ fn drain_and_reject(core: &mut CoreLoop, core_id: usize) {
             error_code: Some(Box::new(ErrorCode::Internal {
                 detail: format!("core-{core_id} is degraded after repeated panics"),
             })),
-            read_set_valid: None,
-            read_version_lsn: crate::types::Lsn::ZERO,
+            stage_vote: None,
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         };
         if let Err(e) = core

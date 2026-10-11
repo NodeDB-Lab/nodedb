@@ -55,6 +55,7 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             calvin_submit_inbox: self.calvin_submit_inbox,
             reserve_read: self.reserve_read,
             release_reservation: self.release_reservation,
+            data_propose_gate: self.data_propose_gate,
             auth_lease: self.auth_lease,
             snapshot_builder: self.snapshot_builder,
             snapshot_applier: self.snapshot_applier,
@@ -225,6 +226,19 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
     /// and release reason and releases the reservation.
     pub fn with_release_reservation(mut self, hook: Arc<dyn ReleaseReservation>) -> Self {
         self.release_reservation = Some(hook);
+        self
+    }
+
+    /// Attach the write gate for data-group proposals (builder chain).
+    ///
+    /// The supplied implementation (backed by `nodedb`'s write-admission
+    /// gate) admits every proposal to a data group this node leads, local
+    /// or forwarded, before the entry enters the log.
+    pub fn with_data_propose_gate(
+        mut self,
+        gate: Arc<dyn super::propose_gate::DataProposeGate>,
+    ) -> Self {
+        self.data_propose_gate = Some(gate);
         self
     }
 

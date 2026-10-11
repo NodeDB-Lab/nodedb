@@ -42,6 +42,7 @@ impl From<ClusterError> for ShardErrorWire {
                 Self::GhostNotFound { node_id, shard_id }
             }
             ClusterError::Transport { detail } => Self::Transport { detail },
+            ClusterError::Unanswered { node_id, detail } => Self::Unanswered { node_id, detail },
             ClusterError::ShardTimeout {
                 vshard_id,
                 elapsed_ms,
@@ -175,6 +176,7 @@ impl From<ShardErrorWire> for ClusterError {
                 Self::GhostNotFound { node_id, shard_id }
             }
             ShardErrorWire::Transport { detail } => Self::Transport { detail },
+            ShardErrorWire::Unanswered { node_id, detail } => Self::Unanswered { node_id, detail },
             ShardErrorWire::ShardTimeout {
                 vshard_id,
                 elapsed_ms,

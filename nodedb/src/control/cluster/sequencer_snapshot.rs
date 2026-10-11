@@ -104,28 +104,44 @@ impl SequencerSnapshotStore {
     /// The log then delivers only the entries after the file's index again:
     /// the state machine skips every entry at or below the index it
     /// restored.
+    ///
+    /// A boundary above 0 with no usable file leaves the entries through the
+    /// boundary unrecoverable. The state machine then records its history as
+    /// unknown, so its leader never seeds an epoch from partial state.
     pub fn restore_at_boot(
         &self,
         multi_raft: &nodedb_cluster::multi_raft::MultiRaft,
     ) -> crate::Result<bool> {
-        let path = self.dir.join(SNAPSHOT_FILE);
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(storage_error(&path, "read", e)),
-        };
-        let snapshot = SequencerSnapshot::decode(&bytes).map_err(codec_error)?;
         let Ok((_, boundary, _)) = multi_raft.snapshot_metadata(SEQUENCER_GROUP_ID) else {
             return Ok(false);
         };
-        if snapshot.applied_index() < boundary {
-            return Ok(false);
+        let snapshot = self.read_kept()?;
+        let mut state_machine = self.state_machine.lock().unwrap_or_else(|p| p.into_inner());
+        match snapshot {
+            Some(snapshot) if snapshot.applied_index() >= boundary => {
+                state_machine.restore_snapshot(snapshot);
+                Ok(true)
+            }
+            _ => {
+                if boundary > 0 {
+                    state_machine.mark_history_unknown();
+                }
+                Ok(false)
+            }
         }
-        self.state_machine
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .restore_snapshot(snapshot);
-        Ok(true)
+    }
+
+    /// The kept snapshot, or `None` when no file exists.
+    fn read_kept(&self) -> crate::Result<Option<SequencerSnapshot>> {
+        let path = self.dir.join(SNAPSHOT_FILE);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(storage_error(&path, "read", e)),
+        };
+        SequencerSnapshot::decode(&bytes)
+            .map(Some)
+            .map_err(codec_error)
     }
 }
 

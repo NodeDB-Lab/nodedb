@@ -17,6 +17,8 @@
 //!
 //! Both dispatch to the Data Plane as dedicated KvOp variants. The entire
 //! read-validate-write executes in a single TPC core pass — no TOCTOU race.
+//! A `TRANSFER_ITEM` between collections on two vShards runs as one
+//! read-dependent Calvin transaction instead (see `transfer_cross_shard`).
 
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::session::DmlTxnCtx;
@@ -134,22 +136,13 @@ pub async fn transfer_item(
     let source_owner = unquote(&args[3]);
     let dest_owner = unquote(&args[4]);
 
-    // Cross-collection transfers must be on the same vshard.
-    // Validate this upfront to prevent silent failures.
+    // A move between collections on two vShards runs as one read-dependent
+    // Calvin transaction. A move within one vShard runs on its core.
     let vshard_src =
         nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, &source_collection).vshard();
     let vshard_dst =
         nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, &dest_collection).vshard();
-    if source_collection != dest_collection && vshard_src != vshard_dst {
-        return Err(ddl_err(
-            "0A000",
-            format!(
-                "TRANSFER_ITEM: cross-shard transfer not supported \
-                 (source '{}' and dest '{}' map to different vShards)",
-                source_collection, dest_collection
-            ),
-        ));
-    }
+    let cross_shard = vshard_src != vshard_dst;
 
     let item_key = format!("{source_owner}:{item_id}");
     let dest_key = format!("{dest_owner}:{item_id}");
@@ -186,6 +179,18 @@ pub async fn transfer_item(
         source_rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         dest_rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
     });
+
+    if cross_shard {
+        return super::transfer_cross_shard::transfer_item_across_shards(
+            state,
+            identity,
+            txn_ctx,
+            plan,
+            [source_collection.as_str(), dest_collection.as_str()],
+            vshard_src,
+        )
+        .await;
+    }
 
     dispatch_and_respond(
         state,

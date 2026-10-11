@@ -29,10 +29,9 @@ pub type GroupMarkEntry = (u64, u64, u8, String, u64);
 /// The apply path that recorded a mark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkSite {
-    /// A committed data-group entry.
+    /// A committed data-group entry, a committed Calvin slice's install
+    /// included.
     ReplicatedApply,
-    /// A committed Calvin transaction's install.
-    CalvinFlush,
     /// A write a RESTORE re-issued.
     Restore,
 }
@@ -42,7 +41,6 @@ impl MarkSite {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ReplicatedApply => "replicated apply",
-            Self::CalvinFlush => "calvin flush",
             Self::Restore => "restore re-issue",
         }
     }
@@ -51,7 +49,6 @@ impl MarkSite {
     pub fn code(self) -> u8 {
         match self {
             Self::ReplicatedApply => 0,
-            Self::CalvinFlush => 1,
             Self::Restore => RESTORE_SITE_CODE,
         }
     }
@@ -59,7 +56,6 @@ impl MarkSite {
     /// The site a persisted or wire code names.
     pub fn from_code(code: u8) -> Self {
         match code {
-            1 => Self::CalvinFlush,
             RESTORE_SITE_CODE => Self::Restore,
             _ => Self::ReplicatedApply,
         }
@@ -293,7 +289,7 @@ mod tests {
     fn a_mark_only_rises() {
         let marks = TenantMarks::default();
         marks.raise(1, 7, 100, MarkSite::ReplicatedApply, Some("docs"));
-        marks.raise(1, 7, 50, MarkSite::CalvinFlush, None);
+        marks.raise(1, 7, 50, MarkSite::ReplicatedApply, None);
         let mark = marks.get(1, 7).expect("mark");
         assert_eq!(mark.hlc, 100);
         assert_eq!(mark.collection.as_deref(), Some("docs"));
@@ -339,7 +335,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let catalog = SystemCatalog::open(&dir.path().join("system.redb")).expect("catalog");
         let marks = TenantMarks::default();
-        marks.raise(3, 1, 900, MarkSite::CalvinFlush, Some("orders"));
+        marks.raise(3, 1, 900, MarkSite::ReplicatedApply, Some("orders"));
         marks.raise_restore(4, 1, 950, Some("orders"), 5);
         marks.persist(&catalog).expect("persist");
 
@@ -348,7 +344,7 @@ mod tests {
             reloaded.get(3, 1),
             Some(GroupMark {
                 hlc: 900,
-                site: MarkSite::CalvinFlush,
+                site: MarkSite::ReplicatedApply,
                 collection: Some("orders".to_owned()),
                 restore_id: 0,
             })

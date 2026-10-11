@@ -7,7 +7,7 @@
 //! `ArrayStore::memtable` is a plain in-memory `Memtable` (see
 //! `engine::array::memtable`). Every `INSERT INTO ARRAY` / `DELETE FROM ARRAY`
 //! lands there and advances the core watermark (`dispatch::array::mutate`
-//! calls `note_write_lsn` with the Control Plane's `wal_lsn`). The periodic
+//! calls `note_write` with the Control Plane's `wal_lsn`). The periodic
 //! checkpoint reports those writes as durable, and the manager then removes
 //! the `ArrayPut` / `ArrayDelete` records below that LSN. The checkpoint must
 //! therefore flush every memtable first. An explicit `NDARRAY_FLUSH` and the
@@ -275,6 +275,7 @@ mod tests {
                     wal_lsn: None,
                     resolved_now_ms: None,
                     commit_hlc: None,
+                    entry_version: None,
                     admission: crate::bridge::envelope::Admission::Admitted,
                 }))
                 .expect("push request");

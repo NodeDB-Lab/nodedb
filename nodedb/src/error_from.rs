@@ -250,9 +250,15 @@ impl From<nodedb_cluster::rpc_codec::TypedClusterError> for Error {
                     descriptor: collection,
                 }
             }
-            TypedClusterError::DeadlineExceeded { .. } => Error::DeadlineExceeded {
-                request_id: crate::types::RequestId::new(0),
-            },
+            TypedClusterError::DeadlineExceeded { elapsed_ms } => {
+                tracing::warn!(
+                    elapsed_ms,
+                    "a remote node reported the request's deadline exceeded"
+                );
+                Error::DeadlineExceeded {
+                    request_id: crate::types::RequestId::new(0),
+                }
+            }
             // A remote shard's Data-Plane verdict, verbatim: rebuilding the
             // code keeps the SQLSTATE `error_classify` renders locally.
             TypedClusterError::DataPlane { code } => Error::DataPlane(code.into()),

@@ -31,15 +31,15 @@ pub(in crate::control::server::graph_dispatch) struct DispatchSuperstepParams<'a
     pub(in crate::control::server::graph_dispatch) linearizable: bool,
 }
 
-/// One owner node's answer to a graph superstep: its payload and the highest
-/// watermark its cores served the plan at.
+/// One owner node's answer to a graph superstep: its payload and the
+/// versions its cores reported.
 pub(in crate::control::server::graph_dispatch) struct NodeRead {
     pub(in crate::control::server::graph_dispatch) payload: Payload,
-    pub(in crate::control::server::graph_dispatch) watermark_lsn: crate::types::Lsn,
+    pub(in crate::control::server::graph_dispatch) read_versions: crate::types::ReadVersions,
 }
 
 /// Dispatch a single already-built graph-superstep `plan` to one owner node and
-/// return its node-level payload and served watermark. The LOCAL node fans the plan across all its
+/// return its node-level payload and reported versions. The LOCAL node fans the plan across all its
 /// Data-Plane cores via `execute_plan_all_local_cores` (per-core results merged
 /// into one payload); a REMOTE node gets one `RouteDecision::Remote` dispatch via
 /// `dispatch_route`. An empty payload denotes a zero-vertex shard — the caller's
@@ -81,7 +81,7 @@ pub(in crate::control::server::graph_dispatch) async fn dispatch_superstep_to_no
         .await?;
         Ok(NodeRead {
             payload: Payload::from_vec(node_result.payload),
-            watermark_lsn: node_result.watermark_lsn,
+            read_versions: node_result.read_versions,
         })
     } else {
         // Remote node: one dispatch via the gateway.
@@ -106,12 +106,7 @@ pub(in crate::control::server::graph_dispatch) async fn dispatch_superstep_to_no
             linearizable,
         })
         .await?;
-        let watermark_lsn = outcome
-            .shard_watermarks
-            .iter()
-            .map(|(_, lsn)| *lsn)
-            .max()
-            .unwrap_or(crate::types::Lsn::ZERO);
+        let read_versions = outcome.read_versions;
         let payload = outcome
             .payloads
             .into_iter()
@@ -122,7 +117,7 @@ pub(in crate::control::server::graph_dispatch) async fn dispatch_superstep_to_no
             })?;
         Ok(NodeRead {
             payload,
-            watermark_lsn,
+            read_versions,
         })
     }
 }

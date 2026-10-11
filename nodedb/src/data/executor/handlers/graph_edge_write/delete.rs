@@ -145,8 +145,8 @@ impl CoreLoop {
                     undo.push(UndoEntry::EdgeWrite(Box::new(edge_undo)));
                 }
                 self.checkpoint_coordinator.mark_dirty("sparse", 1);
-                self.note_edge_write_lsn(task, tid, collection, src_id, label, dst_id);
-                // CDC: emit after `note_edge_write_lsn` so the event LSN matches
+                self.note_edge_write(task, tid, collection, src_id, label, dst_id);
+                // CDC: emit after `note_edge_write` so the event LSN matches
                 // this edge's WAL LSN (the WAL-replay reconstruction key).
                 self.emit_graph_edge_event(
                     task,

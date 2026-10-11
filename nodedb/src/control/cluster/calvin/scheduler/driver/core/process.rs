@@ -3,7 +3,7 @@
 //! New-txn processing, dependent-read barrier setup, and txn-completion
 //! bookkeeping for the Calvin scheduler.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -13,6 +13,17 @@ use nodedb_cluster::calvin::types::{
 
 use super::super::barrier::PendingDependentBarrier;
 use super::scheduler::Scheduler;
+
+/// Who records a finished position in the vShard's applied ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::control::cluster::calvin::scheduler::driver::core) enum LedgerMark {
+    /// The position ended with no log entry: an abort, a slice with no
+    /// write, or an abandoned txn. The scheduler marks it.
+    Terminal,
+    /// The position's stamped redo installed. The apply loop marked it
+    /// before the group's applied index passed the entry.
+    ByApply,
+}
 use crate::control::cluster::calvin::scheduler::lock_manager::{AcquireOutcome, TxnId};
 
 /// Epochs a read reservation can live before the scheduler reaps it as orphaned.
@@ -53,7 +64,11 @@ impl Scheduler {
             SchedulerInput::Txn(txn) => self.process_or_hold_for_metadata(*txn),
             SchedulerInput::Reserve { owner, key } => self.install_reservation(owner, key),
             SchedulerInput::Release { owner, reason } => self.release_reservation(owner, reason),
-            SchedulerInput::CutMarker { hlc } => self.receive_cut_marker(hlc),
+            SchedulerInput::CutMarker {
+                hlc,
+                restore_point,
+                barrier,
+            } => self.receive_cut_marker(hlc, restore_point, barrier),
             SchedulerInput::TxnPart {
                 txn,
                 index,
@@ -144,13 +159,12 @@ impl Scheduler {
         self.applied
             .note_expected(txn.epoch, txn.position, txn.epoch_vshard_txn_count);
 
-        // Exact per-position skip: never re-apply a position that already
-        // committed (its CalvinApplied marker is durable), and never re-run a
-        // whole epoch that has fully folded into the watermark. Re-running an
-        // applied position will re-fire its side effects — this gate IS the
-        // exactly-once mechanism. Skipping a whole epoch on its first completing
-        // position (the previous per-epoch gate) dropped every other position of
-        // that epoch across a restart: a torn transaction.
+        // Exact per-position skip: never re-run a position that already
+        // finished here (its stamped redo installed, or it ended with no log
+        // entry), and never re-run a whole epoch that has fully folded into
+        // the watermark. Re-running an applied position re-fires its side
+        // effects: this gate IS the exactly-once mechanism. A position whose
+        // redo applied before its input arrived is marked here already.
         if self.applied.is_applied(txn.epoch, txn.position) {
             // Learning the count for an already-applied position can complete a
             // historical epoch's applied set (during restart re-fan-out), folding
@@ -221,61 +235,93 @@ impl Scheduler {
         }
     }
 
-    /// Route a ready txn to either a static dispatch or a dependent barrier.
+    /// Route a granted txn: a follower holds it, the leader stages it as a
+    /// static dispatch or a dependent barrier.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn dispatch_or_barrier(
         &mut self,
         txn: SequencedTxn,
         txn_id: TxnId,
         lock_owner: TxnId,
     ) {
-        // A multi-part txn dispatches only once its parts arrived.
+        // A multi-part txn dispatches only once its parts arrived. Every
+        // replica assembles them: a promotion stages the assembled txn.
         let Some(txn) = self.gate_on_parts(txn, txn_id, lock_owner) else {
             return;
         };
-        let is_dependent = txn.tx_class.dependent_reads.is_some();
-        if is_dependent {
-            self.insert_dependent_barrier(txn, txn_id, lock_owner);
+        // Its redo applied while it waited for its locks.
+        if let Some(event) = self.early_applied.remove(&txn_id) {
+            self.complete_applied(txn_id, lock_owner, event);
+            return;
+        }
+        self.route_granted(txn, txn_id, lock_owner);
+    }
+
+    /// Route a granted, assembled txn: a follower holds it, the leader
+    /// stages it as a static dispatch, or routes a dependent-read txn by its
+    /// role on this vShard.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn route_granted(
+        &mut self,
+        txn: SequencedTxn,
+        txn_id: TxnId,
+        lock_owner: TxnId,
+    ) {
+        if !self.role.is_leader() {
+            self.follow(txn, txn_id, lock_owner);
+            return;
+        }
+        if txn.tx_class.dependent_reads.is_some() {
+            self.route_dependent(txn, txn_id, lock_owner);
         } else {
             self.dispatch_txn(txn, txn_id, lock_owner);
         }
     }
 
-    /// Insert a dependent-read barrier for an active vshard.
-    fn insert_dependent_barrier(&mut self, txn: SequencedTxn, txn_id: TxnId, lock_owner: TxnId) {
-        let spec = match &txn.tx_class.dependent_reads {
-            Some(s) => s,
+    /// Open a dependent-read barrier for `txn` on this active vShard.
+    ///
+    /// The barrier waits for the read result of every passive vShard. This
+    /// leader proposes the barrier's timeout entry once it waited past
+    /// `config.passive_timeout()`.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn insert_dependent_barrier(
+        &mut self,
+        txn: SequencedTxn,
+        txn_id: TxnId,
+        lock_owner: TxnId,
+    ) {
+        let passive: BTreeSet<u32> = match &txn.tx_class.dependent_reads {
+            Some(spec) => spec.passive_vshards().collect(),
             None => {
-                // Shouldn't happen; fall through to static dispatch.
-                self.dispatch_txn(txn, txn_id, lock_owner);
+                let error = crate::Error::Internal {
+                    detail: format!(
+                        "calvin txn {}/{} reached a dependent-read barrier with no \
+                         dependent reads",
+                        txn_id.epoch, txn_id.position
+                    ),
+                };
+                self.reject_plan(txn, txn_id, lock_owner, &error);
                 return;
             }
         };
-
-        let waiting_for: std::collections::BTreeSet<u32> =
-            spec.passive_reads.keys().copied().collect();
-        // no-determinism: passive barrier timeout is scheduler observability, not Calvin WAL data
-        let timeout_at = Instant::now() + self.config.passive_timeout();
-
         let barrier = PendingDependentBarrier {
             txn,
             lock_owner,
-            waiting_for,
-            received: BTreeMap::new(),
-            timeout_at,
+            passive,
+            // no-determinism: the leader's clock decides only when it proposes the timeout entry; the entry's place in the log decides the barrier.
+            timeout_due: Instant::now() + self.config.passive_timeout(),
         };
-
-        self.dependent_barrier.insert(txn_id, barrier);
+        self.open_barrier(txn_id, barrier);
     }
 
-    /// Complete an in-flight txn (success or infrastructure error).
+    /// Complete an in-flight txn.
     ///
     /// Releases the lock-table owner recorded in its `pending` entry. A txn
     /// with no `pending` entry has already completed, so this logs and
-    /// releases nothing. A txn that fails before it enters `pending` uses
-    /// [`Self::on_unpending_txn_complete`] instead.
+    /// releases nothing. A multi-part txn whose parts the sequencer abandoned
+    /// never enters `pending`, and uses [`Self::on_unpending_txn_complete`]
+    /// instead. `mark` says who records the position in the ledger.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn on_txn_complete(
         &mut self,
         txn_id: TxnId,
+        mark: LedgerMark,
     ) {
         let Some(pending) = self.pending.remove(&txn_id) else {
             tracing::error!(
@@ -286,26 +332,31 @@ impl Scheduler {
             );
             return;
         };
-        // The flush applied the txn's redo record.
-        if let Some(records) = pending.redo_records {
-            records.settle();
-        }
-        self.release_and_mark_applied(txn_id, pending.lock_owner);
+        self.release_and_mark_applied(txn_id, pending.lock_owner, mark);
     }
 
-    /// Complete a txn that failed before it entered `pending`, releasing the
-    /// locks held under `lock_owner`.
+    /// Complete a txn that never entered `pending`, releasing the locks held
+    /// under `lock_owner`. Only a txn whose stored verdict is already
+    /// `Abort(PartsLost)` completes this way.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn on_unpending_txn_complete(
         &mut self,
         txn_id: TxnId,
         lock_owner: TxnId,
     ) {
-        self.release_and_mark_applied(txn_id, lock_owner);
+        self.release_and_mark_applied(txn_id, lock_owner, LedgerMark::Terminal);
     }
 
     /// Release `lock_owner`'s locks, dispatch the promoted waiters, and mark
     /// `txn_id`'s position applied.
-    fn release_and_mark_applied(&mut self, txn_id: TxnId, lock_owner: TxnId) {
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn release_and_mark_applied(
+        &mut self,
+        txn_id: TxnId,
+        lock_owner: TxnId,
+        mark: LedgerMark,
+    ) {
+        // The txn restages no more, and no barrier of it opens again.
+        let held_log = self.barrier_logs.contains_key(&txn_id);
+        self.forget_held_state(txn_id);
         // Release this txn's locks. `release` promotes any waiter queued behind
         // each freed key to holder (moving it pending -> held) and returns the
         // fully-promoted ids. Those ids are already holders in the table the
@@ -324,12 +375,19 @@ impl Scheduler {
         // so any advertised watermark reflects a FULLY-applied epoch — the value
         // `BEGIN` needs for a torn-free cross-shard snapshot anchor.
         let folded = self.applied.mark_applied(txn_id.epoch, txn_id.position);
-        self.applied_mirror.mark(txn_id.epoch, txn_id.position);
+        match mark {
+            LedgerMark::Terminal => self.ledger.mark_terminal(txn_id.epoch, txn_id.position),
+            LedgerMark::ByApply => {}
+        }
+        // The ledger holds the position now, so the apply loop buffers and
+        // stores no later barrier entry of the txn. Each one it took before
+        // is spent.
+        self.forget_barrier_entries(txn_id, held_log);
         if let Some(watermark) = folded {
             self.publish_watermark(watermark);
         }
-        // A finished txn can give the next committed flush its turn.
-        self.pump_flush_turn();
+        // A finished txn can give the next whole-collection resolve its turn.
+        self.pump_resolve_turn();
     }
 
     /// Dispatch transactions that a `LockManager::release` promoted to holder.
@@ -411,7 +469,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::BTreeMap;
     use std::sync::atomic::Ordering;
 
     use nodedb_cluster::calvin::CalvinCompletionRegistry;
@@ -419,6 +477,7 @@ mod tests {
     use nodedb_physical::physical_plan::meta::MetaOp;
     use nodedb_types::TenantId;
 
+    use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::lead_data_group;
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
         await_data_plane_request, build_test_scheduler, build_test_scheduler_with_data_side,
         fill_tenant_inflight, make_sequenced_txn, make_validate_only_txn, release_filler,
@@ -432,6 +491,7 @@ mod tests {
         let registry = CalvinCompletionRegistry::new_detached();
         let (mut scheduler, _dir, mut data_side) =
             build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        lead_data_group(&mut scheduler);
         let shared = Arc::clone(&scheduler.shared);
         fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
         let watermark_before = shared.calvin.last_applied_epoch.load(Ordering::Acquire);
@@ -457,6 +517,7 @@ mod tests {
         let registry = CalvinCompletionRegistry::new_detached();
         let (mut scheduler, _dir, mut data_side) =
             build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        lead_data_group(&mut scheduler);
         let shared = Arc::clone(&scheduler.shared);
         fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
 
@@ -477,6 +538,7 @@ mod tests {
         let registry = CalvinCompletionRegistry::new_detached();
         let (mut scheduler, _dir, mut data_side) =
             build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        lead_data_group(&mut scheduler);
         let shared = Arc::clone(&scheduler.shared);
         fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
         let tracked_before = shared.tracker.in_flight();
@@ -498,6 +560,7 @@ mod tests {
         let registry = CalvinCompletionRegistry::new_detached();
         let (mut scheduler, _dir, mut data_side) =
             build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        lead_data_group(&mut scheduler);
         let shared = Arc::clone(&scheduler.shared);
         let fillers = fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
 
@@ -538,7 +601,7 @@ mod tests {
             txn_id,
             crate::control::cluster::calvin::scheduler::driver::types::BlockedTxn {
                 txn: txn.clone(),
-                keys: BTreeSet::new(),
+                keys: BTreeMap::new(),
                 // no-determinism: test-only blocked_at timestamp for a fabricated BlockedTxn fixture.
                 blocked_at: Instant::now(),
             },

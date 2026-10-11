@@ -12,8 +12,8 @@ use crate::circuit_breaker::CircuitBreaker;
 use crate::error::{ClusterError, Result};
 
 use super::super::merge::{
-    ArrayAggPartial, any_truncated_before_horizon_agg, merge_slice_rows, merge_slice_rows_sorted,
-    reduce_agg_partials,
+    ArrayAggPartial, any_truncated_before_horizon_agg, merge_read_versions, merge_slice_rows,
+    merge_slice_rows_sorted, reduce_agg_partials,
 };
 use super::super::rpc::ShardRpcDispatch;
 use super::super::scatter::{FanOutParams, FanOutPartitionedParams, fan_out, fan_out_partitioned};
@@ -50,6 +50,8 @@ pub struct ArrayCoordParams {
 pub struct CoordSliceResult {
     pub rows: Vec<Vec<u8>>,
     pub truncated_before_horizon: bool,
+    /// The write versions every shard leg observed, one per vShard.
+    pub read_versions: Vec<nodedb_types::ShardVersion>,
 }
 
 /// Result of a coordinated aggregate fan-out.
@@ -63,6 +65,8 @@ pub struct CoordSliceResult {
 pub struct CoordAggResult {
     pub partials: Vec<ArrayAggPartial>,
     pub truncated_before_horizon: bool,
+    /// The write versions every shard leg observed, one per vShard.
+    pub read_versions: Vec<nodedb_types::ShardVersion>,
 }
 
 /// Compute the inclusive Hilbert-prefix range `[lo, hi]` that vShard `shard_id`
@@ -214,6 +218,7 @@ impl ArrayCoordinator {
         Ok(CoordSliceResult {
             rows,
             truncated_before_horizon,
+            read_versions: merge_read_versions(resps.iter().map(|r| r.read_versions.as_slice())),
         })
     }
 
@@ -263,6 +268,7 @@ impl ArrayCoordinator {
         Ok(CoordAggResult {
             partials: reduce_agg_partials(&resps),
             truncated_before_horizon: any_truncated_before_horizon_agg(&resps),
+            read_versions: merge_read_versions(resps.iter().map(|r| r.read_versions.as_slice())),
         })
     }
 
@@ -339,6 +345,14 @@ mod tests {
 
     use super::*;
 
+    /// The version a mock shard leg reports for its vShard.
+    fn leg_versions(vshard: u32) -> Vec<nodedb_types::ShardVersion> {
+        vec![nodedb_types::ShardVersion {
+            vshard,
+            version: nodedb_types::WriteVersion::logged(1, u64::from(vshard) + 100),
+        }]
+    }
+
     /// Mock dispatch that returns a pre-serialised `ArrayShardSliceResp`.
     struct SliceEchoDispatch {
         /// Rows to return from each shard.
@@ -353,6 +367,7 @@ mod tests {
                 rows_msgpack: self.rows.clone(),
                 truncated: false,
                 truncated_before_horizon: false,
+                read_versions: leg_versions(req.vshard_id),
             };
             let payload = zerompk::to_msgpack_vec(&resp).unwrap();
             Ok(VShardEnvelope::new(
@@ -377,6 +392,7 @@ mod tests {
                 shard_id: req.vshard_id,
                 partials: self.partials.clone(),
                 truncated_before_horizon: false,
+                read_versions: leg_versions(req.vshard_id),
             };
             let payload = zerompk::to_msgpack_vec(&resp).unwrap();
             Ok(VShardEnvelope::new(
@@ -438,6 +454,16 @@ mod tests {
             .expect("coord_slice should succeed");
         assert_eq!(result.rows.len(), 6);
         assert!(!result.truncated_before_horizon);
+        let mut versions = result.read_versions;
+        versions.sort();
+        assert_eq!(
+            versions,
+            [0, 1, 2]
+                .into_iter()
+                .flat_map(leg_versions)
+                .collect::<Vec<_>>(),
+            "the merge keeps every shard leg's version"
+        );
     }
 
     #[tokio::test]
@@ -533,6 +559,7 @@ mod tests {
                     shard_id: req.vshard_id,
                     partials,
                     truncated_before_horizon: false,
+                    read_versions: Vec::new(),
                 };
                 let payload = zerompk::to_msgpack_vec(&resp).unwrap();
                 Ok(VShardEnvelope::new(
@@ -596,6 +623,7 @@ mod tests {
                     shard_id: req.vshard_id,
                     partials,
                     truncated_before_horizon: below,
+                    read_versions: Vec::new(),
                 };
                 let payload = zerompk::to_msgpack_vec(&resp).unwrap();
                 Ok(VShardEnvelope::new(

@@ -90,7 +90,7 @@ impl CoreLoop {
             self.replay_record_unapplied("kv", "field_set_identity", record_lsn, &e.to_string());
             return Some(0);
         }
-        self.note_replay_write_lsn(
+        self.note_replay_write(
             database_id,
             tenant_id,
             &collection,

@@ -199,9 +199,9 @@ impl ExtendedQueryHandler for NodeDbPgHandler {
                 .send(PgWireBackendMessage::NoticeResponse(notice))
                 .await;
         }
-        // Cross-shard graph reads the statement made join the transaction's
+        // Cross-shard reads the statement made join the transaction's
         // read-set.
-        crate::control::server::shared::session::graph_reads::record_pending(
+        crate::control::server::shared::session::pending_shard_reads::record_pending(
             &self.sessions,
             session_id,
         );

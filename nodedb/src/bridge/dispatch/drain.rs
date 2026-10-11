@@ -27,7 +27,6 @@ use crate::bridge::envelope::{ErrorCode, Payload, Status};
 use crate::types::{Lsn, RequestId};
 
 use super::dispatcher::Dispatcher;
-use super::enqueue::release_inflight_slot;
 
 /// Work one core still owes the Control Plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,8 +154,7 @@ impl Dispatcher {
             for rid in ids {
                 // The node is shutting down, and this core publishes nothing more.
                 self.dispatched_lsns.settle(rid);
-                freed |=
-                    release_inflight_slot(&mut self.request_tenant, &mut self.tenant_inflight, rid);
+                freed |= self.tenants.release(rid);
                 abandoned.push(envelope::Response {
                     request_id: RequestId::new(rid),
                     status: Status::Error,
@@ -170,8 +168,8 @@ impl Dispatcher {
                              shutdown drain deadline"
                         ),
                     })),
-                    read_set_valid: None,
-                    read_version_lsn: Lsn::ZERO,
+                    stage_vote: None,
+                    read_versions: crate::types::ReadVersions::new(),
                     write_set: Vec::new(),
                 });
             }

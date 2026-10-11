@@ -172,7 +172,7 @@ impl CoreLoop {
             );
             return 0;
         }
-        self.note_replay_write_lsn(
+        self.note_replay_write(
             database_id,
             tenant_id,
             collection,

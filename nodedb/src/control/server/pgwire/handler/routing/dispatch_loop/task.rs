@@ -15,7 +15,7 @@ use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::request::MaterializedShapeRequest;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::response_shape::types::{
-    ShapedRows, StatementTag, payload_to_dml_outcome,
+    ShapedRows, StatementTag, TaskTagRole, payload_to_dml_outcome,
 };
 use crate::control::server::shared::session::SessionId;
 use crate::types::{DatabaseId, TenantId};
@@ -30,9 +30,9 @@ pub(super) struct ShapeTaskParams<'a> {
     pub(super) response: &'a crate::bridge::envelope::Response,
     pub(super) plan: &'a PhysicalPlan,
     pub(super) plan_kind: PlanKind,
-    /// Whether this task's count answers the statement. False for a derived
-    /// implicit-edge write beside the user's own, which folds as opaque.
-    pub(super) counts_toward_tag: bool,
+    /// Whether this task's count answers the statement. `Opaque` for a
+    /// derived write beside the user's own, which folds as opaque.
+    pub(super) tag_role: TaskTagRole,
     pub(super) projection: Option<&'a OutputSchema>,
     pub(super) result_formats: &'a Format,
     pub(super) session_id: SessionId,
@@ -64,7 +64,7 @@ impl NodeDbPgHandler {
             response,
             plan,
             plan_kind,
-            counts_toward_tag,
+            tag_role,
             projection,
             result_formats,
             session_id,
@@ -113,7 +113,7 @@ impl NodeDbPgHandler {
                 Ok(Some(task_rows))
             }
             ShapeOutcome::Passthrough => {
-                if !counts_toward_tag {
+                if tag_role == TaskTagRole::Opaque {
                     statement_tag.fold_opaque();
                     return Ok(None);
                 }
@@ -121,7 +121,7 @@ impl NodeDbPgHandler {
                     .map_err(|e| error_to_pg(&e))?
                 {
                     Some(outcome) => statement_tag
-                        .fold(outcome)
+                        .fold(tag_role, outcome)
                         .map_err(|e| dml_fold_error_to_pg(&e))?,
                     None => statement_tag.fold_opaque(),
                 }

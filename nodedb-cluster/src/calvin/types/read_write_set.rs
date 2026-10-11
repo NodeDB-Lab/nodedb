@@ -38,10 +38,12 @@ impl ReadWriteSet {
 
     /// Derive the set of vShards participating in this read/write set.
     ///
-    /// For Document/Vector/KV entries the vshard is derived from the
-    /// collection name (collection-level routing, consistent with the
-    /// per-vshard Raft groups that own each collection). KV collections
-    /// are also assigned a single vshard at creation time.
+    /// For Document/Vector/KV/Unique entries, and a Collection entry that
+    /// names no vShards, the vshard is derived from the collection name
+    /// (collection-level routing, consistent with the per-vshard Raft groups
+    /// that own each collection). KV collections are also assigned a single
+    /// vshard at creation time. A Collection entry that names vShards
+    /// participates on exactly those.
     ///
     /// For Edge entries the participating vShards are the edge's
     /// `home_vshards` (the `from_key(src)` / `from_key(dst)` key-hashed
@@ -81,9 +83,19 @@ impl ReadWriteSet {
                         }
                     }
                 }
+                EngineKeySet::Collection { vshards: homes, .. } if !homes.is_empty() => {
+                    for &home in homes.as_slice() {
+                        let vshard = VShardId::new(home);
+                        if seen.insert(vshard.as_u32()) {
+                            result.push(vshard);
+                        }
+                    }
+                }
                 EngineKeySet::Document { .. }
                 | EngineKeySet::Vector { .. }
-                | EngineKeySet::Kv { .. } => {
+                | EngineKeySet::Kv { .. }
+                | EngineKeySet::Collection { .. }
+                | EngineKeySet::Unique { .. } => {
                     let vshard =
                         CollectionKey::from_qualified_str(database_id, engine_set.collection())?
                             .vshard();

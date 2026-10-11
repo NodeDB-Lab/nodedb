@@ -8,6 +8,7 @@ use crate::control::gateway::core::QueryContext;
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
+use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::response_shape::redaction::{QueryRedaction, redact_decoded_value};
 use crate::control::server::shared::authorization::authorize_database;
 use crate::control::server::shared::cluster_array_dispatch::{is_cluster_array, run_cluster_array};
@@ -16,11 +17,17 @@ use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
+use crate::control::server::shared::statement_exec::{
+    AtomicStatement, StatementExec, authorize_one_task,
+};
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TraceId};
 
+use super::super::atomic_statement::{RoutedStatement, route_http_statement};
+
 /// Execute SQL and return result as JSON.
 ///
+/// A statement whose tasks commit together takes the shared atomic routes.
 /// A Control-Plane orchestrated task (array DDL, a cluster array op,
 /// `INSERT ... SELECT`) runs here. Every other task routes through the
 /// gateway.
@@ -64,12 +71,46 @@ pub async fn execute_sql(
         trace_id,
     })
     .await?;
-    let tasks = admission.tasks;
-    let lease_scope = admission.lease_scope;
+    let output_schema = admission.output_schema;
 
     // A statement admitted under a lease this node then loses ends with a
     // retryable error: a read mid-flight, a write only before dispatch.
-    lease_scope.check_not_revoked()?;
+    admission.lease_scope.check_not_revoked()?;
+
+    // The shared atomic routes run a statement whose tasks commit together:
+    // the implicit transaction, the implicit-edge gate, and a Calvin commit
+    // for a write that spans vShards. WebSocket RPC carries no session:
+    // `nextval` advances the registry, `currval` reports "not yet called in
+    // this session".
+    let sequences = SessionSequenceAccess::for_session(shared, None, database_id, tenant_id);
+    let exec = StatementExec {
+        state: shared,
+        identity,
+        scope: &scope,
+        output_schema: Some(&output_schema),
+        database_id,
+        sequences: &sequences,
+        client_session: None,
+    };
+    let routed = {
+        let _request = shared.tenant_request_guard(tenant_id);
+        route_http_statement(
+            &exec,
+            AtomicStatement {
+                tasks: admission.tasks,
+                lease_scope: admission.lease_scope,
+                sum_target_reads: admission.sum_target_reads,
+            },
+        )
+        .await?
+    };
+    let AtomicStatement {
+        tasks, lease_scope, ..
+    } = match routed {
+        RoutedStatement::Answered(rows) => return Ok(rows_result(rows)),
+        RoutedStatement::PerTask(statement) => statement,
+    };
+
     let read_only = tasks
         .iter()
         .all(|task| !crate::control::server::shared::write_admission::plan_is_write(&task.plan));
@@ -99,7 +140,7 @@ pub async fn execute_sql(
 
             // Array DDL proposes a replicated catalog entry, never a core task.
             if crate::control::array_catalog::ddl::is_array_ddl(&task.plan) {
-                let authorized_task = authorize_ws_rpc_task(shared, identity, &task)?;
+                let authorized_task = authorize_one_task(shared, identity, &task)?;
                 let resp = crate::control::array_catalog::ddl::run_authorized_array_ddl(
                     shared,
                     authorized_task,
@@ -117,7 +158,7 @@ pub async fn execute_sql(
             // A cluster array op runs through this node's array coordinator,
             // which routes it to the shards that own its cells.
             if is_cluster_array(&task.plan) {
-                let authorized_task = authorize_ws_rpc_task(shared, identity, &task)?;
+                let authorized_task = authorize_one_task(shared, identity, &task)?;
                 let payload = run_cluster_array(shared, authorized_task).await?;
                 if !payload.is_empty() {
                     let json =
@@ -140,7 +181,7 @@ pub async fn execute_sql(
                 nodedb_physical::physical_plan::DocumentOp::InsertSelect { .. },
             ) = &task.plan
             {
-                let authorized_task = authorize_ws_rpc_task(shared, identity, &task)?;
+                let authorized_task = authorize_one_task(shared, identity, &task)?;
                 match crate::control::insert_select::run_authorized_insert_select(
                     shared,
                     authorized_task,
@@ -194,7 +235,7 @@ pub async fn execute_sql(
                 },
             ) = &task.plan
             {
-                let authorized_task = authorize_ws_rpc_task(shared, identity, &task)?;
+                let authorized_task = authorize_one_task(shared, identity, &task)?;
                 match crate::control::merge_orchestrator::run_authorized_merge(
                     shared,
                     authorized_task,
@@ -247,7 +288,7 @@ pub async fn execute_sql(
                 },
             ) = &task.plan
             {
-                let authorized_task = authorize_ws_rpc_task(shared, identity, &task)?;
+                let authorized_task = authorize_one_task(shared, identity, &task)?;
                 match crate::control::update_from_join_orchestrator::run_authorized_update_from_join(
                     shared,
                     authorized_task,
@@ -277,7 +318,7 @@ pub async fn execute_sql(
             // A governed columnar predicate UPDATE/DELETE resolves to a concrete row set
             // before proposing.
             if let Some(resolver) = crate::control::write_resolve::resolver_for_plan(&task.plan) {
-                let authorized_task = authorize_ws_rpc_task(shared, identity, &task)?;
+                let authorized_task = authorize_one_task(shared, identity, &task)?;
                 match crate::control::write_resolve::run_authorized_write_resolve(
                     shared,
                     authorized_task,
@@ -399,15 +440,7 @@ pub async fn execute_sql(
             meter_task(shared, &scope, &plan_metering_info, rows_before, &results);
         }
 
-        let outcome: crate::Result<serde_json::Value> = match results.len() {
-            0 => Ok(serde_json::Value::Null),
-            1 => Ok(results
-                .into_iter()
-                .next()
-                .unwrap_or(serde_json::Value::Null)),
-            _ => Ok(serde_json::Value::Array(results)),
-        };
-        outcome
+        Ok(rows_result(results))
     };
     if read_only {
         lease_scope.guard(body).await?
@@ -416,30 +449,14 @@ pub async fn execute_sql(
     }
 }
 
-/// Authorize one task with no clone-write check — used only by the
-/// Control-Plane orchestrator branches ahead of the general dispatch tail,
-/// whose plan shapes (`InsertSelect`, `Merge`, `UpdateFromJoin`, a governed
-/// predicate resolution) are never clone-write shapes.
-fn authorize_ws_rpc_task(
-    shared: &SharedState,
-    identity: &AuthenticatedIdentity,
-    task: &nodedb_physical::physical_task::PhysicalTask,
-) -> crate::Result<crate::control::server::shared::authorization::AuthorizedTask> {
-    let emitter = ArcAuditEmitter(Arc::clone(&shared.audit));
-    crate::control::server::shared::authorization::authorize_task_set(
-        identity,
-        std::slice::from_ref(task),
-        &shared.permissions,
-        &shared.roles,
-        &emitter,
-    )
-    .map_err(crate::Error::from)?
-    .into_tasks()
-    .into_iter()
-    .next()
-    .ok_or_else(|| crate::Error::Internal {
-        detail: "authorization returned an empty capability set".into(),
-    })
+/// The RPC result for a statement's JSON rows: `null` for none, the row
+/// itself for one, an array for more.
+fn rows_result(mut rows: Vec<serde_json::Value>) -> serde_json::Value {
+    match rows.len() {
+        0 => serde_json::Value::Null,
+        1 => rows.pop().unwrap_or(serde_json::Value::Null),
+        _ => serde_json::Value::Array(rows),
+    }
 }
 
 /// Meter one task's dispatch after its rows are pushed onto `results` —

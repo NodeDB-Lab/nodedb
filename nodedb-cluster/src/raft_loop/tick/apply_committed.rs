@@ -202,29 +202,17 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             if let Err(e) = mr.advance_applied(group_id, last_applied) {
                 warn!(group_id, error = %e, "failed to advance applied index");
             } else if group_id == crate::calvin::SEQUENCER_GROUP_ID {
-                // Sequencer group: the host applies each
-                // entry to the sequencer state machine
-                // inline, before returning. The watcher
-                // is the sequencer's applied index that
+                // Sequencer group: the host applies each entry to the
+                // sequencer state machine inline, before returning. The
+                // watcher is the sequencer's applied index that
                 // authorization lease coverage reports.
                 //
-                // Data groups are NOT bumped here — for
-                // them `applier.apply_committed` only
-                // enqueues entries onto the
-                // `DistributedApplier` channel; the
-                // actual data lands in storage when
-                // `run_apply_loop` finishes the
-                // SPSC round-trip to the Data Plane.
-                // The host crate bumps the watcher
-                // there, so the watermark always means
-                // "data visible on this node up to
-                // index N" regardless of which group.
-                //
-                // Snapshot-install path also bumps
-                // (in `super::handle_rpc`) — covers
-                // jump-on-snapshot for both group
-                // kinds. The metadata lane bumps the
-                // metadata group's watcher.
+                // Data groups are not bumped here. `apply_committed` only
+                // hands their entries to the host apply loop, which bumps
+                // the watcher once the data is visible on this node. The
+                // metadata lane bumps the metadata group's watcher. A
+                // snapshot install bumps every group whose state it
+                // restored (see `super::super::handle_rpc`).
                 self.group_watchers.bump(group_id, last_applied);
             }
         }

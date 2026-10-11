@@ -29,7 +29,7 @@ pub struct SnapshotClearTarget {
 
 /// A database backup's request to capture its tenants at its cut barrier.
 ///
-/// The barrier the backup proposes into each data group carries it. The
+/// The barrier each data group's leader places for the backup carries it. The
 /// group's leader, when it applies the first barrier of `request_id`,
 /// snapshots every tenant of `tenants` in `database_id` before it applies the
 /// next entry, and parks the capture for the backup to collect.

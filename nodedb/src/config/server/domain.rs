@@ -18,6 +18,22 @@ pub(super) const MIN_WAL_WRITE_BUFFER_BYTES: usize = 64 * 1024;
 /// shorter sweep costs more than the resolution it buys.
 pub(super) const MIN_SCOPE_EXPIRY_SECS: u64 = 10;
 
+/// Smallest Calvin verdict stall warning interval. The scheduler's idle sweep
+/// ticks at a quarter of it, and a zero-length tick panics the timer.
+pub(super) const MIN_CALVIN_VERDICT_STALL_WARN_MS: u64 = 4;
+
+/// Smallest redo entry size. A chunk entry carries its stream header beside
+/// its bytes, so a smaller entry leaves too little room for the bytes.
+pub(super) const MIN_REDO_ENTRY_BYTES: usize = 64 * 1024;
+
+/// Room a redo entry leaves in one RPC frame for the frame header, the
+/// AppendEntries envelope, and the entry's own routing fields.
+pub(super) const REDO_ENTRY_ENVELOPE_BYTES: usize = 1024 * 1024;
+
+/// Largest redo entry size: one entry and its envelope fit one RPC frame.
+pub(super) const MAX_REDO_ENTRY_BYTES: usize =
+    nodedb_cluster::rpc_codec::MAX_RPC_PAYLOAD_SIZE as usize - REDO_ENTRY_ENVELOPE_BYTES;
+
 /// Rejects an endpoint that carries no `http://` or `https://` host.
 pub(super) fn otlp_endpoint_has_host(raw: &str) -> bool {
     raw.strip_prefix("http://")
@@ -103,6 +119,8 @@ pub(super) fn validate_domain(config: &ServerConfig) -> crate::Result<()> {
         ));
     }
 
+    validate_calvin(config)?;
+
     if let Some(cluster) = config.cluster.as_ref() {
         positive_u64(
             u64::from(cluster.join_retry_max_attempts),
@@ -127,5 +145,65 @@ pub(super) fn validate_domain(config: &ServerConfig) -> crate::Result<()> {
         ));
     }
 
+    Ok(())
+}
+
+/// Checks `[tuning.calvin]`. A zero channel capacity panics the channel
+/// constructor, and a zero bound stalls every scheduler.
+fn validate_calvin(config: &ServerConfig) -> crate::Result<()> {
+    let calvin = &config.tuning.calvin;
+    positive_usize(calvin.channel_capacity, "tuning.calvin.channel_capacity")?;
+    positive_u64(
+        u64::from(calvin.txn_deadline_multiplier),
+        "tuning.calvin.txn_deadline_multiplier",
+    )?;
+    positive_u64(
+        calvin.dependent_read_passive_timeout_ms,
+        "tuning.calvin.dependent_read_passive_timeout_ms",
+    )?;
+    if calvin.verdict_stall_warn_ms < MIN_CALVIN_VERDICT_STALL_WARN_MS {
+        return Err(reject(
+            "tuning.calvin.verdict_stall_warn_ms",
+            calvin.verdict_stall_warn_ms,
+            "an interval of at least 4 milliseconds",
+        ));
+    }
+    positive_usize(
+        calvin.max_inflight_backlog,
+        "tuning.calvin.max_inflight_backlog",
+    )?;
+    positive_u64(calvin.catch_up_window, "tuning.calvin.catch_up_window")?;
+    positive_u64(
+        u64::from(calvin.restage_attempts),
+        "tuning.calvin.restage_attempts",
+    )?;
+    positive_u64(
+        calvin.restage_backoff_ms,
+        "tuning.calvin.restage_backoff_ms",
+    )?;
+    validate_redo_sizes(calvin)
+}
+
+/// Checks the redo entry size against one RPC frame, and the open-stream
+/// cap against one entry.
+fn validate_redo_sizes(calvin: &nodedb_types::config::tuning::CalvinTuning) -> crate::Result<()> {
+    let entry = calvin.max_redo_entry_bytes;
+    if !(MIN_REDO_ENTRY_BYTES..=MAX_REDO_ENTRY_BYTES).contains(&entry) {
+        return Err(reject(
+            "tuning.calvin.max_redo_entry_bytes",
+            entry,
+            &format!(
+                "a size of at least {MIN_REDO_ENTRY_BYTES} bytes and at most \
+                 {MAX_REDO_ENTRY_BYTES} bytes, the RPC frame limit less its envelope"
+            ),
+        ));
+    }
+    if calvin.max_open_redo_bytes < entry as u64 {
+        return Err(reject(
+            "tuning.calvin.max_open_redo_bytes",
+            calvin.max_open_redo_bytes,
+            "a size of at least tuning.calvin.max_redo_entry_bytes",
+        ));
+    }
     Ok(())
 }

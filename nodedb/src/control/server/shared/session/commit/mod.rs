@@ -2,9 +2,9 @@
 
 //! Protocol-neutral COMMIT orchestration shared by pgwire and native sessions.
 
-pub mod conflict;
-mod homed_reads;
 pub mod metering;
+mod read_split;
+mod read_validation;
 pub mod restart_identity;
 pub mod run;
 pub mod single_shard;

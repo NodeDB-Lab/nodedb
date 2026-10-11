@@ -26,7 +26,7 @@ use super::write_keys::task_write_keys;
 /// `reads` is the neutral session read-set captured during the transaction; it
 /// is projected onto the `TxClass`'s routing/identity `read_set` (collection-
 /// homed) so a txn that writes shard A but reads shard B enumerates B as a
-/// participant, and onto `versioned_reads` (LSN-versioned OCC validation set)
+/// participant, and onto `versioned_reads` (write-versioned OCC validation set)
 /// for commit-time optimistic-concurrency validation. Autocommit and
 /// pure-write paths pass an empty slice, yielding an empty read_set and
 /// versioned_reads.
@@ -102,8 +102,8 @@ fn build_static_tx_class_impl(
     // must NOT enter the OCC read set. The txn's own staged write advances that
     // collection's write floor, so validating the earlier read against it will
     // flag it stale and abort the commit — a false serialization conflict. This
-    // mirrors the written-collection exclusion the single-shard
-    // `si_conflict_abort` path already applies.
+    // mirrors the written-collection exclusion the non-Calvin commit check
+    // (`session::commit::read_validation`) applies.
     //
     // A PLAN-DERIVATION read is exempt, and the exemption is what makes the
     // derivation guard exist at all. Such a read observed COMMITTED base state
@@ -144,7 +144,7 @@ fn build_static_tx_class_impl(
         detail: format!("failed to encode PhysicalPlan vec for Calvin TxClass: {e}"),
     })?;
 
-    // versioned_reads carries the LSN-versioned OCC validation set, populated
+    // versioned_reads carries the write-versioned OCC validation set, populated
     // from the same session read-set the routing `read_set` above was built
     // from.
     let versioned_reads = versioned_reads_from(&owned_reads);
@@ -179,7 +179,7 @@ fn build_static_tx_class_impl(
 mod tests {
     use super::*;
     use crate::control::server::shared::session::read_set::{EngineTag, ReadKey, ReadOrigin};
-    use crate::types::{DatabaseId, KeyRepr, Lsn, VShardId};
+    use crate::types::{DatabaseId, KeyRepr, VShardId};
     use nodedb_physical::physical_plan::DocumentOp;
     use nodedb_types::Surrogate;
 
@@ -222,14 +222,14 @@ mod tests {
         }
     }
 
-    fn read_entry(collection: &str, key: ReadKey, read_lsn: u64) -> ReadSetEntry {
-        origin_read_entry(collection, key, read_lsn, ReadOrigin::Session)
+    fn read_entry(collection: &str, key: ReadKey, read_index: u64) -> ReadSetEntry {
+        origin_read_entry(collection, key, read_index, ReadOrigin::Session)
     }
 
     fn origin_read_entry(
         collection: &str,
         key: ReadKey,
-        read_lsn: u64,
+        read_index: u64,
         origin: ReadOrigin,
     ) -> ReadSetEntry {
         ReadSetEntry {
@@ -238,13 +238,9 @@ mod tests {
             tenant_id: TenantId::new(1),
             collection: collection.to_owned(),
             key,
-            read_lsn: Lsn::new(read_lsn),
-            // The per-collection read-version is the OCC comparand
-            // `versioned_reads_from` propagates; give it the same synthetic LSN.
-            read_version_lsn: Lsn::new(read_lsn),
+            read_version: nodedb_types::WriteVersion::logged(0, read_index),
             origin,
             home: None,
-            home_node: 0,
         }
     }
 
@@ -274,8 +270,8 @@ mod tests {
         let (col_a, col_b) = two_distinct_collections();
         let tasks = vec![point_insert_task(&col_a, 1), point_insert_task(&col_b, 2)];
 
-        // Synthetic read-set: one point read (surrogate identity) at LSN 7 and
-        // one collection-scoped predicate read at LSN 11, on two collections
+        // Synthetic read-set: one point read (surrogate identity) at index 7 and
+        // one collection-scoped predicate read at index 11, on two collections
         // distinct from the write collections.
         let reads = vec![
             read_entry(
@@ -291,7 +287,7 @@ mod tests {
         let tx = build_static_tx_class(&tasks, TenantId::new(1), &reads)
             .expect("valid multi-vShard TxClass");
 
-        // versioned_reads (the LSN-versioned OCC validation set) carries the
+        // versioned_reads (the versioned OCC validation set) carries the
         // same session reads, 1:1, for commit-time validation.
         assert_eq!(
             tx.versioned_reads.len(),
@@ -300,7 +296,7 @@ mod tests {
         );
         for (entry, read) in tx.versioned_reads.iter().zip(reads.iter()) {
             assert_eq!(entry.collection, read.collection);
-            assert_eq!(entry.read_lsn, read.read_version_lsn);
+            assert_eq!(entry.read_version, read.read_version);
             let expected_key = match &read.key {
                 ReadKey::Point { repr } => {
                     nodedb_cluster::calvin::types::ReadKeyIdent::Point(repr.clone())
@@ -361,6 +357,88 @@ mod tests {
         }
     }
 
+    /// The lock request the scheduler takes for `tx_class` at `position`.
+    fn locks(
+        tx_class: TxClass,
+        position: u32,
+    ) -> std::collections::BTreeMap<
+        crate::control::cluster::calvin::scheduler::LockKey,
+        crate::control::cluster::calvin::scheduler::LockMode,
+    > {
+        crate::control::cluster::calvin::scheduler::driver::helpers::expand_rw_set(
+            &nodedb_cluster::calvin::types::SequencedTxn {
+                epoch: 1,
+                position,
+                tx_class,
+                epoch_system_ms: 1_700_000_000_000,
+                epoch_vshard_txn_count: 2,
+                lock_owner: None,
+            },
+        )
+    }
+
+    /// A predicate read locks its whole collection `Shared`. A later row
+    /// writer of that collection takes `Intent` on it, so it waits until the
+    /// reader releases. A point read locks only its row.
+    #[test]
+    fn a_predicate_read_blocks_a_later_writer_until_released() {
+        use crate::control::cluster::calvin::scheduler::LockMode;
+        use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
+        use crate::control::cluster::calvin::scheduler::{AcquireOutcome, LockKey, LockManager};
+
+        let (col_a, col_b) = two_distinct_collections();
+        let tasks = vec![point_insert_task(&col_a, 1), point_insert_task(&col_b, 2)];
+        let reads = vec![
+            read_entry("scan_col", ReadKey::Predicate, 11),
+            read_entry(
+                "read_col",
+                ReadKey::Point {
+                    repr: KeyRepr::Surrogate(9),
+                },
+                10,
+            ),
+        ];
+        let reader = build_static_tx_class(&tasks, TenantId::new(1), &reads)
+            .expect("valid multi-vShard TxClass");
+        let reader_locks = locks(reader, 0);
+        assert_eq!(
+            reader_locks.get(&LockKey::Collection {
+                collection: std::sync::Arc::from("scan_col"),
+            }),
+            Some(&LockMode::Shared)
+        );
+        assert_eq!(
+            reader_locks.get(&LockKey::Surrogate {
+                collection: std::sync::Arc::from("read_col"),
+                surrogate: 9,
+            }),
+            Some(&LockMode::Shared)
+        );
+        assert!(
+            !reader_locks.contains_key(&LockKey::Collection {
+                collection: std::sync::Arc::from("read_col"),
+            }),
+            "a point read locks nothing collection-wide"
+        );
+
+        let writer = build_single_vshard_tx_class(
+            &[point_insert_task("scan_col", 5)],
+            TenantId::new(1),
+            &[],
+        )
+        .expect("writer TxClass");
+
+        let (first, second) = (TxnId::new(1, 0), TxnId::new(1, 1));
+        let mut table = LockManager::new();
+        assert_eq!(table.acquire(first, reader_locks), AcquireOutcome::Ready);
+        assert_eq!(
+            table.acquire(second, locks(writer, 1)),
+            AcquireOutcome::Blocked,
+            "a row writer waits for the predicate reader of its collection"
+        );
+        assert_eq!(table.release(first), vec![second]);
+    }
+
     #[test]
     fn empty_read_set_yields_empty_read_and_versioned_reads() {
         let (col_a, col_b) = two_distinct_collections();
@@ -381,7 +459,7 @@ mod tests {
 
     /// A PLAN-DERIVATION read of a collection the transaction WRITES survives
     /// the own-write exclusion, reaching BOTH the routing read_set and the
-    /// LSN-versioned `versioned_reads` the Data Plane's
+    /// write-versioned `versioned_reads` the Data Plane's
     /// `read_set_still_current` check consumes.
     ///
     /// This is the whole of the cross-shard materialized-sum guard: the delta
@@ -412,7 +490,10 @@ mod tests {
             "a derivation read must reach versioned_reads — that set IS the guard"
         );
         assert_eq!(tx.versioned_reads.0[0].collection, col_a);
-        assert_eq!(tx.versioned_reads.0[0].read_lsn, Lsn::new(42));
+        assert_eq!(
+            tx.versioned_reads.0[0].read_version,
+            nodedb_types::WriteVersion::logged(0, 42)
+        );
         assert_eq!(
             tx.versioned_reads.0[0].key,
             nodedb_cluster::calvin::types::ReadKeyIdent::Point(KeyRepr::Surrogate(11))

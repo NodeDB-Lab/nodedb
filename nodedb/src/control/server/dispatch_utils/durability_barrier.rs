@@ -169,6 +169,7 @@ mod tests {
             collections: vec!["c".into()],
             sum_targets: Vec::new(),
             origin: nodedb_physical::physical_plan::RedoOrigin::Commit,
+            calvin: None,
         });
         assert_eq!(funnel_minted_redo_engine(&plan), Some("transaction"));
     }

@@ -140,7 +140,7 @@ mod tests {
 
     use crate::control::lease::QueryLeaseScope;
     use crate::control::server::shared::session::state::PendingOffsetCommit;
-    use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
+    use crate::types::{DatabaseId, TenantId, VShardId};
 
     fn task() -> PhysicalTask {
         PhysicalTask {
@@ -160,7 +160,7 @@ mod tests {
         let store = SessionStore::new();
         let addr: std::net::SocketAddr = "127.0.0.1:6010".parse().expect("address");
         store.ensure_session(addr);
-        store.begin(addr, Lsn::new(1), 0).expect("begin");
+        store.begin(addr, 0).expect("begin");
 
         let scope = Arc::new(QueryLeaseScope::empty());
         assert!(store.buffer_write(addr, task()));
@@ -184,7 +184,7 @@ mod tests {
         let store = SessionStore::new();
         let addr: std::net::SocketAddr = "127.0.0.1:6013".parse().expect("address");
         store.ensure_session(addr);
-        store.begin(addr, Lsn::new(1), 0).expect("begin");
+        store.begin(addr, 0).expect("begin");
 
         let before = PendingOffsetCommit {
             database_id: DatabaseId::DEFAULT,
@@ -221,7 +221,7 @@ mod tests {
         let store = SessionStore::new();
         let addr: std::net::SocketAddr = "127.0.0.1:6014".parse().expect("address");
         store.ensure_session(addr);
-        store.begin(addr, Lsn::new(1), 0).expect("begin");
+        store.begin(addr, 0).expect("begin");
         store.create_savepoint(addr, "sp".into(), 1, 0);
         store.fail_transaction(addr);
         assert_eq!(store.transaction_state(addr), TransactionState::Failed);

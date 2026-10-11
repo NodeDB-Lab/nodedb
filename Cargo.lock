@@ -4594,6 +4594,7 @@ name = "nodedb-raft"
 version = "0.5.0"
 dependencies = [
  "crc32c",
+ "nodedb-types",
  "rand 0.10.2",
  "rkyv",
  "serde",

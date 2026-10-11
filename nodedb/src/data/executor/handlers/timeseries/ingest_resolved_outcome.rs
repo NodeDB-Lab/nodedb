@@ -10,7 +10,7 @@
 //!   its durable outcome (`install_outcome`) before the first row lands, so
 //!   WAL catch-up rebuilds exactly the events the install emits.
 //! - A committed redo install records its counts and landed images in the
-//!   open apply scope, so the apply answers the counts and a Calvin flush
+//!   open apply scope, so the apply answers the counts and a Calvin install
 //!   renders its `RETURNING` rows from the stored rows.
 
 use crate::data::executor::core_loop::CoreLoop;

@@ -61,16 +61,12 @@ pub(super) fn add_keys(keys: &mut WriteKeys, op: &KvOp) -> crate::Result<()> {
             dest_key,
             ..
         } => keys.kv_keys(collection.as_str(), [source_key.clone(), dest_key.clone()]),
-        // Every key it writes, and the collection key a multi-row write
-        // holds.
+        // Every key it writes.
         KvOp::BatchPut {
             collection,
             entries,
             ..
-        } => {
-            keys.kv_keys(collection.as_str(), entries.iter().map(|(k, _)| k.clone()));
-            keys.whole_collection(collection.as_str());
-        }
+        } => keys.kv_keys(collection.as_str(), entries.iter().map(|(k, _)| k.clone())),
         KvOp::Truncate { collection, .. }
         | KvOp::PredicateUpdate { collection, .. }
         | KvOp::PredicateDelete { collection, .. } => keys.whole_collection(collection.as_str()),

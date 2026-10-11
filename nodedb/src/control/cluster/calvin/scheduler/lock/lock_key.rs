@@ -36,6 +36,17 @@ pub enum LockKey {
         src: u32,
         dst: u32,
     },
+    /// A whole collection. Writers of single rows hold it `Intent`. Writers
+    /// of the whole collection hold it `Exclusive`. Predicate readers hold it
+    /// `Shared`.
+    Collection { collection: Arc<str> },
+    /// One claimed value of one UNIQUE index. Writers that claim the value
+    /// hold it `Exclusive`, so two claims of one value serialize.
+    Unique {
+        collection: Arc<str>,
+        index: Arc<str>,
+        value: Arc<[u8]>,
+    },
 }
 
 // ── TxnId ─────────────────────────────────────────────────────────────────────

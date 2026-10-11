@@ -18,6 +18,7 @@ use crate::control::distributed_applier::applied_index::AppliedPrefix;
 use crate::control::distributed_applier::propose_tracker::{ApplyingEntry, ProposeTracker};
 use crate::control::server::shared::write_admission::plan_writes_user_data;
 use crate::control::state::tenant_marks::{MarkSite, TenantMarks};
+use crate::control::wal_replication::types::CalvinRedoMeta;
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite, decode_replicated_entry};
 
 use super::proposal_gate::PrefixStep;
@@ -52,9 +53,10 @@ impl QueuedEntry {
     }
 
     /// `(tenant_id, write_hlc, restore_id)` of an entry that writes a
-    /// tenant's data. A cut barrier, a Calvin read result and a surrogate
-    /// bind write no data, and an entry with no proposer stamp has no commit
-    /// HLC to record.
+    /// tenant's data. A cut barrier, a Calvin read result or read timeout
+    /// and a surrogate bind write no data, a Calvin slice that raises no write mark writes
+    /// only derived rows or schema, and an entry with no proposer stamp has
+    /// no commit HLC to record.
     pub fn write_stamp(&self) -> Option<(u64, u64, u64)> {
         let decoded = self.decoded.as_ref()?;
         if decoded.write_hlc == 0
@@ -62,7 +64,17 @@ impl QueuedEntry {
                 decoded.write,
                 ReplicatedWrite::CutBarrier { .. }
                     | ReplicatedWrite::CalvinReadResult { .. }
+                    | ReplicatedWrite::CalvinReadTimeout { .. }
                     | ReplicatedWrite::SurrogateBind { .. }
+                    | ReplicatedWrite::RedoChunk { .. }
+                    | ReplicatedWrite::RedoAbandon { .. }
+                    | ReplicatedWrite::TransactionRedo {
+                        calvin: Some(CalvinRedoMeta {
+                            user_write: false,
+                            ..
+                        }),
+                        ..
+                    }
             )
         {
             return None;
@@ -77,15 +89,20 @@ impl QueuedEntry {
         let Some(decoded) = self.decoded.as_ref() else {
             return false;
         };
-        match decoded.write {
+        match &decoded.write {
+            ReplicatedWrite::TransactionRedo { calvin, .. } => {
+                calvin.as_ref().is_none_or(|meta| meta.user_write)
+            }
             ReplicatedWrite::ArrayOp { .. }
             | ReplicatedWrite::ArrayCellPut { .. }
-            | ReplicatedWrite::ArrayCellDelete { .. }
-            | ReplicatedWrite::TransactionRedo { .. } => true,
+            | ReplicatedWrite::ArrayCellDelete { .. } => true,
             ReplicatedWrite::ArraySchema { .. }
             | ReplicatedWrite::CutBarrier { .. }
             | ReplicatedWrite::CalvinReadResult { .. }
-            | ReplicatedWrite::SurrogateBind { .. } => false,
+            | ReplicatedWrite::CalvinReadTimeout { .. }
+            | ReplicatedWrite::SurrogateBind { .. }
+            | ReplicatedWrite::RedoChunk { .. }
+            | ReplicatedWrite::RedoAbandon { .. } => false,
             _ => matches!(
                 decode_replicated_entry(&self.entry.data),
                 Ok(Some((_, _, plan, _))) if plan_writes_user_data(&plan)
@@ -99,7 +116,8 @@ impl QueuedEntry {
     /// and a schema import must follow every earlier entry's apply. A topic
     /// publication awaits its proposal marker's fsync. A cut barrier
     /// persists its floor, and a capturing one snapshots its tenants, after
-    /// every earlier entry and before every later one.
+    /// every earlier entry and before every later one. A redo chunk or
+    /// abandon changes the stream a later entry of its group reads.
     pub fn is_exclusive(&self) -> bool {
         self.decoded.as_ref().is_some_and(|e| {
             matches!(
@@ -110,6 +128,8 @@ impl QueuedEntry {
                     | ReplicatedWrite::ArrayCellDelete { .. }
                     | ReplicatedWrite::TopicPublish { .. }
                     | ReplicatedWrite::CutBarrier { .. }
+                    | ReplicatedWrite::RedoChunk { .. }
+                    | ReplicatedWrite::RedoAbandon { .. }
             )
         })
     }
@@ -153,13 +173,16 @@ pub(super) struct Lane {
     /// runs, or an exclusive entry that runs.
     pub blocking: Option<u64>,
     /// The durable prefix over every entry this process settled for the
-    /// group. A break holds for the life of the process: an index saved past
-    /// a non-durable entry lets the next boot skip it.
+    /// group. A break holds until a snapshot install covers it: an index
+    /// saved past a non-durable entry lets the next boot skip it.
     prefix: AppliedPrefix,
     /// The floor last saved for the group.
     saved_floor: Option<u64>,
     /// The entry the last settle ended at.
     last_settled: Option<u64>,
+    /// The highest backlog index whose barrier event folded ahead of its
+    /// turn (see `barrier_prefold`).
+    pub prefolded_through: u64,
 }
 
 impl Lane {
@@ -172,6 +195,7 @@ impl Lane {
             prefix: AppliedPrefix::new(),
             saved_floor: None,
             last_settled: None,
+            prefolded_through: 0,
         }
     }
 
@@ -326,6 +350,17 @@ impl Lane {
         settled
     }
 
+    /// Count every entry of the group through `installed_through` durable.
+    /// An installed snapshot holds their state, so a break at or below it
+    /// heals.
+    ///
+    /// The caller passes the index it read under the group's apply gate,
+    /// before it admits an entry. Every entry above the index reaches the
+    /// lane after the install, so none settles before this call.
+    pub fn cover_through(&mut self, installed_through: u64) {
+        self.prefix.cover_through(installed_through);
+    }
+
     /// Whether the durable floor moved past the floor last saved.
     pub fn floor_pending(&self) -> bool {
         self.prefix
@@ -407,6 +442,48 @@ mod tests {
             lane.take_floor_to_save(),
             None,
             "a floor past entry 2 would let the next boot skip it"
+        );
+    }
+
+    #[test]
+    fn a_covering_snapshot_lets_the_floor_pass_a_held_entry() {
+        let tracker = ProposeTracker::new();
+        let marks = TenantMarks::default();
+        let mut lane = Lane::new(1);
+        lane.push(slot(1, SlotState::Concluded(PrefixStep::Record(true))));
+        lane.push(slot(2, SlotState::Concluded(PrefixStep::Record(false))));
+        lane.push(slot(3, SlotState::Running));
+        lane.settle(&tracker, &marks);
+        assert_eq!(lane.take_floor_to_save(), Some(1));
+
+        // A snapshot at index 4 installs while entry 3 still runs.
+        lane.cover_through(4);
+        assert_eq!(lane.take_floor_to_save(), Some(4));
+
+        assert!(lane.conclude(3, false, |_| PrefixStep::Record(false)));
+        lane.push(slot(5, SlotState::Concluded(PrefixStep::Record(true))));
+        lane.settle(&tracker, &marks);
+        assert_eq!(
+            lane.take_floor_to_save(),
+            Some(5),
+            "the snapshot holds entries 2 and 3"
+        );
+    }
+
+    #[test]
+    fn a_held_entry_above_the_snapshot_still_holds_the_floor() {
+        let tracker = ProposeTracker::new();
+        let marks = TenantMarks::default();
+        let mut lane = Lane::new(1);
+        lane.cover_through(4);
+        lane.push(slot(5, SlotState::Concluded(PrefixStep::Record(false))));
+        lane.push(slot(6, SlotState::Concluded(PrefixStep::Record(true))));
+        lane.settle(&tracker, &marks);
+        assert_eq!(lane.take_floor_to_save(), Some(4));
+        assert_eq!(
+            lane.take_floor_to_save(),
+            None,
+            "a floor past entry 5 would let the next boot skip it"
         );
     }
 
@@ -505,5 +582,56 @@ mod tests {
         assert!(lane.conclude(1, true, |_| PrefixStep::Record(true)));
         lane.settle(&tracker, &TenantMarks::default());
         assert!(matches!(barrier.try_recv(), Ok(Ok(_))));
+    }
+
+    /// The stamped redo entry of a Calvin slice that raises the write mark
+    /// when `user_write` holds, proposed with commit HLC 77.
+    fn calvin_redo_entry(user_write: bool) -> QueuedEntry {
+        let payload = crate::control::wal_replication::transaction_redo::TransactionRedoPayload {
+            redo: crate::wal::RedoRecord {
+                version: 1,
+                ops: Vec::new(),
+                calvin_stamp: None,
+                cross_shard_applied: None,
+                row_sources: Vec::new(),
+                publishes: Vec::new(),
+                row_changes: Vec::new(),
+            },
+            collections: vec!["orders".into()],
+            sum_targets: Vec::new(),
+            identities: Vec::new(),
+            event_source: crate::event::EventSource::User,
+            origin: nodedb_physical::physical_plan::RedoOrigin::Commit,
+            calvin: Some(CalvinRedoMeta {
+                epoch_system_ms: 0,
+                reply: nodedb_physical::physical_plan::CalvinReplySpec::Count(Vec::new()),
+                primary_write: true,
+                user_write,
+                returning: false,
+            }),
+        };
+        let mut entry = crate::control::wal_replication::encode::transaction_redo_entry(
+            crate::types::TenantId::new(4),
+            crate::types::DatabaseId::DEFAULT,
+            crate::types::VShardId::new(2),
+            &payload,
+        );
+        entry.write_hlc = 77;
+        QueuedEntry::new(LogEntry {
+            term: 1,
+            index: 9,
+            data: entry.to_bytes(),
+        })
+    }
+
+    /// A Calvin slice that writes only derived rows or schema raises no write
+    /// mark, even as the slice that deposits the reply. A slice that changes
+    /// a tenant row raises its commit HLC.
+    #[test]
+    fn only_a_calvin_slice_that_changes_a_row_carries_a_write_stamp() {
+        assert_eq!(calvin_redo_entry(true).write_stamp(), Some((4, 77, 0)));
+        assert_eq!(calvin_redo_entry(false).write_stamp(), None);
+        assert!(calvin_redo_entry(true).plan_writes_user_data());
+        assert!(!calvin_redo_entry(false).plan_writes_user_data());
     }
 }

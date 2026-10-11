@@ -78,7 +78,7 @@ fn sequencer_coverage(state: &SharedState) -> u64 {
     let fence = &state.authorization_fence;
     fence
         .calvin_acks()
-        .covered_through(registry, fence.calvin_mirrors(), applied, |vshard_id| {
+        .covered_through(registry, &state.calvin.applied, applied, |vshard_id| {
             group_of_vshard(state, vshard_id).is_ok_and(|g| hosts_group(state, g))
         })
 }

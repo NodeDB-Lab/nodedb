@@ -10,7 +10,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{KeyRepr, Lsn};
+use crate::{KeyRepr, WriteVersion};
+
+pub use crate::calvin_passive::{PassiveKey, PassiveReadKeyId};
 
 /// A newtype over `Vec<T>` that guarantees sorted, deduplicated contents.
 ///
@@ -121,6 +123,27 @@ pub enum EngineKeySet {
         collection: String,
         vshards: SortedVec<u32>,
     },
+    /// A whole collection on each vShard in `vshards`, or on the
+    /// collection's own vShard when `vshards` is empty.
+    ///
+    /// In a write set the transaction locks the collection exclusively: a
+    /// truncate, bulk, predicate, or identity-less write. In a read set it
+    /// locks the collection shared: a predicate, scan, or index read. A read
+    /// that observed the collection on named vShards, such as a cross-shard
+    /// graph read, names them in `vshards`.
+    Collection {
+        collection: String,
+        vshards: SortedVec<u32>,
+    },
+    /// UNIQUE values a write claims in one index of `collection`.
+    ///
+    /// Each value is the canonical index value the Data Plane judges. Two
+    /// transactions that claim one value lock one key, so they serialize.
+    Unique {
+        collection: String,
+        index: String,
+        values: SortedVec<Vec<u8>>,
+    },
 }
 
 impl EngineKeySet {
@@ -142,6 +165,15 @@ impl EngineKeySet {
             Self::Edge { edges, .. } => edges.len() * 8,
             // Array: one u32 vShard each.
             Self::Array { vshards, .. } => vshards.len() * 4,
+            // Collection: the name plus one u32 vShard each.
+            Self::Collection {
+                collection,
+                vshards,
+            } => collection.len() + vshards.len() * 4,
+            // Unique: the index name plus each value's bytes.
+            Self::Unique { index, values, .. } => {
+                index.len() + values.iter().map(|v| v.len()).sum::<usize>()
+            }
         }
     }
 
@@ -152,7 +184,9 @@ impl EngineKeySet {
             | Self::Vector { collection, .. }
             | Self::Kv { collection, .. }
             | Self::Edge { collection, .. }
-            | Self::Array { collection, .. } => collection,
+            | Self::Array { collection, .. }
+            | Self::Collection { collection, .. }
+            | Self::Unique { collection, .. } => collection,
         }
     }
 
@@ -164,17 +198,18 @@ impl EngineKeySet {
             Self::Kv { keys, .. } => keys.is_empty(),
             Self::Edge { edges, .. } => edges.is_empty(),
             Self::Array { vshards, .. } => vshards.is_empty(),
+            Self::Collection { .. } => false,
+            Self::Unique { values, .. } => values.is_empty(),
         }
     }
 }
 
-/// A single key that a passive participant must read and broadcast.
+/// A key set a passive participant reads and broadcasts.
 ///
-/// Wraps an [`EngineKeySet`]; per the dependent-read protocol each
-/// `PassiveReadKey` contains a single-element (or small) key set.  The
-/// sequencer does not enforce single-element sets; the scheduler enforces the
-/// total byte budget via `DependentReadSpec::total_bytes()` (which lives in
-/// `nodedb-cluster`).
+/// Wraps an [`EngineKeySet`]. A passive vShard reads document rows by
+/// surrogate and key-value rows by key. It refuses every other key set. The
+/// sequencer bounds the bytes a transaction reads passively through
+/// `DependentReadSpec::total_bytes()` in `nodedb-cluster`.
 #[derive(
     Debug,
     Clone,
@@ -265,13 +300,13 @@ pub enum ReadKeyIdent {
     },
 }
 
-/// One LSN-versioned, predicate-aware read observed by a transaction, carried
-/// on the replicated Calvin `TxClass` so participants can validate it at the
+/// One versioned, predicate-aware read observed by a transaction, carried on
+/// the replicated Calvin `TxClass` so participants can validate it at the
 /// commit serialization point.
 ///
-/// `read_lsn` is the responding shard's write-LSN watermark at read time. The
-/// enclosing `TxClass` scopes the tenant; per-database scoping is carried by
-/// the transaction as a whole.
+/// `read_version` is a data-group log position, so any replica of the read's
+/// vShard validates it. The enclosing `TxClass` scopes the tenant;
+/// per-database scoping is carried by the transaction as a whole.
 #[derive(
     Debug,
     Clone,
@@ -289,27 +324,23 @@ pub struct VersionedReadEntry {
     pub collection: String,
     /// Point-key or collection-scoped-predicate identity of the observation.
     pub key: ReadKeyIdent,
-    /// The responding shard's write-LSN watermark at read time.
-    pub read_lsn: Lsn,
+    /// The version of what the read observed on its home vShard.
+    pub read_version: WriteVersion,
     /// The vShard whose write versions validate this read. `None` homes the
     /// read to its collection's vShard. A graph read names the key vShard it
     /// read edges on, because edges live on their endpoints' vShards. A homed
     /// read with an empty `collection` observed every collection there, so it
-    /// validates against the shard's core watermark.
+    /// validates against the vShard's latest version.
     pub home_vshard: Option<u32>,
-    /// The node that served the read. `read_lsn` is a position in that node's
-    /// WAL, so a participant on any other node treats the read as changed.
-    /// `0` when no one node is known to have served it.
-    pub served_by: u64,
 }
 
-/// The LSN-versioned read-set of a Calvin transaction.
+/// The versioned read-set of a Calvin transaction.
 ///
 /// Empty for pure-write transactions and for autocommit statements (which
 /// accumulate no session read-set). Populated at commit time from the neutral
 /// session read-set, and validated per-participant against the local
 /// write-version index at Calvin stage time (the commit vote on
-/// `read_set_valid`).
+/// a stage response).
 #[derive(
     Debug,
     Clone,

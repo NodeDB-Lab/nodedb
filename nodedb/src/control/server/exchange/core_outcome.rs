@@ -28,6 +28,19 @@ pub(crate) fn classify_core_response(collected: crate::Result<Response>) -> Core
     Ok(Some(resp))
 }
 
+/// The versions every core reported, a `NotFound` refusal's included. A
+/// refusal observed its vShards with no matching row, and a read validates
+/// that observation at the versions the refusal reported.
+pub(crate) fn reported_versions<'a>(
+    collected: impl IntoIterator<Item = &'a crate::Result<Response>>,
+) -> crate::types::ReadVersions {
+    let mut versions = crate::types::ReadVersions::new();
+    for resp in collected.into_iter().flatten() {
+        versions.merge(&resp.read_versions);
+    }
+    versions
+}
+
 /// Require every core to answer, and return the answers in core order.
 ///
 /// The first error in core order fails the whole gather. It crosses as the
@@ -59,8 +72,8 @@ mod tests {
             payload: Payload::from_vec(payload.to_vec()),
             watermark_lsn: Lsn::ZERO,
             error_code: code.map(Box::new),
-            read_set_valid: None,
-            read_version_lsn: Lsn::ZERO,
+            stage_vote: None,
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         }
     }

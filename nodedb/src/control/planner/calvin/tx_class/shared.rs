@@ -4,20 +4,22 @@
 //! dependent `TxClass` builders. The write keys live in
 //! [`super::write_keys`].
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::control::server::shared::session::read_set::{ReadKey, ReadSetEntry};
 use nodedb_cluster::calvin::types::{
     EngineKeySet, EngineTag, ReadKeyIdent, ReadWriteSet, SortedVec, VersionedReadEntry,
     VersionedReadSet,
 };
+use nodedb_types::KeyRepr;
 
-/// Map the neutral session read-set into the replicated, LSN-versioned
+/// Map the neutral session read-set into the replicated, versioned
 /// [`VersionedReadSet`] carried on the `TxClass`.
 ///
 /// Each [`ReadSetEntry`] becomes one [`VersionedReadEntry`], preserving
-/// engine, collection, `read_version_lsn` (the collection's write floor —
-/// the sound OCC comparand, not the core-global `read_lsn`), and the
-/// point/predicate distinction. Own-overlay exclusion already happened at
-/// capture time, so this is a faithful 1:1 projection.
+/// engine, collection, read version, home, and the point/predicate
+/// distinction. Own-overlay exclusion already happened at capture time, so
+/// this is a faithful 1:1 projection.
 pub(super) fn versioned_reads_from(reads: &[ReadSetEntry]) -> VersionedReadSet {
     VersionedReadSet::new(
         reads
@@ -38,98 +40,180 @@ pub(super) fn versioned_reads_from(reads: &[ReadSetEntry]) -> VersionedReadSet {
                         hi: hi.clone(),
                     },
                 },
-                read_lsn: entry.read_version_lsn,
+                read_version: entry.read_version,
                 home_vshard: entry.home.map(|home| home.as_u32()),
-                served_by: entry.home_node,
             })
             .collect(),
     )
 }
 
-/// Build the routing/identity `read_set` for a Calvin `TxClass` from the
-/// neutral session read-set — the key-IDENTITY set for participant/routing,
-/// not the LSN-versioned OCC set ([`versioned_reads_from`]).
+/// Build the routing and lock `read_set` for a Calvin `TxClass` from the
+/// neutral session read-set. This is the key-IDENTITY set for participants
+/// and locks, not the versioned OCC set ([`versioned_reads_from`]).
 ///
-/// A [`ReadSetEntry`] carries only `(engine, collection)`, no key identity,
-/// so an unhomed entry maps to a COLLECTION-homed [`EngineKeySet`] with an
-/// empty key vector. That over-approximates participants: more validation,
-/// never a dropped participant. A homed entry (one vShard of a cross-shard
-/// graph read) maps to an `EngineKeySet::Edge` with no edges and its home in
-/// `home_vshards`, so the vShard it read participates and validates it.
+/// Each read maps to the keys the scheduler locks `Shared`:
+/// - A point read locks its row: a surrogate, a KV key, or an edge's two
+///   node lock pairs.
+/// - A predicate, index-equality, or index-range read locks its whole
+///   collection.
+///
+/// An unhomed read participates on its collection's vShard. A homed read
+/// (one vShard of a cross-shard graph read) participates on its home only.
+/// A homed read with no collection name enlists its home and locks nothing.
 pub(super) fn read_set_from(reads: &[ReadSetEntry]) -> ReadWriteSet {
-    use std::collections::BTreeSet;
-
-    // Dedup by (engine-variant, collection): many reads on one collection
-    // collapse to a single keyset, keeping the Raft-log read_set compact.
-    // Vector/KV keep their engine variant; every other engine routes by
-    // collection name via a Document keyset.
-    let mut vector_colls: BTreeSet<String> = BTreeSet::new();
-    let mut kv_colls: BTreeSet<String> = BTreeSet::new();
-    let mut doc_colls: BTreeSet<String> = BTreeSet::new();
-    // Homed reads (cross-shard graph reads) participate on their home vShards,
-    // not on the collection's vShard. They key no edge, so they lock nothing.
-    let mut homed: std::collections::BTreeMap<String, BTreeSet<u32>> =
-        std::collections::BTreeMap::new();
+    let mut locks = ReadLocks::default();
     for entry in reads {
-        if let Some(home) = entry.home {
-            homed
-                .entry(entry.collection.clone())
-                .or_default()
-                .insert(home.as_u32());
-            continue;
-        }
-        if entry.collection.is_empty() {
-            continue;
-        }
-        match entry.engine {
-            EngineTag::Vector => {
-                vector_colls.insert(entry.collection.clone());
-            }
-            EngineTag::Kv => {
-                kv_colls.insert(entry.collection.clone());
-            }
-            EngineTag::Document
-            | EngineTag::Graph
-            | EngineTag::Text
-            | EngineTag::Columnar
-            | EngineTag::Timeseries
-            | EngineTag::Spatial
-            | EngineTag::Crdt
-            | EngineTag::Query
-            | EngineTag::Meta
-            | EngineTag::Array
-            | EngineTag::ClusterArray => {
-                doc_colls.insert(entry.collection.clone());
-            }
+        match entry.home {
+            Some(home) => locks.homed(entry, home.as_u32()),
+            None if entry.collection.is_empty() => {}
+            None => locks.unhomed(entry),
         }
     }
-    let mut sets: Vec<EngineKeySet> = Vec::new();
-    for collection in vector_colls {
-        sets.push(EngineKeySet::Vector {
-            collection,
-            surrogates: SortedVec::new(vec![]),
-        });
+    ReadWriteSet::new(locks.into_key_sets())
+}
+
+/// The edge reads of one collection.
+#[derive(Default)]
+struct EdgeReads {
+    /// The node lock pairs the reads touch.
+    pairs: Vec<(u32, u32)>,
+    /// The vShards the collection is read on.
+    homes: Vec<u32>,
+}
+
+/// The read lock keys of a session read-set, by engine and collection.
+/// Every map is ordered, so the key sets are identical on every node.
+#[derive(Default)]
+struct ReadLocks {
+    documents: BTreeMap<String, Vec<u32>>,
+    vectors: BTreeMap<String, Vec<u32>>,
+    kv: BTreeMap<String, Vec<Vec<u8>>>,
+    edges: BTreeMap<String, EdgeReads>,
+    /// Collection to the vShards it is read whole on. Empty: its own vShard.
+    whole: BTreeMap<String, BTreeSet<u32>>,
+}
+
+impl ReadLocks {
+    /// A read homed on `home`: it participates there only.
+    fn homed(&mut self, entry: &ReadSetEntry, home: u32) {
+        let collection = entry.collection.clone();
+        if collection.is_empty() {
+            self.edges.entry(collection).or_default().homes.push(home);
+            return;
+        }
+        match &entry.key {
+            ReadKey::Point { repr } => {
+                let edges = self.edges.entry(collection).or_default();
+                edges.homes.push(home);
+                match repr {
+                    KeyRepr::Edge { src, dst, .. } => {
+                        edges
+                            .pairs
+                            .extend([node_lock_pair(src), node_lock_pair(dst)]);
+                    }
+                    // A row key routes by its collection, not by this home,
+                    // so a homed row read only enlists its home.
+                    KeyRepr::Surrogate(_) | KeyRepr::KvKey(_) => {}
+                }
+            }
+            ReadKey::Predicate | ReadKey::IndexEq { .. } | ReadKey::IndexRange { .. } => {
+                self.whole.entry(collection).or_default().insert(home);
+            }
+        }
     }
-    for collection in kv_colls {
-        sets.push(EngineKeySet::Kv {
-            collection,
-            keys: SortedVec::new(vec![]),
-        });
+
+    /// A read of a named collection on the collection's own vShard.
+    fn unhomed(&mut self, entry: &ReadSetEntry) {
+        let collection = entry.collection.clone();
+        match &entry.key {
+            ReadKey::Point {
+                repr: KeyRepr::Surrogate(surrogate),
+            } => {
+                let rows = match entry.engine {
+                    EngineTag::Vector => &mut self.vectors,
+                    EngineTag::Document
+                    | EngineTag::Graph
+                    | EngineTag::Kv
+                    | EngineTag::Text
+                    | EngineTag::Columnar
+                    | EngineTag::Timeseries
+                    | EngineTag::Spatial
+                    | EngineTag::Crdt
+                    | EngineTag::Query
+                    | EngineTag::Meta
+                    | EngineTag::Array
+                    | EngineTag::ClusterArray => &mut self.documents,
+                };
+                rows.entry(collection).or_default().push(*surrogate);
+            }
+            ReadKey::Point {
+                repr: KeyRepr::KvKey(key),
+            } => self.kv.entry(collection).or_default().push(key.to_vec()),
+            // An edge locks by node pairs, which route by key home. The
+            // collection's own vShard is enlisted by an empty document set.
+            ReadKey::Point {
+                repr: KeyRepr::Edge { src, dst, .. },
+            } => {
+                self.edges
+                    .entry(collection.clone())
+                    .or_default()
+                    .pairs
+                    .extend([node_lock_pair(src), node_lock_pair(dst)]);
+                self.documents.entry(collection).or_default();
+            }
+            ReadKey::Predicate | ReadKey::IndexEq { .. } | ReadKey::IndexRange { .. } => {
+                self.whole.entry(collection).or_default();
+            }
+        }
     }
-    for collection in doc_colls {
-        sets.push(EngineKeySet::Document {
-            collection,
-            surrogates: SortedVec::new(vec![]),
-        });
+
+    /// The key sets, one per engine and collection, ordered by collection.
+    fn into_key_sets(self) -> Vec<EngineKeySet> {
+        let mut sets: Vec<EngineKeySet> = Vec::new();
+        sets.extend(
+            self.documents
+                .into_iter()
+                .map(|(collection, rows)| EngineKeySet::Document {
+                    collection,
+                    surrogates: SortedVec::new(rows),
+                }),
+        );
+        sets.extend(
+            self.vectors
+                .into_iter()
+                .map(|(collection, rows)| EngineKeySet::Vector {
+                    collection,
+                    surrogates: SortedVec::new(rows),
+                }),
+        );
+        sets.extend(
+            self.kv
+                .into_iter()
+                .map(|(collection, keys)| EngineKeySet::Kv {
+                    collection,
+                    keys: SortedVec::new(keys),
+                }),
+        );
+        sets.extend(
+            self.edges
+                .into_iter()
+                .map(|(collection, reads)| EngineKeySet::Edge {
+                    collection,
+                    edges: SortedVec::new(reads.pairs),
+                    home_vshards: SortedVec::new(reads.homes),
+                }),
+        );
+        sets.extend(
+            self.whole
+                .into_iter()
+                .map(|(collection, vshards)| EngineKeySet::Collection {
+                    collection,
+                    vshards: SortedVec::new(vshards.into_iter().collect()),
+                }),
+        );
+        sets.sort_by(|a, b| a.collection().cmp(b.collection()));
+        sets
     }
-    for (collection, homes) in homed {
-        sets.push(EngineKeySet::Edge {
-            collection,
-            edges: SortedVec::new(vec![]),
-            home_vshards: SortedVec::new(homes.into_iter().collect()),
-        });
-    }
-    ReadWriteSet::new(sets)
 }
 
 /// The lock pair of node `node` within one edge collection.
@@ -150,11 +234,12 @@ pub(crate) fn node_lock_pair(node: &str) -> (u32, u32) {
 #[cfg(test)]
 mod lockstep_tests {
     use super::*;
-    use crate::control::cluster::calvin::scheduler::lock_manager::LockKey;
+    use crate::control::cluster::calvin::scheduler::driver::helpers::expand_rw_set;
+    use crate::control::cluster::calvin::scheduler::lock_manager::{LockKey, LockMode};
     use crate::control::planner::calvin::tx_class::static_builder::build_single_vshard_tx_class;
     use crate::control::server::shared::write_admission::lock_keys::plan_lock_keys;
     use crate::types::{DatabaseId, TenantId, VShardId};
-    use nodedb_cluster::calvin::types::EngineKeySet;
+    use nodedb_cluster::calvin::types::{SequencedTxn, TxClass};
     use nodedb_physical::physical_plan::{DocumentOp, GraphOp, KvOp, PhysicalPlan};
     use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
     use nodedb_types::Surrogate;
@@ -172,64 +257,22 @@ mod lockstep_tests {
         }
     }
 
-    /// Mirrors the scheduler's `expand_rw_set` `EngineKeySet` → `LockKey`
-    /// mapping (fixed translation). What's under test is whether the
-    /// extractor threads the same `(collection, key/surrogate)` as the
-    /// gate's `plan_lock_keys`, not this mapping.
-    fn scheduler_lock_keys(sets: &[EngineKeySet]) -> BTreeSet<LockKey> {
-        let mut keys = BTreeSet::new();
-        for ks in sets {
-            match ks {
-                EngineKeySet::Document {
-                    collection,
-                    surrogates,
-                }
-                | EngineKeySet::Vector {
-                    collection,
-                    surrogates,
-                } => {
-                    let coll: Arc<str> = Arc::from(collection.as_str());
-                    for &surrogate in surrogates.iter() {
-                        keys.insert(LockKey::Surrogate {
-                            collection: Arc::clone(&coll),
-                            surrogate,
-                        });
-                    }
-                }
-                EngineKeySet::Kv {
-                    collection,
-                    keys: kv_keys,
-                } => {
-                    let coll: Arc<str> = Arc::from(collection.as_str());
-                    for k in kv_keys.iter() {
-                        keys.insert(LockKey::Kv {
-                            collection: Arc::clone(&coll),
-                            key: Arc::from(k.as_slice()),
-                        });
-                    }
-                }
-                EngineKeySet::Edge {
-                    collection, edges, ..
-                } => {
-                    let coll: Arc<str> = Arc::from(collection.as_str());
-                    for &(src, dst) in edges.iter() {
-                        keys.insert(LockKey::Edge {
-                            collection: Arc::clone(&coll),
-                            src,
-                            dst,
-                        });
-                    }
-                }
-                EngineKeySet::Array { collection, .. } => {
-                    keys.insert(LockKey::Surrogate {
-                        collection: Arc::from(collection.as_str()),
-                        surrogate:
-                            crate::control::planner::calvin::tx_class::write_keys::COLLECTION_KEY,
-                    });
-                }
-            }
-        }
-        keys
+    /// The row keys the scheduler locks `Exclusive` for `tx`, from its real
+    /// `expand_rw_set`. The collection's `Intent` key is left out: the gate
+    /// fences row keys only.
+    fn scheduler_lock_keys(tx: TxClass) -> BTreeSet<LockKey> {
+        expand_rw_set(&SequencedTxn {
+            epoch: 1,
+            position: 0,
+            tx_class: tx,
+            epoch_system_ms: 1_700_000_000_000,
+            epoch_vshard_txn_count: 1,
+            lock_owner: None,
+        })
+        .into_iter()
+        .filter(|(_, mode)| *mode == LockMode::Exclusive)
+        .map(|(key, _)| key)
+        .collect()
     }
 
     fn assert_gate_matches_scheduler(plan: PhysicalPlan) {
@@ -238,7 +281,7 @@ mod lockstep_tests {
             plan_lock_keys(&t.plan).expect("op must be fast-path eligible for this test");
         let tx = build_single_vshard_tx_class(&[t], TenantId::new(1), &[])
             .expect("valid single-vshard TxClass");
-        let scheduler_keys = scheduler_lock_keys(&tx.write_set.0);
+        let scheduler_keys = scheduler_lock_keys(tx);
         assert_eq!(
             gate_keys, scheduler_keys,
             "gate and scheduler must lock the identical key set"

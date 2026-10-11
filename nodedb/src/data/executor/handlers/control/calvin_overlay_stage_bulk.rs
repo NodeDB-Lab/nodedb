@@ -11,8 +11,8 @@
 //! live predicate rescan is NOT used as the row set, because a follower's
 //! local snapshot can legitimately lag the leader's verified prediction
 //! window. Re-deriving the row set locally would diverge across replicas.
-//! The flush installs the redo record `CalvinResolve` builds from this
-//! staging, so the staged rows are the rows the flush writes. The
+//! The install applies the redo record `CalvinResolve` builds from this
+//! staging, so the staged rows are the rows the install writes. The
 //! `stage_bulk_delete` / `stage_bulk_update` session-transaction handlers do
 //! a live rescan and are NOT reused here for this reason.
 //!
@@ -92,7 +92,7 @@ pub(in crate::data::executor) struct CalvinBulkUpdateStage<'a> {
 impl CoreLoop {
     /// Stage a Calvin `BulkDelete` into the overlay: one tombstone per
     /// predicted surrogate, resolved to its doc-id via
-    /// `ollp_predicted_doc_ids` — the identical primitive the flush apply
+    /// `ollp_predicted_doc_ids` — the identical primitive the install
     /// uses to derive `apply_ids`. NOT a live predicate rescan. Returns the
     /// number of predicted rows that exist.
     pub(in crate::data::executor) fn stage_calvin_bulk_delete(
@@ -181,7 +181,7 @@ impl CoreLoop {
     /// via the exact same per-row transform `execute_bulk_update` /
     /// `stage_point_update` use (`CoreLoop::stage_apply_update`), and stage
     /// the post-image as a `Put`. Row set = predicted surrogates, matching
-    /// the flush apply set exactly (and correctly excluding rows a
+    /// the install set exactly (and correctly excluding rows a
     /// same-transaction `INSERT` created after the predicted set was
     /// computed at recon).
     ///
@@ -241,7 +241,7 @@ impl CoreLoop {
                 declared_primary_key,
             )?;
             // Decide the staged post-image against the write policy: this is
-            // the row the Calvin flush will install.
+            // the row the stamped redo install writes.
             let identity = stored_row_identity(
                 &new_body,
                 strict_schema.as_ref(),

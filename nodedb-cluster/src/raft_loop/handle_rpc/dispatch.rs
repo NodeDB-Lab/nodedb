@@ -40,7 +40,7 @@ impl<A: CommitApplier, P: PlanExecutor> RaftRpcHandler for RaftLoop<A, P> {
             // Metadata-group proposal forwarding.
             RaftRpc::MetadataProposeRequest(req) => self.handle_metadata_propose_rpc(req),
             // Data-group proposal forwarding.
-            RaftRpc::DataProposeRequest(req) => self.handle_data_propose_rpc(req),
+            RaftRpc::DataProposeRequest(req) => self.handle_data_propose_rpc(req).await,
             // Read index for a node that does not lead the group.
             RaftRpc::ReadIndexRequest(req) => self.handle_read_index_rpc(req).await,
             // The leader this node knows for a group, from its own Raft state.

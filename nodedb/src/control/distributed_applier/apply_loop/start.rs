@@ -14,10 +14,13 @@ use crate::control::array_sync::raft_apply::{
 };
 use nodedb_raft::message::LogEntry;
 
+use crate::control::backup::cut_order::OrderedCut;
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
 use crate::types::{DatabaseId, TenantId};
 
-use super::calvin_read_result::{CalvinReadResultFields, forward_calvin_read_result};
+use super::calvin_read_result::{
+    CalvinReadResultFields, forward_calvin_read_result, forward_calvin_read_timeout,
+};
 use super::context::{ApplyContext, ApplyFuture, EnqueueFuture, FinishedApply};
 use super::group_watch::GroupWatch;
 use super::lane::QueuedEntry;
@@ -221,6 +224,9 @@ fn prepare_replicated<'a>(
         ReplicatedWrite::TransactionRedo { .. } => {
             prepare_transaction_redo_entry(ctx, pos, &replicated, scope.incarnations)
         }
+        ReplicatedWrite::RedoChunk { .. } | ReplicatedWrite::RedoAbandon { .. } => {
+            super::redo_chunk::prepare_stream_entry(ctx, pos, log_term, replicated)
+        }
         ReplicatedWrite::SurrogateBind { ref identities } => {
             Prepared::Concluded(super::surrogate_bind::apply_surrogate_bind(
                 ctx,
@@ -256,42 +262,49 @@ fn prepare_replicated<'a>(
             // Every entry after the barrier records above the cut, on this
             // life and on every later one.
             watch.raise_cut(pos.group_id, pos.log_index, hlc);
-            let barrier = CutBarrierPoint {
-                hlc,
-                restore_point,
+            super::cut_barrier::prepare_cut_barrier(
+                ctx,
+                pos,
                 log_term,
-            };
-            match capture {
-                Some(request) => prepare_capture_barrier(ctx, pos, barrier, request),
-                None => prepare_plain_barrier(ctx, pos, barrier),
-            }
+                OrderedCut {
+                    hlc,
+                    restore_point,
+                    capture,
+                },
+            )
         }
         ReplicatedWrite::CalvinReadResult {
             epoch,
             position,
             passive_vshard,
-            tenant_id,
+            tenant_id: _,
             ref values,
         } => {
-            forward_calvin_read_result(
-                ctx.tracker,
-                ctx.calvin_read_result_senders,
+            // The event's stored row is its durable effect: the entry
+            // extends the applied prefix once the row holds it.
+            Prepared::Concluded(forward_calvin_read_result(
+                ctx,
                 pos,
                 CalvinReadResultFields {
                     target_vshard: replicated.vshard_id,
                     epoch,
                     position,
                     passive_vshard,
-                    tenant_id,
                     values,
                 },
-            );
-            // A read result is forwarded to an in-memory Calvin scheduler and
-            // writes nothing durable, so it neither advances the prefix nor
-            // breaks it. The epoch it belongs to does not survive a restart,
-            // so a re-delivery cannot usefully replay it.
-            Prepared::Concluded(EntryOutcome::Skipped)
+            ))
         }
+        ReplicatedWrite::CalvinReadTimeout {
+            epoch,
+            position,
+            tenant_id: _,
+        } => Prepared::Concluded(forward_calvin_read_timeout(
+            ctx,
+            pos,
+            replicated.vshard_id,
+            epoch,
+            position,
+        )),
         _ => prepare_generic_entry(ctx, pos, entry, scope, false),
     }
 }
@@ -354,139 +367,4 @@ fn prepare_array_op<'a>(
             },
         }
     }))
-}
-
-/// Where a cut barrier cuts its group.
-#[derive(Clone, Copy)]
-struct CutBarrierPoint {
-    hlc: u64,
-    restore_point: u64,
-    log_term: u64,
-}
-
-/// Prepare a backup capture's cut barrier. The lane starts a barrier with
-/// nothing else of its group in flight, and starts no later entry until it
-/// finishes: the floor is durable, and the capture holds every entry at or
-/// below it and none above.
-fn prepare_capture_barrier<'a>(
-    ctx: ApplyContext<'a>,
-    pos: AppliedPosition,
-    barrier: CutBarrierPoint,
-    request: nodedb_physical::physical_plan::CutCaptureRequest,
-) -> Prepared<'a> {
-    let AppliedPosition {
-        group_id,
-        log_index,
-        applied_key,
-        ..
-    } = pos;
-    let CutBarrierPoint {
-        hlc,
-        restore_point,
-        log_term,
-    } = barrier;
-    Prepared::Exclusive(Box::pin(async move {
-        persist_floor_durably(ctx, group_id, log_index, hlc).await;
-        record_restore_point(ctx, group_id, restore_point, hlc, log_index, log_term);
-        crate::control::backup::cut_capture::apply::capture_at_barrier(
-            ctx.state, group_id, &request,
-        )
-        .await;
-        finish_barrier(ctx, group_id, log_index, applied_key)
-    }))
-}
-
-/// Prepare a cut barrier with no capture. A failed floor write holds the
-/// group until the floor is durable.
-fn prepare_plain_barrier<'a>(
-    ctx: ApplyContext<'a>,
-    pos: AppliedPosition,
-    barrier: CutBarrierPoint,
-) -> Prepared<'a> {
-    let AppliedPosition {
-        group_id,
-        log_index,
-        applied_key,
-        ..
-    } = pos;
-    let CutBarrierPoint {
-        hlc,
-        restore_point,
-        log_term,
-    } = barrier;
-    let persisted =
-        crate::control::pitr::restore_point::persist_cut_floor(ctx.state, group_id, log_index, hlc);
-    if persisted.is_ok() {
-        record_restore_point(ctx, group_id, restore_point, hlc, log_index, log_term);
-        return Prepared::Barrier;
-    }
-    Prepared::Exclusive(Box::pin(async move {
-        persist_floor_durably(ctx, group_id, log_index, hlc).await;
-        record_restore_point(ctx, group_id, restore_point, hlc, log_index, log_term);
-        finish_barrier(ctx, group_id, log_index, applied_key)
-    }))
-}
-
-/// Record the group's place at the cluster restore point `restore_point` a
-/// cut barrier takes. `0` takes none.
-fn record_restore_point(
-    ctx: ApplyContext<'_>,
-    group_id: u64,
-    restore_point: u64,
-    hlc: u64,
-    log_index: u64,
-    log_term: u64,
-) {
-    if restore_point == 0 {
-        return;
-    }
-    crate::control::pitr::restore_point::record_group_point(
-        ctx.state,
-        nodedb_wal::record::RestorePointPayload {
-            id: restore_point,
-            hlc,
-            group_id,
-            applied_index: log_index,
-            term: log_term,
-            next_epoch: 0,
-            epoch_system_ms: 0,
-            vshards: Vec::new(),
-        },
-    );
-}
-
-/// Persist the floor of the barrier at `log_index`, retrying until it holds.
-/// A floor write that keeps failing wedges the node until it succeeds.
-async fn persist_floor_durably(ctx: ApplyContext<'_>, group_id: u64, log_index: u64, hlc: u64) {
-    crate::control::pitr::restore_point::persist_until_durable(
-        &ctx.state.metadata_apply_wedge,
-        group_id,
-        log_index,
-        || {
-            crate::control::pitr::restore_point::persist_cut_floor(
-                ctx.state, group_id, log_index, hlc,
-            )
-        },
-    )
-    .await;
-}
-
-/// Resolve a barrier's waiter once every step of the barrier is durable.
-fn finish_barrier(
-    ctx: ApplyContext<'_>,
-    group_id: u64,
-    log_index: u64,
-    applied_key: u64,
-) -> FinishedApply {
-    ctx.tracker.complete(
-        group_id,
-        log_index,
-        applied_key,
-        Ok(crate::control::distributed_applier::AppliedWrite::unversioned(Vec::new())),
-    );
-    FinishedApply {
-        group_id,
-        log_index,
-        outcome: EntryOutcome::Skipped,
-    }
 }

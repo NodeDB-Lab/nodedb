@@ -94,8 +94,8 @@ mod tests {
             payload: Payload::from_vec(payload.to_vec()),
             watermark_lsn: Lsn::ZERO,
             error_code: code.map(Box::new),
-            read_set_valid: None,
-            read_version_lsn: Lsn::ZERO,
+            stage_vote: None,
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         }
     }

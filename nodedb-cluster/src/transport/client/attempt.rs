@@ -9,6 +9,11 @@
 //! typed refusal included. A refusal goes back to the caller as its typed
 //! error and is not resent.
 //!
+//! The peer can have run a request written before a link failure. The
+//! transport resends such a request only when [`RaftRpc::resend_safe`]
+//! holds. Any other request ends as `ClusterError::Unanswered`, an unknown
+//! outcome.
+//!
 //! A link failure drops the pooled connection only when the connection
 //! itself failed. Other sends share that connection, so one stream's
 //! failure must not cut them off. The connection fails when:
@@ -47,19 +52,47 @@ enum Attempt {
 /// A link failure, and the pooled connection it condemns.
 #[derive(Debug)]
 struct LinkFailure {
-    error: ClusterError,
+    error: Box<ClusterError>,
     /// Stable id of the connection to drop from the pool. `None` when no
     /// connection was obtained or the connection still works.
     condemned: Option<usize>,
+    /// Whether the whole request was written before the failure. The peer
+    /// can have run a written request.
+    written: bool,
 }
 
 impl LinkFailure {
-    /// A failure that leaves the pool as it is.
+    /// A failure before the request went out that leaves the pool as it is.
     fn keep_connection(error: ClusterError) -> Self {
         Self {
-            error,
+            error: Box::new(error),
             condemned: None,
+            written: false,
         }
+    }
+
+    /// The error of a written request that got no answer from `target`.
+    fn into_unanswered(self, target: u64) -> ClusterError {
+        ClusterError::Unanswered {
+            node_id: target,
+            detail: self.error.to_string(),
+        }
+    }
+}
+
+/// Whether a failed attempt is sent again.
+///
+/// `Ok` holds the error kept while the next attempt goes out. `Err` ends the
+/// call. A written request that is not [`RaftRpc::resend_safe`] can have run
+/// on the peer. It is never resent and ends as `ClusterError::Unanswered`.
+fn resend_verdict(failure: LinkFailure, target: u64, resend_safe: bool) -> Result<ClusterError> {
+    if failure.written && !resend_safe {
+        return Err(failure.into_unanswered(target));
+    }
+    if RetryPolicy::is_retryable(&failure.error) {
+        Ok(*failure.error)
+    } else {
+        Err(*failure.error)
     }
 }
 
@@ -110,6 +143,7 @@ impl NexarTransport {
         // Each retry wraps it in a fresh envelope so the seq advances
         // per attempt — a retry is a new frame, not a replayed frame.
         let inner = rpc_codec::encode(&rpc, &self.auth.epoch)?;
+        let resend_safe = rpc.resend_safe();
 
         let mut last_err = None;
         for attempt in 0..self.retry_policy.max_attempts {
@@ -124,10 +158,9 @@ impl NexarTransport {
             match self.attempt(target, &inner, read_timeout, admission).await {
                 Attempt::Answered(answer) => return answer,
                 Attempt::FrameRefused(e) => last_err = Some(e),
-                Attempt::LinkFailed(failure) if RetryPolicy::is_retryable(&failure.error) => {
-                    last_err = Some(failure.error)
+                Attempt::LinkFailed(failure) => {
+                    last_err = Some(resend_verdict(failure, target, resend_safe)?)
                 }
-                Attempt::LinkFailed(failure) => return Err(failure.error),
             }
         }
 
@@ -152,7 +185,7 @@ impl NexarTransport {
         {
             Attempt::Answered(answer) => answer,
             Attempt::FrameRefused(e) => Err(e),
-            Attempt::LinkFailed(failure) => Err(failure.error),
+            Attempt::LinkFailed(failure) => Err(*failure.error),
         }
     }
 
@@ -192,7 +225,8 @@ impl NexarTransport {
     /// The outer error is a link failure. The inner result is the peer's
     /// reply. A stream the peer finished without a reply is an inner error:
     /// the peer refused the request before its handler, and a resend gets
-    /// the same answer.
+    /// the same answer. The peer resets a stream whose handler started and
+    /// sent no answer, and that reset is a link failure of a written request.
     async fn try_send_once(
         &self,
         target: u64,
@@ -206,23 +240,26 @@ impl NexarTransport {
         let stable_id = conn.stable_id();
         if let Err(error) = self.verify_connection_target(&conn, target) {
             return Err(LinkFailure {
-                error,
+                error: Box::new(error),
                 condemned: Some(stable_id),
+                written: false,
             });
         }
         let received_before = received_datagrams(&conn);
         self.exchange(&conn, target, inner, read_timeout)
             .await
             .map_err(|failure| {
-                let (error, timed_out) = match failure {
-                    StreamFailure::ReadTimeout(error) => (error, true),
-                    StreamFailure::Other(error) => (error, false),
+                let (error, timed_out, written) = match failure {
+                    StreamFailure::Unsent(error) => (error, false, false),
+                    StreamFailure::ReadTimeout(error) => (error, true, true),
+                    StreamFailure::Unanswered(error) => (error, false, true),
                 };
                 let heard = received_datagrams(&conn) > received_before;
                 let broken = condemns_connection(timed_out, conn.close_reason().is_some(), heard);
                 LinkFailure {
-                    error,
+                    error: Box::new(error),
                     condemned: broken.then_some(stable_id),
+                    written,
                 }
             })
     }
@@ -236,19 +273,21 @@ impl NexarTransport {
         read_timeout: Duration,
     ) -> std::result::Result<Result<RaftRpc>, StreamFailure> {
         let (mut send, mut recv) = conn.open_bi().await.map_err(|e| {
-            StreamFailure::Other(ClusterError::Transport {
+            StreamFailure::Unsent(ClusterError::Transport {
                 detail: format!("open_bi to node {target}: {e}"),
             })
         })?;
 
-        let envelope = self.wrap_inner(inner).map_err(StreamFailure::Other)?;
+        let envelope = self.wrap_inner(inner).map_err(StreamFailure::Unsent)?;
+        // A failed `write_all` left part of the frame unbuffered, so the peer
+        // cannot hold the whole request. Once it returns, the peer can.
         send.write_all(&envelope).await.map_err(|e| {
-            StreamFailure::Other(ClusterError::Transport {
+            StreamFailure::Unsent(ClusterError::Transport {
                 detail: format!("write to node {target}: {e}"),
             })
         })?;
         send.finish().map_err(|e| {
-            StreamFailure::Other(ClusterError::Transport {
+            StreamFailure::Unanswered(ClusterError::Transport {
                 detail: format!("finish send to node {target}: {e}"),
             })
         })?;
@@ -264,7 +303,7 @@ impl NexarTransport {
                         ),
                     })
                 })?
-                .map_err(StreamFailure::Other)?;
+                .map_err(StreamFailure::Unanswered)?;
         let Some(response_envelope) = response_envelope else {
             return Ok(Err(ClusterError::RemoteUntyped {
                 detail: format!("node {target} finished the stream without a reply"),
@@ -281,10 +320,15 @@ impl NexarTransport {
 /// How one stream on a pooled connection failed.
 #[derive(Debug)]
 enum StreamFailure {
-    /// The reply did not arrive within the read timeout.
+    /// The request did not go out whole: the stream did not open, the
+    /// envelope did not build, or the write failed.
+    Unsent(ClusterError),
+    /// The request was written, and the reply did not arrive within the
+    /// read timeout.
     ReadTimeout(ClusterError),
-    /// Opening, writing or reading the stream failed.
-    Other(ClusterError),
+    /// The request was written, and finishing the stream or reading the
+    /// reply failed.
+    Unanswered(ClusterError),
 }
 
 /// Whether a stream failure condemns its connection.
@@ -353,6 +397,46 @@ mod tests {
         }
         assert_eq!(client.peer_connection_stable_id(1), Some(pooled));
         assert_eq!(client.circuit_breaker().failure_count(1), 1);
+    }
+
+    fn lost(written: bool) -> LinkFailure {
+        LinkFailure {
+            error: Box::new(ClusterError::Transport {
+                detail: "connection lost".into(),
+            }),
+            condemned: None,
+            written,
+        }
+    }
+
+    /// A propose that went out can have run on the peer. It is never
+    /// resent, and it ends as an unknown outcome.
+    #[test]
+    fn a_written_request_that_is_not_resend_safe_ends_unanswered() {
+        match resend_verdict(lost(true), 2, false) {
+            Err(ClusterError::Unanswered { node_id: 2, .. }) => {}
+            other => panic!("expected Unanswered, got {other:?}"),
+        }
+    }
+
+    /// A request that never went out ran nowhere, so it is resent.
+    #[test]
+    fn an_unsent_request_is_resent() {
+        for resend_safe in [false, true] {
+            assert!(matches!(
+                resend_verdict(lost(false), 2, resend_safe),
+                Ok(ClusterError::Transport { .. })
+            ));
+        }
+    }
+
+    /// A request whose second run is harmless is resent after a write.
+    #[test]
+    fn a_written_resend_safe_request_is_resent() {
+        assert!(matches!(
+            resend_verdict(lost(true), 2, true),
+            Ok(ClusterError::Transport { .. })
+        ));
     }
 
     #[test]

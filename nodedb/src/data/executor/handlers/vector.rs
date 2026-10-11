@@ -234,7 +234,7 @@ impl CoreLoop {
                 // Record this write's version so cross-shard OCC read-set
                 // validation (predicate reads always record the collection
                 // floor) sees this insert.
-                self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
+                self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
                 self.response_ok(task)
             }
             Err(err) => self.response_error(task, err),
@@ -364,7 +364,7 @@ impl CoreLoop {
                     // surrogate (a superset of `execute_vector_delete`'s
                     // node-id-scoped floor-only record below — correct and
                     // more precise since the surrogate identity is known here).
-                    self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
+                    self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
                 }
                 response
             }
@@ -382,6 +382,7 @@ mod tests {
     use super::*;
     use crate::bridge::envelope::{PhysicalPlan, Priority, Request};
     use crate::data::executor::core_loop::write_index::WriteKey;
+    use crate::data::executor::core_loop::write_index::tests::local;
     use crate::types::{Lsn, RequestId, TraceId, VShardId};
     use nodedb_bridge::buffer::RingBuffer;
     use nodedb_physical::physical_plan::VectorOp;
@@ -417,7 +418,7 @@ mod tests {
         }
     }
 
-    /// A task carrying `wal_lsn` so the handler's `note_*_write_lsn` calls
+    /// A task carrying `wal_lsn` so the handler's `note_*_write` calls
     /// (gated on `task.wal_lsn().is_some()`) actually fire, mirroring a live
     /// write dispatched with an allocated WAL LSN.
     fn make_task_with_lsn(lsn: u64) -> ExecutionTask {
@@ -453,6 +454,7 @@ mod tests {
             wal_lsn: Some(Lsn::new(lsn)),
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: crate::bridge::envelope::Admission::Exempt(
                 crate::bridge::envelope::ExemptReason::Read,
             ),
@@ -478,6 +480,7 @@ mod tests {
         assert_eq!(response.status, crate::bridge::envelope::Status::Ok);
 
         let key = WriteKey {
+            vshard: VShardId::new(0),
             db: DatabaseId::DEFAULT,
             tenant: TenantId::new(1),
             collection: Box::from("docs"),
@@ -486,20 +489,21 @@ mod tests {
             ),
         };
         assert_eq!(
-            h.core.write_index.key_write_lsn(&key),
-            Some(Lsn::new(11)),
+            h.core.write_index.key_version(&key),
+            Some(local(11)),
             "vector insert must populate the per-key (surrogate) write-version index"
         );
 
         let coll_key = crate::data::executor::core_loop::write_index::CollKey {
+            vshard: VShardId::new(0),
             db: DatabaseId::DEFAULT,
             tenant: TenantId::new(1),
             collection: Box::from("docs"),
         };
         assert_eq!(
-            h.core.write_index.collection_write_lsn(&coll_key),
-            Some(Lsn::new(11)),
-            "vector insert must advance the collection write-version floor \
+            h.core.write_index.collection_version(&coll_key),
+            Some(local(11)),
+            "vector insert must advance the collection write version \
              (predicate reads validate against the floor)"
         );
     }

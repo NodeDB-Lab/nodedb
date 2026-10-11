@@ -30,10 +30,8 @@ impl MultiRaft {
     /// Maps the vshard to its Raft group via the routing table and reuses the
     /// existing local leader-role check — no new election. Returns `false` when
     /// the vshard has no group mapping or this node is a follower/learner for
-    /// the owning group. Used by the Calvin scheduler to stamp the per-node,
-    /// non-replicated `is_group_leader` dispatch flag so the OLLP optimistic-lock
-    /// verification runs only on the leader while every replica applies the same
-    /// predicted write-set (determinism).
+    /// the owning group. The Calvin scheduler proposes its owed sequencer
+    /// entries only while this holds.
     pub fn vshard_role_is_leader(&self, vshard_id: u32) -> bool {
         match self
             .routing
@@ -207,10 +205,10 @@ impl MultiRaft {
             return Ok(false);
         };
         // A sequencer replica that installs a snapshot never receives the
-        // Calvin inputs the snapshot covers, and its schedulers lose them.
-        // When every voter does, the inputs are gone from the cluster. So no
-        // replica compacts past an entry a voter's log may lack: no voter
-        // ever takes a sequencer snapshot, under this leader or a later one.
+        // Calvin inputs the snapshot covers. So no replica compacts past an
+        // entry a live voter's log may lack. A voter silent past the
+        // check-quorum window does not hold the floor. It recovers through a
+        // sequencer snapshot install once it answers again.
         let applied_index = if group_id == crate::calvin::SEQUENCER_GROUP_ID {
             applied_index.min(node.replicated_floor())
         } else {

@@ -24,10 +24,6 @@ pub fn run_begin(
     session_id: SessionId,
     state: &SharedState,
 ) -> Result<(), crate::Error> {
-    let snapshot_lsn = {
-        let next = state.wal.next_lsn();
-        crate::types::Lsn::new(next.as_u64().saturating_sub(1))
-    };
     // Last globally-applied Calvin epoch as the cross-shard snapshot anchor.
     // 0 in single-node / no-Calvin deployments (the atomic is never advanced).
     let snapshot_epoch = state
@@ -36,7 +32,7 @@ pub fn run_begin(
         .load(std::sync::atomic::Ordering::Acquire);
     ddl_buffer::activate();
     sessions
-        .begin(session_id, snapshot_lsn, snapshot_epoch)
+        .begin(session_id, snapshot_epoch)
         .map_err(|msg| crate::Error::BadRequest {
             detail: msg.to_owned(),
         })
@@ -198,8 +194,8 @@ mod tests {
                     payload: Payload::empty(),
                     watermark_lsn: Lsn::ZERO,
                     error_code: None,
-                    read_set_valid: None,
-                    read_version_lsn: crate::types::Lsn::ZERO,
+                    stage_vote: None,
+                    read_versions: crate::types::ReadVersions::new(),
                     write_set: Vec::new(),
                 })
             })

@@ -401,7 +401,7 @@ impl CoreLoop {
             // Every successfully imported payload changed authoritative Loro
             // state, including a snapshot import that projects no row. Record
             // its exact durable collection floor either way.
-            self.note_replay_write_lsn(
+            self.note_replay_write(
                 record.header.database_id,
                 tid.as_u64(),
                 collection,
@@ -1054,15 +1054,20 @@ mod crdt_replay_tests {
             "matching fenced retry must rebuild its sparse projection"
         );
         assert_eq!(
-            h.core.write_index.collection_write_lsn(
+            h.core.write_index.collection_version(
                 &crate::data::executor::core_loop::write_index::CollKey {
+                    vshard: crate::data::executor::core_loop::write_index::tests::replay_home(
+                        db, collection
+                    ),
                     db,
                     tenant: tid,
                     collection: Box::from(collection),
                 }
             ),
-            Some(crate::types::Lsn::new(3)),
-            "only the correctly fenced retry advances the replay write floor"
+            Some(crate::data::executor::core_loop::write_index::tests::local(
+                3
+            )),
+            "only the correctly fenced retry advances the replay write version"
         );
     }
 
@@ -1233,14 +1238,23 @@ mod crdt_replay_tests {
         h
     }
 
+    /// The replayed version of `users`, as the WAL LSN it was written at.
     fn users_write_lsn(h: &CoreHarness, tid: TenantId) -> Option<crate::types::Lsn> {
-        h.core.write_index.collection_write_lsn(
+        use crate::data::executor::core_loop::write_index::tests::{local, replay_home};
+        let version = h.core.write_index.collection_version(
             &crate::data::executor::core_loop::write_index::CollKey {
+                vshard: replay_home(DatabaseId::DEFAULT, "users"),
                 db: DatabaseId::DEFAULT,
                 tenant: tid,
                 collection: Box::from("users"),
             },
-        )
+        )?;
+        assert_eq!(
+            version,
+            local(version.local),
+            "a single-node replay records a local version"
+        );
+        Some(crate::types::Lsn::new(version.local))
     }
 
     /// A replayed rejection the full queue refuses stops replay at its

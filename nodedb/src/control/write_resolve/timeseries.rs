@@ -14,7 +14,6 @@ use nodedb_types::RlsWriteCheck;
 use crate::bridge::envelope::{PhysicalPlan, Status};
 use crate::control::maintenance::clone_materializer::dispatch_local;
 use crate::control::state::SharedState;
-use crate::engine::timeseries::install_counts::TsInstallCounts;
 use crate::engine::timeseries::resolved_ingest::{
     RESOLVED_INGEST_FORMAT, ResolveBase, ResolvedTsBatch, TsDriftPolicy,
 };
@@ -245,44 +244,6 @@ pub(crate) fn rejected_lines(plan: &PhysicalPlan) -> crate::Result<u64> {
         }
         _ => Ok(0),
     }
-}
-
-/// The count payload of the resolved timeseries ingest `plan`, in the shape
-/// an install answers: the rows it stores and the lines its resolve
-/// rejected. `None` for every other plan, and for an ingest with
-/// `RETURNING`, which answers rows.
-pub(crate) fn resolved_ingest_counts(plan: &PhysicalPlan) -> crate::Result<Option<Vec<u8>>> {
-    let PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-        collection,
-        payload,
-        format,
-        returning: None,
-        ..
-    }) = plan
-    else {
-        return Ok(None);
-    };
-    if format != RESOLVED_INGEST_FORMAT {
-        return Ok(None);
-    }
-    let batch = ResolvedTsBatch::from_bytes(payload)?;
-    let counts = serde_json::json!({
-        "accepted": batch.rows.len(),
-        "rejected": batch.rejected,
-        "collection": collection.as_str(),
-    });
-    nodedb_types::json_to_msgpack(&counts)
-        .map(Some)
-        .map_err(|e| crate::Error::Codec {
-            detail: format!("timeseries ingest counts: {e}"),
-        })
-}
-
-/// Whether an applied answer's `payload` carries its timeseries installs'
-/// counts. Such a payload has the shape an install answers: the rows the
-/// apply stored, and the lines and rows it rejected.
-pub(crate) fn carries_applied_ingest_counts(payload: &[u8]) -> bool {
-    TsInstallCounts::from_payload(payload).is_some()
 }
 
 /// Whether `plan` is a timeseries ingest that has not resolved its rows.

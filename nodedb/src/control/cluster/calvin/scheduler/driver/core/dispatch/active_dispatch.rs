@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Active (dependent-read) transaction dispatch: submits a
-//! `CalvinExecuteActive` task once all passive results have landed.
+//! Active (dependent-read) transaction dispatch on the data-group leader:
+//! submits a `CalvinExecuteActive` task once all passive results have landed.
 
 use std::time::Instant;
-
-use tracing::error;
 
 use nodedb_cluster::calvin::types::SequencedTxn;
 use nodedb_physical::physical_plan::PhysicalPlan;
@@ -14,7 +12,8 @@ use nodedb_physical::physical_plan::meta::MetaOp;
 use super::super::deferred::{DispatchOutcome, DispatchStep};
 use super::super::scheduler::Scheduler;
 use super::primary_write::{
-    plans_have_primary_write, plans_have_returning, txn_has_non_derived_write,
+    plans_have_primary_write, plans_have_returning, plans_raise_write_mark,
+    txn_has_non_derived_write,
 };
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 
@@ -38,14 +37,7 @@ impl Scheduler {
         let plans = match super::super::super::helpers::decode_plans(&txn.tx_class.plans) {
             Ok(p) => p,
             Err(e) => {
-                error!(
-                    vshard_id = self.vshard_id,
-                    epoch,
-                    position,
-                    error = %e,
-                    "calvin scheduler: active plan decode failed; releasing locks"
-                );
-                self.on_unpending_txn_complete(txn_id, lock_owner);
+                self.reject_plan(txn, txn_id, lock_owner, &e);
                 return;
             }
         };
@@ -59,12 +51,11 @@ impl Scheduler {
             match self.local_calvin_plans(plans, txn.tx_class.database_id, epoch, position) {
                 Ok(p) if !p.is_empty() => p,
                 Ok(_) => {
-                    // A dependent-read active txn dispatched here always carries a
-                    // local write slice (the OLLP orchestrator only routes the write
-                    // participant through this path). An empty local slice is a
-                    // routing bug, not a read-only participant — surface it as a
-                    // terminal routing failure rather than dispatching an
-                    // active task with nothing to apply.
+                    // Only a vShard the write set names opens a barrier, so an
+                    // active txn dispatched here carries a local write slice. An
+                    // empty local slice means the plans and the write set
+                    // disagree, so it rejects the plans rather than dispatching
+                    // an active task with nothing to apply.
                     let e = crate::Error::Internal {
                         detail: format!(
                             "calvin active txn {epoch}/{position} homes no local write plans \
@@ -72,36 +63,24 @@ impl Scheduler {
                             self.vshard_id
                         ),
                     };
-                    error!(
-                        vshard_id = self.vshard_id,
-                        epoch,
-                        position,
-                        error = %e,
-                        "calvin scheduler: active txn homes no local writes; releasing locks"
-                    );
-                    self.propose_routing_failure(txn_id, &e);
-                    self.on_unpending_txn_complete(txn_id, lock_owner);
+                    self.reject_plan(txn, txn_id, lock_owner, &e);
                     return;
                 }
                 Err(e) => {
-                    error!(
-                        vshard_id = self.vshard_id,
-                        epoch,
-                        position,
-                        error = %e,
-                        "calvin scheduler: active txn routing failed; releasing locks"
-                    );
-                    self.propose_routing_failure(txn_id, &e);
-                    self.on_unpending_txn_complete(txn_id, lock_owner);
+                    self.reject_plan(txn, txn_id, lock_owner, &e);
                     return;
                 }
             };
-        if !self.bind_local_identities(&mut plans, txn.tx_class.database_id, tenant_id, txn_id) {
+        let Some(identities) =
+            self.bind_local_identities(&mut plans, txn.tx_class.database_id, tenant_id, txn_id)
+        else {
             return;
-        }
+        };
         let has_primary_write = plans_have_primary_write(&plans, has_non_derived_write);
+        let raises_write_mark = plans_raise_write_mark(&plans, has_primary_write);
         let has_returning = plans_have_returning(&plans);
-        let flush_scope = super::super::super::types::FlushScope::of_plans(&plans);
+        let mut scope = super::super::super::types::SliceScope::of_plans(&plans);
+        scope.identities = identities;
         let plan = PhysicalPlan::Meta(MetaOp::CalvinExecuteActive {
             epoch,
             position,
@@ -109,18 +88,15 @@ impl Scheduler {
             plans,
             injected_reads,
             epoch_system_ms: txn.epoch_system_ms,
-            is_group_leader: self.is_group_leader(),
         });
 
-        // Calvin allocates the CalvinApplied WAL LSN post-apply (in the
-        // scheduler's response handler), so no committed LSN is known at
-        // dispatch time to stamp here.
+        // A stage writes no WAL record, so no committed LSN rides on it.
         let database_id = txn.tx_class.database_id;
-        let request = self.build_exempt_request(request_id, tenant_id, database_id, plan, None);
+        let request = self.build_exempt_request(request_id, tenant_id, database_id, plan);
 
         // The txn enters `pending` before the dispatch, so a stage refused at
         // capacity stays in flight with its locks until the re-send.
-        // Every replica checks the transaction's collection incarnations.
+        // The leader checks the transaction's collection incarnations.
         let (superseded, gates) = self.check_incarnations(&txn.tx_class);
         self.pending.insert(
             txn_id,
@@ -130,26 +106,25 @@ impl Scheduler {
                 // no-determinism: dispatch_time is scheduler observability, not Calvin WAL data
                 dispatch_time: Instant::now(),
                 has_primary_write,
+                raises_write_mark,
                 has_returning,
-                // The commit's resolved redo fills them.
-                change_sets: Vec::new(),
-                // The dependent-read active path STAGES (leader-verify OLLP +
+                // The dependent-read active path STAGES (OLLP verify +
                 // buffer, no base apply); its response drives the same
-                // resolve → redo → flush as the static path, for
-                // WAL-only-restart durability. `resolve_staged_commit` reads the
-                // `read_set_valid: None` the active handler returns as "commit".
-                commit_state: Some(super::super::super::types::CommitState::Staged),
+                // resolve and redo proposal as the static path.
+                // `resolve_staged_commit` reads the `stage_vote` the active
+                // handler sets.
+                commit_state: super::super::super::types::CommitState::Staged,
+                // The dispatch below records its request.
+                awaiting: None,
                 // Set only once the txn parks in `AwaitingVerdict`.
                 verdict_deadline: None,
                 stage_error: None,
-                // Set once a committed txn appends its redo record.
-                redo_records: None,
-                flush_scope,
+                scope,
+                // Set once a committed slice resolves its redo.
+                redo: None,
                 superseded,
                 gates,
                 ungated: false,
-                // Taken when the flush dispatches.
-                install_permit: None,
             },
         );
 

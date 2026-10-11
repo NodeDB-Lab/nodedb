@@ -185,7 +185,7 @@ fn outcome_of(payload: Vec<u8>) -> GatherOutcome {
         raw: payload,
         merged_array,
         watermark_lsn: Lsn::ZERO,
-        read_version_lsn: Lsn::ZERO,
+        read_versions: crate::types::ReadVersions::new(),
         shard_watermarks: Vec::new(),
     }
 }

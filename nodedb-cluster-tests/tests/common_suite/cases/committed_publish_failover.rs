@@ -27,8 +27,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use nodedb::event::cdc::CdcOffset;
+use nodedb_test_support::fail_point::{FailAction, FailGuard};
 use nodedb_types::DatabaseId;
-use nodedb_types::fail_point::{FailAction, FailGuard};
 
 const TOPIC: &str = "committed_failover_feed";
 const SRC: &str = "committed_failover_src";
@@ -184,8 +184,9 @@ async fn a_publish_committed_before_a_leader_kill_is_delivered_once() {
     // Never created: the leader stays parked until it dies.
     let release = gate_dir.path().join("release");
     let parked = gate_dir.path().join("release.parked");
-    let _gate = FailGuard::install(
-        &format!("publish::before_delivery::node{leader_id}"),
+    let _gate = FailGuard::for_node(
+        leader_id,
+        "publish::before_delivery",
         FailAction::WaitForFile(release),
     );
     wait_parked(&parked, "the leader's delivery parks").await;
@@ -223,8 +224,9 @@ async fn a_publish_sent_before_a_leader_kill_is_not_appended_twice() {
     let hold_dir = tempfile::tempdir().expect("gate directory");
     let hold_release = hold_dir.path().join("release");
     let hold_parked = hold_dir.path().join("release.parked");
-    let _hold = FailGuard::install(
-        &format!("publish::before_delivery::node{leader_id}"),
+    let _hold = FailGuard::for_node(
+        leader_id,
+        "publish::before_delivery",
         FailAction::WaitForFile(hold_release.clone()),
     );
     wait_parked(&hold_parked, "the leader's delivery parks").await;
@@ -241,8 +243,9 @@ async fn a_publish_sent_before_a_leader_kill_is_not_appended_twice() {
     // file of the second gate is never created: the leader dies parked.
     let commit_dir = tempfile::tempdir().expect("gate directory");
     let commit_parked = commit_dir.path().join("release.parked");
-    let _commit = FailGuard::install(
-        &format!("publish::before_cursor_commit::node{leader_id}"),
+    let _commit = FailGuard::for_node(
+        leader_id,
+        "publish::before_cursor_commit",
         FailAction::WaitForFile(commit_dir.path().join("release")),
     );
     std::fs::write(&hold_release, b"release").expect("release the delivery");

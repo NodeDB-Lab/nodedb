@@ -68,7 +68,7 @@ impl CoreLoop {
         };
         self.emit_kv_write_event(task, collection, op, key, Some(value), old_slice);
 
-        self.note_kv_write_lsn(task, did, tid, collection, key);
+        self.note_kv_write(task, did, tid, collection, key);
         if let Some(spec) = returning {
             // `value` IS the stored body on this path: the put writes the
             // caller's bytes verbatim, so projecting them is projecting the
@@ -159,7 +159,7 @@ impl CoreLoop {
             None,
         );
 
-        self.note_kv_write_lsn(task, did, tid, collection, key);
+        self.note_kv_write(task, did, tid, collection, key);
         if let Some(spec) = returning {
             return self.kv_stored_returning_response(task, spec, rls_filters, &[(key, value)]);
         }
@@ -241,7 +241,7 @@ impl CoreLoop {
             None,
         );
 
-        self.note_kv_write_lsn(task, did, tid, collection, key);
+        self.note_kv_write(task, did, tid, collection, key);
         if let Some(spec) = returning {
             return self.kv_stored_returning_response(task, spec, rls_filters, &[(key, value)]);
         }
@@ -251,7 +251,7 @@ impl CoreLoop {
     /// Record a committed KV point write's version, keyed by the raw KV key
     /// bytes, if a WAL LSN was threaded onto the task. Shared by every KV write
     /// chokepoint (basic put/delete, atomic ops, batch, field, TTL).
-    pub(in crate::data::executor) fn note_kv_write_lsn(
+    pub(in crate::data::executor) fn note_kv_write(
         &mut self,
         task: &ExecutionTask,
         did: u64,
@@ -259,15 +259,15 @@ impl CoreLoop {
         collection: &str,
         key: &[u8],
     ) {
-        let Some(lsn) = task.wal_lsn() else {
+        let Some(stamp) = self.task_write_stamp(task) else {
             return;
         };
-        self.note_write_lsn(
+        self.note_write(
             crate::types::DatabaseId::new(did),
             crate::types::TenantId::new(tid),
             collection,
             Some(crate::data::executor::core_loop::write_index::KeyRepr::KvKey(Box::from(key))),
-            lsn,
+            stamp,
         );
     }
 }

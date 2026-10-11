@@ -56,9 +56,8 @@ impl RegistryShuffleProducer {
     }
 
     /// Run the produce, returning a [`ShuffleProduceResponse`] whose `error` is a
-    /// terminal error (or `None` on clean produce) and whose `read_version_lsn` is
-    /// the max per-collection read version the local scan observed (`0` on
-    /// failure).
+    /// terminal error (or `None` on clean produce) and whose `read_versions` are
+    /// the read versions the local scan observed (empty on failure).
     ///
     /// Factored out of the trait method so the trait impl stays a thin shim and
     /// every early-exit error path is `?`-propagated here, then mapped to the
@@ -72,7 +71,7 @@ impl RegistryShuffleProducer {
                     message: "shuffle produce requires a cluster transport (single-node mode)"
                         .into(),
                 }),
-                read_version_lsn: 0,
+                read_versions: Vec::new(),
             };
         };
 
@@ -129,12 +128,12 @@ impl RegistryShuffleProducer {
         // (validation reject, decode, deadline, or data-plane stream error).
         let scan_outcome = executor.execute_plan_streaming(exec_req, &mut sink).await;
 
-        // Capture the max per-collection read version the scan observed BEFORE
-        // `finish` consumes the sink. On a clean produce this is the scanned
-        // collection's `coll_write_lsn` at read time — the comparand the
-        // coordinator max-folds across producers for cross-shard OCC read
-        // validation of an in-transaction distributed aggregate.
-        let observed_read_version = sink.observed_read_version_lsn();
+        // Capture the read versions the scan observed BEFORE `finish` consumes
+        // the sink. On a clean produce they are the scanned collection's
+        // versions at read time: the comparand the coordinator folds across
+        // producers for cross-shard OCC read validation of an in-transaction
+        // distributed aggregate.
+        let observed_read_versions = sink.observed_read_versions().to_wire();
 
         // Finalize the fan-out: flush residuals (clean path) and `End` EVERY part
         // for this side — with the scan error if any — so each receiver's barrier
@@ -148,20 +147,21 @@ impl RegistryShuffleProducer {
                     code: 0,
                     message: format!("shuffle produce fan-out finalize failed: {e}"),
                 })),
-                read_version_lsn: 0,
+                read_versions: Vec::new(),
             };
         }
 
-        // On a failed scan the read version is meaningless — report 0 (mirroring
-        // `ExecuteResponse::err`). On a clean produce report the observed max.
-        let read_version_lsn = if scan_outcome.is_none() {
-            observed_read_version
+        // On a failed scan the read versions are meaningless: report none
+        // (mirroring `ExecuteResponse::err`). On a clean produce report what
+        // the scan observed.
+        let read_versions = if scan_outcome.is_none() {
+            observed_read_versions
         } else {
-            0
+            Vec::new()
         };
         ShuffleProduceResponse {
             error: scan_outcome,
-            read_version_lsn,
+            read_versions,
         }
     }
 }

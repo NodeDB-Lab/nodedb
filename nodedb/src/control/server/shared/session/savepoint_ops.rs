@@ -307,8 +307,8 @@ mod tests {
                     payload: Payload::empty(),
                     watermark_lsn: Lsn::ZERO,
                     error_code: None,
-                    read_set_valid: None,
-                    read_version_lsn: crate::types::Lsn::ZERO,
+                    stage_vote: None,
+                    read_versions: crate::types::ReadVersions::new(),
                     write_set: Vec::new(),
                 })
             })
@@ -344,7 +344,7 @@ mod tests {
         let store = SessionStore::new();
         let addr: std::net::SocketAddr = "127.0.0.1:5203".parse().unwrap();
         store.ensure_session(addr);
-        store.begin(addr, Lsn::new(1), 0).unwrap();
+        store.begin(addr, 0).unwrap();
         assert!(store.buffer_write(addr, staged_task(3)));
 
         let result = run_savepoint(
@@ -386,7 +386,7 @@ mod tests {
         let store = SessionStore::new();
         let addr: std::net::SocketAddr = "127.0.0.1:5201".parse().unwrap();
         store.ensure_session(addr);
-        store.begin(addr, Lsn::new(1), 0).unwrap();
+        store.begin(addr, 0).unwrap();
         let tenant = TenantId::new(1);
         let dp = RecordingDp::default();
 
@@ -435,7 +435,7 @@ mod tests {
         let store = SessionStore::new();
         let addr: std::net::SocketAddr = "127.0.0.1:5204".parse().unwrap();
         store.ensure_session(addr);
-        store.begin(addr, Lsn::new(1), 0).unwrap();
+        store.begin(addr, 0).unwrap();
         let tenant = TenantId::new(1);
         let dp = RecordingDp::default();
         assert!(store.buffer_write(addr, staged_task(2)));
@@ -467,7 +467,7 @@ mod tests {
         let store = SessionStore::new();
         let addr: std::net::SocketAddr = "127.0.0.1:5202".parse().unwrap();
         store.ensure_session(addr);
-        store.begin(addr, Lsn::new(1), 0).unwrap();
+        store.begin(addr, 0).unwrap();
         let session = SessionId::from(&addr);
         let tenant = TenantId::new(1);
         let dp = RecordingDp::default();

@@ -160,9 +160,10 @@ async fn submit_commit_calvin(
             // independent single-vShard Calvin transaction, sequenced through the
             // SAME deterministic funnel the contended point-write path uses
             // (`build_single_vshard_tx_class` + `submit_calvin_routed`): the
-            // scheduler resolves it into a `TransactionRedo`, WAL-appends it, and
-            // the Calvin flush sets `epoch_system_ms` so every engine's bitemporal
-            // stamp is epoch-anchored and byte-identical on replay.
+            // scheduler resolves it into a `TransactionRedo` and proposes it as a
+            // stamped data-group entry. The install sets `epoch_system_ms`, so
+            // every engine's bitemporal stamp is epoch-anchored and
+            // byte-identical on replay.
             //
             // Non-atomic ACROSS vShards is preserved by construction: each group
             // is a separate submit-and-await with its own single-participant
@@ -196,10 +197,9 @@ async fn submit_commit_calvin(
                 } else {
                     event_source
                 };
-                // Empty read-set: best-effort performs no cross-shard OCC (the
-                // multi-shard COMMIT path never ran `si_conflict_abort`), so each
-                // group carries no versioned reads — matching the single-vShard
-                // submit `route_write_to_calvin` uses.
+                // Empty read-set: best-effort performs no cross-shard OCC, so
+                // each group carries no versioned reads — matching the
+                // single-vShard submit `route_write_to_calvin` uses.
                 // A timeseries ingest resolves to its rows here, before it is
                 // sequenced: every replica resolves a sequenced group on its own.
                 let tasks =

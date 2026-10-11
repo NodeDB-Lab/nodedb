@@ -42,6 +42,23 @@ impl TestClusterNode {
     /// The document keys of `tenant` in the default database that core
     /// `core_id` stores, from that core's own tenant snapshot.
     pub async fn document_keys_on_core(&self, core_id: usize, tenant: TenantId) -> Vec<String> {
+        self.tenant_snapshot_on_core(core_id, tenant)
+            .await
+            .documents
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+    }
+
+    /// The tenant snapshot of `tenant` in the default database that core
+    /// `core_id` of this node holds. The read never leaves this node, so it
+    /// shows this replica's own stored rows. Panics when the core answers
+    /// with an error.
+    pub async fn tenant_snapshot_on_core(
+        &self,
+        core_id: usize,
+        tenant: TenantId,
+    ) -> TenantDataSnapshot {
         let request_id = RequestId::new(PLACEMENT_REQUEST_ID.fetch_add(1, Ordering::Relaxed));
         let request = Request {
             request_id,
@@ -67,6 +84,7 @@ impl TestClusterNode {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: nodedb::bridge::envelope::Admission::Exempt(
                 nodedb::bridge::envelope::ExemptReason::Read,
             ),
@@ -87,8 +105,6 @@ impl TestClusterNode {
             Status::Ok,
             "core {core_id} snapshot failed"
         );
-        let snap: TenantDataSnapshot =
-            zerompk::from_msgpack(response.payload.as_bytes()).expect("core snapshot decodes");
-        snap.documents.into_iter().map(|(k, _)| k).collect()
+        zerompk::from_msgpack(response.payload.as_bytes()).expect("core snapshot decodes")
     }
 }

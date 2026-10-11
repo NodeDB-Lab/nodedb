@@ -27,6 +27,7 @@ pub mod metadata_stamp;
 pub mod pem_io;
 pub mod read_index;
 pub mod recovery_check;
+pub mod redo_stream_membership;
 pub mod sequencer_compaction;
 pub mod sequencer_halt;
 pub mod sequencer_snapshot;

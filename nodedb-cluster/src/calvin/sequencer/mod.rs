@@ -26,7 +26,7 @@ pub use reservation_inbox::{
 };
 pub use service::{SequencerReceivers, SequencerService};
 pub use state_machine::{
-    CutInstantHook, RestorePointHook, SequencerRestorePoint, SequencerSnapshot,
+    CutInstantHook, HistoryOrigin, RestorePointHook, SequencerRestorePoint, SequencerSnapshot,
     SequencerStateMachine,
 };
 pub use validator::validate_batch;

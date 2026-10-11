@@ -12,8 +12,15 @@ documentation = "https://docs.rs/nodedb-raft"
 keywords = ["raft", "consensus", "replication", "distributed", "leader-election"]
 categories = ["algorithms", "network-programming"]
 
+[features]
+default = []
+# Arms the node-scoped commit gate (`raft::hold_commit::group<G>`) cluster
+# tests use to keep an entry uncommitted across a leadership change.
+failpoints = ["dep:nodedb-types", "nodedb-types/failpoints"]
+
 [dependencies]
 # Workspace
+nodedb-types = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sonic-rs = { workspace = true }

@@ -4,15 +4,14 @@
 //!
 //! A Data-Plane change event names its write by the local WAL LSN of the
 //! write's record. That LSN differs on every replica. The Raft log position
-//! of the entry the record applies, or the Calvin sequencer position of the
-//! transaction it applies, is the same on every replica, so the CDC router
-//! positions events by it.
+//! of the entry the record applies is the same on every replica, so the CDC
+//! router positions events by it. A committed Calvin slice installs from a
+//! data-group entry, so its records take that entry's position too.
 //!
 //! The write path records `record LSN -> position` before it hands the write
 //! to a core, so the entry exists before any event of the write can reach
 //! the Event Plane. Boot rebuilds the ledger from the WAL: a Raft entry's
-//! records link to its `ChangePosition` marker by proposal key, and a Calvin
-//! transaction's redo record carries its sequencer position itself. A WAL
+//! records link to its `ChangePosition` marker by proposal key. A WAL
 //! catch-up that rebuilds an event after a restart therefore positions it as
 //! the ring did.
 
@@ -23,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use nodedb_wal::WalRecord;
 use nodedb_wal::record::RecordType;
 
-use super::marker::{CalvinPosition, ChangePositionMarker, ReplicatedPosition, WritePosition};
+use super::marker::{ChangePositionMarker, ReplicatedPosition};
 
 /// Records the ledger keeps before it evicts the lowest LSN. An event whose
 /// record was evicted before the Event Plane routed it takes its partition's
@@ -33,7 +32,7 @@ pub const CHANGE_POSITION_CAPACITY: usize = 1 << 18;
 /// Local record LSN to replicated position, bounded.
 #[derive(Debug)]
 pub struct ChangePositionLedger {
-    positions: RwLock<BTreeMap<u64, WritePosition>>,
+    positions: RwLock<BTreeMap<u64, ReplicatedPosition>>,
     /// Record LSN to the commit HLC (wall nanoseconds) of the write the
     /// record belongs to. Every replica holds the same value for a
     /// replicated write, so change events date by it.
@@ -64,16 +63,6 @@ impl ChangePositionLedger {
     /// `position`.
     pub fn record(&self, record_lsn: u64, position: ReplicatedPosition) {
         self.mark_replicated();
-        self.insert(record_lsn, WritePosition::Raft(position));
-    }
-
-    /// Record that the WAL record at `record_lsn` applies the Calvin
-    /// transaction at `position`.
-    pub fn record_calvin(&self, record_lsn: u64, position: CalvinPosition) {
-        self.insert(record_lsn, WritePosition::Calvin(position));
-    }
-
-    fn insert(&self, record_lsn: u64, position: WritePosition) {
         let mut positions = self.positions.write().unwrap_or_else(|p| p.into_inner());
         positions.insert(record_lsn, position);
         while positions.len() > self.capacity {
@@ -102,7 +91,7 @@ impl ChangePositionLedger {
     }
 
     /// The replicated position of the record at `record_lsn`, if known.
-    pub fn get(&self, record_lsn: u64) -> Option<WritePosition> {
+    pub fn get(&self, record_lsn: u64) -> Option<ReplicatedPosition> {
         self.positions
             .read()
             .unwrap_or_else(|p| p.into_inner())
@@ -125,9 +114,7 @@ impl ChangePositionLedger {
     /// order. Returns how many records it positioned.
     ///
     /// A record whose header key names a preceding `ChangePosition` marker
-    /// takes that marker's Raft position. Otherwise a `TransactionRedo`
-    /// record that a Calvin flush wrote takes its stamp's sequencer
-    /// position.
+    /// takes that marker's Raft position.
     pub fn recover(&self, records: &[WalRecord]) -> usize {
         let mut by_key: HashMap<u64, ReplicatedPosition> = HashMap::new();
         let mut positioned = 0;
@@ -156,13 +143,6 @@ impl ChangePositionLedger {
             {
                 self.record(record.header.lsn, *position);
                 positioned += 1;
-                continue;
-            }
-            if record_type == Some(RecordType::TransactionRedo)
-                && let Some(position) = calvin_position(record)
-            {
-                self.record_calvin(record.header.lsn, position);
-                positioned += 1;
             }
         }
         if !by_key.is_empty() {
@@ -183,16 +163,6 @@ impl ChangePositionLedger {
     }
 }
 
-/// The sequencer position a Calvin flush stamped on a redo record.
-fn calvin_position(record: &WalRecord) -> Option<CalvinPosition> {
-    let redo = crate::wal::RedoRecord::from_bytes(&record.payload).ok()?;
-    let stamp = redo.calvin_stamp?;
-    Some(CalvinPosition {
-        sequencer_epoch: stamp.epoch,
-        position: stamp.position,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,8 +175,8 @@ mod tests {
         }
     }
 
-    fn raft(log_index: u64) -> Option<WritePosition> {
-        Some(WritePosition::Raft(position(log_index)))
+    fn raft(log_index: u64) -> Option<ReplicatedPosition> {
+        Some(position(log_index))
     }
 
     #[test]
@@ -217,12 +187,6 @@ mod tests {
         assert!(ledger.is_replicated());
         assert_eq!(ledger.get(100), raft(7));
         assert_eq!(ledger.get(101), None);
-        let calvin = CalvinPosition {
-            sequencer_epoch: 4,
-            position: 2,
-        };
-        ledger.record_calvin(102, calvin);
-        assert_eq!(ledger.get(102), Some(WritePosition::Calvin(calvin)));
     }
 
     fn record(record_type: RecordType, lsn: u64, apply_key: u64, payload: Vec<u8>) -> WalRecord {

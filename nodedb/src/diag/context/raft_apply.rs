@@ -41,39 +41,55 @@ impl DomainContext for RaftEntryReapplied {
     }
 }
 
-/// A replicated write waited on a core for a staged Calvin transaction that
-/// owns its rows. The data group's apply loop awaits it, so every later entry
-/// of every group waits too.
-pub(in crate::diag) struct ReplicatedWriteParked {
-    pub core_id: usize,
-    pub collection: String,
-    pub owner_epoch: u64,
-    pub owner_position: u32,
-    pub owner_vshard: u32,
+/// The catalog refused a read or write of a vShard's stored dependent-read
+/// barrier log.
+pub(in crate::diag) struct CalvinBarrierLogStoreFailed<'a> {
+    pub vshard_id: u32,
+    /// The txn's `(epoch, position)`. A removal of every row of the vShard
+    /// names none.
+    pub txn: Option<(u64, u32)>,
+    /// What the store did: `save`, `load` or `remove`.
+    pub op: &'static str,
+    pub error_class: &'a str,
 }
 
-impl DomainContext for ReplicatedWriteParked {
+impl DomainContext for CalvinBarrierLogStoreFailed<'_> {
     fn domain_kind(&self) -> &'static str {
-        "nodedb.replicated_write_parked"
+        "nodedb.calvin_barrier_log_store_failed"
     }
 
     fn grouping_key(&self) -> String {
-        "replicated_write_parked".to_string()
+        // One report per vShard and operation: the txn changes per event.
+        format!(
+            "calvin_barrier_log_store_failed:{}:{}",
+            self.op, self.vshard_id
+        )
     }
 
     fn to_json(&self) -> Value {
+        let effect = match self.op {
+            "save" => {
+                "the barrier event stays in memory, and every later event of the \
+                       txn too. The entry does not count as durably applied, so a restart \
+                       delivers it again from the log"
+            }
+            "load" => {
+                "the scheduler keeps the txn's barrier open and reads the row \
+                       again on its next pass"
+            }
+            _ => {
+                "the row of a finished txn stays stored. The scheduler's next \
+                  stall-tick sweep removes it"
+            }
+        };
         json!({
-            "core_id": self.core_id,
-            "collection": self.collection,
-            "owner_epoch": self.owner_epoch,
-            "owner_position": self.owner_position,
-            "owner_vshard": self.owner_vshard,
-            "why_fatal": "the data-group apply loop applies committed entries one at a \
-                          time. A parked replicated write holds it until the Calvin \
-                          transaction flushes or drops, so replicated writes to unrelated \
-                          collections wait behind an external event",
-            "operator_action": "check the named Calvin transaction's flush; the parked \
-                                 write is refused at its request deadline",
+            "vshard_id": self.vshard_id,
+            "txn": self.txn,
+            "op": self.op,
+            "error_class": self.error_class,
+            "effect": effect,
+            "operator_action": "check the system catalog's disk: free space, I/O errors, \
+                                and the redb file's permissions",
         })
     }
 }

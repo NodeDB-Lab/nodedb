@@ -62,7 +62,7 @@ mod types;
 mod wedge;
 
 pub use boot_seed::{seed_host_tables, seed_metadata_cache};
-pub use catalog_ddl::backup_mark_fail_point;
-pub use dispatch::metadata_apply_hold_point;
+pub use catalog_ddl::BACKUP_MARK_FAIL_POINT;
+pub use dispatch::METADATA_APPLY_HOLD_POINT;
 pub use types::{CATALOG_CHANNEL_CAPACITY, CatalogChangeEvent, MetadataCommitApplier};
 pub use wedge::{ApplyFailureClass, MetadataApplyWedge, WedgeReport, classify};

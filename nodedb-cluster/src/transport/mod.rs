@@ -9,6 +9,7 @@ mod identity_admission;
 pub mod peer_identity_store;
 pub mod peer_identity_verifier;
 pub mod pinned_verifier;
+mod reply_stream;
 pub mod rpc_handler;
 pub mod server;
 mod shuffle_drain;

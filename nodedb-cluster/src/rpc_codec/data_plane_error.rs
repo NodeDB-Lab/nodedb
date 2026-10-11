@@ -237,6 +237,12 @@ pub enum DataPlaneErrorCode {
         object: String,
         detail: String,
     },
+    /// The serving core fail-stopped and applied nothing. Another replica, or
+    /// the same one after a restart, serves the request.
+    CoreFailStopped {
+        core_id: u64,
+        detail: String,
+    },
 }
 
 /// Wire mirror of `nodedb_types::text_search::TextColumnFault`.

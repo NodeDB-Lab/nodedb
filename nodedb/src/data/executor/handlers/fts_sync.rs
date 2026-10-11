@@ -69,7 +69,7 @@ impl CoreLoop {
         {
             Ok(()) => {
                 // Advance the collection floor for this committed FTS write.
-                self.note_collection_write_lsn(task, collection);
+                self.note_collection_write(task, collection);
                 if let Some(prov) = provenance {
                     self.sync_commit(prov);
                     return self.sync_ack_response(task, AckStatus::Applied, prov.seq);
@@ -133,7 +133,7 @@ impl CoreLoop {
         {
             Ok(()) => {
                 // Advance the collection floor for this committed FTS delete.
-                self.note_collection_write_lsn(task, collection);
+                self.note_collection_write(task, collection);
                 if let Some(prov) = provenance {
                     self.sync_commit(prov);
                     return self.sync_ack_response(task, AckStatus::Applied, prov.seq);

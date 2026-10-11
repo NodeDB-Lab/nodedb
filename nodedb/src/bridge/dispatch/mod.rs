@@ -10,6 +10,7 @@ mod journal;
 mod outcome_floor;
 mod refusal;
 mod response_poll;
+mod tenant_inflight;
 #[cfg(test)]
 mod test_requests;
 

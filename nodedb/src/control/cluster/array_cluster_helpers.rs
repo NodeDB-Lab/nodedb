@@ -99,10 +99,13 @@ pub(super) fn cluster_err(e: ClusterError) -> Error {
     match e {
         // A shard did not answer within its timeout: surface as a deterministic
         // deadline rather than an opaque internal error, matching the
-        // `TypedClusterError::DeadlineExceeded` mapping used elsewhere.
-        ClusterError::ShardTimeout { .. } => Error::DeadlineExceeded {
-            request_id: crate::types::RequestId::new(0),
-        },
+        // `TypedClusterError::DeadlineExceeded` mapping used elsewhere. A
+        // sent request with no answer can have run, so it takes the same class.
+        ClusterError::ShardTimeout { .. } | ClusterError::Unanswered { .. } => {
+            Error::DeadlineExceeded {
+                request_id: crate::types::RequestId::new(0),
+            }
+        }
         // A shard's Data-Plane verdict keeps its code, so the statement
         // renders the SQLSTATE a single-node execution renders.
         ClusterError::DataPlane { code } => Error::DataPlane(code.into()),

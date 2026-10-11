@@ -726,16 +726,6 @@ mod tests {
         assert_eq!(seq, 1, "the VectorPut sub-op did not consume a sequence");
     }
 
-    /// A `CalvinApplied` payload-free marker emits no events — its base writes,
-    /// if any, ride a separate `TransactionRedo`.
-    #[test]
-    fn calvin_applied_marker_emits_no_events() {
-        let record = make_record(RecordType::CalvinApplied, &[], 1, 0, 302);
-        let mut seq = 0u64;
-        assert!(record_to_events(&record, &mut seq).is_empty());
-        assert_eq!(seq, 0);
-    }
-
     /// A malformed `TransactionRedo` payload is skipped (logged, no panic) and
     /// produces no events.
     #[test]

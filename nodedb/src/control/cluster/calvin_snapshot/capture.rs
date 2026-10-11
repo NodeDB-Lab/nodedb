@@ -17,6 +17,7 @@ use std::time::Duration;
 use nodedb_cluster::calvin::SequencerEntry;
 
 use crate::Error;
+use crate::control::cluster::calvin::scheduler::barrier_store;
 use crate::control::security::catalog::calvin_base::CalvinBase;
 use crate::control::state::SharedState;
 use crate::types::{GroupCalvinCut, VShardCalvinState};
@@ -68,6 +69,7 @@ pub async fn await_calvin_cut(
     let marker = zerompk::to_msgpack_vec(&SequencerEntry::CutMarker {
         hlc,
         restore_point: 0,
+        barrier: None,
     })
     .map_err(|error| Error::Internal {
         detail: format!("snapshot build: group {group_id}: encode the Calvin cut marker: {error}"),
@@ -102,20 +104,24 @@ pub async fn await_calvin_cut(
 }
 
 /// The group's Calvin cut through `through`: the applied positions of every
-/// group vShard here. The caller holds the group's apply gate exclusive, so
-/// no Calvin install of these vShards runs.
+/// group vShard here, and the stored barrier logs of their unfinished txns.
+/// The caller holds the group's apply gate exclusive, so no Calvin install
+/// of these vShards runs and no barrier entry of the group applies.
+///
+/// Fails when the barrier logs cannot be read whole (see
+/// [`barrier_store::capture_group`]). The build retries on the next
+/// heartbeat.
 pub fn capture_calvin_cut(
     shared: &SharedState,
     group_vshards: &HashSet<u32>,
     through: u64,
-) -> GroupCalvinCut {
-    let mirrors = shared.authorization_fence.calvin_mirrors();
-    let mut ids: Vec<u32> = group_vshards.iter().copied().collect();
-    ids.sort_unstable();
+) -> Result<GroupCalvinCut, Error> {
+    let ledgers = &shared.calvin.applied;
+    let ids: BTreeSet<u32> = group_vshards.iter().copied().collect();
     let vshards = ids
-        .into_iter()
-        .filter_map(|vshard_id| {
-            let (fully_applied_epoch, tail) = mirrors.get(vshard_id)?.snapshot();
+        .iter()
+        .filter_map(|&vshard_id| {
+            let (fully_applied_epoch, tail) = ledgers.get(vshard_id)?.snapshot();
             Some(VShardCalvinState {
                 vshard_id,
                 fully_applied_epoch,
@@ -123,5 +129,10 @@ pub fn capture_calvin_cut(
             })
         })
         .collect();
-    GroupCalvinCut { through, vshards }
+    let barrier_logs = barrier_store::capture_group(shared, &ids)?;
+    Ok(GroupCalvinCut {
+        through,
+        vshards,
+        barrier_logs,
+    })
 }

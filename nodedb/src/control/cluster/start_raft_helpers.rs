@@ -1,22 +1,20 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, RwLock};
 
 use nodedb_cluster::calvin::{CalvinCompletionRegistry, SequencerStateMachine};
 
 use crate::control::cluster::calvin::scheduler::metrics::SchedulerMetrics;
-use crate::control::cluster::calvin::scheduler::recover_applied;
 use crate::control::cluster::calvin::{
-    RaftSequencerProposer, ReadResultEvent, Scheduler, SchedulerConfig, SchedulerParams,
-    SequencerProposer,
+    RaftSequencerProposer, Scheduler, SchedulerConfig, SchedulerParams, SequencerProposer,
 };
 use crate::control::cluster::calvin_snapshot;
 use crate::control::cluster::handle::ClusterHandle;
 use crate::control::state::SharedState;
 
-/// Type alias for the shared per-vShard read-result sender registry.
-type ReadResultSenders =
-    Arc<Mutex<std::collections::BTreeMap<u32, tokio::sync::mpsc::Sender<ReadResultEvent>>>>;
+/// The vShards whose scheduler this node started and has not stopped.
+type ServedVShards = Arc<Mutex<BTreeSet<u32>>>;
 
 /// The vShards this node currently hosts: the union of `vshards_for_group` over
 /// every Raft group whose member set includes this node, read from the live
@@ -42,20 +40,19 @@ fn hosted_vshards(routing: &RwLock<nodedb_cluster::RoutingTable>, node_id: u64) 
 /// them. A snapshot install replaced the state a running scheduler started
 /// from. Dropping the vShard's sequencer sender closes the scheduler's
 /// intake, and the scheduler exits. Its other channels and its lock table go
-/// too. The next reconcile that finds the vShard hosted spawns a new
+/// too. It hands the barrier events of the txns it did not finish back to
+/// the vShard's read-result buffer. The next reconcile that finds the vShard hosted spawns a new
 /// scheduler from the vShard's base.
 fn retire_vshard_schedulers(
     hosted: &[u32],
     shared: &Arc<SharedState>,
     sequencer_state_machine: &Arc<Mutex<SequencerStateMachine>>,
-    calvin_read_result_senders: &ReadResultSenders,
+    served_vshards: &ServedVShards,
     calvin_completion_registry: &Arc<CalvinCompletionRegistry>,
 ) {
     let (left, rebased): (Vec<u32>, Vec<u32>) = {
-        let mut senders = calvin_read_result_senders
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let served: Vec<u32> = senders.keys().copied().collect();
+        let mut served_set = served_vshards.lock().unwrap_or_else(|p| p.into_inner());
+        let served: Vec<u32> = served_set.iter().copied().collect();
         let left: Vec<u32> = served
             .iter()
             .copied()
@@ -66,11 +63,28 @@ fn retire_vshard_schedulers(
             .filter(|vshard| !left.contains(vshard))
             .collect();
         for vshard in left.iter().chain(&rebased) {
-            senders.remove(vshard);
+            served_set.remove(vshard);
         }
         (left, rebased)
     };
     calvin_snapshot::forget_left(shared, &left);
+    // A vShard that left this node keeps no barrier events here, in memory
+    // or stored. A rebased vShard keeps them for the scheduler that starts
+    // again.
+    for &vshard in &left {
+        if let Err(e) =
+            crate::control::cluster::calvin::scheduler::barrier_store::forget_vshard(shared, vshard)
+        {
+            // The rows stay. Boot marks them stored for a vShard with no
+            // scheduler, and a snapshot install of the vShard replaces them.
+            tracing::warn!(
+                vshard_id = vshard,
+                error = %e,
+                "calvin: the barrier rows of a vShard that left were not removed"
+            );
+            crate::diag::calvin_barrier_log_store_failed(vshard, None, "remove", &e);
+        }
+    }
     for &vshard in &rebased {
         tracing::info!(
             vshard_id = vshard,
@@ -102,6 +116,11 @@ fn retire_vshard_schedulers(
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&vshard);
+        // The write gate's holds on the stopped lock table order nothing.
+        shared
+            .calvin
+            .admission_holds
+            .release_vshard(crate::types::VShardId::new(vshard));
         calvin_completion_registry.unregister_verdict_signal_sender(vshard);
         // A cut on this node waits only on the schedulers it runs.
         shared.calvin.cuts.unregister(vshard);
@@ -118,7 +137,7 @@ struct ReconcileSchedulersParams<'a> {
     /// One proposer per node, so its forward limit bounds the whole node.
     sequencer_proposer: &'a Arc<dyn SequencerProposer>,
     sequencer_state_machine: &'a Arc<Mutex<SequencerStateMachine>>,
-    calvin_read_result_senders: &'a ReadResultSenders,
+    served_vshards: &'a ServedVShards,
     calvin_completion_registry: &'a Arc<CalvinCompletionRegistry>,
     scheduler_config: &'a SchedulerConfig,
 }
@@ -126,10 +145,9 @@ struct ReconcileSchedulersParams<'a> {
 /// Idempotently ensure a Calvin `Scheduler` runs for exactly the vShards this
 /// node currently hosts.
 ///
-/// A vShard is considered already-served iff it has a registered read-result
-/// sender (the schedulers' presence registry). A served vShard this node no
-/// longer hosts has its scheduler stopped first (see
-/// [`retire_left_vshard_schedulers`]). Only newly-hosted vShards get a fresh
+/// A vShard is already served when `served_vshards` holds it. A served
+/// vShard this node no longer hosts has its scheduler stopped first (see
+/// [`retire_vshard_schedulers`]). Only newly-hosted vShards get a fresh
 /// scheduler — this pass never double-spawns. Returns the number of NEW
 /// schedulers started.
 fn reconcile_vshard_schedulers(params: ReconcileSchedulersParams<'_>) -> crate::Result<usize> {
@@ -140,7 +158,7 @@ fn reconcile_vshard_schedulers(params: ReconcileSchedulersParams<'_>) -> crate::
         raft_loop_handle,
         sequencer_proposer,
         sequencer_state_machine,
-        calvin_read_result_senders,
+        served_vshards,
         calvin_completion_registry,
         scheduler_config,
     } = params;
@@ -150,18 +168,22 @@ fn reconcile_vshard_schedulers(params: ReconcileSchedulersParams<'_>) -> crate::
         &hosted,
         shared,
         sequencer_state_machine,
-        calvin_read_result_senders,
+        served_vshards,
         calvin_completion_registry,
     );
     calvin_snapshot::retain_mounted(shared, raft_loop_handle, routing);
+    crate::control::cluster::redo_stream_membership::reconcile_redo_streams(
+        shared,
+        raft_loop_handle,
+    );
     let mut spawned = 0usize;
     let mut kept = Vec::new();
     for vshard_id in hosted {
         // Already-served vShards keep their running scheduler untouched.
-        if calvin_read_result_senders
+        if served_vshards
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .contains_key(&vshard_id)
+            .contains(&vshard_id)
         {
             continue;
         }
@@ -193,28 +215,11 @@ fn reconcile_vshard_schedulers(params: ReconcileSchedulersParams<'_>) -> crate::
             continue;
         };
 
-        // The applied state the last checkpoint saved, with the markers the
-        // WAL still holds: a checkpoint deletes the segments that held older
-        // markers, and the sequencer log delivers their entries again.
-        // A failed read leaves the vShard for the next pass. The pass goes
-        // on, so the schedulers it started keep their bases.
-        let recovery = match recover_applied(
-            &shared.wal,
-            shared.credentials.catalog(),
-            vshard_id,
-            group_id,
-        ) {
-            Ok(recovery) => recovery,
-            Err(error) => {
-                tracing::warn!(
-                    vshard_id,
-                    %error,
-                    "calvin: the vShard's applied state did not load; its scheduler starts \
-                     on a later pass"
-                );
-                continue;
-            }
-        };
+        // The vShard's applied ledger: boot recovery or a snapshot install
+        // filled it, and a vShard with no Calvin history here gets an empty
+        // one. The scheduler rebuilds up to its highest applied epoch.
+        let ledger = shared.calvin.applied.get_or_create(vshard_id);
+        let rebuild_target_epoch = ledger.max_applied_epoch();
         let (sequenced_tx, sequenced_rx) =
             tokio::sync::mpsc::channel(scheduler_config.channel_capacity);
 
@@ -241,12 +246,10 @@ fn reconcile_vshard_schedulers(params: ReconcileSchedulersParams<'_>) -> crate::
         // The armed catch-up holds the log from here, so the base is kept.
         kept.push((vshard_id, first_available));
 
-        let (read_result_tx, read_result_rx) =
-            tokio::sync::mpsc::channel(scheduler_config.channel_capacity);
-        calvin_read_result_senders
+        served_vshards
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(vshard_id, read_result_tx);
+            .insert(vshard_id);
 
         // The deterministic lock table is shared between this scheduler and the
         // Control-Plane write-admission gate: build it once and register the
@@ -294,12 +297,10 @@ fn reconcile_vshard_schedulers(params: ReconcileSchedulersParams<'_>) -> crate::
             multi_raft: raft_loop_handle.clone(),
             sequencer_proposer: Arc::clone(sequencer_proposer),
             sequencer_state_machine: Arc::clone(sequencer_state_machine),
-            fully_applied_epoch: recovery.fully_applied_epoch,
-            applied_tail: recovery.applied_tail,
-            rebuild_target_epoch: recovery.max_applied_epoch,
+            ledger,
+            rebuild_target_epoch,
             config: scheduler_config.clone(),
             metrics: SchedulerMetrics::new(),
-            read_result_rx,
             lock_manager,
             promotion_rx,
             registry: Arc::clone(calvin_completion_registry),
@@ -343,7 +344,6 @@ pub(super) struct SpawnVshardSchedulersParams<'a> {
     pub(super) shared: &'a Arc<SharedState>,
     pub(super) raft_loop_handle: Arc<Mutex<nodedb_cluster::multi_raft::MultiRaft>>,
     pub(super) sequencer_state_machine: &'a Arc<Mutex<SequencerStateMachine>>,
-    pub(super) calvin_read_result_senders: &'a ReadResultSenders,
     pub(super) calvin_completion_registry: &'a Arc<CalvinCompletionRegistry>,
     pub(super) scheduler_config: &'a SchedulerConfig,
 }
@@ -363,7 +363,9 @@ pub(super) struct SpawnVshardSchedulersParams<'a> {
 /// (covers the bootstrap node, which already sees its membership) and then
 /// spawns a background task that re-reconciles on a short interval until
 /// shutdown. Reconcile is idempotent: it starts schedulers for vShards this
-/// node gained and stops those of vShards it left.
+/// node gained and stops those of vShards it left. Each pass also runs the
+/// membership pass over this node's chunked redo streams (see
+/// [`crate::control::cluster::redo_stream_membership`]).
 pub(super) fn spawn_vshard_schedulers(
     params: SpawnVshardSchedulersParams<'_>,
 ) -> crate::Result<()> {
@@ -372,12 +374,12 @@ pub(super) fn spawn_vshard_schedulers(
         shared,
         raft_loop_handle,
         sequencer_state_machine,
-        calvin_read_result_senders,
         calvin_completion_registry,
         scheduler_config,
     } = params;
 
     let node_id = handle.node_id;
+    let served_vshards: ServedVShards = Arc::new(Mutex::new(BTreeSet::new()));
     let routing = Arc::clone(&handle.routing);
     let sequencer_proposer: Arc<dyn SequencerProposer> = Arc::new(RaftSequencerProposer::new(
         node_id,
@@ -402,7 +404,7 @@ pub(super) fn spawn_vshard_schedulers(
         raft_loop_handle: &raft_loop_handle,
         sequencer_proposer: &sequencer_proposer,
         sequencer_state_machine,
-        calvin_read_result_senders,
+        served_vshards: &served_vshards,
         calvin_completion_registry,
         scheduler_config,
     })?;
@@ -414,7 +416,7 @@ pub(super) fn spawn_vshard_schedulers(
     // a no-op once the set has converged.
     let shared_task = Arc::clone(shared);
     let sm_task = Arc::clone(sequencer_state_machine);
-    let rr_task = Arc::clone(calvin_read_result_senders);
+    let served_task = Arc::clone(&served_vshards);
     let registry_task = Arc::clone(calvin_completion_registry);
     let cfg_task = scheduler_config.clone();
     crate::control::shutdown::spawn_loop(
@@ -437,7 +439,7 @@ pub(super) fn spawn_vshard_schedulers(
                             raft_loop_handle: &raft_loop_handle,
                             sequencer_proposer: &sequencer_proposer,
                             sequencer_state_machine: &sm_task,
-                            calvin_read_result_senders: &rr_task,
+                            served_vshards: &served_task,
                             calvin_completion_registry: &registry_task,
                             scheduler_config: &cfg_task,
                         }) {

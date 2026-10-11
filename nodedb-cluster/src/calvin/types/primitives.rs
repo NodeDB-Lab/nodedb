@@ -12,14 +12,19 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub use nodedb_types::calvin::{
-    EngineKeySet, EngineTag, PassiveReadKey, ReadKeyIdent, SortedVec, VersionedReadEntry,
-    VersionedReadSet,
+    EngineKeySet, EngineTag, PassiveKey, PassiveReadKey, PassiveReadKeyId, ReadKeyIdent, SortedVec,
+    VersionedReadEntry, VersionedReadSet,
 };
 
 /// Describes the passive-read participants for a dependent-read Calvin txn.
 ///
-/// Each entry maps a vshard id to the keys that vshard must read and broadcast
-/// to all active participants before any writes can proceed.
+/// `passive_reads` maps each passive vShard to the keys it reads at its lock
+/// grant and broadcasts to every active participant before any write stages.
+///
+/// `expected` holds the value the coordinator read for each passive row
+/// before it planned the writes: the stored bytes, `None` for an absent row.
+/// An active participant whose broadcast values differ votes
+/// `PredictionDrift`, and the coordinator reads again.
 ///
 /// `BTreeMap` is mandatory here: the sequencer and scheduler must iterate
 /// vshards in a deterministic order (determinism contract).
@@ -36,20 +41,35 @@ pub use nodedb_types::calvin::{
 pub struct DependentReadSpec {
     /// Passive participants: vshard → keys to read.
     pub passive_reads: BTreeMap<u32, Vec<PassiveReadKey>>,
+    /// The value the coordinator read for each passive row.
+    pub expected: BTreeMap<PassiveReadKeyId, Option<Vec<u8>>>,
 }
 
 impl DependentReadSpec {
-    /// Total estimated serialized bytes across all passive read keys.
+    /// Total estimated serialized bytes across all passive read keys and
+    /// the expected values the coordinator read.
     ///
     /// Used by the sequencer admission check to enforce
     /// `max_dependent_read_bytes_per_txn`.  This is an O(1)-per-key
     /// estimate, not an exact serialized size.
     pub fn total_bytes(&self) -> usize {
-        self.passive_reads
+        let keys: usize = self
+            .passive_reads
             .values()
             .flat_map(|ks| ks.iter())
             .map(|k| k.engine_key.serialized_size_hint())
-            .sum()
+            .sum();
+        let expected: usize = self
+            .expected
+            .iter()
+            .map(|(id, value)| id.serialized_size_hint() + value.as_ref().map_or(0, Vec::len))
+            .sum();
+        keys + expected
+    }
+
+    /// The passive vShards, in id order.
+    pub fn passive_vshards(&self) -> impl Iterator<Item = u32> + '_ {
+        self.passive_reads.keys().copied()
     }
 }
 
@@ -160,10 +180,39 @@ mod tests {
                 );
                 m
             },
+            expected: BTreeMap::from([(
+                PassiveReadKeyId::kv(
+                    nodedb_types::QualifiedCollection::from_stored("sessions".to_owned()),
+                    b"abc".to_vec(),
+                ),
+                Some(b"stored".to_vec()),
+            )]),
         };
         let bytes = zerompk::to_msgpack_vec(&spec).unwrap();
         let decoded: DependentReadSpec = zerompk::from_msgpack(&bytes).unwrap();
-        assert_eq!(spec.passive_reads.len(), decoded.passive_reads.len());
-        assert_eq!(spec.passive_reads.get(&1), decoded.passive_reads.get(&1));
+        assert_eq!(decoded, spec);
+    }
+
+    /// The byte estimate counts the expected values the coordinator read.
+    #[test]
+    fn total_bytes_counts_expected_values() {
+        let mut spec = DependentReadSpec {
+            passive_reads: BTreeMap::from([(
+                1u32,
+                vec![PassiveReadKey {
+                    engine_key: kv_set("s", vec![b"k".to_vec()]),
+                }],
+            )]),
+            expected: BTreeMap::new(),
+        };
+        let keys_only = spec.total_bytes();
+        spec.expected.insert(
+            PassiveReadKeyId::kv(
+                nodedb_types::QualifiedCollection::from_stored("s".to_owned()),
+                b"k".to_vec(),
+            ),
+            Some(vec![0u8; 100]),
+        );
+        assert!(spec.total_bytes() >= keys_only + 100);
     }
 }

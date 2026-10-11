@@ -21,6 +21,16 @@
 //! vShard returns nothing, which will silently under-resolve and leave the
 //! write with no target to address.
 //!
+//! # Transaction view
+//!
+//! Inside a transaction block the read carries the transaction's id. The Data
+//! Plane then reads the transaction's staging overlay over committed base, as
+//! an in-transaction `SELECT` does. A statement's write applies on top of the
+//! rows the transaction's earlier statements staged, so its images are read
+//! there too. A base-only read misses a row the transaction inserted and
+//! returns the base value of a row it rewrote. The delta settled from such an
+//! image is wrong by that row's staged contribution.
+//!
 //! # Plane discipline
 //!
 //! Runs on the coordinator's Control Plane (Tokio). The scan goes through the
@@ -29,7 +39,7 @@
 use nodedb_types::{Surrogate, TenantId};
 
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, Lsn, TraceId};
+use crate::types::{DatabaseId, TraceId, TxnId};
 use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
 
 /// What a plan-time reconnaissance read observed, and the version it observed
@@ -43,13 +53,10 @@ use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
 pub(crate) struct ReconRead<T> {
     /// The decoded rows.
     pub rows: T,
-    /// The source collection's write floor at read time — the comparand
-    /// cross-shard OCC validation checks the read against.
-    pub read_version_lsn: Lsn,
-    /// The node that served the read. `read_version_lsn` is a position in
-    /// that node's WAL, so the commit vote compares it only on that node.
-    /// `0` when no one node is known to have served it.
-    pub served_by: u64,
+    /// The source collection's version on its vShard at read time — the
+    /// comparand OCC validation checks the read against. Every replica
+    /// numbers versions alike, so any replica can have served the read.
+    pub read_version: nodedb_types::WriteVersion,
 }
 
 /// Scan `collection` for the rows `filters` matches, returning each row's full
@@ -63,10 +70,14 @@ pub(crate) struct ReconRead<T> {
 ///
 /// Empty `filters` means "no WHERE clause" — every row, which is what `TRUNCATE`
 /// needs.
+///
+/// `txn_id` is the open transaction the statement runs in, `None` outside a
+/// transaction block. See the module's transaction view.
 pub(in crate::control::planner) async fn recon_scan_rows(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
+    txn_id: Option<TxnId>,
     collection: &str,
     filters: Vec<u8>,
 ) -> crate::Result<ReconRead<Vec<serde_json::Value>>> {
@@ -85,15 +96,14 @@ pub(in crate::control::planner) async fn recon_scan_rows(
         prefilter: None,
     });
 
-    let read = execute_read(state, tenant_id, database_id, collection, scan_plan).await?;
+    let read = execute_read(state, tenant_id, database_id, txn_id, collection, scan_plan).await?;
     let mut rows = Vec::new();
     for payload in &read.rows {
         rows.extend(decode_rows(payload.as_slice()));
     }
     Ok(ReconRead {
         rows,
-        read_version_lsn: read.read_version_lsn,
-        served_by: read.served_by,
+        read_version: read.read_version,
     })
 }
 
@@ -111,10 +121,15 @@ pub(in crate::control::planner) async fn recon_scan_rows(
 ///
 /// Identity is the surrogate, exactly as on the write path — `document_id` is
 /// the user-facing primary key and carries no storage addressing.
+///
+/// `txn_id` is the open transaction the statement runs in, `None` outside a
+/// transaction block. A row this transaction staged reads as staged, and a row
+/// it staged a delete of reads as absent.
 pub(crate) async fn recon_point_row(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
+    txn_id: Option<TxnId>,
     collection: &str,
     document_id: &str,
     surrogate: Surrogate,
@@ -133,7 +148,7 @@ pub(crate) async fn recon_point_row(
         valid_at_ms: None,
     });
 
-    let read = execute_read(state, tenant_id, database_id, collection, get_plan).await?;
+    let read = execute_read(state, tenant_id, database_id, txn_id, collection, get_plan).await?;
     // A point get answers with the row's normalized MessagePack body, and with
     // an EMPTY payload when the row is absent.
     Ok(ReconRead {
@@ -142,8 +157,7 @@ pub(crate) async fn recon_point_row(
             .iter()
             .find(|payload| !payload.is_empty())
             .and_then(|payload| nodedb_types::json_from_msgpack(payload.as_slice()).ok()),
-        read_version_lsn: read.read_version_lsn,
-        served_by: read.served_by,
+        read_version: read.read_version,
     })
 }
 
@@ -154,39 +168,43 @@ pub(crate) async fn recon_point_row(
 /// write with no target to address — so every plan-time read routes through
 /// the gateway.
 ///
-/// The gateway notes the node that served each vShard it read. The read
-/// validates on `collection`'s vShard, so that vShard's note names the node
-/// whose WAL numbers `read_version_lsn`.
+/// The read validates on `collection`'s vShard, so its version is the one
+/// the read reported for that vShard. A vShard the read reported no version
+/// of had no write the serving core knew of, so the read observed it at
+/// `WriteVersion::ZERO`.
+///
+/// The version is the collection's COMMITTED version whether or not `txn_id`
+/// is set: a staged write moves no write version. So an entry stamped with it
+/// still detects a concurrent commit to the rows read, and never this
+/// transaction's own staged writes.
 async fn execute_read(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
+    txn_id: Option<TxnId>,
     collection: &str,
     plan: PhysicalPlan,
 ) -> crate::Result<ReconRead<Vec<Vec<u8>>>> {
     let validation_vshard =
-        nodedb_types::CollectionKey::from_qualified_str(database_id, collection)?
-            .vshard()
-            .as_u32();
+        nodedb_types::CollectionKey::from_qualified_str(database_id, collection)?.vshard();
     let gateway = state.installed_gateway()?;
     let gw_ctx = crate::control::gateway::core::QueryContext {
         tenant_id,
         trace_id: TraceId::ZERO,
         database_id,
-        txn_id: None,
+        // The transaction's staging overlay over committed base, as an
+        // in-transaction read sees it.
+        txn_id,
         linearizable: true,
     };
     // A shard verdict keeps its own typed error.
-    let (payloads, _watermarks, read_version_lsn) = gateway
-        .execute_internal_with_watermarks(&gw_ctx, plan)
-        .await?;
+    let outcome = gateway.execute_internal_outcome(&gw_ctx, plan).await?;
     Ok(ReconRead {
-        rows: payloads,
-        read_version_lsn,
-        served_by: crate::control::server::shared::session::read_set::serving_node(
-            state,
-            validation_vshard,
-        ),
+        read_version: outcome
+            .read_versions
+            .of(validation_vshard)
+            .unwrap_or_default(),
+        rows: outcome.payloads,
     })
 }
 

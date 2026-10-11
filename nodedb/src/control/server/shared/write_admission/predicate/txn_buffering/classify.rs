@@ -359,8 +359,6 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::DropTxnOverlay { .. }
             | MetaOp::MarkSavepoint { .. }
             | MetaOp::RollbackToSavepoint { .. }
-            | MetaOp::RecordCalvinWriteVersions { .. }
-            | MetaOp::CalvinFlush { .. }
             | MetaOp::CalvinDrop { .. }
             | MetaOp::CalvinResolve { .. }
             | MetaOp::ResolveTxn { .. }
@@ -425,8 +423,7 @@ mod tests {
     use nodedb_types::timeseries::continuous_agg::{ContinuousAggregateDef, RefreshPolicy};
     use nodedb_types::vector_distance::DistanceMetric;
     use nodedb_types::{
-        DatabaseId, Lsn, QualifiedCollection, Surrogate, SystemTimeScope, TenantId,
-        VectorAnnOptions,
+        DatabaseId, QualifiedCollection, Surrogate, SystemTimeScope, TenantId, VectorAnnOptions,
     };
     use std::collections::BTreeMap;
 
@@ -1846,6 +1843,7 @@ mod tests {
                 replace_mode: false,
                 collections_to_clear: Vec::new(),
                 group_vshards: Vec::new(),
+                version_floor: Vec::new(),
             }),
             PhysicalPlan::Meta(MetaOp::PurgeTenant { tenant_id: 1 }),
             PhysicalPlan::Meta(MetaOp::UnregisterCollection {
@@ -1916,14 +1914,12 @@ mod tests {
                 tenant_id: tenant(),
                 plans: Vec::new(),
                 epoch_system_ms: 0,
-                is_group_leader: false,
                 versioned_reads: vec![VersionedReadEntry {
                     engine: EngineTag::Kv,
                     collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c").to_string(),
                     key: ReadKeyIdent::Predicate,
-                    read_lsn: Lsn::ZERO,
+                    read_version: nodedb_types::WriteVersion::ZERO,
                     home_vshard: None,
-                    served_by: 0,
                 }],
                 body_plans: Vec::new(),
             }),
@@ -1945,7 +1941,6 @@ mod tests {
                 plans: Vec::new(),
                 injected_reads: BTreeMap::new(),
                 epoch_system_ms: 0,
-                is_group_leader: false,
             }),
             PhysicalPlan::Meta(MetaOp::RebuildIndex {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1973,17 +1968,6 @@ mod tests {
             PhysicalPlan::Meta(MetaOp::RollbackToSavepoint {
                 txn_id: TxnId::new(1),
                 savepoint: 1,
-            }),
-            PhysicalPlan::Meta(MetaOp::RecordCalvinWriteVersions {
-                tenant_id: tenant(),
-                plans: Vec::new(),
-            }),
-            PhysicalPlan::Meta(MetaOp::CalvinFlush {
-                epoch: 0,
-                position: 0,
-                redo: Vec::new(),
-                collections: Vec::new(),
-                sum_targets: Vec::new(),
             }),
             PhysicalPlan::Meta(MetaOp::CalvinDrop {
                 epoch: 0,

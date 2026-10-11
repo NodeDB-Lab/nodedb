@@ -96,7 +96,7 @@ pub(crate) async fn flush_authenticated_ilp_batch(
 /// At most one schema-projection merge is ever in flight, process-wide.
 ///
 /// The merge is a replicated catalog DDL, and every catalog DDL already
-/// serializes on `SharedState::metadata_ddl_lock`. A second concurrent merge
+/// serializes on `MetadataDdlState::lock`. A second concurrent merge
 /// can therefore only park a second task on a lock that admits one holder,
 /// so one permit is both the useful and the safe bound — ingest can never
 /// queue merges no matter how many ILP connections or OTLP requests are live.

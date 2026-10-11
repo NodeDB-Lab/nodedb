@@ -329,7 +329,7 @@ impl CoreLoop {
                 collection,
             );
             self.checkpoint_coordinator.mark_dirty("columnar", written);
-            self.note_collection_write_lsn(task, collection);
+            self.note_collection_write(task, collection);
         }
         Ok(written)
     }

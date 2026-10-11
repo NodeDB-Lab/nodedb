@@ -8,7 +8,7 @@ use nodedb_types::sync::wire::SyncProvenance;
 use crate::bridge::envelope::{CounterFault, ErrorCode, SyncHold};
 
 /// The number of `ErrorCode` variants [`variant_index`] numbers.
-pub(super) const VARIANT_COUNT: usize = 52;
+pub(super) const VARIANT_COUNT: usize = 53;
 
 /// A dense index per variant. Exhaustive, so a new variant fails to compile
 /// here until it gets an index, and [`every_variant_has_a_sample`] then fails
@@ -67,6 +67,7 @@ pub(super) fn variant_index(code: &ErrorCode) -> usize {
         ErrorCode::DatetimeFieldOverflow { .. } => 49,
         ErrorCode::UndefinedObject { .. } => 50,
         ErrorCode::ObjectNotInPrerequisiteState { .. } => 51,
+        ErrorCode::CoreFailStopped { .. } => 52,
     }
 }
 
@@ -88,6 +89,10 @@ pub(super) fn samples() -> Vec<ErrorCode> {
         ErrorCode::DeadlineExceeded,
         ErrorCode::RejectedPrevalidation { reason: text() },
         ErrorCode::RetryableRefusal { reason: text() },
+        ErrorCode::CoreFailStopped {
+            core_id: 0,
+            detail: text(),
+        },
         ErrorCode::SyncRejected {
             violation: ViolationType::PermissionDenied,
             applied_seq: 1,

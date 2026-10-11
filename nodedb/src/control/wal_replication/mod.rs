@@ -19,12 +19,14 @@ pub use decode::{decode_replicated_entry, from_replicated_entry};
 pub use encode::to_replicated_entry;
 pub(crate) use propose::{
     propose_replicated_entry, stamp_collection_incarnations, stamp_metadata_floor,
+    statement_propose_deadline,
 };
 pub use replicable_write::ReplicableWrite;
 pub use types::{
-    AppliedWait, AsyncRaftProposer, AsyncRaftSubmit, CollectionIncarnation, ConstraintChangeOp,
-    ProposedAt, ProposedWrite, RaftAppliedIndexSink, RaftCompactor, RaftProposer, ReplicatedEntry,
-    ReplicatedEventSource, ReplicatedIdentity, ReplicatedSumTarget, ReplicatedWrite,
+    AppliedOutput, AppliedWait, AsyncRaftProposer, AsyncRaftSubmit, CollectionIncarnation,
+    ConstraintChangeOp, ProposedAt, ProposedWrite, RaftAppliedIndexSink, RaftCompactor,
+    RaftProposer, ReplicatedEntry, ReplicatedEventSource, ReplicatedIdentity, ReplicatedSumTarget,
+    ReplicatedWrite,
 };
 
 pub use crate::control::distributed_applier::{

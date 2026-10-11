@@ -134,8 +134,14 @@ impl VShardAdmissionSequencer {
         let queued = self.reserve(slot, vshard_id)?;
         let mut active = tokio::time::timeout_at(deadline, slot.active.lock())
             .await
-            .map_err(|_| crate::Error::DeadlineExceeded {
-                request_id: crate::types::RequestId::new(0),
+            .map_err(|_| {
+                tracing::warn!(
+                    vshard_id = vshard_id.as_u32(),
+                    "a write waited for its vShard's admission slot until its deadline"
+                );
+                crate::Error::DeadlineExceeded {
+                    request_id: crate::types::RequestId::new(0),
+                }
             })?;
         let proposed = submit().await?;
         if proposed.at.is_some() {
@@ -167,7 +173,7 @@ impl Default for VShardAdmissionSequencer {
 }
 
 /// Install raw and admission-sequenced proposal handles, both built from
-/// `submit`, in one atomic set.
+/// `submit`, and `submit` itself, in one atomic set.
 pub(crate) fn install_async_raft_proposer(
     shared: &SharedState,
     submit: Arc<AsyncRaftSubmit>,
@@ -176,9 +182,9 @@ pub(crate) fn install_async_raft_proposer(
         Arc::clone(&shared.vshard_admission_sequencer),
         Arc::clone(&submit),
     );
-    let raw = raw_async_raft_proposer(submit);
+    let raw = raw_async_raft_proposer(Arc::clone(&submit));
     let expected_raw = Arc::clone(&raw);
-    shared.install_async_raft_proposer_pair(sequenced, raw)?;
+    shared.install_async_raft_proposer_pair(sequenced, raw, submit)?;
     let installed_raw = shared.raw_async_raft_proposer()?;
     if !Arc::ptr_eq(installed_raw, &expected_raw) {
         return Err(crate::Error::Internal {
@@ -305,7 +311,12 @@ mod tests {
     use tokio::sync::{Barrier, Notify};
 
     use super::*;
-    use crate::types::Lsn;
+    use crate::types::ReadVersions;
+
+    /// The versions a test proposer answers proposal `key` with.
+    fn applied_at(key: u64) -> ReadVersions {
+        ReadVersions::single(VShardId::new(0), nodedb_types::WriteVersion::logged(0, key))
+    }
 
     fn test_deadline() -> tokio::time::Instant {
         tokio::time::Instant::now() + std::time::Duration::from_secs(30)
@@ -536,7 +547,7 @@ mod tests {
                     entered.notify_one();
                     release.notified().await;
                     active.fetch_sub(1, Ordering::SeqCst);
-                    Ok((data, Lsn::new(key)))
+                    Ok((data, applied_at(key)))
                 })
             })
         };
@@ -557,13 +568,13 @@ mod tests {
         release.notify_one();
         assert_eq!(
             first.await.expect("first joins").expect("first success"),
-            (vec![1], Lsn::new(11))
+            (vec![1], applied_at(11))
         );
         entered.notified().await;
         release.notify_one();
         assert_eq!(
             second.await.expect("second joins").expect("second success"),
-            (vec![2], Lsn::new(12))
+            (vec![2], applied_at(12))
         );
         assert_eq!(maximum.load(Ordering::SeqCst), 1);
     }
@@ -577,7 +588,7 @@ mod tests {
                 let proposed = Arc::clone(&proposed);
                 Box::pin(async move {
                     proposed.lock().expect("proposed log").push(key);
-                    Ok((data, Lsn::new(key)))
+                    Ok((data, applied_at(key)))
                 })
             })
         };
@@ -658,11 +669,11 @@ mod tests {
                 .await
                 .expect("second joins")
                 .expect("second proposes"),
-            (vec![22], Lsn::new(22))
+            (vec![22], applied_at(22))
         );
         assert_eq!(
             third.await.expect("third joins").expect("third proposes"),
-            (vec![23], Lsn::new(23))
+            (vec![23], applied_at(23))
         );
         assert_eq!(
             *proposed.lock().expect("proposed log"),
@@ -696,7 +707,7 @@ mod tests {
                                 detail: format!("test apply gate closed: {e}"),
                             })?
                             .forget();
-                        Ok((data, Lsn::new(key)))
+                        Ok((data, applied_at(key)))
                     }),
                 })
             })
@@ -744,10 +755,10 @@ mod tests {
             first.await.expect("first joins").expect("first applies"),
             second.await.expect("second joins").expect("second applies"),
         ];
-        results.sort_by_key(|(_, lsn)| lsn.as_u64());
+        results.sort_by_key(|(_, versions)| versions.of(VShardId::new(0)));
         assert_eq!(
             results,
-            vec![(vec![1], Lsn::new(11)), (vec![2], Lsn::new(12))]
+            vec![(vec![1], applied_at(11)), (vec![2], applied_at(12))]
         );
         assert_eq!(sequencer.slots[5].capacity.available_permits(), 4);
     }

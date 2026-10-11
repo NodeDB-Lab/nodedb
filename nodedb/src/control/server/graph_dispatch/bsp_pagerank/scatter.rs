@@ -59,8 +59,8 @@ pub(super) struct ShardDispatch {
 pub(super) struct ShardResult {
     pub(super) node_id: u64,
     pub(super) result: BspSuperstepResult,
-    /// The highest watermark the node's cores served the superstep at.
-    pub(super) watermark_lsn: crate::types::Lsn,
+    /// The versions the node's cores reported for the superstep.
+    pub(super) read_versions: crate::types::ReadVersions,
 }
 
 /// Parameters for [`scatter_superstep`].
@@ -139,7 +139,7 @@ pub(super) async fn scatter_superstep(
             Ok::<ShardResult, crate::Error>(ShardResult {
                 node_id,
                 result,
-                watermark_lsn: read.watermark_lsn,
+                read_versions: read.read_versions,
             })
         })
     });

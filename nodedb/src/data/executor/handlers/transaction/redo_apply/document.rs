@@ -92,7 +92,7 @@ impl CoreLoop {
         row: &CommittedDocWrite<'_>,
         value: &[u8],
     ) -> crate::Result<()> {
-        let (resolved, deferred) = self.committed_sum_targets(row.collection, row.record_lsn);
+        let resolved = self.committed_sum_targets(row.collection);
         let surrogate = Surrogate::new(row.surrogate);
         let storage_key = StorageKey::for_surrogate(surrogate);
         let wal_lsn = (row.record_lsn != 0).then(|| Lsn::new(row.record_lsn));
@@ -101,7 +101,8 @@ impl CoreLoop {
             tid: row.tenant_id,
             collection: row.collection,
             resolved_targets: &resolved,
-            deferred_sum_targets: &deferred,
+            // A committed record defers a target by omission from `resolved`.
+            deferred_sum_targets: &[],
             wal_lsn,
         };
 
@@ -238,7 +239,7 @@ impl CoreLoop {
     }
 
     fn committed_document_delete(&mut self, row: &CommittedDocWrite<'_>) -> crate::Result<bool> {
-        let (resolved, _) = self.committed_sum_targets(row.collection, row.record_lsn);
+        let resolved = self.committed_sum_targets(row.collection);
         let surrogate = Surrogate::new(row.surrogate);
         let storage_key = StorageKey::for_surrogate(surrogate);
         let hook_ctx = HookCtx {
@@ -246,7 +247,7 @@ impl CoreLoop {
             tid: row.tenant_id,
             collection: row.collection,
             resolved_targets: &resolved,
-            // A delete is deferred by omission from `resolved`, never by list.
+            // A committed record defers a target by omission from `resolved`.
             deferred_sum_targets: &[],
             wal_lsn: (row.record_lsn != 0).then(|| Lsn::new(row.record_lsn)),
         };
@@ -333,24 +334,17 @@ impl CoreLoop {
         Ok(true)
     }
 
-    /// The sum targets a write to `collection` folds into: the open scope's
-    /// under a committed-redo apply, else the restart-replay folds of the
-    /// record at `record_lsn`.
+    /// The sum targets a write to `collection` folds into: the open
+    /// committed-redo scope's. With no scope open nothing folds.
     fn committed_sum_targets(
         &self,
         collection: &str,
-        record_lsn: u64,
-    ) -> (
-        Vec<nodedb_physical::physical_plan::ResolvedSumTarget>,
-        Vec<String>,
-    ) {
-        match self.redo_apply.scope.as_ref() {
-            Some(scope) => scope.sum_targets_for(collection),
-            None => self
-                .redo_apply
-                .replay_folds_for(record_lsn, collection)
-                .unwrap_or_default(),
-        }
+    ) -> Vec<nodedb_physical::physical_plan::ResolvedSumTarget> {
+        self.redo_apply
+            .scope
+            .as_ref()
+            .map(|scope| scope.sum_targets_for(collection))
+            .unwrap_or_default()
     }
 
     fn record_committed_doc_write(&mut self, write: AppliedDocWrite) {

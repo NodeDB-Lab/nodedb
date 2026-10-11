@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use tokio::sync::Notify;
 
-use crate::control::cluster::calvin::scheduler::AppliedMirrors;
 use crate::control::security::auth_lease::{
     CalvinAckCoverage, LeaderLeaseService, LeaseHolder, LeaseTiming,
 };
@@ -31,8 +30,6 @@ pub struct AuthorizationFence {
     tree_defs: PendingTreeDefs,
     /// The permission cache's source collections, readable without its lock.
     sources: Arc<SourceIndex>,
-    /// Which Calvin positions this node's schedulers applied.
-    calvin_mirrors: AppliedMirrors,
     /// Sequencer completion acks not yet settled against local schedulers.
     calvin_acks: CalvinAckCoverage,
     /// This node's authorization lease.
@@ -56,7 +53,6 @@ impl AuthorizationFence {
             read_index: Mutex::new(HashMap::new()),
             tree_defs: PendingTreeDefs::default(),
             sources,
-            calvin_mirrors: AppliedMirrors::default(),
             calvin_acks: CalvinAckCoverage::default(),
             holder: LeaseHolder::default(),
             timing: OnceLock::new(),
@@ -104,11 +100,6 @@ impl AuthorizationFence {
     /// The permission cache's source collections.
     pub fn sources(&self) -> &SourceIndex {
         &self.sources
-    }
-
-    /// Which Calvin positions this node's schedulers applied.
-    pub fn calvin_mirrors(&self) -> &AppliedMirrors {
-        &self.calvin_mirrors
     }
 
     /// Sequencer completion acks not yet settled against local schedulers.

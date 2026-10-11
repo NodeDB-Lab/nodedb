@@ -38,11 +38,12 @@ impl CoreLoop {
         };
         let token = seed.token();
         let memory = self.graph_memory(target);
+        let fail_scope = self.fail_scope;
         let (tx, rx) = mpsc::sync_channel::<Result<CsrRebuilt, nodedb_graph::GraphError>>(1);
         let spawned = std::thread::Builder::new()
             .name(format!("reindex-csr-{}", self.core_id))
             .spawn(move || {
-                hold_build(CSR_BUILD_HOLD);
+                hold_build(fail_scope, CSR_BUILD_HOLD);
                 // The receiver is gone only when the core shut down.
                 let _ = tx.send(seed.build(memory));
             });

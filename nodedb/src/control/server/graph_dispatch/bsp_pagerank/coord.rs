@@ -166,19 +166,14 @@ pub async fn run_bsp_pagerank(
 
     // The count phase reads every owner's partition first. A write after it
     // on any owned vShard changes what later supersteps read, so the count
-    // phase's watermarks are the ones the transaction read-set keeps.
+    // phase's versions are the ones the transaction read-set keeps.
     let mut reads = ShardReadLog::new();
     for count in &counts {
         if let Some(target) = targets.iter().find(|t| t.node_id == count.node_id) {
-            reads.note(
-                target.owned_vshards.iter().copied(),
-                count.watermark_lsn,
-                target.node_id,
-            );
+            reads.note(target.owned_vshards.iter().copied(), &count.read_versions);
         }
     }
     reads.publish(
-        state,
         tenant_id,
         database_id,
         Some(qualified(database_id, &params.collection)),

@@ -63,9 +63,9 @@ async fn a_columnar_write_in_flight_at_a_checkpoint_survives_kill_9() {
 /// That checkpoint flushes the held array with a stamp naming B writes above
 /// A. Boot 3 replays A below that stamp's highest LSN (`in_flight`).
 ///
-/// An array cell write routes by its coordinate, not by the array's name (see
-/// [`ArrayCellRoute`]). Both arrays take `prefix_bits = 10`, so their cells
-/// spread over every data group. Each B cell sits at a coordinate whose group
+/// An array cell write routes by its tile, not by the array's name (see
+/// [`ArrayCellRoute`]). Both arrays take `prefix_bits = 10`, so the tiles of
+/// the applied array spread over every data group. Each B cell sits at a coordinate whose group
 /// is not the group of A's cell.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_array_write_in_flight_at_a_checkpoint_survives_kill_9() {
@@ -107,10 +107,11 @@ const ARRAY_PREFIX_BITS: u8 = 10;
 
 /// The coordinate of B number `n` in the array case: the `n`th coordinate of
 /// `[0..1023]` whose cell applies in another data group than A's cell, coord 1
-/// of `[0..15]`. The domains match the case's `CREATE ARRAY` statements.
+/// of `[0..15]`. The domains and tile extents match the case's `CREATE
+/// ARRAY` statements.
 fn applied_array_coord(n: usize) -> i64 {
-    let held_group = ArrayCellRoute::new(0, 15, ARRAY_PREFIX_BITS).group(1);
-    let applied = ArrayCellRoute::new(0, 1023, ARRAY_PREFIX_BITS);
+    let held_group = ArrayCellRoute::new(0, 15, 16, ARRAY_PREFIX_BITS).group(1);
+    let applied = ArrayCellRoute::new(0, 1023, 64, ARRAY_PREFIX_BITS);
     (0..=1023)
         .filter(|coord| applied.group(*coord) != held_group)
         .nth(n)

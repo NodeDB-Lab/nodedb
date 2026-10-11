@@ -18,8 +18,6 @@
 //!   transaction record is the exception: it always applies, so it stays,
 //!   its group closes with one part with no rows, and replay runs its
 //!   install.
-//! - A committed Calvin record is whole at append and takes no part. Its
-//!   stored write set holds no row, so boot journals nothing for it.
 //!
 //! Restart replay, a point-in-time restore of the archived WAL, and the event
 //! stream rebuilt from it then agree with the stores. Boot makes the appended
@@ -157,11 +155,6 @@ fn complete_group(
     scanned: &WalGroups,
     capture: &WriteSetCapture,
 ) -> crate::Result<bool> {
-    // A Calvin flush's origin is a committed record whole at append: no part
-    // follows it.
-    if is_calvin_flush(&stored_plan(&capture.origin_append)?) {
-        return Ok(false);
-    }
     let appender = part_appender(wal, &capture.origin_append)?;
     let target = target(capture, Lsn::new(capture.origin));
     let write_set = capture.write_set();
@@ -188,16 +181,6 @@ fn journal_cut_write(wal: &WalManager, capture: &WriteSetCapture) -> crate::Resu
     let inputs = &capture.origin_append;
     let appender = part_appender(wal, inputs)?;
     let plan = stored_plan(inputs)?;
-    // A Calvin flush's origin is the transaction's committed record. The
-    // sequencer holds the transaction, and its recovery runs it again.
-    if is_calvin_flush(&plan) {
-        tracing::warn!(
-            origin = capture.origin,
-            "boot found a Calvin flush whose committed record the crash cut; the \
-             sequencer runs the transaction again"
-        );
-        return Ok(false);
-    }
     let home = target(capture, Lsn::ZERO);
     if let Some((epoch, group_id, log_index)) = inputs.change_position {
         let marker = ChangePositionMarker {
@@ -242,14 +225,6 @@ fn stored_plan(inputs: &OriginAppend) -> crate::Result<PhysicalPlan> {
         format: "msgpack".into(),
         detail: format!("stored write set plan decode: {e}"),
     })
-}
-
-/// Whether `plan` is a Calvin flush, whose origin is whole at append.
-fn is_calvin_flush(plan: &PhysicalPlan) -> bool {
-    matches!(
-        plan,
-        PhysicalPlan::Meta(nodedb_physical::physical_plan::MetaOp::CalvinFlush { .. })
-    )
 }
 
 /// The appender every record of the write carried.

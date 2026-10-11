@@ -61,12 +61,13 @@ pub(super) fn add_keys(keys: &mut WriteKeys, op: &GraphOp) -> crate::Result<()> 
         } => keys.node(collection.as_str(), node_id),
         // A TRUNCATE's edge share locks no edge: it records a cut at its
         // transaction's ordinal, which hides every version applied below it
-        // whatever order this vShard flushes the edge writes in.
+        // whatever order this vShard installs the edge writes in.
         GraphOp::TruncateEdges { collection, vshard } => keys.home(collection.as_str(), *vshard),
         // A CRDT delete's presence guard locks every document it names,
-        // stored or not, by the key every writer of that document locks,
-        // and the collection key every collection-wide write locks. So it
-        // runs after every lower writer of those documents flushed.
+        // stored or not, by the key every writer of that document locks. Its
+        // `Intent` on the collection orders it against every collection-wide
+        // write. So it runs after every lower writer of those documents
+        // installed.
         GraphOp::NodePresenceGuard {
             collection,
             vshard,
@@ -78,7 +79,6 @@ pub(super) fn add_keys(keys: &mut WriteKeys, op: &GraphOp) -> crate::Result<()> 
                 collection.as_str(),
                 present.iter().chain(absent.iter()).map(|id| row_id_key(id)),
             );
-            keys.whole_collection(collection.as_str());
         }
         GraphOp::ResolveEdgeDelete(_)
         | GraphOp::Hop { .. }

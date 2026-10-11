@@ -52,7 +52,7 @@ pub async fn backup_tenant(state: &Arc<SharedState>, tenant_id: u64) -> Result<B
     // The envelope watermark is the consistent cut: every user write
     // committed below it has applied before the snapshots below, and every
     // write committed at or above it refuses a restore of this envelope.
-    let snapshot_watermark = super::cut::consistent_cut(state, tenant_id).await?;
+    let snapshot_watermark = super::cut::consistent_cut(state).await?;
 
     // Every database the tenant has a collection or an array in. Read after
     // the cut, so one created before the cut is in the list.

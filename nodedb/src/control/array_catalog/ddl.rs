@@ -99,8 +99,8 @@ pub(crate) async fn run_trusted_array_ddl(
         payload: Payload::from_vec(payload),
         watermark_lsn: Lsn::ZERO,
         error_code: None,
-        read_set_valid: None,
-        read_version_lsn: Lsn::ZERO,
+        stage_vote: None,
+        read_versions: crate::types::ReadVersions::new(),
         write_set: Vec::new(),
     })
 }

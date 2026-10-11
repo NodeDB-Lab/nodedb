@@ -90,6 +90,8 @@ pub struct CoreShares {
     pub event_lane: crate::types::snapshot::GroupEventLane,
     /// The Calvin cut of the group's vShards.
     pub calvin: Option<crate::types::GroupCalvinCut>,
+    /// The group's open chunked redo streams.
+    pub redo_streams: Vec<crate::wal::CarriedRedoStream>,
 }
 
 /// `(database, collection)` of a `"{db}:{tid}:{collection}[:suffix]"` key.
@@ -211,6 +213,7 @@ pub fn split_by_core(
         group_cut_index,
         group_event_lane,
         group_calvin,
+        group_redo_streams,
     } = snap;
 
     let mut s = Splitter {
@@ -346,6 +349,7 @@ pub fn split_by_core(
         cut_index: group_cut_index,
         event_lane: group_event_lane,
         calvin: group_calvin,
+        redo_streams: group_redo_streams,
     })
 }
 

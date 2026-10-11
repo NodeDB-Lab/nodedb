@@ -12,12 +12,12 @@ use std::sync::Arc;
 use crate::Error;
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::server::result_stream::ResultStream;
-use crate::control::server::shared::session::served_reads;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, Lsn, TenantId, TraceId, TxnId, VShardId};
 
 use super::dispatch_local::{LocalContext, dispatch_local};
-use super::dispatch_remote::{RemoteDispatchArgs, dispatch_remote, dispatch_remote_stream};
+use super::dispatch_remote::{RemoteDispatchArgs, dispatch_remote};
+use super::dispatch_remote_stream::dispatch_remote_stream;
 use super::read_leg::{confirm_local_read, linearizable_read_groups};
 use super::route::{RouteDecision, TaskRoute};
 use super::version_check::check_local_descriptor_versions;
@@ -28,16 +28,14 @@ use super::version_set::GatewayVersionSet;
 ///
 /// `shard_watermarks` is one `(vshard, watermark_lsn)` per contributing shard
 /// — local SPSC watermark, or remote `ExecuteResponse.watermark_lsn` keyed to
-/// the owning vShard — accumulated so an in-transaction read gets one
-/// read-set entry per shard at its true committed LSN.
+/// the owning vShard. A read-set entry takes its version from
+/// `read_versions`, never from a watermark.
 pub struct DispatchOutcome {
     pub payloads: Vec<Vec<u8>>,
     pub shard_watermarks: Vec<(VShardId, Lsn)>,
-    /// This route's scanned collection's read-version LSN (`coll_write_lsn`
-    /// at read time), `Lsn::ZERO` for writes. Max-folded across routes — a
-    /// read targets one collection, so one non-zero value survives — for
-    /// cross-shard OCC read validation.
-    pub read_version_lsn: Lsn,
+    /// The versions this route observed, one per vShard. Folded across
+    /// routes for OCC read validation.
+    pub read_versions: crate::types::ReadVersions,
     /// The owning core refused the task with `ErrorCode::NotFound`.
     ///
     /// A fan-out reads it as a shard that holds no slice. A single-route
@@ -79,11 +77,10 @@ pub(crate) async fn dispatch_route(
     } = params;
     reject_unadmitted_crdt_apply(&route.plan)?;
     let read_groups = linearizable_read_groups(shared, &route, linearizable)?;
-    let route_vshard = route.vshard_id;
     match route.decision {
         RouteDecision::Local => {
             confirm_local_read(shared, database_id, &route.plan, &read_groups, deadline_ms).await?;
-            let outcome = dispatch_local(
+            dispatch_local(
                 route,
                 LocalContext {
                     shared,
@@ -94,13 +91,10 @@ pub(crate) async fn dispatch_route(
                     version_set,
                 },
             )
-            .await?;
-            // The read's versions are this node's WAL positions.
-            served_reads::note(route_vshard, shared.node_id);
-            Ok(outcome)
+            .await
         }
         RouteDecision::Remote { node_id, vshard_id } => {
-            let outcome = dispatch_remote(RemoteDispatchArgs {
+            dispatch_remote(RemoteDispatchArgs {
                 plan: route.plan,
                 shared,
                 node_id,
@@ -114,10 +108,7 @@ pub(crate) async fn dispatch_route(
                 linearizable,
                 read_groups,
             })
-            .await?;
-            // The read's versions are the remote node's WAL positions.
-            served_reads::note(route_vshard, node_id);
-            Ok(outcome)
+            .await
         }
         RouteDecision::Broadcast { .. } => {
             // Split into individual Local/Remote routes by the router before

@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use nodedb_types::fail_point::FailGuard;
+use nodedb_test_support::fail_point::FailGuard;
 
 use crate::common::cluster_harness::{TestCluster, wait_for};
 

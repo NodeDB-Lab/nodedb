@@ -128,7 +128,7 @@ fn answer_consume_stream(
     );
     match reply {
         Ok(reply) => match zerompk::to_msgpack_vec(&reply) {
-            Ok(payload) => ExecuteResponse::ok(vec![payload], 0, 0),
+            Ok(payload) => ExecuteResponse::ok(vec![payload], 0, Vec::new()),
             Err(error) => ExecuteResponse::err(TypedClusterError::Internal {
                 code: PLAN_DECODE_FAILED,
                 message: format!("CDC response encoding failed: {error}"),

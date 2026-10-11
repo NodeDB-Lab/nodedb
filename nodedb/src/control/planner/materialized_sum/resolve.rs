@@ -20,7 +20,7 @@ use super::stored::stored_row_scope;
 use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::server::surrogate_exchange::lookup_surrogate_routed;
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, TenantId, TraceId};
+use crate::types::{DatabaseId, TenantId, TraceId, TxnId};
 
 /// Resolve the materialized-sum target rows for every document write in
 /// `tasks`, storing the result in that op's `resolved_sum_targets`.
@@ -43,11 +43,18 @@ use crate::types::{DatabaseId, TenantId, TraceId};
 /// The returned [`ReadSetEntry`]s cover the folded images; the caller must
 /// union them into the dispatch read-set so Calvin OCC aborts the
 /// statement on concurrent source writes, before any row moves.
+///
+/// `read_txn` is the open transaction the statement runs in, `None` outside a
+/// transaction block. Every source read goes through its staging overlay, so
+/// each image is the row as this transaction sees it. A planned task's own
+/// `txn_id` does not say this: the planner leaves it unset, and the staging
+/// gate stamps it only after this pass.
 pub async fn resolve_materialized_sum_targets(
     state: &SharedState,
     tasks: &mut Vec<PhysicalTask>,
     tenant_id: TenantId,
     database_id: DatabaseId,
+    read_txn: Option<TxnId>,
     trace_id: TraceId,
 ) -> crate::Result<Vec<ReadSetEntry>> {
     let schema_version = state.schema_version.current();
@@ -67,6 +74,7 @@ pub async fn resolve_materialized_sum_targets(
             state,
             op,
             txn_id,
+            read_txn,
             tenant_id,
             database_id,
             trace_id,
@@ -81,7 +89,7 @@ pub async fn resolve_materialized_sum_targets(
         // end before the resolution is written back through `&mut op`.
         let outcome = {
             let carried = value_carrying(op);
-            let stored = stored_row_scope(op);
+            let stored = stored_row_scope(op, read_txn);
             // The two classifications name the same collection when both apply;
             // an op that is neither carries no join value at all and is skipped.
             let Some(collection) = stored
@@ -135,8 +143,7 @@ pub async fn resolve_materialized_sum_targets(
                         source_collection: collection,
                         images: &images.images,
                         source_row: Some(scope.surrogate),
-                        read_version_lsn: images.read_version_lsn,
-                        served_by: images.served_by,
+                        read_version: images.read_version,
                     };
                     let settlement = settle_cross_shard_images(
                         &bindings,
@@ -280,12 +287,16 @@ fn set_resolved(op: &mut DocumentOp, resolved: Vec<ResolvedSumTarget>) {
 /// Resolve the materialized-sum targets for a set of row BODIES of one source
 /// collection, for a caller that holds the bodies itself rather than a plan.
 ///
-/// This is the seam the Control-Plane orchestrators use. `INSERT ... SELECT`,
-/// `MERGE` and `UPDATE ... FROM` all resolve their rows on the Control Plane and
-/// re-issue concrete work (a `BatchInsert` page, an APPLY pass, a write pass)
-/// through `dispatch_local`, which never passes through
+/// This is the seam the autocommit Control-Plane orchestrators use.
+/// `INSERT ... SELECT`, `MERGE` and `UPDATE ... FROM` resolve their rows on the
+/// Control Plane and re-issue concrete work (a `BatchInsert` page, an APPLY
+/// pass, a write pass) that never passes through
 /// [`resolve_materialized_sum_targets`]. Without this they will ship an empty
-/// resolution and the Data-Plane fold will have no target to address.
+/// resolution and the Data-Plane fold will have no target to address. Every
+/// binding they resolve is co-resident: a statement that moves a cross-shard
+/// sum runs in an implicit transaction on every protocol and never reaches
+/// them
+/// ([`statement_needs_implicit_txn`](crate::control::server::shared::txn_route::statement_needs_implicit_txn)).
 ///
 /// `source_collection` is the db-qualified name as it appears on the plan.
 /// Returns an empty vec — and issues no lookup at all — when the collection
@@ -339,6 +350,28 @@ pub fn source_drives_bindings(
         tenant_id,
         source,
     )
+}
+
+/// Whether `source_collection` drives a materialized sum whose target does not
+/// share its vShard. `source_collection` is the db-qualified plan name.
+///
+/// Such a balance cannot ride a write applied on the source's vShard alone.
+/// It ships on an `ApplyBalanceDelta` task homed on the target, so the write
+/// that moves it must run where Calvin can commit the pair together.
+pub fn drives_cross_shard_sum(
+    state: &SharedState,
+    source_collection: &str,
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+) -> crate::Result<bool> {
+    let Some(bindings) = source_drives_bindings(state, source_collection, tenant_id, database_id)?
+    else {
+        return Ok(false);
+    };
+    let source = nodedb_types::CollectionKey::from_qualified_str(database_id, source_collection)?;
+    Ok(bindings.iter().any(|binding| {
+        !crate::query::sum_target_is_co_resident(source, &binding.target_collection)
+    }))
 }
 
 /// Resolve one already-extracted join VALUE to its target row's surrogate.
@@ -545,7 +578,7 @@ mod tests {
             .expect("bind target row");
 
         let mut tasks = vec![insert_task("entries", body("acc-1"))];
-        resolve_materialized_sum_targets(&state, &mut tasks, TENANT, DB, TraceId::ZERO)
+        resolve_materialized_sum_targets(&state, &mut tasks, TENANT, DB, None, TraceId::ZERO)
             .await
             .expect("resolution succeeds");
 
@@ -596,7 +629,7 @@ mod tests {
         );
 
         let mut tasks = vec![insert_task("entries", body("acc-1"))];
-        resolve_materialized_sum_targets(&state, &mut tasks, TENANT, DB, TraceId::ZERO)
+        resolve_materialized_sum_targets(&state, &mut tasks, TENANT, DB, None, TraceId::ZERO)
             .await
             .expect("resolution succeeds");
 
@@ -630,9 +663,10 @@ mod tests {
         declare_binding(&state);
 
         let mut tasks = vec![insert_task("entries", body("acc-missing"))];
-        let error = resolve_materialized_sum_targets(&state, &mut tasks, TENANT, DB, TraceId::ZERO)
-            .await
-            .expect_err("a missing target must fail the statement");
+        let error =
+            resolve_materialized_sum_targets(&state, &mut tasks, TENANT, DB, None, TraceId::ZERO)
+                .await
+                .expect_err("a missing target must fail the statement");
 
         match error {
             crate::Error::MaterializedSumTargetNotFound {
@@ -656,7 +690,7 @@ mod tests {
         declare_binding(&state);
 
         let mut tasks = vec![insert_task("unrelated", body("acc-1"))];
-        resolve_materialized_sum_targets(&state, &mut tasks, TENANT, DB, TraceId::ZERO)
+        resolve_materialized_sum_targets(&state, &mut tasks, TENANT, DB, None, TraceId::ZERO)
             .await
             .expect("resolution succeeds");
 
@@ -714,7 +748,7 @@ mod tests {
             post_set_op: PostSetOp::None,
             txn_id: None,
         }];
-        resolve_materialized_sum_targets(&state, &mut tasks, TENANT, DB, TraceId::ZERO)
+        resolve_materialized_sum_targets(&state, &mut tasks, TENANT, DB, None, TraceId::ZERO)
             .await
             .expect("resolution succeeds");
 
@@ -732,5 +766,133 @@ mod tests {
             ),
             other => panic!("plan shape changed: {other:?}"),
         }
+    }
+
+    /// The fixture pair this module's cross-shard tests rest on.
+    #[test]
+    fn the_fixture_target_is_cross_shard() {
+        assert_ne!(
+            nodedb_types::CollectionKey::from_bare(DB, "entries").vshard(),
+            nodedb_types::CollectionKey::from_bare(DB, "accounts").vshard(),
+            "'accounts' must not share 'entries'' vShard"
+        );
+    }
+
+    /// A staged `INSERT ... SELECT` emits one `PointInsert` per copied row,
+    /// in the open transaction. The pass the expander runs on them ships each
+    /// cross-shard balance on a task homed on the target, in that same
+    /// transaction. The redo's fold table then names no cross-shard target,
+    /// so the install never folds one on the source's core.
+    #[tokio::test]
+    async fn expanded_inserts_ship_cross_shard_balances_and_fold_none() {
+        let (state, _directory) = test_state();
+        declare_binding(&state);
+        state
+            .surrogate_assigner
+            .assign(
+                nodedb_types::CollectionKey::from_bare(DB, "accounts"),
+                TENANT,
+                b"acc-1",
+            )
+            .await
+            .expect("bind target row");
+        let txn = Some(crate::types::TxnId::new(41));
+        let mut tasks: Vec<PhysicalTask> = (0..2)
+            .map(|_| {
+                let mut task = insert_task("entries", body("acc-1"));
+                task.txn_id = txn;
+                task
+            })
+            .collect();
+
+        let reads = crate::control::server::shared::plan_admission::append_sum_and_period_targets(
+            &state,
+            &mut tasks,
+            TENANT,
+            DB,
+            txn,
+            TraceId::ZERO,
+        )
+        .await
+        .expect("the pass succeeds");
+        assert!(reads.is_empty(), "an insert reads no image");
+
+        let balances: Vec<&PhysicalTask> = tasks
+            .iter()
+            .filter(|task| {
+                matches!(
+                    task.plan,
+                    PhysicalPlan::Document(DocumentOp::ApplyBalanceDelta { .. })
+                )
+            })
+            .collect();
+        assert_eq!(balances.len(), 2, "one balance per copied row");
+        for balance in balances {
+            assert_eq!(
+                balance.vshard_id,
+                crate::query::sum_target_vshard(DB, "accounts")
+            );
+            assert_eq!(balance.txn_id, txn, "the balance joins the transaction");
+            match &balance.plan {
+                PhysicalPlan::Document(DocumentOp::ApplyBalanceDelta { delta, .. }) => {
+                    assert_eq!(delta, "25");
+                }
+                other => panic!("plan shape changed: {other:?}"),
+            }
+        }
+
+        let plans: Vec<PhysicalPlan> = tasks.iter().map(|task| task.plan.clone()).collect();
+        assert!(
+            crate::control::wal_replication::transaction_redo::sum_targets::redo_sum_targets(
+                &plans
+            )
+            .is_empty(),
+            "the source core folds no cross-shard target"
+        );
+    }
+
+    /// A source that drives a cross-shard target is reported. A collection
+    /// that drives nothing is not.
+    #[test]
+    fn a_cross_shard_source_is_reported() {
+        let (state, _directory) = test_state();
+        declare_binding(&state);
+
+        assert!(drives_cross_shard_sum(&state, "entries", TENANT, DB).expect("index probe"));
+        assert!(!drives_cross_shard_sum(&state, "unrelated", TENANT, DB).expect("index probe"));
+    }
+
+    /// A source whose every target shares its vShard rides the source write,
+    /// so it reports no cross-shard sum.
+    #[test]
+    fn a_co_resident_source_is_not_cross_shard() {
+        let (state, _directory) = test_state();
+        let (source, target) = ("uo_entries", "uo_accounts");
+        assert_eq!(
+            nodedb_types::CollectionKey::from_bare(DB, source).vshard(),
+            nodedb_types::CollectionKey::from_bare(DB, target).vshard(),
+            "the pair must share a vShard"
+        );
+        let catalog = state.credentials.catalog();
+        let mut stored = StoredCollection::stamped_for_test(TENANT.as_u64(), target, "tester");
+        stored.materialized_sums.push(MaterializedSumDef {
+            target_collection: target.to_string(),
+            target_column: "balance".to_string(),
+            source_collection: source.to_string(),
+            join_column: "account_id".to_string(),
+            value_expr: nodedb_query::expr::SqlExpr::Column("amount".to_string()),
+        });
+        catalog
+            .put_collection(DB, &stored)
+            .expect("persist target collection");
+        catalog
+            .put_collection(
+                DB,
+                &StoredCollection::stamped_for_test(TENANT.as_u64(), source, "tester"),
+            )
+            .expect("persist source collection");
+        state.materialized_sum_index.invalidate();
+
+        assert!(!drives_cross_shard_sum(&state, source, TENANT, DB).expect("index probe"));
     }
 }

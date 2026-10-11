@@ -5,19 +5,18 @@
 //! service, spawn the vShard schedulers, and start the cluster subsystems
 //! (health/gossip/etc.) that share the loop's `MultiRaft`.
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc;
 
 use nodedb_cluster::calvin::{
     CalvinCompletionRegistry, SequencerConfig, SequencerReceivers, SequencerService,
     SequencerStateMachine, new_inbox, new_reservation_inbox,
 };
 
+use crate::control::cluster::calvin::SchedulerConfig;
 use crate::control::cluster::calvin::executor::ollp::OllpConfig;
 use crate::control::cluster::calvin::executor::ollp::orchestrator::OllpOrchestrator;
-use crate::control::cluster::calvin::{ReadResultEvent, SchedulerConfig};
 use crate::control::cluster::handle::ClusterHandle;
 use crate::control::cluster::start_raft_helpers::{
     SpawnVshardSchedulersParams, spawn_vshard_schedulers,
@@ -47,7 +46,6 @@ pub(super) struct LoopBuild {
     pub(super) ollp_orchestrator: Arc<OllpOrchestrator>,
     pub(super) tracker: Arc<ProposeTracker>,
     pub(super) apply_rx: mpsc::Receiver<ApplyBatch>,
-    pub(super) calvin_read_result_senders: Arc<Mutex<BTreeMap<u32, Sender<ReadResultEvent>>>>,
     pub(super) calvin_completion_registry: Arc<CalvinCompletionRegistry>,
     pub(super) token_state: nodedb_cluster::SharedTokenStateMirror,
     /// Shared with the compactor wiring so sequencer-group log compaction can
@@ -78,7 +76,6 @@ pub(super) async fn build_raft_loop(
         calvin_completion_registry,
         calvin_verdict_rx,
         sequencer_state_machine,
-        calvin_read_result_senders,
         metadata_applier,
         token_state,
         plan_executor,
@@ -156,6 +153,7 @@ pub(super) async fn build_raft_loop(
         .with_calvin_submit_inbox(hooks.calvin_submit_inbox)
         .with_reserve_read(hooks.reserve_read)
         .with_release_reservation(hooks.release_reservation)
+        .with_data_propose_gate(hooks.data_propose_gate)
         .with_auth_lease(lease_service)
         .with_data_dir(data_dir.to_path_buf())
         .with_snapshot_chunk_bytes(snapshot_chunk_bytes)
@@ -185,6 +183,8 @@ pub(super) async fn build_raft_loop(
         .map_err(|e| crate::Error::Config {
             detail: e.to_string(),
         })?;
+    // Each scheduler runs on the epoch duration of the sequencer feeding it.
+    let scheduler_config = SchedulerConfig::from_tuning(&shared.tuning.calvin, &sequencer_config);
     let (sequencer_inbox, sequencer_inbox_rx) = new_inbox(10_000, &sequencer_config);
     let (reservation_inbox, reservation_inbox_rx) = new_reservation_inbox(10_000);
     let ollp_orchestrator = Arc::new(OllpOrchestrator::new(OllpConfig::default()));
@@ -208,13 +208,11 @@ pub(super) async fn build_raft_loop(
     );
     let sequencer_metrics = Arc::clone(&sequencer_service.metrics);
 
-    let scheduler_config = SchedulerConfig::default();
     spawn_vshard_schedulers(SpawnVshardSchedulersParams {
         handle,
         shared,
         raft_loop_handle: raft_loop_handle.clone(),
         sequencer_state_machine: &sequencer_state_machine,
-        calvin_read_result_senders: &calvin_read_result_senders,
         calvin_completion_registry: &calvin_completion_registry,
         scheduler_config: &scheduler_config,
     })?;
@@ -264,7 +262,6 @@ pub(super) async fn build_raft_loop(
         ollp_orchestrator,
         tracker,
         apply_rx,
-        calvin_read_result_senders,
         calvin_completion_registry,
         token_state,
         sequencer_state_machine,

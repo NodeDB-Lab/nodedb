@@ -81,6 +81,7 @@ impl CoreLoop {
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
             }),
+            Self::replay_record_lsn(record_lsn),
         );
         let response = self.execute_vector_direct_delete(
             crate::data::executor::handlers::vector_direct_delete::VectorDirectDeleteParams {
@@ -162,6 +163,7 @@ impl CoreLoop {
                 field: field.clone(),
                 restart_identity: false,
             }),
+            Self::replay_record_lsn(record_lsn),
         );
         let response = self.execute_vector_direct_truncate(&task, tenant_id, &collection, &field);
         if response.status != Status::Ok {
@@ -250,6 +252,7 @@ impl CoreLoop {
                 rls_filters: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
             }),
+            Self::replay_record_lsn(record_lsn),
         );
         let response = self.execute_vector_direct_update(
             crate::data::executor::handlers::vector_direct_update::VectorDirectUpdateParams {

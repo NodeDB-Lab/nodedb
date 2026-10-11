@@ -5,13 +5,10 @@
 //! no version at all (fast-path writes and reads already do).
 //!
 //! The version index itself lives on the `!Send` Data-Plane core and its
-//! readers are test-only, so this asserts the recording FIRED via the
-//! node-global `calvin.counters.write_versions_recorded` counter, which the per-vShard
-//! scheduler increments once per committed Calvin apply for which it dispatched
-//! a write-version record op (at the CalvinApplied WAL LSN). The counter is the
-//! standalone-observable proof that a cross-shard-committed write now advances
-//! the version index; the end-to-end serializability regression (via read-set
-//! validation) is covered separately once validation is enforcing.
+//! readers are test-only, so this asserts the recording fired via the
+//! node-global `calvin.counters.write_versions_recorded` counter. The data
+//! group's apply loop increments it once per committed slice whose stamped
+//! redo installed, and the install records the slice's write versions.
 
 use crate::common;
 
@@ -62,8 +59,8 @@ fn distinct_vshard_node_keys() -> (String, String) {
 }
 
 /// A cross-shard (dual-home edge) Calvin-committed write increments the
-/// node-global write-version-recorded counter — i.e. its keys' versions are
-/// recorded at the CalvinApplied WAL LSN instead of being silently dropped.
+/// node-global write-version-recorded counter: the stamped redo install of
+/// each slice records its keys' versions at the install's WAL LSN.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cross_shard_calvin_write_records_write_version() {
     // 4 Data-Plane cores so distinct vShards land on distinct cores — a genuine
@@ -99,7 +96,8 @@ async fn cross_shard_calvin_write_records_write_version() {
     // AUTOCOMMIT cross-shard edge insert: because the endpoints home to distinct
     // vShards, the edge dual-homes atomically through the Calvin scheduler
     // (`submit_calvin_routed`), not the single-home fast path. On commit each
-    // participating vShard's scheduler records its slice's write versions.
+    // participating vShard's data group installs its slice's stamped redo,
+    // and the install records the slice's write versions.
     node.client
         .simple_query(&format!(
             "GRAPH INSERT EDGE IN 'sncalvin_wv_graph' FROM '{src}' TO '{dst}' TYPE 'l'"
@@ -107,8 +105,8 @@ async fn cross_shard_calvin_write_records_write_version() {
         .await
         .expect("cross-shard edge insert must commit via the single-node Calvin path");
 
-    // Recording is dispatched fire-and-forget after the CalvinApplied WAL LSN is
-    // obtained, so wait for the counter to advance.
+    // Each participant's data-group apply loop raises the counter on its own
+    // schedule, so wait for it to advance.
     wait_for(
         "calvin write-version recording fired for the cross-shard commit",
         Duration::from_secs(10),

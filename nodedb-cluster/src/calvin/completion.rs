@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::calvin::completion_entry::{PendingCompletion, outcome_for};
+use crate::calvin::completion_entry::PendingCompletion;
 use crate::calvin::completion_waiter::{CompletionReport, CompletionWaiter};
 use crate::calvin::sequencer::AbortReason;
 
@@ -37,25 +37,15 @@ impl TxnId {
 
 /// Terminal outcome of a single Calvin transaction attempt.
 ///
-/// Exactly one of these fires per attempt on the unified completion channel:
-/// all expected vshards acked AND the global verdict was commit (`Completed`),
-/// all expected vshards acked but the global cross-shard verdict was ABORT
-/// (`Aborted`), the executor reported an OLLP prediction mismatch that forces a
-/// retry (`Mismatch`), or the scheduler rejected the transaction's routing as
-/// terminally broken (`Failed`). `Failed` is never retried. `Aborted` retries
-/// only for `AbortReason::PredictionDrift`, which is the same drift as
-/// `Mismatch`.
+/// Exactly one fires per attempt, once the global verdict is stored and every
+/// expected vShard acked. A transaction that lost its parts fires at its
+/// verdict, since no participant staged it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AttemptOutcome {
+    /// The global verdict was COMMIT.
     Completed,
-    /// The global cross-shard verdict was ABORT. `reason` names the cause.
-    Aborted {
-        reason: AbortReason,
-    },
-    Mismatch,
-    Failed {
-        detail: String,
-    },
+    /// The global verdict was ABORT. `reason` names the cause.
+    Aborted { reason: AbortReason },
 }
 
 /// One participant vShard's durable commit vote.
@@ -93,10 +83,6 @@ pub struct ParticipantProgress {
     pub acked: bool,
     /// The txn's global verdict is stored.
     pub has_verdict: bool,
-    /// An `OllpMismatch` for the txn is recorded.
-    pub mismatched: bool,
-    /// A `TxnRoutingFailed` for the txn is recorded and not yet delivered.
-    pub routing_failed: bool,
 }
 
 /// `pub(crate)`: also read by the vote/verdict-tally methods in
@@ -115,32 +101,47 @@ pub(crate) struct Inner {
     /// Terminal entries with no waiter, oldest first, with the instant each
     /// became one (`completion_gc`).
     pub(crate) waiterless: VecDeque<(Instant, TxnId)>,
-    /// How long a terminal entry waits for a waiter before eviction. `None`
-    /// takes [`super::completion_gc::DEFAULT_WAITERLESS_TTL`].
+    /// Entries no `EpochBatch` apply sequenced, oldest first, with the
+    /// instant each was created (`completion_gc`).
+    pub(crate) orphans: VecDeque<(Instant, TxnId)>,
+    /// How long a terminal entry waits for a waiter before eviction, and how
+    /// long an orphan stays with no live waiter. `None` takes
+    /// [`super::completion_gc::DEFAULT_WAITERLESS_TTL`].
     pub(crate) waiterless_ttl: Option<Duration>,
 }
 
 impl Inner {
-    /// Remove `txn`'s entry and deliver `outcome` to `waiter`. `signal` names
-    /// the event in the warning logged when the receiver is gone.
-    pub(crate) fn fire(
-        &mut self,
-        txn: TxnId,
-        waiter: CompletionWaiter,
-        outcome: AttemptOutcome,
-        ack_results: Vec<Vec<u8>>,
-        signal: &'static str,
-    ) {
-        self.completions.remove(&txn);
-        if !waiter.send(outcome, ack_results) {
-            tracing::warn!(
-                epoch = txn.epoch,
-                position = txn.position,
-                signal,
-                "calvin completion receiver dropped before its outcome fired; \
-                 client likely timed out on completion wait"
-            );
+    /// Deliver `txn`'s outcome to its waiter once the entry is terminal, then
+    /// queue or evict waiterless terminal entries.
+    ///
+    /// The entry stays after its outcome fires. Its votes, verdict, and acks
+    /// answer the participants on this node that still probe it. The
+    /// waiterless sweep removes it.
+    pub(crate) fn settle(&mut self, txn: TxnId) {
+        if let Some(entry) = self.completions.get_mut(&txn)
+            && entry.is_terminal()
+            && let Some(verdict) = entry.verdict
+            && let Some(waiter) = entry.completion_tx.take()
+        {
+            let results = entry.take_ack_results();
+            if !waiter.send(outcome_for(verdict), results) {
+                tracing::warn!(
+                    epoch = txn.epoch,
+                    position = txn.position,
+                    "calvin completion receiver dropped before its outcome fired; \
+                     client likely timed out on completion wait"
+                );
+            }
         }
+        self.settle_waiterless(txn);
+    }
+}
+
+/// The coordinator's outcome for a stored verdict.
+fn outcome_for(verdict: VerdictOutcome) -> AttemptOutcome {
+    match verdict {
+        VerdictOutcome::Commit => AttemptOutcome::Completed,
+        VerdictOutcome::Abort(reason) => AttemptOutcome::Aborted { reason },
     }
 }
 
@@ -223,10 +224,8 @@ impl CalvinCompletionRegistry {
                  client likely timed out on submit_with_retry"
             );
         }
-        inner
-            .completions
-            .entry(txn)
-            .or_insert_with(|| PendingCompletion::new(expected_participants));
+        let entry = inner.entry_mut(txn);
+        entry.expected_participants = entry.expected_participants.max(expected_participants);
     }
 
     /// Register interest in `txn`'s terminal outcome, seeding the authoritative
@@ -260,46 +259,14 @@ impl CalvinCompletionRegistry {
         rx
     }
 
+    /// Store `tx` as `txn`'s waiter. An entry that is terminal already, from
+    /// a verdict and acks that raced ahead of registration, fires at once.
     fn register_waiter(&self, txn: TxnId, expected_participants: usize, tx: CompletionWaiter) {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let entry = inner
-            .completions
-            .entry(txn)
-            .or_insert_with(|| PendingCompletion::new(expected_participants));
+        let entry = inner.entry_mut(txn);
         entry.expected_participants = entry.expected_participants.max(expected_participants);
-        // Routing failure takes precedence over everything else: it is terminal
-        // and must never be masked by a later ack or mismatch signal.
-        if let Some(detail) = entry.routing_failed.take() {
-            inner.fire(
-                txn,
-                tx,
-                AttemptOutcome::Failed { detail },
-                Vec::new(),
-                "routing failure",
-            );
-        } else if entry.abandoned {
-            // The entry keeps its stored verdict for the participants that
-            // still probe it, and parks as a waiterless one.
-            super::completion_parts::send_parts_lost(txn, tx);
-            inner.settle_waiterless(txn);
-        } else if entry.mismatched {
-            inner.fire(
-                txn,
-                tx,
-                AttemptOutcome::Mismatch,
-                Vec::new(),
-                "OLLP mismatch",
-            );
-        } else if entry.is_complete() {
-            // Acks raced ahead of waiter registration: consult the stored
-            // verdict so an already-complete ABORT surfaces as `Aborted`, not a
-            // false `Completed`.
-            let outcome = outcome_for(entry);
-            let results = entry.take_ack_results();
-            inner.fire(txn, tx, outcome, results, "all acked");
-        } else {
-            entry.completion_tx = Some(tx);
-        }
+        entry.completion_tx = Some(tx);
+        inner.settle(txn);
     }
 
     pub fn note_completion_ack(&self, txn: TxnId, vshard_id: u32) {
@@ -310,94 +277,20 @@ impl CalvinCompletionRegistry {
     /// it carried. An empty `result` records none.
     pub fn note_completion_ack_with(&self, txn: TxnId, vshard_id: u32, result: Vec<u8>) {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let entry = inner
-            .completions
-            .entry(txn)
-            .or_insert_with(|| PendingCompletion::new(0));
+        let entry = inner.entry_mut(txn);
         entry.acked_vshards.insert(vshard_id);
         if !result.is_empty() {
             entry.ack_results.insert(vshard_id, result);
         }
-        if entry.is_complete() {
-            // Consult the stored global verdict: `Verdict` is applied strictly
-            // before this abort's `CompletionAck` in the sequencer Raft log, so
-            // an ABORT is `Some(false)` here and must surface as `Aborted`
-            // rather than a silent `Completed` (which would drop the writes and
-            // report COMMIT SUCCESS to the client).
-            //
-            // Only fire + evict when the coordinator's waiter is registered. If
-            // the final ack races AHEAD of registration, LEAVE the entry — its
-            // `acked_vshards` (and the stored verdict) persist, so
-            // `register_completion`'s `is_complete()` branch fires the outcome.
-            // Evicting here would strand that branch (a fresh entry created by
-            // the later `register_completion` never re-completes). Mirrors how
-            // `mismatched`/`routing_failed` persist across the same race.
-            if let Some(tx) = entry.completion_tx.take() {
-                let outcome = outcome_for(entry);
-                let results = entry.take_ack_results();
-                inner.fire(txn, tx, outcome, results, "final ack");
-            }
-        }
-        inner.settle_waiterless(txn);
-    }
-
-    /// Record an OLLP prediction mismatch for `txn`, the second terminal outcome
-    /// of an attempt. Mismatch takes precedence over completion: a mismatched
-    /// attempt must retry, never falsely report success.
-    ///
-    /// If the coordinator's waiter is already registered, fire `Mismatch` and
-    /// evict the entry. Otherwise leave the `mismatched` flag set so a later
-    /// `register_completion` fires it (mirrors `acked_vshards` persistence).
-    pub fn note_ollp_mismatch(&self, txn: TxnId) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let entry = inner
-            .completions
-            .entry(txn)
-            .or_insert_with(|| PendingCompletion::new(0));
-        entry.mismatched = true;
-        if let Some(tx) = entry.completion_tx.take() {
-            inner.fire(
-                txn,
-                tx,
-                AttemptOutcome::Mismatch,
-                Vec::new(),
-                "OLLP mismatch",
-            );
-        }
-        inner.settle_waiterless(txn);
-    }
-
-    /// Record a terminal, NON-retryable routing failure for `txn` — the
-    /// scheduler rejected the transaction's local plan routing as
-    /// `Unroutable`, `ControlPlaneOnly`, or `NotAWrite`. Takes precedence over
-    /// completion AND over an OLLP mismatch: a routing failure can never
-    /// converge via retry, so it must never be masked by a later ack or
-    /// mismatch signal.
-    ///
-    /// If the coordinator's waiter is already registered, fire `Failed` and
-    /// evict the entry. Otherwise leave the `routing_failed` detail set so a
-    /// later `register_completion` fires it (mirrors `mismatched` persistence).
-    pub fn note_routing_failed(&self, txn: TxnId, detail: String) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let entry = inner
-            .completions
-            .entry(txn)
-            .or_insert_with(|| PendingCompletion::new(0));
-        entry.routing_failed = Some(detail.clone());
-        if let Some(tx) = entry.completion_tx.take() {
-            inner.fire(
-                txn,
-                tx,
-                AttemptOutcome::Failed { detail },
-                Vec::new(),
-                "routing failure",
-            );
-        }
-        inner.settle_waiterless(txn);
+        // A participant acks only after it read the verdict, so the verdict
+        // is stored before the last ack applies. A waiter that registers
+        // after the last ack finds the terminal entry and fires then.
+        inner.settle(txn);
     }
 
     /// Set how long a terminal entry with no waiter stays for one to
-    /// register. The host sets it longer than its statement deadline.
+    /// register, and how long an orphan stays with no live waiter. The host
+    /// sets it longer than its statement deadline.
     pub fn set_waiterless_ttl(&self, ttl: Duration) {
         self.inner
             .lock()
@@ -408,7 +301,7 @@ impl CalvinCompletionRegistry {
     /// What this registry holds for participant `vshard` of `txn`.
     ///
     /// `None` means no entry exists for `txn`. That is either a txn this node
-    /// never seeded, or one whose outcome already fired and evicted its entry.
+    /// never seeded, or a terminal one the waiterless sweep evicted.
     pub fn participant_progress(&self, txn: TxnId, vshard: u32) -> Option<ParticipantProgress> {
         self.inner
             .lock()
@@ -419,13 +312,10 @@ impl CalvinCompletionRegistry {
                 voted: entry.votes.contains_key(&vshard),
                 acked: entry.acked_vshards.contains(&vshard),
                 has_verdict: entry.verdict.is_some(),
-                mismatched: entry.mismatched,
-                routing_failed: entry.routing_failed.is_some(),
             })
     }
 
-    /// Test-only: returns the number of pending completion entries.
-    /// Used to verify entries are removed once all acks arrive (no leak).
+    /// Test-only: returns the number of completion entries held.
     #[cfg(test)]
     pub fn pending_completions_len(&self) -> usize {
         self.inner
@@ -450,31 +340,37 @@ impl CalvinCompletionRegistry {
 mod tests {
     use super::*;
 
-    /// A replica on which no coordinator waits keeps no completion entry,
-    /// and no ack result, past the eviction window. An entry that has a
-    /// waiter stays until its outcome fires.
-    #[tokio::test]
-    async fn waiterless_terminal_entries_are_evicted_with_their_results() {
+    /// A registry that evicts a waiterless terminal entry at its next change.
+    fn evicting_registry() -> Arc<CalvinCompletionRegistry> {
         let reg = CalvinCompletionRegistry::new_detached();
         reg.set_waiterless_ttl(Duration::ZERO);
+        reg
+    }
+
+    /// A replica on which no coordinator waits keeps no terminal entry, and
+    /// no ack result, past the eviction window. An entry that has a waiter,
+    /// or that is sequenced and not terminal, stays.
+    #[tokio::test]
+    async fn waiterless_sweep_evicts_only_terminal_entries() {
+        let reg = evicting_registry();
 
         let acked = TxnId::new(3, 0);
-        reg.note_assigned(1, acked, 1);
+        reg.seed_expected(acked, 1);
+        reg.note_verdict(acked, VerdictOutcome::Commit);
         reg.note_completion_ack_with(acked, 5, vec![0xAB; 4096]);
         assert_eq!(
             reg.pending_completions_len(),
             0,
-            "a complete entry nobody waits for is evicted with its result"
+            "a terminal entry nobody waits for is evicted with its result"
         );
 
-        let mismatched = TxnId::new(3, 1);
-        reg.note_ollp_mismatch(mismatched);
-        assert_eq!(reg.pending_completions_len(), 0);
-
         let awaited = TxnId::new(3, 2);
+        let undecided = TxnId::new(3, 3);
         let rx = reg.register_completion_report(awaited, 2);
+        reg.note_verdict(awaited, VerdictOutcome::Commit);
         reg.note_completion_ack_with(awaited, 5, b"five".to_vec());
-        reg.note_completion_ack_with(TxnId::new(3, 3), 6, b"other".to_vec());
+        reg.seed_expected(undecided, 2);
+        reg.note_completion_ack_with(undecided, 6, b"other".to_vec());
         assert!(
             reg.participant_progress(awaited, 5).is_some(),
             "an entry with a waiter is never evicted"
@@ -482,6 +378,12 @@ mod tests {
         reg.note_completion_ack_with(awaited, 6, b"six".to_vec());
         let report = rx.await.expect("completion fires");
         assert_eq!(report.ack_results, vec![b"five".to_vec(), b"six".to_vec()]);
+        assert_eq!(
+            reg.pending_completions_len(),
+            1,
+            "only the undecided entry stays"
+        );
+        assert!(reg.participant_progress(undecided, 6).is_some());
     }
 
     /// The coordinator hosts no replica of either participant: it learns
@@ -490,8 +392,10 @@ mod tests {
     /// vShard order, whether the acks land before or after it registers.
     #[tokio::test]
     async fn a_report_carries_every_participants_ack_result() {
-        let reg = CalvinCompletionRegistry::new_detached();
+        let reg = evicting_registry();
         let txn = TxnId::new(11, 4);
+        reg.seed_expected(txn, 3);
+        reg.note_verdict(txn, VerdictOutcome::Commit);
         reg.note_completion_ack_with(txn, 20, b"twenty".to_vec());
         let rx = reg.register_completion_report(txn, 3);
         reg.note_completion_ack_with(txn, 10, b"ten".to_vec());
@@ -504,89 +408,80 @@ mod tests {
         );
         assert_eq!(reg.pending_completions_len(), 0);
 
+        // A terminal entry waits the window for its waiter.
+        let reg = CalvinCompletionRegistry::new_detached();
         let late = TxnId::new(11, 5);
+        reg.seed_expected(late, 1);
+        reg.note_verdict(late, VerdictOutcome::Commit);
         reg.note_completion_ack_with(late, 7, b"seven".to_vec());
         let report = reg
             .register_completion_report(late, 1)
             .await
-            .expect("an already complete txn fires on registration");
+            .expect("an already terminal txn fires on registration");
         assert_eq!(report.ack_results, vec![b"seven".to_vec()]);
     }
 
     #[tokio::test]
-    async fn completion_entry_removed_after_all_acks() {
-        let reg = CalvinCompletionRegistry::new_detached();
+    async fn completion_fires_once_the_verdict_and_every_ack_are_in() {
+        let reg = evicting_registry();
         let txn = TxnId::new(7, 0);
         reg.note_assigned(1, txn, 2);
-        let rx = reg.register_completion(txn, 2);
-        assert_eq!(reg.pending_completions_len(), 1);
+        let mut rx = reg.register_completion(txn, 2);
+        reg.note_verdict(txn, VerdictOutcome::Commit);
         reg.note_completion_ack(txn, 10);
-        assert_eq!(reg.pending_completions_len(), 1);
+        assert_eq!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty));
         reg.note_completion_ack(txn, 20);
-        let outcome = rx.await.expect("completion fires");
-        assert_eq!(outcome, AttemptOutcome::Completed);
         assert_eq!(
-            reg.pending_completions_len(),
-            0,
-            "entry must be evicted once all expected vshards have acked"
+            rx.await.expect("completion fires"),
+            AttemptOutcome::Completed
         );
+        assert_eq!(reg.pending_completions_len(), 0);
     }
 
     #[tokio::test]
-    async fn completion_entry_removed_when_register_arrives_after_acks() {
-        let reg = CalvinCompletionRegistry::new_detached();
+    async fn completion_fires_when_register_arrives_between_acks() {
+        let reg = evicting_registry();
         let txn = TxnId::new(9, 3);
-        reg.note_assigned(1, txn, 2);
+        reg.seed_expected(txn, 2);
+        reg.note_verdict(txn, VerdictOutcome::Commit);
         reg.note_completion_ack(txn, 10);
-        // Entry remains: expected=2, only 1 ack received.
         assert_eq!(reg.pending_completions_len(), 1);
         let rx = reg.register_completion(txn, 2);
-        assert_eq!(reg.pending_completions_len(), 1);
         reg.note_completion_ack(txn, 20);
         let outcome = rx.await.expect("completion fires once both acks arrived");
         assert_eq!(outcome, AttemptOutcome::Completed);
+        assert_eq!(reg.pending_completions_len(), 0);
+    }
+
+    /// Every ack without a stored verdict is not terminal: the waiter keeps
+    /// waiting, and the sweep keeps the entry.
+    #[tokio::test]
+    async fn all_acks_without_a_verdict_are_not_terminal() {
+        let reg = evicting_registry();
+        let txn = TxnId::new(34, 3);
+        reg.note_assigned(1, txn, 2);
+        let mut rx = reg.register_completion(txn, 2);
+        reg.note_completion_ack(txn, 10);
+        reg.note_completion_ack(txn, 20);
+        assert_eq!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+        assert_eq!(reg.pending_completions_len(), 1);
+
+        reg.note_verdict(txn, VerdictOutcome::Commit);
         assert_eq!(
-            reg.pending_completions_len(),
-            0,
-            "entry must be evicted once awaiter is signalled"
+            rx.await.expect("completion fires"),
+            AttemptOutcome::Completed
         );
     }
 
+    /// A waiterless entry with every ack but no verdict survives the sweep.
     #[tokio::test]
-    async fn mismatch_arriving_before_register_fires_mismatch() {
-        let reg = CalvinCompletionRegistry::new_detached();
-        let txn = TxnId::new(11, 1);
-        reg.note_assigned(1, txn, 2);
-        // Mismatch observed before the coordinator registers its waiter: the
-        // flag must persist so a later register_completion fires it.
-        reg.note_ollp_mismatch(txn);
-        assert_eq!(reg.pending_completions_len(), 1);
-        let rx = reg.register_completion(txn, 2);
-        let outcome = rx.await.expect("mismatch fires");
-        assert_eq!(outcome, AttemptOutcome::Mismatch);
-        assert_eq!(
-            reg.pending_completions_len(),
-            0,
-            "entry must be evicted once mismatch is signalled"
-        );
-    }
-
-    #[tokio::test]
-    async fn register_before_mismatch_fires_mismatch() {
-        let reg = CalvinCompletionRegistry::new_detached();
-        let txn = TxnId::new(12, 5);
-        reg.note_assigned(1, txn, 2);
-        let rx = reg.register_completion(txn, 2);
-        assert_eq!(reg.pending_completions_len(), 1);
-        // Waiter already stored; the mismatch must wake it directly.
-        reg.note_ollp_mismatch(txn);
-        let outcome = rx.await.expect("mismatch fires");
-        assert_eq!(outcome, AttemptOutcome::Mismatch);
-        assert_eq!(
-            reg.pending_completions_len(),
-            0,
-            "entry must be evicted once mismatch is signalled"
-        );
+    async fn a_waiterless_entry_without_a_verdict_is_never_evicted() {
+        let reg = evicting_registry();
+        let txn = TxnId::new(34, 4);
+        reg.seed_expected(txn, 1);
+        reg.note_completion_ack(txn, 10);
+        reg.note_completion_ack(TxnId::new(34, 5), 10);
+        assert!(reg.participant_progress(txn, 10).is_some());
     }
 
     #[tokio::test]
@@ -595,9 +490,10 @@ mod tests {
         // register_completion must seed expected_participants from the assignment.
         // Without the seed (or with the is_complete>0 guard absent) this would
         // spuriously fire Completed with zero acks.
-        let reg = CalvinCompletionRegistry::new_detached();
+        let reg = evicting_registry();
         let txn = TxnId::new(21, 0);
         let rx = reg.register_completion(txn, 1);
+        reg.note_verdict(txn, VerdictOutcome::Commit);
         assert_eq!(
             reg.pending_completions_len(),
             1,
@@ -613,10 +509,11 @@ mod tests {
     async fn ack_racing_ahead_of_register_does_not_prematurely_complete() {
         // The replicated ack can reach a remote coordinator's registry BEFORE the
         // coordinator calls register_completion. With expected_participants still
-        // unknown (0), the ack must persist without firing/evicting; the later
-        // register_completion seeds the count and then completes.
+        // unknown (0), the ack must persist without firing or eviction within the
+        // window; the later register_completion seeds the count and then completes.
         let reg = CalvinCompletionRegistry::new_detached();
         let txn = TxnId::new(22, 0);
+        reg.note_verdict(txn, VerdictOutcome::Commit);
         reg.note_completion_ack(txn, 7);
         assert_eq!(
             reg.pending_completions_len(),
@@ -626,95 +523,19 @@ mod tests {
         let rx = reg.register_completion(txn, 1);
         let outcome = rx.await.expect("completion fires once participants seeded");
         assert_eq!(outcome, AttemptOutcome::Completed);
+        reg.set_waiterless_ttl(Duration::ZERO);
+        reg.note_completion_ack(TxnId::new(22, 1), 7);
         assert_eq!(reg.pending_completions_len(), 0);
-    }
-
-    #[tokio::test]
-    async fn routing_failed_arriving_before_register_fires_failed() {
-        let reg = CalvinCompletionRegistry::new_detached();
-        let txn = TxnId::new(14, 1);
-        reg.note_assigned(1, txn, 2);
-        // Routing failure observed before the coordinator registers its
-        // waiter: the detail must persist so a later register_completion
-        // fires it.
-        reg.note_routing_failed(txn, "unroutable plan".to_owned());
-        assert_eq!(reg.pending_completions_len(), 1);
-        let rx = reg.register_completion(txn, 2);
-        let outcome = rx.await.expect("routing failure fires");
-        assert_eq!(
-            outcome,
-            AttemptOutcome::Failed {
-                detail: "unroutable plan".to_owned()
-            }
-        );
-        assert_eq!(
-            reg.pending_completions_len(),
-            0,
-            "entry must be evicted once routing failure is signalled"
-        );
-    }
-
-    #[tokio::test]
-    async fn register_before_routing_failed_fires_failed() {
-        let reg = CalvinCompletionRegistry::new_detached();
-        let txn = TxnId::new(15, 4);
-        reg.note_assigned(1, txn, 2);
-        let rx = reg.register_completion(txn, 2);
-        assert_eq!(reg.pending_completions_len(), 1);
-        // Waiter already stored; the routing failure must wake it directly.
-        reg.note_routing_failed(txn, "control-plane-only plan".to_owned());
-        let outcome = rx.await.expect("routing failure fires");
-        assert_eq!(
-            outcome,
-            AttemptOutcome::Failed {
-                detail: "control-plane-only plan".to_owned()
-            }
-        );
-        assert_eq!(
-            reg.pending_completions_len(),
-            0,
-            "entry must be evicted once routing failure is signalled"
-        );
-    }
-
-    #[tokio::test]
-    async fn routing_failed_takes_precedence_over_pending_acks_and_mismatch() {
-        let reg = CalvinCompletionRegistry::new_detached();
-        let txn = TxnId::new(16, 0);
-        reg.note_assigned(1, txn, 2);
-        // No waiter registered yet: an ack and a mismatch both persist onto
-        // the entry without firing anything.
-        reg.note_completion_ack(txn, 10);
-        reg.note_ollp_mismatch(txn);
-        assert_eq!(reg.pending_completions_len(), 1);
-        // The routing failure also persists (still no waiter)...
-        reg.note_routing_failed(txn, "non-write plan".to_owned());
-        // ...and when the coordinator finally registers, it must observe the
-        // routing failure, not the mismatch or the ack — routing failure is
-        // terminal and must never be masked by either.
-        let rx = reg.register_completion(txn, 2);
-        let outcome = rx.await.expect("routing failure fires");
-        assert_eq!(
-            outcome,
-            AttemptOutcome::Failed {
-                detail: "non-write plan".to_owned()
-            }
-        );
-        assert_eq!(
-            reg.pending_completions_len(),
-            0,
-            "entry must be evicted once routing failure is signalled"
-        );
     }
 
     #[tokio::test]
     async fn abort_verdict_makes_completion_report_aborted() {
         // An ABORT verdict is stored (Raft-ordered) before the acks that complete
-        // the tally. Completion must consult it and report `Aborted`, never a
-        // silent `Completed` that would drop the writes and report COMMIT success.
-        let reg = CalvinCompletionRegistry::new_detached();
+        // the entry. Completion must report `Aborted`, never a silent
+        // `Completed` that would drop the writes and report COMMIT success.
+        let reg = evicting_registry();
         let txn = TxnId::new(31, 0);
-        reg.note_assigned(1, txn, 2);
+        reg.seed_expected(txn, 2);
         reg.note_verdict(
             txn,
             VerdictOutcome::Abort(AbortReason::SerializationConflict),
@@ -733,34 +554,118 @@ mod tests {
         assert_eq!(reg.pending_completions_len(), 0);
     }
 
+    /// The verdict and acks race ahead of waiter registration. The terminal
+    /// entry waits the window for its waiter, and registration reports
+    /// `Aborted` at once. The sweep evicts the entry after its window.
     #[tokio::test]
     async fn abort_verdict_reports_aborted_when_register_arrives_after_acks() {
-        // Acks (and the verdict) race ahead of waiter registration: the
-        // already-complete branch in `register_completion` must also consult the
-        // stored verdict and report `Aborted`.
         let reg = CalvinCompletionRegistry::new_detached();
         let txn = TxnId::new(32, 1);
-        reg.note_assigned(1, txn, 2);
-        reg.note_verdict(txn, VerdictOutcome::Abort(AbortReason::ParticipantError));
+        reg.seed_expected(txn, 2);
+        reg.note_verdict(txn, VerdictOutcome::Abort(AbortReason::PlanRejected));
         reg.note_completion_ack(txn, 10);
         reg.note_completion_ack(txn, 20);
-        let rx = reg.register_completion(txn, 2);
-        let outcome = rx.await.expect("completion fires");
+        let mut rx = reg.register_completion(txn, 2);
         assert_eq!(
-            outcome,
-            AttemptOutcome::Aborted {
-                reason: AbortReason::ParticipantError
-            }
+            rx.try_recv(),
+            Ok(AttemptOutcome::Aborted {
+                reason: AbortReason::PlanRejected
+            }),
+            "registration on a terminal entry fires at once"
         );
+        assert_eq!(
+            reg.pending_completions_len(),
+            1,
+            "the entry waits its window"
+        );
+
+        reg.set_waiterless_ttl(Duration::ZERO);
+        reg.note_completion_ack(TxnId::new(32, 2), 10);
         assert_eq!(reg.pending_completions_len(), 0);
+    }
+
+    /// An ack or verdict that applies after the sweep evicted its terminal
+    /// entry creates an orphan. The sweep evicts the orphan once its window
+    /// passed, so late signals never pile up.
+    #[tokio::test]
+    async fn a_late_signal_for_an_evicted_txn_leaves_no_entry() {
+        let reg = evicting_registry();
+        let txn = TxnId::new(35, 0);
+        reg.seed_expected(txn, 1);
+        reg.note_vote(txn, 10, ParticipantVote::Commit);
+        reg.note_verdict(txn, VerdictOutcome::Commit);
+        reg.note_completion_ack(txn, 10);
+        assert_eq!(
+            reg.pending_completions_len(),
+            0,
+            "the terminal entry is evicted"
+        );
+
+        reg.note_completion_ack(txn, 10);
+        assert_eq!(
+            reg.pending_completions_len(),
+            0,
+            "a late ack leaves no entry"
+        );
+        reg.note_vote(txn, 10, ParticipantVote::Commit);
+        reg.note_verdict(txn, VerdictOutcome::Commit);
+        assert_eq!(
+            reg.pending_completions_len(),
+            0,
+            "a late vote and verdict leave no entry"
+        );
+        assert_eq!(reg.participant_progress(txn, 10), None);
+    }
+
+    /// An orphan a coordinator waits on stays while the coordinator listens,
+    /// past its window. Once the coordinator drops its receiver, the sweep
+    /// evicts the orphan.
+    #[tokio::test]
+    async fn an_orphan_stays_while_its_coordinator_listens() {
+        let reg = evicting_registry();
+        let txn = TxnId::new(36, 0);
+        let rx = reg.register_completion(txn, 2);
+        reg.note_completion_ack(txn, 10);
+        reg.note_completion_ack(TxnId::new(36, 1), 10);
+        let progress = reg
+            .participant_progress(txn, 10)
+            .expect("a listening coordinator keeps its orphan");
+        assert!(progress.acked && !progress.has_verdict);
+
+        drop(rx);
+        reg.note_completion_ack(TxnId::new(36, 2), 10);
+        assert_eq!(reg.participant_progress(txn, 10), None);
+        assert_eq!(reg.pending_completions_len(), 0);
+    }
+
+    /// A sequenced entry is never an orphan. With no waiter and no verdict,
+    /// it stays past the window: its participants still need its tally.
+    #[tokio::test]
+    async fn a_sequenced_entry_is_never_evicted_as_an_orphan() {
+        let reg = evicting_registry();
+        let txn = TxnId::new(37, 0);
+        reg.note_assigned(1, txn, 2);
+        reg.note_completion_ack(TxnId::new(37, 1), 10);
+        assert_eq!(
+            reg.participant_progress(txn, 10),
+            None,
+            "an assignment alone does not sequence the entry"
+        );
+
+        reg.seed_expected(txn, 2);
+        reg.note_vote(txn, 10, ParticipantVote::Commit);
+        reg.note_completion_ack(TxnId::new(37, 2), 10);
+        assert!(
+            reg.participant_progress(txn, 10)
+                .is_some_and(|progress| progress.voted)
+        );
     }
 
     #[tokio::test]
     async fn commit_verdict_reports_completed() {
-        // A COMMIT verdict must still report `Completed`.
-        let reg = CalvinCompletionRegistry::new_detached();
+        let reg = evicting_registry();
         let txn = TxnId::new(33, 2);
-        reg.note_assigned(1, txn, 2);
+        reg.seed_expected(txn, 2);
         reg.note_verdict(txn, VerdictOutcome::Commit);
         let rx = reg.register_completion(txn, 2);
         reg.note_completion_ack(txn, 10);
@@ -768,6 +673,37 @@ mod tests {
         let outcome = rx.await.expect("completion fires");
         assert_eq!(outcome, AttemptOutcome::Completed);
         assert_eq!(reg.pending_completions_len(), 0);
+    }
+
+    /// A fired outcome keeps the entry's votes, verdict, and acks for the
+    /// participants that still probe it, until the sweep evicts it.
+    #[tokio::test]
+    async fn a_fired_outcome_keeps_the_tally_until_the_sweep() {
+        let reg = CalvinCompletionRegistry::new_detached();
+        let txn = TxnId::new(40, 2);
+        reg.seed_expected(txn, 1);
+        let rx = reg.register_completion(txn, 1);
+        reg.note_vote(txn, 1, ParticipantVote::Abort(AbortReason::PlanRejected));
+        reg.note_verdict(txn, VerdictOutcome::Abort(AbortReason::PlanRejected));
+        reg.note_completion_ack(txn, 1);
+        assert_eq!(
+            rx.await.expect("completion fires"),
+            AttemptOutcome::Aborted {
+                reason: AbortReason::PlanRejected
+            }
+        );
+
+        let progress = reg.participant_progress(txn, 1).expect("entry stays");
+        assert!(progress.voted && progress.acked && progress.has_verdict);
+        assert_eq!(reg.verdict(txn), Some(false));
+        assert_eq!(
+            reg.vote_tally(txn).and_then(|tally| tally.get(&1).copied()),
+            Some(ParticipantVote::Abort(AbortReason::PlanRejected))
+        );
+
+        reg.set_waiterless_ttl(Duration::ZERO);
+        reg.note_completion_ack(TxnId::new(40, 3), 1);
+        assert_eq!(reg.participant_progress(txn, 1), None);
     }
 
     /// A dropped assignment closes the caller's channel at once and leaves no
@@ -797,41 +733,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_verdict_reports_completed_unchanged() {
-        // Single-shard / no-verdict paths (`verdict == None`) must report
-        // `Completed` unchanged — the fix must not stall them.
-        let reg = CalvinCompletionRegistry::new_detached();
-        let txn = TxnId::new(34, 3);
-        reg.note_assigned(1, txn, 2);
-        let rx = reg.register_completion(txn, 2);
-        reg.note_completion_ack(txn, 10);
-        reg.note_completion_ack(txn, 20);
-        let outcome = rx.await.expect("completion fires");
-        assert_eq!(outcome, AttemptOutcome::Completed);
-        assert_eq!(reg.pending_completions_len(), 0);
-    }
-
-    #[tokio::test]
-    async fn mismatch_takes_precedence_over_pending_acks() {
-        let reg = CalvinCompletionRegistry::new_detached();
-        let txn = TxnId::new(13, 2);
-        reg.note_assigned(1, txn, 2);
-        let rx = reg.register_completion(txn, 2);
-        // One ack arrives but the attempt is not yet complete (expected=2).
-        reg.note_completion_ack(txn, 10);
-        assert_eq!(reg.pending_completions_len(), 1);
-        // A mismatch on the same attempt must win and force a retry.
-        reg.note_ollp_mismatch(txn);
-        let outcome = rx.await.expect("mismatch fires");
-        assert_eq!(outcome, AttemptOutcome::Mismatch);
-        assert_eq!(
-            reg.pending_completions_len(),
-            0,
-            "entry must be evicted once mismatch is signalled"
-        );
-    }
-
-    #[tokio::test]
     async fn participant_progress_is_none_before_any_entry_exists() {
         let reg = CalvinCompletionRegistry::new_detached();
         assert_eq!(reg.participant_progress(TxnId::new(40, 0), 1), None);
@@ -844,7 +745,6 @@ mod tests {
         reg.seed_expected(txn, 2);
         let empty = reg.participant_progress(txn, 1).expect("seeded entry");
         assert!(!empty.voted && !empty.acked && !empty.has_verdict);
-        assert!(!empty.mismatched && !empty.routing_failed);
 
         reg.note_vote(txn, 1, ParticipantVote::Commit);
         reg.note_completion_ack(txn, 1);
@@ -857,18 +757,7 @@ mod tests {
         );
 
         reg.note_verdict(txn, VerdictOutcome::Commit);
-        reg.note_ollp_mismatch(txn);
-        reg.note_routing_failed(txn, "unroutable".to_string());
         let txn_wide = reg.participant_progress(txn, 2).expect("entry");
-        assert!(txn_wide.has_verdict && txn_wide.mismatched && txn_wide.routing_failed);
-    }
-
-    #[tokio::test]
-    async fn participant_progress_is_none_once_the_outcome_fired() {
-        let reg = CalvinCompletionRegistry::new_detached();
-        let txn = TxnId::new(40, 2);
-        let _rx = reg.register_completion(txn, 1);
-        reg.note_completion_ack(txn, 1);
-        assert_eq!(reg.participant_progress(txn, 1), None);
+        assert!(txn_wide.has_verdict);
     }
 }

@@ -28,11 +28,15 @@ impl NodeDbPgHandler {
         let ReplicatedWrite { entry, proposer } = args;
         let request_id = self.next_request_id();
 
-        // `write_version` is the post-write `coll_write_lsn`, surfaced so the session
-        // can floor a later read-set at it (read-your-writes for cross-shard OCC).
-        let (payload, write_version) =
-            crate::control::wal_replication::propose_replicated_entry(&self.state, proposer, entry)
-                .await?;
+        // `write_versions` are the versions the write stamped. The session
+        // floors its later reads of the written vShards at them.
+        let (payload, write_versions) = crate::control::wal_replication::propose_replicated_entry(
+            &self.state,
+            proposer,
+            entry,
+            crate::control::wal_replication::statement_propose_deadline(&self.state),
+        )
+        .await?;
 
         let response = Response {
             request_id,
@@ -40,11 +44,11 @@ impl NodeDbPgHandler {
             attempt: 1,
             partial: false,
             payload: payload.into(),
-            // Authoritative participant WAL LSN — CDC ordering must use it, not zero.
-            watermark_lsn: write_version,
+            // A write carries no read watermark.
+            watermark_lsn: crate::types::Lsn::ZERO,
             error_code: None,
-            read_set_valid: None,
-            read_version_lsn: write_version,
+            stage_vote: None,
+            read_versions: write_versions,
             write_set: Vec::new(),
         };
 

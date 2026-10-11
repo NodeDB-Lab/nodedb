@@ -129,6 +129,11 @@ impl ResolvedSumTarget {
 /// A transaction redo record carries source post-images only. Every replica
 /// applying it folds the source rows into their target rows, so the target
 /// identities travel with the redo, keyed by source collection.
+///
+/// The table holds only the targets the source rows fold on their own core.
+/// A target whose balance travels on an `ApplyBalanceDelta` task has no entry
+/// here. The install then skips it. The table is merged over every write of
+/// the collection, so an entry here applies to every row of the collection.
 #[derive(
     Debug,
     Clone,
@@ -142,11 +147,8 @@ impl ResolvedSumTarget {
 pub struct RedoSumTargets {
     /// SOURCE collection the transaction wrote.
     pub collection: String,
-    /// Every target row the transaction's writes to `collection` resolved.
+    /// Every target row the transaction's writes to `collection` fold into.
     pub resolved: Vec<ResolvedSumTarget>,
-    /// TARGET collections whose delta travels on its own `ApplyBalanceDelta`
-    /// task, so the fold skips them.
-    pub deferred: Vec<String>,
 }
 
 /// The surrogate `resolved` binds `target_collection`'s `join_value` to.

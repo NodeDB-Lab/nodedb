@@ -4,9 +4,10 @@
 
 use nodedb_array::query::slice::{DimRange, Slice};
 use nodedb_array::schema::ArraySchema;
-use nodedb_array::tile::layout::tile_id_for_cell;
+use nodedb_array::schema::DimSpec;
+use nodedb_array::tile::{tile_prefix, tiles_per_dim};
 use nodedb_array::types::ArrayId;
-use nodedb_array::types::coord::value::CoordValue;
+use nodedb_array::types::domain::DomainBound;
 use nodedb_sql::temporal::TemporalScope;
 use nodedb_sql::types_array::ArraySliceAst;
 
@@ -66,10 +67,8 @@ pub(crate) fn convert_slice(
         // intercepts it and calls ArrayCoordinator::coord_slice instead
         // of sending to the local SPSC bridge.
         //
-        // Compute a conservative Hilbert bounding range from the slice's
-        // dim-range corners so the coordinator only fans out to the shards
-        // whose Hilbert buckets overlap the query range, rather than all
-        // 1024 shards (the "empty ranges = unbounded" fallback).
+        // The coordinator fans out only to the shards that own a tile the
+        // slice covers. An empty list fans out to every shard.
         let slice_hilbert_ranges =
             compute_slice_hilbert_ranges(&schema, &slice.dim_ranges, entry.prefix_bits);
         PhysicalPlan::ClusterArray(ClusterArrayOp::Slice {
@@ -105,92 +104,94 @@ pub(crate) fn convert_slice(
     }])
 }
 
-/// Compute a conservative Hilbert bounding range for a slice predicate.
+/// The most tiles a slice's shard fan-out enumerates. A slice covering more
+/// tiles fans out to every shard.
+const MAX_FAN_OUT_TILES: u128 = 4096;
+
+/// The Hilbert ranges a slice's shard fan-out covers: one `(key, key)` pair
+/// per routing bucket, each holding the key of one tile in that bucket.
 ///
-/// For each constrained dimension, uses the lo and hi bounds as the range
-/// endpoints. Generates all 2^num_dims corner coordinates of the bounding
-/// box and computes the Hilbert prefix for each. Returns a single
-/// `(min_prefix, max_prefix)` range that conservatively covers all cells
-/// that can match the slice.
+/// Every tile whose cells can match the slice is enumerated, so every shard
+/// that holds such a cell, or will hold one a later write lands there, is
+/// covered. A transaction's read of the slice then validates on each of
+/// those shards. A cell routes by its tile's key (`cell_tile_prefix`), the
+/// same key enumerated here.
 ///
-/// Falls back to an empty vec (unbounded = contact all shards) if the
-/// schema has more than 16 dimensions (2^16 corners will be excessive)
-/// or if any Hilbert encoding fails.
-///
-/// The result can over-estimate the shard set — the shard-side slice
-/// filter is always applied and never produces false positives.
+/// Returns an empty vec, which fans out to every shard, when the slice
+/// covers more than [`MAX_FAN_OUT_TILES`] tiles, when the schema has no
+/// dimension, or when a tile key fails to encode.
 fn compute_slice_hilbert_ranges(
     schema: &ArraySchema,
     dim_ranges: &[Option<DimRange>],
-    _prefix_bits: u8,
+    prefix_bits: u8,
 ) -> Vec<(u64, u64)> {
-    use nodedb_array::types::domain::DomainBound;
-
-    let ndim = schema.dims.len();
-    if ndim == 0 || ndim > 16 {
-        return Vec::new(); // fallback: unbounded
+    if schema.dims.is_empty() || prefix_bits == 0 || prefix_bits > 16 {
+        return Vec::new();
+    }
+    let spans: Vec<(u64, u64)> = schema
+        .dims
+        .iter()
+        .zip(schema.tile_extents.iter())
+        .enumerate()
+        .map(|(i, (dim, extent))| {
+            dim_tile_span(dim, *extent, dim_ranges.get(i).and_then(Option::as_ref))
+        })
+        .collect();
+    let tiles: u128 = spans
+        .iter()
+        .map(|(lo, hi)| u128::from(hi - lo) + 1)
+        .fold(1u128, |acc, n| acc.saturating_mul(n));
+    if tiles > MAX_FAN_OUT_TILES {
+        return Vec::new();
     }
 
-    // Build lo/hi bound for each dim. Unconstrained dims use the schema domain.
-    let mut lo_vals: Vec<CoordValue> = Vec::with_capacity(ndim);
-    let mut hi_vals: Vec<CoordValue> = Vec::with_capacity(ndim);
-
-    for (i, dr_opt) in dim_ranges.iter().enumerate() {
-        let dim = &schema.dims[i];
-        let (lo_bound, hi_bound) = if let Some(dr) = dr_opt {
-            (dr.lo.clone(), dr.hi.clone())
-        } else {
-            (dim.domain.lo.clone(), dim.domain.hi.clone())
+    let shift = 64 - u32::from(prefix_bits);
+    let mut buckets: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
+    let mut indices: Vec<u64> = spans.iter().map(|(lo, _)| *lo).collect();
+    loop {
+        let Ok(key) = tile_prefix(schema, &indices) else {
+            return Vec::new();
         };
-
-        let lo_cv = match lo_bound {
-            DomainBound::Int64(v) => CoordValue::Int64(v),
-            DomainBound::Float64(v) => CoordValue::Float64(v),
-            DomainBound::TimestampMs(v) => CoordValue::TimestampMs(v),
-            DomainBound::String(v) => CoordValue::String(v),
-        };
-        let hi_cv = match hi_bound {
-            DomainBound::Int64(v) => CoordValue::Int64(v),
-            DomainBound::Float64(v) => CoordValue::Float64(v),
-            DomainBound::TimestampMs(v) => CoordValue::TimestampMs(v),
-            DomainBound::String(v) => CoordValue::String(v),
-        };
-
-        lo_vals.push(lo_cv);
-        hi_vals.push(hi_cv);
-    }
-
-    // Generate all 2^ndim corners and compute their Hilbert prefix.
-    let num_corners = 1usize << ndim;
-    let mut min_prefix = u64::MAX;
-    let mut max_prefix = 0u64;
-    let mut found_any = false;
-
-    for mask in 0..num_corners {
-        let corner: Vec<CoordValue> = (0..ndim)
-            .map(|i| {
-                if (mask >> i) & 1 == 1 {
-                    hi_vals[i].clone()
-                } else {
-                    lo_vals[i].clone()
-                }
-            })
-            .collect();
-
-        // Use the tile prefix (computed from tile indices = coord / tile_extents),
-        // not the cell prefix — tiles store and the per-shard filter compares
-        // against tile-level Hilbert keys.
-        if let Ok(tile_id) = tile_id_for_cell(schema, &corner, 0) {
-            min_prefix = min_prefix.min(tile_id.hilbert_prefix);
-            max_prefix = max_prefix.max(tile_id.hilbert_prefix);
-            found_any = true;
+        buckets.entry(key >> shift).or_insert(key);
+        // Advance the odometer over the per-dimension tile spans.
+        let mut dim = 0;
+        loop {
+            if dim == indices.len() {
+                return buckets.into_values().map(|key| (key, key)).collect();
+            }
+            if indices[dim] < spans[dim].1 {
+                indices[dim] += 1;
+                break;
+            }
+            indices[dim] = spans[dim].0;
+            dim += 1;
         }
     }
+}
 
-    if found_any {
-        vec![(min_prefix, max_prefix)]
-    } else {
-        Vec::new() // fallback: unbounded
+/// The inclusive tile index span along `dim` that `range` covers, the whole
+/// dimension when `range` is `None`. A string dimension tiles by hash, so a
+/// range on it covers every tile. A bound outside the domain is clamped to
+/// the domain's tiles.
+fn dim_tile_span(dim: &DimSpec, extent: u64, range: Option<&DimRange>) -> (u64, u64) {
+    let last = u64::try_from(tiles_per_dim(dim, extent).saturating_sub(1)).unwrap_or(u64::MAX);
+    let extent = u128::from(extent.max(1));
+    let index = |bound: &DomainBound| -> Option<u64> {
+        let offset: u128 = match (bound, &dim.domain.lo) {
+            (DomainBound::Int64(v), DomainBound::Int64(lo))
+            | (DomainBound::TimestampMs(v), DomainBound::TimestampMs(lo)) => {
+                ((*v as i128) - (*lo as i128)).max(0) as u128
+            }
+            (DomainBound::Float64(v), DomainBound::Float64(lo)) if v.is_finite() => {
+                (v - lo).max(0.0) as u128
+            }
+            _ => return None,
+        };
+        Some(u64::try_from(offset / extent).unwrap_or(u64::MAX).min(last))
+    };
+    match range.map(|r| (index(&r.lo), index(&r.hi))) {
+        Some((Some(lo), Some(hi))) => (lo.min(hi), lo.max(hi)),
+        _ => (0, last),
     }
 }
 
@@ -263,6 +264,68 @@ mod tests {
             tenant_id: crate::types::TenantId::new(0),
         };
         (ctx, handle)
+    }
+
+    /// Every cell a slice can match, or a later write can land in its box,
+    /// routes to a shard the slice fans out to.
+    #[test]
+    fn the_fan_out_covers_the_shard_of_every_cell_in_the_box() {
+        use nodedb_array::types::coord::value::CoordValue;
+        let schema = ArraySchemaBuilder::new("grid")
+            .dim(DimSpec::new(
+                "chr".to_string(),
+                DimType::Int64,
+                Domain::new(DomainBound::Int64(0), DomainBound::Int64(9)),
+            ))
+            .dim(DimSpec::new(
+                "pos".to_string(),
+                DimType::Int64,
+                Domain::new(DomainBound::Int64(0), DomainBound::Int64(99)),
+            ))
+            .attr(AttrSpec::new("qual".to_string(), AttrType::Float64, true))
+            .tile_extents(vec![1, 100])
+            .build()
+            .expect("schema build");
+        let box_ranges = vec![
+            Some(DimRange::new(DomainBound::Int64(0), DomainBound::Int64(2))),
+            Some(DimRange::new(DomainBound::Int64(0), DomainBound::Int64(99))),
+        ];
+        let ranges = compute_slice_hilbert_ranges(&schema, &box_ranges, 8);
+        assert!(!ranges.is_empty(), "a three-tile slice fans out by tile");
+        let fanned = nodedb_cluster::distributed_array::array_vshards_for_slice(&ranges, 8, 1024)
+            .expect("fan-out");
+        let mut owners = std::collections::BTreeSet::new();
+        for chr in 0..=2 {
+            for pos in [0, 10, 20, 50, 99] {
+                let coord = [CoordValue::Int64(chr), CoordValue::Int64(pos)];
+                let key = nodedb_array::tile::cell_tile_prefix(&schema, &coord).expect("route");
+                let owner = nodedb_cluster::distributed_array::array_vshard_for_tile(key, 8)
+                    .expect("owner");
+                assert!(
+                    fanned.contains(&owner),
+                    "cell ({chr}, {pos}) routes to vShard {owner}, outside the fan-out {fanned:?}"
+                );
+                owners.insert(owner);
+            }
+        }
+        assert!(owners.len() > 1, "the slice's tiles spread over shards");
+    }
+
+    #[test]
+    fn a_slice_of_more_tiles_than_the_cap_fans_out_to_every_shard() {
+        let (_, schema) = make_schema();
+        let wide = ArraySchemaBuilder::new("wide")
+            .dim(DimSpec::new(
+                "x".to_string(),
+                DimType::Int64,
+                Domain::new(DomainBound::Int64(0), DomainBound::Int64(1_000_000)),
+            ))
+            .attr(AttrSpec::new("val".to_string(), AttrType::Float64, true))
+            .tile_extents(vec![1])
+            .build()
+            .expect("schema build");
+        assert!(compute_slice_hilbert_ranges(&wide, &[None], 8).is_empty());
+        assert!(!compute_slice_hilbert_ranges(&schema, &[None], 8).is_empty());
     }
 
     #[test]

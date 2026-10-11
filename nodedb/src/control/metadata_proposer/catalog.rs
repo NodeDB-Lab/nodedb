@@ -233,7 +233,7 @@ pub(super) async fn propose_prepared(
         .await?;
     match outcome {
         WaitOutcome::Reached
-            if shared.metadata_ddl_applied_token.load(Ordering::Acquire) == token =>
+            if shared.metadata_ddl.applied_token.load(Ordering::Acquire) == token =>
         {
             Ok(log_index)
         }

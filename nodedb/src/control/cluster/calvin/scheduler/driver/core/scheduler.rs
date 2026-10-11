@@ -11,7 +11,7 @@ use nodedb_cluster::MultiRaft;
 use nodedb_cluster::calvin::types::SchedulerInput;
 use nodedb_cluster::calvin::{CalvinCompletionRegistry, SequencerStateMachine, VerdictSignal};
 
-use super::super::barrier::{PendingDependentBarrier, ReadResultEvent};
+use super::super::barrier::PendingDependentBarrier;
 use super::super::config::SchedulerConfig;
 use super::super::types::{BlockedTxn, PendingTxn};
 use super::deferred::DeferredQueue;
@@ -49,10 +49,12 @@ pub struct Scheduler {
     /// Shared control-plane state used for dispatch, response tracking, WAL,
     /// and request-id allocation.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) shared: Arc<SharedState>,
-    /// Handle to MultiRaft for the data-group leader check and the catch-up
-    /// read of the sequencer log.
+    /// Handle to MultiRaft for the data-group role, the redo proposals, and
+    /// the catch-up read of the sequencer log.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) multi_raft:
         Arc<Mutex<MultiRaft>>,
+    /// This node's role in the vShard's data group. See [`super::role`].
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) role: super::role::StageGate,
     /// Hands sequencer entries to the sequencer group, locally on its leader
     /// and by forward from any other node.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) sequencer_proposer:
@@ -79,29 +81,47 @@ pub struct Scheduler {
     /// for the brief probe the gate takes.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) lock_manager:
         Arc<Mutex<LockManager>>,
-    /// In-flight static/active transactions awaiting executor response,
-    /// including those whose request waits in `deferred` for capacity.
-    /// `BTreeMap` ensures deterministic iteration order.
+    /// Granted transactions that have not finished: staged ones on the
+    /// leader, held ones on a follower, including those whose request waits
+    /// in `deferred` for capacity. `BTreeMap` ensures deterministic
+    /// iteration order.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) pending:
         BTreeMap<TxnId, PendingTxn>,
+    /// Installs the apply loop reported for txns still waiting for their
+    /// locks. Each completes when its locks are granted.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) early_applied:
+        BTreeMap<TxnId, super::redo_applied::AppliedRedo>,
+    /// This scheduler's registered inbox: how the data-group apply loop
+    /// concluded each stamped redo of the vShard.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) inbox:
+        crate::control::cluster::calvin::scheduler::InboxHandle,
     /// Blocked transactions awaiting lock release.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) blocked:
         BTreeMap<TxnId, BlockedTxn>,
-    /// Dependent-read barriers awaiting passive read results.
-    /// `BTreeMap` for determinism.
+    /// Dependent-read barriers this leader holds open. `BTreeMap` for
+    /// determinism.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) dependent_barrier:
         BTreeMap<TxnId, PendingDependentBarrier>,
-    /// Channel receiving `CalvinReadResult` Raft apply events from the
-    /// per-vshard data Raft apply loop. Bounded.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) read_result_rx:
-        mpsc::Receiver<ReadResultEvent>,
+    /// The barrier entries of the data-group log, folded per dependent txn
+    /// this scheduler holds: at a barrier, or in `pending`. A barrier of the
+    /// txn decides from them. Each entry leaves when its txn completes.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) barrier_logs:
+        BTreeMap<TxnId, crate::control::cluster::calvin::scheduler::BarrierLog>,
+    /// This vShard's read-result buffer: the barrier entries the apply loop
+    /// applied for txns this scheduler did not hold yet.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) read_results:
+        Arc<crate::control::cluster::calvin::scheduler::VShardReadResults>,
+    /// Committed txns whose stage failed on this leader, with their
+    /// restage count and backoff. See [`super::restage`].
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) restages:
+        BTreeMap<TxnId, super::restage::Restage>,
     /// Exactly-once applied gate: the fully-applied watermark plus the set of
     /// applied `(epoch, position)` pairs above it. Replaces a bare per-epoch
     /// counter so a multi-position epoch is never marked applied on the strength
     /// of its first completing position.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) applied: AppliedGate,
-    /// Rebuild target epoch (highest applied epoch from the initial recovery
-    /// scan).
+    /// Rebuild target epoch: the highest applied epoch of the ledger when
+    /// the scheduler started.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) rebuild_target_epoch: u64,
     /// Highest replicated epoch observed across all scheduler inputs so far.
     /// Advances monotonically as `process_scheduler_input` sees new inputs; the
@@ -113,9 +133,17 @@ pub struct Scheduler {
     /// set and the markers not yet reported.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) cut_floors:
         crate::control::cluster::calvin::scheduler::cut_floor::CutFloors,
-    /// Shared mirror of `applied`, read by authorization coverage.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) applied_mirror:
-        Arc<crate::control::cluster::calvin::scheduler::AppliedMirror>,
+    /// Ordered cuts whose barrier this vShard's later redo waits for.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) cut_holds:
+        crate::control::cluster::calvin::scheduler::cut_hold::CutHolds,
+    /// This vShard's applied ledger: the gate's seed, and the shared record
+    /// of each position this scheduler finishes.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) ledger:
+        Arc<crate::control::cluster::calvin::scheduler::CalvinAppliedLedger>,
+    /// This scheduler's caught-up entry, read by the startup readiness gate.
+    /// Set once the watermark reaches `rebuild_target_epoch`.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) caught_up:
+        crate::control::cluster::calvin::scheduler::CaughtUpHandle,
     /// Scheduler configuration.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) config: SchedulerConfig,
     /// Metrics.
@@ -178,7 +206,7 @@ pub struct Scheduler {
     /// staged yet. See [`super::parts`].
     pub(in crate::control::cluster::calvin::scheduler::driver::core) parts:
         super::parts::PartsState,
-    /// Orders flushes against the data group's snapshots. See
+    /// The vShard base this scheduler started under. See
     /// [`super::install_gate`].
     pub(in crate::control::cluster::calvin::scheduler::driver::core) install_gate:
         super::install_gate::InstallGate,
@@ -196,14 +224,14 @@ pub struct SchedulerParams {
     /// Shared sequencer state machine, source of the per-vShard catch-up index
     /// the drain replays from. Same `Arc` the Raft apply loop drives.
     pub sequencer_state_machine: Arc<Mutex<SequencerStateMachine>>,
-    /// Fully-applied watermark seed from the recovery scan.
-    pub fully_applied_epoch: u64,
-    /// Applied `(epoch, position)` pairs seed from the recovery scan.
-    pub applied_tail: std::collections::BTreeSet<(u64, u32)>,
+    /// This vShard's applied ledger. The applied gate starts from its
+    /// state.
+    pub ledger: Arc<crate::control::cluster::calvin::scheduler::CalvinAppliedLedger>,
+    /// The epoch the scheduler must fully apply before it reports caught
+    /// up. [`NOT_YET_APPLIED_EPOCH`] means nothing to rebuild.
     pub rebuild_target_epoch: u64,
     pub config: SchedulerConfig,
     pub metrics: Arc<SchedulerMetrics>,
-    pub read_result_rx: mpsc::Receiver<ReadResultEvent>,
     /// The shared lock table for this vShard. Constructed by
     /// `reconcile_vshard_schedulers` and registered in
     /// `SharedState.calvin.lock_managers` under the SAME `Arc` passed here.
@@ -231,12 +259,10 @@ impl Scheduler {
             multi_raft,
             sequencer_proposer,
             sequencer_state_machine,
-            fully_applied_epoch,
-            applied_tail,
+            ledger,
             rebuild_target_epoch,
             config,
             metrics,
-            read_result_rx,
             lock_manager,
             promotion_rx,
             registry,
@@ -248,15 +274,17 @@ impl Scheduler {
         let completion_cap = config.channel_capacity;
         let (completion_tx, completion_rx) = mpsc::channel(completion_cap);
 
-        let applied_mirror = shared.authorization_fence.calvin_mirrors().register(
-            vshard_id,
-            fully_applied_epoch,
-            &applied_tail,
-        );
+        let (fully_applied_epoch, applied_tail) = ledger.snapshot();
+        let caught_up = shared.calvin.caught_up.register(vshard_id);
 
         // A backup's cut waits on every scheduler this node runs.
         shared.calvin.cuts.register(vshard_id);
         let install_gate = super::install_gate::InstallGate::new(&shared, vshard_id);
+        let inbox = shared
+            .calvin
+            .inboxes
+            .register(vshard_id, config.max_inflight_backlog);
+        let read_results = shared.calvin.read_results.vshard(vshard_id);
 
         let capacity_freed = shared
             .dispatcher
@@ -264,22 +292,29 @@ impl Scheduler {
             .unwrap_or_else(|p| p.into_inner())
             .capacity_freed();
 
-        Self {
+        let scheduler = Self {
             vshard_id,
             receiver,
             shared,
             multi_raft,
+            role: super::role::StageGate::default(),
             sequencer_proposer,
             owed: OwedEntries::new(),
             sequencer_state_machine,
             lock_manager,
             pending: BTreeMap::new(),
+            early_applied: BTreeMap::new(),
+            inbox,
             blocked: BTreeMap::new(),
             dependent_barrier: BTreeMap::new(),
-            read_result_rx,
+            barrier_logs: BTreeMap::new(),
+            read_results,
+            restages: BTreeMap::new(),
             applied: AppliedGate::new(fully_applied_epoch, applied_tail),
             cut_floors: Default::default(),
-            applied_mirror,
+            cut_holds: Default::default(),
+            ledger,
+            caught_up,
             rebuild_target_epoch,
             max_input_epoch: 0,
             config,
@@ -296,17 +331,20 @@ impl Scheduler {
             metadata_hold: None,
             parts: Default::default(),
             install_gate,
-        }
+        };
+        // A scheduler with nothing to rebuild reports caught up at once.
+        scheduler.publish_caught_up();
+        scheduler
     }
 
     /// Whether the scheduler has caught up to the rebuild target epoch.
     ///
-    /// `rebuild_target_epoch` is seeded from `AppliedRecovery::max_applied_epoch`
-    /// (see `recovery.rs`): [`NOT_YET_APPLIED_EPOCH`] means the WAL scan found NO
-    /// `CalvinApplied` marker for this vShard at all — a greenfield node with no
-    /// Calvin history — never a real epoch (epoch 0 with markers reports
-    /// `max_applied_epoch == 0`, distinct from the sentinel). With nothing to
-    /// rebuild, such a node is trivially caught up.
+    /// `rebuild_target_epoch` is seeded from the ledger's highest applied
+    /// epoch (see `CalvinAppliedLedger::max_applied_epoch`):
+    /// [`NOT_YET_APPLIED_EPOCH`] means the ledger holds NO applied position
+    /// for this vShard — a greenfield node with no Calvin history — never a
+    /// real epoch (epoch 0 with markers reports `0`, distinct from the
+    /// sentinel). With nothing to rebuild, such a node is trivially caught up.
     ///
     /// `fully_applied_epoch()` is conservatively seeded to the same sentinel by
     /// recovery (the watermark only advances once the sequencer's re-fan-out
@@ -329,6 +367,21 @@ impl Scheduler {
         fully_applied >= self.rebuild_target_epoch
     }
 
+    /// Report this scheduler caught up to the readiness gate, once
+    /// [`Self::is_caught_up`] holds.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn publish_caught_up(&self) {
+        if self.caught_up.is_caught_up() || !self.is_caught_up() {
+            return;
+        }
+        self.caught_up.mark_caught_up();
+        tracing::info!(
+            vshard_id = self.vshard_id,
+            rebuild_target_epoch = self.rebuild_target_epoch,
+            fully_applied_epoch = self.applied.fully_applied_epoch(),
+            "calvin scheduler caught up to its rebuild target"
+        );
+    }
+
     /// Publish an advanced fully-applied watermark to the metrics gauge and the
     /// shared cross-shard snapshot anchor.
     ///
@@ -342,13 +395,14 @@ impl Scheduler {
         watermark: u64,
     ) {
         self.metrics.update_last_applied_epoch(watermark);
-        self.applied_mirror.fold(watermark);
+        self.ledger.fold(watermark);
         self.shared
             .calvin
             .last_applied_epoch
             .fetch_max(watermark, std::sync::atomic::Ordering::Release);
         // A marker passes once every epoch delivered before it folded.
         self.report_passed_cuts();
+        self.publish_caught_up();
     }
 }
 
@@ -399,7 +453,7 @@ mod tests {
         );
     }
 
-    /// A greenfield node with NO Calvin history at all: `read_applied_recovery`
+    /// A greenfield node with NO Calvin history at all: `recover_all_applied`
     /// seeds `max_applied_epoch` (hence `rebuild_target_epoch`) to
     /// `NOT_YET_APPLIED_EPOCH` too (see `recovery.rs`'s
     /// `greenfield_returns_sentinel_and_empty_tail` test) — this is distinct from
@@ -422,5 +476,67 @@ mod tests {
             scheduler.is_caught_up(),
             "no rebuild target (greenfield node) must report caught-up"
         );
+    }
+
+    fn lagging(scheduler: &Scheduler) -> Vec<u32> {
+        scheduler.shared.calvin.caught_up.lagging()
+    }
+
+    /// A scheduler with a real rebuild target holds the readiness gate until
+    /// its published watermark reaches that target.
+    #[tokio::test]
+    async fn a_scheduler_lags_until_its_watermark_reaches_the_rebuild_target() {
+        let (mut scheduler, _dir) = build_test_scheduler(4);
+        scheduler.rebuild_target_epoch = 3;
+        assert_eq!(lagging(&scheduler), vec![4]);
+
+        scheduler.applied = AppliedGate::new(2, BTreeSet::new());
+        scheduler.publish_watermark(2);
+        assert_eq!(lagging(&scheduler), vec![4], "epoch 2 is below the target");
+
+        scheduler.applied = AppliedGate::new(3, BTreeSet::new());
+        scheduler.publish_watermark(3);
+        assert!(lagging(&scheduler).is_empty());
+    }
+
+    /// A published watermark folds the vShard's applied ledger, which
+    /// coverage, checkpoints and snapshot capture read.
+    #[tokio::test]
+    async fn a_published_watermark_folds_the_ledger() {
+        let (mut scheduler, _dir) = build_test_scheduler(4);
+        let ledger = scheduler
+            .shared
+            .calvin
+            .applied
+            .get(4)
+            .expect("the scheduler's ledger");
+        assert!(Arc::ptr_eq(&ledger, &scheduler.ledger));
+        assert!(!ledger.is_applied(3, 9));
+
+        scheduler.applied = AppliedGate::new(3, BTreeSet::new());
+        scheduler.publish_watermark(3);
+
+        assert!(ledger.is_applied(3, 9));
+        assert!(!ledger.is_applied(4, 0));
+    }
+
+    /// With no Calvin history there is nothing to rebuild, so the scheduler
+    /// reports caught up without a watermark.
+    #[tokio::test]
+    async fn a_scheduler_with_nothing_to_rebuild_reports_caught_up() {
+        let (mut scheduler, _dir) = build_test_scheduler(4);
+        scheduler.rebuild_target_epoch = NOT_YET_APPLIED_EPOCH;
+        scheduler.publish_caught_up();
+        assert!(lagging(&scheduler).is_empty());
+    }
+
+    /// A stopped scheduler no longer holds the readiness gate.
+    #[tokio::test]
+    async fn a_dropped_scheduler_leaves_the_readiness_registry() {
+        let (scheduler, _dir) = build_test_scheduler(4);
+        let shared = Arc::clone(&scheduler.shared);
+        assert_eq!(lagging(&scheduler), vec![4]);
+        drop(scheduler);
+        assert!(shared.calvin.caught_up.lagging().is_empty());
     }
 }

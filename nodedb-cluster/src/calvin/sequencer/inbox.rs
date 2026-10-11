@@ -740,6 +740,7 @@ mod tests {
                 );
                 m
             },
+            expected: BTreeMap::new(),
         });
 
         let err = inbox.submit(tx).expect_err("should be rejected");
@@ -782,6 +783,7 @@ mod tests {
                 }
                 m
             },
+            expected: BTreeMap::new(),
         });
 
         let err = inbox.submit(tx).expect_err("should be rejected");

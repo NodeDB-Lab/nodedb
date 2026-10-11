@@ -67,10 +67,10 @@ impl CoreLoop {
                 // validation sees this batch: per surrogate, a superset of the
                 // collection floor. An empty batch records the floor only.
                 for s in surrogates {
-                    self.note_surrogate_write_lsn(task, tid, collection, s.as_u32());
+                    self.note_surrogate_write(task, tid, collection, s.as_u32());
                 }
                 if surrogates.is_empty() {
-                    self.note_collection_write_lsn(task, collection);
+                    self.note_collection_write(task, collection);
                 }
                 match super::super::response_codec::encode_count("inserted", vectors.len()) {
                     Ok(bytes) => self.response_with_payload(task, bytes),
@@ -154,7 +154,7 @@ impl CoreLoop {
             // surrogate — recording it as a `KeyRepr::Surrogate` would be a
             // wrong identity in a different key space. Floor-only: a
             // predicate reader validates against the collection floor.
-            self.note_collection_write_lsn(task, collection);
+            self.note_collection_write(task, collection);
             self.response_ok(task)
         } else {
             self.response_error(task, ErrorCode::NotFound)
@@ -169,6 +169,7 @@ mod tests {
         Admission, ExemptReason, PhysicalPlan, Priority, Request, Status,
     };
     use crate::data::executor::core_loop::CoreLoop;
+    use crate::data::executor::core_loop::write_index::tests::local;
     use crate::data::executor::core_loop::write_index::{CollKey, KeyRepr, WriteKey};
     use crate::types::{Lsn, ReadConsistency, RequestId, TraceId, VShardId};
     use nodedb_bridge::buffer::RingBuffer;
@@ -205,7 +206,7 @@ mod tests {
         }
     }
 
-    /// A task carrying `wal_lsn` so `note_collection_write_lsn` (gated on
+    /// A task carrying `wal_lsn` so `note_collection_write` (gated on
     /// `task.wal_lsn().is_some()`) actually fires, mirroring a live write
     /// dispatched with an allocated WAL LSN.
     fn make_task_with_lsn(lsn: u64) -> ExecutionTask {
@@ -241,6 +242,7 @@ mod tests {
             wal_lsn: Some(Lsn::new(lsn)),
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: Admission::Exempt(ExemptReason::Read),
         })
     }
@@ -317,27 +319,29 @@ mod tests {
         assert_eq!(response.status, Status::Ok);
 
         let coll_key = CollKey {
+            vshard: VShardId::new(0),
             db: DatabaseId::DEFAULT,
             tenant: TenantId::new(1),
             collection: Box::from("docs"),
         };
         assert_eq!(
-            h.core.write_index.collection_write_lsn(&coll_key),
-            Some(Lsn::new(51)),
-            "vector delete must advance the collection write-version floor"
+            h.core.write_index.collection_version(&coll_key),
+            Some(local(51)),
+            "vector delete must advance the collection write version"
         );
 
         // BRIGHT-LINE: `vector_id` (the internal HNSW node id) must never be
         // recorded as a `KeyRepr::Surrogate` — that is a different key space
         // from the cross-engine surrogate.
         let would_be_key = WriteKey {
+            vshard: VShardId::new(0),
             db: DatabaseId::DEFAULT,
             tenant: TenantId::new(1),
             collection: Box::from("docs"),
             key: KeyRepr::Surrogate(vector_id),
         };
         assert_eq!(
-            h.core.write_index.key_write_lsn(&would_be_key),
+            h.core.write_index.key_version(&would_be_key),
             None,
             "vector delete must not record vector_id as a surrogate key"
         );

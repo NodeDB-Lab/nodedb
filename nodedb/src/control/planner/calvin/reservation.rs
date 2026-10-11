@@ -22,8 +22,8 @@ use std::time::Duration;
 use nodedb_cluster::calvin::SEQUENCER_GROUP_ID;
 use nodedb_cluster::calvin::types::{LockKeyWire, ReleaseReason, TxnIdWire};
 use nodedb_cluster::{
-    RaftRpc, ReleaseReservationRequest, ReleaseReservationResponse, ReserveReadRequest,
-    ReserveReadResponse,
+    ClusterError, RaftRpc, ReleaseReservationRequest, ReleaseReservationResponse,
+    ReserveReadRequest, ReserveReadResponse,
 };
 
 use crate::Error;
@@ -86,8 +86,6 @@ pub(crate) async fn submit_reserve_read(
     vshard: u32,
     owner: Option<TxnIdWire>,
 ) -> crate::Result<TxnIdWire> {
-    let local_timeout = Duration::from_secs(state.tuning.network.default_deadline_secs);
-
     // Every running server has a cluster transport, the synthesized one-node
     // cluster included. Without one, `start_raft` never ran here.
     let Some(transport) = state.cluster_transport.as_ref() else {
@@ -116,6 +114,7 @@ pub(crate) async fn submit_reserve_read(
     // Leader is self: submit locally (a self-RPC will be a pointless extra
     // hop and the local inbox is the one that gets the assignment).
     if leader == state.node_id {
+        let local_timeout = super::submit::budget::statement_budget(state)?;
         return submit_local_reserve_read(state, key, vshard, owner, local_timeout).await;
     }
 
@@ -138,12 +137,8 @@ pub(crate) async fn submit_reserve_read(
         })
         .transpose()?;
 
-    let deadline_remaining_ms = state
-        .tuning
-        .network
-        .default_deadline_secs
-        .saturating_mul(1000)
-        .max(1);
+    // The leader works on the reservation only as long as the statement waits.
+    let deadline_remaining_ms = super::submit::budget::statement_budget_ms(state)?;
     let req = ReserveReadRequest {
         lock_key_bytes,
         vshard,
@@ -175,6 +170,11 @@ pub(crate) async fn submit_reserve_read(
         }
         Ok(other) => Err(Error::Internal {
             detail: format!("reserve-read: unexpected reply from node {leader}: {other:?}"),
+        }),
+        // The request went out and its answer was lost. The leader can have
+        // granted it, so its outcome is unknown. Lease GC reaps a lost grant.
+        Err(ClusterError::Unanswered { .. }) => Err(Error::DeadlineExceeded {
+            request_id: crate::types::RequestId::new(0),
         }),
         Err(e) => Err(Error::Internal {
             detail: format!("reserve-read RPC to sequencer leader node {leader} failed: {e}"),
@@ -282,6 +282,9 @@ pub(crate) async fn release_reservation(
         }
     };
 
+    // A release runs on the abort path too, often after the statement's
+    // deadline passed. It frees a lock other statements wait on, so it takes
+    // the node default, never what is left of the statement.
     let deadline_remaining_ms = state
         .tuning
         .network

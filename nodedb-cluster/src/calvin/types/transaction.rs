@@ -75,7 +75,7 @@ pub struct TxClass {
     /// Each entry carries the responding shard's write-LSN watermark at read
     /// time plus the point/predicate identity, so a participant can validate
     /// the read at the commit serialization point (the local commit vote on
-    /// `read_set_valid`). Empty for pure-write and autocommit transactions.
+    /// a stage response). Empty for pure-write and autocommit transactions.
     #[serde(default)]
     #[msgpack(default)]
     pub versioned_reads: VersionedReadSet,
@@ -347,26 +347,37 @@ impl TxClass {
         Ok(participants)
     }
 
-    /// Ergonomic constructor for dependent-read Calvin transactions.
+    /// Constructor for a dependent-read Calvin transaction of `database_id`.
     ///
-    /// Equivalent to `TxClass::new(read_set, write_set, plans, tenant_id,
-    /// Some(dependent_reads), versioned_reads)`.
+    /// The write set spans two or more vShards, as [`Self::new_in_database`]
+    /// requires. Every passive vShard of `dependent_reads` participates.
     pub fn new_dependent(
         read_set: ReadWriteSet,
         write_set: ReadWriteSet,
         plans: Vec<u8>,
         tenant_id: TenantId,
+        database_id: DatabaseId,
         dependent_reads: DependentReadSpec,
         versioned_reads: VersionedReadSet,
     ) -> Result<Self, CalvinError> {
-        Self::new(
+        Self::new_in_database(
             read_set,
             write_set,
             plans,
             tenant_id,
+            database_id,
             Some(dependent_reads),
             versioned_reads,
         )
+    }
+
+    /// The vShards the write set names: the active participants of a
+    /// dependent-read transaction.
+    ///
+    /// Fails when a write-set collection name lacks the qualifier of the
+    /// class's database. Construction rejects such a class.
+    pub fn active_vshards(&self) -> Result<Vec<u32>, CalvinError> {
+        self.write_vshards()
     }
 
     /// The vShards that must receive this transaction's slice.
@@ -494,7 +505,7 @@ mod tests {
     };
     use super::*;
     use nodedb_types::id::CollectionKey;
-    use nodedb_types::{KeyRepr, Lsn};
+    use nodedb_types::{KeyRepr, WriteVersion};
 
     fn doc_set(collection: &str, surrogates: Vec<u32>) -> EngineKeySet {
         EngineKeySet::Document {
@@ -734,6 +745,7 @@ mod tests {
                 );
                 m
             },
+            expected: std::collections::BTreeMap::new(),
         };
 
         let tc = TxClass::new(
@@ -764,17 +776,15 @@ mod tests {
                 engine: EngineTag::Kv,
                 collection: "kv_col".to_owned(),
                 key: ReadKeyIdent::Point(KeyRepr::KvKey(Box::from(&b"k1"[..]))),
-                read_lsn: Lsn::new(7),
+                read_version: WriteVersion::logged(0, 7),
                 home_vshard: None,
-                served_by: 0,
             },
             VersionedReadEntry {
                 engine: EngineTag::Document,
                 collection: "doc_col".to_owned(),
                 key: ReadKeyIdent::Predicate,
-                read_lsn: Lsn::new(11),
+                read_version: WriteVersion::logged(2, 11),
                 home_vshard: None,
-                served_by: 0,
             },
         ])
     }
@@ -805,7 +815,7 @@ mod tests {
         let mut decoded: TxClass = zerompk::from_msgpack(&bytes).expect("decode TxClass");
         decoded.restore_derived().expect("restore derived");
 
-        // Every read_lsn and the Point/Predicate distinction survive exactly.
+        // Every read version and the Point/Predicate distinction survive exactly.
         assert_eq!(decoded.versioned_reads, reads);
         assert_eq!(decoded.versioned_reads.len(), 2);
         let point = decoded
@@ -813,7 +823,7 @@ mod tests {
             .iter()
             .find(|e| matches!(e.key, ReadKeyIdent::Point(_)))
             .expect("point entry");
-        assert_eq!(point.read_lsn, Lsn::new(7));
+        assert_eq!(point.read_version, WriteVersion::logged(0, 7));
         assert_eq!(
             point.key,
             ReadKeyIdent::Point(KeyRepr::KvKey(Box::from(&b"k1"[..])))
@@ -823,7 +833,7 @@ mod tests {
             .iter()
             .find(|e| matches!(e.key, ReadKeyIdent::Predicate))
             .expect("predicate entry");
-        assert_eq!(predicate.read_lsn, Lsn::new(11));
+        assert_eq!(predicate.read_version, WriteVersion::logged(2, 11));
     }
 
     /// Mirror of `TxClass`'s wire shape from BEFORE `versioned_reads` existed:

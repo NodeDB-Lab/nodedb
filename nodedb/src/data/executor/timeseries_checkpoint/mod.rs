@@ -6,7 +6,7 @@
 //!
 //! `columnar_memtables` holds one `ColumnarMemtable` per timeseries collection,
 //! and every ILP / JSON / msgpack ingest lands there. Those rows advance the
-//! core watermark (`execute_timeseries_ingest` calls `note_collection_write_lsn`
+//! core watermark (`execute_timeseries_ingest` calls `note_collection_write`
 //! with the Control Plane's `wal_lsn`). The periodic checkpoint reports them as
 //! durable, and the manager then removes the `TimeseriesBatch` records below
 //! that LSN. The checkpoint must therefore flush every memtable first. The

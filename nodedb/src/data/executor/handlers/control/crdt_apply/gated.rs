@@ -407,7 +407,7 @@ impl CoreLoop {
             );
         }
         if imported_authoritative {
-            self.note_collection_write_lsn(task, collection);
+            self.note_collection_write(task, collection);
         }
 
         // The high-water-mark and the client-visible frame are decided

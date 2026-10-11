@@ -1,18 +1,15 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Verdict-driven commit resolution for staged static Calvin transactions.
+//! Verdict-driven commit resolution for a staged Calvin transaction on the
+//! data-group leader, and verdict handling for a follower's held txn.
 //!
-//! A static Calvin dispatch STAGES its transaction on the Data Plane (validate
-//! the read-set + buffer the plans, no base mutation). Its executor response
-//! carries the local commit vote on `read_set_valid`. This module drives the
-//! final step: dispatch a flush (commit, after `commit_redo` has WAL-appended
-//! the resolved `TransactionRedo`) or drop (abort) of the staged buffer, wait
-//! for its response, then run the commit tail (deposit applied result, record
-//! write versions — plus a `CalvinApplied` WAL fallback when no redo record
-//! was appended — propose `CompletionAck`) for a flush, or ack-only for a
-//! drop.
+//! A static or active dispatch STAGES its transaction on the Data Plane
+//! (validate the read-set + buffer the plans, no base mutation). Its executor
+//! response carries the local commit vote on `stage_vote`. The leader votes,
+//! waits for the global verdict, then resolves a committed write slice into
+//! its redo and proposes it (see `super::commit_redo`), or drops the staged
+//! state of a slice that ends with no log entry.
 
-mod apply_tail;
-mod flush_parts;
+mod drop_tail;
 mod verdict;
 mod vote;

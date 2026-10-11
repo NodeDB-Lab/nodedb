@@ -352,7 +352,7 @@ mod tests {
     use crate::control::change_stream::ChangeOperation;
     use crate::types::Lsn;
 
-    const GROUP: ChangePartition = ChangePartition::Group(4);
+    const GROUP: ChangePartition = ChangePartition(4);
 
     fn change(index: u64, ordinal: u64) -> PositionedChange {
         PositionedChange {

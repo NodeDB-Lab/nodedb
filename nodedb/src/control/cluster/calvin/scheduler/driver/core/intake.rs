@@ -147,7 +147,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
@@ -157,6 +157,7 @@ mod tests {
     use nodedb_types::TenantId;
     use tokio::sync::mpsc;
 
+    use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::lead_data_group;
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
         build_test_scheduler, build_test_scheduler_with_data_side, fill_tenant_inflight,
         make_sequenced_txn, make_validate_only_txn, release_filler, spawn_scheduler_loop,
@@ -189,7 +190,7 @@ mod tests {
     fn blocked_fixture(epoch: u64) -> BlockedTxn {
         BlockedTxn {
             txn: make_sequenced_txn(epoch, 0),
-            keys: BTreeSet::new(),
+            keys: BTreeMap::new(),
             // no-determinism: test-only blocked_at timestamp for a fabricated BlockedTxn fixture.
             blocked_at: Instant::now(),
         }
@@ -236,6 +237,7 @@ mod tests {
         let registry = CalvinCompletionRegistry::new_detached();
         let (mut scheduler, _dir, mut data_side) =
             build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        lead_data_group(&mut scheduler);
         let shared = Arc::clone(&scheduler.shared);
         let fillers = fill_tenant_inflight(&shared, &mut data_side, TenantId::new(1));
         scheduler
@@ -317,12 +319,10 @@ mod tests {
         let (mut scheduler, _dir, _data_side) =
             build_test_scheduler_with_data_side(test_coll_vshard(), registry);
         let held = TxnId::new(3, 0);
-        scheduler
-            .pending
-            .insert(held, staged_pending(make_validate_only_txn(3, 0), held));
-        scheduler
-            .handle_completion(held, RequestId::new(9), None)
-            .await;
+        let mut pending = staged_pending(make_validate_only_txn(3, 0), held);
+        pending.awaiting = Some(RequestId::new(9));
+        scheduler.pending.insert(held, pending);
+        scheduler.handle_completion(held, RequestId::new(9), None);
         assert_eq!(scheduler.intake_closure(), Some(IntakeClosure::ApplyHalted));
         let metrics = Arc::clone(&scheduler.metrics);
 

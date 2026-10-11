@@ -30,6 +30,14 @@ pub(super) enum EntryAdmission {
     Installing,
 }
 
+/// An entry's admission and the gate state it read.
+pub(super) struct Admission {
+    pub decision: EntryAdmission,
+    /// The highest snapshot index an install adopted for the group, read
+    /// under the gate. `0` with no gates, or while an install holds the gate.
+    pub installed_through: u64,
+}
+
 /// Admit entry `log_index` of `group_id`. `gates` is `None` before
 /// `start_raft` installs them, when no snapshot installs. `covered_through`
 /// is the cut of the last snapshot this node installed for the group.
@@ -38,21 +46,37 @@ pub(super) fn admit_entry(
     group_id: u64,
     log_index: u64,
     covered_through: u64,
-) -> EntryAdmission {
-    let permit = match gates {
-        None => None,
+) -> Admission {
+    let (permit, installed_through) = match gates {
+        None => (None, 0),
         Some(gates) => match gates.try_apply(group_id) {
-            None => return EntryAdmission::Installing,
-            Some(permit) if log_index <= permit.installed_through() => {
-                return EntryAdmission::Covered;
+            None => {
+                return Admission {
+                    decision: EntryAdmission::Installing,
+                    installed_through: 0,
+                };
             }
-            Some(permit) => Some(permit),
+            Some(permit) => {
+                let installed_through = permit.installed_through();
+                if log_index <= installed_through {
+                    return Admission {
+                        decision: EntryAdmission::Covered,
+                        installed_through,
+                    };
+                }
+                (Some(permit), installed_through)
+            }
         },
     };
-    if log_index <= covered_through {
-        return EntryAdmission::CoveredByCut;
+    let decision = if log_index <= covered_through {
+        EntryAdmission::CoveredByCut
+    } else {
+        EntryAdmission::Start(permit)
+    };
+    Admission {
+        decision,
+        installed_through,
     }
-    EntryAdmission::Start(permit)
 }
 
 /// `work`, holding `permit` until it completes.
@@ -79,7 +103,7 @@ mod tests {
     #[test]
     fn a_node_without_raft_starts_every_entry() {
         assert!(matches!(
-            admit_entry(None, 1, 7, 0),
+            admit_entry(None, 1, 7, 0).decision,
             EntryAdmission::Start(None)
         ));
     }
@@ -91,32 +115,32 @@ mod tests {
         let gates = Arc::new(GroupApplyGates::new());
         gates.mount(1);
         assert!(matches!(
-            admit_entry(Some(&gates), 1, 5, 0),
+            admit_entry(Some(&gates), 1, 5, 0).decision,
             EntryAdmission::Start(Some(_))
         ));
 
         let mut install = gates.install(1).await;
         assert!(matches!(
-            admit_entry(Some(&gates), 1, 5, 0),
+            admit_entry(Some(&gates), 1, 5, 0).decision,
             EntryAdmission::Installing
         ));
         install.adopted(5);
         drop(install);
 
         assert!(matches!(
-            admit_entry(Some(&gates), 1, 4, 0),
+            admit_entry(Some(&gates), 1, 4, 0).decision,
             EntryAdmission::Covered
         ));
         assert!(matches!(
-            admit_entry(Some(&gates), 1, 5, 0),
+            admit_entry(Some(&gates), 1, 5, 0).decision,
             EntryAdmission::Covered
         ));
         assert!(matches!(
-            admit_entry(Some(&gates), 1, 6, 0),
+            admit_entry(Some(&gates), 1, 6, 0).decision,
             EntryAdmission::Start(Some(_))
         ));
         assert!(matches!(
-            admit_entry(Some(&gates), 2, 5, 0),
+            admit_entry(Some(&gates), 2, 5, 0).decision,
             EntryAdmission::Start(Some(_))
         ));
     }
@@ -132,26 +156,39 @@ mod tests {
         gates.install(1).await.adopted(9);
         let cut = 12;
         assert!(matches!(
-            admit_entry(Some(&gates), 1, 9, cut),
+            admit_entry(Some(&gates), 1, 9, cut).decision,
             EntryAdmission::Covered
         ));
         for log_index in 10..=cut {
             assert!(
                 matches!(
-                    admit_entry(Some(&gates), 1, log_index, cut),
+                    admit_entry(Some(&gates), 1, log_index, cut).decision,
                     EntryAdmission::CoveredByCut
                 ),
                 "entry {log_index} is in the installed state and must not apply again"
             );
         }
         assert!(matches!(
-            admit_entry(Some(&gates), 1, 13, cut),
+            admit_entry(Some(&gates), 1, 13, cut).decision,
             EntryAdmission::Start(Some(_))
         ));
         assert!(matches!(
-            admit_entry(None, 1, 11, cut),
+            admit_entry(None, 1, 11, cut).decision,
             EntryAdmission::CoveredByCut
         ));
+    }
+
+    /// Every admission after an install reports the adopted index, so the
+    /// lane covers it before any later entry starts.
+    #[tokio::test]
+    async fn an_admission_reports_the_installed_index() {
+        let gates = Arc::new(GroupApplyGates::new());
+        gates.mount(1);
+        assert_eq!(admit_entry(Some(&gates), 1, 3, 0).installed_through, 0);
+        gates.install(1).await.adopted(7);
+        assert_eq!(admit_entry(Some(&gates), 1, 6, 0).installed_through, 7);
+        assert_eq!(admit_entry(Some(&gates), 1, 9, 12).installed_through, 7);
+        assert_eq!(admit_entry(None, 1, 9, 0).installed_through, 0);
     }
 
     /// An install cannot start while a started write still holds its permit.
@@ -159,7 +196,7 @@ mod tests {
     async fn an_install_waits_for_a_started_write() {
         let gates = Arc::new(GroupApplyGates::new());
         gates.mount(1);
-        let EntryAdmission::Start(permit) = admit_entry(Some(&gates), 1, 6, 0) else {
+        let EntryAdmission::Start(permit) = admit_entry(Some(&gates), 1, 6, 0).decision else {
             panic!("open gate must start the entry");
         };
         let (release, released) = tokio::sync::oneshot::channel::<()>();
@@ -182,7 +219,7 @@ mod tests {
         write.await.expect("write task");
         install.await.expect("install task");
         assert!(matches!(
-            admit_entry(Some(&gates), 1, 6, 0),
+            admit_entry(Some(&gates), 1, 6, 0).decision,
             EntryAdmission::Covered
         ));
     }

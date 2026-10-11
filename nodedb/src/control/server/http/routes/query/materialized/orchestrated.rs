@@ -19,10 +19,10 @@ use nodedb_physical::physical_task::PhysicalTask;
 use crate::bridge::envelope::{PhysicalPlan, Response, Status};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::cluster_array_dispatch::{is_cluster_array, run_cluster_array};
+use crate::control::server::shared::statement_exec::authorize_one_task;
 use crate::control::state::SharedState;
 
 use super::super::super::super::auth::ApiError;
-use super::append::authorize_materialized_task;
 use super::encode::{gateway_error, response_error};
 
 /// The payload an orchestrated plan answered with.
@@ -39,7 +39,7 @@ pub(super) async fn run_orchestrated(
     identity: &AuthenticatedIdentity,
     task: &PhysicalTask,
 ) -> Result<Option<Orchestrated>, ApiError> {
-    let authorize = || authorize_materialized_task(shared, identity, task).map_err(gateway_error);
+    let authorize = || authorize_one_task(shared, identity, task).map_err(gateway_error);
 
     if crate::control::array_catalog::ddl::is_array_ddl(&task.plan) {
         let response =

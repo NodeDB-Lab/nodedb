@@ -100,9 +100,11 @@ pub async fn run(
     }
 
     // Fails the cutover after the re-issue and before the proposal.
-    crate::fail_point_err!("move_tenant::cutover::before_proposal", |detail: String| {
-        failed(format!("fail point: {detail}"))
-    });
+    crate::fail_point_err!(
+        crate::fail_point::FailScope::Node(state.node_id),
+        "move_tenant::cutover::before_proposal",
+        |detail: String| failed(format!("fail point: {detail}"))
+    );
 
     // The arrays are read under the DDL preparation lease, so the commit
     // rekeys exactly the arrays the catalog holds when it is proposed. Its apply rekeyed the arrays and

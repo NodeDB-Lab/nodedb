@@ -28,6 +28,8 @@ pub(super) struct Hooks {
     pub(super) calvin_submit_inbox: Arc<dyn nodedb_cluster::CalvinSubmitInbox>,
     pub(super) reserve_read: Arc<dyn nodedb_cluster::ReserveRead>,
     pub(super) release_reservation: Arc<dyn nodedb_cluster::ReleaseReservation>,
+    /// The write gate a data-group leader runs on every proposal to its group.
+    pub(super) data_propose_gate: Arc<dyn nodedb_cluster::DataProposeGate>,
     /// The sequencer group's kept snapshot, which its own compaction writes.
     pub(super) sequencer_snapshots:
         Arc<crate::control::cluster::sequencer_snapshot::SequencerSnapshotStore>,
@@ -54,7 +56,8 @@ pub(super) async fn build_hooks(
     // The sequencer group's snapshot: its state machine, captured on the
     // send path and kept durably on the receive path. A node whose sequencer
     // log starts right after an installed snapshot restores the state
-    // machine from it before any entry applies.
+    // machine from it before any entry applies. A log that starts above its
+    // first entry with no usable snapshot marks the history unknown.
     let sequencer_snapshots = Arc::new(
         crate::control::cluster::sequencer_snapshot::SequencerSnapshotStore::new(
             Arc::clone(sequencer_state_machine),
@@ -76,6 +79,47 @@ pub(super) async fn build_hooks(
         Arc::clone(&handle.routing),
         multi_raft,
     )?;
+
+    // Every vShard's Calvin applied ledger, from one WAL pass and the state
+    // the last checkpoint saved. The data-group apply loop and the
+    // schedulers read the ledgers, so they fill before either starts. A
+    // boot completion of a snapshot install below replaces its group's.
+    let vshard_to_group = handle
+        .routing
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .vshard_to_group()
+        .to_vec();
+    let group_of = |vshard_id: u32| vshard_to_group.get(vshard_id as usize).copied();
+    let recovered = crate::control::cluster::calvin::scheduler::recover_all_applied(
+        &shared.wal,
+        shared.credentials.catalog(),
+        &group_of,
+    )?;
+    for (vshard_id, state) in recovered {
+        shared
+            .calvin
+            .applied
+            .install(vshard_id, state.fully_applied_epoch, state.applied_tail);
+    }
+    // A chunk stream of an applied position installs nothing more: a copy
+    // of the position's redo installed already.
+    shared
+        .redo_chunks
+        .drop_applied_calvin_streams(|vshard_id, epoch, position| {
+            shared
+                .calvin
+                .applied
+                .get(vshard_id)
+                .is_some_and(|ledger| ledger.is_applied(epoch, position))
+        });
+
+    // Every stored dependent-read barrier log of an unfinished txn waits in
+    // its vShard's buffer, and the rows of finished txns go. A barrier entry
+    // at or below a group's durable applied floor is never delivered again,
+    // so its row is what a barrier reads from now on. A boot completion of a
+    // snapshot install below replaces its group's rows.
+    crate::control::cluster::calvin::scheduler::barrier_store::restore_at_boot(shared)?;
 
     // Per-group snapshot builder for the SEND path: on the leader, build the
     // real serialized engine state for a lagging follower's group vshards
@@ -181,6 +225,12 @@ pub(super) async fn build_hooks(
         crate::control::server::reservation::RegistryReleaseReservation::new(shared.clone()),
     );
 
+    // Leader write gate: when this node leads a data group, every proposal
+    // to it, local or forwarded, takes its lock keys on the vShard's Calvin
+    // lock table before the entry enters the log.
+    let data_propose_gate: Arc<dyn nodedb_cluster::DataProposeGate> =
+        Arc::new(crate::control::server::shared::write_admission::LeaderWriteGate::new(shared));
+
     Ok(Hooks {
         quarantine_hook,
         snapshot_builder,
@@ -194,6 +244,7 @@ pub(super) async fn build_hooks(
         calvin_submit_inbox,
         reserve_read,
         release_reservation,
+        data_propose_gate,
         sequencer_snapshots,
     })
 }

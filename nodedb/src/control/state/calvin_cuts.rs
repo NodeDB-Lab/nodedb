@@ -208,6 +208,20 @@ impl CalvinCuts {
             .collect()
     }
 
+    /// The vShards of `vshards` whose scheduler runs here and has not passed
+    /// exactly the marker `hlc`. A vShard with no scheduler here never lags.
+    pub fn lagging_among(&self, hlc: u64, vshards: &[u32]) -> Vec<u32> {
+        let registered = self.registered.lock().unwrap_or_else(|p| p.into_inner());
+        let recent = self.recent.lock().unwrap_or_else(|p| p.into_inner());
+        let passed = recent.get(&hlc).map(|marker| &marker.passed);
+        vshards
+            .iter()
+            .copied()
+            .filter(|vshard_id| registered.contains(vshard_id))
+            .filter(|vshard_id| passed.is_none_or(|passed| !passed.contains(vshard_id)))
+            .collect()
+    }
+
     /// Wait until every scheduler passed the marker `hlc`, or `deadline`.
     /// Returns the vShards still lagging, empty once every one passed.
     pub async fn await_passed(&self, hlc: u64, deadline: tokio::time::Instant) -> Vec<u32> {
@@ -309,5 +323,25 @@ mod tests {
 
         let other: BTreeSet<u32> = [3].into_iter().collect();
         assert_eq!(cuts.await_vshards_passed(80, &other, soon()).await, None);
+    }
+
+    /// A group's barrier waits only on the schedulers of its vShards that
+    /// run here, and only until each passed exactly the cut's marker.
+    #[test]
+    fn a_group_lags_on_its_own_registered_vshards() {
+        let cuts = CalvinCuts::default();
+        cuts.register(1);
+        cuts.register(2);
+        assert_eq!(cuts.lagging_among(90, &[1, 2, 9]), vec![1, 2]);
+        cuts.note_passed(1, 90);
+        cuts.note_passed(2, 91);
+        assert_eq!(
+            cuts.lagging_among(90, &[1, 2, 9]),
+            vec![2],
+            "vShard 2 passed another marker; vShard 9 runs no scheduler here"
+        );
+        cuts.note_passed(2, 90);
+        assert!(cuts.lagging_among(90, &[1, 2, 9]).is_empty());
+        assert!(cuts.lagging_among(95, &[]).is_empty(), "no vShard, no wait");
     }
 }

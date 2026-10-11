@@ -589,6 +589,48 @@ a crashed node's descriptor leases block DDL until they expire.
 All three must be positive. `scope_expiry_interval_secs` has a floor of `10`.
 Below that the sweep costs more than the resolution it buys.
 
+**Calvin scheduler settings** (config file only):
+
+| Config field                                     | Default |
+| ------------------------------------------------ | ------- |
+| `tuning.calvin.channel_capacity`                 | `512`   |
+| `tuning.calvin.txn_deadline_multiplier`          | `3`     |
+| `tuning.calvin.dependent_read_passive_timeout_ms` | `5000`  |
+| `tuning.calvin.verdict_stall_warn_ms`            | `5000`  |
+| `tuning.calvin.max_inflight_backlog`             | `1024`  |
+| `tuning.calvin.catch_up_window`                  | `512`   |
+| `tuning.calvin.restage_attempts`                 | `5`     |
+| `tuning.calvin.restage_backoff_ms`               | `100`   |
+
+Each hosted vShard runs one Calvin scheduler with these settings.
+
+- `channel_capacity` sizes each scheduler's bounded input and completion
+  channels.
+- `txn_deadline_multiplier` sets a transaction deadline in sequencer epochs.
+- `dependent_read_passive_timeout_ms` bounds the wait of a dependent-read
+  barrier for passive read results. Past it, the vShard's data-group leader
+  proposes a timeout entry, and every replica aborts the barrier alike.
+- `verdict_stall_warn_ms` spaces the stall warnings of a transaction waiting
+  on its global verdict. The transaction keeps waiting and never aborts.
+- `max_inflight_backlog` is the in-flight backlog at which a scheduler stops
+  taking new input. It also bounds the dependent-read barrier entries a
+  vShard holds in memory for transactions its scheduler has not taken yet.
+  Entries past it wait in the system catalog alone.
+- `catch_up_window` is the most sequencer log entries one catch-up pass
+  replays.
+- `restage_attempts` is the most times a data-group leader stages a
+  committed transaction again after its own stage failed. The scheduler
+  halts once they run out.
+- `restage_backoff_ms` is the wait before the first restage. Each later
+  restage waits twice as long, at most 60 seconds.
+
+Every value must be positive. `verdict_stall_warn_ms` has a floor of `4`.
+
+After a restart, a scheduler re-applies epochs up to the highest epoch it
+applied before. The client gateway opens only after every scheduler on the
+node reaches that epoch. The wait shares the data-group recovery bound, and
+startup fails when the bound expires.
+
 **Observability settings:**
 
 | Config field                                      | Environment variable              | Default        |

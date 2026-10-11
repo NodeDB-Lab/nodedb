@@ -58,14 +58,10 @@ impl CoreLoop {
         };
         self.io_metrics.record_wait(tier, wait_ns);
 
-        // A write to a row a staged Calvin transaction owns waits for it.
         // A plain REINDEX starts its rebuilds and waits for their cutovers.
-        if let Some(task) = self.park_if_calvin_owned(qt.task)
-            && let Some(task) = self.hold_plain_reindex(task)
-        {
+        if let Some(task) = self.hold_plain_reindex(qt.task) {
             self.run_task(task);
         }
-        self.release_resolved_calvin_owners();
         true
     }
 
@@ -101,8 +97,8 @@ impl CoreLoop {
                 watermark_lsn: self.watermark,
                 // The task never started, so nothing it would write ran.
                 error_code: Some(Box::new(ErrorCode::ExpiredBeforeExecution)),
-                read_set_valid: None,
-                read_version_lsn: crate::types::Lsn::ZERO,
+                stage_vote: None,
+                read_versions: crate::types::ReadVersions::new(),
                 write_set: Vec::new(),
             }
         } else {
@@ -128,7 +124,10 @@ impl CoreLoop {
             #[cfg(feature = "failpoints")]
             if task.wal_lsn().is_some() {
                 for collection in task.plan().named_collections() {
-                    crate::fail_point!(&format!("core::after_apply::{collection}"));
+                    crate::fail_point!(
+                        self.fail_scope,
+                        &format!("core::after_apply::{collection}")
+                    );
                 }
             }
             if let Some(group) = journal {
@@ -137,7 +136,10 @@ impl CoreLoop {
                 // is stored and its parts are not journalled yet.
                 #[cfg(feature = "failpoints")]
                 for collection in task.plan().named_collections() {
-                    crate::fail_point!(&format!("core::after_capture::{collection}"));
+                    crate::fail_point!(
+                        self.fail_scope,
+                        &format!("core::after_capture::{collection}")
+                    );
                 }
             }
             task.state = TaskState::Completed;
@@ -184,7 +186,6 @@ impl CoreLoop {
         // Adjust SPSC read depth based on current memory pressure.
         self.apply_spsc_pressure();
         self.drain_requests();
-        self.expire_calvin_parked();
         let mut processed = 0;
         while !self.task_queue.is_empty() {
             // A fail-stopped core serves nothing, including the rest of the
@@ -271,6 +272,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: crate::bridge::envelope::Admission::Admitted,
         }
     }
@@ -337,7 +339,7 @@ mod tests {
             assert!(
                 matches!(
                     resp.inner.error_code.as_deref(),
-                    Some(ErrorCode::RetryableRefusal { .. })
+                    Some(ErrorCode::CoreFailStopped { .. })
                 ),
                 "{:?}",
                 resp.inner.error_code

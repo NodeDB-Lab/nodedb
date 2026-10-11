@@ -1,27 +1,103 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Decode a committed `ReplicatedWrite::TransactionRedo` entry back into the
-//! payload every replica applies.
+//! payload every replica applies, or into the stream a chunked body names.
 //!
 //! The apply loop intercepts these entries before the generic decode: the
 //! apply stamps the redo with the entry's Raft coordinates, which the generic
 //! `from_replicated_entry` result has no place for.
 
+use nodedb_physical::physical_plan::RedoOrigin;
 use nodedb_types::Surrogate;
 
 use super::super::transaction_redo::TransactionRedoPayload;
-use super::super::types::ReplicatedWrite;
+use super::super::types::{
+    CalvinRedoMeta, RedoBody, RedoContent, ReplicatedEventSource, ReplicatedWrite,
+};
 use crate::control::surrogate::CarriedIdentity;
+use crate::wal::RedoStreamId;
 
-/// The payload `write` carries, or an error when `write` is another variant.
-pub fn transaction_redo_payload(write: &ReplicatedWrite) -> crate::Result<TransactionRedoPayload> {
+/// A decoded `TransactionRedo` entry.
+#[derive(Debug, Clone)]
+pub enum DecodedTransactionRedo {
+    /// The entry carries the whole payload.
+    Inline(Box<TransactionRedoPayload>),
+    /// The entry names the stream whose chunks carry the content.
+    Chunked(ChunkedRedo),
+}
+
+/// The final entry of a chunked redo: its stream and the fields the entry
+/// itself carries.
+#[derive(Debug, Clone)]
+pub struct ChunkedRedo {
+    pub stream: RedoStreamId,
+    /// How many chunks the stream holds.
+    pub count: u32,
+    /// How many bytes the chunks hold in all.
+    pub len: u64,
+    collections: Vec<String>,
+    event_source: ReplicatedEventSource,
+    origin: RedoOrigin,
+    calvin: Option<CalvinRedoMeta>,
+}
+
+impl ChunkedRedo {
+    /// The payload of the stream's assembled `content`.
+    pub fn payload(&self, content: RedoContent) -> TransactionRedoPayload {
+        payload_of(
+            content,
+            &self.collections,
+            self.event_source,
+            self.origin,
+            self.calvin.clone(),
+        )
+    }
+
+    /// Every collection the transaction wrote.
+    pub fn collections(&self) -> &[String] {
+        &self.collections
+    }
+
+    /// The Calvin meta of a committed Calvin slice's redo.
+    pub fn calvin(&self) -> Option<&CalvinRedoMeta> {
+        self.calvin.as_ref()
+    }
+}
+
+fn payload_of(
+    content: RedoContent,
+    collections: &[String],
+    event_source: ReplicatedEventSource,
+    origin: RedoOrigin,
+    calvin: Option<CalvinRedoMeta>,
+) -> TransactionRedoPayload {
+    TransactionRedoPayload {
+        redo: content.redo,
+        collections: collections.to_vec(),
+        sum_targets: content.sum_targets,
+        identities: content
+            .identities
+            .into_iter()
+            .map(|identity| CarriedIdentity {
+                collection: identity.collection,
+                pk_bytes: identity.pk_bytes,
+                surrogate: Surrogate::new(identity.surrogate),
+            })
+            .collect(),
+        event_source: event_source.into(),
+        origin,
+        calvin,
+    }
+}
+
+/// What `write` carries, or an error when `write` is another variant.
+pub fn decode_transaction_redo(write: &ReplicatedWrite) -> crate::Result<DecodedTransactionRedo> {
     let ReplicatedWrite::TransactionRedo {
-        redo,
+        body,
         collections,
-        sum_targets,
-        identities,
         event_source,
         origin,
+        calvin,
     } = write
     else {
         return Err(crate::Error::Internal {
@@ -29,20 +105,23 @@ pub fn transaction_redo_payload(write: &ReplicatedWrite) -> crate::Result<Transa
                 .into(),
         });
     };
-    Ok(TransactionRedoPayload {
-        redo: redo.clone(),
-        collections: collections.clone(),
-        sum_targets: sum_targets.clone(),
-        identities: identities
-            .iter()
-            .map(|identity| CarriedIdentity {
-                collection: identity.collection.clone(),
-                pk_bytes: identity.pk_bytes.clone(),
-                surrogate: Surrogate::new(identity.surrogate),
-            })
-            .collect(),
-        event_source: (*event_source).into(),
-        origin: *origin,
+    Ok(match body {
+        RedoBody::Inline(content) => DecodedTransactionRedo::Inline(Box::new(payload_of(
+            (**content).clone(),
+            collections,
+            *event_source,
+            *origin,
+            calvin.clone(),
+        ))),
+        RedoBody::Chunked { stream, count, len } => DecodedTransactionRedo::Chunked(ChunkedRedo {
+            stream: *stream,
+            count: *count,
+            len: *len,
+            collections: collections.clone(),
+            event_source: *event_source,
+            origin: *origin,
+            calvin: calvin.clone(),
+        }),
     })
 }
 
@@ -50,11 +129,13 @@ pub fn transaction_redo_payload(write: &ReplicatedWrite) -> crate::Result<Transa
 mod tests {
     use super::*;
     use crate::control::wal_replication::ReplicatedEntry;
-    use crate::control::wal_replication::encode::transaction_redo_entry;
+    use crate::control::wal_replication::encode::{
+        RedoEntryTarget, RedoProposal, session_redo_proposal, transaction_redo_entry,
+    };
     use crate::event::EventSource;
     use crate::types::{DatabaseId, TenantId, VShardId};
     use crate::wal::{CalvinStamp, RedoRecord, RedoSubRecord};
-    use nodedb_physical::physical_plan::{RedoOrigin, RedoSumTargets, ResolvedSumTarget};
+    use nodedb_physical::physical_plan::{RedoSumTargets, ResolvedSumTarget};
 
     fn payload() -> TransactionRedoPayload {
         TransactionRedoPayload {
@@ -68,8 +149,6 @@ mod tests {
                     epoch: 11,
                     position: 2,
                     vshard_id: 7,
-                    collections: Vec::new(),
-                    sum_targets: Vec::new(),
                 }),
                 cross_shard_applied: None,
                 row_sources: Vec::new(),
@@ -88,7 +167,6 @@ mod tests {
             sum_targets: vec![RedoSumTargets {
                 collection: "entries".into(),
                 resolved: vec![ResolvedSumTarget::new("accounts", "a1", Surrogate::new(9))],
-                deferred: vec!["audit".into()],
             }],
             identities: vec![CarriedIdentity {
                 collection: "entries".into(),
@@ -97,6 +175,16 @@ mod tests {
             }],
             event_source: EventSource::Trigger,
             origin: RedoOrigin::Restore,
+            calvin: None,
+        }
+    }
+
+    fn inline(write: &ReplicatedWrite) -> TransactionRedoPayload {
+        match decode_transaction_redo(write).expect("payload decodes") {
+            DecodedTransactionRedo::Inline(payload) => *payload,
+            DecodedTransactionRedo::Chunked(chunked) => {
+                panic!("expected an inline body, got stream {:?}", chunked.stream)
+            }
         }
     }
 
@@ -116,7 +204,7 @@ mod tests {
         assert_eq!(decoded_entry.vshard_id, 7);
         assert_eq!(decoded_entry.idempotency_key, entry.idempotency_key);
 
-        let decoded = transaction_redo_payload(&decoded_entry.write).expect("payload decodes");
+        let decoded = inline(&decoded_entry.write);
         assert_eq!(decoded.redo, original.redo);
         assert_eq!(decoded.collections, original.collections);
         assert_eq!(decoded.sum_targets, original.sum_targets);
@@ -130,6 +218,77 @@ mod tests {
             .map(|named| named.collection.as_str())
             .collect();
         assert_eq!(named, vec!["accounts", "entries"]);
+    }
+
+    /// A committed Calvin slice's meta travels unchanged through the entry,
+    /// so every replica renders the same reply.
+    #[test]
+    fn a_calvin_slice_meta_round_trips_through_the_raft_bytes() {
+        let mut original = payload();
+        let meta = CalvinRedoMeta {
+            epoch_system_ms: 1_700_000_000_000,
+            reply: nodedb_physical::physical_plan::CalvinReplySpec::Count(vec![1, 2]),
+            primary_write: true,
+            user_write: true,
+            returning: true,
+        };
+        original.calvin = Some(meta.clone());
+        let entry = transaction_redo_entry(
+            TenantId::new(1),
+            DatabaseId::new(5),
+            VShardId::new(7),
+            &original,
+        );
+        let decoded_entry = ReplicatedEntry::from_bytes(&entry.to_bytes()).expect("entry decodes");
+
+        let decoded = inline(&decoded_entry.write);
+        assert_eq!(decoded.calvin, Some(meta));
+        assert_eq!(decoded.redo.calvin_stamp, original.redo.calvin_stamp);
+    }
+
+    #[test]
+    fn a_chunked_final_entry_round_trips_and_rebuilds_the_payload() {
+        let mut original = payload();
+        original.redo.ops[0].payload = vec![9; 200_000];
+        let RedoProposal::Chunked {
+            stream,
+            chunks,
+            last,
+        } = session_redo_proposal(
+            RedoEntryTarget {
+                tenant_id: TenantId::new(1),
+                database_id: DatabaseId::new(5),
+                vshard_id: VShardId::new(7),
+            },
+            &original,
+            64 * 1024,
+        )
+        .expect("build")
+        else {
+            panic!("a 200 KB redo travels chunked");
+        };
+        let decoded_last = ReplicatedEntry::from_bytes(&last.to_bytes()).expect("entry decodes");
+        let DecodedTransactionRedo::Chunked(chunked) =
+            decode_transaction_redo(&decoded_last.write).expect("decodes")
+        else {
+            panic!("the final entry names its stream");
+        };
+        assert_eq!(chunked.stream, stream);
+        assert_eq!(chunked.count as usize, chunks.len());
+        assert_eq!(chunked.collections(), original.collections.as_slice());
+        let joined: Vec<u8> = chunks
+            .iter()
+            .flat_map(|chunk| match &chunk.write {
+                ReplicatedWrite::RedoChunk { bytes, .. } => bytes.clone(),
+                other => panic!("expected a chunk, got {other:?}"),
+            })
+            .collect();
+        let rebuilt = chunked.payload(RedoContent::from_bytes(&joined).expect("content"));
+        assert_eq!(rebuilt.redo, original.redo);
+        assert_eq!(rebuilt.sum_targets, original.sum_targets);
+        assert_eq!(rebuilt.identities, original.identities);
+        assert_eq!(rebuilt.event_source, EventSource::Trigger);
+        assert_eq!(rebuilt.origin, RedoOrigin::Restore);
     }
 
     #[test]
@@ -153,6 +312,6 @@ mod tests {
             collection: "kv".into(),
             restart_identity: false,
         };
-        assert!(transaction_redo_payload(&write).is_err());
+        assert!(decode_transaction_redo(&write).is_err());
     }
 }

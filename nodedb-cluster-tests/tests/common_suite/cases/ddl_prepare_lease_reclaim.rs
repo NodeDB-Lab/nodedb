@@ -22,7 +22,8 @@ const DEAD_TOKEN: u64 = 0x00dd_1ea5;
 
 fn owner_token(node: &TestClusterNode) -> Option<u64> {
     node.shared
-        .metadata_ddl_owner
+        .metadata_ddl
+        .owner
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .map(|owner| owner.token)
@@ -124,7 +125,8 @@ async fn a_dead_ddl_lease_owner_is_reclaimed_before_its_lease_runs_out() {
     assert_ne!(
         survivor
             .shared
-            .metadata_ddl_applied_token
+            .metadata_ddl
+            .applied_token
             .load(std::sync::atomic::Ordering::Acquire),
         DEAD_TOKEN,
         "a reclaimed token's finalize applies nothing"

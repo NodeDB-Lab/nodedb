@@ -261,7 +261,8 @@ impl MetadataCommitApplier {
         }
         self.apply_host_side_effects(entry, raft_index).await?;
         shared
-            .metadata_ddl_applied_token
+            .metadata_ddl
+            .applied_token
             .store(token, std::sync::atomic::Ordering::Release);
         Ok(())
     }
@@ -314,10 +315,9 @@ impl MetadataCommitApplier {
     }
 }
 
-/// The fail point that holds back node `node_id`'s whole metadata apply.
-pub fn metadata_apply_hold_point(node_id: u64) -> String {
-    format!("metadata_apply::hold::node{node_id}")
-}
+/// The fail point that holds back a node's whole metadata apply. A test arms
+/// it for one node.
+pub const METADATA_APPLY_HOLD_POINT: &str = "metadata_apply::hold";
 
 #[async_trait::async_trait]
 impl MetadataApplier for MetadataCommitApplier {
@@ -509,7 +509,7 @@ mod tests {
     /// `DdlPrepareAcquire` does. A pending propose and finalize apply only
     /// under the owner's token.
     fn own_ddl_lease(state: &SharedState, token: u64) {
-        *state.metadata_ddl_owner.lock().unwrap() =
+        *state.metadata_ddl.owner.lock().unwrap() =
             Some(crate::control::metadata_proposer::DdlPrepareOwner {
                 token,
                 node_id: state.node_id,
@@ -564,7 +564,8 @@ mod tests {
         }
         assert_ne!(
             state
-                .metadata_ddl_applied_token
+                .metadata_ddl
+                .applied_token
                 .load(std::sync::atomic::Ordering::Acquire),
             dead,
             "the dead owner's proposer must see its entries superseded"

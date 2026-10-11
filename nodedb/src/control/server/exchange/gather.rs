@@ -20,7 +20,9 @@ use futures::future::join_all;
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Response};
 use crate::control::arrow_convert;
 use crate::control::gateway::core::QueryContext;
-use crate::control::server::exchange::core_outcome::{classify_core_response, require_every_core};
+use crate::control::server::exchange::core_outcome::{
+    classify_core_response, reported_versions, require_every_core,
+};
 use crate::control::server::exchange::read_scope::ReadScope;
 use crate::control::server::payload_merge::{encode_msgpack_array, extract_msgpack_elements};
 use crate::control::server::result_stream::ResultStream;
@@ -126,6 +128,7 @@ pub(crate) fn eager_dispatch_to_all_cores_until(
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: crate::bridge::envelope::Admission::Exempt(
                 crate::bridge::envelope::ExemptReason::Read,
             ),
@@ -154,12 +157,11 @@ pub struct GatherOutcome {
     /// Maximum watermark LSN seen across all responding cores. Retained as the
     /// scalar fence value for Strong-consistency callers that need one LSN.
     pub watermark_lsn: Lsn,
-    /// Max per-collection read-version LSN across all responding cores. A read
-    /// homes to exactly ONE core, so the non-owning cores report `Lsn::ZERO` and
-    /// the owning core's value dominates the fold — yielding the scanned
-    /// collection's `coll_write_lsn` at read time (the sound comparand for
-    /// cross-shard OCC read validation, distinct from `watermark_lsn`).
-    pub read_version_lsn: Lsn,
+    /// The read versions every responding core reported, one per vShard. A
+    /// vShard lives on ONE core, so only that core reports it: the scanned
+    /// collection's version at read time (the comparand for cross-shard OCC
+    /// read validation, distinct from `watermark_lsn`).
+    pub read_versions: crate::types::ReadVersions,
     /// Per-shard watermark LSNs — one `(vshard, watermark_lsn)` per responding
     /// core, NOT collapsed to the max. The transaction read-set records one
     /// entry per participating shard from this, so a predicate read fanned over
@@ -219,6 +221,9 @@ pub(crate) async fn gather_all_cores(
         });
 
     let results: Vec<(usize, crate::Result<Response>)> = join_all(response_futures).await;
+    // The read versions of every core, one per vShard: a vShard lives on ONE
+    // core, so only that core reports it.
+    let read_versions = reported_versions(results.iter().map(|(_, result)| result));
     let answered = require_every_core(results.into_iter().map(|(core_id, result)| {
         classify_core_response(result).map(|resp| resp.map(|resp| (core_id, resp)))
     }))?;
@@ -226,11 +231,6 @@ pub(crate) async fn gather_all_cores(
     let mut raw = Vec::new();
     let mut all_elements: Vec<Vec<u8>> = Vec::new();
     let mut max_lsn = Lsn::ZERO;
-    // Max-fold of the per-collection read-version across cores: a collection
-    // homes to ONE core, so non-owning cores contribute `Lsn::ZERO` and the
-    // owning core's value dominates. Kept as a single scalar (not per-core) —
-    // the read plan targets one collection, so one non-zero value survives.
-    let mut max_read_version = Lsn::ZERO;
     let mut shard_watermarks: Vec<(VShardId, Lsn)> = Vec::new();
 
     for (core_id, resp) in answered {
@@ -241,9 +241,6 @@ pub(crate) async fn gather_all_cores(
 
         if resp.watermark_lsn > max_lsn {
             max_lsn = resp.watermark_lsn;
-        }
-        if resp.read_version_lsn > max_read_version {
-            max_read_version = resp.read_version_lsn;
         }
 
         if resp.payload.is_empty() {
@@ -261,7 +258,7 @@ pub(crate) async fn gather_all_cores(
         raw,
         merged_array,
         watermark_lsn: max_lsn,
-        read_version_lsn: max_read_version,
+        read_versions,
         shard_watermarks,
     })
 }
@@ -382,8 +379,10 @@ pub(crate) async fn gather_all_vshards(
     // The gateway already fails with a typed `crate::Error` — a shard's
     // `Error::DataPlane` code included. Re-wrapping it in `Dispatch` will
     // rewrite every such verdict as SQLSTATE XX000, so it passes through.
-    let (payloads, shard_watermarks, read_version_lsn): (Vec<Vec<u8>>, Vec<(VShardId, Lsn)>, Lsn) =
-        Box::pin(gateway.execute_internal_with_watermarks(&ctx, plan)).await?;
+    let (payloads, shard_watermarks, read_versions) =
+        Box::pin(gateway.execute_internal_outcome(&ctx, plan))
+            .await?
+            .into_parts();
 
     let mut all_elements: Vec<Vec<u8>> = Vec::new();
     let mut raw = Vec::new();
@@ -407,7 +406,7 @@ pub(crate) async fn gather_all_vshards(
         raw,
         merged_array,
         watermark_lsn,
-        read_version_lsn,
+        read_versions,
         shard_watermarks,
     })
 }

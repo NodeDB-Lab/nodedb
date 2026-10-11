@@ -6,13 +6,11 @@
 //! A message is named by the change-feed partition of the record that carries
 //! it and a position in that partition: the record's replicated position with
 //! the message's ordinal. The apply that installs the record stamps that
-//! position on the message itself ([`crate::wal::PublishPosition`]): a
-//! Raft-applied record takes its entry's `(epoch, log index)`, and a Calvin
-//! record takes its sequencer epoch and batch position.
+//! position on the message itself ([`crate::wal::PublishPosition`]): the
+//! record takes its data-group entry's `(epoch, log index)`.
 
 use crate::control::state::SharedState;
 use crate::event::cdc::CdcOffset;
-use crate::event::cdc::position::vshard_of_partition;
 use crate::event::topic::types::PublishOrigin;
 use crate::wal::RedoPublish;
 
@@ -53,12 +51,7 @@ pub(super) fn origin_of_event(ordinal: u32, publish: &RedoPublish) -> Option<Pub
     let position = publish.position?;
     Some(PublishOrigin {
         partition: position.partition,
-        position: CdcOffset::data_event_in(
-            position.epoch,
-            position.index,
-            position.base,
-            u64::from(ordinal) + 1,
-        ),
+        position: CdcOffset::data_event(position.epoch, position.index, u64::from(ordinal) + 1),
     })
 }
 
@@ -73,7 +66,7 @@ pub(crate) fn delivery_lease(state: &SharedState, partition: u32) -> Option<(u64
     let group_id = routing
         .read()
         .unwrap_or_else(|p| p.into_inner())
-        .group_for_vshard(vshard_of_partition(partition))
+        .group_for_vshard(partition)
         .ok()?;
     gate.leader_lease_term(group_id)
         .map(|term| (group_id, term))
@@ -108,7 +101,6 @@ mod tests {
             partition: 9,
             epoch: 2,
             index: 500,
-            base: 0,
         });
         assert_eq!(
             origin_of_event(0, &stamped),

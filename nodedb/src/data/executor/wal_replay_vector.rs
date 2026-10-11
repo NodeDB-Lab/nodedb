@@ -198,6 +198,7 @@ impl CoreLoop {
                             pk_bytes: None,
                             provenance: provenance.clone(),
                         }),
+                        Self::replay_record_lsn(record_lsn),
                     );
                     let response = self.execute_vector_insert(
                         crate::data::executor::handlers::vector::VectorInsertParams {

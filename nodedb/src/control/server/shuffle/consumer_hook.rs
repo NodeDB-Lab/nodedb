@@ -61,8 +61,8 @@ const SIDE_PROBE: u8 = 1;
 ///
 /// Holds the node's [`SharedState`] so it can reach the shuffle receiver
 /// registry (for the staged inboxes), the SPSC dispatcher + request tracker (to
-/// run the grace join on the Data Plane), and the network tuning (deadline /
-/// result-byte ceilings).
+/// run the grace join on the Data Plane), and the network tuning (result-byte
+/// ceiling).
 pub struct RegistryShuffleConsumer {
     state: Arc<SharedState>,
 }
@@ -110,6 +110,7 @@ impl RegistryShuffleConsumer {
         //    individually — is capped; on expiry we surface a deterministic
         //    DeadlineExceeded rather than hanging.
         let deadline_ms = req.deadline_remaining_ms.max(1);
+        let hop_deadline = Instant::now() + Duration::from_millis(deadline_ms);
         let wait_both = async {
             build_inbox.wait_finalized().await;
             probe_inbox.wait_finalized().await;
@@ -162,9 +163,9 @@ impl RegistryShuffleConsumer {
         //    plan is built locally (it carries node-local paths and must never be
         //    wire-encoded), so we build the `Request` directly rather than
         //    round-tripping through `plan_bytes`.
-        let deadline = Duration::from_millis(deadline_ms).min(Duration::from_secs(
-            self.state.tuning.network.default_deadline_secs,
-        ));
+        //    The hop runs on what is left of the budget the coordinator sent.
+        //    This node's default is no ceiling on it.
+        let deadline = hop_deadline.saturating_duration_since(Instant::now());
 
         let request_id = self.state.next_request_id();
         let request = Request {
@@ -173,7 +174,7 @@ impl RegistryShuffleConsumer {
             database_id: DatabaseId::from(req.database_id),
             vshard_id: crate::types::VShardId::new(0),
             plan,
-            deadline: Instant::now() + deadline,
+            deadline: hop_deadline,
             priority: Priority::Normal,
             trace_id: nodedb_types::TraceId(req.trace_id),
             consistency: ReadConsistency::Strong,
@@ -186,6 +187,7 @@ impl RegistryShuffleConsumer {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: crate::bridge::envelope::Admission::Exempt(
                 crate::bridge::envelope::ExemptReason::Read,
             ),

@@ -57,7 +57,6 @@ pub(super) fn inject_meta(ctx: &RlsCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         MetaOp::TransactionBatch { plans, .. }
         | MetaOp::CalvinExecuteStatic { plans, .. }
         | MetaOp::CalvinExecuteActive { plans, .. }
-        | MetaOp::RecordCalvinWriteVersions { plans, .. }
         | MetaOp::ResolveTxn { plans, .. } => {
             for plan in plans.iter_mut() {
                 walk(ctx, plan)?;
@@ -107,7 +106,6 @@ pub(super) fn inject_meta(ctx: &RlsCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         | MetaOp::DropTxnOverlay { .. }
         | MetaOp::MarkSavepoint { .. }
         | MetaOp::RollbackToSavepoint { .. }
-        | MetaOp::CalvinFlush { .. }
         | MetaOp::CalvinDrop { .. }
         | MetaOp::CalvinResolve { .. }
         | MetaOp::ApplyTransactionRedo { .. }

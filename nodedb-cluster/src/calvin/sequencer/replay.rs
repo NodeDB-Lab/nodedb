@@ -168,8 +168,16 @@ impl SequencerStateMachine {
                 }
                 // A cut marker reaches every vShard, exactly as the live
                 // `CutMarker` arm fans it out.
-                SequencerEntry::CutMarker { hlc, .. } => {
-                    result.push(SchedulerInput::CutMarker { hlc });
+                SequencerEntry::CutMarker {
+                    hlc,
+                    restore_point,
+                    barrier,
+                } => {
+                    result.push(SchedulerInput::CutMarker {
+                        hlc,
+                        restore_point,
+                        barrier: barrier.map(std::sync::Arc::new),
+                    });
                 }
                 // A part reaches the vShards it targets, exactly as the live
                 // `TxnPart` arm fans it out. The scheduler ignores a part of a
@@ -216,8 +224,6 @@ impl SequencerStateMachine {
                 // scheduler input; they are re-derived via live `apply` on every
                 // replica's completion registry, not replayed to a scheduler.
                 SequencerEntry::CompletionAck { .. } => {}
-                SequencerEntry::OllpMismatch { .. } => {}
-                SequencerEntry::TxnRoutingFailed { .. } => {}
                 SequencerEntry::Vote { .. } => {}
                 SequencerEntry::Verdict { .. } => {}
                 SequencerEntry::AbortVote { .. } => {}

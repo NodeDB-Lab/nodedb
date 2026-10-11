@@ -78,7 +78,7 @@ impl CoreLoop {
 
         self.checkpoint_coordinator
             .mark_dirty("columnar", truncated);
-        self.note_collection_write_lsn(task, collection);
+        self.note_collection_write(task, collection);
         self.invalidate_aggregate_cache_for_collection(db.as_u64(), tid.as_u64(), collection);
 
         debug!(core = self.core_id, %collection, truncated, "columnar truncate complete");

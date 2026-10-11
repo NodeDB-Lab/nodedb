@@ -218,6 +218,7 @@ pub(crate) async fn handle_direct_op(
                 &mut tasks,
                 tenant_id,
                 ctx.database_id(),
+                txn_id,
                 TraceId::ZERO,
             )
             .await
@@ -243,6 +244,7 @@ pub(crate) async fn handle_direct_op(
             &mut tasks,
             tenant_id,
             ctx.database_id(),
+            txn_id,
             TraceId::ZERO,
         )
         .await
@@ -263,8 +265,9 @@ pub(crate) async fn handle_direct_op(
                 Err(error) => return error_to_native(seq, &crate::Error::from(error)),
             };
 
-        // A write that fires a BEFORE, INSTEAD OF or SYNC AFTER body, or a
-        // MERGE into an edge-bearing collection, runs in one transaction, as
+        // A write that fires a BEFORE, INSTEAD OF or SYNC AFTER body, a MERGE
+        // into an edge-bearing collection, or a join-expanding write into the
+        // source of a cross-shard materialized sum, runs in one transaction, as
         // the SQL path's does. The loop there clone-checks, authorizes and
         // meters each task itself.
         if statement_needs_implicit_txn(ctx.state, &tasks) {

@@ -117,7 +117,6 @@ pub fn replay_sync_hwm_records(
             | RecordType::CollectionTombstoned
             | RecordType::TimeAnchor
             | RecordType::TemporalPurge
-            | RecordType::CalvinApplied
             | RecordType::SurrogateAlloc
             | RecordType::SurrogateBind
             | RecordType::FtsIndex
@@ -137,7 +136,8 @@ pub fn replay_sync_hwm_records(
             | RecordType::GraphNodeCascade
             | RecordType::GraphEdgeCut
             | RecordType::SnapshotInstalled
-            | RecordType::WriteGroup => {}
+            | RecordType::WriteGroup
+            | RecordType::RedoChunk => {}
         }
     }
 

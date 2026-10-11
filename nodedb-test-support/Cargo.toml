@@ -10,6 +10,11 @@ description = "Shared test harness for NodeDB integration tests (not for end-use
 [lib]
 path = "src/lib.rs"
 
+[features]
+# Re-exports the fail-point test API (`fail_point::FailGuard`) and arms the
+# fail points of the nodes this harness spawns.
+failpoints = ["nodedb/failpoints", "nodedb-types/failpoints"]
+
 [dependencies]
 # Production crates this harness drives.
 nodedb = { workspace = true }

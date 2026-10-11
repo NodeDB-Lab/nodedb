@@ -358,17 +358,23 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
 
+        // Record each committed row's version against its surrogate and
+        // collection.
+        for (_, key) in &applied {
+            self.note_surrogate_write(task, tid, collection, key.surrogate().as_u32());
+        }
+
         // Record each committed row's touched secondary-index values into the
         // per-index write-value substrate. This runs only after the batch has
         // durably committed.
-        if let Some(lsn) = task.wal_lsn() {
+        if let Some(stamp) = self.task_write_stamp(task) {
             for tuples in &row_index_tuples {
                 self.note_index_write_values(
                     task.request.database_id,
                     crate::types::TenantId::new(tid),
                     collection,
                     tuples,
-                    lsn,
+                    stamp,
                 );
             }
         }
@@ -501,6 +507,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
+            entry_version: None,
             admission: crate::bridge::envelope::Admission::Admitted,
         })
     }

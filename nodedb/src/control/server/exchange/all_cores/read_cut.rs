@@ -76,6 +76,7 @@ async fn resolve_read_cut(state: &SharedState, marker: u64) -> crate::Result<i64
     let entry = zerompk::to_msgpack_vec(&SequencerEntry::CutMarker {
         hlc: marker,
         restore_point: 0,
+        barrier: None,
     })
     .map_err(|error| crate::Error::Internal {
         detail: format!("graph read cut: encode the cut marker: {error}"),

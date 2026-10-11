@@ -78,13 +78,12 @@ pub struct ShuffleFanoutSink {
     keys: Vec<String>,
     /// `part -> PartState`, one entry per part in `0..num_parts`.
     parts: HashMap<u32, PartState>,
-    /// Max per-collection read-version LSN observed across every scanned frame
-    /// fed to this sink (each frame's scanned collection `coll_write_lsn` at read
-    /// time). A producer scans exactly one collection, so this single max-folded
-    /// value is that collection's observed read version — the sound comparand the
-    /// coordinator uses for cross-shard OCC read validation of an in-transaction
-    /// distributed aggregate.
-    max_read_version_lsn: u64,
+    /// The read versions observed across every scanned frame fed to this sink,
+    /// one per vShard. A producer scans exactly one collection, so the fold
+    /// holds that collection's observed versions: the comparand the
+    /// coordinator uses for cross-shard OCC read validation of an
+    /// in-transaction distributed aggregate.
+    read_versions: crate::types::ReadVersions,
 }
 
 /// Parameters for [`ShuffleFanoutSink::new`].
@@ -148,16 +147,16 @@ impl ShuffleFanoutSink {
             producer_count,
             keys,
             parts,
-            max_read_version_lsn: 0,
+            read_versions: crate::types::ReadVersions::new(),
         }
     }
 
-    /// The max per-collection read-version LSN observed across every scanned
-    /// frame fed to this sink (`0` if no frame carried one). The producer hook
-    /// reads this after the streaming scan completes and reports it on the
+    /// The read versions observed across every scanned frame fed to this
+    /// sink (empty if no frame carried one). The producer hook reads them
+    /// after the streaming scan completes and reports them on the
     /// `ShuffleProduceResponse` so the coordinator can validate the read.
-    pub fn observed_read_version_lsn(&self) -> u64 {
-        self.max_read_version_lsn
+    pub fn observed_read_versions(&self) -> &crate::types::ReadVersions {
+        &self.read_versions
     }
 
     /// The `ShufflePushRequest` opener for `part` (shared shape for remote +
@@ -412,16 +411,17 @@ impl nodedb_cluster::ChunkSink for &mut ShuffleFanoutSink {
         &mut self,
         payload: Vec<u8>,
         _watermark_lsn: u64,
-        read_version_lsn: u64,
+        read_versions: Vec<nodedb_types::ShardVersion>,
     ) -> nodedb_cluster::Result<()> {
-        // The streaming executor calls this per scan batch. Max-fold this frame's
-        // per-collection read version so the producer can report the observed
-        // read version for cross-shard OCC validation (NOT the core-global
-        // watermark). Then hash-partition the batch and buffer/flush per part. A
+        // The streaming executor calls this per scan batch. Fold this frame's
+        // read versions so the producer can report what it observed for
+        // cross-shard OCC validation (NOT the core-global watermark). Then
+        // hash-partition the batch and buffer/flush per part. A
         // routing/flush failure is surfaced as a cluster error so the streaming
         // executor terminates the scan; the producer hook then `finish`es the
         // fan-out with the error so consumers fail fast (never a silent drop).
-        self.max_read_version_lsn = self.max_read_version_lsn.max(read_version_lsn);
+        self.read_versions
+            .merge(&crate::types::ReadVersions::from_wire(&read_versions));
         self.route_chunk(payload)
             .await
             .map_err(|e| nodedb_cluster::ClusterError::Storage {

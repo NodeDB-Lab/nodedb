@@ -92,7 +92,7 @@ impl CoreLoop {
         }
         // The key set is resolved at replay time rather than carried, so the
         // collection floor is the version this can record.
-        self.note_replay_write_lsn(database_id, tenant_id, &collection, None, record_lsn);
+        self.note_replay_write(database_id, tenant_id, &collection, None, record_lsn);
         Some(written)
     }
 
@@ -138,7 +138,7 @@ impl CoreLoop {
         let removed = self
             .kv_engine
             .delete(database_id, tenant_id, &collection, &keys, now_ms);
-        self.note_replay_write_lsn(database_id, tenant_id, &collection, None, record_lsn);
+        self.note_replay_write(database_id, tenant_id, &collection, None, record_lsn);
         Some(removed)
     }
 }

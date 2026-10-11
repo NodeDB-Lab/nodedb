@@ -9,16 +9,26 @@ use crate::types::{DatabaseId, ReadConsistency};
 use super::core_loop::CoreLoop;
 
 impl CoreLoop {
+    /// The LSN a replayed record hands its task. A `record_lsn` of 0 means
+    /// the record has no durable LSN and yields `None`.
+    pub(in crate::data::executor) fn replay_record_lsn(
+        record_lsn: u64,
+    ) -> Option<crate::types::Lsn> {
+        (record_lsn != 0).then(|| crate::types::Lsn::new(record_lsn))
+    }
+
     /// Build a synthetic `ExecutionTask` for WAL replay.
     ///
     /// Mirrors `CoreLoop::replay_task` (`replay_task.rs`). The task carries
-    /// no meaningful request semantics — it is only needed so that the handler
-    /// methods can return a typed `Response`.
+    /// no meaningful request semantics. It lets the handler methods return a
+    /// typed `Response`. The task carries the record's LSN so the handler
+    /// records the write's version.
     pub(in crate::data::executor) fn replay_vector_task(
         tenant_id: crate::types::TenantId,
         database_id: DatabaseId,
         vshard_id: crate::types::VShardId,
         plan: PhysicalPlan,
+        wal_lsn: Option<crate::types::Lsn>,
     ) -> ExecutionTask {
         ExecutionTask {
             request: Request {
@@ -38,15 +48,16 @@ impl CoreLoop {
                 user_id: None,
                 statement_digest: None,
                 txn_id: None,
-                wal_lsn: None,
+                wal_lsn,
                 resolved_now_ms: None,
                 commit_hlc: None,
+                entry_version: None,
                 admission: crate::bridge::envelope::Admission::Exempt(
                     crate::bridge::envelope::ExemptReason::AlreadyOrdered,
                 ),
             },
             state: TaskState::Running,
-            wal_lsn: None,
+            wal_lsn,
             resolved_now_ms: None,
         }
     }

@@ -205,7 +205,7 @@ impl CoreLoop {
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
         // Same post-commit index bookkeeping `execute_point_update` runs.
-        if let Some(lsn) = task.wal_lsn() {
+        if let Some(stamp) = self.task_write_stamp(task) {
             let mut tuples = std::mem::take(&mut outcome.secondary_index_added);
             tuples.append(&mut outcome.secondary_index_removed);
             tuples.append(&mut outcome.bitemporal_index_tuples);
@@ -214,7 +214,7 @@ impl CoreLoop {
                 crate::types::TenantId::new(tid),
                 collection,
                 &tuples,
-                lsn,
+                stamp,
             );
         }
 
@@ -227,7 +227,7 @@ impl CoreLoop {
             &stored_bytes,
             precondition,
         );
-        self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
+        self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
 
         // The row, journalled after apply from the body `apply_point_put`
         // took. A resolved write's mutations can name several collections,
@@ -347,8 +347,8 @@ impl CoreLoop {
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
         if let Some(prior_bytes) = outcome.prior_value.as_deref() {
-            self.note_surrogate_write_lsn(task, tid, collection, surrogate.as_u32());
-            if let Some(lsn) = task.wal_lsn() {
+            self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
+            if let Some(stamp) = self.task_write_stamp(task) {
                 let mut tuples = outcome.secondary_index_tuples;
                 tuples.extend(outcome.bitemporal_index_tuples);
                 self.note_index_write_values(
@@ -356,7 +356,7 @@ impl CoreLoop {
                     crate::types::TenantId::new(tid),
                     collection,
                     &tuples,
-                    lsn,
+                    stamp,
                 );
             }
             self.emit_document_delete_event(

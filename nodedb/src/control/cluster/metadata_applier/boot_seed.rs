@@ -7,7 +7,7 @@
 //! loads those rows into the in-memory state before any entry applies.
 //! State that no row holds starts fresh:
 //! - `last_applied_hlc` is the highest expiry over the seeded leases and drains.
-//! - `metadata_ddl_applied_token` is 0.
+//! - `metadata_ddl.applied_token` is 0.
 //! - `topology_log`, `routing_log`, and `catalog_entries_applied` are empty.
 //!
 //! A read error fails boot: running with a partial view of leases or drains
@@ -45,7 +45,8 @@ pub fn seed_host_tables(shared: &SharedState) -> crate::Result<()> {
             .insert(record.token, record.objects, record.proposed_at);
     }
     *shared
-        .metadata_ddl_owner
+        .metadata_ddl
+        .owner
         .lock()
         .unwrap_or_else(|p| p.into_inner()) =
         owner.map(
@@ -240,7 +241,8 @@ mod tests {
         assert_eq!(record.proposed_at, Hlc::new(60, 0));
         assert_eq!(
             state
-                .metadata_ddl_owner
+                .metadata_ddl
+                .owner
                 .lock()
                 .unwrap()
                 .map(|owner| (owner.token, owner.node_id)),
@@ -248,7 +250,8 @@ mod tests {
         );
         assert_eq!(
             state
-                .metadata_ddl_applied_token
+                .metadata_ddl
+                .applied_token
                 .load(std::sync::atomic::Ordering::Acquire),
             0
         );

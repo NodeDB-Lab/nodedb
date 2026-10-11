@@ -50,7 +50,7 @@ use crate::bridge::envelope::PhysicalPlan;
 use crate::control::cluster::snapshot_install::{
     CoreMap, CoreShares, SettleStep, SnapshotInstallError, append_install_barrier,
     append_install_marker, clear_targets_per_core, group_collections, install_on_every_core,
-    split_by_core,
+    split_by_core, version_floor,
 };
 use crate::control::state::SharedState;
 use crate::types::{SurrogateBindEntry, TenantDataSnapshot, TenantId, VShardId};
@@ -167,6 +167,7 @@ impl DataPlaneSnapshotApplier {
             cut_index,
             event_lane,
             calvin,
+            redo_streams,
         } = split_by_core(group_id, snap, &cores)?;
         // Refused before any core changes: storage installed without its
         // Calvin cut will hold Calvin transactions no applied state names.
@@ -179,6 +180,7 @@ impl DataPlaneSnapshotApplier {
         // vShards. A store with none of them stays as it is.
         let mut vshards: Vec<u32> = group_vshards.iter().copied().collect();
         vshards.sort_unstable();
+        let version_floor = version_floor(&self.shared, group_id, &vshards, cut_index);
 
         let plans = per_core
             .into_iter()
@@ -197,6 +199,7 @@ impl DataPlaneSnapshotApplier {
                     replace_mode: true,
                     collections_to_clear,
                     group_vshards: vshards.clone(),
+                    version_floor: version_floor.clone(),
                 }))
             })
             .collect::<Result<Vec<_>, SnapshotInstallError>>()?;
@@ -214,6 +217,17 @@ impl DataPlaneSnapshotApplier {
             &group_vshards,
             calvin,
         )?;
+        // After the install marker too: boot drops the group's earlier streams
+        // there and rebuilds these.
+        self.shared
+            .redo_chunks
+            .install_group(group_id, redo_streams)
+            .await
+            .map_err(|source| SnapshotInstallError::Settle {
+                group_id,
+                step: SettleStep::RedoStreams,
+                source: source.into(),
+            })?;
         crate::control::pitr::force_base_after_install(&self.shared);
         self.settle(
             group_id,
@@ -243,6 +257,17 @@ impl DataPlaneSnapshotApplier {
         if let Some(tracker) = self.shared.propose_tracker.get() {
             tracker.cover_through(group_id, cut_index);
         }
+        // Last: the group's streams here are the snapshot's now, so a
+        // snapshot this node owed the group is paid. An install that fails
+        // earlier leaves the debt, and the group keeps requiring one.
+        self.shared
+            .redo_chunks
+            .settle_owed(self.shared.credentials.catalog(), group_id)
+            .map_err(|source| SnapshotInstallError::Settle {
+                group_id,
+                step: SettleStep::RedoStreams,
+                source,
+            })?;
         Ok(())
     }
 

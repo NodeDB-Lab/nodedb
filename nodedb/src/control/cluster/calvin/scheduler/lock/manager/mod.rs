@@ -7,11 +7,11 @@
 //! The lock manager provides a deterministic, totally-ordered lock table over
 //! per-key entries keyed by
 //! [`LockKey`](crate::control::cluster::calvin::scheduler::lock::LockKey).
-//! Locks come in two modes: `Exclusive` (one holder, excludes all others) and
-//! `Shared` (many compatible holders). The Calvin batch acquire path takes
-//! every key in a transaction's `read_set ∪ write_set` as an `Exclusive`
-//! lock; single-key `Shared` locks are available via
-//! [`LockManager::acquire_shared`].
+//! Locks come in three modes (see
+//! [`LockMode`](crate::control::cluster::calvin::scheduler::lock::LockMode)):
+//! `Exclusive` (one holder), `Shared` (many readers), and `Intent` (many row
+//! writers of one collection). A transaction acquires one map of key to mode.
+//! Read reservations take one `Shared` key via [`LockManager::acquire_shared`].
 //!
 //! # Determinism
 //!
@@ -20,19 +20,23 @@
 //! requirement, not a style preference.
 //!
 //! Split by concern:
-//! - [`types`]: the lock table struct and its internal decision enums.
-//! - [`acquire`]: exclusive lock acquisition and waiter queueing.
+//! - [`types`]: the lock table struct and its internal decision enum.
+//! - [`classify`]: per-key request classification and grants.
+//! - [`acquire`]: moded lock acquisition and FIFO waiter queueing.
 //! - [`wound_wait`]: shared-lock reservations and wound-wait conflict
 //!   resolution.
-//! - [`release`]: lock release and FIFO/shared waiter promotion.
-//! - [`try_acquire`]: the non-blocking exclusive fast path.
-//! - [`introspection`]: readiness checks and test counters.
+//! - [`release`]: lock release and mode-aware FIFO waiter promotion.
+//! - [`try_acquire`]: the non-blocking fast path.
+//! - [`introspection`]: readiness checks, request contention and test
+//!   counters.
 
 mod acquire;
+mod classify;
 mod introspection;
 mod release;
 mod try_acquire;
 mod types;
 mod wound_wait;
 
+pub use introspection::KeyContention;
 pub use types::LockManager;

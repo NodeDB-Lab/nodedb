@@ -232,6 +232,13 @@ pub struct RaftLoop<A: CommitApplier, P: PlanExecutor = NoopPlanExecutor> {
     /// configured" error.
     pub(super) release_reservation: Option<Arc<dyn ReleaseReservation>>,
 
+    /// Optional write gate for data-group proposals on their leader. When
+    /// set (by the `nodedb` binary via `with_data_propose_gate`), a proposal
+    /// to a group this node leads takes its lock keys through it before the
+    /// entry enters the log. Cluster-only tests leave this `None`, which
+    /// proposes every entry ungated.
+    pub(super) data_propose_gate: Option<Arc<dyn super::propose_gate::DataProposeGate>>,
+
     /// Optional authorization lease service. When set (by the `nodedb`
     /// binary via `with_auth_lease`), lease renewals and authorization
     /// barriers are answered through it.
@@ -344,6 +351,7 @@ impl<A: CommitApplier> RaftLoop<A> {
             calvin_submit_inbox: None,
             reserve_read: None,
             release_reservation: None,
+            data_propose_gate: None,
             auth_lease: None,
             snapshot_builder: None,
             snapshot_applier: None,

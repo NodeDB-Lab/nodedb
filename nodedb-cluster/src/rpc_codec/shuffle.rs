@@ -125,14 +125,12 @@ pub struct ShuffleProduceRequest {
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ShuffleProduceResponse {
     pub error: Option<TypedClusterError>,
-    /// Max per-collection read-version LSN observed by the producer's local scan
-    /// (its scanned collection's `coll_write_lsn` at read time, a WAL LSN); 0 for
-    /// a failed produce. The sound comparand the coordinator max-folds across
+    /// The read versions the producer's local scan observed, one per vShard
+    /// read. Empty for a failed produce. The coordinator folds them across
     /// producers for cross-shard OCC read validation of an in-transaction
-    /// distributed aggregate — distinct from the core-global watermark. Raw `u64`
-    /// on the wire, converted to `Lsn` at the coordinator via `Lsn::new`. Mirrors
-    /// [`ExecuteResponse::read_version_lsn`](super::execute::ExecuteResponse::read_version_lsn).
-    pub read_version_lsn: u64,
+    /// distributed aggregate. Mirrors
+    /// [`ExecuteResponse::read_versions`](super::execute::ExecuteResponse::read_versions).
+    pub read_versions: Vec<nodedb_types::ShardVersion>,
 }
 
 /// One `(left_key, right_key)` equi-join pair of a [`ShuffleConsumeRequest`]'s
@@ -639,14 +637,18 @@ mod tests {
 
     #[test]
     fn roundtrip_shuffle_produce_response_clean() {
+        let read_versions = vec![nodedb_types::ShardVersion {
+            vshard: 9,
+            version: nodedb_types::WriteVersion::logged(1, 0xABCD_1234),
+        }];
         let decoded = roundtrip_produce_resp(ShuffleProduceResponse {
             error: None,
-            read_version_lsn: 0xABCD_1234,
+            read_versions: read_versions.clone(),
         });
         assert!(decoded.error.is_none());
         assert_eq!(
-            decoded.read_version_lsn, 0xABCD_1234,
-            "producer read-version LSN roundtrips on the produce reply"
+            decoded.read_versions, read_versions,
+            "producer read versions roundtrip on the produce reply"
         );
     }
 
@@ -657,11 +659,11 @@ mod tests {
                 code: 0x55,
                 message: "produce scan failed".into(),
             }),
-            read_version_lsn: 0,
+            read_versions: Vec::new(),
         });
-        assert_eq!(
-            decoded.read_version_lsn, 0,
-            "a failed produce carries no read-version LSN"
+        assert!(
+            decoded.read_versions.is_empty(),
+            "a failed produce carries no read versions"
         );
         match decoded.error {
             Some(TypedClusterError::Internal { code, message }) => {

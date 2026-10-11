@@ -9,14 +9,26 @@
 //! of a backup that already holds every row the tenant wrote.
 
 use crate::bridge::envelope::PhysicalPlan;
-use nodedb_physical::physical_plan::{CrdtOp, KvOp};
+use nodedb_physical::physical_plan::{CrdtOp, KvOp, MetaOp};
 
 use super::plan_is_write::plan_is_write;
 
 /// Whether `plan` writes a tenant's rows: a write-class plan that is not a
 /// schema install.
 pub fn plan_writes_user_data(plan: &PhysicalPlan) -> bool {
-    plan_is_write(plan) && !installs_schema(plan)
+    plan_is_write(plan) && !installs_schema(plan) && !calvin_install_without_user_write(plan)
+}
+
+/// The install of a Calvin slice that raises no write mark: a slice that
+/// writes only derived rows or schema.
+fn calvin_install_without_user_write(plan: &PhysicalPlan) -> bool {
+    matches!(
+        plan,
+        PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
+            calvin: Some(install),
+            ..
+        }) if !install.user_write
+    )
 }
 
 /// A write-class plan that installs or removes schema state on a replica and
@@ -72,5 +84,29 @@ mod tests {
             provenance: None,
         });
         assert!(plan_writes_user_data(&plan));
+    }
+
+    fn calvin_install(user_write: bool) -> PhysicalPlan {
+        PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
+            redo: Vec::new(),
+            collections: vec!["c".into()],
+            sum_targets: Vec::new(),
+            origin: nodedb_physical::physical_plan::RedoOrigin::Commit,
+            calvin: Some(nodedb_physical::physical_plan::CalvinInstall {
+                epoch: 1,
+                position: 0,
+                epoch_system_ms: 0,
+                reply: nodedb_physical::physical_plan::CalvinReplySpec::Count(Vec::new()),
+                user_write,
+            }),
+        })
+    }
+
+    /// A Calvin slice that only installs schema, such as a constraint set
+    /// the leader's write gate sequenced, raises no write mark at install.
+    #[test]
+    fn a_calvin_install_counts_only_when_its_slice_writes_user_rows() {
+        assert!(plan_writes_user_data(&calvin_install(true)));
+        assert!(!plan_writes_user_data(&calvin_install(false)));
     }
 }

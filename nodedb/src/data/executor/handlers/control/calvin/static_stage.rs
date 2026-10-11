@@ -8,7 +8,7 @@ use tracing::{debug, info_span};
 
 use nodedb_types::calvin::VersionedReadEntry;
 
-use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
+use crate::bridge::envelope::{ErrorCode, Payload, Response, StageVote, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::commit_pending::PendingCommit;
 use crate::data::executor::handlers::control::calvin_reply::{CalvinReply, CalvinStaging};
@@ -25,14 +25,13 @@ impl CoreLoop {
     /// Validate a static-set Calvin transaction and stage it for commit.
     ///
     /// Computes the local commit vote by checking whether this participant's
-    /// slice of the transaction's LSN-versioned read-set is still current
+    /// slice of the transaction's versioned read-set is still current
     /// against the per-core write versions, then STAGES the write plans into
     /// the synthetic overlay and the commit-pending buffer keyed by
     /// `(epoch, position)`. It performs NO base mutation and fires NO side
-    /// effects — nothing is observable until a subsequent
-    /// [`CoreLoop::execute_calvin_flush`] installs the transaction's redo
-    /// record (or [`CoreLoop::execute_calvin_drop`] discards the staged
-    /// state). The response carries the vote on `read_set_valid`. Staging runs
+    /// effects. Nothing is observable until the apply of the slice's stamped
+    /// redo entry installs it, or [`CoreLoop::execute_calvin_drop`] discards
+    /// the staged state. The response carries the vote on `stage_vote`. Staging runs
     /// under the epoch's deterministic time anchor, which the pending entry
     /// keeps for resolve. `body_plans` indexes the plans a trigger body
     /// buffered: they stage under `Trigger`, so their rows fire no trigger.
@@ -49,7 +48,6 @@ impl CoreLoop {
             epoch,
             position,
             epoch_system_ms,
-            is_group_leader,
         } = ctx;
         let vshard_id = task.request.vshard_id.as_u32();
         debug!(
@@ -58,7 +56,6 @@ impl CoreLoop {
             position,
             epoch_system_ms,
             vshard_id,
-            is_group_leader,
             plan_count = plans.len(),
             read_count = versioned_reads.len(),
             "calvin stage for commit"
@@ -95,7 +92,7 @@ impl CoreLoop {
                 self.begin_calvin_plan_staging(task, synthetic_txn_id, *tenant_id, plan, body);
                 self.stage_calvin_plan(task, synthetic_txn_id, *tenant_id, plan, &mut staging)?;
                 // Test-only fault boundary after a potentially-mutating stage.
-                crate::fail_point!("calvin_static::during_overlay_stage");
+                crate::fail_point!(self.fail_scope, "calvin_static::during_overlay_stage");
             }
             Ok::<CalvinReply, ErrorCode>(staging.reply)
         }));
@@ -125,7 +122,11 @@ impl CoreLoop {
         // current against the local write versions? Empty read-set is vacuously
         // current. Read-only — no base mutation here. A stale-read false vote
         // retains the fully staged state until the durable global verdict.
-        let vote = self.read_set_still_current(task, tenant_id.as_u64(), versioned_reads);
+        let vote = StageVote::of_read_set(self.read_set_still_current(
+            task,
+            tenant_id.as_u64(),
+            versioned_reads,
+        ));
 
         // Publish only a fully staged transaction. Resolve reads these plans
         // against the overlay; a global abort drops both.
@@ -147,8 +148,8 @@ impl CoreLoop {
             payload: Payload::empty(),
             watermark_lsn: self.watermark,
             error_code: None,
-            read_set_valid: Some(vote),
-            read_version_lsn: crate::types::Lsn::ZERO,
+            stage_vote: Some(vote),
+            read_versions: crate::types::ReadVersions::new(),
             write_set: Vec::new(),
         }
     }
@@ -211,11 +212,12 @@ mod tests {
             epoch: 1,
             position: 0,
             epoch_system_ms: 0,
-            is_group_leader: true,
         };
 
         let resp = core.execute_calvin_execute_static(&task, ctx, &tenant_id, &plans, &[], &[]);
         assert_eq!(resp.status, Status::Ok);
+        // An empty read-set is current.
+        assert_eq!(resp.stage_vote, Some(StageVote::Commit));
 
         let vshard_id = task.request.vshard_id.as_u32();
 
@@ -239,6 +241,89 @@ mod tests {
         );
     }
 
+    /// A predicate read of `collection` on vShard 0, taken after the entry at
+    /// `index`.
+    fn homed_read(collection: &str, index: u64) -> VersionedReadEntry {
+        VersionedReadEntry {
+            engine: nodedb_types::calvin::EngineTag::Document,
+            collection: collection.to_string(),
+            key: nodedb_types::calvin::ReadKeyIdent::Predicate,
+            read_version: nodedb_types::WriteVersion::logged(0, index),
+            home_vshard: Some(0),
+        }
+    }
+
+    /// Record a write of `collection` applying the entry at `index` on
+    /// vShard 0.
+    fn write_at(core: &mut CoreLoop, collection: &str, index: u64) {
+        core.note_write(
+            DatabaseId::DEFAULT,
+            TenantId::new(1),
+            collection,
+            None,
+            crate::data::executor::core_loop::write_index::WriteStamp {
+                vshard: crate::types::VShardId::new(0),
+                lsn: crate::types::Lsn::new(index),
+                entry: Some(nodedb_types::WriteVersion::logged(0, index)),
+            },
+        );
+    }
+
+    #[test]
+    fn static_stage_with_a_superseded_read_votes_serialization_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        write_at(&mut core, "orders", 20);
+        let task = make_task();
+        let tenant_id = TenantId::new(1);
+        let ctx = CalvinExecCtx {
+            epoch: 3,
+            position: 0,
+            epoch_system_ms: 0,
+        };
+
+        let resp = core.execute_calvin_execute_static(
+            &task,
+            ctx,
+            &tenant_id,
+            &[point_insert_plan("orders", "o1", 7)],
+            &[homed_read("orders", 10)],
+            &[],
+        );
+
+        assert_eq!(resp.status, Status::Ok);
+        assert_eq!(resp.stage_vote, Some(StageVote::SerializationConflict));
+        // A stale slice stays staged until the global verdict drops it.
+        let vshard = task.request.vshard_id.as_u32();
+        assert!(core.calvin.commit_pending.contains_key(&(3, 0, vshard)));
+    }
+
+    #[test]
+    fn static_stage_with_a_current_read_votes_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        write_at(&mut core, "orders", 20);
+        let task = make_task();
+        let tenant_id = TenantId::new(1);
+        let ctx = CalvinExecCtx {
+            epoch: 3,
+            position: 1,
+            epoch_system_ms: 0,
+        };
+
+        let resp = core.execute_calvin_execute_static(
+            &task,
+            ctx,
+            &tenant_id,
+            &[point_insert_plan("orders", "o1", 7)],
+            &[homed_read("orders", 20)],
+            &[],
+        );
+
+        assert_eq!(resp.status, Status::Ok);
+        assert_eq!(resp.stage_vote, Some(StageVote::Commit));
+    }
+
     #[test]
     fn synthetic_id_failure_leaves_no_pending_or_overlay_state() {
         let dir = tempfile::tempdir().unwrap();
@@ -253,7 +338,6 @@ mod tests {
                 epoch: epoch_outside_synthetic_range,
                 position: 0,
                 epoch_system_ms: 0,
-                is_group_leader: true,
             },
             &tenant_id,
             &[point_insert_plan("orders", "o1", 7)],
@@ -262,7 +346,7 @@ mod tests {
         );
 
         assert_eq!(response.status, Status::Error);
-        assert_eq!(response.read_set_valid, Some(false));
+        assert_eq!(response.stage_vote, Some(StageVote::ParticipantError));
         assert!(core.calvin.commit_pending.is_empty());
         assert!(core.txn_overlays.is_empty());
         assert!(core.graph_txn_overlays.is_empty());
@@ -286,7 +370,6 @@ mod tests {
             epoch: 9,
             position: 3,
             epoch_system_ms: 0,
-            is_group_leader: true,
         };
         let vshard = task.request.vshard_id.as_u32();
         let synthetic = calvin_synthetic_txn_id(9, 3, vshard).unwrap();
@@ -306,7 +389,7 @@ mod tests {
         let response = core.execute_calvin_execute_static(&task, ctx, &tenant_id, &plans, &[], &[]);
 
         assert_eq!(response.status, Status::Error);
-        assert_eq!(response.read_set_valid, Some(false));
+        assert_eq!(response.stage_vote, Some(StageVote::ParticipantError));
         assert!(!core.calvin.commit_pending.contains_key(&(9, 3, vshard)));
         assert!(!core.txn_overlays.contains_key(&synthetic));
         assert!(!core.graph_txn_overlays.contains_key(&synthetic));
@@ -335,7 +418,6 @@ mod tests {
                 epoch: 9,
                 position: 5,
                 epoch_system_ms: 0,
-                is_group_leader: true,
             },
             &tenant_id,
             &[bulk_delete_plan("orders", None)],
@@ -343,7 +425,7 @@ mod tests {
             &[],
         );
 
-        assert_eq!(response.read_set_valid, Some(false));
+        assert_eq!(response.stage_vote, Some(StageVote::ParticipantError));
         assert!(!core.graph_txn_overlays.contains_key(&synthetic));
     }
 
@@ -366,7 +448,6 @@ mod tests {
             epoch: 9,
             position: 4,
             epoch_system_ms: 0,
-            is_group_leader: true,
         };
         let vshard = task.request.vshard_id.as_u32();
         let synthetic = calvin_synthetic_txn_id(9, 4, vshard).unwrap();
@@ -391,7 +472,7 @@ mod tests {
         );
 
         assert_eq!(response.status, Status::Error);
-        assert_eq!(response.read_set_valid, Some(false));
+        assert_eq!(response.stage_vote, Some(StageVote::ParticipantError));
         assert!(!core.calvin.commit_pending.contains_key(&(9, 4, vshard)));
         assert!(!core.txn_overlays.contains_key(&synthetic));
         assert!(!core.graph_txn_overlays.contains_key(&synthetic));
@@ -428,14 +509,13 @@ mod tests {
                 epoch: 21,
                 position: 1,
                 epoch_system_ms: 0,
-                is_group_leader: true,
             },
             &tenant,
             &[malformed],
             &[],
             &[],
         );
-        assert_eq!(failed.read_set_valid, Some(false));
+        assert_eq!(failed.stage_vote, Some(StageVote::ParticipantError));
         assert!(matches!(
             failed.error_code.as_deref(),
             Some(ErrorCode::RejectedPrevalidation { .. })
@@ -450,14 +530,13 @@ mod tests {
                 epoch: 21,
                 position: 1,
                 epoch_system_ms: 0,
-                is_group_leader: true,
             },
             &tenant,
             &[valid],
             &[],
             &[],
         );
-        assert_eq!(staged.read_set_valid, Some(true));
+        assert_eq!(staged.stage_vote, Some(StageVote::Commit));
         assert_eq!(
             core.txn_overlays
                 .get(&synthetic)
@@ -472,7 +551,6 @@ mod tests {
                 epoch: 21,
                 position: 2,
                 epoch_system_ms: 0,
-                is_group_leader: true,
             },
             &tenant,
             &[mismatch],
@@ -480,7 +558,7 @@ mod tests {
             &[],
         );
         let mismatch_id = calvin_synthetic_txn_id(21, 2, vshard).expect("synthetic transaction id");
-        assert_eq!(failed.read_set_valid, Some(false));
+        assert_eq!(failed.stage_vote, Some(StageVote::ParticipantError));
         assert!(!core.calvin.commit_pending.contains_key(&(21, 2, vshard)));
         assert!(!core.txn_overlays.contains_key(&mismatch_id));
 
@@ -496,7 +574,6 @@ mod tests {
                 epoch: 21,
                 position: 3,
                 epoch_system_ms: 0,
-                is_group_leader: true,
             },
             &tenant,
             &[overflow],
@@ -505,14 +582,14 @@ mod tests {
         );
         let overflow_id = calvin_synthetic_txn_id(21, 3, vshard).expect("synthetic transaction id");
         assert_eq!(failed.status, Status::Error);
-        assert_eq!(failed.read_set_valid, Some(false));
+        assert_eq!(failed.stage_vote, Some(StageVote::ParticipantError));
         assert!(matches!(
             failed.error_code.as_deref(),
             Some(ErrorCode::RejectedPrevalidation { .. })
         ));
         assert!(
             !core.calvin.commit_pending.contains_key(&(21, 3, vshard)),
-            "a rejected stage cannot reach the TransactionRedo-producing flush path"
+            "a rejected stage cannot reach the TransactionRedo-producing resolve path"
         );
         assert!(!core.txn_overlays.contains_key(&overflow_id));
     }

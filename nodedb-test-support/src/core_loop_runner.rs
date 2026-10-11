@@ -63,6 +63,9 @@ pub struct WalReplay {
 pub struct CoreLoopSpawn {
     /// Core index within the data plane (0-based).
     pub idx: usize,
+    /// The node this core runs on, the scope of its fail points. An
+    /// in-process cluster runs several nodes, so a test arms one node's core.
+    pub node_id: u64,
     /// Total number of Data-Plane cores in this node. The committed-redo apply
     /// routes each record to `vshard_id % num_cores`, the same rule the
     /// dispatcher routes requests by.
@@ -131,6 +134,7 @@ pub fn event_interest_for(shared: &SharedState) -> Arc<EventInterest> {
 pub fn spawn_core_loop(spawn: CoreLoopSpawn) -> tokio::task::JoinHandle<()> {
     let CoreLoopSpawn {
         idx,
+        node_id,
         num_cores,
         data_side,
         core_dir,
@@ -162,6 +166,7 @@ pub fn spawn_core_loop(spawn: CoreLoopSpawn) -> tokio::task::JoinHandle<()> {
                     core_array_catalog,
                 )
                 .expect("CoreLoop::open_with_array_catalog");
+                core.set_fail_scope(node_id);
                 core.set_event_producer(event_producer);
                 core.set_event_interest(event_interest);
                 core.set_num_cores(num_cores);

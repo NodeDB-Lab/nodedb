@@ -145,7 +145,7 @@ impl CoreLoop {
         // a checkpoint stamp that already contains it, and replay would
         // duplicate the row.
         if affected > 0 {
-            self.note_collection_write_lsn(task, collection);
+            self.note_collection_write(task, collection);
         }
 
         debug!(core = self.core_id, %collection, affected, "columnar resolved update complete");
@@ -224,7 +224,7 @@ impl CoreLoop {
         }
 
         if affected > 0 {
-            self.note_collection_write_lsn(task, collection);
+            self.note_collection_write(task, collection);
         }
 
         debug!(core = self.core_id, %collection, affected, "columnar resolved delete complete");

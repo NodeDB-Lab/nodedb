@@ -74,12 +74,30 @@ pub struct PlanAdmissionRequest<'a> {
 /// Plan `sql`, authorize it, expand implicit graph edges, authorize the expanded
 /// set, and acquire the descriptor leases — retrying the whole unit while a
 /// descriptor drain is in flight.
+///
+/// For a transport with no transaction block: every derived read sees
+/// committed base only. A session transport uses
+/// [`plan_authorize_and_admit_in_txn`].
 pub async fn plan_authorize_and_admit(
     request: PlanAdmissionRequest<'_>,
 ) -> crate::Result<PlanAdmission> {
+    plan_authorize_and_admit_in_txn(request, None).await
+}
+
+/// [`plan_authorize_and_admit`] for a statement that runs in the open
+/// transaction `read_txn`, `None` outside a transaction block.
+///
+/// The derived writes read their source rows through that transaction's
+/// staging overlay. A materialized-sum balance or a period lock then derives
+/// from the rows as this transaction sees them, including the rows its earlier
+/// statements staged.
+pub async fn plan_authorize_and_admit_in_txn(
+    request: PlanAdmissionRequest<'_>,
+    read_txn: Option<crate::types::TxnId>,
+) -> crate::Result<PlanAdmission> {
     let request = &request;
     retry_on_schema_change(&request.state.lease_drain, move || {
-        plan_authorize_and_admit_once(request)
+        plan_authorize_and_admit_once(request, read_txn)
     })
     .await
 }
@@ -88,6 +106,7 @@ pub async fn plan_authorize_and_admit(
 /// re-invocation with no partial state carried between attempts.
 async fn plan_authorize_and_admit_once(
     request: &PlanAdmissionRequest<'_>,
+    read_txn: Option<crate::types::TxnId>,
 ) -> crate::Result<PlanAdmission> {
     let state = request.state;
     let query_ctx = request.query_ctx;
@@ -137,8 +156,15 @@ async fn plan_authorize_and_admit_once(
     let _preauthorized_tasks =
         authorize_task_set(identity, &tasks, &state.permissions, &state.roles, &emitter)?;
 
-    let sum_target_reads =
-        append_derived_tasks(state, &mut tasks, tenant_id, database_id, trace_id).await?;
+    let sum_target_reads = append_derived_tasks(
+        state,
+        &mut tasks,
+        tenant_id,
+        database_id,
+        read_txn,
+        trace_id,
+    )
+    .await?;
 
     // Deliberate gate: proves the final task set is authorizable before a
     // descriptor lease is acquired. The caller re-derives the capability per
@@ -166,11 +192,16 @@ async fn plan_authorize_and_admit_once(
 ///
 /// Returns the read-set entries covering the images every cross-shard
 /// balance was settled from. The caller unions them into its read set.
+///
+/// `read_txn` is the open transaction the statement runs in, `None` outside a
+/// transaction block. Each derived write reads its source rows through that
+/// transaction's staging overlay.
 pub async fn append_derived_tasks(
     state: &SharedState,
     tasks: &mut Vec<PhysicalTask>,
     tenant_id: crate::types::TenantId,
     database_id: crate::types::DatabaseId,
+    read_txn: Option<crate::types::TxnId>,
     trace_id: TraceId,
 ) -> crate::Result<Vec<crate::control::server::shared::session::read_set::ReadSetEntry>> {
     crate::control::planner::implicit_edges::append_implicit_edge_tasks(
@@ -181,13 +212,39 @@ pub async fn append_derived_tasks(
         trace_id,
     )
     .await?;
+    append_sum_and_period_targets(state, tasks, tenant_id, database_id, read_txn, trace_id).await
+}
 
+/// Resolve every write's materialized-sum targets, append one
+/// `ApplyBalanceDelta` task per cross-shard balance, and resolve every
+/// write's period-lock reference row.
+///
+/// A plain statement runs this through [`append_derived_tasks`]. The
+/// in-transaction expanders run it on the point writes they emit. So every
+/// write that moves a sum source ships its cross-shard balance on a task
+/// homed on the target's vShard.
+///
+/// Returns the read-set entries covering the images every cross-shard
+/// balance was settled from. The caller unions them into its read set.
+///
+/// `read_txn` is the open transaction the statement runs in, `None` outside a
+/// transaction block. Each source read goes through that transaction's
+/// staging overlay.
+pub async fn append_sum_and_period_targets(
+    state: &SharedState,
+    tasks: &mut Vec<PhysicalTask>,
+    tenant_id: crate::types::TenantId,
+    database_id: crate::types::DatabaseId,
+    read_txn: Option<crate::types::TxnId>,
+    trace_id: TraceId,
+) -> crate::Result<Vec<crate::control::server::shared::session::read_set::ReadSetEntry>> {
     let sum_target_reads =
         crate::control::planner::materialized_sum::resolve_materialized_sum_targets(
             state,
             tasks,
             tenant_id,
             database_id,
+            read_txn,
             trace_id,
         )
         .await?;
@@ -209,6 +266,7 @@ pub async fn append_derived_tasks(
         tasks,
         tenant_id,
         database_id,
+        read_txn,
         trace_id,
     )
     .await?;

@@ -147,6 +147,8 @@ impl<S: LogStorage> RaftNode<S> {
         // The contact window belongs to a leader term; it means nothing here.
         self.last_quorum_contact = None;
         self.quorum_window.clear();
+        self.leader_since = None;
+        self.term_start_index = None;
         self.persist_hard_state();
         self.reset_election_timeout();
 
@@ -197,7 +199,9 @@ impl<S: LogStorage> RaftNode<S> {
             index: self.log.last_index() + 1,
             data: Vec::new(),
         };
+        let noop_index = noop.index;
         let _ = self.log.append(noop);
+        self.term_start_index = Some(noop_index);
 
         // Single-voter cluster: the no-op commits once it is durable here.
         if self.config.cluster_size() == 1 {
@@ -255,7 +259,11 @@ impl<S: LogStorage> RaftNode<S> {
         };
 
         let entries = if next_index <= self.log.last_index() {
-            match self.log.entries_range(next_index, self.log.last_index()) {
+            match self.log.entries_within(
+                next_index,
+                self.log.last_index(),
+                crate::log::MAX_APPEND_BATCH_BYTES,
+            ) {
                 Ok(slice) => slice.to_vec(),
                 Err(RaftError::LogCompacted { .. }) => {
                     debug!(
@@ -345,7 +353,11 @@ impl<S: LogStorage> RaftNode<S> {
         };
 
         let entries = if next_index <= self.log.last_index() {
-            match self.log.entries_range(next_index, self.log.last_index()) {
+            match self.log.entries_within(
+                next_index,
+                self.log.last_index(),
+                crate::log::MAX_APPEND_BATCH_BYTES,
+            ) {
                 Ok(slice) => slice.to_vec(),
                 Err(crate::error::RaftError::LogCompacted { .. }) => {
                     debug!(
@@ -395,6 +407,10 @@ impl<S: LogStorage> RaftNode<S> {
     /// up for promotion) but intentionally excluded from this calculation
     /// so adding a learner never weakens the commit quorum.
     pub(super) fn try_advance_commit_index(&mut self) {
+        #[cfg(feature = "failpoints")]
+        if crate::fail_gate::holds_commit(self.config.node_id, self.config.group_id) {
+            return;
+        }
         let leader = match &self.leader_state {
             Some(ls) => ls,
             None => return,
@@ -514,6 +530,25 @@ mod tests {
             indices.windows(2).all(|pair| pair[0] < pair[1]),
             "queued indices must be strictly increasing: {indices:?}"
         );
+    }
+
+    /// A leader names the index of the no-op it appended when it won its
+    /// term. Later proposals leave it unchanged, and a step-down clears it.
+    #[test]
+    fn a_leader_names_its_term_start_index() {
+        let mut node = RaftNode::new(test_config(1, vec![]), MemStorage::new());
+        assert_eq!(node.term_start_index(), None, "a follower names none");
+        force_election(&mut node);
+        let noop = node.last_log_index();
+        assert_eq!(node.term_start_index(), Some(noop));
+
+        node.propose(b"write".to_vec())
+            .expect("single voter commits immediately");
+        assert_eq!(node.term_start_index(), Some(noop));
+
+        let term = node.current_term();
+        node.become_follower(term + 1);
+        assert_eq!(node.term_start_index(), None);
     }
 
     /// A committed range below the log's first available index is a hard
