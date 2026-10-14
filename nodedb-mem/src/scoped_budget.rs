@@ -25,7 +25,7 @@ pub(crate) struct BudgetDenied {
 }
 
 impl ScopedBudget {
-    fn new(limit: Option<usize>) -> Self {
+    pub(crate) fn new(limit: Option<usize>) -> Self {
         Self {
             limit,
             allocated: Arc::new(AtomicUsize::new(0)),

@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 use tracing::info;
 
 use nodedb_types::config::tuning::WalTuning;
-use nodedb_wal::TimeAnchors;
 use nodedb_wal::segmented::{SegmentedWal, SegmentedWalConfig};
 use nodedb_wal::writer::WalWriterConfig;
 
@@ -46,11 +45,8 @@ pub struct WalManager {
     /// Wakes `wait_durable` followers when `durable_lsn` advances (or a leader's
     /// fsync fails, so they re-attempt and observe the same error).
     pub(super) durable_notify: tokio::sync::Notify,
-    /// Commit-time anchors of this WAL, stamped from the node's HLC. The writer
-    /// records one per fsynced batch. Replay records the persisted ones.
-    pub(super) time_anchors: Arc<TimeAnchors>,
-    /// Floors truncation keeps for holders that read records back at boot.
-    pub(super) floor_holds: super::floor_holds::WalFloorHolds,
+    /// System metrics registry handle for recording group-commit fsync latency.
+    pub(super) metrics: std::sync::RwLock<Option<Arc<crate::control::metrics::SystemMetrics>>>,
 }
 
 impl WalManager {
@@ -69,6 +65,20 @@ impl WalManager {
         self.durable_lsn.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Wire or replace the system metrics handle used to record group-commit fsync latency.
+    pub fn set_metrics(&self, metrics: Arc<crate::control::metrics::SystemMetrics>) {
+        let mut w = self.metrics.write().unwrap_or_else(|p| p.into_inner());
+        *w = Some(metrics);
+    }
+
+    /// Read the optional system metrics handle.
+    pub fn metrics(&self) -> Option<Arc<crate::control::metrics::SystemMetrics>> {
+        self.metrics
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
     /// Return the stable in-memory root for per-user CRDT signing keys.
     /// The root is persisted only as WAL-key-wrapped ciphertext and is
     /// rewrapped on rotation, so offline signatures survive chained key
@@ -76,22 +86,6 @@ impl WalManager {
     /// which prevents `SIGNED_DELTAS` from being enabled.
     pub fn crdt_signing_root(&self) -> crate::Result<Option<[u8; 32]>> {
         Ok(self.crdt_signing_root)
-    }
-
-    /// The floors truncation of this WAL keeps.
-    pub fn floor_holds(&self) -> &super::floor_holds::WalFloorHolds {
-        &self.floor_holds
-    }
-
-    /// This WAL's commit-time anchors.
-    pub fn time_anchors(&self) -> &Arc<TimeAnchors> {
-        &self.time_anchors
-    }
-
-    /// The node's HLC. Anchors are stamped from it, so every commit stamp it
-    /// issues orders against anchor times.
-    pub fn hlc_clock(&self) -> Arc<nodedb_types::HlcClock> {
-        Arc::clone(self.time_anchors.clock())
     }
 
     /// Open or create a segmented WAL at the given path.
@@ -136,8 +130,6 @@ impl WalManager {
                 alignment: tuning.alignment,
                 use_direct_io: tuning.direct_io,
                 dwb_mode: None,
-                // `open_internal` installs the manager's anchors.
-                time_anchors: None,
             },
         )
     }
@@ -146,11 +138,9 @@ impl WalManager {
     pub(super) fn open_internal(
         path: &Path,
         segment_target_size: u64,
-        mut writer_config: WalWriterConfig,
+        writer_config: WalWriterConfig,
     ) -> crate::Result<Self> {
         let wal_dir = path.to_path_buf();
-        let time_anchors = Arc::new(TimeAnchors::new(Arc::new(nodedb_types::HlcClock::new())));
-        writer_config.time_anchors = Some(Arc::clone(&time_anchors));
 
         let effective_target = if segment_target_size > 0 {
             segment_target_size
@@ -166,11 +156,6 @@ impl WalManager {
         };
 
         let wal = SegmentedWal::open(config).map_err(crate::Error::Wal)?;
-        // A new log has nothing to replay. Anchor its empty state now, so a
-        // time after open resolves to LSN 0 instead of an error.
-        if wal.next_lsn() == 1 {
-            time_anchors.cover_recovered(0);
-        }
 
         // `direct_io` is logged because a WAL running buffered is a weaker
         // durability posture than the default, and the log is the only place
@@ -196,15 +181,14 @@ impl WalManager {
 
         Ok(Self {
             wal: Arc::new(Mutex::new(wal)),
-            wal_dir,
+            wal_dir: wal_dir.to_path_buf(),
             encryption_ring: None,
             crdt_signing_root: None,
             audit_wal,
             durable_lsn: AtomicU64::new(0),
             commit_lock: tokio::sync::Mutex::new(()),
             durable_notify: tokio::sync::Notify::new(),
-            time_anchors,
-            floor_holds: super::floor_holds::WalFloorHolds::default(),
+            metrics: std::sync::RwLock::new(None),
         })
     }
 

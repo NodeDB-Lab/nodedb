@@ -183,7 +183,7 @@ pub fn update_lag_status(
     let lag_ms = now.saturating_sub(lag_record.last_apply_ms);
 
     // Publish the metric: now_ms - last_apply_ms.
-    db_metrics.set_mirror_lag_ms(db_name, lag_ms);
+    db_metrics.set_mirror_lag_ms(db_id, db_name, lag_ms);
 
     // Fall back to apply-time when the registry has no entry.
     let last_received = last_entry_received_ms.unwrap_or(lag_record.last_apply_ms);
