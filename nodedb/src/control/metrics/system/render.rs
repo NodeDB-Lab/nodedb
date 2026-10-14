@@ -240,6 +240,28 @@ impl SystemMetrics {
         }
     }
 
+    /// Remove all metric entries for a dropped database.
+    pub fn remove_database(&self, db_name: &str) {
+        if let Ok(mut m) = self.database_collections_by_name.write() {
+            m.remove(db_name);
+        }
+        if let Ok(mut m) = self.database_tenants_by_name.write() {
+            m.remove(db_name);
+        }
+        if let Ok(mut m) = self.database_memory_bytes_by_name.write() {
+            m.remove(db_name);
+        }
+        if let Ok(mut m) = self.database_storage_bytes_by_name.write() {
+            m.remove(db_name);
+        }
+        if let Ok(mut m) = self.database_queries_by_name.write() {
+            m.remove(db_name);
+        }
+        if let Ok(mut m) = self.database_errors_by_name.write() {
+            m.remove(db_name);
+        }
+    }
+
     pub(super) fn prometheus_backpressure(&self, out: &mut String) {
         use std::fmt::Write as _;
         let critical = self

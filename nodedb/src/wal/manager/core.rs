@@ -59,6 +59,8 @@ pub struct WalManager {
     pub(super) ordinal_clock: Arc<nodedb_types::OrdinalClock>,
     /// Floors truncation keeps for holders that read records back at boot.
     pub(super) floor_holds: super::floor_holds::WalFloorHolds,
+    /// System metrics registry handle for recording group-commit fsync latency.
+    pub(super) metrics: std::sync::RwLock<Option<Arc<crate::control::metrics::SystemMetrics>>>,
 }
 
 impl WalManager {
@@ -91,6 +93,20 @@ impl WalManager {
     /// rewrapped on rotation, so offline signatures survive chained key
     /// rotations and restarts. No root exists when WAL encryption is disabled,
     /// which prevents `SIGNED_DELTAS` from being enabled.
+    /// Wire or replace the system metrics handle used to record group-commit fsync latency.
+    pub fn set_metrics(&self, metrics: Arc<crate::control::metrics::SystemMetrics>) {
+        let mut w = self.metrics.write().unwrap_or_else(|p| p.into_inner());
+        *w = Some(metrics);
+    }
+
+    /// Read the optional system metrics handle.
+    pub fn metrics(&self) -> Option<Arc<crate::control::metrics::SystemMetrics>> {
+        self.metrics
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
     pub fn crdt_signing_root(&self) -> crate::Result<Option<[u8; 32]>> {
         Ok(self.crdt_signing_root)
     }
@@ -231,6 +247,7 @@ impl WalManager {
             time_anchors,
             ordinal_clock: Arc::new(nodedb_types::OrdinalClock::new()),
             floor_holds: super::floor_holds::WalFloorHolds::default(),
+            metrics: std::sync::RwLock::new(None),
         })
     }
 

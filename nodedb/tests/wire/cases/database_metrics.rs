@@ -168,3 +168,38 @@ async fn tenant_quota_metrics_non_zero_under_load() {
         "at least one tenant should have tracked requests: {body}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drop_database_removes_metrics_series() {
+    let (server, db_a) = TestServer::with_database("metrics_drop_test").await;
+
+    // Issue a query so db_a creates a series in DatabaseMetricsRegistry
+    server
+        .exec("CREATE COLLECTION col_drop (id STRING PRIMARY KEY) WITH (engine='kv')")
+        .await
+        .unwrap();
+
+    let body = fetch_metrics_body(server.http_port).await;
+    assert!(
+        body.contains(&format!("database=\"{db_a}\"")),
+        "database '{db_a}' must appear in /metrics after queries"
+    );
+
+    // Drop database via SQL through real post-apply path
+    server
+        .client
+        .simple_query("USE DATABASE default")
+        .await
+        .unwrap();
+    server
+        .client
+        .simple_query(&format!("DROP DATABASE {db_a}"))
+        .await
+        .unwrap();
+
+    let body_after = fetch_metrics_body(server.http_port).await;
+    assert!(
+        !body_after.contains(&format!("database=\"{db_a}\"")),
+        "database '{db_a}' series must be removed from /metrics after DROP DATABASE: {body_after}"
+    );
+}

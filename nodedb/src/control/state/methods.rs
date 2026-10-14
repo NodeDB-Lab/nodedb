@@ -13,6 +13,13 @@ use crate::types::TenantId;
 use super::SharedState;
 
 impl SharedState {
+    /// Wire system metrics to the WAL manager if system metrics are present.
+    pub(super) fn wire_wal_and_metrics(&self) {
+        if let Some(metrics) = &self.system_metrics {
+            self.wal.set_metrics(Arc::clone(metrics));
+        }
+    }
+
     /// Bundle of the auth-adjacent stores every `RequestAuthScope`
     /// construction needs (`scope_grants`, `quota_manager`), for callers
     /// that build a scope from `&SharedState` directly rather than pulling

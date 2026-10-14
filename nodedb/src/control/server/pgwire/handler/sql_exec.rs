@@ -413,7 +413,7 @@ impl NodeDbPgHandler {
             if let Some(ref m) = self.state.system_metrics {
                 m.record_database_query(&desc.name);
             }
-            self.state.database_metrics.record_qps(&desc.name);
+            self.state.database_metrics.record_qps(desc.id, &desc.name);
         }
 
         // Request-admission gate: internal-service exemption, blacklist,

@@ -436,6 +436,7 @@ impl SharedState {
             startup: Arc::clone(&startup_gate),
         });
         Self::wire_session_handle_audit(&state);
+        state.wire_wal_and_metrics();
         Ok(state)
     }
 }

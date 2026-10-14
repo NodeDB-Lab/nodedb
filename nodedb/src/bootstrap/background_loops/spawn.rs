@@ -60,6 +60,7 @@ pub fn spawn_background_loops(
     maintenance::spawn_pending_leave_cleanup(shared);
     maintenance::spawn_orphaned_drain_sweep(shared);
     timers::spawn_tenant_timers(shared);
+    crate::bootstrap::database_metrics_sampler::spawn_database_metrics_sampler(shared);
     spawn_security_loops(shared);
 
     // Checkpoint manager. It is handed the Event Plane's watermark store

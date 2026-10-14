@@ -9,6 +9,7 @@ pub mod core_stall_monitor;
 pub mod credentials;
 pub mod data_group_recovery;
 pub mod data_plane;
+pub mod database_metrics_sampler;
 pub mod diagnostics;
 pub mod jwks_registry;
 pub mod listeners;

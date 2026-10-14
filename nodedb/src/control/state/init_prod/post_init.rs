@@ -17,6 +17,7 @@ use super::super::SharedState;
 pub(super) fn hydrate_caches(state: &Arc<SharedState>) {
     SharedState::wire_session_handle_audit(state);
     super::catalog_registries::load_catalog_caches(state, state.credentials.catalog());
+    state.wire_wal_and_metrics();
 }
 
 /// Spawn the array GC background task. The handle is stored by the caller

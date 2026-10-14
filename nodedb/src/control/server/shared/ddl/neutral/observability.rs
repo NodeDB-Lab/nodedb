@@ -14,8 +14,10 @@
 //! `SHOW MEMORY` reports per-engine memory budgets and current
 //! utilisation from `nodedb_mem::MemoryGovernor`.
 //!
-//! The metric source reads, ordering, and the tenant-admin gate run here. The
-//! result is the protocol-neutral `DdlResult` over `ShapedRows`.
+//! Ported from the pgwire `ddl::observability` handlers. The metric source
+//! reads, ordering, and the tenant-admin gate are preserved verbatim; only the
+//! result construction changed from pgwire `Response` / `QueryResponse` to the
+//! protocol-neutral `DdlResult` over `ShapedRows`.
 
 use serde_json::{Map, Value as JsonValue};
 
@@ -169,19 +171,19 @@ pub fn show_metrics(
     if let Some(sys) = state.system_metrics.as_ref() {
         rows.push((
             "wal_fsync_p50_us".into(),
-            sys.wal_fsync_seconds.percentile(50.0).to_string(),
+            sys.wal_fsync_seconds.percentile(0.5).to_string(),
         ));
         rows.push((
             "wal_fsync_p99_us".into(),
-            sys.wal_fsync_seconds.percentile(99.0).to_string(),
+            sys.wal_fsync_seconds.percentile(0.99).to_string(),
         ));
         rows.push((
             "query_latency_p50_us".into(),
-            sys.query_latency.percentile(50.0).to_string(),
+            sys.query_latency.percentile(0.5).to_string(),
         ));
         rows.push((
             "query_latency_p99_us".into(),
-            sys.query_latency.percentile(99.0).to_string(),
+            sys.query_latency.percentile(0.99).to_string(),
         ));
     }
 
