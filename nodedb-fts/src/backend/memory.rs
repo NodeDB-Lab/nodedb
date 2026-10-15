@@ -11,7 +11,7 @@
 //! ordering.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use nodedb_types::Surrogate;
@@ -36,6 +36,9 @@ type IndexKey = (u64, u64, String, String);
 type SubKey = (IndexKey, String);
 /// An index key plus a document.
 type DocLenKey = (IndexKey, Surrogate);
+/// One term's postings keyed by document, so one document's posting is
+/// replaced or removed without touching the rest of the list.
+type PostingList = BTreeMap<Surrogate, Posting>;
 
 /// In-memory FTS backend backed by HashMaps keyed by
 /// `(database_id, tid, collection, field, …)` tuples.
@@ -44,8 +47,8 @@ type DocLenKey = (IndexKey, Surrogate);
 /// can use `&self` uniformly (redb has its own transactional isolation).
 #[derive(Debug, Default)]
 pub struct MemoryBackend {
-    /// `(index, term) → posting list`.
-    postings: RefCell<HashMap<SubKey, Vec<Posting>>>,
+    /// `(index, term) → posting list`, ordered by document.
+    postings: RefCell<HashMap<SubKey, PostingList>>,
     /// `(index, doc_id) → token count`.
     doc_lengths: RefCell<HashMap<DocLenKey, u32>>,
     /// `index → (doc_count, total_token_sum)`.
@@ -120,7 +123,7 @@ impl FtsBackend for MemoryBackend {
             .postings
             .borrow()
             .get(&sub_key(database_id, tid, index, term))
-            .cloned()
+            .map(|list| list.values().cloned().collect())
             .unwrap_or_default())
     }
 
@@ -137,7 +140,47 @@ impl FtsBackend for MemoryBackend {
         if postings.is_empty() {
             map.remove(&key);
         } else {
-            map.insert(key, postings.to_vec());
+            let list: PostingList = postings.iter().map(|p| (p.doc_id, p.clone())).collect();
+            map.insert(key, list);
+        }
+        Ok(())
+    }
+
+    fn upsert_posting(
+        &self,
+        database_id: u64,
+        tid: u64,
+        index: IndexScope<'_>,
+        term: &str,
+        posting: &Posting,
+    ) -> Result<(), Self::Error> {
+        self.postings
+            .borrow_mut()
+            .entry(sub_key(database_id, tid, index, term))
+            .or_default()
+            .insert(posting.doc_id, posting.clone());
+        Ok(())
+    }
+
+    fn remove_posting(
+        &self,
+        database_id: u64,
+        tid: u64,
+        index: IndexScope<'_>,
+        term: &str,
+        doc_id: Surrogate,
+    ) -> Result<(), Self::Error> {
+        let key = sub_key(database_id, tid, index, term);
+        let mut map = self.postings.borrow_mut();
+        let emptied = match map.get_mut(&key) {
+            Some(list) => {
+                list.remove(&doc_id);
+                list.is_empty()
+            }
+            None => false,
+        };
+        if emptied {
+            map.remove(&key);
         }
         Ok(())
     }
@@ -389,6 +432,40 @@ mod tests {
         let read = backend.read_postings(DB, T, COL, "hello").unwrap();
         assert_eq!(read.len(), 1);
         assert_eq!(read[0].doc_id, Surrogate(1));
+    }
+
+    #[test]
+    fn upsert_replaces_one_document_and_remove_empties_the_list() {
+        let backend = MemoryBackend::new();
+        let doc = |id: u32, freq: u32| Posting {
+            doc_id: Surrogate(id),
+            term_freq: freq,
+            positions: vec![0],
+        };
+        for (id, freq) in [(3, 1), (1, 1), (2, 1), (1, 4)] {
+            backend
+                .upsert_posting(DB, T, COL, "ab", &doc(id, freq))
+                .unwrap();
+        }
+        backend
+            .upsert_posting(DB, T, COL, "abc", &doc(9, 1))
+            .unwrap();
+
+        let ab = backend.read_postings(DB, T, COL, "ab").unwrap();
+        let ids: Vec<(u32, u32)> = ab.iter().map(|p| (p.doc_id.0, p.term_freq)).collect();
+        assert_eq!(ids, vec![(1, 4), (2, 1), (3, 1)]);
+        assert_eq!(backend.read_postings(DB, T, COL, "abc").unwrap().len(), 1);
+
+        for id in [1, 2, 3] {
+            backend
+                .remove_posting(DB, T, COL, "ab", Surrogate(id))
+                .unwrap();
+        }
+        assert!(backend.read_postings(DB, T, COL, "ab").unwrap().is_empty());
+        assert_eq!(backend.collection_terms(DB, T, COL).unwrap(), vec!["abc"]);
+        backend
+            .remove_posting(DB, T, COL, "missing", Surrogate(1))
+            .unwrap();
     }
 
     #[test]

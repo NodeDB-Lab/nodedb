@@ -40,11 +40,11 @@ use std::collections::BTreeSet;
 use redb::{ReadableTable as _, WriteTransaction};
 
 use nodedb_fts::IndexScope;
-use nodedb_fts::posting::Posting;
 
 use super::errors::inverted_err;
 use super::indexing::IndexDocScope;
-use crate::engine::sparse::fts_redb::keys::{KeyOwner, doc_key, posting_key};
+use crate::engine::sparse::fts_redb::backend::posting_rows;
+use crate::engine::sparse::fts_redb::keys::{KeyOwner, doc_key};
 use crate::engine::sparse::fts_redb::scan;
 use crate::engine::sparse::fts_redb::tables::{DOC_TERMS, POSTINGS};
 
@@ -131,17 +131,18 @@ pub(super) fn index_terms(
     let table = txn
         .open_table(POSTINGS)
         .map_err(|e| inverted_err("open postings", e))?;
-    let keys = scan::str_keys(
+    let terms = scan::posting_terms(
         &table,
         KeyOwner::index(doc.database_id, doc.tid.as_u64(), index),
     )
     .map_err(|e| inverted_err("postings range", e))?;
-    Ok(keys.into_iter().map(|(_, _, term)| term).collect())
+    Ok(terms.into_iter().map(|(_, term)| term).collect())
 }
 
-/// Remove the surrogate's posting from each of `terms` in `index`, deleting
-/// a list that this empties so the term's `df` returns to its true value
-/// instead of counting a document that no longer contains it.
+/// Remove the surrogate's posting from each of `terms` in `index`: one row
+/// per term. A term whose last posting goes has no rows left, so its `df`
+/// returns to its true value instead of counting a document that no longer
+/// contains it.
 pub(super) fn strip_postings(
     txn: &WriteTransaction,
     doc: IndexDocScope<'_>,
@@ -155,56 +156,14 @@ pub(super) fn strip_postings(
     let mut table = txn
         .open_table(POSTINGS)
         .map_err(|e| inverted_err("open postings", e))?;
-
-    // Collect the edits before applying them: `get` borrows the table
-    // immutably for as long as its result lives, so the writes cannot be
-    // interleaved with the reads.
-    let mut updates: Vec<(&str, Option<Vec<u8>>)> = Vec::new();
     for term in terms {
-        let key = posting_key(doc.database_id, t, index, term.as_str());
-        let existing = match table
-            .get(key)
-            .map_err(|e| inverted_err("read postings", e))?
-        {
-            Some(v) => zerompk::from_msgpack::<Vec<Posting>>(v.value())
-                .map_err(|e| inverted_err("decode postings", e))?,
-            None => continue,
-        };
-        let mut remaining = existing;
-        let before = remaining.len();
-        remaining.retain(|p| p.doc_id != doc.surrogate);
-        if remaining.len() == before {
-            continue;
-        }
-        if remaining.is_empty() {
-            updates.push((term.as_str(), None));
-        } else {
-            let bytes = zerompk::to_msgpack_vec(&remaining)
-                .map_err(|e| inverted_err("serialize postings", e))?;
-            updates.push((term.as_str(), Some(bytes)));
-        }
-    }
-
-    for (term, new_value) in updates {
-        let key = posting_key(doc.database_id, t, index, term);
-        match new_value {
-            None => {
-                table
-                    .remove(key)
-                    .map_err(|e| inverted_err("remove posting", e))?;
-            }
-            Some(bytes) => {
-                table
-                    .insert(key, bytes.as_slice())
-                    .map_err(|e| inverted_err("update posting", e))?;
-            }
-        }
+        posting_rows::remove(&mut table, doc.database_id, t, index, term, doc.surrogate)?;
     }
     Ok(())
 }
 
 /// Remove every surrogate `removals` names from its term's posting list in
-/// `index`, rewriting each list once. A list this empties is deleted.
+/// `index`: one row per `(term, surrogate)` pair.
 pub(super) fn strip_postings_many(
     txn: &WriteTransaction,
     database_id: u64,
@@ -219,29 +178,8 @@ pub(super) fn strip_postings_many(
         .open_table(POSTINGS)
         .map_err(|e| inverted_err("open postings", e))?;
     for (term, docs) in removals {
-        let key = posting_key(database_id, tid, index, term.as_str());
-        let remaining = match table
-            .get(key)
-            .map_err(|e| inverted_err("read postings", e))?
-        {
-            Some(v) => {
-                let mut postings = zerompk::from_msgpack::<Vec<Posting>>(v.value())
-                    .map_err(|e| inverted_err("decode postings", e))?;
-                postings.retain(|p| !docs.contains(&p.doc_id));
-                postings
-            }
-            None => continue,
-        };
-        if remaining.is_empty() {
-            table
-                .remove(key)
-                .map_err(|e| inverted_err("remove posting", e))?;
-        } else {
-            let bytes = zerompk::to_msgpack_vec(&remaining)
-                .map_err(|e| inverted_err("serialize postings", e))?;
-            table
-                .insert(key, bytes.as_slice())
-                .map_err(|e| inverted_err("update posting", e))?;
+        for surrogate in docs {
+            posting_rows::remove(&mut table, database_id, tid, index, term, *surrogate)?;
         }
     }
     Ok(())

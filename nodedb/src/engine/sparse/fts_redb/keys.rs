@@ -10,8 +10,11 @@
 use nodedb_fts::IndexScope;
 use nodedb_types::Surrogate;
 
-/// `(db, tid, collection, field, term | subkey | segment_id)`: POSTINGS,
-/// INDEX_META, SEGMENTS.
+/// `(db, tid, collection, field, term, surrogate)`: POSTINGS. One row per
+/// document per term. `term` is its own tuple component, so every row of
+/// term `ab` sorts apart from every row of term `abc`.
+pub(crate) type PostingKey<'a> = (u64, u64, &'a str, &'a str, &'a str, u32);
+/// `(db, tid, collection, field, subkey | segment_id)`: INDEX_META, SEGMENTS.
 pub(crate) type FieldStrKey<'a> = (u64, u64, &'a str, &'a str, &'a str);
 /// `(db, tid, collection, field, surrogate)`: DOC_LENGTHS, DOC_TERMS.
 pub(crate) type FieldDocKey<'a> = (u64, u64, &'a str, &'a str, u32);
@@ -20,19 +23,51 @@ pub(crate) type StatsKey<'a> = (u64, u64, &'a str, &'a str);
 /// `(db, tid, collection, surrogate)`: DOC_FIELDS.
 pub(crate) type DocFieldsKey<'a> = (u64, u64, &'a str, u32);
 
-/// POSTINGS key of `term` in one index.
+/// POSTINGS key of the posting of `surrogate` under `term` in one index.
 pub(crate) fn posting_key<'a>(
     database_id: u64,
     tid: u64,
     index: IndexScope<'a>,
     term: &'a str,
-) -> FieldStrKey<'a> {
+    surrogate: Surrogate,
+) -> PostingKey<'a> {
     (
         database_id,
         tid,
         index.collection(),
         index.field_key(),
         term,
+        surrogate.as_u32(),
+    )
+}
+
+/// The lowest and highest POSTINGS keys of `term` in one index. The range
+/// between them, both ends included, holds exactly the term's posting list.
+pub(crate) fn term_bounds<'a>(
+    database_id: u64,
+    tid: u64,
+    index: IndexScope<'a>,
+    term: &'a str,
+) -> (PostingKey<'a>, PostingKey<'a>) {
+    (
+        posting_key(database_id, tid, index, term, Surrogate::new(0)),
+        posting_key(database_id, tid, index, term, Surrogate::new(u32::MAX)),
+    )
+}
+
+/// INDEX_META / SEGMENTS key of `suffix` in one index.
+fn field_str_key<'a>(
+    database_id: u64,
+    tid: u64,
+    index: IndexScope<'a>,
+    suffix: &'a str,
+) -> FieldStrKey<'a> {
+    (
+        database_id,
+        tid,
+        index.collection(),
+        index.field_key(),
+        suffix,
     )
 }
 
@@ -43,7 +78,7 @@ pub(crate) fn meta_key<'a>(
     index: IndexScope<'a>,
     subkey: &'a str,
 ) -> FieldStrKey<'a> {
-    posting_key(database_id, tid, index, subkey)
+    field_str_key(database_id, tid, index, subkey)
 }
 
 /// SEGMENTS key of `segment_id` in one index.
@@ -53,7 +88,7 @@ pub(crate) fn segment_key<'a>(
     index: IndexScope<'a>,
     segment_id: &'a str,
 ) -> FieldStrKey<'a> {
-    posting_key(database_id, tid, index, segment_id)
+    field_str_key(database_id, tid, index, segment_id)
 }
 
 /// DOC_LENGTHS / DOC_TERMS key of one document in one index.
@@ -127,6 +162,16 @@ impl<'a> KeyOwner<'a> {
         }
     }
 
+    /// The database every owned key carries.
+    pub(crate) fn database_id(&self) -> u64 {
+        self.database_id
+    }
+
+    /// The tenant every owned key carries.
+    pub(crate) fn tid(&self) -> u64 {
+        self.tid
+    }
+
     /// Whether a key with these leading components belongs to this owner.
     /// `field` is `None` for a table without a field component.
     pub(crate) fn owns(
@@ -153,7 +198,19 @@ impl<'a> KeyOwner<'a> {
         self.field.unwrap_or("")
     }
 
-    /// Lowest POSTINGS / INDEX_META / SEGMENTS key this owner covers.
+    /// Lowest POSTINGS key this owner covers.
+    pub(crate) fn posting_start(&self) -> PostingKey<'a> {
+        (
+            self.database_id,
+            self.tid,
+            self.collection_bound(),
+            self.field_bound(),
+            "",
+            0,
+        )
+    }
+
+    /// Lowest INDEX_META / SEGMENTS key this owner covers.
     pub(crate) fn str_start(&self) -> FieldStrKey<'a> {
         (
             self.database_id,
@@ -199,8 +256,13 @@ mod tests {
     fn document_and_field_keys_differ_only_in_the_field_component() {
         let doc = IndexScope::document("c");
         let title = IndexScope::field("c", "title").unwrap();
-        assert_eq!(posting_key(1, 2, doc, "t"), (1, 2, "c", "", "t"));
-        assert_eq!(posting_key(1, 2, title, "t"), (1, 2, "c", "title", "t"));
+        let s = Surrogate::new(7);
+        assert_eq!(posting_key(1, 2, doc, "t", s), (1, 2, "c", "", "t", 7));
+        assert_eq!(
+            posting_key(1, 2, title, "t", s),
+            (1, 2, "c", "title", "t", 7)
+        );
+        assert_eq!(meta_key(1, 2, title, "m"), (1, 2, "c", "title", "m"));
         assert_eq!(stats_key(1, 2, title), (1, 2, "c", "title"));
         assert_eq!(doc_key(1, 2, doc, Surrogate::new(7)), (1, 2, "c", "", 7));
     }
@@ -229,6 +291,7 @@ mod tests {
     #[test]
     fn owner_lower_bounds_sort_before_every_owned_key() {
         let coll = KeyOwner::collection(1, 2, "c");
+        assert!(coll.posting_start() <= (1, 2, "c", "", "", 0));
         assert!(coll.str_start() <= (1, 2, "c", "", ""));
         assert!(coll.doc_start() <= (1, 2, "c", "", 0));
         assert!(coll.stats_start() <= (1, 2, "c", ""));

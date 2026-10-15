@@ -12,10 +12,16 @@
 
 use redb::TableDefinition;
 
-/// Inverted index: key = `(database_id, tenant_id, collection, field, term)`,
-/// value = MessagePack-encoded `Vec<Posting>`.
-pub const POSTINGS: TableDefinition<(u64, u64, &str, &str, &str), &[u8]> =
-    TableDefinition::new("text.postings");
+/// Inverted index, one row per document per term: key =
+/// `(database_id, tenant_id, collection, field, term, surrogate)`, value =
+/// MessagePack-encoded `(term_freq, positions)` of that document's posting.
+/// A term's posting list is the range of rows sharing its key prefix, in
+/// surrogate order. Indexing or removing one document writes one row per
+/// term, whatever the list length.
+pub const POSTINGS: TableDefinition<PostingRowKey, &[u8]> = TableDefinition::new("text.postings");
+
+/// `POSTINGS` key: `(database_id, tenant_id, collection, field, term, surrogate)`.
+pub type PostingRowKey = (u64, u64, &'static str, &'static str, &'static str, u32);
 
 /// Document lengths: key = `(database_id, tenant_id, collection, field, surrogate)`,
 /// value = MessagePack-encoded `u32` token count.

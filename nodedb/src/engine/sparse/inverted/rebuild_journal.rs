@@ -151,7 +151,7 @@ impl InvertedIndex {
         let postings = txn
             .open_table(POSTINGS)
             .map_err(|e| inverted_err("rebuild probe postings", e))?;
-        if scan::has_str_rows(&postings, owner)
+        if scan::has_posting_rows(&postings, owner)
             .map_err(|e| inverted_err("rebuild probe postings range", e))?
         {
             return Ok(true);

@@ -32,7 +32,8 @@ pub trait FtsBackend {
     /// Error type for backend operations.
     type Error: std::fmt::Display;
 
-    /// Read the posting list for a term in an index.
+    /// Read the posting list for a term in an index: one posting per
+    /// document.
     fn read_postings(
         &self,
         database_id: u64,
@@ -59,6 +60,55 @@ pub trait FtsBackend {
         index: IndexScope<'_>,
         term: &str,
     ) -> Result<(), Self::Error>;
+
+    /// Insert one document's posting into a term's list, replacing that
+    /// document's prior posting in the list.
+    ///
+    /// The default reads and rewrites the whole list, so it costs the list's
+    /// length. A backend that stores one entry per `(term, document)`
+    /// overrides it with a single write.
+    fn upsert_posting(
+        &self,
+        database_id: u64,
+        tid: u64,
+        index: IndexScope<'_>,
+        term: &str,
+        posting: &Posting,
+    ) -> Result<(), Self::Error> {
+        let mut list = self.read_postings(database_id, tid, index, term)?;
+        match list.iter_mut().find(|p| p.doc_id == posting.doc_id) {
+            Some(slot) => slot.clone_from(posting),
+            None => list.push(posting.clone()),
+        }
+        self.write_postings(database_id, tid, index, term, &list)
+    }
+
+    /// Remove one document's posting from a term's list. The list is removed
+    /// when this empties it. A document absent from the list is a no-op.
+    ///
+    /// The default reads and rewrites the whole list, so it costs the list's
+    /// length. A backend that stores one entry per `(term, document)`
+    /// overrides it with a single remove.
+    fn remove_posting(
+        &self,
+        database_id: u64,
+        tid: u64,
+        index: IndexScope<'_>,
+        term: &str,
+        doc_id: Surrogate,
+    ) -> Result<(), Self::Error> {
+        let mut list = self.read_postings(database_id, tid, index, term)?;
+        let before = list.len();
+        list.retain(|p| p.doc_id != doc_id);
+        if list.len() == before {
+            return Ok(());
+        }
+        if list.is_empty() {
+            self.remove_postings(database_id, tid, index, term)
+        } else {
+            self.write_postings(database_id, tid, index, term, &list)
+        }
+    }
 
     /// Read the document length (token count) of a document in an index.
     fn read_doc_length(

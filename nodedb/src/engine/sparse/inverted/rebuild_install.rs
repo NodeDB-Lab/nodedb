@@ -26,6 +26,7 @@ use super::errors::inverted_err;
 use super::indexing::IndexDocScope;
 use super::rebuild_journal::JournalState;
 use super::rebuild_snapshot::{FtsRebuilt, RebuiltScope};
+use crate::engine::sparse::fts_redb::backend::posting_rows;
 use crate::engine::sparse::fts_redb::keys::{
     KeyOwner, doc_fields_key, doc_key, posting_key, stats_key,
 };
@@ -153,15 +154,16 @@ fn clear_collection_rows(
         let mut table = txn
             .open_table(POSTINGS)
             .map_err(|e| inverted_err("rebuild open postings", e))?;
-        let keys =
-            scan::str_keys(&table, owner).map_err(|e| inverted_err("rebuild postings range", e))?;
-        for (c, f, term) in &keys {
+        let keys = scan::posting_keys(&table, owner)
+            .map_err(|e| inverted_err("rebuild postings range", e))?;
+        for (c, f, term, s) in &keys {
             table
                 .remove(posting_key(
                     database_id,
                     tid,
                     IndexScope::from_key(c, f),
                     term,
+                    Surrogate::new(*s),
                 ))
                 .map_err(|e| inverted_err("rebuild remove postings", e))?;
         }
@@ -259,12 +261,12 @@ fn write_rebuilt_scope(
         let mut table = txn
             .open_table(POSTINGS)
             .map_err(|e| inverted_err("rebuild open postings", e))?;
+        // The collection's rows were cleared first, so each posting is one
+        // fresh row.
         for (term, list) in &scope.postings {
-            let bytes = zerompk::to_msgpack_vec(list)
-                .map_err(|e| inverted_err("rebuild serialize postings", e))?;
-            table
-                .insert(posting_key(db, t, index, term), bytes.as_slice())
-                .map_err(|e| inverted_err("rebuild insert postings", e))?;
+            for posting in list {
+                posting_rows::put(&mut table, db, t, index, term, posting)?;
+            }
         }
     }
     {
@@ -309,7 +311,7 @@ fn write_rebuilt_scope(
 mod tests {
     use std::sync::Arc;
 
-    use redb::{Database, ReadableDatabase as _, ReadableTable as _};
+    use redb::{Database, ReadableDatabase as _};
 
     use nodedb_fts::FtsSearchParams;
     use nodedb_fts::posting::QueryMode;
@@ -409,22 +411,19 @@ mod tests {
             outcome,
             FtsInstallOutcome::Installed { replayed: 1, .. }
         ));
-        let alpha = idx
-            .backend()
-            .db()
-            .begin_read()
-            .unwrap()
-            .open_table(POSTINGS)
-            .unwrap()
-            .get(posting_key(
-                DB,
-                T.as_u64(),
-                IndexScope::document("docs"),
-                "alpha",
-            ))
-            .unwrap()
-            .map(|v| zerompk::from_msgpack::<Vec<nodedb_fts::posting::Posting>>(v.value()).unwrap())
-            .unwrap_or_default();
+        let alpha = posting_rows::read_list(
+            &idx.backend()
+                .db()
+                .begin_read()
+                .unwrap()
+                .open_table(POSTINGS)
+                .unwrap(),
+            DB,
+            T.as_u64(),
+            IndexScope::document("docs"),
+            "alpha",
+        )
+        .unwrap();
         assert_eq!(
             alpha.iter().map(|p| p.doc_id.as_u32()).collect::<Vec<_>>(),
             vec![2],

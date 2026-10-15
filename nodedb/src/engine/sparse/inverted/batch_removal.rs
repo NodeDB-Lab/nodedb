@@ -3,10 +3,10 @@
 //! Removal of many documents from the inverted index in one write
 //! transaction.
 //!
-//! A bulk delete removes its rows' text in batches. Each posting list a batch
-//! occupies is rewritten once for the whole batch, and each index's corpus
-//! counters are updated once, so a batch costs the lists it touches rather
-//! than one rewrite per document per term.
+//! A bulk delete removes its rows' text in batches. Each removed document
+//! drops one POSTINGS row per term it holds, and each index's corpus counters
+//! are updated once per batch, so a batch costs the postings it removes, not
+//! the length of the lists they sit in.
 
 use std::collections::{BTreeMap, HashSet};
 

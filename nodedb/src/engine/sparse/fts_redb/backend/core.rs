@@ -101,6 +101,18 @@ impl RedbFtsBackend {
         super::purge::collection_data(self, database_id, tid, collection)
     }
 
+    /// The number of documents holding a posting under `term` in one index.
+    /// Counts rows without decoding them.
+    pub fn term_doc_count(
+        &self,
+        database_id: u64,
+        tid: u64,
+        index: IndexScope<'_>,
+        term: &str,
+    ) -> crate::Result<usize> {
+        super::postings::doc_count(self, database_id, tid, index, term)
+    }
+
     /// Every document one index holds, read in one transaction.
     pub fn index_members(
         &self,
@@ -151,6 +163,28 @@ impl FtsBackend for RedbFtsBackend {
         term: &str,
     ) -> crate::Result<()> {
         super::postings::remove(self, database_id, tid, index, term)
+    }
+
+    fn upsert_posting(
+        &self,
+        database_id: u64,
+        tid: u64,
+        index: IndexScope<'_>,
+        term: &str,
+        posting: &Posting,
+    ) -> crate::Result<()> {
+        super::postings::upsert_one(self, database_id, tid, index, term, posting)
+    }
+
+    fn remove_posting(
+        &self,
+        database_id: u64,
+        tid: u64,
+        index: IndexScope<'_>,
+        term: &str,
+        doc_id: Surrogate,
+    ) -> crate::Result<()> {
+        super::postings::remove_one(self, database_id, tid, index, term, doc_id)
     }
 
     fn read_doc_length(

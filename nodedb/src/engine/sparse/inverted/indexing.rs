@@ -25,7 +25,8 @@ use nodedb_types::{Surrogate, TenantId};
 use super::core::InvertedIndex;
 use super::doc_terms;
 use super::errors::inverted_err;
-use crate::engine::sparse::fts_redb::keys::{doc_key, posting_key, stats_key};
+use crate::engine::sparse::fts_redb::backend::posting_rows;
+use crate::engine::sparse::fts_redb::keys::{doc_key, stats_key};
 use crate::engine::sparse::fts_redb::tables::{DOC_LENGTHS, POSTINGS, STATS};
 
 /// `(database_id, tenant, collection, surrogate)` scope shared by the
@@ -178,31 +179,17 @@ impl InvertedIndex {
             .open_table(POSTINGS)
             .map_err(|e| inverted_err("open postings", e))?;
 
-        for (term, (freq, positions)) in &term_postings {
-            let key = posting_key(database_id, t, index, term);
+        let term_count = term_postings.len();
+        // One row per term, keyed by the surrogate: writing it replaces the
+        // document's prior posting and leaves every other document's row
+        // untouched, so the cost does not grow with the term's list.
+        for (term, (freq, positions)) in term_postings {
             let posting = Posting {
                 doc_id: surrogate,
-                term_freq: *freq,
-                positions: positions.clone(),
+                term_freq: freq,
+                positions,
             };
-
-            let mut existing: Vec<Posting> = match postings_table
-                .get(key)
-                .map_err(|e| inverted_err("read postings", e))?
-            {
-                Some(v) => zerompk::from_msgpack(v.value())
-                    .map_err(|e| inverted_err("decode postings", e))?,
-                None => Vec::new(),
-            };
-
-            existing.retain(|p| p.doc_id != surrogate);
-            existing.push(posting);
-
-            let bytes = zerompk::to_msgpack_vec(&existing)
-                .map_err(|e| inverted_err("serialize postings", e))?;
-            postings_table
-                .insert(key, bytes.as_slice())
-                .map_err(|e| inverted_err("insert posting", e))?;
+            posting_rows::put(&mut postings_table, database_id, t, index, term, &posting)?;
         }
         drop(postings_table);
 
@@ -240,7 +227,7 @@ impl InvertedIndex {
             field = index.field_key(),
             surrogate = surrogate.as_u32(),
             tokens = tokens.len(),
-            terms = term_postings.len(),
+            terms = term_count,
             "indexed document"
         );
         Ok(())
@@ -334,6 +321,63 @@ mod tests {
         let idx =
             InvertedIndex::open(db, crate::data::executor::core_loop::test_governor()).unwrap();
         (idx, dir)
+    }
+
+    /// The whole-document POSTINGS rows of `term`: `(surrogate, value bytes)`.
+    fn term_rows(idx: &InvertedIndex, term: &str) -> Vec<(u32, Vec<u8>)> {
+        use crate::engine::sparse::fts_redb::scan;
+        use redb::ReadableDatabase as _;
+
+        let txn = idx.backend().db().begin_read().unwrap();
+        let table = txn.open_table(POSTINGS).unwrap();
+        scan::posting_rows(&table, DB, T.as_u64(), "docs")
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.field.is_empty() && row.term == term)
+            .map(|row| (row.surrogate, row.value))
+            .collect()
+    }
+
+    /// Indexing one more document into a term that N documents already hold
+    /// adds one row and leaves the N existing rows byte-for-byte unchanged,
+    /// so the write cost does not depend on N.
+    #[test]
+    fn indexing_into_a_long_list_writes_one_row() {
+        let (idx, _dir) = open_temp();
+        const N: u32 = 300;
+        for i in 1..=N {
+            idx.index_document(DB, T, "docs", Surrogate::new(i), &body("bravo"))
+                .unwrap();
+        }
+        let before = term_rows(&idx, "bravo");
+        assert_eq!(before.len(), N as usize, "one row per document");
+
+        idx.index_document(DB, T, "docs", Surrogate::new(N + 1), &body("bravo"))
+            .unwrap();
+
+        let after = term_rows(&idx, "bravo");
+        assert_eq!(after.len(), N as usize + 1);
+        assert_eq!(&after[..N as usize], &before[..], "an existing row changed");
+        let (surrogate, value) = &after[N as usize];
+        assert_eq!(*surrogate, N + 1);
+        let expected = Posting {
+            doc_id: Surrogate::new(N + 1),
+            term_freq: 1,
+            positions: vec![0],
+        };
+        assert_eq!(value, &posting_rows::encode(&expected).unwrap());
+
+        // A re-index of one document rewrites only its own row.
+        idx.index_document(DB, T, "docs", Surrogate::new(7), &body("bravo bravo"))
+            .unwrap();
+        let reindexed = term_rows(&idx, "bravo");
+        for (old, new) in after.iter().zip(&reindexed) {
+            if old.0 != 7 {
+                assert_eq!(old, new, "row of document {} changed", old.0);
+            }
+        }
+        assert_eq!(reindexed.len(), N as usize + 1);
+        assert_eq!(idx.term_df(DB, T, "docs", "bravo").unwrap(), N + 1);
     }
 
     /// A term that an UPDATE removed from a document must leave no posting for

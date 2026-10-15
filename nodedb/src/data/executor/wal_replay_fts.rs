@@ -23,11 +23,12 @@
 //! contains. That is safe because BOTH handlers are total overwrites keyed by
 //! the surrogate, in all three tables the Origin index reads:
 //!
-//! * POSTINGS — `write_index_data` does `retain(doc_id != surrogate)` then
-//!   pushes exactly one posting back, so a term's list cannot grow a duplicate
-//!   however many times the record is applied.
+//! * POSTINGS — each row is keyed by `(term, surrogate)`, so
+//!   `write_index_data` overwrites the document's one row per term and a
+//!   term's list cannot grow a duplicate however many times the record is
+//!   applied.
 //! * DOC_LENGTHS — the surrogate's entry is overwritten with the same length.
-//! * STATS — the counters are the part that a `retain`-then-insert does NOT
+//! * STATS — the counters are the part that a keyed row overwrite does NOT
 //!   make idempotent on its own, so `write_index_data` derives the deltas from
 //!   the PRIOR DOC_LENGTHS entry read in the same write transaction: an
 //!   already-counted surrogate re-indexes with `count_delta = 0` and a
@@ -475,7 +476,7 @@ mod tests {
     /// Everything the Origin FTS reads: the corpus counters and the length of
     /// every posting list the indexed text produces. Postings catch a duplicate
     /// entry; the counters catch a double-counted document or token sum, which
-    /// a `retain`-then-insert on the posting alone would NOT prevent.
+    /// a keyed overwrite of the posting alone would NOT prevent.
     fn fts_state(core: &CoreLoop) -> ((u32, f32), Vec<(String, u32)>) {
         let tid = TenantId::new(TENANT);
         let stats = core

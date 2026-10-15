@@ -3,7 +3,7 @@
 //! Search paths for the inverted index: BM25, phrase, fuzzy, and the
 //! highlighting/offset helpers used by the SQL projection layer.
 
-use redb::{ReadableDatabase, ReadableTable};
+use redb::ReadableDatabase;
 use tracing::debug;
 
 use nodedb_fts::posting::{MatchOffset, Posting, TextSearchResult};
@@ -12,7 +12,7 @@ use nodedb_types::{Surrogate, TenantId};
 
 use super::core::InvertedIndex;
 use super::errors::{fts_index_err, inverted_err};
-use crate::engine::sparse::fts_redb::keys::posting_key;
+use crate::engine::sparse::fts_redb::backend::posting_rows;
 use crate::engine::sparse::fts_redb::tables::POSTINGS;
 
 /// Query and tuning parameters for an inverted-index phrase search.
@@ -67,26 +67,12 @@ impl InvertedIndex {
             .open_table(POSTINGS)
             .map_err(|e| inverted_err("open postings", e))?;
 
-        // Load posting list for each analyzed term.
-        let mut term_lists: Vec<Vec<Posting>> = Vec::with_capacity(terms.len());
-        for term in terms {
-            let postings: Vec<Posting> = match postings_table
-                .get(posting_key(database_id, t, index, term.as_str()))
-                .map_err(|e| inverted_err("read posting", e))?
-            {
-                Some(v) => zerompk::from_msgpack(v.value())
-                    .map_err(|e| inverted_err("decode posting", e))?,
-                None => Vec::new(),
-            };
-            term_lists.push(postings);
-        }
-
         // The first term's postings are the candidate set.
-        // For each candidate doc, verify remaining terms follow consecutively.
-        let first = &term_lists[0];
+        let first: Vec<Posting> =
+            posting_rows::read_list(&postings_table, database_id, t, index, &terms[0])?;
         let mut matches: Vec<(Surrogate, u32)> = Vec::new();
 
-        'outer: for posting in first {
+        'outer: for posting in &first {
             // Prefilter check.
             if prefilter.is_some_and(|bm| !bm.contains(posting.doc_id))
                 || exclude.is_some_and(|bm| bm.contains(posting.doc_id))
@@ -96,15 +82,27 @@ impl InvertedIndex {
 
             let surrogate = posting.doc_id;
 
+            // The candidate's posting under each remaining term: one point
+            // read per term. A term the document lacks rules it out.
+            let mut rest: Vec<Posting> = Vec::with_capacity(terms.len() - 1);
+            for term in &terms[1..] {
+                match posting_rows::read_one(
+                    &postings_table,
+                    database_id,
+                    t,
+                    index,
+                    term,
+                    surrogate,
+                )? {
+                    Some(other) => rest.push(other),
+                    None => continue 'outer,
+                }
+            }
+
             // For each start position of the first term, check subsequent terms.
             'pos: for &start_pos in &posting.positions {
-                for (offset, list) in term_lists[1..].iter().enumerate() {
+                for (offset, other_posting) in rest.iter().enumerate() {
                     let expected_pos = start_pos + (offset as u32) + 1;
-                    // Find a posting for this doc in this term's list.
-                    let Some(other_posting) = list.iter().find(|p| p.doc_id == surrogate) else {
-                        // Doc doesn't have this term at all — skip entire doc.
-                        continue 'outer;
-                    };
                     if !other_posting.positions.contains(&expected_pos) {
                         continue 'pos;
                     }

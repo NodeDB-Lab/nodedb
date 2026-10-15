@@ -13,16 +13,14 @@
 use std::collections::BTreeSet;
 
 use nodedb_fts::IndexScope;
-use nodedb_fts::posting::Posting;
 use nodedb_types::{Surrogate, TenantId};
-use redb::ReadableTable as _;
 
 use super::core::InvertedIndex;
 use super::doc_fields;
 use super::doc_terms;
 use super::errors::inverted_err;
 use super::indexing::{IndexDocScope, prior_doc_length};
-use crate::engine::sparse::fts_redb::keys::posting_key;
+use crate::engine::sparse::fts_redb::backend::posting_rows;
 use crate::engine::sparse::fts_redb::tables::POSTINGS;
 
 /// The analyzed token streams one document is indexed with, one per index.
@@ -139,19 +137,15 @@ fn read_scope_tokens(
         .map_err(|e| inverted_err("open postings", e))?;
     let mut tokens = vec![String::new(); doc_len as usize];
     for term in terms {
-        let list: Vec<Posting> = postings
-            .get(posting_key(
-                doc.database_id,
-                doc.tid.as_u64(),
-                index,
-                term.as_str(),
-            ))
-            .map_err(|e| inverted_err("read postings", e))?
-            .map(|bytes| zerompk::from_msgpack(bytes.value()))
-            .transpose()
-            .map_err(|e| inverted_err("decode postings", e))?
-            .unwrap_or_default();
-        let Some(posting) = list.iter().find(|p| p.doc_id == doc.surrogate) else {
+        let Some(posting) = posting_rows::read_one(
+            &postings,
+            doc.database_id,
+            doc.tid.as_u64(),
+            index,
+            term.as_str(),
+            doc.surrogate,
+        )?
+        else {
             continue;
         };
         for &position in &posting.positions {

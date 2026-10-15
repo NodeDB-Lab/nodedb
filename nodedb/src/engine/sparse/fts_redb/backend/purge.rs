@@ -18,9 +18,9 @@ use redb::{TableDefinition, WriteTransaction};
 use super::core::RedbFtsBackend;
 use super::shared::redb_err;
 use crate::engine::sparse::fts_redb::keys::{
-    KeyOwner, doc_fields_key, doc_key, posting_key, stats_key,
+    KeyOwner, doc_fields_key, doc_key, meta_key, posting_key, segment_key, stats_key,
 };
-use crate::engine::sparse::fts_redb::scan::{self, DocKeyDef, StrKeyDef};
+use crate::engine::sparse::fts_redb::scan::{self, DocKeyDef};
 use crate::engine::sparse::fts_redb::tables::{
     DOC_FIELDS, DOC_LENGTHS, DOC_TERMS, INDEX_META, POSTINGS, SEGMENTS, STATS,
 };
@@ -81,7 +81,7 @@ pub(super) fn tenant(backend: &RedbFtsBackend, database_id: u64, tid: u64) -> cr
 }
 
 /// Drop every row `owner` covers from every FTS table, with metadata rows
-/// dropped per `meta`. Returns the number of posting lists, document-length
+/// dropped per `meta`. Returns the number of posting rows, document-length
 /// rows, and segments removed.
 fn purge(
     backend: &RedbFtsBackend,
@@ -96,7 +96,7 @@ fn purge(
         .map_err(|e| redb_err("purge write txn", e))?;
     let mut removed = 0;
 
-    removed += drop_str_rows(&write_txn, POSTINGS, database_id, tid, owner, "postings")?;
+    removed += drop_posting_rows(&write_txn, database_id, tid, owner)?;
     // DOC_LENGTHS and DOC_TERMS are per-document rows of the same indexes and
     // must go together: a surviving term set would name posting lists that no
     // longer exist.
@@ -110,7 +110,7 @@ fn purge(
     )?;
     drop_doc_rows(&write_txn, DOC_TERMS, database_id, tid, owner, "doc_terms")?;
     drop_meta_rows(&write_txn, database_id, tid, owner, meta)?;
-    removed += drop_str_rows(&write_txn, SEGMENTS, database_id, tid, owner, "segments")?;
+    removed += drop_segment_rows(&write_txn, database_id, tid, owner)?;
 
     {
         let mut stats = write_txn
@@ -142,23 +142,46 @@ fn purge(
     Ok(removed)
 }
 
-/// Delete every row `owner` covers from a POSTINGS-shaped table.
-fn drop_str_rows(
+/// Delete every POSTINGS row `owner` covers.
+fn drop_posting_rows(
     txn: &WriteTransaction,
-    def: TableDefinition<'static, StrKeyDef, &'static [u8]>,
     database_id: u64,
     tid: u64,
     owner: KeyOwner<'_>,
-    name: &str,
 ) -> crate::Result<usize> {
     let mut table = txn
-        .open_table(def)
-        .map_err(|e| redb_err(&format!("open {name}"), e))?;
-    let keys = scan::str_keys(&table, owner).map_err(|e| redb_err(&format!("{name} range"), e))?;
+        .open_table(POSTINGS)
+        .map_err(|e| redb_err("open postings", e))?;
+    let keys = scan::posting_keys(&table, owner).map_err(|e| redb_err("postings range", e))?;
+    for (c, f, term, s) in &keys {
+        table
+            .remove(posting_key(
+                database_id,
+                tid,
+                IndexScope::from_key(c, f),
+                term,
+                Surrogate::new(*s),
+            ))
+            .map_err(|e| redb_err("remove postings", e))?;
+    }
+    Ok(keys.len())
+}
+
+/// Delete every SEGMENTS row `owner` covers.
+fn drop_segment_rows(
+    txn: &WriteTransaction,
+    database_id: u64,
+    tid: u64,
+    owner: KeyOwner<'_>,
+) -> crate::Result<usize> {
+    let mut table = txn
+        .open_table(SEGMENTS)
+        .map_err(|e| redb_err("open segments", e))?;
+    let keys = scan::str_keys(&table, owner).map_err(|e| redb_err("segments range", e))?;
     for (c, f, s) in &keys {
         table
-            .remove(posting_key(database_id, tid, IndexScope::from_key(c, f), s))
-            .map_err(|e| redb_err(&format!("remove {name}"), e))?;
+            .remove(segment_key(database_id, tid, IndexScope::from_key(c, f), s))
+            .map_err(|e| redb_err("remove segments", e))?;
     }
     Ok(keys.len())
 }
@@ -180,7 +203,7 @@ fn drop_meta_rows(
             continue;
         }
         table
-            .remove(posting_key(database_id, tid, IndexScope::from_key(c, f), s))
+            .remove(meta_key(database_id, tid, IndexScope::from_key(c, f), s))
             .map_err(|e| redb_err("remove index_meta", e))?;
     }
     Ok(())

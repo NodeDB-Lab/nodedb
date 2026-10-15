@@ -15,6 +15,7 @@ use redb::ReadTransaction;
 use nodedb_fts::posting::Posting;
 
 use super::errors::inverted_err;
+use crate::engine::sparse::fts_redb::backend::posting_rows;
 use crate::engine::sparse::fts_redb::scan;
 use crate::engine::sparse::fts_redb::tables::{DOC_LENGTHS, POSTINGS};
 
@@ -104,14 +105,18 @@ impl FtsRebuildTicket {
             .txn
             .open_table(POSTINGS)
             .map_err(|e| inverted_err("rebuild open postings", e))?;
-        for row in scan::str_rows(&postings_table, db, t, &self.collection)
+        // Rows arrive grouped by field, then term, then surrogate, so each
+        // term's list is the run of consecutive rows sharing its field and
+        // term.
+        for row in scan::posting_rows(&postings_table, db, t, &self.collection)
             .map_err(|e| inverted_err("rebuild postings range", e))?
         {
-            let list: Vec<Posting> = zerompk::from_msgpack(&row.value)
-                .map_err(|e| inverted_err("rebuild decode postings", e))?;
-            scope_entry(&mut scopes, row.field)
-                .postings
-                .push((row.suffix, list));
+            let posting = posting_rows::decode(row.surrogate, &row.value)?;
+            let lists = &mut scope_entry(&mut scopes, row.field).postings;
+            match lists.last_mut() {
+                Some((term, list)) if *term == row.term => list.push(posting),
+                Some(_) | None => lists.push((row.term, vec![posting])),
+            }
         }
 
         let lengths_table = self

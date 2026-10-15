@@ -35,11 +35,11 @@ impl InvertedIndex {
         index: impl Into<IndexScope<'a>>,
         term: &str,
     ) -> crate::Result<u32> {
-        let postings =
+        let count =
             self.inner
                 .backend()
-                .read_postings(database_id, tid.as_u64(), index.into(), term)?;
-        Ok(postings.len() as u32)
+                .term_doc_count(database_id, tid.as_u64(), index.into(), term)?;
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
     }
 
     /// Every document one index holds, read in one transaction. An index
