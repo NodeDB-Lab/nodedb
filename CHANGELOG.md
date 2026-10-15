@@ -11,6 +11,14 @@ NodeDB uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.2] - 2026-10-16
+
+### Fixed
+
+- **Mobile builds:** the shared engine crates linked jemalloc, so iOS and Android builds failed to link. jemalloc is opt-in through the `nodedb-mem` `jemalloc` feature, which the server enables.
+
+---
+
 ## [0.6.1] - 2026-10-15
 
 ### Fixed
@@ -361,6 +369,7 @@ NodeDB 0.4.0 is a substantial distributed-correctness and durability release. It
 
 ---
 
+[0.6.2]: https://github.com/NodeDB-Lab/nodedb/releases/tag/v0.6.2
 [0.6.1]: https://github.com/NodeDB-Lab/nodedb/releases/tag/v0.6.1
 [0.6.0]: https://github.com/NodeDB-Lab/nodedb/releases/tag/v0.6.0
 [0.5.0]: https://github.com/NodeDB-Lab/nodedb/releases/tag/v0.5.0
