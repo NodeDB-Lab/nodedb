@@ -17,7 +17,8 @@ impl HnswIndex {
     /// Compact and return both the removed count and the old→new id map.
     ///
     /// `id_map[old_local]` = new_local, or `u32::MAX` if the node was
-    /// tombstoned (removed).
+    /// tombstoned (removed). Repairs edges so the entry point reaches every
+    /// remaining node.
     pub fn compact_with_map(&mut self) -> (usize, Vec<u32>) {
         let tombstone_count = self.tombstone_count();
         if tombstone_count == 0 {
@@ -25,6 +26,7 @@ impl HnswIndex {
             return (0, identity);
         }
         self.ensure_mutable_neighbors();
+        self.bridge_deleted_neighbors();
 
         let mut id_map: Vec<u32> = Vec::with_capacity(self.nodes.len());
         let mut new_id = 0u32;
@@ -88,6 +90,130 @@ impl HnswIndex {
             .unwrap_or(0);
 
         self.nodes = new_nodes;
+        self.connect_unreachable();
         (tombstone_count, id_map)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use nodedb_types::vector_dtype::VectorStorageDtype;
+
+    use crate::distance::DistanceMetric;
+    use crate::hnsw::{HnswIndex, HnswParams};
+
+    fn params(m: usize, m0: usize) -> HnswParams {
+        HnswParams {
+            m,
+            m0,
+            ef_construction: 32,
+            metric: DistanceMetric::L2,
+            dtype: VectorStorageDtype::F32,
+        }
+    }
+
+    /// Nodes the entry point reaches over layer-0 edges.
+    fn reached_at_layer0(idx: &HnswIndex) -> Vec<bool> {
+        let mut reached = vec![false; idx.nodes.len()];
+        let Some(ep) = idx.entry_point() else {
+            return reached;
+        };
+        reached[ep as usize] = true;
+        let mut queue = VecDeque::from([ep]);
+        while let Some(cur) = queue.pop_front() {
+            for &next in &idx.nodes[cur as usize].neighbors[0] {
+                if !reached[next as usize] {
+                    reached[next as usize] = true;
+                    queue.push_back(next);
+                }
+            }
+        }
+        reached
+    }
+
+    /// Points 0, 1, 2, 3 on a line with `m0 = 2`. Node 1 prunes its edge to
+    /// node 3, so node 2 holds the only edge into node 3. Search walks
+    /// through deleted node 2 before compaction. Compaction drops node 2 and
+    /// must not strand node 3.
+    #[test]
+    fn compaction_keeps_node_whose_only_in_edge_came_from_a_deleted_node() {
+        // `m = 2^40` puts every node on layer 0, so the graph is fixed.
+        let mut idx = HnswIndex::with_seed(3, params(1 << 40, 2), 1);
+        for x in 0..4u8 {
+            idx.insert(vec![f32::from(x), 0.0, 0.0]).unwrap();
+        }
+        assert_eq!(idx.max_layer(), 0);
+        let into_3: Vec<usize> = idx
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.neighbors[0].contains(&3))
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(
+            into_3,
+            vec![2],
+            "fixture: node 2 holds the only edge into node 3"
+        );
+
+        assert!(idx.delete(2));
+        let query = [3.0, 0.0, 0.0];
+        assert_eq!(idx.search(&query, 1, 32).unwrap()[0].id, 3);
+
+        let (removed, id_map) = idx.compact_with_map();
+        assert_eq!(removed, 1);
+        let hits = idx.search(&query, 1, 32).unwrap();
+        assert_eq!(
+            hits.first().map(|h| h.id),
+            Some(id_map[3]),
+            "node 3 is unreachable after compaction, got {hits:?}"
+        );
+        assert!(reached_at_layer0(&idx).iter().all(|&r| r));
+    }
+
+    /// Heavy deletes cut many paths. After compaction the entry point reaches
+    /// every node, an exact query finds every node, and no list exceeds its cap.
+    #[test]
+    fn compaction_after_heavy_deletes_keeps_every_node_reachable() {
+        use crate::test_support::seeded_vectors;
+
+        let vectors = seeded_vectors(400, 8, 0x9E37_79B9_7F4A_7C15);
+        let mut idx = HnswIndex::with_seed(
+            8,
+            HnswParams {
+                ef_construction: 64,
+                ..params(4, 8)
+            },
+            7,
+        );
+        for v in &vectors {
+            idx.insert(v.clone()).unwrap();
+        }
+        for id in 0..vectors.len() as u32 {
+            if id % 5 != 0 {
+                assert!(idx.delete(id));
+            }
+        }
+        let (_, id_map) = idx.compact_with_map();
+
+        let reached = reached_at_layer0(&idx);
+        let lost = reached.iter().filter(|&&r| !r).count();
+        assert_eq!(lost, 0, "{lost} of {} nodes unreachable", reached.len());
+        for old in (0..vectors.len()).step_by(5) {
+            let hits = idx.search(&vectors[old], 1, idx.len()).unwrap();
+            assert_eq!(
+                hits.first().map(|h| h.id),
+                Some(id_map[old]),
+                "old node {old} not found"
+            );
+        }
+        let (m, m0) = (idx.params().m, idx.params().m0);
+        for node in &idx.nodes {
+            for (layer, list) in node.neighbors.iter().enumerate() {
+                assert!(list.len() <= if layer == 0 { m0 } else { m });
+            }
+        }
     }
 }

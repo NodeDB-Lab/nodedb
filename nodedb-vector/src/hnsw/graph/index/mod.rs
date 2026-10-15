@@ -6,6 +6,7 @@ mod backing;
 mod compact;
 mod distance_ops;
 mod neighbors;
+mod repair;
 mod state;
 mod tombstones;
 mod vectors;
