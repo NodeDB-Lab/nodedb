@@ -16,7 +16,24 @@ use super::super::SharedState;
 /// the first write after startup, then wire the session-handle audit sink.
 pub(super) fn hydrate_caches(state: &Arc<SharedState>) {
     SharedState::wire_session_handle_audit(state);
-    super::catalog_registries::load_catalog_caches(state, state.credentials.catalog());
+
+    let catalog = state.credentials.catalog();
+    if let Err(e) = state.audit_dml_cache.load_from_catalog(catalog) {
+        tracing::warn!(error = %e, "boot: failed to populate audit_dml_cache from catalog");
+    }
+    if let Err(e) = state.collection_to_database.load_from_catalog(catalog) {
+        tracing::warn!(
+            error = %e,
+            "boot: failed to populate collection_to_database cache from catalog"
+        );
+    }
+    if let Err(e) = state.idle_timeout_cache.load_from_catalog(catalog) {
+        tracing::warn!(
+            error = %e,
+            "boot: failed to populate idle_timeout_cache from catalog"
+        );
+    }
+    state.wire_wal_and_metrics();
 }
 
 /// Spawn the array GC background task. The handle is stored by the caller
@@ -32,6 +49,6 @@ pub(super) fn spawn_array_gc(state: &Arc<SharedState>) {
         Arc::clone(&state.shutdown),
         crate::control::array_sync::gc_task::DEFAULT_GC_INTERVAL,
     );
-    // `array_gc_handle` in SharedState stays None; main.rs can install the
+    // `array_gc_handle` in SharedState stays None; main.rs may install the
     // handle via Arc::get_mut after open() returns (before cloning the Arc).
 }

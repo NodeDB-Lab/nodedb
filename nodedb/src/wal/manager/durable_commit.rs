@@ -63,9 +63,15 @@ impl WalManager {
                     // advances to exactly what the fsync made durable, never past
                     // it.
                     let wal = std::sync::Arc::clone(&self.wal);
+                    let metrics = self.metrics();
                     let join = tokio::task::spawn_blocking(move || -> crate::Result<u64> {
                         let mut guard = wal.lock().unwrap_or_else(|p| p.into_inner());
+                        let start = std::time::Instant::now();
                         guard.sync().map_err(crate::Error::Wal)?;
+                        let elapsed_us = start.elapsed().as_micros() as u64;
+                        if let Some(m) = &metrics {
+                            m.record_wal_fsync(elapsed_us);
+                        }
                         // `next_lsn()` is the next LSN to assign; the highest LSN
                         // this sync made durable is one below it.
                         Ok(guard.next_lsn().saturating_sub(1))
@@ -113,6 +119,8 @@ mod tests {
     use super::*;
     use crate::types::{DatabaseId, TenantId, VShardId};
     use crate::wal::manager::NO_APPLY_KEY;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
 
     fn open_wal(dir: &std::path::Path) -> WalManager {
         WalManager::open_for_testing(&dir.join("test.wal")).expect("open wal")
@@ -140,6 +148,8 @@ mod tests {
     async fn wait_durable_fast_path_when_already_durable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let wal = open_wal(dir.path());
+        let metrics = Arc::new(crate::control::metrics::SystemMetrics::new());
+        wal.set_metrics(Arc::clone(&metrics));
         let lsn = wal
             .appender(NO_APPLY_KEY)
             .with_event_source(crate::event::EventSource::User)
@@ -151,8 +161,11 @@ mod tests {
             )
             .expect("append");
         wal.wait_durable(lsn).await.expect("first");
+        assert_eq!(metrics.wal_fsync_count.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.wal_fsync_seconds.count(), 1);
         // Second call is the fast path — no further fsync required.
         wal.wait_durable(lsn).await.expect("second");
+        assert_eq!(metrics.wal_fsync_count.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

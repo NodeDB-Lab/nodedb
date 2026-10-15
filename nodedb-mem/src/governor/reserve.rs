@@ -13,6 +13,7 @@ use crate::error::{MemError, Result};
 use crate::over_release::ReleaseIdentity;
 use crate::reservation_token::{ReservationParams, ReservationToken};
 use crate::reserve_scope::{ReserveScope, ReservedLayers};
+use crate::scoped_budget::ScopedBudget;
 
 /// Build the token both entry points return. They differ in how they reach
 /// a committed [`ReservedLayers`], never in what they build from one.
@@ -67,6 +68,24 @@ impl MemoryGovernor {
                 .read()
                 .unwrap_or_else(|p| p.into_inner());
             if let Some(budget) = map.get(&db) {
+                match budget.try_reserve(size) {
+                    Ok(arc) => scope.credit_database(arc),
+                    Err(denied) => {
+                        return Err(MemError::DatabaseBudgetExhausted {
+                            db,
+                            requested: size,
+                            available: budget.available(),
+                            limit: denied.limit,
+                        });
+                    }
+                }
+            } else {
+                drop(map);
+                let mut map = self
+                    .database_budgets
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner());
+                let budget = map.entry(db).or_insert_with(|| ScopedBudget::new(None));
                 match budget.try_reserve(size) {
                     Ok(arc) => scope.credit_database(arc),
                     Err(denied) => {
@@ -143,6 +162,14 @@ impl MemoryGovernor {
                 .read()
                 .unwrap_or_else(|p| p.into_inner());
             if let Some(budget) = map.get(&db) {
+                scope.credit_database(budget.credit(size));
+            } else {
+                drop(map);
+                let mut map = self
+                    .database_budgets
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner());
+                let budget = map.entry(db).or_insert_with(|| ScopedBudget::new(None));
                 scope.credit_database(budget.credit(size));
             }
         }
@@ -492,5 +519,19 @@ mod tests {
             "rejected reservations must not exhaust the database quota, got {:?}",
             tok.err()
         );
+    }
+
+    #[test]
+    fn uncapped_database_usage_tracks_allocation() {
+        let gov = MemoryGovernor::new(test_config()).unwrap();
+        assert_eq!(gov.database_usage_bytes(db()), 0);
+
+        let tok = gov
+            .try_reserve(db(), tenant(), EngineId::Vector, 512)
+            .unwrap();
+        assert_eq!(gov.database_usage_bytes(db()), 512);
+
+        drop(tok);
+        assert_eq!(gov.database_usage_bytes(db()), 0);
     }
 }

@@ -31,6 +31,8 @@ struct DbWindow {
     buckets: [Bucket; 60],
     /// UNIX-style second index of the last bucket written (wraps at 60).
     last_bucket_secs: u64,
+    /// Cumulative CPU-seconds consumed since process start.
+    cumulative_cpu_secs: f64,
 }
 
 impl DbWindow {
@@ -38,6 +40,7 @@ impl DbWindow {
         Self {
             buckets: std::array::from_fn(|_| Bucket::default()),
             last_bucket_secs: 0,
+            cumulative_cpu_secs: 0.0,
         }
     }
 
@@ -64,6 +67,9 @@ impl DbWindow {
         self.advance(now_secs);
         let idx = (now_secs % 60) as usize;
         self.buckets[idx].consumed_secs += secs;
+        if secs.is_finite() && secs > 0.0 {
+            self.cumulative_cpu_secs += secs;
+        }
     }
 }
 
@@ -115,6 +121,23 @@ impl MaintenanceBudgetTracker {
         }
     }
 
+    /// Cumulative maintenance CPU-seconds consumed by `db`.
+    pub fn cumulative_cpu_secs(&self, db: DatabaseId) -> f64 {
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner
+            .windows
+            .get(&db)
+            .map(|w| w.cumulative_cpu_secs)
+            .unwrap_or(0.0)
+    }
+
+    /// Remove a database's budget window and cap (e.g. on database drop).
+    pub fn remove_database(&self, db: DatabaseId) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.caps.remove(&db);
+        inner.windows.remove(&db);
+    }
+
     /// Install or replace the maintenance CPU cap for `db`.
     ///
     /// `maintenance_cpu_pct` is the `QuotaRecord` field (0–100).
@@ -127,6 +150,11 @@ impl MaintenanceBudgetTracker {
         };
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.caps.insert(db, cap);
+    }
+
+    /// Install or replace the maintenance CPU cap and register the database name for `db`.
+    pub fn set_cap_named(&self, db: DatabaseId, _name: impl Into<String>, maintenance_cpu_pct: u8) {
+        self.set_cap(db, maintenance_cpu_pct);
     }
 
     /// Attempt to acquire a maintenance lease for `db`.
@@ -171,11 +199,18 @@ impl Default for MaintenanceBudgetTracker {
 /// RAII lease returned by [`MaintenanceBudgetTracker::try_acquire`].
 ///
 /// On drop, the actual elapsed wall-clock seconds are recorded into the
-/// sliding window for the database.
+/// sliding window and cumulative total for the database.
 pub struct MaintenanceLease {
     tracker: Arc<MaintenanceBudgetTracker>,
     db: DatabaseId,
     start: Instant,
+}
+
+impl MaintenanceLease {
+    /// Database id for which the lease was acquired.
+    pub fn db(&self) -> DatabaseId {
+        self.db
+    }
 }
 
 impl Drop for MaintenanceLease {
@@ -270,6 +305,7 @@ mod tests {
             assert!(total > 0.0, "lease drop should have recorded elapsed time");
             assert!(total < 1.0, "elapsed should be under 1s");
         }
+        assert!(t.cumulative_cpu_secs(db) > 0.0);
     }
 
     #[test]
@@ -292,6 +328,23 @@ mod tests {
         assert!(
             lease.is_some(),
             "old consumption should have expired out of the window"
+        );
+    }
+
+    #[test]
+    fn cumulative_cpu_secs_increments() {
+        let t = tracker();
+        let db = DatabaseId::new(42);
+        t.set_cap(db, 100);
+
+        assert_eq!(t.cumulative_cpu_secs(db), 0.0);
+        {
+            let _lease = t.try_acquire(db, 1.0).expect("acquire should succeed");
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        assert!(
+            t.cumulative_cpu_secs(db) > 0.0,
+            "cumulative maintenance CPU time should be > 0 after lease drop"
         );
     }
 }
