@@ -95,16 +95,14 @@ impl TDigest {
         std::mem::size_of::<Self>() + self.centroids.capacity() * std::mem::size_of::<Centroid>()
     }
 
+    /// Sort the centroids by mean, then merge the closest pairs down to
+    /// `max_centroids`. `quantile_sorted` reads them in sorted order, so the
+    /// sort runs even when no merge is needed.
     fn compress(&mut self) {
+        self.centroids.sort_by(|a, b| a.mean.total_cmp(&b.mean));
         if self.centroids.len() <= self.max_centroids {
             return;
         }
-
-        self.centroids.sort_by(|a, b| {
-            a.mean
-                .partial_cmp(&b.mean)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
 
         let target = self.max_centroids;
         while self.centroids.len() > target {
@@ -177,6 +175,20 @@ mod tests {
     fn tdigest_empty() {
         let td = TDigest::new();
         assert!(td.quantile(0.5).is_nan());
+    }
+
+    /// Fewer values than the centroid limit are never merged, and their
+    /// quantiles still come from the sorted order, not the insertion order.
+    #[test]
+    fn tdigest_quantile_below_the_centroid_limit_reads_sorted_values() {
+        let mut td = TDigest::new();
+        for i in 0..100 {
+            td.add(f64::from(i % 10));
+        }
+        let p50 = td.quantile(0.5);
+        assert!((4.0..=5.0).contains(&p50), "p50 expected 4..=5, got {p50}");
+        assert_eq!(td.quantile(0.0), 0.0);
+        assert_eq!(td.quantile(1.0), 9.0);
     }
 
     #[test]
