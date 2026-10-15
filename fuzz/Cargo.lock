@@ -1435,7 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-codec"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "lz4_flex",
  "nalgebra",
@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-columnar"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "crc32c",
  "nodedb-codec",
@@ -1471,7 +1471,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-fts"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "arc-swap",
  "crc32c",
@@ -1506,19 +1506,17 @@ dependencies = [
 
 [[package]]
 name = "nodedb-mem"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "libc",
  "nodedb-types",
  "thiserror",
- "tikv-jemalloc-ctl",
- "tikv-jemallocator",
  "tracing",
 ]
 
 [[package]]
 name = "nodedb-query"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "hex",
  "nodedb-fts",
@@ -1536,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-spatial"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "h3o",
  "nodedb-mem",
@@ -1552,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-sql"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "chrono",
  "hex",
@@ -1567,7 +1565,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-strict"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "arrow",
  "nodedb-types",
@@ -1583,7 +1581,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-types"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "aes-gcm",
  "bytemuck",
@@ -1609,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "nodedb-wal"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "aes-gcm",
  "crc32c",
@@ -1714,12 +1712,6 @@ checksum = "8c7c9e0d9b23589f26070720bac724174bfec1083e82f7854cdd0267518343c0"
 dependencies = [
  "num-traits",
 ]
-
-[[package]]
-name = "paste"
-version = "1.0.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pco"
@@ -2442,37 +2434,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
-]
-
-[[package]]
-name = "tikv-jemalloc-ctl"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a184c43b8ab2f41df2733b55556e3f5f632f4aeaa205b1bb018f574b7f5f142"
-dependencies = [
- "libc",
- "paste",
- "tikv-jemalloc-sys",
-]
-
-[[package]]
-name = "tikv-jemalloc-sys"
-version = "0.7.1+5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a2825c78386b4ae0314074867860ba9577875de945f05992c38815cbec327f0"
-dependencies = [
- "cc",
- "libc",
-]
-
-[[package]]
-name = "tikv-jemallocator"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "249f09e49ab1609436f34c776e84231bead18d6a955f119f939bdc1d847561bd"
-dependencies = [
- "libc",
- "tikv-jemalloc-sys",
 ]
 
 [[package]]
