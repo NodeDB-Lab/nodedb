@@ -17,9 +17,14 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 nodedb-types = { workspace = true }
 
+[features]
+# jemalloc arena pinning and introspection. Enable it only in a binary that
+# installs jemalloc as its global allocator. Without it, arena calls are
+# no-ops and stats are absent, and no jemalloc C library is linked.
+jemalloc = ["dep:tikv-jemalloc-ctl"]
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tikv-jemallocator = { workspace = true }
-tikv-jemalloc-ctl = { workspace = true }
+tikv-jemalloc-ctl = { workspace = true, optional = true }
 libc = { workspace = true }
 
 [dev-dependencies]

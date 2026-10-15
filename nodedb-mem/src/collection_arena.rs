@@ -111,10 +111,10 @@ fn allocate_handle(tenant_id: u64, collection: &str) -> CollectionArenaHandle {
 
 /// Create a new jemalloc arena and return its index.
 ///
-/// On wasm32 the standard allocator is used; returns an error so that
+/// Without the `jemalloc` feature, or on wasm32, returns an error so that
 /// `allocate_handle` degrades to a no-dedicated-arena handle transparently.
 fn create_arena() -> Result<u32> {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "jemalloc", not(target_arch = "wasm32")))]
     {
         // SAFETY: `arenas.create` is a standard jemalloc mallctl that creates a
         // new arena and returns its unsigned index. No pointers are involved.
@@ -122,21 +122,20 @@ fn create_arena() -> Result<u32> {
             .map_err(|e| MemError::Jemalloc(format!("failed to create collection arena: {e:?}")))?;
         Ok(arena_idx)
     }
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(not(feature = "jemalloc"), target_arch = "wasm32"))]
     {
-        // wasm32 uses the standard allocator; per-collection arena isolation is unavailable.
         Err(MemError::Jemalloc(
-            "per-collection arenas are not available on wasm32".into(),
+            "per-collection arenas need the jemalloc feature on a non-wasm32 target".into(),
         ))
     }
 }
 
 /// Query the resident memory (bytes) of a jemalloc arena.
 ///
-/// On wasm32 the standard allocator is used; always returns an error so that
-/// callers degrade to returning `None`.
+/// Without the `jemalloc` feature, or on wasm32, always returns an error so
+/// that callers degrade to returning `None`.
 fn read_arena_resident(arena_index: u32) -> Result<usize> {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "jemalloc", not(target_arch = "wasm32")))]
     {
         // Bump the epoch so stats are up-to-date.
         if let Ok(mib) = tikv_jemalloc_ctl::epoch::mib() {
@@ -149,12 +148,11 @@ fn read_arena_resident(arena_index: u32) -> Result<usize> {
         unsafe { tikv_jemalloc_ctl::raw::read::<usize>(key.as_bytes()) }
             .map_err(|e| MemError::Jemalloc(format!("failed to read arena resident: {e:?}")))
     }
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(not(feature = "jemalloc"), target_arch = "wasm32"))]
     {
-        // wasm32 uses the standard allocator; arena resident stats are unavailable.
         let _ = arena_index;
         Err(MemError::Jemalloc(
-            "arena resident stats are not available on wasm32".into(),
+            "arena resident stats need the jemalloc feature on a non-wasm32 target".into(),
         ))
     }
 }

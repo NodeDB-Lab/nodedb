@@ -5,7 +5,7 @@
 //! Provides jemalloc introspection to report actual RSS, mapped memory,
 //! and arena statistics alongside the governor's logical budget tracking.
 //!
-//! On wasm32 the standard allocator is used; `SystemMemoryStats::query()`
+//! Without the `jemalloc` feature, or on wasm32, `SystemMemoryStats::query()`
 //! always returns `None` because jemalloc introspection is unavailable.
 
 /// System memory statistics from jemalloc.
@@ -43,10 +43,10 @@ pub struct SystemMemoryStats {
 impl SystemMemoryStats {
     /// Query jemalloc for current system memory statistics.
     ///
-    /// Returns `None` if jemalloc introspection is unavailable (including on
-    /// wasm32 where the standard allocator is used instead of jemalloc).
+    /// Returns `None` if jemalloc introspection is unavailable, including
+    /// without the `jemalloc` feature and on wasm32.
     pub fn query() -> Option<Self> {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(feature = "jemalloc", not(target_arch = "wasm32")))]
         {
             // Trigger a stats epoch refresh.
             let _ = tikv_jemalloc_ctl::epoch::advance();
@@ -76,9 +76,8 @@ impl SystemMemoryStats {
                 fragmentation_ratio,
             })
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(any(not(feature = "jemalloc"), target_arch = "wasm32"))]
         {
-            // wasm32 uses the standard allocator; jemalloc introspection is unavailable.
             None
         }
     }

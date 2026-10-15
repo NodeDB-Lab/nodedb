@@ -4281,7 +4281,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tikv-jemalloc-ctl",
- "tikv-jemallocator",
  "tokio",
  "tracing",
  "tracing-subscriber",

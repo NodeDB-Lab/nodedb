@@ -30,7 +30,7 @@ rust_decimal = { workspace = true, features = ["db-postgres"] }
 nodedb-cluster = { workspace = true, features = ["diagnostics"] }
 nodedb-raft = { workspace = true }
 nodedb-wal = { workspace = true, features = ["diagnostics"] }
-nodedb-mem = { workspace = true }
+nodedb-mem = { workspace = true, features = ["jemalloc"] }
 nodedb-fts = { workspace = true }
 nodedb-query = { workspace = true }
 nodedb-crdt = { workspace = true }
