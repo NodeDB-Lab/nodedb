@@ -67,9 +67,13 @@ impl HnswIndex {
 
         // Phase 2: Insert at each layer from min(new_layer, max_layer) down to 0.
         let insert_top = new_layer.min(self.max_layer);
+        let mut reached_live = false;
         for layer in (0..=insert_top).rev() {
             let ef = self.params.ef_construction;
             let candidates = search_layer(self, &probe, current_ep, ef, layer, None, 0);
+            if layer == 0 {
+                reached_live = !candidates.is_empty();
+            }
 
             let m = self.max_neighbors(layer);
             let selected = select_neighbors_heuristic(self, &candidates, m);
@@ -90,7 +94,11 @@ impl HnswIndex {
             }
         }
 
-        if new_layer > self.max_layer {
+        // `search_layer` admits only live nodes, and with fewer than `ef`
+        // results it visits every node it can reach. No layer-0 candidate
+        // means no live node is reachable from the entry point, so the new
+        // node becomes the entry point.
+        if !reached_live || new_layer > self.max_layer {
             self.entry_point = Some(new_id);
             self.max_layer = new_layer;
         }
@@ -125,7 +133,7 @@ impl HnswIndex {
 }
 
 /// Heuristic neighbor selection (Malkov & Yashunin, Algorithm 4).
-fn select_neighbors_heuristic(
+pub(crate) fn select_neighbors_heuristic(
     index: &HnswIndex,
     candidates: &[Candidate],
     m: usize,
@@ -350,6 +358,43 @@ mod tests {
             assert!(!results.is_empty());
             let found_vec = idx.get_vector(results[0].id).unwrap();
             assert_eq!(found_vec[0], target_old_id as f32);
+        }
+    }
+
+    /// An index whose every node is deleted keeps serving vectors inserted
+    /// afterwards. Many seeds, because one seed can give a new node a layer
+    /// above the deleted entry point, which hides the defect.
+    #[test]
+    fn insert_after_every_node_is_deleted_stays_searchable() {
+        for seed in 1..=32u64 {
+            let mut idx = HnswIndex::with_seed(
+                3,
+                HnswParams {
+                    m: 4,
+                    m0: 8,
+                    ef_construction: 32,
+                    metric: DistanceMetric::L2,
+                    dtype: VectorStorageDtype::F32,
+                },
+                seed,
+            );
+            idx.insert(vec![1.0, 0.0, 0.0]).unwrap();
+            assert!(idx.delete(0));
+            let fresh = [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.5, 0.5, 0.0]];
+            for v in fresh {
+                idx.insert(v.to_vec()).unwrap();
+            }
+            let ep = idx.entry_point().unwrap();
+            assert!(!idx.is_deleted(ep), "seed {seed}: entry point is deleted");
+            for (i, v) in fresh.iter().enumerate() {
+                let hits = idx.search(v, 1, 32).unwrap();
+                assert_eq!(
+                    hits.first().map(|h| h.id),
+                    Some(i as u32 + 1),
+                    "seed {seed}: node {} unreachable",
+                    i + 1
+                );
+            }
         }
     }
 }
