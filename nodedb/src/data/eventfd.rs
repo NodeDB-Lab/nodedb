@@ -14,7 +14,12 @@
 //! - **Non-Unix (wasm, Windows)**: unsupported; `EventFd::new()` errors.
 
 #[cfg(unix)]
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+#[cfg(unix)]
 use std::os::unix::io::RawFd;
+#[cfg(unix)]
+use std::sync::Arc;
+
 #[cfg(not(unix))]
 type RawFd = i32;
 
@@ -23,13 +28,15 @@ type RawFd = i32;
 /// `!Send` and `!Sync` — each core owns its own EventFd on the Data Plane side.
 /// The Control Plane holds a cloneable `EventFdNotifier` (which is `Send + Sync`).
 pub struct EventFd {
+    // Shared with every `EventFdNotifier`: the descriptor closes when the core
+    // and the last notifier are gone, never while a notifier can still write.
     #[cfg(target_os = "linux")]
-    fd: RawFd,
+    fd: Arc<OwnedFd>,
     // Self-pipe: read end lives with the core, the notifier writes to `write_fd`.
     #[cfg(all(unix, not(target_os = "linux")))]
-    read_fd: RawFd,
+    read_fd: OwnedFd,
     #[cfg(all(unix, not(target_os = "linux")))]
-    write_fd: RawFd,
+    write_fd: Arc<OwnedFd>,
 }
 
 impl EventFd {
@@ -43,7 +50,10 @@ impl EventFd {
             if fd < 0 {
                 return Err(crate::Error::Io(std::io::Error::last_os_error()));
             }
-            Ok(Self { fd })
+            // SAFETY: `fd` was just returned by eventfd2 and nothing else owns it.
+            Ok(Self {
+                fd: Arc::new(unsafe { OwnedFd::from_raw_fd(fd) }),
+            })
         }
         #[cfg(all(unix, not(target_os = "linux")))]
         {
@@ -52,19 +62,18 @@ impl EventFd {
             if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
                 return Err(crate::Error::Io(std::io::Error::last_os_error()));
             }
+            // SAFETY: both fds were just returned by pipe() and nothing else owns
+            // them. The owners close both if the flag setup below fails.
+            let (read_fd, write_fd) =
+                unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
             // Both ends non-blocking + close-on-exec: drain() must not block on
             // an empty pipe, and notify() must not block on a full one.
-            if let Err(e) = set_pipe_flags(fds[0]).and_then(|()| set_pipe_flags(fds[1])) {
-                // SAFETY: both fds were just returned by pipe() and are still open.
-                unsafe {
-                    libc::close(fds[0]);
-                    libc::close(fds[1]);
-                }
-                return Err(crate::Error::Io(e));
-            }
+            set_pipe_flags(read_fd.as_raw_fd())
+                .and_then(|()| set_pipe_flags(write_fd.as_raw_fd()))
+                .map_err(crate::Error::Io)?;
             Ok(Self {
-                read_fd: fds[0],
-                write_fd: fds[1],
+                read_fd,
+                write_fd: Arc::new(write_fd),
             })
         }
         #[cfg(not(unix))]
@@ -80,11 +89,11 @@ impl EventFd {
     pub fn as_raw_fd(&self) -> RawFd {
         #[cfg(target_os = "linux")]
         {
-            self.fd
+            self.fd.as_raw_fd()
         }
         #[cfg(all(unix, not(target_os = "linux")))]
         {
-            self.read_fd
+            self.read_fd.as_raw_fd()
         }
         #[cfg(not(unix))]
         {
@@ -103,7 +112,7 @@ impl EventFd {
             // SAFETY: reading 8 bytes from an eventfd is the documented API.
             let ret = unsafe {
                 libc::read(
-                    self.fd,
+                    self.fd.as_raw_fd(),
                     &mut buf as *mut u64 as *mut libc::c_void,
                     std::mem::size_of::<u64>(),
                 )
@@ -120,7 +129,7 @@ impl EventFd {
                 // SAFETY: reading into a valid local buffer from a non-blocking fd.
                 let ret = unsafe {
                     libc::read(
-                        self.read_fd,
+                        self.read_fd.as_raw_fd(),
                         buf.as_mut_ptr() as *mut libc::c_void,
                         buf.len(),
                     )
@@ -169,36 +178,19 @@ impl EventFd {
     pub fn notifier(&self) -> EventFdNotifier {
         #[cfg(target_os = "linux")]
         {
-            EventFdNotifier { fd: self.fd }
+            EventFdNotifier {
+                fd: Arc::clone(&self.fd),
+            }
         }
         #[cfg(all(unix, not(target_os = "linux")))]
         {
-            EventFdNotifier { fd: self.write_fd }
+            EventFdNotifier {
+                fd: Arc::clone(&self.write_fd),
+            }
         }
         #[cfg(not(unix))]
         {
             EventFdNotifier {}
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for EventFd {
-    fn drop(&mut self) {
-        // SAFETY: `self.fd` is owned by this EventFd and closed exactly once.
-        unsafe {
-            libc::close(self.fd);
-        }
-    }
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-impl Drop for EventFd {
-    fn drop(&mut self) {
-        // SAFETY: both pipe ends are owned by this EventFd and closed once.
-        unsafe {
-            libc::close(self.read_fd);
-            libc::close(self.write_fd);
         }
     }
 }
@@ -229,18 +221,18 @@ fn set_pipe_flags(fd: RawFd) -> std::io::Result<()> {
 
 /// A `Send + Sync` handle for signaling an `EventFd` from the Control Plane.
 ///
-/// The underlying fd is owned by the `EventFd` on the Data Plane side.
-/// The notifier only writes to it — it does not close the fd on drop.
-#[derive(Clone, Copy)]
+/// The notifier shares ownership of the descriptor with the `EventFd`. A core
+/// that exits, or panics while it opens its engines, drops its `EventFd`, and
+/// the descriptor stays open for as long as any notifier is alive. A notifier
+/// that held only the descriptor number would write into whatever file the
+/// kernel next handed that number to, such as a database file opened after the
+/// core died. The write (eventfd 8-byte / pipe 1-byte) is atomic and
+/// thread-safe, so a notifier can be cloned across threads.
+#[derive(Clone)]
 pub struct EventFdNotifier {
     #[cfg(unix)]
-    fd: RawFd,
+    fd: Arc<OwnedFd>,
 }
-
-// SAFETY: the underlying write (eventfd 8-byte / pipe 1-byte) is atomic and
-// thread-safe, so the notifier can be shared and copied across threads.
-unsafe impl Send for EventFdNotifier {}
-unsafe impl Sync for EventFdNotifier {}
 
 impl EventFdNotifier {
     /// Signal the Data Plane core to wake up.
@@ -252,7 +244,7 @@ impl EventFdNotifier {
             // This is atomic and thread-safe per the Linux man page.
             unsafe {
                 libc::write(
-                    self.fd,
+                    self.fd.as_raw_fd(),
                     &val as *const u64 as *const libc::c_void,
                     std::mem::size_of::<u64>(),
                 );
@@ -265,7 +257,11 @@ impl EventFdNotifier {
             // (EAGAIN) is intentionally ignored — it already means a wake is
             // pending, so the level-triggered poll will still fire.
             unsafe {
-                libc::write(self.fd, &val as *const u8 as *const libc::c_void, 1);
+                libc::write(
+                    self.fd.as_raw_fd(),
+                    &val as *const u8 as *const libc::c_void,
+                    1,
+                );
             }
         }
     }
@@ -344,5 +340,74 @@ mod tests {
     fn notifier_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<EventFdNotifier>();
+    }
+
+    /// A core that exits drops its `EventFd`. The Control Plane keeps notifying
+    /// it until it learns the core is gone, so the descriptor must outlive the
+    /// core. A closed descriptor number goes to the next `open()`, and the
+    /// notifier's 8-byte write then lands in that file.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn notifier_outlives_the_core_without_reaching_a_reused_descriptor() {
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+
+        let efd = EventFd::new().unwrap();
+        let notifier = efd.notifier();
+        let notifier_fd = notifier.fd.as_raw_fd();
+        drop(efd);
+
+        // The descriptor is still open: the kernel cannot hand its number out.
+        // SAFETY: F_GETFD only reads the descriptor's flags.
+        assert_ne!(
+            unsafe { libc::fcntl(notifier_fd, libc::F_GETFD) },
+            -1,
+            "the notifier's descriptor was closed with the core"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut files = Vec::new();
+        for i in 0..8 {
+            let file = std::fs::File::create(dir.path().join(format!("db-{i}.redb"))).unwrap();
+            assert_ne!(
+                file.as_raw_fd(),
+                notifier_fd,
+                "a file opened after the core died reused the notifier's descriptor"
+            );
+            files.push(file);
+        }
+
+        // Signals after the core died go to the eventfd, not to any file.
+        for _ in 0..4 {
+            notifier.notify();
+        }
+        for i in 0..8 {
+            let mut contents = Vec::new();
+            std::fs::File::open(dir.path().join(format!("db-{i}.redb")))
+                .unwrap()
+                .read_to_end(&mut contents)
+                .unwrap();
+            assert!(contents.is_empty(), "db-{i}.redb received notifier bytes");
+        }
+    }
+
+    #[test]
+    fn notifier_clones_keep_the_descriptor_until_the_last_one_drops() {
+        let efd = EventFd::new().unwrap();
+        let first = efd.notifier();
+        let second = first.clone();
+        drop(efd);
+        drop(first);
+        // `second` still signals without error and the descriptor is valid.
+        second.notify();
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            // SAFETY: F_GETFD only reads the descriptor's flags.
+            assert_ne!(
+                unsafe { libc::fcntl(second.fd.as_raw_fd(), libc::F_GETFD) },
+                -1
+            );
+        }
     }
 }
