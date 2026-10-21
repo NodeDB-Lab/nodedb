@@ -531,7 +531,7 @@ mod tests {
                 "one flush before the record and one after it"
             );
             assert_eq!(memtable_rows(&core), 0);
-            let stamp = &core.ts_replay_stamps.get(&key()).expect("stamp").rows;
+            let stamp = &core.ts_replay.stamps.get(&key()).expect("stamp").rows;
             assert!(stamp.skips(20), "the settle flush names the whole record");
         }
 

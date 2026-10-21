@@ -106,7 +106,7 @@ impl CoreLoop {
 
         // The rows the residual filters and RLS admit restrict every leg
         // before fusion, so the fused top-k counts only admitted rows.
-        let eligible = match TextRowGate::new(filters, rls_filters)
+        let eligible = match TextRowGate::new(filters, rls_filters, self.crs_context())
             .and_then(|gate| self.text_eligible_rows(task, tid, collection, &gate))
         {
             Ok(eligible) => combine_eligible(filter_bitmap, eligible),
@@ -172,7 +172,7 @@ impl CoreLoop {
         // The seed is named by the query itself, so it resolves to a surrogate
         // once; the walk then runs in the same identity currency as the vector
         // and text legs it will be fused with.
-        let expansion = self.expand_graph(GraphExpansionParams {
+        let expansion = match self.expand_graph(GraphExpansionParams {
             database_id: task.request.database_id.as_u64(),
             tid,
             seeds: GraphSeeds::Names(&[graph_seed_id]),
@@ -182,7 +182,12 @@ impl CoreLoop {
             max_visited: self.query_tuning.bfs_memory_budget_bytes
                 / self.query_tuning.bfs_bytes_per_node,
             collection,
-        });
+            // A hybrid search walks the current graph.
+            scope: &nodedb_physical::physical_plan::GraphReadScope::default(),
+        }) {
+            Ok(expansion) => expansion,
+            Err(e) => return self.response_error(task, e),
+        };
         // 4. Build ranked lists.
 
         // Inside a transaction, read-your-own-writes: the vector and text legs

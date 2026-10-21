@@ -57,7 +57,11 @@ fn split_brain_unique_violation_with_compensation() {
     };
 
     assert!(matches!(
-        validator.validate(&leader_state, &agent_b_change),
+        validator.validate(
+            &leader_state,
+            &agent_b_change,
+            &nodedb_crs::CrsContext::builtin_only()
+        ),
         ValidationOutcome::Accepted
     ));
 
@@ -94,6 +98,7 @@ fn split_brain_unique_violation_with_compensation() {
         nodedb_crdt::CrdtAuthContext::default(),
         &agent_a_change,
         b"agent-a-delta".to_vec(),
+        &nodedb_crs::CrsContext::builtin_only(),
     );
 
     assert!(result.is_err());
@@ -129,7 +134,11 @@ fn split_brain_unique_violation_with_compensation() {
 
     // The retry succeeds.
     assert!(matches!(
-        validator.validate(&leader_state, &retry_change),
+        validator.validate(
+            &leader_state,
+            &retry_change,
+            &nodedb_crs::CrsContext::builtin_only()
+        ),
         ValidationOutcome::Accepted
     ));
     assert!(validator.dlq().is_empty());
@@ -161,6 +170,7 @@ fn offline_agent_references_deleted_user() {
         nodedb_crdt::CrdtAuthContext::default(),
         &change,
         b"post-delta".to_vec(),
+        &nodedb_crs::CrsContext::builtin_only(),
     );
 
     assert!(result.is_err());
@@ -214,7 +224,12 @@ fn pre_validation_saves_raft_roundtrip() {
         ],
     };
 
-    match pre_validate::pre_validate(&validator, &leader_state, &change) {
+    match pre_validate::pre_validate(
+        &validator,
+        &leader_state,
+        &change,
+        &nodedb_crs::CrsContext::builtin_only(),
+    ) {
         PreValidationResult::FastReject { constraint, .. } => {
             assert_eq!(constraint, "users_email_unique");
         }
@@ -275,7 +290,7 @@ fn not_null_violation_hints_provide_field() {
         ],
     };
 
-    match validator.validate(&state, &change) {
+    match validator.validate(&state, &change, &nodedb_crs::CrsContext::builtin_only()) {
         ValidationOutcome::Rejected(violations) => {
             assert_eq!(violations.len(), 1);
             match &violations[0].hint {

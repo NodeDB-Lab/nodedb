@@ -55,6 +55,7 @@ struct SliceArgs<'a> {
     system_time: nodedb_types::SystemTimeScope,
     valid_at_ms: Option<i64>,
     zone_msgpack: &'a [u8],
+    physical: bool,
     txn_id: Option<TxnId>,
 }
 
@@ -65,9 +66,10 @@ struct AggArgs<'a> {
     group_by_dim: i32,
     slice_tile_keys: &'a [u64],
     prefix_bits: u8,
-    system_as_of: Option<i64>,
+    system_time: nodedb_types::SystemTimeScope,
     valid_at_ms: Option<i64>,
     region_msgpack: &'a [u8],
+    physical: bool,
     txn_id: Option<TxnId>,
 }
 
@@ -123,6 +125,7 @@ impl ClusterArrayExecutor {
                 system_time,
                 valid_at_ms,
                 zone_msgpack,
+                physical,
             } => {
                 self.execute_slice(SliceArgs {
                     array_id,
@@ -134,6 +137,7 @@ impl ClusterArrayExecutor {
                     system_time: *system_time,
                     valid_at_ms: *valid_at_ms,
                     zone_msgpack,
+                    physical: *physical,
                     txn_id,
                 })
                 .await
@@ -146,9 +150,10 @@ impl ClusterArrayExecutor {
                 group_by_dim,
                 slice_tile_keys,
                 prefix_bits,
-                system_as_of,
+                system_time,
                 valid_at_ms,
                 region_msgpack,
+                physical,
             } => {
                 self.execute_agg(AggArgs {
                     array_id,
@@ -157,9 +162,10 @@ impl ClusterArrayExecutor {
                     group_by_dim: *group_by_dim,
                     slice_tile_keys,
                     prefix_bits: *prefix_bits,
-                    system_as_of: *system_as_of,
+                    system_time: *system_time,
                     valid_at_ms: *valid_at_ms,
                     region_msgpack,
+                    physical: *physical,
                     txn_id,
                 })
                 .await
@@ -171,7 +177,7 @@ impl ClusterArrayExecutor {
                 op,
                 attr_idx,
                 prefix_bits,
-                system_as_of,
+                system_time,
                 valid_at_ms,
             } => {
                 self.execute_elementwise(super::elementwise::ElementwiseArgs {
@@ -180,7 +186,7 @@ impl ClusterArrayExecutor {
                     op: *op,
                     attr_idx: *attr_idx,
                     prefix_bits: *prefix_bits,
-                    system_as_of: *system_as_of,
+                    system_time: *system_time,
                     valid_at_ms: *valid_at_ms,
                     txn_id,
                 })
@@ -241,6 +247,7 @@ impl ClusterArrayExecutor {
             system_time,
             valid_at_ms,
             zone_msgpack,
+            physical,
             txn_id,
         } = args;
         let coordinator = ArrayCoordinator::for_slice(
@@ -270,6 +277,7 @@ impl ClusterArrayExecutor {
             valid_at_ms,
             txn_id: txn_id.map(TxnId::as_u64),
             zone_msgpack: zone_msgpack.to_vec(),
+            physical,
         };
         let result = coordinator
             .coord_slice(req, limit, system_time)
@@ -301,9 +309,10 @@ impl ClusterArrayExecutor {
             group_by_dim,
             slice_tile_keys,
             prefix_bits,
-            system_as_of,
+            system_time,
             valid_at_ms,
             region_msgpack,
+            physical,
             txn_id,
         } = args;
         let coordinator = ArrayCoordinator::for_slice(
@@ -325,10 +334,11 @@ impl ClusterArrayExecutor {
             group_by_dim,
             cell_filter_msgpack: vec![],
             shard_bucket: None,
-            system_as_of,
+            system_time,
             valid_at_ms,
             txn_id: txn_id.map(TxnId::as_u64),
             region_msgpack: region_msgpack.to_vec(),
+            physical,
         };
         let agg = coordinator.coord_agg(req).await.map_err(coord_err)?;
         note_array_reads(array_id, &agg.read_versions);
@@ -346,7 +356,7 @@ impl ClusterArrayExecutor {
         // only. This ensures payload_to_response → decode_payload_to_json emits
         // the same JSON structure for both single-node and cluster agg queries —
         // including the below-horizon signal, which must not be silently dropped.
-        let emit_horizon = system_as_of.is_some() || valid_at_ms.is_some();
+        let emit_horizon = system_time.is_temporal() || valid_at_ms.is_some();
         let rows = finalize_agg_partials(
             &agg.partials,
             &reducer,

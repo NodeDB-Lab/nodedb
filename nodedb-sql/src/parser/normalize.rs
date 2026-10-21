@@ -81,13 +81,14 @@ pub fn normalize_insert_column(name: &sqlparser::ast::ObjectName) -> Result<Stri
     normalize_object_name_checked(name)
 }
 
-/// Normalize a table name, accepting the two system-schema qualifiers that name
-/// catalog relations (NodeDB has no user schemas, so any other qualifier is
-/// rejected by [`normalize_object_name_checked`]):
+/// Normalize a table name, accepting the three system-schema qualifiers that
+/// name catalog relations (NodeDB has no user schemas, so any other qualifier
+/// is rejected by [`normalize_object_name_checked`]):
 ///
 /// - `pg_catalog.pg_class` → `pg_class` (the `pg_catalog` schema is implicit).
 /// - `_system.audit_log` → `_system.audit_log` (the `_system.` prefix is part of
 ///   the catalog relation's name).
+/// - `nodedb.spatial_ref_sys` → `nodedb.spatial_ref_sys`, the same way.
 ///
 /// These are resolved like any other relation through `SqlCatalog::resolve_relation`.
 fn normalize_table_name(name: &sqlparser::ast::ObjectName) -> Result<String> {
@@ -106,6 +107,7 @@ fn normalize_table_name(name: &sqlparser::ast::ObjectName) -> Result<String> {
         match parts[0].as_str() {
             "pg_catalog" => return Ok(parts[1].clone()),
             "_system" => return Ok(format!("_system.{}", parts[1])),
+            "nodedb" => return Ok(format!("nodedb.{}", parts[1])),
             _ => {}
         }
     }
@@ -120,6 +122,7 @@ fn normalize_table_name(name: &sqlparser::ast::ObjectName) -> Result<String> {
 ///
 /// - `pg_catalog.pg_class` → `pg_class`.
 /// - `_system.audit_log` → `_system.audit_log`.
+/// - `nodedb.spatial_ref_sys` → `nodedb.spatial_ref_sys`.
 /// - Any other qualifier is rejected as schema-qualified.
 /// - An unqualified token decodes through [`check_identifier`].
 ///
@@ -139,6 +142,7 @@ pub fn check_relation_token(raw_name: &str) -> Result<String> {
         match parts[0].as_str() {
             "pg_catalog" => return Ok(parts[1].clone()),
             "_system" => return Ok(format!("_system.{}", parts[1])),
+            "nodedb" => return Ok(format!("nodedb.{}", parts[1])),
             _ => {}
         }
     }
@@ -298,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn relation_tokens_accept_the_two_system_qualifiers() {
+    fn relation_tokens_accept_the_system_qualifiers() {
         assert_eq!(
             check_relation_token("_system.audit_log").expect("system relation"),
             "_system.audit_log"
@@ -306,6 +310,10 @@ mod tests {
         assert_eq!(
             check_relation_token("pg_catalog.pg_class").expect("catalog relation"),
             "pg_class"
+        );
+        assert_eq!(
+            check_relation_token("nodedb.spatial_ref_sys").expect("nodedb relation"),
+            "nodedb.spatial_ref_sys"
         );
         assert_eq!(check_relation_token("MiXeD").expect("bare"), "mixed");
         assert_eq!(check_relation_token("\"MiXeD\"").expect("quoted"), "MiXeD");

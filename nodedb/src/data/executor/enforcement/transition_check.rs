@@ -21,6 +21,7 @@ pub fn check_transition_predicates(
     checks: &[TransitionCheckDef],
     old_doc: &serde_json::Value,
     new_doc: &serde_json::Value,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<(), ErrorCode> {
     let old_val = nodedb_types::Value::from(old_doc.clone());
     let new_val = nodedb_types::Value::from(new_doc.clone());
@@ -32,7 +33,7 @@ pub fn check_transition_predicates(
         // rather than under this check's own 23xxx violation code.
         let result = check
             .predicate
-            .eval_with_old(&new_val, &old_val)
+            .eval_with_old(&new_val, &old_val, crs)
             .map_err(ErrorCode::from)?;
         let passed = match result {
             nodedb_types::Value::Bool(b) => b,
@@ -70,7 +71,16 @@ mod tests {
         );
         let old = serde_json::json!({"x": 1});
         let new = serde_json::json!({"x": 2});
-        assert!(check_transition_predicates("coll", &[check], &old, &new).is_ok());
+        assert!(
+            check_transition_predicates(
+                "coll",
+                &[check],
+                &old,
+                &new,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -81,7 +91,16 @@ mod tests {
         );
         let old = serde_json::json!({"x": 1});
         let new = serde_json::json!({"x": 2});
-        assert!(check_transition_predicates("coll", &[check], &old, &new).is_err());
+        assert!(
+            check_transition_predicates(
+                "coll",
+                &[check],
+                &old,
+                &new,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -100,14 +119,27 @@ mod tests {
         let old = serde_json::json!({"sealed": false, "amount": 100});
         let new = serde_json::json!({"sealed": false, "amount": 200});
         assert!(
-            check_transition_predicates("coll", std::slice::from_ref(&check), &old, &new).is_ok()
+            check_transition_predicates(
+                "coll",
+                std::slice::from_ref(&check),
+                &old,
+                &new,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_ok()
         );
 
         // OLD.sealed = true → predicate fails
         let old_sealed = serde_json::json!({"sealed": true, "amount": 100});
         assert!(
-            check_transition_predicates("coll", std::slice::from_ref(&check), &old_sealed, &new)
-                .is_err()
+            check_transition_predicates(
+                "coll",
+                std::slice::from_ref(&check),
+                &old_sealed,
+                &new,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_err()
         );
     }
 
@@ -127,12 +159,28 @@ mod tests {
         let old = serde_json::json!({"amount": 100});
         let new = serde_json::json!({"amount": 200});
         assert!(
-            check_transition_predicates("coll", std::slice::from_ref(&check), &old, &new).is_ok()
+            check_transition_predicates(
+                "coll",
+                std::slice::from_ref(&check),
+                &old,
+                &new,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_ok()
         );
 
         // 50 >= 100 → fail
         let new_less = serde_json::json!({"amount": 50});
-        assert!(check_transition_predicates("coll", &[check], &old, &new_less).is_err());
+        assert!(
+            check_transition_predicates(
+                "coll",
+                &[check],
+                &old,
+                &new_less,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -142,14 +190,32 @@ mod tests {
         let old = serde_json::json!({});
         let new = serde_json::json!({});
         // c1 passes but c2 fails → overall failure
-        assert!(check_transition_predicates("coll", &[c1, c2], &old, &new).is_err());
+        assert!(
+            check_transition_predicates(
+                "coll",
+                &[c1, c2],
+                &old,
+                &new,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn empty_checks_passes() {
         let old = serde_json::json!({"x": 1});
         let new = serde_json::json!({"x": 2});
-        assert!(check_transition_predicates("coll", &[], &old, &new).is_ok());
+        assert!(
+            check_transition_predicates(
+                "coll",
+                &[],
+                &old,
+                &new,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -158,7 +224,16 @@ mod tests {
         let check = make_check("null_check", SqlExpr::OldColumn("nonexistent".into()));
         let old = serde_json::json!({"x": 1});
         let new = serde_json::json!({"x": 2});
-        assert!(check_transition_predicates("coll", &[check], &old, &new).is_err());
+        assert!(
+            check_transition_predicates(
+                "coll",
+                &[check],
+                &old,
+                &new,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -181,7 +256,13 @@ mod tests {
         let old = serde_json::json!({"divisor": 0});
         let new = serde_json::json!({"amount": 10});
         assert!(matches!(
-            check_transition_predicates("coll", &[check], &old, &new),
+            check_transition_predicates(
+                "coll",
+                &[check],
+                &old,
+                &new,
+                &nodedb_crs::CrsContext::builtin_only()
+            ),
             Err(ErrorCode::DivisionByZero)
         ));
     }

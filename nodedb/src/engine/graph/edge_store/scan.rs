@@ -117,7 +117,7 @@ impl EdgeStore {
             let Some((coll, src, label, dst, sys)) = parse_versioned_edge_key(composite) else {
                 continue;
             };
-            if sys > cutoff || visibility.hidden(db, t, coll, composite, sys, cutoff)? {
+            if !visibility.visible_at(db, t, coll, composite, sys, cutoff)? {
                 continue;
             }
             let base: TenantBaseKey = (
@@ -305,7 +305,7 @@ impl EdgeStore {
             let Some((coll, src, label, dst, sys)) = parse_versioned_edge_key(composite) else {
                 continue;
             };
-            if visibility.hidden(db, t, coll, composite, sys, i64::MAX)? {
+            if !visibility.visible_at(db, t, coll, composite, sys, i64::MAX)? {
                 continue;
             }
             let base = (

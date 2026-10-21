@@ -120,7 +120,7 @@ impl CoreLoop {
         let Some(index) = self.text_index(task, p.tid, p.collection, p.field)? else {
             return Ok(Vec::new());
         };
-        let gate = TextRowGate::new(p.filters, p.rls_filters)?;
+        let gate = TextRowGate::new(p.filters, p.rls_filters, self.crs_context())?;
         let eligible = combine_eligible(
             p.prefilter,
             self.text_eligible_rows(task, p.tid, p.collection, &gate)?,

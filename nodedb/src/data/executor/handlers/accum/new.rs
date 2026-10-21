@@ -59,9 +59,7 @@ impl AggAccum {
             },
             "stddev" | "stddev_pop" | "stddev_samp" | "variance" | "var_pop" | "var_samp"
             | "ts_stddev" => AggAccum::Welford {
-                n: 0,
-                mean: 0.0,
-                m2: 0.0,
+                moments: nodedb_types::array_agg::Moments::default(),
             },
             "approx_count_distinct" => AggAccum::Hll {
                 hll: nodedb_types::approx::HyperLogLog::new(),

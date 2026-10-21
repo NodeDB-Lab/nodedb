@@ -58,6 +58,7 @@ pub(super) async fn scatter_round_zero(
     let GraphRead {
         txn_id,
         linearizable,
+        scope,
     } = read;
     // Local cores: fan to all and unwrap each `{rows, frontier}` envelope. The
     // active `txn_id` is threaded onto this LOCAL leg so each core merges the
@@ -71,6 +72,7 @@ pub(super) async fn scatter_round_zero(
         query: query_bytes.to_vec(),
         frontier_bitmap: None,
         cluster_mode: true,
+        scope,
     });
     let local_fut = broadcast_match_to_all_cores(
         state,
@@ -93,6 +95,7 @@ pub(super) async fn scatter_round_zero(
             query: query_bytes.to_vec(),
             frontier_bitmap: None,
             cluster_mode: true,
+            scope,
         });
         let route = TaskRoute {
             plan,

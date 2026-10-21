@@ -12,7 +12,8 @@
 
 use sqlparser::ast;
 
-use nodedb_types::geometry::{Geometry, Srid};
+use nodedb_crs::CrsContext;
+use nodedb_types::geometry::Geometry;
 
 use super::helpers::{expect_string_array, expect_string_literal, is_null_literal};
 use crate::catalog::ArrayCatalogView;
@@ -27,10 +28,11 @@ pub(super) fn parse_optional_zone(
     at: usize,
     name: &str,
     view: &ArrayCatalogView,
+    crs: &CrsContext<'_>,
 ) -> Result<Option<ArrayZoneAst>> {
     match (args.get(at), args.get(at + 1)) {
         (Some(wkt), Some(dims)) if !is_null_literal(wkt) => {
-            parse_zone_args(func, wkt, dims, name, view).map(Some)
+            parse_zone_args(func, wkt, dims, name, view, crs).map(Some)
         }
         (Some(_), Some(dims)) if !is_null_literal(dims) => Err(SqlError::Unsupported {
             detail: format!("{func}: zone_dims needs a zone_wkt; pass both, or neither"),
@@ -46,22 +48,26 @@ fn parse_zone_args(
     dims_expr: &ast::Expr,
     name: &str,
     view: &ArrayCatalogView,
+    crs: &CrsContext<'_>,
 ) -> Result<ArrayZoneAst> {
     let wkt = expect_string_literal(wkt_expr, &format!("{func} zone"))?;
-    let mut ewkt =
-        nodedb_spatial::geometry_from_ewkt(&wkt).ok_or_else(|| SqlError::InvalidFunction {
-            detail: format!("{func}: zone is not valid WKT or EWKT: {wkt}"),
-        })?;
+    let ewkt = nodedb_spatial::geometry_from_ewkt(&wkt).map_err(|e| SqlError::InvalidFunction {
+        detail: format!("{func}: zone is not valid WKT or EWKT: {e}"),
+    })?;
+    let ewkt_srid = ewkt.srid;
+    // A zone is a 2D region: Z and M do not take part in membership.
+    let (_, mut zone, _) = ewkt.geometry.into_parts();
     // Membership is an even-odd test, so ring direction never changes it.
     // Orienting first accepts a zone drawn clockwise.
-    nodedb_spatial::orient_rings(&mut ewkt.geometry);
-    let issues = nodedb_spatial::validate::validate_geometry(&ewkt.geometry);
+    nodedb_spatial::orient_rings(&mut zone);
+    let issues = nodedb_spatial::validate::validate_geometry(&zone);
     if !issues.is_empty() {
+        let reasons: Vec<String> = issues.iter().map(ToString::to_string).collect();
         return Err(SqlError::InvalidFunction {
-            detail: format!("{func}: invalid zone: {}", issues.join("; ")),
+            detail: format!("{func}: invalid zone: {}", reasons.join("; ")),
         });
     }
-    let polygons = match ewkt.geometry {
+    let polygons = match zone {
         Geometry::Polygon { coordinates } => vec![coordinates],
         Geometry::MultiPolygon { coordinates } => coordinates,
         other => {
@@ -81,7 +87,7 @@ fn parse_zone_args(
             &format!("{func} zone dims"),
         )?)
     };
-    let (x_dim, y_dim, srid) = match ewkt.srid {
+    let (x_dim, y_dim, srid) = match ewkt_srid {
         None => {
             let dims = dims.ok_or_else(|| SqlError::Unsupported {
                 detail: format!(
@@ -93,9 +99,11 @@ fn parse_zone_args(
             (x_dim, y_dim, None)
         }
         Some(code) => {
-            let srid = Srid::from_code(code).map_err(|e| SqlError::DataException {
-                detail: format!("{func}: zone SRID: {e}"),
-            })?;
+            let srid = crs
+                .resolve_code(code)
+                .map_err(|e| SqlError::DataException {
+                    detail: format!("{func}: zone SRID: {e}"),
+                })?;
             let (x_dim, y_dim) = georef_axes(func, name, view, dims)?;
             (x_dim, y_dim, Some(srid.code()))
         }
@@ -227,6 +235,7 @@ mod tests {
                     name: "b1".into(),
                     dtype: ArrayAttrType::Float64,
                     nullable: true,
+                    meta: Default::default(),
                 }],
                 tile_extents: vec![64, 64],
                 georef,
@@ -343,10 +352,10 @@ mod tests {
     }
 
     #[test]
-    fn an_unsupported_zone_srid_is_a_data_exception() {
+    fn an_undefined_zone_srid_is_a_data_exception() {
         let err = plan(
             "SELECT * FROM ARRAY_AGG('img', 'b1', 'sum', NULL, NULL, \
-             'SRID=2154;POLYGON((0 0, 1 0, 1 1, 0 0))', NULL)",
+             'SRID=999;POLYGON((0 0, 1 0, 1 1, 0 0))', NULL)",
         )
         .expect_err("refused");
         assert!(matches!(err, SqlError::DataException { .. }), "{err:?}");

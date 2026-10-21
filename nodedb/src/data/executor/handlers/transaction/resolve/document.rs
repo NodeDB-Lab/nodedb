@@ -10,7 +10,7 @@
 //! * A staged value ([`Staged::Put`]) → `RecordType::Put`,
 //!   `(collection, document_id, value, Option<SyncProvenance>, surrogate)`. For
 //!   a `bitemporal=true` collection this becomes an 8-tuple that appends the
-//!   resolve-time stamp `(sys_from_ms, valid_from_ms, valid_until_ms)` so replay
+//!   resolve-time stamp `(sys_from, valid_from_ms, valid_until_ms)` so replay
 //!   restores the row on the versioned store at the same stamp the commit-time
 //!   install uses. The replay decoder distinguishes the two forms by arity.
 //! * A staged tombstone ([`Staged::Tombstone`]) → `RecordType::Delete`,
@@ -129,7 +129,7 @@ pub(super) fn serialize_document_collection(
                         value,
                         prov,
                         surrogate,
-                        stamp.sys_from_ms,
+                        stamp.sys_from,
                         stamp.valid_from_ms,
                         stamp.valid_until_ms,
                     )),
@@ -156,7 +156,7 @@ pub(super) fn serialize_document_collection(
                 surrogate,
                 overlay
                     .get_bitemporal(coll_key, surrogate)
-                    .map(|stamp| stamp.sys_from_ms),
+                    .map(|stamp| stamp.sys_from),
             )?),
         }
     }
@@ -165,16 +165,16 @@ pub(super) fn serialize_document_collection(
 
 /// The `RecordType::Delete` redo sub-record for one row:
 /// `(collection, document_id, Option<SyncProvenance>, surrogate)`, with the
-/// tombstone's system time appended when `sys_from_ms` is `Some` (a
+/// tombstone's system-time ordinal appended when `sys_from` is `Some` (a
 /// `bitemporal=true` collection).
 fn delete_sub_record(
     collection: &str,
     doc_id: &RowIdentity,
     surrogate: u32,
-    sys_from_ms: Option<i64>,
+    sys_from: Option<i64>,
 ) -> crate::Result<RedoSubRecord> {
     let prov: Option<SyncProvenance> = None;
-    let payload = match sys_from_ms {
+    let payload = match sys_from {
         Some(sys) => zerompk::to_msgpack_vec(&(collection, doc_id.as_str(), prov, surrogate, sys)),
         None => zerompk::to_msgpack_vec(&(collection, doc_id.as_str(), prov, surrogate)),
     }
@@ -253,9 +253,9 @@ pub(super) struct TruncatedBaseRows<'a> {
     pub strict_schema: Option<&'a StrictSchema>,
     /// The collection's declared `PRIMARY KEY` column, from the plan.
     pub declared_primary_key: Option<&'a str>,
-    /// The truncate's system time on a `bitemporal=true` collection. Every
-    /// removed row's tombstone carries it.
-    pub sys_from_ms: Option<i64>,
+    /// Each removed row's tombstone ordinal, keyed by surrogate, on a
+    /// `bitemporal=true` collection. `None` on any other.
+    pub tombstone_sys_from: Option<&'a BTreeMap<u32, i64>>,
 }
 
 /// Append one `RecordType::Delete` redo sub-record per base row a staged
@@ -271,7 +271,7 @@ pub(super) fn serialize_truncated_base_rows(
         rows,
         strict_schema,
         declared_primary_key,
-        sys_from_ms,
+        tombstone_sys_from,
     } = params;
     let mut entries: BTreeMap<RowIdentity, u32> = BTreeMap::new();
     for (key, body) in rows {
@@ -279,12 +279,18 @@ pub(super) fn serialize_truncated_base_rows(
         entries.insert(identity, key.surrogate().as_u32());
     }
     for (doc_id, surrogate) in &entries {
-        ops.push(delete_sub_record(
-            collection,
-            doc_id,
-            *surrogate,
-            sys_from_ms,
-        )?);
+        let sys_from = match tombstone_sys_from {
+            Some(stamps) => Some(stamps.get(surrogate).copied().ok_or_else(|| {
+                crate::Error::Internal {
+                    detail: format!(
+                        "document resolve: truncated row '{doc_id}' of '{collection}' has no \
+                         tombstone ordinal"
+                    ),
+                }
+            })?),
+            None => None,
+        };
+        ops.push(delete_sub_record(collection, doc_id, *surrogate, sys_from)?);
     }
     Ok(())
 }
@@ -420,7 +426,7 @@ mod tests {
             &coll_key("hist"),
             11,
             BitemporalStamp {
-                sys_from_ms: 4_242,
+                sys_from: 4_242,
                 valid_from_ms: i64::MIN,
                 valid_until_ms: i64::MAX,
             },

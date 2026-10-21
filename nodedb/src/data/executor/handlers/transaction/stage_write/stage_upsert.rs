@@ -133,7 +133,12 @@ impl CoreLoop {
         let merged = if on_conflict_updates.is_empty() {
             merge_values(existing_val, new_val)
         } else {
-            apply_on_conflict_updates(existing_val, &new_val, on_conflict_updates)?
+            apply_on_conflict_updates(
+                existing_val,
+                &new_val,
+                on_conflict_updates,
+                &self.crs_context(),
+            )?
         };
 
         // Apply typeguards and generated columns to the merged row, as the
@@ -145,6 +150,7 @@ impl CoreLoop {
                     config,
                     &mut doc,
                     GuardScope::Assigned(&assigned),
+                    &self.crs_context(),
                 )
                 .map_err(crate::Error::DataPlane)?;
                 nodedb_types::Value::from(doc)
@@ -153,8 +159,8 @@ impl CoreLoop {
         };
 
         let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
-        let sys_from_ms = if bitemporal {
-            self.bitemporal_now_ms()
+        let sys_from = if bitemporal {
+            self.bitemporal_ordinal()
         } else {
             0
         };
@@ -164,7 +170,7 @@ impl CoreLoop {
                 strict_format::value_to_binary_tuple_bitemporal(
                     &merged,
                     schema,
-                    sys_from_ms,
+                    sys_from,
                     i64::MIN,
                     i64::MAX,
                     ctx.collection,

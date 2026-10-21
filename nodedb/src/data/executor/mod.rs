@@ -15,6 +15,7 @@ mod dispatch;
 pub(crate) mod doc_format;
 pub mod enforcement;
 pub(crate) mod fts_text;
+mod graph_label_apply;
 mod graph_label_checkpoint;
 pub mod handlers;
 mod identity_column;

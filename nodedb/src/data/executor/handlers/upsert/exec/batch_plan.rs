@@ -80,7 +80,12 @@ impl CoreLoop {
                             detail: "failed to decode document for upsert".into(),
                         }
                     })?;
-                    let merged = merge_upsert_body(existing, value, on_conflict_updates)?;
+                    let merged = merge_upsert_body(
+                        existing,
+                        value,
+                        on_conflict_updates,
+                        &self.crs_context(),
+                    )?;
                     key.post = merged.body;
                     if let Some(assigned) = &mut key.assigned {
                         assigned.extend(merged.assigned);
@@ -104,6 +109,7 @@ impl CoreLoop {
                                 decode_stored_row(current, scope.strict_schema)?,
                                 value,
                                 on_conflict_updates,
+                                &self.crs_context(),
                             )?;
                             (merged.body, Some(merged.assigned))
                         }
@@ -125,12 +131,15 @@ impl CoreLoop {
         for key in &keys {
             rls_write_gate::admit_stored_row(
                 rls_write_check,
-                &key.post,
-                &key.identity,
-                None,
-                scope.identity_column,
+                rls_write_gate::GatedRow {
+                    body: &key.post,
+                    identity: &key.identity,
+                    strict_schema: None,
+                    identity_column: scope.identity_column,
+                },
                 scope.tid,
                 scope.collection,
+                &self.crs_context(),
             )
             .map_err(ErrorCode::from)?;
         }

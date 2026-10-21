@@ -96,8 +96,17 @@ impl CoreLoop {
         // applied to the computed bytes rather than to a duplicate of the
         // increment arithmetic out here.
         let declared = self.declared_columns_of(did, tid, collection).to_vec();
+        let crs = self.crs_context();
         let admit = |image: &[u8]| {
-            fit_and_admit_kv_image(image, &declared, rls_write_check, key, tid, collection)
+            fit_and_admit_kv_image(
+                image,
+                &declared,
+                rls_write_check,
+                key,
+                tid,
+                collection,
+                &crs,
+            )
         };
         match self.kv_engine.incr(
             crate::engine::kv::AtomicKeyCtx {
@@ -165,8 +174,17 @@ impl CoreLoop {
             .unwrap_or_else(current_ms);
         // Same engine-internal compute-and-persist as `Incr` — see there.
         let declared = self.declared_columns_of(did, tid, collection).to_vec();
+        let crs = self.crs_context();
         let admit = |image: &[u8]| {
-            fit_and_admit_kv_image(image, &declared, rls_write_check, key, tid, collection)
+            fit_and_admit_kv_image(
+                image,
+                &declared,
+                rls_write_check,
+                key,
+                tid,
+                collection,
+                &crs,
+            )
         };
         match self.kv_engine.incr_float(
             crate::engine::kv::AtomicKeyCtx {
@@ -234,8 +252,17 @@ impl CoreLoop {
         // `new_value` itself, so the declared rule and the policy apply to the
         // image the engine computes — see `Incr`.
         let declared = self.declared_columns_of(did, tid, collection).to_vec();
+        let crs = self.crs_context();
         let admit = |image: &[u8]| {
-            fit_and_admit_kv_image(image, &declared, rls_write_check, key, tid, collection)
+            fit_and_admit_kv_image(
+                image,
+                &declared,
+                rls_write_check,
+                key,
+                tid,
+                collection,
+                &crs,
+            )
         };
         let result = match self.kv_engine.cas(
             crate::engine::kv::AtomicKeyCtx {
@@ -315,8 +342,17 @@ impl CoreLoop {
         // the declared rule and the policy apply to the image the engine
         // computes — see `Incr`.
         let declared = self.declared_columns_of(did, tid, collection).to_vec();
+        let crs = self.crs_context();
         let admit = |image: &[u8]| {
-            fit_and_admit_kv_image(image, &declared, rls_write_check, key, tid, collection)
+            fit_and_admit_kv_image(
+                image,
+                &declared,
+                rls_write_check,
+                key,
+                tid,
+                collection,
+                &crs,
+            )
         };
         let crate::engine::kv::GetSetResult { old, written } = match self.kv_engine.getset(
             crate::engine::kv::AtomicKeyCtx {

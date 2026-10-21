@@ -11,8 +11,10 @@ use super::keys::database_id_from_qualified;
 impl CoreLoop {
     /// Install the snapshot's document rows, document versions and index
     /// entries under their exported keys. Returns `(documents, indexes)`
-    /// written. The first entry that fails to install fails the restore: a
-    /// follower missing it would serve a partial collection.
+    /// written. The first entry that fails to install fails the restore, so
+    /// no follower serves a partial collection. Each installed
+    /// version's system-time ordinal folds into the shared clock, so a later
+    /// local write stamps above every installed version.
     pub(super) fn restore_sparse(
         &self,
         snap: &crate::types::TenantDataSnapshot,
@@ -22,6 +24,9 @@ impl CoreLoop {
         }
         for (key, value) in &snap.documents_versioned {
             self.sparse.put_versioned_document_raw(key, value)?;
+            if let Some(sys_from) = crate::engine::sparse::btree_versioned::parse_sys_from(key) {
+                self.observe_bitemporal_ordinal(sys_from);
+            }
         }
         for (key, value) in &snap.indexes {
             self.sparse.put_index_raw(key, value)?;
@@ -160,11 +165,12 @@ impl CoreLoop {
         collection: &str,
         bytes: &[u8],
     ) -> crate::Result<()> {
+        let crs = self.crs_context();
         let tid = crate::types::TenantId::new(tenant_id);
         // Lazily create the tenant engine if absent, then import into the
         // target collection's per-collection LoroDoc.
         let engine = self.get_crdt_engine(crate::types::DatabaseId::new(database_id), tid)?;
-        engine.import_snapshot_bytes(collection, bytes)
+        engine.import_snapshot_bytes(collection, bytes, &crs)
     }
 
     /// Reconstructs a collection's installed constraint set + version from a
@@ -209,10 +215,9 @@ impl CoreLoop {
         // handled by `parse_scoped_snapshot_key`.
         let (database_id, tenant_id, collection) = super::keys::parse_scoped_snapshot_key(key);
 
-        // Restore under this core's operator tuning, not the compiled defaults:
-        // a memtable keeps the limits it was built with for its whole life, so
-        // a restored collection would otherwise run budgets the operator never
-        // configured until it happened to flush.
+        // Restore under this core's operator tuning, not the compiled defaults.
+        // A memtable keeps the limits it was built with until it flushes, so
+        // the restored one runs the budgets the operator configured.
         let mt = ColumnarMemtable::from_snapshot(
             snap,
             ColumnarMemtableConfig::from_tuning(&self.ts_tuning),

@@ -15,7 +15,7 @@
 //! - `Path`: a msgpack array `[src, …, dst]`, or a `NotFound` refusal when
 //!   `dst` is unreachable.
 
-use nodedb_physical::physical_plan::GraphOp;
+use nodedb_physical::physical_plan::{GraphOp, GraphReadScope};
 
 use crate::bridge::envelope::{Payload, PhysicalPlan, Response};
 use crate::control::server::dispatch_utils::{not_found_response, ok_payload_response};
@@ -24,6 +24,7 @@ use crate::engine::graph::edge_store::Direction;
 use crate::types::{DatabaseId, TenantId, TxnId};
 
 use super::bfs::{CrossCoreBfsParams, cross_core_bfs_with_options};
+use super::read_scope::check_walk_scope;
 use super::shortest_path::{CrossCoreShortestPathParams, cross_core_shortest_path};
 use super::traverse_subgraph::{CrossCoreTraverseSubgraphParams, SubgraphWalk, walk_subgraph};
 
@@ -37,8 +38,9 @@ struct SubgraphEdgeWire<'a> {
 }
 
 /// Run `plan` through the walk coordinators when it is a `Hop`, `Path` or
-/// `Subgraph`. Returns `None` for every other plan. The walk sees the staged
-/// edge writes of `txn_id`, the session's transaction.
+/// `Subgraph`. Returns `None` for every other plan. A live walk sees the
+/// staged edge writes of `txn_id`, the session's transaction. Every hop
+/// carries the plan's bitemporal scope.
 pub async fn serve_walk_plan(
     state: &SharedState,
     tenant_id: TenantId,
@@ -58,48 +60,58 @@ pub async fn serve_walk_plan(
             direction,
             depth,
             options,
+            scope,
             ..
-        } => cross_core_bfs_with_options(
-            state,
-            CrossCoreBfsParams {
-                tenant_id,
-                database_id,
-                collection: collection.as_ref().map(|c| c.as_str()),
-                start_nodes: start_nodes.clone(),
-                edge_labels,
-                direction: *direction,
-                max_depth: *depth,
-                options,
-                linearizable,
-                txn_id,
-            },
-        )
-        .await
-        .and_then(|response| rewrap_as_msgpack(&response.payload)),
+        } => match check_walk_scope(scope) {
+            Err(error) => Err(error),
+            Ok(()) => cross_core_bfs_with_options(
+                state,
+                CrossCoreBfsParams {
+                    tenant_id,
+                    database_id,
+                    collection: collection.as_ref().map(|c| c.as_str()),
+                    start_nodes: start_nodes.clone(),
+                    edge_labels,
+                    direction: *direction,
+                    max_depth: *depth,
+                    options,
+                    linearizable,
+                    txn_id,
+                    read_scope: *scope,
+                },
+            )
+            .await
+            .and_then(|response| rewrap_as_msgpack(&response.payload)),
+        },
         GraphOp::Subgraph {
             collection,
             start_nodes,
             edge_labels,
             depth,
             options,
+            scope,
             ..
-        } => {
-            subgraph(
-                state,
-                tenant_id,
-                database_id,
-                SubgraphRequest {
-                    collection: collection.as_ref().map(|c| c.as_str().to_owned()),
-                    start_nodes,
-                    edge_labels,
-                    depth: *depth,
-                    options,
-                    linearizable,
-                    txn_id,
-                },
-            )
-            .await
-        }
+        } => match check_walk_scope(scope) {
+            Err(error) => Err(error),
+            Ok(()) => {
+                subgraph(
+                    state,
+                    tenant_id,
+                    database_id,
+                    SubgraphRequest {
+                        collection: collection.as_ref().map(|c| c.as_str().to_owned()),
+                        start_nodes,
+                        edge_labels,
+                        depth: *depth,
+                        options,
+                        linearizable,
+                        txn_id,
+                        read_scope: *scope,
+                    },
+                )
+                .await
+            }
+        },
         GraphOp::Path {
             collection,
             src,
@@ -107,26 +119,52 @@ pub async fn serve_walk_plan(
             edge_labels,
             max_depth,
             options,
+            scope,
             ..
-        } => {
-            path(
-                state,
-                tenant_id,
-                database_id,
-                PathRequest {
-                    collection: collection.as_ref(),
-                    src,
-                    dst,
-                    edge_labels,
-                    max_depth: *max_depth,
-                    options,
-                    linearizable,
-                    txn_id,
-                },
-            )
-            .await
-        }
-        _ => return None,
+        } => match check_walk_scope(scope) {
+            Err(error) => Err(error),
+            Ok(()) => {
+                path(
+                    state,
+                    tenant_id,
+                    database_id,
+                    PathRequest {
+                        collection: collection.as_ref(),
+                        src,
+                        dst,
+                        edge_labels,
+                        max_depth: *max_depth,
+                        options,
+                        linearizable,
+                        txn_id,
+                        read_scope: *scope,
+                    },
+                )
+                .await
+            }
+        },
+        GraphOp::EdgePut { .. }
+        | GraphOp::EdgePutBatch { .. }
+        | GraphOp::EdgeDelete { .. }
+        | GraphOp::ResolveEdgeDelete(_)
+        | GraphOp::EdgeDeleteBatch { .. }
+        | GraphOp::Neighbors { .. }
+        | GraphOp::NeighborsMulti { .. }
+        | GraphOp::RagFusion { .. }
+        | GraphOp::Algo { .. }
+        | GraphOp::Match { .. }
+        | GraphOp::MatchContinuation { .. }
+        | GraphOp::MatchVarLenResume { .. }
+        | GraphOp::BspSuperstep(_)
+        | GraphOp::WccSuperstep(_)
+        | GraphOp::SetNodeLabels { .. }
+        | GraphOp::RemoveNodeLabels { .. }
+        | GraphOp::TemporalNeighbors { .. }
+        | GraphOp::Stats { .. }
+        | GraphOp::NodeEdgeGuard { .. }
+        | GraphOp::NodePresenceGuard { .. }
+        | GraphOp::TruncateEdges { .. }
+        | GraphOp::NodePresenceRead { .. } => return None,
     })
 }
 
@@ -139,6 +177,7 @@ struct SubgraphRequest<'a> {
     options: &'a crate::engine::graph::traversal_options::GraphTraversalOptions,
     linearizable: bool,
     txn_id: Option<TxnId>,
+    read_scope: GraphReadScope,
 }
 
 async fn subgraph(
@@ -171,6 +210,7 @@ async fn subgraph(
             edge_predicate: &[],
             with_properties: false,
             txn_id: request.txn_id,
+            read_scope: request.read_scope,
         },
     )
     .await?;
@@ -198,6 +238,7 @@ struct PathRequest<'a> {
     options: &'a crate::engine::graph::traversal_options::GraphTraversalOptions,
     linearizable: bool,
     txn_id: Option<TxnId>,
+    read_scope: GraphReadScope,
 }
 
 async fn path(
@@ -222,6 +263,7 @@ async fn path(
             linearizable: request.linearizable,
             edge_predicate: Vec::new(),
             txn_id: request.txn_id,
+            read_scope: request.read_scope,
         },
     )
     .await?;

@@ -29,9 +29,19 @@ use crate::control::state::SharedState;
 /// leader change can drop a proposed marker.
 const MARKER_RETRY: Duration = Duration::from_secs(1);
 
-/// Resolve the read cut of a BSP or WCC `plan` on this node. A plan that
-/// carries a cut marker gets its cut in `system_as_of`. Returns the cut the
-/// plan's cores read at. A plan with neither a marker nor a cut is an error.
+/// Resolve the read cut of a BSP or WCC `plan` on this node. Returns the cut
+/// the plan's cores read at. A plan with neither a marker nor a cut is an
+/// error.
+///
+/// - A live run carries a marker and no cut. Its cut is the marker's cut, a
+///   pure Calvin cut, so every node resolves the same one.
+/// - A historical run (`AS OF SYSTEM TIME`) carries its statement's pinned
+///   ordinal and a marker. The ordinal can sit above the marker's cut: the
+///   statement's cap holds a clock part for writes outside Calvin. The node
+///   waits for the marker, so every Calvin version sequenced before it is
+///   installed, folds the ordinal into its ordinal clock, so no write it
+///   stamps later lands at or below the cut, and reads at the ordinal
+///   unchanged.
 pub(super) async fn resolve_plan_cut(
     state: &SharedState,
     plan: &mut PhysicalPlan,
@@ -50,7 +60,11 @@ pub(super) async fn resolve_plan_cut(
         }
     };
     if *marker != 0 {
-        *system_as_of = Some(resolve_read_cut(state, *marker).await?);
+        let cut = resolve_read_cut(state, *marker).await?;
+        match *system_as_of {
+            Some(pinned) => state.wal.ordinal_clock().update_from_remote(pinned),
+            None => *system_as_of = Some(cut),
+        }
         *marker = 0;
     }
     system_as_of.ok_or_else(|| crate::Error::Internal {
@@ -61,10 +75,20 @@ pub(super) async fn resolve_plan_cut(
 }
 
 /// Propose the cut marker `marker` and wait until it applied here and every
-/// local Calvin scheduler passed it. Returns the cut as a system-time
-/// ordinal: `0` when no epoch applied before the marker, so no Calvin edge
-/// version is visible.
-async fn resolve_read_cut(state: &SharedState, marker: u64) -> crate::Result<i64> {
+/// local Calvin scheduler passed it, within the running statement's
+/// deadline. Returns the cut as a system-time ordinal: `0` when no epoch
+/// applied before the marker, so no Calvin edge version is visible.
+pub(crate) async fn resolve_read_cut(state: &SharedState, marker: u64) -> crate::Result<i64> {
+    resolve_read_cut_by(state, marker, StatementDeadline::of_statement(state)).await
+}
+
+/// [`resolve_read_cut`] bounded by `statement`. A marker that did not apply
+/// and pass every local scheduler by then is `Error::DeadlineExceeded`.
+pub(crate) async fn resolve_read_cut_by(
+    state: &SharedState,
+    marker: u64,
+    statement: StatementDeadline,
+) -> crate::Result<i64> {
     let proposer = state
         .calvin
         .sequencer_proposer
@@ -82,7 +106,6 @@ async fn resolve_read_cut(state: &SharedState, marker: u64) -> crate::Result<i64
     .map_err(|error| crate::Error::Internal {
         detail: format!("graph read cut: encode the cut marker: {error}"),
     })?;
-    let statement = StatementDeadline::of_statement(state);
     let budget_ms = statement.remaining().as_millis();
     let deadline = statement.tokio_instant();
     let mut last_refusal = None;
@@ -95,15 +118,16 @@ async fn resolve_read_cut(state: &SharedState, marker: u64) -> crate::Result<i64
             return Ok(instant.map_or(0, nodedb_types::ms_to_ordinal_upper));
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(crate::Error::Internal {
-                detail: format!(
-                    "graph read cut: cut marker {marker} did not apply and pass every Calvin \
-                     scheduler of this node within the statement deadline ({} ms) (vShards \
-                     still before it: {:?}, last marker refusal: {}). Retry the query",
-                    budget_ms,
-                    state.calvin.cuts.lagging(marker),
-                    last_refusal.as_deref().unwrap_or("none"),
-                ),
+            tracing::warn!(
+                marker,
+                budget_ms,
+                lagging = ?state.calvin.cuts.lagging(marker),
+                last_refusal = last_refusal.as_deref().unwrap_or("none"),
+                "graph read cut: the cut marker did not apply and pass every Calvin scheduler \
+                 of this node within the statement deadline"
+            );
+            return Err(crate::Error::DeadlineExceeded {
+                request_id: crate::types::RequestId::new(0),
             });
         }
     }

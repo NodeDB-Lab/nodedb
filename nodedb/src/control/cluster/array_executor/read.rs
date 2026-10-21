@@ -52,6 +52,7 @@ impl DataPlaneArrayExecutor {
             system_time: req.system_time,
             valid_at_ms: req.valid_at_ms,
             zone_msgpack: req.zone_msgpack.clone(),
+            physical: req.physical,
         });
 
         let resp = self
@@ -121,9 +122,10 @@ impl DataPlaneArrayExecutor {
             cell_filter,
             return_partial: true,
             shard_bucket: req.shard_bucket,
-            system_as_of: req.system_as_of,
+            system_time: req.system_time,
             valid_at_ms: req.valid_at_ms,
             region_msgpack: req.region_msgpack.clone(),
+            physical: req.physical,
         });
 
         let resp = self

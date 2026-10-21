@@ -49,4 +49,4 @@ pub use hooks::{
 };
 pub use in_flight_snapshots::{InFlightSnapshotGuard, InFlightSnapshots};
 pub use loop_core::{CommitApplier, RaftLoop, VShardEnvelopeHandler};
-pub use propose_gate::{DataProposeGate, ProposeHold};
+pub use propose_gate::{Admitted, DataProposeGate, ProposeHold};

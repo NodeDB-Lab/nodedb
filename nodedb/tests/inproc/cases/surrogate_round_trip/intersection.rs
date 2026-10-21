@@ -136,6 +136,8 @@ pub(super) fn assert_bitmap_intersection(
             properties: vec![],
             src_surrogate: Surrogate::new(10),
             dst_surrogate: Surrogate::new(11),
+            valid_from_ms: None,
+            valid_until_ms: None,
         }),
     );
 
@@ -152,6 +154,7 @@ pub(super) fn assert_bitmap_intersection(
             rls_filters: Vec::new(),
             frontier_bitmap: None,
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let hop_all_json = decode_payload_to_json(&hop_all);
@@ -174,6 +177,7 @@ pub(super) fn assert_bitmap_intersection(
             rls_filters: Vec::new(),
             frontier_bitmap: Some(intersection.clone()),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let hop_filtered_json = decode_payload_to_json(&hop_filtered);
@@ -207,6 +211,7 @@ pub(super) fn assert_bitmap_intersection(
                 system_time: nodedb_types::SystemTimeScope::Current,
                 valid_at_ms: None,
                 zone_msgpack: Vec::new(),
+                physical: false,
             }),
         );
         // Unfiltered: returns all ARR_SURS cells.
@@ -230,6 +235,7 @@ pub(super) fn assert_bitmap_intersection(
                 system_time: nodedb_types::SystemTimeScope::Current,
                 valid_at_ms: None,
                 zone_msgpack: Vec::new(),
+                physical: false,
             }),
         );
         // Filtered: intersection ∩ ARR_SURS = {10}.  Surrogate 10 is at

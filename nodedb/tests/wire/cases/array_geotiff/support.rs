@@ -54,10 +54,19 @@ pub async fn copy_geotiff(
     path: &str,
     extra: &str,
 ) -> Result<u64, Refusal> {
-    let sql = format!("COPY {array} FROM '{path}' WITH (FORMAT geotiff{extra})");
+    copy_sql(
+        server,
+        &format!("COPY {array} FROM '{path}' WITH (FORMAT geotiff{extra})"),
+    )
+    .await
+}
+
+/// Run the COPY statement `sql` and return the row count of its
+/// `COPY <n>` tag.
+pub async fn copy_sql(server: &TestServer, sql: &str) -> Result<u64, Refusal> {
     let messages = server
         .client
-        .simple_query(&sql)
+        .simple_query(sql)
         .await
         .map_err(|e| match e.as_db_error() {
             Some(db) => Refusal {

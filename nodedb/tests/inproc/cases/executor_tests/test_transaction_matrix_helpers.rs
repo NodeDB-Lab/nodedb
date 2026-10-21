@@ -63,6 +63,8 @@ pub fn edge_put(coll: &str, src: &str, dst: &str) -> PhysicalPlan {
         properties: Vec::new(),
         src_surrogate: nodedb_test_support::kv_rows::kv_row_surrogate(src.as_bytes()),
         dst_surrogate: nodedb_test_support::kv_rows::kv_row_surrogate(dst.as_bytes()),
+        valid_from_ms: None,
+        valid_until_ms: None,
     })
 }
 
@@ -74,5 +76,6 @@ pub fn neighbors(src: &str) -> PhysicalPlan {
         direction: nodedb::engine::graph::edge_store::Direction::Out,
         rls_filters: Vec::new(),
         collection: None,
+        scope: nodedb_physical::physical_plan::GraphReadScope::default(),
     })
 }

@@ -396,6 +396,8 @@ mod lockstep_tests {
             properties: Vec::new(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
         });
         let (_, gate_keys) = plan_lock_keys(&plan).expect("a single-home edge is fast-path");
         for node in [src, dst.as_str()] {

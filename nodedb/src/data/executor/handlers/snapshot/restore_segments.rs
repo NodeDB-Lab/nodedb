@@ -229,7 +229,8 @@ impl CoreLoop {
                 // no local record: the partition carries the collection's
                 // local stamp, which names nothing new.
                 let local_stamp = self
-                    .ts_replay_stamps
+                    .ts_replay
+                    .stamps
                     .get(&reg_key)
                     .cloned()
                     .unwrap_or_default();
@@ -382,6 +383,8 @@ impl CoreLoop {
                 // overwritten engine).
                 self.columnar_flushed_segments.remove(&engine_key);
             }
+            // The snapshot's versions carry ordinals another node stamped.
+            self.fold_columnar_system_ordinals(&engine_key)?;
             // Re-attach the cross-engine surrogate sidecar under the SAME key so
             // prefiltered scans see flushed rows post-restore. Old snapshots
             // carry empty surrogates (non-empty segments): we skip populating

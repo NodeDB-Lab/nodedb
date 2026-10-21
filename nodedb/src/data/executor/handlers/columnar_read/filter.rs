@@ -2,6 +2,7 @@
 
 //! Row-level WHERE predicate evaluation for memtable scans.
 
+use nodedb_crs::CrsContext;
 use nodedb_query::EvalError;
 use nodedb_query::scan_filter::{FilterOp, ScanFilter};
 
@@ -22,13 +23,15 @@ pub(in crate::data::executor) fn row_matches_filters(
     row: &[nodedb_types::value::Value],
     schema: &nodedb_types::columnar::ColumnarSchema,
     filters: &[ScanFilter],
+    crs: &CrsContext<'_>,
 ) -> Result<bool, EvalError> {
-    // Build the row image through the ONE builder every columnar path uses —
-    // the write gate, the `ON CONFLICT` merge, and a `RETURNING` projection all
-    // call it too. A private copy here is how the same schema-ordered row came
-    // to mean two different objects on the read and write sides.
-    let doc = crate::data::executor::handlers::columnar_write::row_values_to_object(schema, row);
-    value_matches_filters(&doc, filters)
+    // Build the row image through the ONE builder every user-facing columnar
+    // path uses — the write gate and a `RETURNING` projection call it too. A
+    // private copy here is how the same schema-ordered row came to mean two
+    // different objects on the read and write sides.
+    let doc =
+        crate::data::executor::handlers::columnar_write::row_values_to_user_object(schema, row);
+    value_matches_filters(&doc, filters, crs)
 }
 
 /// Check whether an already-assembled row object satisfies all predicates.
@@ -40,12 +43,13 @@ pub(in crate::data::executor) fn row_matches_filters(
 pub(in crate::data::executor) fn value_matches_filters(
     doc: &nodedb_types::Value,
     filters: &[ScanFilter],
+    crs: &CrsContext<'_>,
 ) -> Result<bool, EvalError> {
     for filter in filters {
         if filter.op == FilterOp::MatchAll {
             continue;
         }
-        if !filter.matches_value(doc)? {
+        if !filter.matches_value(doc, crs)? {
             return Ok(false);
         }
     }
@@ -75,10 +79,15 @@ pub(in crate::data::executor) fn row_matches_filters_and_policy(
     schema: &nodedb_types::columnar::ColumnarSchema,
     filters: &[ScanFilter],
     rls_filters: &[ScanFilter],
+    crs: &CrsContext<'_>,
 ) -> Result<bool, EvalError> {
     if filters.is_empty() && rls_filters.is_empty() {
         return Ok(true);
     }
-    let doc = crate::data::executor::handlers::columnar_write::row_values_to_object(schema, row);
-    Ok(value_matches_filters(&doc, filters)? && value_matches_filters(&doc, rls_filters)?)
+    let doc =
+        crate::data::executor::handlers::columnar_write::row_values_to_user_object(schema, row);
+    Ok(
+        value_matches_filters(&doc, filters, crs)?
+            && value_matches_filters(&doc, rls_filters, crs)?,
+    )
 }

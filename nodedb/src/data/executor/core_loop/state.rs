@@ -107,18 +107,16 @@ pub struct CoreLoop {
     /// redb-backed graph edge storage for this core.
     pub(in crate::data::executor) edge_store: EdgeStore,
 
-    /// Strictly-monotonic ordinal clock for bitemporal `system_from` suffixes.
-    /// Shared across all Data Plane cores so edge keys are globally ordered
-    /// even under concurrent multi-core writes.
+    /// Strictly-monotonic ordinal clock for every bitemporal system-time
+    /// key: edge, document and columnar versions alike. Shared across all
+    /// Data Plane cores, so version keys are globally ordered even under
+    /// concurrent multi-core writes.
     pub(in crate::data::executor) hlc: Arc<OrdinalClock>,
-    /// HLC watermark for `_ts_system` stamping (see `bitemporal_time.rs`).
-    pub(in crate::data::executor) last_stamp_ms: std::sync::atomic::AtomicI64,
 
-    /// Per-tenant in-memory CSR adjacency index, rebuilt from
-    /// edge_store on startup. Each tenant's graph state lives in its
-    /// own `CsrIndex` partition — no shared key space, no lexical
-    /// `<tid>:` prefix anywhere in memory.
+    /// Live CSR, one `CsrIndex` per `(database, tenant)`, rebuilt from `edge_store` on startup.
     pub(in crate::data::executor) csr: ShardedCsrIndex,
+    /// CSRs of one collection at one bitemporal cut, for `AS OF` graph reads.
+    pub(in crate::data::executor) historical_csr: crate::engine::graph::csr::HistoricalCsrCache,
 
     /// Full-text inverted index (BM25), shares redb with sparse engine.
     pub(in crate::data::executor) inverted: InvertedIndex,
@@ -262,18 +260,8 @@ pub struct CoreLoop {
     pub(in crate::data::executor) columnar_flushed_surrogates:
         HashMap<(DatabaseId, TenantId, String), FlushedSurrogateTable>,
 
-    /// Per-collection replay stamps: the records whose rows a partition
-    /// holds or a truncate removed, and the truncates that took effect. See
-    /// `timeseries_checkpoint::stamp`. Key: (DatabaseId, TenantId, collection).
-    pub(in crate::data::executor) ts_replay_stamps: HashMap<
-        (DatabaseId, TenantId, String),
-        crate::data::executor::timeseries_checkpoint::stamp::TsReplayStamp,
-    >,
-
-    /// While restart replay runs the timeseries pass: the LSN through which it
-    /// has passed every record. A flush or truncate then stamps through it
-    /// instead of the core stamp. `None` outside that pass.
-    pub(in crate::data::executor) ts_replay_cursor: Option<u64>,
+    /// Timeseries replay stamps and the restart replay's timeseries cursor.
+    pub(in crate::data::executor) ts_replay: super::ts_replay_state::TsReplayState,
 
     /// Last time any timeseries ingest was processed on this core.
     /// Used by idle flush: if no ingest for 5 seconds, `maybe_run_maintenance`
@@ -327,18 +315,8 @@ pub struct CoreLoop {
     pub(in crate::data::executor) doc_configs:
         HashMap<(DatabaseId, TenantId, String), crate::engine::document::store::CollectionConfig>,
 
-    /// Per-collection chain head of every HASH_CHAIN collection: the last
-    /// link's install-order position and hash.
-    pub(in crate::data::executor) chain_hashes:
-        HashMap<(DatabaseId, TenantId, String), crate::types::hash_chain::ChainHead>,
-
-    /// The chain link each in-flight write of a HASH_CHAIN row asks
-    /// `build_stored_body` to write, keyed by collection and row surrogate.
-    /// `ChainGuard` sets an entry before the write and clears it after.
-    pub(in crate::data::executor) chain_intents: HashMap<
-        ((DatabaseId, TenantId, String), u32),
-        crate::data::executor::enforcement::chain_guard::ChainIntent,
-    >,
+    /// Chain heads and in-flight chain links of every HASH_CHAIN collection.
+    pub(in crate::data::executor) chain: super::hash_chain_state::HashChainState,
 
     /// Query execution tuning parameters (sort run size, stream chunk size, etc.).
     /// Set at core spawn time from config; never changed at runtime.
@@ -371,6 +349,9 @@ pub struct CoreLoop {
     /// resolving array names to `ArrayId` + schema digests during
     /// dispatch.
     pub(in crate::data::executor) array_catalog: ArrayCatalogHandle,
+
+    /// This core's copy of the user-defined CRS set, swapped by `MetaOp::SetCustomCrsSet`.
+    pub(in crate::data::executor) crs_set: Arc<nodedb_crs::CustomCrsSet>,
 
     /// Per-core io_uring reader for batched columnar segment reads.
     /// Initialized lazily; `None` if io_uring is not available.
@@ -431,10 +412,12 @@ pub struct CoreLoop {
     /// Set to `Some(ms)` by `execute_calvin_execute_static`,
     /// `execute_calvin_execute_active` and `execute_calvin_resolve` while they
     /// stage or resolve a transaction's plans, and by `install_calvin_redo`
-    /// while it renders the reply, then restored immediately after. Engine handlers that need "current time" (bitemporal sys_from,
-    /// KV TTL expire_at, timeseries system_ms) call
-    /// `self.epoch_system_ms.unwrap_or_else(<wall_clock_read>)` so that
-    /// single-shard (non-Calvin) paths read the wall clock.
+    /// while it renders the reply, then restored immediately after. Engine
+    /// handlers that need "current time" (KV TTL expire_at, timeseries
+    /// system_ms) call `self.epoch_system_ms.unwrap_or_else(<wall_clock_read>)`
+    /// so that single-shard (non-Calvin) paths read the wall clock. A
+    /// bitemporal document or columnar stamp reads
+    /// `apply_scope.calvin_txn_ordinal` instead (see `bitemporal_time.rs`).
     ///
     /// Safety: this is safe because `CoreLoop` is `!Send` and single-threaded
     /// per core, and staging never recurses into another Calvin execute.

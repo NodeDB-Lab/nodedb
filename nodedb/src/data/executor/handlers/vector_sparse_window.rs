@@ -57,6 +57,7 @@ pub(super) fn sparse_hit(result: &SparseSearchResult) -> VectorSearchHit {
 pub(super) fn rank_sparse_window<R, A>(
     top_k: usize,
     residual: &[ScanFilter],
+    crs: &nodedb_crs::CrsContext<'_>,
     rank: R,
     attach: A,
 ) -> crate::Result<Vec<VectorSearchHit>>
@@ -72,7 +73,7 @@ where
             .iter()
             .map(|result| attach(sparse_hit(result)))
             .collect::<crate::Result<_>>()?;
-        if residual.is_empty() || exhausted || passing(&hits, residual) >= top_k {
+        if residual.is_empty() || exhausted || passing(&hits, residual, crs) >= top_k {
             return Ok(hits);
         }
         fetch_k = fetch_k.saturating_mul(2);
@@ -145,6 +146,7 @@ mod tests {
         let hits = rank_sparse_window(
             2,
             &filter,
+            &nodedb_crs::CrsContext::builtin_only(),
             |k| {
                 windows.set(windows.get() + 1);
                 index.rank(k)
@@ -154,7 +156,7 @@ mod tests {
         .expect("rank");
         assert!(windows.get() > 1, "the first window held no match");
         assert!(
-            passing(&hits, &filter) >= 2,
+            passing(&hits, &filter, &nodedb_crs::CrsContext::builtin_only()) >= 2,
             "two matching candidates rank in the final window"
         );
     }
@@ -167,10 +169,19 @@ mod tests {
             keep_from: 29,
         };
         let filter = keep_filter();
-        let hits =
-            rank_sparse_window(5, &filter, |k| index.rank(k), |hit| index.body(hit)).expect("rank");
+        let hits = rank_sparse_window(
+            5,
+            &filter,
+            &nodedb_crs::CrsContext::builtin_only(),
+            |k| index.rank(k),
+            |hit| index.body(hit),
+        )
+        .expect("rank");
         assert_eq!(hits.len(), 30, "every candidate ranked");
-        assert_eq!(passing(&hits, &filter), 1);
+        assert_eq!(
+            passing(&hits, &filter, &nodedb_crs::CrsContext::builtin_only()),
+            1
+        );
     }
 
     /// Without a filter the search ranks `top_k` in one window, and each hit
@@ -185,6 +196,7 @@ mod tests {
         let hits = rank_sparse_window(
             3,
             &[],
+            &nodedb_crs::CrsContext::builtin_only(),
             |k| {
                 windows.set(windows.get() + 1);
                 index.rank(k)

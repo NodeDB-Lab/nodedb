@@ -54,6 +54,7 @@ fn register(ctx: &mut TestCtx, collection: &str, conflict_policy: Option<String>
             vector_fields: Vec::new(),
             declared_columns: Vec::new(),
             declared_key: None,
+            incarnation: nodedb_types::Hlc::ZERO,
         }),
     );
     assert_eq!(resp.status, Status::Ok, "register document collection");

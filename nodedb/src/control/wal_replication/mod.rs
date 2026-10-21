@@ -21,6 +21,7 @@ pub(crate) use propose::{
     propose_replicated_entry, stamp_collection_incarnations, stamp_metadata_floor,
 };
 pub use replicable_write::ReplicableWrite;
+pub(crate) use types::columnar_rows;
 pub use types::{
     AppliedOutput, AppliedWait, AsyncRaftProposer, AsyncRaftSubmit, CollectionIncarnation,
     ConstraintChangeOp, ProposedAt, ProposedWrite, RaftAppliedIndexSink, RaftCompactor,

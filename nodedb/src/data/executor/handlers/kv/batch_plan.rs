@@ -52,6 +52,7 @@ pub(in crate::data::executor) fn plan_kv_batch<'a>(
     entries: &'a [(Vec<u8>, Vec<u8>)],
     intent: &KvBatchIntent,
     declared: &[DeclaredColumn],
+    crs: &nodedb_crs::CrsContext<'_>,
     mut read: impl FnMut(&[u8]) -> Option<Vec<u8>>,
 ) -> crate::Result<Vec<PlannedKvRow<'a>>> {
     // The latest planned row of each key the batch has written.
@@ -84,6 +85,7 @@ pub(in crate::data::executor) fn plan_kv_batch<'a>(
                 value,
                 updates,
                 declared,
+                crs,
             )?),
         };
         latest.insert(key, rows.len());

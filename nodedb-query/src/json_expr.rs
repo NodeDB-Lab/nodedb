@@ -19,13 +19,14 @@ use crate::json_ops::compare_json_numbers;
 pub fn eval_expr_on_json(
     expr: &SqlExpr,
     doc: &serde_json::Value,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<serde_json::Value, EvalError> {
     match expr {
         SqlExpr::Column(name) => Ok(doc.get(name).cloned().unwrap_or(serde_json::Value::Null)),
         SqlExpr::Literal(v) => Ok(serde_json::Value::from(v.clone())),
         other => {
             let row = nodedb_types::Value::from(doc.clone());
-            Ok(serde_json::Value::from(other.eval(&row)?))
+            Ok(serde_json::Value::from(other.eval(&row, crs)?))
         }
     }
 }

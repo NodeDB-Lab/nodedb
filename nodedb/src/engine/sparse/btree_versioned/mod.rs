@@ -2,9 +2,10 @@
 
 //! Versioned document storage — bitemporal key layout backed by redb.
 //!
-//! Key: `"{tenant}:{coll}:{doc_id}\x00{system_from_ms:020}"`, where `doc_id`
+//! Key: `"{tenant}:{coll}:{doc_id}\x00{system_from:020}"`, where `doc_id`
 //! is a [`nodedb_types::StorageKey`]'s 8-hex-character rendering — a hex
-//! render cannot contain the `\x00` version separator.
+//! render cannot contain the `\x00` version separator. `system_from` is the
+//! version's system-time ordinal, from the clock graph edges stamp from.
 //! Value: `[tag:u8][valid_from_ms:i64 LE][valid_until_ms:i64 LE][body...]`
 //! where `tag = 0x00` (live), `0xFF` (tombstone), `0xFE` (GDPR erased).
 

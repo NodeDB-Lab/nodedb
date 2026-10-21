@@ -94,6 +94,28 @@ impl CoreLoop {
         })
     }
 
+    /// The ingest stamp of a timeseries batch, in epoch milliseconds: the
+    /// `_ts_system` of its bitemporal rows and the default timestamp of its
+    /// untimed rows.
+    ///
+    /// It is the millisecond of an ordinal of the shared clock documents and
+    /// edges stamp from: the Calvin epoch's, the replicated entry's, or a
+    /// fresh one. A pinned `AS OF` cut folds into the same clock, so a batch
+    /// ingested after the pin stamps past it, as a document written after it
+    /// does. The stamp marks the ingest only: a batch writes no version.
+    pub(in crate::data::executor) fn ingest_stamp_ms(&self) -> i64 {
+        match self.epoch_system_ms {
+            Some(ms) => ms,
+            None => nodedb_types::ordinal_to_ms(self.bitemporal_ordinal()),
+        }
+    }
+
+    /// Fold an ingest stamp a record or a resolved batch carries into the
+    /// shared clock, so a later batch or version stamps at or past it.
+    pub(in crate::data::executor) fn observe_ingest_stamp_ms(&self, stamp_ms: i64) {
+        self.observe_bitemporal_ordinal(stamp_ms.saturating_mul(nodedb_types::NANOS_PER_MS));
+    }
+
     /// Execute a timeseries ingest, applying the sync gate and dispatching the
     /// payload to the format-specific implementation.
     pub(in crate::data::executor) fn execute_timeseries_ingest(
@@ -179,12 +201,14 @@ impl CoreLoop {
             };
         }
 
-        // The instant the write funnel resolved and the WAL record carries,
-        // so live apply and replay stamp untimed rows alike.
+        // The ingest stamp the write funnel resolved and the WAL record
+        // carries, so live apply and replay stamp alike. It folds into the
+        // shared clock.
         let now_ms = task
             .resolved_now_ms()
             .and_then(|ms| i64::try_from(ms).ok())
-            .unwrap_or_else(|| self.ingest_now_ms());
+            .unwrap_or_else(|| self.ingest_stamp_ms());
+        self.observe_ingest_stamp_ms(now_ms);
 
         let ingest_response = match format {
             RESOLVED_INGEST_FORMAT => self.execute_resolved_ingest(TimeseriesIngestParams {
@@ -268,5 +292,65 @@ impl CoreLoop {
             self.note_collection_write(task, collection);
         }
         ingest_response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_types::{SystemTimeScope, ms_to_ordinal_upper};
+
+    use crate::data::executor::core_loop::CoreLoop;
+    use crate::data::executor::core_loop::tests::make_core_with_dir;
+
+    /// An ingest after a pinned cut stamps past it, as a document version
+    /// written after the cut does, so a read pinned at the cut hides both. An
+    /// ingest and a document before the pin stay visible to it.
+    #[test]
+    fn an_ingest_after_a_pinned_cut_reads_like_a_document_written_after_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (core, _tx, _rx): (CoreLoop, _, _) = make_core_with_dir(dir.path());
+        let ingest_before = core.ingest_stamp_ms();
+        let doc_before = core.bitemporal_ordinal();
+
+        // A cut past the wall clock, folded into the clock as a serving node
+        // folds a pinned cut.
+        let cut = ms_to_ordinal_upper(ingest_before + 10_000);
+        core.observe_bitemporal_ordinal(cut);
+        let ingest_after = core.ingest_stamp_ms();
+        let doc_after = core.bitemporal_ordinal();
+
+        let scope = SystemTimeScope::Pinned {
+            ordinal: cut,
+            cut_marker: 0,
+        };
+        let ts_cutoff = scope.as_of_ms().expect("a pinned cut");
+        let doc_cutoff = scope.as_of_ordinal().expect("a pinned cut");
+        assert!(
+            ingest_before <= ts_cutoff,
+            "an earlier ingest reads at the cut"
+        );
+        assert!(
+            doc_before <= doc_cutoff,
+            "an earlier document reads at the cut"
+        );
+        assert!(
+            ingest_after > ts_cutoff,
+            "a later ingest stamps past the cut: {ingest_after} vs {ts_cutoff}"
+        );
+        assert!(
+            doc_after > doc_cutoff,
+            "a later document stamps past the cut"
+        );
+    }
+
+    /// An ingest stamp a record carries folds into the clock, so the next
+    /// batch stamps at or past it.
+    #[test]
+    fn a_carried_ingest_stamp_folds_into_the_clock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (core, _tx, _rx): (CoreLoop, _, _) = make_core_with_dir(dir.path());
+        let carried = core.ingest_stamp_ms() + 60_000;
+        core.observe_ingest_stamp_ms(carried);
+        assert!(core.ingest_stamp_ms() >= carried);
     }
 }

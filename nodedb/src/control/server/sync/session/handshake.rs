@@ -37,10 +37,11 @@ impl SyncSession {
         self.clear_handshake_binding();
         self.last_activity = Instant::now();
 
-        // Wire format compatibility check: reject incompatible clients early.
-        // Version 0 (missing field) falls through to check_wire_compatibility
-        // and is rejected cleanly as "too old".
-        if let Err(e) = crate::version::check_wire_compatibility(msg.wire_version) {
+        // A client of another sync protocol version frames messages in a
+        // layout this server does not decode, so it is refused before any
+        // other frame. Version 0 (missing field) is refused the same way.
+        if let Err(mismatch) = msg.check_wire_version() {
+            let e = crate::Error::from(mismatch);
             warn!(
                 session = %self.session_id,
                 client_wire_version = msg.wire_version,
@@ -53,7 +54,7 @@ impl SyncSession {
                 server_clock: current_server_clock,
                 error: Some(format!("incompatible wire version: {e}")),
                 fork_detected: false,
-                server_wire_version: crate::version::WIRE_FORMAT_VERSION,
+                server_wire_version: SYNC_WIRE_VERSION,
                 producer_id: 0,
                 accepted_epoch: 0,
                 delta_signing_key: [0; 32],
@@ -73,7 +74,7 @@ impl SyncSession {
                     server_clock: current_server_clock,
                     error: Some("configured trust identity is unavailable".into()),
                     fork_detected: false,
-                    server_wire_version: crate::version::WIRE_FORMAT_VERSION,
+                    server_wire_version: SYNC_WIRE_VERSION,
                     producer_id: 0,
                     accepted_epoch: 0,
                     delta_signing_key: [0; 32],
@@ -140,7 +141,7 @@ impl SyncSession {
                 server_clock: current_server_clock,
                 error: None,
                 fork_detected: false,
-                server_wire_version: crate::version::WIRE_FORMAT_VERSION,
+                server_wire_version: SYNC_WIRE_VERSION,
                 producer_id: self.producer_id,
                 accepted_epoch: self.accepted_epoch,
                 delta_signing_key: [0; 32],
@@ -177,7 +178,7 @@ impl SyncSession {
                 // client learns it is unauthenticated, never why.
                 error: Some("invalid bearer token".into()),
                 fork_detected: false,
-                server_wire_version: crate::version::WIRE_FORMAT_VERSION,
+                server_wire_version: SYNC_WIRE_VERSION,
                 producer_id: 0,
                 accepted_epoch: 0,
                 delta_signing_key: [0; 32],
@@ -267,7 +268,7 @@ impl SyncSession {
             server_clock: current_server_clock,
             error: None,
             fork_detected: false,
-            server_wire_version: crate::version::WIRE_FORMAT_VERSION,
+            server_wire_version: SYNC_WIRE_VERSION,
             producer_id: self.producer_id,
             accepted_epoch: self.accepted_epoch,
             delta_signing_key: self.delta_signing_key.unwrap_or([0; 32]),
@@ -328,7 +329,7 @@ impl SyncSession {
             server_clock: server_clock.clone(),
             error: Some(message.into()),
             fork_detected,
-            server_wire_version: crate::version::WIRE_FORMAT_VERSION,
+            server_wire_version: SYNC_WIRE_VERSION,
             producer_id: 0,
             accepted_epoch: 0,
             delta_signing_key: [0; 32],
@@ -377,7 +378,8 @@ mod tests {
     use std::sync::Arc;
 
     use nodedb_types::sync::wire::{
-        DeltaPushMsg, DeltaRejectMsg, HandshakeAckMsg, HandshakeMsg, SyncFrame, SyncMessageType,
+        DeltaPushMsg, DeltaRejectMsg, HandshakeAckMsg, HandshakeMsg, SYNC_WIRE_VERSION, SyncFrame,
+        SyncMessageType, SyncWireVersionMismatch,
     };
 
     use crate::bridge::dispatch::Dispatcher;
@@ -424,7 +426,7 @@ mod tests {
             client_version: "0.1".into(),
             lite_id: String::new(),
             epoch: 0,
-            wire_version: 1,
+            wire_version: SYNC_WIRE_VERSION,
         };
 
         let response = session
@@ -443,7 +445,7 @@ mod tests {
     async fn empty_token_uses_configured_durable_trust_identity() {
         let (state, _dir) = trust_state();
         let mut session = SyncSession::new("test-session".into());
-        let msg = make_handshake(crate::version::WIRE_FORMAT_VERSION);
+        let msg = make_handshake(SYNC_WIRE_VERSION);
 
         let frame = session
             .handle_handshake(&msg, HashMap::new(), Some(&state))
@@ -468,7 +470,7 @@ mod tests {
         let (state, _dir) = trust_state();
         let mut session = SyncSession::new("test-session".into());
         session.device_metadata.remote_addr = "203.0.113.9:4433".into();
-        let msg = make_handshake(crate::version::WIRE_FORMAT_VERSION);
+        let msg = make_handshake(SYNC_WIRE_VERSION);
 
         let frame = session
             .handle_handshake(&msg, HashMap::new(), Some(&state))
@@ -486,7 +488,7 @@ mod tests {
     #[tokio::test]
     async fn empty_token_without_configured_identity_fails_closed() {
         let mut session = SyncSession::new("test-session".into());
-        let msg = make_handshake(crate::version::WIRE_FORMAT_VERSION);
+        let msg = make_handshake(SYNC_WIRE_VERSION);
 
         let frame = session
             .handle_handshake(&msg, HashMap::new(), None)
@@ -511,7 +513,7 @@ mod tests {
             "this fixture must have no JWT verifier for the refusal to be meaningful"
         );
         let mut session = SyncSession::new("test-session".into());
-        let mut msg = make_handshake(crate::version::WIRE_FORMAT_VERSION);
+        let mut msg = make_handshake(SYNC_WIRE_VERSION);
         // Synthetic fixture token, not a credential.
         msg.jwt_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2ln".into(); // gitleaks:allow
 
@@ -535,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn presented_token_without_shared_state_is_refused() {
         let mut session = SyncSession::new("test-session".into());
-        let mut msg = make_handshake(crate::version::WIRE_FORMAT_VERSION);
+        let mut msg = make_handshake(SYNC_WIRE_VERSION);
         // Synthetic fixture token, not a credential.
         msg.jwt_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2ln".into(); // gitleaks:allow
 
@@ -572,6 +574,37 @@ mod tests {
         );
     }
 
+    /// A client built against the previous sync layout sends version 1. The
+    /// server refuses it at the handshake, before any delta frame: the ack
+    /// carries the server's version, so the client reads the refusal as the
+    /// typed mismatch, and the session stays unauthenticated even where a
+    /// trust identity is configured.
+    #[tokio::test]
+    async fn handshake_refuses_a_client_of_the_previous_sync_layout() {
+        let (state, _dir) = trust_state();
+        let mut session = SyncSession::new("old-layout-session".into());
+        let msg = make_handshake(SYNC_WIRE_VERSION - 1);
+
+        let frame = session
+            .handle_handshake(&msg, HashMap::new(), Some(&state))
+            .await
+            .expect("handshake response");
+        assert_eq!(frame.msg_type, SyncMessageType::HandshakeAck);
+        let ack: HandshakeAckMsg = frame.decode_body().expect("decode handshake ack");
+
+        assert!(!ack.success);
+        assert_eq!(ack.server_wire_version, SYNC_WIRE_VERSION);
+        let expected = SyncWireVersionMismatch {
+            client: SYNC_WIRE_VERSION - 1,
+            server: SYNC_WIRE_VERSION,
+        };
+        assert_eq!(msg.check_wire_version(), Err(expected));
+        let error = ack.error.expect("the refusal names its reason");
+        assert!(error.contains(&expected.to_string()), "{error}");
+        assert!(!session.authenticated);
+        assert!(session.identity.is_none());
+    }
+
     #[tokio::test]
     async fn malformed_handshake_clears_binding_and_denies_following_delta() {
         let (shared, _dir) = trust_state();
@@ -579,7 +612,7 @@ mod tests {
 
         // Establish a real production-backed identity, then stage the
         // identity-bound state a prior authenticated Lite handshake can hold.
-        let valid_handshake = make_handshake(crate::version::WIRE_FORMAT_VERSION);
+        let valid_handshake = make_handshake(SYNC_WIRE_VERSION);
         let valid_frame = session
             .handle_handshake(&valid_handshake, HashMap::new(), Some(&shared))
             .await
@@ -658,6 +691,7 @@ mod tests {
             mutation_id: 17,
             device_id: 0,
             delta_signature: [0; 32],
+            collection_incarnation: nodedb_types::Hlc::ZERO,
             checksum: 0,
             device_valid_time_ms: None,
             producer_id: 42,
@@ -701,7 +735,7 @@ mod tests {
         let mut high_epoch_session = SyncSession::new("high-epoch-session".into());
         // Stamped once at accept time, as `handle_sync_session` does.
         high_epoch_session.device_metadata.remote_addr = "203.0.113.12:6666".into();
-        let mut high_epoch_msg = make_handshake(crate::version::WIRE_FORMAT_VERSION);
+        let mut high_epoch_msg = make_handshake(SYNC_WIRE_VERSION);
         high_epoch_msg.lite_id = "fenced-lite-id".into();
         high_epoch_msg.epoch = 9;
         let high_epoch_frame = high_epoch_session
@@ -731,7 +765,7 @@ mod tests {
 
         // This new handshake attempt stages the configured trust identity
         // before the registry discovers that this LiteId's epoch is stale.
-        let mut stale_msg = make_handshake(crate::version::WIRE_FORMAT_VERSION);
+        let mut stale_msg = make_handshake(SYNC_WIRE_VERSION);
         stale_msg.lite_id = "fenced-lite-id".into();
         stale_msg.epoch = 3;
         let stale_frame = high_epoch_session
@@ -775,6 +809,7 @@ mod tests {
             mutation_id: 17,
             device_id: 0,
             delta_signature: [0; 32],
+            collection_incarnation: nodedb_types::Hlc::ZERO,
             checksum: 0,
             device_valid_time_ms: None,
             producer_id: 0,

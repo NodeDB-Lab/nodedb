@@ -40,13 +40,14 @@ fn decode_batch_to_columns_rows(
     payload: &[u8],
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
+    crs_set: &nodedb_crs::CustomCrsSet,
 ) -> crate::Result<(Vec<String>, Vec<Vec<Value>>)> {
     match decode_payload_value(payload) {
         Ok(decoded) => {
             // A streamed plan never carries Control-Plane computed columns:
             // `try_open_sql_stream` declines those, so no session access
             // is needed per batch.
-            let shaped = shape_decoded_rows(decoded, projection, redaction, None)?;
+            let shaped = shape_decoded_rows(decoded, projection, redaction, None, crs_set)?;
             Ok(to_native_columns_rows(&shaped))
         }
         Err(_) => Ok((
@@ -120,6 +121,7 @@ pub(super) async fn emit_sql_stream(
             &batch.payload,
             projection.as_ref(),
             redaction.as_ref().map(|r| r.ctx(&state.redaction)),
+            &crate::control::crs_context::crs_set_for(state),
         )?;
         if batch_rows.is_empty() {
             continue;

@@ -117,6 +117,7 @@ impl SystemCatalog {
     pub fn persist_calvin_barrier_logs(&self) -> crate::Result<()> {
         #[cfg(test)]
         if self
+            .faults
             .fail_next_calvin_barrier_persist
             .swap(false, Ordering::SeqCst)
         {
@@ -257,6 +258,7 @@ impl SystemCatalog {
         }
         #[cfg(test)]
         if self
+            .faults
             .fail_next_calvin_barrier_replace
             .swap(false, Ordering::SeqCst)
         {

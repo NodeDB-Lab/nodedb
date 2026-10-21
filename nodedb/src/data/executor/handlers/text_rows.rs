@@ -20,21 +20,25 @@ use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
 
 /// The row predicates a full-text read applies before ranking: the residual
-/// WHERE filters and the RLS filters.
-pub(in crate::data::executor) struct TextRowGate {
+/// WHERE filters and the RLS filters, with the CRS context their geo
+/// functions resolve SRIDs through.
+pub(in crate::data::executor) struct TextRowGate<'c> {
     filters: Vec<ScanFilter>,
     rls: Vec<ScanFilter>,
+    crs: nodedb_crs::CrsContext<'c>,
 }
 
-impl TextRowGate {
+impl<'c> TextRowGate<'c> {
     /// Decode the serialized `Vec<ScanFilter>` of both predicate sets.
     pub(in crate::data::executor) fn new(
         filters: &[u8],
         rls_filters: &[u8],
+        crs: nodedb_crs::CrsContext<'c>,
     ) -> crate::Result<Self> {
         Ok(Self {
             filters: decode_scan_filters(filters, "text search filters")?,
             rls: decode_scan_filters(rls_filters, "text search RLS filters")?,
+            crs,
         })
     }
 
@@ -48,10 +52,11 @@ impl TextRowGate {
     /// RLS filter that fails to evaluate denies the row: RLS fails closed and
     /// never tells an erroring row from a missing one.
     pub(in crate::data::executor) fn admits(&self, image: &[u8]) -> crate::Result<bool> {
-        if !ScanFilter::all_match_binary(&self.filters, image)? {
+        if !ScanFilter::all_match_binary(&self.filters, image, &self.crs)? {
             return Ok(false);
         }
-        Ok(self.rls.is_empty() || ScanFilter::all_match_binary(&self.rls, image).unwrap_or(false))
+        Ok(self.rls.is_empty()
+            || ScanFilter::all_match_binary(&self.rls, image, &self.crs).unwrap_or(false))
     }
 }
 
@@ -170,9 +175,19 @@ mod tests {
         let body = msgpack(serde_json::json!({ "body": "rust" }));
         let image = text_row_image(&key, &body, SparseBodyFormatRef::Document, "id");
         let identity = key.to_identity();
-        let gate = TextRowGate::new(&id_filter(identity.as_str()), &[]).unwrap();
+        let gate = TextRowGate::new(
+            &id_filter(identity.as_str()),
+            &[],
+            nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert!(gate.admits(&image).unwrap());
-        let other = TextRowGate::new(&id_filter("nope"), &[]).unwrap();
+        let other = TextRowGate::new(
+            &id_filter("nope"),
+            &[],
+            nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert!(!other.admits(&image).unwrap());
     }
 
@@ -183,7 +198,12 @@ mod tests {
         let body = msgpack(serde_json::json!({ "body": "rust" }));
         let image = text_row_image(&key, &body, SparseBodyFormatRef::Document, "id");
         let identity = key.to_identity();
-        let gate = TextRowGate::new(&[], &id_filter(identity.as_str())).unwrap();
+        let gate = TextRowGate::new(
+            &[],
+            &id_filter(identity.as_str()),
+            nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert!(!gate.is_open());
         assert!(gate.admits(&image).unwrap());
     }
@@ -196,7 +216,12 @@ mod tests {
         let body = msgpack(serde_json::json!({ "sku": "p1", "body": "rust" }));
         let image = text_row_image(&key, &body, SparseBodyFormatRef::Document, "sku");
         let identity = key.to_identity();
-        let on_id = TextRowGate::new(&id_filter(identity.as_str()), &[]).unwrap();
+        let on_id = TextRowGate::new(
+            &id_filter(identity.as_str()),
+            &[],
+            nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert!(!on_id.admits(&image).unwrap());
         let sku = ScanFilter {
             field: "sku".into(),
@@ -205,7 +230,12 @@ mod tests {
             clauses: Vec::new(),
             expr: None,
         };
-        let on_key = TextRowGate::new(&zerompk::to_msgpack_vec(&vec![sku]).unwrap(), &[]).unwrap();
+        let on_key = TextRowGate::new(
+            &zerompk::to_msgpack_vec(&vec![sku]).unwrap(),
+            &[],
+            nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert!(on_key.admits(&image).unwrap());
     }
 }

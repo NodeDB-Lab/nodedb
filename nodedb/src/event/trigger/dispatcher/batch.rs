@@ -73,6 +73,7 @@ pub async fn dispatch_trigger_batch(
             &batch.collection,
             &batch.operation,
             trigger.when_condition.as_deref(),
+            &crate::control::crs_context::crs_context_for(state),
         ) {
             Ok(mask) => mask,
             Err(e) => {

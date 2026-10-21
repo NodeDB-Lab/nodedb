@@ -1,145 +1,226 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! `COPY <array> FROM '<path>' WITH (FORMAT geotiff)`: the decode task and
-//! the load that drains it.
+//! `COPY <array> FROM <sources> WITH (FORMAT geotiff, ...)`: one transport
+//! per source, then the one async driver.
 //!
-//! One blocking task owns the file handle and the decoder. It reads the
-//! tags, waits for the open-time checks, then decodes one block at a time
-//! into a channel of two. The async side turns each block into rows and
-//! feeds the array loader, so the load holds at most four decoded blocks
-//! and the loader's few chunks. Decoding runs on the Control Plane's
-//! blocking pool, never on a Data Plane core.
+//! - A server path opens once through the jailed handle every check ran
+//!   on. The entry point checked the superuser privilege and the path.
+//! - An `http(s)://` URL passes the egress policy before the first request.
+//!   A `CREDENTIAL` of `TYPE 'bearer'` sends its token as
+//!   `Authorization: Bearer`; one of `TYPE 'sas'` appends its signature to
+//!   the query.
+//! - An `s3://bucket/key` object reads through object_store over the egress
+//!   client. A `CREDENTIAL` of `TYPE 's3'` signs the requests and names the
+//!   region; without one the bucket is read unsigned, in the region AWS
+//!   reports for it.
+//!
+//! `OVERVIEW n` opens image `n` of every source: 0 is full resolution, 1
+//! the first overview.
 
-use std::io::BufReader;
+use std::sync::Arc;
+use std::time::Duration;
 
-use nodedb_raster::{GeoTiffReader, RasterBlock, RasterError, RasterLimits};
-use nodedb_sql::ddl_ast::statement::CopyRasterOptions;
-use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
+use nodedb_raster::TiffOpener;
+use nodedb_sql::ddl_ast::statement::{CopyRasterOptions, CopySource};
+use zeroize::Zeroizing;
 
+use crate::control::security::egress::{EgressClientOptions, SystemLookup, egress_client};
+use crate::control::security::source_credential::{CredentialSecret, open_secret};
 use crate::control::server::shared::ddl::result::DdlError;
 
 use super::super::super::source_file::CopySourceFile;
-use super::super::decode::RowError;
-use super::super::dispatch::{ArrayLoadCtx, input_cap};
-use super::super::loader::{ArrayLoader, LoadInput};
-use super::open::{RasterHeader, RasterPlan};
-use super::pixels::BlockRows;
-use super::refusal::raster_refusal;
+use super::super::dispatch::ArrayLoadCtx;
+use super::driver::drive_raster;
+use super::fetch::http::display_name;
+use super::fetch::{
+    FetchError, HttpAuth, HttpRange, LocalFile, ObjectStoreRange, S3Keys, S3Target, SourceFetch,
+    SourceSet, bucket_region,
+};
 
-/// The most bytes one block decodes to, before the memory headroom cap.
-const MAX_BLOCK_BYTES: usize = 64 * 1024 * 1024;
-/// Decoded blocks queued between the decoder and the load.
-const BLOCK_QUEUE: usize = 2;
+/// Redirects one remote request follows.
+const MAX_REDIRECTS: usize = 5;
+/// Cap on connecting to a remote source.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Cap on the time between two reads of a remote answer.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
-type HeaderResult = Result<RasterHeader, RasterError>;
-type BlockResult = Result<RasterBlock, RasterError>;
-
-/// Load the GeoTIFF at `path` into `array`. Returns the number of rows
-/// loaded: every pixel but the all-nodata ones.
+/// Load `sources` into `array`. Returns the number of rows loaded: every
+/// pixel but the masked and all-nodata ones.
 pub(crate) async fn copy_raster(
     ctx: &ArrayLoadCtx<'_>,
     array: &str,
-    path: &str,
+    sources: &[CopySource],
     options: &CopyRasterOptions,
 ) -> Result<u64, DdlError> {
-    let mut loader = ArrayLoader::open(ctx, array, LoadInput::Raster)?;
-    let georef = loader.view().georef.clone().ok_or_else(|| {
-        loader.refuse(RowError::new(
-            0,
-            "55000",
-            format!(
-                "array '{array}' has no GEOREF, so no pixel has a cell; \
-                 add one with ALTER ARRAY {array} SET GEOREF (...)"
-            ),
-        ))
-    })?;
-    let cap = MAX_BLOCK_BYTES.min(input_cap(ctx.state));
-    let file = CopySourceFile::open(path).await?.into_std().await;
-    let (header_tx, header_rx) = oneshot::channel();
-    let (go_tx, go_rx) = oneshot::channel();
-    let (block_tx, mut block_rx) = mpsc::channel(BLOCK_QUEUE);
-    let decoder = tokio::task::spawn_blocking(move || {
-        decode_file(file, cap, header_tx, go_rx, block_tx);
-    });
-
-    let header = match header_rx.await {
-        Ok(Ok(header)) => header,
-        Ok(Err(e)) => return Err(loader.refuse(raster_refusal(&e, path, cap))),
-        Err(_) => return Err(decoder_gone(decoder).await),
+    let secret = match &options.credential {
+        Some(name) => Some(resolve_credential(ctx, name)?),
+        None => None,
     };
-    let plan =
-        RasterPlan::new(loader.view(), &georef, &header, options).map_err(|e| loader.refuse(e))?;
-    if go_tx.send(()).is_err() {
-        return Err(decoder_gone(decoder).await);
+    let remote = sources.iter().any(|s| !matches!(s, CopySource::File(_)));
+    if secret.is_some() && !remote {
+        return Err(DdlError::new(
+            "22023",
+            "COPY: CREDENTIAL applies to http(s):// and s3:// sources; every source is a server \
+             file",
+        ));
     }
-    while let Some(next) = block_rx.recv().await {
-        let block = next.map_err(|e| loader.refuse(raster_refusal(&e, path, cap)))?;
-        let rows = BlockRows::new(&plan, &block).map_err(|e| loader.refuse(e))?;
-        loader.feed_rows(ctx, rows).await?;
-    }
-    // The channel closes once the decoder returns. A panic closes it early,
-    // so the join result tells a whole file from a cut-short one.
-    decoder
-        .await
-        .map_err(|e| DdlError::internal(format!("COPY: GeoTIFF decoder failed: {e}")))?;
-    loader.finish(ctx).await
-}
-
-/// The error of a decoder that ended before it answered.
-async fn decoder_gone(decoder: JoinHandle<()>) -> DdlError {
-    match decoder.await {
-        Err(e) => DdlError::internal(format!("COPY: GeoTIFF decoder failed: {e}")),
-        Ok(()) => DdlError::internal("COPY: GeoTIFF decoder ended before the file was read"),
-    }
-}
-
-/// The decode task. It ends early once the load drops its side: a refused
-/// file, a refused row, or a cancelled statement.
-fn decode_file(
-    file: std::fs::File,
-    cap: usize,
-    header_tx: oneshot::Sender<HeaderResult>,
-    go: oneshot::Receiver<()>,
-    blocks: mpsc::Sender<BlockResult>,
-) {
-    let opened = GeoTiffReader::open(BufReader::new(file), RasterLimits::new(cap))
-        .and_then(|reader| header_of(&reader).map(|header| (reader, header)));
-    let mut reader = match opened {
-        Ok((reader, header)) => {
-            if header_tx.send(Ok(header)).is_err() {
-                return;
-            }
-            reader
-        }
-        Err(e) => {
-            // A dropped receiver means the load already ended; nothing waits.
-            let _ = header_tx.send(Err(e));
-            return;
-        }
+    let client = if remote {
+        Some(
+            egress_client(
+                Arc::clone(ctx.state.remote_sources.egress()),
+                Arc::new(SystemLookup),
+                EgressClientOptions {
+                    timeout: None,
+                    connect_timeout: CONNECT_TIMEOUT,
+                    read_timeout: READ_TIMEOUT,
+                    max_redirects: MAX_REDIRECTS,
+                },
+            )
+            .map_err(|e| DdlError::internal(format!("COPY: HTTP client: {e}")))?,
+        )
+    } else {
+        None
     };
-    if go.blocking_recv().is_err() {
-        return;
+    let mut names = Vec::with_capacity(sources.len());
+    let mut fetches = Vec::with_capacity(sources.len());
+    for source in sources {
+        let (name, fetch) =
+            transport(ctx, source, client.as_ref(), secret.as_ref(), options).await?;
+        names.push(name);
+        fetches.push(fetch);
     }
-    for index in 0..reader.block_count() {
-        let block = reader.read_block(index);
-        let failed = block.is_err();
-        if blocks.blocking_send(block).is_err() || failed {
-            return;
+    let opener = TiffOpener::new().with_image(options.overview.unwrap_or(0));
+    let fetch = Arc::new(SourceSet::new(fetches));
+    drive_raster(ctx, array, &names, opener, fetch, options).await
+}
+
+/// The display name and transport of `source`.
+async fn transport(
+    ctx: &ArrayLoadCtx<'_>,
+    source: &CopySource,
+    client: Option<&reqwest::Client>,
+    secret: Option<&CredentialSecret>,
+    options: &CopyRasterOptions,
+) -> Result<(String, SourceFetch), DdlError> {
+    let client = || {
+        client
+            .cloned()
+            .ok_or_else(|| DdlError::internal("COPY: a remote source has no HTTP client"))
+    };
+    match source {
+        CopySource::File(path) => {
+            let file = CopySourceFile::open(path).await?.into_std().await;
+            Ok((
+                path.clone(),
+                SourceFetch::Local(LocalFile::new(file, path.clone())),
+            ))
+        }
+        CopySource::Http(text) => {
+            let url = reqwest::Url::parse(text)
+                .map_err(|_| DdlError::new("22023", "COPY: a source URL is malformed"))?;
+            let name = display_name(&url);
+            ctx.state
+                .remote_sources
+                .egress()
+                .check_parsed(&url)
+                .map_err(|error| {
+                    fetch_error(FetchError::Egress {
+                        source_name: name.clone(),
+                        error,
+                    })
+                })?;
+            let auth = match secret {
+                None => HttpAuth::None,
+                Some(CredentialSecret::Bearer { token }) => {
+                    HttpAuth::Bearer(Zeroizing::new(token.clone()))
+                }
+                Some(CredentialSecret::Sas { token }) => {
+                    HttpAuth::Sas(Zeroizing::new(token.clone()))
+                }
+                Some(CredentialSecret::S3 { .. }) => {
+                    return Err(wrong_type(&name, "s3", "s3:// sources"));
+                }
+            };
+            Ok((
+                name,
+                SourceFetch::Http(HttpRange::new(client()?, url, auth)),
+            ))
+        }
+        CopySource::S3 { bucket, key } => {
+            let name = source.display();
+            let client = client()?;
+            let target = match secret {
+                Some(CredentialSecret::S3 {
+                    access_key_id,
+                    secret_access_key,
+                    region,
+                    session_token,
+                    endpoint,
+                }) => S3Target {
+                    bucket: bucket.clone(),
+                    key: key.clone(),
+                    region: region.clone(),
+                    endpoint: endpoint.clone(),
+                    keys: Some(S3Keys {
+                        access_key_id: Zeroizing::new(access_key_id.clone()),
+                        secret_access_key: Zeroizing::new(secret_access_key.clone()),
+                        session_token: session_token.clone().map(Zeroizing::new),
+                    }),
+                    requester_pays: options.requester_pays,
+                },
+                Some(other) => {
+                    return Err(wrong_type(&name, other.type_name(), "http(s):// sources"));
+                }
+                None => S3Target {
+                    bucket: bucket.clone(),
+                    key: key.clone(),
+                    region: bucket_region(&client, bucket).await.map_err(fetch_error)?,
+                    endpoint: None,
+                    keys: None,
+                    requester_pays: options.requester_pays,
+                },
+            };
+            let store = ObjectStoreRange::new(client, target, ctx.state.remote_sources.egress())
+                .map_err(fetch_error)?;
+            Ok((name, SourceFetch::Store(store)))
         }
     }
 }
 
-fn header_of<R: std::io::Read + std::io::Seek>(
-    reader: &GeoTiffReader<R>,
-) -> Result<RasterHeader, RasterError> {
-    Ok(RasterHeader {
-        width: reader.width(),
-        height: reader.height(),
-        bands: reader.band_count(),
-        sample_type: reader.sample_type(),
-        transform: reader.transform().map(|gt| gt.0),
-        srid: reader.srid()?,
-        nodata: reader.nodata(),
-    })
+/// Open credential `name` of the statement's tenant.
+fn resolve_credential(ctx: &ArrayLoadCtx<'_>, name: &str) -> Result<CredentialSecret, DdlError> {
+    let kek = ctx
+        .state
+        .remote_sources
+        .credential_kek
+        .as_ref()
+        .ok_or_else(|| {
+            DdlError::new(
+                "55000",
+                "COPY: CREDENTIAL needs a credential key: set [credential_encryption] key_path \
+                 in the server config",
+            )
+        })?;
+    let tenant_id = ctx.identity.tenant_id.as_u64();
+    let row = ctx
+        .state
+        .credentials
+        .catalog()
+        .get_credential(tenant_id, name)?
+        .ok_or_else(|| {
+            DdlError::new("42704", format!("COPY: credential '{name}' does not exist"))
+        })?;
+    open_secret(kek, tenant_id, name, row.kind.type_name(), &row.sealed)
+        .map_err(|e| DdlError::new("55000", format!("COPY: credential '{name}': {e}")))
+}
+
+fn wrong_type(source: &str, kind: &str, applies_to: &str) -> DdlError {
+    DdlError::new(
+        "22023",
+        format!("COPY: '{source}': a credential of TYPE '{kind}' applies to {applies_to}"),
+    )
+}
+
+fn fetch_error(e: FetchError) -> DdlError {
+    DdlError::new(e.sqlstate(), format!("COPY: {e}"))
 }

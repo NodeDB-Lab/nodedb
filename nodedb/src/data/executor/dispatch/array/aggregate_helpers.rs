@@ -2,14 +2,16 @@
 
 use std::collections::BTreeMap;
 
+use nodedb_array::ArrayError;
 use nodedb_array::query::agg_number::{AggNumber, AggScalar};
-use nodedb_array::query::aggregate::{AggregateResult, Reducer};
+use nodedb_array::query::aggregate::{AggOutput, AggregateResult, Reducer};
 use nodedb_array::schema::ArraySchema;
 use nodedb_array::segment::TilePayload;
 use nodedb_array::tile::sparse_tile::{RowKind, SparseRow, SparseTile, SparseTileBuilder};
 use nodedb_array::types::coord::value::CoordValue;
 use nodedb_cluster::distributed_array::merge::ArrayAggPartial;
 use nodedb_cluster::distributed_array::{ArrayAggGroupKey, ArrayAggNumber};
+use nodedb_types::array_agg::ValueDist;
 use nodedb_types::{InstantKind, NdbDateTime, SurrogateBitmap};
 
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -18,6 +20,7 @@ use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::ArrayReducer;
 
 /// Standard-msgpack-friendly cell value for aggregate rows.
+#[derive(Clone)]
 pub(super) enum AggCell {
     Float(f64),
     Int(i64),
@@ -60,32 +63,73 @@ pub(super) fn coord_to_agg_cell(c: &CoordValue) -> Result<AggCell, ErrorCode> {
     })
 }
 
-/// The `result` cell of a finalized reducer. A SUM past `i64` is SQLSTATE
-/// `22003`, the code a single-node and a cluster read both answer.
-pub(super) fn result_cell(result: Option<AggregateResult>) -> Result<AggCell, ErrorCode> {
-    let finalized = match result {
-        Some(r) => r
-            .finalize()
-            .map_err(|e| ErrorCode::NumericValueOutOfRange {
-                detail: format!("array aggregate: {e}"),
-            })?,
-        None => None,
+/// One aggregate row: its columns by name.
+pub(super) type AggRow = BTreeMap<&'static str, AggCell>;
+
+/// The rows of one finalized partial, after `group` when it groups.
+///
+/// A scalar reducer gives one row holding `result`. A histogram gives one
+/// row per bin holding `bin_lo`, `bin_hi` and `count`, zero-count bins
+/// included. A SUM past `i64` is SQLSTATE `22003` and a median, percentile
+/// or mode past its distinct-value budget is `54000`, the codes a
+/// single-node and a cluster read both answer.
+pub(super) fn result_rows(
+    group: Option<AggCell>,
+    result: AggregateResult,
+) -> Result<Vec<AggRow>, ErrorCode> {
+    let with_group = |mut row: AggRow| {
+        if let Some(g) = &group {
+            row.insert("group", g.clone());
+        }
+        row
     };
-    Ok(match finalized {
-        Some(AggScalar::Int(v)) => AggCell::Int(v),
-        Some(AggScalar::Float(v)) => AggCell::Float(v),
-        None => AggCell::Null,
+    Ok(match result.finalize().map_err(finalize_error)? {
+        AggOutput::Scalar(v) => {
+            let cell = match v {
+                Some(AggScalar::Int(i)) => AggCell::Int(i),
+                Some(AggScalar::Float(f)) => AggCell::Float(f),
+                None => AggCell::Null,
+            };
+            vec![with_group(AggRow::from([("result", cell)]))]
+        }
+        AggOutput::Bins(bins) => bins
+            .into_iter()
+            .map(|bin| {
+                let count =
+                    i64::try_from(bin.count).map_err(|_| ErrorCode::NumericValueOutOfRange {
+                        detail: format!(
+                            "array aggregate: bin count {} is out of range for bigint",
+                            bin.count
+                        ),
+                    })?;
+                Ok(with_group(AggRow::from([
+                    ("bin_lo", AggCell::Float(bin.lo)),
+                    ("bin_hi", AggCell::Float(bin.hi)),
+                    ("count", AggCell::Int(count)),
+                ])))
+            })
+            .collect::<Result<_, ErrorCode>>()?,
     })
 }
 
-pub(super) fn map_reducer(r: ArrayReducer) -> Reducer {
-    match r {
-        ArrayReducer::Sum => Reducer::Sum,
-        ArrayReducer::Count => Reducer::Count,
-        ArrayReducer::Min => Reducer::Min,
-        ArrayReducer::Max => Reducer::Max,
-        ArrayReducer::Mean => Reducer::Mean,
+/// The Data-Plane code of a finalize refusal.
+fn finalize_error(e: ArrayError) -> ErrorCode {
+    match e {
+        ArrayError::AggregateBudgetExceeded { .. } => ErrorCode::ProgramLimitExceeded {
+            detail: format!("array aggregate: {e}"),
+        },
+        other => ErrorCode::NumericValueOutOfRange {
+            detail: format!("array aggregate: {other}"),
+        },
     }
+}
+
+/// The engine reducer of a plan reducer. A malformed histogram spec is a
+/// bad request.
+pub(super) fn map_reducer(r: ArrayReducer) -> Result<Reducer, ErrorCode> {
+    r.engine().map_err(|e| ErrorCode::BadRequest {
+        detail: format!("array aggregate: {e}"),
+    })
 }
 
 pub(super) fn unwrap_sparse(t: TilePayload) -> Result<SparseTile, ErrorCode> {
@@ -181,6 +225,8 @@ pub(super) fn agg_result_to_partial(
                     0.0
                 },
                 welford_m2: 0.0,
+                dist: ValueDist::Empty,
+                bins: Vec::new(),
             }
         }
         AggregateResult::Count { count } => {
@@ -193,6 +239,8 @@ pub(super) fn agg_result_to_partial(
                 max: n,
                 welford_mean: if count > 0 { 1.0 } else { 0.0 },
                 welford_m2: 0.0,
+                dist: ValueDist::Empty,
+                bins: Vec::new(),
             }
         }
         AggregateResult::Mean { sum, count } => {
@@ -209,8 +257,31 @@ pub(super) fn agg_result_to_partial(
                 max: ArrayAggNumber::Float(mean),
                 welford_mean: mean,
                 welford_m2: 0.0,
+                dist: ValueDist::Empty,
+                bins: Vec::new(),
             }
         }
+        AggregateResult::Dist { acc, .. } => {
+            let dist = acc.into_dist();
+            ArrayAggPartial {
+                // An over-budget distribution counts no value, yet must not
+                // merge as empty, or the refusal is lost.
+                count: dist.count().max(dist.distinct()),
+                dist,
+                ..ArrayAggPartial::empty(group_key)
+            }
+        }
+        AggregateResult::Moments { moments, .. } => ArrayAggPartial {
+            count: moments.count,
+            welford_mean: moments.mean,
+            welford_m2: moments.m2,
+            ..ArrayAggPartial::empty(group_key)
+        },
+        AggregateResult::Histogram { counts, .. } => ArrayAggPartial {
+            count: counts.iter().sum(),
+            bins: counts,
+            ..ArrayAggPartial::empty(group_key)
+        },
         AggregateResult::Empty(_) => ArrayAggPartial::empty(group_key),
     }
 }

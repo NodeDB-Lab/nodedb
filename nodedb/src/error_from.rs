@@ -18,6 +18,14 @@ impl From<nodedb_query::expr_parse::ExprParseError> for Error {
 
 /// A non-scalar offered where a raw KV body is required is a request
 /// shape error, not an internal fault.
+impl From<nodedb_types::sync::wire::SyncWireVersionMismatch> for Error {
+    fn from(e: nodedb_types::sync::wire::SyncWireVersionMismatch) -> Self {
+        Error::VersionCompat {
+            detail: e.to_string(),
+        }
+    }
+}
+
 impl From<nodedb_types::NotScalar> for Error {
     fn from(e: nodedb_types::NotScalar) -> Self {
         Self::BadRequest {
@@ -141,15 +149,6 @@ impl From<nodedb_vector::error::VectorError> for Error {
             // so the compiler requires this arm. A variant this build cannot
             // name fails stop.
             _ => Self::SegmentCorrupted { detail },
-        }
-    }
-}
-
-impl From<nodedb_spatial::RTreeCheckpointError> for Error {
-    /// Spatial checkpoint failures fail-stop as segment corruption.
-    fn from(e: nodedb_spatial::RTreeCheckpointError) -> Self {
-        Self::SegmentCorrupted {
-            detail: e.to_string(),
         }
     }
 }
@@ -409,6 +408,7 @@ impl From<Error> for nodedb_cluster::rpc_codec::TypedClusterError {
             | Error::DivisionByZero
             | Error::DataException { .. }
             | Error::MixedSrid { .. }
+            | Error::UnknownSrid { .. }
             | Error::NumericValueOutOfRange { .. }
             | Error::InvalidLimitValue { .. }
             | Error::RetryableLeaderChange { .. }

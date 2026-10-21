@@ -155,6 +155,7 @@ impl JwksRegistry {
 mod tests {
     use super::*;
     use crate::config::auth::JwtAuthConfig;
+    use crate::control::security::egress::EgressPolicy;
 
     fn claims(iat: u64, exp: u64) -> JwtClaims {
         JwtClaims {
@@ -186,7 +187,7 @@ mod tests {
     /// A session whose stored claims have since expired must be rejected.
     #[tokio::test]
     async fn check_not_expired_rejects_claims_past_exp() {
-        let registry = JwksRegistry::init(JwtAuthConfig::default())
+        let registry = JwksRegistry::init(JwtAuthConfig::default(), strict())
             .await
             .expect("registry with no configured providers must still initialize");
         let now = now_secs();
@@ -200,7 +201,7 @@ mod tests {
     /// path this check now gates.
     #[tokio::test]
     async fn check_not_expired_accepts_claims_before_exp() {
-        let registry = JwksRegistry::init(JwtAuthConfig::default())
+        let registry = JwksRegistry::init(JwtAuthConfig::default(), strict())
             .await
             .expect("registry with no configured providers must still initialize");
         let now = now_secs();
@@ -215,8 +216,14 @@ mod tests {
     fn config_from_toml(body: &str) -> JwtAuthConfig {
         let parsed: JwtAuthConfig =
             toml::from_str(body).expect("the [auth.jwt] section must deserialize");
-        parsed.validate().expect("the section must be valid");
         parsed
+            .validate(&EgressPolicy::strict())
+            .expect("the section must be valid");
+        parsed
+    }
+
+    fn strict() -> std::sync::Arc<EgressPolicy> {
+        std::sync::Arc::new(EgressPolicy::strict())
     }
 
     fn claims_with_extra(pairs: &[(&str, serde_json::Value)]) -> JwtClaims {
@@ -232,12 +239,15 @@ mod tests {
     /// must actually reject a token carrying a blocked value.
     #[tokio::test]
     async fn blocked_status_from_server_config_rejects_the_token() {
-        let registry = JwksRegistry::init(config_from_toml(
-            r#"
+        let registry = JwksRegistry::init(
+            config_from_toml(
+                r#"
             status_claim = "account_status"
             blocked_statuses = ["suspended", "banned"]
             "#,
-        ))
+            ),
+            strict(),
+        )
         .await
         .expect("registry with no configured providers must still initialize");
 
@@ -259,12 +269,15 @@ mod tests {
     /// provider-named claim onto the field NodeDB reads.
     #[tokio::test]
     async fn claim_remap_from_server_config_reaches_the_verification_pipeline() {
-        let registry = JwksRegistry::init(config_from_toml(
-            r#"
+        let registry = JwksRegistry::init(
+            config_from_toml(
+                r#"
             [claims]
             upn = "email"
             "#,
-        ))
+            ),
+            strict(),
+        )
         .await
         .expect("registry with no configured providers must still initialize");
 
@@ -280,15 +293,18 @@ mod tests {
     /// provider claim after renaming it onto `status`.
     #[tokio::test]
     async fn remap_feeds_the_status_check() {
-        let registry = JwksRegistry::init(config_from_toml(
-            r#"
+        let registry = JwksRegistry::init(
+            config_from_toml(
+                r#"
             status_claim = "status"
             blocked_statuses = ["deactivated"]
 
             [claims]
             acct_state = "status"
             "#,
-        ))
+            ),
+            strict(),
+        )
         .await
         .expect("registry with no configured providers must still initialize");
 
@@ -304,10 +320,13 @@ mod tests {
     /// authentication — not a hand-rolled or zero tolerance.
     #[tokio::test]
     async fn check_not_expired_honors_configured_clock_skew() {
-        let registry = JwksRegistry::init(JwtAuthConfig {
-            clock_skew_secs: 120,
-            ..JwtAuthConfig::default()
-        })
+        let registry = JwksRegistry::init(
+            JwtAuthConfig {
+                clock_skew_secs: 120,
+                ..JwtAuthConfig::default()
+            },
+            strict(),
+        )
         .await
         .expect("registry with no configured providers must still initialize");
         let now = now_secs();

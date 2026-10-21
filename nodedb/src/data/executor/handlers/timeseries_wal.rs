@@ -35,8 +35,16 @@ impl CoreLoop {
         use crate::data::executor::wal_replay_columnar_truncate::TruncateFloors;
         use nodedb_wal::record::RecordType;
 
-        let mut truncate_floors =
-            TruncateFloors::collect(records, num_cores, self.core_id, &self.ts_replay_stamps);
+        let bitemporal = |key: &(DatabaseId, crate::types::TenantId, String)| {
+            self.is_bitemporal(key.0.as_u64(), key.1.as_u64(), &key.2)
+        };
+        let mut truncate_floors = TruncateFloors::collect(
+            records,
+            num_cores,
+            self.core_id,
+            &self.ts_replay.stamps,
+            &bitemporal,
+        );
         let mut replayed = 0usize;
         let mut skipped = 0usize;
         // Records replayed below the highest LSN their collection's stamp
@@ -76,7 +84,7 @@ impl CoreLoop {
             }
             // Every record below this one is passed.
             if restart {
-                self.ts_replay_cursor = Some(record.header.lsn.saturating_sub(1));
+                self.ts_replay.cursor = Some(record.header.lsn.saturating_sub(1));
             }
             self.begin_ts_record(records, index, num_cores, &mut current);
 
@@ -161,6 +169,7 @@ impl CoreLoop {
                 surrogates: record_surrogates,
                 conflict_policy,
                 default_timestamp_ms,
+                system_from,
             }) = decode_batch_record(&record.payload)
             else {
                 self.replay_record_unapplied(
@@ -209,7 +218,8 @@ impl CoreLoop {
                 continue;
             }
             let passed = self
-                .ts_replay_stamps
+                .ts_replay
+                .stamps
                 .get(&key)
                 .is_some_and(|stamp| stamp.rows.highest() > record_lsn);
 
@@ -244,6 +254,7 @@ impl CoreLoop {
                         provenance: record_provenance,
                         surrogates: record_surrogates,
                         conflict_policy,
+                        system_from,
                     },
                 ),
                 Some("timeseries") | None => self.replay_timeseries_payload(
@@ -285,7 +296,7 @@ impl CoreLoop {
             self.end_ts_record(record);
         }
         if restart {
-            self.ts_replay_cursor = None;
+            self.ts_replay.cursor = None;
         }
 
         if replayed > 0 {
@@ -451,12 +462,12 @@ mod tests {
             "the partition holds record 10 and none of record 11, so it may \
              claim only record 10"
         );
-        let stamp = &h.core.ts_replay_stamps.get(&key).expect("stamp").rows;
+        let stamp = &h.core.ts_replay.stamps.get(&key).expect("stamp").rows;
         assert!(
             stamp.skips(10) && !stamp.skips(11),
             "the stamp names record 10 only: {stamp:?}"
         );
-        assert_eq!(h.core.ts_replay_cursor, None, "the pass clears its cursor");
+        assert_eq!(h.core.ts_replay.cursor, None, "the pass clears its cursor");
     }
 
     /// A `TimeseriesBatch`-typed WAL record carrying a map-shaped
@@ -469,6 +480,7 @@ mod tests {
             provenance: None,
             surrogates: Vec::new(),
             conflict_policy: Vec::new(),
+            system_from: None,
         };
         let payload = zerompk::to_msgpack_vec(&rec).expect("encode columnar wal record");
         WalRecord::new(WalRecordArgs {
@@ -523,6 +535,7 @@ mod tests {
             provenance: None,
             surrogates: Vec::new(),
             conflict_policy: policy.encode().expect("encode policy"),
+            system_from: None,
         };
         let record = WalRecord::new(WalRecordArgs {
             record_type: RecordType::TimeseriesBatch as u32,
@@ -551,6 +564,73 @@ mod tests {
             .collect::<Result<_, _>>()
             .expect("read");
         assert_eq!(rows, vec![vec![Value::Integer(1), Value::Integer(10)]]);
+    }
+
+    /// A bitemporal columnar record replays at the ordinals its live insert
+    /// stamped: two cores replaying one record store the same `_ts_system`,
+    /// so `AS OF` after a restart reads what it read before, and the clock
+    /// folds past the run.
+    #[test]
+    fn a_bitemporal_columnar_record_replays_at_its_carried_ordinals() {
+        use nodedb_types::Value;
+
+        let first = 1_700_000_000_000 * nodedb_types::NANOS_PER_MS + 5;
+        let rows: Vec<Value> = [10, 20]
+            .iter()
+            .map(|v| {
+                Value::Object(std::collections::HashMap::from([
+                    ("id".to_string(), Value::Integer(1)),
+                    ("v".to_string(), Value::Integer(*v)),
+                ]))
+            })
+            .collect();
+        let rec = ColumnarWalRecord {
+            kind: "columnar".to_string(),
+            collection: "bt".to_string(),
+            payload: nodedb_types::value_to_msgpack(&Value::Array(rows)).expect("encode rows"),
+            provenance: None,
+            surrogates: Vec::new(),
+            conflict_policy: Vec::new(),
+            system_from: Some(first),
+        };
+        let record = WalRecord::new(WalRecordArgs {
+            record_type: RecordType::TimeseriesBatch as u32,
+            lsn: 50,
+            tenant_id: 7,
+            vshard_id: 0,
+            database_id: 0,
+            payload: zerompk::to_msgpack_vec(&rec).expect("encode record"),
+            encryption_key: None,
+            preamble_bytes: None,
+        })
+        .expect("wal record");
+        let key = (DatabaseId::new(0), TenantId::new(7), "bt".to_string());
+
+        let stamps = |h: &mut CoreHarness| -> Vec<i64> {
+            let mut config = crate::engine::document::store::CollectionConfig::new("bt");
+            config.bitemporal = true;
+            h.core.doc_configs.insert(key.clone(), config);
+            h.core.replay_timeseries_wal(
+                std::slice::from_ref(&record),
+                1,
+                &nodedb_wal::TombstoneSet::new(),
+            );
+            assert!(h.core.hlc.peek() > first, "the clock folds past the run");
+            let engine = h.core.columnar_engines.get(&key).expect("engine");
+            let ts_idx = engine.schema().ts_system_idx().expect("bitemporal schema");
+            engine
+                .scan_memtable_rows()
+                .map(|row| match row.expect("read").get(ts_idx) {
+                    Some(Value::Integer(ordinal)) => *ordinal,
+                    other => panic!("no _ts_system ordinal: {other:?}"),
+                })
+                .collect()
+        };
+        let mut before = make_core();
+        let mut after_restart = make_core();
+        let first_run = stamps(&mut before);
+        assert_eq!(first_run, vec![first, first + 1], "row i stamps first + i");
+        assert_eq!(stamps(&mut after_restart), first_run);
     }
 
     #[test]
@@ -843,6 +923,7 @@ mod tests {
             provenance: Some(prov.clone()),
             surrogates: vec![Surrogate::new(100), Surrogate::new(101)],
             conflict_policy: Vec::new(),
+            system_from: None,
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode map record");
 

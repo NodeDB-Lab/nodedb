@@ -9,6 +9,7 @@ pub mod l2_cleanup_queue;
 pub mod oid;
 pub mod provider;
 pub mod schema;
+pub mod spatial_ref_sys;
 pub mod tables;
 
 pub use provider::{CatalogProvider, catalog_rows};

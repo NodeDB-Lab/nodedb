@@ -11,11 +11,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nodedb_physical::physical_plan::PhysicalPlan;
-use nodedb_types::RowIdentity;
 
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::transaction::overlay::BitemporalStamp;
 use crate::data::executor::handlers::transaction::stage_write::GRAPH_LABEL_COLL_KEY;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{TenantId, TxnId};
@@ -257,50 +255,12 @@ impl CoreLoop {
             }
         }
 
-        // Pin the resolve-time bitemporal stamp once, in the overlay sidecar, for
-        // every staged put AND tombstone, so the redo carries it and every apply
-        // (install, replica, restart) writes the same version key. Deterministic
-        // (collection, doc-id) order keeps replicas resolving the same txn in
-        // sync.
+        // Pin the resolve-time bitemporal stamp of every staged document
+        // version (see `doc_ordinal`).
+        let txn_ordinal = self.txn_system_ordinal(txn_id);
+        let database_id = task.request.database_id;
         for collection in &doc_collections {
-            if !self.is_bitemporal(task.request.database_id.as_u64(), tid, collection) {
-                continue;
-            }
-            let coll_key = (
-                task.request.database_id,
-                TenantId::new(tid),
-                collection.clone(),
-            );
-            let mut writes: Vec<(&RowIdentity, u32)> = match self.txn_overlays.get(&txn_id) {
-                Some(overlay) => overlay
-                    .iter_doc_entries_for_collection(&coll_key)
-                    .filter_map(|(doc_id, _staged)| {
-                        overlay
-                            .surrogate_for_doc_id(&coll_key, doc_id)
-                            .map(|surrogate| (doc_id, surrogate))
-                    })
-                    .collect(),
-                None => Vec::new(),
-            };
-            writes.sort();
-            let stamps: Vec<(u32, BitemporalStamp)> = writes
-                .into_iter()
-                .map(|(_doc_id, surrogate)| {
-                    (
-                        surrogate,
-                        BitemporalStamp {
-                            sys_from_ms: self.bitemporal_now_ms(),
-                            valid_from_ms: i64::MIN,
-                            valid_until_ms: i64::MAX,
-                        },
-                    )
-                })
-                .collect();
-            if let Some(overlay) = self.txn_overlays.get_mut(&txn_id) {
-                for (surrogate, stamp) in stamps {
-                    overlay.set_bitemporal(&coll_key, surrogate, stamp);
-                }
-            }
+            self.pin_doc_stamps(database_id, tid, txn_id, collection, txn_ordinal)?;
         }
 
         if let Some(overlay) = self.txn_overlays.get(&txn_id) {
@@ -328,6 +288,13 @@ impl CoreLoop {
                 if overlay.is_truncated(&coll_key) {
                     let rows =
                         self.truncated_base_rows(task, tid, collection, overlay, &coll_key)?;
+                    let tombstones = self.truncated_row_ordinals(
+                        database_id,
+                        tid,
+                        collection,
+                        &rows,
+                        txn_ordinal,
+                    )?;
                     document::serialize_truncated_base_rows(
                         document::TruncatedBaseRows {
                             collection,
@@ -336,9 +303,7 @@ impl CoreLoop {
                             declared_primary_key: truncate_primary_keys
                                 .get(collection.as_str())
                                 .and_then(|pk| pk.as_deref()),
-                            sys_from_ms: self
-                                .is_bitemporal(task.request.database_id.as_u64(), tid, collection)
-                                .then(|| self.bitemporal_now_ms()),
+                            tombstone_sys_from: tombstones.as_ref(),
                         },
                         &mut ops,
                     )?;
@@ -355,7 +320,10 @@ impl CoreLoop {
         self.serialize_staged_image_collections(
             task,
             tid,
-            txn_id,
+            ResolvingTxn {
+                id: txn_id,
+                ordinal: txn_ordinal,
+            },
             &columnar_collections,
             &vector_primary_collections,
             &mut ops,
@@ -369,8 +337,9 @@ impl CoreLoop {
                 .apply_scope
                 .calvin_txn_ordinal
                 .unwrap_or_else(|| self.hlc.next_ordinal());
+            let txn_ordinal = graph_overlay.freeze_system_from(candidate);
             let ordinals = EdgeOrdinals::above_stored(
-                graph_overlay.freeze_system_from(candidate),
+                txn_ordinal,
                 StoredEdges {
                     store: &self.edge_store,
                     database_id: task.request.database_id,
@@ -399,7 +368,21 @@ impl CoreLoop {
                 TenantId::new(tid),
                 GRAPH_LABEL_COLL_KEY.to_string(),
             );
-            graph::serialize_node_label_deltas(graph_overlay, &label_coll_key, &mut ops)?;
+            let label_ordinal = |node: &str| {
+                graph::label_ordinal(
+                    &self.edge_store,
+                    task.request.database_id,
+                    TenantId::new(tid),
+                    node,
+                    txn_ordinal,
+                )
+            };
+            graph::serialize_node_label_deltas(
+                graph_overlay,
+                &label_coll_key,
+                label_ordinal,
+                &mut ops,
+            )?;
         }
         self.serialize_truncated_edges(plans, &mut ops)?;
         let mut row_changes = self.resolve_row_changes(
@@ -448,11 +431,15 @@ impl CoreLoop {
         &self,
         task: &ExecutionTask,
         tid: u64,
-        txn_id: TxnId,
+        txn: ResolvingTxn,
         columnar: &ColumnarCollections,
         vector_primary: &VectorPrimaryCollections,
         ops: &mut Vec<RedoSubRecord>,
     ) -> crate::Result<()> {
+        let ResolvingTxn {
+            id: txn_id,
+            ordinal: txn_ordinal,
+        } = txn;
         let Some(overlay) = self.txn_overlays.get(&txn_id) else {
             return Ok(());
         };
@@ -465,12 +452,15 @@ impl CoreLoop {
         };
         for (collection, schema_bytes) in columnar {
             let key = coll_key(collection);
+            let stamps = self.columnar_txn_stamps(overlay, &key, txn_ordinal)?;
             columnar_image::serialize_columnar_collection(
                 ColumnarCollectionImages {
                     overlay,
                     coll_key: &key,
                     schema: self.columnar_engines.get(&key).map(|e| e.schema()),
                     schema_bytes,
+                    stamps: stamps.as_ref(),
+                    txn_ordinal: stamps.as_ref().map(|_| txn_ordinal),
                 },
                 ops,
             )?;
@@ -480,6 +470,14 @@ impl CoreLoop {
         }
         Ok(())
     }
+}
+
+/// The transaction a resolve serializes, and the system-time ordinal its
+/// bitemporal versions take (`txn_system_ordinal`).
+#[derive(Clone, Copy)]
+struct ResolvingTxn {
+    id: TxnId,
+    ordinal: i64,
 }
 
 #[cfg(test)]
@@ -2155,6 +2153,8 @@ mod tests {
             properties: Vec::new(),
             src_surrogate: Surrogate::new(src_surrogate),
             dst_surrogate: Surrogate::new(dst_surrogate),
+            valid_from_ms: None,
+            valid_until_ms: None,
         })
     }
 
@@ -2299,6 +2299,8 @@ mod tests {
                 properties: &[],
                 src_surrogate: Surrogate::new(1),
                 dst_surrogate: Surrogate::new(2),
+                valid_from_ms: None,
+                valid_until_ms: None,
             },
         );
         dst_core.apply_scope.graph_system_from = None;
@@ -2361,6 +2363,8 @@ mod tests {
                 properties: b"base",
                 src_surrogate: Surrogate::new(1),
                 dst_surrogate: Surrogate::new(2),
+                valid_from_ms: None,
+                valid_until_ms: None,
             },
         );
 
@@ -2833,6 +2837,7 @@ mod tests {
             schema_bytes: zerompk::to_msgpack_vec(&columnar_schema()).expect("encode schema"),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
@@ -2862,6 +2867,7 @@ mod tests {
                 surrogates,
                 schema_bytes,
                 provenance: None,
+                system_from: None,
                 rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 returning: None,
                 rls_filters: &[],
@@ -3006,11 +3012,13 @@ mod tests {
                         .expect("encode assignment"),
                 ),
             )],
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         let delete = PhysicalPlan::Columnar(ColumnarOp::Delete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "moves"),
             filters: pk_filter("b"),
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         for plan in [&update, &delete] {
@@ -3298,6 +3306,8 @@ mod tests {
         let columnar = PhysicalPlan::Columnar(ColumnarOp::Truncate {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cevents"),
             restart_identity: true,
+            system_from: None,
+            erase_history: false,
         });
         // A columnar truncate resolves from the overlay marker its statement
         // staged.
@@ -4008,6 +4018,7 @@ mod tests {
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
@@ -4199,7 +4210,7 @@ mod tests {
                     tenant: TID,
                     coll: "ledger",
                     doc_id: &storage_key(surrogate),
-                    sys_from_ms: 1,
+                    sys_from: 1,
                     valid_from_ms: i64::MIN,
                     valid_until_ms: i64::MAX,
                     body: &schemaless_body("committed"),
@@ -4306,6 +4317,7 @@ mod tests {
                 expr: None,
             }])
             .expect("encode filter"),
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         for plan in [&insert, &delete] {

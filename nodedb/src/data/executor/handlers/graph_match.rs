@@ -8,107 +8,15 @@ use std::collections::HashMap;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::graph::graph_txn_merge;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::graph::pattern::ast::MatchQuery;
-use crate::engine::graph::pattern::executor::{
-    BindingRow, ContinuationSeed, PropertyLookup, UnresolvedExpansion, VarLenResume,
-    rows_to_msgpack,
+use crate::engine::graph::pattern::executor::{ContinuationSeed, PropertyLookup, VarLenResume};
+use nodedb_physical::physical_plan::GraphReadScope;
+
+pub(crate) use super::graph_match_envelope::{
+    MATCH_ENVELOPE_FRONTIER_KEY, MATCH_ENVELOPE_RESUME_KEY, MATCH_ENVELOPE_ROWS_KEY,
+    encode_match_envelope, encode_match_envelope_raw,
 };
-use crate::types::TenantId;
-
-/// Map key carrying the binding-rows msgpack array in the MATCH envelope.
-pub(crate) const MATCH_ENVELOPE_ROWS_KEY: &str = "rows";
-/// Map key carrying the cross-shard frontier msgpack array in the MATCH envelope.
-pub(crate) const MATCH_ENVELOPE_FRONTIER_KEY: &str = "frontier";
-/// Map key carrying the variable-length truncation resume cursors in the MATCH
-/// envelope. A msgpack array of [`VarLenResume`] (empty when nothing truncated).
-///
-/// A shard truncates a `[*min..max]` expansion independently, so a node fanned
-/// across multiple cores can produce several resume cursors in one envelope —
-/// the value is therefore an ARRAY, never a single optional cursor. The array
-/// rides the SAME envelope bytes that already carry `rows`/`frontier` across the
-/// SPSC bridge AND the cross-node round-trip; nothing widens `ExecuteResponse`.
-pub(crate) const MATCH_ENVELOPE_RESUME_KEY: &str = "resume";
-
-/// Zerompk-encode a `VarLenResume` slice into the `resume` map value (a msgpack
-/// array, empty when nothing truncated). Modeled exactly on the `frontier`
-/// value encoding so encode/decode/empty-case stay symmetric.
-fn encode_resume_value(resume: &[VarLenResume]) -> Result<Vec<u8>, crate::Error> {
-    zerompk::to_msgpack_vec(&resume.to_vec()).map_err(|e| crate::Error::Serialization {
-        format: "msgpack".into(),
-        detail: format!("match resume serialization: {e}"),
-    })
-}
-
-/// Encode a MATCH result into the DP→CP `{rows, frontier, resume}` msgpack
-/// envelope.
-///
-/// `rows` are serialized exactly as [`rows_to_msgpack`] produces (an unchanged
-/// bare msgpack array) and embedded as the `rows` map value. The
-/// `unresolved_frontier` is zerompk-encoded (a msgpack array of
-/// [`UnresolvedExpansion`]) and embedded as the `frontier` map value. The
-/// variable-length truncation `resume` cursors are zerompk-encoded the same way
-/// (a msgpack array of [`VarLenResume`], empty when nothing truncated). All are
-/// already-valid msgpack values, so they are spliced in via `write_kv_raw`
-/// without re-encoding. The map ALWAYS carries 3 keys so decode is uniform.
-pub(crate) fn encode_match_envelope(
-    rows: &[BindingRow],
-    frontier: &[UnresolvedExpansion],
-    resume: &[VarLenResume],
-) -> Result<Vec<u8>, crate::Error> {
-    use nodedb_query::msgpack_scan::writer::{write_kv_raw, write_map_header};
-
-    let rows_bytes = rows_to_msgpack(rows)?;
-    let frontier_bytes =
-        zerompk::to_msgpack_vec(&frontier.to_vec()).map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("match frontier serialization: {e}"),
-        })?;
-    let resume_bytes = encode_resume_value(resume)?;
-
-    let mut buf =
-        Vec::with_capacity(rows_bytes.len() + frontier_bytes.len() + resume_bytes.len() + 24);
-    write_map_header(&mut buf, 3);
-    write_kv_raw(&mut buf, MATCH_ENVELOPE_ROWS_KEY, &rows_bytes);
-    write_kv_raw(&mut buf, MATCH_ENVELOPE_FRONTIER_KEY, &frontier_bytes);
-    write_kv_raw(&mut buf, MATCH_ENVELOPE_RESUME_KEY, &resume_bytes);
-    Ok(buf)
-}
-
-/// Build the `{rows, frontier, resume}` envelope from an ALREADY-encoded bare
-/// rows msgpack array plus frontier entries and resume cursors.
-///
-/// Mirrors [`encode_match_envelope`] but accepts pre-merged rows bytes (as
-/// produced by `broadcast_match_to_all_cores`) instead of `&[BindingRow]`,
-/// avoiding a redundant decode+re-encode round-trip.  The output is byte-
-/// identical to what `encode_match_envelope` would produce for the same inputs.
-///
-/// Called by `execute_plan_all_local_cores` in the MATCH branch to reconstruct
-/// the single-shard envelope shape from a node-level `MatchBroadcastOutcome`,
-/// carrying the merged-across-cores `resume` cursors onto the cross-node wire.
-pub(crate) fn encode_match_envelope_raw(
-    rows_array: &[u8],
-    frontier: &[UnresolvedExpansion],
-    resume: &[VarLenResume],
-) -> Result<Vec<u8>, crate::Error> {
-    use nodedb_query::msgpack_scan::writer::{write_kv_raw, write_map_header};
-
-    let frontier_bytes =
-        zerompk::to_msgpack_vec(&frontier.to_vec()).map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("match frontier serialization: {e}"),
-        })?;
-    let resume_bytes = encode_resume_value(resume)?;
-
-    let mut buf =
-        Vec::with_capacity(rows_array.len() + frontier_bytes.len() + resume_bytes.len() + 24);
-    write_map_header(&mut buf, 3);
-    write_kv_raw(&mut buf, MATCH_ENVELOPE_ROWS_KEY, rows_array);
-    write_kv_raw(&mut buf, MATCH_ENVELOPE_FRONTIER_KEY, &frontier_bytes);
-    write_kv_raw(&mut buf, MATCH_ENVELOPE_RESUME_KEY, &resume_bytes);
-    Ok(buf)
-}
 
 /// Bundled arguments for [`CoreLoop::execute_graph_match_continuation`].
 pub(in crate::data::executor) struct GraphMatchContinuationParams<'a> {
@@ -118,6 +26,7 @@ pub(in crate::data::executor) struct GraphMatchContinuationParams<'a> {
     pub partial_row_bytes: &'a [u8],
     pub source_node: &'a str,
     pub source_binding: &'a str,
+    pub scope: &'a GraphReadScope,
 }
 
 impl CoreLoop {
@@ -126,9 +35,9 @@ impl CoreLoop {
     /// otherwise).
     ///
     /// The envelope is a 3-field msgpack map carrying the binding rows
-    /// (exactly as [`rows_to_msgpack`] produces them — a bare msgpack array),
+    /// (exactly as `rows_to_msgpack` produces them — a bare msgpack array),
     /// the cross-shard `unresolved_frontier` (a zerompk-encoded array of
-    /// [`UnresolvedExpansion`]), AND the variable-length truncation `resume`
+    /// `UnresolvedExpansion`), AND the variable-length truncation `resume`
     /// cursors (a zerompk-encoded array of [`VarLenResume`], empty when nothing
     /// truncated):
     ///
@@ -175,40 +84,14 @@ impl CoreLoop {
         }
     }
 
-    /// Build the transaction's staged-edge overlay for a MATCH read, when the
-    /// task carries a `txn_id` with a live `GraphTxnOverlay`. Mirrors the delta
-    /// construction in `execute_graph_hop` so MATCH observes the same staged
-    /// edge writes/deletes for read-your-own-writes. `None` (the autocommit
-    /// path, no overlay) yields committed-CSR-only execution — byte-identical
-    /// to prior behaviour.
-    fn match_graph_overlay(
-        &self,
-        task: &ExecutionTask,
-        tid: u64,
-    ) -> Option<crate::engine::graph::csr::GraphOverlayDelta> {
-        // Read-your-own-writes refreshes the lease (see the overlay reaper).
-        if let Some(txn_id) = task.request.txn_id {
-            self.touch_overlay(txn_id);
-        }
-        task.request
-            .txn_id
-            .and_then(|txn_id| self.graph_txn_overlays.get(&txn_id))
-            .map(|ov| {
-                graph_txn_merge::build_graph_overlay_delta(
-                    ov,
-                    task.request.database_id,
-                    TenantId::new(tid),
-                )
-            })
-    }
-
     pub(in crate::data::executor) fn execute_graph_match(
-        &self,
+        &mut self,
         task: &ExecutionTask,
         tid: u64,
         query_bytes: &[u8],
         frontier_bitmap: Option<&nodedb_types::SurrogateBitmap>,
         cluster_mode: bool,
+        scope: &GraphReadScope,
     ) -> Response {
         debug!(core = self.core_id, tid, "graph match execution");
         let database_id = task.request.database_id.as_u64();
@@ -227,13 +110,18 @@ impl CoreLoop {
             }
         };
 
-        // Execute the pattern match on the caller's CSR partition +
-        // EdgeStore. An absent partition means "this tenant has no
-        // graph state" — return the empty row set rather than error.
-        let partition = match self.csr_partition(database_id, tid) {
-            Some(p) => p,
-            None => return self.match_empty_partition_response(task),
+        // Execute the pattern match on the CSR at the plan's cut + EdgeStore.
+        // An absent partition means "this tenant has no graph state" —
+        // return the empty row set rather than error.
+        if let Err(e) = self.prepare_match_view(task, tid, &query, scope) {
+            return self.response_error(task, e);
+        }
+        let view = match self.match_view(task, tid, &query, scope) {
+            Ok(Some(view)) => view,
+            Ok(None) => return self.match_empty_partition_response(task),
+            Err(e) => return self.response_error(task, e),
         };
+        let partition = view.csr;
         // In cluster mode the Data Plane has no routing knowledge, so it
         // cannot pre-filter which bound zero-degree sources are genuinely
         // remote. It emits ALL of them as frontier candidates (predicate
@@ -262,9 +150,10 @@ impl CoreLoop {
             csr: partition,
             database_id,
             tenant_id: tid,
-            collection: query.collection.as_deref(),
+            collection: view.collection.as_deref(),
+            document_cut: view.document_cut,
         };
-        let overlay = self.match_graph_overlay(task, tid);
+        let overlay = view.overlay;
         match crate::engine::graph::pattern::executor::execute(
             &query,
             crate::engine::graph::pattern::executor::MatchExecCtx {
@@ -302,7 +191,7 @@ impl CoreLoop {
     /// The response already envelopes `{rows, frontier}` via
     /// `match_outcome_response`.
     pub(in crate::data::executor) fn execute_graph_match_continuation(
-        &self,
+        &mut self,
         task: &ExecutionTask,
         params: GraphMatchContinuationParams<'_>,
     ) -> Response {
@@ -313,6 +202,7 @@ impl CoreLoop {
             partial_row_bytes,
             source_node,
             source_binding,
+            scope,
         } = params;
         debug!(
             core = self.core_id,
@@ -353,10 +243,15 @@ impl CoreLoop {
 
         // An absent partition means this tenant has no graph state on this
         // shard — return the empty row set rather than error.
-        let partition = match self.csr_partition(database_id, tid) {
-            Some(p) => p,
-            None => return self.match_empty_partition_response(task),
+        if let Err(e) = self.prepare_match_view(task, tid, &query, scope) {
+            return self.response_error(task, e);
+        }
+        let view = match self.match_view(task, tid, &query, scope) {
+            Ok(Some(view)) => view,
+            Ok(None) => return self.match_empty_partition_response(task),
+            Err(e) => return self.response_error(task, e),
         };
+        let partition = view.csr;
 
         // A continuation only ever runs cross-shard, so it must surface its
         // own unresolved frontier (every bound zero-degree source becomes a
@@ -372,14 +267,16 @@ impl CoreLoop {
             csr: partition,
             database_id,
             tenant_id: tid,
-            collection: query.collection.as_deref(),
+            collection: view.collection.as_deref(),
+            document_cut: view.document_cut,
         };
-        // Resolve the transaction's staged edge overlay (when the task carries a
-        // live `txn_id`) so the resumed pattern observes read-your-own-writes on
-        // this core, mirroring the round-0 `execute_graph_match` path. With the
-        // fixed-hop overlay merge un-gated in cluster mode, a bound zero-degree
-        // source still emits its cross-shard frontier for onward continuation.
-        let overlay = self.match_graph_overlay(task, tid);
+        // The transaction's staged edge overlay (a live read whose task
+        // carries a `txn_id`) lets the resumed pattern observe
+        // read-your-own-writes on this core, mirroring the round-0
+        // `execute_graph_match` path. With the fixed-hop overlay merge
+        // un-gated in cluster mode, a bound zero-degree source still emits
+        // its cross-shard frontier for onward continuation.
+        let overlay = view.overlay;
         match crate::engine::graph::pattern::executor::execute_continuation(
             &query,
             crate::engine::graph::pattern::executor::MatchExecCtx {
@@ -418,11 +315,12 @@ impl CoreLoop {
     /// route onward. The query MUST NOT be re-optimized — `triple_idx` indexes
     /// the originating shard's triple order.
     pub(in crate::data::executor) fn execute_graph_match_varlen_resume(
-        &self,
+        &mut self,
         task: &ExecutionTask,
         tid: u64,
         query_bytes: &[u8],
         resume_bytes: &[u8],
+        scope: &GraphReadScope,
     ) -> Response {
         debug!(
             core = self.core_id,
@@ -457,10 +355,15 @@ impl CoreLoop {
                 }
             };
 
-        let partition = match self.csr_partition(database_id, tid) {
-            Some(p) => p,
-            None => return self.match_empty_partition_response(task),
+        if let Err(e) = self.prepare_match_view(task, tid, &query, scope) {
+            return self.response_error(task, e);
+        }
+        let view = match self.match_view(task, tid, &query, scope) {
+            Ok(Some(view)) => view,
+            Ok(None) => return self.match_empty_partition_response(task),
+            Err(e) => return self.response_error(task, e),
         };
+        let partition = view.csr;
 
         let all_remote = |_: &str| true;
         let is_remote_node: Option<&dyn Fn(&str) -> bool> = Some(&all_remote);
@@ -472,13 +375,15 @@ impl CoreLoop {
             csr: partition,
             database_id,
             tenant_id: tid,
-            collection: query.collection.as_deref(),
+            collection: view.collection.as_deref(),
+            document_cut: view.document_cut,
         };
-        // Resolve the transaction's staged edge overlay (when the task carries a
-        // live `txn_id`) so the resumed variable-length expansion observes
-        // read-your-own-writes on this core — the name-keyed BFS walks staged
-        // edges and continues onto their owning core via boundary resumes.
-        let overlay = self.match_graph_overlay(task, tid);
+        // The transaction's staged edge overlay (a live read whose task
+        // carries a `txn_id`) lets the resumed variable-length expansion
+        // observe read-your-own-writes on this core — the name-keyed BFS
+        // walks staged edges and continues onto their owning core via
+        // boundary resumes.
+        let overlay = view.overlay;
         match crate::engine::graph::pattern::executor::execute_varlen_resume(
             &query,
             crate::engine::graph::pattern::executor::MatchExecCtx {

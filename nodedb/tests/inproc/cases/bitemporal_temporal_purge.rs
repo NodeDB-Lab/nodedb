@@ -88,14 +88,16 @@ fn document_strict_end_to_end_purge() {
     let dir = tempfile::tempdir().unwrap();
     let eng = SparseEngine::open(&dir.path().join("s.redb")).unwrap();
 
-    for sys in [100i64, 200, 300] {
+    // Document versions are keyed by system-time ordinal, as edges are, so
+    // the purge's ms→ordinal conversion lines up with the stored keys.
+    for ms in [100i64, 200, 300] {
         eng.versioned_put(VersionedPut {
             database_id: 0,
             tenant: 1,
             coll: "users",
             doc_id: &key(1),
             body: b"payload",
-            sys_from_ms: sys,
+            sys_from: ms_to_ordinal_upper(ms),
             valid_from_ms: 0,
             valid_until_ms: i64::MAX,
         })
@@ -115,7 +117,7 @@ fn document_strict_end_to_end_purge() {
         coll: "orphan",
         doc_id: &key(2),
         body: b"payload",
-        sys_from_ms: 400,
+        sys_from: ms_to_ordinal_upper(400),
         valid_from_ms: 0,
         valid_until_ms: i64::MAX,
     })

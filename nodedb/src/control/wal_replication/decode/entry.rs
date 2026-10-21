@@ -15,10 +15,11 @@ use crate::control::surrogate::{SurrogateAssigner, bind_plan_identities};
 use crate::types::{DatabaseId, TenantId, VShardId};
 
 /// Decoded `(tenant, vshard, plan, resolved_now_ms)` for a committed entry.
-/// `resolved_now_ms` is the instant the proposer read for the write, stamped
-/// onto the request so every replica installs the same value: a TTL-bearing
-/// KV write's `expire_at_ms`, and a timeseries ingest's untimed rows. `None`
-/// for every other write.
+/// `resolved_now_ms` is the instant decided once for the write, stamped onto
+/// the request so every replica installs the same value: a TTL-bearing KV
+/// write's `expire_at_ms`, the instant its proposer read, and a timeseries
+/// ingest's stamp, the millisecond of the ordinal the entry's leader
+/// assigned. `None` for every other write.
 pub type DecodedEntry = (TenantId, VShardId, PhysicalPlan, Option<u64>);
 
 /// Decodes a committed entry and binds every surrogate it carries.
@@ -80,6 +81,15 @@ pub fn decode_parsed_entry(
         vshard_id: entry.vshard_id,
     };
     let (plan, resolved_now_ms) = to_physical_plan(&entry.write, &ctx)?;
+    // A timeseries ingest stamps the millisecond of its leader's ordinal, the
+    // clock a pinned cut folds into. An entry no leader stamped keeps the
+    // proposer's instant.
+    let resolved_now_ms = match (&entry.write, entry.carried_system_ordinal()) {
+        (ReplicatedWrite::TimeseriesIngest { .. }, Some(ordinal)) => {
+            u64::try_from(nodedb_types::ordinal_to_ms(ordinal)).ok()
+        }
+        _ => resolved_now_ms,
+    };
     Ok(Some((
         database_id,
         (

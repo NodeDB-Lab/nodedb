@@ -3,7 +3,9 @@
 mod array;
 mod classify;
 mod columnar_image;
+mod columnar_ordinal;
 mod crdt;
+mod doc_ordinal;
 mod document;
 mod edge_ordinal;
 mod entry;

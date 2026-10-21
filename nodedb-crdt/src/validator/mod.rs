@@ -9,9 +9,11 @@
 
 pub mod bitemporal;
 mod core;
+pub mod incoming;
 mod policy_dispatch;
 mod types;
 mod validate;
 
 pub use core::Validator;
+pub use incoming::IncomingDelta;
 pub use types::{ProposedChange, ValidationOutcome, Violation};

@@ -47,6 +47,20 @@ impl CsrIndex {
         self.add_edge_internal(src, label, dst, collection, weight, weight != 1.0)
     }
 
+    /// Add a stored edge record scoped to `collection`. Its weight is the
+    /// `weight` key of the msgpack `properties`, `1.0` when absent.
+    pub fn insert_record_edge(
+        &mut self,
+        src: &str,
+        label: &str,
+        dst: &str,
+        collection: &str,
+        properties: &[u8],
+    ) -> Result<(), crate::GraphError> {
+        let weight = crate::csr::weights::extract_weight_from_properties(properties);
+        self.add_edge_weighted_in_collection(src, label, dst, collection, weight)
+    }
+
     /// Incrementally add a weighted edge (goes into mutable buffer).
     ///
     /// If this is the first weighted edge (weight != 1.0), initializes

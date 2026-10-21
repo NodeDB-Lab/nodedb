@@ -127,7 +127,14 @@ impl CoreLoop {
         let Some(body) = self.kv_engine.get(did, tid, collection, key, now_ms) else {
             return Ok(());
         };
-        super::rls::admit_kv_row(rls_write_check, &body, key, tid, collection)
+        super::rls::admit_kv_row(
+            rls_write_check,
+            &body,
+            key,
+            tid,
+            collection,
+            &self.crs_context(),
+        )
     }
 
     pub(in crate::data::executor) fn execute_kv_get_ttl(

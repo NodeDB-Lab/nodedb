@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use nodedb_types::TenantId;
 use redb::KeyRange;
 
+use super::node_labels::{NODE_LABEL_VERSIONS, parse_version_key};
 use super::stats::table::{GRAPH_STATS, collection_stat_prefix};
 use super::store::{EDGES, EdgeStore, REVERSE_EDGES, redb_err};
 use super::temporal::parse_versioned_edge_key;
@@ -23,13 +24,8 @@ use crate::types::{HomedRecord, RecordHomes};
 ///
 /// One pass over the range: `extract_from_if` yields each entry and removes it
 /// as it is read, so nothing is materialized and no key is descended to twice.
-/// The shape this replaces collected every key in the range into a `Vec` and
-/// then called `remove` per key — holding the whole range in memory and paying
-/// a fresh root-to-leaf descent for each removal, on a path whose entire job is
-/// to empty that range.
 ///
-/// `what` names the table for the error message; a purge that fails partway
-/// should say which table it was draining.
+/// `what` names the drained table in the error of a purge that fails partway.
 fn drain_range<K, V>(
     table: &mut redb::Table<'_, K, V>,
     range: impl KeyRange<K>,
@@ -50,20 +46,20 @@ where
     Ok(removed)
 }
 
-/// Remove every entry of `table` whose versioned edge key has an endpoint
-/// home in `vshards`, returning how many went. The forward and the reverse
+/// Remove every entry of `table` whose versioned edge key's endpoint homes
+/// `removes` accepts, returning how many went. The forward and the reverse
 /// key name the same two endpoints, so one test serves every table keyed by
 /// either. A key that does not parse names no home and stays.
-fn drain_homed(
+fn drain_by_homes(
     table: &mut redb::Table<'_, (u64, u64, &'static str), impl redb::Value + 'static>,
-    vshards: &HashSet<u32>,
+    removes: &impl Fn(RecordHomes) -> bool,
     what: &'static str,
 ) -> crate::Result<usize> {
     let mut removed = 0usize;
     let drained = table
         .extract_from_if((0u64, 0u64, "").., |key, _| {
             parse_versioned_edge_key(key.2).is_some_and(|(_, src, _, dst, _)| {
-                RecordHomes::of(HomedRecord::Edge { src, dst }).intersects(vshards)
+                removes(RecordHomes::of(HomedRecord::Edge { src, dst }))
             })
         })
         .map_err(|e| redb_err(what, e))?;
@@ -88,6 +84,65 @@ impl EdgeStore {
         if vshards.is_empty() {
             return Ok(0);
         }
+        self.purge_by_homes(&|homes: RecordHomes| homes.intersects(vshards))
+    }
+
+    /// Purge every edge version with an endpoint home in `departed` and none
+    /// in `resident`: the edges of vShards this node left that no vShard it
+    /// still hosts holds. An edge with one endpoint on a vShard this node
+    /// still hosts stays, since that vShard serves it here. Returns the
+    /// number of forward versions removed. Cuts and `GRAPH_STATS` stay, as
+    /// in [`Self::purge_homed`].
+    pub fn purge_departed(
+        &self,
+        departed: &HashSet<u32>,
+        resident: &HashSet<u32>,
+    ) -> crate::Result<usize> {
+        if departed.is_empty() {
+            return Ok(0);
+        }
+        self.purge_by_homes(&|homes: RecordHomes| {
+            homes.intersects(departed) && !homes.intersects(resident)
+        })
+    }
+
+    /// Remove every label version, in every database and tenant, of a node
+    /// whose labels home on one of `vshards`. Returns how many went.
+    pub fn purge_homed_node_labels(&self, vshards: &HashSet<u32>) -> crate::Result<usize> {
+        if vshards.is_empty() {
+            return Ok(0);
+        }
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| redb_err("begin_write", e))?;
+        let mut removed = 0usize;
+        {
+            let mut table = write_txn
+                .open_table(NODE_LABEL_VERSIONS)
+                .map_err(|e| redb_err("open node_label_versions", e))?;
+            let drained = table
+                .extract_from_if((0u64, 0u64, "").., |key, _| {
+                    parse_version_key(key.2).is_some_and(|(node, _)| {
+                        RecordHomes::of(HomedRecord::NodeLabels { node }).owned_by(vshards)
+                    })
+                })
+                .map_err(|e| redb_err("homed node label purge", e))?;
+            for entry in drained {
+                entry.map_err(|e| redb_err("homed node label purge", e))?;
+                removed += 1;
+            }
+        }
+        write_txn
+            .commit()
+            .map_err(|e| redb_err("commit homed node label purge", e))?;
+        Ok(removed)
+    }
+
+    /// Remove, in one transaction, the forward key, reverse key and applied
+    /// ordinal of every edge version whose endpoint homes `removes` accepts.
+    /// Returns the number of forward versions removed.
+    fn purge_by_homes(&self, removes: &impl Fn(RecordHomes) -> bool) -> crate::Result<usize> {
         let write_txn = self
             .db
             .begin_write()
@@ -97,19 +152,19 @@ impl EdgeStore {
             let mut edges = write_txn
                 .open_table(EDGES)
                 .map_err(|e| redb_err("open edges", e))?;
-            removed = drain_homed(&mut edges, vshards, "homed edge purge")?;
+            removed = drain_by_homes(&mut edges, removes, "edge purge by home")?;
             let mut rev_t = write_txn
                 .open_table(REVERSE_EDGES)
                 .map_err(|e| redb_err("open reverse", e))?;
-            drain_homed(&mut rev_t, vshards, "homed reverse edge purge")?;
+            drain_by_homes(&mut rev_t, removes, "reverse edge purge by home")?;
             let mut applied = write_txn
                 .open_table(EDGE_APPLIED)
                 .map_err(|e| redb_err("open edge_applied", e))?;
-            drain_homed(&mut applied, vshards, "homed edge applied purge")?;
+            drain_by_homes(&mut applied, removes, "edge applied purge by home")?;
         }
         write_txn
             .commit()
-            .map_err(|e| redb_err("commit homed edge purge", e))?;
+            .map_err(|e| redb_err("commit edge purge by home", e))?;
         Ok(removed)
     }
 
@@ -167,6 +222,14 @@ impl EdgeStore {
                 &mut applied,
                 (db, t, "")..(db, t + 1, ""),
                 "edge applied purge",
+            )?;
+            let mut labels = write_txn
+                .open_table(NODE_LABEL_VERSIONS)
+                .map_err(|e| redb_err("open node_label_versions", e))?;
+            drain_range(
+                &mut labels,
+                (db, t, "")..(db, t + 1, ""),
+                "node label version purge",
             )?;
         }
 
@@ -303,5 +366,80 @@ mod tests {
         let kept = versioned_edge_key("g", &b, "L", &b, 1).expect("key");
         assert_eq!(left, vec![kept]);
         assert_eq!(store.purge_homed(&HashSet::new()).expect("purge"), 0);
+    }
+
+    /// A departure purge takes the edges whose every endpoint home left: an
+    /// edge with one endpoint on a vShard this node still hosts stays.
+    #[test]
+    fn purge_departed_keeps_an_edge_a_resident_vshard_holds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = EdgeStore::open(&dir.path().join("graph.redb")).expect("open");
+        let (a, b) = two_homes();
+        let value = EdgeValuePayload::new(0, i64::MAX, Vec::new())
+            .encode()
+            .expect("payload");
+        let tid = TenantId::new(1);
+        for (src, dst) in [(&a, &a), (&a, &b), (&b, &b)] {
+            let key = versioned_edge_key("g", src, "L", dst, 1).expect("key");
+            store.put_edge_raw(0, tid, &key, &value).expect("put");
+        }
+
+        let departed: HashSet<u32> = [VShardId::from_key(a.as_bytes()).as_u32()].into();
+        let resident: HashSet<u32> = [VShardId::from_key(b.as_bytes()).as_u32()].into();
+        assert_eq!(
+            store.purge_departed(&departed, &resident).expect("purge"),
+            1
+        );
+
+        let mut left: Vec<String> = store
+            .export_edges()
+            .expect("export")
+            .into_iter()
+            .map(|(_, _, key, _)| key)
+            .collect();
+        left.sort();
+        let mut kept = vec![
+            versioned_edge_key("g", &a, "L", &b, 1).expect("key"),
+            versioned_edge_key("g", &b, "L", &b, 1).expect("key"),
+        ];
+        kept.sort();
+        assert_eq!(left, kept);
+        assert_eq!(
+            store
+                .purge_departed(&departed, &resident)
+                .expect("a second purge"),
+            0,
+            "the purge is idempotent"
+        );
+    }
+
+    /// A homed label purge takes the versions of the nodes the vShards home,
+    /// and nothing else.
+    #[test]
+    fn a_homed_label_purge_takes_only_the_group_nodes_versions() {
+        use nodedb_types::DatabaseId;
+        const DB: DatabaseId = DatabaseId::DEFAULT;
+        let t = TenantId::new(1);
+        let labels = vec!["L".to_string()];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = EdgeStore::open(&dir.path().join("graph.redb")).expect("open");
+        let (moved, kept) = two_homes();
+        for (node, ordinal) in [(&moved, 100), (&moved, 200), (&kept, 150)] {
+            store
+                .put_node_label_version(DB, t, node, ordinal, None, &labels)
+                .expect("put");
+        }
+        let group: HashSet<u32> = [VShardId::from_key(moved.as_bytes()).as_u32()].into();
+        assert_eq!(store.purge_homed_node_labels(&group).expect("purge"), 2);
+        assert_eq!(
+            store.scan_node_label_versions(DB, t).expect("scan"),
+            vec![(kept.clone(), 150, labels.clone())]
+        );
+        assert_eq!(
+            store
+                .purge_homed_node_labels(&HashSet::new())
+                .expect("purge"),
+            0
+        );
     }
 }

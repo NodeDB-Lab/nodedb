@@ -25,11 +25,12 @@ pub(super) fn order_matched(
     sort_keys: &[SortKeySpec],
     all_versions: bool,
     ts_system_idx: Option<usize>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     if !sort_keys.is_empty() {
         let mut keyed = Vec::with_capacity(matched.len());
         for (_, row, _) in matched.iter() {
-            keyed.push(eval_row_sort_values(row, schema, sort_keys)?);
+            keyed.push(eval_row_sort_values(row, schema, sort_keys, crs)?);
         }
         let mut indexed: Vec<_> = keyed.into_iter().zip(matched.drain(..)).collect();
         indexed.sort_by(|a, b| compare_sort_values(&a.0, &b.0, sort_keys));

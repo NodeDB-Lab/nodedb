@@ -317,7 +317,6 @@ fn graph_routing(op: &GraphOp) -> PlanRouting {
         | GraphOp::BspSuperstep(_)
         | GraphOp::WccSuperstep(_)
         | GraphOp::TemporalNeighbors { .. }
-        | GraphOp::TemporalAlgorithm { .. }
         | GraphOp::Stats { .. }
         | GraphOp::NodePresenceRead { .. } => PlanRouting::NotAWrite,
     }
@@ -450,6 +449,8 @@ mod tests {
             properties: Vec::new(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
         });
 
         let mut got = vshards_of(&plan);
@@ -471,6 +472,8 @@ mod tests {
             dst_id: dst.to_owned(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
         };
 
         // Two edges over the same endpoint pair: the union must dedupe.
@@ -520,6 +523,8 @@ mod tests {
             properties: Vec::new(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(1),
+            valid_from_ms: None,
+            valid_until_ms: None,
         });
         assert_eq!(vshards_of(&plan), vec![v]);
     }
@@ -615,6 +620,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
             filters: Vec::new(),
             updates: Vec::new(),
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         });
         assert_eq!(vshards_of(&update), vec![want]);
@@ -622,6 +628,7 @@ mod tests {
         let delete = PhysicalPlan::Columnar(ColumnarOp::Delete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
             filters: Vec::new(),
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         });
         assert_eq!(vshards_of(&delete), vec![want]);

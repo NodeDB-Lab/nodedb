@@ -31,6 +31,11 @@ impl From<ColumnarError> for Error {
             | ColumnarError::InvalidMagic(_) => Self::SegmentCorrupted {
                 detail: e.to_string(),
             },
+            // A geometry value that does not parse is the caller's data
+            // fault, SQLSTATE `22000`, like the evaluator's parse errors.
+            ColumnarError::Geometry { .. } => Self::DataException {
+                detail: e.to_string(),
+            },
             ColumnarError::NullViolation(ref column) => Self::RejectedConstraint {
                 collection: String::new(),
                 constraint: "not_null".into(),

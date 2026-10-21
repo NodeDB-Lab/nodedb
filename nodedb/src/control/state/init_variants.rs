@@ -95,6 +95,11 @@ impl SharedState {
                 credentials.catalog().get_database_hwm()?,
                 credentials.catalog().get_database_reserve_index()?,
             );
+            // The tenant write marks resume from the durable catalog, as in
+            // production boot. A group that applies no entry after the
+            // restart never raises its marks again.
+            s.tenant_marks =
+                crate::control::state::tenant_marks::TenantMarks::load(credentials.catalog())?;
             s.credentials = credentials;
             // The metadata group restarts above its durable applied floor and
             // never applies the entries below it again. Every registry their
@@ -227,6 +232,39 @@ mod tests {
             replayed.iter().any(|e| e.source == "session_handle"
                 && e.event == AuditEvent::SessionHandleFingerprintMismatch),
             "the session-handle entry must replay after a crash: {replayed:?}"
+        );
+    }
+
+    /// A state reopened on a durable catalog holds the tenant write marks
+    /// the previous session persisted, restore marks included.
+    #[tokio::test]
+    async fn reopened_state_resumes_persisted_tenant_marks() {
+        use crate::control::state::tenant_marks::{MarkSite, TenantMarks};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let catalog_path = dir.path().join("system.redb");
+        {
+            // The previous session: a restore write's mark, persisted.
+            let credentials = CredentialStore::open(&catalog_path).expect("catalog");
+            let marks = TenantMarks::default();
+            marks.raise_restore(2, 1, 500, None, 77);
+            marks
+                .persist(credentials.catalog())
+                .expect("persist the marks");
+        }
+
+        let wal =
+            Arc::new(WalManager::open_for_testing(&dir.path().join("wal")).expect("open WAL"));
+        let (dispatcher, _sides) = Dispatcher::new(1, 64);
+        let credentials = Arc::new(CredentialStore::open(&catalog_path).expect("catalog"));
+        let reopened = SharedState::new_with_credentials(dispatcher, wal, credentials, true)
+            .expect("shared state");
+        let marks = reopened.tenant_marks.get_all(2, 1);
+        assert!(
+            marks
+                .iter()
+                .any(|mark| mark.site == MarkSite::Restore && mark.restore_id == 77),
+            "the persisted restore mark is held after the reopen: {marks:?}"
         );
     }
 }

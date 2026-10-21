@@ -6,10 +6,16 @@
 //! node-label name in a partition owns one bit, so a partition holds at most
 //! [`NODE_LABEL_LIMIT`] distinct node labels. A set that needs a label past
 //! that limit is refused whole, and nothing of it stays applied.
+//!
+//! Every applied op also writes a node-label version: the node's whole label
+//! set at the op's system-time ordinal, which a graph read `AS OF` a system
+//! time reads labels from.
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::graph_label_apply::LabelOpKind;
 use crate::data::executor::task::ExecutionTask;
+use crate::wal::NodeLabelRedo;
 
 /// The most distinct node labels one graph partition holds: one bit each in
 /// the `u64` label bitset of the CSR.
@@ -25,7 +31,8 @@ impl CoreLoop {
         node_id: &str,
         labels: &[String],
     ) -> Response {
-        if let Err(code) = self.set_node_labels(database_id, tid, node_id, labels) {
+        let op = NodeLabelRedo::live(node_id, labels);
+        if let Err(code) = self.apply_live_label_op(task, database_id, tid, &op, LabelOpKind::Set) {
             return self.response_error(task, code);
         }
         // CDC: a node-label set is an Insert on the nameable node-label
@@ -44,17 +51,48 @@ impl CoreLoop {
         node_id: &str,
         labels: &[String],
     ) -> Response {
-        let partition = self.csr_partition_mut(database_id, tid);
         // Read before the removals: `remove_node_label` does not report
         // whether the node exists.
-        let existed = partition.contains_node(node_id);
-        for label in labels {
-            partition.remove_node_label(node_id, label);
+        let existed = self
+            .csr_partition(database_id, tid)
+            .is_some_and(|p| p.contains_node(node_id));
+        let op = NodeLabelRedo::live(node_id, labels);
+        if let Err(code) =
+            self.apply_live_label_op(task, database_id, tid, &op, LabelOpKind::Remove)
+        {
+            return self.response_error(task, code);
         }
         // CDC: a node-label removal is a Delete on the nameable node-label
         // stream, with the removed labels as `old_value`.
         self.emit_graph_label_event(task, node_id, labels, crate::event::WriteOp::Delete);
         self.response_affected(task, u64::from(existed))
+    }
+
+    /// Apply `op` and write its label version for the WAL record `task`
+    /// carries. A version that does not write takes the op back, and the
+    /// answer is the version error.
+    fn apply_live_label_op(
+        &mut self,
+        task: &ExecutionTask,
+        database_id: u64,
+        tid: u64,
+        op: &NodeLabelRedo,
+        kind: LabelOpKind,
+    ) -> Result<(), ErrorCode> {
+        let lsn = task.wal_lsn().map(|lsn| lsn.as_u64());
+        let applied = self.apply_label_op(database_id, tid, op, kind, lsn)?;
+        let Some(version) = applied.version else {
+            return Ok(());
+        };
+        if let Err(error) = self
+            .edge_store
+            .put_node_label_versions(std::slice::from_ref(&version), lsn)
+        {
+            self.rollback_undo_log(database_id, tid, vec![applied.undo])
+                .map_err(ErrorCode::from)?;
+            return Err(ErrorCode::from(error));
+        }
+        Ok(())
     }
 
     /// Set every label of `labels` on `node_id`, or none of them.
@@ -71,9 +109,9 @@ impl CoreLoop {
         node_id: &str,
         labels: &[String],
     ) -> Result<(), ErrorCode> {
-        // The partition reports the limit only from `add_node_label`, and its
-        // distinct-label count is not public. So the prior state is captured
-        // first, and a refused set restores it.
+        // The partition reports the limit from `add_node_label`, part way
+        // through the set. So the prior state is captured first, and a
+        // refused set restores it.
         let undo = self.capture_node_labels_undo(database_id, tid, node_id, labels);
         for label in labels {
             let refusal = match self

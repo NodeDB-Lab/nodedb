@@ -12,6 +12,7 @@ on:
       - fuzz/**
       - nodedb-codec/**
       - nodedb-raster/**
+      - nodedb-raster-load/**
       - nodedb-columnar/**
       - nodedb-strict/**
       - nodedb-wal/**
@@ -110,4 +111,5 @@ jobs:
       - name: Check decoders build for wasm32
         run: |
           cargo check --target wasm32-unknown-unknown \
-            -p nodedb-codec -p nodedb-columnar -p nodedb-strict
+            -p nodedb-codec -p nodedb-columnar -p nodedb-strict \
+            -p nodedb-raster -p nodedb-raster-load

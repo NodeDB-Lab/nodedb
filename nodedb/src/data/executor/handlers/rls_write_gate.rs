@@ -33,7 +33,7 @@ use nodedb_types::{RlsWriteCheck, WriteGateDecision};
 use crate::bridge::scan_filter::ScanFilter;
 
 use super::columnar_read::filter::value_matches_filters;
-use super::columnar_write::row_values_to_object;
+use super::columnar_write::row_values_to_user_object;
 use super::returning_doc;
 use super::rls_eval;
 
@@ -47,9 +47,10 @@ pub(in crate::data::executor) fn admit_row(
     image: &serde_json::Value,
     tid: u64,
     collection: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     decide(rls_write_check, tid, collection, |bytes| {
-        rls_eval::rls_check_document(bytes, image)
+        rls_eval::rls_check_document(bytes, image, crs)
     })
 }
 
@@ -65,9 +66,10 @@ pub(in crate::data::executor) fn admit_document_value(
     image: &nodedb_types::Value,
     tid: u64,
     collection: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     decide(rls_write_check, tid, collection, |bytes| {
-        rls_eval::rls_check_value(bytes, image)
+        rls_eval::rls_check_value(bytes, image, crs)
     })
 }
 
@@ -99,6 +101,19 @@ fn decide(
     }
 }
 
+/// A stored row as the write gate judges it: the encoded body, the row's
+/// client-visible identity, and what the decoder needs to read the body.
+pub(in crate::data::executor) struct GatedRow<'a> {
+    /// The stored bytes: MessagePack, or a Binary Tuple when `strict_schema`
+    /// is `Some`.
+    pub body: &'a [u8],
+    pub identity: &'a crate::engine::document::store::RowIdentity,
+    /// `Some` exactly when the collection stores Binary Tuples.
+    pub strict_schema: Option<&'a StrictSchema>,
+    /// The column that carries `identity` when the body lacks it.
+    pub identity_column: &'a str,
+}
+
 /// Decide one STORED row body — the bytes about to be written, or the bytes
 /// about to be removed — against the compiled write policy.
 ///
@@ -119,13 +134,17 @@ fn decide(
 /// row a later read returns.
 pub(in crate::data::executor) fn admit_stored_row(
     rls_write_check: &RlsWriteCheck,
-    body: &[u8],
-    identity: &crate::engine::document::store::RowIdentity,
-    strict_schema: Option<&StrictSchema>,
-    identity_column: &str,
+    row: GatedRow<'_>,
     tid: u64,
     collection: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
+    let GatedRow {
+        body,
+        identity,
+        strict_schema,
+        identity_column,
+    } = row;
     match rls_write_check.decision() {
         WriteGateDecision::AdmitAll => Ok(()),
         WriteGateDecision::DenyNotInjected => Err(crate::Error::Internal {
@@ -136,7 +155,7 @@ pub(in crate::data::executor) fn admit_stored_row(
         }),
         WriteGateDecision::Evaluate(_) => {
             match returning_doc::from_stored(body, identity, strict_schema, identity_column) {
-                Ok(image) => admit_document_value(rls_write_check, &image, tid, collection),
+                Ok(image) => admit_document_value(rls_write_check, &image, tid, collection, crs),
                 Err(e) => Err(crate::Error::RejectedAuthz {
                     tenant_id: crate::types::TenantId::new(tid),
                     resource: format!(
@@ -167,6 +186,7 @@ pub(in crate::data::executor) fn admit_edge_properties(
     properties: Option<&[u8]>,
     tid: u64,
     collection: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     match rls_write_check.decision() {
         WriteGateDecision::AdmitAll => Ok(()),
@@ -185,7 +205,7 @@ pub(in crate::data::executor) fn admit_edge_properties(
             });
             match map {
                 Some(bytes) => decide(rls_write_check, tid, collection, |filters| {
-                    rls_eval::rls_check_msgpack_bytes(filters, bytes)
+                    rls_eval::rls_check_msgpack_bytes(filters, bytes, crs)
                 }),
                 None => Err(crate::Error::RejectedAuthz {
                     tenant_id: crate::types::TenantId::new(tid),
@@ -214,13 +234,14 @@ pub(in crate::data::executor) fn admit_value_row(
     image: &nodedb_types::Value,
     tid: u64,
     collection: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     decide(
         rls_write_check,
         tid,
         collection,
         |bytes| match zerompk::from_msgpack::<Vec<ScanFilter>>(bytes) {
-            Ok(filters) => value_matches_filters(image, &filters).unwrap_or(false),
+            Ok(filters) => value_matches_filters(image, &filters, crs).unwrap_or(false),
             Err(_) => false,
         },
     )
@@ -234,12 +255,14 @@ pub(in crate::data::executor) fn admit_columnar_row(
     schema: &ColumnarSchema,
     tid: u64,
     collection: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     admit_value_row(
         rls_write_check,
-        &row_values_to_object(schema, row),
+        &row_values_to_user_object(schema, row),
         tid,
         collection,
+        crs,
     )
 }
 
@@ -266,7 +289,8 @@ mod tests {
                 &RlsWriteCheck::NoPolicyApplies,
                 &json!({"owner": "mallory"}),
                 1,
-                "orders"
+                "orders",
+                &nodedb_crs::CrsContext::builtin_only()
             )
             .is_ok()
         );
@@ -279,7 +303,8 @@ mod tests {
                 &RlsWriteCheck::PendingInjection,
                 &json!({"owner": "mallory"}),
                 1,
-                "orders"
+                "orders",
+                &nodedb_crs::CrsContext::builtin_only()
             ),
             Err(crate::Error::Internal { .. })
         ));
@@ -292,7 +317,8 @@ mod tests {
                 &RlsWriteCheck::Predicate(owner_policy("alice")),
                 &json!({"owner": "alice"}),
                 1,
-                "orders"
+                "orders",
+                &nodedb_crs::CrsContext::builtin_only()
             )
             .is_ok()
         );
@@ -305,7 +331,8 @@ mod tests {
                 &RlsWriteCheck::Predicate(owner_policy("alice")),
                 &json!({"owner": "bob"}),
                 1,
-                "orders"
+                "orders",
+                &nodedb_crs::CrsContext::builtin_only()
             ),
             Err(crate::Error::RejectedAuthz { .. })
         ));
@@ -320,7 +347,8 @@ mod tests {
                 &RlsWriteCheck::Predicate(owner_policy("alice")),
                 &json!({"note": "x"}),
                 1,
-                "orders"
+                "orders",
+                &nodedb_crs::CrsContext::builtin_only()
             )
             .is_err()
         );
@@ -328,7 +356,16 @@ mod tests {
 
     #[test]
     fn an_empty_check_admits_an_edge_with_no_properties() {
-        assert!(admit_edge_properties(&RlsWriteCheck::NoPolicyApplies, None, 1, "knows").is_ok());
+        assert!(
+            admit_edge_properties(
+                &RlsWriteCheck::NoPolicyApplies,
+                None,
+                1,
+                "knows",
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_ok()
+        );
     }
 
     /// Edge properties as stored: a plain-MessagePack map.
@@ -343,7 +380,8 @@ mod tests {
                 &RlsWriteCheck::Predicate(owner_policy("alice")),
                 Some(&edge_properties(json!({"owner": "alice"}))),
                 1,
-                "knows"
+                "knows",
+                &nodedb_crs::CrsContext::builtin_only()
             )
             .is_ok()
         );
@@ -356,7 +394,8 @@ mod tests {
                 &RlsWriteCheck::Predicate(owner_policy("alice")),
                 Some(&edge_properties(json!({"owner": "bob"}))),
                 1,
-                "knows"
+                "knows",
+                &nodedb_crs::CrsContext::builtin_only()
             )
             .is_err()
         );
@@ -378,9 +417,19 @@ mod tests {
         ] {
             let bytes = edge_properties(properties.clone());
             let put = crate::control::security::rls::admit_compiled_write_image(
-                &policy, &bytes, 1, "knows",
+                &policy,
+                &bytes,
+                1,
+                "knows",
+                &nodedb_crs::CrsContext::builtin_only(),
             );
-            let delete = admit_edge_properties(&check, Some(&bytes), 1, "knows");
+            let delete = admit_edge_properties(
+                &check,
+                Some(&bytes),
+                1,
+                "knows",
+                &nodedb_crs::CrsContext::builtin_only(),
+            );
             assert_eq!(put.is_ok(), admitted, "put {properties}");
             assert_eq!(delete.is_ok(), admitted, "delete {properties}");
         }
@@ -394,7 +443,8 @@ mod tests {
                 &RlsWriteCheck::Predicate(owner_policy("alice")),
                 Some(br#"{"owner":"alice"}"#),
                 1,
-                "knows"
+                "knows",
+                &nodedb_crs::CrsContext::builtin_only()
             )
             .is_err()
         );
@@ -406,11 +456,35 @@ mod tests {
     #[test]
     fn an_edge_without_a_decodable_property_object_is_rejected() {
         let policy = RlsWriteCheck::Predicate(owner_policy("alice"));
-        assert!(admit_edge_properties(&policy, None, 1, "knows").is_err());
-        assert!(admit_edge_properties(&policy, Some(b""), 1, "knows").is_err());
         assert!(
-            admit_edge_properties(&policy, Some(&edge_properties(json!([1, 2]))), 1, "knows")
-                .is_err()
+            admit_edge_properties(
+                &policy,
+                None,
+                1,
+                "knows",
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_err()
+        );
+        assert!(
+            admit_edge_properties(
+                &policy,
+                Some(b""),
+                1,
+                "knows",
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_err()
+        );
+        assert!(
+            admit_edge_properties(
+                &policy,
+                Some(&edge_properties(json!([1, 2]))),
+                1,
+                "knows",
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_err()
         );
     }
 
@@ -423,7 +497,8 @@ mod tests {
                 &RlsWriteCheck::Predicate(vec![0xFF, 0xFE]),
                 &json!({"owner": "alice"}),
                 1,
-                "orders"
+                "orders",
+                &nodedb_crs::CrsContext::builtin_only()
             )
             .is_err()
         );

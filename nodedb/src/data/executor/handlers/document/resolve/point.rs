@@ -125,8 +125,8 @@ impl CoreLoop {
                 )
         });
         // Stamped as the live handler stamps it; apply mints its own on write.
-        let sys_from_ms = if ctx.bitemporal {
-            self.bitemporal_now_ms()
+        let sys_from = if ctx.bitemporal {
+            self.bitemporal_ordinal()
         } else {
             0
         };
@@ -138,7 +138,7 @@ impl CoreLoop {
             has_generated,
             has_expr,
             bitemporal: ctx.bitemporal,
-            sys_from_ms,
+            sys_from,
             declared_primary_key,
         };
         let body = self.compute_point_update_body(image_params)?;
@@ -149,12 +149,15 @@ impl CoreLoop {
 
         rls_write_gate::admit_stored_row(
             rls_write_check,
-            &stored_image,
-            &row_identity,
-            ctx.strict_schema.as_ref(),
-            &ctx.identity_column,
+            rls_write_gate::GatedRow {
+                body: &stored_image,
+                identity: &row_identity,
+                strict_schema: ctx.strict_schema.as_ref(),
+                identity_column: &ctx.identity_column,
+            },
             tid,
             collection,
+            &self.crs_context(),
         )
         .map_err(ErrorCode::from)?;
 
@@ -163,6 +166,7 @@ impl CoreLoop {
             rls_filters,
             &ctx,
             &[(&document_identity, stored_image.as_slice())],
+            &self.crs_context(),
         )?;
         Ok(DocumentResolveOutcome {
             mutations: vec![put_mutation(ResolvedPut {
@@ -210,19 +214,28 @@ impl CoreLoop {
         let Some((surrogate, prior)) = prior else {
             return Ok(DocumentResolveOutcome {
                 mutations: Vec::new(),
-                response_payload: resolved_response_payload(returning, rls_filters, &ctx, &[])?,
+                response_payload: resolved_response_payload(
+                    returning,
+                    rls_filters,
+                    &ctx,
+                    &[],
+                    &self.crs_context(),
+                )?,
             });
         };
         let row_identity = StorageKey::for_surrogate(surrogate).to_identity();
 
         rls_write_gate::admit_stored_row(
             rls_write_check,
-            &prior,
-            &row_identity,
-            ctx.strict_schema.as_ref(),
-            &ctx.identity_column,
+            rls_write_gate::GatedRow {
+                body: &prior,
+                identity: &row_identity,
+                strict_schema: ctx.strict_schema.as_ref(),
+                identity_column: &ctx.identity_column,
+            },
             tid,
             collection,
+            &self.crs_context(),
         )
         .map_err(ErrorCode::from)?;
 
@@ -231,6 +244,7 @@ impl CoreLoop {
             rls_filters,
             &ctx,
             &[(&document_identity, prior.as_slice())],
+            &self.crs_context(),
         )?;
         Ok(DocumentResolveOutcome {
             mutations: vec![delete_mutation(

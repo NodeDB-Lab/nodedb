@@ -119,6 +119,12 @@ pub struct ColumnarEngineSnapshot {
     pub memtable_surrogates: Vec<Option<Surrogate>>,
     /// Serialised `PkIndex` bytes (via `PkIndex::to_bytes()`).
     pub pk_index_bytes: Vec<u8>,
+    /// Serialised closed-key index bytes (via `PkIndex::to_bytes()`): each
+    /// key a bitemporal close unbound, to its tombstone row. Empty when no
+    /// key was ever closed.
+    #[msgpack(default)]
+    #[serde(default)]
+    pub closed_index_bytes: Vec<u8>,
     /// Serialised delete bitmaps for FLUSHED segments only.
     ///
     /// Excludes the entry keyed by `memtable_segment_id`; that is
@@ -172,6 +178,11 @@ impl MutationEngine {
 
         // Serialise the PK index.
         let pk_index_bytes = self.pk_index.to_bytes()?;
+        let closed_index_bytes = if self.closed_index.is_empty() {
+            Vec::new()
+        } else {
+            self.closed_index.to_bytes()?
+        };
 
         // Partition delete bitmaps: separate the memtable's virtual segment
         // from flushed-segment bitmaps.
@@ -193,6 +204,7 @@ impl MutationEngine {
             memtable_columns,
             memtable_surrogates: self.memtable_surrogates.clone(),
             pk_index_bytes,
+            closed_index_bytes,
             delete_bitmaps,
             memtable_delete_bitmap_bytes,
             flushed_segments: flushed_segments.to_vec(),
@@ -233,6 +245,11 @@ impl MutationEngine {
 
         // Rebuild PK index.
         let pk_index = PkIndex::from_bytes(&snap.pk_index_bytes)?;
+        let closed_index = if snap.closed_index_bytes.is_empty() {
+            PkIndex::new()
+        } else {
+            PkIndex::from_bytes(&snap.closed_index_bytes)?
+        };
 
         // Rebuild flushed-segment delete bitmaps.
         let mut delete_bitmaps: HashMap<u64, DeleteBitmap> = HashMap::new();
@@ -276,6 +293,7 @@ impl MutationEngine {
             schema: snap.schema,
             memtable,
             pk_index,
+            closed_index,
             delete_bitmaps,
             pk_col_indices,
             next_segment_id: snap.next_segment_id,

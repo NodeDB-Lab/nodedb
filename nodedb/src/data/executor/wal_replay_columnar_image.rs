@@ -10,6 +10,11 @@
 //! columnar insert runs (memtable flush, geometry index, aggregate cache,
 //! checkpoint dirtiness, collection write floor).
 //!
+//! A bitemporal collection keeps every base row as history. A base key the
+//! transaction removes (a delete, or an update that changes the key) closes
+//! with a tombstone at the stamp the row carries. A base row an image of the
+//! same key replaces stays as the version the image supersedes.
+//!
 //! The install is all-or-nothing up to engine errors: every row decodes,
 //! every image coerces to the schema, and every displaced key is bound before
 //! the first mutation.
@@ -22,6 +27,7 @@ use nodedb_types::{Surrogate, Value};
 use super::core_loop::CoreLoop;
 use super::wal_replay_columnar_truncate::TruncateFloors;
 use crate::bridge::envelope::{ErrorCode, PhysicalPlan};
+use crate::data::executor::handlers::columnar_mutation_apply::ColumnarDeleteMode;
 use crate::data::executor::handlers::columnar_write::ndb_field_to_value;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::task::ExecutionTask;
@@ -32,6 +38,27 @@ struct ImageRow {
     surrogate: Surrogate,
     prior_pk: Option<Value>,
     image: Option<Value>,
+    /// The stamp the transaction's resolve fixed, for a bitemporal
+    /// collection.
+    system_from: Option<i64>,
+}
+
+/// How an install removes the base rows its record displaces.
+enum Removals {
+    /// Mark each base row deleted: a collection that is not bitemporal.
+    Erase(Vec<Value>),
+    /// Close each base key with a tombstone at its stamp: a bitemporal
+    /// collection.
+    Close(Vec<(Value, i64)>),
+}
+
+impl Removals {
+    fn len(&self) -> usize {
+        match self {
+            Self::Erase(pks) => pks.len(),
+            Self::Close(closes) => closes.len(),
+        }
+    }
 }
 
 /// Decode every row, or name the first one that does not decode.
@@ -63,6 +90,7 @@ fn decode_rows(record: &ColumnarImageWalRecord) -> crate::Result<Vec<ImageRow>> 
                 surrogate: Surrogate::new(row.surrogate),
                 prior_pk: decode(&row.prior_pk_msgpack, "base key", row.surrogate)?,
                 image,
+                system_from: row.system_from,
             })
         })
         .collect()
@@ -168,6 +196,7 @@ impl CoreLoop {
                 schema_bytes: record.schema_bytes.clone(),
                 provenance: None,
                 wal_lsn: Some(record_lsn),
+                system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: Vec::new(),
@@ -238,7 +267,10 @@ impl CoreLoop {
         let mut images: Vec<(Surrogate, Vec<Value>, Value)> = Vec::with_capacity(rows.len());
         for row in rows {
             if let Some(image) = &row.image {
-                images.push((row.surrogate, image_values(&schema, image)?, image.clone()));
+                let values = image_values(&schema, image)?;
+                // The image keeps the ordinal its transaction stamped.
+                self.observe_columnar_row_ordinal(&schema, &values);
+                images.push((row.surrogate, values, image.clone()));
             }
         }
         let priors: Vec<Value> = rows.iter().filter_map(|r| r.prior_pk.clone()).collect();
@@ -255,17 +287,35 @@ impl CoreLoop {
             });
         }
 
+        let removals = self.image_removals(&key, &schema, rows)?;
         let mut undo = Vec::new();
-        let removed = self
-            .apply_columnar_delete_pks(&key, &schema, &priors, recording.then_some(&mut undo))
-            .map_err(ErrorCode::from)?;
+        let removed = match &removals {
+            Removals::Erase(pks) => self.apply_columnar_delete_pks(
+                &key,
+                &schema,
+                pks,
+                ColumnarDeleteMode::Erase,
+                recording.then_some(&mut undo),
+            ),
+            Removals::Close(closes) => self.apply_columnar_close_pks_at(
+                &key,
+                &schema,
+                closes,
+                recording.then_some(&mut undo),
+            ),
+        }
+        .map_err(ErrorCode::from)?;
+        let affected = removed.affected;
+        // The removed base rows come back when the install rolls back.
+        if recording {
+            undo.push(removed.undo_entry(key.clone()));
+        }
         self.record_redo_undo(undo);
-        if removed.affected != priors.len() as u64 {
+        if affected != removals.len() as u64 {
             return Err(ErrorCode::Internal {
                 detail: format!(
-                    "columnar image record removed {} of {} base rows of '{collection}'",
-                    removed.affected,
-                    priors.len()
+                    "columnar image record removed {affected} of {} base rows of '{collection}'",
+                    removals.len()
                 ),
             });
         }
@@ -334,5 +384,202 @@ impl CoreLoop {
             self.note_collection_write(task, collection);
         }
         Ok(written)
+    }
+}
+
+impl CoreLoop {
+    /// The base rows the install of `rows` removes. A collection that is not
+    /// bitemporal erases every base row a row names. A bitemporal collection
+    /// closes a base key the row's image does not keep, at the row's stamp,
+    /// and keeps a base row an image of the same key supersedes.
+    ///
+    /// `Err` when a bitemporal row that closes a key carries no stamp, or an
+    /// image carries no primary key.
+    fn image_removals(
+        &self,
+        key: &(DatabaseId, TenantId, String),
+        schema: &ColumnarSchema,
+        rows: &[ImageRow],
+    ) -> Result<Removals, ErrorCode> {
+        if !schema.is_bitemporal() {
+            return Ok(Removals::Erase(
+                rows.iter().filter_map(|r| r.prior_pk.clone()).collect(),
+            ));
+        }
+        let collection = key.2.as_str();
+        let mut closes = Vec::new();
+        for row in rows {
+            let Some(prior) = &row.prior_pk else {
+                continue;
+            };
+            if let Some(image) = &row.image {
+                let values = image_values(schema, image)?;
+                let image_key = self
+                    .columnar_engines
+                    .get(key)
+                    .map(|engine| engine.encode_pk_from_row(&values))
+                    .transpose()
+                    .map_err(|e| ErrorCode::from(crate::Error::from(e)))?;
+                if image_key.as_deref() == Some(encode_pk(prior).as_slice()) {
+                    continue;
+                }
+            }
+            let stamp = row.system_from.ok_or_else(|| ErrorCode::Internal {
+                detail: format!(
+                    "columnar image record closes base row {prior:?} of bitemporal \
+                     '{collection}' without a system-time stamp"
+                ),
+            })?;
+            closes.push((prior.clone(), stamp));
+        }
+        Ok(Removals::Close(closes))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use nodedb_types::columnar::{ColumnDef, ColumnType};
+
+    use super::*;
+    use crate::data::executor::core_loop::tests::make_core_with_dir;
+    use crate::types::VShardId;
+
+    fn schema() -> ColumnarSchema {
+        ColumnarSchema::new(vec![
+            ColumnDef::required("_ts_system", ColumnType::Int64),
+            ColumnDef::required("_ts_valid_from", ColumnType::Int64),
+            ColumnDef::required("_ts_valid_until", ColumnType::Int64),
+            ColumnDef::required("id", ColumnType::Int64).with_primary_key(),
+            ColumnDef::required("v", ColumnType::Int64),
+        ])
+        .expect("valid")
+    }
+
+    fn version(ts: i64, id: i64, v: i64) -> Vec<Value> {
+        vec![
+            Value::Integer(ts),
+            Value::Integer(0),
+            Value::Integer(i64::MAX),
+            Value::Integer(id),
+            Value::Integer(v),
+        ]
+    }
+
+    fn image(ts: i64, id: i64, v: i64) -> Value {
+        let names = ["_ts_system", "_ts_valid_from", "_ts_valid_until", "id", "v"];
+        Value::Object(
+            names
+                .iter()
+                .map(|n| n.to_string())
+                .zip(version(ts, id, v))
+                .collect::<HashMap<_, _>>(),
+        )
+    }
+
+    /// A bitemporal install keeps every base row. An image of the same key
+    /// supersedes its base row, a removed key closes with a tombstone at the
+    /// row's stamp, and a key-changing image closes the old key and binds
+    /// the new one.
+    #[test]
+    fn a_bitemporal_install_keeps_every_base_row_as_history() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let key = (DatabaseId::DEFAULT, TenantId::new(1), "bt".to_string());
+        let mut engine = nodedb_columnar::MutationEngine::new("bt".to_string(), schema());
+        for (s, (ts, id, v)) in [(100, 1, 10), (200, 2, 20), (300, 3, 30)]
+            .into_iter()
+            .enumerate()
+        {
+            engine
+                .insert_with_surrogate(&version(ts, id, v), Surrogate::new(s as u32 + 1))
+                .expect("seed");
+        }
+        core.columnar_engines.insert(key.clone(), engine);
+
+        let txn = 1_000;
+        let rows = vec![
+            ImageRow {
+                surrogate: Surrogate::new(1),
+                prior_pk: Some(Value::Integer(1)),
+                image: Some(image(txn, 1, 11)),
+                system_from: Some(txn),
+            },
+            ImageRow {
+                surrogate: Surrogate::new(2),
+                prior_pk: Some(Value::Integer(2)),
+                image: None,
+                system_from: Some(txn),
+            },
+            ImageRow {
+                surrogate: Surrogate::new(3),
+                prior_pk: Some(Value::Integer(3)),
+                image: Some(image(txn, 4, 30)),
+                system_from: Some(txn),
+            },
+        ];
+        let task = CoreLoop::replay_task(
+            TenantId::new(1),
+            DatabaseId::DEFAULT,
+            VShardId::new(0),
+            PhysicalPlan::Columnar(ColumnarOp::Truncate {
+                collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "bt"),
+                restart_identity: false,
+                system_from: None,
+                erase_history: false,
+            }),
+            None,
+        );
+        core.install_columnar_images(&task, "bt", &[], &rows)
+            .expect("install");
+
+        let engine = core.columnar_engines.get(&key).expect("engine");
+        assert_eq!(
+            engine.memtable().row_count(),
+            7,
+            "3 base rows, 2 tombstones, 2 images"
+        );
+        let bound = |id: i64| engine.pk_index().contains(&encode_pk(&Value::Integer(id)));
+        let closed = |id: i64| {
+            engine
+                .closed_location(&encode_pk(&Value::Integer(id)))
+                .is_some()
+        };
+        assert!(bound(1) && !closed(1));
+        assert!(!bound(2) && closed(2));
+        assert!(!bound(3) && closed(3));
+        assert!(bound(4));
+
+        let stored: Vec<Vec<Value>> = engine
+            .scan_memtable_rows()
+            .map(|row| row.expect("read"))
+            .collect();
+        let read = |cut: Option<i64>| -> Vec<(i64, i64)> {
+            let gate = core
+                .columnar_version_gate(&key, cut, false)
+                .expect("gate")
+                .expect("bitemporal");
+            let mut out: Vec<(i64, i64)> = stored
+                .iter()
+                .filter(|row| gate.admits(row))
+                .map(|row| match (&row[3], &row[4]) {
+                    (Value::Integer(id), Value::Integer(v)) => (*id, *v),
+                    other => panic!("unexpected cells {other:?}"),
+                })
+                .collect();
+            out.sort_unstable();
+            out
+        };
+        assert_eq!(
+            read(None),
+            vec![(1, 11), (4, 30)],
+            "the state after the commit"
+        );
+        assert_eq!(
+            read(Some(txn - 1)),
+            vec![(1, 10), (2, 20), (3, 30)],
+            "the state before the commit"
+        );
     }
 }

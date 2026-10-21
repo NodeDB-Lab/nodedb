@@ -99,6 +99,7 @@ impl SystemCatalog {
         }
         #[cfg(test)]
         if self
+            .faults
             .fail_next_user_counter_write
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {

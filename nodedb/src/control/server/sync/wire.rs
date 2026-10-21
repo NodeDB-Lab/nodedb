@@ -13,11 +13,11 @@ pub use nodedb_types::sync::wire::{
     FtsDeleteAckMsg, FtsDeleteMsg, FtsIndexAckMsg, FtsIndexMsg, HandshakeAckMsg, HandshakeMsg,
     KvPushAckMsg, KvPushMsg, KvPushOp, PeerPresence, PingPongMsg, PresenceBroadcastMsg,
     PresenceLeaveMsg, PresenceUpdateMsg, ResyncReason, ResyncRequestMsg, RowPushRefusal,
-    RowPushRejectMsg, ShapeDeltaMsg, ShapeSnapshotMsg, ShapeSubscribeMsg, ShapeUnsubscribeMsg,
-    SpatialDeleteAckMsg, SpatialDeleteMsg, SpatialInsertAckMsg, SpatialInsertMsg, SyncFrame,
-    SyncMessageType, SyncProvenance, ThrottleMsg, TimeseriesAckMsg, TimeseriesPushMsg,
-    TokenRefreshAckMsg, TokenRefreshMsg, VectorClockSyncMsg, VectorDeleteAckMsg, VectorDeleteMsg,
-    VectorInsertAckMsg, VectorInsertMsg,
+    RowPushRejectMsg, SYNC_WIRE_VERSION, ShapeDeltaMsg, ShapeSnapshotMsg, ShapeSubscribeMsg,
+    ShapeUnsubscribeMsg, SpatialDeleteAckMsg, SpatialDeleteMsg, SpatialInsertAckMsg,
+    SpatialInsertMsg, SyncFrame, SyncMessageType, SyncProvenance, ThrottleMsg, TimeseriesAckMsg,
+    TimeseriesPushMsg, TokenRefreshAckMsg, TokenRefreshMsg, VectorClockSyncMsg, VectorDeleteAckMsg,
+    VectorDeleteMsg, VectorInsertAckMsg, VectorInsertMsg,
 };
 
 // ── Re-export CompensationHint (used by dlq.rs and session.rs) ──

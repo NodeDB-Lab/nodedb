@@ -230,6 +230,7 @@ fn parse_coord(text: &str, dtype: ArrayDimType) -> Option<ArrayCoordLiteral> {
 fn parse_attr(text: &str, dtype: ArrayAttrType) -> Option<ArrayAttrLiteral> {
     match dtype {
         ArrayAttrType::Int64
+        | ArrayAttrType::Int8
         | ArrayAttrType::UInt8
         | ArrayAttrType::Int16
         | ArrayAttrType::UInt16
@@ -396,11 +397,13 @@ mod tests {
                     name: "b1".into(),
                     dtype: ArrayAttrType::Float64,
                     nullable: false,
+                    meta: Default::default(),
                 },
                 ArrayAttrAst {
                     name: "label".into(),
                     dtype: ArrayAttrType::String,
                     nullable: true,
+                    meta: Default::default(),
                 },
             ],
             tile_extents: vec![64],
@@ -465,6 +468,7 @@ mod tests {
             name: name.into(),
             dtype,
             nullable: true,
+            meta: Default::default(),
         };
         ArrayCatalogView {
             name: "scene".into(),

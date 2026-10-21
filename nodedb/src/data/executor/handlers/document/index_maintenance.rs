@@ -32,6 +32,7 @@ impl CoreLoop {
         task: &ExecutionTask,
         params: BackfillIndexParams<'_>,
     ) -> Response {
+        let crs = self.crs_context();
         let BackfillIndexParams {
             tid,
             collection,
@@ -142,7 +143,7 @@ impl CoreLoop {
             // false (Postgres partial-index semantics), so only rows
             // for which the predicate is explicitly true are indexed.
             if let Some(ref p) = parsed_predicate
-                && !p.evaluate_json(&doc)
+                && !p.evaluate_json(&doc, &crs)
             {
                 continue;
             }

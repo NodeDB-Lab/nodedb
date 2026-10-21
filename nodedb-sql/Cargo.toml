@@ -15,6 +15,7 @@ categories = ["database", "parser-implementations"]
 
 [dependencies]
 nodedb-types = { workspace = true }
+nodedb-crs = { workspace = true }
 nodedb-query = { workspace = true }
 nodedb-spatial = { workspace = true }
 sqlparser = { workspace = true }

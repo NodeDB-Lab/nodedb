@@ -115,7 +115,7 @@ proptest! {
         let doc = serde_json::json!({ doc_field: doc_val });
         let msgpack = nodedb_types::json_msgpack::json_to_msgpack(&doc).unwrap();
         // Deny filter should NOT match any document.
-        let passes = deny_filters.iter().all(|f| f.matches_binary(&msgpack).unwrap());
+        let passes = deny_filters.iter().all(|f| f.matches_binary(&msgpack, &nodedb_crs::CrsContext::builtin_only()).unwrap());
         prop_assert!(!passes, "deny filter should reject all documents");
     }
 

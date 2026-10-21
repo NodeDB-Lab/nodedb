@@ -272,6 +272,8 @@ mod tests {
                 properties: Vec::new(),
                 src_surrogate: Surrogate::new(1),
                 dst_surrogate: Surrogate::new(2),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
             post_set_op: PostSetOp::None,
             txn_id: None,

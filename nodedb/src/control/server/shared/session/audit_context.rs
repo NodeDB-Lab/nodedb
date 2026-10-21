@@ -2,11 +2,13 @@
 
 //! Per-connection DDL audit context.
 //!
-//! The pgwire `do_query` entry point installs a snapshot of the
-//! authenticated identity + raw statement text on the connection slot
-//! before dispatching the statement. Every `propose_catalog_entry`
-//! call that fires inside that scope picks up the context and
-//! attaches it to the replicated [`MetadataEntry::CatalogDdlAudited`]
+//! The pgwire statement loop installs a snapshot of the authenticated
+//! identity + the text of each statement on the connection slot before
+//! it dispatches that statement. A statement that carries a secret
+//! installs its redacted text, so no secret reaches the metadata log.
+//! Every `propose_catalog_entry` call that fires inside that scope picks
+//! up the context and attaches it to the replicated
+//! [`MetadataEntry::CatalogDdlAudited`]
 //! so the applier can emit the J.4 audit record on every replica —
 //! including followers that never saw the raw SQL.
 //!
@@ -16,10 +18,12 @@
 
 use std::cell::RefCell;
 
+use crate::control::security::identity::AuthenticatedIdentity;
+
 /// Minimal identity/SQL snapshot captured at pgwire statement entry.
 ///
 /// Cloned into every `CatalogDdlAudited` entry proposed while it's
-/// active; cleared on scope exit via [`AuditScope::drop`].
+/// active. [`AuditScope::drop`] restores the outer context on scope exit.
 #[derive(Debug, Clone)]
 pub struct AuditCtx {
     pub auth_user_id: String,
@@ -33,25 +37,43 @@ fn with_slot<T>(default: T, f: impl FnOnce(&RefCell<Option<AuditCtx>>) -> T) -> 
     super::conn_scope::with_scope(default, |scope| f(&scope.audit))
 }
 
+impl AuditCtx {
+    /// The context of one statement `identity` runs. A statement that
+    /// carries a secret (a credential, a user password) records its redacted
+    /// text.
+    pub fn for_statement(identity: &AuthenticatedIdentity, sql: &str) -> Self {
+        Self {
+            auth_user_id: identity.user_id.to_string(),
+            auth_user_name: identity.username.clone(),
+            sql_text: nodedb_sql::ddl_ast::parse::audit_text_for(sql)
+                .unwrap_or_else(|| sql.to_string()),
+        }
+    }
+}
+
 /// RAII guard that installs `ctx` in the connection's audit slot on
-/// construction and clears it on drop. Use at the top of a pgwire
-/// statement handler so nested DDL proposers inherit the context.
+/// construction and restores the outer context on drop. Install one per
+/// statement so nested DDL proposers inherit that statement's context.
 pub struct AuditScope {
-    _private: (),
+    outer: Option<AuditCtx>,
 }
 
 impl AuditScope {
     pub fn new(ctx: AuditCtx) -> Self {
-        with_slot((), |c| *c.borrow_mut() = Some(ctx));
-        Self { _private: () }
+        let outer = with_slot(None, |c| c.borrow_mut().replace(ctx));
+        Self { outer }
+    }
+
+    /// Install the context of one statement `identity` runs.
+    pub fn statement(identity: &AuthenticatedIdentity, sql: &str) -> Self {
+        Self::new(AuditCtx::for_statement(identity, sql))
     }
 }
 
 impl Drop for AuditScope {
     fn drop(&mut self) {
-        with_slot((), |c| {
-            let _ = c.borrow_mut().take();
-        });
+        let outer = self.outer.take();
+        with_slot((), |c| *c.borrow_mut() = outer);
     }
 }
 
@@ -103,23 +125,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inner_scope_shadows_outer() {
+    async fn inner_scope_shadows_and_restores_outer() {
         conn_scope::scoped(async {
-            let _outer = AuditScope::new(ctx("root", "outer"));
             {
-                let _inner = AuditScope::new(ctx("bob", "inner"));
-                assert_eq!(
-                    current().expect("inner scope sets context").auth_user_name,
-                    "bob"
-                );
+                let _outer = AuditScope::new(ctx("root", "outer"));
+                {
+                    let _inner = AuditScope::new(ctx("bob", "inner"));
+                    assert_eq!(
+                        current().expect("inner scope sets context").auth_user_name,
+                        "bob"
+                    );
+                }
+                // `EXECUTE` runs its prepared body inside the outer
+                // statement's scope, which resumes once the body ends.
+                assert_eq!(current().expect("outer scope restored").sql_text, "outer");
             }
-            // After inner drops the slot is cleared entirely — outer scope is
-            // not restored. Pgwire installs exactly one scope per `do_query`,
-            // so this is fine; the test pins it so a future caller does not
-            // assume restoration behaviour.
             assert!(current().is_none());
         })
         .await;
+    }
+
+    #[test]
+    fn a_secret_bearing_statement_records_redacted_text() {
+        let identity = AuthenticatedIdentity::new_internal_service(
+            1,
+            "root",
+            crate::types::TenantId::new(1),
+            Vec::new(),
+            true,
+            None,
+            AuthenticatedIdentity::default_database_set(true),
+        );
+        let ctx = AuditCtx::for_statement(
+            &identity,
+            "CREATE CREDENTIAL c (TYPE 'bearer', TOKEN 'tok-secret')",
+        );
+        assert!(!ctx.sql_text.contains("tok-secret"), "{}", ctx.sql_text);
+        let ctx = AuditCtx::for_statement(&identity, "ALTER USER bob SET PASSWORD 'pw-secret'");
+        assert!(!ctx.sql_text.contains("pw-secret"), "{}", ctx.sql_text);
+        let ctx = AuditCtx::for_statement(&identity, "CREATE COLLECTION a");
+        assert_eq!(ctx.sql_text, "CREATE COLLECTION a");
     }
 
     /// The context must survive a worker-thread hop: the statement handler

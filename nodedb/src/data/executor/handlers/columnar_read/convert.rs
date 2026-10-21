@@ -8,6 +8,8 @@ use std::collections::HashMap;
 
 use nodedb_types::value::Value;
 
+use crate::data::executor::handlers::columnar_write::render_system_ms;
+
 /// Project a decoded columnar row into the scan's response object: column
 /// projection, the forced `_ts_system` audit column, and computed
 /// (scalar-expression) columns. Shared by the flushed-segment scan, the base
@@ -20,8 +22,10 @@ use nodedb_types::value::Value;
 /// written as the instant ext by `value_to_msgpack`, from the live memtable
 /// and from a flushed segment alike. The bitemporal `_ts_system`,
 /// `_ts_valid_from`, `_ts_valid_until` columns are declared `Int64` and stay
-/// integers: they hold epoch milliseconds with `i64::MIN` / `i64::MAX` as
-/// the unbounded sentinels, which no instant can carry.
+/// integers, which `i64::MIN` / `i64::MAX` unbounded sentinels need.
+/// `_ts_system` stores a system-time ordinal and reads as its epoch
+/// millisecond (`render_system_ms`). The valid-time columns hold epoch
+/// milliseconds.
 ///
 /// A computed column evaluates over the whole stored row. Its expression can
 /// read a column the projection leaves out, as `ST_AsText(loc)` does beside a
@@ -36,6 +40,7 @@ pub(in crate::data::executor) fn row_to_projected_value(
     projection: &[String],
     computed_cols: &[crate::bridge::expr_eval::ComputedColumn],
     all_versions: bool,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Value> {
     let keep_every_column = projection.is_empty() || !computed_cols.is_empty();
     let mut obj: HashMap<String, Value> = HashMap::with_capacity(schema.columns.len());
@@ -47,7 +52,7 @@ pub(in crate::data::executor) fn row_to_projected_value(
             continue;
         }
         if let Some(cell) = row.get(i) {
-            obj.insert(col_def.name.clone(), cell.clone());
+            obj.insert(col_def.name.clone(), render_system_ms(&col_def.name, cell));
         }
     }
     if !computed_cols.is_empty() {
@@ -59,7 +64,7 @@ pub(in crate::data::executor) fn row_to_projected_value(
             // A computed column is projection-shaped: a division/modulo-by-
             // zero fails the whole scan rather than silently materializing
             // NULL into the response row.
-            let v = cc.expr.eval(&doc_val)?;
+            let v = cc.expr.eval(&doc_val, crs)?;
             obj.insert(cc.alias.clone(), v);
         }
         if !projection.is_empty() {
@@ -71,6 +76,15 @@ pub(in crate::data::executor) fn row_to_projected_value(
         }
     }
     Ok(Value::Object(obj))
+}
+
+/// A decoded columnar row as the object a user reads, holding every stored
+/// column (`row_values_to_user_object`).
+pub(in crate::data::executor) fn row_to_value(
+    row: &[Value],
+    schema: &nodedb_types::columnar::ColumnarSchema,
+) -> Value {
+    crate::data::executor::handlers::columnar_write::row_values_to_user_object(schema, row)
 }
 
 /// Write a timeseries columnar memtable cell value directly as msgpack bytes.
@@ -211,7 +225,7 @@ mod tests {
 
     /// A projected row carries a declared `TIMESTAMP` cell as the instant the
     /// row reader typed it, and the `_ts_system` audit column as the integer
-    /// it is declared as.
+    /// millisecond of the ordinal it stores.
     #[test]
     fn a_projected_row_keeps_instant_cells_and_integer_system_time() {
         use nodedb_types::NdbDateTime;
@@ -225,20 +239,34 @@ mod tests {
         ])
         .expect("valid schema");
         let at = Value::NaiveDateTime(NdbDateTime::from_micros(MS * 1000));
-        let row = [Value::Integer(1), at.clone(), Value::Integer(MS)];
+        // An ordinal inside millisecond `MS`.
+        let ordinal = MS * nodedb_types::NANOS_PER_MS + 7;
+        let row = [Value::Integer(1), at.clone(), Value::Integer(ordinal)];
 
-        let Value::Object(all) =
-            row_to_projected_value(&row, &schema, &[], &[], false).expect("project")
-        else {
+        let Value::Object(all) = row_to_projected_value(
+            &row,
+            &schema,
+            &[],
+            &[],
+            false,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("project") else {
             panic!("a projected row is an object");
         };
         assert_eq!(all.get("at"), Some(&at));
         assert_eq!(all.get(TS_SYSTEM), Some(&Value::Integer(MS)));
 
         let projection = ["at".to_string()];
-        let Value::Object(audit) =
-            row_to_projected_value(&row, &schema, &projection, &[], true).expect("project")
-        else {
+        let Value::Object(audit) = row_to_projected_value(
+            &row,
+            &schema,
+            &projection,
+            &[],
+            true,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("project") else {
             panic!("a projected row is an object");
         };
         assert_eq!(audit.get("at"), Some(&at));
@@ -286,9 +314,15 @@ mod tests {
         let (schema, row) = name_city_row();
         let projection = ["name".to_string()];
         let computed = [upper("upper(city)", "city")];
-        let Value::Object(obj) =
-            row_to_projected_value(&row, &schema, &projection, &computed, false).expect("project")
-        else {
+        let Value::Object(obj) = row_to_projected_value(
+            &row,
+            &schema,
+            &projection,
+            &computed,
+            false,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("project") else {
             panic!("a projected row is an object");
         };
         assert_eq!(obj.get("name"), Some(&Value::String("ali".into())));
@@ -307,9 +341,15 @@ mod tests {
     fn a_computed_alias_shadowing_a_stored_column_carries_the_computed_value() {
         let (schema, row) = name_city_row();
         let computed = [upper("name", "name")];
-        let Value::Object(obj) =
-            row_to_projected_value(&row, &schema, &[], &computed, false).expect("project")
-        else {
+        let Value::Object(obj) = row_to_projected_value(
+            &row,
+            &schema,
+            &[],
+            &computed,
+            false,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("project") else {
             panic!("a projected row is an object");
         };
         assert_eq!(obj.get("name"), Some(&Value::String("ALI".into())));

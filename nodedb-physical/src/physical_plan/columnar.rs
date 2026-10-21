@@ -47,6 +47,12 @@ pub enum ColumnarInsertIntent {
     /// the row with `RejectedConstraint` (SQLSTATE 23505) instead of the
     /// `Insert` tombstone-and-append behavior above.
     InsertUnique,
+    /// A RESTORE re-issue of backed-up rows. A bitemporal row keeps the
+    /// `_ts_system` ordinal its row carries, the stamp its original write
+    /// took, and the insert folds it into the shared clock. A duplicate PK
+    /// behaves as `Insert`. Only the restore path builds it: a client
+    /// statement never chooses its own system time.
+    Restore,
 }
 
 /// Base columnar physical operations.
@@ -146,6 +152,15 @@ pub enum ColumnarOp {
         /// to disk. `None` for live ingest (always accepted).
         #[serde(default)]
         wal_lsn: Option<u64>,
+        /// System-time ordinal of the first row of a bitemporal insert. Row
+        /// `i` of `payload` stamps `system_from + i` in `_ts_system`. The
+        /// write funnel reserves the run on the node's ordinal clock right
+        /// before the write's WAL record, so the live apply and every replay
+        /// of the record stamp the same ordinals. `None` mints at apply: a
+        /// Calvin stage stamps its transaction's ordinal, any other apply a
+        /// fresh ordinal per row.
+        #[serde(default)]
+        system_from: Option<i64>,
         /// Compiled row-level-security WRITE predicate (`Vec<ScanFilter>` as
         /// MessagePack), or the reason no predicate is attached. Carried only
         /// for the ON CONFLICT DO UPDATE shape, whose merged post-image
@@ -180,6 +195,16 @@ pub enum ColumnarOp {
         /// Field assignments: `(column_name, value)`. An `Expr` value
         /// evaluates against each matched row's pre-image.
         updates: Vec<(String, super::document::UpdateValue)>,
+        /// System-time ordinal every new version this update writes to a
+        /// bitemporal collection stamps in `_ts_system`, raised one above its
+        /// key's bound row when that row sits at or above it. The write
+        /// funnel fixes it right before the write's WAL record: the run the
+        /// applied entry's leader reserved, else an ordinal of the node's
+        /// clock. The live apply and every replay of the record stamp alike.
+        /// `None` stamps at apply: a Calvin stage its transaction's ordinal,
+        /// any other apply a fresh ordinal.
+        #[serde(default)]
+        system_from: Option<i64>,
         /// Compiled row-level-security WRITE predicate, evaluated against each
         /// row's post-image once the assignments have been applied, or the
         /// reason no predicate is attached.
@@ -193,6 +218,14 @@ pub enum ColumnarOp {
         collection: QualifiedCollection,
         /// Serialized `Vec<ScanFilter>` (MessagePack).
         filters: Vec<u8>,
+        /// System-time ordinal at which a delete on a bitemporal collection
+        /// closes each removed key: the stamp of the tombstone version it
+        /// appends, raised one above the key's bound row when that row sits
+        /// at or above it. Fixed by the write funnel as for an update, so the
+        /// live apply and every replay close at the same ordinal. `None`
+        /// stamps at apply. A collection that is not bitemporal ignores it.
+        #[serde(default)]
+        system_from: Option<i64>,
         /// Compiled row-level-security WRITE predicate, evaluated against the
         /// pre-image of every row this removes, or the reason no predicate is
         /// attached.
@@ -211,6 +244,16 @@ pub enum ColumnarOp {
         /// (primary key, full post-image) for each row the Control Plane
         /// resolved and the write policy admitted.
         rows: Vec<(nodedb_types::Value, Vec<nodedb_types::Value>)>,
+        /// System-time ordinal every new version this update writes to a
+        /// bitemporal collection stamps in `_ts_system`, raised one above its
+        /// key's bound row when that row sits at or above it. The write
+        /// funnel fixes it right before the write's WAL record: the run the
+        /// applied entry's leader reserved, else an ordinal of the node's
+        /// clock. The live apply and every replay of the record stamp alike.
+        /// `None` stamps at apply: a Calvin stage its transaction's ordinal,
+        /// any other apply a fresh ordinal.
+        #[serde(default)]
+        system_from: Option<i64>,
         rls_write_check: RlsWriteCheck,
     },
 
@@ -225,6 +268,14 @@ pub enum ColumnarOp {
         collection: QualifiedCollection,
         /// Primary key of each row the write policy admitted for removal.
         pks: Vec<nodedb_types::Value>,
+        /// System-time ordinal at which a delete on a bitemporal collection
+        /// closes each removed key: the stamp of the tombstone version it
+        /// appends, raised one above the key's bound row when that row sits
+        /// at or above it. Fixed by the write funnel as for an update, so the
+        /// live apply and every replay close at the same ordinal. `None`
+        /// stamps at apply. A collection that is not bitemporal ignores it.
+        #[serde(default)]
+        system_from: Option<i64>,
         rls_write_check: RlsWriteCheck,
     },
 
@@ -259,14 +310,27 @@ pub enum ColumnarOp {
     },
 
     /// `TRUNCATE` of a columnar or spatial collection: every row, every
-    /// bitemporal version, every flushed segment, and every R-tree entry
-    /// the collection's geometry columns produced. Reports the number of
-    /// live rows that existed.
+    /// flushed segment, and every R-tree entry the collection's geometry
+    /// columns produced. A bitemporal collection closes every current key
+    /// with a tombstone version instead and keeps its history. Reports the
+    /// number of live rows that existed.
     Truncate {
         collection: QualifiedCollection,
         /// `TRUNCATE ... RESTART IDENTITY`: the Control Plane resets the
         /// collection's sequences after the Data Plane clears the rows.
         #[serde(default)]
         restart_identity: bool,
+        /// System-time ordinal at which a truncate of a bitemporal
+        /// collection closes every current key, raised per key above its
+        /// bound row, as for a delete. Fixed by the write funnel, so the live
+        /// apply and every replay close at the same ordinal. `None` stamps at
+        /// apply. A collection that is not bitemporal ignores it.
+        #[serde(default)]
+        system_from: Option<i64>,
+        /// Erase every row and version even on a bitemporal collection. A
+        /// backup restore clears this way before it reinstalls every
+        /// version under the system time it carries.
+        #[serde(default)]
+        erase_history: bool,
     },
 }

@@ -12,12 +12,16 @@ use super::core::{TenantCrdtEngine, TenantRowLookup};
 
 impl TenantCrdtEngine {
     /// Pre-validate a proposed change (fast-reject before Raft).
-    pub fn pre_validate(&self, change: &ProposedChange) -> PreValidationResult {
+    pub fn pre_validate(
+        &self,
+        change: &ProposedChange,
+        crs: &nodedb_crs::CrsContext<'_>,
+    ) -> PreValidationResult {
         let view = TenantRowLookup {
             collections: &self.collections,
             array_surrogate_ids: &self.array_surrogate_ids,
         };
-        pre_validate::pre_validate(&self.validator, &view, change)
+        pre_validate::pre_validate(&self.validator, &view, change, crs)
     }
 
     /// Test-only raw import used to seed transaction rollback fixtures.
@@ -54,6 +58,7 @@ impl TenantCrdtEngine {
         auth: nodedb_crdt::CrdtAuthContext,
         change: &ProposedChange,
         delta_bytes: Vec<u8>,
+        crs: &nodedb_crs::CrsContext<'_>,
     ) -> crate::Result<()> {
         // Tenant-wide view over all collections + array surrogates. The view
         // borrows `self.collections` / `self.array_surrogate_ids` immutably
@@ -65,7 +70,7 @@ impl TenantCrdtEngine {
                 array_surrogate_ids: &self.array_surrogate_ids,
             };
             self.validator
-                .validate_or_reject(&view, peer_id, auth, change, delta_bytes)
+                .validate_or_reject(&view, peer_id, auth, change, delta_bytes, crs)
                 .map_err(crate::Error::Crdt)?;
         }
 
@@ -136,6 +141,7 @@ mod tests {
                 nodedb_crdt::CrdtAuthContext::default(),
                 &change,
                 b"delta".to_vec(),
+                &nodedb_crs::CrsContext::builtin_only(),
             )
             .unwrap();
 
@@ -166,6 +172,7 @@ mod tests {
                 nodedb_crdt::CrdtAuthContext::default(),
                 &change,
                 b"delta".to_vec(),
+                &nodedb_crs::CrsContext::builtin_only(),
             )
             .unwrap_err();
 
@@ -184,7 +191,7 @@ mod tests {
             fields: vec![("email".into(), LoroValue::String("a@b.com".into()))],
         };
 
-        match engine.pre_validate(&change) {
+        match engine.pre_validate(&change, &nodedb_crs::CrsContext::builtin_only()) {
             PreValidationResult::FastReject { constraint, .. } => {
                 assert_eq!(constraint, "users_name_nn");
             }
@@ -219,6 +226,7 @@ mod tests {
                 nodedb_crdt::CrdtAuthContext::default(),
                 &first,
                 b"d1".to_vec(),
+                &nodedb_crs::CrsContext::builtin_only(),
             )
             .unwrap();
 
@@ -241,7 +249,8 @@ mod tests {
                     2,
                     nodedb_crdt::CrdtAuthContext::default(),
                     &second,
-                    b"d2".to_vec()
+                    b"d2".to_vec(),
+                    &nodedb_crs::CrsContext::builtin_only()
                 )
                 .is_err()
         );
@@ -273,6 +282,7 @@ mod tests {
             nodedb_crdt::CrdtAuthContext::default(),
             &change,
             b"d".to_vec(),
+            &nodedb_crs::CrsContext::builtin_only(),
         )
     }
 

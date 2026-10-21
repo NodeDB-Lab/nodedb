@@ -2,7 +2,7 @@
 
 //! The payload an installed Calvin slice answers with.
 
-use super::images::{RowLocation, StoredRow};
+use super::images::{ReturningImageRow, RowLocation};
 use super::reply::{CalvinReply, InstalledTimeseries};
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
@@ -48,7 +48,7 @@ impl CoreLoop {
             }
             CalvinReply::Rows(payload) => return Ok(payload),
             CalvinReply::InstalledTimeseries(installed) => {
-                return installed_timeseries_rows(&installed, ts_installs);
+                return installed_timeseries_rows(&installed, ts_installs, &self.crs_context());
             }
             CalvinReply::PostImages(images) => images,
         };
@@ -72,7 +72,7 @@ impl CoreLoop {
                     ),
                 });
             };
-            rows.push(StoredRow {
+            rows.push(ReturningImageRow {
                 identity: identity.clone(),
                 surrogate: *surrogate,
                 bytes,
@@ -88,6 +88,7 @@ impl CoreLoop {
 fn installed_timeseries_rows(
     installed: &InstalledTimeseries,
     ts_installs: &[TsInstalled],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<Vec<u8>, ErrorCode> {
     let Some(install) = ts_installs
         .get(installed.ordinal)
@@ -117,6 +118,12 @@ fn installed_timeseries_rows(
         collection: installed.collection.clone(),
         lines: rejected,
     });
-    build_rejecting_rows_payload(&installed.spec, &installed.rls_filters, &docs, rejection)
-        .map_err(ErrorCode::from)
+    build_rejecting_rows_payload(
+        &installed.spec,
+        &installed.rls_filters,
+        &docs,
+        rejection,
+        crs,
+    )
+    .map_err(ErrorCode::from)
 }

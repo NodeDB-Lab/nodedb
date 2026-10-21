@@ -192,6 +192,36 @@ impl TestServer {
         (server, dir)
     }
 
+    /// Spawn a single-core NodeDB server that pushes OTLP metrics every
+    /// second to a collector at `http://localhost:<port>`.
+    pub async fn start_with_otlp_collector(port: u16) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::otlp_collector(port),
+            1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
+    /// Spawn a single-core NodeDB server whose WAL key a Vault transit engine
+    /// at `http://localhost:<port>` unwraps.
+    pub async fn start_with_vault(port: u16) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(dir.path(), AuthMode::Trust, TuningOverrides::vault(port), 1);
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
+    /// Reopen `dir` with the Vault key source a server started by
+    /// [`Self::start_with_vault`] used.
+    pub async fn open_on_path_with_vault(dir: TestDataDir, port: u16) -> (Self, TestDataDir) {
+        let spawned = process::spawn(dir.path(), AuthMode::Trust, TuningOverrides::vault(port), 1);
+        let placeholder = tempfile::tempdir().expect("placeholder tempdir");
+        let server = Self::connect_and_build(spawned, placeholder, AuthMode::Trust).await;
+        (server, dir)
+    }
+
     /// Open a server backed by an existing data directory, reopened in place
     /// so a previous server's data is visible after boot. `dir` is not
     /// consumed — ownership stays with the caller.

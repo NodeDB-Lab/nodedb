@@ -122,7 +122,7 @@ fn count_matching_leases(
 ) -> usize {
     let instant = Instant::now();
     let now = nodedb_cluster::LeaseNow {
-        wall_ns: super::wall_now_ns(),
+        wall_ns: nodedb_types::wall_now_ns(),
         instant,
         // Reading the leader term takes the raft coordinator lock, so skip
         // it unless some holder can qualify for early release.
@@ -288,7 +288,7 @@ mod tests {
     /// nothing.
     fn unexpired() -> nodedb_types::Hlc {
         nodedb_types::Hlc::new(
-            super::super::wall_now_ns().saturating_add(60_000_000_000),
+            nodedb_types::wall_now_ns().saturating_add(60_000_000_000),
             0,
         )
     }
@@ -296,7 +296,7 @@ mod tests {
     /// A lease expiry a minute in the past, in REAL wall time.
     fn expired() -> nodedb_types::Hlc {
         nodedb_types::Hlc::new(
-            super::super::wall_now_ns().saturating_sub(60_000_000_000),
+            nodedb_types::wall_now_ns().saturating_sub(60_000_000_000),
             0,
         )
     }
@@ -395,11 +395,11 @@ mod tests {
 
         // An HLC an hour ahead of real time, folded into the local clock.
         let skewed = nodedb_types::Hlc::new(
-            super::super::wall_now_ns().saturating_add(3_600_000_000_000),
+            nodedb_types::wall_now_ns().saturating_add(3_600_000_000_000),
             0,
         );
         state.hlc_clock.update(skewed);
-        assert!(state.hlc_clock.peek().wall_ns > super::super::wall_now_ns());
+        assert!(state.hlc_clock.peek().wall_ns > nodedb_types::wall_now_ns());
 
         insert_lease(&state, &descriptor, 1, 1, unexpired());
         assert_eq!(
@@ -523,7 +523,7 @@ mod tests {
         let (state, remote, _directory) = state_with_remote_member();
         let descriptor = orders();
         let just_expired =
-            nodedb_types::Hlc::new(super::super::wall_now_ns().saturating_sub(1_000_000_000), 0);
+            nodedb_types::Hlc::new(nodedb_types::wall_now_ns().saturating_sub(1_000_000_000), 0);
 
         insert_lease(&state, &descriptor, remote, 1, just_expired);
         assert_eq!(

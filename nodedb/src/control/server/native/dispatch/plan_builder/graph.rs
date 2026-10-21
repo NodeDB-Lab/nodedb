@@ -57,6 +57,9 @@ pub(crate) async fn build_rag_fusion(
         bm25_query: None,
         bm25_field: None,
         stage: nodedb_physical::physical_plan::RagStage::Local,
+        // The native graph ops carry no temporal field: they read the
+        // current graph. `AS OF` reads go through the SQL surface.
+        scope: nodedb_physical::physical_plan::GraphReadScope::default(),
     }))
 }
 
@@ -99,6 +102,9 @@ pub(crate) async fn build_hop(
         options: Default::default(),
         rls_filters: Vec::new(),
         frontier_bitmap: None,
+        // The native graph ops carry no temporal field: they read the
+        // current graph. `AS OF` reads go through the SQL surface.
+        scope: nodedb_physical::physical_plan::GraphReadScope::default(),
     }))
 }
 
@@ -121,6 +127,9 @@ pub(crate) async fn build_neighbors(
         edge_labels: fields.edge_labels.clone().unwrap_or_default(),
         direction: parse_direction(fields.direction.as_deref())?,
         rls_filters: Vec::new(),
+        // The native graph ops carry no temporal field: they read the
+        // current graph. `AS OF` reads go through the SQL surface.
+        scope: nodedb_physical::physical_plan::GraphReadScope::default(),
     }))
 }
 
@@ -152,6 +161,9 @@ pub(crate) async fn build_path(
         options: Default::default(),
         rls_filters: Vec::new(),
         frontier_bitmap: None,
+        // The native graph ops carry no temporal field: they read the
+        // current graph. `AS OF` reads go through the SQL surface.
+        scope: nodedb_physical::physical_plan::GraphReadScope::default(),
     }))
 }
 
@@ -175,6 +187,9 @@ pub(crate) async fn build_subgraph(
         edge_labels: fields.edge_labels.clone().unwrap_or_default(),
         options: Default::default(),
         rls_filters: Vec::new(),
+        // The native graph ops carry no temporal field: they read the
+        // current graph. `AS OF` reads go through the SQL surface.
+        scope: nodedb_physical::physical_plan::GraphReadScope::default(),
     }))
 }
 
@@ -218,6 +233,9 @@ pub(crate) async fn build_edge_put(
         properties,
         src_surrogate,
         dst_surrogate,
+        // A native edge put takes the write's own valid time.
+        valid_from_ms: None,
+        valid_until_ms: None,
     }))
 }
 
@@ -339,6 +357,9 @@ pub(crate) async fn build_algo(
         algorithm,
         params,
         stage: nodedb_physical::physical_plan::AlgoStage::Local,
+        // The native graph ops carry no temporal field: they read the
+        // current graph. `AS OF` reads go through the SQL surface.
+        scope: nodedb_physical::physical_plan::GraphReadScope::default(),
     }))
 }
 
@@ -374,9 +395,11 @@ fn parse_algo_personalization(
     Ok(Some(map))
 }
 
+/// A native MATCH: the query text, its `AS OF` clauses split off and its
+/// pattern compiled, as the `MatchQuery` the Data Plane executes.
 pub(crate) async fn build_match(
+    ctx: &DispatchCtx<'_>,
     fields: &TextFields,
-    _collection: &str,
 ) -> crate::Result<PhysicalPlan> {
     let query_str = fields
         .match_query
@@ -385,18 +408,34 @@ pub(crate) async fn build_match(
         .ok_or_else(|| crate::Error::BadRequest {
             detail: "missing 'match_query'".to_string(),
         })?;
-
-    // Serialize the MATCH query string as MessagePack for the Data Plane.
-    let query = zerompk::to_msgpack_vec(query_str).map_err(|e| crate::Error::Serialization {
+    let (body, temporal) = match nodedb_sql::ddl_ast::graph_parse::try_parse(query_str) {
+        Some(Ok(nodedb_sql::ddl_ast::NodedbStatement::Graph(
+            nodedb_sql::ddl_ast::GraphStmt::MatchQuery { body, temporal },
+        ))) => (body, temporal),
+        Some(Err(e)) => {
+            return Err(crate::Error::BadRequest {
+                detail: format!("MATCH parse error: {e}"),
+            });
+        }
+        Some(Ok(_)) | None => {
+            return Err(crate::Error::BadRequest {
+                detail: "'match_query' must be a MATCH statement".to_string(),
+            });
+        }
+    };
+    let compiled = crate::engine::graph::pattern::compiler::parse(&body)?;
+    let query = zerompk::to_msgpack_vec(&compiled).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
         detail: format!("match query serialization: {e}"),
     })?;
+    let scope =
+        crate::control::server::graph_dispatch::graph_read_scope(ctx.state, &temporal).await?;
 
     Ok(PhysicalPlan::Graph(GraphOp::Match {
         query,
         frontier_bitmap: None,
-        // B1: native MATCH stays single-node; B2 wires cluster orchestration.
         cluster_mode: false,
+        scope,
     }))
 }
 

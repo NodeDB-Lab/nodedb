@@ -2,9 +2,9 @@
 
 //! Spherical geo math on (longitude, latitude) degrees.
 
-/// Mean Earth radius in metres (IUGG R1), the sphere every haversine
-/// measure in this crate uses.
-const EARTH_RADIUS_M: f64 = 6_371_000.0;
+/// Mean Earth radius in metres (IUGG R1), the sphere every haversine and
+/// spherical-excess measure uses.
+pub const EARTH_RADIUS_M: f64 = 6_371_000.0;
 
 /// Haversine distance between two points in meters.
 ///

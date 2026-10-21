@@ -179,7 +179,7 @@ mod tests {
                 bbox: BoundingBox::new(0.0, 0.0, 1.0, 1.0),
             }],
             memory,
-            nodedb_types::geometry::Srid::Wgs84,
+            crate::engine::spatial::TreeSrid::WGS84,
         );
         rtree.checkpoint_to_bytes(None).expect("encode R-tree")
     }

@@ -57,6 +57,9 @@ pub struct SpawnCoreParams<'a> {
             nodedb_types::columnar::ColumnarSchema,
         )>,
     >,
+    /// The catalog's user-defined CRS set, installed before `replay_all_wal`
+    /// so replay and every later request resolve user-defined SRIDs.
+    pub crs_set_seed: Arc<nodedb_crs::CustomCrsSet>,
     /// One-shot signal fired once this core finishes `replay_all_wal` (before
     /// it enters its event loop). Boot awaits every core's signal before
     /// opening the client gateway, so `/healthz` never reports ready while a

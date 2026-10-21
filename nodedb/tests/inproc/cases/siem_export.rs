@@ -19,6 +19,14 @@ use nodedb::control::state::SharedState;
 /// Open a catalog-backed `SharedState` from a server config whose `[auth]`
 /// section carries `siem`, exactly as an operator's config file would.
 fn open_state(siem: Option<SiemConfig>) -> (Arc<SharedState>, tempfile::TempDir) {
+    let (state, dir) = try_open_state(siem);
+    (state.expect("shared state opens"), dir)
+}
+
+/// `open_state` without the success expectation.
+fn try_open_state(
+    siem: Option<SiemConfig>,
+) -> (nodedb::Result<Arc<SharedState>>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let wal_path = dir.path().join("test.wal");
     let wal = Arc::new(nodedb::wal::WalManager::open_for_testing(&wal_path).expect("wal"));
@@ -37,12 +45,11 @@ fn open_state(siem: Option<SiemConfig>) -> (Arc<SharedState>, tempfile::TempDir)
         },
         wal,
         &catalog_path,
-        &auth_config,
+        nodedb::control::state::OpenConfig::strict(&auth_config),
         nodedb_types::config::TuningConfig::default(),
         false,
         nodedb::data::executor::core_loop::test_governor(),
-    )
-    .expect("shared state opens");
+    );
     (state, dir)
 }
 
@@ -53,6 +60,25 @@ fn webhook_siem(buffer_size: usize) -> SiemConfig {
         webhook_hmac_secret: "s3cret".into(),
         buffer_size,
         ..SiemConfig::default()
+    }
+}
+
+/// The SIEM endpoint is operator config. One the `[egress]` policy refuses
+/// stops startup instead of failing every export later.
+#[test]
+fn a_siem_webhook_outside_the_egress_policy_stops_startup() {
+    for url in [
+        "http://siem.example/ingest",
+        "https://127.0.0.1:8088/ingest",
+    ] {
+        let (state, _dir) = try_open_state(Some(SiemConfig {
+            webhook_url: url.into(),
+            ..webhook_siem(64)
+        }));
+        let err = state
+            .err()
+            .unwrap_or_else(|| panic!("{url} must be refused"));
+        assert!(err.to_string().contains("[egress]"), "{url}: {err}");
     }
 }
 

@@ -108,7 +108,12 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
         ReplicatedWrite::ColumnarTruncate {
             collection,
             restart_identity,
-        } => Ok(columnar::truncate(collection, *restart_identity)),
+            erase_history,
+        } => Ok(columnar::truncate(
+            collection,
+            *restart_identity,
+            *erase_history,
+        )),
         ReplicatedWrite::TimeseriesTruncate {
             collection,
             restart_identity,
@@ -170,5 +175,14 @@ mod tests {
             .expect("decode")
             .expect("an entry");
         assert_eq!(again, Some(instant));
+
+        // A leader-stamped entry stamps the batch with the millisecond of the
+        // leader's ordinal, the clock a pinned cut folds into.
+        let mut stamped = entry;
+        stamped.system_ordinal = 1_800_000_000_123 * nodedb_types::NANOS_PER_MS + 42;
+        let (_, _, _, leader_ms) = decode::decode_replicated_entry(&stamped.to_bytes())
+            .expect("decode")
+            .expect("an entry");
+        assert_eq!(leader_ms, Some(1_800_000_000_123));
     }
 }

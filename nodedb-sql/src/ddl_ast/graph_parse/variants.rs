@@ -15,14 +15,17 @@ use super::{
     tokenizer::Tok,
 };
 use crate::error::SqlError;
+use crate::temporal::TemporalScope;
 use nodedb_types::filter::MetadataFilter;
 
-/// Parse `GRAPH INSERT EDGE IN <c> FROM <a> TO <b> TYPE <l> [PROPERTIES ...]`.
+/// Parse `GRAPH INSERT EDGE IN <c> FROM <a> TO <b> TYPE <l> [PROPERTIES ...]
+/// [VALID_TIME <from> [UNTIL <until>]]`.
 pub(super) fn parse_insert_edge(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH INSERT EDGE";
     let mut c = Cursor::new(toks, STMT, 3);
     let (mut collection, mut src, mut dst, mut label, mut properties) =
         (None, None, None, None, None);
+    let (mut valid_from_ms, mut valid_until_ms) = (None, None);
     while let Some(clause) = c.next_clause()? {
         match clause.as_str() {
             "IN" => set_once(&mut collection, c.value("IN")?, "IN", STMT)?,
@@ -30,16 +33,43 @@ pub(super) fn parse_insert_edge(toks: &[Tok<'_>]) -> Result<NodedbStatement, Sql
             "TO" => set_once(&mut dst, c.value("TO")?, "TO", STMT)?,
             "TYPE" => set_once(&mut label, c.value("TYPE")?, "TYPE", STMT)?,
             "PROPERTIES" => set_once(&mut properties, c.properties()?, "PROPERTIES", STMT)?,
+            "VALID_TIME" => set_once(
+                &mut valid_from_ms,
+                c.timestamp("VALID_TIME")?,
+                "VALID_TIME",
+                STMT,
+            )?,
+            "UNTIL" => set_once(&mut valid_until_ms, c.timestamp("UNTIL")?, "UNTIL", STMT)?,
             _ => return Err(c.unknown_clause()),
         }
     }
+    check_valid_interval(valid_from_ms, valid_until_ms)?;
     Ok(NodedbStatement::Graph(GraphStmt::GraphInsertEdge {
         collection: collection.ok_or_else(|| missing_clause(STMT, "IN <collection>"))?,
         src: src.ok_or_else(|| missing_clause(STMT, "FROM <node>"))?,
         dst: dst.ok_or_else(|| missing_clause(STMT, "TO <node>"))?,
         label: label.ok_or_else(|| missing_clause(STMT, "TYPE <label>"))?,
         properties: properties.unwrap_or(GraphProperties::None),
+        valid_from_ms,
+        valid_until_ms,
     }))
+}
+
+/// `UNTIL` needs `VALID_TIME`, and the interval `[from, until)` must not be
+/// empty.
+fn check_valid_interval(from: Option<i64>, until: Option<i64>) -> Result<(), SqlError> {
+    match (from, until) {
+        (None, Some(_)) => Err(SqlError::Parse {
+            detail: "GRAPH INSERT EDGE: UNTIL needs VALID_TIME <from>".to_owned(),
+        }),
+        (Some(from), Some(until)) if until <= from => Err(SqlError::Parse {
+            detail: format!(
+                "GRAPH INSERT EDGE: VALID_TIME {from} UNTIL {until} is empty; UNTIL must be \
+                 after VALID_TIME"
+            ),
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Parse `GRAPH DELETE EDGE IN <c> FROM <a> TO <b> TYPE <l>`.
@@ -96,6 +126,7 @@ pub(super) fn parse_set_labels(
 pub(super) fn parse_traverse(
     toks: &[Tok<'_>],
     edge_predicate: Vec<MetadataFilter>,
+    temporal: TemporalScope,
 ) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH TRAVERSE";
     let mut c = Cursor::new(toks, STMT, 2);
@@ -118,11 +149,15 @@ pub(super) fn parse_traverse(
         edge_labels: labels.unwrap_or_default(),
         direction: direction.unwrap_or(GraphDirection::Out),
         edge_predicate,
+        temporal,
     }))
 }
 
 /// Parse `GRAPH NEIGHBORS IN <c> OF <node> [LABEL ...] [DIRECTION d]`.
-pub(super) fn parse_neighbors(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
+pub(super) fn parse_neighbors(
+    toks: &[Tok<'_>],
+    temporal: TemporalScope,
+) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH NEIGHBORS";
     let mut c = Cursor::new(toks, STMT, 2);
     let (mut collection, mut node, mut labels, mut direction) = (None, None, None, None);
@@ -140,6 +175,7 @@ pub(super) fn parse_neighbors(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlEr
         node: node.ok_or_else(|| missing_clause(STMT, "OF <node>"))?,
         edge_labels: labels.unwrap_or_default(),
         direction: direction.unwrap_or(GraphDirection::Out),
+        temporal,
     }))
 }
 
@@ -147,6 +183,7 @@ pub(super) fn parse_neighbors(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlEr
 pub(super) fn parse_path(
     toks: &[Tok<'_>],
     edge_predicate: Vec<MetadataFilter>,
+    temporal: TemporalScope,
 ) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH PATH";
     let mut c = Cursor::new(toks, STMT, 2);
@@ -169,6 +206,7 @@ pub(super) fn parse_path(
         max_depth: max_depth.unwrap_or(10),
         edge_labels: labels.unwrap_or_default(),
         edge_predicate,
+        temporal,
     }))
 }
 
@@ -189,7 +227,10 @@ struct AlgoClauses {
 }
 
 /// Parse `GRAPH ALGO <algorithm> ON <collection> [options...]`.
-pub(super) fn parse_algo(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
+pub(super) fn parse_algo(
+    toks: &[Tok<'_>],
+    temporal: TemporalScope,
+) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH ALGO";
     let mut c = Cursor::new(toks, STMT, 2);
     let Some(algorithm) = c.next_clause()? else {
@@ -232,6 +273,7 @@ pub(super) fn parse_algo(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> 
         direction: a.direction,
         mode: a.mode,
         personalization: a.personalization,
+        temporal,
     }))
 }
 
@@ -255,7 +297,10 @@ fn refuse_subquery(collection: &str) -> Result<(), SqlError> {
 ///
 /// The fusion parameters go through [`FusionParams::parse`], which every
 /// fusion SQL surface shares.
-pub(super) fn parse_rag_fusion(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
+pub(super) fn parse_rag_fusion(
+    toks: &[Tok<'_>],
+    temporal: TemporalScope,
+) -> Result<NodedbStatement, SqlError> {
     const STMT: &str = "GRAPH RAG FUSION";
     let mut c = Cursor::new(toks, STMT, 3);
     if !c.eat_keyword("ON") {
@@ -266,5 +311,6 @@ pub(super) fn parse_rag_fusion(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlE
     Ok(NodedbStatement::Graph(GraphStmt::GraphRagFusion {
         collection,
         params,
+        temporal,
     }))
 }

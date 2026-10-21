@@ -293,6 +293,13 @@ pub enum DocumentOp {
         /// identity under this column, else under `id`, and only when the
         /// row lacks that column.
         declared_key: Option<String>,
+        /// The collection's incarnation in the catalog: the stamp of the
+        /// create a drop and a same-name create replace. The collection's
+        /// CRDT document mints its Loro operations under a peer id derived
+        /// from it, so a re-created collection never reuses an operation id
+        /// of the dropped one. `Hlc::ZERO` when the catalog holds none.
+        #[serde(default)]
+        incarnation: nodedb_types::Hlc,
     },
 
     /// Lookup documents by secondary index value.
@@ -321,12 +328,13 @@ pub enum DocumentOp {
         projection: Vec<String>,
         limit: usize,
         offset: usize,
-        /// `FOR SYSTEM_TIME AS OF <ms>` cutoff on a bitemporal collection.
-        /// `None` reads the current state. The versioned index answers at the
-        /// cutoff and each row is read at its version as of the cutoff. The
-        /// index holds no valid time and no history listing, so a valid-time
-        /// or all-versions read never plans this variant.
-        system_as_of_ms: Option<i64>,
+        /// System-time scope on a bitemporal collection: `Current` reads the
+        /// current state, and a point-in-time scope reads at its cut. The
+        /// versioned index answers at the cut and each row is read at its
+        /// version as of the cut. The index holds no valid time and no
+        /// history listing, so a valid-time or all-versions read never plans
+        /// this variant, and the handler refuses `AllVersions`.
+        system_time: nodedb_types::SystemTimeScope,
     },
 
     /// Drop all secondary index entries for a field.
@@ -609,14 +617,16 @@ pub enum DocumentOp {
     /// `value_bytes` is always MessagePack, transcoded from the source
     /// encoding. `next_cursor` empty = scan complete.
     ///
-    /// Honors `system_as_of_ms` (the clone's `as_of_lsn`) on bitemporal
-    /// collections; ignored otherwise.
+    /// Honors `system_time` on bitemporal collections; ignored otherwise.
+    /// A clone copy reads `AsOf` its `as_of_lsn`, and a paged source read
+    /// reads at its statement's cut.
     MaterializeScan {
         collection: QualifiedCollection,
         cursor: Vec<u8>,
         count: usize,
-        system_as_of_ms: Option<i64>,
-        // Point-in-time snapshot: `AllVersions` is rejected upstream.
+        /// `Current` or a point-in-time cut. The handler refuses
+        /// `AllVersions`.
+        system_time: nodedb_types::SystemTimeScope,
         /// Return each body as stored, transcoded to MessagePack with no
         /// `id` added. Every clone materializer copy reads these: a
         /// `HASH_CHAIN` link covers the stored contents, and a strict target

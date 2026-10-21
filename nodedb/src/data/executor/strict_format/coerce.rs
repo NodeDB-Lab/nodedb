@@ -245,9 +245,10 @@ fn coerce_to_type(val: &Value, col_type: &ColumnType, col_name: &str) -> crate::
             // index-build time. Schema validation catches genuine mismatches.
             Ok(val.clone())
         }
-        // The tuple encoder stores a native geometry, or WKT / GeoJSON text.
+        // The tuple encoder stores EWKB from a native geometry, its text
+        // (GeoJSON, EWKT, WKT, hex EWKB) or WKB bytes.
         ColumnType::Geometry => match val {
-            Value::Geometry(_) | Value::String(_) => Ok(val.clone()),
+            Value::Geometry(_) | Value::String(_) | Value::Bytes(_) => Ok(val.clone()),
             _ => Err(wrong_kind(col_name, val, "GEOMETRY")),
         },
         ColumnType::Duration => match val {
@@ -411,11 +412,11 @@ pub fn value_to_json(val: &Value) -> serde_json::Value {
             }
             serde_json::Value::Object(obj)
         }
-        Value::Geometry(_)
-        | Value::Regex(_)
-        | Value::Range { .. }
-        | Value::Record { .. }
-        | Value::ArrayCell(_) => serde_json::Value::Null,
+        // GeoJSON, `crs` member included for a non-WGS 84 SRID.
+        Value::Geometry(g) => nodedb_types::geometry::geojson_tree(g),
+        Value::Regex(_) | Value::Range { .. } | Value::Record { .. } | Value::ArrayCell(_) => {
+            serde_json::Value::Null
+        }
         // Value is #[non_exhaustive]; future variants collapse to JSON null
         // at the pgwire output boundary.
         _ => serde_json::Value::Null,

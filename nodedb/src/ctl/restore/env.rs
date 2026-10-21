@@ -29,15 +29,16 @@ pub struct RestoreEnv {
 impl RestoreEnv {
     /// Read `path` the way the server boot reads it: the file, then the
     /// `NODEDB_*` environment overrides.
-    pub fn from_config_file(path: &Path, kept: &[&str]) -> Result<Self, RestoreError> {
+    pub async fn from_config_file(path: &Path, kept: &[&str]) -> Result<Self, RestoreError> {
         let mut config = ServerConfig::from_file(path)?;
         apply_env_overrides(&mut config)?;
-        Self::from_config(&config, kept)
+        Self::from_config(&config, kept).await
     }
 
     /// Refuse a data directory holding any entry other than those named in
     /// `kept`, or a local store inside it, before any store is opened.
-    pub fn from_config(config: &ServerConfig, kept: &[&str]) -> Result<Self, RestoreError> {
+    /// The WAL key comes from the source `[encryption]` names, as at boot.
+    pub async fn from_config(config: &ServerConfig, kept: &[&str]) -> Result<Self, RestoreError> {
         let data_dir = absolute(&config.server.data_dir)?;
         require_empty_target(&data_dir, kept)?;
 
@@ -77,7 +78,11 @@ impl RestoreEnv {
             refuse_inside(&data_dir, &dir, "cold_storage")?;
         }
 
-        let key = nodedb_wal::crypto::WalEncryptionKey::from_file(&encryption.key_path)?;
+        let key = crate::control::security::keystore::load_wal_key(
+            encryption,
+            std::sync::Arc::new(config.egress.checked_policy()?),
+        )
+        .await?;
         let snapshot_root = build_snapshot_store(&snapshot_config, &data_dir)?;
         let cold = ColdStorage::new(cold_config)?;
         Ok(Self {
@@ -176,15 +181,15 @@ mod tests {
         refuse_inside(data, Path::new("/srv/nodedb-snapshots"), "snapshot_storage").unwrap();
     }
 
-    #[test]
-    fn a_config_without_snapshot_storage_is_refused_before_anything_is_created() {
+    #[tokio::test]
+    async fn a_config_without_snapshot_storage_is_refused_before_anything_is_created() {
         let dir = tempfile::tempdir().unwrap();
         let data_dir = dir.path().join("data");
         let mut config = ServerConfig::default();
         config.server.data_dir = data_dir.clone();
-        config.encryption = Some(crate::config::server::EncryptionSettings {
-            key_path: dir.path().join("wal.key"),
-        });
+        config.encryption = Some(crate::config::server::EncryptionSettings::file(
+            dir.path().join("wal.key"),
+        ));
         config.cold_storage = Some(
             toml::from_str(&format!(
                 "local_dir = \"{}\"",
@@ -193,7 +198,7 @@ mod tests {
             .unwrap(),
         );
         assert!(matches!(
-            RestoreEnv::from_config(&config, &[]),
+            RestoreEnv::from_config(&config, &[]).await,
             Err(RestoreError::StoreInsideDataDir {
                 section: "snapshot_storage",
                 ..

@@ -8,6 +8,8 @@ members = [
   "nodedb-raft",
   "nodedb-cluster",
   "nodedb-types",
+  "nodedb-srid",
+  "nodedb-crs",
   "nodedb-client",
   "nodedb-query",
   "nodedb-codec",
@@ -20,6 +22,7 @@ members = [
   "nodedb-columnar",
   "nodedb-array",
   "nodedb-raster",
+  "nodedb-raster-load",
   "nodedb-sql",
   "nodedb-physical",
   "nodedb-test-support",
@@ -33,9 +36,9 @@ version = "0.7.0-dev"
 edition = "2024"
 rust-version = "1.96"
 license = "BUSL-1.1"
+authors = ["Biz Impulse Solutions Sdn. Bhd. and the NodeDB contributors"]
 readme = "README.md"
 repository = "https://github.com/NodeDB-Lab/nodedb"
-authors = ["Biz Impulse Solutions Sdn. Bhd. and the NodeDB contributors"]
 homepage = "https://nodedb.dev"
 documentation = "https://docs.rs/nodedb"
 
@@ -43,6 +46,8 @@ documentation = "https://docs.rs/nodedb"
 # Foundation crates (internal)
 nodedb = { path = "nodedb", version = "0.7.0-dev" }
 nodedb-types = { path = "nodedb-types", version = "0.7.0-dev" }
+nodedb-srid = { path = "nodedb-srid", version = "0.7.0-dev" }
+nodedb-crs = { path = "nodedb-crs", version = "0.7.0-dev" }
 nodedb-client = { path = "nodedb-client", version = "0.7.0-dev" }
 nodedb-bridge = { path = "nodedb-bridge", version = "0.7.0-dev" }
 nodedb-wal = { path = "nodedb-wal", version = "0.7.0-dev" }
@@ -61,6 +66,7 @@ nodedb-strict = { path = "nodedb-strict", version = "0.7.0-dev" }
 nodedb-columnar = { path = "nodedb-columnar", version = "0.7.0-dev" }
 nodedb-array = { path = "nodedb-array", version = "0.7.0-dev" }
 nodedb-raster = { path = "nodedb-raster", version = "0.7.0-dev" }
+nodedb-raster-load = { path = "nodedb-raster-load", version = "0.7.0-dev" }
 nodedb-sql = { path = "nodedb-sql", version = "0.7.0-dev" }
 nodedb-physical = { path = "nodedb-physical", version = "0.7.0-dev" }
 nodedb-test-support = { path = "nodedb-test-support" }
@@ -97,9 +103,13 @@ libc = "0.2"
 # Checksums
 crc32c = "0.6"
 
-# GeoTIFF decoding with the deflate and LZW codecs only.
-# The raster reader refuses JPEG, fax and WebP compression.
+# Writes GeoTIFF test fixtures only. nodedb-raster decodes TIFF itself.
 tiff = { version = "0.11.3", default-features = false, features = ["deflate", "lzw"] }
+
+# Pure-Rust raster codecs of nodedb-raster (wasm32-safe, no C).
+weezl = "0.1.12"
+zune-jpeg = "0.5.15"
+lerc-rs = { version = "0.7.0", default-features = false, features = ["std"] }
 
 # Crypto
 # Pinned to the digest 0.10 generation: `rsa` (JWT RS256) has no release on
@@ -263,6 +273,10 @@ nexar = "0.1"
 
 # H3 hexagonal spatial index
 h3o = "0.11"
+
+# Planar geometry algorithms (buffer, boolean ops, DE-9IM, hulls, repair).
+# No `multithreading` (rayon) or `earcut`: the spatial crate builds for wasm32.
+geo = { version = "0.33", default-features = false, features = ["spade"] }
 
 # Linear algebra (SVD, matrix ops for OPQ Procrustes rotation)
 nalgebra = "0.35"

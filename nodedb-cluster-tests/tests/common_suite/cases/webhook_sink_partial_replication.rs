@@ -93,7 +93,12 @@ async fn insert(cluster: &TestCluster, collection: &str, row: usize) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_webhook_reads_events_from_the_node_that_holds_them() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let url = format!("http://{}/hook", listener.local_addr().expect("addr"));
+    // The egress policy refuses an IP-literal host, so the URL names the
+    // loopback listener by DNS name.
+    let url = format!(
+        "http://localhost:{}/hook",
+        listener.local_addr().expect("addr").port()
+    );
     let deliveries: Deliveries = Arc::default();
     let tokens: FencingTokens = Arc::default();
     let server = tokio::spawn(serve(

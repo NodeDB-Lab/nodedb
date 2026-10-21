@@ -13,11 +13,22 @@ use tracing::debug;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::decode_scan_filters;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::columnar_mutation_apply::ColumnarDeleteMode;
 use crate::data::executor::handlers::columnar_resolve::{
     ResolveDeleteRowsParams, ResolveUpdateRowsParams, require_pk_column_index,
 };
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::task::ExecutionTask;
+
+/// The target and context of one columnar UPDATE or DELETE statement.
+pub(in crate::data::executor) struct ColumnarDml<'a> {
+    pub collection: &'a str,
+    /// Serialized `Vec<ScanFilter>` selecting the rows.
+    pub filter_bytes: &'a [u8],
+    /// The system time the statement stamps, when the caller carries one.
+    pub system_from: Option<i64>,
+    pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+}
 
 impl CoreLoop {
     /// Handle columnar UPDATE: match the current rows, flushed and in the
@@ -32,12 +43,16 @@ impl CoreLoop {
     pub(in crate::data::executor) fn execute_columnar_update(
         &mut self,
         task: &ExecutionTask,
-        collection: &str,
-        filter_bytes: &[u8],
+        dml: ColumnarDml<'_>,
         updates: &[(String, UpdateValue)],
-        rls_write_check: &nodedb_types::RlsWriteCheck,
         undo_log: Option<&mut Vec<UndoEntry>>,
     ) -> Response {
+        let ColumnarDml {
+            collection,
+            filter_bytes,
+            system_from,
+            rls_write_check,
+        } = dml;
         debug!(core = self.core_id, %collection, "columnar update");
 
         let key = (
@@ -110,6 +125,7 @@ impl CoreLoop {
             &key,
             &schema,
             &pending,
+            system_from,
             undo_log.as_deref_mut(),
         ) {
             Ok(outcome) => outcome,
@@ -158,19 +174,28 @@ impl CoreLoop {
     /// memtable, and delete each match.
     /// Returns `{"affected": N}` as JSON payload.
     ///
+    /// A bitemporal collection closes each matched key with a tombstone
+    /// version stamped at `system_from` (see `ColumnarDeleteMode::Close`) and
+    /// keeps the closed version as history. Any other collection marks each
+    /// matched row deleted.
+    ///
     /// When `undo_log` is `Some` (the durable COMMIT-replay path inside a
-    /// transaction batch), the `(pk_bytes, RowLocation)` of every deleted row
-    /// is captured into a [`UndoEntry::ColumnarDelete`] so a sibling sub-plan
+    /// transaction batch), the `(pk_bytes, RowLocation)` of every removed row
+    /// is captured into the outcome's undo entry so a sibling sub-plan
     /// failing later in the same COMMIT can restore the rows. On the autocommit
     /// path it is `None`.
     pub(in crate::data::executor) fn execute_columnar_delete(
         &mut self,
         task: &ExecutionTask,
-        collection: &str,
-        filter_bytes: &[u8],
-        rls_write_check: &nodedb_types::RlsWriteCheck,
+        dml: ColumnarDml<'_>,
         undo_log: Option<&mut Vec<UndoEntry>>,
     ) -> Response {
+        let ColumnarDml {
+            collection,
+            filter_bytes,
+            system_from,
+            rls_write_check,
+        } = dml;
         debug!(core = self.core_id, %collection, "columnar delete");
 
         let key = (
@@ -222,13 +247,14 @@ impl CoreLoop {
         };
 
         // Undo capture (only on the durable COMMIT-replay path): the location
-        // and PK bytes of each tombstoned row, so the undo can clear its
-        // delete-bitmap bit and re-bind the PK index.
+        // and PK bytes of each removed row, so the undo can cut a close's
+        // tombstones or clear a delete's marks, and re-bind the PK index.
         let mut undo_log = undo_log;
         let outcome = match self.apply_columnar_delete_pks(
             &key,
             &schema,
             &pk_values,
+            ColumnarDeleteMode::Close { system_from },
             undo_log.as_deref_mut(),
         ) {
             Ok(outcome) => outcome,
@@ -237,10 +263,7 @@ impl CoreLoop {
         let affected = outcome.affected;
 
         if let Some(log) = undo_log {
-            log.push(UndoEntry::ColumnarDelete {
-                collection_key: key,
-                restored: outcome.restored,
-            });
+            log.push(outcome.undo_entry(key));
         }
 
         // Advance the collection floor for this committed columnar write. DELETE

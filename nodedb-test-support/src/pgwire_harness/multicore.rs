@@ -87,6 +87,7 @@ impl TestServer {
                     doc_config_seed: nodedb::bootstrap::data_plane::load_doc_config_registry_from(
                         shared.credentials.catalog(),
                     ),
+                    crs_set_seed: shared.credentials.catalog().custom_crs_set(),
                     event_interest: crate::core_loop_runner::event_interest_for(&shared),
                     stop_rx: core_stop_rx,
                 });

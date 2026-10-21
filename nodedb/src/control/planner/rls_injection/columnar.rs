@@ -186,6 +186,7 @@ mod tests {
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             returning: None,
             rls_filters: Vec::new(),
@@ -200,6 +201,7 @@ mod tests {
             ),
             filters: Vec::new(),
             updates: Vec::new(),
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         })
     }
@@ -211,6 +213,8 @@ mod tests {
                 collection,
             ),
             restart_identity: false,
+            system_from: None,
+            erase_history: false,
         })
     }
 
@@ -349,6 +353,7 @@ mod tests {
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             returning: None,
             rls_filters: Vec::new(),
@@ -378,6 +383,7 @@ mod tests {
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             returning: None,
             rls_filters: Vec::new(),
@@ -405,6 +411,7 @@ mod tests {
                 "events",
             ),
             filters: Vec::new(),
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         });
         assert!(inject(&mut delete, &store).is_ok());

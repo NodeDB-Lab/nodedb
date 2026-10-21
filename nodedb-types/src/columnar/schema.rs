@@ -100,7 +100,8 @@ pub struct ColumnarSchema {
 
 /// Reserved strict-tuple column names for bitemporal collections. Stored
 /// in fixed Int64 slots 0/1/2 so the decoder can extract them via a
-/// constant-offset jump.
+/// constant-offset jump. Slot 0 holds the host engine's system-time key:
+/// Origin stores the system-time ordinal there, not milliseconds.
 pub const BITEMPORAL_SYSTEM_FROM: &str = "__system_from_ms";
 pub const BITEMPORAL_VALID_FROM: &str = "__valid_from_ms";
 pub const BITEMPORAL_VALID_UNTIL: &str = "__valid_until_ms";
@@ -341,12 +342,28 @@ impl ColumnarSchema {
     /// by `prepend_bitemporal_columns` on the write path, so its
     /// presence is a reliable bitemporal signal.
     pub fn is_bitemporal(&self) -> bool {
-        self.columns.iter().any(|c| c.name == "_ts_system")
+        self.ts_system_idx().is_some()
     }
 
     /// Position of the `_ts_system` column, or `None` for non-bitemporal.
     pub fn ts_system_idx(&self) -> Option<usize> {
-        self.columns.iter().position(|c| c.name == "_ts_system")
+        self.column_idx(TS_SYSTEM)
+    }
+
+    /// Position of the `_ts_valid_from` column, or `None` for
+    /// non-bitemporal.
+    pub fn ts_valid_from_idx(&self) -> Option<usize> {
+        self.column_idx(TS_VALID_FROM)
+    }
+
+    /// Position of the `_ts_valid_until` column, or `None` for
+    /// non-bitemporal.
+    pub fn ts_valid_until_idx(&self) -> Option<usize> {
+        self.column_idx(TS_VALID_UNTIL)
+    }
+
+    fn column_idx(&self, name: &str) -> Option<usize> {
+        self.columns.iter().position(|c| c.name == name)
     }
 }
 
@@ -431,5 +448,26 @@ mod tests {
             StrictSchema::new(cols),
             Err(SchemaError::ZeroVectorDim(_))
         ));
+    }
+
+    #[test]
+    fn bitemporal_columns_resolve_by_reserved_name() {
+        let schema = ColumnarSchema::new(vec![
+            ColumnDef::required(TS_SYSTEM, ColumnType::Int64),
+            ColumnDef::required(TS_VALID_FROM, ColumnType::Int64),
+            ColumnDef::required(TS_VALID_UNTIL, ColumnType::Int64),
+            ColumnDef::required("v", ColumnType::Int64),
+        ])
+        .unwrap();
+        assert!(schema.is_bitemporal());
+        assert_eq!(schema.ts_system_idx(), Some(0));
+        assert_eq!(schema.ts_valid_from_idx(), Some(1));
+        assert_eq!(schema.ts_valid_until_idx(), Some(2));
+
+        let plain = ColumnarSchema::new(vec![ColumnDef::required("v", ColumnType::Int64)]).unwrap();
+        assert!(!plain.is_bitemporal());
+        assert_eq!(plain.ts_system_idx(), None);
+        assert_eq!(plain.ts_valid_from_idx(), None);
+        assert_eq!(plain.ts_valid_until_idx(), None);
     }
 }

@@ -7,7 +7,8 @@
 //!
 //! Shared by the predicate handlers (`columnar_mutation.rs`) and the
 //! resolved-row-set handlers (`columnar_resolved_mutation.rs`), so the two
-//! cannot drift in what a mutation leaves behind.
+//! cannot drift in what a mutation leaves behind. The close of a bitemporal
+//! key lives in `columnar_close_apply.rs`.
 
 use nodedb_columnar::pk_index::{RowLocation, encode_pk};
 use nodedb_types::Value;
@@ -34,11 +35,53 @@ pub(in crate::data::executor) struct ColumnarUpdateOutcome {
     pub restored: Vec<(Vec<u8>, RowLocation)>,
 }
 
+/// How [`CoreLoop::apply_columnar_delete_pks`] removes a key.
+#[derive(Clone, Copy)]
+pub(in crate::data::executor) enum ColumnarDeleteMode {
+    /// A bitemporal collection closes each key with a tombstone version
+    /// stamped as an UPDATE stamps: the Calvin transaction's ordinal, else
+    /// `system_from`, else a fresh one, raised above the key's newest stored
+    /// version. The closed version stays as history. Any other collection
+    /// marks the row deleted.
+    Close { system_from: Option<i64> },
+    /// Mark the bound row deleted in every collection. A transaction's
+    /// row-image install removes the base rows it displaced this way.
+    Erase,
+}
+
 /// What [`CoreLoop::apply_columnar_delete_pks`] changed, for the caller's
-/// `UndoEntry::ColumnarDelete`.
+/// undo entry ([`Self::undo_entry`]).
 pub(in crate::data::executor) struct ColumnarDeleteOutcome {
     pub affected: u64,
+    /// Each removed key and the row it was bound to.
     pub restored: Vec<(Vec<u8>, RowLocation)>,
+    /// The memtable row count before the first tombstone version was
+    /// appended. `None` when no key was closed: every row was marked deleted.
+    pub closed_from: Option<usize>,
+}
+
+impl ColumnarDeleteOutcome {
+    /// The undo entry that reverses this outcome: a close cuts its
+    /// tombstones and re-binds each key, a delete clears each mark and
+    /// re-binds each key.
+    pub(in crate::data::executor) fn undo_entry(
+        self,
+        collection_key: ColumnarEngineKey,
+    ) -> UndoEntry {
+        match self.closed_from {
+            Some(row_count_before) => UndoEntry::ColumnarUpdate {
+                collection_key,
+                row_count_before,
+                inserted_pks: Vec::new(),
+                displaced: Vec::new(),
+                restored: self.restored,
+            },
+            None => UndoEntry::ColumnarDelete {
+                collection_key,
+                restored: self.restored,
+            },
+        }
+    }
 }
 
 /// The surrogate the segment sidecar records for the flushed row at `loc`.
@@ -78,8 +121,28 @@ impl CoreLoop {
         key: &ColumnarEngineKey,
         schema: &ColumnarSchema,
         rows: &[(Value, Vec<Value>)],
+        system_from: Option<i64>,
         undo_log: Option<&mut Vec<UndoEntry>>,
     ) -> crate::Result<ColumnarUpdateOutcome> {
+        // Every new version of a bitemporal collection takes the statement's
+        // system time, raised above its key's bound row, before any row
+        // changes.
+        let stamped;
+        let rows = if schema.is_bitemporal() {
+            let mut owned = rows.to_vec();
+            self.stamp_columnar_update_rows(key, schema, &mut owned, system_from)?;
+            stamped = owned;
+            stamped.as_slice()
+        } else {
+            rows
+        };
+        // A key-changing update of a bitemporal collection closes the old
+        // key with a tombstone at the new version's stamp.
+        let closings = if schema.is_bitemporal() {
+            self.columnar_update_closings(key, schema, rows)?
+        } else {
+            vec![None; rows.len()]
+        };
         let has_geometry = schema_has_geometry(schema);
         let collection = key.2.as_str();
         let row_count_before = self
@@ -109,7 +172,7 @@ impl CoreLoop {
             self.check_columnar_geometry_srids(task, schema, collection, &post_images)?;
         }
 
-        for ((old_pk, new_row), pre_image) in rows.iter().zip(pre_images) {
+        for (((old_pk, new_row), pre_image), closing) in rows.iter().zip(pre_images).zip(closings) {
             let old_pk_bytes = encode_pk(old_pk);
             let applied = match self.columnar_engines.get_mut(key) {
                 Some(engine) => {
@@ -137,8 +200,13 @@ impl CoreLoop {
                         .and_then(|loc| {
                             flushed_row_surrogate(&self.columnar_flushed_surrogates, key, loc)
                         });
-                    engine
-                        .update(old_pk, new_row, flushed_surrogate)
+                    let updated = match &closing {
+                        Some(tombstone) => {
+                            engine.update_closing(old_pk, new_row, tombstone, flushed_surrogate)
+                        }
+                        None => engine.update(old_pk, new_row, flushed_surrogate),
+                    };
+                    updated
                         .map(|_| (old_location, new_pk_bytes, displaced_entry))
                         .map_err(crate::Error::from)
                 }
@@ -209,10 +277,10 @@ impl CoreLoop {
         Ok(outcome)
     }
 
-    /// Remove the rows bound to `pks` through `MutationEngine::delete`. For
-    /// a collection with geometry columns each row's R-tree entries go too.
-    /// When `undo_log` is `Some`, every in-memory change this makes is
-    /// recorded on it.
+    /// Remove the keys `pks` binds, as `mode` says: `MutationEngine::close`
+    /// or `MutationEngine::delete`. For a collection with geometry columns
+    /// each row's R-tree entries go too. When `undo_log` is `Some`, every
+    /// in-memory change this makes is recorded on it.
     ///
     /// The statement applies whole or not at all. Every pre-image is read
     /// before the first row is removed, so a pre-image that does not read
@@ -224,13 +292,20 @@ impl CoreLoop {
         key: &ColumnarEngineKey,
         schema: &ColumnarSchema,
         pks: &[Value],
+        mode: ColumnarDeleteMode,
         undo_log: Option<&mut Vec<UndoEntry>>,
     ) -> crate::Result<ColumnarDeleteOutcome> {
+        if let ColumnarDeleteMode::Close { system_from } = mode
+            && schema.is_bitemporal()
+        {
+            return self.apply_columnar_close_pks(key, schema, pks, system_from, undo_log);
+        }
         let has_geometry = schema_has_geometry(schema);
         let collection = key.2.as_str();
         let mut outcome = ColumnarDeleteOutcome {
             affected: 0,
             restored: Vec::new(),
+            closed_from: None,
         };
         let mut spatial_removed: Vec<RemovedSpatialEntry> = Vec::new();
         let pre_images = self.read_geometry_pre_images(key, has_geometry, pks.iter())?;
@@ -254,10 +329,7 @@ impl CoreLoop {
                 Err(error) => {
                     let mut undo = Vec::new();
                     push_removed_spatial_undo(&mut undo, spatial_removed);
-                    undo.push(UndoEntry::ColumnarDelete {
-                        collection_key: key.clone(),
-                        restored: outcome.restored,
-                    });
+                    undo.push(outcome.undo_entry(key.clone()));
                     return Err(self.reverse_columnar_statement(key, undo, error));
                 }
             };
@@ -304,7 +376,7 @@ impl CoreLoop {
     /// stopped at `error`, last change first. The answer is `error`, or
     /// `RollbackFailed` when a change does not reverse: the core's state is
     /// then unknown, and the core fail-stops when that error leaves it.
-    fn reverse_columnar_statement(
+    pub(super) fn reverse_columnar_statement(
         &mut self,
         key: &ColumnarEngineKey,
         undo: Vec<UndoEntry>,
@@ -316,7 +388,7 @@ impl CoreLoop {
 }
 
 /// The error for a columnar engine that is absent mid-statement.
-fn engine_missing(collection: &str) -> crate::Error {
+pub(super) fn engine_missing(collection: &str) -> crate::Error {
     crate::Error::Internal {
         detail: format!("columnar engine not found for collection '{collection}'"),
     }
@@ -325,7 +397,10 @@ fn engine_missing(collection: &str) -> crate::Error {
 /// Record removed R-tree entries so a rollback re-inserts them. Shares
 /// `CoreLoop::push_geometry_index_undo`'s removed-entry push with an empty
 /// inserted half.
-fn push_removed_spatial_undo(undo_log: &mut Vec<UndoEntry>, removed: Vec<RemovedSpatialEntry>) {
+pub(super) fn push_removed_spatial_undo(
+    undo_log: &mut Vec<UndoEntry>,
+    removed: Vec<RemovedSpatialEntry>,
+) {
     CoreLoop::push_geometry_index_undo(
         undo_log,
         GeometryIndexDelta {
@@ -382,6 +457,7 @@ mod tests {
                     Value::Integer(1),
                     vec![Value::Integer(1), Value::Integer(99)],
                 )],
+                None,
                 None,
             )
             .expect("apply");
@@ -457,6 +533,7 @@ mod tests {
                 (Value::Integer(2), vec![Value::Integer(2), Value::Null]),
             ],
             None,
+            None,
         );
 
         match result {
@@ -493,6 +570,7 @@ mod tests {
             &key,
             &schema(),
             &[Value::Integer(1), Value::Integer(99)],
+            ColumnarDeleteMode::Close { system_from: None },
             None,
         );
 

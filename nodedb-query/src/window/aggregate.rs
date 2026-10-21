@@ -12,6 +12,7 @@
 //!
 //! A float result keeps NaN and ±Infinity, as in PostgreSQL.
 
+use nodedb_crs::CrsContext;
 use nodedb_types::Value;
 
 use super::arg::{ArgValues, arg_at, eval_arg_values};
@@ -26,11 +27,12 @@ pub(super) fn apply_aggregate_window(
     rows: &mut [(String, Value)],
     indices: &[usize],
     spec: &WindowFuncSpec,
+    crs: &CrsContext<'_>,
 ) -> Result<(), crate::expr::EvalError> {
     // The argument is an expression evaluated per row, not a column name: a
     // zero divisor inside it fails the statement here rather than folding the
     // aggregate to a silently-wrong total.
-    let arg_values = eval_arg_values(rows, indices, spec, 0)?;
+    let arg_values = eval_arg_values(rows, indices, spec, 0, crs)?;
 
     // Fast path: RANGE UNBOUNDED PRECEDING TO CURRENT ROW is the most common
     // pattern (the PostgreSQL default for ordered windows). Use the running
@@ -40,11 +42,11 @@ pub(super) fn apply_aggregate_window(
         && matches!(spec.frame.end, FrameBound::CurrentRow);
 
     if use_running {
-        running_aggregate(rows, indices, spec, &arg_values)?;
+        running_aggregate(rows, indices, spec, &arg_values, crs)?;
         return Ok(());
     }
 
-    per_row_aggregate(rows, indices, spec, &arg_values)
+    per_row_aggregate(rows, indices, spec, &arg_values, crs)
 }
 
 /// Per-row frame evaluator.
@@ -59,6 +61,7 @@ fn per_row_aggregate(
     indices: &[usize],
     spec: &WindowFuncSpec,
     arg_values: &ArgValues,
+    crs: &CrsContext<'_>,
 ) -> Result<(), crate::expr::EvalError> {
     let len = indices.len();
     if len == 0 {
@@ -70,7 +73,7 @@ fn per_row_aggregate(
     let order_values: Vec<Value> = indices
         .iter()
         .map(|&i| match order_expr {
-            Some(expr) => expr.eval(&rows[i].1),
+            Some(expr) => expr.eval(&rows[i].1, crs),
             None => Ok(Value::Null),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -169,8 +172,13 @@ mod tests {
     use super::super::spec::{FrameBound, WindowFrame, WindowFuncSpec};
     use super::apply_aggregate_window;
     use crate::expr::SqlExpr;
+    use nodedb_crs::CrsContext;
     use nodedb_types::Value;
     use serde_json::json;
+
+    fn crs() -> CrsContext<'static> {
+        CrsContext::builtin_only()
+    }
 
     fn v(j: serde_json::Value) -> Value {
         Value::from(j)
@@ -236,7 +244,7 @@ mod tests {
             "n",
             rows_frame(FrameBound::Preceding(1), FrameBound::Following(1)),
         );
-        apply_aggregate_window(&mut rows, &indices, &spec).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &spec, &crs()).unwrap();
         // row 0 (n=1): sum of [1,2] = 3
         // row 1 (n=2): sum of [1,2,3] = 6
         // row 2 (n=3): sum of [2,3,4] = 9
@@ -258,7 +266,7 @@ mod tests {
             "n",
             rows_frame(FrameBound::UnboundedPreceding, FrameBound::CurrentRow),
         );
-        apply_aggregate_window(&mut rows, &indices, &spec).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &spec, &crs()).unwrap();
         assert_eq!(res(&rows[0]), Value::Integer(1));
         assert_eq!(res(&rows[1]), Value::Integer(3));
         assert_eq!(res(&rows[2]), Value::Integer(6));
@@ -275,7 +283,7 @@ mod tests {
             "n",
             rows_frame(FrameBound::CurrentRow, FrameBound::UnboundedFollowing),
         );
-        apply_aggregate_window(&mut rows, &indices, &spec).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &spec, &crs()).unwrap();
         // row 0: sum 1+2+3+4+5=15
         // row 1: sum 2+3+4+5=14
         // ...
@@ -304,7 +312,7 @@ mod tests {
             "n",
             range_frame(FrameBound::UnboundedPreceding, FrameBound::CurrentRow),
         );
-        apply_aggregate_window(&mut rows, &indices, &spec).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &spec, &crs()).unwrap();
         // Row a (n=1, pos=0): CURRENT ROW expands to last peer at pos=1, sum=1+1=2
         assert_eq!(res(&rows[0]), Value::Integer(2));
         // Row b (n=1, pos=1): same
@@ -326,12 +334,14 @@ mod tests {
         let indices: Vec<usize> = (0..2).collect();
 
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("sum", "v", whole())).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("sum", "v", whole()), &crs())
+            .unwrap();
         assert_eq!(res(&rows[0]), Value::Integer(18_014_398_509_481_985));
 
         let running = range_frame(FrameBound::UnboundedPreceding, FrameBound::CurrentRow);
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("sum", "v", running)).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("sum", "v", running), &crs())
+            .unwrap();
         assert_eq!(
             results(&rows),
             vec![
@@ -341,7 +351,8 @@ mod tests {
         );
 
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("avg", "v", whole())).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("avg", "v", whole()), &crs())
+            .unwrap();
         assert_eq!(res(&rows[0]), Value::Float(9_007_199_254_740_992.0));
     }
 
@@ -354,7 +365,8 @@ mod tests {
         ];
         let indices: Vec<usize> = (0..3).collect();
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("sum", "v", whole())).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("sum", "v", whole()), &crs())
+            .unwrap();
         let want = i128::from(i64::MAX) + 2 * i128::from(u64::MAX);
         assert_eq!(
             res(&rows[0]),
@@ -367,12 +379,14 @@ mod tests {
         let vals = [Value::Integer(2), Value::Float(0.5), Value::Null];
         let indices: Vec<usize> = (0..3).collect();
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("sum", "v", whole())).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("sum", "v", whole()), &crs())
+            .unwrap();
         assert_eq!(res(&rows[0]), Value::Float(2.5));
 
         let one_row = rows_frame(FrameBound::CurrentRow, FrameBound::CurrentRow);
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("sum", "v", one_row)).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("sum", "v", one_row), &crs())
+            .unwrap();
         assert_eq!(res(&rows[2]), Value::Null);
     }
 
@@ -384,12 +398,14 @@ mod tests {
         let overflow = [Value::Float(1e308), Value::Float(1e308)];
 
         let mut rows = keyed(&overflow);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("sum", "v", whole())).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("sum", "v", whole()), &crs())
+            .unwrap();
         assert_eq!(res(&rows[0]), Value::Float(f64::INFINITY));
 
         let running = range_frame(FrameBound::UnboundedPreceding, FrameBound::CurrentRow);
         let mut rows = keyed(&overflow);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("sum", "v", running)).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("sum", "v", running), &crs())
+            .unwrap();
         assert_eq!(
             results(&rows),
             vec![Value::Float(1e308), Value::Float(f64::INFINITY)]
@@ -397,7 +413,8 @@ mod tests {
 
         let cancel = [Value::Float(f64::INFINITY), Value::Float(f64::NEG_INFINITY)];
         let mut rows = keyed(&cancel);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("avg", "v", whole())).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("avg", "v", whole()), &crs())
+            .unwrap();
         assert!(matches!(res(&rows[0]), Value::Float(f) if f.is_nan()));
     }
 
@@ -437,11 +454,13 @@ mod tests {
         let indices: Vec<usize> = (0..2).collect();
 
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("min", "v", whole())).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("min", "v", whole()), &crs())
+            .unwrap();
         assert_eq!(res(&rows[0]), Value::Integer(9_007_199_254_740_992));
 
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("max", "v", whole())).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("max", "v", whole()), &crs())
+            .unwrap();
         assert_eq!(res(&rows[0]), Value::Integer(9_007_199_254_740_993));
     }
 
@@ -455,11 +474,13 @@ mod tests {
         let indices: Vec<usize> = (0..3).collect();
 
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("min", "v", whole())).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("min", "v", whole()), &crs())
+            .unwrap();
         assert_eq!(res(&rows[2]), Value::Integer(1_700_000_000_000_000_001));
 
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("max", "v", whole())).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("max", "v", whole()), &crs())
+            .unwrap();
         assert_eq!(res(&rows[2]), Value::Integer(1_700_000_000_000_000_003));
     }
 
@@ -474,11 +495,13 @@ mod tests {
         let indices: Vec<usize> = (0..4).collect();
 
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("min", "v", whole())).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("min", "v", whole()), &crs())
+            .unwrap();
         assert_eq!(res(&rows[0]), Value::Float(1.5));
 
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("max", "v", whole())).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("max", "v", whole()), &crs())
+            .unwrap();
         assert_eq!(res(&rows[0]), Value::Integer(9_007_199_254_740_993));
     }
 
@@ -490,11 +513,13 @@ mod tests {
         let indices: Vec<usize> = (0..3).collect();
 
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("max", "v", whole())).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("max", "v", whole()), &crs())
+            .unwrap();
         assert!(matches!(res(&rows[0]), Value::Float(f) if f.is_nan()));
 
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("min", "v", whole())).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &make_spec("min", "v", whole()), &crs())
+            .unwrap();
         assert_eq!(res(&rows[0]), Value::Float(1.5));
     }
 
@@ -509,7 +534,13 @@ mod tests {
         let running = || range_frame(FrameBound::UnboundedPreceding, FrameBound::CurrentRow);
 
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("min", "v", running())).unwrap();
+        apply_aggregate_window(
+            &mut rows,
+            &indices,
+            &make_spec("min", "v", running()),
+            &crs(),
+        )
+        .unwrap();
         assert_eq!(
             results(&rows),
             vec![
@@ -520,7 +551,13 @@ mod tests {
         );
 
         let mut rows = keyed(&vals);
-        apply_aggregate_window(&mut rows, &indices, &make_spec("max", "v", running())).unwrap();
+        apply_aggregate_window(
+            &mut rows,
+            &indices,
+            &make_spec("max", "v", running()),
+            &crs(),
+        )
+        .unwrap();
         assert_eq!(
             results(&rows),
             vec![
@@ -549,7 +586,7 @@ mod tests {
             "n",
             groups_frame(FrameBound::Preceding(1), FrameBound::Following(1)),
         );
-        apply_aggregate_window(&mut rows, &indices, &spec).unwrap();
+        apply_aggregate_window(&mut rows, &indices, &spec, &crs()).unwrap();
         // pos=0 (group 0): frame → groups 0..=1 → rows 0..=2 → sum=1+1+2=4
         assert_eq!(res(&rows[0]), Value::Integer(4));
         // pos=1 (group 0): same frame

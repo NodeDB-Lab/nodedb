@@ -19,7 +19,9 @@ use nodedb_sql::types_array::{
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::array_catalog::ArrayCatalogEntry;
-use crate::control::array_catalog::georef::{georef_from_ast, schema_error};
+use crate::control::array_catalog::attr_meta::meta_from_ast;
+use crate::control::array_catalog::georef::georef_from_ast;
+use crate::control::array_catalog::schema_recode::schema_error;
 use crate::types::TenantId;
 use nodedb_physical::physical_plan::ArrayOp;
 
@@ -88,6 +90,7 @@ pub(in super::super) fn convert_create_array(
         cell_order,
         tile_order,
         georef,
+        crs: &ctx.crs_context(),
     })?;
 
     // 2. Encode + hash.
@@ -96,7 +99,10 @@ pub(in super::super) fn convert_create_array(
             format: "msgpack".into(),
             detail: format!("array schema encode: {e}"),
         })?;
-    let schema_hash = stable_schema_hash(&schema.content_msgpack());
+    let content = schema
+        .content_msgpack()
+        .map_err(|e| schema_error(&format!("CREATE ARRAY {name}"), e))?;
+    let schema_hash = stable_schema_hash(&content);
 
     // Retention is carried as `u64` from the parser and stored signed, because
     // downstream it is subtracted from a wall-clock millisecond
@@ -212,6 +218,7 @@ pub(super) struct SchemaParts<'a> {
     pub cell_order: ArrayCellOrderAst,
     pub tile_order: ArrayTileOrderAst,
     pub georef: Option<&'a ArrayGeorefAst>,
+    pub crs: &'a nodedb_crs::CrsContext<'a>,
 }
 
 pub(super) fn build_schema(parts: SchemaParts<'_>) -> crate::Result<Arc<ArraySchema>> {
@@ -223,6 +230,7 @@ pub(super) fn build_schema(parts: SchemaParts<'_>) -> crate::Result<Arc<ArraySch
         cell_order,
         tile_order,
         georef,
+        crs,
     } = parts;
     let engine_dims: Vec<DimSpec> = dims
         .iter()
@@ -240,14 +248,16 @@ pub(super) fn build_schema(parts: SchemaParts<'_>) -> crate::Result<Arc<ArraySch
         .collect();
     let mut builder = ArraySchemaBuilder::new(name);
     if let Some(georef) = georef {
-        builder = builder.georef(georef_from_ast(name, georef, &engine_dims)?);
+        builder = builder.georef(georef_from_ast(name, georef, &engine_dims, crs)?);
     }
     for d in engine_dims {
         builder = builder.dim(d);
     }
     for a in attrs {
         let dtype = super::attr_type::engine_attr_type(a.dtype);
-        builder = builder.attr(AttrSpec::new(a.name.clone(), dtype, a.nullable));
+        builder = builder.attr(
+            AttrSpec::new(a.name.clone(), dtype, a.nullable).with_meta(meta_from_ast(&a.meta)),
+        );
     }
     let extents: Vec<u64> = tile_extents.iter().map(|n| *n as u64).collect();
     builder = builder

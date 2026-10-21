@@ -245,7 +245,7 @@ impl CoreLoop {
                 surrogate.as_u32(),
                 row_identity,
                 value.to_vec(),
-                outcome.bitemporal_sys_from_ms,
+                outcome.bitemporal_sys_from,
             )
             .in_collection(collection.to_string()),
         ];
@@ -383,7 +383,7 @@ impl CoreLoop {
                 removed_row_image(
                     surrogate.as_u32(),
                     RowIdentity::from_user_key(document_id),
-                    outcome.bitemporal_sys_from_ms,
+                    outcome.bitemporal_sys_from,
                 )
                 .in_collection(collection.to_string()),
             );

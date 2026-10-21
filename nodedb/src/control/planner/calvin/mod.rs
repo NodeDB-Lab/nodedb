@@ -10,9 +10,9 @@ pub mod dependent_recon_plan;
 mod dependent_recon_predicate;
 pub mod dispatch;
 pub mod dispatch_multi;
-pub mod edge_sequencing;
 pub mod edge_truncate;
 pub mod explain;
+pub mod graph_sequencing;
 pub mod node_delete_txn;
 pub mod predicate;
 pub mod preexec;
@@ -38,10 +38,11 @@ pub use dispatch::{
 };
 pub use dispatch_multi::dispatch_authorized_tasks_to_calvin;
 pub(crate) use dispatch_multi::{TxnProvenance, dispatch_strict_atomic_tasks_to_calvin};
-pub use edge_sequencing::{
-    EdgeWrite, is_edge_write, sequence_edge_write, sequence_replicated_edge_write, writes_edges,
-};
 pub use explain::calvin_explain_preamble;
+pub use graph_sequencing::{
+    GraphWrite, is_edge_write, is_label_write, is_sequenced_graph_write, sequence_graph_write,
+    sequence_replicated_graph_write, writes_sequenced_graph,
+};
 pub use predicate::predicate_class_for_filters;
 pub use retry_loop::{DependentOutcome, DependentRetryArgs, run_dependent_with_retry};
 pub use submit::{

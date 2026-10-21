@@ -3,8 +3,8 @@
 //! Typed AST returned by the array-statement parser.
 
 use crate::types_array::{
-    ArrayAttrAst, ArrayCellOrderAst, ArrayCoordLiteral, ArrayDimAst, ArrayGeorefAlter,
-    ArrayGeorefAst, ArrayInsertRow, ArrayTileOrderAst,
+    ArrayAttrAst, ArrayAttrMetaAlter, ArrayCellOrderAst, ArrayCoordLiteral, ArrayDimAst,
+    ArrayGeorefAlter, ArrayGeorefAst, ArrayInsertRow, ArrayTileOrderAst,
 };
 
 /// Top-level array-statement AST. One variant per surface command.
@@ -18,7 +18,9 @@ pub enum ArrayStatement {
 }
 
 /// `ALTER ARRAY <name> SET ( key = value [, key = value]* )`,
-/// `ALTER ARRAY <name> SET GEOREF (...)`, or `ALTER ARRAY <name> DROP GEOREF`.
+/// `ALTER ARRAY <name> SET GEOREF (...)`, `ALTER ARRAY <name> DROP GEOREF`,
+/// `ALTER ARRAY <name> ALTER ATTR <attr> SET (NODATA n, ...)`, or
+/// `ALTER ARRAY <name> ALTER ATTR <attr> DROP NODATA [, ...]`.
 ///
 /// Supported SET keys:
 /// - `audit_retain_ms`         — `NULL` or non-negative integer.
@@ -37,6 +39,8 @@ pub enum AlterArrayAction {
     SetOptions(Vec<(String, Option<i64>)>),
     /// `SET GEOREF (...)` or `DROP GEOREF`.
     Georef(ArrayGeorefAlter),
+    /// `ALTER ATTR <attr> SET (...)` or `ALTER ATTR <attr> DROP ...`.
+    AttrMeta(ArrayAttrMetaAlter),
 }
 
 #[derive(Debug, Clone, PartialEq)]

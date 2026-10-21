@@ -93,8 +93,15 @@ impl CoreLoop {
         {
             let old_doc = self.decode_stored_document(config, old_bytes)?;
             let new_doc = doc_format::decode_document(value)?;
-            check_update_transitions(collection, rules, &old_doc, &new_doc, user_roles)
-                .map_err(map_enforcement_error)?;
+            check_update_transitions(
+                collection,
+                rules,
+                &old_doc,
+                &new_doc,
+                user_roles,
+                &self.crs_context(),
+            )
+            .map_err(map_enforcement_error)?;
         }
         Ok(())
     }

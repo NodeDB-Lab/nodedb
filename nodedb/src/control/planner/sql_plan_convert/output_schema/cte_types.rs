@@ -49,6 +49,10 @@ impl<C: SqlCatalog + ?Sized> SqlCatalog for CatalogRef<'_, C> {
     fn lookup_array(&self, name: &str) -> Option<ArrayCatalogView> {
         self.0.lookup_array(name)
     }
+
+    fn crs_context(&self) -> nodedb_crs::CrsContext<'_> {
+        self.0.crs_context()
+    }
 }
 
 /// A catalog that answers for each CTE definition name first.
@@ -135,6 +139,10 @@ impl SqlCatalog for CteTypesCatalog<'_> {
 
     fn lookup_array(&self, name: &str) -> Option<ArrayCatalogView> {
         self.inner.lookup_array(name)
+    }
+
+    fn crs_context(&self) -> nodedb_crs::CrsContext<'_> {
+        self.inner.crs_context()
     }
 }
 

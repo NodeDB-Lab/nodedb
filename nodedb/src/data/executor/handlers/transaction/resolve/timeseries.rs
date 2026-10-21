@@ -120,7 +120,7 @@ impl CoreLoop {
                         now
                     }
                 };
-                let now_ms = staged_now.unwrap_or_else(|| self.ingest_now_ms());
+                let now_ms = staged_now.unwrap_or_else(|| self.ingest_stamp_ms());
                 let lines = self
                     .stamped_ingest_lines(StampedIngest {
                         database_id: task.request.database_id,
@@ -162,7 +162,8 @@ impl CoreLoop {
                 collection,
                 restart_identity: _,
             } => {
-                let sub_payload = encode_columnar_truncate_payload(collection.as_str())?;
+                let sub_payload =
+                    encode_columnar_truncate_payload(collection.as_str(), None, false)?;
                 ops.push(RedoSubRecord {
                     record_type: RecordType::TimeseriesTruncate as u32,
                     payload: sub_payload,

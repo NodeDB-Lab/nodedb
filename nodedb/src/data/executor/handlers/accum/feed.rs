@@ -19,18 +19,19 @@ impl AggAccum {
         &mut self,
         agg: &AggregateSpec,
         doc: &[u8],
+        crs: &nodedb_crs::CrsContext<'_>,
     ) -> Result<(), nodedb_query::EvalError> {
         use nodedb_query::msgpack_scan::aggregate_helpers as ah;
         match self {
             AggAccum::Count { n } => {
                 if (agg.field == "*" && agg.expr.is_none())
-                    || ah::extract_non_null(doc, &agg.field, agg.expr.as_ref())?.is_some()
+                    || ah::extract_non_null(doc, &agg.field, agg.expr.as_ref(), crs)?.is_some()
                 {
                     *n += 1;
                 }
             }
             AggAccum::SumAvg { sum } => {
-                if let Some(v) = ah::extract_sum_value(doc, &agg.field, agg.expr.as_ref())? {
+                if let Some(v) = ah::extract_sum_value(doc, &agg.field, agg.expr.as_ref(), crs)? {
                     sum.add_value(&v);
                 }
             }
@@ -43,75 +44,71 @@ impl AggAccum {
                 // alongside the key so finalize can derive an
                 // order-independent sum (which also makes the state
                 // mergeable across spilled runs).
-                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref())?
+                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref(), crs)?
                     && bytes != [0xc0u8]
                     && let Entry::Vacant(slot) = seen.entry(bytes)
-                    && let Some(v) = ah::extract_sum_value(doc, &agg.field, agg.expr.as_ref())?
+                    && let Some(v) = ah::extract_sum_value(doc, &agg.field, agg.expr.as_ref(), crs)?
                 {
                     slot.insert(v);
                 }
             }
-            AggAccum::Min { best } => feed_extremum(best, agg, doc, false)?,
-            AggAccum::Max { best } => feed_extremum(best, agg, doc, true)?,
+            AggAccum::Min { best } => feed_extremum(best, agg, doc, false, crs)?,
+            AggAccum::Max { best } => feed_extremum(best, agg, doc, true, crs)?,
             AggAccum::CountDistinct { seen } => {
-                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref())?
+                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref(), crs)?
                     && bytes != [0xc0u8]
                 {
                     seen.insert(bytes);
                 }
             }
-            AggAccum::Welford { n, mean, m2 } => {
-                if let Some(v) = ah::extract_f64(doc, &agg.field, agg.expr.as_ref())? {
-                    *n += 1;
-                    let delta = v - *mean;
-                    *mean += delta / *n as f64;
-                    let delta2 = v - *mean;
-                    *m2 += delta * delta2;
+            AggAccum::Welford { moments } => {
+                if let Some(v) = ah::extract_f64(doc, &agg.field, agg.expr.as_ref(), crs)? {
+                    moments.push(v);
                 }
             }
             AggAccum::Hll { hll } => {
-                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref())?
+                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref(), crs)?
                     && bytes != [0xc0u8]
                 {
                     hll.add(fnv1a(&bytes));
                 }
             }
             AggAccum::TDigest { digest, .. } => {
-                if let Some(v) = ah::extract_f64(doc, &agg.field, agg.expr.as_ref())? {
+                if let Some(v) = ah::extract_f64(doc, &agg.field, agg.expr.as_ref(), crs)? {
                     digest.add(v);
                 }
             }
             AggAccum::TopK { ss, .. } => {
-                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref())?
+                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref(), crs)?
                     && bytes != [0xc0u8]
                 {
                     ss.add(fnv1a(&bytes));
                 }
             }
             AggAccum::ArrayAgg { values } => {
-                if let Some(v) = ah::extract_value(doc, &agg.field, agg.expr.as_ref())?
+                if let Some(v) = ah::extract_value(doc, &agg.field, agg.expr.as_ref(), crs)?
                     && !v.is_null()
                 {
                     values.push(v);
                 }
             }
             AggAccum::ArrayAggDistinct { seen, values } => {
-                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref())?
+                if let Some(bytes) = ah::extract_bytes(doc, &agg.field, agg.expr.as_ref(), crs)?
                     && bytes != [0xc0u8]
                     && !seen.contains(&bytes)
-                    && let Some(v) = ah::extract_value(doc, &agg.field, agg.expr.as_ref())?
+                    && let Some(v) = ah::extract_value(doc, &agg.field, agg.expr.as_ref(), crs)?
                 {
                     seen.insert(bytes.clone());
                     values.push((bytes, v));
                 }
             }
             AggAccum::PercentileCont { values, .. } => {
-                if let Some(v) = ah::extract_f64(doc, &agg.field, agg.expr.as_ref())? {
+                if let Some(v) = ah::extract_f64(doc, &agg.field, agg.expr.as_ref(), crs)? {
                     values.push(v);
                 }
             }
             AggAccum::StringAgg { parts } => {
-                if let Some(s) = ah::extract_str(doc, &agg.field, agg.expr.as_ref())? {
+                if let Some(s) = ah::extract_str(doc, &agg.field, agg.expr.as_ref(), crs)? {
                     parts.push(s);
                 }
             }
@@ -128,9 +125,10 @@ fn feed_extremum(
     agg: &AggregateSpec,
     doc: &[u8],
     want_max: bool,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<(), nodedb_query::EvalError> {
     use nodedb_query::msgpack_scan::aggregate_helpers as ah;
-    if let Some(v) = ah::extract_value(doc, &agg.field, agg.expr.as_ref())?
+    if let Some(v) = ah::extract_value(doc, &agg.field, agg.expr.as_ref(), crs)?
         && !v.is_null()
         && nodedb_query::window::extremum::value_replaces(&v, best.as_ref(), want_max)
     {

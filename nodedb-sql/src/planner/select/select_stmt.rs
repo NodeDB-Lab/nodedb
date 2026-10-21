@@ -181,8 +181,13 @@ pub(super) fn plan_select(
             // SELECT target list is threaded through so the search plan
             // self-describes its output columns.
             let where_projection = convert_projection(&select.projection, &scope)?;
-            if let Some(plan) = try_extract_where_search(expr, table, functions, &where_projection)?
-            {
+            if let Some(plan) = try_extract_where_search(
+                expr,
+                table,
+                functions,
+                &where_projection,
+                &catalog.crs_context(),
+            )? {
                 refuse_dropped_clauses(
                     &plan,
                     SearchBodyClauses {

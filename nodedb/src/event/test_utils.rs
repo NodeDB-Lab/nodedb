@@ -39,7 +39,7 @@ pub fn event_test_deps(dir: &tempfile::TempDir) -> EventTestDeps {
         },
         Arc::clone(&wal),
         &catalog_path,
-        &crate::config::auth::AuthConfig::default(),
+        crate::control::state::OpenConfig::strict(&crate::config::auth::AuthConfig::default()),
         Default::default(),
         false,
         crate::data::executor::core_loop::test_governor(),

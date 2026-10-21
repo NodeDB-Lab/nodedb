@@ -8,13 +8,14 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
 use crate::data::executor::handlers::columnar_read::filter::decode_rls_filters;
 use crate::data::executor::handlers::spatial_refine::{
-    SpatialHit, apply_predicate, expand_bbox, extract_geometry, hit_rows, mixed_srid_error,
-    project_doc,
+    SpatialHit, apply_predicate, extract_geometry, hit_rows, mixed_srid_error, project_doc,
+    search_bbox,
 };
 use crate::data::executor::handlers::transaction::overlay::SpatialOverlayMergeParams;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::SpatialPredicate;
+use nodedb_spatial::Metric;
 use nodedb_types::SurrogateBitmap;
 
 use super::full_scan::SpatialFullScanParams;
@@ -47,6 +48,7 @@ impl CoreLoop {
         &mut self,
         params: SpatialScanParams<'_>,
     ) -> Response {
+        let crs = self.crs_context();
         let SpatialScanParams {
             task,
             tid,
@@ -101,15 +103,17 @@ impl CoreLoop {
             Err(e) => return self.response_error(task, e),
         };
 
-        // 3. Compute search bbox (expand by distance for ST_DWithin) in the
-        // query SRID's space.
-        let space = query_geom.srid.bbox_space();
-        let query_bbox = query_geom.bbox();
-        let search_bbox = if distance_meters > 0.0 {
-            expand_bbox(&query_bbox, distance_meters, space)
-        } else {
-            query_bbox
+        // 3. Compute the search bbox in the query SRID's space, widened by
+        // the distance predicates' reach.
+        let metric = match Metric::resolve(&crs, query_geom.srid) {
+            Ok(metric) => metric,
+            Err(e) => return self.response_error(task, crate::Error::from(e)),
         };
+        let query_bbox = match query_geom.bbox(&crs) {
+            Ok(bbox) => bbox,
+            Err(e) => return self.response_error(task, crate::Error::from(e)),
+        };
+        let search_bbox = search_bbox(predicate, query_bbox, distance_meters, &metric);
 
         let db_id = task.request.database_id;
         let tid_id = crate::types::TenantId::new(tid);
@@ -294,12 +298,13 @@ impl CoreLoop {
                 }
             };
 
-            let doc_geom = match extract_geometry(&doc, field) {
-                Some(g) => g,
-                None => continue,
+            let doc_geom = match extract_geometry(&doc, field, &crs) {
+                Ok(Some(g)) => g,
+                Ok(None) => continue,
+                Err(e) => return self.response_error(task, crate::Error::from(e)),
             };
 
-            match apply_predicate(predicate, query_geom, &doc_geom, distance_meters) {
+            match apply_predicate(predicate, query_geom, &doc_geom, distance_meters, &metric) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(mismatch) => {
@@ -308,14 +313,14 @@ impl CoreLoop {
                 }
             }
 
-            match ScanFilter::all_match_value(&attr_filters, &doc) {
+            match ScanFilter::all_match_value(&attr_filters, &doc, &crs) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(e) => {
                     return self.response_error(task, ErrorCode::from(e));
                 }
             }
-            match ScanFilter::all_match_value(&row_level_filters, &doc) {
+            match ScanFilter::all_match_value(&row_level_filters, &doc, &crs) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(e) => {
@@ -460,7 +465,7 @@ mod tests {
             .spatial_indexes
             .entry(spatial_key.clone())
             .or_insert_with(|| {
-                crate::engine::spatial::RTree::new(memory, nodedb_types::geometry::Srid::Wgs84)
+                crate::engine::spatial::RTree::new(memory, crate::engine::spatial::TreeSrid::WGS84)
             });
         rtree.insert(RTreeEntry { id: entry_id, bbox });
         core.spatial_doc_map.insert(
@@ -553,7 +558,7 @@ mod tests {
         insert_spatial_doc(&mut core, tid, "geo", "loc", Surrogate(10), 0.0, 0.0);
 
         let query = nodedb_types::geometry::SridGeometry::new(
-            nodedb_types::geometry::Srid::Utm48N,
+            nodedb_types::geometry::Srid::new(32648).expect("srid"),
             nodedb_types::geometry::Geometry::point(500_000.0, 0.0),
         );
         let task = make_task(dummy_spatial_plan());

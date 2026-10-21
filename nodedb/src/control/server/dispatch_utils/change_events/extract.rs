@@ -485,6 +485,7 @@ mod tests {
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             returning: None,
             rls_filters: Vec::new(),
@@ -501,6 +502,7 @@ mod tests {
         let plan = PhysicalPlan::Columnar(ColumnarOp::Delete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
             filters: Vec::new(),
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         });
         let meta = extract_write_metadata(&plan, TenantId::new(1));
@@ -586,6 +588,7 @@ mod tests {
             system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             zone_msgpack: Vec::new(),
+            physical: false,
         });
         assert!(extract_write_metadata(&slice, TenantId::new(1)).is_empty());
 
@@ -596,9 +599,10 @@ mod tests {
             group_by_dim: -1,
             slice_tile_keys: Vec::new(),
             prefix_bits: 8,
-            system_as_of: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             region_msgpack: Vec::new(),
+            physical: false,
         });
         assert!(extract_write_metadata(&agg, TenantId::new(1)).is_empty());
     }
@@ -615,6 +619,8 @@ mod tests {
             properties: Vec::new(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
         });
         let meta = extract_write_metadata(&plan, TenantId::new(1));
         assert!(meta.is_empty());

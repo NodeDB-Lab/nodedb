@@ -6,9 +6,12 @@
 //! plain tuple:
 //!
 //! * a put is `(collection, document_id, value, provenance, surrogate)`, or
-//!   that tuple plus `(sys_from_ms, valid_from_ms, valid_until_ms)`;
+//!   that tuple plus `(sys_from, valid_from_ms, valid_until_ms)`;
 //! * a delete is `(collection, document_id, provenance, surrogate)`, or that
-//!   tuple plus `sys_from_ms`.
+//!   tuple plus `sys_from`.
+//!
+//! `sys_from` is the version's system-time ordinal. An event carries its
+//! millisecond, the unit `_ts_system` renders.
 //!
 //! MessagePack tuples decode only at their exact arity, so each decoder tries
 //! the bitemporal form, then the plain one.
@@ -39,8 +42,9 @@ pub(super) struct DocPut {
     pub document_id: String,
     pub value: Vec<u8>,
     /// `(system_time_ms, valid_time_ms)` the record carries: `Some` system
-    /// time for a bitemporal record, `None` for a plain one. A valid time of
-    /// `i64::MIN` means unbounded and reads as `None`.
+    /// time for a bitemporal record, the millisecond of its system-time
+    /// ordinal, `None` for a plain one. A valid time of `i64::MIN` means
+    /// unbounded and reads as `None`.
     pub stamps: Option<(i64, Option<i64>)>,
 }
 
@@ -53,7 +57,10 @@ pub(super) fn decode_doc_put(payload: &[u8]) -> Option<DocPut> {
             collection,
             document_id,
             value,
-            stamps: Some((sys, (valid_from != i64::MIN).then_some(valid_from))),
+            stamps: Some((
+                nodedb_types::ordinal_to_ms(sys),
+                (valid_from != i64::MIN).then_some(valid_from),
+            )),
         });
     }
     zerompk::from_msgpack::<PlainPut>(payload).ok().map(
@@ -86,9 +93,19 @@ mod tests {
     #[test]
     fn a_bitemporal_put_decodes_with_its_stamp() {
         let prov: Option<SyncProvenance> = None;
-        let payload =
-            zerompk::to_msgpack_vec(&("c", "d1", vec![1u8], prov, 7u32, 10i64, i64::MIN, i64::MAX))
-                .expect("encode");
+        // An ordinal inside millisecond 10 reads as millisecond 10.
+        let ordinal = 10 * nodedb_types::NANOS_PER_MS + 42;
+        let payload = zerompk::to_msgpack_vec(&(
+            "c",
+            "d1",
+            vec![1u8],
+            prov,
+            7u32,
+            ordinal,
+            i64::MIN,
+            i64::MAX,
+        ))
+        .expect("encode");
         let put = decode_doc_put(&payload).expect("decodes");
         assert_eq!(put.collection, "c");
         assert_eq!(put.document_id, "d1");

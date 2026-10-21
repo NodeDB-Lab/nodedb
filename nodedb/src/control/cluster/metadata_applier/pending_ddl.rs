@@ -154,7 +154,7 @@ impl MetadataCommitApplier {
             catalog,
             teardown,
             shared.wal.next_lsn().as_u64(),
-            crate::control::lease::wall_now_ns(),
+            nodedb_types::wall_now_ns(),
         )?;
         // A same-name CREATE waits on the pending-reclaim path's hold until
         // the teardown finishes. A re-delivered cancel finds it already held.

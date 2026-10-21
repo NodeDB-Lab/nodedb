@@ -140,6 +140,8 @@ mod tests {
             dst_id: dst,
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
         }
     }
 

@@ -2,6 +2,7 @@
 
 //! Request/response envelopes exchanged over the SPSC bridge.
 
+pub mod applied_entry;
 pub mod crdt_error_code;
 pub mod error_code;
 pub mod error_code_from;
@@ -12,6 +13,7 @@ pub mod stage_vote;
 pub mod status;
 pub mod sync_hold;
 
+pub use applied_entry::AppliedEntry;
 pub use error_code::ErrorCode;
 pub use nodedb_physical::kv_atomic::CounterFault;
 pub use nodedb_physical::physical_plan::PhysicalPlan;

@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Key layout for the versioned document and index tables.
+//! Key layout for the versioned document and index tables. The key suffix
+//! is the version's system-time ordinal, from the clock graph edges stamp
+//! from.
 
 use nodedb_types::StorageKey;
 
 /// 20-digit zero-pad for i64 lexicographic ordering under reverse-scan.
-pub fn format_sys_from(sys_from_ms: i64) -> String {
-    format!("{sys_from_ms:020}")
+pub fn format_sys_from(sys_from: i64) -> String {
+    format!("{sys_from:020}")
 }
 
 /// Build a versioned document key.
@@ -15,11 +17,11 @@ pub fn versioned_doc_key(
     tenant: u64,
     coll: &str,
     doc_id: &StorageKey,
-    sys_from_ms: i64,
+    sys_from: i64,
 ) -> String {
     format!(
         "{database_id}:{tenant}:{coll}:{doc_id}\x00{}",
-        format_sys_from(sys_from_ms)
+        format_sys_from(sys_from)
     )
 }
 
@@ -60,7 +62,7 @@ pub fn tenant_prefix_end(database_id: u64, tenant: u64) -> String {
     format!("{database_id}:{tenant};")
 }
 
-/// Extract `sys_from_ms` from a versioned key. Returns `None` if the key
+/// Extract the system-time ordinal from a versioned key. Returns `None` if the key
 /// has no NUL separator (defensive — should not happen for keys produced
 /// by [`versioned_doc_key`]).
 pub fn parse_sys_from(key: &str) -> Option<i64> {

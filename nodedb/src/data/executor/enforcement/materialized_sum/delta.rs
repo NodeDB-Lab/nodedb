@@ -62,13 +62,14 @@ pub(in crate::data::executor) struct SumDelta {
 pub(in crate::data::executor) fn fold_sum_deltas(
     binding: &MaterializedSumBinding,
     images: &RowImages<'_>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<SumDelta>> {
     let (old, new) = match images {
         RowImages::Insert { new_doc } => (None, Some(*new_doc)),
         RowImages::Delete { old_doc } => (Some(*old_doc), None),
         RowImages::Update { old_doc, new_doc } => (Some(*old_doc), Some(*new_doc)),
     };
-    Ok(crate::query::binding_image_deltas(binding, old, new)?
+    Ok(crate::query::binding_image_deltas(binding, old, new, crs)?
         .into_iter()
         .map(|entry| SumDelta {
             join_value: entry.join_value,
@@ -109,8 +110,12 @@ mod tests {
     #[test]
     fn insert_adds_the_new_rows_value() {
         let new_doc = row("a1", 25);
-        let deltas =
-            fold_sum_deltas(&binding(), &RowImages::Insert { new_doc: &new_doc }).expect("fold");
+        let deltas = fold_sum_deltas(
+            &binding(),
+            &RowImages::Insert { new_doc: &new_doc },
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("fold");
         assert_eq!(
             deltas,
             vec![SumDelta {
@@ -126,8 +131,12 @@ mod tests {
     #[test]
     fn delete_subtracts_the_old_rows_value() {
         let old_doc = row("a1", 25);
-        let deltas =
-            fold_sum_deltas(&binding(), &RowImages::Delete { old_doc: &old_doc }).expect("fold");
+        let deltas = fold_sum_deltas(
+            &binding(),
+            &RowImages::Delete { old_doc: &old_doc },
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("fold");
         assert_eq!(
             deltas,
             vec![SumDelta {
@@ -148,6 +157,7 @@ mod tests {
                 old_doc: &old_doc,
                 new_doc: &new_doc,
             },
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("fold");
         assert_eq!(
@@ -172,6 +182,7 @@ mod tests {
                 old_doc: &old_doc,
                 new_doc: &new_doc,
             },
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("fold");
 
@@ -202,8 +213,12 @@ mod tests {
     #[test]
     fn a_row_without_the_join_column_contributes_nothing() {
         let new_doc = serde_json::json!({"amount": 25});
-        let deltas =
-            fold_sum_deltas(&binding(), &RowImages::Insert { new_doc: &new_doc }).expect("fold");
+        let deltas = fold_sum_deltas(
+            &binding(),
+            &RowImages::Insert { new_doc: &new_doc },
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("fold");
         assert!(deltas.is_empty());
     }
 
@@ -219,6 +234,7 @@ mod tests {
                 old_doc: &old_doc,
                 new_doc: &new_doc,
             },
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("fold");
         assert_eq!(

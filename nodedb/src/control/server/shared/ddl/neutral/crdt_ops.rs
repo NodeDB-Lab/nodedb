@@ -213,16 +213,20 @@ pub async fn crdt_apply(
     // collection)`, so the policy must be handed that same key or it silently
     // misses a policy on a non-default database.
     let qualified_collection = db_qualified(database_id, collection);
+    let crs_set = crate::control::crs_context::crs_set_for(state);
     let policy = ExternalCrdtPostImagePolicy::from_identity(
         tenant_id,
         database_id,
         &qualified_collection,
         identity,
         "sql".into(),
-        &state.rls,
-        &audit,
+        crate::control::crdt_post_image_policy::PolicyServices {
+            rls: &state.rls,
+            audit: &audit,
+            crs_set: &crs_set,
+        },
     )
-    .with_type_guards_from(state.credentials.catalog(), database_id);
+    .with_type_guards_from(state, database_id);
     crate::control::crdt_admission::dispatch_authorized_crdt_apply_admitted(
         state,
         crate::control::crdt_admission::AuthorizedCrdtApplyAdmissionRequest {

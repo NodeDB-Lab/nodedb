@@ -28,21 +28,20 @@ pub fn try_plan_array_maint_fn(
         _ => return Ok(None),
     };
     let fn_name = crate::parser::normalize::normalize_object_name_checked(&func.name)?;
+    let sql_name = match fn_name.as_str() {
+        "array_flush" => "ARRAY_FLUSH",
+        "array_compact" => "ARRAY_COMPACT",
+        _ => return Ok(None),
+    };
     let arg_exprs = match &func.args {
-        ast::FunctionArguments::List(list) => collect_args(&list.args),
+        ast::FunctionArguments::List(list) => collect_args(&list.args, sql_name)?,
         _ => Vec::new(),
     };
-    match fn_name.as_str() {
-        "array_flush" => {
-            let name = require_array_name(&arg_exprs, 0, "ARRAY_FLUSH", catalog)?;
-            Ok(Some(SqlPlan::ArrayFlush { name }))
-        }
-        "array_compact" => {
-            let name = require_array_name(&arg_exprs, 0, "ARRAY_COMPACT", catalog)?;
-            Ok(Some(SqlPlan::ArrayCompact { name }))
-        }
-        _ => Ok(None),
-    }
+    let name = require_array_name(&arg_exprs, 0, sql_name, catalog)?;
+    Ok(Some(match sql_name {
+        "ARRAY_FLUSH" => SqlPlan::ArrayFlush { name },
+        _ => SqlPlan::ArrayCompact { name },
+    }))
 }
 
 #[cfg(test)]
@@ -101,11 +100,13 @@ mod tests {
                     name: "variant".into(),
                     dtype: ArrayAttrType::String,
                     nullable: true,
+                    meta: Default::default(),
                 },
                 ArrayAttrAst {
                     name: "qual".into(),
                     dtype: ArrayAttrType::Float64,
                     nullable: true,
+                    meta: Default::default(),
                 },
             ],
             tile_extents: vec![1, 1_000_000],

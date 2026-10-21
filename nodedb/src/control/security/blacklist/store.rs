@@ -15,8 +15,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::{info, warn};
 
-use super::ip::{CidrRange, CidrSet, normalize_peer_ip};
+use super::ip::{CidrSet, normalize_peer_ip};
 use crate::control::security::catalog::{StoredBlacklistEntry, SystemCatalog};
+use crate::control::security::net::Cidr;
 
 /// A cached blacklist entry with expiry tracking.
 #[derive(Debug, Clone)]
@@ -102,7 +103,7 @@ impl BlacklistStore {
         let stored = catalog.load_all_blacklist_entries()?;
         let mut expired_keys = Vec::new();
         let mut loaded_exact = Vec::new();
-        let mut loaded_cidr: Vec<(String, CidrRange, BlacklistEntry)> = Vec::new();
+        let mut loaded_cidr: Vec<(String, Cidr, BlacklistEntry)> = Vec::new();
 
         for s in &stored {
             let entry = BlacklistEntry::from_stored(s);
@@ -111,7 +112,7 @@ impl BlacklistStore {
                 continue;
             }
             match cidr_addr_part(&entry) {
-                Some(addr) => match CidrRange::parse(addr) {
+                Some(addr) => match Cidr::parse(addr) {
                     Some(range) => loaded_cidr.push((entry.key.clone(), range, entry)),
                     None => {
                         warn!(key = %entry.key, "skipping unparsable CIDR blacklist entry on load");
@@ -218,7 +219,7 @@ impl BlacklistStore {
     /// CIDR range matched by [`check_ip`](Self::check_ip) against every
     /// address in the range. A bare address is validated and stored under
     /// its canonical `IpAddr` string form so lookups stay exact-match O(1).
-    /// Both IPv4 and IPv6 are supported by [`CidrRange`]. Returns a
+    /// Both IPv4 and IPv6 are supported by [`Cidr`]. Returns a
     /// [`crate::Error::BadRequest`] if `addr` is neither a valid IP address
     /// nor a valid CIDR range — an entry that can never match must not be
     /// stored silently.
@@ -230,7 +231,7 @@ impl BlacklistStore {
         expires_at: u64,
     ) -> crate::Result<()> {
         if addr.contains('/') {
-            let range = CidrRange::parse(addr).ok_or_else(|| crate::Error::BadRequest {
+            let range = Cidr::parse(addr).ok_or_else(|| crate::Error::BadRequest {
                 detail: format!(
                     "invalid CIDR range '{addr}': expected e.g. '10.0.0.0/8' or a valid IPv6 prefix"
                 ),
@@ -282,7 +283,7 @@ impl BlacklistStore {
     fn add_cidr_entry(
         &self,
         key: String,
-        range: CidrRange,
+        range: Cidr,
         reason: &str,
         created_by: &str,
         expires_at: u64,
@@ -419,7 +420,7 @@ impl BlacklistStore {
             }
             match cidr_addr_part(&entry) {
                 Some(addr) => {
-                    if let Some(range) = CidrRange::parse(addr) {
+                    if let Some(range) = Cidr::parse(addr) {
                         cidrs.upsert(entry.key.clone(), range, entry);
                     } else {
                         warn!(key = %entry.key, "skipping unparsable CIDR blacklist entry on reload");
@@ -454,7 +455,7 @@ impl Default for BlacklistStore {
 }
 
 /// If `entry` is a CIDR-range IP entry (key `"ip:<addr>/<prefix>"`), return
-/// the `<addr>/<prefix>` part to be parsed by [`CidrRange::parse`].
+/// the `<addr>/<prefix>` part to be parsed by [`Cidr::parse`].
 /// Returns `None` for exact-match entries (user or single-host IP).
 fn cidr_addr_part(entry: &BlacklistEntry) -> Option<&str> {
     if entry.kind != "ip" {

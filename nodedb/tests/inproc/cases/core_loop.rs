@@ -22,6 +22,8 @@ mod test_cross_engine_validation;
 mod test_cross_type_join;
 #[path = "executor_tests/test_document.rs"]
 mod test_document;
+#[path = "executor_tests/test_document_index_recovery.rs"]
+mod test_document_index_recovery;
 #[path = "executor_tests/test_facet.rs"]
 mod test_facet;
 #[path = "executor_tests/test_generated_columns.rs"]
@@ -54,6 +56,10 @@ mod test_kv_ttl_overlay;
 mod test_ollp_verification;
 #[path = "executor_tests/test_range_scan_bitemporal.rs"]
 mod test_range_scan_bitemporal;
+#[path = "executor_tests/test_replay_and_engine_isolation.rs"]
+mod test_replay_and_engine_isolation;
+#[path = "executor_tests/test_rrf_fusion.rs"]
+mod test_rrf_fusion;
 #[path = "executor_tests/test_security_and_isolation.rs"]
 mod test_security_and_isolation;
 #[path = "executor_tests/test_tenant_cache_isolation.rs"]

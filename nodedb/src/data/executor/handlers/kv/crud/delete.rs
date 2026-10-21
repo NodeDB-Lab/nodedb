@@ -55,8 +55,14 @@ impl CoreLoop {
                 continue;
             };
             if gated
-                && let Err(e) =
-                    super::super::rls::admit_kv_row(rls_write_check, &body, key, tid, collection)
+                && let Err(e) = super::super::rls::admit_kv_row(
+                    rls_write_check,
+                    &body,
+                    key,
+                    tid,
+                    collection,
+                    &self.crs_context(),
+                )
             {
                 return self.response_error(task, e);
             }

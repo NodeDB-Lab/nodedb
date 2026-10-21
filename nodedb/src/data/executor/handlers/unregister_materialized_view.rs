@@ -77,7 +77,8 @@ impl CoreLoop {
         // In memory AND on disk: a head left behind would be rehydrated at the
         // next restart, so a materialized view recreated under the same name
         // would resume the dropped view's chain.
-        self.chain_hashes
+        self.chain
+            .heads
             .retain(|(d, t, c), _| !(*d == db && *t == tid && c == &nm));
         if let Err(e) =
             self.sparse

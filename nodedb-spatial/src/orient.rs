@@ -9,7 +9,7 @@
 
 use nodedb_types::geometry::Geometry;
 
-use crate::validate::signed_area;
+use crate::planar::area::signed_area;
 
 /// Reverse every ring of `geom` that breaks the right-hand rule. Polygons
 /// nested in a `MultiPolygon` or `GeometryCollection` are oriented too.
@@ -40,7 +40,21 @@ fn orient_polygon(rings: &mut [Vec<[f64; 2]>]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::validate::validate_geometry;
+
+    /// Whether every shell runs counter-clockwise and every hole clockwise.
+    fn right_handed(geom: &Geometry) -> bool {
+        let polygon_ok = |rings: &Vec<Vec<[f64; 2]>>| {
+            rings.iter().enumerate().all(|(i, r)| {
+                let a = signed_area(r);
+                if i == 0 { a > 0.0 } else { a < 0.0 }
+            })
+        };
+        match geom {
+            Geometry::Polygon { coordinates } => polygon_ok(coordinates),
+            Geometry::MultiPolygon { coordinates } => coordinates.iter().all(polygon_ok),
+            _ => true,
+        }
+    }
 
     fn square(clockwise: bool, lo: f64, hi: f64) -> Vec<[f64; 2]> {
         let mut ring = vec![[lo, lo], [hi, lo], [hi, hi], [lo, hi], [lo, lo]];
@@ -51,11 +65,11 @@ mod tests {
     }
 
     #[test]
-    fn clockwise_exterior_and_ccw_hole_become_valid() {
+    fn clockwise_exterior_and_ccw_hole_are_reversed() {
         let mut geom = Geometry::polygon(vec![square(true, 0.0, 10.0), square(false, 2.0, 4.0)]);
-        assert!(!validate_geometry(&geom).is_empty());
+        assert!(!right_handed(&geom));
         orient_rings(&mut geom);
-        assert!(validate_geometry(&geom).is_empty(), "{geom:?}");
+        assert!(right_handed(&geom), "{geom:?}");
     }
 
     #[test]
@@ -72,6 +86,6 @@ mod tests {
             coordinates: vec![vec![square(true, 0.0, 1.0)], vec![square(false, 5.0, 6.0)]],
         };
         orient_rings(&mut geom);
-        assert!(validate_geometry(&geom).is_empty(), "{geom:?}");
+        assert!(right_handed(&geom), "{geom:?}");
     }
 }

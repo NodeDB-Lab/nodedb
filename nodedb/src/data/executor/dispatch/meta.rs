@@ -123,6 +123,12 @@ impl CoreLoop {
                 response
             }
 
+            MetaOp::PurgeDepartedVShards {
+                departed,
+                resident,
+                collections,
+            } => self.execute_purge_departed_vshards(task, departed, resident, collections),
+
             MetaOp::ConvertCollection {
                 collection,
                 target_type,
@@ -275,6 +281,12 @@ impl CoreLoop {
 
             MetaOp::DeleteSynonymGroup { tenant_id, name } => {
                 self.execute_delete_synonym_group(task, *tenant_id, name)
+            }
+
+            // The set is whole: the core swaps its copy and answers.
+            MetaOp::SetCustomCrsSet { set } => {
+                self.set_crs_set(std::sync::Arc::new(set.clone()));
+                self.response_ok(task)
             }
 
             MetaOp::CalvinDrop { epoch, position } => {

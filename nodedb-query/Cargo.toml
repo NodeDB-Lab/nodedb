@@ -15,6 +15,7 @@ categories = ["algorithms", "text-processing"]
 
 [dependencies]
 nodedb-types = { workspace = true }
+nodedb-crs = { workspace = true }
 nodedb-spatial = { workspace = true }
 thiserror = { workspace = true }
 nodedb-fts = { workspace = true }

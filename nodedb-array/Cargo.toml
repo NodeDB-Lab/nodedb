@@ -15,6 +15,7 @@ categories = ["science", "database-implementations"]
 
 [dependencies]
 nodedb-types = { workspace = true }
+nodedb-crs = { workspace = true }
 nodedb-codec = { workspace = true }
 nodedb-spatial = { workspace = true }
 serde = { workspace = true }

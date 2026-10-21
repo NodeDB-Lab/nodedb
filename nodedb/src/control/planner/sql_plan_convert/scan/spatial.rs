@@ -32,6 +32,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_spatial_scan(
     let proj_names = extract_projection_names(projection, &[]);
     let sp = match predicate {
         nodedb_sql::types::SpatialPredicate::DWithin => SpatialPredicate::DWithin,
+        nodedb_sql::types::SpatialPredicate::DWithin3D => SpatialPredicate::DWithin3D,
         nodedb_sql::types::SpatialPredicate::Contains => SpatialPredicate::Contains,
         nodedb_sql::types::SpatialPredicate::Intersects => SpatialPredicate::Intersects,
         nodedb_sql::types::SpatialPredicate::Within => SpatialPredicate::Within,

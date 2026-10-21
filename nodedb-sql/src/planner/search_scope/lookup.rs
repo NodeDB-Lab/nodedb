@@ -23,6 +23,7 @@ pub(super) fn is_index_owned(trigger: SearchTrigger) -> bool {
         SearchTrigger::None
         | SearchTrigger::VectorSearch
         | SearchTrigger::SpatialDWithin
+        | SearchTrigger::SpatialDWithin3D
         | SearchTrigger::SpatialContains
         | SearchTrigger::SpatialIntersects
         | SearchTrigger::SpatialWithin

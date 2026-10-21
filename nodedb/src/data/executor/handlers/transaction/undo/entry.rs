@@ -92,9 +92,9 @@ pub(in crate::data::executor) enum UndoEntry {
         /// bitemporal collection. `None` = plain non-bitemporal op → reverse via
         /// the non-versioned table exactly as before. `Some(t)` = physically
         /// remove the version row at `t` (and skip the plain-table reversal).
-        bitemporal_sys_from_ms: Option<i64>,
+        bitemporal_sys_from: Option<i64>,
         /// `(field, value)` pairs whose versioned index entries this op wrote at
-        /// `bitemporal_sys_from_ms`. Empty = none.
+        /// `bitemporal_sys_from`. Empty = none.
         bitemporal_index_tuples: Vec<(String, String)>,
         /// `(field, value)` pairs this op INSERTED into the plain secondary
         /// index. Reversed by `index_remove` on undo. Empty = none.
@@ -102,7 +102,7 @@ pub(in crate::data::executor) enum UndoEntry {
         /// `(field, value)` pairs this op REMOVED from the plain secondary index
         /// (stale entries on UPDATE). Restored by `index_put` on undo. Empty = none.
         secondary_index_removed: Vec<(String, String)>,
-        /// Pre-image of `chain_hashes[(tenant, collection)]` before this op
+        /// Pre-image of `chain.heads[(tenant, collection)]` before this op
         /// mutated it. Outer `None` = op didn't touch the chain (no-op on undo);
         /// `Some(None)` = no prior entry (genesis insert → remove key on undo);
         /// `Some(Some(prev))` = restore the key to `prev` on undo.
@@ -128,15 +128,15 @@ pub(in crate::data::executor) enum UndoEntry {
         /// bitemporal collection. `None` = plain op → re-insert via the
         /// non-versioned table as before. `Some(t)` = physically remove the
         /// tombstone row at `t` (and skip the plain-table re-insert).
-        bitemporal_sys_from_ms: Option<i64>,
+        bitemporal_sys_from: Option<i64>,
         /// `(field, value)` pairs whose versioned index entries this op wrote at
-        /// `bitemporal_sys_from_ms`. Empty = none.
+        /// `bitemporal_sys_from`. Empty = none.
         bitemporal_index_tuples: Vec<(String, String)>,
         /// `(field, value)` pairs the plain secondary-index cascade removed for
         /// this document. Restored by `index_put` on undo, closing the
         /// rolled-back-DELETE secondary-index hole. Empty = none.
         secondary_index_tuples: Vec<(String, String)>,
-        /// Pre-image of `chain_hashes[(tenant, collection)]` before this op
+        /// Pre-image of `chain.heads[(tenant, collection)]` before this op
         /// mutated it (see [`UndoEntry::PutDocument`] for semantics).
         chain_hash_prior: Option<Option<crate::types::hash_chain::ChainHead>>,
     },
@@ -212,7 +212,7 @@ pub(in crate::data::executor) enum UndoEntry {
         entry_id: u64,
         bbox: nodedb_types::BoundingBox,
         document_id: String,
-        srid: nodedb_types::geometry::Srid,
+        srid: crate::engine::spatial::TreeSrid,
     },
     /// Undo a graph edge write: remove the version it added and put the CSR
     /// back.
@@ -327,6 +327,12 @@ pub(in crate::data::executor) enum UndoEntry {
         interned_labels: Vec<String>,
         /// Whether the op created the node in the CSR.
         created_node: bool,
+        /// The ordinal of the node-label version the op wrote, `None` when
+        /// it wrote none.
+        version: Option<i64>,
+        /// The label set the version's key held before the op wrote it.
+        /// The undo writes it back. `None` removes the version.
+        replaced: Option<Vec<String>>,
     },
     /// Undo a columnar insert by rolling back in-memory state.
     ///

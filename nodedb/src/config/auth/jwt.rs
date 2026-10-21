@@ -22,7 +22,11 @@ use serde::{Deserialize, Serialize};
 /// audience = "nodedb"
 /// tenant_id = 42
 /// ```
+///
+/// JWKS fetches go through the `[egress]` policy. A provider on a private
+/// network needs its host on that allow-list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JwtAuthConfig {
     /// JWKS refresh interval in seconds (default: 3600 = 1 hour).
     #[serde(default = "default_jwks_refresh")]
@@ -106,23 +110,6 @@ pub struct JwtAuthConfig {
     /// Enforced by `control::security::jwt_policy::enforce_declared_scopes`.
     #[serde(default)]
     pub enforce_scopes: bool,
-
-    /// SSRF relaxation: allow `http://` scheme for JWKS URLs whose host
-    /// is in [`Self::allow_jwks_hosts`]. Off by default.
-    #[serde(default)]
-    pub allow_http_jwks: bool,
-
-    /// SSRF relaxation: hostnames that may resolve to addresses inside
-    /// [`Self::allow_jwks_cidrs`]. Exact-match, lowercase. IP literals
-    /// remain forbidden regardless of this list.
-    #[serde(default)]
-    pub allow_jwks_hosts: Vec<String>,
-
-    /// SSRF relaxation: CIDR ranges that [`Self::allow_jwks_hosts`] are
-    /// permitted to resolve into, in addition to global unicast.
-    /// Example: `["10.42.0.0/16"]` for an in-cluster Keycloak.
-    #[serde(default)]
-    pub allow_jwks_cidrs: Vec<String>,
 }
 
 /// Configuration for a single JWT identity provider.
@@ -131,7 +118,8 @@ pub struct JwtProviderConfig {
     /// Provider name (for logging and diagnostics).
     pub name: String,
 
-    /// JWKS endpoint URL. Must be HTTPS in production.
+    /// JWKS endpoint URL. It must pass the `[egress]` policy: `https://`,
+    /// or `http://` for a host on its allow-list.
     pub jwks_url: String,
 
     /// Expected `iss` claim. Empty = don't validate issuer for this provider.
@@ -150,11 +138,11 @@ pub struct JwtProviderConfig {
 }
 
 impl JwtProviderConfig {
-    /// Validate provider config against a [`JwksPolicy`]. Fail-closed:
+    /// Validate provider config against the `[egress]` policy. Fail-closed:
     /// empty `issuer` is rejected; `jwks_url` must pass the policy.
     pub fn validate(
         &self,
-        policy: &crate::control::security::jwks::url::JwksPolicy,
+        policy: &crate::control::security::egress::EgressPolicy,
     ) -> crate::Result<()> {
         if self.name.trim().is_empty() {
             return Err(crate::Error::Config {
@@ -181,35 +169,27 @@ impl JwtProviderConfig {
 }
 
 impl JwtAuthConfig {
-    /// Build the effective [`JwksPolicy`] from the allow-list fields.
-    pub fn jwks_policy(
+    /// Validate all providers against the `[egress]` policy. Called by the
+    /// server-config loader and JWKS registry construction so
+    /// misconfiguration fails before authentication.
+    pub fn validate(
         &self,
-    ) -> Result<
-        crate::control::security::jwks::url::JwksPolicy,
-        crate::control::security::jwks::url::UrlValidationError,
-    > {
-        crate::control::security::jwks::url::JwksPolicy::from_parts(
-            self.allow_http_jwks,
-            &self.allow_jwks_hosts,
-            &self.allow_jwks_cidrs,
-        )
-    }
-
-    /// Validate all providers. Called by the server-config loader and JWKS
-    /// registry construction so misconfiguration fails before authentication.
-    pub fn validate(&self) -> crate::Result<()> {
+        policy: &crate::control::security::egress::EgressPolicy,
+    ) -> crate::Result<()> {
+        if self.jwks_refresh_secs == 0 {
+            return Err(crate::Error::Config {
+                detail: "auth.jwt jwks_refresh_secs must be greater than zero".into(),
+            });
+        }
         if self.max_token_lifetime_secs == 0 {
             return Err(crate::Error::Config {
                 detail: "auth.jwt max_token_lifetime_secs must be greater than zero".into(),
             });
         }
         crate::control::security::jwt_policy::validate_claim_remap(&self.claims)?;
-        let policy = self.jwks_policy().map_err(|e| crate::Error::Config {
-            detail: format!("auth.jwt allow-list is invalid: {e}"),
-        })?;
         let mut provider_names = HashSet::with_capacity(self.providers.len());
         for provider in &self.providers {
-            provider.validate(&policy)?;
+            provider.validate(policy)?;
             if !provider_names.insert(provider.name.as_str()) {
                 return Err(crate::Error::Config {
                     detail: format!(
@@ -285,9 +265,6 @@ impl Default for JwtAuthConfig {
             status_claim: None,
             blocked_statuses: Vec::new(),
             enforce_scopes: false,
-            allow_http_jwks: false,
-            allow_jwks_hosts: Vec::new(),
-            allow_jwks_cidrs: Vec::new(),
         }
     }
 }
@@ -317,7 +294,9 @@ mod tests {
             upn = "email"
             "#,
         );
-        config.validate().expect("section must be valid");
+        config
+            .validate(&crate::control::security::egress::EgressPolicy::strict())
+            .expect("section must be valid");
 
         assert!(config.jit_provisioning);
         assert!(!config.jit_sync_claims);
@@ -336,7 +315,7 @@ mod tests {
             "#,
         );
         let err = config
-            .validate()
+            .validate(&crate::control::security::egress::EgressPolicy::strict())
             .expect_err("a mapping no reader consults must fail startup");
         assert!(err.to_string().contains("unknown field"));
     }

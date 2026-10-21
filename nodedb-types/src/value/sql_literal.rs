@@ -216,8 +216,11 @@ mod tests {
             quote_literal("Point { coordinates: [1.0, 2.0] }")
         );
         assert_eq!(
-            Value::Geometry(SridGeometry::new(Srid::Utm48N, Geometry::point(1.0, 2.0)))
-                .to_sql_literal(),
+            Value::Geometry(SridGeometry::new(
+                Srid::new(32648).unwrap(),
+                Geometry::point(1.0, 2.0)
+            ))
+            .to_sql_literal(),
             quote_literal("SRID=32648;Point { coordinates: [1.0, 2.0] }")
         );
         assert_eq!(

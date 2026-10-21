@@ -271,6 +271,9 @@ impl QueryContext {
             .await?;
         self.apply_task_policy(&mut tasks, sec, tenant_id, &mut version_set)
             .await?;
+        let cache_eligibility = self
+            .pin_statement_cut(&mut tasks, purpose, cache_eligibility)
+            .await?;
         Ok((tasks, output_schema, version_set, cache_eligibility))
     }
 
@@ -361,6 +364,14 @@ impl QueryContext {
         let mut version_set = catalog.take_recorded_versions();
         self.apply_task_policy(&mut tasks, sec, tenant_id, &mut version_set)
             .await?;
+        // A parameterized plan never enters a plan cache, so its verdict
+        // is not kept.
+        self.pin_statement_cut(
+            &mut tasks,
+            PlanningPurpose::Execute,
+            nodedb_sql::types::PlanCacheEligibility::DataDependent,
+        )
+        .await?;
         Ok((tasks, output_schema, version_set))
     }
 }

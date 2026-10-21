@@ -24,6 +24,7 @@ use crate::bridge::envelope::ErrorCode;
 pub fn inject_defaults(
     guards: &[CompiledTypeGuard],
     fields: &mut HashMap<String, Value>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<Vec<String>, ErrorCode> {
     let mut injected = Vec::new();
     for guard in guards {
@@ -42,7 +43,7 @@ pub fn inject_defaults(
             continue;
         };
         let doc = Value::Object(fields.clone());
-        let value = expr.eval(&doc).map_err(ErrorCode::from)?;
+        let value = expr.eval(&doc, crs).map_err(ErrorCode::from)?;
         fields.insert(guard.field.clone(), value);
         injected.push(guard.field.clone());
     }

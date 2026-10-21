@@ -44,6 +44,7 @@
 //! targets.
 
 use super::core_loop::CoreLoop;
+use super::handlers::columnar_mutation::ColumnarDml;
 use crate::bridge::envelope::{PhysicalPlan, Status};
 use crate::types::{DatabaseId, Lsn, TenantId};
 use nodedb_physical::physical_plan::ColumnarOp;
@@ -144,6 +145,7 @@ impl CoreLoop {
                 ),
                 filters: record.filters.clone(),
                 updates: updates.clone(),
+                system_from: record.system_from,
                 rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
             })
         } else {
@@ -152,6 +154,7 @@ impl CoreLoop {
                     record.collection.clone(),
                 ),
                 filters: record.filters.clone(),
+                system_from: record.system_from,
                 rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
             })
         };
@@ -179,18 +182,27 @@ impl CoreLoop {
         let response = if record.is_update {
             self.execute_columnar_update(
                 &task,
-                &record.collection,
-                &record.filters,
+                ColumnarDml {
+                    collection: &record.collection,
+                    filter_bytes: &record.filters,
+                    // The stamp the live update took, so replay writes the
+                    // same version keys.
+                    system_from: record.system_from,
+                    rls_write_check: &replay_check,
+                },
                 &updates,
-                &replay_check,
                 recording.then_some(&mut undo),
             )
         } else {
             self.execute_columnar_delete(
                 &task,
-                &record.collection,
-                &record.filters,
-                &replay_check,
+                ColumnarDml {
+                    collection: &record.collection,
+                    filter_bytes: &record.filters,
+                    // The stamp the live delete's tombstones took.
+                    system_from: record.system_from,
+                    rls_write_check: &replay_check,
+                },
                 recording.then_some(&mut undo),
             )
         };
@@ -332,6 +344,7 @@ impl CoreLoop {
                     record.collection.clone(),
                 ),
                 rows: rows.clone(),
+                system_from: record.system_from,
                 rls_write_check: replay_check.clone(),
             });
             let task = Self::replay_task(
@@ -345,6 +358,7 @@ impl CoreLoop {
                 &task,
                 &record.collection,
                 &rows,
+                record.system_from,
                 &replay_check,
                 None,
             )
@@ -373,6 +387,7 @@ impl CoreLoop {
                     record.collection.clone(),
                 ),
                 pks: pks.clone(),
+                system_from: record.system_from,
                 rls_write_check: replay_check.clone(),
             });
             let task = Self::replay_task(
@@ -386,6 +401,7 @@ impl CoreLoop {
                 &task,
                 &record.collection,
                 &pks,
+                record.system_from,
                 &replay_check,
                 None,
             )
@@ -473,6 +489,7 @@ mod tests {
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
             returning: None,
             rls_filters: Vec::new(),
@@ -566,6 +583,7 @@ mod tests {
         let delete = PhysicalPlan::Columnar(ColumnarOp::Delete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
             filters: eq_filter_bytes("id", Value::Integer(2)),
+            system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
         });
         let outcome = wal_append_if_write(
@@ -600,6 +618,7 @@ mod tests {
                     nodedb_types::value_to_msgpack(&Value::Integer(999)).expect("encode"),
                 ),
             )],
+            system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
         });
         let outcome = wal_append_if_write(
@@ -623,6 +642,7 @@ mod tests {
         let delete = PhysicalPlan::Columnar(ColumnarOp::Delete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
             filters: eq_filter_bytes("id", Value::Integer(2)),
+            system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
         });
 
@@ -657,6 +677,7 @@ mod tests {
                     nodedb_types::value_to_msgpack(&Value::Integer(999)).expect("encode"),
                 ),
             )],
+            system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
         });
 
@@ -695,6 +716,7 @@ mod tests {
                     right: Box::new(SqlExpr::Literal(Value::Integer(5))),
                 }),
             )],
+            system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
         });
 

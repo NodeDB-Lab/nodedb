@@ -140,11 +140,13 @@ fn convert_action(action: &MergePlanAction) -> crate::Result<MergeActionOp> {
             // are evaluated against the qualified source document at apply time.
             let encoded: Vec<UpdateValue> = values
                 .iter()
-                .map(|expr| match expr {
-                    SqlExpr::Literal(v) => UpdateValue::Literal(sql_value_to_msgpack(v)),
-                    other => UpdateValue::Expr(sql_expr_to_bridge_expr_qualified(other)),
+                .map(|expr| {
+                    Ok(match expr {
+                        SqlExpr::Literal(v) => UpdateValue::Literal(sql_value_to_msgpack(v)?),
+                        other => UpdateValue::Expr(sql_expr_to_bridge_expr_qualified(other)),
+                    })
                 })
-                .collect();
+                .collect::<crate::Result<_>>()?;
             Ok(MergeActionOp::Insert {
                 columns: columns.clone(),
                 values: encoded,

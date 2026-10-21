@@ -60,6 +60,8 @@ pub(in crate::data::executor) struct UniqueScope<'a> {
     /// `false` when the unit truncated the collection: no committed row
     /// survives it.
     pub base_visible: bool,
+    /// Resolves SRIDs in partial-index predicates.
+    pub crs: &'a nodedb_crs::CrsContext<'a>,
 }
 
 /// One submitted row write of a unit, as its caller holds it.
@@ -101,7 +103,7 @@ pub(in crate::data::executor) fn check_unique_post_state(
             let Some(doc) = row.doc else {
                 continue;
             };
-            for needle in claimed_values(doc, path) {
+            for needle in claimed_values(doc, path, scope.crs) {
                 match claims.entry(needle) {
                     Entry::Vacant(slot) => {
                         if row.judged {
@@ -138,9 +140,13 @@ pub(in crate::data::executor) fn check_unique_post_state(
 
 /// The values `doc` claims under `path`: the stored, case-folded index keys.
 /// A row the partial-index predicate rejects claims none.
-fn claimed_values(doc: &serde_json::Value, path: &IndexPath) -> BTreeSet<String> {
+fn claimed_values(
+    doc: &serde_json::Value,
+    path: &IndexPath,
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> BTreeSet<String> {
     if let Some(predicate) = &path.predicate
-        && !predicate.evaluate_json(doc)
+        && !predicate.evaluate_json(doc, crs)
     {
         return BTreeSet::new();
     }
@@ -206,6 +212,7 @@ impl CoreLoop {
                 paths: &config.index_paths,
                 bitemporal: config.bitemporal,
                 base_visible: true,
+                crs: &self.crs_context(),
             },
             rows,
         )
@@ -263,7 +270,7 @@ impl CoreLoop {
         body: &[u8],
     ) -> crate::Result<serde_json::Value> {
         let mut doc = doc_format::decode_document(body)?;
-        evaluate_generated(config, &mut doc)?;
+        evaluate_generated(config, &mut doc, &self.crs_context())?;
         Ok(doc)
     }
 }
@@ -276,8 +283,9 @@ impl CoreLoop {
 pub(in crate::data::executor) fn evaluate_generated(
     config: &CollectionConfig,
     doc: &mut serde_json::Value,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
-    write_body::materialize_write_body(config, doc, GuardScope::InjectOnly)
+    write_body::materialize_write_body(config, doc, GuardScope::InjectOnly, crs)
         .map_err(crate::Error::DataPlane)
 }
 
@@ -509,6 +517,7 @@ mod tests {
                 paths: &config.index_paths,
                 bitemporal: false,
                 base_visible: false,
+                crs: &nodedb_crs::CrsContext::builtin_only(),
             },
             &rows,
         )

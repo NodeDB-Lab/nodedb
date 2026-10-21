@@ -84,9 +84,10 @@ impl ScanFilter {
     pub fn all_match_value(
         group: &[ScanFilter],
         doc: &nodedb_types::Value,
+        crs: &nodedb_crs::CrsContext<'_>,
     ) -> Result<bool, EvalError> {
         for f in group {
-            if !f.matches_value(doc)? {
+            if !f.matches_value(doc, crs)? {
                 return Ok(false);
             }
         }
@@ -105,12 +106,18 @@ impl ScanFilter {
     /// `10 / denom > 1` must fail the whole query with SQLSTATE `22012`,
     /// matching Postgres, rather than evaluate to `Value::Null`/`false`
     /// (silently filtering the row out) when `denom` is `0`.
-    pub fn matches_value(&self, doc: &nodedb_types::Value) -> Result<bool, EvalError> {
+    ///
+    /// Geo functions in an expression filter resolve SRIDs through `crs`.
+    pub fn matches_value(
+        &self,
+        doc: &nodedb_types::Value,
+        crs: &nodedb_crs::CrsContext<'_>,
+    ) -> Result<bool, EvalError> {
         match self.op {
             FilterOp::MatchAll | FilterOp::Exists | FilterOp::NotExists => return Ok(true),
             FilterOp::Or => {
                 for clause in &self.clauses {
-                    if Self::all_match_value(clause, doc)? {
+                    if Self::all_match_value(clause, doc, crs)? {
                         return Ok(true);
                     }
                 }
@@ -118,7 +125,7 @@ impl ScanFilter {
             }
             FilterOp::Expr => {
                 return match &self.expr {
-                    Some(expr) => Ok(crate::value_ops::is_truthy(&expr.eval(doc)?)),
+                    Some(expr) => Ok(crate::value_ops::is_truthy(&expr.eval(doc, crs)?)),
                     None => Ok(false),
                 };
             }

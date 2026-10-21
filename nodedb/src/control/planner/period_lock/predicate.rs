@@ -53,7 +53,11 @@ pub(super) async fn resolve_predicate_period_values(
     for row in &read.rows {
         resolve_period_value(scope, def, row, &mut resolved).await?;
         if matches!(effect, PeriodLockEffect::Assign) {
-            let new_row = crate::query::apply_update_assignments(row, updates)?;
+            let new_row = crate::query::apply_update_assignments(
+                row,
+                updates,
+                &crate::control::crs_context::crs_context_for(scope.state),
+            )?;
             resolve_period_value(scope, def, &new_row, &mut resolved).await?;
         }
     }

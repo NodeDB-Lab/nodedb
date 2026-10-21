@@ -193,7 +193,6 @@ fn graph_read_key(op: &GraphOp) -> ReadKey {
         | GraphOp::SetNodeLabels { .. }
         | GraphOp::RemoveNodeLabels { .. }
         | GraphOp::TemporalNeighbors { .. }
-        | GraphOp::TemporalAlgorithm { .. }
         | GraphOp::Stats { .. }
         | GraphOp::NodeEdgeGuard { .. }
         | GraphOp::NodePresenceGuard { .. }
@@ -312,6 +311,7 @@ fn meta_read_key(op: &MetaOp) -> ReadKey {
         | MetaOp::ConvertCollection { .. }
         | MetaOp::CreateTenantSnapshot { .. }
         | MetaOp::RestoreTenantSnapshot { .. }
+        | MetaOp::PurgeDepartedVShards { .. }
         | MetaOp::PurgeTenant { .. }
         | MetaOp::UnregisterCollection { .. }
         | MetaOp::UnregisterMaterializedView { .. }
@@ -334,6 +334,7 @@ fn meta_read_key(op: &MetaOp) -> ReadKey {
         | MetaOp::RebuildIndex { .. }
         | MetaOp::PutSynonymGroup { .. }
         | MetaOp::DeleteSynonymGroup { .. }
+        | MetaOp::SetCustomCrsSet { .. }
         | MetaOp::StageWrite { .. }
         | MetaOp::DropTxnOverlay { .. }
         | MetaOp::MarkSavepoint { .. }

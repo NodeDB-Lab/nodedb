@@ -55,18 +55,21 @@ impl CoreLoop {
             } = mutation
                 && let Err(e) = rls_write_gate::admit_stored_row(
                     rls_write_check,
-                    value,
-                    &crate::engine::document::store::RowIdentity::from_user_key(
-                        document_id.as_str(),
-                    ),
-                    None,
-                    &self.identity_column(
-                        task.request.database_id.as_u64(),
-                        tid,
-                        collection.as_str(),
-                    ),
+                    rls_write_gate::GatedRow {
+                        body: value,
+                        identity: &crate::engine::document::store::RowIdentity::from_user_key(
+                            document_id.as_str(),
+                        ),
+                        strict_schema: None,
+                        identity_column: &self.identity_column(
+                            task.request.database_id.as_u64(),
+                            tid,
+                            collection.as_str(),
+                        ),
+                    },
                     tid,
                     collection.as_str(),
+                    &self.crs_context(),
                 )
             {
                 return self.response_error(task, e);

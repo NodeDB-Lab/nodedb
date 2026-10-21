@@ -53,6 +53,13 @@ pub(super) struct TuningOverrides {
     /// Overrides `[tuning.calvin] max_redo_entry_bytes` so a test can drive
     /// chunked redo with a commit of a few hundred kilobytes.
     pub(super) max_redo_entry_bytes: Option<usize>,
+    /// Enables `[observability.otlp.export]` to a collector at
+    /// `http://localhost:<port>`, pushing metrics every second.
+    pub(super) otlp_collector_port: Option<u16>,
+    /// Takes the `[encryption]` WAL key from a Vault transit engine at
+    /// `http://localhost:<port>`. The token and wrapped-key files live in
+    /// the data directory.
+    pub(super) vault_port: Option<u16>,
 }
 
 impl TuningOverrides {
@@ -97,6 +104,22 @@ impl TuningOverrides {
     pub(super) fn max_redo_entry_bytes(bytes: usize) -> Self {
         Self {
             max_redo_entry_bytes: Some(bytes),
+            ..Self::default()
+        }
+    }
+
+    /// Boot with OTLP export to a collector on `port`.
+    pub(super) fn otlp_collector(port: u16) -> Self {
+        Self {
+            otlp_collector_port: Some(port),
+            ..Self::default()
+        }
+    }
+
+    /// Boot with the WAL key from a Vault on `port`.
+    pub(super) fn vault(port: u16) -> Self {
+        Self {
+            vault_port: Some(port),
             ..Self::default()
         }
     }
@@ -161,6 +184,23 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
             "\n[tuning.calvin]\nmax_redo_entry_bytes = {bytes}\n"
         ));
     }
+    if let Some(port) = tuning.otlp_collector_port {
+        toml.push_str(&format!(
+            "\n[observability.otlp.export]\nenabled = true\n\
+             endpoint = \"http://localhost:{port}\"\nmetrics_interval_secs = 1\n"
+        ));
+    }
+    if let Some(port) = tuning.vault_port {
+        let (token_path, blob_path) = write_vault_files(dir);
+        toml.push_str(&format!(
+            "\n[encryption.key_derivation]\ntype = \"vault\"\n\
+             addr = \"http://localhost:{port}\"\ntoken_path = {}\n\
+             key_name = \"nodedb-wal\"\nmount = \"transit\"\n\
+             ciphertext_blob_path = {}\n",
+            toml_quote(&token_path),
+            toml_quote(&blob_path)
+        ));
+    }
     toml.push_str(&format!(
         "\n[backup_encryption]\nkey_path = {}\n",
         toml_quote(&write_backup_kek(dir))
@@ -169,9 +209,37 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
         "\n[backup_storage]\nlocal_root = {}\n",
         toml_quote(&backup_root(dir))
     ));
+    toml.push_str(&format!(
+        "\n[credential_encryption]\nkey_path = {}\n",
+        toml_quote(&write_credential_key(dir))
+    ));
+    // Remote COPY tests serve rasters from this process on loopback.
+    toml.push_str(
+        "\n[egress]\nallow_http = true\nallow_hosts = [\"localhost\"]\n\
+         allow_cidrs = [\"127.0.0.0/8\", \"::1/128\"]\n",
+    );
     let path = dir.join("nodedb.toml");
     std::fs::write(&path, toml).expect("write test server config file");
     path
+}
+
+/// Write the Vault token and the wrapped WAL key with mode `0600`, as the
+/// key-file checks require. A restarted server reads the same files.
+fn write_vault_files(dir: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let token_path = dir.join("vault.token");
+    let blob_path = dir.join("wal-key.wrapped");
+    for (path, body) in [
+        (&token_path, "test-vault-token"),
+        (&blob_path, "vault:v1:test-wrapped-wal-key"),
+    ] {
+        if !path.exists() {
+            std::fs::write(path, body).expect("write vault file");
+        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .expect("restrict vault file");
+    }
+    (token_path, blob_path)
 }
 
 /// Write the 32-byte key that wraps each backup's data key.
@@ -182,6 +250,21 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
 fn write_backup_kek(dir: &Path) -> PathBuf {
     let path = dir.join("backup.key");
     std::fs::write(&path, TEST_BACKUP_KEK).expect("write backup key file");
+    path
+}
+
+/// Fixed 32-byte key that seals `CREATE CREDENTIAL` secrets. A restarted
+/// server reads the same key, so its credentials still open.
+const TEST_CREDENTIAL_KEY: [u8; 32] = [0x5au8; 32];
+
+/// Write the credential key with mode `0600`: the server refuses a key file
+/// any other user can read.
+fn write_credential_key(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = dir.join("credential.key");
+    std::fs::write(&path, TEST_CREDENTIAL_KEY).expect("write credential key file");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .expect("restrict credential key file");
     path
 }
 

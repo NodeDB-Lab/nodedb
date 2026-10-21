@@ -39,6 +39,7 @@ impl CoreLoop {
         task: &ExecutionTask,
         params: DocumentScanParams<'_>,
     ) -> Response {
+        let crs = self.crs_context();
         let DocumentScanParams {
             tid,
             collection,
@@ -220,6 +221,7 @@ impl CoreLoop {
                                 row_key,
                                 value,
                                 &identity_column,
+                                &crs,
                             )
                         })
                     };
@@ -314,13 +316,14 @@ impl CoreLoop {
                 let sorted = if !window_specs.is_empty() {
                     let (ids, bodies): (Vec<String>, Vec<Vec<u8>>) = filtered.into_iter().unzip();
                     let bodies =
-                        match apply_windows_and_computed(bodies, window_functions_bytes, &[]) {
+                        match apply_windows_and_computed(bodies, window_functions_bytes, &[], &crs)
+                        {
                             Ok(bodies) => bodies,
                             Err(e) => return self.response_error(task, e),
                         };
                     let mut windowed: Vec<(String, Vec<u8>)> =
                         ids.into_iter().zip(bodies).collect();
-                    if let Err(e) = sort::sort_rows(&mut windowed, sort_keys, &decimal_keys) {
+                    if let Err(e) = sort::sort_rows(&mut windowed, sort_keys, &decimal_keys, &crs) {
                         return self.response_error(task, e);
                     }
                     windowed
@@ -330,7 +333,7 @@ impl CoreLoop {
                     let mut v = filtered;
                     // Propagate the typed error: a zero divisor in a sort key
                     // is a `22012` statement failure, not an internal fault.
-                    if let Err(e) = sort::sort_rows(&mut v, sort_keys, &decimal_keys) {
+                    if let Err(e) = sort::sort_rows(&mut v, sort_keys, &decimal_keys, &crs) {
                         return self.response_error(task, e);
                     }
                     v
@@ -372,7 +375,7 @@ impl CoreLoop {
                         .into_iter()
                         .map(|(doc_id, mp)| {
                             let projected =
-                                apply_projection_msgpack(&mp, &computed_cols, projection)?;
+                                apply_projection_msgpack(&mp, &computed_cols, projection, &crs)?;
                             Ok((doc_id, projected))
                         })
                         .collect::<crate::Result<Vec<_>>>()
@@ -402,7 +405,7 @@ impl CoreLoop {
                         .into_iter()
                         .map(|(doc_id, mp)| {
                             let projected =
-                                apply_projection_msgpack(&mp, &computed_cols, projection)?;
+                                apply_projection_msgpack(&mp, &computed_cols, projection, &crs)?;
                             Ok((doc_id, projected))
                         })
                         .collect::<crate::Result<Vec<_>>>()

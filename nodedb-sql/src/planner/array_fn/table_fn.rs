@@ -6,16 +6,17 @@
 use crate::types::{ArrayAggPlan, ArrayElementwisePlan, ArraySlicePlan};
 use sqlparser::ast;
 
+use super::agg_args::{AGG_NAMED_ARGS, SLICE_NAMED_ARGS, parse_agg_options, parse_physical};
 use super::helpers::{
-    collect_args, expect_string_array, expect_string_literal, expect_u32, is_null_literal,
-    parse_slice_arg, require_array_name,
+    collect_named_args, expect_string_array, expect_string_literal, expect_u32, is_null_literal,
+    parse_slice_arg, require_array_name, split_args,
 };
 use super::zone::parse_optional_zone;
 use crate::error::{Result, SqlError};
 use crate::resolver::array_tvf::check_agg_reducer;
 use crate::temporal::TemporalScope;
 use crate::types::{SqlCatalog, SqlPlan};
-use crate::types_array::{ArrayBinaryOpAst, ArrayReducerAst, ArraySliceAst};
+use crate::types_array::{ArrayBinaryOpAst, ArraySliceAst};
 
 /// One planned array table-valued function call.
 ///
@@ -106,26 +107,34 @@ pub fn try_plan_array_table_fn(
         _ => return Ok(None),
     };
     let fn_name = crate::parser::normalize::normalize_object_name_checked(name)?;
-    let arg_exprs = collect_args(&args.args);
+    let (sql_name, allowed): (&str, &[&str]) = match fn_name.as_str() {
+        "array_slice" => ("ARRAY_SLICE", SLICE_NAMED_ARGS),
+        "array_project" => ("ARRAY_PROJECT", &[]),
+        "array_agg" => ("ARRAY_AGG", AGG_NAMED_ARGS),
+        "array_elementwise" => ("ARRAY_ELEMENTWISE", &[]),
+        _ => return Ok(None),
+    };
+    let (arg_exprs, named) = split_args(&args.args, sql_name)?;
+    let named = collect_named_args(named, sql_name, allowed)?;
     match fn_name.as_str() {
         "array_slice" => Ok(Some(ArrayTableFn::Slice(plan_slice(
-            &arg_exprs, catalog, temporal,
+            &arg_exprs, &named, catalog, temporal,
         )?))),
         "array_project" => Ok(Some(ArrayTableFn::Project(plan_project(
             &arg_exprs, catalog, temporal,
         )?))),
         "array_agg" => Ok(Some(ArrayTableFn::Agg(plan_agg(
+            &arg_exprs, &named, catalog, temporal,
+        )?))),
+        _ => Ok(Some(ArrayTableFn::Elementwise(plan_elementwise(
             &arg_exprs, catalog, temporal,
         )?))),
-        "array_elementwise" => Ok(Some(ArrayTableFn::Elementwise(plan_elementwise(
-            &arg_exprs, catalog, temporal,
-        )?))),
-        _ => Ok(None),
     }
 }
 
 fn plan_slice(
     args: &[ast::Expr],
+    named: &[(String, ast::Expr)],
     catalog: &dyn SqlCatalog,
     temporal: TemporalScope,
 ) -> Result<ArraySlicePlan> {
@@ -173,7 +182,7 @@ fn plan_slice(
         Some(arg) if !is_null_literal(arg) => expect_u32(arg, "ARRAY_SLICE limit")?,
         _ => 0,
     };
-    let zone = parse_optional_zone("ARRAY_SLICE", args, 4, &name, &view)?;
+    let zone = parse_optional_zone("ARRAY_SLICE", args, 4, &name, &view, &catalog.crs_context())?;
 
     Ok(ArraySlicePlan {
         name,
@@ -182,6 +191,7 @@ fn plan_slice(
         limit,
         zone,
         temporal,
+        physical: parse_physical(named, "ARRAY_SLICE")?,
     })
 }
 
@@ -224,11 +234,13 @@ fn plan_project(
         limit: 0,
         zone: None,
         temporal,
+        physical: false,
     })
 }
 
 fn plan_agg(
     args: &[ast::Expr],
+    named: &[(String, ast::Expr)],
     catalog: &dyn SqlCatalog,
     temporal: TemporalScope,
 ) -> Result<ArrayAggPlan> {
@@ -264,9 +276,8 @@ fn plan_agg(
         })?;
 
     let reducer_str = expect_string_literal(&args[2], "ARRAY_AGG reducer")?;
-    let reducer = ArrayReducerAst::parse(&reducer_str).ok_or_else(|| SqlError::Unsupported {
-        detail: format!("ARRAY_AGG: unknown reducer '{reducer_str}' (want sum/count/min/max/mean)"),
-    })?;
+    let options = parse_agg_options(&reducer_str, named)?;
+    let reducer = options.reducer;
     check_agg_reducer(reducer, &attr, attr_type)?;
 
     let group_by_dim = match args.get(3) {
@@ -287,7 +298,7 @@ fn plan_agg(
         _ => ArraySliceAst::default(),
     };
 
-    let zone = parse_optional_zone("ARRAY_AGG", args, 5, &name, &view)?;
+    let zone = parse_optional_zone("ARRAY_AGG", args, 5, &name, &view, &catalog.crs_context())?;
 
     Ok(ArrayAggPlan {
         name,
@@ -297,6 +308,7 @@ fn plan_agg(
         slice,
         zone,
         temporal,
+        physical: options.physical,
     })
 }
 
@@ -419,11 +431,13 @@ mod tests {
                     name: "variant".into(),
                     dtype: ArrayAttrType::String,
                     nullable: true,
+                    meta: Default::default(),
                 },
                 ArrayAttrAst {
                     name: "qual".into(),
                     dtype: ArrayAttrType::Float64,
                     nullable: true,
+                    meta: Default::default(),
                 },
             ],
             tile_extents: vec![1, 1_000_000],
@@ -564,6 +578,37 @@ mod tests {
                 assert!(group_by_dim.is_none());
             }
             other => panic!("expected ArrayAgg, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agg_named_args_parse_and_unknown_ones_are_refused() {
+        let p = plan_one(
+            "SELECT * FROM ARRAY_AGG('g', 'qual', 'percentile', 'chrom', p => 0.9, physical => true)",
+        )
+        .unwrap();
+        match relation_body(p) {
+            SqlPlan::ArrayAgg(ArrayAggPlan {
+                reducer, physical, ..
+            }) => {
+                assert_eq!(reducer, ArrayReducerAst::Percentile(0.9));
+                assert!(physical);
+            }
+            other => panic!("expected ArrayAgg, got {other:?}"),
+        }
+        for sql in [
+            "SELECT * FROM ARRAY_AGG('g', 'qual', 'sum', colour => 1)",
+            "SELECT * FROM ARRAY_AGG('g', 'qual', 'sum', p => 0.5)",
+            "SELECT * FROM ARRAY_SLICE('g', '{chrom: [1, 1]}', p => 0.5)",
+            "SELECT * FROM ARRAY_PROJECT('g', ARRAY['qual'], physical => true)",
+        ] {
+            assert!(plan_one(sql).is_err(), "{sql}");
+        }
+        let p = plan_one("SELECT * FROM ARRAY_SLICE('g', '{chrom: [1, 1]}', physical => true)")
+            .unwrap();
+        match relation_body(p) {
+            SqlPlan::ArraySlice(ArraySlicePlan { physical, .. }) => assert!(physical),
+            other => panic!("expected ArraySlice, got {other:?}"),
         }
     }
 

@@ -57,8 +57,8 @@ impl WalAppender<'_> {
         self.append_record(RecordType::SpatialDelete, tid, vs, db, p)
     }
 
-    /// Append a `GraphNodeLabelSet` record. Payload is produced by
-    /// `encode_graph_node_label_payload`.
+    /// Append a `GraphNodeLabelSet` record. The payload is an encoded
+    /// `NodeLabelRedo`.
     pub fn append_graph_node_label_set(
         &self,
         tid: TenantId,
@@ -69,8 +69,8 @@ impl WalAppender<'_> {
         self.append_row_record(RecordType::GraphNodeLabelSet, tid, vs, db, p)
     }
 
-    /// Append a `GraphNodeLabelRemove` record. Payload is produced by
-    /// `encode_graph_node_label_payload`.
+    /// Append a `GraphNodeLabelRemove` record. The payload is an encoded
+    /// `NodeLabelRedo`.
     pub fn append_graph_node_label_remove(
         &self,
         tid: TenantId,

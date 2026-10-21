@@ -19,14 +19,17 @@ use std::sync::{Arc, RwLock};
 
 use super::config::SiemConfig;
 use crate::control::security::audit::AuditEntry;
+use crate::control::security::egress::{EgressPolicy, outbound_client};
 
 /// SIEM export adapter: buffers events for CDC streaming and webhook delivery.
 pub struct SiemExporter {
     pub(super) config: SiemConfig,
     /// Shared HTTP client — constructed once at startup and reused across
     /// every webhook flush so we don't rebuild the connection pool and
-    /// TLS session cache per call.
+    /// TLS session cache per call. It is the egress client built on `policy`.
     pub(super) client: Arc<reqwest::Client>,
+    /// The `[egress]` policy the webhook URL passes before every flush.
+    pub(super) policy: Arc<EgressPolicy>,
     /// Buffered audit events for CDC consumers.
     audit_buffer: RwLock<VecDeque<AuditEntry>>,
     /// Buffered auth events for CDC consumers.
@@ -42,16 +45,24 @@ pub struct SiemExporter {
 }
 
 impl SiemExporter {
-    pub fn new(config: SiemConfig) -> Self {
-        Self::with_client(config, Arc::new(reqwest::Client::new()))
+    /// An exporter with its own egress client built on `policy`.
+    pub fn new(config: SiemConfig, policy: Arc<EgressPolicy>) -> Result<Self, reqwest::Error> {
+        let client = Arc::new(outbound_client(Arc::clone(&policy))?);
+        Ok(Self::with_client(config, client, policy))
     }
 
-    /// Construct with an existing shared HTTP client.
-    pub fn with_client(config: SiemConfig, client: Arc<reqwest::Client>) -> Self {
+    /// Construct with an existing shared HTTP client, the egress client
+    /// built on `policy`.
+    pub fn with_client(
+        config: SiemConfig,
+        client: Arc<reqwest::Client>,
+        policy: Arc<EgressPolicy>,
+    ) -> Self {
         let cap = config.buffer_size;
         Self {
             config,
             client,
+            policy,
             audit_buffer: RwLock::new(VecDeque::with_capacity(cap.min(10_000))),
             auth_buffer: RwLock::new(VecDeque::with_capacity(cap.min(10_000))),
             dropped_audit: AtomicU64::new(0),
@@ -59,6 +70,12 @@ impl SiemExporter {
             delivered: AtomicU64::new(0),
             delivery_failures: AtomicU64::new(0),
         }
+    }
+
+    /// An exporter under the strict egress policy, for tests.
+    #[cfg(test)]
+    pub(crate) fn strict_for_test(config: SiemConfig) -> Self {
+        Self::new(config, Arc::new(EgressPolicy::strict())).expect("exporter")
     }
 
     /// Push an audit event to the export buffer.
@@ -240,12 +257,6 @@ impl SiemExporter {
     }
 }
 
-impl Default for SiemExporter {
-    fn default() -> Self {
-        Self::new(SiemConfig::default())
-    }
-}
-
 /// Compute HMAC-SHA256 signature for webhook payload.
 pub(super) fn compute_hmac(secret: &str, message: &str) -> String {
     use hmac::{Hmac, Mac};
@@ -292,7 +303,7 @@ mod tests {
 
     #[test]
     fn buffer_and_drain() {
-        let exporter = SiemExporter::default();
+        let exporter = SiemExporter::strict_for_test(SiemConfig::default());
         exporter.push_audit(test_entry(1));
         exporter.push_audit(test_entry(2));
         exporter.push_auth(test_entry(3));
@@ -306,7 +317,7 @@ mod tests {
 
     #[test]
     fn push_past_buffer_size_is_bounded_and_counted() {
-        let exporter = SiemExporter::new(webhook_config(3));
+        let exporter = SiemExporter::strict_for_test(webhook_config(3));
         for seq in 0..10 {
             exporter.push_audit(test_entry(seq));
         }
@@ -325,7 +336,7 @@ mod tests {
 
     #[test]
     fn zero_capacity_buffers_nothing_and_counts_every_event() {
-        let exporter = SiemExporter::new(webhook_config(0));
+        let exporter = SiemExporter::strict_for_test(webhook_config(0));
         exporter.push_audit(test_entry(1));
         exporter.push_auth(test_entry(2));
         assert_eq!(exporter.buffered_count(), 0);
@@ -335,7 +346,7 @@ mod tests {
 
     #[test]
     fn requeue_restores_order_and_respects_the_ceiling() {
-        let exporter = SiemExporter::new(webhook_config(3));
+        let exporter = SiemExporter::strict_for_test(webhook_config(3));
         exporter.push_audit(test_entry(10));
         // Two in-flight events come back ahead of the one that arrived after.
         exporter.requeue_audit(vec![test_entry(1), test_entry(2)]);
@@ -358,7 +369,7 @@ mod tests {
             webhook_hmac_secret: "test_secret".into(),
             ..Default::default()
         };
-        let exporter = SiemExporter::new(config);
+        let exporter = SiemExporter::strict_for_test(config);
 
         let (body, signature) = exporter
             .build_webhook_payload(&[test_entry(1)])
@@ -371,7 +382,7 @@ mod tests {
 
     #[test]
     fn webhook_payload_carries_the_whole_drained_batch() {
-        let exporter = SiemExporter::new(webhook_config(10));
+        let exporter = SiemExporter::strict_for_test(webhook_config(10));
         let batch = vec![test_entry(1), test_entry(2), test_entry(3)];
         let (body, signature) = exporter
             .build_webhook_payload(&batch)
@@ -392,7 +403,7 @@ mod tests {
 
     #[test]
     fn default_exporter_is_not_configured() {
-        assert!(!SiemExporter::default().is_configured());
-        assert!(SiemExporter::new(webhook_config(1)).is_configured());
+        assert!(!SiemExporter::strict_for_test(SiemConfig::default()).is_configured());
+        assert!(SiemExporter::strict_for_test(webhook_config(1)).is_configured());
     }
 }

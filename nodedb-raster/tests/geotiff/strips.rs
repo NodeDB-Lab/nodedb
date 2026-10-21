@@ -5,14 +5,16 @@
 
 use nodedb_raster::{BlockKind, Interleave, SampleType};
 use tiff::encoder::colortype::{
-    ColorType, Gray8, Gray16, Gray32, Gray32Float, Gray64Float, GrayI16, RGB8, RGB16,
+    ColorType, Gray8, Gray16, Gray32, Gray32Float, Gray64Float, GrayI8, GrayI16, GrayI32, RGB8,
+    RGB16,
 };
 use tiff::encoder::{Compression, DeflateLevel, Predictor, TiffValue};
 
 use crate::fixtures::{
-    DEFLATE, NONE, Pred, RawImage, RawLayout, Sample, StripSpec, encode_chunks, encode_raw,
-    encode_strips, expected, interleave, open, planes, read_all, strip_spec,
+    DEFLATE, LZW, Pred, RawImage, RawLayout, Sample, StripSpec, encode_chunks, encode_raw,
+    encode_strips, expected, interleave, planes, strip_spec,
 };
+use crate::image::{open, read_all};
 
 const W: u32 = 10;
 const H: u32 = 7;
@@ -35,10 +37,10 @@ fn every_strip_codec_round_trips() {
             ..strip_spec(W, H)
         };
         let bytes = encode_strips::<Gray16>(&spec, &planes[0]);
-        let mut reader = open(&bytes).expect("opens");
+        let reader = open(&bytes).expect("opens");
         assert_eq!(reader.layout().kind, BlockKind::Strips);
         assert_eq!(reader.block_count(), blocks);
-        assert_eq!(read_all(&mut reader), expected(&planes));
+        assert_eq!(read_all(&reader), expected(&planes));
     }
 }
 
@@ -50,7 +52,7 @@ fn last_strip_is_cropped_to_the_image() {
         ..strip_spec(W, H)
     };
     let bytes = encode_strips::<Gray16>(&spec, &planes[0]);
-    let mut reader = open(&bytes).expect("opens");
+    let reader = open(&bytes).expect("opens");
     let last = reader.read_block(2).expect("last strip");
     assert_eq!(
         (last.window.row_off, last.window.width, last.window.height),
@@ -68,8 +70,8 @@ fn horizontal_predictor_round_trips() {
         rows_per_strip: Some(2),
         ..strip_spec(W, H)
     };
-    let mut reader = open(&encode_strips::<Gray16>(&spec, &gray[0])).expect("opens");
-    assert_eq!(read_all(&mut reader), expected(&gray));
+    let reader = open(&encode_strips::<Gray16>(&spec, &gray[0])).expect("opens");
+    assert_eq!(read_all(&reader), expected(&gray));
 
     let signed = planes::<i16>(W, H, 1);
     let spec = StripSpec {
@@ -77,8 +79,8 @@ fn horizontal_predictor_round_trips() {
         predictor: Predictor::Horizontal,
         ..strip_spec(W, H)
     };
-    let mut reader = open(&encode_strips::<GrayI16>(&spec, &signed[0])).expect("opens");
-    assert_eq!(read_all(&mut reader), expected(&signed));
+    let reader = open(&encode_strips::<GrayI16>(&spec, &signed[0])).expect("opens");
+    assert_eq!(read_all(&reader), expected(&signed));
 
     let rgb = planes::<u16>(W, H, 3);
     let spec = StripSpec {
@@ -87,15 +89,16 @@ fn horizontal_predictor_round_trips() {
         rows_per_strip: Some(4),
         ..strip_spec(W, H)
     };
-    let mut reader = open(&encode_strips::<RGB16>(&spec, &interleave(&rgb))).expect("opens");
+    let reader = open(&encode_strips::<RGB16>(&spec, &interleave(&rgb))).expect("opens");
     assert_eq!(reader.band_count(), 3);
-    assert_eq!(read_all(&mut reader), expected(&rgb));
+    assert_eq!(read_all(&reader), expected(&rgb));
 }
 
 #[test]
 fn floating_point_predictor_round_trips() {
     let layout = RawLayout::Strips { rows_per_strip: 3 };
-    for compression in [NONE, DEFLATE] {
+    // libtiff applies a predictor under LZW, deflate and ZSTD only.
+    for compression in [LZW, DEFLATE] {
         let two_band = planes::<f32>(W, H, 2);
         let chunks = encode_chunks(
             &two_band,
@@ -119,9 +122,9 @@ fn floating_point_predictor_round_trips() {
             chunks,
             extras: &[],
         });
-        let mut reader = open(&bytes).expect("opens");
+        let reader = open(&bytes).expect("opens");
         assert_eq!(reader.sample_type(), SampleType::F32);
-        assert_eq!(read_all(&mut reader), expected(&two_band));
+        assert_eq!(read_all(&reader), expected(&two_band));
     }
 
     let single = planes::<f64>(W, H, 1);
@@ -140,9 +143,9 @@ fn floating_point_predictor_round_trips() {
         chunks,
         extras: &[],
     });
-    let mut reader = open(&bytes).expect("opens");
+    let reader = open(&bytes).expect("opens");
     assert_eq!(reader.sample_type(), SampleType::F64);
-    assert_eq!(read_all(&mut reader), expected(&single));
+    assert_eq!(read_all(&reader), expected(&single));
 }
 
 fn round_trip<C: ColorType>(sample_type: SampleType)
@@ -156,14 +159,16 @@ where
         rows_per_strip: Some(2),
         ..strip_spec(W, H)
     };
-    let mut reader = open(&encode_strips::<C>(&spec, &planes[0])).expect("opens");
+    let reader = open(&encode_strips::<C>(&spec, &planes[0])).expect("opens");
     assert_eq!(reader.sample_type(), sample_type);
-    assert_eq!(read_all(&mut reader), expected(&planes));
+    assert_eq!(read_all(&reader), expected(&planes));
 }
 
 #[test]
 fn every_supported_sample_type_round_trips() {
     round_trip::<Gray8>(SampleType::U8);
+    round_trip::<GrayI8>(SampleType::I8);
+    round_trip::<GrayI32>(SampleType::I32);
     round_trip::<Gray16>(SampleType::U16);
     round_trip::<GrayI16>(SampleType::I16);
     round_trip::<Gray32>(SampleType::U32);
@@ -180,16 +185,16 @@ fn multi_band_chunky_pixels_split_per_band() {
         extra_samples: 3,
         ..strip_spec(W, H)
     };
-    let mut reader = open(&encode_strips::<Gray16>(&spec, &interleave(&multiband))).expect("opens");
+    let reader = open(&encode_strips::<Gray16>(&spec, &interleave(&multiband))).expect("opens");
     assert_eq!(reader.band_count(), 4);
     assert_eq!(reader.layout().interleave, Interleave::Chunky);
-    assert_eq!(read_all(&mut reader), expected(&multiband));
+    assert_eq!(read_all(&reader), expected(&multiband));
 
     let rgb = planes::<u8>(W, H, 3);
     let spec = StripSpec {
         compression: Compression::Packbits,
         ..strip_spec(W, H)
     };
-    let mut reader = open(&encode_strips::<RGB8>(&spec, &interleave(&rgb))).expect("opens");
-    assert_eq!(read_all(&mut reader), expected(&rgb));
+    let reader = open(&encode_strips::<RGB8>(&spec, &interleave(&rgb))).expect("opens");
+    assert_eq!(read_all(&reader), expected(&rgb));
 }

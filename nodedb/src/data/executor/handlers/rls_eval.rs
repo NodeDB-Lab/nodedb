@@ -20,11 +20,19 @@ use crate::bridge::scan_filter::ScanFilter;
 /// Returns `false` if any filter rejects the document (caller must deny).
 ///
 /// Used by the write gate over the JSON post-images the update paths build.
-pub fn rls_check_document(rls_filters: &[u8], doc: &serde_json::Value) -> bool {
+pub fn rls_check_document(
+    rls_filters: &[u8],
+    doc: &serde_json::Value,
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> bool {
     if rls_filters.is_empty() {
         return true;
     }
-    check_encoded(rls_filters, &nodedb_types::json_to_msgpack_or_empty(doc))
+    check_encoded(
+        rls_filters,
+        &nodedb_types::json_to_msgpack_or_empty(doc),
+        crs,
+    )
 }
 
 /// Evaluate RLS filters against a typed `Value` document.
@@ -32,12 +40,12 @@ pub fn rls_check_document(rls_filters: &[u8], doc: &serde_json::Value) -> bool {
 /// Same contract as [`rls_check_document`]. A document that does not encode
 /// is denied: a row the policy could not be evaluated against is not a row
 /// the policy admitted.
-pub fn rls_check_value(rls_filters: &[u8], doc: &Value) -> bool {
+pub fn rls_check_value(rls_filters: &[u8], doc: &Value, crs: &nodedb_crs::CrsContext<'_>) -> bool {
     if rls_filters.is_empty() {
         return true;
     }
     match nodedb_types::value_to_msgpack(doc) {
-        Ok(msgpack) => check_encoded(rls_filters, &msgpack),
+        Ok(msgpack) => check_encoded(rls_filters, &msgpack, crs),
         Err(e) => {
             tracing::warn!(error = %e, "RLS document encode failed — denying access");
             false
@@ -49,13 +57,17 @@ pub fn rls_check_value(rls_filters: &[u8], doc: &Value) -> bool {
 ///
 /// Evaluates filters directly on msgpack bytes — no decode to serde_json::Value.
 /// Returns `true` if passes. Returns `false` if any filter rejects.
-pub fn rls_check_msgpack_bytes(rls_filters: &[u8], doc_bytes: &[u8]) -> bool {
+pub fn rls_check_msgpack_bytes(
+    rls_filters: &[u8],
+    doc_bytes: &[u8],
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> bool {
     if rls_filters.is_empty() {
         return true;
     }
     // Ensure bytes are standard msgpack for matches_binary.
     let mp = super::super::doc_format::json_to_msgpack(doc_bytes);
-    check_encoded(rls_filters, &mp)
+    check_encoded(rls_filters, &mp, crs)
 }
 
 /// Decode the compiled filters and match them against one standard msgpack
@@ -63,7 +75,7 @@ pub fn rls_check_msgpack_bytes(rls_filters: &[u8], doc_bytes: &[u8]) -> bool {
 /// filter payload or a division/modulo-by-zero inside a filter denies rather
 /// than propagating a query error, so a malformed or adversarial predicate
 /// can never distinguish "row exists but errors" from "row doesn't exist".
-fn check_encoded(rls_filters: &[u8], msgpack: &[u8]) -> bool {
+fn check_encoded(rls_filters: &[u8], msgpack: &[u8], crs: &nodedb_crs::CrsContext<'_>) -> bool {
     let filters: Vec<ScanFilter> = match zerompk::from_msgpack(rls_filters) {
         Ok(f) => f,
         Err(_) => {
@@ -71,7 +83,7 @@ fn check_encoded(rls_filters: &[u8], msgpack: &[u8]) -> bool {
             return false;
         }
     };
-    match ScanFilter::all_match_binary(&filters, msgpack) {
+    match ScanFilter::all_match_binary(&filters, msgpack, crs) {
         Ok(pass) => pass,
         Err(e) => {
             tracing::warn!(error = %e, "RLS filter evaluation failed — denying access");
@@ -100,7 +112,11 @@ mod tests {
     #[test]
     fn empty_filters_allow() {
         let doc = json!({"anything": "goes"});
-        assert!(rls_check_document(&[], &doc));
+        assert!(rls_check_document(
+            &[],
+            &doc,
+            &nodedb_crs::CrsContext::builtin_only()
+        ));
     }
 
     #[test]
@@ -111,7 +127,11 @@ mod tests {
             nodedb_types::Value::String("42".into()),
         );
         let doc = json!({"user_id": "42", "name": "alice"});
-        assert!(rls_check_document(&rls, &doc));
+        assert!(rls_check_document(
+            &rls,
+            &doc,
+            &nodedb_crs::CrsContext::builtin_only()
+        ));
     }
 
     #[test]
@@ -122,7 +142,11 @@ mod tests {
             nodedb_types::Value::String("42".into()),
         );
         let doc = json!({"user_id": "99", "name": "bob"});
-        assert!(!rls_check_document(&rls, &doc));
+        assert!(!rls_check_document(
+            &rls,
+            &doc,
+            &nodedb_crs::CrsContext::builtin_only()
+        ));
     }
 
     #[test]
@@ -133,7 +157,11 @@ mod tests {
             nodedb_types::Value::String("42".into()),
         );
         let doc = json!({"name": "alice"});
-        assert!(!rls_check_document(&rls, &doc));
+        assert!(!rls_check_document(
+            &rls,
+            &doc,
+            &nodedb_crs::CrsContext::builtin_only()
+        ));
     }
 
     #[test]
@@ -145,16 +173,32 @@ mod tests {
         );
         let ok = Value::from(json!({"user_id": "42"}));
         let bad = Value::from(json!({"user_id": "99"}));
-        assert!(rls_check_value(&rls, &ok));
-        assert!(!rls_check_value(&rls, &bad));
-        assert!(rls_check_value(&[], &bad));
+        assert!(rls_check_value(
+            &rls,
+            &ok,
+            &nodedb_crs::CrsContext::builtin_only()
+        ));
+        assert!(!rls_check_value(
+            &rls,
+            &bad,
+            &nodedb_crs::CrsContext::builtin_only()
+        ));
+        assert!(rls_check_value(
+            &[],
+            &bad,
+            &nodedb_crs::CrsContext::builtin_only()
+        ));
     }
 
     #[test]
     fn corrupt_filters_deny() {
         let corrupt = vec![0xFF, 0xFE, 0xFD];
         let doc = json!({"user_id": "42"});
-        assert!(!rls_check_document(&corrupt, &doc));
+        assert!(!rls_check_document(
+            &corrupt,
+            &doc,
+            &nodedb_crs::CrsContext::builtin_only()
+        ));
     }
 
     #[test]
@@ -178,9 +222,17 @@ mod tests {
         let rls = zerompk::to_msgpack_vec(&filters).unwrap();
 
         let doc_ok = json!({"user_id": "42", "status": "active"});
-        assert!(rls_check_document(&rls, &doc_ok));
+        assert!(rls_check_document(
+            &rls,
+            &doc_ok,
+            &nodedb_crs::CrsContext::builtin_only()
+        ));
 
         let doc_bad = json!({"user_id": "42", "status": "banned"});
-        assert!(!rls_check_document(&rls, &doc_bad));
+        assert!(!rls_check_document(
+            &rls,
+            &doc_bad,
+            &nodedb_crs::CrsContext::builtin_only()
+        ));
     }
 }

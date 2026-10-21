@@ -7,7 +7,7 @@ use nodedb_crdt::policy::{
     CollectionPolicy, ConflictPolicy, PolicyRegistry, PolicyResolution, ResolvedAction,
 };
 use nodedb_crdt::state::CrdtState;
-use nodedb_crdt::validator::Validator;
+use nodedb_crdt::validator::{IncomingDelta, Validator};
 
 use crate::common::{AuthCtx, post_change, schema, user_change, wall_now_ms};
 
@@ -36,11 +36,14 @@ fn fk_chain_child_arrives_before_parent_then_resolves() {
     let r_post = validator
         .validate_with_policy(
             &leader,
-            1,
-            AuthCtx::default(),
             &post,
-            b"post-delta".to_vec(),
-            started_ms,
+            IncomingDelta {
+                peer_id: 1,
+                auth: AuthCtx::default(),
+                delta_bytes: b"post-delta".to_vec(),
+                hlc_timestamp: started_ms,
+            },
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
     assert!(matches!(r_post, PolicyResolution::Deferred { .. }));
@@ -50,11 +53,14 @@ fn fk_chain_child_arrives_before_parent_then_resolves() {
     let r_user = validator
         .validate_with_policy(
             &leader,
-            2,
-            AuthCtx::default(),
             &user,
-            b"user-delta".to_vec(),
-            started_ms + 50,
+            IncomingDelta {
+                peer_id: 2,
+                auth: AuthCtx::default(),
+                delta_bytes: b"user-delta".to_vec(),
+                hlc_timestamp: started_ms + 50,
+            },
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
     assert!(
@@ -85,11 +91,14 @@ fn fk_chain_child_arrives_before_parent_then_resolves() {
     let r_retry = validator
         .validate_with_policy(
             &leader,
-            1,
-            AuthCtx::default(),
             &post,
-            b"post-delta".to_vec(),
-            retry_now,
+            IncomingDelta {
+                peer_id: 1,
+                auth: AuthCtx::default(),
+                delta_bytes: b"post-delta".to_vec(),
+                hlc_timestamp: retry_now,
+            },
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
     assert!(

@@ -57,13 +57,19 @@ pub struct VectorHitCut<'a> {
 /// Apply the residual filter, then truncate to `top_k`. With
 /// `strip_bodies`, drop the body bytes the Data Plane attached only for the
 /// predicate. A no-op when `rls_filters` is empty.
-fn apply_rls_filter(hits: &mut Vec<Hit>, rls_filters: &[u8], top_k: usize, strip_bodies: bool) {
+fn apply_rls_filter(
+    hits: &mut Vec<Hit>,
+    rls_filters: &[u8],
+    top_k: usize,
+    strip_bodies: bool,
+    crs: &nodedb_crs::CrsContext<'_>,
+) {
     // When filters are empty the Data Plane ranks exactly `top_k` and
     // attaches a body only for projection, so there is nothing to do.
     if rls_filters.is_empty() {
         return;
     }
-    admit_hits(hits, rls_filters, top_k);
+    admit_hits(hits, rls_filters, top_k, crs);
     if strip_bodies {
         for h in hits.iter_mut() {
             h.body = None;
@@ -77,7 +83,12 @@ fn apply_rls_filter(hits: &mut Vec<Hit>, rls_filters: &[u8], top_k: usize, strip
 /// The Data Plane ranks a wider window when a residual filter applies: the
 /// statement's `WHERE` conjuncts and any read policy. The filter and the cut
 /// run here, on the Control Plane.
-fn admit_hits(hits: &mut Vec<Hit>, rls_filters: &[u8], top_k: usize) {
+fn admit_hits(
+    hits: &mut Vec<Hit>,
+    rls_filters: &[u8],
+    top_k: usize,
+    crs: &nodedb_crs::CrsContext<'_>,
+) {
     let filters: Vec<ScanFilter> = match zerompk::from_msgpack(rls_filters) {
         Ok(f) => f,
         Err(_) => {
@@ -96,7 +107,7 @@ fn admit_hits(hits: &mut Vec<Hit>, rls_filters: &[u8], top_k: usize) {
     // request without larger dispatch-chain changes, and dropping hits is
     // the strictly safer outcome for an RLS filter regardless.
     hits.retain(|h| match h.body.as_deref() {
-        Some(body) => ScanFilter::all_match_binary(&filters, body).unwrap_or(false),
+        Some(body) => ScanFilter::all_match_binary(&filters, body, crs).unwrap_or(false),
         None => false,
     });
     if hits.len() > top_k {
@@ -115,6 +126,7 @@ pub(crate) fn filter_vector_hits(
     payload: &[u8],
     rls_filters: &[u8],
     top_k: usize,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<u8>> {
     if rls_filters.is_empty() {
         return Ok(payload.to_vec());
@@ -124,7 +136,7 @@ pub(crate) fn filter_vector_hits(
             format: "msgpack".into(),
             detail: format!("vector search hits do not decode: {e}"),
         })?;
-    admit_hits(&mut hits, rls_filters, top_k);
+    admit_hits(&mut hits, rls_filters, top_k, crs);
     zerompk::to_msgpack_vec(&hits).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
         detail: format!("vector search hits do not encode: {e}"),
@@ -159,7 +171,13 @@ pub async fn translate_vector_search_payload(
             detail: format!("vector search hits do not decode: {e}"),
         })?;
 
-    apply_rls_filter(&mut hits, cut.rls_filters, cut.top_k, cut.strip_bodies);
+    apply_rls_filter(
+        &mut hits,
+        cut.rls_filters,
+        cut.top_k,
+        cut.strip_bodies,
+        &crate::control::crs_context::crs_context_for(state),
+    );
 
     let FlattenedHits { mut rows, unnamed } = flatten_hits(&hits)?;
     let keys = resolve_surrogate_pks(

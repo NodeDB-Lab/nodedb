@@ -60,11 +60,15 @@ pub async fn serve_rag_plan(
     state.cluster_routing.as_ref()?;
     let PhysicalPlan::Graph(GraphOp::RagFusion {
         stage: RagStage::Local,
+        scope: read_scope,
         ..
     }) = plan
     else {
         return None;
     };
+    if let Err(error) = super::super::read_scope::check_walk_scope(read_scope) {
+        return Some(Err(error));
+    }
     Some(
         run(
             state,
@@ -72,6 +76,7 @@ pub async fn serve_rag_plan(
                 tenant_id,
                 database_id,
                 linearizable,
+                read_scope: *read_scope,
             },
             plan,
         )
@@ -84,6 +89,8 @@ struct RagScope {
     tenant_id: TenantId,
     database_id: DatabaseId,
     linearizable: bool,
+    /// The bitemporal cut every hop of the expansion reads.
+    read_scope: nodedb_physical::physical_plan::GraphReadScope,
 }
 
 async fn run(state: &SharedState, scope: RagScope, plan: &PhysicalPlan) -> crate::Result<Response> {
@@ -109,6 +116,7 @@ async fn run(state: &SharedState, scope: RagScope, plan: &PhysicalPlan) -> crate
         tenant_id,
         database_id,
         linearizable,
+        ..
     } = scope;
     let qualified = collection.as_str().to_owned();
     let vshard = nodedb_types::CollectionKey::from_qualified(database_id, collection)?
@@ -361,6 +369,7 @@ async fn walk_from_seeds(
                 with_properties: false,
                 // A RAG fusion plan carries no session transaction.
                 txn_id: None,
+                read_scope: scope.read_scope,
             },
         )
         .await?;

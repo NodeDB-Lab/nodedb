@@ -25,8 +25,10 @@
 //!   are sorted, so the CSR, and the answer, match a single node's exactly.
 //! - On a single node every algorithm gathers, so an algorithm sees the edges
 //!   of every core, not one core's share.
-//! - A historical run (`AS OF SYSTEM TIME`) gathers for every algorithm: each
-//!   owner exports the edges live at that time.
+//! - A historical run (`AS OF SYSTEM TIME` / `AS OF VALID TIME`) runs the
+//!   same way at its pinned cut: PageRank and WCC as BSP supersteps that
+//!   every owner reads at that cut, every other algorithm over the edges each
+//!   owner exports at it.
 //! - A gathered run needs the whole graph in one CSR on one core, as a single
 //!   node's run does. It is bounded by `GraphTuning::max_gathered_algo_edges`:
 //!   past the cap it is refused with the edge count, never answered from part
@@ -43,7 +45,7 @@ use crate::control::server::shared::session::StatementDeadline;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId, VShardId};
 use nodedb_graph::{AlgoParams, GraphAlgorithm};
-use nodedb_physical::physical_plan::{AlgoEdge, AlgoStage, GraphOp};
+use nodedb_physical::physical_plan::{AlgoEdge, AlgoStage, GraphOp, GraphReadScope};
 
 use super::bsp_pagerank::enumerate::enumerate_shards;
 use super::cluster_resolve::{DispatchSuperstepParams, dispatch_superstep_to_node, gateway_shared};
@@ -112,21 +114,22 @@ pub async fn scatter_to_graph_owners(
 }
 
 /// Run `algorithm` over the whole graph of `params.collection` and return its
-/// `AlgoResultBatch` payload. `system_as_of_ms` runs it over the edges live at
-/// that system time; `None` runs it over the current edges.
+/// `AlgoResultBatch` payload, read at `scope`: the current edges, or the
+/// edges at the statement's pinned bitemporal cut.
 pub async fn run_graph_algo(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
     algorithm: GraphAlgorithm,
     params: AlgoParams,
-    system_as_of_ms: Option<i64>,
+    scope: GraphReadScope,
     linearizable: bool,
 ) -> crate::Result<Payload> {
+    super::read_scope::check_walk_scope(&scope)?;
     let deadline_ms = StatementDeadline::of_statement(state).hop_budget_ms();
-    // A current-state BSP run pins its own read cut from a Calvin cut marker
-    // (`run_cut`). A historical run gathers the edges live at its system time.
-    if state.cluster_routing.is_some() && system_as_of_ms.is_none() {
+    // A BSP run pins its read cut from a Calvin cut marker (`read_cut::run_marker`),
+    // capped at a historical run's own ordinal.
+    if state.cluster_routing.is_some() {
         match algorithm {
             GraphAlgorithm::PageRank => {
                 return super::run_bsp_pagerank(
@@ -136,6 +139,7 @@ pub async fn run_graph_algo(
                     params,
                     deadline_ms,
                     linearizable,
+                    scope,
                 )
                 .await;
             }
@@ -147,10 +151,21 @@ pub async fn run_graph_algo(
                     params,
                     deadline_ms,
                     linearizable,
+                    scope,
                 )
                 .await;
             }
-            _ => {}
+            GraphAlgorithm::LabelPropagation
+            | GraphAlgorithm::Lcc
+            | GraphAlgorithm::Sssp
+            | GraphAlgorithm::Betweenness
+            | GraphAlgorithm::Closeness
+            | GraphAlgorithm::Harmonic
+            | GraphAlgorithm::Degree
+            | GraphAlgorithm::Louvain
+            | GraphAlgorithm::Triangles
+            | GraphAlgorithm::Diameter
+            | GraphAlgorithm::KCore => {}
         }
     }
     let edges = gather_algo_edges(
@@ -159,7 +174,7 @@ pub async fn run_graph_algo(
         database_id,
         algorithm,
         &params,
-        system_as_of_ms,
+        scope,
         linearizable,
     )
     .await?;
@@ -167,6 +182,8 @@ pub async fn run_graph_algo(
         algorithm,
         params,
         stage: AlgoStage::Gathered { edges },
+        // The gathered edges already are the graph at the cut.
+        scope,
     });
     let response = crate::control::server::dispatch_utils::dispatch_to_data_plane(
         state,
@@ -190,13 +207,14 @@ async fn gather_algo_edges(
     database_id: DatabaseId,
     algorithm: GraphAlgorithm,
     params: &AlgoParams,
-    system_as_of_ms: Option<i64>,
+    scope: GraphReadScope,
     linearizable: bool,
 ) -> crate::Result<Vec<AlgoEdge>> {
     let plan = PhysicalPlan::Graph(GraphOp::Algo {
         algorithm,
         params: params.clone(),
-        stage: AlgoStage::ExportEdges { system_as_of_ms },
+        stage: AlgoStage::ExportEdges,
+        scope,
     });
     let payloads = scatter_to_graph_owners(
         state,

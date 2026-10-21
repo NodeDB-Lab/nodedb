@@ -237,13 +237,10 @@ async fn scalar_st_distance() {
 }
 
 // ── R-tree indexing parity: DOCUMENT collections vs the `spatial` engine ────
-// SQL-inserted geometry (`ST_Point(...)`) is serialized to a GeoJSON STRING
-// field. The `spatial` engine's write path always handled that string form
-// for R-tree indexing; a DOCUMENT (schemaless) collection's index-build path
-// only recognized a GeoJSON OBJECT field, so SQL-inserted geometry into a
-// DOCUMENT collection was silently never R-tree-indexed (O(n) full-scan
-// fallback instead of O(log n)). Both paths must return identical, correct
-// results for a spatial predicate regardless of engine.
+// SQL-inserted geometry (`ST_Point(...)`) is stored as a native geometry
+// value in a DOCUMENT collection and as EWKB in a `spatial` collection. Both
+// are R-tree-indexed, and both return identical results for a spatial
+// predicate.
 #[tokio::test]
 async fn sql_geometry_insert_into_document_collection_matches_spatial_predicate() {
     let srv = TestServer::start().await;

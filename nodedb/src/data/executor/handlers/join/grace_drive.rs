@@ -281,7 +281,7 @@ impl CoreLoop {
             return self.response_error(join.task, ErrorCode::ResourcesExhausted);
         }
 
-        if let Err(e) = join.filter_and_project(&mut results) {
+        if let Err(e) = join.filter_and_project(&mut results, &self.crs_context()) {
             return self.response_error(join.task, ErrorCode::from(e));
         }
 

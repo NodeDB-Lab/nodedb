@@ -48,7 +48,7 @@ fn snapshot_at(store: &EdgeStore, nodes: &[&str], cutoff: i64) -> Vec<(String, S
                 collection: COLL,
                 node: n,
                 label_filter: None,
-                system_as_of_ms: Some(cutoff),
+                cutoff_ordinal: nodedb_types::ms_to_ordinal_upper(cutoff),
                 valid_at_ms: None,
             })
             .unwrap();
@@ -66,7 +66,7 @@ fn snapshot_at(store: &EdgeStore, nodes: &[&str], cutoff: i64) -> Vec<(String, S
                 collection: COLL,
                 node: n,
                 label_filter: None,
-                system_as_of_ms: Some(cutoff),
+                cutoff_ordinal: nodedb_types::ms_to_ordinal_upper(cutoff),
                 valid_at_ms: None,
             })
             .unwrap();
@@ -149,7 +149,7 @@ fn ceiling_resolves_correctly_after_crash_mid_write() {
             collection: COLL,
             node: "b",
             label_filter: None,
-            system_as_of_ms: Some(1_000),
+            cutoff_ordinal: nodedb_types::ms_to_ordinal_upper(1_000),
             valid_at_ms: None,
         })
         .unwrap();

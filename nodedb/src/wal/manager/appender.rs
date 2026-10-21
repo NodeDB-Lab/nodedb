@@ -131,6 +131,16 @@ impl WalAppender<'_> {
         self.wal.max_payload()
     }
 
+    /// The millisecond of a fresh ordinal of the node's shared system-time
+    /// clock: the stamp a timeseries ingest takes when no replicated entry
+    /// carries one.
+    pub fn ordinal_now_ms(&self) -> u64 {
+        u64::try_from(nodedb_types::ordinal_to_ms(
+            self.wal.ordinal_clock().next_ordinal(),
+        ))
+        .unwrap_or(0)
+    }
+
     /// The commit HLC the next record carries: its write's, else the stamp
     /// of the metadata entry this task applies, else `0`. A cluster restore
     /// judges a record with `0` by its WAL position, never by a clock.

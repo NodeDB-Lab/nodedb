@@ -25,4 +25,10 @@ pub struct BatchEdge {
     pub dst_id: String,
     pub src_surrogate: Surrogate,
     pub dst_surrogate: Surrogate,
+    /// Start of the edge's valid time, ms since epoch. `None` takes the
+    /// write's wall time. A delete ignores it.
+    pub valid_from_ms: Option<i64>,
+    /// Exclusive end of the edge's valid time. `None` leaves it open. A
+    /// delete ignores it.
+    pub valid_until_ms: Option<i64>,
 }

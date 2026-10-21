@@ -26,7 +26,7 @@ use nodedb::config::auth::JwtAuthConfig;
 use nodedb::control::security::jwks::registry::JwksRegistry;
 use nodedb::control::server::sync::listener::{SyncListenerConfig, start_sync_listener};
 use nodedb::control::server::sync::shape::handler::{ShapeSnapshotMsg, ShapeSubscribeMsg};
-use nodedb_test_support::jwks_fixture::{JwksFixture, now_secs};
+use nodedb_test_support::jwks_fixture::{JwksFixture, loopback_egress, now_secs};
 use nodedb_test_support::pgwire_harness::TestServer;
 use nodedb_types::sync::shape::{ShapeDefinition, ShapeType};
 use nodedb_types::sync::wire::{HandshakeAckMsg, HandshakeMsg, SyncFrame, SyncMessageType};
@@ -61,7 +61,7 @@ impl SyncAuthFixture {
     async fn start_with(adjust: impl FnOnce(JwtAuthConfig) -> JwtAuthConfig) -> Self {
         let jwks = JwksFixture::spawn().await;
         let config = adjust(jwks.auth_config(ISSUER, AUDIENCE, TENANT));
-        let registry = JwksRegistry::init(config)
+        let registry = JwksRegistry::init(config, loopback_egress())
             .await
             .expect("test JWKS registry must initialize");
         let server = TestServer::start_with_jwks(std::sync::Arc::new(registry)).await;
@@ -154,7 +154,7 @@ async fn handshake(ws: &mut Ws, token: &str) -> HandshakeAckMsg {
         client_version: "sync-jwt-auth-test".into(),
         lite_id: String::new(),
         epoch: 0,
-        wire_version: nodedb_types::wire_version::WIRE_FORMAT_VERSION,
+        wire_version: nodedb_types::sync::wire::SYNC_WIRE_VERSION,
     };
     send(ws, SyncMessageType::Handshake, &msg).await;
     let frame = next_frame(ws).await.expect("handshake must be answered");

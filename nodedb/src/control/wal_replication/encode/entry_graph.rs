@@ -23,15 +23,19 @@ pub(super) fn graph_write(op: &GraphOp) -> Option<ReplicatedWrite> {
             properties,
             src_surrogate,
             dst_surrogate,
-        } => graph::edge_put(
-            collection.as_str(),
+            valid_from_ms,
+            valid_until_ms,
+        } => graph::edge_put(graph::EdgePutEncode {
+            collection: collection.as_str(),
             src_id,
             label,
             dst_id,
             properties,
-            src_surrogate.as_u32(),
-            dst_surrogate.as_u32(),
-        ),
+            src_surrogate: src_surrogate.as_u32(),
+            dst_surrogate: dst_surrogate.as_u32(),
+            valid_from_ms: *valid_from_ms,
+            valid_until_ms: *valid_until_ms,
+        }),
         // The compiled write predicate is already decided before replication,
         // so it is not carried on the wire.
         GraphOp::EdgeDelete {
@@ -75,7 +79,6 @@ pub(super) fn graph_write(op: &GraphOp) -> Option<ReplicatedWrite> {
         | GraphOp::BspSuperstep(_)
         | GraphOp::WccSuperstep(_)
         | GraphOp::TemporalNeighbors { .. }
-        | GraphOp::TemporalAlgorithm { .. }
         | GraphOp::Stats { .. }
         | GraphOp::NodePresenceRead { .. } => return None,
     })

@@ -81,6 +81,7 @@ impl CoreLoop {
         params: ColumnarOverlayMergeParams<'_>,
         matched: &mut Vec<ColumnarMatchedRow>,
     ) -> crate::Result<()> {
+        let crs = self.crs_context();
         let ColumnarOverlayMergeParams {
             txn_id,
             coll_key,
@@ -100,7 +101,7 @@ impl CoreLoop {
         };
 
         let predicate = |row: &[Value]| -> Result<bool, nodedb_query::EvalError> {
-            row_matches_filters_and_policy(row, schema, filter_predicates, rls_predicates)
+            row_matches_filters_and_policy(row, schema, filter_predicates, rls_predicates, &crs)
         };
 
         // Surrogates already represented in the base result. Additions
@@ -150,6 +151,7 @@ impl CoreLoop {
                             projection,
                             computed_cols,
                             all_versions,
+                            &crs,
                         ) {
                             Ok(v) => *obj = v,
                             Err(e) => {
@@ -187,8 +189,14 @@ impl CoreLoop {
             if !predicate(&new_row)? {
                 continue;
             }
-            let obj =
-                row_to_projected_value(&new_row, schema, projection, computed_cols, all_versions)?;
+            let obj = row_to_projected_value(
+                &new_row,
+                schema,
+                projection,
+                computed_cols,
+                all_versions,
+                &crs,
+            )?;
             matched.push((Some(Surrogate::new(surrogate)), new_row, obj));
             seen.insert(surrogate);
         }

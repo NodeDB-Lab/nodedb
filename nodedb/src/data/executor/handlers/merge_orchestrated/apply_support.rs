@@ -46,6 +46,7 @@ pub(super) fn gate_merge_arms(
     identity_column: &str,
     tid: u64,
     collection: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     if matches!(
         rls_write_check.decision(),
@@ -64,12 +65,15 @@ pub(super) fn gate_merge_arms(
         let identity = key.to_identity();
         rls_write_gate::admit_stored_row(
             rls_write_check,
-            body,
-            &identity,
-            None,
-            identity_column,
+            rls_write_gate::GatedRow {
+                body,
+                identity: &identity,
+                strict_schema: None,
+                identity_column,
+            },
             tid,
             collection,
+            crs,
         )?;
     }
     for insert in &plan.inserts {
@@ -77,12 +81,15 @@ pub(super) fn gate_merge_arms(
             crate::engine::document::store::RowIdentity::from_user_key(insert.join_key.as_str());
         rls_write_gate::admit_stored_row(
             rls_write_check,
-            &insert.body,
-            &identity,
-            None,
-            identity_column,
+            rls_write_gate::GatedRow {
+                body: &insert.body,
+                identity: &identity,
+                strict_schema: None,
+                identity_column,
+            },
             tid,
             collection,
+            crs,
         )?;
     }
     Ok(())

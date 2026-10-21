@@ -10,6 +10,7 @@
 //! projection or WHERE clause, and a non-column argument yields its computed
 //! value rather than a NULL placeholder.
 
+use nodedb_crs::CrsContext;
 use nodedb_types::Value;
 
 use super::spec::WindowFuncSpec;
@@ -32,13 +33,14 @@ pub(super) fn eval_arg_values(
     indices: &[usize],
     spec: &WindowFuncSpec,
     idx: usize,
+    crs: &CrsContext<'_>,
 ) -> Result<ArgValues, EvalError> {
     let Some(expr) = spec.args.get(idx) else {
         return Ok(None);
     };
     let values = indices
         .iter()
-        .map(|&i| expr.eval(&rows[i].1))
+        .map(|&i| expr.eval(&rows[i].1, crs))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(values))
 }

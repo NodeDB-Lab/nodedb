@@ -7,8 +7,8 @@
 
 use crate::data::executor::core_loop::CoreLoop;
 
-/// Seed `doc_configs`, vector-index params, and columnar-family schemas from the
-/// durable catalog.
+/// Seed the user-defined CRS set, `doc_configs`, vector-index params, and
+/// columnar-family schemas from the durable catalog.
 ///
 /// # Ordering (load-bearing)
 ///
@@ -27,7 +27,13 @@ pub(super) fn seed_catalog_state(
         String,
         nodedb_types::columnar::ColumnarSchema,
     )],
+    crs_set_seed: &std::sync::Arc<nodedb_crs::CustomCrsSet>,
 ) {
+    // Install the catalog's user-defined CRS set BEFORE WAL replay, which
+    // rebuilds spatial indexes and evaluates stored geometry: a row in a
+    // user-defined SRID resolves only against this set.
+    core.set_crs_set(std::sync::Arc::clone(crs_set_seed));
+
     // Seed `doc_configs` from the durable catalog BEFORE WAL
     // replay. `doc_configs` is otherwise only populated by
     // `DocumentOp::Register` broadcasts processed in the event

@@ -61,6 +61,7 @@ fn is_transient_verdict(code: &ErrorCode) -> bool {
         | ErrorCode::ActiveSqlTransaction { .. }
         | ErrorCode::DependentObjectsExist { .. }
         | ErrorCode::NodeLabelLimit { .. }
+        | ErrorCode::ProgramLimitExceeded { .. }
         | ErrorCode::RejectedConstraint { .. }
         | ErrorCode::RejectedPrevalidation { .. }
         | ErrorCode::SyncRejected { .. }
@@ -166,6 +167,8 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         // A label write past the node-label cap is refused before any label of
         // the statement stays set.
         | ErrorCode::NodeLabelLimit { .. }
+        // A statement past a program limit is refused before it applies.
+        | ErrorCode::ProgramLimitExceeded { .. }
         // Expression evaluation failed before producing a value to write.
         | ErrorCode::DivisionByZero
         | ErrorCode::UndefinedFunction { .. }

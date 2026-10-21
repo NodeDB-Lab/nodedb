@@ -35,7 +35,9 @@ use crate::control::backup::snapshot_keys::{
     homes_of_stored,
 };
 use crate::control::cluster::calvin_snapshot::{await_calvin_cut, capture_calvin_cut};
-use crate::control::cluster::snapshot_builder_filter::{bind_in_group, push_group_edges};
+use crate::control::cluster::snapshot_builder_filter::{
+    bind_in_group, push_group_edges, push_group_node_labels,
+};
 use crate::control::cluster::snapshot_cut::settled_cut;
 use crate::control::security::catalog::SystemCatalog;
 use crate::control::state::SharedState;
@@ -265,6 +267,12 @@ impl DataPlaneSnapshotBuilder {
             snap.edge_cuts
                 .into_iter()
                 .map(|(collection, cut)| (database_id.as_u64(), tenant_id, collection, cut)),
+        );
+        push_group_node_labels(
+            snap.node_labels,
+            snap.node_label_versions,
+            group_vshards,
+            merged,
         );
 
         // CRDT: one Loro doc per (tenant, collection). Each entry carries its

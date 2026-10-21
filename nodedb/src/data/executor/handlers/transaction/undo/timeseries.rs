@@ -101,7 +101,7 @@ impl CoreLoop {
             &collection_key,
             series_catalog,
         );
-        reinstall(&mut self.ts_replay_stamps, &collection_key, replay_stamp);
+        reinstall(&mut self.ts_replay.stamps, &collection_key, replay_stamp);
         // The directory back in place carries the aggregates' image. Reset
         // them so the maintenance tick reloads it and folds what it lacks.
         let (database_id, tenant_id, collection) = &collection_key;

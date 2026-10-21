@@ -5,21 +5,28 @@
 //! The same rules run again in the engine schema builder. This copy
 //! reports each refusal with its own SQLSTATE class.
 //!
-//! - SRID outside the supported set: `22000`.
+//! - SRID no CRS defines: `22000`.
 //! - X or Y names no dim: `42703`.
 //! - X equals Y, wrong dim type, or bad coefficients: `22000`.
 
-use nodedb_types::geometry::Srid;
+use nodedb_crs::CrsContext;
 
 use crate::error::{Result, SqlError};
 use crate::types_array::{ArrayDimAst, ArrayDimType, ArrayGeorefAst};
 
-/// Check `georef` against the dims of array `array`.
-pub fn check_georef(array: &str, georef: &ArrayGeorefAst, dims: &[ArrayDimAst]) -> Result<()> {
+/// Check `georef` against the dims of array `array`. The SRID must resolve
+/// in `crs`.
+pub fn check_georef(
+    array: &str,
+    georef: &ArrayGeorefAst,
+    dims: &[ArrayDimAst],
+    crs: &CrsContext<'_>,
+) -> Result<()> {
     let data = |detail: String| SqlError::DataException {
         detail: format!("array '{array}' GEOREF: {detail}"),
     };
-    Srid::try_from(georef.srid).map_err(|e| data(e.to_string()))?;
+    crs.resolve_u32(georef.srid)
+        .map_err(|e| data(e.to_string()))?;
     let dim = |name: &str| {
         dims.iter()
             .find(|d| d.name == name)
@@ -84,6 +91,10 @@ fn dim_type_name(dtype: ArrayDimType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn crs() -> CrsContext<'static> {
+        CrsContext::builtin_only()
+    }
     use crate::types_array::ArrayDomainBound;
 
     fn dim(name: &str, dtype: ArrayDimType) -> ArrayDimAst {
@@ -130,33 +141,38 @@ mod tests {
 
     #[test]
     fn accepts_pixel_and_world() {
-        assert!(check_georef("a", &georef(Some(GT)), &ints()).is_ok());
+        assert!(check_georef("a", &georef(Some(GT)), &ints(), &crs()).is_ok());
         let world = vec![
             dim("row", ArrayDimType::Float64),
             dim("col", ArrayDimType::Int64),
         ];
-        assert!(check_georef("a", &georef(None), &world).is_ok());
+        assert!(check_georef("a", &georef(None), &world, &crs()).is_ok());
     }
 
     #[test]
-    fn unsupported_srid_is_22000() {
+    fn undefined_srid_is_22000() {
         let mut g = georef(None);
-        g.srid = 2154;
-        let err = check_georef("a", &g, &ints()).unwrap_err();
+        g.srid = 999;
+        let err = check_georef("a", &g, &ints(), &crs()).unwrap_err();
         let SqlError::DataException { detail } = err else {
             panic!("expected DataException, got {err:?}");
         };
-        assert!(
-            detail.contains("4326, 32647, 32648, 3375, 3376"),
-            "{detail}"
-        );
+        assert!(detail.contains("SRID 999 is not defined"), "{detail}");
+    }
+
+    /// Any EPSG projected CRS is accepted, such as UTM 50N for Sabah.
+    #[test]
+    fn epsg_projected_srid_is_accepted() {
+        let mut g = georef(Some(GT));
+        g.srid = 32650;
+        assert!(check_georef("a", &g, &ints(), &crs()).is_ok());
     }
 
     #[test]
     fn unknown_dim_is_42703() {
         let mut g = georef(None);
         g.y_dim = "lat".into();
-        let err = check_georef("a", &g, &ints()).unwrap_err();
+        let err = check_georef("a", &g, &ints(), &crs()).unwrap_err();
         assert_eq!(
             err,
             SqlError::UnknownColumn {
@@ -170,7 +186,7 @@ mod tests {
     fn same_dim_is_22000() {
         let mut g = georef(None);
         g.y_dim = "col".into();
-        let err = check_georef("a", &g, &ints()).unwrap_err();
+        let err = check_georef("a", &g, &ints(), &crs()).unwrap_err();
         assert!(matches!(err, SqlError::DataException { .. }), "{err:?}");
     }
 
@@ -180,19 +196,19 @@ mod tests {
             dim("row", ArrayDimType::String),
             dim("col", ArrayDimType::Int64),
         ];
-        let err = check_georef("a", &georef(None), &strings).unwrap_err();
+        let err = check_georef("a", &georef(None), &strings, &crs()).unwrap_err();
         assert!(matches!(err, SqlError::DataException { .. }), "{err:?}");
         let floats = vec![
             dim("row", ArrayDimType::Float64),
             dim("col", ArrayDimType::Float64),
         ];
-        let err = check_georef("a", &georef(Some(GT)), &floats).unwrap_err();
+        let err = check_georef("a", &georef(Some(GT)), &floats, &crs()).unwrap_err();
         assert!(matches!(err, SqlError::DataException { .. }), "{err:?}");
         let times = vec![
             dim("row", ArrayDimType::TimestampMs),
             dim("col", ArrayDimType::Int64),
         ];
-        let err = check_georef("a", &georef(None), &times).unwrap_err();
+        let err = check_georef("a", &georef(None), &times, &crs()).unwrap_err();
         assert!(matches!(err, SqlError::DataException { .. }), "{err:?}");
     }
 
@@ -205,7 +221,7 @@ mod tests {
             [0.0, 1.0, 2.0, 0.0, 2.0, 4.0],
             [0.0, 1e300, 0.0, 0.0, 0.0, 1e300],
         ] {
-            let err = check_georef("a", &georef(Some(gt)), &ints()).unwrap_err();
+            let err = check_georef("a", &georef(Some(gt)), &ints(), &crs()).unwrap_err();
             assert!(matches!(err, SqlError::DataException { .. }), "{err:?}");
         }
     }

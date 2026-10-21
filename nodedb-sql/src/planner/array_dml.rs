@@ -193,6 +193,7 @@ mod tests {
                 name: "v".into(),
                 dtype: ArrayAttrType::Float64,
                 nullable: true,
+                meta: Default::default(),
             }],
             tile_extents: vec![1, 1_000_000],
             georef: None,

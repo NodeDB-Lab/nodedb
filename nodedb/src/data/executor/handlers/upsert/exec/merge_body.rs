@@ -44,6 +44,7 @@ pub(in crate::data::executor) fn merge_upsert_body(
     existing: Value,
     value: &[u8],
     on_conflict_updates: &[(String, UpdateValue)],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<MergedUpsert, ErrorCode> {
     let new_val = nodedb_types::value_from_msgpack(value).map_err(|_| ErrorCode::Internal {
         detail: "failed to decode upsert value from msgpack".into(),
@@ -59,7 +60,7 @@ pub(in crate::data::executor) fn merge_upsert_body(
     let merged = if on_conflict_updates.is_empty() {
         merge_values(existing, new_val)
     } else {
-        apply_on_conflict_updates(existing, &new_val, on_conflict_updates)?
+        apply_on_conflict_updates(existing, &new_val, on_conflict_updates, crs)?
     };
     // The merged row as a MessagePack body: `apply_point_put` encodes the
     // strict Binary Tuple, and stamps a bitemporal version, itself.

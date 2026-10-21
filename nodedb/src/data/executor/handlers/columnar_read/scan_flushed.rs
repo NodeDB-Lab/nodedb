@@ -26,11 +26,15 @@ pub(in crate::data::executor) struct FlushedScanCtx<'a> {
     pub prefilter: Option<&'a nodedb_types::surrogate_bitmap::SurrogateBitmap>,
     pub computed_cols: &'a [ComputedColumn],
     pub all_versions: bool,
-    pub system_as_of_ms: Option<i64>,
+    /// System-time ordinal cutoff; `None` reads every version.
+    pub system_as_of: Option<i64>,
     pub valid_at_ms: Option<i64>,
     pub ts_system_idx: Option<usize>,
     pub ts_valid_from_idx: Option<usize>,
     pub ts_valid_until_idx: Option<usize>,
+    /// The version each key emits on a bitemporal collection. `None` for a
+    /// collection that is not bitemporal.
+    pub version_gate: Option<&'a super::versions::VersionGate>,
 }
 
 impl CoreLoop {
@@ -50,6 +54,7 @@ impl CoreLoop {
         ctx: FlushedScanCtx<'_>,
         matched: &mut Vec<ColumnarMatchedRow>,
     ) -> crate::Result<()> {
+        let crs = self.crs_context();
         let FlushedScanCtx {
             collection,
             engine_key,
@@ -62,11 +67,12 @@ impl CoreLoop {
             prefilter,
             computed_cols,
             all_versions,
-            system_as_of_ms,
+            system_as_of,
             valid_at_ms,
             ts_system_idx,
             ts_valid_from_idx,
             ts_valid_until_idx,
+            version_gate,
         } = ctx;
 
         if let Some(segments) = self.columnar_flushed_segments.get(engine_key) {
@@ -138,9 +144,15 @@ impl CoreLoop {
                         ts_system_idx,
                         ts_valid_from_idx,
                         ts_valid_until_idx,
-                        system_as_of_ms,
+                        system_as_of,
                         valid_at_ms,
                     ) {
+                        continue;
+                    }
+                    // A superseded version, or a key closed at the cut,
+                    // emits nothing: the gate runs before WHERE, so a
+                    // predicate judges each key's version at the cut.
+                    if version_gate.is_some_and(|gate| !gate.admits(&row)) {
                         continue;
                     }
                     // The query's WHERE predicates, then the caller's read
@@ -151,6 +163,7 @@ impl CoreLoop {
                         schema,
                         filter_predicates,
                         rls_predicates,
+                        &crs,
                     )? {
                         continue;
                     }
@@ -163,6 +176,7 @@ impl CoreLoop {
                         projection,
                         computed_cols,
                         all_versions,
+                        &crs,
                     )?;
                     matched.push((row_surrogate, row, obj));
                     if sort_keys.is_empty() && matched.len() >= limit {

@@ -195,7 +195,8 @@ impl CoreLoop {
                         bytes: encode_sidecar(&key.fields)?,
                         fields: std::mem::take(&mut key.fields),
                     };
-                    merge_vector_upsert_patch(&patch, Some(stored), proposed)?.fields
+                    merge_vector_upsert_patch(&patch, Some(stored), proposed, &self.crs_context())?
+                        .fields
                 };
                 key.vector = &row.vector;
                 written.push((slot, true));
@@ -334,6 +335,7 @@ impl CoreLoop {
                     vector: page.field,
                 },
                 &rows,
+                &self.crs_context(),
             )
             .map_err(ErrorCode::from);
         }

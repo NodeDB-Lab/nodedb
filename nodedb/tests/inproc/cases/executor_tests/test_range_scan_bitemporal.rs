@@ -48,6 +48,7 @@ fn register_schemaless_bitemporal(ctx: &mut TestCtx, collection: &str) {
             vector_fields: Vec::new(),
             declared_columns: Vec::new(),
             declared_key: None,
+            incarnation: nodedb_types::Hlc::ZERO,
         }),
     );
     assert_eq!(resp.status, Status::Ok, "register schemaless bitemporal");
@@ -84,6 +85,7 @@ fn register_strict_bitemporal(ctx: &mut TestCtx, collection: &str) {
             vector_fields: Vec::new(),
             declared_columns: Vec::new(),
             declared_key: None,
+            incarnation: nodedb_types::Hlc::ZERO,
         }),
     );
     assert_eq!(resp.status, Status::Ok, "register strict bitemporal");

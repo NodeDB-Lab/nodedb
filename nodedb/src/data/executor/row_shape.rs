@@ -123,8 +123,10 @@ pub(in crate::data::executor) fn inject_row_identity<'a>(
 /// type backed by integer storage yields the integer stored: a
 /// `SystemTimestamp` column is an engine-assigned system-time count, and the
 /// bitemporal `_ts_system`, `_ts_valid_from`, `_ts_valid_until` columns are
-/// declared `Int64` and hold epoch milliseconds with `i64::MIN` / `i64::MAX`
-/// as the unbounded sentinels, which no instant can carry.
+/// declared `Int64`: `_ts_system` holds a system-time ordinal (a columnar
+/// read renders its millisecond), and the valid-time columns hold epoch
+/// milliseconds with `i64::MIN` / `i64::MAX` as the unbounded sentinels,
+/// which no instant can carry.
 ///
 /// Returns `Value::Null` if the row index is out of range or the validity bit
 /// is false. Returns `Err` when the cell's bytes do not hold a value of the

@@ -15,11 +15,12 @@ use super::rewrite::rewrite_plan_for_source;
 
 /// Parameters for the clone read resolver.
 pub struct CloneReadParams {
-    /// The LSN at which the query runs (T_lsn).
-    pub query_lsn: Lsn,
-    /// Wall-clock milliseconds corresponding to `query_lsn` (for engine
-    /// `system_as_of_ms` fields that work in millisecond space).
-    pub query_ms: Option<i64>,
+    /// The read's `AS OF SYSTEM TIME` milliseconds, `None` for a current read.
+    /// Only a read of a live clone maps it to an LSN (T_lsn), through this
+    /// node's WAL time anchors. A read of any other collection never consults
+    /// the anchors, so a historical read of versions that predate them (a
+    /// restored backup's) is answered from the versions themselves.
+    pub as_of_ms: Option<i64>,
 }
 
 /// Outcome of attempting to resolve a clone read for one task.
@@ -77,10 +78,17 @@ pub async fn resolve_read(
         });
     }
 
+    // T_lsn: the highest LSN committed by the `AS OF` time, and a time before
+    // the oldest retained anchor is refused. Without one, the WAL frontier.
+    let query_lsn = match params.as_of_ms {
+        Some(as_of_ms) => state.ms_to_lsn(as_of_ms)?,
+        None => state.wal.next_lsn(),
+    };
+
     // Bitemporal correctness: check if T_lsn < clone_created_at.
-    if params.query_lsn < live.origin.clone_created_at {
+    if query_lsn < live.origin.clone_created_at {
         return Ok(Some(ResolveOutcome::PreDatesClone(
-            ClonePredicatesNote::new(params.query_lsn, live.origin.clone_created_at),
+            ClonePredicatesNote::new(query_lsn, live.origin.clone_created_at),
         )));
     }
 
@@ -89,7 +97,7 @@ pub async fn resolve_read(
         coll_name: coll_name.to_string(),
         live,
     };
-    let source_tasks = walk_clone_chain(state, &task, tenant_id, params.query_lsn, first).await?;
+    let source_tasks = walk_clone_chain(state, &task, tenant_id, query_lsn, first).await?;
     let target_collection_key =
         crate::control::planner::sql_plan_convert::convert::db_qualified(db_id, coll_name);
 

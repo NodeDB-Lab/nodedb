@@ -103,6 +103,24 @@ impl CoreLoop {
             }
         }
 
+        // Node labels: the CSR's current label sets and every label version.
+        // A snapshot that omits them restores every node unlabeled and loses
+        // its label history.
+        match self.capture_node_labels(database_id, crate::types::TenantId::new(tenant_id)) {
+            Ok((current, versions)) => {
+                snapshot.node_labels = current;
+                snapshot.node_label_versions = versions;
+            }
+            Err(e) => {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("snapshot: node label capture failed: {e}"),
+                    },
+                );
+            }
+        }
+
         // 3-6. The in-memory engines: vectors, KV, CRDT, timeseries
         // memtables. A section that fails to export fails the snapshot: a
         // snapshot that left it out would restore without it.
@@ -170,6 +188,8 @@ impl CoreLoop {
             documents_versioned = snapshot.documents_versioned.len(),
             indexes_versioned = snapshot.indexes_versioned.len(),
             edges = snapshot.edges.len(),
+            labeled_nodes = snapshot.node_labels.len(),
+            node_label_versions = snapshot.node_label_versions.len(),
             vectors = snapshot.vectors.len(),
             kv_tables = snapshot.kv_tables.len(),
             crdt = snapshot.crdt_state.len(),

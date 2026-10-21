@@ -31,8 +31,17 @@ fn response_affected(response: &crate::bridge::envelope::Response) -> Result<u64
     })
 }
 
+/// What `GRAPH INSERT EDGE` writes besides the edge identity.
+pub struct EdgeInsert {
+    pub properties: GraphProperties,
+    /// `VALID_TIME <from>`, ms since epoch. `None` takes the write's time.
+    pub valid_from_ms: Option<i64>,
+    /// `UNTIL <until>`. `None` leaves the valid time open.
+    pub valid_until_ms: Option<i64>,
+}
+
 /// `GRAPH INSERT EDGE IN '<collection>' FROM '<src>' TO '<dst>' TYPE '<label>'`
-/// `[PROPERTIES '<json object>' | { ... }]`
+/// `[PROPERTIES '<json object>' | { ... }] [VALID_TIME <from> [UNTIL <until>]]`
 ///
 /// Edge identity is bundled in [`EdgeRef`] to stay within the argument budget.
 pub async fn insert_edge(
@@ -40,7 +49,7 @@ pub async fn insert_edge(
     identity: &AuthenticatedIdentity,
     database_id: DatabaseId,
     edge: EdgeRef,
-    properties: GraphProperties,
+    insert: EdgeInsert,
     txn_ctx: &DmlTxnCtx<'_>,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let EdgeRef {
@@ -49,6 +58,11 @@ pub async fn insert_edge(
         dst,
         label,
     } = edge;
+    let EdgeInsert {
+        properties,
+        valid_from_ms,
+        valid_until_ms,
+    } = insert;
     if collection.is_empty() {
         return Err(ddl_err(
             "42601",
@@ -102,6 +116,8 @@ pub async fn insert_edge(
             properties,
             src_surrogate,
             dst_surrogate,
+            valid_from_ms,
+            valid_until_ms,
         },
     )?;
 
@@ -372,8 +388,8 @@ pub async fn set_node_labels(
     };
 
     // Single-keyed on `node_id`, so single-home: route to `from_key(node_id)`.
-    // No redb durability: the WAL record the Raft entry's apply appends on
-    // every replica is the bitset's only backing.
+    // The propose seam runs the write as a Calvin transaction, so every
+    // replica writes the label version at the transaction's ordinal.
     let response =
         crate::control::server::sync::raft_dispatch::dispatch_trusted_internal_sync_response(
             state,

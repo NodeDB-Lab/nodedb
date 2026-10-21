@@ -39,7 +39,7 @@ pub(in crate::data::executor) struct PointUpdateImage<'a> {
     pub(in crate::data::executor) has_expr: bool,
     pub(in crate::data::executor) bitemporal: bool,
     /// System time stamped into a bitemporal strict tuple; `0` otherwise.
-    pub(in crate::data::executor) sys_from_ms: i64,
+    pub(in crate::data::executor) sys_from: i64,
     /// Declared `PRIMARY KEY` column of a schemaless collection, `None`
     /// otherwise. `Some` makes the post-image guard below run.
     pub(in crate::data::executor) declared_primary_key: Option<&'a str>,
@@ -68,7 +68,7 @@ impl CoreLoop {
             config_key,
             is_strict,
             bitemporal,
-            sys_from_ms,
+            sys_from,
             ..
         } = params;
         let doc = match body {
@@ -96,7 +96,7 @@ impl CoreLoop {
             strict_format::value_to_binary_tuple_bitemporal(
                 &ndb_val,
                 schema,
-                sys_from_ms,
+                sys_from,
                 i64::MIN,
                 i64::MAX,
                 collection,
@@ -121,7 +121,7 @@ impl CoreLoop {
             has_generated,
             has_expr,
             bitemporal: _,
-            sys_from_ms: _,
+            sys_from: _,
             declared_primary_key,
         } = params;
 
@@ -213,6 +213,7 @@ impl CoreLoop {
         // Expressions evaluate against the pre-update snapshot, so later
         // assignments don't observe earlier ones — matches PostgreSQL.
         let eval_doc: nodedb_types::Value = doc.clone().into();
+        let crs = self.crs_context();
         if let Some(obj) = doc.as_object_mut() {
             for (field, update_val) in updates {
                 let val = match update_val {
@@ -225,7 +226,7 @@ impl CoreLoop {
                         }
                     },
                     UpdateValue::Expr(expr) => {
-                        let result: nodedb_types::Value = match expr.eval(&eval_doc) {
+                        let result: nodedb_types::Value = match expr.eval(&eval_doc, &crs) {
                             Ok(v) => v,
                             // An evaluation error fails the statement.
                             Err(e) => return Err(ErrorCode::from(e)),
@@ -262,12 +263,14 @@ impl CoreLoop {
                     &config.type_guards,
                     &mut doc,
                     crate::data::executor::enforcement::typeguard::GuardScope::Assigned(&assigned),
+                    &crs,
                 )?;
             }
             if has_generated {
                 crate::data::executor::handlers::generated::evaluate_generated_columns(
                     &mut doc,
                     &config.enforcement.generated_columns,
+                    &crs,
                 )?;
             }
         }

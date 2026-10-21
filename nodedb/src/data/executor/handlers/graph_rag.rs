@@ -30,6 +30,7 @@ use crate::data::executor::response_codec::{
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::graph::edge_store::Direction;
 use crate::query::fusion::{FusedResult, RankedResult, reciprocal_rank_fusion_weighted};
+use nodedb_physical::physical_plan::GraphReadScope;
 
 /// Result of a successful vector search.
 ///
@@ -71,6 +72,19 @@ pub(in crate::data::executor) struct GraphRagFusionParams<'a> {
     pub rrf_k: (f64, f64),
     pub vector_field: &'a str,
     pub max_visited: usize,
+    /// The bitemporal cut the graph expansion walks.
+    pub scope: &'a GraphReadScope,
+}
+
+/// The vector leg of a fusion, and the cut whose graph names its hits.
+pub(in crate::data::executor) struct VectorLeg<'a> {
+    pub tenant_id: u64,
+    pub collection: &'a str,
+    pub query_vector: &'a [f32],
+    pub vector_top_k: usize,
+    pub vector_field: &'a str,
+    /// A hit keys by the graph node its surrogate names at this cut.
+    pub scope: &'a GraphReadScope,
 }
 
 impl CoreLoop {
@@ -91,6 +105,7 @@ impl CoreLoop {
             rrf_k,
             vector_field,
             max_visited,
+            scope,
         } = params;
         debug!(
             core = self.core_id,
@@ -103,17 +118,20 @@ impl CoreLoop {
 
         let (vector_results, vector_scores, seeds) = match self.vector_search_to_node_scores(
             task,
-            tenant_id,
-            collection,
-            query_vector,
-            vector_top_k,
-            vector_field,
+            VectorLeg {
+                tenant_id,
+                collection,
+                query_vector,
+                vector_top_k,
+                vector_field,
+                scope,
+            },
         ) {
             Ok(r) => r,
             Err(resp) => return resp,
         };
 
-        let expansion = self.expand_graph(GraphExpansionParams {
+        let expansion = match self.expand_graph(GraphExpansionParams {
             database_id: task.request.database_id.as_u64(),
             tid: tenant_id,
             seeds: GraphSeeds::Surrogates(&seeds),
@@ -122,7 +140,11 @@ impl CoreLoop {
             max_depth: expansion_depth,
             max_visited,
             collection,
-        });
+            scope,
+        }) {
+            Ok(expansion) => expansion,
+            Err(e) => return self.response_error(task, e),
+        };
         let (expanded_nodes, hop_distances, bfs_truncated, unaddressable) = (
             expansion.names,
             expansion.distances,
@@ -166,12 +188,16 @@ impl CoreLoop {
     pub(in crate::data::executor) fn vector_search_to_node_scores(
         &self,
         task: &ExecutionTask,
-        tenant_id: u64,
-        collection: &str,
-        query_vector: &[f32],
-        vector_top_k: usize,
-        vector_field: &str,
+        leg: VectorLeg<'_>,
     ) -> Result<VectorNodeScores, Response> {
+        let VectorLeg {
+            tenant_id,
+            collection,
+            query_vector,
+            vector_top_k,
+            vector_field,
+            scope,
+        } = leg;
         let database_id = task.request.database_id.as_u64();
         let hits = self.vector_leg_hits(
             task,
@@ -192,7 +218,10 @@ impl CoreLoop {
         // The fusion key is resolved once per hit: the graph node name when
         // the surrogate is bound to one, otherwise the surrogate itself. The
         // text leg keys by the same rule, so the two legs meet on one key.
-        let csr = self.csr_partition(database_id, tenant_id);
+        let csr = match self.csr_view(database_id, tenant_id, Some(collection), scope) {
+            Ok(csr) => csr,
+            Err(e) => return Err(self.response_error(task, e)),
+        };
         let mut vector_scores: HashMap<RagKey, (usize, f32)> = HashMap::new();
         let mut seeds: Vec<Surrogate> = Vec::with_capacity(hits.len());
         let mut vector_results: Vec<SearchResult> = Vec::with_capacity(hits.len());

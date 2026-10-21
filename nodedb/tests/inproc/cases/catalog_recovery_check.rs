@@ -682,7 +682,7 @@ async fn redaction_policy_survives_restart_via_boot_load() {
         },
         wal,
         &catalog_path,
-        &AuthConfig::default(),
+        nodedb::control::state::OpenConfig::strict(&AuthConfig::default()),
         Default::default(),
         false,
         nodedb::data::executor::core_loop::test_governor(),

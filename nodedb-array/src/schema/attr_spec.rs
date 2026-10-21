@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::attr_meta::AttrMeta;
+
 /// Attribute type tag. One-to-one with
 /// [`crate::types::cell_value::value::CellValue`] (excluding `Null`,
 /// which is per-cell, not per-attribute).
@@ -38,6 +40,10 @@ pub enum AttrType {
     #[serde(rename = "uint32")]
     UInt32,
     Float32,
+    /// A 1-byte signed integer. The array DDL names widths in bits, so
+    /// `INT8` is this type, not PostgreSQL's 8-byte `int8`.
+    #[serde(rename = "int8")]
+    Int8,
 }
 
 impl AttrType {
@@ -54,6 +60,7 @@ impl AttrType {
             AttrType::Int32 => "INT32",
             AttrType::UInt32 => "UINT32",
             AttrType::Float32 => "FLOAT32",
+            AttrType::Int8 => "INT8",
         }
     }
 
@@ -62,6 +69,7 @@ impl AttrType {
     pub fn int_range(self) -> Option<(i64, i64)> {
         match self {
             AttrType::Int64 => Some((i64::MIN, i64::MAX)),
+            AttrType::Int8 => Some((i64::from(i8::MIN), i64::from(i8::MAX))),
             AttrType::UInt8 => Some((0, i64::from(u8::MAX))),
             AttrType::Int16 => Some((i64::from(i16::MIN), i64::from(i16::MAX))),
             AttrType::UInt16 => Some((0, i64::from(u16::MAX))),
@@ -76,6 +84,7 @@ impl AttrType {
         match self {
             AttrType::Float64 | AttrType::Float32 => true,
             AttrType::Int64
+            | AttrType::Int8
             | AttrType::UInt8
             | AttrType::Int16
             | AttrType::UInt16
@@ -103,6 +112,10 @@ pub struct AttrSpec {
     pub dtype: AttrType,
     /// Whether the attribute may carry [`crate::types::CellValue::Null`].
     pub nullable: bool,
+    /// Nodata, scale, offset and units. Not part of
+    /// [`super::ArraySchema::content_msgpack`], so it never changes
+    /// `schema_hash`.
+    pub meta: AttrMeta,
 }
 
 impl AttrSpec {
@@ -111,7 +124,13 @@ impl AttrSpec {
             name: name.into(),
             dtype,
             nullable,
+            meta: AttrMeta::default(),
         }
+    }
+
+    /// This attribute with `meta` in place of its current metadata.
+    pub fn with_meta(self, meta: AttrMeta) -> Self {
+        Self { meta, ..self }
     }
 }
 
@@ -129,6 +148,8 @@ mod tests {
     #[test]
     fn integer_ranges_match_their_widths() {
         assert_eq!(AttrType::UInt8.int_range(), Some((0, 255)));
+        assert_eq!(AttrType::Int8.int_range(), Some((-128, 127)));
+        assert_eq!(AttrType::Int8.sql_name(), "INT8");
         assert_eq!(AttrType::Int16.int_range(), Some((-32768, 32767)));
         assert_eq!(AttrType::UInt16.int_range(), Some((0, 65535)));
         assert_eq!(AttrType::UInt32.int_range(), Some((0, 4_294_967_295)));

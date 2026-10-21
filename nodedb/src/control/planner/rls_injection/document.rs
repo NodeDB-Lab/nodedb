@@ -253,7 +253,7 @@ mod tests {
                     collection,
                 ),
                 filters: Vec::new(),
-                system_as_of_ms: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
                 offset: 0,
                 limit: None,
                 column_map: Vec::new(),
@@ -651,7 +651,7 @@ mod tests {
             projection: Vec::new(),
             limit: 0,
             offset: 0,
-            system_as_of_ms: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 

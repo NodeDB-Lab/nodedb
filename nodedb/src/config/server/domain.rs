@@ -115,6 +115,7 @@ pub(super) fn validate_domain(config: &ServerConfig) -> crate::Result<()> {
     )?;
     super::pitr::validate_pitr(config)?;
     super::backup::validate_backup(config)?;
+    super::egress::validate_egress(&config.egress)?;
 
     let s = &config.tuning.startup;
     startup_bound(

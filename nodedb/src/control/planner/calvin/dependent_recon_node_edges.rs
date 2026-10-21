@@ -23,7 +23,7 @@ use std::collections::{BTreeSet, HashMap};
 use nodedb_physical::physical_plan::{BatchEdge, GraphOp, PhysicalPlan};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 use nodedb_types::graph::Direction;
-use nodedb_types::{QualifiedCollection, Surrogate, SystemTimeScope, Value};
+use nodedb_types::{QualifiedCollection, Surrogate, Value};
 
 use super::dependent_recon_predicate::EdgeLifecycle;
 use super::preexec::{PreexecRequest, PreexecScan, RowIdentityRead, run_preexec_scan};
@@ -115,8 +115,7 @@ pub(super) async fn read_node_incident_edges(
                 node_id: node.clone(),
                 edge_label: None,
                 direction,
-                system_time: SystemTimeScope::Current,
-                valid_at_ms: None,
+                scope: nodedb_physical::physical_plan::GraphReadScope::default(),
                 rls_filters: Vec::new(),
             });
             let payload =
@@ -293,6 +292,8 @@ fn build_node_delete_tasks(
                 dst_id: dst.clone(),
                 src_surrogate: surrogate_of(src)?,
                 dst_surrogate: surrogate_of(dst)?,
+                valid_from_ms: None,
+                valid_until_ms: None,
             });
         }
         guards.push(PhysicalTask {

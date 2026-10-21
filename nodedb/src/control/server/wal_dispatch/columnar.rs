@@ -33,6 +33,7 @@ pub(super) fn wal_append_columnar_op(
             schema_bytes: _,
             provenance,
             wal_lsn: _,
+            system_from,
             // The compiled RLS predicate is a per-request authorization input,
             // not part of the row image being made durable, so it is not
             // written to the log and replay does not re-evaluate it.
@@ -60,6 +61,7 @@ pub(super) fn wal_append_columnar_op(
                         intent: *intent,
                         on_conflict_updates: on_conflict_updates.clone(),
                     },
+                    system_from: *system_from,
                 },
             )?;
             Some(wal.append_timeseries_batch(tenant_id, vshard_id, database_id, &wal_payload)?)
@@ -68,6 +70,7 @@ pub(super) fn wal_append_columnar_op(
             collection,
             filters,
             updates,
+            system_from,
             rls_write_check: _,
         } => {
             // Predicate UPDATE has no row post-image at append time (the
@@ -81,12 +84,14 @@ pub(super) fn wal_append_columnar_op(
                 true,
                 filters,
                 updates,
+                *system_from,
             )?;
             Some(wal.append_timeseries_batch(tenant_id, vshard_id, database_id, &wal_payload)?)
         }
         ColumnarOp::Delete {
             collection,
             filters,
+            system_from,
             rls_write_check: _,
         } => {
             // Mirrors the `Update` arm above; delete is idempotent (mark +
@@ -98,12 +103,14 @@ pub(super) fn wal_append_columnar_op(
                 false,
                 filters,
                 &[],
+                *system_from,
             )?;
             Some(wal.append_timeseries_batch(tenant_id, vshard_id, database_id, &wal_payload)?)
         }
         ColumnarOp::ResolvedUpdate {
             collection,
             rows,
+            system_from,
             rls_write_check: _,
         } => {
             // Rows the Control Plane already resolved and decided against the
@@ -115,12 +122,14 @@ pub(super) fn wal_append_columnar_op(
                 true,
                 rows,
                 &[],
+                *system_from,
             )?;
             Some(wal.append_timeseries_batch(tenant_id, vshard_id, database_id, &wal_payload)?)
         }
         ColumnarOp::ResolvedDelete {
             collection,
             pks,
+            system_from,
             rls_write_check: _,
         } => {
             let wal_payload = super::timeseries::encode_columnar_resolved_dml_payload(
@@ -128,6 +137,7 @@ pub(super) fn wal_append_columnar_op(
                 false,
                 &[],
                 pks,
+                *system_from,
             )?;
             Some(wal.append_timeseries_batch(tenant_id, vshard_id, database_id, &wal_payload)?)
         }
@@ -137,9 +147,14 @@ pub(super) fn wal_append_columnar_op(
         ColumnarOp::Truncate {
             collection,
             restart_identity: _,
+            system_from,
+            erase_history,
         } => {
-            let wal_payload =
-                super::timeseries::encode_columnar_truncate_payload(collection.as_str())?;
+            let wal_payload = super::timeseries::encode_columnar_truncate_payload(
+                collection.as_str(),
+                *system_from,
+                *erase_history,
+            )?;
             Some(wal.append_columnar_truncate(tenant_id, vshard_id, database_id, &wal_payload)?)
         }
         // NotAWrite — reads / query ops / DDL that produces no engine mutation
@@ -183,6 +198,7 @@ mod tests {
             schema_bytes: vec![],
             provenance: None,
             wal_lsn: None,
+            system_from: Some(1_700_000_000_000_000_042),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             returning: None,
             rls_filters: vec![],
@@ -201,6 +217,19 @@ mod tests {
             &wal,
             nodedb_wal::record::RecordType::TimeseriesBatch
         ));
+        // The record carries the stamp, so replay stamps what the live
+        // insert stamped.
+        let record = wal
+            .replay()
+            .expect("read wal")
+            .into_iter()
+            .find(|r| {
+                nodedb_wal::record::RecordType::from_raw(r.logical_record_type())
+                    == Some(nodedb_wal::record::RecordType::TimeseriesBatch)
+            })
+            .expect("batch record");
+        let decoded = crate::wal::decode_batch_record(&record.payload).expect("decode");
+        assert_eq!(decoded.system_from, Some(1_700_000_000_000_000_042));
     }
 
     #[test]
@@ -210,6 +239,8 @@ mod tests {
         let plan = PhysicalPlan::Columnar(ColumnarOp::Truncate {
             collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
             restart_identity: true,
+            system_from: None,
+            erase_history: false,
         });
 
         let outcome = super::super::wal_append_if_write(

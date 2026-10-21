@@ -13,6 +13,7 @@ mod columnar;
 mod continuous_agg;
 mod crdt;
 mod crdt_dead_letter_store;
+mod crs;
 mod cut_barrier;
 mod data_plane;
 mod event_image;
@@ -28,6 +29,7 @@ mod redo_stream;
 mod retention;
 mod vector;
 mod vector_build;
+mod vshard_departure;
 mod write_path;
 
 pub(in crate::diag) use array_sync::ArraySnapshotBufferPoisoned;
@@ -49,6 +51,7 @@ pub(in crate::diag) use crdt::{
 pub(in crate::diag) use crdt_dead_letter_store::{
     CrdtDeadLetterNotRestored, CrdtDeadLetterNotStored,
 };
+pub(in crate::diag) use crs::CustomCrsSetNotApplied;
 pub(in crate::diag) use cut_barrier::CutBarrierNotPlaced;
 pub use data_plane::LostResponseWrite;
 pub(in crate::diag) use data_plane::{
@@ -77,6 +80,7 @@ pub(in crate::diag) use redo_stream::{
 pub(in crate::diag) use retention::RetentionAutowireOrphaned;
 pub(in crate::diag) use vector::VectorIndexNotApplied;
 pub(in crate::diag) use vector_build::{VectorBuildNotInstalled, VectorBuilderUnavailable};
+pub(in crate::diag) use vshard_departure::VShardDeparturePurgeFailed;
 pub(in crate::diag) use write_path::{
     BatchInsertWithoutSurrogates, FtsIndexUpdateFailed, OrphanedIndexEntryAfterDelete,
     StrictRowUndecodable, WriteAckedWithoutDurability,

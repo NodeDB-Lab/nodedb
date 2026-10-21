@@ -199,7 +199,7 @@ mod tests {
             csr.add_edge(&format!("n{i}"), "L", &format!("n{}", (i + 1) % 100))
                 .unwrap();
         }
-        Arc::new(CsrSnapshot::from_csr(&mut csr))
+        Arc::new(CsrSnapshot::from_csr(&mut csr).expect("snapshot"))
     }
 
     #[test]

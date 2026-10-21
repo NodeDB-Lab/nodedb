@@ -20,6 +20,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use nodedb_types::array_agg::ValueDist;
+
 use super::agg_number::ArrayAggNumber;
 use super::group_key::ArrayAggGroupKey;
 use super::wire::{ArrayShardAggResp, ArrayShardSliceResp};
@@ -27,8 +29,10 @@ use crate::error::{ClusterError, Result};
 
 /// Partial aggregate contributed by a single shard for one group-by bucket.
 ///
-/// Carries enough state for all supported reducers (SUM, COUNT, MIN, MAX,
-/// MEAN). Welford fields enable variance/stddev if a future reducer needs it.
+/// Carries enough state for every reducer: SUM, COUNT, MIN, MAX and MEAN
+/// from the running numbers, the variances and standard deviations from the
+/// Welford fields, MEDIAN / PERCENTILE / MODE from the exact `dist`, and
+/// HISTOGRAM from `bins`. Every field merges exactly.
 #[derive(
     Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
 )]
@@ -43,6 +47,11 @@ pub struct ArrayAggPartial {
     /// Welford mean — enables MEAN without a second pass.
     pub welford_mean: f64,
     pub welford_m2: f64,
+    /// Every distinct value with its count. `Empty` for a reducer that
+    /// needs no distribution.
+    pub dist: ValueDist,
+    /// Histogram bin counts. Empty for any other reducer.
+    pub bins: Vec<u64>,
 }
 
 impl ArrayAggPartial {
@@ -65,6 +74,8 @@ impl ArrayAggPartial {
             max: val,
             welford_mean: val.as_f64(),
             welford_m2: 0.0,
+            dist: ValueDist::Empty,
+            bins: Vec::new(),
         }
     }
 
@@ -78,18 +89,32 @@ impl ArrayAggPartial {
             max: ArrayAggNumber::Float(f64::NEG_INFINITY),
             welford_mean: 0.0,
             welford_m2: 0.0,
+            dist: ValueDist::Empty,
+            bins: Vec::new(),
         }
     }
 
     /// Merge another partial into this one using parallel Welford.
+    ///
+    /// Histogram bins add even when a side counted no value in range, so a
+    /// group keeps its bins.
     pub fn merge(&mut self, other: &ArrayAggPartial) {
+        if self.bins.len() < other.bins.len() {
+            self.bins.resize(other.bins.len(), 0);
+        }
+        for (slot, n) in self.bins.iter_mut().zip(&other.bins) {
+            *slot = slot.saturating_add(*n);
+        }
         if other.count == 0 {
             return;
         }
         if self.count == 0 {
+            let bins = std::mem::take(&mut self.bins);
             *self = other.clone();
+            self.bins = bins;
             return;
         }
+        self.dist = std::mem::replace(&mut self.dist, ValueDist::Empty).merge(other.dist.clone());
         self.sum = self.sum.sum_with(other.sum);
         self.min = self.min.min_with(other.min);
         self.max = self.max.max_with(other.max);
@@ -107,7 +132,7 @@ impl ArrayAggPartial {
     }
 }
 
-/// Returns `true` if any shard reported that `system_as_of` fell below its
+/// Returns `true` if any shard reported that the system-time cutoff fell below its
 /// oldest tile version and it produced zero rows as a result.
 ///
 /// Callers combine this flag via logical OR across shards to propagate the
@@ -116,7 +141,7 @@ pub fn any_truncated_before_horizon_slice(shard_resps: &[ArrayShardSliceResp]) -
     shard_resps.iter().any(|r| r.truncated_before_horizon)
 }
 
-/// Returns `true` if any shard reported that `system_as_of` fell below its
+/// Returns `true` if any shard reported that the system-time cutoff fell below its
 /// oldest tile version, causing the shard to contribute zero partials.
 pub fn any_truncated_before_horizon_agg(shard_resps: &[ArrayShardAggResp]) -> bool {
     shard_resps.iter().any(|r| r.truncated_before_horizon)
@@ -328,6 +353,36 @@ mod tests {
         a.merge(&empty);
         assert_eq!(a.count, 1);
         assert!((a.sum.as_f64() - 42.0).abs() < f64::EPSILON);
+    }
+
+    /// Distributions and histogram bins merge exactly across shards, and a
+    /// shard with no in-range value still keeps its bins.
+    #[test]
+    fn dist_and_bins_merge_across_shards() {
+        use nodedb_types::array_agg::IntRun;
+        let with = |runs: Vec<(i64, u64)>, bins: Vec<u64>| ArrayAggPartial {
+            count: runs.iter().map(|r| r.1).sum(),
+            dist: ValueDist::Ints(
+                runs.into_iter()
+                    .map(|(value, count)| IntRun { value, count })
+                    .collect(),
+            ),
+            bins,
+            ..ArrayAggPartial::empty(g(0))
+        };
+        let mut a = with(vec![(1, 1), (5, 2)], vec![1, 2]);
+        a.merge(&with(vec![(5, 1), (9, 1)], vec![0, 2]));
+        assert_eq!(a.count, 5);
+        assert_eq!(a.dist.percentile(0.5), Ok(Some(5.0)));
+        assert_eq!(a.bins, vec![1, 4]);
+
+        let mut empty = ArrayAggPartial {
+            bins: vec![0, 0],
+            ..ArrayAggPartial::empty(g(0))
+        };
+        empty.merge(&with(vec![(3, 1)], vec![1, 0]));
+        assert_eq!(empty.bins, vec![1, 0]);
+        assert_eq!(empty.count, 1);
     }
 
     #[test]

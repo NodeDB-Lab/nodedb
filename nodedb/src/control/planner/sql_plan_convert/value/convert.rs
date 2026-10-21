@@ -20,6 +20,7 @@ pub(crate) fn sql_value_to_nodedb_value(v: &SqlValue) -> nodedb_types::Value {
         SqlValue::Bytes(b) => nodedb_types::Value::Bytes(b.clone()),
         SqlValue::Timestamp(dt) => nodedb_types::Value::NaiveDateTime(*dt),
         SqlValue::Timestamptz(dt) => nodedb_types::Value::DateTime(*dt),
+        SqlValue::Geometry(g) => nodedb_types::Value::Geometry(g.clone()),
     }
 }
 
@@ -34,6 +35,8 @@ pub(crate) fn sql_value_to_string(v: &SqlValue) -> String {
         SqlValue::Bytes(b) => format!("\\x{}", hex::encode(b)),
         SqlValue::Array(arr) => format_pg_array(arr),
         SqlValue::Null => String::new(),
+        // GeoJSON text, `crs` member included for a non-WGS 84 SRID.
+        SqlValue::Geometry(g) => nodedb_types::geometry::geojson_tree(g).to_string(),
     }
 }
 
@@ -76,17 +79,18 @@ pub(crate) fn sql_value_to_bytes(v: &SqlValue) -> crate::Result<Vec<u8>> {
         | SqlValue::Null
         | SqlValue::Bytes(_)
         | SqlValue::Timestamp(_)
-        | SqlValue::Timestamptz(_) => Ok(nodedb_types::scalar_to_raw_bytes(
+        | SqlValue::Timestamptz(_)
+        | SqlValue::Geometry(_) => Ok(nodedb_types::scalar_to_raw_bytes(
             &sql_value_to_nodedb_value(v),
         )?),
     }
 }
 
 /// Encode a SQL value as standard msgpack for field-level updates.
-pub(crate) fn sql_value_to_msgpack(v: &SqlValue) -> Vec<u8> {
+pub(crate) fn sql_value_to_msgpack(v: &SqlValue) -> crate::Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(16);
-    write_msgpack_value(&mut buf, v);
-    buf
+    write_msgpack_value(&mut buf, v)?;
+    Ok(buf)
 }
 
 #[cfg(test)]

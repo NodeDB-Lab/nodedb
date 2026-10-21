@@ -92,6 +92,8 @@ pub(in crate::control::backup) fn append_snapshot(
         index_configs,
         surrogate_pk,
         tenant_edges,
+        node_labels,
+        node_label_versions,
         group_write_marks,
         group_proposal_keys,
         group_proposal_keys_complete_from,
@@ -141,6 +143,9 @@ pub(in crate::control::backup) fn append_snapshot(
     into.surrogate_pk.extend(surrogate_pk);
     into.arrays.extend(arrays);
     into.tenant_edges.extend(tenant_edges);
+    // Each node's labels come from the source of its home vShard.
+    into.node_labels.extend(node_labels);
+    into.node_label_versions.extend(node_label_versions);
     // A backup carries no marks: the guard reads the destination's marks.
     into.group_write_marks.extend(group_write_marks);
     // A backup carries no proposal keys: they serve Raft installs only.

@@ -22,6 +22,7 @@ pub mod delete_bitmap;
 pub mod error;
 pub mod filter;
 pub mod format;
+pub(crate) mod geometry_cell;
 pub mod materialize_rows;
 pub mod memtable;
 pub mod mutation;

@@ -62,6 +62,8 @@ pub enum ClusterArrayOp {
         /// zerompk-encoded `nodedb_array::query::PolygonZone`, forwarded to
         /// every shard. Empty = no zone.
         zone_msgpack: Vec<u8>,
+        /// Read attrs physically. See `ArrayOp::Slice::physical`.
+        physical: bool,
     },
 
     /// Fan-out an aggregate across all target vShards and reduce partials.
@@ -77,13 +79,15 @@ pub enum ClusterArrayOp {
         slice_tile_keys: Vec<u64>,
         /// Routing granularity.
         prefix_bits: u8,
-        /// Bitemporal system-time cutoff. `None` = live read.
-        system_as_of: Option<i64>,
+        /// Bitemporal system-time scope. See `ArrayOp::Aggregate::system_time`.
+        system_time: SystemTimeScope,
         /// Bitemporal valid-time point. `None` = no valid-time filter.
         valid_at_ms: Option<i64>,
         /// zerompk-encoded `nodedb_array::query::ArrayRegion`, forwarded to
         /// every shard. Empty = the whole array.
         region_msgpack: Vec<u8>,
+        /// Reduce physical values. See `ArrayOp::Aggregate::physical`.
+        physical: bool,
     },
 
     /// Fan-out an elementwise op to every primary vShard and concatenate the
@@ -101,9 +105,9 @@ pub enum ClusterArrayOp {
         attr_idx: u32,
         /// Routing granularity, shared by both arrays.
         prefix_bits: u8,
-        /// Bitemporal system-time cutoff for both operands. `None` = live
-        /// read.
-        system_as_of: Option<i64>,
+        /// Bitemporal system-time scope for both operands. See
+        /// `ArrayOp::Aggregate::system_time`.
+        system_time: SystemTimeScope,
         /// Bitemporal valid-time point for both operands. `None` = no
         /// valid-time filter.
         valid_at_ms: Option<i64>,

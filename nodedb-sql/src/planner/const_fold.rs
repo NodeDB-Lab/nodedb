@@ -21,6 +21,7 @@
 
 use std::sync::LazyLock;
 
+use nodedb_crs::CrsContext;
 use nodedb_types::Value;
 use sonic_rs;
 
@@ -47,8 +48,8 @@ pub fn default_registry() -> &'static FunctionRegistry {
 }
 
 /// Convenience wrapper around [`fold_constant`] using the default registry.
-pub fn fold_constant_default(expr: &SqlExpr) -> FoldResult {
-    fold_constant(expr, default_registry())
+pub fn fold_constant_default(expr: &SqlExpr, crs: &CrsContext<'_>) -> FoldResult {
+    fold_constant(expr, default_registry(), crs)
 }
 
 /// Whether a fold is allowed to evaluate `Volatile` functions.
@@ -66,9 +67,14 @@ pub enum FoldScope {
 }
 
 /// Fold a `SqlExpr` to a literal `SqlValue` at plan time. See [`FoldResult`]
-/// for what each outcome means. Volatile calls are never folded.
-pub fn fold_constant(expr: &SqlExpr, registry: &FunctionRegistry) -> FoldResult {
-    fold_constant_scoped(expr, registry, FoldScope::Reuse)
+/// for what each outcome means. Volatile calls are never folded. Geo
+/// functions resolve SRIDs through `crs`.
+pub fn fold_constant(
+    expr: &SqlExpr,
+    registry: &FunctionRegistry,
+    crs: &CrsContext<'_>,
+) -> FoldResult {
+    fold_constant_scoped(expr, registry, FoldScope::Reuse, crs)
 }
 
 /// Fold a `SqlExpr` under an explicit [`FoldScope`].
@@ -76,13 +82,14 @@ pub fn fold_constant_scoped(
     expr: &SqlExpr,
     registry: &FunctionRegistry,
     scope: FoldScope,
+    crs: &CrsContext<'_>,
 ) -> FoldResult {
     match expr {
         SqlExpr::Literal(v) => Ok(Some(v.clone())),
         SqlExpr::ArrayLiteral(items) => {
             let mut folded = Vec::with_capacity(items.len());
             for item in items {
-                match fold_constant_scoped(item, registry, scope)? {
+                match fold_constant_scoped(item, registry, scope, crs)? {
                     Some(v) => folded.push(v),
                     None => return Ok(None),
                 }
@@ -92,7 +99,7 @@ pub fn fold_constant_scoped(
         SqlExpr::UnaryOp {
             op: UnaryOp::Neg,
             expr,
-        } => Ok(match fold_constant_scoped(expr, registry, scope)? {
+        } => Ok(match fold_constant_scoped(expr, registry, scope, crs)? {
             // `checked_neg` so negating `i64::MIN` declines to fold rather
             // than wrapping (release) or panicking (debug).
             Some(SqlValue::Int(i)) => i.checked_neg().map(SqlValue::Int),
@@ -110,17 +117,17 @@ pub fn fold_constant_scoped(
         }),
         SqlExpr::BinaryOp { left, op, right } => {
             let (Some(l), Some(r)) = (
-                fold_constant_scoped(left, registry, scope)?,
-                fold_constant_scoped(right, registry, scope)?,
+                fold_constant_scoped(left, registry, scope, crs)?,
+                fold_constant_scoped(right, registry, scope, crs)?,
             ) else {
                 return Ok(None);
             };
             fold_binary(l, *op, r)
         }
         SqlExpr::Function { name, args, .. } => {
-            fold_function_call_scoped(name, args, registry, scope)
+            fold_function_call_scoped(name, args, registry, scope, crs)
         }
-        SqlExpr::Cast { expr, to_type } => Ok(fold_constant_scoped(expr, registry, scope)?
+        SqlExpr::Cast { expr, to_type } => Ok(fold_constant_scoped(expr, registry, scope, crs)?
             .and_then(|inner| fold_cast(inner, to_type))),
         _ => Ok(None),
     }
@@ -343,8 +350,13 @@ fn fold_binary(l: SqlValue, op: BinaryOp, r: SqlValue) -> FoldResult {
 /// `SqlValue`. Only folds functions that are present in `registry`, so
 /// callers can distinguish "unknown function" from "known function, all
 /// args folded". A `Volatile` function is never folded.
-pub fn fold_function_call(name: &str, args: &[SqlExpr], registry: &FunctionRegistry) -> FoldResult {
-    fold_function_call_scoped(name, args, registry, FoldScope::Reuse)
+pub fn fold_function_call(
+    name: &str,
+    args: &[SqlExpr],
+    registry: &FunctionRegistry,
+    crs: &CrsContext<'_>,
+) -> FoldResult {
+    fold_function_call_scoped(name, args, registry, FoldScope::Reuse, crs)
 }
 
 /// Fold a function call under an explicit [`FoldScope`].
@@ -353,6 +365,7 @@ pub fn fold_function_call_scoped(
     args: &[SqlExpr],
     registry: &FunctionRegistry,
     scope: FoldScope,
+    crs: &CrsContext<'_>,
 ) -> FoldResult {
     // Gate on registry so unknown-function paths keep their existing
     // fallbacks instead of collapsing to SqlValue::Null. Aggregates and
@@ -382,7 +395,7 @@ pub fn fold_function_call_scoped(
 
     let mut folded_args = Vec::with_capacity(args.len());
     for arg in args {
-        match fold_constant_scoped(arg, registry, scope)? {
+        match fold_constant_scoped(arg, registry, scope, crs)? {
             Some(v) => folded_args.push(sql_to_ndb_value(v)),
             None => return Ok(None),
         }
@@ -394,7 +407,7 @@ pub fn fold_function_call_scoped(
     // clause; `SELECT mod(5, 0)` has no row scope and became NULL.
     // Exhaustive on purpose: a new `EvalError` variant must be classified
     // here rather than defaulting to "defer to a runtime that may not exist".
-    match nodedb_query::functions::eval_function(&name_lower, &folded_args) {
+    match nodedb_query::functions::eval_function(&name_lower, &folded_args, crs) {
         Ok(result) => Ok(Some(ndb_to_sql_value(result))),
         Err(nodedb_query::EvalError::DivisionByZero) => Err(SqlError::DivisionByZero),
         Err(
@@ -402,9 +415,11 @@ pub fn fold_function_call_scoped(
             | nodedb_query::EvalError::ArgumentType { .. }
             | nodedb_query::EvalError::InvalidJsonPath { .. }
             | nodedb_query::EvalError::NumericOverflow { .. }
-            | nodedb_query::EvalError::UnsupportedSrid { .. }
+            | nodedb_query::EvalError::Crs { .. }
             | nodedb_query::EvalError::MixedSrid { .. }
-            | nodedb_query::EvalError::ProjectionDomain { .. }),
+            | nodedb_query::EvalError::Transform { .. }
+            | nodedb_query::EvalError::Geometry { .. }
+            | nodedb_query::EvalError::ArgumentValue { .. }),
         ) => Err(SqlError::DataException {
             detail: e.to_string(),
         }),
@@ -427,6 +442,7 @@ fn sql_to_ndb_value(v: SqlValue) -> Value {
         SqlValue::Array(a) => Value::Array(a.into_iter().map(sql_to_ndb_value).collect()),
         SqlValue::Timestamp(dt) => Value::NaiveDateTime(dt),
         SqlValue::Timestamptz(dt) => Value::DateTime(dt),
+        SqlValue::Geometry(g) => Value::Geometry(g),
     }
 }
 
@@ -445,15 +461,10 @@ fn ndb_to_sql_value(v: Value) -> SqlValue {
         Value::Uuid(s) | Value::Ulid(s) | Value::Regex(s) => SqlValue::String(s),
         Value::Duration(d) => SqlValue::String(d.to_human()),
         Value::Decimal(d) => SqlValue::Decimal(d),
-        // Geometry and Object values are serialized to JSON strings so that
-        // nested function calls like ST_Distance(ST_Point(...), ST_Point(...))
-        // survive the SqlValue round-trip. The geo evaluator's geom_arg helper
-        // recovers Geometry from a GeoJSON string, SRID included through the
-        // `crs` member; Object results (e.g. from
-        // ST_GeoHashDecode) reach the client as a JSON-encoded string column.
-        Value::Geometry(g) => sonic_rs::to_string(&g)
-            .map(SqlValue::String)
-            .unwrap_or(SqlValue::Null),
+        // A geometry keeps its SRID, Z and M through the fold.
+        Value::Geometry(g) => SqlValue::Geometry(g),
+        // Object results (ST_GeoHashDecode) reach the client as a
+        // JSON-encoded string column.
         Value::Object(map) => sonic_rs::to_string(&map)
             .map(SqlValue::String)
             .unwrap_or(SqlValue::Null),
@@ -472,6 +483,10 @@ fn ndb_to_sql_value(v: Value) -> SqlValue {
 mod tests {
     use super::*;
 
+    fn crs() -> CrsContext<'static> {
+        CrsContext::builtin_only()
+    }
+
     #[test]
     fn fold_now_produces_timestamptz_once_only() {
         let registry = FunctionRegistry::new();
@@ -482,10 +497,10 @@ mod tests {
         };
         // `now` is volatile, so a reusable plan must never carry its value.
         assert!(
-            matches!(fold_constant(&expr, &registry), Ok(None)),
+            matches!(fold_constant(&expr, &registry, &crs()), Ok(None)),
             "now() must not fold into a reusable plan"
         );
-        let val = fold_constant_scoped(&expr, &registry, FoldScope::Once)
+        let val = fold_constant_scoped(&expr, &registry, FoldScope::Once, &crs())
             .expect("fold must not error")
             .expect("now() must fold for a single execution");
         match val {
@@ -509,11 +524,11 @@ mod tests {
             ))),
         };
         assert_eq!(
-            fold_constant(&neg("9223372036854775808"), &registry).unwrap(),
+            fold_constant(&neg("9223372036854775808"), &registry, &crs()).unwrap(),
             Some(SqlValue::Int(i64::MIN))
         );
         assert_eq!(
-            fold_constant(&neg("18446744073709551615"), &registry).unwrap(),
+            fold_constant(&neg("18446744073709551615"), &registry, &crs()).unwrap(),
             Some(SqlValue::Decimal(-rust_decimal::Decimal::from(u64::MAX)))
         );
     }
@@ -531,7 +546,7 @@ mod tests {
             ],
             distinct: false,
         };
-        let err = fold_constant(&expr, &registry).expect_err("malformed path must fail");
+        let err = fold_constant(&expr, &registry, &crs()).expect_err("malformed path must fail");
         assert!(
             matches!(&err, SqlError::DataException { detail } if detail.contains("invalid JSONPath")),
             "{err:?}"
@@ -547,11 +562,11 @@ mod tests {
             distinct: false,
         };
         assert!(
-            matches!(fold_constant(&expr, &registry), Ok(None)),
+            matches!(fold_constant(&expr, &registry, &crs()), Ok(None)),
             "current_timestamp must not fold into a reusable plan"
         );
         assert!(matches!(
-            fold_constant_scoped(&expr, &registry, FoldScope::Once),
+            fold_constant_scoped(&expr, &registry, FoldScope::Once, &crs()),
             Ok(Some(SqlValue::Timestamptz(_)))
         ));
     }
@@ -565,7 +580,7 @@ mod tests {
             distinct: false,
         };
         assert!(
-            fold_constant(&expr, &registry)
+            fold_constant(&expr, &registry, &crs())
                 .expect("fold must not error")
                 .is_none()
         );
@@ -579,7 +594,7 @@ mod tests {
             SqlExpr::Literal(SqlValue::Int(42)),
         ]);
         assert_eq!(
-            fold_constant(&expr, &registry),
+            fold_constant(&expr, &registry, &crs()),
             Ok(Some(SqlValue::Array(vec![
                 SqlValue::String("public".into()),
                 SqlValue::Int(42),
@@ -595,7 +610,10 @@ mod tests {
             op: BinaryOp::Add,
             right: Box::new(SqlExpr::Literal(SqlValue::Int(3))),
         };
-        assert_eq!(fold_constant(&expr, &registry), Ok(Some(SqlValue::Int(5))));
+        assert_eq!(
+            fold_constant(&expr, &registry, &crs()),
+            Ok(Some(SqlValue::Int(5)))
+        );
     }
 
     #[test]
@@ -606,7 +624,7 @@ mod tests {
             name: "name".into(),
         };
         assert!(
-            fold_constant(&expr, &registry)
+            fold_constant(&expr, &registry, &crs())
                 .expect("fold must not error")
                 .is_none()
         );
@@ -618,7 +636,7 @@ mod tests {
         let d = rust_decimal::Decimal::new(12345, 2); // 123.45
         let expr = SqlExpr::Literal(SqlValue::Decimal(d));
         assert_eq!(
-            fold_constant(&expr, &registry),
+            fold_constant(&expr, &registry, &crs()),
             Ok(Some(SqlValue::Decimal(d)))
         );
     }
@@ -636,7 +654,7 @@ mod tests {
         };
         let expected = Decimal::new(58023, 2); // 580.23
         assert_eq!(
-            fold_constant(&expr, &registry),
+            fold_constant(&expr, &registry, &crs()),
             Ok(Some(SqlValue::Decimal(expected)))
         );
     }
@@ -651,7 +669,7 @@ mod tests {
             expr: Box::new(SqlExpr::Literal(SqlValue::Decimal(d))),
         };
         assert_eq!(
-            fold_constant(&expr, &registry),
+            fold_constant(&expr, &registry, &crs()),
             Ok(Some(SqlValue::Decimal(-d)))
         );
     }
@@ -671,7 +689,7 @@ mod tests {
             ],
             distinct: false,
         };
-        let v = fold_constant(&expr, &registry).expect("fold must not error");
+        let v = fold_constant(&expr, &registry, &crs()).expect("fold must not error");
         match v {
             Some(SqlValue::String(ref s)) if !s.is_empty() => {}
             other => panic!("expected non-empty SqlValue::String, got {other:?}"),
@@ -694,7 +712,7 @@ mod tests {
             args: vec![make_point(-122.4, 37.8), make_point(-87.6, 41.8)],
             distinct: false,
         };
-        let v = fold_constant(&expr, &registry).expect("fold must not error");
+        let v = fold_constant(&expr, &registry, &crs()).expect("fold must not error");
         match v {
             Some(SqlValue::Float(d)) => {
                 assert!(d > 0.0, "distance should be positive, got {d}");
@@ -715,7 +733,7 @@ mod tests {
         };
         let expected = Decimal::new(150, 0);
         assert_eq!(
-            fold_constant(&expr, &registry),
+            fold_constant(&expr, &registry, &crs()),
             Ok(Some(SqlValue::Decimal(expected)))
         );
     }

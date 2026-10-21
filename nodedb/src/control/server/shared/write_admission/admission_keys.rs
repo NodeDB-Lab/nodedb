@@ -327,6 +327,7 @@ mod tests {
             PhysicalPlan::Columnar(ColumnarOp::Delete {
                 collection: qualified("docs"),
                 filters: Vec::new(),
+                system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             }),
             PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
@@ -463,6 +464,7 @@ mod tests {
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             returning: None,
             rls_filters: Vec::new(),

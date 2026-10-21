@@ -24,6 +24,11 @@ pub fn constraint_sqlstate(constraint: &str) -> &'static str {
     }
 }
 
+/// The SQLSTATE of an expression evaluation error.
+pub fn eval_error_sqlstate(e: &nodedb_query::EvalError) -> &'static str {
+    error_code_to_sqlstate(&ErrorCode::from(e.clone())).1
+}
+
 /// Map a Data Plane `ErrorCode` to SQLSTATE.
 pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, String) {
     match code {
@@ -321,6 +326,9 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
                  split the transaction into smaller batches"
             ),
         ),
+        ErrorCode::ProgramLimitExceeded { detail } => {
+            ("ERROR", sqlstate::PROGRAM_LIMIT_EXCEEDED, detail.clone())
+        }
         ErrorCode::NodeLabelLimit { node, label, limit } => (
             "ERROR",
             sqlstate::PROGRAM_LIMIT_EXCEEDED,

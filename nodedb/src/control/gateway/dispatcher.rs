@@ -85,6 +85,16 @@ pub(crate) async fn dispatch_route(
     match route.decision {
         RouteDecision::Local => {
             confirm_local_read(shared, database_id, &route.plan, &read_groups, deadline_ms).await?;
+            // A historical read runs only once this node installed its cut
+            // (`read_cut::wait`).
+            crate::control::read_cut::await_read_cut(
+                shared,
+                &route.plan,
+                crate::control::server::shared::session::StatementDeadline::after(
+                    std::time::Duration::from_millis(deadline_ms),
+                ),
+            )
+            .await?;
             dispatch_local(
                 route,
                 LocalContext {

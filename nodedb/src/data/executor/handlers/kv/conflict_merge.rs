@@ -29,13 +29,14 @@ pub(in crate::data::executor) fn merge_kv_conflict_body(
     incoming: &[u8],
     updates: &[(String, UpdateValue)],
     declared: &[DeclaredColumn],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<u8>> {
     let Some(existing) = existing else {
         return Ok(coerce_kv_body(incoming, declared)?.into_owned());
     };
     let (existing_row, shape) = kv_body_to_row(existing).map_err(KvBodyError::from)?;
     let (excluded_row, _) = kv_body_to_row(incoming).map_err(KvBodyError::from)?;
-    let mut merged = apply_on_conflict_updates(existing_row, &excluded_row, updates)?;
+    let mut merged = apply_on_conflict_updates(existing_row, &excluded_row, updates, crs)?;
     if let Value::Object(map) = &mut merged {
         coerce_declared_row(map, declared)?;
     }
@@ -79,6 +80,7 @@ mod tests {
             b"second-longer-value",
             &set_value_from_excluded(),
             &[],
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("merge");
         assert_eq!(merged, b"second-longer-value".to_vec());
@@ -88,25 +90,42 @@ mod tests {
     fn raw_single_byte_body_keeps_its_shape() {
         // 0x31 is a msgpack fixint; the merge must still treat it as the
         // string "1" and write back "2" as one raw byte.
-        let merged =
-            merge_kv_conflict_body(Some(b"1".as_slice()), b"2", &set_value_from_excluded(), &[])
-                .expect("merge");
+        let merged = merge_kv_conflict_body(
+            Some(b"1".as_slice()),
+            b"2",
+            &set_value_from_excluded(),
+            &[],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("merge");
         assert_eq!(merged, b"2".to_vec());
     }
 
     #[test]
     fn raw_body_with_literal_value_assignment_stays_raw() {
         let updates = vec![("value".to_string(), literal(Value::String("lit".into())))];
-        let merged = merge_kv_conflict_body(Some(b"first".as_slice()), b"ignored", &updates, &[])
-            .expect("merge");
+        let merged = merge_kv_conflict_body(
+            Some(b"first".as_slice()),
+            b"ignored",
+            &updates,
+            &[],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("merge");
         assert_eq!(merged, b"lit".to_vec());
     }
 
     #[test]
     fn raw_body_refuses_a_typed_column_assignment() {
         let updates = vec![("n".to_string(), literal(Value::Integer(1)))];
-        let err = merge_kv_conflict_body(Some(b"first".as_slice()), b"second", &updates, &[])
-            .expect_err("a raw row cannot grow a typed column");
+        let err = merge_kv_conflict_body(
+            Some(b"first".as_slice()),
+            b"second",
+            &updates,
+            &[],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect_err("a raw row cannot grow a typed column");
         assert!(
             matches!(err, crate::Error::BadRequest { .. }),
             "got {err:?}"
@@ -122,6 +141,7 @@ mod tests {
             &map_body(&[("hp", 1)]),
             &updates,
             &[],
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("merge");
         let row = nodedb_types::value_from_msgpack(&merged).expect("map body");
@@ -140,6 +160,7 @@ mod tests {
             &map_body(&[("hp", 1)]),
             &updates,
             &[],
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("merge");
         let row = nodedb_types::value_from_msgpack(&merged).expect("map body");
@@ -164,6 +185,7 @@ mod tests {
             &map_body(&[("hp", 1)]),
             &updates,
             &declared,
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect_err("39999 + 10 is past smallint");
         assert!(
@@ -171,8 +193,14 @@ mod tests {
             "{err:?}"
         );
 
-        let err = merge_kv_conflict_body(None, &map_body(&[("hp", 40000)]), &updates, &declared)
-            .expect_err("the insert row is past smallint");
+        let err = merge_kv_conflict_body(
+            None,
+            &map_body(&[("hp", 40000)]),
+            &updates,
+            &declared,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect_err("the insert row is past smallint");
         assert!(
             matches!(err, crate::Error::NumericValueOutOfRange { .. }),
             "{err:?}"

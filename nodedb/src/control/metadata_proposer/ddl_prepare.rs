@@ -4,7 +4,7 @@
 //! serialize descriptor preparation across the cluster.
 
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use nodedb_cluster::{MetadataEntry, encode_entry};
 
@@ -19,14 +19,6 @@ use super::wait::await_metadata_apply;
 const DDL_PREPARE_WAIT: Duration =
     super::ddl_owner::DDL_PREPARE_LEASE.saturating_add(Duration::from_secs(10));
 
-fn wall_now_ns() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .min(u64::MAX as u128) as u64
-}
-
 /// Poll interval while another token holds the preparation lease.
 const DDL_PREPARE_POLL: Duration = Duration::from_millis(10);
 
@@ -36,7 +28,9 @@ fn next_token(shared: &SharedState) -> u64 {
         .metadata_ddl
         .token_seq
         .fetch_add(1, Ordering::Relaxed);
-    shared.node_id.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ wall_now_ns().rotate_left(17) ^ sequence
+    shared.node_id.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ nodedb_types::wall_now_ns().rotate_left(17)
+        ^ sequence
 }
 
 fn encode_metadata(entry: &MetadataEntry) -> Result<Vec<u8>, Error> {

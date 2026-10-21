@@ -57,9 +57,9 @@ pub(in crate::data::executor) struct PointDeleteOutcome {
     /// System-time key the bitemporal tombstone row (and its versioned index
     /// tombstones) were appended at. `Some(t)` on the bitemporal branch,
     /// `None` on the plain delete branch.
-    pub bitemporal_sys_from_ms: Option<i64>,
+    pub bitemporal_sys_from: Option<i64>,
     /// `(field, value)` pairs whose versioned index tombstones this op wrote
-    /// at `bitemporal_sys_from_ms`. Empty when not bitemporal / none written.
+    /// at `bitemporal_sys_from`. Empty when not bitemporal / none written.
     pub bitemporal_index_tuples: Vec<(String, String)>,
     /// `(field, value)` pairs the plain (non-bitemporal) secondary-index
     /// cascade removed for this document. Captured unconditionally (the cascade
@@ -120,6 +120,7 @@ impl CoreLoop {
         txn: &WriteTransaction,
         params: PointDeleteParams<'_>,
     ) -> crate::Result<PointDeleteOutcome> {
+        let crs = self.crs_context();
         let PointDeleteParams {
             database_id,
             tid,
@@ -142,7 +143,7 @@ impl CoreLoop {
             .apply_scope
             .bitemporal_stamps
             .get(&surrogate.as_u32())
-            .map(|stamp| stamp.sys_from_ms);
+            .map(|stamp| stamp.sys_from);
         let bitemporal =
             carried_sys_from.is_some() || self.is_bitemporal(database_id, tid, collection);
         let config_key = (
@@ -157,7 +158,7 @@ impl CoreLoop {
         // Current-state-only indexes (text, graph, spatial, vector) are
         // still cascaded below — they track "what exists now" regardless
         // of bitemporal history.
-        let mut bitemporal_sys_from_ms: Option<i64> = None;
+        let mut bitemporal_sys_from: Option<i64> = None;
         let mut bitemporal_index_tuples: Vec<(String, String)> = Vec::new();
         let prior = if bitemporal {
             let prior =
@@ -175,8 +176,11 @@ impl CoreLoop {
                         resolved_targets,
                     )?;
                 }
-                let sys_from = carried_sys_from.unwrap_or_else(|| self.bitemporal_now_ms());
-                bitemporal_sys_from_ms = Some(sys_from);
+                let sys_from = match carried_sys_from {
+                    Some(sys_from) => sys_from,
+                    None => self.row_version_ordinal(database_id, tid, collection, &storage_key)?,
+                };
+                bitemporal_sys_from = Some(sys_from);
                 // The tombstone version, plus an index tombstone for every
                 // current value, so a lookup at or after `sys_from` skips
                 // this row.
@@ -188,7 +192,7 @@ impl CoreLoop {
                         collection,
                         storage_key: &storage_key,
                         current_body: body,
-                        sys_from_ms: sys_from,
+                        sys_from,
                     },
                 )?;
             }
@@ -233,7 +237,7 @@ impl CoreLoop {
             let doc = self.decode_stored_document(config, body)?;
             for path in config.index_paths.clone() {
                 if let Some(ref pred) = path.predicate
-                    && !pred.evaluate_json(&doc)
+                    && !pred.evaluate_json(&doc, &crs)
                 {
                     continue;
                 }
@@ -375,7 +379,7 @@ impl CoreLoop {
 
         Ok(PointDeleteOutcome {
             prior_value: prior,
-            bitemporal_sys_from_ms,
+            bitemporal_sys_from,
             bitemporal_index_tuples,
             secondary_index_tuples,
             memory_undo,

@@ -46,6 +46,7 @@ impl CoreLoop {
         num_cores: usize,
         tombstones: &nodedb_wal::TombstoneSet,
     ) {
+        let crs = self.crs_context();
         use nodedb_wal::record::RecordType;
         use tracing::{debug, warn};
 
@@ -174,6 +175,7 @@ impl CoreLoop {
                             },
                             payload.peer_id,
                             replayed_admission(&payload),
+                            &crs,
                         ),
                         Err(error) => {
                             self.replay_record_unapplied(
@@ -307,6 +309,7 @@ impl CoreLoop {
                             crate::engine::crdt::tenant_state::ApplyTarget::Collection,
                             payload.peer_id,
                             replayed_admission(&payload),
+                            &crs,
                         ) {
                             crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Clean {
                                 ..

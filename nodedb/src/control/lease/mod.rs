@@ -38,10 +38,8 @@ pub mod renewal;
 pub mod runtime;
 mod self_fence;
 pub mod shutdown_release;
-mod wall_time;
 
 pub(crate) use self_fence::lease_use_is_fenced;
-pub(super) use wall_time::wall_now_ns;
 
 pub use descriptor_lookup::{
     clear_implicit_drains, descriptor_id_and_prior_version, descriptor_id_for_implicit_clear,

@@ -146,6 +146,7 @@ pub(crate) async fn execute_cluster_array(
         projection,
         Some(redaction.ctx(&state.redaction)),
         None,
+        &crate::control::crs_context::crs_set_for(state),
     )? {
         ShapeOutcome::Rows(shaped) => Ok(ClusterArrayShaped::Rows(shaped)),
         ShapeOutcome::Passthrough => match cluster_plan_kind {

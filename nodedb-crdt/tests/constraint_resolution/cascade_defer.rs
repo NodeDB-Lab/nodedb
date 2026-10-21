@@ -5,7 +5,7 @@
 use loro::LoroValue;
 use nodedb_crdt::policy::{PolicyResolution, ResolvedAction};
 use nodedb_crdt::state::CrdtState;
-use nodedb_crdt::validator::Validator;
+use nodedb_crdt::validator::{IncomingDelta, Validator};
 
 use crate::common::{AuthCtx, cascade_defer_policy, post_change, schema, wall_now_ms};
 
@@ -27,11 +27,14 @@ fn cascade_defer_succeeds_when_parent_arrives_before_ttl() {
     let r = validator
         .validate_with_policy(
             &leader,
-            42,
-            AuthCtx::default(),
             &post,
-            b"post-delta".to_vec(),
-            started_ms,
+            IncomingDelta {
+                peer_id: 42,
+                auth: AuthCtx::default(),
+                delta_bytes: b"post-delta".to_vec(),
+                hlc_timestamp: started_ms,
+            },
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
     match r {
@@ -65,11 +68,14 @@ fn cascade_defer_succeeds_when_parent_arrives_before_ttl() {
     let r2 = validator
         .validate_with_policy(
             &leader,
-            42,
-            AuthCtx::default(),
             &post,
-            b"post-delta".to_vec(),
-            retry_now,
+            IncomingDelta {
+                peer_id: 42,
+                auth: AuthCtx::default(),
+                delta_bytes: b"post-delta".to_vec(),
+                hlc_timestamp: retry_now,
+            },
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
     assert!(
@@ -101,11 +107,14 @@ fn cascade_defer_expires_to_dlq_when_parent_never_arrives() {
     let r = validator
         .validate_with_policy(
             &leader,
-            42,
-            AuthCtx::default(),
             &post_change("post-orphan", "ghost-user"),
-            b"orphan-delta".to_vec(),
-            started_ms,
+            IncomingDelta {
+                peer_id: 42,
+                auth: AuthCtx::default(),
+                delta_bytes: b"orphan-delta".to_vec(),
+                hlc_timestamp: started_ms,
+            },
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
     assert!(matches!(r, PolicyResolution::Deferred { .. }));

@@ -305,7 +305,7 @@ impl CoreLoop {
         format: &str,
     ) -> Result<(usize, StagePreview, i64), ErrorCode> {
         let tenant = TenantId::new(args.tid);
-        let now_ms = self.ingest_now_ms();
+        let now_ms = self.ingest_stamp_ms();
         let lines = self.stamped_ingest_lines(StampedIngest {
             database_id: args.task.request.database_id,
             tid: tenant,
@@ -344,6 +344,7 @@ impl CoreLoop {
             now_ms,
             args.tid,
             args.collection,
+            &self.crs_context(),
         )?;
         self.prevalidate_deferred_ilp_ingest(args.task, tenant, args.collection, parsed.lines())?;
         let preview = self.preview_lines(&preview_target(args), parsed.lines(), now_ms);

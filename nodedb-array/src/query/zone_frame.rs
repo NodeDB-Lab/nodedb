@@ -8,8 +8,14 @@
 //! casting runs there. A zone edge is straight in the zone SRID, so its image
 //! in dim space is curved. The dim box densifies each exterior edge by
 //! recursive bisection before it takes the bounds.
+//!
+//! The Control Plane resolves both CRS definitions when it builds the frame
+//! and the frame carries them, so the Data Plane maps cells without a CRS
+//! registry.
 
-use nodedb_spatial::crs::Transformer;
+use std::sync::Arc;
+
+use nodedb_crs::{CrsContext, CrsDef, Transformer, UnknownSrid};
 use nodedb_types::geometry::Srid;
 use serde::{Deserialize, Serialize};
 
@@ -32,7 +38,7 @@ const WORLD_TOLERANCE_DIVISOR: f64 = 64.0;
 /// Offset from a pixel corner to its centre, in pixels.
 const PIXEL_CENTRE: f64 = 0.5;
 
-/// The SRIDs and affine that carry a cell into the zone's SRID.
+/// The CRS definitions and affine that carry a cell into the zone's SRID.
 #[derive(
     Debug,
     Clone,
@@ -45,8 +51,10 @@ const PIXEL_CENTRE: f64 = 0.5;
 pub struct ZoneFrame {
     /// The georef affine. `None` means the dims hold world coordinates.
     pub transform: Option<GeoTransform>,
-    pub array_srid: Srid,
-    pub zone_srid: Srid,
+    /// The array's GEOREF CRS, resolved.
+    pub array_crs: CrsDef,
+    /// The zone's CRS, resolved.
+    pub zone_crs: CrsDef,
     /// `[min_x, min_y, max_x, max_y]` in dim coordinates.
     ///
     /// Every cell the zone holds lies inside it. Pruning reads it. Membership
@@ -57,7 +65,15 @@ pub struct ZoneFrame {
 impl ZoneFrame {
     /// The cell-to-zone transformer. Build one per scan, never one per cell.
     pub fn cell_transformer(&self) -> Transformer {
-        Transformer::new(self.array_srid, self.zone_srid)
+        Transformer::new(
+            Arc::new(self.array_crs.clone()),
+            Arc::new(self.zone_crs.clone()),
+        )
+    }
+
+    /// The SRID of the zone's coordinates.
+    pub fn zone_srid(&self) -> Srid {
+        self.zone_crs.srid
     }
 
     /// Position in the zone SRID of the centre of the cell at dim
@@ -81,7 +97,10 @@ impl ZoneFrame {
             },
             None => [coord_to_f64(x)?, coord_to_f64(y)?],
         };
-        transformer.apply(world).ok()
+        transformer
+            .apply([world[0], world[1], 0.0])
+            .ok()
+            .map(|[zx, zy, _]| [zx, zy])
     }
 }
 
@@ -116,6 +135,11 @@ pub enum ZoneFrameError {
     /// The zone has no exterior position. SQLSTATE `22000`.
     #[error("zone on array '{array}' has no exterior position")]
     EmptyZone { array: String },
+
+    /// The zone SRID or the array's GEOREF SRID names no defined CRS.
+    /// SQLSTATE `22000`.
+    #[error("zone on array '{array}': {source}")]
+    Crs { array: String, source: UnknownSrid },
 }
 
 impl ZoneFrameError {
@@ -125,12 +149,14 @@ impl ZoneFrameError {
             ZoneFrameError::NoGeoref { array }
             | ZoneFrameError::VertexBudget { array, .. }
             | ZoneFrameError::OutOfDomain { array, .. }
-            | ZoneFrameError::EmptyZone { array } => array,
+            | ZoneFrameError::EmptyZone { array }
+            | ZoneFrameError::Crs { array, .. } => array,
         }
     }
 }
 
 /// Build the frame of `polygons`, drawn in `zone_srid`, over `schema`.
+/// Both SRIDs resolve through `ctx`.
 ///
 /// The dim box is padded by twice the chord tolerance. An `INT64` dim rounds
 /// it outward to whole coordinates.
@@ -138,14 +164,16 @@ pub fn build_zone_frame(
     schema: &ArraySchema,
     zone_srid: Srid,
     polygons: &[ZonePolygon],
+    ctx: &CrsContext<'_>,
 ) -> Result<ZoneFrame, ZoneFrameError> {
-    build_with_budget(schema, zone_srid, polygons, MAX_FRAME_VERTICES)
+    build_with_budget(schema, zone_srid, polygons, ctx, MAX_FRAME_VERTICES)
 }
 
 fn build_with_budget(
     schema: &ArraySchema,
     zone_srid: Srid,
     polygons: &[ZonePolygon],
+    ctx: &CrsContext<'_>,
     budget: usize,
 ) -> Result<ZoneFrame, ZoneFrameError> {
     let georef = schema
@@ -154,13 +182,21 @@ fn build_with_budget(
         .ok_or_else(|| ZoneFrameError::NoGeoref {
             array: schema.name.clone(),
         })?;
+    let resolve = |srid: Srid| {
+        ctx.resolve(srid).map_err(|source| ZoneFrameError::Crs {
+            array: schema.name.clone(),
+            source,
+        })
+    };
+    let zone_crs = resolve(zone_srid)?;
+    let array_crs = resolve(georef.srid)?;
     let tolerance = match georef.transform {
         Some(_) => PIXEL_TOLERANCE,
         None => world_tolerance(schema, georef.x_dim, georef.y_dim),
     };
     let mut walk = EdgeWalk {
         array: &schema.name,
-        transformer: Transformer::new(zone_srid, georef.srid),
+        transformer: Transformer::new(Arc::clone(&zone_crs), Arc::clone(&array_crs)),
         transform: georef.transform,
         zone_srid,
         tolerance,
@@ -186,8 +222,8 @@ fn build_with_budget(
     }
     Ok(ZoneFrame {
         transform: georef.transform,
-        array_srid: georef.srid,
-        zone_srid,
+        array_crs: (*array_crs).clone(),
+        zone_crs: (*zone_crs).clone(),
         dim_bbox,
     })
 }
@@ -277,10 +313,11 @@ impl EdgeWalk<'_> {
             });
         }
         self.mapped += 1;
-        let world = self
+        let [wx, wy, _] = self
             .transformer
-            .apply(p)
+            .apply([p[0], p[1], 0.0])
             .map_err(|e| self.out_of_domain(p, e.to_string()))?;
+        let world = [wx, wy];
         let dim = match &self.transform {
             None => world,
             Some(gt) => {
@@ -326,10 +363,25 @@ mod tests {
     /// Pixel size of the UTM grids, metres.
     const PIXEL_M: f64 = 30.0;
 
+    fn ctx() -> CrsContext<'static> {
+        CrsContext::builtin_only()
+    }
+
+    fn utm47n() -> Srid {
+        Srid::new(32647).unwrap()
+    }
+
+    fn transformer(from: Srid, to: Srid) -> Transformer {
+        ctx().transformer(from, to).unwrap()
+    }
+
+    fn apply2(t: &Transformer, [x, y]: [f64; 2]) -> [f64; 2] {
+        let [tx, ty, _] = t.apply([x, y, 0.0]).unwrap();
+        [tx, ty]
+    }
+
     fn utm(lon: f64, lat: f64) -> [f64; 2] {
-        Transformer::new(Srid::Wgs84, Srid::Utm47N)
-            .apply([lon, lat])
-            .unwrap()
+        apply2(&transformer(Srid::WGS84, utm47n()), [lon, lat])
     }
 
     fn pixel_schema(gt: [f64; 6]) -> ArraySchema {
@@ -348,7 +400,7 @@ mod tests {
             .build()
             .unwrap()
             .with_georef(Some(ArrayGeoref {
-                srid: Srid::Utm47N,
+                srid: utm47n(),
                 x_dim: 1,
                 y_dim: 0,
                 transform: Some(GeoTransform(gt)),
@@ -404,7 +456,7 @@ mod tests {
     fn a_curved_edge_bounds_every_cell_inside_it() {
         let (schema, cols, rows) = grid_at_six_north();
         let polygons = vec![rect(99.0, 6.0, 100.0, 6.5)];
-        let frame = build_zone_frame(&schema, Srid::Wgs84, &polygons).unwrap();
+        let frame = build_zone_frame(&schema, Srid::WGS84, &polygons, &ctx()).unwrap();
         let zone = PolygonZone {
             x_dim: 1,
             y_dim: 0,
@@ -437,7 +489,7 @@ mod tests {
         let (schema, cols, rows) = grid_at_six_north();
         let gt = schema.georef.as_ref().unwrap().transform.unwrap();
         let polygons = vec![rect(99.0, 6.0, 100.0, 6.5)];
-        let frame = build_zone_frame(&schema, Srid::Wgs84, &polygons).unwrap();
+        let frame = build_zone_frame(&schema, Srid::WGS84, &polygons, &ctx()).unwrap();
         let zone = PolygonZone {
             x_dim: 1,
             y_dim: 0,
@@ -450,13 +502,13 @@ mod tests {
             .iter()
             .map(|p| utm(p[0], p[1]))
             .collect();
-        let to_lon_lat = Transformer::new(Srid::Utm47N, Srid::Wgs84);
+        let to_lon_lat = transformer(utm47n(), Srid::WGS84);
         let (mut differs, mut inside) = (0usize, 0usize);
         for row in 0..rows {
             for col in 0..cols {
                 let exact = prepared.contains(&[CoordValue::Int64(row), CoordValue::Int64(col)]);
                 let (x, y) = gt.cell_centre(col, row);
-                let [lon, lat] = to_lon_lat.apply([x, y]).unwrap();
+                let [lon, lat] = apply2(&to_lon_lat, [x, y]);
                 let truth = (99.0..100.0).contains(&lon) && (6.0..6.5).contains(&lat);
                 assert_eq!(exact, truth, "cell ({row}, {col}) at ({lon}, {lat})");
                 let vertex_only = nodedb_types::geometry::point_in_polygon(x, y, &straight);
@@ -476,8 +528,13 @@ mod tests {
         let (schema, _, _) = grid_at_six_north();
         // The south edge straddles the central meridian at 99°E. In UTM the
         // parallel dips south at the meridian, between the two vertices.
-        let frame =
-            build_zone_frame(&schema, Srid::Wgs84, &[rect(98.5, 6.0, 99.5, 6.001)]).unwrap();
+        let frame = build_zone_frame(
+            &schema,
+            Srid::WGS84,
+            &[rect(98.5, 6.0, 99.5, 6.001)],
+            &ctx(),
+        )
+        .unwrap();
         let gt = schema.georef.as_ref().unwrap().transform.unwrap();
         let row_of = |lon: f64| {
             let p = utm(lon, 6.0);
@@ -498,9 +555,14 @@ mod tests {
 
     #[test]
     fn a_world_frame_pads_by_the_tile_tolerance() {
-        let schema = world_schema(Srid::Wgs84, -180.0, 180.0, 64);
-        let frame =
-            build_zone_frame(&schema, Srid::Wgs84, &[rect(100.0, 2.0, 101.0, 3.0)]).unwrap();
+        let schema = world_schema(Srid::WGS84, -180.0, 180.0, 64);
+        let frame = build_zone_frame(
+            &schema,
+            Srid::WGS84,
+            &[rect(100.0, 2.0, 101.0, 3.0)],
+            &ctx(),
+        )
+        .unwrap();
         // Same SRID: the edges map straight, and the pad is 2 · 64 / 64.
         assert_eq!(frame.dim_bbox, [98.0, 0.0, 103.0, 5.0]);
         assert_eq!(frame.transform, None);
@@ -508,9 +570,9 @@ mod tests {
 
     #[test]
     fn a_zone_without_georef_is_refused() {
-        let mut schema = world_schema(Srid::Wgs84, 0.0, 10.0, 1);
+        let mut schema = world_schema(Srid::WGS84, 0.0, 10.0, 1);
         schema.georef = None;
-        let err = build_zone_frame(&schema, Srid::Wgs84, &[rect(1.0, 1.0, 2.0, 2.0)])
+        let err = build_zone_frame(&schema, Srid::WGS84, &[rect(1.0, 1.0, 2.0, 2.0)], &ctx())
             .expect_err("refused");
         assert!(matches!(err, ZoneFrameError::NoGeoref { .. }), "{err:?}");
     }
@@ -518,8 +580,13 @@ mod tests {
     #[test]
     fn a_vertex_outside_the_projection_is_refused() {
         let (schema, _, _) = grid_at_six_north();
-        let err = build_zone_frame(&schema, Srid::Wgs84, &[rect(150.0, 6.0, 151.0, 7.0)])
-            .expect_err("refused");
+        let err = build_zone_frame(
+            &schema,
+            Srid::WGS84,
+            &[rect(150.0, 6.0, 151.0, 7.0)],
+            &ctx(),
+        )
+        .expect_err("refused");
         assert!(matches!(err, ZoneFrameError::OutOfDomain { .. }), "{err:?}");
     }
 
@@ -527,8 +594,9 @@ mod tests {
     fn the_vertex_budget_is_enforced() {
         let (schema, _, _) = grid_at_six_north();
         let polygons = [rect(99.0, 6.0, 100.0, 6.5)];
-        assert!(build_with_budget(&schema, Srid::Wgs84, &polygons, 1 << 16).is_ok());
-        let err = build_with_budget(&schema, Srid::Wgs84, &polygons, 8).expect_err("over budget");
+        assert!(build_with_budget(&schema, Srid::WGS84, &polygons, &ctx(), 1 << 16).is_ok());
+        let err =
+            build_with_budget(&schema, Srid::WGS84, &polygons, &ctx(), 8).expect_err("over budget");
         assert_eq!(
             err,
             ZoneFrameError::VertexBudget {
@@ -556,7 +624,7 @@ mod tests {
             ],
             holes: Vec::new(),
         };
-        let err = build_zone_frame(&schema, Srid::Wgs84, &[ring]).expect_err("over budget");
+        let err = build_zone_frame(&schema, Srid::WGS84, &[ring], &ctx()).expect_err("over budget");
         assert!(
             matches!(err, ZoneFrameError::VertexBudget { .. }),
             "{err:?}"
@@ -580,13 +648,13 @@ mod tests {
     fn every_inside_cell_lies_in_the_dim_bbox_for_random_zones() {
         let (schema, cols, rows) = grid_at_six_north();
         let gt = schema.georef.as_ref().unwrap().transform.unwrap();
-        let to_lon_lat = Transformer::new(Srid::Utm47N, Srid::Wgs84);
+        let to_lon_lat = transformer(utm47n(), Srid::WGS84);
         let mut rng = Lcg(0x5eed);
         for case in 0..24 {
             // A random quadrilateral whose corners fall inside the grid.
             let corner = |rng: &mut Lcg| {
                 let (x, y) = gt.pixel_to_world(rng.next() * cols as f64, rng.next() * rows as f64);
-                to_lon_lat.apply([x, y]).unwrap()
+                apply2(&to_lon_lat, [x, y])
             };
             let a = corner(&mut rng);
             let b = corner(&mut rng);
@@ -596,7 +664,7 @@ mod tests {
                 exterior: vec![a, b, c, d, a],
                 holes: Vec::new(),
             }];
-            let frame = build_zone_frame(&schema, Srid::Wgs84, &polygons).unwrap();
+            let frame = build_zone_frame(&schema, Srid::WGS84, &polygons, &ctx()).unwrap();
             let [x0, y0, x1, y1] = frame.dim_bbox;
             let zone = PolygonZone {
                 x_dim: 1,
@@ -621,14 +689,34 @@ mod tests {
 
     #[test]
     fn a_frame_round_trips_through_msgpack() {
+        let ctx = ctx();
         let frame = ZoneFrame {
             transform: Some(GeoTransform([1.0, 2.0, 0.0, 3.0, 0.0, -2.0])),
-            array_srid: Srid::Utm47N,
-            zone_srid: Srid::Wgs84,
+            array_crs: (*ctx.resolve(utm47n()).unwrap()).clone(),
+            zone_crs: (*ctx.resolve(Srid::WGS84).unwrap()).clone(),
             dim_bbox: [0.0, 1.0, 2.0, 3.0],
         };
         let bytes = zerompk::to_msgpack_vec(&frame).unwrap();
         let back: ZoneFrame = zerompk::from_msgpack(&bytes).unwrap();
         assert_eq!(back, frame);
+    }
+
+    #[test]
+    fn an_undefined_zone_srid_is_refused() {
+        let (schema, _, _) = grid_at_six_north();
+        let err = build_zone_frame(
+            &schema,
+            Srid::new(999).unwrap(),
+            &[rect(99.0, 6.0, 100.0, 6.5)],
+            &ctx(),
+        )
+        .expect_err("refused");
+        assert_eq!(
+            err,
+            ZoneFrameError::Crs {
+                array: "scene".into(),
+                source: UnknownSrid::Undefined { code: 999 }
+            }
+        );
     }
 }

@@ -26,7 +26,7 @@ impl SharedState {
         handles: DataPlaneHandles,
         wal: Arc<WalManager>,
         catalog_path: &std::path::Path,
-        auth_config: &crate::config::auth::AuthConfig,
+        config: super::open_config::OpenConfig<'_>,
         tuning: TuningConfig,
         is_cluster: bool,
         governor: Arc<nodedb_mem::MemoryGovernor>,
@@ -37,6 +37,16 @@ impl SharedState {
             array_catalog,
             system_metrics,
         } = handles;
+        let super::open_config::OpenConfig {
+            auth: auth_config,
+            egress,
+        } = config;
+        let remote_sources =
+            crate::control::security::egress::RemoteSources::new(egress).map_err(|e| {
+                crate::Error::Config {
+                    detail: format!("outbound HTTP client: {e}"),
+                }
+            })?;
         dispatcher.adopt_capacity_metrics(Arc::clone(&system_metrics.dispatch_capacity));
         let super::bootstrap::ProdBootstrap {
             credentials,
@@ -76,7 +86,6 @@ impl SharedState {
         let super::auth_parts::AuthParts {
             metering_config,
             rate_limit_config,
-            http_client,
             siem,
             risk_scorer,
             escalation,
@@ -84,7 +93,7 @@ impl SharedState {
             auth_users,
             scope_grants,
             quota_manager,
-        } = super::auth_parts::build(auth_config, &credentials, &shared_audit)?;
+        } = super::auth_parts::build(auth_config, &remote_sources, &credentials, &shared_audit)?;
 
         let super::stores::DiskStores {
             data_dir,
@@ -128,7 +137,6 @@ impl SharedState {
             tracker: RequestTracker::new(),
             wal,
             quiesce,
-            http_client,
             credentials: Arc::clone(&credentials),
             audit: shared_audit,
             audit_recorder: std::sync::OnceLock::new(),
@@ -193,6 +201,7 @@ impl SharedState {
             cross_shard_metrics: None,
             cross_shard_dedup: std::sync::OnceLock::new(),
             redo_chunks,
+            departure_fence: Default::default(),
             kafka_manager: crate::event::kafka::KafkaManager::new(shutdown.raw_receiver()),
             definition_sync_fanout: std::sync::Arc::new(
                 crate::control::server::sync::definition_fanout::DefinitionSyncFanout::new(),
@@ -347,6 +356,7 @@ impl SharedState {
             gateway: std::sync::OnceLock::new(),
             backup_kek: None,
             backup_storage: None,
+            remote_sources,
             cut_captures: Arc::new(crate::control::backup::cut_capture::CutCaptures::new()),
             backup_schedules: Vec::new(),
             quarantine_registry: Arc::new(crate::storage::quarantine::QuarantineRegistry::new()),
@@ -405,7 +415,7 @@ mod tests {
             },
             wal,
             &catalog_path,
-            auth_config,
+            super::super::open_config::OpenConfig::strict(auth_config),
             TuningConfig::default(),
             false,
             crate::data::executor::core_loop::test_governor(),

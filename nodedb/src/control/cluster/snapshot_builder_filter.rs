@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The record filters a data-group snapshot build applies: which edges and
-//! which PK→surrogate binds have a home in the target group.
+//! The record filters a data-group snapshot build applies: which edges,
+//! which node labels and which PK→surrogate binds have a home in the target
+//! group.
 
 use std::collections::HashSet;
 
@@ -9,7 +10,9 @@ use nodedb_types::id::DatabaseId;
 
 use crate::Error;
 use crate::control::backup::snapshot_keys::{StoredRecord, homes_of_stored};
-use crate::types::{HomedRecord, RecordHomes};
+use crate::types::{
+    HomedRecord, NodeLabelVersionEntry, NodeLabelsEntry, RecordHomes, TenantDataSnapshot,
+};
 
 /// The number of edge-key characters an unparseable-key error carries.
 pub(crate) const EDGE_KEY_PREFIX_CHARS: usize = 32;
@@ -27,6 +30,28 @@ pub(crate) fn bind_in_group(
         holds_edges,
     })
     .intersects(group_vshards)
+}
+
+/// Push the current labels and the label versions of every node whose
+/// labels home on a vShard of `group_vshards` onto `merged`.
+pub(crate) fn push_group_node_labels(
+    labels: Vec<NodeLabelsEntry>,
+    versions: Vec<NodeLabelVersionEntry>,
+    group_vshards: &HashSet<u32>,
+    merged: &mut TenantDataSnapshot,
+) {
+    let in_group =
+        |node: &str| RecordHomes::of(HomedRecord::NodeLabels { node }).owned_by(group_vshards);
+    merged.node_labels.extend(
+        labels
+            .into_iter()
+            .filter(|(_, _, node, _)| in_group(node.as_str())),
+    );
+    merged.node_label_versions.extend(
+        versions
+            .into_iter()
+            .filter(|(_, _, node, _, _)| in_group(node.as_str())),
+    );
 }
 
 /// Push every entry of `edges`, keyed by an edge version's key, with an

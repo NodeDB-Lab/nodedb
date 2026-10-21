@@ -19,6 +19,7 @@ pub(in crate::data::executor) fn apply_projection_msgpack(
     data: &[u8],
     computed_cols: &[ComputedColumn],
     projection: &[String],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<u8>> {
     if computed_cols.is_empty() && projection.is_empty() {
         return Ok(data.to_vec());
@@ -63,7 +64,7 @@ pub(in crate::data::executor) fn apply_projection_msgpack(
             // A division/modulo-by-zero in a computed column fails the whole
             // query instead of silently materializing NULL into the
             // response.
-            let result = cc.expr.eval(&doc_val)?;
+            let result = cc.expr.eval(&doc_val, crs)?;
             let encoded = nodedb_types::value_to_msgpack(&result).map_err(|e| {
                 crate::Error::Serialization {
                     format: "msgpack".into(),
@@ -101,7 +102,12 @@ mod tests {
         computed: &[ComputedColumn],
         projection: &[String],
     ) -> crate::Result<Value> {
-        let bytes = apply_projection_msgpack(&row(doc), computed, projection)?;
+        let bytes = apply_projection_msgpack(
+            &row(doc),
+            computed,
+            projection,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )?;
         Ok(nodedb_types::value_from_msgpack(&bytes).expect("decode projected row"))
     }
 

@@ -41,6 +41,7 @@ pub fn enforce_type_guards(
     guards: &[CompiledTypeGuard],
     doc: &mut serde_json::Value,
     scope: GuardScope<'_>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<(), ErrorCode> {
     if guards.is_empty() {
         return Ok(());
@@ -52,7 +53,7 @@ pub fn enforce_type_guards(
         .iter()
         .map(|(name, value)| (name.clone(), Value::from(value.clone())))
         .collect();
-    let injected = inject_defaults(guards, &mut fields)?;
+    let injected = inject_defaults(guards, &mut fields, crs)?;
     let in_scope: Option<Vec<String>> = match scope {
         GuardScope::Document => None,
         GuardScope::Assigned(assigned) => Some(
@@ -67,7 +68,12 @@ pub fn enforce_type_guards(
             return Ok(());
         }
     };
-    check_type_guards(guards, &Value::Object(fields.clone()), in_scope.as_deref())?;
+    check_type_guards(
+        guards,
+        &Value::Object(fields.clone()),
+        in_scope.as_deref(),
+        crs,
+    )?;
     write_back(map, &fields, &injected);
     Ok(())
 }
@@ -111,13 +117,24 @@ mod tests {
     #[test]
     fn document_scope_injects_then_validates() {
         let mut doc = serde_json::json!({ "title": "Hi", "email": "a@b.c" });
-        enforce_type_guards(&guards(), &mut doc, GuardScope::Document).expect("valid");
+        enforce_type_guards(
+            &guards(),
+            &mut doc,
+            GuardScope::Document,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("valid");
         assert_eq!(doc["role"], "user");
         assert_eq!(doc["slug"], "hi");
 
         let mut missing = serde_json::json!({ "title": "Hi" });
-        let error = enforce_type_guards(&guards(), &mut missing, GuardScope::Document)
-            .expect_err("email is required");
+        let error = enforce_type_guards(
+            &guards(),
+            &mut missing,
+            GuardScope::Document,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect_err("email is required");
         assert!(matches!(error, ErrorCode::TypeGuardViolation { .. }));
     }
 
@@ -125,8 +142,13 @@ mod tests {
     fn assigned_scope_skips_unwritten_required_fields() {
         let mut doc = serde_json::json!({ "title": "New X" });
         let assigned = vec!["title".to_string()];
-        enforce_type_guards(&guards(), &mut doc, GuardScope::Assigned(&assigned))
-            .expect("email is not assigned");
+        enforce_type_guards(
+            &guards(),
+            &mut doc,
+            GuardScope::Assigned(&assigned),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("email is not assigned");
         assert_eq!(doc["slug"], "new x");
     }
 
@@ -143,23 +165,39 @@ mod tests {
         let guards = CompiledTypeGuard::compile_all("c", &[def]);
         let mut doc = serde_json::json!({ "other": 1 });
         let assigned = vec!["other".to_string()];
-        let error = enforce_type_guards(&guards, &mut doc, GuardScope::Assigned(&assigned))
-            .expect_err("the injected value is not an INT");
+        let error = enforce_type_guards(
+            &guards,
+            &mut doc,
+            GuardScope::Assigned(&assigned),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect_err("the injected value is not an INT");
         assert!(matches!(error, ErrorCode::TypeGuardViolation { .. }));
     }
 
     #[test]
     fn inject_only_never_refuses() {
         let mut doc = serde_json::json!({ "title": "Hi" });
-        enforce_type_guards(&guards(), &mut doc, GuardScope::InjectOnly)
-            .expect("replay never refuses");
+        enforce_type_guards(
+            &guards(),
+            &mut doc,
+            GuardScope::InjectOnly,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("replay never refuses");
         assert_eq!(doc["slug"], "hi");
     }
 
     #[test]
     fn value_overwrites_an_assigned_value() {
         let mut doc = serde_json::json!({ "title": "Hi", "email": "a@b.c", "slug": "zzz" });
-        enforce_type_guards(&guards(), &mut doc, GuardScope::Document).expect("valid");
+        enforce_type_guards(
+            &guards(),
+            &mut doc,
+            GuardScope::Document,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("valid");
         assert_eq!(doc["slug"], "hi");
     }
 
@@ -167,7 +205,13 @@ mod tests {
     fn default_refills_a_null_assignment() {
         let mut doc = serde_json::json!({ "title": "Hi", "role": null });
         let assigned = vec!["role".to_string()];
-        enforce_type_guards(&guards(), &mut doc, GuardScope::Assigned(&assigned)).expect("valid");
+        enforce_type_guards(
+            &guards(),
+            &mut doc,
+            GuardScope::Assigned(&assigned),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("valid");
         assert_eq!(doc["role"], "user");
     }
 }

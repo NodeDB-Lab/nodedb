@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Durable, replicated RESTORE of document rows, their index entries, and
-//! graph edges, as Calvin transactions.
+//! Durable, replicated RESTORE of document rows, their index entries, graph
+//! edges and node labels, as Calvin transactions.
 
 mod commit;
 mod documents;
 mod edges;
+mod labels;
 mod prepared;
 mod reissue;
 mod sub_record;

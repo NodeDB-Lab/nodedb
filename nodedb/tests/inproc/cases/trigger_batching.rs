@@ -153,28 +153,56 @@ fn classify_invalid_body_row_at_a_time() {
 #[test]
 fn when_none_all_pass() {
     let rows = vec![row("a"), row("b"), row("c")];
-    let mask = filter_batch_by_when(&rows, "c", "INSERT", None).unwrap();
+    let mask = filter_batch_by_when(
+        &rows,
+        "c",
+        "INSERT",
+        None,
+        &nodedb_crs::CrsContext::builtin_only(),
+    )
+    .unwrap();
     assert_eq!(mask, vec![true, true, true]);
 }
 
 #[test]
 fn when_true_all_pass() {
     let rows = vec![row("a"), row("b")];
-    let mask = filter_batch_by_when(&rows, "c", "INSERT", Some("TRUE")).unwrap();
+    let mask = filter_batch_by_when(
+        &rows,
+        "c",
+        "INSERT",
+        Some("TRUE"),
+        &nodedb_crs::CrsContext::builtin_only(),
+    )
+    .unwrap();
     assert_eq!(mask, vec![true, true]);
 }
 
 #[test]
 fn when_false_none_pass() {
     let rows = vec![row("a"), row("b")];
-    let mask = filter_batch_by_when(&rows, "c", "INSERT", Some("FALSE")).unwrap();
+    let mask = filter_batch_by_when(
+        &rows,
+        "c",
+        "INSERT",
+        Some("FALSE"),
+        &nodedb_crs::CrsContext::builtin_only(),
+    )
+    .unwrap();
     assert_eq!(mask, vec![false, false]);
 }
 
 #[test]
 fn when_null_none_pass() {
     let rows = vec![row("a")];
-    let mask = filter_batch_by_when(&rows, "c", "INSERT", Some("NULL")).unwrap();
+    let mask = filter_batch_by_when(
+        &rows,
+        "c",
+        "INSERT",
+        Some("NULL"),
+        &nodedb_crs::CrsContext::builtin_only(),
+    )
+    .unwrap();
     assert_eq!(mask, vec![false]);
 }
 

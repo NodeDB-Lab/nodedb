@@ -31,7 +31,7 @@ impl CoreLoop {
                 database_id: did,
                 tenant: tid,
                 coll: collection,
-                sys_cutoff_ms: None,
+                sys_cutoff: None,
                 valid_at_ms: None,
                 limit,
             },

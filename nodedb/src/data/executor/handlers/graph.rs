@@ -2,9 +2,11 @@
 
 //! Graph operation handlers: EdgePut, EdgeDelete, GraphHop, GraphNeighbors,
 //! GraphPath, GraphSubgraph. The CSR index is partitioned structurally by
-//! tenant; handlers resolve the partition once via
-//! `self.csr_partition(_mut)(tid)` and address node ids in their raw,
-//! user-visible form throughout — no `<tid>:` prefix, no `scoped_node()`.
+//! tenant. A read resolves its CSR once via `self.csr_view`, the live
+//! partition or a historical CSR at the plan's cut; a write resolves the
+//! live partition via `self.csr_partition_mut`. Both address node ids in
+//! their raw, user-visible form throughout — no `<tid>:` prefix, no
+//! `scoped_node()`.
 
 use nodedb_types::diagnostic::DiagnosticLayer;
 use tracing::{debug, warn};
@@ -16,6 +18,7 @@ use crate::data::executor::task::ExecutionTask;
 use crate::engine::graph::csr::CsrIndex;
 use crate::engine::graph::edge_store::Direction;
 use crate::types::TenantId;
+use nodedb_physical::physical_plan::GraphReadScope;
 
 #[path = "graph_edge_resolve.rs"]
 pub(in crate::data::executor) mod graph_edge_resolve;
@@ -43,6 +46,11 @@ pub(in crate::data::executor) struct GraphHopParams<'a> {
     /// The walk's visit cap ([`CoreLoop::walk_visit_cap`]).
     pub max_visited: usize,
     pub frontier_bitmap: Option<&'a nodedb_types::SurrogateBitmap>,
+    /// The collection a historical read walks. A live read walks every
+    /// collection's edges.
+    pub collection: Option<&'a str>,
+    /// The bitemporal cut the walk reads.
+    pub scope: &'a GraphReadScope,
 }
 
 /// Arguments for [`CoreLoop::execute_graph_neighbors_multi`].
@@ -58,6 +66,20 @@ pub(in crate::data::executor) struct GraphNeighborsMultiArgs<'a> {
     pub edge_predicate: &'a [nodedb_types::filter::MetadataFilter],
     /// Each row carries the crossed edge's property object.
     pub with_properties: bool,
+    /// The bitemporal cut the hop reads.
+    pub scope: &'a GraphReadScope,
+}
+
+/// Arguments for [`CoreLoop::execute_graph_neighbors`].
+pub(in crate::data::executor) struct GraphNeighborsArgs<'a> {
+    pub node_id: &'a str,
+    /// Empty keeps every edge. Otherwise an edge with any listed label.
+    pub edge_labels: &'a [String],
+    pub direction: crate::engine::graph::edge_store::Direction,
+    /// Collection scope, or `None` for a label-only lookup.
+    pub collection: Option<&'a str>,
+    /// The bitemporal cut the lookup reads.
+    pub scope: &'a GraphReadScope,
 }
 
 /// One `NeighborsMulti` row: `(frontier node, label, neighbour, properties)`.
@@ -89,6 +111,22 @@ impl CoreLoop {
         options.max_visited.min(self.graph_tuning.max_visited)
     }
 
+    /// The transaction's staged edge writes, for a live read. A historical
+    /// read sees committed versions only. Read-your-own-writes refreshes the
+    /// overlay lease (see the overlay reaper).
+    fn live_overlay(
+        &self,
+        task: &ExecutionTask,
+        scope: &GraphReadScope,
+    ) -> Option<&crate::data::executor::handlers::transaction::overlay::GraphTxnOverlay> {
+        if !scope.is_live() {
+            return None;
+        }
+        let txn_id = task.request.txn_id?;
+        self.touch_overlay(txn_id);
+        self.graph_txn_overlays.get(&txn_id)
+    }
+
     pub(in crate::data::executor) fn execute_graph_hop(
         &self,
         task: &ExecutionTask,
@@ -102,6 +140,8 @@ impl CoreLoop {
             depth,
             max_visited,
             frontier_bitmap,
+            collection,
+            scope,
         } = params;
         debug!(
             core = self.core_id,
@@ -115,26 +155,16 @@ impl CoreLoop {
         let database_id = task.request.database_id.as_u64();
         let depth = depth.min(crate::engine::graph::traversal_options::MAX_GRAPH_TRAVERSAL_DEPTH);
         let refs: Vec<&str> = start_nodes.iter().map(String::as_str).collect();
-        // Read-your-own-writes refreshes the lease (see the overlay reaper).
-        if let Some(txn_id) = task.request.txn_id {
-            self.touch_overlay(txn_id);
-        }
-        // Read-your-own-writes: the staged delta joins the walk at every
+        // Read-your-own-writes: the staged delta joins a live walk at every
         // depth. A tenant with no CSR partition still walks its staged edges.
-        let delta = task
-            .request
-            .txn_id
-            .and_then(|txn_id| self.graph_txn_overlays.get(&txn_id))
-            .map(|ov| {
-                graph_txn_merge::build_graph_overlay_delta(
-                    ov,
-                    task.request.database_id,
-                    TenantId::new(tid),
-                )
-            });
+        let delta = self.live_overlay_delta(task, tid, scope);
+        let csr = match self.csr_view(database_id, tid, collection, scope) {
+            Ok(csr) => csr,
+            Err(e) => return self.response_error(task, e),
+        };
         let labels: Vec<&str> = edge_labels.iter().map(String::as_str).collect();
         let result: Vec<String> = CsrIndex::traverse_bfs_on(
-            self.csr_partition(database_id, tid),
+            csr,
             nodedb_graph::BfsParams {
                 start_nodes: &refs,
                 label_filter: &labels,
@@ -161,17 +191,24 @@ impl CoreLoop {
         &self,
         task: &ExecutionTask,
         tid: u64,
-        node_id: &str,
-        edge_labels: &[String],
-        direction: crate::engine::graph::edge_store::Direction,
-        collection: Option<&str>,
+        args: GraphNeighborsArgs<'_>,
     ) -> Response {
-        debug!(core = self.core_id, tid, %node_id, ?edge_labels, ?direction, "graph neighbors");
+        let GraphNeighborsArgs {
+            node_id,
+            edge_labels,
+            direction,
+            collection,
+            scope,
+        } = args;
+        debug!(core = self.core_id, tid, %node_id, ?edge_labels, ?direction, ?scope, "graph neighbors");
         let database_id = task.request.database_id.as_u64();
         let labels: Vec<&str> = edge_labels.iter().map(String::as_str).collect();
         // A named collection restricts the walk; unscoped `neighbors` would
         // silently span every collection's edges in the shared node space.
-        let partition = self.csr_partition(database_id, tid);
+        let partition = match self.csr_view(database_id, tid, collection, scope) {
+            Ok(partition) => partition,
+            Err(e) => return self.response_error(task, e),
+        };
         let durable_of = |pass: Direction| match (partition, collection) {
             (Some(partition), Some(collection)) => {
                 partition.neighbors_in_collection(node_id, &labels, pass, collection)
@@ -180,15 +217,9 @@ impl CoreLoop {
             (None, _) => Vec::new(),
         };
         // Read-your-own-writes: fold staged edge writes of the same
-        // collection scope into the durable result (see `graph_txn_merge`),
-        // and refresh the overlay lease.
-        if let Some(txn_id) = task.request.txn_id {
-            self.touch_overlay(txn_id);
-        }
-        let overlay = task
-            .request
-            .txn_id
-            .and_then(|txn_id| self.graph_txn_overlays.get(&txn_id));
+        // collection scope into a live result (see `graph_txn_merge`), and
+        // refresh the overlay lease.
+        let overlay = self.live_overlay(task, scope);
         let neighbors = match overlay {
             Some(overlay) => merge_graph_txn_overlay_neighbors(
                 overlay,
@@ -298,14 +329,7 @@ impl CoreLoop {
         };
         let database_id = task.request.database_id;
         let labels: Vec<&str> = args.edge_labels.iter().map(String::as_str).collect();
-        // Read-your-own-writes refreshes the lease (see the overlay reaper).
-        if let Some(txn_id) = task.request.txn_id {
-            self.touch_overlay(txn_id);
-        }
-        let overlay = task
-            .request
-            .txn_id
-            .and_then(|txn_id| self.graph_txn_overlays.get(&txn_id));
+        let overlay = self.live_overlay(task, args.scope);
         let mut edge_properties = graph_edge_predicate::HopEdgeProperties::open(
             &self.edge_store,
             graph_edge_predicate::HopPropertyScope {
@@ -314,10 +338,11 @@ impl CoreLoop {
                 collection: args.collection,
                 filters: args.edge_predicate,
                 with_properties: args.with_properties,
+                read_scope: *args.scope,
             },
         )?;
         let mut out: Vec<NeighborRow> = Vec::with_capacity(args.node_ids.len().min(cap) * 4);
-        let partition = self.csr_partition(database_id.as_u64(), tid);
+        let partition = self.csr_view(database_id.as_u64(), tid, args.collection, args.scope)?;
         let durable = |node: &str, direction| match (partition, args.collection) {
             (Some(partition), Some(collection)) => {
                 partition.neighbors_in_collection(node, &labels, direction, collection)
@@ -443,6 +468,7 @@ mod tests {
                 direction: Direction::Out,
                 rls_filters: Vec::new(),
                 collection: None,
+                scope: GraphReadScope::default(),
             }),
             deadline: Instant::now() + Duration::from_secs(5),
             priority: Priority::Normal,
@@ -480,6 +506,8 @@ mod tests {
                     properties: &properties,
                     src_surrogate: Surrogate::new(1),
                     dst_surrogate: Surrogate::new(surrogate),
+                    valid_from_ms: None,
+                    valid_until_ms: None,
                 },
             );
             assert_eq!(put.status, Status::Ok, "{:?}", put.error_code);
@@ -503,6 +531,7 @@ mod tests {
                 collection,
                 edge_predicate: &[],
                 with_properties: collection.is_some(),
+                scope: &GraphReadScope::default(),
             },
         )
     }

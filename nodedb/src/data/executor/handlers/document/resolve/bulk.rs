@@ -105,7 +105,7 @@ impl CoreLoop {
                 // Stamped as the live handler stamps it, so a strict
                 // bitemporal image takes the bitemporal tuple layout. The
                 // apply mints its own system time on write.
-                bitemporal_sys_from_ms: ctx.bitemporal.then(|| self.bitemporal_now_ms()),
+                bitemporal_sys_from: ctx.bitemporal.then(|| self.bitemporal_ordinal()),
             })
             .map_err(ErrorCode::from)?;
 
@@ -121,7 +121,7 @@ impl CoreLoop {
             } = row;
             // Decided against the post-update image, exactly as
             // `execute_bulk_update` decides it — on the same JSON document.
-            rls_write_gate::admit_row(rls_write_check, &doc, tid, collection)
+            rls_write_gate::admit_row(rls_write_check, &doc, tid, collection, &self.crs_context())
                 .map_err(ErrorCode::from)?;
             let surrogate = storage_key.surrogate();
             // Rendered once here — `ResolvedPut::document_id` is the one `&str`
@@ -141,10 +141,15 @@ impl CoreLoop {
         }
 
         let response_payload = match returning {
-            Some(spec) => returning_rows::build_rows_payload(spec, rls_filters, &returned_docs)
-                .map_err(|e| ErrorCode::Internal {
-                    detail: format!("RETURNING encode: {e}"),
-                })?,
+            Some(spec) => returning_rows::build_rows_payload(
+                spec,
+                rls_filters,
+                &returned_docs,
+                &self.crs_context(),
+            )
+            .map_err(|e| ErrorCode::Internal {
+                detail: format!("RETURNING encode: {e}"),
+            })?,
             None => affected_payload(mutations.len()),
         };
         Ok(DocumentResolveOutcome {
@@ -180,12 +185,15 @@ impl CoreLoop {
             let identity = key.to_identity();
             rls_write_gate::admit_stored_row(
                 rls_write_check,
-                &stored,
-                &identity,
-                ctx.strict_schema.as_ref(),
-                &ctx.identity_column,
+                rls_write_gate::GatedRow {
+                    body: &stored,
+                    identity: &identity,
+                    strict_schema: ctx.strict_schema.as_ref(),
+                    identity_column: &ctx.identity_column,
+                },
                 tid,
                 collection,
+                &self.crs_context(),
             )
             .map_err(ErrorCode::from)?;
             let surrogate = key.surrogate();
@@ -203,7 +211,13 @@ impl CoreLoop {
             .iter()
             .map(|(id, body)| (id, body.as_slice()))
             .collect();
-        let response_payload = resolved_response_payload(returning, rls_filters, &ctx, &borrowed)?;
+        let response_payload = resolved_response_payload(
+            returning,
+            rls_filters,
+            &ctx,
+            &borrowed,
+            &self.crs_context(),
+        )?;
         Ok(DocumentResolveOutcome {
             mutations,
             response_payload,

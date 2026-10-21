@@ -22,12 +22,12 @@
 use nodedb_physical::physical_plan::{PhysicalPlan, TimeseriesOp};
 use nodedb_types::{Surrogate, Value};
 
-use super::images::{RowLocation, StoredRow, staged_row_image};
+use super::images::{ReturningImageRow, RowLocation, staged_row_image};
 use super::reply::{CalvinReply, CalvinStaging, InstalledTimeseries, PostImages};
 use super::target::{ReplyImage, ReturningTarget, RowEngine, returning_target};
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::columnar_write::row_values_to_object;
+use crate::data::executor::handlers::columnar_write::row_values_to_user_object;
 use crate::data::executor::handlers::returning_rows::build_rows_payload;
 use crate::data::executor::handlers::timeseries::StampedIngest;
 use crate::data::executor::handlers::transaction::overlay::{
@@ -217,7 +217,7 @@ impl CoreLoop {
                 let rows = written
                     .map(|(slot, body)| {
                         let (bytes, vector) = staged_row_image(target.engine, body)?;
-                        Ok(StoredRow {
+                        Ok(ReturningImageRow {
                             identity: slot.doc_id.clone(),
                             surrogate: Surrogate::new(slot.surrogate),
                             bytes,
@@ -243,7 +243,7 @@ impl CoreLoop {
                 let docs = written
                     .map(|(slot, body)| {
                         decode_staged_row(body)
-                            .map(|row| row_values_to_object(&schema, &row))
+                            .map(|row| row_values_to_user_object(&schema, &row))
                             .ok_or_else(|| ErrorCode::Internal {
                                 detail: format!(
                                     "calvin RETURNING: staged columnar row {} of '{}' does not \
@@ -253,7 +253,7 @@ impl CoreLoop {
                             })
                     })
                     .collect::<Result<Vec<Value>, ErrorCode>>()?;
-                build_rows_payload(target.spec, target.rls_filters, &docs)
+                build_rows_payload(target.spec, target.rls_filters, &docs, &self.crs_context())
                     .map(CalvinReply::Rows)
                     .map_err(ErrorCode::from)
             }
@@ -271,7 +271,7 @@ impl CoreLoop {
         target: &ReturningTarget<'_>,
         slots: &[TouchedSlot<'_>],
         base_visible: bool,
-    ) -> Result<Vec<StoredRow>, ErrorCode> {
+    ) -> Result<Vec<ReturningImageRow>, ErrorCode> {
         let mut rows = Vec::new();
         for slot in slots {
             if !matches!(slot.after, Some(Staged::Tombstone)) {
@@ -287,7 +287,7 @@ impl CoreLoop {
                 None => None,
             };
             if let Some((bytes, vector)) = prior {
-                rows.push(StoredRow {
+                rows.push(ReturningImageRow {
                     identity: slot.doc_id.clone(),
                     surrogate,
                     bytes,
@@ -355,7 +355,7 @@ impl CoreLoop {
                     .get(&txn_id)?
                     .ingest_now(&coll_key, first.as_u32())
             })
-            .unwrap_or_else(|| self.ingest_now_ms());
+            .unwrap_or_else(|| self.ingest_stamp_ms());
         let lines = self.stamped_ingest_lines(StampedIngest {
             database_id,
             tid: tenant,
@@ -376,7 +376,8 @@ impl CoreLoop {
             now_ms,
         )?;
         let docs: Vec<Value> = rows.iter().map(rmpv_to_value).collect();
-        build_rows_payload(target.spec, target.rls_filters, &docs).map_err(ErrorCode::from)
+        build_rows_payload(target.spec, target.rls_filters, &docs, &self.crs_context())
+            .map_err(ErrorCode::from)
     }
 
     /// Decide a document or CRDT post-image reply when a later plan,
@@ -426,7 +427,7 @@ impl CoreLoop {
             };
             if let Some(Staged::Put(body)) = staged {
                 let (bytes, vector) = staged_row_image(images.engine, body)?;
-                rows.push(StoredRow {
+                rows.push(ReturningImageRow {
                     identity: identity.clone(),
                     surrogate: *surrogate,
                     bytes,
@@ -862,6 +863,7 @@ mod tests {
             schema_bytes: zerompk::to_msgpack_vec(&schema).expect("encode schema"),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: returning(&["note"]),
             rls_filters: Vec::new(),

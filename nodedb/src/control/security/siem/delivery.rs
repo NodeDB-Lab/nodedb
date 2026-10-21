@@ -45,6 +45,12 @@ impl SiemExporter {
         }
         let count = batch.len();
 
+        // An IP-literal host is never resolved, so only this check refuses it.
+        if let Err(e) = self.policy.check_url(&self.config.webhook_url) {
+            warn!(error = %e, events = count, "SIEM webhook URL fails the [egress] policy");
+            return self.fail(batch, audit_len);
+        }
+
         let (body, signature) = match self.build_webhook_payload(&batch) {
             Ok(payload) => payload,
             Err(e) => {
@@ -100,6 +106,10 @@ mod tests {
     use crate::control::security::audit::AuditEvent;
     use crate::control::security::siem::config::SiemConfig;
 
+    fn exporter(config: SiemConfig) -> SiemExporter {
+        SiemExporter::strict_for_test(config)
+    }
+
     fn entry(seq: u64) -> AuditEntry {
         AuditEntry {
             seq,
@@ -118,7 +128,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_webhook_url_is_idle_and_keeps_the_buffer() {
-        let exporter = SiemExporter::new(SiemConfig {
+        let exporter = exporter(SiemConfig {
             destinations: vec!["splunk".into()],
             ..Default::default()
         });
@@ -129,7 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_buffers_are_idle() {
-        let exporter = SiemExporter::new(SiemConfig {
+        let exporter = exporter(SiemConfig {
             destinations: vec!["webhook".into()],
             webhook_url: "http://127.0.0.1:1/ingest".into(),
             ..Default::default()
@@ -139,13 +149,13 @@ mod tests {
 
     /// No local HTTP sink is available in unit tests, so the success path is
     /// covered by payload-construction tests; here the reachable behaviour is
-    /// the failure path — a refused connection must requeue every event and
-    /// count the failure rather than silently discarding the batch.
+    /// the failure path. The strict egress policy refuses the IP-literal URL,
+    /// and the refusal must requeue every event and count the failure rather
+    /// than silently discarding the batch.
     #[tokio::test]
     async fn failed_delivery_requeues_both_buffers() {
-        let exporter = SiemExporter::new(SiemConfig {
+        let exporter = exporter(SiemConfig {
             destinations: vec!["webhook".into()],
-            // Port 1 is reserved and refuses connections immediately.
             webhook_url: "http://127.0.0.1:1/ingest".into(),
             webhook_timeout_secs: 2,
             ..Default::default()

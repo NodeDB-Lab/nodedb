@@ -17,7 +17,10 @@
 //!    runs before the snapshot's rows of that incarnation land, never after.
 //!    The wait is bounded: a group 0 snapshot this node still needs can queue
 //!    behind this install, so a lagging node refuses the install and the
-//!    leader resends it;
+//!    leader resends it. It then holds the departure fence on the group's
+//!    vShards until it settles: a running departure purge of any of them
+//!    ends first, and no purge of them starts meanwhile
+//!    ([`crate::control::cluster::vshard_departure::fence`]);
 //! 1. splits the snapshot into one share per local core, routed the way live
 //!    writes route ([`crate::control::cluster::snapshot_install::split`]);
 //! 2. appends and fsyncs the WAL install barrier, so restart replay never
@@ -149,6 +152,13 @@ impl DataPlaneSnapshotApplier {
             .await?;
 
         let group_vshards = self.group_vshards(group_id)?;
+        // Held to the end: a departure purge removes no row this install
+        // writes.
+        let _fenced = self
+            .shared
+            .departure_fence
+            .begin_install(&group_vshards)
+            .await;
         let cores = {
             let dispatcher = self
                 .shared

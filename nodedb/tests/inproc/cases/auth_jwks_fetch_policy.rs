@@ -9,11 +9,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use nodedb::config::ServerConfig;
+use nodedb::control::security::egress::EgressPolicy;
 use nodedb::control::security::jwks::cache::JwksCache;
 use nodedb::control::security::jwks::fetch::fetch_and_cache;
-use nodedb::control::security::jwks::url::JwksPolicy;
 
-fn provider_config(jwt_policy: &str, jwks_url: &str) -> String {
+/// A server config with one JWKS provider at `jwks_url`, the `[egress]`
+/// section `egress`, and the extra `[auth.jwt]` keys `jwt_extra`.
+fn provider_config(egress: &str, jwt_extra: &str, jwks_url: &str) -> String {
     format!(
         r#"
 [server]
@@ -40,8 +42,11 @@ max_connections_per_user = 0
 password_expiry_days     = 0
 audit_retention_days     = 0
 
+[egress]
+{egress}
+
 [auth.jwt]
-{jwt_policy}
+{jwt_extra}
 
 [[auth.jwt.providers]]
 name      = "prod"
@@ -120,7 +125,8 @@ async fn spawn_static_body(body: impl Into<String>) -> String {
 #[test]
 fn config_accepts_allowlisted_http_jwks_host() {
     let toml = provider_config(
-        "allow_http_jwks = true\nallow_jwks_hosts = [\"keycloak.internal\"]\nallow_jwks_cidrs = [\"10.42.0.0/16\"]",
+        "allow_http = true\nallow_hosts = [\"keycloak.internal\"]\nallow_cidrs = [\"10.42.0.0/16\"]",
+        "",
         "http://keycloak.internal/jwks.json",
     );
     load_config(&toml).expect("allow-listed HTTP host must pass config validation");
@@ -129,7 +135,8 @@ fn config_accepts_allowlisted_http_jwks_host() {
 #[test]
 fn config_rejects_non_allowlisted_http_jwks_host() {
     let toml = provider_config(
-        "allow_http_jwks = true\nallow_jwks_hosts = [\"keycloak.internal\"]",
+        "allow_http = true\nallow_hosts = [\"keycloak.internal\"]",
+        "",
         "http://evil.example.com/jwks.json",
     );
     assert!(load_config(&toml).is_err());
@@ -138,17 +145,31 @@ fn config_rejects_non_allowlisted_http_jwks_host() {
 #[test]
 fn config_rejects_ip_literal_jwks_even_with_allow_list() {
     let toml = provider_config(
-        "allow_jwks_cidrs = [\"0.0.0.0/0\"]",
+        "allow_cidrs = [\"0.0.0.0/0\"]",
+        "",
         "https://10.0.0.5/jwks.json",
     );
     assert!(load_config(&toml).is_err());
+}
+
+/// `[egress]` is the one outbound allow-list. A JWKS-only allow-list key in
+/// `[auth.jwt]` fails startup instead of being ignored.
+#[test]
+fn config_rejects_a_jwks_allow_list_in_auth_jwt() {
+    let toml = provider_config(
+        "",
+        "allow_http_jwks = true\nallow_jwks_hosts = [\"keycloak.internal\"]",
+        "http://keycloak.internal/jwks.json",
+    );
+    let err = load_config(&toml).expect_err("the JWKS-only allow-list is gone");
+    assert!(err.to_string().contains("allow_http_jwks"), "{err}");
 }
 
 #[tokio::test]
 async fn fetch_does_not_connect_to_http_url() {
     let (url, counter) = spawn_counting_listener();
     let cache = JwksCache::new(None);
-    let keys = fetch_and_cache("prod", "prod", &url, &cache, &JwksPolicy::strict()).await;
+    let keys = fetch_and_cache("prod", "prod", &url, &cache, &EgressPolicy::strict()).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(keys, 0);
     assert_eq!(counter.load(Ordering::SeqCst), 0);
@@ -176,7 +197,7 @@ async fn fetch_does_not_connect_to_ip_literal() {
         SocketAddr::from((Ipv4Addr::LOCALHOST, port))
     );
     let cache = JwksCache::new(None);
-    let keys = fetch_and_cache("prod", "prod", &url, &cache, &JwksPolicy::strict()).await;
+    let keys = fetch_and_cache("prod", "prod", &url, &cache, &EgressPolicy::strict()).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(keys, 0);
     assert_eq!(counter.load(Ordering::SeqCst), 0);
@@ -186,7 +207,7 @@ async fn fetch_does_not_connect_to_ip_literal() {
 async fn fetch_caps_redirect_hops() {
     let (url, counter) = spawn_redirect_loop().await;
     let cache = JwksCache::new(None);
-    let keys = fetch_and_cache("prod", "prod", &url, &cache, &JwksPolicy::strict()).await;
+    let keys = fetch_and_cache("prod", "prod", &url, &cache, &EgressPolicy::strict()).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(keys, 0);
     let connections = counter.load(Ordering::SeqCst);
@@ -211,7 +232,7 @@ async fn parse_error_log_does_not_leak_response_body() {
     {
         let _guard = set_default(subscriber);
         let cache = JwksCache::new(None);
-        let _ = fetch_and_cache("prod", "prod", &url, &cache, &JwksPolicy::strict()).await;
+        let _ = fetch_and_cache("prod", "prod", &url, &cache, &EgressPolicy::strict()).await;
     }
 
     let captured = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();

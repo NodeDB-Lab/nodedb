@@ -177,13 +177,20 @@ pub async fn balance_as_of(
         }
 
         let src_val = nodedb_types::Value::from(src_doc.clone());
-        let delta_val =
-            serde_json::Value::from(mat_def.value_expr.eval(&src_val).map_err(|e| {
-                err(
-                    nodedb_types::error::sqlstate::DIVISION_BY_ZERO,
-                    &format!("BALANCE_AS_OF: value_expr failed to evaluate: {e}"),
+        let delta_val = serde_json::Value::from(
+            mat_def
+                .value_expr
+                .eval(
+                    &src_val,
+                    &crate::control::crs_context::crs_context_for(state),
                 )
-            })?);
+                .map_err(|e| {
+                    err(
+                        crate::control::server::shared::ddl::sqlstate::eval_error_sqlstate(&e),
+                        &format!("BALANCE_AS_OF: value_expr failed to evaluate: {e}"),
+                    )
+                })?,
+        );
         if let Some(d) = json_to_decimal(&delta_val) {
             recent_sum += d;
         }

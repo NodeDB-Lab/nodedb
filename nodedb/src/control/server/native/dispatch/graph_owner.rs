@@ -29,12 +29,12 @@ use super::{DispatchCtx, error_to_native};
 
 /// A graph read this module serves.
 enum OwnerRead {
-    /// An algorithm, over the edges live at `Option<i64>` system time when set.
-    /// The parameters are boxed: they dwarf the other variants.
+    /// An algorithm, over the edges at the plan's bitemporal cut. The
+    /// parameters are boxed: they dwarf the other variants.
     Algo(
         nodedb_graph::GraphAlgorithm,
         Box<nodedb_graph::AlgoParams>,
-        Option<i64>,
+        nodedb_physical::physical_plan::GraphReadScope,
     ),
     Neighbors(String),
     /// A `Hop`, `Path` or `Subgraph` in a cluster.
@@ -51,41 +51,45 @@ pub(super) async fn dispatch_graph_owner_read(
     plan: &PhysicalPlan,
     vshard_id: VShardId,
 ) -> Option<NativeResponse> {
-    let read = match plan {
-        PhysicalPlan::Graph(GraphOp::Algo {
-            algorithm, params, ..
-        }) => OwnerRead::Algo(*algorithm, Box::new(params.clone()), None),
-        PhysicalPlan::Graph(GraphOp::TemporalAlgorithm {
+    let PhysicalPlan::Graph(op) = plan else {
+        return None;
+    };
+    let clustered = ctx.state.cluster_routing.is_some();
+    let read = match op {
+        GraphOp::Algo {
             algorithm,
             params,
-            system_time,
-        }) => match system_time {
-            nodedb_types::SystemTimeScope::Current => {
-                OwnerRead::Algo(*algorithm, Box::new(params.clone()), None)
-            }
-            nodedb_types::SystemTimeScope::AsOf(ms) => {
-                OwnerRead::Algo(*algorithm, Box::new(params.clone()), Some(*ms))
-            }
-            nodedb_types::SystemTimeScope::AllVersions => {
-                return Some(error_to_native(
-                    seq,
-                    &crate::Error::BadRequest {
-                        detail: "a graph algorithm runs over one system time;                                  all-versions is not supported"
-                            .into(),
-                    },
-                ));
-            }
-        },
-        PhysicalPlan::Graph(GraphOp::Neighbors { node_id, .. }) => {
-            OwnerRead::Neighbors(node_id.clone())
+            scope,
+            ..
+        } => OwnerRead::Algo(*algorithm, Box::new(params.clone()), *scope),
+        GraphOp::Neighbors { node_id, .. } => OwnerRead::Neighbors(node_id.clone()),
+        GraphOp::Hop { .. } | GraphOp::Path { .. } | GraphOp::Subgraph { .. } if clustered => {
+            OwnerRead::Walk
         }
-        PhysicalPlan::Graph(
-            GraphOp::Hop { .. } | GraphOp::Path { .. } | GraphOp::Subgraph { .. },
-        ) if ctx.state.cluster_routing.is_some() => OwnerRead::Walk,
-        PhysicalPlan::Graph(GraphOp::RagFusion { .. }) if ctx.state.cluster_routing.is_some() => {
-            OwnerRead::Rag
-        }
-        _ => return None,
+        GraphOp::RagFusion { .. } if clustered => OwnerRead::Rag,
+        GraphOp::Hop { .. }
+        | GraphOp::Path { .. }
+        | GraphOp::Subgraph { .. }
+        | GraphOp::RagFusion { .. }
+        | GraphOp::EdgePut { .. }
+        | GraphOp::EdgePutBatch { .. }
+        | GraphOp::EdgeDelete { .. }
+        | GraphOp::ResolveEdgeDelete(_)
+        | GraphOp::EdgeDeleteBatch { .. }
+        | GraphOp::NeighborsMulti { .. }
+        | GraphOp::Match { .. }
+        | GraphOp::MatchContinuation { .. }
+        | GraphOp::MatchVarLenResume { .. }
+        | GraphOp::BspSuperstep(_)
+        | GraphOp::WccSuperstep(_)
+        | GraphOp::SetNodeLabels { .. }
+        | GraphOp::RemoveNodeLabels { .. }
+        | GraphOp::TemporalNeighbors { .. }
+        | GraphOp::Stats { .. }
+        | GraphOp::NodeEdgeGuard { .. }
+        | GraphOp::NodePresenceGuard { .. }
+        | GraphOp::TruncateEdges { .. }
+        | GraphOp::NodePresenceRead { .. } => return None,
     };
     let tenant_id = ctx.tenant_id();
     let database_id = ctx.database_id();
@@ -103,14 +107,14 @@ pub(super) async fn dispatch_graph_owner_read(
     }
     let _request = ctx.state.tenant_request_guard(tenant_id);
     let served = match read {
-        OwnerRead::Algo(algorithm, params, system_as_of_ms) => {
+        OwnerRead::Algo(algorithm, params, scope) => {
             crate::control::server::graph_dispatch::run_graph_algo(
                 ctx.state,
                 tenant_id,
                 database_id,
                 algorithm,
                 *params,
-                system_as_of_ms,
+                scope,
                 true,
             )
             .await

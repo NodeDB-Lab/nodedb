@@ -170,11 +170,6 @@ impl CoreLoop {
                 .insert(engine_key.clone());
         }
 
-        let sys_now = if bitemporal {
-            self.bitemporal_now_ms()
-        } else {
-            0
-        };
         // Coerce every row, resolve the image it will actually persist, and let
         // the write policy decide all of them BEFORE the first
         // `stage_put_capped`. A rejection must leave the overlay exactly as it
@@ -196,6 +191,11 @@ impl CoreLoop {
             let obj = match row {
                 Value::Object(m) => m,
                 _ => continue,
+            };
+            let sys_now = if bitemporal {
+                self.columnar_system_ordinal(None, row_idx)
+            } else {
+                0
             };
 
             let values: Vec<Value> = match schema

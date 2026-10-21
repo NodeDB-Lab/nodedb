@@ -3,9 +3,11 @@
 //! Entry point: `copy_from_file`, the privilege and path checks, and the
 //! engine's bulk-load route, which `EngineRules::plan_bulk_load` answers.
 //!
-//! A server-path `COPY` reads a file as the server's OS user, so only a
-//! superuser may run it. The file is opened once, and every later check and
-//! read uses that handle.
+//! A `COPY ... FROM` reads a file as the server's OS user, or fetches a
+//! remote raster from the server's network, so only a superuser may run it.
+//! A server file is opened once, and every later check and read uses that
+//! handle. Text formats read one server file. A raster reads one or more
+//! sources: server files, `http(s)://` URLs or `s3://` objects.
 //!
 //! The result type is [`DdlResult`] / [`DdlError`] throughout. Each error
 //! site builds a `DdlError` directly via [`ddl_err`] so the whole call chain
@@ -14,7 +16,7 @@
 use nodedb_types::DatabaseId;
 
 use nodedb_sql::SqlError;
-use nodedb_sql::ddl_ast::statement::{CopyFormat, CopyRasterOptions, CopyStdinFormat};
+use nodedb_sql::ddl_ast::statement::{CopyFormat, CopyRasterOptions, CopySource, CopyStdinFormat};
 
 use crate::control::planner::context::{BulkLoadRoute, QueryContext};
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -45,7 +47,7 @@ pub struct CopyFromOptions<'a> {
     pub format: Option<&'a CopyFormat>,
     pub delimiter: Option<char>,
     pub header: bool,
-    /// `BANDS`, `NODATA` and `TIME`. Empty unless `format` is `GeoTiff`.
+    /// The raster options. Empty unless `format` is `GeoTiff`.
     pub raster: &'a CopyRasterOptions,
 }
 
@@ -56,12 +58,12 @@ enum RowFormat {
     Csv(CsvOptions),
 }
 
-/// Execute `COPY <collection> FROM '<path>' [WITH (...)]`.
+/// Execute `COPY <collection> FROM <sources> [WITH (...)]`.
 pub async fn copy_from_file(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
     collection: &str,
-    path: &str,
+    sources: &[CopySource],
     options: CopyFromOptions<'_>,
     database_id: DatabaseId,
     txn_ctx: &DmlTxnCtx<'_>,
@@ -75,14 +77,22 @@ pub async fn copy_from_file(
 
     require_superuser(identity, "COPY ... FROM '<path>'")?;
     authorize_write_target(state, identity, database_id, collection)?;
-    validate_path(path, "COPY")?;
+    for source in sources {
+        if let CopySource::File(path) = source {
+            validate_path(path, "COPY")?;
+        }
+    }
+    let first = sources
+        .first()
+        .ok_or_else(|| ddl_err("42601", "COPY: FROM names no source"))?;
+    let shown = first.display();
 
     // Determine format (caller has already auto-detected from extension; this is a safety net).
     let resolved_format = format.ok_or_else(|| {
         ddl_err(
             "42601",
             format!(
-                "COPY: cannot infer format for '{path}'; \
+                "COPY: cannot infer format for '{shown}'; \
                  add WITH (FORMAT ndjson|json|csv|geotiff)"
             ),
         )
@@ -102,7 +112,7 @@ pub async fn copy_from_file(
             database_id,
             txn_ctx,
         };
-        return copy_array_from_file(&ctx, collection, path, options).await;
+        return copy_array_from_file(&ctx, collection, sources, options).await;
     }
 
     let row_format = match resolved_format {
@@ -119,6 +129,7 @@ pub async fn copy_from_file(
             ));
         }
     };
+    let path = single_file(sources)?;
     let bytes = CopySourceFile::open(path).await?.read_all().await?;
 
     // Each row fires its collection's BEFORE, INSTEAD OF and SYNC AFTER
@@ -186,7 +197,7 @@ pub(super) fn bulk_load_refusal(e: SqlError, tenant_id: nodedb_types::TenantId) 
 async fn copy_array_from_file(
     ctx: &ArrayLoadCtx<'_>,
     array: &str,
-    path: &str,
+    sources: &[CopySource],
     options: CopyFromOptions<'_>,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let CopyFromOptions {
@@ -198,7 +209,7 @@ async fn copy_array_from_file(
     match format {
         Some(CopyFormat::Csv) => {}
         Some(CopyFormat::GeoTiff) => {
-            let rows = copy_raster(ctx, array, path, raster).await?;
+            let rows = copy_raster(ctx, array, sources, raster).await?;
             return Ok(vec![DdlResult::Status {
                 command: format!("COPY {rows}"),
                 rows_affected: None,
@@ -211,6 +222,7 @@ async fn copy_array_from_file(
             ));
         }
     }
+    let path = single_file(sources)?;
     let format = TextFormat {
         format: CopyStdinFormat::Csv,
         delimiter,
@@ -231,6 +243,18 @@ async fn copy_array_from_file(
         command: format!("COPY {rows}"),
         rows_affected: None,
     }])
+}
+
+/// The one server file a text format reads.
+fn single_file(sources: &[CopySource]) -> Result<&str, DdlError> {
+    match sources {
+        [CopySource::File(path)] => Ok(path),
+        _ => Err(ddl_err(
+            "0A000",
+            "COPY: text formats read one server file; HTTP and S3 sources and source lists \
+             need FORMAT geotiff",
+        )),
+    }
 }
 
 /// Wrap a row-level error to include the row number in the message.

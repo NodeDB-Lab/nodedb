@@ -38,7 +38,7 @@ impl CoreLoop {
                 collection,
                 document_id,
                 old_value,
-                bitemporal_sys_from_ms,
+                bitemporal_sys_from,
                 bitemporal_index_tuples,
                 secondary_index_added,
                 secondary_index_removed,
@@ -53,13 +53,13 @@ impl CoreLoop {
                 };
                 let storage_key = document_id;
                 let surrogate = document_id.surrogate();
-                if let Some(sys_from_ms) = bitemporal_sys_from_ms {
+                if let Some(sys_from) = bitemporal_sys_from {
                     // Bitemporal op: never wrote the non-versioned table, so
                     // physically remove the appended version row (+ its index
                     // entries) instead of a plain put/delete. `versioned_get_current`
                     // recomputes from the remaining rows, so removing the newest
                     // version restores the prior one automatically.
-                    self.undo_bitemporal_write(ctx, sys_from_ms, &bitemporal_index_tuples)?;
+                    self.undo_bitemporal_write(ctx, sys_from, &bitemporal_index_tuples)?;
                 } else {
                     let result = if let Some(old) = old_value {
                         self.sparse
@@ -131,7 +131,7 @@ impl CoreLoop {
                 collection,
                 document_id,
                 old_value,
-                bitemporal_sys_from_ms,
+                bitemporal_sys_from,
                 bitemporal_index_tuples,
                 secondary_index_tuples,
                 chain_hash_prior,
@@ -145,8 +145,8 @@ impl CoreLoop {
                 };
                 let storage_key = document_id;
                 let surrogate = document_id.surrogate();
-                if let Some(sys_from_ms) = bitemporal_sys_from_ms {
-                    self.undo_bitemporal_write(ctx, sys_from_ms, &bitemporal_index_tuples)?;
+                if let Some(sys_from) = bitemporal_sys_from {
+                    self.undo_bitemporal_write(ctx, sys_from, &bitemporal_index_tuples)?;
                 } else {
                     self.sparse
                         .put(database_id, tid, &collection, &storage_key, &old_value)
@@ -192,13 +192,13 @@ impl CoreLoop {
 
     /// Physically reverse a bitemporal versioned write inside a single
     /// caller-owned redb write transaction: remove the version/tombstone row
-    /// appended at `sys_from_ms`, plus every versioned index entry written at
+    /// appended at `sys_from`, plus every versioned index entry written at
     /// the same system time. redb is single-writer, so all removals share one
     /// transaction.
     fn undo_bitemporal_write(
         &self,
         ctx: UndoDocumentContext<'_>,
-        sys_from_ms: i64,
+        sys_from: i64,
         index_tuples: &[(String, String)],
     ) -> Result<(), UndoError> {
         let UndoDocumentContext {
@@ -229,7 +229,7 @@ impl CoreLoop {
             .begin_write()
             .map_err(|e| map_err("begin_write", e))?;
         self.sparse
-            .versioned_remove_in_txn(&txn, database_id, tid, collection, document_id, sys_from_ms)
+            .versioned_remove_in_txn(&txn, database_id, tid, collection, document_id, sys_from)
             .map_err(|e| map_err("version remove", e))?;
         for (field, value) in index_tuples {
             self.sparse
@@ -242,7 +242,7 @@ impl CoreLoop {
                         field,
                         value,
                         doc_id: document_id,
-                        sys_from_ms,
+                        sys_from,
                     },
                 )
                 .map_err(|e| map_err("index remove", e))?;
@@ -335,11 +335,11 @@ impl CoreLoop {
         let persisted = match chain_hash_prior {
             None => return Ok(()),
             Some(None) => {
-                self.chain_hashes.remove(&key);
+                self.chain.heads.remove(&key);
                 self.sparse.delete_chain_head(database_id, tid, collection)
             }
             Some(Some(prev)) => {
-                self.chain_hashes.insert(key, prev.clone());
+                self.chain.heads.insert(key, prev.clone());
                 self.sparse
                     .put_chain_head(database_id, tid, collection, &prev)
             }
@@ -390,7 +390,7 @@ mod tests {
                 tenant: TID,
                 coll: "c",
                 doc_id: &storage_key(doc),
-                sys_from_ms: t,
+                sys_from: t,
                 valid_from_ms: 0,
                 valid_until_ms: i64::MAX,
                 body,
@@ -407,7 +407,7 @@ mod tests {
                 field: "status",
                 value: "active",
                 doc_id: &storage_key(doc),
-                sys_from_ms: t,
+                sys_from: t,
             })
             .unwrap();
     }
@@ -440,7 +440,7 @@ mod tests {
             collection: "c".into(),
             document_id: d1,
             old_value: None,
-            bitemporal_sys_from_ms: Some(t),
+            bitemporal_sys_from: Some(t),
             bitemporal_index_tuples: vec![("status".into(), "active".into())],
             secondary_index_added: Vec::new(),
             secondary_index_removed: Vec::new(),
@@ -478,7 +478,7 @@ mod tests {
                 field: "status",
                 value: "active",
                 doc_id: &d1,
-                sys_from_ms: 2_000,
+                sys_from: 2_000,
             })
             .unwrap();
 
@@ -494,7 +494,7 @@ mod tests {
             collection: "c".into(),
             document_id: d1,
             old_value: b"v1".to_vec(),
-            bitemporal_sys_from_ms: Some(2_000),
+            bitemporal_sys_from: Some(2_000),
             bitemporal_index_tuples: vec![("status".into(), "active".into())],
             secondary_index_tuples: Vec::new(),
             chain_hash_prior: None,
@@ -528,33 +528,33 @@ mod tests {
             hash: hash.to_string(),
         };
         // Restore-to-prior case: map holds "h1", undo restores "h0".
-        core.chain_hashes.insert(key(), head(2, "h1"));
+        core.chain.heads.insert(key(), head(2, "h1"));
         let restore = UndoEntry::PutDocument {
             collection: "c".into(),
             document_id: storage_key(0),
             old_value: None,
-            bitemporal_sys_from_ms: None,
+            bitemporal_sys_from: None,
             bitemporal_index_tuples: Vec::new(),
             secondary_index_added: Vec::new(),
             secondary_index_removed: Vec::new(),
             chain_hash_prior: Some(Some(head(1, "h0"))),
         };
         core.apply_undo_document(DB, TID, 0, restore).unwrap();
-        assert_eq!(core.chain_hashes.get(&key()), Some(&head(1, "h0")));
+        assert_eq!(core.chain.heads.get(&key()), Some(&head(1, "h0")));
 
         // Genesis case: undo removes the key entirely.
         let genesis = UndoEntry::PutDocument {
             collection: "c".into(),
             document_id: storage_key(0),
             old_value: None,
-            bitemporal_sys_from_ms: None,
+            bitemporal_sys_from: None,
             bitemporal_index_tuples: Vec::new(),
             secondary_index_added: Vec::new(),
             secondary_index_removed: Vec::new(),
             chain_hash_prior: Some(None),
         };
         core.apply_undo_document(DB, TID, 0, genesis).unwrap();
-        assert!(!core.chain_hashes.contains_key(&key()));
+        assert!(!core.chain.heads.contains_key(&key()));
     }
 
     #[test]
@@ -571,7 +571,7 @@ mod tests {
             collection: "c".into(),
             document_id: key1,
             old_value: Some(b"old".to_vec()),
-            bitemporal_sys_from_ms: None,
+            bitemporal_sys_from: None,
             bitemporal_index_tuples: Vec::new(),
             secondary_index_added: Vec::new(),
             secondary_index_removed: Vec::new(),
@@ -590,7 +590,7 @@ mod tests {
             collection: "c".into(),
             document_id: key2,
             old_value: None,
-            bitemporal_sys_from_ms: None,
+            bitemporal_sys_from: None,
             bitemporal_index_tuples: Vec::new(),
             secondary_index_added: Vec::new(),
             secondary_index_removed: Vec::new(),
@@ -611,7 +611,7 @@ mod tests {
             collection: "c".into(),
             document_id: key1,
             old_value: b"prior".to_vec(),
-            bitemporal_sys_from_ms: None,
+            bitemporal_sys_from: None,
             bitemporal_index_tuples: Vec::new(),
             secondary_index_tuples: Vec::new(),
             chain_hash_prior: None,

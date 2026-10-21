@@ -2,6 +2,7 @@
 
 //! Scalar function evaluation dispatch across per-family sub-modules.
 
+use nodedb_crs::CrsContext;
 use nodedb_types::Value;
 
 use crate::expr::EvalError;
@@ -25,7 +26,9 @@ use super::{
 /// The fallible families (`math`, `vector`, `json`, geo) return
 /// `Option<Result<Value, EvalError>>`. The rest stay `Option<Value>`-shaped
 /// and are wrapped in `Ok` at this dispatch boundary.
-pub fn eval_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
+///
+/// Geo functions resolve SRIDs through `crs`.
+pub fn eval_function(name: &str, args: &[Value], crs: &CrsContext<'_>) -> Result<Value, EvalError> {
     if let Some(v) = string::try_eval(name, args) {
         return Ok(v);
     }
@@ -63,8 +66,8 @@ pub fn eval_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
         return Ok(v);
     }
     // Geo / Spatial functions — delegated to geo_functions module. A geo
-    // fault (unsupported or mixed SRID, projection domain) fails the call.
-    match crate::geo_functions::eval_geo_function(name, args) {
+    // fault (undefined or mixed SRID, projection domain) fails the call.
+    match crate::geo_functions::eval_geo_function(name, args, crs) {
         Some(r) => r,
         None => Err(EvalError::UnknownFunction {
             name: name.to_owned(),
@@ -77,19 +80,24 @@ mod tests {
     use super::*;
     use crate::expr::SqlExpr;
 
+    fn crs() -> CrsContext<'static> {
+        CrsContext::builtin_only()
+    }
+
     fn eval_fn(name: &str, args: Vec<Value>) -> Value {
-        eval_function(name, &args).unwrap()
+        eval_function(name, &args, &crs()).unwrap()
     }
 
     #[test]
     fn mod_by_zero_errors() {
-        let err = eval_function("mod", &[Value::Integer(5), Value::Integer(0)]).unwrap_err();
+        let err =
+            eval_function("mod", &[Value::Integer(5), Value::Integer(0)], &crs()).unwrap_err();
         assert_eq!(err, EvalError::DivisionByZero);
     }
 
     #[test]
     fn an_unknown_function_is_an_error_not_null() {
-        let err = eval_function("no_such_function", &[Value::Integer(1)]).unwrap_err();
+        let err = eval_function("no_such_function", &[Value::Integer(1)], &crs()).unwrap_err();
         assert_eq!(
             err,
             EvalError::UnknownFunction {
@@ -136,7 +144,7 @@ mod tests {
             ),
         ];
         for (name, args) in calls {
-            let value = eval_function(name, &args)
+            let value = eval_function(name, &args, &crs())
                 .unwrap_or_else(|e| panic!("{name}() must evaluate, got {e}"));
             assert_ne!(value, Value::Null, "{name}() gave NULL");
         }
@@ -214,7 +222,7 @@ mod tests {
             name: "like".into(),
             args: vec![SqlExpr::Literal(text("bob")), SqlExpr::Literal(text("a%"))],
         }));
-        assert_eq!(expr.eval(&Value::Null).unwrap(), Value::Bool(true));
+        assert_eq!(expr.eval(&Value::Null, &crs()).unwrap(), Value::Bool(true));
     }
 
     #[test]
@@ -283,7 +291,10 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        assert_eq!(expr.eval(&doc).unwrap(), Value::String("ALICE".into()));
+        assert_eq!(
+            expr.eval(&doc, &crs()).unwrap(),
+            Value::String("ALICE".into())
+        );
     }
 
     #[test]
@@ -358,7 +369,8 @@ mod tests {
             vec![point_value(0.0, 0.0), point_value(0.0, 1.0)],
         );
         let d = result.as_f64().unwrap();
-        assert!((d - 111_195.0).abs() < 500.0, "got {d}");
+        // WGS 84 geodesic, pyproj Geod(ellps="WGS84").inv(0, 0, 0, 1).
+        assert!((d - 110_574.388_557_798_78).abs() < 1e-6, "got {d}");
     }
 
     #[test]
@@ -401,7 +413,7 @@ mod tests {
         ));
         let result = eval_fn("geo_length", vec![line]);
         let d = result.as_f64().unwrap();
-        assert!((d - 111_195.0).abs() < 500.0, "got {d}");
+        assert!((d - 110_574.388_557_798_78).abs() < 1e-6, "got {d}");
     }
 
     #[test]

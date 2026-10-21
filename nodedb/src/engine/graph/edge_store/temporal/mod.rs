@@ -15,11 +15,12 @@
 //! TIME `<ms>`" queries translate via
 //! [`nodedb_types::ms_to_ordinal_upper`].
 //!
-//! Values are either an [`EdgeValuePayload`] (zerompk fixarray-3, first byte
-//! `0x93`) or a single-byte sentinel ([`TOMBSTONE_SENTINEL`] `0xFF`,
+//! Values are either an [`EdgeValuePayload`] (zerompk fixarray-5, first byte
+//! `0x95`) or a single-byte sentinel ([`TOMBSTONE_SENTINEL`] `0xFF`,
 //! [`GDPR_ERASURE_SENTINEL`] `0xFE`). Sentinels never collide with fixarray
 //! prefixes (`0x90..=0x9f`).
 
+pub mod collection_scan;
 pub mod cut;
 pub mod keys;
 pub mod payload;
@@ -30,6 +31,7 @@ pub mod revert;
 pub mod visibility;
 pub mod write;
 
+pub use collection_scan::CutEdge;
 pub use cut::{EdgeCutInstall, EdgeFlip};
 pub use keys::{
     EdgeRef, GDPR_ERASURE_SENTINEL, SYSTEM_TIME_WIDTH, TOMBSTONE_SENTINEL, edge_version_prefix,

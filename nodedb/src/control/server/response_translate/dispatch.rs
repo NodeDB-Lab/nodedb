@@ -240,7 +240,6 @@ async fn translate_graph_op(
         | GraphOp::BspSuperstep(_)
         | GraphOp::WccSuperstep(_)
         | GraphOp::TemporalNeighbors { .. }
-        | GraphOp::TemporalAlgorithm { .. }
         | GraphOp::Stats { .. }
         | GraphOp::NodeEdgeGuard { .. }
         | GraphOp::NodePresenceGuard { .. }

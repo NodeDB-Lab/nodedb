@@ -97,6 +97,7 @@ impl NodeDbPgHandler {
                     .as_ref()
                     .map(|r| r.ctx(&self.state.redaction)),
                 sequences.as_ref().map(|s| s as &dyn SequenceAccess),
+                &crate::control::crs_context::crs_set_for(&self.state),
             )?;
             if let Some(n) = notice {
                 self.sessions.push_notice(session_id, n);

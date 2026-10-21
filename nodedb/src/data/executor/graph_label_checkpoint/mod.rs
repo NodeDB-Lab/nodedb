@@ -64,14 +64,13 @@
 //! save any work: the export is a full rewrite of the live state every cycle,
 //! identical in total bytes either way.
 //!
-//! ## Why no replay floor
+//! ## The replay floor
 //!
-//! Both label records are absolute, not deltas: `GraphNodeLabelSet` ORs a bit
-//! on, `GraphNodeLabelRemove` ANDs it off, both keyed by `(node, label)` name.
-//! Re-applying one over a restored state that already contains it reproduces
-//! that state, so replaying the retained WAL in LSN order on top of the restore
-//! converges on the same bitset a from-zero replay would reach. A floor would
-//! gate records for no reason — see `replay_floors.rs`.
+//! Replay skips every label record at or below `durable_through_lsn`: the
+//! published state holds it. A snapshot install writes labels that no WAL
+//! record carries and publishes this state durable through the install. An
+//! older label record of an installed node, still in the local WAL, then
+//! never lands on top of the installed labels.
 
 mod format;
 mod load;

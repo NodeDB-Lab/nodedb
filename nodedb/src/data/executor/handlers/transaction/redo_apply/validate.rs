@@ -215,6 +215,7 @@ impl CoreLoop {
                 paths: &scope.config.index_paths,
                 bitemporal: scope.bitemporal,
                 base_visible: true,
+                crs: &self.crs_context(),
             },
             &rows,
         )

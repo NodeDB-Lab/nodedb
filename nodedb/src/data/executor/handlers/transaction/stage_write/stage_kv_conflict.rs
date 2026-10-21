@@ -44,6 +44,7 @@ impl CoreLoop {
             value,
             updates,
             self.declared_columns_of(ctx.database_id, ctx.tid, ctx.collection),
+            &self.crs_context(),
         ) {
             Ok(b) => b,
             Err(e) => return self.response_error(ctx.task, e),

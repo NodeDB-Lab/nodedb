@@ -22,11 +22,12 @@ use tokio_tungstenite::tungstenite::Message;
 
 use nodedb::control::security::jwks::registry::JwksRegistry;
 use nodedb::control::server::sync::listener::{SyncListenerConfig, start_sync_listener};
-use nodedb_test_support::jwks_fixture::{JwksFixture, now_secs};
+use nodedb_test_support::jwks_fixture::{JwksFixture, loopback_egress, now_secs};
 use nodedb_test_support::pgwire_harness::TestServer;
+use nodedb_types::sync::shape::{ShapeDefinition, ShapeType};
 use nodedb_types::sync::wire::{
-    AckStatus, DeltaAckMsg, DeltaPushMsg, DeltaRejectMsg, HandshakeAckMsg, HandshakeMsg, SyncFrame,
-    SyncMessageType,
+    AckStatus, CollectionSchemaSyncMsg, DeltaAckMsg, DeltaPushMsg, DeltaRejectMsg, HandshakeAckMsg,
+    HandshakeMsg, ShapeSubscribeMsg, SyncFrame, SyncMessageType,
 };
 
 /// Sync sessions authenticate into tenant 1, the tenant the pgwire harness
@@ -65,9 +66,12 @@ struct Harness {
 impl Harness {
     async fn start() -> Self {
         let fixture = JwksFixture::spawn().await;
-        let registry = JwksRegistry::init(fixture.auth_config(ISSUER, AUDIENCE, TENANT))
-            .await
-            .expect("test JWKS registry must initialize");
+        let registry = JwksRegistry::init(
+            fixture.auth_config(ISSUER, AUDIENCE, TENANT),
+            loopback_egress(),
+        )
+        .await
+        .expect("test JWKS registry must initialize");
         let server = TestServer::start_with_jwks(std::sync::Arc::new(registry)).await;
         let config = SyncListenerConfig {
             listen_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -115,7 +119,7 @@ impl Harness {
             client_version: "sync-role-test".into(),
             lite_id: String::new(),
             epoch: 0,
-            wire_version: nodedb_types::wire_version::WIRE_FORMAT_VERSION,
+            wire_version: nodedb_types::sync::wire::SYNC_WIRE_VERSION,
         };
         send(&mut ws, SyncMessageType::Handshake, &msg).await;
         let frame = next_frame(&mut ws)
@@ -167,10 +171,43 @@ async fn next_frame(ws: &mut Ws) -> Option<SyncFrame> {
     }
 }
 
+/// The incarnation of [`COLL`], as a Lite client learns it: subscribe to the
+/// collection and read the `creation_hlc` of the `CollectionSchema` announce
+/// that precedes the snapshot.
+async fn incarnation(ws: &mut Ws) -> nodedb_types::Hlc {
+    let shape = ShapeDefinition {
+        shape_id: format!("{COLL}_incarnation"),
+        tenant_id: TENANT as u32,
+        shape_type: ShapeType::Document {
+            collection: COLL.into(),
+            predicate: Vec::new(),
+        },
+        description: String::new(),
+        field_filter: Vec::new(),
+    };
+    send(
+        ws,
+        SyncMessageType::ShapeSubscribe,
+        &ShapeSubscribeMsg { shape },
+    )
+    .await;
+    while let Some(frame) = next_frame(ws).await {
+        if frame.msg_type == SyncMessageType::CollectionSchema {
+            let announce: CollectionSchemaSyncMsg = frame.decode_body().expect("announce decodes");
+            if announce.descriptor.name == COLL {
+                return announce.creation_hlc;
+            }
+        }
+    }
+    panic!("no CollectionSchema announce for {COLL}");
+}
+
 /// Push the updates `doc` holds past `base` once, as a Lite client does, and
-/// wait for the server's answer to it.
+/// wait for the server's answer to it. The delta states `incarnation`, the
+/// collection's incarnation the session learned from its announce.
 async fn push(
     ws: &mut Ws,
+    incarnation: nodedb_types::Hlc,
     doc: &loro::LoroDoc,
     base: &loro::VersionVector,
     mutation_id: u64,
@@ -191,6 +228,7 @@ async fn push(
         seq: 0,
         device_id: 0,
         delta_signature: [0; 32],
+        collection_incarnation: incarnation,
     };
     send(ws, SyncMessageType::DeltaPush, &msg).await;
     while let Some(frame) = next_frame(ws).await {
@@ -267,11 +305,16 @@ async fn synced_update_judges_the_session_role() {
         .session("sync_role_approver", &["readwrite", "approver"])
         .await;
     let mut clerk = h.session("sync_role_clerk", &["readwrite"]).await;
+    let approver_incarnation = incarnation(&mut approver).await;
+    let clerk_incarnation = incarnation(&mut clerk).await;
 
     // The base: row `a` in `draft`. An insert has no prior row, so no
     // transition is judged.
     let (doc, empty) = draft_base();
-    assert_eq!(push(&mut approver, &doc, &empty, 1).await, Verdict::Applied);
+    assert_eq!(
+        push(&mut approver, approver_incarnation, &doc, &empty, 1).await,
+        Verdict::Applied
+    );
     assert_eq!(h.status().await, "draft");
 
     h.server
@@ -283,7 +326,14 @@ async fn synced_update_judges_the_session_role() {
         .unwrap();
     let base = doc.oplog_vv();
 
-    let refused = push(&mut clerk, &status_fork(&doc, "active"), &base, 2).await;
+    let refused = push(
+        &mut clerk,
+        clerk_incarnation,
+        &status_fork(&doc, "active"),
+        &base,
+        2,
+    )
+    .await;
     assert!(
         matches!(refused, Verdict::Refused(_)),
         "a session without the role must be refused: {refused:?}"
@@ -294,7 +344,14 @@ async fn synced_update_judges_the_session_role() {
         "a refused delta must leave the row in draft"
     );
 
-    let admitted = push(&mut approver, &status_fork(&doc, "active"), &base, 3).await;
+    let admitted = push(
+        &mut approver,
+        approver_incarnation,
+        &status_fork(&doc, "active"),
+        &base,
+        3,
+    )
+    .await;
     assert_eq!(
         admitted,
         Verdict::Applied,
@@ -322,11 +379,39 @@ async fn a_delta_pushed_right_after_create_applies() {
         .await
         .unwrap();
 
+    let incarnation = incarnation(&mut session).await;
     let (doc, empty) = draft_base();
     assert_eq!(
-        push(&mut session, &doc, &empty, 1).await,
+        push(&mut session, incarnation, &doc, &empty, 1).await,
         Verdict::Applied,
         "the first delta after CREATE must apply, not answer Gap"
     );
     assert_eq!(h.status().await, "draft");
+}
+
+/// Every client the handshake admits states the collection's incarnation. A
+/// delta that states none is refused, and nothing is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delta_that_states_no_incarnation_is_refused() {
+    let h = Harness::start().await;
+    let mut session = h.session("sync_zero_writer", &["readwrite"]).await;
+    h.server
+        .exec(&format!(
+            "CREATE COLLECTION {COLL} (id TEXT PRIMARY KEY, status TEXT) WITH (crdt='true')"
+        ))
+        .await
+        .unwrap();
+
+    let (doc, empty) = draft_base();
+    let verdict = push(&mut session, nodedb_types::Hlc::ZERO, &doc, &empty, 1).await;
+    assert!(
+        matches!(&verdict, Verdict::Refused(reason) if reason.contains("states no incarnation")),
+        "{verdict:?}"
+    );
+    let rows = h
+        .server
+        .query_text(&format!("SELECT status FROM {COLL} WHERE id = '{ROW}'"))
+        .await
+        .expect("read status");
+    assert!(rows.is_empty(), "a refused delta writes nothing: {rows:?}");
 }

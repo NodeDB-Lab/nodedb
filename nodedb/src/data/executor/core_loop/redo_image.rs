@@ -18,8 +18,8 @@ use super::fail_stop::FailStopCause;
 
 impl CoreLoop {
     /// The write-set entry of a row a write stored as `stored`.
-    /// `sys_from_ms` is the version's system time on a `bitemporal=true`
-    /// collection, whose version is valid for all time.
+    /// `sys_from` is the version's system-time ordinal on a
+    /// `bitemporal=true` collection, whose version is valid for all time.
     ///
     /// The redo body is MessagePack: a strict collection's Binary Tuple is
     /// decoded, other bytes are journalled as stored. A strict row that does
@@ -28,9 +28,9 @@ impl CoreLoop {
     /// and its write set cannot be journalled, so the core fail-stops.
     pub(in crate::data::executor) fn stored_row_image(
         &mut self,
-        row: StoredRow<'_>,
+        row: WriteSetRow<'_>,
         stored: &[u8],
-        sys_from_ms: Option<i64>,
+        sys_from: Option<i64>,
     ) -> crate::Result<WriteSetEntry> {
         let body =
             match self.resolve_event_payload(row.database_id, row.tid, row.collection, stored) {
@@ -43,12 +43,12 @@ impl CoreLoop {
                 }
             };
         Ok(WriteSetEntry::put(row.surrogate, row.identity, body)
-            .versioned(sys_from_ms.map(RowVersion::open)))
+            .versioned(sys_from.map(RowVersion::open)))
     }
 }
 
 /// The row a write-set entry names.
-pub(in crate::data::executor) struct StoredRow<'a> {
+pub(in crate::data::executor) struct WriteSetRow<'a> {
     pub database_id: u64,
     pub tid: u64,
     pub collection: &'a str,
@@ -61,9 +61,9 @@ pub(in crate::data::executor) struct StoredRow<'a> {
 pub(in crate::data::executor) fn removed_row_image(
     surrogate: u32,
     identity: RowIdentity,
-    sys_from_ms: Option<i64>,
+    sys_from: Option<i64>,
 ) -> WriteSetEntry {
-    WriteSetEntry::delete(surrogate, identity).versioned(sys_from_ms.map(RowVersion::open))
+    WriteSetEntry::delete(surrogate, identity).versioned(sys_from.map(RowVersion::open))
 }
 
 /// The write-set entry of a row a write stored from `value`, the MessagePack
@@ -72,9 +72,9 @@ pub(in crate::data::executor) fn submitted_row_image(
     surrogate: u32,
     identity: RowIdentity,
     value: Vec<u8>,
-    sys_from_ms: Option<i64>,
+    sys_from: Option<i64>,
 ) -> WriteSetEntry {
-    WriteSetEntry::put(surrogate, identity, value).versioned(sys_from_ms.map(RowVersion::open))
+    WriteSetEntry::put(surrogate, identity, value).versioned(sys_from.map(RowVersion::open))
 }
 
 /// The entries a point write on a `bitemporal=true` collection owes beyond
@@ -82,11 +82,11 @@ pub(in crate::data::executor) fn submitted_row_image(
 ///
 /// The pre-dispatch record carries an unversioned row exactly. On a versioned
 /// collection the apply decides the version key, so the write journals its
-/// image stamped at `sys_from_ms` and cancels the unstamped record.
+/// image stamped at `sys_from` and cancels the unstamped record.
 pub(in crate::data::executor) fn versioned_point_images(
     image: WriteSetEntry,
-    sys_from_ms: i64,
+    sys_from: i64,
 ) -> Vec<WriteSetEntry> {
     let cancel = WriteSetEntry::cancel_forward(image.surrogate, image.identity.clone());
-    vec![image.versioned(Some(RowVersion::open(sys_from_ms))), cancel]
+    vec![image.versioned(Some(RowVersion::open(sys_from))), cancel]
 }

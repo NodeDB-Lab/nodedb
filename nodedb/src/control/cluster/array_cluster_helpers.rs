@@ -4,11 +4,14 @@
 //! and response-opcode → `VShardMessageType` lookup for the local-dispatch
 //! fast path.
 
+use nodedb_array::query::agg_number::{AggNumber, AggScalar};
+use nodedb_array::query::aggregate::{AggOutput, AggregateResult, Reducer};
 use nodedb_cluster::distributed_array::merge::ArrayAggPartial;
 use nodedb_cluster::distributed_array::scatter::{ArrayCoordError, ShardFailure};
 use nodedb_cluster::distributed_array::{ArrayAggGroupKey, ArrayAggNumber};
 use nodedb_cluster::error::ClusterError;
 use nodedb_cluster::wire::VShardMessageType;
+use nodedb_types::array_agg::{DistAcc, Moments};
 
 use crate::Error;
 
@@ -17,6 +20,7 @@ use crate::Error;
 /// Writes as an untagged msgpack scalar — same wire shape as `AggCell` in
 /// `data::executor::dispatch::array::aggregate` — so that
 /// `decode_payload_to_json` produces clean JSON numbers and nulls.
+#[derive(Clone)]
 pub(super) enum AggValue {
     Float(f64),
     Int(i64),
@@ -65,16 +69,20 @@ fn group_cell(key: &ArrayAggGroupKey) -> Result<AggValue, Error> {
 /// Finalize merged `ArrayAggPartial`s into the same msgpack-map structure
 /// the local `ArrayOp::Aggregate` path produces via `encode_agg_rows`.
 ///
-/// For scalar (no group-by), returns a single `[{"result": <value>}]`.
-/// For group-by, returns one `{"group": <dim value>, "result": <value>}` per
-/// partial, the dim value typed as its dim. `COUNT` and an integer attr's
-/// `SUM` / `MIN` / `MAX` are integers, and a `SUM` past `i64` refuses with
-/// SQLSTATE `22003`, as on a single node. `MEAN` is a float.
+/// Each partial turns back into the engine partial of `reducer` and
+/// finalizes through `AggregateResult::finalize`, the one finalizer a
+/// single-node read uses, so both topologies answer the same values:
+///
+/// - A scalar reducer gives one `{"result": v}` row, after `"group"` when
+///   it groups. `COUNT` and an integer attr's `SUM` / `MIN` / `MAX` / `MODE`
+///   are integers, and a `SUM` past `i64` refuses with SQLSTATE `22003`.
+/// - A histogram gives one `{"bin_lo", "bin_hi", "count"}` row per bin.
+/// - A median, percentile or mode past its distinct-value budget refuses
+///   with SQLSTATE `54000`.
+///
 /// When `emit_horizon` is set (temporal queries only), a trailing
-/// `{"truncated_before_horizon": bool}` summary row is appended. This mirrors
-/// the single-node path (`dispatch::array::aggregate`) exactly — including the
-/// rule that the below-horizon signal is surfaced only for temporal reads — so
-/// `decode_payload_to_json` produces byte-identical JSON on both topologies.
+/// `{"truncated_before_horizon": bool}` summary row is appended, as on the
+/// single-node path.
 pub(super) fn finalize_agg_partials(
     partials: &[ArrayAggPartial],
     reducer: &nodedb_physical::physical_plan::ArrayReducer,
@@ -82,35 +90,30 @@ pub(super) fn finalize_agg_partials(
     truncated_before_horizon: bool,
     emit_horizon: bool,
 ) -> Result<Vec<std::collections::BTreeMap<String, AggValue>>, Error> {
-    use nodedb_physical::physical_plan::ArrayReducer;
-
-    let finalize = |p: &ArrayAggPartial| -> Result<AggValue, Error> {
-        if p.count == 0 {
-            return Ok(AggValue::Null);
-        }
-        let n = match reducer {
-            ArrayReducer::Sum => p.sum,
-            ArrayReducer::Count => return count_value(p.count),
-            ArrayReducer::Min => p.min,
-            ArrayReducer::Max => p.max,
-            ArrayReducer::Mean => return Ok(AggValue::Float(p.welford_mean)),
-        };
-        number_value(n)
-    };
-
+    let engine = reducer.engine().map_err(|e| Error::BadRequest {
+        detail: format!("array aggregate: {e}"),
+    })?;
     let is_grouped = group_by_dim >= 0;
 
-    let mut rows: Vec<std::collections::BTreeMap<String, AggValue>> = partials
-        .iter()
-        .map(|p| {
-            let mut row = std::collections::BTreeMap::new();
-            if is_grouped {
-                row.insert("group".to_string(), group_cell(&p.group_key)?);
-            }
-            row.insert("result".to_string(), finalize(p)?);
-            Ok(row)
-        })
-        .collect::<Result<_, Error>>()?;
+    let mut rows: Vec<std::collections::BTreeMap<String, AggValue>> = Vec::new();
+    for p in partials {
+        let group = if is_grouped {
+            Some(group_cell(&p.group_key)?)
+        } else {
+            None
+        };
+        let output = partial_result(p, engine)
+            .finalize()
+            .map_err(finalize_error)?;
+        rows.extend(output_rows(group, output)?);
+    }
+    // A scalar read over no shard partial still answers its one row.
+    if partials.is_empty() && !is_grouped {
+        let output = AggregateResult::Empty(engine)
+            .finalize()
+            .map_err(finalize_error)?;
+        rows.extend(output_rows(None, output)?);
+    }
 
     // Trailing summary row carrying the below-horizon signal — only for
     // temporal queries, matching the single-node path so both topologies emit
@@ -127,20 +130,114 @@ pub(super) fn finalize_agg_partials(
     Ok(rows)
 }
 
-fn out_of_range(detail: String) -> Error {
-    Error::NumericValueOutOfRange {
-        detail: format!("array aggregate: {detail}"),
+/// The engine partial of `reducer` that partial `p` carries.
+fn partial_result(p: &ArrayAggPartial, reducer: Reducer) -> AggregateResult {
+    let number = |n: ArrayAggNumber| match n.as_i128() {
+        Some(v) => AggNumber::Int(v),
+        None => AggNumber::Float(n.as_f64()),
+    };
+    if p.count == 0 {
+        // A histogram keeps the bins of a group whose values all fell
+        // outside its range.
+        return match reducer {
+            Reducer::Histogram(spec) if !p.bins.is_empty() => AggregateResult::Histogram {
+                spec,
+                counts: p.bins.clone(),
+            },
+            _ => AggregateResult::Empty(reducer),
+        };
+    }
+    match reducer {
+        Reducer::Sum => AggregateResult::Sum {
+            value: number(p.sum),
+            count: p.count,
+        },
+        Reducer::Count => AggregateResult::Count { count: p.count },
+        Reducer::Min => AggregateResult::Min {
+            value: number(p.min),
+            count: p.count,
+        },
+        Reducer::Max => AggregateResult::Max {
+            value: number(p.max),
+            count: p.count,
+        },
+        Reducer::Mean => AggregateResult::Mean {
+            sum: number(p.sum),
+            count: p.count,
+        },
+        Reducer::Median | Reducer::Percentile(_) | Reducer::Mode => AggregateResult::Dist {
+            reducer,
+            acc: DistAcc::from_dist(p.dist.clone()),
+        },
+        Reducer::StdDevPop | Reducer::StdDevSamp | Reducer::VarPop | Reducer::VarSamp => {
+            AggregateResult::Moments {
+                reducer,
+                moments: Moments {
+                    count: p.count,
+                    mean: p.welford_mean,
+                    m2: p.welford_m2,
+                },
+            }
+        }
+        Reducer::Histogram(spec) => AggregateResult::Histogram {
+            spec,
+            counts: p.bins.clone(),
+        },
     }
 }
 
-/// The final value of a partial's number: an exact integer, refused past
-/// `i64`, or a float.
-fn number_value(n: ArrayAggNumber) -> Result<AggValue, Error> {
-    match n.as_i128() {
-        Some(v) => i64::try_from(v)
-            .map(AggValue::Int)
-            .map_err(|_| out_of_range(format!("value {v} is out of range for bigint"))),
-        None => Ok(AggValue::Float(n.as_f64())),
+/// The rows of one finalized partial, after `group` when it groups.
+fn output_rows(
+    group: Option<AggValue>,
+    output: AggOutput,
+) -> Result<Vec<std::collections::BTreeMap<String, AggValue>>, Error> {
+    let with_group = |mut row: std::collections::BTreeMap<String, AggValue>| {
+        if let Some(g) = &group {
+            row.insert("group".to_string(), g.clone());
+        }
+        row
+    };
+    Ok(match output {
+        AggOutput::Scalar(v) => {
+            let value = match v {
+                Some(AggScalar::Int(i)) => AggValue::Int(i),
+                Some(AggScalar::Float(f)) => AggValue::Float(f),
+                None => AggValue::Null,
+            };
+            vec![with_group(std::collections::BTreeMap::from([(
+                "result".to_string(),
+                value,
+            )]))]
+        }
+        AggOutput::Bins(bins) => bins
+            .into_iter()
+            .map(|bin| {
+                Ok(with_group(std::collections::BTreeMap::from([
+                    ("bin_lo".to_string(), AggValue::Float(bin.lo)),
+                    ("bin_hi".to_string(), AggValue::Float(bin.hi)),
+                    ("count".to_string(), count_value(bin.count)?),
+                ])))
+            })
+            .collect::<Result<_, Error>>()?,
+    })
+}
+
+/// The statement error of a finalize refusal: `54000` past a distribution
+/// budget, `22003` for a value out of range.
+fn finalize_error(e: nodedb_array::ArrayError) -> Error {
+    match e {
+        nodedb_array::ArrayError::AggregateBudgetExceeded { .. } => {
+            Error::DataPlane(crate::bridge::envelope::ErrorCode::ProgramLimitExceeded {
+                detail: format!("array aggregate: {e}"),
+            })
+        }
+        other => out_of_range(other.to_string()),
+    }
+}
+
+fn out_of_range(detail: String) -> Error {
+    Error::NumericValueOutOfRange {
+        detail: format!("array aggregate: {detail}"),
     }
 }
 
@@ -371,6 +468,85 @@ mod tests {
         assert!(matches!(
             finalize_agg_partials(&[over], &ArrayReducer::Sum, -1, false, false),
             Err(Error::NumericValueOutOfRange { .. })
+        ));
+    }
+
+    /// Exact median, mode, variance and histogram finalize from merged shard
+    /// partials, and a distribution past its budget refuses with `54000`.
+    #[test]
+    fn new_reducers_finalize_from_merged_partials() {
+        use nodedb_physical::physical_plan::ArrayReducer;
+        use nodedb_types::array_agg::{IntRun, ValueDist};
+        let dist = |runs: &[(i64, u64)]| ArrayAggPartial {
+            count: runs.iter().map(|r| r.1).sum(),
+            dist: ValueDist::Ints(
+                runs.iter()
+                    .map(|&(value, count)| IntRun { value, count })
+                    .collect(),
+            ),
+            ..ArrayAggPartial::empty(ArrayAggGroupKey::Scalar)
+        };
+        let mut merged = dist(&[(1, 1), (4, 2)]);
+        merged.merge(&dist(&[(2, 1), (4, 1)]));
+        let result = |reducer: ArrayReducer, p: &ArrayAggPartial| {
+            let rows = finalize_agg_partials(std::slice::from_ref(p), &reducer, -1, false, false)
+                .expect("finalize");
+            match rows[0].get("result") {
+                Some(AggValue::Float(v)) => *v,
+                Some(AggValue::Int(v)) => *v as f64,
+                _ => f64::NAN,
+            }
+        };
+        // Values 1, 2, 4, 4, 4.
+        assert_eq!(result(ArrayReducer::Median, &merged), 4.0);
+        assert_eq!(result(ArrayReducer::Mode, &merged), 4.0);
+        assert_eq!(result(ArrayReducer::Percentile { p: 0.25 }, &merged), 2.0);
+
+        let mut a = ArrayAggPartial {
+            count: 2,
+            welford_mean: 3.0,
+            welford_m2: 2.0,
+            ..ArrayAggPartial::empty(ArrayAggGroupKey::Scalar)
+        };
+        a.merge(&ArrayAggPartial {
+            count: 2,
+            welford_mean: 7.0,
+            welford_m2: 2.0,
+            ..ArrayAggPartial::empty(ArrayAggGroupKey::Scalar)
+        });
+        // Values 2, 4, 6, 8: population variance 5.
+        assert!((result(ArrayReducer::VarPop, &a) - 5.0).abs() < 1e-9);
+
+        let hist = ArrayAggPartial {
+            count: 3,
+            bins: vec![1, 2],
+            ..ArrayAggPartial::empty(ArrayAggGroupKey::Int64(7))
+        };
+        let rows = finalize_agg_partials(
+            &[hist],
+            &ArrayReducer::Histogram {
+                bins: 2,
+                lo: 0.0,
+                hi: 1.0,
+            },
+            0,
+            false,
+            false,
+        )
+        .expect("bins");
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[1].get("count"), Some(AggValue::Int(2))));
+        assert!(matches!(rows[1].get("bin_lo"), Some(AggValue::Float(v)) if *v == 0.5));
+        assert!(matches!(rows[1].get("group"), Some(AggValue::Int(7))));
+
+        let over = ArrayAggPartial {
+            count: 1,
+            dist: ValueDist::OverBudget { distinct: 9 },
+            ..ArrayAggPartial::empty(ArrayAggGroupKey::Scalar)
+        };
+        assert!(matches!(
+            finalize_agg_partials(&[over], &ArrayReducer::Median, -1, false, false),
+            Err(Error::DataPlane(ErrorCode::ProgramLimitExceeded { .. }))
         ));
     }
 

@@ -83,14 +83,14 @@ impl CoreLoop {
             }
         };
 
-        // Restore the epoch's deterministic time anchor around resolve so the
-        // bitemporal stamps `execute_resolve_txn` assigns are identical across
-        // replicas. The redo record carries them, so every install writes the
-        // same version key.
-        // The graph versions take the transaction's ordinal. Every
+        // Restore the epoch's deterministic time anchor around resolve. The
+        // graph and document versions take the transaction's ordinal. Every
         // participant derives it from the same epoch instant and position, so
-        // a cross-shard edge's two homes write one version key. The local
-        // clock folds it in, so a later local write stamps above it.
+        // a cross-shard edge's two homes write one version key, and every
+        // replica stamps the transaction's documents alike. The redo record
+        // carries the stamps, so every install writes the same version key.
+        // The local clock folds the ordinal in, so a later local write stamps
+        // above it.
         let txn_ordinal = nodedb_types::calvin_txn_ordinal(epoch_system_ms, position);
         self.hlc.update_from_remote(txn_ordinal);
         let prev_epoch_ms = self.epoch_system_ms;
@@ -569,6 +569,7 @@ mod tests {
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
@@ -617,6 +618,8 @@ mod tests {
             properties: b"{}".to_vec(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
         });
         let homes = crate::types::RecordHomes::edge("a", "b");
         let mut version_keys = Vec::new();

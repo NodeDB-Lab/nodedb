@@ -19,6 +19,7 @@ pub(super) fn resolve_accessors(
     expr: &SqlExpr,
     row: &Value,
     access: &dyn SequenceAccess,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<SqlExpr> {
     match expr {
         SqlExpr::Column(_)
@@ -26,15 +27,15 @@ pub(super) fn resolve_accessors(
         | SqlExpr::OldColumn(_)
         | SqlExpr::ExcludedColumn(_) => Ok(expr.clone()),
         SqlExpr::BinaryOp { left, op, right } => Ok(SqlExpr::BinaryOp {
-            left: Box::new(resolve_accessors(left, row, access)?),
+            left: Box::new(resolve_accessors(left, row, access, crs)?),
             op: *op,
-            right: Box::new(resolve_accessors(right, row, access)?),
+            right: Box::new(resolve_accessors(right, row, access, crs)?),
         }),
         SqlExpr::Negate(inner) => Ok(SqlExpr::Negate(Box::new(resolve_accessors(
-            inner, row, access,
+            inner, row, access, crs,
         )?))),
         SqlExpr::Cast { expr, to_type } => Ok(SqlExpr::Cast {
-            expr: Box::new(resolve_accessors(expr, row, access)?),
+            expr: Box::new(resolve_accessors(expr, row, access, crs)?),
             to_type: to_type.clone(),
         }),
         SqlExpr::Case {
@@ -42,41 +43,41 @@ pub(super) fn resolve_accessors(
             when_thens,
             else_expr,
         } => Ok(SqlExpr::Case {
-            operand: resolve_boxed(operand.as_deref(), row, access)?,
+            operand: resolve_boxed(operand.as_deref(), row, access, crs)?,
             when_thens: when_thens
                 .iter()
                 .map(|(when, then)| {
                     Ok((
-                        resolve_accessors(when, row, access)?,
-                        resolve_accessors(then, row, access)?,
+                        resolve_accessors(when, row, access, crs)?,
+                        resolve_accessors(then, row, access, crs)?,
                     ))
                 })
                 .collect::<crate::Result<Vec<_>>>()?,
-            else_expr: resolve_boxed(else_expr.as_deref(), row, access)?,
+            else_expr: resolve_boxed(else_expr.as_deref(), row, access, crs)?,
         }),
-        SqlExpr::Coalesce(items) => Ok(SqlExpr::Coalesce(resolve_list(items, row, access)?)),
+        SqlExpr::Coalesce(items) => Ok(SqlExpr::Coalesce(resolve_list(items, row, access, crs)?)),
         SqlExpr::NullIf(left, right) => Ok(SqlExpr::NullIf(
-            Box::new(resolve_accessors(left, row, access)?),
-            Box::new(resolve_accessors(right, row, access)?),
+            Box::new(resolve_accessors(left, row, access, crs)?),
+            Box::new(resolve_accessors(right, row, access, crs)?),
         )),
         SqlExpr::IsNull { expr, negated } => Ok(SqlExpr::IsNull {
-            expr: Box::new(resolve_accessors(expr, row, access)?),
+            expr: Box::new(resolve_accessors(expr, row, access, crs)?),
             negated: *negated,
         }),
         SqlExpr::Function { name, args } => {
-            let args = resolve_list(args, row, access)?;
+            let args = resolve_list(args, row, access, crs)?;
             let lowered = name.to_ascii_lowercase();
             match lowered.as_str() {
                 "nextval" => {
-                    let sequence = sequence_name(&lowered, &args, row)?;
+                    let sequence = sequence_name(&lowered, &args, row, crs)?;
                     Ok(SqlExpr::Literal(Value::Integer(access.nextval(&sequence)?)))
                 }
                 "currval" => {
-                    let sequence = sequence_name(&lowered, &args, row)?;
+                    let sequence = sequence_name(&lowered, &args, row, crs)?;
                     Ok(SqlExpr::Literal(Value::Integer(access.currval(&sequence)?)))
                 }
                 "setval" => {
-                    let (sequence, value) = setval_args(&args, row)?;
+                    let (sequence, value) = setval_args(&args, row, crs)?;
                     Ok(SqlExpr::Literal(Value::Integer(
                         access.setval(&sequence, value)?,
                     )))
@@ -94,8 +95,9 @@ fn resolve_boxed(
     expr: Option<&SqlExpr>,
     row: &Value,
     access: &dyn SequenceAccess,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Option<Box<SqlExpr>>> {
-    expr.map(|e| resolve_accessors(e, row, access).map(Box::new))
+    expr.map(|e| resolve_accessors(e, row, access, crs).map(Box::new))
         .transpose()
 }
 
@@ -103,16 +105,22 @@ fn resolve_list(
     items: &[SqlExpr],
     row: &Value,
     access: &dyn SequenceAccess,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<SqlExpr>> {
     items
         .iter()
-        .map(|item| resolve_accessors(item, row, access))
+        .map(|item| resolve_accessors(item, row, access, crs))
         .collect()
 }
 
 /// The single sequence-name argument of `nextval` / `currval`, evaluated
 /// against the row.
-fn sequence_name(function: &str, args: &[SqlExpr], row: &Value) -> crate::Result<String> {
+fn sequence_name(
+    function: &str,
+    args: &[SqlExpr],
+    row: &Value,
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> crate::Result<String> {
     let [arg] = args else {
         return Err(crate::Error::PlanError {
             detail: format!(
@@ -121,7 +129,7 @@ fn sequence_name(function: &str, args: &[SqlExpr], row: &Value) -> crate::Result
             ),
         });
     };
-    match arg.eval(row)? {
+    match arg.eval(row, crs)? {
         Value::String(name) => Ok(name),
         other => Err(crate::Error::PlanError {
             detail: format!(
@@ -132,7 +140,11 @@ fn sequence_name(function: &str, args: &[SqlExpr], row: &Value) -> crate::Result
 }
 
 /// The `(name, value)` arguments of `setval`, both evaluated against the row.
-fn setval_args(args: &[SqlExpr], row: &Value) -> crate::Result<(String, i64)> {
+fn setval_args(
+    args: &[SqlExpr],
+    row: &Value,
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> crate::Result<(String, i64)> {
     let [name_arg, value_arg] = args else {
         return Err(crate::Error::PlanError {
             detail: format!(
@@ -141,7 +153,7 @@ fn setval_args(args: &[SqlExpr], row: &Value) -> crate::Result<(String, i64)> {
             ),
         });
     };
-    let name = match name_arg.eval(row)? {
+    let name = match name_arg.eval(row, crs)? {
         Value::String(name) => name,
         other => {
             return Err(crate::Error::PlanError {
@@ -151,7 +163,7 @@ fn setval_args(args: &[SqlExpr], row: &Value) -> crate::Result<(String, i64)> {
             });
         }
     };
-    let value = coerce_i64(&value_arg.eval(row)?).ok_or_else(|| crate::Error::PlanError {
+    let value = coerce_i64(&value_arg.eval(row, crs)?).ok_or_else(|| crate::Error::PlanError {
         detail: "setval() second argument must evaluate to a bigint".to_string(),
     })?;
     Ok((name, value))
@@ -237,8 +249,13 @@ mod tests {
     #[test]
     fn nextval_becomes_an_integer_literal() {
         let access = FakeAccess::new();
-        let out =
-            resolve_accessors(&call("NEXTVAL", vec![text("s")]), &row(), &access).expect("resolve");
+        let out = resolve_accessors(
+            &call("NEXTVAL", vec![text("s")]),
+            &row(),
+            &access,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("resolve");
         assert_eq!(out, SqlExpr::Literal(Value::Integer(1)));
         assert_eq!(access.calls.borrow().as_slice(), ["nextval:s"]);
     }
@@ -262,12 +279,22 @@ mod tests {
                 ],
             )),
         };
-        let out = resolve_accessors(&expr, &row(), &access).expect("resolve");
+        let out = resolve_accessors(
+            &expr,
+            &row(),
+            &access,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("resolve");
         assert_eq!(
             access.calls.borrow().as_slice(),
             ["nextval:s", "nextval:s", "setval:s=12"]
         );
-        assert_eq!(out.eval(&row()).expect("eval"), Value::Integer(13));
+        assert_eq!(
+            out.eval(&row(), &nodedb_crs::CrsContext::builtin_only())
+                .expect("eval"),
+            Value::Integer(13)
+        );
     }
 
     #[test]
@@ -280,6 +307,7 @@ mod tests {
             &call("nextval", vec![SqlExpr::Column("seq".to_string())]),
             &row,
             &access,
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("resolve");
         assert_eq!(access.calls.borrow().as_slice(), ["nextval:orders"]);
@@ -292,6 +320,7 @@ mod tests {
             &call("currval", vec![SqlExpr::Literal(Value::Integer(3))]),
             &row(),
             &access,
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect_err("must fail");
         assert!(
@@ -304,11 +333,21 @@ mod tests {
     fn wrong_arity_is_a_plan_error() {
         let access = FakeAccess::new();
         assert!(matches!(
-            resolve_accessors(&call("nextval", vec![]), &row(), &access),
+            resolve_accessors(
+                &call("nextval", vec![]),
+                &row(),
+                &access,
+                &nodedb_crs::CrsContext::builtin_only()
+            ),
             Err(crate::Error::PlanError { .. })
         ));
         assert!(matches!(
-            resolve_accessors(&call("setval", vec![text("s")]), &row(), &access),
+            resolve_accessors(
+                &call("setval", vec![text("s")]),
+                &row(),
+                &access,
+                &nodedb_crs::CrsContext::builtin_only()
+            ),
             Err(crate::Error::PlanError { .. })
         ));
     }
@@ -320,6 +359,7 @@ mod tests {
             &call("setval", vec![text("s"), text(" 7 ")]),
             &row(),
             &access,
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("text");
         resolve_accessors(
@@ -329,6 +369,7 @@ mod tests {
             ),
             &row(),
             &access,
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("float");
         assert!(matches!(
@@ -339,6 +380,7 @@ mod tests {
                 ),
                 &row(),
                 &access,
+                &nodedb_crs::CrsContext::builtin_only()
             ),
             Err(crate::Error::PlanError { .. })
         ));
@@ -355,7 +397,13 @@ mod tests {
             SqlExpr::Column("x".to_string()),
             call("abs", vec![call("nextval", vec![text("s")])]),
         ]);
-        let out = resolve_accessors(&expr, &row(), &access).expect("resolve");
+        let out = resolve_accessors(
+            &expr,
+            &row(),
+            &access,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("resolve");
         assert_eq!(
             out,
             SqlExpr::Coalesce(vec![

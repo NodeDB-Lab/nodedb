@@ -61,6 +61,13 @@ pub struct ReplicatedEntry {
     /// role-guarded state transition against this set, so each reaches the
     /// same verdict. Empty for a write no user made.
     pub user_roles: Vec<String>,
+    /// The system-time ordinal the data group's leader assigned as it
+    /// admitted the entry: the stamp of every bitemporal document version the
+    /// write lands, the first ordinal of the run a columnar insert's rows
+    /// stamp, and the ingest stamp of a timeseries batch. Every replica
+    /// installs it and folds it into its clock. `0` for an entry no leader
+    /// stamped.
+    pub system_ordinal: i64,
 }
 
 /// A user collection a replicated write names, and the incarnation its
@@ -105,7 +112,14 @@ impl ReplicatedEntry {
             restore_id: 0,
             incarnations: Vec::new(),
             user_roles: Vec::new(),
+            system_ordinal: 0,
         }
+    }
+
+    /// The system-time ordinal the entry's leader assigned, `None` when no
+    /// leader stamped it.
+    pub fn carried_system_ordinal(&self) -> Option<i64> {
+        (self.system_ordinal != 0).then_some(self.system_ordinal)
     }
 
     /// Stamp the roles of the identity that wrote the write.

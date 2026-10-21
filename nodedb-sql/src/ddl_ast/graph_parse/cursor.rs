@@ -121,6 +121,26 @@ impl<'t, 'a> Cursor<'t, 'a> {
             .map_err(|_| parse_error(format!("{clause} must be a number — found '{text}'")))
     }
 
+    /// A timestamp in ms since epoch, in the forms `AS OF VALID TIME`
+    /// accepts: an integer, `NOW()`, or an ISO-8601 string.
+    pub(super) fn timestamp(&mut self, clause: &str) -> Result<i64, SqlError> {
+        let expression = match self.peek() {
+            Some(Tok::Quoted(text)) => format!("'{text}'"),
+            // The tokenizer drops `(` and `)`, so `NOW()` arrives as `NOW`.
+            Some(Tok::Word(word)) if word.eq_ignore_ascii_case("NOW") => "NOW()".to_owned(),
+            Some(Tok::Word(word)) => (*word).to_owned(),
+            other => {
+                return Err(parse_error(format!(
+                    "{clause} needs a timestamp — found {}",
+                    describe_opt(other)
+                )));
+            }
+        };
+        self.pos += 1;
+        crate::parser::preprocess::temporal::parse_temporal_expr(&expression)
+            .map_err(|error| parse_error(format!("{clause}: {}", error.0)))
+    }
+
     /// Consume the next word when it parses as a number.
     pub(super) fn number_word(&mut self) -> Option<f64> {
         let Some(Tok::Word(word)) = self.peek() else {

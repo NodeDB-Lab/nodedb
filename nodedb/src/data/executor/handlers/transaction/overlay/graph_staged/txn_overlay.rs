@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 
 use super::super::lease::{LeaseStamp, SystemFromLatch};
-use super::types::{EdgeKey, GraphCollKey, GraphCollectionOverlay, NodeLabelDelta};
+use super::types::{EdgeKey, EdgeValidTime, GraphCollKey, GraphCollectionOverlay, NodeLabelDelta};
 
 /// One graph-overlay slot's state captured immediately before a staged edge
 /// or node-label mutation overwrote it. The undo journal of these entries is
@@ -48,6 +48,8 @@ enum GraphOverlayUndo {
         prev_props: Option<Vec<u8>>,
         /// Prior membership in `pending_edge_tombstones`.
         prev_tombstoned: bool,
+        /// Prior `pending_edge_valid` entry, or `None` if the slot was absent.
+        prev_valid: Option<EdgeValidTime>,
     },
     /// Prior `pending_node_labels` delta for a node, or `None` if the node had
     /// no staged delta before this mutation.
@@ -114,18 +116,20 @@ impl GraphTxnOverlay {
     /// `stage_edge_put` and `stage_edge_delete` (and the batch forms, which
     /// call those per-edge), so no edge-set mutation escapes the journal.
     pub(super) fn record_edge_undo(&mut self, coll_key: &GraphCollKey, key: &EdgeKey) {
-        let (prev_props, prev_tombstoned) = match self.collections.get(coll_key) {
+        let (prev_props, prev_tombstoned, prev_valid) = match self.collections.get(coll_key) {
             Some(overlay) => (
                 overlay.pending_edges.get(key).cloned(),
                 overlay.pending_edge_tombstones.contains(key),
+                overlay.pending_edge_valid.get(key).copied(),
             ),
-            None => (None, false),
+            None => (None, false, None),
         };
         self.journal.push(GraphOverlayUndo::Edge {
             coll_key: coll_key.clone(),
             key: key.clone(),
             prev_props,
             prev_tombstoned,
+            prev_valid,
         });
     }
 
@@ -171,10 +175,19 @@ impl GraphTxnOverlay {
                     key,
                     prev_props,
                     prev_tombstoned,
+                    prev_valid,
                 } => {
                     let Some(overlay) = self.collections.get_mut(&coll_key) else {
                         continue;
                     };
+                    match prev_valid {
+                        Some(valid) => {
+                            overlay.pending_edge_valid.insert(key.clone(), valid);
+                        }
+                        None => {
+                            overlay.pending_edge_valid.remove(&key);
+                        }
+                    }
                     match prev_props {
                         Some(props) => {
                             overlay.pending_edges.insert(key.clone(), props);

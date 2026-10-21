@@ -49,6 +49,9 @@ pub struct WalManager {
     /// Commit-time anchors of this WAL, stamped from the node's HLC. The writer
     /// records one per fsynced batch. Replay records the persisted ones.
     pub(super) time_anchors: Arc<TimeAnchors>,
+    /// The node's system-time ordinal clock. The Data Plane stamps edge
+    /// versions from it, and a historical graph read caps its cut at it.
+    pub(super) ordinal_clock: Arc<nodedb_types::OrdinalClock>,
     /// Floors truncation keeps for holders that read records back at boot.
     pub(super) floor_holds: super::floor_holds::WalFloorHolds,
 }
@@ -92,6 +95,12 @@ impl WalManager {
     /// issues orders against anchor times.
     pub fn hlc_clock(&self) -> Arc<nodedb_types::HlcClock> {
         Arc::clone(self.time_anchors.clock())
+    }
+
+    /// The node's system-time ordinal clock. Every Data Plane core stamps
+    /// from it, so an ordinal it issues orders against every stamped version.
+    pub fn ordinal_clock(&self) -> Arc<nodedb_types::OrdinalClock> {
+        Arc::clone(&self.ordinal_clock)
     }
 
     /// Open or create a segmented WAL at the given path.
@@ -204,6 +213,7 @@ impl WalManager {
             commit_lock: tokio::sync::Mutex::new(()),
             durable_notify: tokio::sync::Notify::new(),
             time_anchors,
+            ordinal_clock: Arc::new(nodedb_types::OrdinalClock::new()),
             floor_holds: super::floor_holds::WalFloorHolds::default(),
         })
     }

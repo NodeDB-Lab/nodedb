@@ -327,9 +327,8 @@ impl PartitionedSpiller {
                 let probe_docs = item.probe.materialize()?;
 
                 let index = HashIndex::build(&build_docs, &build_key_refs);
-                // `join_filters: &[]` here → `probe_hash_index` never evaluates a
-                // residual predicate on this path, so the `?` is a no-op today;
-                // it is threaded for signature consistency.
+                // `join_filters: None` here: `probe_hash_index` evaluates no
+                // residual predicate on this path, so the `?` never fires.
                 let mut part = probe_hash_index(&ProbeParams {
                     probe_docs: &probe_docs,
                     index: &index,
@@ -339,7 +338,7 @@ impl PartitionedSpiller {
                     limit: usize::MAX,
                     probe_collection: &probe_collection,
                     index_collection: &index_collection,
-                    join_filters: &[],
+                    join_filters: None,
                     emit_unmatched_right,
                 })?;
                 results.append(&mut part);

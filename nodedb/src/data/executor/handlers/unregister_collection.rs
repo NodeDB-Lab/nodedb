@@ -247,6 +247,8 @@ impl CoreLoop {
             // will be absent from the next CSR rebuild (which reads from
             // EdgeStore).
             self.csr.drop_collection(db, tid, collection);
+            self.historical_csr
+                .invalidate_collection(db, tid, collection);
             removed
         } else {
             0
@@ -291,7 +293,7 @@ impl CoreLoop {
             }
             self.columnar_memtable_mem.remove(&key);
             self.ts_registries.remove(&key);
-            self.ts_replay_stamps.remove(&key);
+            self.ts_replay.stamps.remove(&key);
             self.ts_last_value_caches.remove(&key);
             self.ts_series_catalogs.remove(&key);
             r
@@ -439,7 +441,8 @@ impl CoreLoop {
             // collection's chain instead of starting at genesis. The
             // clear-then-install path (`preserve_collection_metadata`) keeps
             // both, so the map and the table never disagree.
-            self.chain_hashes
+            self.chain
+                .heads
                 .retain(|(d, t, c), _| !(*d == db && *t == tid && c == &coll));
             self.sparse.delete_chain_head(db_raw, tid_raw, collection)?;
             self.invalidate_aggregate_cache_for_collection(db_raw, tid_raw, collection);

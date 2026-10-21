@@ -287,7 +287,12 @@ pub(super) async fn materialize_child_rows(
         HitShape::Vector => {
             let merged = outcome.merged_rows(as_aggregate)?;
             let merged = match &hit_cut {
-                Some((rls_filters, top_k)) => filter_vector_hits(&merged, rls_filters, *top_k)?,
+                Some((rls_filters, top_k)) => filter_vector_hits(
+                    &merged,
+                    rls_filters,
+                    *top_k,
+                    &crate::control::crs_context::crs_context_for(state),
+                )?,
                 None => merged,
             };
             // Every surrogate the flatten can ask for resolves in one batch.

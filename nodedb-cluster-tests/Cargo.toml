@@ -27,7 +27,9 @@ nodedb-array = { workspace = true }
 nodedb-bridge = { workspace = true }
 nodedb-client = { workspace = true, features = ["native"] }
 nodedb-cluster = { workspace = true }
+nodedb-columnar = { workspace = true }
 nodedb-crdt = { workspace = true }
+nodedb-crs = { workspace = true }
 nodedb-physical = { workspace = true }
 nodedb-query = { workspace = true }
 nodedb-raft = { workspace = true }

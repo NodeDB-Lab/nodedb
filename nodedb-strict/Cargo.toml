@@ -15,6 +15,7 @@ categories = ["encoding", "data-structures"]
 
 [dependencies]
 nodedb-types = { workspace = true }
+nodedb-spatial = { workspace = true }
 arrow = { workspace = true, features = ["ffi"] }
 thiserror = { workspace = true }
 rust_decimal = { workspace = true }

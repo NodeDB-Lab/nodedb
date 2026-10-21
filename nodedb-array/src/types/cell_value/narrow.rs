@@ -54,6 +54,9 @@ impl CellValue {
         };
         match dtype {
             AttrType::Int64 => Ok(CellValue::Int64(v)),
+            AttrType::Int8 => i8::try_from(v)
+                .map(CellValue::Int8)
+                .map_err(|_| out_of_range()),
             AttrType::UInt8 => u8::try_from(v)
                 .map(CellValue::UInt8)
                 .map_err(|_| out_of_range()),
@@ -93,6 +96,7 @@ impl CellValue {
                 Ok(CellValue::Float32(narrowed))
             }
             AttrType::Int64
+            | AttrType::Int8
             | AttrType::UInt8
             | AttrType::Int16
             | AttrType::UInt16
@@ -130,6 +134,10 @@ mod tests {
             Ok(CellValue::UInt32(u32::MAX))
         );
         assert_eq!(
+            CellValue::from_int_literal(-128, AttrType::Int8),
+            Ok(CellValue::Int8(-128))
+        );
+        assert_eq!(
             CellValue::from_int_literal(3, AttrType::Float32),
             Ok(CellValue::Float32(3.0))
         );
@@ -147,6 +155,8 @@ mod tests {
             (2_147_483_648, AttrType::Int32),
             (4_294_967_296, AttrType::UInt32),
             (-1, AttrType::UInt32),
+            (128, AttrType::Int8),
+            (-129, AttrType::Int8),
         ];
         for (v, dtype) in cases {
             assert!(

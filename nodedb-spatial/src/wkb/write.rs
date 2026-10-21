@@ -1,226 +1,323 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! ISO WKB writer (little-endian, no SRID).
+//! WKB writers: ISO WKB and PostGIS EWKB, little-endian.
+//!
+//! Both writers carry Z and M. ISO WKB adds 1000 / 2000 / 3000 to the type
+//! code. EWKB sets the Z / M flags on every type word and puts the SRID in
+//! the top-level header only, as PostGIS writes it. An EMPTY point writes
+//! NaN for every ordinate. Output is little-endian unless a caller asks
+//! for big-endian.
 
-use nodedb_types::geometry::Geometry;
+use nodedb_types::geometry::{Dimension, Geometry, GeometryKind, Ordinates, SridGeometry};
 
+use super::error::WkbError;
 use super::format::{
-    BYTE_ORDER_LE, MAX_WKB_BYTES, MAX_WKB_DEPTH, MAX_WKB_ELEMENTS, WKB_GEOMETRYCOLLECTION,
-    WKB_LINESTRING, WKB_MULTILINESTRING, WKB_MULTIPOINT, WKB_MULTIPOLYGON, WKB_POINT, WKB_POLYGON,
+    BYTE_ORDER_BE, BYTE_ORDER_LE, EWKB_SRID_FLAG, MAX_WKB_BYTES, MAX_WKB_DEPTH, MAX_WKB_ELEMENTS,
+    ewkb_type_word, iso_type_word,
 };
 
-/// Serialize a Geometry to ISO WKB (little-endian). Carries no SRID.
-///
-/// Returns `None` when the geometry exceeds the decoder's element or nesting
-/// limits, ensuring every emitted WKB value remains decodable.
-pub fn geometry_to_wkb(geom: &Geometry) -> Option<Vec<u8>> {
-    let encoded_size = checked_encoded_size(geom, MAX_WKB_DEPTH)?;
-    let mut buf = Vec::with_capacity(encoded_size);
-    write_geometry(&mut buf, geom, MAX_WKB_DEPTH)?;
-    debug_assert_eq!(buf.len(), encoded_size);
-    Some(buf)
+/// WKB byte order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ByteOrder {
+    /// NDR, marker 1.
+    #[default]
+    LittleEndian,
+    /// XDR, marker 0.
+    BigEndian,
 }
 
-pub(super) fn checked_encoded_size(geom: &Geometry, depth_remaining: usize) -> Option<usize> {
-    if depth_remaining == 0 {
-        return None;
+/// Serialize to little-endian ISO WKB. Carries Z and M, no SRID.
+///
+/// Fails when the geometry exceeds the decoder's element, size or nesting
+/// limits, so every emitted value stays decodable.
+pub fn geometry_to_wkb(g: &SridGeometry) -> Result<Vec<u8>, WkbError> {
+    encode(g, Convention::Iso, ByteOrder::LittleEndian)
+}
+
+/// [`geometry_to_wkb`] in `order`.
+pub fn geometry_to_wkb_ordered(g: &SridGeometry, order: ByteOrder) -> Result<Vec<u8>, WkbError> {
+    encode(g, Convention::Iso, order)
+}
+
+/// The type-word convention of a writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Convention {
+    Iso,
+    /// EWKB with the SRID in the top-level header.
+    Ewkb {
+        srid: u32,
+    },
+}
+
+pub(super) fn encode(
+    g: &SridGeometry,
+    convention: Convention,
+    order: ByteOrder,
+) -> Result<Vec<u8>, WkbError> {
+    let dimension = g.dimension();
+    let stride = 8 * usize::from(dimension.coord_dim());
+    let srid_bytes = match convention {
+        Convention::Iso => 0,
+        Convention::Ewkb { .. } => 4,
+    };
+    let size = encoded_size(g.geometry(), stride, MAX_WKB_DEPTH)?
+        .checked_add(srid_bytes)
+        .filter(|s| *s <= MAX_WKB_BYTES)
+        .ok_or(WkbError::TooLarge { max: MAX_WKB_BYTES })?;
+    let mut writer = Writer {
+        buf: Vec::with_capacity(size),
+        ordinates: g.ordinates(),
+        dimension,
+        convention,
+        order,
+        index: 0,
+    };
+    writer.geometry(g.geometry(), true);
+    debug_assert_eq!(writer.buf.len(), size);
+    Ok(writer.buf)
+}
+
+/// Encoded size of `geom` whose coordinates take `stride` bytes each.
+fn encoded_size(geom: &Geometry, stride: usize, depth: usize) -> Result<usize, WkbError> {
+    if depth == 0 {
+        return Err(WkbError::TooDeep { max: MAX_WKB_DEPTH });
     }
+    let path = |len: usize| -> Result<usize, WkbError> {
+        checked_count(len)?;
+        add(4, mul(len, stride)?)
+    };
     let size = match geom {
-        Geometry::Point { .. } => 21,
-        Geometry::LineString { coordinates } => {
-            checked_count(coordinates.len())?;
-            bounded_add(9, coordinates.len().checked_mul(16)?)?
-        }
+        Geometry::Point { .. } => 5 + stride,
+        Geometry::LineString { coordinates } => add(5, path(coordinates.len())?)?,
         Geometry::Polygon { coordinates } => {
             checked_count(coordinates.len())?;
-            let mut size = 9usize;
-            for ring in coordinates {
-                checked_count(ring.len())?;
-                size = bounded_add(size, bounded_add(4, ring.len().checked_mul(16)?)?)?;
-            }
-            size
+            coordinates
+                .iter()
+                .try_fold(9usize, |acc, ring| add(acc, path(ring.len())?))?
         }
         Geometry::MultiPoint { coordinates } => {
             checked_count(coordinates.len())?;
-            bounded_add(9, coordinates.len().checked_mul(21)?)?
+            add(9, mul(coordinates.len(), 5 + stride)?)?
         }
         Geometry::MultiLineString { coordinates } => {
-            if depth_remaining == 1 {
-                return None;
+            if depth == 1 {
+                return Err(WkbError::TooDeep { max: MAX_WKB_DEPTH });
             }
             checked_count(coordinates.len())?;
-            let mut size = 9usize;
-            for line in coordinates {
-                checked_count(line.len())?;
-                size = bounded_add(size, bounded_add(9, line.len().checked_mul(16)?)?)?;
-            }
-            size
+            coordinates
+                .iter()
+                .try_fold(9usize, |acc, line| add(acc, add(5, path(line.len())?)?))?
         }
         Geometry::MultiPolygon { coordinates } => {
-            if depth_remaining == 1 {
-                return None;
+            if depth == 1 {
+                return Err(WkbError::TooDeep { max: MAX_WKB_DEPTH });
             }
             checked_count(coordinates.len())?;
-            let mut size = 9usize;
-            for polygon in coordinates {
+            coordinates.iter().try_fold(9usize, |acc, polygon| {
                 checked_count(polygon.len())?;
-                let mut polygon_size = 9usize;
-                for ring in polygon {
-                    checked_count(ring.len())?;
-                    polygon_size =
-                        bounded_add(polygon_size, bounded_add(4, ring.len().checked_mul(16)?)?)?;
-                }
-                size = bounded_add(size, polygon_size)?;
-            }
-            size
+                let rings = polygon
+                    .iter()
+                    .try_fold(9usize, |acc, ring| add(acc, path(ring.len())?))?;
+                add(acc, rings)
+            })?
         }
         Geometry::GeometryCollection { geometries } => {
             checked_count(geometries.len())?;
-            let mut size = 9usize;
-            for geometry in geometries {
-                size = bounded_add(size, checked_encoded_size(geometry, depth_remaining - 1)?)?;
-            }
-            size
+            geometries.iter().try_fold(9usize, |acc, member| {
+                add(acc, encoded_size(member, stride, depth - 1)?)
+            })?
         }
-        _ => 9,
     };
-    (size <= MAX_WKB_BYTES).then_some(size)
-}
-
-fn checked_count(count: usize) -> Option<()> {
-    (count <= MAX_WKB_ELEMENTS && u32::try_from(count).is_ok()).then_some(())
-}
-
-fn bounded_add(left: usize, right: usize) -> Option<usize> {
-    left.checked_add(right)
-        .filter(|&size| size <= MAX_WKB_BYTES)
-}
-
-fn write_geometry(buf: &mut Vec<u8>, geom: &Geometry, depth_remaining: usize) -> Option<()> {
-    if depth_remaining == 0 {
-        return None;
+    if size > MAX_WKB_BYTES {
+        return Err(WkbError::TooLarge { max: MAX_WKB_BYTES });
     }
-    match geom {
-        Geometry::Point { coordinates } => {
-            write_header(buf, WKB_POINT);
-            write_f64(buf, coordinates[0]);
-            write_f64(buf, coordinates[1]);
-        }
-        Geometry::LineString { coordinates } => {
-            write_header(buf, WKB_LINESTRING);
-            write_count(buf, coordinates.len())?;
-            for c in coordinates {
-                write_f64(buf, c[0]);
-                write_f64(buf, c[1]);
+    Ok(size)
+}
+
+fn checked_count(count: usize) -> Result<(), WkbError> {
+    if count > MAX_WKB_ELEMENTS || u32::try_from(count).is_err() {
+        return Err(WkbError::TooManyElements {
+            count,
+            max: MAX_WKB_ELEMENTS,
+        });
+    }
+    Ok(())
+}
+
+fn add(left: usize, right: usize) -> Result<usize, WkbError> {
+    left.checked_add(right)
+        .filter(|size| *size <= MAX_WKB_BYTES)
+        .ok_or(WkbError::TooLarge { max: MAX_WKB_BYTES })
+}
+
+fn mul(left: usize, right: usize) -> Result<usize, WkbError> {
+    left.checked_mul(right)
+        .filter(|size| *size <= MAX_WKB_BYTES)
+        .ok_or(WkbError::TooLarge { max: MAX_WKB_BYTES })
+}
+
+struct Writer<'a> {
+    buf: Vec<u8>,
+    ordinates: &'a Ordinates,
+    dimension: Dimension,
+    convention: Convention,
+    order: ByteOrder,
+    /// Index of the next coordinate in traversal order.
+    index: usize,
+}
+
+impl Writer<'_> {
+    fn header(&mut self, kind: GeometryKind, top: bool) {
+        self.buf.push(match self.order {
+            ByteOrder::LittleEndian => BYTE_ORDER_LE,
+            ByteOrder::BigEndian => BYTE_ORDER_BE,
+        });
+        match self.convention {
+            Convention::Iso => self.u32(iso_type_word(kind, self.dimension)),
+            Convention::Ewkb { srid } if top => {
+                self.u32(ewkb_type_word(kind, self.dimension) | EWKB_SRID_FLAG);
+                self.u32(srid);
             }
+            Convention::Ewkb { .. } => self.u32(ewkb_type_word(kind, self.dimension)),
         }
-        Geometry::Polygon { coordinates } => {
-            write_header(buf, WKB_POLYGON);
-            write_count(buf, coordinates.len())?;
-            for ring in coordinates {
-                write_count(buf, ring.len())?;
-                for c in ring {
-                    write_f64(buf, c[0]);
-                    write_f64(buf, c[1]);
+    }
+
+    /// `encoded_size` runs first and bounds every count to
+    /// `MAX_WKB_ELEMENTS`, so the count fits a `u32`.
+    fn count(&mut self, count: usize) {
+        self.u32(count as u32);
+    }
+
+    fn geometry(&mut self, geom: &Geometry, top: bool) {
+        self.header(geom.kind(), top);
+        match geom {
+            Geometry::Point { .. } if geom.is_empty() => {
+                for _ in 0..self.dimension.coord_dim() {
+                    self.f64(f64::NAN);
+                }
+            }
+            Geometry::Point { coordinates } => self.coord(*coordinates),
+            Geometry::LineString { coordinates } => self.path(coordinates),
+            Geometry::Polygon { coordinates } => self.rings(coordinates),
+            Geometry::MultiPoint { coordinates } => {
+                self.count(coordinates.len());
+                for c in coordinates {
+                    self.header(GeometryKind::Point, false);
+                    self.coord(*c);
+                }
+            }
+            Geometry::MultiLineString { coordinates } => {
+                self.count(coordinates.len());
+                for line in coordinates {
+                    self.header(GeometryKind::LineString, false);
+                    self.path(line);
+                }
+            }
+            Geometry::MultiPolygon { coordinates } => {
+                self.count(coordinates.len());
+                for polygon in coordinates {
+                    self.header(GeometryKind::Polygon, false);
+                    self.rings(polygon);
+                }
+            }
+            Geometry::GeometryCollection { geometries } => {
+                self.count(geometries.len());
+                for member in geometries {
+                    self.geometry(member, false);
                 }
             }
         }
-        Geometry::MultiPoint { coordinates } => {
-            write_header(buf, WKB_MULTIPOINT);
-            write_count(buf, coordinates.len())?;
-            for c in coordinates {
-                write_header(buf, WKB_POINT);
-                write_f64(buf, c[0]);
-                write_f64(buf, c[1]);
-            }
-        }
-        Geometry::MultiLineString { coordinates } => {
-            write_header(buf, WKB_MULTILINESTRING);
-            write_count(buf, coordinates.len())?;
-            for ls in coordinates {
-                write_geometry(
-                    buf,
-                    &Geometry::LineString {
-                        coordinates: ls.clone(),
-                    },
-                    depth_remaining - 1,
-                )?;
-            }
-        }
-        Geometry::MultiPolygon { coordinates } => {
-            write_header(buf, WKB_MULTIPOLYGON);
-            write_count(buf, coordinates.len())?;
-            for poly in coordinates {
-                write_geometry(
-                    buf,
-                    &Geometry::Polygon {
-                        coordinates: poly.clone(),
-                    },
-                    depth_remaining - 1,
-                )?;
-            }
-        }
-        Geometry::GeometryCollection { geometries } => {
-            write_header(buf, WKB_GEOMETRYCOLLECTION);
-            write_count(buf, geometries.len())?;
-            for geometry in geometries {
-                write_geometry(buf, geometry, depth_remaining - 1)?;
-            }
-        }
-        _ => {
-            write_header(buf, WKB_GEOMETRYCOLLECTION);
-            write_u32(buf, 0);
+    }
+
+    fn rings(&mut self, rings: &[Vec<[f64; 2]>]) {
+        self.count(rings.len());
+        for ring in rings {
+            self.path(ring);
         }
     }
-    Some(())
-}
 
-fn write_count(buf: &mut Vec<u8>, count: usize) -> Option<()> {
-    if count > MAX_WKB_ELEMENTS {
-        return None;
+    fn path(&mut self, coords: &[[f64; 2]]) {
+        self.count(coords.len());
+        for c in coords {
+            self.coord(*c);
+        }
     }
-    write_u32(buf, u32::try_from(count).ok()?);
-    Some(())
-}
 
-pub(super) fn write_header(buf: &mut Vec<u8>, wkb_type: u32) {
-    buf.push(BYTE_ORDER_LE);
-    write_u32(buf, wkb_type);
-}
+    fn coord(&mut self, c: [f64; 2]) {
+        let (z, m) = self.ordinates.at(self.index);
+        self.index += 1;
+        self.f64(c[0]);
+        self.f64(c[1]);
+        if let Some(z) = z {
+            self.f64(z);
+        }
+        if let Some(m) = m {
+            self.f64(m);
+        }
+    }
 
-pub(super) fn write_u32(buf: &mut Vec<u8>, val: u32) {
-    buf.extend_from_slice(&val.to_le_bytes());
-}
+    fn u32(&mut self, v: u32) {
+        match self.order {
+            ByteOrder::LittleEndian => self.buf.extend_from_slice(&v.to_le_bytes()),
+            ByteOrder::BigEndian => self.buf.extend_from_slice(&v.to_be_bytes()),
+        }
+    }
 
-fn write_f64(buf: &mut Vec<u8>, val: f64) {
-    buf.extend_from_slice(&val.to_le_bytes());
+    fn f64(&mut self, v: f64) {
+        match self.order {
+            ByteOrder::LittleEndian => self.buf.extend_from_slice(&v.to_le_bytes()),
+            ByteOrder::BigEndian => self.buf.extend_from_slice(&v.to_be_bytes()),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nodedb_types::geometry::Srid;
+
+    fn xy(g: Geometry) -> SridGeometry {
+        SridGeometry::new(Srid::WGS84, g)
+    }
 
     #[test]
-    fn encoder_rejects_total_output_above_byte_limit_before_writing() {
-        let geometry = Geometry::MultiLineString {
+    fn encoder_rejects_total_output_above_byte_limit() {
+        let g = xy(Geometry::MultiLineString {
             coordinates: (0..5).map(|_| vec![[0.0, 0.0]; 840_000]).collect(),
-        };
-        assert!(checked_encoded_size(&geometry, MAX_WKB_DEPTH).is_none());
-        assert!(geometry_to_wkb(&geometry).is_none());
+        });
+        assert!(matches!(
+            geometry_to_wkb(&g),
+            Err(WkbError::TooLarge { .. })
+        ));
     }
 
     #[test]
     fn encoder_rejects_element_count_above_decoder_limit() {
-        let geometry = Geometry::LineString {
+        let g = xy(Geometry::LineString {
             coordinates: vec![[0.0, 0.0]; MAX_WKB_ELEMENTS + 1],
-        };
-        assert!(geometry_to_wkb(&geometry).is_none());
+        });
+        assert!(geometry_to_wkb(&g).is_err());
     }
 
     #[test]
-    fn point_wkb_size() {
-        let wkb = geometry_to_wkb(&Geometry::point(0.0, 0.0)).unwrap();
-        // 1 (byte order) + 4 (type) + 8 (x) + 8 (y) = 21 bytes
-        assert_eq!(wkb.len(), 21);
+    fn big_endian_round_trips() {
+        use super::super::read::geometry_from_wkb;
+        let g = xy(Geometry::line_string(vec![[1.0, 2.0], [3.0, 4.0]]));
+        let be = geometry_to_wkb_ordered(&g, ByteOrder::BigEndian).unwrap();
+        assert_eq!(be[0], BYTE_ORDER_BE);
+        assert_eq!(geometry_from_wkb(&be).map(|w| w.geometry), Ok(g));
+    }
+
+    #[test]
+    fn point_sizes() {
+        assert_eq!(
+            geometry_to_wkb(&xy(Geometry::point(0.0, 0.0)))
+                .unwrap()
+                .len(),
+            21
+        );
+        let empty = geometry_to_wkb(&xy(Geometry::empty_point())).unwrap();
+        assert_eq!(empty.len(), 21);
+        assert!(f64::from_le_bytes(empty[5..13].try_into().unwrap()).is_nan());
     }
 }

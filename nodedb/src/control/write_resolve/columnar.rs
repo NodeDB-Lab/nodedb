@@ -36,11 +36,13 @@ pub(super) fn resolver_for_columnar_op(op: &ColumnarOp) -> Option<Box<dyn Engine
             collection,
             filters,
             updates,
+            system_from: _,
             rls_write_check,
         } => (collection, filters, Some(updates), true, rls_write_check),
         ColumnarOp::Delete {
             collection,
             filters,
+            system_from: _,
             rls_write_check,
         } => (collection, filters, None, false, rls_write_check),
         ColumnarOp::Insert { .. }
@@ -131,11 +133,13 @@ impl EngineWriteResolver for ColumnarWriteResolver {
             ResolvedRows::Update(rows) => ColumnarOp::ResolvedUpdate {
                 collection: nodedb_types::QualifiedCollection::from_stored(self.collection.clone()),
                 rows,
+                system_from: None,
                 rls_write_check: RlsWriteCheck::decided_earlier_in_request(),
             },
             ResolvedRows::Delete(pks) => ColumnarOp::ResolvedDelete {
                 collection: nodedb_types::QualifiedCollection::from_stored(self.collection.clone()),
                 pks,
+                system_from: None,
                 rls_write_check: RlsWriteCheck::decided_earlier_in_request(),
             },
             ResolvedRows::Kv { .. }

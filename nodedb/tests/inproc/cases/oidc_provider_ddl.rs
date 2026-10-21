@@ -55,6 +55,104 @@ async fn create_oidc_provider_requires_superuser() {
     assert!(error.contains("42501") || error.contains("permission denied"));
 }
 
+/// Every key fetch goes through the `[egress]` policy, so a JWKS URI the
+/// policy refuses is refused at definition time.
+#[tokio::test]
+async fn create_oidc_provider_refuses_a_jwks_uri_outside_the_egress_policy() {
+    let state = make_state_with_catalog();
+    let su = superuser();
+    ddl_ok(&state, &su, "CREATE TENANT acme ID 42").await;
+    for uri in [
+        "https://127.0.0.1/jwks",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://keycloak.internal/jwks",
+    ] {
+        let error = ddl_err(
+            &state,
+            &su,
+            &format!(
+                "CREATE OIDC PROVIDER refused \
+                 ISSUER 'https://refused.example/' \
+                 JWKS_URI '{uri}' \
+                 TENANT 42"
+            ),
+        )
+        .await;
+        assert!(error.contains("[egress]"), "{uri}: {error}");
+    }
+    assert!(
+        state
+            .credentials
+            .catalog()
+            .get_oidc_provider("refused")
+            .expect("catalog read must succeed")
+            .is_none()
+    );
+}
+
+/// A claim mapping that names a database that does not exist is refused with
+/// 3D000 by `CREATE OIDC PROVIDER` and by `ALTER ... SET CLAIM MAPPING`. A
+/// mapping to an existing database is accepted.
+#[tokio::test]
+async fn a_claim_mapping_to_a_missing_database_is_refused() {
+    let state = make_state_with_catalog();
+    let su = superuser();
+    ddl_ok(&state, &su, "CREATE TENANT acme ID 42").await;
+    for mapping in [
+        "SET DEFAULT_DATABASE = 4242",
+        "SET DEFAULT_DATABASE = 0 ADD DATABASES [4243]",
+    ] {
+        let error = ddl_err(
+            &state,
+            &su,
+            &format!(
+                "CREATE OIDC PROVIDER missing_db \
+                 ISSUER 'https://missing-db.example/' \
+                 JWKS_URI 'https://missing-db.example/jwks' \
+                 TENANT 42 \
+                 CLAIM MAPPING WHEN sub = '*' {mapping}"
+            ),
+        )
+        .await;
+        assert!(error.contains("3D000"), "{mapping}: {error}");
+        assert!(error.contains("424"), "{mapping}: {error}");
+    }
+    assert!(
+        state
+            .credentials
+            .catalog()
+            .get_oidc_provider("missing_db")
+            .expect("catalog read must succeed")
+            .is_none()
+    );
+
+    ddl_ok(
+        &state,
+        &su,
+        "CREATE OIDC PROVIDER missing_db \
+         ISSUER 'https://missing-db.example/' \
+         JWKS_URI 'https://missing-db.example/jwks' \
+         TENANT 42 \
+         CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 0",
+    )
+    .await;
+    let error = ddl_err(
+        &state,
+        &su,
+        "ALTER OIDC PROVIDER missing_db SET CLAIM MAPPING \
+         WHEN sub = '*' SET DEFAULT_DATABASE = 4244",
+    )
+    .await;
+    assert!(error.contains("3D000") && error.contains("4244"), "{error}");
+    let stored = state
+        .credentials
+        .catalog()
+        .get_oidc_provider("missing_db")
+        .expect("catalog read must succeed")
+        .expect("the provider exists");
+    assert_eq!(stored.claim_mapping[0].default_database, Some(0));
+}
+
 #[tokio::test]
 async fn create_oidc_provider_rejects_unknown_tenant() {
     let state = make_state_with_catalog();

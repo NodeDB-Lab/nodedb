@@ -166,7 +166,11 @@ impl JoinParams<'_> {
     /// returning rows that should have been excluded.
     ///
     /// An empty `post_filter_bytes` slice is a no-op and always returns `Ok(())`.
-    pub fn filter_and_project(&self, results: &mut Vec<Vec<u8>>) -> crate::Result<()> {
+    pub fn filter_and_project(
+        &self,
+        results: &mut Vec<Vec<u8>>,
+        crs: &nodedb_crs::CrsContext<'_>,
+    ) -> crate::Result<()> {
         if !self.post_filter_bytes.is_empty() {
             let filters: Vec<ScanFilter> =
                 zerompk::from_msgpack(self.post_filter_bytes).map_err(|e| {
@@ -187,7 +191,7 @@ impl JoinParams<'_> {
                     if first_err.is_some() {
                         return true;
                     }
-                    match super::binary_row_matches_filters(row, &filters) {
+                    match super::binary_row_matches_filters(row, &filters, crs) {
                         Ok(keep) => keep,
                         Err(e) => {
                             first_err = Some(crate::Error::from(e));
@@ -214,6 +218,7 @@ impl JoinParams<'_> {
                     row,
                     &computed,
                     &[],
+                    crs,
                 )?;
             }
         } else if !self.projection.is_empty() {
@@ -270,7 +275,11 @@ mod tests {
             post_filter_bytes: &[],
         };
         let mut results = vec![vec![1u8, 2, 3], vec![4u8, 5, 6]];
-        assert!(params.filter_and_project(&mut results).is_ok());
+        assert!(
+            params
+                .filter_and_project(&mut results, &nodedb_crs::CrsContext::builtin_only())
+                .is_ok()
+        );
         // Results are untouched.
         assert_eq!(results.len(), 2);
     }
@@ -292,7 +301,7 @@ mod tests {
             post_filter_bytes: corrupt,
         };
         let mut results = vec![vec![0u8; 8]]; // would be "leaked" under the old code
-        let err = params.filter_and_project(&mut results);
+        let err = params.filter_and_project(&mut results, &nodedb_crs::CrsContext::builtin_only());
         assert!(
             err.is_err(),
             "corrupt post-filter bytes must return Err, not silently skip the filter"
@@ -326,7 +335,11 @@ mod tests {
             row_with_score(42), // should be dropped
             row_with_score(99), // should be kept
         ];
-        assert!(params.filter_and_project(&mut results).is_ok());
+        assert!(
+            params
+                .filter_and_project(&mut results, &nodedb_crs::CrsContext::builtin_only())
+                .is_ok()
+        );
         assert_eq!(
             results.len(),
             2,

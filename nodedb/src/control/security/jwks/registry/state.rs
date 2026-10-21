@@ -6,11 +6,12 @@
 use std::sync::Arc;
 
 use crate::config::auth::{JwtAuthConfig, JwtProviderConfig};
+use crate::control::security::egress::EgressPolicy;
 use crate::control::security::jwks::cache::JwksCache;
-use crate::control::security::jwks::url::JwksPolicy;
 use crate::control::security::jwt::JwtClaims;
 
 use super::header::JwtHeader;
+use super::targets::RefreshTargets;
 
 /// Multi-provider JWKS registry.
 ///
@@ -20,7 +21,10 @@ pub struct JwksRegistry {
     pub(super) providers: Vec<JwtProviderConfig>,
     pub(super) cache: Arc<JwksCache>,
     pub(super) config: JwtAuthConfig,
-    pub(super) policy: Arc<JwksPolicy>,
+    pub(super) policy: Arc<EgressPolicy>,
+    /// The endpoints the refresh task fetches: static providers and every
+    /// catalog provider registered on this node.
+    pub(super) targets: Arc<parking_lot::RwLock<RefreshTargets>>,
     /// Background refresh task handle.
     pub(super) _refresh_handle: Option<tokio::task::JoinHandle<()>>,
 }

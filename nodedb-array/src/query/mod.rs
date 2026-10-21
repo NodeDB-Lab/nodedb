@@ -4,7 +4,7 @@
 //!
 //! Pure, tile-local primitives: slice (coord-range filter), project
 //! (attr subset), region (coordinate box plus polygon zone), aggregate
-//! (sum/count/min/max/mean with optional group-by + cross-tile merge),
+//! (exact reducers with optional group-by + cross-tile merge),
 //! elementwise (binary ops between two aligned tiles) and rechunk
 //! (re-bucket cells into a new tile-extent layout). No engine state, no plane crossings — the executor wires these
 //! into the physical plan.
@@ -13,6 +13,7 @@ pub mod agg_number;
 pub mod aggregate;
 pub mod ceiling;
 pub mod elementwise;
+pub mod physical;
 pub mod project;
 pub mod rechunk;
 pub mod region;
@@ -21,9 +22,12 @@ pub mod slice;
 pub mod zone_frame;
 
 pub use agg_number::{AggNumber, AggScalar};
-pub use aggregate::{AggregateResult, GroupAggregate, Reducer, aggregate_attr, group_by_dim};
+pub use aggregate::{
+    AggOutput, AggRead, AggregateResult, GroupAggregate, Reducer, aggregate_attr, group_by_dim,
+};
 pub use ceiling::{CeilingParams, CeilingResult, ceiling_resolve_cell};
 pub use elementwise::{BinaryOp, elementwise};
+pub use physical::{physical_cells, physical_sparse};
 pub use project::{Projection, project_sparse};
 pub use rechunk::rechunk_sparse;
 pub use region::{

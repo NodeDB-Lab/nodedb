@@ -23,13 +23,20 @@ pub(in crate::data::executor) struct GeometryIndexDelta {
     pub inserted: Vec<(SpatialIndexKey, u64)>,
 }
 
-/// The geometry a columnar cell holds: a native geometry or GeoJSON text.
-/// Any other cell holds none.
-fn cell_geometry(value: &Value) -> Option<SridGeometry> {
-    match value {
-        Value::Geometry(g) => Some(g.clone()),
-        Value::String(s) => nodedb_types::geometry::from_geojson_str(s),
-        _ => None,
+/// The indexable geometry a columnar cell holds, in every form the
+/// memtable stores: a native geometry, its text (GeoJSON, EWKT, WKT, hex
+/// EWKB), its WKB bytes, or a GeoJSON object. An EMPTY geometry and a value
+/// of another type index nothing: the memtable refuses that type. A form
+/// that does not parse, or an SRID `crs` does not define, fails, so an
+/// index never misses a stored geometry.
+fn cell_geometry(
+    value: &Value,
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> crate::Result<Option<SridGeometry>> {
+    match nodedb_spatial::geometry_from_value(value, nodedb_spatial::SridCheck::Resolve(crs)) {
+        Ok(geom) => Ok((!geom.is_empty()).then_some(geom)),
+        Err(nodedb_spatial::SpatialError::NotGeometryValue { .. }) => Ok(None),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -48,6 +55,7 @@ impl CoreLoop {
         collection: &str,
         ndb_rows: &[nodedb_types::Value],
     ) -> crate::Result<()> {
+        let crs = self.crs_context();
         let db_id = task.request.database_id;
         let tid = task.request.tenant_id;
         for col_def in schema
@@ -65,7 +73,10 @@ impl CoreLoop {
                 let Value::Object(obj) = row else {
                     continue;
                 };
-                let Some(geom) = obj.get(&col_def.name).and_then(cell_geometry) else {
+                let Some(cell) = obj.get(&col_def.name) else {
+                    continue;
+                };
+                let Some(geom) = cell_geometry(cell, &crs)? else {
                     continue;
                 };
                 match fixed {
@@ -119,6 +130,7 @@ impl CoreLoop {
             return Ok(delta);
         }
         self.check_columnar_geometry_srids(task, schema, collection, ndb_rows)?;
+        let crs = self.crs_context();
         for row in ndb_rows {
             let obj = match row {
                 nodedb_types::Value::Object(m) => m,
@@ -153,14 +165,11 @@ impl CoreLoop {
                     Some(v) => v,
                     None => continue,
                 };
-                // Geometry may be stored as Value::Geometry or Value::String (GeoJSON).
-                // See `nodedb_types::geometry::from_geojson_str` — shared with the
-                // document index path (`apply_point_put_spatial`) and the read path
-                // (`extract_geometry`); keep all three in sync.
-                let Some(geom) = cell_geometry(field_val) else {
+                let Some(geom) = cell_geometry(field_val, &crs)? else {
                     continue;
                 };
-                let bbox = geom.bbox();
+                let tree_srid = crate::engine::spatial::TreeSrid::resolve(geom.srid, &crs)?;
+                let bbox = geom.bbox(&crs)?;
                 let index_key = (db_id, tid, collection.to_string(), col_def.name.clone());
                 let entry_id = spatial_entry_id.as_u64();
                 let memory = nodedb_mem::ScopedMemory::new(
@@ -172,11 +181,11 @@ impl CoreLoop {
                 let rtree = self
                     .spatial_indexes
                     .entry(index_key.clone())
-                    .or_insert_with(|| crate::engine::spatial::RTree::new(memory, geom.srid));
+                    .or_insert_with(|| crate::engine::spatial::RTree::new(memory, tree_srid));
                 // The batch check above admitted every SRID here; removing a
                 // re-indexed row's prior entry can only empty the tree.
                 rtree
-                    .bind_srid(geom.srid)
+                    .bind_srid(tree_srid)
                     .map_err(|m| crate::Error::MixedSrid {
                         collection: collection.to_string(),
                         field: col_def.name.clone(),

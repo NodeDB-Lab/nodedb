@@ -21,7 +21,7 @@
 //! mass is in flight when the run halts.
 //!
 //! Ownership model: each superstep builds a collection-scoped CSR via
-//! `build_csr_for_collection` (the same call `execute_graph_algo` uses), so
+//! `CoreLoop::algo_csr` (the same read `execute_graph_algo` uses), so
 //! distributed PageRank runs over exactly the `(collection, edge_label)`
 //! subgraph single-node `GRAPH ALGO ON <collection>` does. A node whose
 //! `VShardId::from_key(name)` is in `owned_vshards` is owned by this shard
@@ -47,8 +47,6 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::BspSuperstepResult;
 
-use super::graph_algo::build_csr_for_collection;
-
 /// Borrowed arguments for [`CoreLoop::execute_bsp_superstep`], destructured
 /// from the `GraphOp::BspSuperstep` plan variant by the dispatcher.
 pub struct BspSuperstepArgs<'a> {
@@ -72,6 +70,9 @@ pub struct BspSuperstepArgs<'a> {
     /// graph at (see `BspSuperstepPlan::read_cut_marker`). A superstep
     /// without one is refused.
     pub system_as_of: Option<i64>,
+    /// The valid-time instant every edge the run reads must contain, or
+    /// `None` for every valid time.
+    pub valid_at_ms: Option<i64>,
 }
 
 /// The pure BSP-superstep core: given an already-built `CsrIndex` and the
@@ -79,7 +80,7 @@ pub struct BspSuperstepArgs<'a> {
 /// and returns the complete [`BspSuperstepResult`].
 ///
 /// Both [`CoreLoop::execute_bsp_superstep`] (after calling
-/// `build_csr_for_collection`) and the unit tests call this function, so the
+/// `CoreLoop::algo_csr`) and the unit tests call this function, so the
 /// tests exercise the real handler math rather than a re-implementation.
 ///
 /// A superstep that cannot be one step of the whole graph is an error:
@@ -314,27 +315,16 @@ impl CoreLoop {
             );
         };
 
-        let database_id = task.request.database_id.as_u64();
-        let memory = nodedb_mem::ScopedMemory::new(
-            self.governor.clone(),
-            task.request.database_id,
-            crate::types::TenantId::new(tid),
-            nodedb_mem::EngineId::Graph,
+        // The collection-scoped CSR at the cut — the same read as
+        // execute_graph_algo — so distributed PageRank runs over exactly the
+        // same (collection, edge_label) subgraph as single-node
+        // GRAPH ALGO ON <collection>. Every superstep of a run reads the one
+        // CSR the historical cache holds for the cut.
+        let scope = nodedb_physical::physical_plan::GraphReadScope::at_installed_cut(
+            system_as_of,
+            args.valid_at_ms,
         );
-
-        // Build a collection-scoped CSR from the edge store as of the cut —
-        // same call as execute_graph_algo — so distributed PageRank runs over
-        // exactly the same (collection, edge_label) subgraph as single-node
-        // GRAPH ALGO ON <collection>.
-        let csr = match build_csr_for_collection(
-            &self.edge_store,
-            database_id,
-            tid,
-            &args.params.collection,
-            args.params.edge_label.as_deref(),
-            Some(system_as_of),
-            memory,
-        ) {
+        let csr = match self.algo_csr(task.request.database_id, tid, args.params, &scope) {
             Ok(c) => c,
             Err(e) => return self.response_error(task, ErrorCode::from(e)),
         };
@@ -410,6 +400,7 @@ mod tests {
             global_dangling: 0.0,
             personalization_sum: 0.0,
             system_as_of: Some(i64::MAX),
+            valid_at_ms: None,
         }
     }
 
@@ -620,13 +611,13 @@ mod tests {
                 TenantId::new(0),
                 nodedb_mem::EngineId::Graph,
             );
-            build_csr_for_collection(
+            super::super::graph_algo::build_csr_for_collection(
                 &store,
                 DatabaseId::DEFAULT.as_u64(),
                 0,
                 "test_coll",
                 None,
-                Some(cut),
+                &nodedb_physical::physical_plan::GraphReadScope::at_installed_cut(cut, None),
                 memory,
             )
             .expect("csr as of the cut")

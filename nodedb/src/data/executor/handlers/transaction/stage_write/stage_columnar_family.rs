@@ -51,6 +51,7 @@ impl CoreLoop {
             ColumnarOp::Delete {
                 collection,
                 filters,
+                system_from: _,
                 rls_write_check,
             } => self.stage_columnar_delete(StageColumnarDeleteParams {
                 task,
@@ -64,6 +65,7 @@ impl CoreLoop {
                 collection,
                 filters,
                 updates,
+                system_from: _,
                 rls_write_check,
             } => self.stage_columnar_update(StageColumnarUpdateParams {
                 task,
@@ -79,6 +81,7 @@ impl CoreLoop {
             ColumnarOp::ResolvedUpdate {
                 collection,
                 rows,
+                system_from: _,
                 rls_write_check,
             } => self.stage_columnar_resolved_update(StageColumnarResolvedUpdateParams {
                 task,
@@ -91,6 +94,7 @@ impl CoreLoop {
             ColumnarOp::ResolvedDelete {
                 collection,
                 pks,
+                system_from: _,
                 rls_write_check: _,
             } => self.stage_columnar_resolved_delete(StageColumnarResolvedDeleteParams {
                 task,
@@ -101,9 +105,13 @@ impl CoreLoop {
             }),
             // An overlay marker hides every base row; COMMIT replays the
             // live truncate.
+            // The resolve stamps the transaction's ordinal. A restore never
+            // runs inside a transaction, so a staged truncate keeps history.
             ColumnarOp::Truncate {
                 collection,
                 restart_identity: _,
+                system_from: _,
+                erase_history: _,
             } => self.stage_collection_truncate(task, tid, txn_id, collection.as_str()),
             ColumnarOp::Scan { .. }
             | ColumnarOp::MaterializeScan { .. }

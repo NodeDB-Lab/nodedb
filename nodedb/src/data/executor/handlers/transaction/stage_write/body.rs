@@ -78,8 +78,13 @@ impl CoreLoop {
             && write_body::rewrites_body(config)
         {
             if let Ok(mut doc) = doc_format::decode_document(value) {
-                write_body::materialize_write_body(config, &mut doc, GuardScope::Document)
-                    .map_err(crate::Error::DataPlane)?;
+                write_body::materialize_write_body(
+                    config,
+                    &mut doc,
+                    GuardScope::Document,
+                    &self.crs_context(),
+                )
+                .map_err(crate::Error::DataPlane)?;
                 doc_format::encode_to_msgpack(&doc)
             } else {
                 value.to_vec()
@@ -93,7 +98,7 @@ impl CoreLoop {
         let value = strict_format::coerce_declared_body(value, self.declared_columns(&config_key))?;
 
         let bitemporal = self.is_bitemporal(database_id, tid, collection);
-        let sys_from_ms = self.bitemporal_now_ms();
+        let sys_from = self.bitemporal_ordinal();
 
         if let Some(config) = self.doc_configs.get(&config_key)
             && let StorageMode::Strict { ref schema } = config.storage_mode
@@ -121,7 +126,7 @@ impl CoreLoop {
                 strict_format::bytes_to_binary_tuple_bitemporal(
                     &encoded_input,
                     schema,
-                    sys_from_ms,
+                    sys_from,
                     i64::MIN,
                     i64::MAX,
                     collection,
@@ -156,8 +161,8 @@ impl CoreLoop {
             collection.to_string(),
         );
         let bitemporal = self.is_bitemporal(database_id, tid, collection);
-        let sys_from_ms = if bitemporal {
-            self.bitemporal_now_ms()
+        let sys_from = if bitemporal {
+            self.bitemporal_ordinal()
         } else {
             0
         };
@@ -192,6 +197,7 @@ impl CoreLoop {
         // semantics): a later assignment observing a column updated earlier in
         // the same statement still sees the pre-statement value.
         let eval_doc: nodedb_types::Value = doc.clone().into();
+        let crs = self.crs_context();
         if let Some(obj) = doc.as_object_mut() {
             for (field, update_val) in updates {
                 let val =
@@ -206,7 +212,7 @@ impl CoreLoop {
                             // write, same as the literal decode-failure arm
                             // above.
                             let result: nodedb_types::Value =
-                                expr.eval(&eval_doc).map_err(crate::Error::from)?;
+                                expr.eval(&eval_doc, &crs).map_err(crate::Error::from)?;
                             result.into()
                         }
                     };
@@ -228,8 +234,13 @@ impl CoreLoop {
             && write_body::rewrites_body(config)
         {
             let assigned = write_body::assigned_names(updates);
-            write_body::materialize_write_body(config, &mut doc, GuardScope::Assigned(&assigned))
-                .map_err(crate::Error::DataPlane)?;
+            write_body::materialize_write_body(
+                config,
+                &mut doc,
+                GuardScope::Assigned(&assigned),
+                &crs,
+            )
+            .map_err(crate::Error::DataPlane)?;
         }
 
         // A declared numeric column holds the value its type stores, whether
@@ -243,7 +254,7 @@ impl CoreLoop {
                     strict_format::value_to_binary_tuple_bitemporal(
                         &ndb_val,
                         schema,
-                        sys_from_ms,
+                        sys_from,
                         i64::MIN,
                         i64::MAX,
                         collection,

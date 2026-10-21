@@ -93,6 +93,8 @@ pub(super) struct SettleInput<'a> {
     pub source_row: Option<Surrogate>,
     /// Version the images were read at, on the source collection's vShard.
     pub read_version: nodedb_types::WriteVersion,
+    /// Resolves SRIDs in the binding's value expression.
+    pub crs: &'a nodedb_crs::CrsContext<'a>,
 }
 
 /// What settling produced.
@@ -158,6 +160,7 @@ pub(super) fn settle_cross_shard_images(
                 binding,
                 old.as_ref(),
                 new.as_ref(),
+                input.crs,
             )?);
         }
         for (join_value, delta) in crate::query::coalesce_binding_deltas(folded) {
@@ -327,7 +330,9 @@ pub(super) fn co_resident_target_keys(
             continue;
         }
         for (old, new) in input.images {
-            for entry in crate::query::binding_image_deltas(binding, old.as_ref(), new.as_ref())? {
+            for entry in
+                crate::query::binding_image_deltas(binding, old.as_ref(), new.as_ref(), input.crs)?
+            {
                 let key = SumTargetKey::new(&binding.target_collection, entry.join_value);
                 if !keep.contains(&key) {
                     keep.push(key);
@@ -403,6 +408,7 @@ mod tests {
             images: &images,
             source_row: Some(Surrogate::new(11)),
             read_version: nodedb_types::WriteVersion::logged(3, 42),
+            crs: &nodedb_crs::CrsContext::builtin_only(),
         };
         let settlement = settle_cross_shard_images(
             &[binding(&target)],
@@ -438,6 +444,7 @@ mod tests {
             images: &images,
             source_row: Some(Surrogate::new(11)),
             read_version: nodedb_types::WriteVersion::logged(3, 42),
+            crs: &nodedb_crs::CrsContext::builtin_only(),
         };
         let settlement = settle_cross_shard_images(
             &[binding(&target)],
@@ -478,6 +485,7 @@ mod tests {
             images: &images,
             source_row: Some(Surrogate::new(11)),
             read_version: nodedb_types::WriteVersion::logged(3, 42),
+            crs: &nodedb_crs::CrsContext::builtin_only(),
         };
         let settlement = settle_cross_shard_images(
             &[binding(&target)],
@@ -502,6 +510,7 @@ mod tests {
             images: &images,
             source_row: Some(Surrogate::new(11)),
             read_version: nodedb_types::WriteVersion::logged(3, 42),
+            crs: &nodedb_crs::CrsContext::builtin_only(),
         };
         let settlement = settle_cross_shard_images(
             &[binding(&target)],
@@ -530,6 +539,7 @@ mod tests {
             images: &images,
             source_row: Some(Surrogate::new(11)),
             read_version: nodedb_types::WriteVersion::logged(3, 42),
+            crs: &nodedb_crs::CrsContext::builtin_only(),
         };
         // A binding whose target IS the source collection is co-resident by
         // construction, whatever the hash function does.
@@ -559,6 +569,7 @@ mod tests {
             images: &images,
             source_row: Some(Surrogate::new(11)),
             read_version: nodedb_types::WriteVersion::logged(3, 42),
+            crs: &nodedb_crs::CrsContext::builtin_only(),
         };
         let settlement = settle_cross_shard_images(
             &[binding(&target)],
@@ -596,6 +607,7 @@ mod tests {
             images: &images,
             source_row: None,
             read_version: nodedb_types::WriteVersion::logged(3, 42),
+            crs: &nodedb_crs::CrsContext::builtin_only(),
         };
         let settlement = settle_cross_shard_images(
             &[binding(&target)],

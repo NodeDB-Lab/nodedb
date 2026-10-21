@@ -17,6 +17,7 @@
 //! record it removed, and a record it does not name applied after the
 //! truncate and survives it.
 
+use crate::data::executor::handlers::columnar_truncate::TruncateHistory;
 use std::collections::HashMap;
 
 use nodedb_types::columnar::ColumnarTruncateWalRecord;
@@ -47,29 +48,40 @@ pub(in crate::data::executor) struct TruncateFloors {
 
 /// The collection a truncate record names, or `None` for any other record.
 fn truncate_key(record: &WalRecord) -> Option<CollectionKey> {
-    let is_truncate = matches!(
-        RecordType::from_raw(record.logical_record_type()),
-        Some(RecordType::ColumnarTruncate) | Some(RecordType::TimeseriesTruncate)
-    );
-    if !is_truncate {
-        return None;
-    }
+    truncate_target(record).map(|(key, _)| key)
+}
+
+/// The collection a truncate record names, and whether the truncate erases
+/// history: a timeseries truncate, or a columnar truncate the record marks
+/// `erase_history`. `None` for any other record.
+fn truncate_target(record: &WalRecord) -> Option<(CollectionKey, bool)> {
+    let record_type = RecordType::from_raw(record.logical_record_type());
+    let columnar = match record_type {
+        Some(RecordType::ColumnarTruncate) => true,
+        Some(RecordType::TimeseriesTruncate) => false,
+        _ => return None,
+    };
     let payload = zerompk::from_msgpack::<ColumnarTruncateWalRecord>(&record.payload).ok()?;
-    Some((
+    let key = (
         DatabaseId::new(record.header.database_id),
         TenantId::new(record.header.tenant_id),
         payload.collection,
-    ))
+    );
+    Some((key, !columnar || payload.erase_history))
 }
 
 impl TruncateFloors {
     /// Collect the truncate records that route to `core_id`. `stamps` holds
-    /// the timeseries collection stamps restored from disk.
+    /// the timeseries collection stamps restored from disk. `bitemporal`
+    /// names a bitemporal collection: its columnar truncate closes keys and
+    /// keeps every earlier record's rows as history, so it imposes no floor,
+    /// unless the record erases history.
     pub(in crate::data::executor) fn collect(
         records: &[WalRecord],
         num_cores: usize,
         core_id: usize,
         stamps: &HashMap<CollectionKey, TsReplayStamp>,
+        bitemporal: &dyn Fn(&CollectionKey) -> bool,
     ) -> Self {
         let mut this = Self::default();
         for record in records {
@@ -81,9 +93,12 @@ impl TruncateFloors {
             if target_core != core_id {
                 continue;
             }
-            let Some(key) = truncate_key(record) else {
+            let Some((key, erases)) = truncate_target(record) else {
                 continue;
             };
+            if !erases && bitemporal(&key) {
+                continue;
+            }
             let lsn = record.header.lsn;
             let took_effect = stamps
                 .get(&key)
@@ -227,14 +242,18 @@ impl CoreLoop {
                     record.collection.clone(),
                 ),
                 restart_identity: false,
+                system_from: record.system_from,
+                erase_history: record.erase_history,
             }),
             Some(Lsn::new(record_lsn)),
         );
         let mut undo = Vec::new();
         let recording = self.recording_redo_undo();
+        // The stamp the live truncate's tombstones took.
         let response = self.execute_columnar_truncate(
             &task,
             &record.collection,
+            TruncateHistory::of(record.erase_history, record.system_from),
             recording.then_some(&mut undo),
         );
         self.record_redo_undo(undo);
@@ -343,6 +362,8 @@ mod tests {
     fn truncate_record(record_type: RecordType, lsn: u64, vshard: u32, coll: &str) -> WalRecord {
         let payload = zerompk::to_msgpack_vec(&ColumnarTruncateWalRecord {
             collection: coll.to_string(),
+            system_from: None,
+            erase_history: false,
         })
         .expect("encode");
         WalRecord::new(WalRecordArgs {
@@ -361,13 +382,29 @@ mod tests {
     #[test]
     fn a_row_at_the_truncates_own_lsn_is_not_covered() {
         let records = vec![truncate_record(RecordType::ColumnarTruncate, 9, 0, "c")];
-        let floors = TruncateFloors::collect(&records, 1, 0, &HashMap::new());
+        let floors = TruncateFloors::collect(&records, 1, 0, &HashMap::new(), &|_| false);
         let c = (DatabaseId::DEFAULT, TenantId::new(1), "c".to_string());
         assert!(floors.covers(&c, 8));
         assert!(
             !floors.covers(&c, 9),
             "a sibling sub-record of the truncate's redo group applies in group order"
         );
+    }
+
+    /// A columnar truncate of a bitemporal collection keeps every earlier
+    /// row as history, so it imposes no floor. A timeseries truncate still
+    /// does.
+    #[test]
+    fn a_bitemporal_columnar_truncate_imposes_no_floor() {
+        let records = vec![
+            truncate_record(RecordType::ColumnarTruncate, 9, 0, "c"),
+            truncate_record(RecordType::TimeseriesTruncate, 9, 0, "ts"),
+        ];
+        let floors = TruncateFloors::collect(&records, 1, 0, &HashMap::new(), &|_| true);
+        let c = (DatabaseId::DEFAULT, TenantId::new(1), "c".to_string());
+        let ts = (DatabaseId::DEFAULT, TenantId::new(1), "ts".to_string());
+        assert!(!floors.covers(&c, 8));
+        assert!(floors.covers(&ts, 8));
     }
 
     #[test]
@@ -379,7 +416,7 @@ mod tests {
             // Routes to another core.
             truncate_record(RecordType::TimeseriesTruncate, 50, 1, "ts"),
         ];
-        let floors = TruncateFloors::collect(&records, 2, 0, &HashMap::new());
+        let floors = TruncateFloors::collect(&records, 2, 0, &HashMap::new(), &|_| false);
         let c = (DatabaseId::DEFAULT, TenantId::new(1), "c".to_string());
         let ts = (DatabaseId::DEFAULT, TenantId::new(1), "ts".to_string());
         assert!(floors.covers(&c, 8));
@@ -408,7 +445,8 @@ mod tests {
             },
         )]);
         let truncate = truncate_record(RecordType::TimeseriesTruncate, 20, 0, "ts");
-        let mut floors = TruncateFloors::collect(std::slice::from_ref(&truncate), 1, 0, &stamps);
+        let mut floors =
+            TruncateFloors::collect(std::slice::from_ref(&truncate), 1, 0, &stamps, &|_| false);
 
         assert!(
             !floors.covers(&ts, 15),
@@ -424,8 +462,13 @@ mod tests {
             "a sibling after the truncate applies"
         );
 
-        let unnamed =
-            TruncateFloors::collect(std::slice::from_ref(&truncate), 1, 0, &HashMap::new());
+        let unnamed = TruncateFloors::collect(
+            std::slice::from_ref(&truncate),
+            1,
+            0,
+            &HashMap::new(),
+            &|_| false,
+        );
         assert!(
             unnamed.covers(&ts, 15),
             "a truncate that did not take effect floors"

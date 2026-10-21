@@ -14,6 +14,7 @@
 
 use std::collections::HashSet;
 
+use nodedb_physical::physical_plan::GraphReadScope;
 use nodedb_types::filter::MetadataFilter;
 use sonic_rs;
 
@@ -38,8 +39,8 @@ struct WireNode<'a> {
     depth: u8,
 }
 
-/// Wire-shape JSON edge entry. `properties` is the edge's current property
-/// object, `{}` for an edge without properties.
+/// Wire-shape JSON edge entry. `properties` is the edge's property object
+/// at the walk's cut, `{}` for an edge without properties.
 #[derive(serde::Serialize)]
 struct WireEdge<'a> {
     from: &'a str,
@@ -79,6 +80,8 @@ pub struct CrossCoreTraverseSubgraphParams<'a> {
     /// The session's transaction. The walk, its predicate and the returned
     /// properties see its staged edge writes.
     pub txn_id: Option<TxnId>,
+    /// The bitemporal cut every hop of the walk reads.
+    pub read_scope: GraphReadScope,
 }
 
 /// BFS that returns a `{nodes,edges}` JSON subgraph for `GRAPH TRAVERSE`.
@@ -168,6 +171,7 @@ pub(crate) async fn walk_subgraph(
         edge_predicate,
         with_properties,
         txn_id,
+        read_scope,
     } = params;
     // Per-node depth: the start node is at depth 0. Each later node carries
     // the hop index that first surfaced it.
@@ -189,6 +193,7 @@ pub(crate) async fn walk_subgraph(
         edge_predicate,
         with_properties,
         txn_id,
+        read_scope,
     };
 
     // One core's subgraph is empty for a start its graph does not hold, as is
@@ -205,6 +210,8 @@ pub(crate) async fn walk_subgraph(
             options: &whole,
             linearizable,
             txn_id,
+            collection: collection.as_deref(),
+            read_scope,
         },
         std::slice::from_ref(&start),
         &mut presence_reads,
@@ -278,6 +285,7 @@ struct WalkHop<'a> {
     edge_predicate: &'a [MetadataFilter],
     with_properties: bool,
     txn_id: Option<TxnId>,
+    read_scope: GraphReadScope,
 }
 
 impl WalkHop<'_> {
@@ -309,6 +317,7 @@ impl WalkHop<'_> {
                     edge_predicate: self.edge_predicate,
                     with_properties: self.with_properties,
                     txn_id: self.txn_id,
+                    read_scope: self.read_scope,
                 },
             )
             .await?;

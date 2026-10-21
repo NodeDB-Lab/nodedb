@@ -26,7 +26,7 @@ pub(in crate::data::executor) struct BitemporalUpdateReindex<'a> {
     pub tid: u64,
     pub collection: &'a str,
     pub doc_id: &'a crate::engine::document::store::StorageKey,
-    pub sys_from_ms: i64,
+    pub sys_from: i64,
     pub valid_from_ms: i64,
     pub valid_until_ms: i64,
     pub new_body: &'a [u8],
@@ -66,7 +66,7 @@ pub(in crate::data::executor) struct UpdateBody<'a> {
     pub updated_bytes: &'a [u8],
     /// The system time of the new version on a bitemporal collection, `None`
     /// on any other.
-    pub bitemporal_sys_from_ms: Option<i64>,
+    pub bitemporal_sys_from: Option<i64>,
 }
 
 impl CoreLoop {
@@ -89,8 +89,8 @@ impl CoreLoop {
         txn: &WriteTransaction,
         p: UpdateBody<'_>,
     ) -> crate::Result<Vec<(String, String)>> {
-        match p.bitemporal_sys_from_ms {
-            Some(sys_from_ms) => self.bitemporal_update_body_in_txn(txn, &p, sys_from_ms),
+        match p.bitemporal_sys_from {
+            Some(sys_from) => self.bitemporal_update_body_in_txn(txn, &p, sys_from),
             None => self.plain_update_body_in_txn(txn, &p),
         }
     }
@@ -99,7 +99,7 @@ impl CoreLoop {
         &mut self,
         txn: &WriteTransaction,
         p: &UpdateBody<'_>,
-        sys_from_ms: i64,
+        sys_from: i64,
     ) -> crate::Result<Vec<(String, String)>> {
         let Some(cfg) = self.doc_configs.get(p.config_key) else {
             // An unregistered collection has no index paths to maintain.
@@ -110,7 +110,7 @@ impl CoreLoop {
                     tenant: p.tid,
                     coll: p.collection,
                     doc_id: p.storage_key,
-                    sys_from_ms,
+                    sys_from,
                     valid_from_ms: i64::MIN,
                     valid_until_ms: i64::MAX,
                     body: p.updated_bytes,
@@ -140,7 +140,7 @@ impl CoreLoop {
                 tid: p.tid,
                 collection: p.collection,
                 doc_id: p.storage_key,
-                sys_from_ms,
+                sys_from,
                 valid_from_ms: i64::MIN,
                 valid_until_ms: i64::MAX,
                 new_body: p.updated_bytes,
@@ -211,9 +211,13 @@ impl CoreLoop {
     /// Extract the indexed values a document contributes for one path, honoring
     /// the path's partial predicate and case-folding — matching the put-time
     /// semantics in `apply_point_put`.
-    fn indexed_values_for_path(doc: &serde_json::Value, path: &IndexPath) -> BTreeSet<String> {
+    fn indexed_values_for_path(
+        doc: &serde_json::Value,
+        path: &IndexPath,
+        crs: &nodedb_crs::CrsContext<'_>,
+    ) -> BTreeSet<String> {
         if let Some(ref pred) = path.predicate
-            && !pred.evaluate_json(doc)
+            && !pred.evaluate_json(doc, crs)
         {
             return BTreeSet::new();
         }
@@ -231,7 +235,7 @@ impl CoreLoop {
 
     /// Write the new bitemporal body and reconcile the versioned secondary
     /// index within an externally-owned WriteTransaction. Removed values are
-    /// tombstoned; current values are asserted live at `sys_from_ms`. Does NOT
+    /// tombstoned; current values are asserted live at `sys_from`. Does NOT
     /// commit.
     ///
     /// The transaction belongs to the caller because the body and its index
@@ -258,7 +262,7 @@ impl CoreLoop {
                 tenant: p.tid,
                 coll: p.collection,
                 doc_id: p.doc_id,
-                sys_from_ms: p.sys_from_ms,
+                sys_from: p.sys_from,
                 valid_from_ms: p.valid_from_ms,
                 valid_until_ms: p.valid_until_ms,
                 body: p.new_body,
@@ -269,16 +273,17 @@ impl CoreLoop {
         // to `note_index_write_values` after the caller's commit without a
         // borrow conflict.
         let mut touched_values: Vec<(String, String)> = Vec::new();
+        let crs = self.crs_context();
 
         for path in p.index_paths {
-            let new_values = Self::indexed_values_for_path(p.new_doc, path);
+            let new_values = Self::indexed_values_for_path(p.new_doc, path, &crs);
             let old_values = p
                 .old_doc
-                .map(|d| Self::indexed_values_for_path(d, path))
+                .map(|d| Self::indexed_values_for_path(d, path, &crs))
                 .unwrap_or_default();
 
             // Tombstone values the update dropped so lookups on them skip this
-            // doc from `sys_from_ms` onward.
+            // doc from `sys_from` onward.
             for value in old_values.difference(&new_values) {
                 self.sparse.versioned_index_tombstone_in_txn(
                     txn,
@@ -289,7 +294,7 @@ impl CoreLoop {
                         field: &path.path,
                         value,
                         doc_id: p.doc_id,
-                        sys_from_ms: p.sys_from_ms,
+                        sys_from: p.sys_from,
                     },
                 )?;
             }
@@ -305,7 +310,7 @@ impl CoreLoop {
                         field: &path.path,
                         value,
                         doc_id: p.doc_id,
-                        sys_from_ms: p.sys_from_ms,
+                        sys_from: p.sys_from,
                     },
                 )?;
             }

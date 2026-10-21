@@ -47,7 +47,14 @@ impl CoreLoop {
             return Ok(());
         }
         for row in rows {
-            if let Err(error) = admit_columnar_row(rls_write_check, row, schema, tid, collection) {
+            if let Err(error) = admit_columnar_row(
+                rls_write_check,
+                row,
+                schema,
+                tid,
+                collection,
+                &self.crs_context(),
+            ) {
                 return Err(self.response_error(task, error));
             }
         }
@@ -118,18 +125,31 @@ impl CoreLoop {
 
         let existing = row_values_to_object(schema, &prior);
         let excluded = row_values_to_object(schema, &values);
-        let merged = apply_on_conflict_updates(existing, &excluded, on_conflict_updates)
-            .map_err(ErrorCode::from)?;
+        let merged = apply_on_conflict_updates(
+            existing,
+            &excluded,
+            on_conflict_updates,
+            &self.crs_context(),
+        )
+        .map_err(ErrorCode::from)?;
         let Value::Object(merged) = merged else {
             return Err(ErrorCode::Internal {
                 detail: "merged ON CONFLICT value was not an object".into(),
             });
         };
-        schema
+        let mut merged = schema
             .columns
             .iter()
             .map(|col| ndb_field_to_value(merged.get(&col.name), col))
             .collect::<Result<Vec<Value>, crate::Error>>()
-            .map_err(ErrorCode::from)
+            .map_err(ErrorCode::from)?;
+        // The merged row is a new version: it carries this insert's stamp,
+        // never the prior row's.
+        crate::data::executor::handlers::columnar_write::keep_fresh_system_stamp(
+            schema,
+            &values,
+            &mut merged,
+        );
+        Ok(merged)
     }
 }

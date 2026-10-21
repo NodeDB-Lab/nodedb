@@ -17,6 +17,7 @@ tempfile = "3"
 nodedb-codec = { path = "../nodedb-codec" }
 nodedb-columnar = { path = "../nodedb-columnar" }
 nodedb-mem = { path = "../nodedb-mem" }
+nodedb-crs = { path = "../nodedb-crs" }
 nodedb-raster = { path = "../nodedb-raster" }
 nodedb-strict = { path = "../nodedb-strict" }
 nodedb-types = { path = "../nodedb-types" }

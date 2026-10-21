@@ -34,6 +34,10 @@ use crate::Result;
 
 use super::KeyProvider;
 use super::key_file_security::check_key_file;
+use crate::control::security::egress::RemoteSources;
+
+/// Cap on one Vault request, connect and read included.
+const VAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Vault transit-engine key provider.
 pub struct VaultKeyProvider {
@@ -42,25 +46,39 @@ pub struct VaultKeyProvider {
     pub(super) key_name: String,
     pub(super) mount: String,
     pub(super) ciphertext_blob_path: PathBuf,
-    client: reqwest::Client,
+    /// The outbound egress client of the server's `[egress]` policy.
+    client: std::sync::Arc<reqwest::Client>,
 }
 
 impl VaultKeyProvider {
+    /// A provider for the Vault at `addr`, reached through the outbound
+    /// client of `sources`. The address is operator config: one the
+    /// `[egress]` policy refuses is an error, so its host must be on the
+    /// allow-list.
     pub(super) fn new(
         addr: String,
         token_path: PathBuf,
         key_name: String,
         mount: String,
         ciphertext_blob_path: PathBuf,
-    ) -> Self {
-        Self {
+        sources: &RemoteSources,
+    ) -> Result<Self> {
+        sources
+            .egress()
+            .check_url(&addr)
+            .map_err(|e| crate::Error::Config {
+                detail: format!(
+                    "Vault addr fails the [egress] policy: {e}; put its host on allow_hosts"
+                ),
+            })?;
+        Ok(Self {
             addr,
             token_path,
             key_name,
             mount,
             ciphertext_blob_path,
-            client: reqwest::Client::new(),
-        }
+            client: std::sync::Arc::clone(sources.http()),
+        })
     }
 
     fn read_token(&self) -> Result<String> {
@@ -111,6 +129,7 @@ impl VaultKeyProvider {
             .client
             .post(&url)
             .header("X-Vault-Token", &token)
+            .timeout(VAULT_TIMEOUT)
             .json(&serde_json::json!({ "ciphertext": ciphertext }))
             .send()
             .await
@@ -153,6 +172,7 @@ impl VaultKeyProvider {
             .client
             .post(&url)
             .header("X-Vault-Token", &token)
+            .timeout(VAULT_TIMEOUT)
             .json(&serde_json::json!({ "ciphertext": old_ciphertext }))
             .send()
             .await
@@ -286,6 +306,46 @@ mod tests {
         })
     }
 
+    /// Remote sources whose `[egress]` policy admits plaintext
+    /// `http://localhost` resolving to loopback, as an operator allow-lists a
+    /// private Vault.
+    fn loopback() -> RemoteSources {
+        RemoteSources::new(std::sync::Arc::new(
+            crate::control::security::egress::EgressPolicy::from_parts(
+                true,
+                &["localhost".to_string()],
+                &["127.0.0.0/8".to_string(), "::1/128".to_string()],
+            )
+            .expect("valid policy"),
+        ))
+        .expect("remote sources")
+    }
+
+    /// A Vault address outside the `[egress]` policy is refused before any
+    /// request: an IP literal always, and a host off the allow-list.
+    #[test]
+    fn a_vault_addr_outside_the_egress_policy_is_refused() {
+        let strict = RemoteSources::new(std::sync::Arc::new(
+            crate::control::security::egress::EgressPolicy::strict(),
+        ))
+        .expect("remote sources");
+        for (addr, sources) in [
+            ("http://127.0.0.1:8200", loopback()),
+            ("http://vault.internal:8200", strict),
+        ] {
+            let refused = VaultKeyProvider::new(
+                addr.into(),
+                "token".into(),
+                "mykey".into(),
+                "transit".into(),
+                "blob".into(),
+                &sources,
+            );
+            let detail = refused.err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(detail.contains("[egress]"), "{addr}: {detail}");
+        }
+    }
+
     /// Write a file with secure Unix permissions (0o600) for use in tests.
     #[cfg(unix)]
     fn write_secure(path: &std::path::Path, content: &[u8]) {
@@ -310,12 +370,14 @@ mod tests {
         write_secure(&blob_path, b"vault:v1:someciphertext==");
 
         let provider = VaultKeyProvider::new(
-            format!("http://127.0.0.1:{port}"),
+            format!("http://localhost:{port}"),
             token_path,
             "mykey".into(),
             "transit".into(),
             blob_path,
-        );
+            &loopback(),
+        )
+        .expect("an allow-listed Vault");
 
         let key = provider.unwrap_key().await.unwrap();
         assert_eq!(*key, [0x42u8; 32]);
@@ -335,12 +397,14 @@ mod tests {
         write_secure(&blob_path, b"vault:v1:cipher==");
 
         let provider = VaultKeyProvider::new(
-            format!("http://127.0.0.1:{port}"),
+            format!("http://localhost:{port}"),
             token_path,
             "badkey".into(),
             "transit".into(),
             blob_path,
-        );
+            &loopback(),
+        )
+        .expect("an allow-listed Vault");
 
         let err = provider.unwrap_key().await.unwrap_err();
         let detail = format!("{err:?}");
@@ -364,12 +428,14 @@ mod tests {
         write_secure(&blob_path, b"vault:v1:original==");
 
         let provider = VaultKeyProvider::new(
-            format!("http://127.0.0.1:{port}"),
+            format!("http://localhost:{port}"),
             token_path,
             "mykey".into(),
             "transit".into(),
             blob_path.clone(),
-        );
+            &loopback(),
+        )
+        .expect("an allow-listed Vault");
 
         let key = provider.rotate().await.unwrap();
         assert_eq!(*key, [0x42u8; 32]);
@@ -395,12 +461,14 @@ mod tests {
         write_secure(&blob_path, b"vault:v1:cipher==");
 
         let provider = VaultKeyProvider::new(
-            "http://127.0.0.1:1".into(), // unreachable — error before HTTP
+            "http://localhost:1".into(), // unreachable — error before HTTP
             token_path,
             "mykey".into(),
             "transit".into(),
             blob_path,
-        );
+            &loopback(),
+        )
+        .expect("an allow-listed Vault");
 
         let err = provider.unwrap_key().await.unwrap_err();
         let detail = format!("{err:?}");

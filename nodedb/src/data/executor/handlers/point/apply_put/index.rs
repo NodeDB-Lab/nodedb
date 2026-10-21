@@ -73,14 +73,12 @@ impl CoreLoop {
         let document_id = storage_key.to_string();
         let document_id = document_id.as_str();
         let spatial_entry_id = SpatialEntryId::from_rendered(document_id);
-        // Spatial index: detect geometry fields. Tries to parse each field as
-        // a GeoJSON Geometry — either a native JSON object (schemaless
-        // document writes, e.g. `{"type":"Point","coordinates":[...]}`) or a
-        // JSON string containing GeoJSON (SQL `ST_Point(...)` inserts, which
-        // serialize geometry to a string). See
-        // `nodedb_types::geometry::from_geojson_str` — shared with the read
-        // path (`extract_geometry` in spatial.rs) and the columnar index path
-        // (`geometry_index.rs`); keep all three in sync.
+        // Spatial index: detect geometry fields. A field is a geometry when
+        // it holds the native geometry (SQL `ST_Point(...)` inserts store
+        // it as the msgpack geometry ext), a GeoJSON object (schemaless
+        // document writes, e.g. `{"type":"Point","coordinates":[...]}`), or
+        // a GeoJSON string. A geometry whose SRID is undefined fails the
+        // put; any other value is no geometry.
         //
         // `value` is `apply_point_put`'s incoming body, and the invariant on
         // that function applies unchanged here: geometry is detected by walking
@@ -90,20 +88,20 @@ impl CoreLoop {
         // failed to decode would silently drop out of the R-tree while the row
         // stayed queryable, which is the desync the delete-then-insert below
         // exists to prevent.
+        let crs = self.crs_context();
         let mut geometries = Vec::new();
-        if let Ok(doc) = doc_format::decode_document(value)
+        if let Ok(doc) = doc_format::decode_document_value(value)
             && let Some(obj) = doc.as_object()
         {
             for (field_name, field_value) in obj {
-                let parsed_geom = match field_value {
-                    serde_json::Value::String(s) => nodedb_types::geometry::from_geojson_str(s),
-                    _ => serde_json::from_value::<nodedb_types::geometry::SridGeometry>(
-                        field_value.clone(),
-                    )
-                    .ok(),
-                };
-                if let Some(geom) = parsed_geom {
-                    geometries.push((field_name.clone(), geom));
+                let parsed_geom =
+                    nodedb_types::geometry::SridGeometry::from_value(field_value, &crs)?;
+                // An EMPTY geometry has no extent to index.
+                if let Some(geom) = parsed_geom.filter(|g| !g.is_empty()) {
+                    // The SRID resolves before any index changes.
+                    let tree_srid = crate::engine::spatial::TreeSrid::resolve(geom.srid, &crs)?;
+                    let bbox = geom.bbox(&crs)?;
+                    geometries.push((field_name.clone(), geom, tree_srid, bbox));
                 }
             }
         }
@@ -111,7 +109,7 @@ impl CoreLoop {
         let db_id = nodedb_types::DatabaseId::new(database_id);
         let tid_id = crate::types::TenantId::new(tid);
         // Check every SRID before any mutation: a refused put changes no index.
-        for (field_name, geom) in &geometries {
+        for (field_name, geom, _, _) in &geometries {
             let spatial_key = (db_id, tid_id, collection.to_string(), field_name.clone());
             if let Some(rtree) = self.spatial_indexes.get(&spatial_key)
                 && !rtree.accepts_srid(geom.srid)
@@ -139,8 +137,7 @@ impl CoreLoop {
             undo,
         );
         let entry_id = spatial_entry_id.as_u64();
-        for (field_name, geom) in geometries {
-            let bbox = geom.bbox();
+        for (field_name, _, tree_srid, bbox) in geometries {
             let spatial_key = (db_id, tid_id, collection.to_string(), field_name.clone());
             let memory = nodedb_mem::ScopedMemory::new(
                 self.governor.clone(),
@@ -151,11 +148,11 @@ impl CoreLoop {
             let rtree = self
                 .spatial_indexes
                 .entry(spatial_key.clone())
-                .or_insert_with(|| crate::engine::spatial::RTree::new(memory, geom.srid));
+                .or_insert_with(|| crate::engine::spatial::RTree::new(memory, tree_srid));
             // The pre-check above admitted this SRID. The prior-entry removal
             // can only empty the tree, so binding cannot refuse here.
             rtree
-                .bind_srid(geom.srid)
+                .bind_srid(tree_srid)
                 .map_err(|m| crate::Error::MixedSrid {
                     collection: collection.to_string(),
                     field: field_name.clone(),
@@ -239,7 +236,7 @@ impl CoreLoop {
                     .entries()
                     .into_iter()
                     .find(|e| e.id == entry_id)
-                    .map(|e| (e.bbox, rtree.srid()))
+                    .map(|e| (e.bbox, rtree.tree_srid()))
             });
             if let Some(rtree) = self.spatial_indexes.get_mut(&skey) {
                 rtree.delete(entry_id);
@@ -505,7 +502,7 @@ mod tests {
         assert_eq!(put(&mut core, "a", 1, utm).status, Status::Error);
 
         let rtree = core.spatial_indexes.get(&key).unwrap();
-        assert_eq!(rtree.srid(), nodedb_types::geometry::Srid::Wgs84);
+        assert_eq!(rtree.srid(), nodedb_types::geometry::Srid::WGS84);
         let entries = rtree.entries();
         assert_eq!(entries.len(), 1, "the refused puts added no entry");
         assert_eq!(entries[0].bbox, before, "the first entry is unchanged");
@@ -524,9 +521,11 @@ mod tests {
         let doc = crate::data::executor::doc_format::decode_document_value(&stored_a).unwrap();
         let geom = nodedb_types::geometry::SridGeometry::from_value(
             doc.get("loc").expect("geometry field"),
+            &nodedb_crs::CrsContext::builtin_only(),
         )
+        .expect("defined srid")
         .expect("stored geometry");
-        assert_eq!(geom.srid, nodedb_types::geometry::Srid::Wgs84);
+        assert_eq!(geom.srid, nodedb_types::geometry::Srid::WGS84);
     }
 
     /// A put that overwrites a geometry row and then aborts puts the row's

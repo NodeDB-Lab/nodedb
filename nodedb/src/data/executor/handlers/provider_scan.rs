@@ -44,6 +44,7 @@ impl CoreLoop {
         task: &ExecutionTask,
         params: ProviderScanParams<'_>,
     ) -> Response {
+        let crs = self.crs_context();
         let ProviderScanParams {
             rows_bytes,
             filters_bytes,
@@ -81,7 +82,9 @@ impl CoreLoop {
                 // `Vec::retain`'s closure must return `bool`, so an
                 // evaluation error is held and returned once the retain ends.
                 let held = crate::data::executor::core_loop::filter_match::HeldEvalError::default();
-                rows.retain(|row| held.check(|| ScanFilter::all_match_binary(&predicates, row)));
+                rows.retain(|row| {
+                    held.check(|| ScanFilter::all_match_binary(&predicates, row, &crs))
+                });
                 if let Err(e) = held.finish::<_, ErrorCode>(()) {
                     return self.response_error(task, e);
                 }
@@ -98,6 +101,7 @@ impl CoreLoop {
                 rows,
                 window_functions_bytes,
                 computed_columns_bytes,
+                &crs,
             ) {
                 Ok(r) => r,
                 Err(e) => return self.response_error(task, e),
@@ -108,7 +112,7 @@ impl CoreLoop {
         // Runs before offset: `ORDER BY ... OFFSET n` skips the first `n` rows
         // of the SORTED set, not the decoded set.
         if !sort_keys.is_empty()
-            && let Err(e) = sort_msgpack_rows(&mut rows, sort_keys)
+            && let Err(e) = sort_msgpack_rows(&mut rows, sort_keys, &crs)
         {
             return self.response_error(task, e);
         }

@@ -6,8 +6,8 @@ use crate::error::Result;
 use crate::parser::array_stmt::ast::CreateArrayAst;
 use crate::parser::array_stmt::lexer::Tok;
 use crate::types_array::{
-    ArrayAttrAst, ArrayAttrType, ArrayCellOrderAst, ArrayDimAst, ArrayDimType, ArrayDomainBound,
-    ArrayTileOrderAst,
+    ArrayAttrAst, ArrayAttrMetaAst, ArrayAttrType, ArrayCellOrderAst, ArrayDimAst, ArrayDimType,
+    ArrayDomainBound, ArrayTileOrderAst,
 };
 
 use super::core::Parser;
@@ -176,18 +176,26 @@ impl<'a> Parser<'a> {
         let type_name = self.expect_ident()?;
         let dtype = parse_attr_type(&type_name)
             .ok_or_else(|| self.err(format!("unknown attr type `{type_name}`")))?;
-        let nullable = if self.match_kw("NOT") {
-            // The lexer reads `NULL` as its own token, never as an identifier.
-            self.expect(&Tok::Null)?;
-            false
-        } else {
-            // Default: nullable.
-            true
-        };
+        // Default: nullable. `NOT NULL` and the metadata clauses follow the
+        // type in any order.
+        let mut nullable = true;
+        let mut meta = ArrayAttrMetaAst::default();
+        loop {
+            if self.match_kw("NOT") {
+                // The lexer reads `NULL` as its own token, never as an identifier.
+                self.expect(&Tok::Null)?;
+                nullable = false;
+            } else if self.peek_meta_key().is_some() {
+                self.parse_meta_pair(&mut meta)?;
+            } else {
+                break;
+            }
+        }
         Ok(ArrayAttrAst {
             name,
             dtype,
             nullable,
+            meta,
         })
     }
 
@@ -245,10 +253,14 @@ fn parse_dim_type(s: &str) -> Option<ArrayDimType> {
     }
 }
 
-/// An attr type name. `INT` is the 4-byte `INT32`, as in PostgreSQL. A
-/// bare `FLOAT` is the 8-byte `FLOAT64`.
+/// An attr type name. The canonical names give the width in bits, so
+/// `INT8` is the 1-byte signed type, like `UINT8`. The PostgreSQL aliases
+/// give it in bytes: `INT2` is `INT16`, `INT4` is `INT32`, and an 8-byte
+/// integer is `INT64` or `BIGINT`. `INT` is the 4-byte `INT32`, as in
+/// PostgreSQL. A bare `FLOAT` is the 8-byte `FLOAT64`.
 fn parse_attr_type(s: &str) -> Option<ArrayAttrType> {
     match s.to_ascii_uppercase().as_str() {
+        "INT8" | "TINYINT" => Some(ArrayAttrType::Int8),
         "INT64" | "BIGINT" => Some(ArrayAttrType::Int64),
         "FLOAT64" | "DOUBLE" | "FLOAT" => Some(ArrayAttrType::Float64),
         "STRING" | "TEXT" | "VARCHAR" => Some(ArrayAttrType::String),

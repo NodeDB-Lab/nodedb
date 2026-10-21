@@ -166,6 +166,7 @@ impl CoreLoop {
         collection: &str,
         bytes: &[u8],
     ) -> Response {
+        let crs = self.crs_context();
         let tid = crate::types::TenantId::new(tenant_id);
         debug!(core = self.core_id, %tid, %collection, "crdt import snapshot");
         let engine = match self.get_crdt_engine(task.request.database_id, tid) {
@@ -180,6 +181,7 @@ impl CoreLoop {
             bytes,
             crate::engine::crdt::tenant_state::ApplyTarget::Collection,
             0,
+            &crs,
         ) {
             crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Clean { .. } => {
                 self.checkpoint_coordinator.mark_dirty("crdt", 1);

@@ -47,14 +47,14 @@ impl CoreLoop {
     /// nothing behind. A row is never skipped, because a skipped row would
     /// report a smaller affected count than the predicate matched.
     ///
-    /// `bitemporal_sys_from_ms` is `Some` on a bitemporal collection. The row
+    /// `bitemporal_sys_from` is `Some` on a bitemporal collection. The row
     /// then lands as a new version valid for all time, with the versioned
     /// index diff, through the same write the point update lands.
     pub(super) fn persist_bulk_update_row(
         &mut self,
         p: NonbitemporalUpdateReindex<'_>,
         hook: &HookCtx<'_>,
-        bitemporal_sys_from_ms: Option<i64>,
+        bitemporal_sys_from: Option<i64>,
     ) -> crate::Result<PersistedBulkUpdateRow> {
         // Hoisted before the transaction opens: the images below borrow them,
         // and a collection that declares no image-folding enforcement must not
@@ -75,15 +75,15 @@ impl CoreLoop {
             surrogate: doc_id.surrogate(),
             new_doc,
         };
-        let touched = match bitemporal_sys_from_ms {
-            Some(sys_from_ms) => self.bitemporal_update_reindex(
+        let touched = match bitemporal_sys_from {
+            Some(sys_from) => self.bitemporal_update_reindex(
                 &txn,
                 BitemporalUpdateReindex {
                     database_id: p.database_id,
                     tid: p.tid,
                     collection: p.collection,
                     doc_id: p.storage_key,
-                    sys_from_ms,
+                    sys_from,
                     valid_from_ms: i64::MIN,
                     valid_until_ms: i64::MAX,
                     new_body: p.new_body,

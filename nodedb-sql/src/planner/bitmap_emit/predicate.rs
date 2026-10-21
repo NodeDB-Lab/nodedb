@@ -36,22 +36,23 @@ pub struct BitmapHint {
     pub primary_value: SqlValue,
     /// Additional values for IN-list expansion (empty for equality).
     pub extra_values: Vec<SqlValue>,
-    /// The side's system-time cutoff, `None` for the current state. The
-    /// bitmap reads the versioned index at this cutoff, so it holds the rows
+    /// The side's system-time scope: `Current` or a point-in-time cut. The
+    /// bitmap reads the versioned index at this scope, so it holds the rows
     /// the side reads.
-    pub system_as_of_ms: Option<i64>,
+    pub system_time: SystemTimeScope,
 }
 
-/// The system-time cutoff a side's bitmap reads at. `None` inside the outer
-/// `Option` when the index cannot answer the side's scope: it holds no valid
-/// time and lists no history, so such a side takes no pushdown.
-fn bitmap_cutoff(temporal: &TemporalScope) -> Option<Option<i64>> {
+/// The system-time scope a side's bitmap reads at. `None` when the index
+/// cannot answer the side's scope: it holds no valid time and lists no
+/// history, so such a side takes no pushdown.
+fn bitmap_cutoff(temporal: &TemporalScope) -> Option<SystemTimeScope> {
     if !matches!(temporal.valid_time, ValidTime::Any) {
         return None;
     }
     match temporal.system_time {
-        SystemTimeScope::Current => Some(None),
-        SystemTimeScope::AsOf(ms) => Some(Some(ms)),
+        scope @ (SystemTimeScope::Current
+        | SystemTimeScope::AsOf(_)
+        | SystemTimeScope::Pinned { .. }) => Some(scope),
         SystemTimeScope::AllVersions => None,
     }
 }
@@ -75,7 +76,7 @@ pub fn analyze(plan: &SqlPlan) -> Option<BitmapHint> {
             field: field.clone(),
             primary_value: value.clone(),
             extra_values: Vec::new(),
-            system_as_of_ms: bitmap_cutoff(temporal)?,
+            system_time: bitmap_cutoff(temporal)?,
         }),
 
         // Plain scan: inspect WHERE filters for indexed-column equality / IN-list.
@@ -85,7 +86,7 @@ pub fn analyze(plan: &SqlPlan) -> Option<BitmapHint> {
             temporal,
             ..
         } => {
-            let system_as_of_ms = bitmap_cutoff(temporal)?;
+            let system_time = bitmap_cutoff(temporal)?;
             // The `SqlPlan::Scan` does not directly carry `IndexSpec` list — that
             // lives on `TableInfo` which the engine-rules layer consumed when it
             // chose *not* to rewrite to `DocumentIndexLookup`. However, when the
@@ -100,7 +101,7 @@ pub fn analyze(plan: &SqlPlan) -> Option<BitmapHint> {
             // index-backed) is emitted unconditionally.
             //
             // Future: if `Scan` carries index metadata, extend this arm.
-            analyze_scan_filters(collection, filters, system_as_of_ms)
+            analyze_scan_filters(collection, filters, system_time)
         }
 
         _ => None,
@@ -118,7 +119,7 @@ pub fn analyze(plan: &SqlPlan) -> Option<BitmapHint> {
 fn analyze_scan_filters(
     collection: &str,
     filters: &[crate::types::Filter],
-    system_as_of_ms: Option<i64>,
+    system_time: SystemTimeScope,
 ) -> Option<BitmapHint> {
     // Conservative: only emit when there is exactly one filter and it is an
     // equality or a small IN-list. The caller (engine rules) would have promoted
@@ -137,7 +138,7 @@ fn analyze_scan_filters(
             field: field.clone(),
             primary_value: value.clone(),
             extra_values: Vec::new(),
-            system_as_of_ms,
+            system_time,
         }),
         FilterExpr::InList { field, values }
             if !values.is_empty() && values.len() <= MAX_IN_LIST =>
@@ -149,7 +150,7 @@ fn analyze_scan_filters(
                 field: field.clone(),
                 primary_value: primary,
                 extra_values: iter.collect(),
-                system_as_of_ms,
+                system_time,
             })
         }
         _ => None,

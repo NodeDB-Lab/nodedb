@@ -75,6 +75,13 @@ impl ReadOnlySystemCatalog {
         super::vector_index_params::list_all_vector_index_params_in(&self.read_txn("read txn")?)
     }
 
+    /// The user-defined CRS set the catalog holds.
+    pub fn load_custom_crs_set(&self) -> crate::Result<nodedb_crs::CustomCrsSet> {
+        super::spatial_ref_sys::load_custom_crs_set_in(
+            &self.read_txn("load_custom_crs_set read txn")?,
+        )
+    }
+
     /// See [`SystemCatalog::list_databases`].
     pub fn list_databases(&self) -> crate::Result<Vec<DatabaseDescriptor>> {
         super::database::list_databases_in(&self.read_txn("list_databases read txn")?)

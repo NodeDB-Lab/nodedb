@@ -104,6 +104,7 @@ pub(crate) fn decide_write_policy_over_images<'a>(
     images: impl IntoIterator<Item = &'a [u8]>,
     tenant_id: TenantId,
     collection: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     match rls_write_check.decision() {
         nodedb_types::WriteGateDecision::AdmitAll => Ok(()),
@@ -114,6 +115,7 @@ pub(crate) fn decide_write_policy_over_images<'a>(
                     image,
                     tenant_id.as_u64(),
                     collection,
+                    crs,
                 )?;
             }
             Ok(())

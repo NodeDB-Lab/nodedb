@@ -171,12 +171,11 @@ fn select_codec(col_type: &ColumnType) -> ResolvedColumnCodec {
         ColumnType::Timestamp | ColumnType::Timestamptz | ColumnType::SystemTimestamp => {
             ColumnTypeHint::Timestamp
         }
-        ColumnType::String
-        | ColumnType::Geometry
-        | ColumnType::Regex
-        | ColumnType::SparseVector => ColumnTypeHint::String,
+        ColumnType::String | ColumnType::Regex | ColumnType::SparseVector => ColumnTypeHint::String,
+        // Geometry cells are EWKB bytes.
         ColumnType::Bool
         | ColumnType::Bytes
+        | ColumnType::Geometry
         | ColumnType::Decimal { .. }
         | ColumnType::Uuid
         | ColumnType::Ulid => {

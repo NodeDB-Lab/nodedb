@@ -13,6 +13,7 @@
 mod edges;
 mod engines;
 mod keys;
+mod node_labels;
 mod tenant_snapshot;
 mod text;
 

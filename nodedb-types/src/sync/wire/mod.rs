@@ -96,7 +96,8 @@ pub use presence::{PeerPresence, PresenceBroadcastMsg, PresenceLeaveMsg, Presenc
 pub use provenance::SyncProvenance;
 pub use resync::{ResyncReason, ResyncRequestMsg, ThrottleMsg};
 pub use session::{
-    HandshakeAckMsg, HandshakeMsg, PingPongMsg, TokenRefreshAckMsg, TokenRefreshMsg,
+    HandshakeAckMsg, HandshakeMsg, PingPongMsg, SYNC_WIRE_VERSION, SyncWireVersionMismatch,
+    TokenRefreshAckMsg, TokenRefreshMsg,
 };
 pub use shape::{
     ShapeDeltaMsg, ShapeSnapshotMsg, ShapeSubscribeMsg, ShapeUnsubscribeMsg, VectorClockSyncMsg,

@@ -22,6 +22,7 @@ use nodedb_crdt::constraint::ConstraintSet;
 use nodedb_crdt::row_lookup::RowLookup;
 use nodedb_crdt::state::CrdtState;
 use nodedb_crdt::validator::Validator;
+use nodedb_types::Hlc;
 
 use crate::types::TenantId;
 
@@ -106,6 +107,12 @@ pub struct TenantCrdtEngine {
     /// The dead-letter entry the latest validated apply enqueued. The applier
     /// binds it to the record that carried the delta.
     pub(super) last_dead_letter: Option<u64>,
+
+    /// The catalog incarnation of each collection, bound at registration.
+    /// A collection's Loro peer id derives from it, so a re-created
+    /// collection mints operation ids the dropped one never held. A
+    /// collection with no bound incarnation derives as `Hlc::ZERO`.
+    pub(super) incarnations: HashMap<String, Hlc>,
 }
 
 impl TenantCrdtEngine {
@@ -124,6 +131,7 @@ impl TenantCrdtEngine {
             constraint_versions: HashMap::new(),
             apply_candidates: HashMap::new(),
             last_dead_letter: None,
+            incarnations: HashMap::new(),
         })
     }
 
@@ -146,11 +154,19 @@ impl TenantCrdtEngine {
     /// embedded peer stores them — sees the second operation as a replay of the
     /// first and silently drops one of the rows.
     ///
-    /// The derivation is a pure function of `(base_peer_id, collection)`, so
-    /// every replica computes the identical id for the identical collection and
-    /// the Raft-applied path stays deterministic. Zero is avoided because Loro
-    /// treats it as an unset peer.
-    pub(super) fn collection_peer_id(base_peer_id: u64, collection: &str) -> u64 {
+    /// The collection's incarnation enters the derivation too. A drop and a
+    /// same-name create start a new incarnation, and a Loro document counts
+    /// its operations from zero, so the re-created collection's document
+    /// would otherwise mint the dropped one's operation ids again. A client
+    /// that still holds the dropped document's history would read the new
+    /// operations as ones it already has, and a delta built on the dropped
+    /// history would merge into the new document as if it belonged there.
+    ///
+    /// The derivation is a pure function of `(base_peer_id, collection,
+    /// incarnation)`, so every replica computes the identical id for the
+    /// identical collection and the Raft-applied path stays deterministic.
+    /// Zero is avoided because Loro treats it as an unset peer.
+    pub(super) fn collection_peer_id(base_peer_id: u64, collection: &str, incarnation: Hlc) -> u64 {
         const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
         const FNV_PRIME: u64 = 1099511628211;
 
@@ -163,6 +179,17 @@ impl TenantCrdtEngine {
             hash ^= *byte as u64;
             hash = hash.wrapping_mul(FNV_PRIME);
         }
+        if incarnation != Hlc::ZERO {
+            for byte in incarnation
+                .wall_ns
+                .to_le_bytes()
+                .into_iter()
+                .chain(incarnation.logical.to_le_bytes())
+            {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(FNV_PRIME);
+            }
+        }
         // Loro reserves the top bit of a peer id, and 0 reads as "unset".
         let id = hash & ((1u64 << 63) - 1);
         if id == 0 { 1 } else { id }
@@ -171,7 +198,7 @@ impl TenantCrdtEngine {
     /// Lazily get (creating if absent) the per-collection state. Propagates the
     /// `CrdtState::new` error rather than panicking.
     pub(super) fn state_mut(&mut self, collection: &str) -> crate::Result<&mut CrdtState> {
-        let peer_id = Self::collection_peer_id(self.peer_id, collection);
+        let peer_id = self.peer_id_of(collection);
         match self.collections.entry(collection.to_string()) {
             Entry::Occupied(e) => Ok(e.into_mut()),
             Entry::Vacant(e) => {
@@ -179,6 +206,39 @@ impl TenantCrdtEngine {
                 Ok(e.insert(state))
             }
         }
+    }
+
+    /// The Loro peer id `collection`'s document mints its operations under.
+    pub(super) fn peer_id_of(&self, collection: &str) -> u64 {
+        let incarnation = self
+            .incarnations
+            .get(collection)
+            .copied()
+            .unwrap_or(Hlc::ZERO);
+        Self::collection_peer_id(self.peer_id, collection, incarnation)
+    }
+
+    /// Bind `collection` to its catalog incarnation. A document of an
+    /// earlier incarnation belongs to a dropped collection and goes. A
+    /// document the collection already holds under this incarnation, loaded
+    /// before the binding, mints its later operations under the derived peer
+    /// id.
+    pub fn bind_incarnation(&mut self, collection: &str, incarnation: Hlc) -> crate::Result<()> {
+        let previous = self.incarnations.insert(collection.to_owned(), incarnation);
+        if previous == Some(incarnation) {
+            return Ok(());
+        }
+        // A retained validation candidate carries the old peer id.
+        self.apply_candidates.remove(collection);
+        if previous.is_some_and(|previous| previous != Hlc::ZERO) {
+            self.collections.remove(collection);
+            return Ok(());
+        }
+        let peer_id = self.peer_id_of(collection);
+        if let Some(state) = self.collections.get_mut(collection) {
+            state.set_peer_id(peer_id).map_err(crate::Error::Crdt)?;
+        }
+        Ok(())
     }
 
     /// Names of every collection that currently has local CRDT state.

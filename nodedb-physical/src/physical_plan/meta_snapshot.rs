@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Types carried by `MetaOp::RestoreTenantSnapshot` and
-//! `MetaOp::CreateTenantSnapshot`.
+//! Types carried by `MetaOp::RestoreTenantSnapshot`,
+//! `MetaOp::CreateTenantSnapshot` and `MetaOp::PurgeDepartedVShards`.
 
 /// One collection a Raft snapshot install clears on a core before it
 /// installs that core's share of the snapshot.
@@ -25,6 +25,26 @@ pub struct SnapshotClearTarget {
     /// files. Those paths are keyed by `(database, tenant, collection)`, not
     /// by core, so exactly one core per collection (its home core) sets it.
     pub reclaim_l1_files: bool,
+}
+
+/// One collection a departure purge clears on every core: a collection whose
+/// home vShard left this node.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub struct DepartedCollection {
+    pub database_id: u64,
+    pub tenant_id: u64,
+    /// The name the Data Plane stores the collection under:
+    /// database-qualified outside the default database.
+    pub collection: String,
 }
 
 /// A database backup's request to capture its tenants at its cut barrier.

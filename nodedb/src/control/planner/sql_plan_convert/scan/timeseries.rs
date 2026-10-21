@@ -15,7 +15,7 @@ use super::super::expr::convert_sort_keys;
 use super::super::filter::serialize_filters;
 use super::super::scan_params::TimeseriesScanParams;
 use super::super::value::{InstantForm, row_to_msgpack_with, write_msgpack_array_header};
-use super::helpers::valid_at_from_scope;
+use crate::control::planner::sql_plan_convert::valid_time_point;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 pub(in crate::control::planner::sql_plan_convert) fn convert_timeseries_scan(
@@ -98,7 +98,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_timeseries_scan(
             computed_columns: computed_bytes,
             rls_filters: Vec::new(),
             system_time: temporal.system_time,
-            valid_at_ms: valid_at_from_scope(temporal),
+            valid_at_ms: valid_time_point(temporal.valid_time, "timeseries")?,
             having: having_bytes,
             tiering,
             output_columns,

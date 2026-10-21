@@ -43,6 +43,7 @@ pub(in crate::data::executor) fn vector_sidecar_matches(
     sidecar: &[u8],
     filters: &[ScanFilter],
     identity_column: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<bool, ErrorCode> {
     if filters.is_empty() {
         return Ok(true);
@@ -53,7 +54,7 @@ pub(in crate::data::executor) fn vector_sidecar_matches(
         SparseBodyFormatRef::VectorSidecar,
         identity_column,
     );
-    ScanFilter::all_match_binary(filters, &mp).map_err(ErrorCode::from)
+    ScanFilter::all_match_binary(filters, &mp, crs).map_err(ErrorCode::from)
 }
 
 impl CoreLoop {
@@ -103,6 +104,7 @@ impl CoreLoop {
         collection: &str,
         filters: &[ScanFilter],
     ) -> Result<Vec<Surrogate>, ErrorCode> {
+        let crs = self.crs_context();
         let prefix = crate::engine::sparse::btree::coll_prefix(database_id, tid, collection);
         let end = format!("{prefix}\u{ffff}");
         let storage_err = |what: &str, e: &dyn std::fmt::Display| ErrorCode::Internal {
@@ -136,7 +138,8 @@ impl CoreLoop {
                     rest,
                 ))
             })?;
-            if !vector_sidecar_matches(&key, value_guard.value(), filters, &identity_column)? {
+            if !vector_sidecar_matches(&key, value_guard.value(), filters, &identity_column, &crs)?
+            {
                 continue;
             }
             out.push(key.surrogate());

@@ -94,13 +94,16 @@ mod tests {
     #[test]
     fn unconfigured_exporter_renders_nothing() {
         let mut out = String::new();
-        render_prometheus(&SiemExporter::default(), &mut out);
+        render_prometheus(
+            &SiemExporter::strict_for_test(SiemConfig::default()),
+            &mut out,
+        );
         assert!(out.is_empty());
     }
 
     #[test]
     fn surfaces_buffer_overflow_drops() {
-        let exporter = SiemExporter::new(SiemConfig {
+        let exporter = SiemExporter::strict_for_test(SiemConfig {
             destinations: vec!["webhook".into()],
             buffer_size: 1,
             ..Default::default()

@@ -53,13 +53,11 @@
 //!   max-wins, so re-folding a record already contained in the restored state
 //!   cannot change it. What that restore needs instead is for replay to MERGE
 //!   into it rather than replace it; see `install_sync_hwm_maps`.
-//! * Graph node labels — `GraphNodeLabelSet` ORs a bit on and
-//!   `GraphNodeLabelRemove` ANDs it off, both keyed by `(node, label)` NAME, so
-//!   a record re-applied over the restored bitset lands on the same bit. The
-//!   names are why: the restore keys by name rather than by local node id
-//!   precisely because ids are not stable across restarts, and replay uses the
-//!   same `add_node_label` / `remove_node_label` entry points as the live
-//!   handler.
+//! * Graph node labels — the label checkpoint carries its own durable LSN
+//!   (`CheckpointFloors::graph_label_durable_lsn`), and label replay skips
+//!   every record at or below it. A snapshot install leaves labels that no
+//!   WAL record carries, so an older record of an installed node must not
+//!   land on top of them.
 //! * The array and timeseries engines. Each carries its own stamp per
 //!   artifact rather than one here: an array manifest carries the stamp of
 //!   the flush that last published it, and a timeseries partition carries the

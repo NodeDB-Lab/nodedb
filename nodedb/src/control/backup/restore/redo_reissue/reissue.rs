@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Re-issue every restored document row and graph edge as Calvin
+//! Re-issue every restored document row, graph edge and node label as Calvin
 //! transactions.
 //!
 //! Rows go first, then edges, so an edge's endpoints are in place when it
-//! installs. Each row goes to its collection's home, each edge to both of its
-//! endpoint homes. Every one of them runs in the Calvin sequence, so one
+//! installs, then node labels. Each row goes to its collection's home, each
+//! edge to both of its endpoint homes, each node's labels to its home. Every one of them runs in the Calvin sequence, so one
 //! RESTORE has one ordering domain. A backup's index entries are not
 //! re-issued: every replica derives a row's secondary index entries as it
 //! installs the row, exactly as for a committed transaction's row.
@@ -14,8 +14,9 @@ use crate::control::state::SharedState;
 use crate::types::TenantId;
 
 use super::super::target::DatabaseTarget;
-use super::commit::{commit_collection, commit_edges};
+use super::commit::{commit_collection, commit_edges, commit_labels};
 use super::edges::edge_units;
+use super::labels::label_units;
 use super::prepared::{PreparedRows, document_units};
 
 /// The backup sections this re-issue consumes.
@@ -23,6 +24,10 @@ pub(in crate::control::backup::restore) struct RestoredRows {
     /// The document rows, prepared and checked against their homes.
     pub documents: Vec<PreparedRows>,
     pub edges: Vec<(String, Vec<u8>)>,
+    /// Each node's current label set.
+    pub node_labels: Vec<crate::types::NodeLabelsEntry>,
+    /// Every node label version.
+    pub node_label_versions: Vec<crate::types::NodeLabelVersionEntry>,
 }
 
 /// What the re-issue committed.
@@ -70,5 +75,7 @@ pub(in crate::control::backup::restore) async fn reissue_rows_and_edges(
     for collection in edges {
         stats.records += commit_edges(state, tenant, target.restore_id, collection).await?;
     }
+    let labels = label_units(tenant_id, rows.node_labels, rows.node_label_versions)?;
+    stats.records += commit_labels(state, tenant, target.dest, target.restore_id, labels).await?;
     Ok(stats)
 }

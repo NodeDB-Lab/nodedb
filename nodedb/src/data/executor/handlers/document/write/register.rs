@@ -41,6 +41,9 @@ pub(in crate::data::executor) struct RegisterDocumentCollectionParams<'a> {
     /// The collection's declared key column. `None` when rows key by the
     /// implicit `id` or `_rowid`.
     pub declared_key: Option<&'a str>,
+    /// The collection's catalog incarnation, which its CRDT document's Loro
+    /// peer id derives from.
+    pub incarnation: nodedb_types::Hlc,
 }
 
 impl CoreLoop {
@@ -68,6 +71,7 @@ impl CoreLoop {
             vector_fields,
             declared_columns,
             declared_key,
+            incarnation,
         } = params;
         let mode_label = match storage_mode {
             nodedb_physical::physical_plan::StorageMode::Schemaless => "document_schemaless",
@@ -113,6 +117,7 @@ impl CoreLoop {
                         .collection_name(task.request.database_id),
                     &enforcement.type_guards,
                 ),
+            incarnation,
         };
 
         // Rehydrate the durable CRDT conflict-resolution policy (if any) into
@@ -141,6 +146,21 @@ impl CoreLoop {
             collection.to_string(),
         );
         self.doc_configs.insert(config_key, config);
+
+        // The tenant's CRDT engine derives the collection's Loro peer id from
+        // its incarnation. An engine created later binds it from
+        // `doc_configs` (`get_crdt_engine`).
+        if self
+            .crdt_engines
+            .contains_key(&(task.request.database_id, crate::types::TenantId::new(tid)))
+        {
+            let bound = self
+                .get_crdt_engine(task.request.database_id, crate::types::TenantId::new(tid))
+                .and_then(|engine| engine.bind_incarnation(collection, incarnation));
+            if let Err(e) = bound {
+                return self.response_error(task, ErrorCode::from(e));
+            }
+        }
 
         self.response_ok(task)
     }

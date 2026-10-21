@@ -33,6 +33,7 @@ nanoid = { workspace = true }
 rand = { workspace = true }
 rust_decimal = { workspace = true }
 nodedb-codec = { workspace = true }
+nodedb-srid = { workspace = true }
 crc32c = { workspace = true }
 roaring = { workspace = true }
 bytemuck = { workspace = true }
@@ -42,4 +43,5 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]
+nodedb-crs = { workspace = true }
 toml = { workspace = true }

@@ -62,6 +62,7 @@ impl CoreLoop {
         task: &ExecutionTask,
         args: super::snapshot::RangeScanArgs<'_>,
     ) -> Response {
+        let crs = self.crs_context();
         let super::snapshot::RangeScanArgs {
             tid,
             collection,
@@ -150,7 +151,7 @@ impl CoreLoop {
                                 &identity_column,
                             );
                             match crate::bridge::scan_filter::ScanFilter::all_match_binary(
-                                filters, &mp,
+                                filters, &mp, &crs,
                             ) {
                                 Ok(admitted) => admitted,
                                 Err(e) => {
@@ -186,7 +187,7 @@ impl CoreLoop {
                 database_id: task.request.database_id.as_u64(),
                 tenant: tid,
                 coll: collection,
-                sys_cutoff_ms: None,
+                sys_cutoff: None,
                 valid_at_ms: None,
                 limit: scan_limit,
             },
@@ -267,7 +268,7 @@ impl CoreLoop {
             field, true,
         )];
         let decimal_keys = sort::decimal_sort_keys(&sort_keys, strict_schema.as_ref());
-        if let Err(e) = sort::sort_rows(&mut rows, &sort_keys, &decimal_keys) {
+        if let Err(e) = sort::sort_rows(&mut rows, &sort_keys, &decimal_keys, &crs) {
             return self.response_error(task, ErrorCode::from(e));
         }
         rows.truncate(limit);

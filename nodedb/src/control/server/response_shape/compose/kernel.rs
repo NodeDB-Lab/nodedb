@@ -39,6 +39,7 @@ pub fn shape_decoded_rows(
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
     sequences: Option<&dyn SequenceAccess>,
+    crs_set: &nodedb_crs::CustomCrsSet,
 ) -> crate::Result<ShapedRows> {
     let mut rows = Vec::new();
     push_flat_rows(
@@ -61,7 +62,12 @@ pub fn shape_decoded_rows(
     // redaction (an expression reads the values the policy lets through)
     // and BEFORE projection (the projection drops the pass-through base
     // columns the expression reads and keeps only the alias).
-    stamp_computed_columns(projection, &mut rows, sequences)?;
+    stamp_computed_columns(
+        projection,
+        &mut rows,
+        sequences,
+        &nodedb_crs::CrsContext::new(crs_set),
+    )?;
 
     match projection {
         Some(s) if !s.is_star && !s.columns.is_empty() => {
@@ -112,6 +118,7 @@ pub(in crate::control::server::response_shape) fn stamp_computed_columns(
     projection: Option<&OutputSchema>,
     rows: &mut [ShapedRow],
     sequences: Option<&dyn SequenceAccess>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     let Some(schema) = projection.filter(|s| !s.cp_computed.is_empty()) else {
         return Ok(());
@@ -120,7 +127,7 @@ pub(in crate::control::server::response_shape) fn stamp_computed_columns(
         Some(access) => access,
         None => &NoSequenceAccess,
     };
-    stamp_rows(rows, &schema.cp_computed, access)
+    stamp_rows(rows, &schema.cp_computed, access, crs)
 }
 
 /// Apply the statement's column-level redaction policy to every flat row.
@@ -348,8 +355,14 @@ mod tests {
         let sources = vec![(String::new(), "users".to_string())];
         let decoded = one_row(&[("email", text("a@b.c")), ("name", text("Alice"))]);
 
-        let shaped = shape_decoded_rows(decoded, None, Some(ctx(&store, &roles, &sources)), None)
-            .expect("shape rows");
+        let shaped = shape_decoded_rows(
+            decoded,
+            None,
+            Some(ctx(&store, &roles, &sources)),
+            None,
+            nodedb_crs::CustomCrsSet::empty(),
+        )
+        .expect("shape rows");
         assert_eq!(shaped.rows[0]["email"], text("***"));
         assert_eq!(shaped.rows[0]["name"], text("Alice"));
     }
@@ -368,9 +381,22 @@ mod tests {
         let sources = vec![(String::new(), "users".to_string())];
         let decoded = one_row(&[("email", text("a@b.c")), ("name", text("Alice"))]);
 
-        let baseline = shape_decoded_rows(decoded.clone(), None, None, None).expect("shape rows");
-        let shaped = shape_decoded_rows(decoded, None, Some(ctx(&store, &roles, &sources)), None)
-            .expect("shape rows");
+        let baseline = shape_decoded_rows(
+            decoded.clone(),
+            None,
+            None,
+            None,
+            nodedb_crs::CustomCrsSet::empty(),
+        )
+        .expect("shape rows");
+        let shaped = shape_decoded_rows(
+            decoded,
+            None,
+            Some(ctx(&store, &roles, &sources)),
+            None,
+            nodedb_crs::CustomCrsSet::empty(),
+        )
+        .expect("shape rows");
         assert_eq!(shaped.rows, baseline.rows);
         assert_eq!(shaped.columns, baseline.columns);
     }
@@ -395,6 +421,7 @@ mod tests {
             Some(&projection),
             Some(ctx(&store, &roles, &sources)),
             None,
+            nodedb_crs::CustomCrsSet::empty(),
         )
         .expect("shape rows");
         assert_eq!(shaped.columns, vec!["contact".to_string()]);
@@ -424,6 +451,7 @@ mod tests {
             Some(&projection),
             Some(ctx(&store, &roles, &sources)),
             None,
+            nodedb_crs::CustomCrsSet::empty(),
         )
         .expect("shape rows");
         // `cell_keys` suffixes the duplicate display name.
@@ -445,8 +473,14 @@ mod tests {
         let sources = vec![(String::new(), "users".to_string())];
         let decoded = one_row(&[("id", text("u1")), ("email", text("a@b.c"))]);
 
-        let shaped = shape_decoded_rows(decoded, None, Some(ctx(&store, &roles, &sources)), None)
-            .expect("shape rows");
+        let shaped = shape_decoded_rows(
+            decoded,
+            None,
+            Some(ctx(&store, &roles, &sources)),
+            None,
+            nodedb_crs::CustomCrsSet::empty(),
+        )
+        .expect("shape rows");
         assert!(
             shaped.columns.contains(&"email".to_string()),
             "redacted column must stay in the derived SELECT * schema"
@@ -477,8 +511,14 @@ mod tests {
         let decoded = one_row(&[("at", Value::NaiveDateTime(at)), ("id", text("r1"))]);
         let projection = named_projection(&[("at", "at")]);
 
-        let shaped =
-            shape_decoded_rows(decoded, Some(&projection), None, None).expect("shape rows");
+        let shaped = shape_decoded_rows(
+            decoded,
+            Some(&projection),
+            None,
+            None,
+            nodedb_crs::CustomCrsSet::empty(),
+        )
+        .expect("shape rows");
         assert_eq!(shaped.rows[0]["at"], Value::NaiveDateTime(at));
         assert_eq!(
             crate::control::server::response_shape::cell::value_to_wire_json(&shaped.rows[0]["at"]),
@@ -573,8 +613,14 @@ mod tests {
         let projection = cp_computed_projection();
         let access = FixedAccess(41);
 
-        let shaped = shape_decoded_rows(decoded, Some(&projection), None, Some(&access))
-            .expect("shape rows");
+        let shaped = shape_decoded_rows(
+            decoded,
+            Some(&projection),
+            None,
+            Some(&access),
+            nodedb_crs::CustomCrsSet::empty(),
+        )
+        .expect("shape rows");
         assert_eq!(shaped.columns, vec!["id".to_string(), "n".to_string()]);
         assert_eq!(shaped.rows[0]["n"], Value::Integer(41));
     }
@@ -584,8 +630,14 @@ mod tests {
         let decoded = one_row(&[("id", text("r1"))]);
         let projection = cp_computed_projection();
 
-        let err =
-            shape_decoded_rows(decoded, Some(&projection), None, None).expect_err("must refuse");
+        let err = shape_decoded_rows(
+            decoded,
+            Some(&projection),
+            None,
+            None,
+            nodedb_crs::CustomCrsSet::empty(),
+        )
+        .expect_err("must refuse");
         assert!(matches!(err, crate::Error::FeatureNotSupported { .. }));
     }
 
@@ -608,8 +660,14 @@ mod tests {
             },
         ];
 
-        let shaped = shape_decoded_rows(decoded, Some(&projection), None, None)
-            .expect("an accessor-free column evaluates without sequence access");
+        let shaped = shape_decoded_rows(
+            decoded,
+            Some(&projection),
+            None,
+            None,
+            nodedb_crs::CustomCrsSet::empty(),
+        )
+        .expect("an accessor-free column evaluates without sequence access");
         assert_eq!(shaped.columns, vec!["document".to_string()]);
         let Value::Object(document) = &shaped.rows[0]["document"] else {
             panic!("the whole row is an object: {:?}", shaped.rows[0]);

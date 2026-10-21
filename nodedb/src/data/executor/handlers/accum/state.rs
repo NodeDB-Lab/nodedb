@@ -35,8 +35,10 @@ pub(crate) enum AggAccum {
     Max { best: Option<Value> },
     /// count_distinct: set of raw msgpack bytes.
     CountDistinct { seen: HashSet<Vec<u8>> },
-    /// stddev / variance variants: Welford M2 accumulator.
-    Welford { n: u64, mean: f64, m2: f64 },
+    /// stddev / variance variants: Welford moments.
+    Welford {
+        moments: nodedb_types::array_agg::Moments,
+    },
     /// approx_count_distinct: HyperLogLog.
     Hll {
         hll: nodedb_types::approx::HyperLogLog,
@@ -91,9 +93,10 @@ impl GroupState {
         &mut self,
         aggregates: &[AggregateSpec],
         doc: &[u8],
+        crs: &nodedb_crs::CrsContext<'_>,
     ) -> Result<(), nodedb_query::EvalError> {
         for (accum, agg) in self.accums.iter_mut().zip(aggregates) {
-            accum.feed(agg, doc)?;
+            accum.feed(agg, doc, crs)?;
         }
         Ok(())
     }

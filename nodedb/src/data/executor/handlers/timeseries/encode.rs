@@ -120,6 +120,7 @@ pub(in crate::data::executor) fn encode_grouped_results(
     aggregates: &[(String, String)],
     shape: GroupedOutputShape<'_>,
     key_types: GroupedKeyTypes<'_>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<u8>> {
     let GroupedOutputShape {
         limit,
@@ -223,14 +224,14 @@ pub(in crate::data::executor) fn encode_grouped_results(
             rmpv::encode::write_value(&mut bytes, &row).map_err(|e| crate::Error::Codec {
                 detail: format!("HAVING row encode: {e}"),
             })?;
-            if crate::bridge::scan_filter::ScanFilter::all_match_binary(having, &bytes)? {
+            if crate::bridge::scan_filter::ScanFilter::all_match_binary(having, &bytes, crs)? {
                 kept.push(row);
             }
         }
         rows = kept;
     }
 
-    super::sort::sort_rows(&mut rows, sort_keys)?;
+    super::sort::sort_rows(&mut rows, sort_keys, crs)?;
     rows.truncate(limit);
     // HAVING and the sort keys read the encoded keys. The output names are
     // applied last.
@@ -284,6 +285,7 @@ mod tests {
                 aggregate_kinds: &[],
                 bucket_kind,
             },
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("encode");
         let rmpv::Value::Array(rows) =
@@ -403,6 +405,7 @@ mod tests {
                 aggregate_kinds: &[],
                 bucket_kind: TimeKind::Millis,
             },
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("encode");
         let rmpv::Value::Array(rows) =
@@ -620,6 +623,7 @@ mod tests {
                 aggregate_kinds: &[TsGroupKeyKind::Text],
                 bucket_kind: TimeKind::Millis,
             },
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("encode");
         let rmpv::Value::Array(rows) =

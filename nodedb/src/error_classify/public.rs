@@ -200,7 +200,9 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::UnknownStrictField { column, .. } => NodeDbError::undefined_column(column.clone()),
         Error::DivisionByZero => NodeDbError::division_by_zero(),
         Error::DataException { detail } => NodeDbError::data_exception(detail.clone()),
-        e @ Error::MixedSrid { .. } => NodeDbError::data_exception(e.to_string()),
+        e @ (Error::MixedSrid { .. } | Error::UnknownSrid { .. }) => {
+            NodeDbError::data_exception(e.to_string())
+        }
         Error::NumericValueOutOfRange { detail } => {
             NodeDbError::numeric_value_out_of_range(detail.clone())
         }

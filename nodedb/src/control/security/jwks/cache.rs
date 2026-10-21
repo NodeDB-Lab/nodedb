@@ -77,6 +77,17 @@ impl JwksCache {
         }
     }
 
+    /// Drop every cached key of `provider`: a catalog provider that is
+    /// dropped, or whose JWKS endpoint changed, keeps no key.
+    pub fn remove_provider(&self, provider: &str) {
+        let mut providers = self.providers.write();
+        if providers.remove(provider).is_some()
+            && let Some(ref path) = self.disk_path
+        {
+            let _ = self.persist_to_disk(path, &providers);
+        }
+    }
+
     /// Check if enough time has passed since last re-fetch attempt.
     /// Used to rate-limit on-demand re-fetches for unknown `kid`.
     pub fn can_refetch(&self, provider: &str, min_interval_secs: u64) -> bool {

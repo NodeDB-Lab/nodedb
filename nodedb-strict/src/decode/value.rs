@@ -7,6 +7,8 @@ use nodedb_types::datetime::NdbDateTime;
 use nodedb_types::decode_bounds::checked_decode_capacity;
 use nodedb_types::value::Value;
 
+use crate::error::StrictError;
+
 /// Decode a fixed-size raw byte slice into a value.
 pub(super) fn decode_fixed_value(col_type: &ColumnType, raw: &[u8]) -> Value {
     match col_type {
@@ -80,19 +82,24 @@ pub(super) fn decode_fixed_value(col_type: &ColumnType, raw: &[u8]) -> Value {
     }
 }
 
-/// Decode a variable-length raw byte slice into a value.
-pub(super) fn decode_variable_value(col_type: &ColumnType, raw: &[u8]) -> Value {
-    match col_type {
+/// Decode a variable-length raw byte slice into a value. A geometry cell
+/// that is not EWKB is [`StrictError::CorruptCell`].
+pub(super) fn decode_variable_value(
+    col_type: &ColumnType,
+    raw: &[u8],
+) -> Result<Value, StrictError> {
+    Ok(match col_type {
         ColumnType::String | ColumnType::SparseVector => {
             Value::String(std::str::from_utf8(raw).unwrap_or_default().to_string())
         }
         ColumnType::Bytes => Value::Bytes(raw.to_vec()),
-        // GeoJSON with an optional `crs` member, which carries the SRID.
-        // Any other text (WKT) stays a string.
-        ColumnType::Geometry => match nodedb_types::geometry::parse_geojson_slice(raw) {
-            Ok(geometry) => Value::Geometry(geometry),
-            Err(_) => Value::String(std::str::from_utf8(raw).unwrap_or_default().to_string()),
-        },
+        // EWKB: SRID, Z and M. A stored SRID is checked for syntax only.
+        ColumnType::Geometry => {
+            nodedb_spatial::value_of_ewkb(raw).map_err(|e| StrictError::CorruptCell {
+                column_type: *col_type,
+                detail: e.to_string(),
+            })?
+        }
         ColumnType::Json => match nodedb_types::value_from_msgpack(raw) {
             Ok(value) => value,
             Err(error) => {
@@ -110,7 +117,7 @@ pub(super) fn decode_variable_value(col_type: &ColumnType, raw: &[u8]) -> Value 
             decode_typed_msgpack(raw, |value| matches!(value, Value::Record { .. }))
         }
         _ => Value::Null,
-    }
+    })
 }
 
 /// Decode MessagePack only when it carries the exact Value variant required
@@ -128,19 +135,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn projected_geometry_decodes_with_its_srid() {
-        use nodedb_types::geometry::{Geometry, Srid, SridGeometry};
-        let g = SridGeometry::new(Srid::Utm48N, Geometry::point(134_445.5, 349_624.7));
-        let raw = sonic_rs::to_vec(&g).unwrap();
+    fn geometry_cell_decodes_srid_z_and_m() {
+        use nodedb_types::geometry::{Geometry, Ordinates, Srid, SridGeometry};
+        let g = SridGeometry::with_ordinates(
+            Srid::new(32648).unwrap(),
+            Geometry::point(134_445.5, 349_624.7),
+            Ordinates::new(Some(vec![12.0]), Some(vec![3.0])),
+        )
+        .unwrap();
+        let raw = nodedb_spatial::geometry_to_ewkb(&g).unwrap();
         assert_eq!(
             decode_variable_value(&ColumnType::Geometry, &raw),
-            Value::Geometry(g)
+            Ok(Value::Geometry(g))
         );
-        let plain = sonic_rs::to_vec(&SridGeometry::wgs84(Geometry::point(1.0, 2.0))).unwrap();
-        assert!(
-            !String::from_utf8(plain).unwrap().contains("crs"),
-            "4326 writes no crs member"
-        );
+        assert!(matches!(
+            decode_variable_value(&ColumnType::Geometry, b"POINT(1 2)"),
+            Err(StrictError::CorruptCell { .. })
+        ));
     }
 
     #[test]

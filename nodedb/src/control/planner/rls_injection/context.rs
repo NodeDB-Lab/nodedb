@@ -29,6 +29,11 @@ pub(super) struct RlsCtx<'a> {
 }
 
 impl RlsCtx<'_> {
+    /// The CRS context write predicates resolve SRIDs against.
+    fn crs(&self) -> nodedb_crs::CrsContext<'_> {
+        crate::control::crs_context::catalog_crs_context(self.catalog)
+    }
+
     /// The concrete read filters for `collection`; empty when no policy
     /// restricts this identity.
     pub(super) fn read_filters(
@@ -112,6 +117,7 @@ impl RlsCtx<'_> {
             image,
             self.tenant_id,
             collection.as_str(),
+            &self.crs(),
         )
     }
 
@@ -147,6 +153,7 @@ impl RlsCtx<'_> {
             &with_id,
             self.tenant_id,
             collection.as_str(),
+            &self.crs(),
         )
     }
 
@@ -196,6 +203,7 @@ impl RlsCtx<'_> {
             image,
             self.tenant_id,
             collection.as_str(),
+            &self.crs(),
         )
     }
 
@@ -238,6 +246,7 @@ impl RlsCtx<'_> {
             &bytes,
             self.tenant_id,
             collection.as_str(),
+            &self.crs(),
         )
     }
 
@@ -278,6 +287,7 @@ impl RlsCtx<'_> {
                 &image,
                 self.tenant_id,
                 collection.as_str(),
+                &self.crs(),
             )?;
         }
         // Decided here, with a live identity, against the exact images carried.

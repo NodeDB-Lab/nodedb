@@ -117,9 +117,9 @@ pub use migration_executor::{
 };
 pub use multi_raft::{GroupStatus, MultiRaft};
 pub use raft_loop::{
-    ApplyPermit, AssignRemoteSurrogate, AuthLeaseService, BuiltGroupSnapshot, CalvinSubmit,
-    CalvinSubmitInbox, CommitApplier, DataProposeGate, GroupApplyGates, InstallPermit,
-    MetadataSnapshotCapture, ProposeHold, RaftLoop, ReleaseReservation, ReserveRead,
+    Admitted, ApplyPermit, AssignRemoteSurrogate, AuthLeaseService, BuiltGroupSnapshot,
+    CalvinSubmit, CalvinSubmitInbox, CommitApplier, DataProposeGate, GroupApplyGates,
+    InstallPermit, MetadataSnapshotCapture, ProposeHold, RaftLoop, ReleaseReservation, ReserveRead,
     ShuffleAggregator, ShuffleConsumer, ShuffleProducer, ShuffleReceiver, SnapshotApplier,
     SnapshotBuilder, SnapshotQuarantineHook, VShardEnvelopeHandler,
 };

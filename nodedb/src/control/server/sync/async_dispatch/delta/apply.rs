@@ -59,6 +59,15 @@ pub(crate) struct DeltaSessionContext<'a> {
     pub(crate) peer_addr: &'a str,
 }
 
+/// Whether `delta` fails to state `current`, the incarnation of its collection
+/// the catalog holds. Every committed collection has a nonzero incarnation and
+/// every client the handshake admits states one, so a delta that states none
+/// (`Hlc::ZERO`) is refused like one for a replaced incarnation.
+fn incarnation_mismatch(delta: &DeltaPushMsg, current: nodedb_types::Hlc) -> bool {
+    delta.collection_incarnation == nodedb_types::Hlc::ZERO
+        || delta.collection_incarnation != current
+}
+
 /// Apply a CRDT delta on the Data Plane, converting the outcome into the final
 /// client frame.
 ///
@@ -160,6 +169,7 @@ pub(crate) async fn apply_delta_and_finalize(
         database_id,
         &delta_msg.collection,
     );
+    let crs_set = crate::control::crs_context::crs_set_for(shared);
     let policy =
         crate::control::crdt_post_image_policy::ExternalCrdtPostImagePolicy::from_identity(
             tenant_id,
@@ -167,16 +177,49 @@ pub(crate) async fn apply_delta_and_finalize(
             &qualified_collection,
             identity,
             "sync".into(),
-            &shared.rls,
-            &audit,
+            crate::control::crdt_post_image_policy::PolicyServices {
+                rls: &shared.rls,
+                audit: &audit,
+                crs_set: &crs_set,
+            },
         )
-        .with_type_guards_from(shared.credentials.catalog(), database_id);
+        .with_type_guards_from(shared, database_id);
 
     let (constraint_version_required, signing_required) = match shared
         .credentials
         .catalog()
         .get_collection(database_id, tenant_id.as_u64(), &delta_msg.collection)
     {
+        // A delta built against an incarnation a drop and a same-name create
+        // replaced writes into a collection that no longer exists. Merged
+        // into the new collection's document it would bring the dropped rows
+        // back, so it is refused, and the client drops its state for it. A
+        // delta that states no incarnation cannot be judged, so it is refused
+        // the same way.
+        Ok(Some(collection)) if incarnation_mismatch(delta_msg, collection.incarnation) => {
+            let reason = if delta_msg.collection_incarnation == nodedb_types::Hlc::ZERO {
+                format!(
+                    "the delta for collection '{}' states no incarnation; drop the local state \
+                     of the collection and sync it again",
+                    delta_msg.collection
+                )
+            } else {
+                format!(
+                    "collection '{}' was dropped and created again: the delta targets an \
+                     incarnation it no longer holds; drop the local state of the collection \
+                     and sync it again",
+                    delta_msg.collection
+                )
+            };
+            return terminal_reject(
+                delta_msg,
+                reason.clone(),
+                CompensationHint::Custom {
+                    constraint: "collection_incarnation".into(),
+                    detail: reason,
+                },
+            );
+        }
         Ok(Some(collection)) => (
             collection.constraint_version,
             collection.crdt_signing_required,
@@ -459,6 +502,28 @@ mod tests {
 
     const PEER_ADDR: &str = "10.0.0.7:44321";
 
+    /// Only a delta that states the incarnation the catalog holds is
+    /// admitted. A delta for an incarnation a drop and a same-name create
+    /// replaced is refused, and so is one that states none.
+    #[test]
+    fn only_the_current_incarnation_is_admitted() {
+        let current = nodedb_types::Hlc::new(2_000, 0);
+        let dropped = nodedb_types::Hlc::new(1_000, 0);
+        let mut msg = delta();
+        msg.collection_incarnation = nodedb_types::Hlc::ZERO;
+        assert!(
+            incarnation_mismatch(&msg, current),
+            "an unstated incarnation"
+        );
+        msg.collection_incarnation = current;
+        assert!(
+            !incarnation_mismatch(&msg, current),
+            "the current incarnation"
+        );
+        msg.collection_incarnation = dropped;
+        assert!(incarnation_mismatch(&msg, current), "a dropped incarnation");
+    }
+
     fn state_with_risk(risk: RiskConfig) -> (Arc<SharedState>, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("create delta admission test directory");
         let wal = Arc::new(
@@ -512,6 +577,7 @@ mod tests {
             seq: 1,
             device_id: 0,
             delta_signature: [0u8; 32],
+            collection_incarnation: nodedb_types::Hlc::new(1_000, 0),
         }
     }
 

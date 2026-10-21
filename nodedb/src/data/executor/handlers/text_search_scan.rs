@@ -98,7 +98,7 @@ impl CoreLoop {
         let Some(index) = self.text_index(task, p.tid, p.collection, p.field)? else {
             return Ok(Vec::new());
         };
-        let gate = TextRowGate::new(p.filters, p.rls_filters)?;
+        let gate = TextRowGate::new(p.filters, p.rls_filters, self.crs_context())?;
         let eligible = combine_eligible(
             p.prefilter,
             self.text_eligible_rows(task, p.tid, p.collection, &gate)?,
@@ -196,7 +196,7 @@ impl CoreLoop {
     ) -> crate::Result<Vec<DocumentRow>> {
         let database_id = task.request.database_id;
         let tenant = TenantId::new(p.tid);
-        let gate = TextRowGate::new(p.filters, p.rls_filters)?;
+        let gate = TextRowGate::new(p.filters, p.rls_filters, self.crs_context())?;
         let eligible = self.text_eligible_rows(task, p.tid, p.collection, &gate)?;
         let columns =
             self.text_score_columns(task, p.tid, p.collection, p.scores, eligible.as_ref())?;

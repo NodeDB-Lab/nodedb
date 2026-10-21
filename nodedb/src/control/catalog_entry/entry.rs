@@ -673,4 +673,27 @@ pub enum CatalogEntry {
     /// minute nor repeats a finished one. The mark is keyed by the schedule's
     /// config incarnation, and apply only raises it, so a replay is a no-op.
     PutBackupScheduleMark(Box<StoredBackupScheduleMark>),
+
+    // ── User-defined CRSs ──────────────────────────────────────────
+    /// `CREATE SPATIAL_REF_SYS`: one user-defined CRS. Apply defines it in
+    /// the catalog's set, and leaves the set unchanged when the code is live
+    /// or dropped. Post-apply sends the set to every core of every node.
+    PutSpatialRefSys(Box<nodedb_crs::CrsDef>),
+    /// `DROP SPATIAL_REF_SYS`: retire a user-defined CRS. The code stays a
+    /// tombstone and is never reused, so stored data that names it fails to
+    /// resolve instead of changing meaning.
+    DropSpatialRefSys {
+        srid: nodedb_crs::Srid,
+    },
+
+    // ── Credentials ────────────────────────────────────────────────
+    /// `CREATE CREDENTIAL`: one credential, its secret sealed before the
+    /// proposal so the log holds ciphertext only. Apply writes the row when
+    /// the name is free and leaves a live row unchanged.
+    PutCredential(Box<crate::control::security::source_credential::StoredCredential>),
+    /// `DROP CREDENTIAL`: remove one credential.
+    DropCredential {
+        tenant_id: u64,
+        name: String,
+    },
 }

@@ -212,6 +212,10 @@ pub enum DataPlaneErrorCode {
         label: String,
         limit: u64,
     },
+    /// The statement passed a fixed program limit (SQLSTATE `54000`).
+    ProgramLimitExceeded {
+        detail: String,
+    },
     /// Text does not parse as the column's type (SQLSTATE `22P02`).
     InvalidTextRepresentation {
         detail: String,

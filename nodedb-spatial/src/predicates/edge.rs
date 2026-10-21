@@ -2,10 +2,9 @@
 
 //! Low-level segment and edge geometry primitives.
 //!
-//! Used by ST_Contains, ST_Intersects, and ST_Distance. All operations
-//! are planar (coordinate-space), not spherical. This is correct for the
-//! small-area geometries typical of spatial predicates (city blocks, not
-//! hemispheres). For large-area work, haversine handles the globe.
+//! Used by ST_Contains, ST_Intersects and the distance algorithms. Every
+//! operation is planar in the coordinates. Geodesic measures live in
+//! `crate::geodesic`.
 
 /// Orientation of three points (collinear, clockwise, counter-clockwise).
 /// Uses the cross product of vectors (p→q) and (p→r).

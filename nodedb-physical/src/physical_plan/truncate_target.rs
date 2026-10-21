@@ -33,6 +33,7 @@ impl PhysicalPlan {
             | PhysicalPlan::Columnar(ColumnarOp::Truncate {
                 collection,
                 restart_identity,
+                ..
             })
             | PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
                 collection,
@@ -93,6 +94,8 @@ mod tests {
         let plan = PhysicalPlan::Columnar(ColumnarOp::Truncate {
             collection: coll(),
             restart_identity: true,
+            system_from: None,
+            erase_history: false,
         });
         let (c, restart) = plan.truncate_target().expect("columnar truncate target");
         assert_eq!(c.as_str(), "t");

@@ -94,7 +94,6 @@ pub(super) fn add_keys(keys: &mut WriteKeys, op: &GraphOp) -> crate::Result<()> 
         | GraphOp::BspSuperstep(_)
         | GraphOp::WccSuperstep(_)
         | GraphOp::TemporalNeighbors { .. }
-        | GraphOp::TemporalAlgorithm { .. }
         | GraphOp::Stats { .. }
         | GraphOp::NodePresenceRead { .. } => {
             return Err(not_a_write("a graph read"));

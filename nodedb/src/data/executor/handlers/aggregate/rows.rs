@@ -50,6 +50,7 @@ pub(in crate::data::executor::handlers) fn apply_user_aliases_to_rows(
 pub(in crate::data::executor::handlers) fn retain_having(
     rows: &mut Vec<Value>,
     predicates: &[ScanFilter],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     if predicates.is_empty() {
         return Ok(());
@@ -59,7 +60,7 @@ pub(in crate::data::executor::handlers) fn retain_having(
         let mp = nodedb_types::value_to_msgpack(&row).map_err(|e| crate::Error::Codec {
             detail: format!("HAVING row encode: {e}"),
         })?;
-        if ScanFilter::all_match_binary(predicates, &mp)? {
+        if ScanFilter::all_match_binary(predicates, &mp, crs)? {
             kept.push(row);
         }
     }
@@ -81,6 +82,7 @@ pub(in crate::data::executor::handlers) fn retain_having(
 pub(in crate::data::executor::handlers) fn sort_aggregated_rows(
     rows: &mut [Value],
     sort_keys: &[nodedb_physical::physical_plan::SortKeySpec],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     if sort_keys.is_empty() {
         return Ok(());
@@ -91,7 +93,7 @@ pub(in crate::data::executor::handlers) fn sort_aggregated_rows(
         .map(|row| {
             sort_keys
                 .iter()
-                .map(|k| k.expr.eval(row).map_err(crate::Error::from))
+                .map(|k| k.expr.eval(row, crs).map_err(crate::Error::from))
                 .collect::<crate::Result<Vec<_>>>()
         })
         .collect::<crate::Result<Vec<_>>>()?;
@@ -140,7 +142,8 @@ mod tests {
     }
 
     fn sorted(mut rows: Vec<Value>, key: SortKeySpec) -> Vec<Value> {
-        sort_aggregated_rows(&mut rows, &[key]).expect("sort");
+        sort_aggregated_rows(&mut rows, &[key], &nodedb_crs::CrsContext::builtin_only())
+            .expect("sort");
         rows
     }
 

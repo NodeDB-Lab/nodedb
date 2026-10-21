@@ -73,6 +73,12 @@ impl CoreLoop {
                 return false;
             }
         };
+        // A historical CSR at or above the cut read the versions it hides.
+        self.historical_csr.invalidate_collection(
+            DatabaseId::new(database_id),
+            TenantId::new(tid),
+            &cut.collection,
+        );
         let flips = install.flips.clone();
         // The undo is recorded once the store holds the cut, and before the
         // CSR follows it, so a rollback removes the cut even when a CSR
@@ -180,6 +186,8 @@ mod tests {
                 properties: b"",
                 src_surrogate: Surrogate::new(1),
                 dst_surrogate: Surrogate::new(2),
+                valid_from_ms: None,
+                valid_until_ms: None,
             },
         );
         core.apply_scope.graph_system_from = None;
@@ -236,6 +244,8 @@ mod tests {
                 dst_surrogate: 2,
                 system_from: Some(system_from),
                 applied,
+                valid_from_ms: None,
+                valid_until_ms: None,
             })
             .expect("encode put"),
         }

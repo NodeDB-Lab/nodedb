@@ -151,6 +151,7 @@ pub async fn crdt_apply(
     // collection)`.
     let qualified_collection =
         crate::control::planner::sql_plan_convert::convert::db_qualified(database_id, &collection);
+    let crs_set = crate::control::crs_context::crs_set_for(&state.shared);
     let policy =
         crate::control::crdt_post_image_policy::ExternalCrdtPostImagePolicy::from_identity(
             identity.tenant_id,
@@ -158,10 +159,13 @@ pub async fn crdt_apply(
             &qualified_collection,
             &identity,
             "http".into(),
-            &state.shared.rls,
-            &audit,
+            crate::control::crdt_post_image_policy::PolicyServices {
+                rls: &state.shared.rls,
+                audit: &audit,
+                crs_set: &crs_set,
+            },
         )
-        .with_type_guards_from(state.shared.credentials.catalog(), database_id);
+        .with_type_guards_from(&state.shared, database_id);
     let result = crate::control::crdt_admission::dispatch_authorized_crdt_apply_admitted(
         &state.shared,
         crate::control::crdt_admission::AuthorizedCrdtApplyAdmissionRequest {

@@ -7,6 +7,7 @@
 //! against the pre-update ("old") document — this is the path used by TRANSITION
 //! CHECK and similar old/new diff predicates.
 
+use nodedb_crs::{CrsContext, CrsError, UnknownSrid};
 use nodedb_types::Value;
 
 use crate::value_ops::{coerced_eq, is_truthy, to_value_number, value_to_f64};
@@ -27,9 +28,13 @@ use super::types::{SqlExpr, WHOLE_ROW_COLUMN};
 ///   dimensions, an argument of the wrong type, a malformed JSONPath.
 ///   SQLSTATE `22000`. A `NULL` argument stays `NULL` instead;
 /// - an exact integer SUM past the `Decimal` range, SQLSTATE `22000`;
-/// - a geometry SRID fault: an unsupported SRID, operands in different
-///   SRIDs, or a coordinate outside a projection's domain. SQLSTATE `22000`.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// - a geometry SRID fault: an SRID no CRS defines, operands in different
+///   SRIDs, or a coordinate outside a projection's domain. SQLSTATE `22000`;
+/// - a geometry argument that does not parse (WKT, WKB, GeoJSON), or a
+///   geometry operation that cannot run on its input. SQLSTATE `22000`;
+/// - an argument whose value is out of range for the function. SQLSTATE
+///   `22000`.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum EvalError {
     #[error("division by zero")]
     DivisionByZero,
@@ -68,13 +73,13 @@ pub enum EvalError {
     /// An exact integer aggregate total lies outside the `Decimal` range.
     #[error("{function}(): integer total out of range")]
     NumericOverflow { function: &'static str },
-    /// An SRID argument, or an SRID a geometry declares, is outside the
-    /// supported set. SQLSTATE `22000`.
-    #[error(
-        "{function}(): unsupported SRID {srid}; supported: {}",
-        nodedb_types::geometry::SUPPORTED_SRID_CODES
-    )]
-    UnsupportedSrid { function: &'static str, srid: i64 },
+    /// An SRID argument, or an SRID a geometry declares, names no defined
+    /// CRS. SQLSTATE `22000`.
+    #[error("{function}(): {source}")]
+    Crs {
+        function: &'static str,
+        source: UnknownSrid,
+    },
     /// Two geometry operands are in different SRIDs. No implicit transform
     /// runs. SQLSTATE `22000`.
     #[error("{function}(): operands have different SRIDs {left} and {right}; use ST_Transform")]
@@ -83,10 +88,45 @@ pub enum EvalError {
         left: u32,
         right: u32,
     },
-    /// A coordinate lies outside the region the target projection is
-    /// defined on. SQLSTATE `22000`.
-    #[error("{function}(): coordinate is outside the domain of SRID {srid}")]
-    ProjectionDomain { function: &'static str, srid: u32 },
+    /// A coordinate transform fails: a coordinate lies outside the region a
+    /// projection is defined on, a CRS definition does not parse or has no
+    /// PROJ-string form, or a coordinate epoch is out of range. SQLSTATE
+    /// `22000`.
+    #[error("{function}(): {source}")]
+    Transform {
+        function: &'static str,
+        source: CrsError,
+    },
+    /// A geometry argument does not parse, or a geometry operation cannot
+    /// run on its input. SQLSTATE `22000`.
+    #[error("{function}(): {source}")]
+    Geometry {
+        function: &'static str,
+        source: nodedb_spatial::SpatialError,
+    },
+    /// An argument holds a value outside the range the function accepts.
+    /// SQLSTATE `22000`.
+    #[error("{function}(): argument {position} {reason}")]
+    ArgumentValue {
+        function: &'static str,
+        /// 1-based argument position.
+        position: usize,
+        reason: String,
+    },
+}
+
+impl EvalError {
+    /// The fault a CRS operation in `function` raises. An unknown SRID keeps
+    /// its own variant.
+    pub fn from_crs(function: &'static str, e: CrsError) -> EvalError {
+        match e {
+            CrsError::Unknown(source) => EvalError::Crs { function, source },
+            source @ (CrsError::OutOfDomain { .. }
+            | CrsError::Parse(_)
+            | CrsError::Epoch(_)
+            | CrsError::ProjExport(_)) => EvalError::Transform { function, source },
+        }
+    }
 }
 
 /// Row scope for `SqlExpr::eval_scope`: how `Column(..)` and `OldColumn(..)`
@@ -94,6 +134,8 @@ pub enum EvalError {
 /// into this scope for every leaf column reference — both `eval()` and
 /// `eval_with_old()` delegate here instead of duplicating the walk.
 struct RowScope<'a> {
+    /// Resolves the SRIDs geo functions meet.
+    crs: &'a CrsContext<'a>,
     new_doc: &'a Value,
     /// Pre-update row, if this is an old/new evaluation (TRANSITION CHECK).
     /// `None` means `OldColumn(..)` resolves to `Null`, matching plain `eval`.
@@ -146,8 +188,11 @@ impl SqlExpr {
     /// historically-`NULL`-folding case (bad casts, wrong arg counts,
     /// unknown-value coercions) is unaffected and still evaluates to
     /// `Ok(Value::Null)`.
-    pub fn eval(&self, doc: &Value) -> Result<Value, EvalError> {
+    ///
+    /// Geo functions resolve SRIDs through `crs`.
+    pub fn eval(&self, doc: &Value, crs: &CrsContext<'_>) -> Result<Value, EvalError> {
         self.eval_scope(&RowScope {
+            crs,
             new_doc: doc,
             old_doc: None,
             excluded_doc: None,
@@ -157,8 +202,14 @@ impl SqlExpr {
     /// Evaluate with access to both NEW and OLD documents, used by
     /// TRANSITION CHECK predicates. `Column(name)` resolves against
     /// `new_doc`; `OldColumn(name)` resolves against `old_doc`.
-    pub fn eval_with_old(&self, new_doc: &Value, old_doc: &Value) -> Result<Value, EvalError> {
+    pub fn eval_with_old(
+        &self,
+        new_doc: &Value,
+        old_doc: &Value,
+        crs: &CrsContext<'_>,
+    ) -> Result<Value, EvalError> {
         self.eval_scope(&RowScope {
+            crs,
             new_doc,
             old_doc: Some(old_doc),
             excluded_doc: None,
@@ -169,8 +220,14 @@ impl SqlExpr {
     /// `INSERT ... ON CONFLICT DO UPDATE`. `Column(name)` resolves
     /// against the existing (current) row `doc`; `ExcludedColumn(name)`
     /// resolves against `excluded`.
-    pub fn eval_with_excluded(&self, doc: &Value, excluded: &Value) -> Result<Value, EvalError> {
+    pub fn eval_with_excluded(
+        &self,
+        doc: &Value,
+        excluded: &Value,
+        crs: &CrsContext<'_>,
+    ) -> Result<Value, EvalError> {
         self.eval_scope(&RowScope {
+            crs,
             new_doc: doc,
             old_doc: None,
             excluded_doc: Some(excluded),
@@ -215,7 +272,7 @@ impl SqlExpr {
                     .iter()
                     .map(|a| a.eval_scope(scope))
                     .collect::<Result<_, EvalError>>()?;
-                crate::functions::eval_function(name, &evaluated)
+                crate::functions::eval_function(name, &evaluated, scope.crs)
             }
 
             SqlExpr::Cast { expr, to_type } => {
@@ -282,6 +339,10 @@ mod tests {
     use super::super::types::BinaryOp;
     use super::*;
 
+    fn crs() -> CrsContext<'static> {
+        CrsContext::builtin_only()
+    }
+
     fn doc() -> Value {
         Value::Object(
             [
@@ -300,22 +361,25 @@ mod tests {
     #[test]
     fn column_ref() {
         let expr = SqlExpr::Column("name".into());
-        assert_eq!(expr.eval(&doc()).unwrap(), Value::String("Alice".into()));
+        assert_eq!(
+            expr.eval(&doc(), &crs()).unwrap(),
+            Value::String("Alice".into())
+        );
     }
 
     #[test]
     fn missing_column() {
         let expr = SqlExpr::Column("missing".into());
-        assert_eq!(expr.eval(&doc()).unwrap(), Value::Null);
+        assert_eq!(expr.eval(&doc(), &crs()).unwrap(), Value::Null);
     }
 
     #[test]
     fn whole_row_column_is_the_document() {
         let expr = SqlExpr::Column(WHOLE_ROW_COLUMN.into());
-        assert_eq!(expr.eval(&doc()).unwrap(), doc());
+        assert_eq!(expr.eval(&doc(), &crs()).unwrap(), doc());
         let old = SqlExpr::OldColumn(WHOLE_ROW_COLUMN.into());
         let before = Value::Object(Default::default());
-        assert_eq!(old.eval_with_old(&doc(), &before).unwrap(), before);
+        assert_eq!(old.eval_with_old(&doc(), &before, &crs()).unwrap(), before);
     }
 
     #[test]
@@ -324,13 +388,13 @@ mod tests {
             name: "to_jsonb".into(),
             args: vec![SqlExpr::Column(WHOLE_ROW_COLUMN.into())],
         };
-        assert_eq!(expr.eval(&doc()).unwrap(), doc());
+        assert_eq!(expr.eval(&doc(), &crs()).unwrap(), doc());
     }
 
     #[test]
     fn literal() {
         let expr = SqlExpr::Literal(Value::Integer(42));
-        assert_eq!(expr.eval(&doc()).unwrap(), Value::Integer(42));
+        assert_eq!(expr.eval(&doc(), &crs()).unwrap(), Value::Integer(42));
     }
 
     #[test]
@@ -340,7 +404,7 @@ mod tests {
             op: BinaryOp::Add,
             right: Box::new(SqlExpr::Literal(Value::Float(1.5))),
         };
-        assert_eq!(expr.eval(&doc()).unwrap(), Value::Integer(12));
+        assert_eq!(expr.eval(&doc(), &crs()).unwrap(), Value::Integer(12));
     }
 
     #[test]
@@ -350,7 +414,7 @@ mod tests {
             op: BinaryOp::Mul,
             right: Box::new(SqlExpr::Column("qty".into())),
         };
-        assert_eq!(expr.eval(&doc()).unwrap(), Value::Integer(42));
+        assert_eq!(expr.eval(&doc(), &crs()).unwrap(), Value::Integer(42));
     }
 
     #[test]
@@ -367,7 +431,10 @@ mod tests {
             )],
             else_expr: Some(Box::new(SqlExpr::Literal(Value::String("minor".into())))),
         };
-        assert_eq!(expr.eval(&doc()).unwrap(), Value::String("adult".into()));
+        assert_eq!(
+            expr.eval(&doc(), &crs()).unwrap(),
+            Value::String("adult".into())
+        );
     }
 
     #[test]
@@ -377,7 +444,7 @@ mod tests {
             SqlExpr::Literal(Value::String("default@example.com".into())),
         ]);
         assert_eq!(
-            expr.eval(&doc()).unwrap(),
+            expr.eval(&doc(), &crs()).unwrap(),
             Value::String("default@example.com".into())
         );
     }
@@ -388,7 +455,7 @@ mod tests {
             expr: Box::new(SqlExpr::Column("email".into())),
             negated: false,
         };
-        assert_eq!(expr.eval(&doc()).unwrap(), Value::Bool(true));
+        assert_eq!(expr.eval(&doc(), &crs()).unwrap(), Value::Bool(true));
     }
 
     // ── Division/modulo by zero ──────────────────────────────────────────────
@@ -400,7 +467,7 @@ mod tests {
             op: BinaryOp::Div,
             right: Box::new(SqlExpr::Literal(Value::Integer(0))),
         };
-        assert_eq!(expr.eval(&doc()), Err(EvalError::DivisionByZero));
+        assert_eq!(expr.eval(&doc(), &crs()), Err(EvalError::DivisionByZero));
     }
 
     #[test]
@@ -410,7 +477,7 @@ mod tests {
             op: BinaryOp::Div,
             right: Box::new(SqlExpr::Literal(Value::Float(0.0))),
         };
-        assert_eq!(expr.eval(&doc()), Err(EvalError::DivisionByZero));
+        assert_eq!(expr.eval(&doc(), &crs()), Err(EvalError::DivisionByZero));
     }
 
     #[test]
@@ -424,7 +491,7 @@ mod tests {
                 rust_decimal::Decimal::ZERO,
             ))),
         };
-        assert_eq!(expr.eval(&doc()), Err(EvalError::DivisionByZero));
+        assert_eq!(expr.eval(&doc(), &crs()), Err(EvalError::DivisionByZero));
     }
 
     #[test]
@@ -434,7 +501,7 @@ mod tests {
             op: BinaryOp::Mod,
             right: Box::new(SqlExpr::Literal(Value::Integer(0))),
         };
-        assert_eq!(expr.eval(&doc()), Err(EvalError::DivisionByZero));
+        assert_eq!(expr.eval(&doc(), &crs()), Err(EvalError::DivisionByZero));
     }
 
     #[test]
@@ -446,7 +513,7 @@ mod tests {
                 SqlExpr::Literal(Value::Integer(0)),
             ],
         };
-        assert_eq!(expr.eval(&doc()), Err(EvalError::DivisionByZero));
+        assert_eq!(expr.eval(&doc(), &crs()), Err(EvalError::DivisionByZero));
     }
 
     /// An untaken CASE branch must never be evaluated — `1/0` in the THEN
@@ -465,7 +532,7 @@ mod tests {
             )],
             else_expr: Some(Box::new(SqlExpr::Literal(Value::Integer(0)))),
         };
-        assert_eq!(expr.eval(&doc()).unwrap(), Value::Integer(0));
+        assert_eq!(expr.eval(&doc(), &crs()).unwrap(), Value::Integer(0));
     }
 
     /// COALESCE stops at the first non-null argument — a later `1/0`
@@ -480,7 +547,7 @@ mod tests {
                 right: Box::new(SqlExpr::Literal(Value::Integer(0))),
             },
         ]);
-        assert_eq!(expr.eval(&doc()).unwrap(), Value::Integer(1));
+        assert_eq!(expr.eval(&doc(), &crs()).unwrap(), Value::Integer(1));
     }
 
     /// Control: `NULL + 1` still folds to `Ok(Null)` — non-division NULL
@@ -492,7 +559,7 @@ mod tests {
             op: BinaryOp::Add,
             right: Box::new(SqlExpr::Literal(Value::Integer(1))),
         };
-        assert_eq!(expr.eval(&doc()).unwrap(), Value::Null);
+        assert_eq!(expr.eval(&doc(), &crs()).unwrap(), Value::Null);
     }
 
     /// Control: a valid (non-zero-divisor) division still succeeds.
@@ -503,6 +570,6 @@ mod tests {
             op: BinaryOp::Div,
             right: Box::new(SqlExpr::Literal(Value::Integer(2))),
         };
-        assert_eq!(expr.eval(&doc()).unwrap(), Value::Integer(5));
+        assert_eq!(expr.eval(&doc(), &crs()).unwrap(), Value::Integer(5));
     }
 }

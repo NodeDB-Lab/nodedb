@@ -404,6 +404,14 @@ pub(super) fn spawn_vshard_schedulers(
         scheduler_config,
     })?;
 
+    // The data of vShards that left this node goes once their new owners
+    // serve them.
+    crate::control::cluster::vshard_departure::spawn_departure_purge(
+        shared,
+        node_id,
+        Arc::clone(&raft_loop_handle),
+    );
+
     // Background reconcile: pick up vShards whose membership lands after startup
     // (joiner admission) or shifts later (rebalancing). The routing table has no
     // change-notification, so a short fixed-interval reconcile is the simplest

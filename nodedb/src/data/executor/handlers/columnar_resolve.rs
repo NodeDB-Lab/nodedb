@@ -180,15 +180,16 @@ impl CoreLoop {
             collection,
         } = params;
         let assignments = ColumnarAssignments::bind(schema, updates)?;
+        let crs = self.crs_context();
         let mut resolved = Vec::new();
         self.for_each_current_columnar_row(key, "columnar_dml_resolve", |row| {
             let row = row.values;
-            if !row_matches(&row, schema, filter_predicates)? {
+            if !row_matches(&row, schema, filter_predicates, &crs)? {
                 return Ok(());
             }
             let old_pk = pk_value(&row, pk_col_idx, collection)?;
-            let new_row = assignments.apply(schema, row)?;
-            admit_columnar_row(rls_write_check, &new_row, schema, tid, collection)?;
+            let new_row = assignments.apply(schema, row, &crs)?;
+            admit_columnar_row(rls_write_check, &new_row, schema, tid, collection, &crs)?;
             resolved.push((old_pk, new_row));
             Ok(())
         })?;
@@ -213,12 +214,13 @@ impl CoreLoop {
             collection,
         } = params;
         let mut pks = Vec::new();
+        let crs = self.crs_context();
         self.for_each_current_columnar_row(key, "columnar_dml_resolve", |row| {
             let row = row.values;
-            if !row_matches(&row, schema, filter_predicates)? {
+            if !row_matches(&row, schema, filter_predicates, &crs)? {
                 return Ok(());
             }
-            admit_columnar_row(rls_write_check, &row, schema, tid, collection)?;
+            admit_columnar_row(rls_write_check, &row, schema, tid, collection, &crs)?;
             pks.push(pk_value(&row, pk_col_idx, collection)?);
             Ok(())
         })?;
@@ -231,11 +233,12 @@ fn row_matches(
     row: &[Value],
     schema: &ColumnarSchema,
     filter_predicates: &[ScanFilter],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<bool> {
     if filter_predicates.is_empty() {
         return Ok(true);
     }
-    row_matches_filters(row, schema, filter_predicates).map_err(crate::Error::from)
+    row_matches_filters(row, schema, filter_predicates, crs).map_err(crate::Error::from)
 }
 
 /// The primary-key cell of `row`.

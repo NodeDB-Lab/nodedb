@@ -122,6 +122,7 @@ impl CoreLoop {
         // Stand-in "no source row" document for NOT-MATCHED-BY-SOURCE arms,
         // matching the legacy walk's `&serde_json::Value::Null`.
         let null_source = serde_json::Value::Null;
+        let crs = self.crs_context();
 
         for (key, bytes) in &target_docs {
             let key = *key;
@@ -144,7 +145,7 @@ impl CoreLoop {
                 target_doc.clone()
             };
 
-            if let Some(arm) = find_arm(params.clauses, arm_kind, &context)? {
+            if let Some(arm) = find_arm(params.clauses, arm_kind, &context, &crs)? {
                 match &arm.action {
                     MergeActionOp::Update { updates: upd } => {
                         // A strict target already refuses a NULL primary key
@@ -162,6 +163,7 @@ impl CoreLoop {
                             params.source_alias,
                             upd,
                             pk,
+                            &crs,
                         )?;
                         IdentitySnapshot::capture(
                             strict_schema.as_ref(),
@@ -200,6 +202,7 @@ impl CoreLoop {
                 params.clauses,
                 MergeClauseKindOp::NotMatched,
                 &source_row.doc,
+                &crs,
             )? && let MergeActionOp::Insert { columns, values } = &arm.action
             {
                 let body = encode_doc_body(&build_insert_doc(
@@ -207,6 +210,7 @@ impl CoreLoop {
                     values,
                     &source_row.doc,
                     params.source_alias,
+                    &crs,
                 )?);
                 inserts.push(MergeInsert {
                     join_key: source_row.id.clone(),

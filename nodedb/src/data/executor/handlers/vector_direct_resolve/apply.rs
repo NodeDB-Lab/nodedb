@@ -158,10 +158,17 @@ impl CoreLoop {
                         rls_write_check,
                         tid,
                         index.collection,
+                        &self.crs_context(),
                     )?;
                 }
                 VectorResolvedMutation::Upsert { payload, .. } => {
-                    decode_resolved_payload(payload, rls_write_check, tid, index.collection)?;
+                    decode_resolved_payload(
+                        payload,
+                        rls_write_check,
+                        tid,
+                        index.collection,
+                        &self.crs_context(),
+                    )?;
                 }
                 VectorResolvedMutation::Delete { .. } => {}
             }
@@ -233,8 +240,13 @@ impl CoreLoop {
                         }
                         None => probe_key.clone(),
                     };
-                    let fields =
-                        decode_resolved_payload(merged_payload, rls_write_check, tid, collection)?;
+                    let fields = decode_resolved_payload(
+                        merged_payload,
+                        rls_write_check,
+                        tid,
+                        collection,
+                        &self.crs_context(),
+                    )?;
                     let row = VectorPlannedRow {
                         surrogate: *surrogate,
                         fields,
@@ -259,8 +271,13 @@ impl CoreLoop {
                 } => {
                     let index_key =
                         self.vector_direct_index(task, tid, &index.with_dim(vector.len()))?;
-                    let fields =
-                        decode_resolved_payload(payload, rls_write_check, tid, collection)?;
+                    let fields = decode_resolved_payload(
+                        payload,
+                        rls_write_check,
+                        tid,
+                        collection,
+                        &self.crs_context(),
+                    )?;
                     if self.vector_direct_node(&index_key, *surrogate).is_some() {
                         self.remove_vector_direct_row(&index_key, tid, collection, *surrogate)?;
                     }
@@ -288,6 +305,7 @@ fn decode_resolved_payload(
     rls_write_check: &RlsWriteCheck,
     tid: u64,
     collection: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<HashMap<String, Value>, ErrorCode> {
     let fields = decode_payload_lowercased(payload).map_err(|e| ErrorCode::Internal {
         detail: format!("vector resolved write on '{collection}': sidecar decode: {e}"),
@@ -297,6 +315,7 @@ fn decode_resolved_payload(
         &Value::Object(fields.clone()),
         tid,
         collection,
+        crs,
     )?;
     Ok(fields)
 }

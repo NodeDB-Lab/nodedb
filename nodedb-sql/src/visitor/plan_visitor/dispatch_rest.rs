@@ -78,11 +78,13 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             audit_retain_ms,
             minimum_audit_retain_ms,
             georef,
+            attr_meta,
         }) => visitor.alter_array(AlterArrayVisitArgs {
             name,
             audit_retain_ms: *audit_retain_ms,
             minimum_audit_retain_ms: *minimum_audit_retain_ms,
             georef: georef.as_ref(),
+            attr_meta: attr_meta.as_ref(),
         }),
         SqlPlan::InsertArray(InsertArrayPlan { name, rows }) => visitor.insert_array(name, rows),
         SqlPlan::DeleteArray(DeleteArrayPlan { name, coords }) => {
@@ -95,6 +97,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             limit,
             zone,
             temporal,
+            physical,
         }) => visitor.array_slice(ArraySliceVisitArgs {
             name,
             slice,
@@ -102,6 +105,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             limit: *limit,
             zone: zone.as_ref(),
             temporal,
+            physical: *physical,
         }),
         SqlPlan::ArrayAgg(ArrayAggPlan {
             name,
@@ -111,6 +115,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             slice,
             zone,
             temporal,
+            physical,
         }) => visitor.array_agg(ArrayAggVisitArgs {
             name,
             attr,
@@ -119,6 +124,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             slice,
             zone: zone.as_ref(),
             temporal,
+            physical: *physical,
         }),
         SqlPlan::ArrayElementwise(ArrayElementwisePlan {
             left,

@@ -61,12 +61,25 @@ impl CoreLoop {
             value,
             updates,
             self.declared_columns_of(did, tid, collection),
+            &self.crs_context(),
         )?;
 
-        admit_kv_row(rls_write_check, &stored_bytes, key, tid, collection)?;
+        admit_kv_row(
+            rls_write_check,
+            &stored_bytes,
+            key,
+            tid,
+            collection,
+            &self.crs_context(),
+        )?;
 
         let response_payload = match returning {
-            Some(spec) => kv_stored_rows_payload(spec, rls_filters, &[(key, &stored_bytes)])?,
+            Some(spec) => kv_stored_rows_payload(
+                spec,
+                rls_filters,
+                &[(key, &stored_bytes)],
+                &self.crs_context(),
+            )?,
             // Same `{affected, op}` shape `execute_kv_insert_on_conflict_update`
             // reports, so the tag renders identically on both paths.
             None => response_codec::encode_affected_with_op(
@@ -112,7 +125,14 @@ impl CoreLoop {
             let Some(body) = self.kv_resolve_read(did, tid, collection, key, now_ms) else {
                 continue;
             };
-            admit_kv_row(rls_write_check, &body, key, tid, collection)?;
+            admit_kv_row(
+                rls_write_check,
+                &body,
+                key,
+                tid,
+                collection,
+                &self.crs_context(),
+            )?;
             pre_images.push((key.as_slice(), body));
         }
 
@@ -122,7 +142,7 @@ impl CoreLoop {
                     .iter()
                     .map(|(key, body)| (*key, body.as_slice()))
                     .collect();
-                kv_stored_rows_payload(spec, rls_filters, &rows)?
+                kv_stored_rows_payload(spec, rls_filters, &rows, &self.crs_context())?
             }
             None => response_codec::encode_count("deleted", pre_images.len())?,
         };
@@ -194,7 +214,14 @@ impl CoreLoop {
         } = *target;
         let body = self.kv_resolve_read(did, tid, collection, key, now_ms);
         if let Some(bytes) = &body {
-            admit_kv_row(rls_write_check, bytes, key, tid, collection)?;
+            admit_kv_row(
+                rls_write_check,
+                bytes,
+                key,
+                tid,
+                collection,
+                &self.crs_context(),
+            )?;
         }
         Ok(body)
     }
@@ -228,7 +255,7 @@ impl CoreLoop {
         // mirrors `execute_kv_field_set`'s decision.
         if if_present && current.is_none() {
             let response_payload = match returning {
-                Some(spec) => kv_stored_rows_payload(spec, rls_filters, &[])?,
+                Some(spec) => kv_stored_rows_payload(spec, rls_filters, &[], &self.crs_context())?,
                 None => response_codec::encode_json_as_msgpack(
                     &serde_json::json!({ "affected": 0, "fields_added": 0 }),
                 )?,
@@ -245,10 +272,22 @@ impl CoreLoop {
             updates,
             self.declared_columns_of(did, tid, collection),
         )?;
-        admit_kv_row(rls_write_check, &computed.new_value, key, tid, collection)?;
+        admit_kv_row(
+            rls_write_check,
+            &computed.new_value,
+            key,
+            tid,
+            collection,
+            &self.crs_context(),
+        )?;
 
         let response_payload = match returning {
-            Some(spec) => kv_stored_rows_payload(spec, rls_filters, &[(key, &computed.new_value)])?,
+            Some(spec) => kv_stored_rows_payload(
+                spec,
+                rls_filters,
+                &[(key, &computed.new_value)],
+                &self.crs_context(),
+            )?,
             // Same shape `execute_kv_field_set` reports.
             None => response_codec::encode_json_as_msgpack(
                 &serde_json::json!({ "affected": 1, "fields_added": computed.fields_added }),

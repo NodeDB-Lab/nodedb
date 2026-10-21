@@ -300,6 +300,7 @@ mod tests {
                     name: "b1".into(),
                     dtype: ArrayAttrType::Float64,
                     nullable: true,
+                    meta: Default::default(),
                 }],
                 tile_extents: vec![4, 4],
                 georef,

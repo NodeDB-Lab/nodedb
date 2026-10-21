@@ -242,6 +242,15 @@ pub struct EdgePutRedo {
     #[serde(default)]
     #[msgpack(default)]
     pub applied: Option<i64>,
+    /// Start of the version's valid time, ms since epoch. `None` takes the
+    /// apply's epoch time, or the ordinal's wall time outside Calvin.
+    #[serde(default)]
+    #[msgpack(default)]
+    pub valid_from_ms: Option<i64>,
+    /// Exclusive end of the version's valid time. `None` leaves it open.
+    #[serde(default)]
+    #[msgpack(default)]
+    pub valid_until_ms: Option<i64>,
 }
 
 /// Payload of a graph edge delete: the bytes of an autocommit

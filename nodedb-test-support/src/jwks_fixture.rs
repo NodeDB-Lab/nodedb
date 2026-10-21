@@ -116,15 +116,10 @@ impl JwksFixture {
     }
 
     /// An `[auth.jwt]` section with one static provider pointing at this
-    /// fixture, bound to `tenant_id`.
-    ///
-    /// Includes the loopback allowances the JWKS fetcher needs to accept a
-    /// plaintext `http://localhost` keyset — production forbids both.
+    /// fixture, bound to `tenant_id`. Its registry fetches through
+    /// [`loopback_egress`].
     pub fn auth_config(&self, issuer: &str, audience: &str, tenant_id: u64) -> JwtAuthConfig {
         JwtAuthConfig {
-            allow_http_jwks: true,
-            allow_jwks_hosts: vec!["localhost".into()],
-            allow_jwks_cidrs: vec!["127.0.0.0/8".into(), "::1/128".into()],
             providers: vec![JwtProviderConfig {
                 name: "test-provider".into(),
                 jwks_url: self.jwks_url.clone(),
@@ -135,6 +130,26 @@ impl JwksFixture {
             ..JwtAuthConfig::default()
         }
     }
+}
+
+/// The `[egress]` policy a JWKS fetch of a fixture needs: plaintext
+/// `http://localhost` resolving to loopback. The strict default refuses both.
+pub fn loopback_egress() -> std::sync::Arc<nodedb::control::security::egress::EgressPolicy> {
+    std::sync::Arc::new(
+        nodedb::control::security::egress::EgressPolicy::from_parts(
+            true,
+            &["localhost".to_string()],
+            &["127.0.0.0/8".to_string(), "::1/128".to_string()],
+        )
+        .expect("the loopback egress policy is valid"),
+    )
+}
+
+/// Remote sources under [`loopback_egress`], so `CREATE OIDC PROVIDER` admits
+/// a fixture's `http://localhost` JWKS URI.
+pub fn loopback_sources() -> nodedb::control::security::egress::RemoteSources {
+    nodedb::control::security::egress::RemoteSources::new(loopback_egress())
+        .expect("the loopback remote sources build")
 }
 
 /// Seconds since the UNIX epoch, for `iat` / `exp` claims.

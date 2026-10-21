@@ -36,6 +36,7 @@ use super::hop::{NeighborHopParams, execute_neighbor_hop};
 use super::neighbor_rows::NeighborRow;
 use super::presence::{PresenceScope, graph_nodes_present};
 use super::shard_reads::ShardReadLog;
+use nodedb_physical::physical_plan::GraphReadScope;
 use nodedb_types::filter::MetadataFilter;
 
 /// Parameters for [`cross_core_shortest_path`].
@@ -63,6 +64,8 @@ pub struct CrossCoreShortestPathParams {
     pub edge_predicate: Vec<MetadataFilter>,
     /// The session's transaction. The path sees its staged edge writes.
     pub txn_id: Option<TxnId>,
+    /// The bitemporal cut every hop of the search reads.
+    pub read_scope: GraphReadScope,
 }
 
 /// Node → the node it was reached from. An endpoint maps to itself.
@@ -90,6 +93,7 @@ pub async fn cross_core_shortest_path(
         linearizable,
         edge_predicate,
         txn_id,
+        read_scope,
     } = params;
     let whole = whole_hop();
     // One core finds no path when either endpoint is absent from its graph,
@@ -104,6 +108,8 @@ pub async fn cross_core_shortest_path(
             options: &whole,
             linearizable,
             txn_id,
+            collection: collection.as_deref(),
+            read_scope,
         },
         &[src.clone(), dst.clone()],
         &mut presence_reads,
@@ -153,6 +159,7 @@ pub async fn cross_core_shortest_path(
                         edge_predicate: &edge_predicate,
                         with_properties: false,
                         txn_id,
+                        read_scope,
                     },
                 )
                 .await?;

@@ -180,7 +180,7 @@ impl LeaseRenewalLoop {
         let Some(shared) = self.shared.upgrade() else {
             return;
         };
-        let now_wall_ns = super::wall_now_ns();
+        let now_wall_ns = nodedb_types::wall_now_ns();
         let near_expiry = collect_near_expiry(&shared, now_wall_ns, &self.config);
         if near_expiry.is_empty() {
             return;

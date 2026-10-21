@@ -115,7 +115,8 @@ impl SystemCatalog {
                 continue;
             };
             #[cfg(test)]
-            self.dml_audit_rows_read
+            self.faults
+                .dml_audit_rows_read
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             entries.push(decode_entry(value.value())?);
         }
@@ -125,7 +126,8 @@ impl SystemCatalog {
     /// DML audit rows the position read decoded since the catalog opened.
     #[cfg(test)]
     pub(crate) fn dml_audit_rows_read_for_test(&self) -> u64 {
-        self.dml_audit_rows_read
+        self.faults
+            .dml_audit_rows_read
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 }

@@ -87,13 +87,19 @@ pub struct BspSuperstepPlan {
     /// scheduler the node runs passed it, and reads at the marker's epoch
     /// instant. Every edge version sequenced before the marker is then
     /// installed and at or below that cut. Every version sequenced after it
-    /// is above the cut. The count phase answers the cut in
+    /// is above the cut. A historical run carries its statement's pinned
+    /// ordinal in `system_as_of` with the marker: each node waits for the
+    /// marker, folds the ordinal into its ordinal clock, and reads at the
+    /// ordinal unchanged. The count phase answers the cut in
     /// `BspSuperstepResult::system_as_of`, and every later dispatch carries
     /// it as `system_as_of`.
     pub read_cut_marker: u64,
     /// The system-time ordinal every core reads the graph at. The handler
     /// refuses a plan without one.
     pub system_as_of: Option<i64>,
+    /// The valid-time instant every edge read must contain (`AS OF VALID
+    /// TIME`), or `None` for every valid time.
+    pub valid_at_ms: Option<i64>,
 }
 
 /// Result of one [`super::op::GraphOp::BspSuperstep`] on a single shard.

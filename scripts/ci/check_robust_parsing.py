@@ -17,6 +17,7 @@ APPROVED_CAPACITY_HELPERS = {
     ("nodedb-array/src/codec/limits.rs", "checked_capacity"),
     ("nodedb-codec/src/bounds.rs", "checked_capacity"),
     ("nodedb-codec/src/bounds.rs", "decoded_len"),
+    ("nodedb-raster/src/limits.rs", "checked_raster_capacity"),
     ("nodedb-spatial/src/wkb/read.rs", "checked_wkb_capacity"),
     ("nodedb-types/src/backup_envelope/read.rs", "checked_section_capacity"),
     ("nodedb-types/src/decode_bounds.rs", "checked_decode_capacity"),

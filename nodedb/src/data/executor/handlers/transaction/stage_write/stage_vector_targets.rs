@@ -68,6 +68,7 @@ impl CoreLoop {
         index_key: &VectorIndexKey,
         targets: &VectorWriteTargets,
     ) -> Result<Vec<(Surrogate, VectorCurrentRow)>, ErrorCode> {
+        let crs = self.crs_context();
         let mut out: Vec<(Surrogate, VectorCurrentRow)> = Vec::new();
         match targets {
             VectorWriteTargets::Surrogates(surrogates) => {
@@ -135,6 +136,7 @@ impl CoreLoop {
                             &row.sidecar.bytes,
                             &filters,
                             &identity_column,
+                            &crs,
                         )? {
                             out.push((surrogate, row));
                         }
@@ -173,9 +175,13 @@ impl CoreLoop {
         ) {
             for (_, row) in &rows {
                 let image = Value::Object(row.sidecar.fields.clone());
-                if let Err(e) =
-                    rls_write_gate::admit_document_value(rls_write_check, &image, tid, collection)
-                {
+                if let Err(e) = rls_write_gate::admit_document_value(
+                    rls_write_check,
+                    &image,
+                    tid,
+                    collection,
+                    &self.crs_context(),
+                ) {
                     return self.response_error(task, e);
                 }
             }
@@ -249,7 +255,12 @@ impl CoreLoop {
         let mut planned: Vec<(Surrogate, Vec<u8>, Vec<u8>)> = Vec::with_capacity(rows.len());
         for (surrogate, row) in rows {
             let VectorCurrentRow { vector, sidecar } = row;
-            let merged = match merge_vector_direct_update_row(&patch, surrogate, sidecar) {
+            let merged = match merge_vector_direct_update_row(
+                &patch,
+                surrogate,
+                sidecar,
+                &self.crs_context(),
+            ) {
                 Ok(merged) => merged,
                 Err(e) => return self.response_error(task, e),
             };

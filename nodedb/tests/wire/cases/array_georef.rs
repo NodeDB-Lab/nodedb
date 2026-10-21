@@ -121,7 +121,7 @@ async fn create_with_georef_then_describe() {
 async fn create_georef_refusals_carry_their_sqlstate() {
     let server = TestServer::start().await;
     let cases = [
-        ("GEOREF (SRID 2154, X col, Y row)", "22000"),
+        ("GEOREF (SRID 999, X col, Y row)", "22000"),
         ("GEOREF (SRID 4326, X col, Y lat)", "42703"),
         ("GEOREF (SRID 4326, X col, Y col)", "22000"),
         (

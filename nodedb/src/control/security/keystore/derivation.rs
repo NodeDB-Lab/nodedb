@@ -9,6 +9,7 @@ use super::file::FileKeyProvider;
 use super::provider::KeyProvider;
 use super::vault::VaultKeyProvider;
 use crate::Result;
+use crate::control::security::egress::RemoteSources;
 
 /// How the server obtains its 32-byte AES-256 encryption key.
 ///
@@ -79,11 +80,24 @@ pub enum KeyDerivation {
 }
 
 impl KeyDerivation {
+    /// The `type` name of this source, for log lines and errors.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            KeyDerivation::File { .. } => "file",
+            KeyDerivation::Vault { .. } => "vault",
+            KeyDerivation::AwsKms { .. } => "aws_kms",
+        }
+    }
+
     /// Build a boxed `KeyProvider` for this derivation config.
     ///
     /// This is called once at startup. The returned provider's `unwrap_key()`
-    /// is then called to obtain the 32-byte plaintext key.
-    pub async fn into_provider(self) -> Result<Box<dyn KeyProvider + Send + Sync>> {
+    /// is then called to obtain the 32-byte plaintext key. A Vault provider
+    /// reaches Vault through the outbound client of `sources`.
+    pub async fn into_provider(
+        self,
+        sources: &RemoteSources,
+    ) -> Result<Box<dyn KeyProvider + Send + Sync>> {
         match self {
             KeyDerivation::File { key_path } => Ok(Box::new(FileKeyProvider { key_path })),
             KeyDerivation::Vault {
@@ -98,7 +112,8 @@ impl KeyDerivation {
                 key_name,
                 mount,
                 ciphertext_blob_path,
-            ))),
+                sources,
+            )?)),
             KeyDerivation::AwsKms {
                 key_id,
                 region,

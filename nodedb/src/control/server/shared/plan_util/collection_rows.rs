@@ -114,10 +114,7 @@ pub(super) fn graph_collection(op: &GraphOp) -> Option<&str> {
         GraphOp::EdgePutBatch { .. } | GraphOp::EdgeDeleteBatch { .. } => None,
         // `params.collection` is a bare catalog name, not a qualified
         // collection. The algorithm dispatch gates its read before it runs.
-        GraphOp::Algo { .. }
-        | GraphOp::TemporalAlgorithm { .. }
-        | GraphOp::BspSuperstep(_)
-        | GraphOp::WccSuperstep(_) => None,
+        GraphOp::Algo { .. } | GraphOp::BspSuperstep(_) | GraphOp::WccSuperstep(_) => None,
         // A pattern names its collections inside the encoded query.
         GraphOp::Match { .. }
         | GraphOp::MatchContinuation { .. }
@@ -181,9 +178,7 @@ mod tests {
     use nodedb_graph::{Direction, GraphTraversalOptions};
     use nodedb_physical::physical_plan::BatchEdge;
     use nodedb_types::geometry::{Geometry, SridGeometry};
-    use nodedb_types::{
-        DatabaseId, QualifiedCollection, RlsWriteCheck, Surrogate, SystemTimeScope,
-    };
+    use nodedb_types::{DatabaseId, QualifiedCollection, RlsWriteCheck, Surrogate};
 
     use super::super::collection::extract_collection;
     use crate::bridge::envelope::PhysicalPlan;
@@ -220,7 +215,7 @@ mod tests {
                 collection: docs(),
                 cursor: Vec::new(),
                 count: 0,
-                system_as_of_ms: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
                 raw_bodies: false,
             }),
             PhysicalPlan::Document(DocumentOp::ApplyBalanceDelta {
@@ -317,6 +312,8 @@ mod tests {
                 properties: Vec::new(),
                 src_surrogate: Surrogate::new(1),
                 dst_surrogate: Surrogate::new(2),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
             PhysicalPlan::Graph(edge_delete()),
             PhysicalPlan::Graph(GraphOp::ResolveEdgeDelete(Box::new(edge_delete()))),
@@ -329,6 +326,7 @@ mod tests {
                 options: GraphTraversalOptions::default(),
                 rls_filters: Vec::new(),
                 frontier_bitmap: None,
+                scope: nodedb_physical::physical_plan::GraphReadScope::default(),
             }),
             PhysicalPlan::Graph(GraphOp::Neighbors {
                 collection: scoped(),
@@ -336,6 +334,7 @@ mod tests {
                 edge_labels: Vec::new(),
                 direction: Direction::Out,
                 rls_filters: Vec::new(),
+                scope: nodedb_physical::physical_plan::GraphReadScope::default(),
             }),
             PhysicalPlan::Graph(GraphOp::NeighborsMulti {
                 collection: scoped(),
@@ -346,6 +345,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 edge_predicate: Vec::new(),
                 with_properties: false,
+                scope: nodedb_physical::physical_plan::GraphReadScope::default(),
             }),
             PhysicalPlan::Graph(GraphOp::Path {
                 collection: scoped(),
@@ -356,6 +356,7 @@ mod tests {
                 options: GraphTraversalOptions::default(),
                 rls_filters: Vec::new(),
                 frontier_bitmap: None,
+                scope: nodedb_physical::physical_plan::GraphReadScope::default(),
             }),
             PhysicalPlan::Graph(GraphOp::Subgraph {
                 collection: scoped(),
@@ -364,6 +365,7 @@ mod tests {
                 depth: 1,
                 options: GraphTraversalOptions::default(),
                 rls_filters: Vec::new(),
+                scope: nodedb_physical::physical_plan::GraphReadScope::default(),
             }),
             PhysicalPlan::Graph(GraphOp::Stats {
                 collection: scoped(),
@@ -374,8 +376,7 @@ mod tests {
                 node_id: "n".into(),
                 edge_label: None,
                 direction: Direction::Out,
-                system_time: SystemTimeScope::Current,
-                valid_at_ms: None,
+                scope: nodedb_physical::physical_plan::GraphReadScope::default(),
                 rls_filters: Vec::new(),
             }),
             PhysicalPlan::Graph(GraphOp::NodeEdgeGuard {

@@ -72,6 +72,7 @@ pub(in crate::data::executor) fn fit_and_admit_kv_image(
     key: &[u8],
     tid: u64,
     collection: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<Option<Vec<u8>>, AtomicError> {
     let fitted =
         fit_kv_image(image, declared).map_err(|error| AtomicError::Declared(Box::new(error)))?;
@@ -81,6 +82,7 @@ pub(in crate::data::executor) fn fit_and_admit_kv_image(
         key,
         tid,
         collection,
+        crs,
     )
     .map_err(|error| AtomicError::Rejected(Box::new(error)))?;
     Ok(fitted)

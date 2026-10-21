@@ -3,6 +3,7 @@
 //! `Parser` struct and recursive-descent parse methods for array statements.
 
 mod alter;
+mod attr_meta;
 mod core;
 mod create;
 mod delete_stmt;

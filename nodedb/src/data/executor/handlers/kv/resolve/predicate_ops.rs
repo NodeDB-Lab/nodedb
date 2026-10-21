@@ -41,7 +41,14 @@ impl CoreLoop {
         for (key, body) in matched {
             let computed =
                 merge_field_updates(collection, Some(body.as_slice()), updates, declared)?;
-            admit_kv_row(rls_write_check, &computed.new_value, &key, tid, collection)?;
+            admit_kv_row(
+                rls_write_check,
+                &computed.new_value,
+                &key,
+                tid,
+                collection,
+                &self.crs_context(),
+            )?;
             writes.push((key, body, computed.new_value));
         }
 
@@ -51,7 +58,7 @@ impl CoreLoop {
                     .iter()
                     .map(|(key, _old_body, new_value)| (key.as_slice(), new_value.as_slice()))
                     .collect();
-                kv_stored_rows_payload(spec, rls_filters, &rows)?
+                kv_stored_rows_payload(spec, rls_filters, &rows, &self.crs_context())?
             }
             None => response_codec::encode_count("affected", writes.len())?,
         };
@@ -93,7 +100,14 @@ impl CoreLoop {
         let matched = self.kv_predicate_matches(did, tid, collection, filters, now_ms)?;
 
         for (key, body) in &matched {
-            admit_kv_row(rls_write_check, body, key, tid, collection)?;
+            admit_kv_row(
+                rls_write_check,
+                body,
+                key,
+                tid,
+                collection,
+                &self.crs_context(),
+            )?;
         }
 
         let response_payload = match returning {
@@ -102,7 +116,7 @@ impl CoreLoop {
                     .iter()
                     .map(|(key, body)| (key.as_slice(), body.as_slice()))
                     .collect();
-                kv_stored_rows_payload(spec, rls_filters, &rows)?
+                kv_stored_rows_payload(spec, rls_filters, &rows, &self.crs_context())?
             }
             None => response_codec::encode_count("deleted", matched.len())?,
         };

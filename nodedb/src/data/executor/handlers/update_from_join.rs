@@ -15,6 +15,7 @@ use crate::data::executor::enforcement::materialized_sum::divergence::SumTargetC
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::response_codec::encode_json_as_msgpack;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::document::store::StorageKey;
 
 use super::update_from_join_write::WriteResolvedRowsCtx;
 
@@ -116,14 +117,14 @@ impl CoreLoop {
         // A bitemporal target reads each row's current version and lands a new
         // version at one system time for the whole statement, as a point
         // update does for its row.
-        let bitemporal_sys_from_ms = self
+        let mut bitemporal_sys_from = self
             .is_bitemporal(task.request.database_id.as_u64(), tid, target_collection)
-            .then(|| self.bitemporal_now_ms());
+            .then(|| self.bitemporal_ordinal());
 
         // Scan the target, join, evaluate assignments, encode the post-image —
         // without writing. Shared by both the resolve pass and write path.
-        let rows = match self.collect_update_from_join_rows(
-            super::update_from_join_collect::CollectUpdateRows {
+        let collect_rows = |core: &Self, bitemporal_sys_from: Option<i64>| {
+            core.collect_update_from_join_rows(super::update_from_join_collect::CollectUpdateRows {
                 task,
                 tid,
                 target_collection,
@@ -135,14 +136,39 @@ impl CoreLoop {
                 strict_schema: strict_schema.as_ref(),
                 config_key: &config_key,
                 declared_primary_key,
-                bitemporal_sys_from_ms,
-            },
-        ) {
+                bitemporal_sys_from,
+            })
+        };
+        let mut rows = match collect_rows(&*self, bitemporal_sys_from) {
             Ok(r) => r,
             Err(e) => {
                 return self.response_error(task, ErrorCode::from(e));
             }
         };
+
+        // The statement's ordinal rises above the newest stored version of
+        // every matched row. A raised ordinal re-encodes the post-images,
+        // which carry it.
+        if let Some(base) = bitemporal_sys_from {
+            let keys: Vec<StorageKey> = rows.iter().map(|row| row.key).collect();
+            let raised = match self.raised_rows_ordinal(
+                base,
+                task.request.database_id.as_u64(),
+                tid,
+                target_collection,
+                &keys,
+            ) {
+                Ok(ordinal) => ordinal,
+                Err(e) => return self.response_error(task, ErrorCode::from(e)),
+            };
+            if raised != base {
+                bitemporal_sys_from = Some(raised);
+                rows = match collect_rows(&*self, bitemporal_sys_from) {
+                    Ok(r) => r,
+                    Err(e) => return self.response_error(task, ErrorCode::from(e)),
+                };
+            }
+        }
 
         // RESOLVE pass: hand the matched rows back for COMMIT-time expansion.
         // No `sparse.put`, no vector re-index, no write-set, no events.
@@ -184,9 +210,13 @@ impl CoreLoop {
             nodedb_types::WriteGateDecision::AdmitAll
         ) {
             for row in &rows {
-                if let Err(e) =
-                    rls_write_gate::admit_row(rls_write_check, &row.doc, tid, target_collection)
-                {
+                if let Err(e) = rls_write_gate::admit_row(
+                    rls_write_check,
+                    &row.doc,
+                    tid,
+                    target_collection,
+                    &self.crs_context(),
+                ) {
                     return self.response_error(task, e);
                 }
             }
@@ -228,7 +258,7 @@ impl CoreLoop {
                 strict_schema: strict_schema.as_ref(),
                 declared_primary_key,
                 want_returning: returning.is_some(),
-                bitemporal_sys_from_ms,
+                bitemporal_sys_from,
             },
             rows,
         ) {
@@ -241,6 +271,7 @@ impl CoreLoop {
                 spec,
                 rls_filters,
                 &outcome.returned_docs,
+                &self.crs_context(),
             ) {
                 Ok(payload) => self.response_with_payload(task, payload),
                 Err(e) => self.response_error(task, ErrorCode::from(e)),

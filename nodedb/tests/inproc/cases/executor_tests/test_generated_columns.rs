@@ -47,6 +47,7 @@ fn register_with_generated(
             vector_fields: Vec::new(),
             declared_columns: Vec::new(),
             declared_key: None,
+            incarnation: nodedb_types::Hlc::ZERO,
         }),
     );
 }

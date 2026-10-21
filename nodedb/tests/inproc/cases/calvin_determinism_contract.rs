@@ -248,6 +248,7 @@ fn columnar_insert_byte_identical() {
                 schema_bytes: Vec::new(),
                 provenance: None,
                 wal_lsn: None,
+                system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 returning: None,
                 rls_filters: Vec::new(),
@@ -296,22 +297,20 @@ fn crdt_apply_byte_identical() {
 // epoch timestamp through the Calvin write path so all replicas produce
 // byte-identical responses.
 
-/// Document engine (bitemporal): verifies that `bitemporal_now_ms()` now uses
-/// `epoch_system_ms` (the Calvin epoch anchor) instead of `SystemTime::now()`.
+/// Document engine (bitemporal): two independent `CoreLoop` instances
+/// receiving the same ops produce byte-identical response payloads.
 ///
-/// Two independent `CoreLoop` instances receiving the same ops must produce
-/// byte-identical response payloads. The bitemporal `sys_from` field is stamped
-/// from `last_stamp_ms` (seeded to 0 on each fresh core), not wall clock,
-/// so payloads are identical across runs.
+/// On the Calvin path a bitemporal document version stamps the
+/// transaction's system-time ordinal (`calvin_txn_ordinal`), which every
+/// replica derives from the epoch instant and position, so replicas key the
+/// version alike.
 ///
 /// Note: this test does NOT register a bitemporal collection config because the
-/// test harness doesn't expose `RegisterDocumentCollection`. Non-bitemporal
-/// PointPut goes through `apply_point_put` → `self.bitemporal_now_ms()` only
-/// when `is_bitemporal()` returns true. Without registration the collection is
-/// treated as non-bitemporal and the response is already deterministic via the
-/// existing `document_schemaless_non_bitemporal_byte_identical` test.
-/// The determinism of the bitemporal code path is verified by the structural
-/// fix: `bitemporal_now_ms()` now returns `epoch_system_ms.unwrap_or(wall)`.
+/// test harness doesn't expose `RegisterDocumentCollection`. A PointPut stamps
+/// a system-time ordinal in `apply_point_put` only when `is_bitemporal()`
+/// returns true. Without registration the collection is treated as
+/// non-bitemporal and the response is already deterministic via the existing
+/// `document_schemaless_non_bitemporal_byte_identical` test.
 #[test]
 fn document_bitemporal_byte_identical() {
     let ops: Vec<PhysicalPlan> = (0..100)
@@ -400,6 +399,8 @@ fn graph_edge_put_byte_identical() {
                 properties: Vec::new(),
                 src_surrogate: nodedb_types::Surrogate::new(i + 1),
                 dst_surrogate: nodedb_types::Surrogate::new(i + 2),
+                valid_from_ms: None,
+                valid_until_ms: None,
             })
         })
         .collect();

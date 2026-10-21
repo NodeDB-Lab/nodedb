@@ -52,11 +52,10 @@ pub(super) fn apply_graph(ctx: &PermCtx<'_>, op: &GraphOp) -> crate::Result<()> 
         // every row (including ones outside the subtree), no column to
         // filter. `AlgoParams` comes from `nodedb-graph` and carries a bare
         // name — qualify it against this task's database before the lookup.
-        GraphOp::Algo { params, .. } | GraphOp::TemporalAlgorithm { params, .. } => ctx
-            .refuse_if_tree(
-                &nodedb_types::QualifiedCollection::new(ctx.database_id, &params.collection),
-                ALGORITHM_REASON,
-            ),
+        GraphOp::Algo { params, .. } => ctx.refuse_if_tree(
+            &nodedb_types::QualifiedCollection::new(ctx.database_id, &params.collection),
+            ALGORITHM_REASON,
+        ),
 
         // Refuse: the distributed supersteps are the same algorithms one round
         // at a time, carrying the target collection in their params.
@@ -159,6 +158,7 @@ mod tests {
             edge_labels: Vec::new(),
             direction: nodedb_types::graph::Direction::Out,
             rls_filters: Vec::new(),
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         })
     }
 
@@ -210,6 +210,7 @@ mod tests {
                 personalization_vector: None,
             },
             stage: nodedb_physical::physical_plan::AlgoStage::Local,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         });
         assert_refused(apply(&mut plan, &cache), "docs");
     }

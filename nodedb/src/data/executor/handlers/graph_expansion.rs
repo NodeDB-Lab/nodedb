@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 
 use nodedb_graph::{SurrogateBfsParams, SurrogateHops};
+use nodedb_physical::physical_plan::GraphReadScope;
 use nodedb_types::Surrogate;
 use tracing::warn;
 
@@ -43,6 +44,9 @@ pub(in crate::data::executor) struct GraphExpansionParams<'a> {
     pub max_depth: usize,
     pub max_visited: usize,
     pub collection: &'a str,
+    /// The bitemporal cut the expansion walks. A historical cut walks the
+    /// collection's CSR at it, which the dispatcher prepared.
+    pub scope: &'a GraphReadScope,
 }
 
 /// Reached nodes, in both currencies.
@@ -75,7 +79,7 @@ impl CoreLoop {
     pub(in crate::data::executor) fn expand_graph(
         &self,
         params: GraphExpansionParams<'_>,
-    ) -> GraphExpansion {
+    ) -> crate::Result<GraphExpansion> {
         let GraphExpansionParams {
             database_id,
             tid,
@@ -85,20 +89,21 @@ impl CoreLoop {
             max_depth,
             max_visited,
             collection,
+            scope,
         } = params;
 
         let budget_node_limit =
             self.query_tuning.bfs_memory_budget_bytes / self.query_tuning.bfs_bytes_per_node;
         let effective_limit = max_visited.min(budget_node_limit);
 
-        let Some(partition) = self.csr_partition(database_id, tid) else {
-            return GraphExpansion {
+        let Some(partition) = self.csr_view(database_id, tid, Some(collection), scope)? else {
+            return Ok(GraphExpansion {
                 names: Vec::new(),
                 distances: HashMap::new(),
                 reached: Vec::new(),
                 truncated: false,
                 unaddressable: 0,
-            };
+            });
         };
 
         // Both seed kinds resolve to CSR-local ids once, here. A name resolves
@@ -149,7 +154,7 @@ impl CoreLoop {
             );
         }
 
-        self.resolve_reached(partition, &hops)
+        Ok(self.resolve_reached(partition, &hops))
     }
 
     /// The single name resolution: one lookup per reached node, at the end.

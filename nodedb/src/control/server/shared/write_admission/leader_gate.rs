@@ -17,10 +17,18 @@
 //!   remains of that deadline.
 //!
 //! Followers apply the committed entry with no gate: the leader ordered it.
+//!
+//! The gate also stamps the entry with the system-time ordinals its write
+//! lands (`ReplicatedEntry::system_ordinal`), reserved from this leader's
+//! clock once the entry holds its keys. A later write to the same keys is
+//! admitted only after this one lands, so it reserves a later run. Every
+//! replica folds each applied stamp into its clock, so a new leader stamps
+//! above every entry it applied. Every replica installs the stamp the entry
+//! carries, so a version has one system time on every replica.
 
 use std::sync::{Arc, Weak};
 
-use nodedb_cluster::{CalvinError, ClusterError, DataProposeGate, ProposeHold};
+use nodedb_cluster::{Admitted, CalvinError, ClusterError, DataProposeGate, ProposeHold};
 
 use crate::control::state::SharedState;
 use crate::control::wal_replication::decode::decode_parsed_entry;
@@ -56,39 +64,66 @@ impl DataProposeGate for LeaderWriteGate {
         vshard_id: u32,
         entry: &[u8],
         deadline: tokio::time::Instant,
-    ) -> nodedb_cluster::Result<Option<Box<dyn ProposeHold>>> {
+    ) -> nodedb_cluster::Result<Admitted> {
         // A node that is shutting down proposes nothing its gate must order.
         let Some(state) = self.state.upgrade() else {
-            return Ok(None);
+            return Ok(Admitted::default());
         };
         let vshard = VShardId::new(vshard_id);
         // Bytes that are not a replicated entry apply as nothing on any replica.
-        let Some(entry) = ReplicatedEntry::from_bytes(entry) else {
-            return Ok(None);
+        let Some(mut entry) = ReplicatedEntry::from_bytes(entry) else {
+            return Ok(Admitted::default());
         };
         admit_redo_stream(&state, &entry, deadline).map_err(gate_error)?;
-        let guard = match admit_entry(&state, vshard, &entry).map_err(gate_error)? {
-            WriteAdmission::ExemptRead | WriteAdmission::FastPath { guard: None } => {
-                return Ok(None);
-            }
-            // No scheduler runs for the vShard here: the log alone orders
-            // the write. Its landing fences the vShard's next scheduler.
-            WriteAdmission::FastPathBlocking { ticket, .. }
-            | WriteAdmission::Unscheduled { ticket } => {
-                return Ok(Some(Box::new(UnscheduledLanding { ticket })));
-            }
-            WriteAdmission::FastPath { guard: Some(guard) } => guard,
-            WriteAdmission::RouteToCalvin => {
-                return Err(ClusterError::Calvin(CalvinError::RouteToSequencer));
-            }
-            WriteAdmission::Wait(wait) => wait.acquire(deadline).await.map_err(gate_error)?,
-        };
-        Ok(Some(Box::new(LandedHold {
-            state,
-            vshard,
-            guard,
-        })))
+        let hold: Option<Box<dyn ProposeHold>> =
+            match admit_entry(&state, vshard, &entry).map_err(gate_error)? {
+                WriteAdmission::ExemptRead | WriteAdmission::FastPath { guard: None } => None,
+                // No scheduler runs for the vShard here: the log alone orders
+                // the write. Its landing fences the vShard's next scheduler.
+                WriteAdmission::FastPathBlocking { ticket, .. }
+                | WriteAdmission::Unscheduled { ticket } => {
+                    Some(Box::new(UnscheduledLanding { ticket }))
+                }
+                WriteAdmission::FastPath { guard: Some(guard) } => Some(Box::new(LandedHold {
+                    state: Arc::clone(&state),
+                    vshard,
+                    guard,
+                })),
+                WriteAdmission::RouteToCalvin => {
+                    return Err(ClusterError::Calvin(CalvinError::RouteToSequencer));
+                }
+                WriteAdmission::Wait(wait) => {
+                    let guard = wait.acquire(deadline).await.map_err(gate_error)?;
+                    Some(Box::new(LandedHold {
+                        state: Arc::clone(&state),
+                        vshard,
+                        guard,
+                    }))
+                }
+            };
+        // Stamped once the entry holds its keys. A refusal past this point
+        // drops `hold`, which frees them.
+        let entry = stamp_system_ordinal(&state, &mut entry).map_err(gate_error)?;
+        Ok(Admitted { hold, entry })
     }
+}
+
+/// Reserve the run of system-time ordinals `entry`'s write stamps from this
+/// leader's clock, write its first ordinal into the entry, and return the
+/// re-encoded entry. `None` for a write that lands no system-time version:
+/// its bytes propose as sent.
+///
+/// The leader's stamp replaces any stamp the bytes carry, so a re-proposal
+/// to a new leader stamps from the new leader's clock.
+fn stamp_system_ordinal(
+    state: &SharedState,
+    entry: &mut ReplicatedEntry,
+) -> crate::Result<Option<Vec<u8>>> {
+    let Some(span) = entry.write.system_ordinal_span() else {
+        return Ok(None);
+    };
+    entry.system_ordinal = state.wal.ordinal_clock().reserve(span);
+    entry.encode().map(Some)
 }
 
 /// An admitted entry's keys, held until the entry lands in the log.

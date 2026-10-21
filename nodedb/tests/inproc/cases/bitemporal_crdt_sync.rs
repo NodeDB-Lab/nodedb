@@ -64,6 +64,7 @@ fn bitemporal_unique_scoped_to_current() {
         CrdtAuthContext::default(),
         &change("u1-v1", "alice@old.com", 0, 1_000, 100),
         b"delta1".to_vec(),
+        &nodedb_crs::CrsContext::builtin_only(),
     )
     .expect("v1 should accept");
 
@@ -74,6 +75,7 @@ fn bitemporal_unique_scoped_to_current() {
         CrdtAuthContext::default(),
         &change("u2-v1", "alice@old.com", 2_000, VALID_UNTIL_OPEN, 200),
         b"delta2".to_vec(),
+        &nodedb_crs::CrsContext::builtin_only(),
     )
     .expect("reusing superseded email should not collide");
 }
@@ -89,6 +91,7 @@ fn bitemporal_unique_still_collides_for_live_rows() {
         CrdtAuthContext::default(),
         &change("u1", "bob@example.com", 0, VALID_UNTIL_OPEN, 100),
         b"delta1".to_vec(),
+        &nodedb_crs::CrsContext::builtin_only(),
     )
     .expect("first live insert accepted");
 
@@ -97,6 +100,7 @@ fn bitemporal_unique_still_collides_for_live_rows() {
         CrdtAuthContext::default(),
         &change("u2", "bob@example.com", 0, VALID_UNTIL_OPEN, 200),
         b"delta2".to_vec(),
+        &nodedb_crs::CrsContext::builtin_only(),
     );
     assert!(
         err.is_err(),
@@ -121,6 +125,7 @@ fn bitemporal_crdt_system_ts_receiver_stamped() {
         CrdtAuthContext::default(),
         &change("u1", "c@example.com", 0, VALID_UNTIL_OPEN, sender_ts),
         b"delta".to_vec(),
+        &nodedb_crs::CrsContext::builtin_only(),
     )
     .unwrap();
 
@@ -162,6 +167,7 @@ fn bitemporal_crdt_preserves_multi_version_history() {
             CrdtAuthContext::default(),
             &change("u1", row_email, valid_from, VALID_UNTIL_OPEN, 0),
             vec![],
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
     }
@@ -202,6 +208,7 @@ fn bitemporal_crdt_purge_drops_superseded_below_cutoff() {
             CrdtAuthContext::default(),
             &change("u1", email, 0, VALID_UNTIL_OPEN, 0),
             vec![],
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
     }
@@ -247,6 +254,7 @@ fn bitemporal_crdt_divergence_preserves_both_versions_via_archive() {
         CrdtAuthContext::default(),
         &change("u1", "a@peer.com", 0, VALID_UNTIL_OPEN, 0),
         vec![],
+        &nodedb_crs::CrsContext::builtin_only(),
     )
     .unwrap();
     let ts_a = {
@@ -267,6 +275,7 @@ fn bitemporal_crdt_divergence_preserves_both_versions_via_archive() {
         CrdtAuthContext::default(),
         &change("u1", "b@peer.com", 1_000, VALID_UNTIL_OPEN, 0),
         vec![],
+        &nodedb_crs::CrsContext::builtin_only(),
     )
     .unwrap();
 

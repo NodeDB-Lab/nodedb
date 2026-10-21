@@ -46,6 +46,7 @@ pub(super) enum RecursionError {
 pub(super) fn iterate(
     rows: &[RecursiveRow],
     spec: &RecursionSpec<'_>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<Vec<Vec<u8>>, RecursionError> {
     let mut results: Vec<Vec<u8>> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -60,7 +61,8 @@ pub(super) fn iterate(
         (Some(_), false) => (false, ""),
     };
     for row in rows {
-        if matches(spec.base_preds, &row.body)? && admit(base_dedup, &mut seen, row, base_key)? {
+        if matches(spec.base_preds, &row.body, crs)? && admit(base_dedup, &mut seen, row, base_key)?
+        {
             results.push(row.body.clone());
         }
     }
@@ -76,7 +78,7 @@ pub(super) fn iterate(
             // between steps.
             let mut reachable = LinkIndex::default();
             for (index, row) in rows.iter().enumerate() {
-                if matches(spec.recursive_preds, &row.body)?
+                if matches(spec.recursive_preds, &row.body, crs)?
                     && let Some(key) = field_value(&row.body, collection_field)
                 {
                     reachable.insert(key, index);
@@ -125,7 +127,7 @@ pub(super) fn iterate(
             for _ in 0..spec.max_iterations {
                 let mut new_rows = Vec::new();
                 for row in rows {
-                    if matches(spec.recursive_preds, &row.body)?
+                    if matches(spec.recursive_preds, &row.body, crs)?
                         && admit(true, &mut seen, row, if spec.distinct { "" } else { "id" })?
                     {
                         new_rows.push(row.body.clone());
@@ -151,8 +153,12 @@ fn finish(mut results: Vec<Vec<u8>>, limit: usize) -> Vec<Vec<u8>> {
     results
 }
 
-fn matches(preds: &[ScanFilter], body: &[u8]) -> Result<bool, RecursionError> {
-    ScanFilter::all_match_binary(preds, body).map_err(RecursionError::Eval)
+fn matches(
+    preds: &[ScanFilter],
+    body: &[u8],
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> Result<bool, RecursionError> {
+    ScanFilter::all_match_binary(preds, body, crs).map_err(RecursionError::Eval)
 }
 
 /// Whether `row` is new. With `distinct` off every row is new. `by` selects
@@ -264,7 +270,12 @@ mod tests {
             distinct: true,
             limit: usize::MAX,
         };
-        assert_eq!(iterate(&rows, &spec).expect("iterate").len(), 10_500);
+        assert_eq!(
+            iterate(&rows, &spec, &nodedb_crs::CrsContext::builtin_only())
+                .expect("iterate")
+                .len(),
+            10_500
+        );
     }
 
     #[test]
@@ -281,7 +292,7 @@ mod tests {
             limit: usize::MAX,
         };
         assert!(matches!(
-            iterate(&rows, &spec),
+            iterate(&rows, &spec, &nodedb_crs::CrsContext::builtin_only()),
             Err(RecursionError::DepthExceeded { max_depth: 10 })
         ));
     }
@@ -299,7 +310,12 @@ mod tests {
             distinct: true,
             limit: 5,
         };
-        assert_eq!(iterate(&rows, &spec).expect("iterate").len(), 5);
+        assert_eq!(
+            iterate(&rows, &spec, &nodedb_crs::CrsContext::builtin_only())
+                .expect("iterate")
+                .len(),
+            5
+        );
     }
 
     /// A filter-only recursion without DISTINCT returns each base row once:
@@ -332,7 +348,8 @@ mod tests {
             distinct: false,
             limit: usize::MAX,
         };
-        let results = iterate(&rows, &spec).expect("iterate");
+        let results =
+            iterate(&rows, &spec, &nodedb_crs::CrsContext::builtin_only()).expect("iterate");
         let roots = results
             .iter()
             .filter(|body| field_value(body, "id") == Some(Value::String("root".into())))
@@ -370,7 +387,12 @@ mod tests {
             distinct: false,
             limit: usize::MAX,
         };
-        assert_eq!(iterate(&rows, &spec).expect("iterate").len(), 4);
+        assert_eq!(
+            iterate(&rows, &spec, &nodedb_crs::CrsContext::builtin_only())
+                .expect("iterate")
+                .len(),
+            4
+        );
     }
 
     /// The link compares by WHERE equality: a text parent `'0'` follows the
@@ -397,6 +419,11 @@ mod tests {
             distinct: true,
             limit: usize::MAX,
         };
-        assert_eq!(iterate(&rows, &spec).expect("iterate").len(), 2);
+        assert_eq!(
+            iterate(&rows, &spec, &nodedb_crs::CrsContext::builtin_only())
+                .expect("iterate")
+                .len(),
+            2
+        );
     }
 }

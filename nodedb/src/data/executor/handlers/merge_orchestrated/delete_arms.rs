@@ -164,7 +164,7 @@ impl CoreLoop {
                         write_set.push(removed_row_image(
                             surrogate.as_u32(),
                             row_identity.clone(),
-                            outcome.bitemporal_sys_from_ms,
+                            outcome.bitemporal_sys_from,
                         ));
                     }
                     write_set.extend(write_hook::target_write_set(&target_writes));

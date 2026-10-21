@@ -246,6 +246,7 @@ mod tests {
             system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             zone_msgpack: Vec::new(),
+            physical: false,
         }
     }
 
@@ -257,9 +258,10 @@ mod tests {
             group_by_dim: -1,
             slice_tile_keys: Vec::new(),
             prefix_bits: 0,
-            system_as_of: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             region_msgpack: Vec::new(),
+            physical: false,
         }
     }
 
@@ -329,7 +331,7 @@ mod tests {
             op: nodedb_physical::physical_plan::ArrayBinaryOp::Add,
             attr_idx: 0,
             prefix_bits: 0,
-            system_as_of: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
         };
         let rows = vec![row(1), row(2)];

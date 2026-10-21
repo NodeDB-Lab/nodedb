@@ -24,6 +24,7 @@ path = "src/lib.rs"
 [dependencies]
 # Internal foundation crates
 nodedb-types = { workspace = true }
+nodedb-crs = { workspace = true }
 nodedb-columnar = { workspace = true, features = ["diagnostics"] }
 nodedb-bridge = { workspace = true }
 nodedb-physical = { workspace = true }
@@ -42,6 +43,7 @@ nodedb-graph = { workspace = true }
 nodedb-vector = { workspace = true }
 nodedb-array = { workspace = true }
 nodedb-raster = { workspace = true }
+nodedb-raster-load = { workspace = true }
 nodedb-sql = { workspace = true }
 arrow = { workspace = true }
 

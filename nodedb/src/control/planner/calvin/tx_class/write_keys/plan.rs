@@ -188,6 +188,8 @@ mod tests {
             dst_id: dst.to_owned(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
         }
     }
 
@@ -442,6 +444,8 @@ mod tests {
                         properties: Vec::new(),
                         src_surrogate: edge.src_surrogate,
                         dst_surrogate: edge.dst_surrogate,
+                        valid_from_ms: None,
+                        valid_until_ms: None,
                     })
                 })
                 .collect(),
@@ -482,6 +486,7 @@ mod tests {
             PhysicalPlan::Columnar(ColumnarOp::Delete {
                 collection: qualified("col"),
                 filters: Vec::new(),
+                system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             }),
             PhysicalPlan::Vector(VectorOp::SparseDelete {

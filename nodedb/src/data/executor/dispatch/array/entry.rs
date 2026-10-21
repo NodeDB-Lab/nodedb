@@ -10,6 +10,7 @@ use nodedb_array::types::ArrayId;
 use crate::bridge::envelope::{ErrorCode, Response};
 use nodedb_mem;
 use nodedb_physical::physical_plan::ArrayOp;
+use nodedb_types::SystemTimeScope;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::dispatch::array::aggregate::AggParams;
@@ -93,6 +94,7 @@ impl CoreLoop {
                 system_time,
                 valid_at_ms,
                 zone_msgpack,
+                physical,
             } => self.dispatch_array_slice(
                 task,
                 SliceParams {
@@ -105,6 +107,7 @@ impl CoreLoop {
                     system_time: *system_time,
                     valid_at_ms: *valid_at_ms,
                     zone_msgpack,
+                    physical: *physical,
                 },
             ),
             ArrayOp::SurrogateBitmapScan {
@@ -119,24 +122,29 @@ impl CoreLoop {
                 cell_filter,
                 return_partial,
                 shard_bucket,
-                system_as_of,
+                system_time,
                 valid_at_ms,
                 region_msgpack,
-            } => self.dispatch_array_aggregate(
-                task,
-                AggParams {
-                    array_id,
-                    attr_idx: *attr_idx,
-                    reducer: *reducer,
-                    group_by_dim_idx: *group_by_dim,
-                    cell_filter: cell_filter.as_ref(),
-                    return_partial: *return_partial,
-                    shard_bucket: *shard_bucket,
-                    system_as_of: *system_as_of,
-                    valid_at_ms: *valid_at_ms,
-                    region_msgpack,
-                },
-            ),
+                physical,
+            } => match self.point_in_time_ms(task, *system_time, "ARRAY_AGG") {
+                Ok(system_as_of) => self.dispatch_array_aggregate(
+                    task,
+                    AggParams {
+                        array_id,
+                        attr_idx: *attr_idx,
+                        reducer: *reducer,
+                        group_by_dim_idx: *group_by_dim,
+                        cell_filter: cell_filter.as_ref(),
+                        return_partial: *return_partial,
+                        shard_bucket: *shard_bucket,
+                        system_as_of,
+                        valid_at_ms: *valid_at_ms,
+                        region_msgpack,
+                        physical: *physical,
+                    },
+                ),
+                Err(resp) => resp,
+            },
             ArrayOp::Elementwise {
                 left,
                 right,
@@ -144,21 +152,50 @@ impl CoreLoop {
                 attr_idx,
                 cell_filter,
                 shard_bucket,
-                system_as_of,
+                system_time,
                 valid_at_ms,
-            } => self.dispatch_array_elementwise(
+            } => match self.point_in_time_ms(task, *system_time, "ARRAY_ELEMENTWISE") {
+                Ok(system_as_of) => self.dispatch_array_elementwise(
+                    task,
+                    ElementwiseParams {
+                        left,
+                        right,
+                        op: *op,
+                        attr_idx: *attr_idx,
+                        cell_filter: cell_filter.as_ref(),
+                        shard_bucket: *shard_bucket,
+                        system_as_of,
+                        valid_at_ms: *valid_at_ms,
+                    },
+                ),
+                Err(resp) => resp,
+            },
+        }
+    }
+
+    /// The millisecond cutoff an aggregate or elementwise read reads at.
+    /// Array tile versions stamp system time in milliseconds, so a pinned
+    /// scope reads its newest whole millisecond (`as_of_ms`). `None` for a
+    /// live read. `AllVersions` is refused: a reduction over every version
+    /// has no meaning.
+    fn point_in_time_ms(
+        &self,
+        task: &ExecutionTask,
+        system_time: SystemTimeScope,
+        context: &str,
+    ) -> Result<Option<i64>, Response> {
+        match system_time {
+            SystemTimeScope::Current => Ok(None),
+            SystemTimeScope::AsOf(_) | SystemTimeScope::Pinned { .. } => Ok(system_time.as_of_ms()),
+            SystemTimeScope::AllVersions => Err(self.response_error(
                 task,
-                ElementwiseParams {
-                    left,
-                    right,
-                    op: *op,
-                    attr_idx: *attr_idx,
-                    cell_filter: cell_filter.as_ref(),
-                    shard_bucket: *shard_bucket,
-                    system_as_of: *system_as_of,
-                    valid_at_ms: *valid_at_ms,
+                ErrorCode::Unsupported {
+                    detail: format!(
+                        "{context}: AS OF SYSTEM TIME NULL has no meaning for a reduction; \
+                         use AS OF SYSTEM TIME <ms>, or ARRAY_SLICE for the audit log"
+                    ),
                 },
-            ),
+            )),
         }
     }
 

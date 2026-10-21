@@ -82,6 +82,7 @@ pub(super) const BOOTSTRAP_TABLES: &[BootstrapTable] = bootstrap_tables![
     "calvin_base" => super::calvin_base::CALVIN_BASE,
     "calvin_sequencer_install" => super::calvin_base::CALVIN_SEQUENCER_INSTALL,
     "redo_snapshot_owed" => super::redo_snapshot_owed::REDO_SNAPSHOT_OWED,
+    "vshard_residency" => super::vshard_residency::VSHARD_RESIDENCY,
     "l2_cleanup_queue" => L2_CLEANUP_QUEUE,
     "pending_reclaim" => PENDING_RECLAIM,
     // ── Metadata-group host state ──
@@ -125,6 +126,8 @@ pub(super) const BOOTSTRAP_TABLES: &[BootstrapTable] = bootstrap_tables![
     "synonym_groups" => SYNONYM_GROUPS,
     "custom_types" => CUSTOM_TYPES,
     "custom_type_oid_hwm" => super::custom_type_oid_hwm::CUSTOM_TYPE_OID_HWM,
+    "spatial_ref_sys" => SPATIAL_REF_SYS,
+    "credentials" => super::credentials::CREDENTIALS,
     "wasm_modules" => WASM_MODULES,
     "rls_policies" => super::rls::RLS_POLICIES,
     "redaction_policies" => super::redaction::REDACTION_POLICIES,

@@ -11,18 +11,23 @@ use nodedb_types::value::Value;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::bitemporal_time::KeyStamps;
 use crate::data::executor::handlers::upsert::apply_on_conflict_updates;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::ColumnarInsertIntent;
 use nodedb_physical::physical_plan::document::UpdateValue;
 
 use super::schema::{ndb_field_to_value, row_values_to_object};
+use super::system_stamp::RowStampInput;
 
 /// Parameters for [`CoreLoop::insert_columnar_rows`].
 pub(in crate::data::executor) struct RowIngestParams<'a> {
     pub engine_key: &'a (nodedb_types::DatabaseId, crate::types::TenantId, String),
     pub schema: &'a ColumnarSchema,
     pub bitemporal: bool,
+    /// System-time ordinal of the batch's first row
+    /// (`ColumnarOp::Insert::system_from`).
+    pub system_from: Option<i64>,
     pub intent: ColumnarInsertIntent,
     pub on_conflict_updates: &'a [(String, UpdateValue)],
     pub surrogates: &'a [Surrogate],
@@ -81,7 +86,8 @@ impl CoreLoop {
             ColumnarInsertIntent::InsertIfAbsent => BatchConflict::Skip,
             ColumnarInsertIntent::InsertUnique
             | ColumnarInsertIntent::Insert
-            | ColumnarInsertIntent::Put => BatchConflict::Upsert,
+            | ColumnarInsertIntent::Put
+            | ColumnarInsertIntent::Restore => BatchConflict::Upsert,
         };
 
         let Some(engine) = self.columnar_engines.get_mut(engine_key) else {
@@ -139,6 +145,7 @@ impl CoreLoop {
             engine_key,
             schema,
             bitemporal,
+            system_from,
             intent,
             on_conflict_updates,
             surrogates,
@@ -154,6 +161,7 @@ impl CoreLoop {
         // row, and a unique insert reads the key alone.
         let mut batch_rows: std::collections::HashMap<Vec<u8>, Vec<Value>> =
             std::collections::HashMap::new();
+        let mut batch_stamps = KeyStamps::default();
 
         for (row_idx, row) in ndb_rows.iter().enumerate() {
             // A row that is not an object has no fields to write. Skipping it
@@ -173,20 +181,15 @@ impl CoreLoop {
             // Build Value slice in schema order. For bitemporal
             // collections, the three reserved columns are auto-populated
             // when absent from the user payload: `_ts_system` is always
-            // clamped to the current wall-clock time (clients cannot
-            // forge system time), `_ts_valid_from` / `_ts_valid_until`
-            // default to the open interval `[i64::MIN, i64::MAX)` if
-            // missing.
-            let sys_now = if bitemporal {
-                self.bitemporal_now_ms()
-            } else {
-                0
-            };
-            let values: Vec<Value> = match schema
+            // stamped with a system-time ordinal (clients cannot forge
+            // system time; only a restore keeps the stamp its row carries),
+            // `_ts_valid_from` / `_ts_valid_until` default to the open
+            // interval `[i64::MIN, i64::MAX)` if missing.
+            let mut values: Vec<Value> = match schema
                 .columns
                 .iter()
                 .map(|col| match col.name.as_str() {
-                    TS_SYSTEM if bitemporal => Ok(Value::Integer(sys_now)),
+                    TS_SYSTEM if bitemporal => Ok(Value::Integer(0)),
                     TS_VALID_FROM if bitemporal => Ok(match obj.get(TS_VALID_FROM) {
                         Some(Value::Integer(i)) => Value::Integer(*i),
                         _ => Value::Integer(i64::MIN),
@@ -202,6 +205,26 @@ impl CoreLoop {
                 Ok(v) => v,
                 Err(e) => return Err(self.response_error(task, ErrorCode::from(e))),
             };
+            if bitemporal {
+                let stamp = match self.columnar_row_stamp(
+                    RowStampInput {
+                        engine_key,
+                        schema,
+                        intent,
+                        system_from,
+                        row_idx,
+                        incoming: obj,
+                        values: &values,
+                    },
+                    &mut batch_stamps,
+                ) {
+                    Ok(stamp) => stamp,
+                    Err(e) => return Err(self.response_error(task, ErrorCode::from(e))),
+                };
+                if let Some(slot) = schema.ts_system_idx().and_then(|idx| values.get_mut(idx)) {
+                    *slot = Value::Integer(stamp);
+                }
+            }
 
             let pk_bytes = if merging || unique {
                 let engine = match self.columnar_engines.get(engine_key) {
@@ -243,19 +266,26 @@ impl CoreLoop {
                     };
                     match prior_row {
                         None => values,
-                        Some(prior) => self.merge_on_conflict(
-                            task,
-                            schema,
-                            &prior,
-                            &values,
-                            on_conflict_updates,
-                        )?,
+                        Some(prior) => {
+                            let mut merged = self.merge_on_conflict(
+                                task,
+                                schema,
+                                &prior,
+                                &values,
+                                on_conflict_updates,
+                            )?;
+                            // The merged row is a new version: it carries this
+                            // insert's stamp, never the prior row's.
+                            keep_fresh_system_stamp(schema, &values, &mut merged);
+                            merged
+                        }
                     }
                 }
                 ColumnarInsertIntent::Put
                 | ColumnarInsertIntent::Insert
                 | ColumnarInsertIntent::InsertIfAbsent
-                | ColumnarInsertIntent::InsertUnique => values,
+                | ColumnarInsertIntent::InsertUnique
+                | ColumnarInsertIntent::Restore => values,
             };
 
             // The row that will actually exist afterwards is decided here, not
@@ -269,6 +299,7 @@ impl CoreLoop {
                 schema,
                 task.request.tenant_id.as_u64(),
                 engine_key.2.as_str(),
+                &self.crs_context(),
             ) {
                 return Err(self.response_error(task, error));
             }
@@ -328,11 +359,15 @@ impl CoreLoop {
     ) -> Result<Vec<Value>, Response> {
         let existing_val = row_values_to_object(schema, prior);
         let excluded_val = row_values_to_object(schema, values);
-        let merged =
-            match apply_on_conflict_updates(existing_val, &excluded_val, on_conflict_updates) {
-                Ok(v) => v,
-                Err(e) => return Err(self.response_error(task, e)),
-            };
+        let merged = match apply_on_conflict_updates(
+            existing_val,
+            &excluded_val,
+            on_conflict_updates,
+            &self.crs_context(),
+        ) {
+            Ok(v) => v,
+            Err(e) => return Err(self.response_error(task, e)),
+        };
         let merged_obj = match merged {
             nodedb_types::Value::Object(m) => m,
             _ => {
@@ -350,6 +385,21 @@ impl CoreLoop {
             .map(|col| ndb_field_to_value(merged_obj.get(&col.name), col))
             .collect::<Result<Vec<Value>, crate::Error>>()
             .map_err(|e| self.response_error(task, ErrorCode::from(e)))
+    }
+}
+
+/// Copy the incoming row's `_ts_system` stamp onto `merged`, the row an
+/// `ON CONFLICT DO UPDATE` merge built from the prior row. A schema with no
+/// `_ts_system` column is left as it is.
+pub(in crate::data::executor) fn keep_fresh_system_stamp(
+    schema: &ColumnarSchema,
+    incoming: &[Value],
+    merged: &mut [Value],
+) {
+    if let Some(idx) = schema.ts_system_idx()
+        && let (Some(stamp), Some(slot)) = (incoming.get(idx), merged.get_mut(idx))
+    {
+        *slot = stamp.clone();
     }
 }
 
@@ -382,6 +432,8 @@ mod tests {
             crate::bridge::envelope::PhysicalPlan::Columnar(ColumnarOp::Truncate {
                 collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
                 restart_identity: false,
+                system_from: None,
+                erase_history: false,
             }),
             None,
         )
@@ -422,6 +474,7 @@ mod tests {
                 surrogates: &[],
                 schema_bytes: &schema,
                 provenance: None,
+                system_from: None,
                 rls_write_check: &RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: &[],
@@ -513,6 +566,7 @@ mod tests {
                 surrogates: &[],
                 schema_bytes: &schema,
                 provenance: None,
+                system_from: None,
                 rls_write_check: &RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: &[],

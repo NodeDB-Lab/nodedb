@@ -85,6 +85,8 @@ fn transaction_edge_put_committed() {
                 properties: Vec::new(),
                 src_surrogate: doc_surrogate("alice"),
                 dst_surrogate: doc_surrogate("bob"),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
         ],
         10,
@@ -102,6 +104,7 @@ fn transaction_edge_put_committed() {
             direction: nodedb::engine::graph::edge_store::Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     assert_eq!(n.status, Status::Ok);
@@ -166,6 +169,8 @@ fn a_refused_transaction_leaves_no_edge() {
             properties: Vec::new(),
             src_surrogate: doc_surrogate("alice"),
             dst_surrogate: doc_surrogate("bob"),
+            valid_from_ms: None,
+            valid_until_ms: None,
         })]),
         20,
     );
@@ -182,6 +187,7 @@ fn a_refused_transaction_leaves_no_edge() {
             direction: nodedb::engine::graph::edge_store::Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     assert_eq!(n.status, Status::Ok);
@@ -268,6 +274,8 @@ fn a_refused_transaction_leaves_neither_doc_nor_edge() {
                 properties: Vec::new(),
                 src_surrogate: nodedb_types::Surrogate::new(1),
                 dst_surrogate: nodedb_types::Surrogate::new(2),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
         ]),
         30,
@@ -306,6 +314,7 @@ fn a_refused_transaction_leaves_neither_doc_nor_edge() {
             direction: nodedb::engine::graph::edge_store::Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     assert_eq!(n.status, Status::Ok);

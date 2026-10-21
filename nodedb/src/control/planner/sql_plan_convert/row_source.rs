@@ -72,16 +72,17 @@ pub(super) fn lower_row_source(
         && window_functions.is_empty()
         && matches!(temporal.valid_time, nodedb_sql::ValidTime::Any)
     {
-        let system_as_of_ms = match temporal.system_time {
-            SystemTimeScope::Current => Some(None),
-            SystemTimeScope::AsOf(ms) => Some(Some(ms)),
+        let system_time = match temporal.system_time {
+            scope @ (SystemTimeScope::Current
+            | SystemTimeScope::AsOf(_)
+            | SystemTimeScope::Pinned { .. }) => Some(scope),
             SystemTimeScope::AllVersions => None,
         };
-        if let Some(system_as_of_ms) = system_as_of_ms {
+        if let Some(system_time) = system_time {
             return Ok(RowSource::DocumentPages(DocumentPageSource {
                 collection: nodedb_types::QualifiedCollection::new(ctx.database_id, collection),
                 filters: super::filter::serialize_filters(filters)?,
-                system_as_of_ms,
+                system_time,
                 offset: *offset,
                 limit: *limit,
                 column_map: super::aggregate::serialize_column_map(maps.stored)?,
@@ -380,6 +381,6 @@ mod tests {
         let RowSource::DocumentPages(page) = source_of(&tasks) else {
             panic!("expected a page source");
         };
-        assert_eq!(page.system_as_of_ms, Some(1_700_000_000_000));
+        assert_eq!(page.system_time, SystemTimeScope::AsOf(1_700_000_000_000));
     }
 }
