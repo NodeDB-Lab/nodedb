@@ -228,6 +228,8 @@ WITH (
 
 Each POST includes `X-Idempotency-Key`, `X-Fencing-Token`, `X-CDC-Offset`, `X-Event-Sequence`, `X-Partition`, and `X-LSN` headers. 4xx client errors (except 429) are not retried.
 
+The URL goes through the `[egress]` policy: `https://` to a DNS name that resolves to global unicast addresses, or a host on the allow-list. No redirect is followed. A URL the policy refuses stops the stream's delivery. Alert `NOTIFY WEBHOOK` URLs pass the same policy when the alert is created (`42501` on refusal) and before every send.
+
 In a cluster, one node delivers a stream at a time: the node that holds the leader lease of the stream's owning Raft group. It reads every partition, including partitions whose rows live on other nodes. It checks its lease right before each POST and right before each offset commit. When that node fails, the next lease holder resumes from the committed offsets. Delivery is at-least-once: a POST can succeed after the old owner lost its lease but before it committed the offset, and the new owner then sends that event again. Two headers let an endpoint apply each event once:
 
 | Header | Value | What the endpoint does with it |

@@ -133,6 +133,31 @@ SELECT lon, lat, temp_c FROM ARRAY_SLICE(
 AS OF SYSTEM TIME '2026-06-06T00:00:00Z';
 ```
 
+### Relationship Timelines (Graph)
+
+Every edge write is a new version. A graph read takes the same `AS OF` clauses, and a write names an edge's valid time with `VALID_TIME ... UNTIL ...`:
+
+```sql
+-- Alice reports to Bob for the first half of 2025.
+GRAPH INSERT EDGE IN 'org' FROM 'alice' TO 'bob' TYPE 'reports_to'
+  VALID_TIME '2025-01-01T00:00:00Z' UNTIL '2025-07-01T00:00:00Z';
+
+-- Then to Carol.
+GRAPH INSERT EDGE IN 'org' FROM 'alice' TO 'carol' TYPE 'reports_to'
+  VALID_TIME '2025-07-01T00:00:00Z';
+
+-- Who Alice reported to on 2025-03-01.
+GRAPH NEIGHBORS IN 'org' OF 'alice' AS OF VALID TIME '2025-03-01T00:00:00Z';
+
+-- The reporting chain as the database held it at a past moment.
+GRAPH TRAVERSE FROM 'alice' IN 'org' DEPTH 5 AS OF SYSTEM TIME 1735689600000;
+
+-- Influence as of that moment.
+GRAPH ALGO PAGERANK ON org AS OF SYSTEM TIME 1735689600000;
+```
+
+`GRAPH TRAVERSE`, `GRAPH NEIGHBORS`, `GRAPH PATH`, `MATCH`, `GRAPH ALGO` and `GRAPH RAG FUSION` read one cut per statement, on one node or across a cluster. `AS OF SYSTEM TIME NULL` and a valid-time range are refused on graph reads. See [Graph](graph.md#bitemporal-support).
+
 ### Lineage and Compliance
 
 Track row lineage across corrections:
@@ -163,6 +188,21 @@ ORDER BY _ts_system ASC;
 ```
 
 `AS OF SYSTEM TIME NULL` returns every system-time version of each matching row, ordered ascending. Each version row carries the user columns plus three synthetic temporal columns: `_ts_system`, `_ts_valid_from`, and `_ts_valid_until`. Unbounded valid-time ends surface as the raw `i64::MIN` / `i64::MAX` sentinels (matching the Columnar and Timeseries engines). It is supported on the Document (strict and schemaless), Columnar, and Timeseries engines, and on `ARRAY_SLICE`. An `ARRAY_SLICE` version row carries the dimension and attribute columns plus `_ts_system` only. It is not supported on the Graph engine or on `ARRAY_AGG`, nor when reading through a database clone — those return a typed error rather than collapsing to a single version.
+
+**Deletes in the audit log.** A `DELETE` and a `TRUNCATE` close a row with a delete version. On Columnar, an `UPDATE` that changes the primary key closes the old key the same way. The audit log shows each delete version as a row, on the Document (strict and schemaless) and Columnar engines alike:
+
+- `_ts_system` is the system time of the delete.
+- `_ts_valid_from` and `_ts_valid_until` are both `i64::MIN`. The empty valid interval marks the row as a delete.
+- The row repeats the cells of the version it closes, the row's key among them.
+- A delete version leaves the audit log with the version it closes. Once retention or a GDPR erasure removes that version, the delete version no longer shows.
+
+To list only delete versions, filter on `_ts_valid_from = _ts_valid_until`. To hide them, filter on `_ts_valid_from < _ts_valid_until`. A read at a cut (`AS OF SYSTEM TIME <ms>`) never returns a delete version: a row deleted at or before the cut is absent. An `AS OF VALID TIME` filter never matches a delete version, since no instant falls inside an empty interval.
+
+Document versions and graph edge versions take their system time from one clock. A `MATCH` reads its node documents at the same cut as its edges, so a node's properties and its edges answer the same moment. `_ts_system` shows the version's millisecond. Versions written within one millisecond keep their write order. `AS OF SYSTEM TIME <ms>` covers every version written up to the end of that millisecond. The versions one transaction writes on one shard share one system time. A cross-shard transaction that commits through the Calvin sequencer shares one system time on every shard.
+
+One statement reads one cut. Every `AS OF SYSTEM TIME` read of a statement, both sides of a join included, reads at the same instant, on every core and every node. A time past the moment the statement is planned reads the state at that moment. A write that commits later never appears in that statement, and the next statement takes a fresh cut.
+
+In a multi-node cluster, a write that commits outside the Calvin sequencer takes its system time from the clock of the node that writes it. A statement's cut includes it only when that clock is not ahead of the planning node's clock, after the planning node has applied every write it holds. Keep node clocks synchronized (NTP or PTP): a write committed just before a statement can fall outside the statement's cut by up to the clock skew between the two nodes. Writes through the Calvin sequencer and writes on a single node have no such bound.
 
 `AS OF` reads run at parity with non-temporal reads: `WHERE` predicates (including on strict Binary-Tuple collections), `ORDER BY`, computed columns, and window functions all apply to temporal queries.
 

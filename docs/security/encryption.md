@@ -26,6 +26,45 @@ head -c 32 /dev/urandom > /etc/nodedb/keys/wal.key
 chmod 600 /etc/nodedb/keys/wal.key
 ```
 
+**Key sources:** `key_path` is the default source. A key-management
+service supplies the key instead through an `[encryption.key_derivation]`
+table. Set exactly one of `key_path` and `key_derivation`; startup refuses
+both or neither. The same key also derives the segment and checkpoint keys,
+and `nodedb restore` reads it from the same source.
+
+| `type`    | Source                                                                 |
+| --------- | ---------------------------------------------------------------------- |
+| `file`    | A 32-byte key file (`key_path`), as `[encryption] key_path`.           |
+| `vault`   | HashiCorp Vault transit engine: unwraps a wrapped data key on disk.   |
+| `aws_kms` | AWS KMS `Decrypt` of a ciphertext blob on disk.                        |
+
+```toml
+[encryption.key_derivation]
+type = "vault"
+addr = "https://vault.internal:8200"
+token_path = "/etc/nodedb/keys/vault.token"   # mode 0600
+key_name = "nodedb-wal"
+mount = "transit"
+ciphertext_blob_path = "/var/lib/nodedb/.wal-key.wrapped"
+```
+
+Create the wrapped key once with `vault write -f transit/datakey/wrapped/nodedb-wal`
+and store its `ciphertext` in `ciphertext_blob_path`. The Vault address goes
+through the `[egress]` policy: a private Vault needs its host on
+`allow_hosts` and its addresses in `allow_cidrs`, and an IP-literal address
+is refused.
+
+```toml
+[encryption.key_derivation]
+type = "aws_kms"
+key_id = "arn:aws:kms:us-east-1:123456789012:key/..."
+region = "us-east-1"
+ciphertext_blob_path = "/var/lib/nodedb/.wal-key.kms"
+```
+
+The KMS client uses the AWS SDK credential chain and its own HTTP stack, not
+the `[egress]` policy.
+
 When `[encryption]` is absent, WAL records are written in plaintext.
 This is acceptable only for local development or when the data directory
 is on an encrypted volume (LUKS, dm-crypt, FileVault, BitLocker).
@@ -159,6 +198,23 @@ When `[backup_encryption]` is absent, a warning is emitted at the first
 backup operation. Unencrypted backups should not leave the data center
 or be stored in shared object storage without additional encryption.
 
+### Credential Encryption
+
+`CREATE CREDENTIAL` secrets (S3 keys, bearer tokens, SAS signatures for
+remote `COPY` sources) are sealed with AES-256-GCM under a key derived
+from the credential key, before the statement proposes them. The metadata
+log, the catalog and every snapshot hold ciphertext only. The key file must
+be 32 bytes, mode `0400` or `0600`, owned by the server's user, and differ
+from the WAL and backup keys. Every node of a cluster needs the same file.
+
+```toml
+[credential_encryption]
+key_path = "/etc/nodedb/keys/credential.key"
+```
+
+When `[credential_encryption]` is absent, `CREATE CREDENTIAL` is refused
+with SQLSTATE `55000`.
+
 ## Encryption in Transit
 
 See [protocols.md — TLS](protocols.md#tls) for wire encryption
@@ -177,3 +233,4 @@ and is appropriate only for local development.
 | Vamana DiskANN segments   | Filesystem         | OS volume encryption     | Plaintext on disk    |
 | L2 cold tier (S3)         | SSE (object store) | `[cold_storage].sse_mode`| No SSE header sent   |
 | Backups                   | AES-256-GCM (app)  | `[backup_encryption].key_path` | Plaintext backup |
+| COPY credentials          | AES-256-GCM (app)  | `[credential_encryption].key_path` | `CREATE CREDENTIAL` refused |
