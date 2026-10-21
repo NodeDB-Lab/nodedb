@@ -35,6 +35,7 @@ rust-version = "1.96"
 license = "BUSL-1.1"
 readme = "README.md"
 repository = "https://github.com/NodeDB-Lab/nodedb"
+authors = ["Biz Impulse Solutions Sdn. Bhd. and the NodeDB contributors"]
 homepage = "https://nodedb.dev"
 documentation = "https://docs.rs/nodedb"
 
