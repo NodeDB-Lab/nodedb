@@ -86,7 +86,9 @@ pub use bootstrap::{
     start_cluster_subsystems,
 };
 #[doc(hidden)]
-pub use calvin::{EngineKeySet, EpochBatch, ReadWriteSet, SequencedTxn, SortedVec, TxClass};
+pub use calvin::{
+    EngineKeySet, EpochBatch, HomedPair, ReadWriteSet, SequencedTxn, SortedVec, TxClass,
+};
 pub use catalog::ClusterCatalog;
 #[doc(hidden)]
 pub use circuit_breaker::BreakerSnapshot;

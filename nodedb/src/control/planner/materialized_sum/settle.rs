@@ -71,11 +71,11 @@ use nodedb_types::id::TxnId;
 use nodedb_types::{CollectionKey, Surrogate};
 
 use crate::control::server::shared::session::read_set::{
-    EngineTag, ReadKey, ReadOrigin, ReadSetEntry,
+    EngineTag, ReadKey, ReadOrigin, ReadPoint, ReadSetEntry,
 };
 use crate::engine::document::store::StorageKey;
 use crate::query::{sum_target_is_co_resident, sum_target_vshard};
-use crate::types::{DatabaseId, KeyRepr, TenantId};
+use crate::types::{DatabaseId, TenantId};
 
 /// One source write's plan-time images, ready to settle.
 pub(super) struct SettleInput<'a> {
@@ -270,7 +270,7 @@ fn image_read_entry(
         collection: input.source_collection.to_string(),
         key: match input.source_row {
             Some(surrogate) => ReadKey::Point {
-                repr: KeyRepr::Surrogate(surrogate.as_u32()),
+                repr: ReadPoint::Surrogate(surrogate.as_u32()),
             },
             None => ReadKey::Predicate,
         },
@@ -585,7 +585,7 @@ mod tests {
         assert_eq!(
             settlement.reads[0].key,
             ReadKey::Point {
-                repr: KeyRepr::Surrogate(11)
+                repr: ReadPoint::Surrogate(11)
             }
         );
         assert_eq!(

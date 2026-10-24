@@ -95,6 +95,19 @@ pub enum AcquireOutcome {
     Blocked,
 }
 
+/// Result of a moded acquire: the requester's outcome, plus the other txns
+/// the call granted.
+///
+/// A holder that raises its mode and waits drops its hold. Waiters at the
+/// queue front can then take the key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Acquisition {
+    pub outcome: AcquireOutcome,
+    /// Other txns that now hold their whole request, in ascending order. The
+    /// caller dispatches them like the ids a release returns.
+    pub promoted: Vec<TxnId>,
+}
+
 // ── LockEntry ─────────────────────────────────────────────────────────────────
 
 /// Per-key lock state.

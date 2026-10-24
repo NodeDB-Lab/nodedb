@@ -162,10 +162,11 @@ pub(super) fn make_sequenced_txn(epoch: u64, position: u32) -> SequencedTxn {
     SequencedTxn {
         epoch,
         position,
-        tx_class,
+        tx_class: std::sync::Arc::new(tx_class),
         epoch_system_ms: 1_700_000_000_000,
         epoch_vshard_txn_count: 1,
         lock_owner: None,
+        local_plans: None,
     }
 }
 
@@ -209,10 +210,11 @@ pub(super) fn make_validate_only_txn(epoch: u64, position: u32) -> SequencedTxn 
     SequencedTxn {
         epoch,
         position,
-        tx_class,
+        tx_class: std::sync::Arc::new(tx_class),
         epoch_system_ms: 1_700_000_000_000,
         epoch_vshard_txn_count: 1,
         lock_owner: None,
+        local_plans: None,
     }
 }
 
@@ -246,10 +248,11 @@ pub(super) fn make_local_write_txn(epoch: u64, position: u32) -> SequencedTxn {
     SequencedTxn {
         epoch,
         position,
-        tx_class,
+        tx_class: std::sync::Arc::new(tx_class),
         epoch_system_ms: 1_700_000_000_000,
         epoch_vshard_txn_count: 1,
         lock_owner: None,
+        local_plans: None,
     }
 }
 

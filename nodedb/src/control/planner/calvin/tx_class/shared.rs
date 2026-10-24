@@ -6,12 +6,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::control::server::shared::session::read_set::{ReadKey, ReadSetEntry};
+use crate::control::server::shared::session::read_set::{ReadKey, ReadPoint, ReadSetEntry};
 use nodedb_cluster::calvin::types::{
     EngineKeySet, EngineTag, ReadKeyIdent, ReadWriteSet, SortedVec, VersionedReadEntry,
     VersionedReadSet,
 };
-use nodedb_types::KeyRepr;
 
 /// Map the neutral session read-set into the replicated, versioned
 /// [`VersionedReadSet`] carried on the `TxClass`.
@@ -28,7 +27,7 @@ pub(super) fn versioned_reads_from(reads: &[ReadSetEntry]) -> VersionedReadSet {
                 engine: entry.engine,
                 collection: entry.collection.clone(),
                 key: match &entry.key {
-                    ReadKey::Point { repr } => ReadKeyIdent::Point(repr.clone()),
+                    ReadKey::Point { repr } => ReadKeyIdent::Point(repr.to_key_repr()),
                     ReadKey::Predicate => ReadKeyIdent::Predicate,
                     ReadKey::IndexEq { field, value } => ReadKeyIdent::IndexEq {
                         field: field.clone(),
@@ -52,8 +51,7 @@ pub(super) fn versioned_reads_from(reads: &[ReadSetEntry]) -> VersionedReadSet {
 /// and locks, not the versioned OCC set ([`versioned_reads_from`]).
 ///
 /// Each read maps to the keys the scheduler locks `Shared`:
-/// - A point read locks its row: a surrogate, a KV key, or an edge's two
-///   node lock pairs.
+/// - A point read locks its row: a surrogate or a KV key.
 /// - A predicate, index-equality, or index-range read locks its whole
 ///   collection.
 ///
@@ -72,15 +70,6 @@ pub(super) fn read_set_from(reads: &[ReadSetEntry]) -> ReadWriteSet {
     ReadWriteSet::new(locks.into_key_sets())
 }
 
-/// The edge reads of one collection.
-#[derive(Default)]
-struct EdgeReads {
-    /// The node lock pairs the reads touch.
-    pairs: Vec<(u32, u32)>,
-    /// The vShards the collection is read on.
-    homes: Vec<u32>,
-}
-
 /// The read lock keys of a session read-set, by engine and collection.
 /// Every map is ordered, so the key sets are identical on every node.
 #[derive(Default)]
@@ -88,7 +77,8 @@ struct ReadLocks {
     documents: BTreeMap<String, Vec<u32>>,
     vectors: BTreeMap<String, Vec<u32>>,
     kv: BTreeMap<String, Vec<Vec<u8>>>,
-    edges: BTreeMap<String, EdgeReads>,
+    /// Collection to the vShards its homed reads enlist without a lock key.
+    homes: BTreeMap<String, Vec<u32>>,
     /// Collection to the vShards it is read whole on. Empty: its own vShard.
     whole: BTreeMap<String, BTreeSet<u32>>,
 }
@@ -98,24 +88,13 @@ impl ReadLocks {
     fn homed(&mut self, entry: &ReadSetEntry, home: u32) {
         let collection = entry.collection.clone();
         if collection.is_empty() {
-            self.edges.entry(collection).or_default().homes.push(home);
+            self.homes.entry(collection).or_default().push(home);
             return;
         }
         match &entry.key {
-            ReadKey::Point { repr } => {
-                let edges = self.edges.entry(collection).or_default();
-                edges.homes.push(home);
-                match repr {
-                    KeyRepr::Edge { src, dst, .. } => {
-                        edges
-                            .pairs
-                            .extend([node_lock_pair(src), node_lock_pair(dst)]);
-                    }
-                    // A row key routes by its collection, not by this home,
-                    // so a homed row read only enlists its home.
-                    KeyRepr::Surrogate(_) | KeyRepr::KvKey(_) => {}
-                }
-            }
+            // A row key routes by its collection, not by this home, so a
+            // homed row read only enlists its home.
+            ReadKey::Point { .. } => self.homes.entry(collection).or_default().push(home),
             ReadKey::Predicate | ReadKey::IndexEq { .. } | ReadKey::IndexRange { .. } => {
                 self.whole.entry(collection).or_default().insert(home);
             }
@@ -127,7 +106,7 @@ impl ReadLocks {
         let collection = entry.collection.clone();
         match &entry.key {
             ReadKey::Point {
-                repr: KeyRepr::Surrogate(surrogate),
+                repr: ReadPoint::Surrogate(surrogate),
             } => {
                 let rows = match entry.engine {
                     EngineTag::Vector => &mut self.vectors,
@@ -147,20 +126,8 @@ impl ReadLocks {
                 rows.entry(collection).or_default().push(*surrogate);
             }
             ReadKey::Point {
-                repr: KeyRepr::KvKey(key),
+                repr: ReadPoint::KvKey(key),
             } => self.kv.entry(collection).or_default().push(key.to_vec()),
-            // An edge locks by node pairs, which route by key home. The
-            // collection's own vShard is enlisted by an empty document set.
-            ReadKey::Point {
-                repr: KeyRepr::Edge { src, dst, .. },
-            } => {
-                self.edges
-                    .entry(collection.clone())
-                    .or_default()
-                    .pairs
-                    .extend([node_lock_pair(src), node_lock_pair(dst)]);
-                self.documents.entry(collection).or_default();
-            }
             ReadKey::Predicate | ReadKey::IndexEq { .. } | ReadKey::IndexRange { .. } => {
                 self.whole.entry(collection).or_default();
             }
@@ -195,12 +162,12 @@ impl ReadLocks {
                 }),
         );
         sets.extend(
-            self.edges
+            self.homes
                 .into_iter()
-                .map(|(collection, reads)| EngineKeySet::Edge {
+                .map(|(collection, homes)| EngineKeySet::Edge {
                     collection,
-                    edges: SortedVec::new(reads.pairs),
-                    home_vshards: SortedVec::new(reads.homes),
+                    edges: SortedVec::new(Vec::new()),
+                    home_vshards: SortedVec::new(homes),
                 }),
         );
         sets.extend(
@@ -234,7 +201,7 @@ pub(crate) fn node_lock_pair(node: &str) -> (u32, u32) {
 #[cfg(test)]
 mod lockstep_tests {
     use super::*;
-    use crate::control::cluster::calvin::scheduler::driver::helpers::expand_rw_set;
+    use crate::control::cluster::calvin::scheduler::driver::helpers::{LockSite, expand_rw_set};
     use crate::control::cluster::calvin::scheduler::lock_manager::{LockKey, LockMode};
     use crate::control::planner::calvin::tx_class::static_builder::build_single_vshard_tx_class;
     use crate::control::server::shared::write_admission::lock_keys::plan_lock_keys;
@@ -261,14 +228,18 @@ mod lockstep_tests {
     /// `expand_rw_set`. The collection's `Intent` key is left out: the gate
     /// fences row keys only.
     fn scheduler_lock_keys(tx: TxClass) -> BTreeSet<LockKey> {
-        expand_rw_set(&SequencedTxn {
-            epoch: 1,
-            position: 0,
-            tx_class: tx,
-            epoch_system_ms: 1_700_000_000_000,
-            epoch_vshard_txn_count: 1,
-            lock_owner: None,
-        })
+        expand_rw_set(
+            &SequencedTxn {
+                epoch: 1,
+                position: 0,
+                tx_class: std::sync::Arc::new(tx),
+                epoch_system_ms: 1_700_000_000_000,
+                epoch_vshard_txn_count: 1,
+                lock_owner: None,
+                local_plans: None,
+            },
+            LockSite::Everywhere,
+        )
         .into_iter()
         .filter(|(_, mode)| *mode == LockMode::Exclusive)
         .map(|(key, _)| key)
@@ -546,5 +517,84 @@ mod routing_agreement_tests {
                 task.vshard_id
             );
         }
+    }
+}
+
+/// A graph read and an edge write meet on every vShard the read observed.
+#[cfg(test)]
+mod graph_read_lock_tests {
+    use super::*;
+    use crate::control::cluster::calvin::scheduler::driver::helpers::{LockSite, expand_rw_set};
+    use crate::control::cluster::calvin::scheduler::lock_manager::LockKey;
+    use crate::control::planner::calvin::tx_class::write_keys::WriteKeys;
+    use crate::control::server::shared::session::read_set::ReadOrigin;
+    use crate::types::{DatabaseId, RecordHomes, TenantId, VShardId};
+    use nodedb_cluster::calvin::types::{SequencedTxn, TxClass};
+    use std::sync::Arc;
+
+    fn graph_read(home: Option<VShardId>) -> ReadSetEntry {
+        ReadSetEntry {
+            engine: EngineTag::Graph,
+            database_id: DatabaseId::DEFAULT,
+            tenant_id: TenantId::new(1),
+            collection: "g".to_owned(),
+            key: ReadKey::Predicate,
+            read_version: nodedb_types::WriteVersion::logged(0, 5),
+            origin: ReadOrigin::Session,
+            home,
+        }
+    }
+
+    fn sequenced(read_set: ReadWriteSet, write_keys: WriteKeys) -> SequencedTxn {
+        let tx_class = TxClass::new_single_vshard_in_database(
+            read_set,
+            ReadWriteSet::new(write_keys.into_key_sets()),
+            Vec::new(),
+            TenantId::new(1),
+            DatabaseId::DEFAULT,
+            None,
+            VersionedReadSet::default(),
+        )
+        .expect("valid single-vshard TxClass");
+        SequencedTxn {
+            epoch: 1,
+            position: 0,
+            tx_class: Arc::new(tx_class),
+            epoch_system_ms: 1_700_000_000_000,
+            epoch_vshard_txn_count: 1,
+            lock_owner: None,
+            local_plans: None,
+        }
+    }
+
+    #[test]
+    fn a_graph_read_conflicts_with_an_edge_write_on_the_observed_vshard() {
+        let owner = RecordHomes::edge("a", "b").owner();
+
+        let mut reader_writes = WriteKeys::default();
+        reader_writes.rows("other", [1]);
+        let reader = sequenced(
+            read_set_from(&[graph_read(None), graph_read(Some(owner))]),
+            reader_writes,
+        );
+
+        let mut edge_writes = WriteKeys::default();
+        edge_writes.edge("g", "a", "b", (1, 2));
+        let writer = sequenced(ReadWriteSet::new(Vec::new()), edge_writes);
+
+        let site = LockSite::On(owner.as_u32());
+        let whole = LockKey::Collection {
+            collection: Arc::from("g"),
+        };
+        let read_mode = *expand_rw_set(&reader, site)
+            .get(&whole)
+            .expect("the graph read locks the collection");
+        let write_mode = *expand_rw_set(&writer, site)
+            .get(&whole)
+            .expect("the edge write announces on the collection");
+        assert!(
+            !read_mode.compatible(write_mode),
+            "a graph read ({read_mode:?}) must conflict with an edge write ({write_mode:?})"
+        );
     }
 }

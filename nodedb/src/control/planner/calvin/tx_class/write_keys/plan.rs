@@ -85,7 +85,7 @@ mod tests {
     use nodedb_types::{CollectionKey, QualifiedCollection, Surrogate};
 
     use super::*;
-    use crate::control::cluster::calvin::scheduler::driver::helpers::expand_rw_set;
+    use crate::control::cluster::calvin::scheduler::driver::helpers::{LockSite, expand_rw_set};
     use crate::control::cluster::calvin::scheduler::{
         AcquireOutcome, LockKey, LockManager, LockMode, TxnId,
     };
@@ -116,14 +116,18 @@ mod tests {
         let tasks: Vec<PhysicalTask> = plans.into_iter().map(task).collect();
         let tx_class = build_single_vshard_tx_class(&tasks, TenantId::new(1), &[])
             .expect("a valid transaction class");
-        expand_rw_set(&SequencedTxn {
-            epoch: EPOCH,
-            position,
-            tx_class,
-            epoch_system_ms: 1_700_000_000_000,
-            epoch_vshard_txn_count: 2,
-            lock_owner: None,
-        })
+        expand_rw_set(
+            &SequencedTxn {
+                epoch: EPOCH,
+                position,
+                tx_class: std::sync::Arc::new(tx_class),
+                epoch_system_ms: 1_700_000_000_000,
+                epoch_vshard_txn_count: 2,
+                lock_owner: None,
+                local_plans: None,
+            },
+            LockSite::Everywhere,
+        )
     }
 
     /// Acquire the lower transaction's keys, then the higher one's, in
@@ -133,11 +137,11 @@ mod tests {
         let (lower_id, higher_id) = (TxnId::new(EPOCH, 0), TxnId::new(EPOCH, 1));
         let mut table = LockManager::new();
         assert!(matches!(
-            table.acquire(lower_id, locks(lower, 0)),
+            table.acquire(lower_id, locks(lower, 0)).outcome,
             AcquireOutcome::Ready
         ));
         let waits = matches!(
-            table.acquire(higher_id, locks(higher, 1)),
+            table.acquire(higher_id, locks(higher, 1)).outcome,
             AcquireOutcome::Blocked
         );
         if waits {

@@ -23,20 +23,32 @@ impl LockManager {
         if let Some(pending) = self.pending_keys.remove(&txn) {
             keys.extend(pending.into_keys());
         }
+        let waited = self.waiting.remove(&txn).unwrap_or_default();
 
         let mut newly_promoted: BTreeSet<TxnId> = BTreeSet::new();
         for key in &keys {
-            let Some(entry) = self.table.get_mut(key) else {
-                continue;
-            };
-            entry.drop_holder(txn);
-            entry.waiters.retain(|(w, _)| *w != txn);
-            self.promote_waiters(key, &mut newly_promoted);
-        }
-        if !keys.is_empty() {
-            self.released.notify_waiters();
+            if let Some(entry) = self.table.get_mut(key) {
+                entry.drop_holder(txn);
+                // A holder never waits on its own key, so only waited keys
+                // scan the queue.
+                if waited.contains(key) {
+                    entry.waiters.retain(|(w, _)| *w != txn);
+                }
+                self.promote_waiters(key, &mut newly_promoted);
+            }
+            self.wake_watchers(key);
         }
         newly_promoted.into_iter().collect()
+    }
+
+    /// Wake and drop every write-admission watcher filed under `key`.
+    /// `notify_one` stores a permit, so a watcher not yet asleep still wakes.
+    pub(super) fn wake_watchers(&mut self, key: &LockKey) {
+        if let Some(signals) = self.watchers.remove(key) {
+            for signal in signals {
+                signal.notify_one();
+            }
+        }
     }
 
     /// Grant the front of `key`'s waiter queue while it is compatible with the
@@ -44,9 +56,10 @@ impl LockManager {
     ///
     /// A key with no holders grants its first waiter in that waiter's mode,
     /// then every following waiter compatible with it. A key with neither
-    /// holders nor waiters is removed. Any granted txn that now holds all of
-    /// its requested keys moves into `held_locks` and joins `newly_promoted`.
-    fn promote_waiters(&mut self, key: &LockKey, newly_promoted: &mut BTreeSet<TxnId>) {
+    /// holders nor waiters is removed. Each grant drops `key` from the
+    /// waiter's `waiting` set. A waiter whose set empties holds its whole
+    /// request: it moves into `held_locks` and joins `newly_promoted`.
+    pub(super) fn promote_waiters(&mut self, key: &LockKey, newly_promoted: &mut BTreeSet<TxnId>) {
         let mut granted: Vec<TxnId> = Vec::new();
         let Some(entry) = self.table.get_mut(key) else {
             return;
@@ -64,17 +77,21 @@ impl LockManager {
         }
 
         for next in granted {
-            let Some(pending) = self.pending_keys.remove(&next) else {
+            #[cfg(test)]
+            {
+                self.promotion_steps += 1;
+            }
+            let Some(waited) = self.waiting.get_mut(&next) else {
                 continue;
             };
-            let all_held = pending
-                .keys()
-                .all(|k| self.table.get(k).is_some_and(|entry| entry.holds(next)));
-            if all_held {
-                self.finish_ready(next, pending);
+            waited.remove(key);
+            if !waited.is_empty() {
+                continue;
+            }
+            self.waiting.remove(&next);
+            if let Some(request) = self.pending_keys.remove(&next) {
+                self.finish_ready(next, request);
                 newly_promoted.insert(next);
-            } else {
-                self.pending_keys.insert(next, pending);
             }
         }
     }
@@ -137,7 +154,7 @@ mod tests {
             "the fast-path holder takes the uncontended key"
         );
         assert_eq!(
-            lm.acquire(scheduler_txn, keyset(&["k"])),
+            lm.acquire(scheduler_txn, keyset(&["k"])).outcome,
             AcquireOutcome::Blocked,
             "the scheduler txn queues behind the fast-path holder"
         );
@@ -154,20 +171,65 @@ mod tests {
         );
     }
 
-    /// A release wakes a waiter that enabled the release signal before it.
-    #[tokio::test]
-    async fn release_wakes_the_release_signal() {
+    /// Keys `k0` through `k{count - 1}`, each requested `Exclusive`.
+    fn numbered(count: u32) -> BTreeMap<LockKey, LockMode> {
+        (0..count)
+            .map(|n| (key(&format!("k{n}")), LockMode::Exclusive))
+            .collect()
+    }
+
+    const WIDE: u32 = 512;
+
+    /// One waiter on WIDE keys, each freed by its own release: each grant
+    /// runs once, whatever the request width.
+    #[test]
+    fn promotion_work_is_linear_when_keys_free_one_release_at_a_time() {
         let mut lm = LockManager::new();
-        let holder = txn(1, 0);
-        assert_eq!(lm.acquire(holder, keyset(&["k"])), AcquireOutcome::Ready);
-        let signal = lm.release_signal();
-        let notified = signal.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        lm.release(holder);
-        tokio::time::timeout(std::time::Duration::from_secs(5), notified)
-            .await
-            .expect("a release wakes the release signal");
+        for n in 0..WIDE {
+            let holder = txn(1, n);
+            let request = BTreeMap::from([(key(&format!("k{n}")), LockMode::Exclusive)]);
+            assert_eq!(lm.acquire(holder, request).outcome, AcquireOutcome::Ready);
+        }
+        let waiter = txn(2, 0);
+        assert_eq!(
+            lm.acquire(waiter, numbered(WIDE)).outcome,
+            AcquireOutcome::Blocked
+        );
+        lm.assert_consistent();
+        for n in 0..WIDE {
+            let promoted = lm.release(txn(1, n));
+            lm.assert_consistent();
+            if n + 1 < WIDE {
+                assert!(
+                    promoted.is_empty(),
+                    "the waiter still waits after release {n}"
+                );
+            } else {
+                assert_eq!(promoted, vec![waiter]);
+            }
+        }
+        assert_eq!(lm.promotion_steps, u64::from(WIDE));
+        assert!(lm.is_ready(waiter, &numbered(WIDE)));
+    }
+
+    /// One release that frees all WIDE keys of a waiter runs one grant per key.
+    #[test]
+    fn promotion_work_is_linear_when_one_release_frees_every_key() {
+        let mut lm = LockManager::new();
+        let (holder, waiter) = (txn(1, 0), txn(2, 0));
+        assert_eq!(
+            lm.acquire(holder, numbered(WIDE)).outcome,
+            AcquireOutcome::Ready
+        );
+        assert_eq!(
+            lm.acquire(waiter, numbered(WIDE)).outcome,
+            AcquireOutcome::Blocked
+        );
+        lm.assert_consistent();
+        assert_eq!(lm.release(holder), vec![waiter]);
+        lm.assert_consistent();
+        assert_eq!(lm.promotion_steps, u64::from(WIDE));
+        assert!(lm.is_ready(waiter, &numbered(WIDE)));
     }
 
     #[test]
@@ -211,9 +273,18 @@ mod tests {
         let s2 = txn(2, 1);
 
         // Exclusive holder, two shared waiters queued behind it.
-        assert_eq!(lm.acquire(holder, keyset(&["k"])), AcquireOutcome::Ready);
-        assert_eq!(lm.acquire_shared(s1, key("k")), AcquireOutcome::Blocked);
-        assert_eq!(lm.acquire_shared(s2, key("k")), AcquireOutcome::Blocked);
+        assert_eq!(
+            lm.acquire(holder, keyset(&["k"])).outcome,
+            AcquireOutcome::Ready
+        );
+        assert_eq!(
+            lm.acquire_shared(s1, key("k")).outcome,
+            AcquireOutcome::Blocked
+        );
+        assert_eq!(
+            lm.acquire_shared(s2, key("k")).outcome,
+            AcquireOutcome::Blocked
+        );
 
         // Releasing the exclusive holder promotes the whole run of shared
         // waiters together.
@@ -234,9 +305,18 @@ mod tests {
         let x1 = txn(2, 0);
         let x2 = txn(2, 1);
 
-        assert_eq!(lm.acquire(holder, keyset(&["k"])), AcquireOutcome::Ready);
-        assert_eq!(lm.acquire(x1, keyset(&["k"])), AcquireOutcome::Blocked);
-        assert_eq!(lm.acquire(x2, keyset(&["k"])), AcquireOutcome::Blocked);
+        assert_eq!(
+            lm.acquire(holder, keyset(&["k"])).outcome,
+            AcquireOutcome::Ready
+        );
+        assert_eq!(
+            lm.acquire(x1, keyset(&["k"])).outcome,
+            AcquireOutcome::Blocked
+        );
+        assert_eq!(
+            lm.acquire(x2, keyset(&["k"])).outcome,
+            AcquireOutcome::Blocked
+        );
 
         // Only the single leading exclusive waiter is promoted.
         let promoted = lm.release(holder);
@@ -256,8 +336,14 @@ mod tests {
         let t1 = txn(1, 0);
         let t2 = txn(1, 1);
 
-        assert_eq!(lm.acquire_shared(t1, key("k")), AcquireOutcome::Ready);
-        assert_eq!(lm.acquire_shared(t2, key("k")), AcquireOutcome::Ready);
+        assert_eq!(
+            lm.acquire_shared(t1, key("k")).outcome,
+            AcquireOutcome::Ready
+        );
+        assert_eq!(
+            lm.acquire_shared(t2, key("k")).outcome,
+            AcquireOutcome::Ready
+        );
         assert_eq!(lm.lock_count(), 1);
 
         // Releasing one shared holder leaves the other holding the key.
@@ -287,10 +373,10 @@ mod tests {
         )]
         .into();
 
-        let o1 = lm.acquire(txn1, shared_key.clone());
+        let o1 = lm.acquire(txn1, shared_key.clone()).outcome;
         assert_eq!(o1, AcquireOutcome::Ready);
 
-        let o2 = lm.acquire(txn2, shared_key.clone());
+        let o2 = lm.acquire(txn2, shared_key.clone()).outcome;
         assert_eq!(o2, AcquireOutcome::Blocked);
 
         let unblocked = lm.release(txn1);
@@ -315,10 +401,10 @@ mod tests {
         )]
         .into();
 
-        let o1 = lm.acquire(txn_n, key_k.clone());
+        let o1 = lm.acquire(txn_n, key_k.clone()).outcome;
         assert_eq!(o1, AcquireOutcome::Ready);
 
-        let o2 = lm.acquire(txn_n1, key_k.clone());
+        let o2 = lm.acquire(txn_n1, key_k.clone()).outcome;
         assert_eq!(o2, AcquireOutcome::Blocked);
 
         let unblocked = lm.release(txn_n);

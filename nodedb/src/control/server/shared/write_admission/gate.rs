@@ -509,7 +509,8 @@ mod tests {
             lock_manager
                 .lock()
                 .expect("table")
-                .acquire(truncate, BTreeMap::from([(coll(), LockMode::Exclusive)])),
+                .acquire(truncate, BTreeMap::from([(coll(), LockMode::Exclusive)]))
+                .outcome,
             AcquireOutcome::Ready
         );
         let routed = probe(
@@ -553,7 +554,8 @@ mod tests {
             lock_manager
                 .lock()
                 .expect("table")
-                .acquire(truncate, BTreeMap::from([(coll(), LockMode::Exclusive)])),
+                .acquire(truncate, BTreeMap::from([(coll(), LockMode::Exclusive)]))
+                .outcome,
             AcquireOutcome::Blocked
         );
         drop(admitted);
@@ -637,7 +639,8 @@ mod tests {
             table
                 .lock()
                 .expect("table")
-                .acquire(holder, BTreeMap::from([(coll(), LockMode::Exclusive)])),
+                .acquire(holder, BTreeMap::from([(coll(), LockMode::Exclusive)]))
+                .outcome,
             AcquireOutcome::Ready
         );
         let admission = probe(

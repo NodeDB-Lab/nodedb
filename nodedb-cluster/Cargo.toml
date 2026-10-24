@@ -30,7 +30,7 @@ nodedb-raft = { workspace = true }
 nodedb-types = { workspace = true }
 
 # Workspace deps
-serde = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 sonic-rs = { workspace = true }
 thiserror = { workspace = true }

@@ -184,7 +184,8 @@ mod tests {
         let ledger = incarnation("ledger");
 
         let mut tx_class = make_sequenced_txn(3, 0).tx_class;
-        tx_class.set_incarnations(vec![named("orders", planned), named("ledger", ledger)]);
+        std::sync::Arc::make_mut(&mut tx_class)
+            .set_incarnations(vec![named("orders", planned), named("ledger", ledger)]);
         let (superseded, gates) = scheduler.check_incarnations(&tx_class);
         assert!(
             !superseded,
@@ -236,7 +237,7 @@ mod tests {
         })
         .await;
         let mut tx_class = make_sequenced_txn(4, 0).tx_class;
-        tx_class.set_incarnations(vec![named("purging", Hlc::ZERO)]);
+        std::sync::Arc::make_mut(&mut tx_class).set_incarnations(vec![named("purging", Hlc::ZERO)]);
         let (superseded, gates) = scheduler.check_incarnations(&tx_class);
         assert!(superseded);
         assert!(gates.is_empty());
@@ -265,7 +266,7 @@ mod tests {
             .expect("row")
             .incarnation;
         let mut tx_class = make_sequenced_txn(5, 0).tx_class;
-        tx_class.set_incarnations(vec![named("orders", planned)]);
+        std::sync::Arc::make_mut(&mut tx_class).set_incarnations(vec![named("orders", planned)]);
         let (superseded, gates) = scheduler.check_incarnations(&tx_class);
         assert!(!superseded);
         if let Some(pending) = scheduler.pending.get_mut(&txn_id) {

@@ -7,6 +7,6 @@ pub mod manager;
 pub mod reap;
 
 pub use hot_key_table::HotKeyTable;
-pub use lock_entry::{AcquireOutcome, LockMode};
+pub use lock_entry::{AcquireOutcome, Acquisition, LockMode};
 pub use lock_key::{LockKey, TxnId};
-pub use manager::{KeyContention, LockManager};
+pub use manager::{GateProbe, KeyContention, LockManager};

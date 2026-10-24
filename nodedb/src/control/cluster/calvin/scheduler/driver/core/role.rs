@@ -367,10 +367,14 @@ mod tests {
     /// `surrogate`, so txns on distinct rows hold their locks together.
     fn validate_only_on(epoch: u64, surrogate: u32) -> SequencedTxn {
         let mut txn = make_validate_only_txn(epoch, 0);
-        txn.tx_class.write_set = ReadWriteSet::new(vec![EngineKeySet::Document {
-            collection: "test_coll".to_string(),
-            surrogates: SortedVec::new(vec![surrogate]),
-        }]);
+        std::sync::Arc::make_mut(&mut txn.tx_class).write_set =
+            ReadWriteSet::new(vec![EngineKeySet::Document {
+                collection: "test_coll".to_string(),
+                surrogates: SortedVec::new(vec![surrogate]),
+            }]);
+        std::sync::Arc::make_mut(&mut txn.tx_class)
+            .restore_derived()
+            .expect("a derivable class");
         txn
     }
 

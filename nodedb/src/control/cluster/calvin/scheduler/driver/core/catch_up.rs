@@ -66,8 +66,11 @@ impl Scheduler {
         //    after a confirmed replay (step 4), so a tick that cannot complete
         //    the replay (committed index not yet known, transient log-read
         //    fault) leaves the catch-up armed for the next tick instead of
-        //    silently dropping it. Release the SM lock before the MultiRaft read.
-        let (lo, hi) = {
+        //    silently dropping it. The same scope asks how far the replay
+        //    cache already holds the window decoded. Release the SM lock before
+        //    the MultiRaft read.
+        let window = self.config.catch_up_window.max(1);
+        let (lo, hi, end, kept_through) = {
             let sm = self
                 .sequencer_state_machine
                 .lock()
@@ -86,21 +89,26 @@ impl Scheduler {
                 // replica). Nothing to replay yet; stay armed.
                 return CatchUpDrain::Settled;
             }
-            (lo, hi)
+            // Last index this drain replays: the window end, capped at `hi`.
+            let end = lo.saturating_add(window - 1).min(hi);
+            (lo, hi, end, sm.replay_kept_through(lo, end))
         };
-        // Last index this drain reads: the window end, capped at `hi`.
-        let window = self.config.catch_up_window.max(1);
-        let end = lo.saturating_add(window - 1).min(hi);
 
-        // 2. MultiRaft-lock scope: read the committed sequencer log window. No
-        //    SM lock is held here (see the lock-discipline note above).
-        // The read runs under the MultiRaft lock alone; the result is handled
-        // after the lock drops.
-        let read = self
-            .multi_raft
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .read_committed_entries(SEQUENCER_GROUP_ID, lo, end);
+        // 2. MultiRaft-lock scope: read the committed sequencer log from the
+        //    first index the replay cache lacks. No SM lock is held here (see
+        //    the lock-discipline note above). The read runs under the
+        //    MultiRaft lock alone; the result is handled after the lock drops.
+        let read_from = kept_through.map_or(Some(lo), |kept| {
+            kept.checked_add(1).filter(|&next| next <= end)
+        });
+        let read = match read_from {
+            Some(read_from) => self
+                .multi_raft
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .read_committed_entries(SEQUENCER_GROUP_ID, read_from, end),
+            None => Ok(Vec::new()),
+        };
         let entries = {
             match read {
                 Ok(entries) => entries,
@@ -143,29 +151,21 @@ impl Scheduler {
             }
         };
 
-        // 3. SM-lock scope: decode the raw log entries into this vShard's
-        //    `SchedulerInput` stream (a pure `&self` read — no side effects).
-        //    Each entry decodes on its own, so every input keeps the Raft index
-        //    it came from. Decoding holds no cross-entry state, so the stream is
-        //    identical to a whole-range decode.
+        // 3. SM-lock scope: project the window into this vShard's
+        //    `SchedulerInput` stream, each input with the Raft index it came
+        //    from. The replay cache decodes each entry once per node, so a
+        //    vShard the entry does not target pays no decode. `None` means
+        //    the cache evicted an index of the window after step 1: the
+        //    catch-up stays armed, and the next drain reads it again.
         let inputs: Vec<(u64, SchedulerInput)> = {
             let sm = self
                 .sequencer_state_machine
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
-            entries
-                .iter()
-                .flat_map(|entry| {
-                    sm.replay_epochs_for_vshard(
-                        std::slice::from_ref(entry),
-                        self.vshard_id,
-                        0,
-                        u64::MAX,
-                    )
-                    .into_iter()
-                    .map(move |input| (entry.index, input))
-                })
-                .collect()
+            match sm.replay_window_for_vshard(&entries, self.vshard_id, lo, end) {
+                Some(inputs) => inputs,
+                None => return CatchUpDrain::Remaining,
+            }
         };
 
         // 4. Feed each replayed input through the SAME live processing path — no
@@ -206,11 +206,15 @@ impl Scheduler {
             }
             match resume_from {
                 // Stopped early: re-arm exactly at the first unprocessed input's
-                // index. Clearing below it first lets the min-collapse arm move
-                // the entry forward. Both run under one SM lock.
+                // index. The arm widens the range to `next`, and the clear
+                // below it moves the start forward. The vShard stays armed
+                // throughout, so the replay cache keeps the entries from
+                // `next`. Both run under one SM lock.
                 Some(next) => {
-                    sm.clear_catch_up_up_to(self.vshard_id, next.saturating_sub(1));
                     sm.arm_catch_up_from(self.vshard_id, next);
+                    if let Some(below) = next.checked_sub(1) {
+                        sm.clear_catch_up_up_to(self.vshard_id, below);
+                    }
                 }
                 // Replay of `lo ..= hi` is complete (`end == hi` here): clear
                 // the armed catch-up, but only up to `hi` — a concurrent drop
@@ -298,7 +302,7 @@ mod tests {
     // sequencer Raft group, COMMIT epoch batches to it, force the live fan-out to
     // actually DROP under a full channel, then run the real `drain_catch_up` —
     // which reads the genuine committed log via `read_committed_entries`, decodes
-    // it through `replay_epochs_for_vshard`, and feeds each input through
+    // it through `replay_window_for_vshard`, and feeds each input through
     // `process_scheduler_input` — and assert the dropped input's effect lands in
     // the scheduler's lock table. This proves the whole mechanism closes the
     // fan-out gap, not only each half.
@@ -433,7 +437,12 @@ mod tests {
 
         // Pre-seed a conflicting exclusive holder so the replayed txn BLOCKS (and so
         // never dispatches to a Data Plane that is not running in this harness).
-        let keys = crate::control::cluster::calvin::scheduler::driver::helpers::expand_rw_set(&txn);
+        let keys = crate::control::cluster::calvin::scheduler::driver::helpers::expand_rw_set(
+            &txn,
+            crate::control::cluster::calvin::scheduler::driver::helpers::LockSite::On(
+                scheduler.vshard_id,
+            ),
+        );
         assert!(!keys.is_empty(), "txn must expand to at least one lock key");
         let sentinel = TxnId::new(u64::MAX, 0);
         {
@@ -441,7 +450,10 @@ mod tests {
                 .lock_manager
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
-            assert_eq!(lm.acquire(sentinel, keys.clone()), AcquireOutcome::Ready);
+            assert_eq!(
+                lm.acquire(sentinel, keys.clone()).outcome,
+                AcquireOutcome::Ready
+            );
         }
 
         let replayed_before = scheduler.metrics.catch_up_replayed.load(Ordering::Relaxed);
@@ -511,15 +523,22 @@ mod tests {
         // A single conflicting holder on the shared key (both txns write test_coll
         // surrogate 1) so every txn BLOCKS rather than dispatching to a Data Plane
         // that is not running.
-        let keys =
-            crate::control::cluster::calvin::scheduler::driver::helpers::expand_rw_set(&txn0);
+        let keys = crate::control::cluster::calvin::scheduler::driver::helpers::expand_rw_set(
+            &txn0,
+            crate::control::cluster::calvin::scheduler::driver::helpers::LockSite::On(
+                scheduler.vshard_id,
+            ),
+        );
         let sentinel = TxnId::new(u64::MAX, 0);
         {
             let mut lm = scheduler
                 .lock_manager
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
-            assert_eq!(lm.acquire(sentinel, keys.clone()), AcquireOutcome::Ready);
+            assert_eq!(
+                lm.acquire(sentinel, keys.clone()).outcome,
+                AcquireOutcome::Ready
+            );
         }
 
         // Deliver epoch 1 LIVE: it acquires, blocks behind the sentinel, and is now
@@ -651,15 +670,19 @@ mod tests {
 
         // A conflicting holder on the shared key makes each replayed txn
         // block, so nothing dispatches.
-        let keys =
-            crate::control::cluster::calvin::scheduler::driver::helpers::expand_rw_set(&txn0);
+        let keys = crate::control::cluster::calvin::scheduler::driver::helpers::expand_rw_set(
+            &txn0,
+            crate::control::cluster::calvin::scheduler::driver::helpers::LockSite::On(
+                scheduler.vshard_id,
+            ),
+        );
         {
             let mut lm = scheduler
                 .lock_manager
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
             assert_eq!(
-                lm.acquire(TxnId::new(u64::MAX, 0), keys),
+                lm.acquire(TxnId::new(u64::MAX, 0), keys).outcome,
                 AcquireOutcome::Ready
             );
         }

@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nodedb_cluster::calvin::types::{EngineKeySet, SortedVec};
+use nodedb_cluster::calvin::types::{EngineKeySet, HomedPair, SortedVec};
 
 use super::super::shared::node_lock_pair;
 use crate::types::{RecordHomes, VShardId};
@@ -21,10 +21,10 @@ pub fn row_id_key(document_id: &str) -> Vec<u8> {
     document_id.as_bytes().to_vec()
 }
 
-/// The lock pairs and routing homes of one edge collection.
+/// The homed lock pairs and routing homes of one edge collection.
 #[derive(Debug, Default)]
 struct EdgeKeys {
-    pairs: Vec<(u32, u32)>,
+    pairs: Vec<HomedPair>,
     homes: Vec<u32>,
 }
 
@@ -83,24 +83,30 @@ impl WriteKeys {
     }
 
     /// Lock the edge `src_id -> dst_id` of `collection` by its surrogate
-    /// pair, and both endpoints' node lock pairs, on both endpoint homes.
+    /// pair, and both endpoints' node lock pairs, on each endpoint home.
+    ///
+    /// Each home locks the three pairs itself. A node guard locks its node
+    /// pair on the node's home, which is one of these homes.
     pub fn edge(&mut self, collection: &str, src_id: &str, dst_id: &str, pair: (u32, u32)) {
         let keys = self.edges.entry(collection.to_owned()).or_default();
-        keys.pairs
-            .extend([pair, node_lock_pair(src_id), node_lock_pair(dst_id)]);
-        keys.homes.extend(
-            RecordHomes::edge(src_id, dst_id)
-                .iter()
-                .map(VShardId::as_u32),
-        );
+        let lock_pairs = [pair, node_lock_pair(src_id), node_lock_pair(dst_id)];
+        for home in RecordHomes::edge(src_id, dst_id)
+            .iter()
+            .map(VShardId::as_u32)
+        {
+            keys.pairs
+                .extend(lock_pairs.iter().map(|&p| HomedPair::on(home, p)));
+            keys.homes.push(home);
+        }
     }
 
     /// Lock node `node_id` of `collection` on the node's key home.
     pub fn node(&mut self, collection: &str, node_id: &str) {
         let keys = self.edges.entry(collection.to_owned()).or_default();
-        keys.pairs.push(node_lock_pair(node_id));
-        keys.homes
-            .push(VShardId::from_key(node_id.as_bytes()).as_u32());
+        let home = VShardId::from_key(node_id.as_bytes()).as_u32();
+        keys.pairs
+            .push(HomedPair::on(home, node_lock_pair(node_id)));
+        keys.homes.push(home);
     }
 
     /// Enlist `vshard` for `collection` without locking a key.

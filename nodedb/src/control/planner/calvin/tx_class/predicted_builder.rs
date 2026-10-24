@@ -266,11 +266,13 @@ mod tests {
             &nodedb_cluster::calvin::types::SequencedTxn {
                 epoch: 1,
                 position,
-                tx_class,
+                tx_class: std::sync::Arc::new(tx_class),
                 epoch_system_ms: 1_700_000_000_000,
                 epoch_vshard_txn_count: 2,
                 lock_owner: None,
+                local_plans: None,
             },
+            crate::control::cluster::calvin::scheduler::driver::helpers::LockSite::Everywhere,
         )
     }
 
@@ -317,11 +319,11 @@ mod tests {
         let (first, second) = (TxnId::new(1, 0), TxnId::new(1, 1));
         let mut table = LockManager::new();
         assert_eq!(
-            table.acquire(first, locks(predicate, 0)),
+            table.acquire(first, locks(predicate, 0)).outcome,
             AcquireOutcome::Ready
         );
         assert_eq!(
-            table.acquire(second, locks(insert, 1)),
+            table.acquire(second, locks(insert, 1)).outcome,
             AcquireOutcome::Blocked,
             "a phantom insert waits for the predicate write"
         );

@@ -94,18 +94,9 @@ impl Scheduler {
         // Every replica judges a role-guarded state transition against the
         // roles of the identity whose writes the transaction commits.
         redo.user_roles = tx_class.user_roles.clone();
-        // The participants whose records carry the messages and the applied
-        // key. A class whose write vShards cannot be derived fails.
-        let publish_home = tx_class
-            .publish_vshard()
-            .map_err(|e| crate::Error::Internal {
-                detail: format!("Calvin transaction write vShards underivable: {e}"),
-            })?;
-        let applied_key_home = tx_class
-            .applied_key_home()
-            .map_err(|e| crate::Error::Internal {
-                detail: format!("Calvin transaction write vShards underivable: {e}"),
-            })?;
+        // The participants whose records carry the messages and the applied key.
+        let publish_home = tx_class.publish_vshard();
+        let applied_key_home = tx_class.applied_key_home();
         // One participant's record carries the messages the transaction's
         // trigger bodies published, so they commit once, with its writes.
         // Every replica stamps their position from the entry's log place.

@@ -26,44 +26,48 @@ use nodedb_physical::physical_plan::{BatchEdge, GraphOp, PhysicalPlan};
 use crate::Error;
 use crate::types::{RecordHomes, VShardId};
 
-/// Split every edge batch of `tx_class` that spans more than one home pair.
-/// A class with no edge write, or one already split into parts, is left as
-/// it is. `body_plans` follows the split: a slice of a body task is a body
-/// task.
-pub(crate) fn slice_edge_batches(tx_class: &mut TxClass) -> crate::Result<()> {
+/// `tx_class`'s decoded plans after edge slicing.
+pub(crate) struct SlicedPlans {
+    /// The plans, each edge batch split by home pair.
+    pub plans: Vec<PhysicalPlan>,
+    /// Whether a batch split, so `plans` no longer match the class's plan
+    /// bytes.
+    pub sliced: bool,
+}
+
+/// Split every edge batch of `plans`, `tx_class`'s decoded plans, that spans
+/// more than one home pair. Each edge moves into its slice. A class with no
+/// edge write, or one already split into parts, keeps its plans as they
+/// are. `body_plans` follows the split: a slice of a body task is a body
+/// task. `tx_class.body_plans` is sorted and deduplicated, and stays so.
+pub(crate) fn slice_edge_batches(
+    tx_class: &mut TxClass,
+    plans: Vec<PhysicalPlan>,
+) -> crate::Result<SlicedPlans> {
     if tx_class.is_multi_part() || !writes_edges(tx_class) {
-        return Ok(());
+        return Ok(SlicedPlans {
+            plans,
+            sliced: false,
+        });
     }
-    let plans =
-        nodedb_physical::physical_plan::wire::decode_batch(&tx_class.plans).map_err(|e| {
-            Error::Serialization {
-                format: "msgpack".into(),
-                detail: format!("calvin edge slicing: plan decode: {e}"),
-            }
-        })?;
-    if !plans.iter().any(|plan| batch_slices(plan).is_some()) {
-        return Ok(());
-    }
-    let mut sliced: Vec<PhysicalPlan> = Vec::with_capacity(plans.len());
+    let mut out: Vec<PhysicalPlan> = Vec::with_capacity(plans.len());
     let mut body_plans: Vec<u32> = Vec::with_capacity(tx_class.body_plans.len());
+    let mut sliced = false;
     for (task, plan) in (0u32..).zip(plans) {
-        let body = tx_class.body_plans.contains(&task);
-        let slices = batch_slices(&plan).unwrap_or_else(|| vec![plan]);
+        let body = tx_class.body_plans.binary_search(&task).is_ok();
+        let slices = batch_slices(plan);
+        sliced |= slices.len() > 1;
         for slice in slices {
             if body {
-                body_plans.push(index_of(sliced.len())?);
+                body_plans.push(index_of(out.len())?);
             }
-            sliced.push(slice);
+            out.push(slice);
         }
     }
-    tx_class.plans = nodedb_physical::physical_plan::wire::encode_batch(&sliced).map_err(|e| {
-        Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("calvin edge slicing: plan encode: {e}"),
-        }
-    })?;
-    tx_class.body_plans = body_plans;
-    Ok(())
+    if sliced {
+        tx_class.body_plans = body_plans;
+    }
+    Ok(SlicedPlans { plans: out, sliced })
 }
 
 /// Whether `tx_class` writes an edge: its write set names edge keys.
@@ -75,36 +79,37 @@ pub(crate) fn writes_edges(tx_class: &TxClass) -> bool {
         .any(|keys| matches!(keys, EngineKeySet::Edge { .. }))
 }
 
-/// The per-home-pair slices of `plan` when it is an edge batch over more
-/// than one home pair, else `None`.
-fn batch_slices(plan: &PhysicalPlan) -> Option<Vec<PhysicalPlan>> {
+/// The per-home-pair slices of `plan`, in home-pair order, when it is an
+/// edge batch. Every other plan, and a batch over one home pair, is its
+/// own one slice. Each edge moves into its slice.
+fn batch_slices(plan: PhysicalPlan) -> Vec<PhysicalPlan> {
     let (edges, delete) = match plan {
         PhysicalPlan::Graph(GraphOp::EdgePutBatch { edges }) => (edges, false),
         PhysicalPlan::Graph(GraphOp::EdgeDeleteBatch { edges }) => (edges, true),
-        _ => return None,
+        other => return vec![other],
     };
     let mut groups: BTreeMap<(u32, u32), Vec<BatchEdge>> = BTreeMap::new();
     for edge in edges {
-        groups
-            .entry(home_pair(edge))
-            .or_default()
-            .push(edge.clone());
+        groups.entry(home_pair(&edge)).or_default().push(edge);
     }
-    if groups.len() < 2 {
-        return None;
+    // One group holds every edge in its batch order, so the batch rebuilds
+    // whole. An empty batch stays one empty batch.
+    if groups.is_empty() {
+        return vec![edge_batch(Vec::new(), delete)];
     }
-    Some(
-        groups
-            .into_values()
-            .map(|edges| {
-                PhysicalPlan::Graph(if delete {
-                    GraphOp::EdgeDeleteBatch { edges }
-                } else {
-                    GraphOp::EdgePutBatch { edges }
-                })
-            })
-            .collect(),
-    )
+    groups
+        .into_values()
+        .map(|edges| edge_batch(edges, delete))
+        .collect()
+}
+
+/// An edge put batch of `edges`, or a delete batch when `delete`.
+fn edge_batch(edges: Vec<BatchEdge>, delete: bool) -> PhysicalPlan {
+    PhysicalPlan::Graph(if delete {
+        GraphOp::EdgeDeleteBatch { edges }
+    } else {
+        GraphOp::EdgePutBatch { edges }
+    })
 }
 
 /// `(source home, destination home)` of `edge`. The source home owns it.
@@ -157,8 +162,8 @@ mod tests {
         let plan = PhysicalPlan::Graph(GraphOp::EdgePutBatch {
             edges: edges.clone(),
         });
-        let slices = batch_slices(&plan).expect("a wide batch splits");
-        assert_eq!(slices.len(), pairs.len());
+        let slices = batch_slices(plan);
+        assert_eq!(slices.len(), pairs.len(), "a wide batch splits");
         let mut seen = 0;
         for slice in &slices {
             let PhysicalPlan::Graph(GraphOp::EdgePutBatch { edges }) = slice else {
@@ -180,8 +185,9 @@ mod tests {
         let one_pair = PhysicalPlan::Graph(GraphOp::EdgePutBatch {
             edges: vec![edge("a".into(), "b".into())],
         });
-        assert!(
-            batch_slices(&one_pair).is_none(),
+        assert_eq!(
+            batch_slices(one_pair.clone()),
+            vec![one_pair],
             "one home pair stays whole"
         );
     }

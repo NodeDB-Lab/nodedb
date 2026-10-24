@@ -196,8 +196,10 @@ pub async fn dispatch_authorized_tasks_to_calvin(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::server::shared::session::read_set::{EngineTag, ReadKey, ReadOrigin};
-    use crate::types::{DatabaseId, KeyRepr, VShardId};
+    use crate::control::server::shared::session::read_set::{
+        EngineTag, ReadKey, ReadOrigin, ReadPoint,
+    };
+    use crate::types::{DatabaseId, VShardId};
     use nodedb_cluster::calvin::types::TxnIdWire;
     use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan};
     use nodedb_physical::physical_task::PostSetOp;
@@ -231,7 +233,7 @@ mod tests {
             tenant_id: TenantId::new(1),
             collection: collection.to_owned(),
             key: ReadKey::Point {
-                repr: KeyRepr::Surrogate(1),
+                repr: ReadPoint::Surrogate(1),
             },
             read_version: nodedb_types::WriteVersion::logged(0, 1),
             origin: ReadOrigin::Session,

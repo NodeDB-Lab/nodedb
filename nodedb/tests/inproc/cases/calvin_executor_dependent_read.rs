@@ -93,7 +93,7 @@ fn a_dependent_class_participates_its_passive_and_active_vshards() {
         .map(|v| v.as_u32())
         .collect();
     assert!(participants.contains(&passive_vshard));
-    let active = tx_class.active_vshards().expect("active vShards");
+    let active = tx_class.active_vshards();
     assert_eq!(active.len(), 2);
     assert!(!active.contains(&passive_vshard));
 }

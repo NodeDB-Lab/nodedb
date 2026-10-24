@@ -147,18 +147,23 @@ mod tests {
         let watcher = scheduler.shared.applied_index_watcher(METADATA_GROUP_ID);
         let floor = watcher.current() + 3;
         let mut txn = make_sequenced_txn(1, 0);
-        txn.tx_class.metadata_floor = floor;
+        std::sync::Arc::make_mut(&mut txn.tx_class).metadata_floor = floor;
 
         // A conflicting holder on the txn's key: once it runs, it blocks
         // instead of dispatching to a Data Plane this test does not run.
-        let keys = crate::control::cluster::calvin::scheduler::driver::helpers::expand_rw_set(&txn);
+        let keys = crate::control::cluster::calvin::scheduler::driver::helpers::expand_rw_set(
+            &txn,
+            crate::control::cluster::calvin::scheduler::driver::helpers::LockSite::On(
+                scheduler.vshard_id,
+            ),
+        );
         {
             let mut lm = scheduler
                 .lock_manager
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
             assert_eq!(
-                lm.acquire(TxnId::new(u64::MAX, 0), keys),
+                lm.acquire(TxnId::new(u64::MAX, 0), keys).outcome,
                 AcquireOutcome::Ready
             );
         }
@@ -195,7 +200,7 @@ mod tests {
         let (mut scheduler, _dir) = build_test_scheduler(0);
         let watcher = scheduler.shared.applied_index_watcher(METADATA_GROUP_ID);
         let mut txn = make_sequenced_txn(1, 0);
-        txn.tx_class.metadata_floor = watcher.current() + 3;
+        std::sync::Arc::make_mut(&mut txn.tx_class).metadata_floor = watcher.current() + 3;
 
         scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(txn)));
         assert!(scheduler.holds_for_metadata());

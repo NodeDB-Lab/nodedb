@@ -9,9 +9,10 @@
 //! `SequencerEntry::TxnPart` after the header. A participant stages the
 //! transaction once every part that targets it has arrived.
 //!
-//! - A part holds consecutive whole tasks, encoded as the plan batch a
-//!   single-entry transaction carries in `plans`. `first_task` is the index
-//!   of its first task in the whole transaction.
+//! - A part holds consecutive whole tasks in the [`super::part_tasks`] form:
+//!   each task's own encoding, byte end, and homes. A target decodes only
+//!   the tasks that route to it. `first_task` is the index of its first
+//!   task in the whole transaction.
 //! - A task too large for one part travels as a run of chunk parts. Each
 //!   holds one byte range of the task's own encoding and nothing else.
 //! - A part targets the vShards its tasks route to. Only those receive it.
@@ -84,8 +85,8 @@ pub struct PlanPart {
     /// Index of the part's first task in the whole transaction. For a chunk
     /// part, the index of its one task.
     pub first_task: u32,
-    /// The part's tasks as a plan batch, or for a chunk part, one byte range
-    /// of its task's encoding.
+    /// The part's tasks in the [`super::part_tasks`] form, or for a chunk
+    /// part, one byte range of its task's encoding.
     pub plans: Vec<u8>,
     /// Set on a chunk part.
     #[serde(default)]

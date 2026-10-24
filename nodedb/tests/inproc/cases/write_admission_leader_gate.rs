@@ -79,7 +79,10 @@ async fn an_admitted_entry_holds_its_keys_until_its_apply_starts() {
     let truncate = TxnId::new(9, 0);
     let keys = truncate_keys(coll);
     assert_eq!(
-        lm.lock().expect("lm").acquire(truncate, keys.clone()),
+        lm.lock()
+            .expect("lm")
+            .acquire(truncate, keys.clone())
+            .outcome,
         AcquireOutcome::Blocked,
         "a Calvin truncate waits for the admitted write"
     );
@@ -111,7 +114,8 @@ async fn a_contended_sequenced_entry_routes_to_the_sequencer() {
     assert_eq!(
         lm.lock()
             .expect("lm")
-            .acquire(TxnId::new(9, 0), truncate_keys(coll)),
+            .acquire(TxnId::new(9, 0), truncate_keys(coll))
+            .outcome,
         AcquireOutcome::Ready
     );
     let gate = LeaderWriteGate::new(&shared);
@@ -139,7 +143,8 @@ async fn a_contended_resolved_entry_waits_for_its_keys() {
     assert_eq!(
         lm.lock()
             .expect("lm")
-            .acquire(truncate, truncate_keys(coll)),
+            .acquire(truncate, truncate_keys(coll))
+            .outcome,
         AcquireOutcome::Ready
     );
     let resolved = PhysicalPlan::Kv(KvOp::ResolvedWrite {
@@ -178,7 +183,8 @@ async fn a_contended_resolved_entry_waits_for_its_keys() {
     assert_eq!(
         lm.lock()
             .expect("lm")
-            .acquire(TxnId::new(10, 0), truncate_keys(coll)),
+            .acquire(TxnId::new(10, 0), truncate_keys(coll))
+            .outcome,
         AcquireOutcome::Ready,
         "dropping the hold frees every key it held"
     );
@@ -195,7 +201,8 @@ async fn a_contended_entry_waits_no_longer_than_its_budget() {
     assert_eq!(
         lm.lock()
             .expect("lm")
-            .acquire(TxnId::new(9, 0), truncate_keys(coll)),
+            .acquire(TxnId::new(9, 0), truncate_keys(coll))
+            .outcome,
         AcquireOutcome::Ready
     );
     let resolved = PhysicalPlan::Kv(KvOp::ResolvedWrite {

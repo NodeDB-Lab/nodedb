@@ -12,9 +12,9 @@
 //!   this vShard, per the header's manifest.
 //! - Each part is kept by its index in the transaction. A part delivered
 //!   again is ignored. Parts can arrive in any order.
-//! - Once every part arrived, the scheduler reads them in index order. Each
-//!   part decodes once, and only the tasks that route here are kept, with
-//!   their index in the whole transaction.
+//! - Once every part arrived, the scheduler reads them in index order. A
+//!   part names each task's homes, so only the tasks that route here
+//!   decode. Each keeps its index in the whole transaction.
 //! - A task too large for one part travels as a run of chunk parts with
 //!   consecutive indexes. Every chunk targets the task's homes, so a home
 //!   receives the whole run. The task decodes from its joined chunks.
@@ -24,9 +24,9 @@
 //! - A txn whose locks are granted before its parts arrived waits in
 //!   `awaiting`, holding its locks. It counts as unfinished, so every later
 //!   whole-collection resolve on this vShard waits for it.
-//! - Once every part that targets this vShard arrived, the txn stages as a
-//!   single-entry txn whose plans are its local tasks. Its manifest keeps
-//!   the whole-transaction facts the dispatch reads.
+//! - Once every part that targets this vShard arrived, the txn stages with
+//!   its local tasks as `local_plans`. The class stays shared, and its
+//!   manifest keeps the whole-transaction facts the dispatch reads.
 //! - An abandoned txn stages nothing. It releases its locks and completes
 //!   when its locks are granted, or at once when it already holds them.
 
@@ -34,21 +34,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use nodedb_cluster::calvin::types::{SequencedTxn, TaskChunk, TxnIdWire};
-use nodedb_physical::physical_plan::PhysicalPlan;
 use tracing::warn;
 
+use super::parts_assemble::{ReceivedPart, assemble};
 use super::parts_error::PartsError;
-use super::routing::{PlanRouting, plan_vshard_in_database};
 use super::scheduler::Scheduler;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
-
-/// One part as it arrived: its first task, its bytes, and its chunk.
-#[derive(Debug)]
-struct ReceivedPart {
-    first_task: u32,
-    plans: Arc<Vec<u8>>,
-    chunk: Option<TaskChunk>,
-}
 
 /// The parts one multi-part txn owes this vShard, and the ones that arrived.
 #[derive(Debug)]
@@ -65,125 +56,6 @@ struct Assembly {
 impl Assembly {
     fn is_complete(&self) -> bool {
         self.received.len() >= self.expected as usize
-    }
-}
-
-/// A task whose chunks are being joined.
-#[derive(Debug)]
-struct SpanningTask {
-    task: u32,
-    bytes: Vec<u8>,
-    total_len: u64,
-}
-
-/// Reads an assembly's parts, in index order, into its local tasks.
-#[derive(Debug)]
-struct Assembler {
-    database_id: crate::types::DatabaseId,
-    /// `(task index in the whole txn, plan)` of every local task so far.
-    local: Vec<(u32, PhysicalPlan)>,
-    /// The task whose chunks are being joined.
-    spanning: Option<SpanningTask>,
-    /// Why a part cannot be read. The txn fails at dispatch.
-    failed: Option<PartsError>,
-}
-
-impl Assembler {
-    fn fail(&mut self, error: impl FnOnce() -> PartsError) {
-        self.failed.get_or_insert_with(error);
-    }
-
-    /// Keep `plan`, the txn's task `task` from part `index`, when it routes
-    /// to `vshard_id`.
-    fn keep_if_local(&mut self, index: u32, task: u32, plan: PhysicalPlan, vshard_id: u32) {
-        match plan_vshard_in_database(&plan, self.database_id) {
-            PlanRouting::Vshards(vshards) => {
-                if vshards.iter().any(|v| v.as_u32() == vshard_id) {
-                    self.local.push((task, plan));
-                }
-            }
-            PlanRouting::ControlPlaneOnly => {
-                self.fail(|| PartsError::ControlPlaneOnly { part: index, task });
-            }
-            PlanRouting::NotAWrite => {
-                self.fail(|| PartsError::NotAWrite { part: index, task });
-            }
-            PlanRouting::Unroutable(reason) => {
-                self.fail(|| PartsError::Unroutable {
-                    part: index,
-                    task,
-                    reason,
-                });
-            }
-        }
-    }
-
-    /// Take part `index`, a batch of whole tasks from task `first_task`.
-    fn take_tasks(&mut self, index: u32, first_task: u32, plans: &[u8], vshard_id: u32) {
-        if let Some(spanning) = &self.spanning {
-            let task = spanning.task;
-            self.fail(|| PartsError::InterruptsChunks { part: index, task });
-            return;
-        }
-        match super::super::helpers::decode_plans(plans) {
-            Ok(decoded) => {
-                for (task, plan) in (first_task..).zip(decoded) {
-                    self.keep_if_local(index, task, plan, vshard_id);
-                }
-            }
-            Err(error) => self.fail(|| PartsError::PartUndecodable {
-                part: index,
-                source: Box::new(error),
-            }),
-        }
-    }
-
-    /// Take part `index`, one chunk of task `task`.
-    fn take_chunk(
-        &mut self,
-        index: u32,
-        task: u32,
-        bytes: &[u8],
-        chunk: TaskChunk,
-        vshard_id: u32,
-    ) {
-        let continues = match &self.spanning {
-            None => chunk.offset == 0,
-            Some(spanning) => {
-                spanning.task == task
-                    && spanning.bytes.len() as u64 == chunk.offset
-                    && spanning.total_len == chunk.total_len
-            }
-        };
-        if !continues {
-            self.fail(|| PartsError::BrokenChunks { part: index, task });
-            self.spanning = None;
-            return;
-        }
-        let spanning = self.spanning.get_or_insert_with(|| SpanningTask {
-            task,
-            bytes: Vec::new(),
-            total_len: chunk.total_len,
-        });
-        spanning.bytes.extend_from_slice(bytes);
-        let len = spanning.bytes.len() as u64;
-        if len < spanning.total_len {
-            return;
-        }
-        let Some(whole) = self.spanning.take() else {
-            return;
-        };
-        if len > whole.total_len {
-            self.fail(|| PartsError::ChunksOverrun {
-                task,
-                total_len: whole.total_len,
-            });
-            return;
-        }
-        match nodedb_physical::physical_plan::wire::decode(&whole.bytes) {
-            Ok(plan) => self.keep_if_local(index, task, plan, vshard_id),
-            Err(source) => self.fail(|| PartsError::TaskUndecodable { task, source }),
-        }
     }
 }
 
@@ -310,7 +182,12 @@ impl Scheduler {
         }
         let vshard_id = self.vshard_id;
         let assembled = match self.parts.assemblies.remove(&txn_id) {
-            Some(assembly) => assemble(&mut txn, assembly, vshard_id),
+            Some(assembly) => assemble(
+                &mut txn,
+                assembly.database_id,
+                &assembly.received,
+                vshard_id,
+            ),
             None => Err(PartsError::NoAssembly),
         };
         match assembled {
@@ -396,61 +273,14 @@ impl Scheduler {
     }
 }
 
-/// The single-entry form of `txn`: its local tasks as `plans`, in their
-/// order in the whole txn, and `body_plans` as indexes into them. The
-/// manifest stays for the whole-transaction facts.
-///
-/// Reads the parts in index order, so the result depends only on their
-/// contents. Every replica that holds the same parts assembles the same
-/// plans, or fails alike. A failure leaves `txn` unchanged.
-fn assemble(txn: &mut SequencedTxn, assembly: Assembly, vshard_id: u32) -> Result<(), PartsError> {
-    let mut assembler = Assembler {
-        database_id: assembly.database_id,
-        local: Vec::new(),
-        spanning: None,
-        failed: None,
-    };
-    for (index, part) in &assembly.received {
-        match part.chunk {
-            Some(chunk) => {
-                assembler.take_chunk(*index, part.first_task, &part.plans, chunk, vshard_id);
-            }
-            None => assembler.take_tasks(*index, part.first_task, &part.plans, vshard_id),
-        }
-    }
-    if let Some(failed) = assembler.failed {
-        return Err(failed);
-    }
-    if let Some(spanning) = assembler.spanning {
-        return Err(PartsError::Unfinished {
-            task: spanning.task,
-            received: spanning.bytes.len(),
-            total_len: spanning.total_len,
-        });
-    }
-    let mut local = assembler.local;
-    local.sort_by_key(|(task, _)| *task);
-    let body_plans: Vec<u32> = (0u32..)
-        .zip(&local)
-        .filter(|(_, (task, _))| txn.tx_class.body_plans.contains(task))
-        .map(|(local_index, _)| local_index)
-        .collect();
-    let plans: Vec<&PhysicalPlan> = local.iter().map(|(_, plan)| plan).collect();
-    let bytes = zerompk::to_msgpack_vec(&plans)
-        .map_err(|source| PartsError::PlansDoNotEncode { source })?;
-    txn.tx_class.plans = bytes;
-    txn.tx_class.body_plans = body_plans;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use nodedb_cluster::calvin::types::{
-        MultiPartPlans, PartStreamId, SchedulerInput, VShardParts,
+        MultiPartPlans, PartStreamId, PartTasksBuilder, SchedulerInput, VShardParts,
     };
     use nodedb_cluster::calvin::{AbortReason, CalvinCompletionRegistry, SequencerEntry};
-    use nodedb_physical::physical_plan::DocumentOp;
     use nodedb_physical::physical_plan::wire as plan_wire;
+    use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
     use nodedb_types::QualifiedCollection;
 
     use super::*;
@@ -467,13 +297,37 @@ mod tests {
     use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
     use crate::types::DatabaseId;
 
-    fn truncate_plan() -> PhysicalPlan {
+    fn truncate_of(collection: &str) -> PhysicalPlan {
         PhysicalPlan::Document(DocumentOp::Truncate {
-            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "test_coll"),
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, collection),
             restart_identity: false,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
         })
+    }
+
+    fn truncate_plan() -> PhysicalPlan {
+        truncate_of("test_coll")
+    }
+
+    /// The vShard a bare collection of the default database homes to.
+    fn home_of(collection: &str) -> u32 {
+        nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, collection)
+            .vshard()
+            .as_u32()
+    }
+
+    /// The plan bytes of one whole-task part: each task's bytes and its home.
+    fn part_tasks(tasks: &[(Vec<u8>, u32)]) -> Vec<u8> {
+        let mut builder = PartTasksBuilder::new();
+        for (bytes, home) in tasks {
+            builder.push(bytes, &[*home]).expect("push a task");
+        }
+        builder.take().expect("encode the part")
+    }
+
+    fn encoded(plan: &PhysicalPlan) -> Vec<u8> {
+        plan_wire::encode(plan).expect("encode one task")
     }
 
     /// A single-entry truncate of `test_coll` at `(epoch, position)`. Each
@@ -489,8 +343,9 @@ mod tests {
     /// part targeting the `test_coll` vShard.
     fn header(epoch: u64, position: u32, parts: u32, tasks: u32) -> SequencedTxn {
         let mut txn = plain_write(epoch, position);
-        txn.tx_class.plans = Vec::new();
-        txn.tx_class.multi_part = Some(MultiPartPlans {
+        let class = std::sync::Arc::make_mut(&mut txn.tx_class);
+        class.plans = Vec::new();
+        class.multi_part = Some(MultiPartPlans {
             stream: PartStreamId { node: 1, seq: 1 },
             part_count: parts,
             total_tasks: tasks,
@@ -537,7 +392,37 @@ mod tests {
     }
 
     fn one_truncate() -> Vec<u8> {
-        plan_wire::encode_batch(&vec![truncate_plan()]).expect("encode one truncate")
+        part_tasks(&[(encoded(&truncate_plan()), test_coll_vshard())])
+    }
+
+    /// One whole-task part, index 0, from task 0.
+    fn one_part(plans: Vec<u8>) -> BTreeMap<u32, ReceivedPart> {
+        BTreeMap::from([(
+            0,
+            ReceivedPart {
+                first_task: 0,
+                plans: Arc::new(plans),
+                chunk: None,
+            },
+        )])
+    }
+
+    /// Three collections that home to three distinct vShards.
+    fn three_homes() -> [(String, u32); 3] {
+        let mut found: Vec<(String, u32)> = Vec::new();
+        for i in 0u32..1024 {
+            let name = format!("c_{i}");
+            let home = home_of(&name);
+            if found.iter().all(|(_, seen)| *seen != home) {
+                found.push((name, home));
+            }
+            if found.len() == 3 {
+                break;
+            }
+        }
+        found
+            .try_into()
+            .expect("three collections over distinct vShards")
     }
 
     /// A scheduler on the `test_coll` vShard that leads its data group and
@@ -663,7 +548,7 @@ mod tests {
         scheduler.process_scheduler_input(part(3, 0, 1, one_truncate()));
         assert!(!scheduler.parts.is_awaiting(txn_id));
         let pending = scheduler.pending.get(&txn_id).expect("staged");
-        let plans = plan_wire::decode_batch(&pending.txn.tx_class.plans).expect("decode");
+        let plans = plan_wire::decode_batch(pending.txn.plans()).expect("decode");
         assert_eq!(plans.len(), 2, "both parts' tasks stage together");
     }
 
@@ -686,7 +571,7 @@ mod tests {
         scheduler.process_scheduler_input(chunk_part(7, 2, 1, &task[half..], half as u64, total));
 
         let pending = scheduler.pending.get(&txn_id).expect("staged");
-        let plans = plan_wire::decode_batch(&pending.txn.tx_class.plans).expect("decode");
+        let plans = plan_wire::decode_batch(pending.txn.plans()).expect("decode");
         assert_eq!(plans, vec![truncate_plan(), truncate_plan()]);
     }
 
@@ -733,7 +618,7 @@ mod tests {
         ));
 
         let pending = scheduler.pending.get(&txn_id).expect("staged");
-        let plans = plan_wire::decode_batch(&pending.txn.tx_class.plans).expect("decode");
+        let plans = plan_wire::decode_batch(pending.txn.plans()).expect("decode");
         assert_eq!(plans, vec![truncate_plan()]);
     }
 
@@ -871,5 +756,96 @@ mod tests {
         assert!(!scheduler.blocked.contains_key(&multi));
         assert!(!scheduler.pending.contains_key(&multi), "stages nothing");
         assert!(scheduler.applied.is_applied(5, 1));
+    }
+
+    /// Assembly keeps the class shared with the header and every other
+    /// vShard's copy. The local plans live on this copy alone.
+    #[test]
+    fn assembly_leaves_the_class_shared() {
+        let mut header = header(10, 0, 1, 2);
+        std::sync::Arc::make_mut(&mut header.tx_class).set_body_plans(vec![1]);
+        let mut copy = header.clone();
+        let plans = part_tasks(&[
+            (encoded(&truncate_plan()), test_coll_vshard()),
+            (encoded(&truncate_plan()), test_coll_vshard()),
+        ]);
+        assemble(
+            &mut copy,
+            DatabaseId::DEFAULT,
+            &one_part(plans),
+            test_coll_vshard(),
+        )
+        .expect("assembles");
+
+        assert!(Arc::ptr_eq(&copy.tx_class, &header.tx_class));
+        assert!(!copy.plans().is_empty());
+        assert_eq!(copy.body_plans(), &[1]);
+        assert!(header.local_plans.is_none());
+        let plans = plan_wire::decode_batch(copy.plans()).expect("decode");
+        assert_eq!(plans, vec![truncate_plan(), truncate_plan()]);
+    }
+
+    /// A part of three tasks over three homes: each target decodes only its
+    /// own task. A task's bytes that do not decode fail only its own home.
+    #[test]
+    fn each_target_decodes_only_its_own_tasks() {
+        let homes = three_homes();
+        let plans: Vec<PhysicalPlan> = homes.iter().map(|(name, _)| truncate_of(name)).collect();
+        let part = part_tasks(&[
+            (encoded(&plans[0]), homes[0].1),
+            (encoded(&plans[1]), homes[1].1),
+            (encoded(&plans[2]), homes[2].1),
+        ]);
+        for (at, (_, home)) in homes.iter().enumerate() {
+            let mut txn = header(11, 0, 1, 3);
+            assemble(
+                &mut txn,
+                DatabaseId::DEFAULT,
+                &one_part(part.clone()),
+                *home,
+            )
+            .expect("assembles");
+            let local = plan_wire::decode_batch(txn.plans()).expect("decode");
+            assert_eq!(local, vec![plans[at].clone()], "home {home}");
+        }
+
+        let broken = part_tasks(&[
+            (encoded(&plans[0]), homes[0].1),
+            (vec![0xc1], homes[1].1),
+            (encoded(&plans[2]), homes[2].1),
+        ]);
+        for (at, (_, home)) in homes.iter().enumerate() {
+            let mut txn = header(12, 0, 1, 3);
+            let assembled = assemble(
+                &mut txn,
+                DatabaseId::DEFAULT,
+                &one_part(broken.clone()),
+                *home,
+            );
+            match at {
+                1 => assert!(
+                    matches!(assembled, Err(PartsError::TaskUndecodable { task: 1, .. })),
+                    "the undecodable task fails its home"
+                ),
+                _ => assert!(assembled.is_ok(), "home {home} never decodes task 1"),
+            }
+        }
+    }
+
+    /// A task whose routing differs from the homes its part names fails.
+    #[test]
+    fn a_task_routed_off_its_named_homes_fails() {
+        let homes = three_homes();
+        let part = part_tasks(&[(encoded(&truncate_of(&homes[0].0)), homes[1].1)]);
+        let mut txn = header(13, 0, 1, 1);
+        let assembled = assemble(&mut txn, DatabaseId::DEFAULT, &one_part(part), homes[1].1);
+        assert!(matches!(
+            assembled,
+            Err(PartsError::HomesMismatch { part: 0, task: 0 })
+        ));
+        assert!(
+            txn.local_plans.is_none(),
+            "a failure leaves the txn as it was"
+        );
     }
 }

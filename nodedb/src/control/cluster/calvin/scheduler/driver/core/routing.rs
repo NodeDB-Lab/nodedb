@@ -9,6 +9,8 @@
 
 #![deny(clippy::wildcard_enum_match_arm)]
 
+use std::collections::BTreeSet;
+
 use nodedb_physical::physical_plan::{
     ArrayOp, ColumnarOp, CrdtOp, DocumentOp, GraphOp, KvOp, MetaOp, PhysicalPlan, TimeseriesOp,
     VectorOp,
@@ -271,10 +273,12 @@ fn graph_routing(op: &GraphOp) -> PlanRouting {
         // A batch is the union of its edges' homes, under the same key-homing
         // rule as the single-edge plans above.
         GraphOp::EdgePutBatch { edges } | GraphOp::EdgeDeleteBatch { edges } => {
+            // First-seen order, deduplicated through an ordered seen-set.
             let mut vshards: Vec<VShardId> = Vec::new();
+            let mut seen: BTreeSet<u32> = BTreeSet::new();
             for edge in edges {
                 for vshard in RecordHomes::edge(&edge.src_id, &edge.dst_id).iter() {
-                    if !vshards.contains(&vshard) {
+                    if seen.insert(vshard.as_u32()) {
                         vshards.push(vshard);
                     }
                 }

@@ -104,6 +104,9 @@ pub struct SequencerStateMachine {
     pub(super) undurable: super::undurable::UndurableInputs,
     /// Where the history this state holds begins (see [`super::history`]).
     pub(super) history: super::history::HistoryOrigin,
+    /// Committed entries decoded once for every armed vShard's replay (see
+    /// [`super::replay_cache`]). Never locked with `catch_up_from` held.
+    pub(super) replay_cache: Mutex<super::replay_cache::ReplayCache>,
 }
 
 pub(super) const NOT_YET_APPLIED: u64 = u64::MAX;
@@ -154,6 +157,7 @@ impl SequencerStateMachine {
             open_parts: super::parts::OpenParts::default(),
             undurable: super::undurable::UndurableInputs::default(),
             history: super::history::HistoryOrigin::LogStart,
+            replay_cache: Mutex::new(super::replay_cache::ReplayCache::default()),
         }
     }
 
@@ -247,12 +251,14 @@ impl SequencerStateMachine {
         self.drop_catch_up(vshard);
     }
 
-    /// Forget `vshard`'s armed catch-up.
+    /// Forget `vshard`'s armed catch-up, and the replay entries no armed
+    /// vShard still owes.
     fn drop_catch_up(&self, vshard: u32) {
         self.catch_up_from
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&vshard);
+        self.prune_replay_cache();
     }
 
     /// The highest epoch number that has been committed and applied on this
@@ -325,8 +331,14 @@ impl SequencerStateMachine {
     /// drain consumes each recorded miss exactly once. Returns `None` when no
     /// drop is pending for the vShard. The next drop re-records a fresh index.
     pub fn take_catch_up_from(&self, vshard: u32) -> Option<u64> {
-        let mut map = self.catch_up_from.lock().unwrap_or_else(|p| p.into_inner());
-        map.remove(&vshard).map(|range| range.from)
+        let taken = self
+            .catch_up_from
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&vshard)
+            .map(|range| range.from);
+        self.prune_replay_cache();
+        taken
     }
 
     /// Arm a catch-up for `vshard` from `index` (min-collapse), so the
@@ -362,19 +374,24 @@ impl SequencerStateMachine {
     /// `up_to + 1`, so the next drain delivers it and no live input overtakes
     /// it. With none, the vShard is disarmed and live delivery resumes. An
     /// armed range that starts past `up_to` is left as it is.
+    ///
+    /// The replay entries no armed vShard still owes are then forgotten.
     pub fn clear_catch_up_up_to(&self, vshard: u32, up_to: u64) {
-        let mut map = self.catch_up_from.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(range) = map.get_mut(&vshard) else {
-            return;
-        };
-        if range.from > up_to {
-            return;
+        {
+            let mut map = self.catch_up_from.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(range) = map.get_mut(&vshard) else {
+                return;
+            };
+            if range.from > up_to {
+                return;
+            }
+            if range.through > up_to {
+                range.from = up_to.saturating_add(1);
+            } else {
+                map.remove(&vshard);
+            }
         }
-        if range.through > up_to {
-            range.from = up_to.saturating_add(1);
-        } else {
-            map.remove(&vshard);
-        }
+        self.prune_replay_cache();
     }
 
     /// Arm `vshard`'s catch-up past the last applied entry, so every later

@@ -239,10 +239,11 @@ mod tests {
             txns: vec![SequencedTxn {
                 epoch: 7,
                 position: 0,
-                tx_class,
+                tx_class: std::sync::Arc::new(tx_class),
                 epoch_system_ms: 1_700_000_000_000,
                 epoch_vshard_txn_count: 1,
                 lock_owner: None,
+                local_plans: None,
             }],
             epoch_system_ms: 1_700_000_000_000,
         }

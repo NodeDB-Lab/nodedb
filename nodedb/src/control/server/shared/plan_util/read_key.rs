@@ -9,8 +9,7 @@
 //! decided.
 
 use crate::bridge::envelope::PhysicalPlan;
-use crate::control::server::shared::session::read_set::ReadKey;
-use crate::types::KeyRepr;
+use crate::control::server::shared::session::read_set::{ReadKey, ReadPoint};
 use nodedb_physical::physical_plan::{
     ArrayOp, ClusterArrayOp, ClusterEventOp, ColumnarOp, CrdtOp, DocumentOp, GraphOp, KvOp, MetaOp,
     QueryOp, SpatialOp, TextOp, TimeseriesOp, VectorOp,
@@ -42,7 +41,7 @@ fn document_read_key(op: &DocumentOp, found: bool) -> ReadKey {
     match op {
         DocumentOp::PointGet { surrogate, .. } => match surrogate {
             Some(surrogate) if found => ReadKey::Point {
-                repr: KeyRepr::Surrogate(surrogate.as_u32()),
+                repr: ReadPoint::Surrogate(surrogate.as_u32()),
             },
             // A miss, or a read with no bound surrogate, observes the
             // predicate: a later insert of the key must still conflict.
@@ -100,7 +99,7 @@ fn document_read_key(op: &DocumentOp, found: bool) -> ReadKey {
 fn kv_read_key(op: &KvOp) -> ReadKey {
     match op {
         KvOp::Get { key, .. } | KvOp::FieldGet { key, .. } => ReadKey::Point {
-            repr: KeyRepr::KvKey(key.clone().into_boxed_slice()),
+            repr: ReadPoint::KvKey(key.clone().into_boxed_slice()),
         },
         KvOp::Put { .. }
         | KvOp::Insert { .. }
