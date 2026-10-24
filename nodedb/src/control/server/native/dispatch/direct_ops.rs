@@ -285,6 +285,12 @@ pub(crate) async fn handle_direct_op(
         // source of a cross-shard materialized sum, runs in one transaction, as
         // the SQL path's does. The loop there clone-checks, authorizes and
         // meters each task itself.
+        // One direct op is one write, so inside a transaction block this refuses
+        // only a single write that ships two deltas to one balance column.
+        if let Err(error) = crate::control::planner::calvin::refuse_several_settling_writes(&tasks)
+        {
+            return error_to_native(seq, &error);
+        }
         if statement_needs_implicit_txn(ctx.state, &tasks) {
             let _request = ctx.state.tenant_request_guard(tenant_id);
             needs_top_level_metering = false;
@@ -304,7 +310,9 @@ pub(crate) async fn handle_direct_op(
         // cleanup in the same Calvin transaction, as the SQL path's does.
         use super::edge_recon_gate::{EdgeReconResult, try_edge_recon_dispatch};
         let (tasks, authorized_tasks) =
-            match try_edge_recon_dispatch(ctx, seq, tasks, authorized_tasks).await {
+            match try_edge_recon_dispatch(ctx, seq, tasks, authorized_tasks, &sum_target_reads)
+                .await
+            {
                 EdgeReconResult::Outcome(outcome) => return outcome.into_response(),
                 EdgeReconResult::NotFired(tasks, authorized) => (tasks, authorized),
             };
@@ -350,6 +358,21 @@ pub(crate) async fn handle_direct_op(
                 DispatchClass::MultiShard { .. }
             );
         if route_to_calvin {
+            // A predicate write names the rows it matched only after the
+            // coordinator reads them, so it takes the same route as on pgwire.
+            use super::edge_recon_gate::try_multi_shard_predicate_recon_dispatch;
+            let (tasks, authorized_tasks) = match try_multi_shard_predicate_recon_dispatch(
+                ctx,
+                seq,
+                tasks,
+                authorized_tasks,
+                &sum_target_reads,
+            )
+            .await
+            {
+                EdgeReconResult::Outcome(outcome) => return outcome.into_response(),
+                EdgeReconResult::NotFired(tasks, authorized) => (tasks, authorized),
+            };
             let plans: Vec<PhysicalPlan> = tasks.iter().map(|task| task.plan.clone()).collect();
             match dispatch_authorized_tasks_to_calvin(
                 ctx.state,
@@ -390,6 +413,12 @@ pub(crate) async fn handle_direct_op(
                 if doc_response.is_none() {
                     doc_response = Some(resp);
                 }
+            }
+            // The buffered tasks apply at COMMIT, which checks these images
+            // against the rows then. A refused write leaves nothing to guard.
+            if in_txn_block && error.is_none() {
+                ctx.sessions
+                    .record_read_entries(ctx.peer_addr, sum_target_reads);
             }
             error
                 .or(doc_response)

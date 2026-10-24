@@ -32,6 +32,21 @@ impl TestServer {
         Self::connect_and_build(spawned, dir, AuthMode::Trust).await
     }
 
+    /// [`Self::start_with_failpoints`] with `cores` Data Plane cores, for a
+    /// test whose collections must land on different cores.
+    #[cfg(feature = "failpoints")]
+    pub async fn start_multicores_with_failpoints(cores: usize, spec: &str) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn_with_failpoints(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::none(),
+            cores,
+            Some(spec),
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
     /// Spawn a single-core server in pgwire password mode (SCRAM-SHA-256)
     /// with the credential lockout policy enabled (`5` failures -> `300s`).
     /// The harness user `nodedb` keeps password `nodedb`.

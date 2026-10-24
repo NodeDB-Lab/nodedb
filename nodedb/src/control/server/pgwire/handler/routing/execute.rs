@@ -222,13 +222,14 @@ impl NodeDbPgHandler {
                 .maybe_dispatch_implicit_edge_recon(
                     &tasks,
                     tenant_id,
-                    identity,
-                    session_id,
-                    ResultShaping {
+                    super::calvin_dispatch::CalvinDispatchSession {
+                        identity,
+                        session_id,
+                        result_formats: shaping.formats,
+                        auth: &auth_ctx,
                         projection: effective_schema,
-                        formats: shaping.formats,
                     },
-                    &auth_ctx,
+                    &sum_target_reads,
                 )
                 .await?
             {
@@ -236,8 +237,14 @@ impl NodeDbPgHandler {
             }
 
             // Read once, ahead of the gateway gate: an in-block write must never
-            // forward here, or it applies durably outside the transaction.
+            // forward here, or it applies durably outside the transaction. A
+            // request that ships a settled balance delta commits through Calvin
+            // below: a forward applies its tasks one by one, with no check of the
+            // images the delta was folded from.
+            #[cfg(feature = "failpoints")]
+            crate::control::fail_gate::before_route(self.state.node_id).await;
             if tx_state != TransactionState::InBlock
+                && !crate::control::planner::calvin::ships_balance_delta(&tasks, &sum_target_reads)
                 && let Some(responses) = self
                     .maybe_dispatch_tasks_via_gateway(
                         &tasks,

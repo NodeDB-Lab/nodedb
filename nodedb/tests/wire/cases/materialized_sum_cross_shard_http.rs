@@ -11,6 +11,10 @@
 //! answers one `{"affected": n}` row: the balance task adds no count, as on
 //! pgwire and native.
 //!
+//! A predicate `UPDATE` or `DELETE` of the source plans the source write and a
+//! balance task on the target's vShard, so it commits through Calvin with the
+//! rows it matched. Each route settles the balance the way pgwire does.
+//!
 //! The fixture is the one the pgwire cases use: two Data Plane cores, and a
 //! target and source that land on different cores.
 
@@ -174,4 +178,86 @@ async fn ws_rpc_query_moves_a_cross_shard_sum_atomically() {
         "two copied rows: a balance task adds no count"
     );
     assert_balances(&server).await;
+}
+
+/// A predicate write of the two postings of `acc`: both set to 1, then both deleted.
+const PREDICATE_UPDATE: &str = "UPDATE ptv_post SET amount = '1' WHERE account_id = 'acc'";
+const PREDICATE_DELETE: &str = "DELETE FROM ptv_post WHERE account_id = 'acc'";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pgwire_predicate_write_settles_a_cross_shard_sum() {
+    let server = sum_fixture().await;
+
+    server
+        .exec(PREDICATE_UPDATE)
+        .await
+        .expect("predicate update");
+    assert_eq!(balance(&server, "acc").await, "2", "two postings at 1");
+
+    server
+        .exec(PREDICATE_DELETE)
+        .await
+        .expect("predicate delete");
+    assert_eq!(balance(&server, "acc").await, "0", "both postings gone");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_query_predicate_write_settles_a_cross_shard_sum() {
+    let server = sum_fixture().await;
+
+    assert_eq!(
+        http_rows(server.http_port, PREDICATE_UPDATE).await,
+        vec![affected(2)],
+        "two matched postings: the balance task adds no count"
+    );
+    assert_eq!(balance(&server, "acc").await, "2", "two postings at 1");
+
+    assert_eq!(
+        http_rows(server.http_port, PREDICATE_DELETE).await,
+        vec![affected(2)],
+        "two matched postings: the balance task adds no count"
+    );
+    assert_eq!(balance(&server, "acc").await, "0", "both postings gone");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ndjson_query_predicate_write_settles_a_cross_shard_sum() {
+    let server = sum_fixture().await;
+
+    assert_eq!(
+        ndjson_lines(server.http_port, PREDICATE_UPDATE).await,
+        vec![affected(2)],
+        "two matched postings: the balance task adds no count"
+    );
+    assert_eq!(balance(&server, "acc").await, "2", "two postings at 1");
+
+    assert_eq!(
+        ndjson_lines(server.http_port, PREDICATE_DELETE).await,
+        vec![affected(2)],
+        "two matched postings: the balance task adds no count"
+    );
+    assert_eq!(balance(&server, "acc").await, "0", "both postings gone");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ws_rpc_predicate_write_settles_a_cross_shard_sum() {
+    let server = sum_fixture().await;
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}/v1/ws", server.http_port))
+            .await
+            .expect("connect the WebSocket RPC endpoint");
+
+    assert_eq!(
+        ws_result(&mut ws, 1, PREDICATE_UPDATE).await,
+        affected(2),
+        "two matched postings: the balance task adds no count"
+    );
+    assert_eq!(balance(&server, "acc").await, "2", "two postings at 1");
+
+    assert_eq!(
+        ws_result(&mut ws, 2, PREDICATE_DELETE).await,
+        affected(2),
+        "two matched postings: the balance task adds no count"
+    );
+    assert_eq!(balance(&server, "acc").await, "0", "both postings gone");
 }

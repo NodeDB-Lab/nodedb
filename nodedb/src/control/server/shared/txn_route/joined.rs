@@ -6,6 +6,7 @@ use nodedb_physical::physical_plan::DocumentOp;
 use nodedb_physical::physical_task::PhysicalTask;
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::control::planner::calvin::{is_dependent_predicate, is_write_plan};
 use crate::control::state::SharedState;
 use crate::control::trigger::dml_hook::classify_dml_write;
 use crate::control::trigger::statement_txn::fires_joined_body;
@@ -44,8 +45,12 @@ pub fn statement_fires_joined_body(state: &SharedState, tasks: &[PhysicalTask]) 
 }
 
 /// Whether a statement outside a transaction block runs in an implicit
-/// transaction. It does in three cases:
+/// transaction. It does in four cases:
 ///
+/// - It holds a predicate write that follows another write. A request of
+///   several statements plans as one task set, and each later statement must
+///   read the rows the earlier ones wrote, which only the block's staging scan
+///   does.
 /// - It fires a joined body.
 /// - It is a `MERGE` into a collection an edge was ever written into. The
 ///   MERGE then stages each removed row with its node's edge tasks, and
@@ -55,10 +60,36 @@ pub fn statement_fires_joined_body(state: &SharedState, tasks: &[PhysicalTask]) 
 ///   The expansion ships that balance on an `ApplyBalanceDelta` task homed
 ///   on the target, and COMMIT applies it with the source rows.
 pub fn statement_needs_implicit_txn(state: &SharedState, tasks: &[PhysicalTask]) -> bool {
-    statement_fires_joined_body(state, tasks)
+    holds_ordered_predicate_write(tasks)
+        || statement_fires_joined_body(state, tasks)
         || tasks
             .iter()
             .any(|task| merges_into_edge_bearing(state, task) || moves_cross_shard_sum(state, task))
+}
+
+/// Whether a predicate write of `tasks` must read the writes that come before
+/// it in the request: it follows another predicate write or any other write. A
+/// later statement matches against the rows the earlier ones wrote, which only
+/// the block's staging scan sees. One SQL statement plans at most one predicate
+/// task and no write ahead of it, so the position is the statement order. The
+/// balance deltas of a settled sum follow the write that moved them and do not
+/// count.
+fn holds_ordered_predicate_write(tasks: &[PhysicalTask]) -> bool {
+    let mut earlier_write = false;
+    for task in tasks {
+        if is_dependent_predicate(&task.plan) && earlier_write {
+            return true;
+        }
+        earlier_write |= is_write_plan(&task.plan) && !is_balance_delta(&task.plan);
+    }
+    false
+}
+
+fn is_balance_delta(plan: &PhysicalPlan) -> bool {
+    matches!(
+        plan,
+        PhysicalPlan::Document(DocumentOp::ApplyBalanceDelta { .. })
+    )
 }
 
 /// Whether `task` is an unexpanded `INSERT ... SELECT`, `UPDATE ... FROM` or

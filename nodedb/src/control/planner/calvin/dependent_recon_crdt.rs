@@ -35,6 +35,7 @@ use crate::control::cluster::calvin::executor::ollp::error::OllpError;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::graph_dispatch::{VShardRead, read_on_vshard};
 use crate::control::server::shared::session::StatementDeadline;
+use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::state::SharedState;
 use crate::types::VShardId;
 use crate::types::{DatabaseId, TenantId};
@@ -46,12 +47,14 @@ pub fn is_crdt_doc_delete(plan: &PhysicalPlan) -> bool {
 
 /// Dispatch the CRDT document deletes among `tasks` with their nodes' edge
 /// tombstones. `None` when `tasks` holds no CRDT document delete.
+/// `reads` guard the settled balance deltas that ride in `tasks`.
 pub(super) async fn dispatch_crdt_doc_deletes(
     state: &SharedState,
     tasks: &[PhysicalTask],
     identity: Option<&AuthenticatedIdentity>,
     tenant_id: TenantId,
     database_id: DatabaseId,
+    reads: &[ReadSetEntry],
 ) -> crate::Result<Option<DependentReconOutcome>> {
     // The node every deleted document id names, bound or not. An id unbound
     // at planning names no stored document, so the read finds it absent and
@@ -141,11 +144,13 @@ pub(super) async fn dispatch_crdt_doc_deletes(
                 .map(|task| task.into_physical_task())
                 .collect();
             }
+            #[cfg(feature = "failpoints")]
+            crate::control::fail_gate::before_recon_submit(state.node_id).await;
             orc.submit_with_retry_via(
                 pred_class,
                 tenant_id,
                 || {
-                    let tx_class = build_single_vshard_tx_class(&submission, tenant_id, &[])
+                    let tx_class = build_single_vshard_tx_class(&submission, tenant_id, reads)
                         .map_err(|e| OllpError::Terminal(Box::new(e)))?;
                     Ok(Some(tx_class))
                 },

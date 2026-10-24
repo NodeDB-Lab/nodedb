@@ -70,16 +70,10 @@ impl NodeDbPgHandler {
         &self,
         tasks: &[PhysicalTask],
         tenant_id: TenantId,
-        identity: &AuthenticatedIdentity,
-        session_id: SessionId,
-        shaping: ResultShaping<'_>,
-        auth: &crate::control::security::auth_context::AuthContext,
+        session: super::calvin_dispatch::CalvinDispatchSession<'_>,
+        sum_target_reads: &[crate::control::server::shared::session::read_set::ReadSetEntry],
     ) -> PgWireResult<Option<Vec<Response>>> {
-        let ResultShaping {
-            projection,
-            formats: result_formats,
-        } = shaping;
-        let tx_state = self.sessions.transaction_state(session_id);
+        let tx_state = self.sessions.transaction_state(session.session_id);
         if tx_state == TransactionState::InBlock {
             return Ok(None);
         }
@@ -100,15 +94,10 @@ impl NodeDbPgHandler {
         self.dispatch_calvin_multishard(
             tasks.to_vec(),
             tenant_id,
-            super::calvin_dispatch::CalvinDispatchSession {
-                identity,
-                session_id,
-                result_formats,
-                auth,
-                projection,
-            },
-            // No settled image read to carry — this fires before materialized-sum settlement.
-            &[],
+            session,
+            // The tasks are already settled: the reads stamped on the source images
+            // their cross-shard balances were folded from travel with them.
+            sum_target_reads,
         )
         .await
         .map(Some)

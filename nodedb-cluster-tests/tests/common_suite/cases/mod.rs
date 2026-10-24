@@ -116,6 +116,7 @@ mod listeners_gateway_smoke;
 mod listeners_typed_not_leader;
 mod materialized_sum_cross_core;
 mod materialized_sum_cross_shard;
+mod materialized_sum_gateway_occ;
 mod materialized_sum_replication;
 mod metadata_floor_restart;
 mod metadata_replay;

@@ -217,6 +217,7 @@ impl NodeDbPgHandler {
             identity,
             tenant_id,
             database_id,
+            reads,
         )
         .await
         .map_err(|e| {

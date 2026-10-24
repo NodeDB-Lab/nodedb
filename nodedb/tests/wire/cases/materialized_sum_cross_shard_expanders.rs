@@ -76,7 +76,15 @@ async fn exec(server: &TestServer, sql: &str) {
 /// `acc2` start empty. Posting `e0` puts 10 on `acc`, posting `e1` puts 5 on
 /// `acc`.
 pub(super) async fn sum_fixture() -> TestServer {
-    let server = TestServer::start_multicores(CORES).await;
+    sum_fixture_on(TestServer::start_multicores(CORES).await).await
+}
+
+/// The data cores a `server` handed to [`sum_fixture_on`] must run.
+#[cfg(feature = "failpoints")]
+pub(super) const FIXTURE_CORES: usize = CORES;
+
+/// [`sum_fixture`] on a `server` the caller started with [`CORES`] cores.
+pub(super) async fn sum_fixture_on(server: TestServer) -> TestServer {
     exec(
         &server,
         &format!(
