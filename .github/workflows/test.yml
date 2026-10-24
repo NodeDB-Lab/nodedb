@@ -92,6 +92,11 @@ jobs:
         run: |
           python3 scripts/ci/check_advisory_ignores.py --self-test
           python3 scripts/ci/check_advisory_ignores.py
+      - name: EPSG table gate
+        run: |
+          python3 -m venv "$RUNNER_TEMP/proj"
+          "$RUNNER_TEMP/proj/bin/pip" install --quiet pyproj==3.8.0
+          "$RUNNER_TEMP/proj/bin/python" -I scripts/gen_epsg.py --check
       - name: Install cargo-deny
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2
         with:
