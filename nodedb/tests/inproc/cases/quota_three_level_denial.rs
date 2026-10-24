@@ -216,15 +216,23 @@ fn maintenance_budget_tracker_three_level() {
 #[test]
 fn database_metrics_registry_independent_counters() {
     let reg = DatabaseMetricsRegistry::new();
+    let db_alpha = nodedb_types::DatabaseId::new(1);
+    let db_beta = nodedb_types::DatabaseId::new(2);
     for _ in 0..5 {
-        reg.record_qps("alpha");
+        reg.record_qps(db_alpha, "alpha");
     }
     for _ in 0..3 {
-        reg.record_qps("beta");
+        reg.record_qps(db_beta, "beta");
     }
     use std::sync::atomic::Ordering;
-    let alpha = reg.get_or_create("alpha").qps_total.load(Ordering::Relaxed);
-    let beta = reg.get_or_create("beta").qps_total.load(Ordering::Relaxed);
+    let alpha = reg
+        .get_or_create(db_alpha, "alpha")
+        .qps_total
+        .load(Ordering::Relaxed);
+    let beta = reg
+        .get_or_create(db_beta, "beta")
+        .qps_total
+        .load(Ordering::Relaxed);
     assert_eq!(alpha, 5);
     assert_eq!(beta, 3);
 

@@ -37,7 +37,7 @@ impl SharedState {
     /// Construct the test state every constructor in [`super::init_variants`]
     /// builds on.
     pub(super) fn new_inner(
-        mut dispatcher: Dispatcher,
+        dispatcher: Dispatcher,
         wal: Arc<WalManager>,
     ) -> crate::Result<Arc<Self>> {
         let shutdown = Arc::new(crate::control::shutdown::ShutdownWatch::new());
@@ -112,21 +112,6 @@ impl SharedState {
         // can't silently diverge from it.
         let rate_limit_config = RateLimitConfig::default();
 
-        // The CDC router matches events against the registry DDL writes to,
-        // as the production constructor wires it.
-        let stream_registry = Arc::new(crate::event::cdc::StreamRegistry::new());
-
-        let redo_chunks = Arc::new(
-            crate::control::wal_replication::transaction_redo::RedoChunkStore::new(
-                Arc::clone(&wal),
-                crate::control::wal_replication::transaction_redo::chunks::RedoChunkLimits::from_tuning(
-                    &TuningConfig::default().calvin,
-                ),
-            ),
-        );
-        let hlc_clock = wal.hlc_clock();
-        let system_metrics = Arc::new(crate::control::metrics::SystemMetrics::new());
-        dispatcher.adopt_capacity_metrics(Arc::clone(&system_metrics.dispatch_capacity));
         let state = Arc::new(Self {
             outcome_floor: dispatcher.outcome_floor(),
             dispatcher: Mutex::new(dispatcher),
@@ -151,7 +136,10 @@ impl SharedState {
             )
             .0,
             group_watchers: Arc::new(nodedb_cluster::GroupAppliedWatchers::new()),
-            metadata_ddl: super::MetadataDdlState::new(),
+            metadata_ddl_lock: std::sync::Mutex::new(()),
+            metadata_ddl_owner: std::sync::Mutex::new(None),
+            metadata_ddl_applied_token: std::sync::atomic::AtomicU64::new(0),
+            metadata_ddl_token_seq: std::sync::atomic::AtomicU64::new(1),
             pending_ddl: crate::control::pending_ddl::PendingDdlTable::new(),
             metadata_apply_wedge: std::sync::Arc::default(),
             sequencer_halt: std::sync::Arc::default(),
@@ -165,12 +153,9 @@ impl SharedState {
             ),
             raft_compactor: std::sync::OnceLock::new(),
             raft_applied_index_sink: std::sync::OnceLock::new(),
-            raft_apply_gates: std::sync::OnceLock::new(),
             raft_read_gate: std::sync::OnceLock::new(),
-            multi_raft: std::sync::OnceLock::new(),
             cluster_epoch: std::sync::OnceLock::new(),
             raft_status_fn: std::sync::OnceLock::new(),
-            data_groups_replayed: std::sync::atomic::AtomicBool::new(false),
             cluster_observer: std::sync::OnceLock::new(),
             loop_metrics_registry: nodedb_cluster::LoopMetricsRegistry::new(),
             per_vshard_metrics: crate::control::metrics::PerVShardMetricsRegistry::new(),
@@ -274,8 +259,10 @@ impl SharedState {
             block_cache: crate::control::planner::procedural::executor::ProcedureBlockCache::new(
                 4096,
             ),
-            stream_registry: Arc::clone(&stream_registry),
-            cdc_router: Arc::new(crate::event::cdc::CdcRouter::new(stream_registry)),
+            stream_registry: Arc::new(crate::event::cdc::StreamRegistry::new()),
+            cdc_router: Arc::new(crate::event::cdc::CdcRouter::new(Arc::new(
+                crate::event::cdc::StreamRegistry::new(),
+            ))),
             group_registry: crate::event::cdc::GroupRegistry::new(),
             offset_store: {
                 let dir = test_state_dir.path().join("offsets");
@@ -311,8 +298,7 @@ impl SharedState {
             cross_shard_dispatcher: None,
             cross_shard_dlq: None,
             cross_shard_metrics: None,
-            cross_shard_dedup: std::sync::OnceLock::new(),
-            redo_chunks,
+            hwm_store: None,
             kafka_manager: crate::event::kafka::KafkaManager::new(shutdown.raw_receiver()),
             definition_sync_fanout: std::sync::Arc::new(
                 crate::control::server::sync::definition_fanout::DefinitionSyncFanout::new(),
@@ -334,7 +320,7 @@ impl SharedState {
             raft_propose_leader_change_retries: AtomicU64::new(0),
             request_id_counter: AtomicU64::new(1),
             shuffle_id_counter: AtomicU64::new(1),
-            system_metrics: Some(system_metrics),
+            system_metrics: Some(Arc::new(crate::control::metrics::SystemMetrics::new())),
             database_metrics: Arc::new(crate::control::metrics::DatabaseMetricsRegistry::new()),
             quota_ceiling: Arc::new(std::sync::RwLock::new(
                 crate::control::security::catalog::GlobalQuotaCeiling::default(),
@@ -349,16 +335,14 @@ impl SharedState {
             producer_registry: None,
             cold_storage: None,
             snapshot_storage: Arc::new(object_store::memory::InMemory::new()),
-            pitr: Default::default(),
             quarantine_storage: Arc::new(object_store::memory::InMemory::new()),
-            hlc_clock,
+            hlc_clock: Arc::new(nodedb_types::HlcClock::new()),
             tenant_write_hlc: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             tenant_marks: super::tenant_marks::TenantMarks::load(test_credentials.catalog())?,
             lease_admission_gate: Mutex::new(()),
-            lease_grant_gate: Arc::new(tokio::sync::Mutex::new(())),
+            lease_grant_gate: Arc::new(Mutex::new(())),
             lease_drain: Arc::new(crate::control::lease::DescriptorDrainTracker::new()),
             lease_refcount: Arc::new(crate::control::lease::LeaseRefCount::new()),
-            lease_runtime: crate::control::lease::LeaseRuntime::new(),
             sequencer_inbox: std::sync::OnceLock::new(),
             reservation_inbox: std::sync::OnceLock::new(),
             sequencer_metrics: std::sync::OnceLock::new(),
@@ -383,8 +367,6 @@ impl SharedState {
             write_order_locks: Arc::new(
                 crate::control::server::shared::write_admission::KeyedWriteOrderLock::new(),
             ),
-            write_order_fence:
-                crate::control::server::shared::write_admission::WriteOrderFence::new(),
             presence: Arc::new(tokio::sync::RwLock::new(
                 crate::control::server::sync::presence::PresenceManager::new(
                     crate::control::server::sync::presence::PresenceConfig::default(),
@@ -395,13 +377,11 @@ impl SharedState {
             gateway_invalidator: std::sync::OnceLock::new(),
             gateway: std::sync::OnceLock::new(),
             backup_kek: None,
-            backup_storage: None,
-            cut_captures: Arc::new(crate::control::backup::cut_capture::CutCaptures::new()),
-            backup_schedules: Vec::new(),
             quarantine_registry: Arc::new(crate::storage::quarantine::QuarantineRegistry::new()),
             admission_registry: Arc::new(
                 crate::control::server::admission::AdmissionRegistry::new(),
             ),
+            lsn_ms_map: Arc::new(Mutex::new(nodedb_types::temporal::LsnMsMap::new())),
             audit_dml_cache: Arc::new(crate::control::state::audit_dml_cache::AuditDmlCache::new()),
             idle_timeout_cache: Arc::new(
                 crate::control::state::idle_timeout_cache::IdleTimeoutCache::new(),
@@ -409,6 +389,7 @@ impl SharedState {
             collection_to_database: Arc::new(
                 crate::control::state::collection_to_database::CollectionToDatabase::new(),
             ),
+            materialize_freeze: crate::control::clone::MaterializeFreezeRegistry::new(),
             shuffle_registry: Arc::new(
                 // Test path: no catalog data dir, so stage under a process- and
                 // test-unique temp subdir to keep concurrent test inboxes
@@ -424,6 +405,7 @@ impl SharedState {
             startup: Arc::clone(&startup_gate),
         });
         Self::wire_session_handle_audit(&state);
+        state.wire_wal_and_metrics();
         Ok(state)
     }
 }

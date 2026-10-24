@@ -13,6 +13,13 @@ use crate::types::TenantId;
 use super::SharedState;
 
 impl SharedState {
+    /// Wire system metrics to the WAL manager if system metrics are present.
+    pub(super) fn wire_wal_and_metrics(&self) {
+        if let Some(metrics) = &self.system_metrics {
+            self.wal.set_metrics(Arc::clone(metrics));
+        }
+    }
+
     /// Bundle of the auth-adjacent stores every `RequestAuthScope`
     /// construction needs (`scope_grants`, `quota_manager`), for callers
     /// that build a scope from `&SharedState` directly rather than pulling
@@ -21,81 +28,31 @@ impl SharedState {
         AuthStores::new(&self.scope_grants, &self.quota_manager, &self.risk_scorer)
     }
 
-    /// Sequenced Raft proposer for ordinary writes. `start_raft` installs it
-    /// before any listener opens.
+    /// Sequenced Raft proposer for ordinary writes; absent outside cluster mode.
     pub(crate) fn async_raft_proposer(
         &self,
-    ) -> crate::Result<&Arc<crate::control::wal_replication::AsyncRaftProposer>> {
+    ) -> Option<&Arc<crate::control::wal_replication::AsyncRaftProposer>> {
         self.async_raft_proposer_pair
             .get()
             .map(|pair| &pair.sequenced)
-            .ok_or_else(|| raft_not_started("the async raft proposer"))
     }
 
     /// Raw proposer used only while a CRDT admission holds the vShard sequence.
     /// Ordinary writes must use [`Self::async_raft_proposer`].
     pub(in crate::control) fn raw_async_raft_proposer(
         &self,
-    ) -> crate::Result<&Arc<crate::control::wal_replication::AsyncRaftProposer>> {
-        self.async_raft_proposer_pair
-            .get()
-            .map(|pair| &pair.raw)
-            .ok_or_else(|| raft_not_started("the raw async raft proposer"))
+    ) -> Option<&Arc<crate::control::wal_replication::AsyncRaftProposer>> {
+        self.async_raft_proposer_pair.get().map(|pair| &pair.raw)
     }
 
-    /// The propose phase alone: it returns once the data-group leader holds
-    /// the entry in its log, with the wait for this node's apply of it. It
-    /// takes no vShard admission slot. Calvin bookkeeping entries, which no
-    /// write admission orders, propose through it.
-    pub(in crate::control) fn async_raft_submit(
-        &self,
-    ) -> crate::Result<&Arc<crate::control::wal_replication::AsyncRaftSubmit>> {
-        self.async_raft_proposer_pair
-            .get()
-            .map(|pair| &pair.submit)
-            .ok_or_else(|| raft_not_started("the async raft submit"))
-    }
-
-    /// Handle for proposing to the metadata Raft group. `start_raft`
-    /// installs it before any listener opens.
-    pub fn metadata_raft_handle(
-        &self,
-    ) -> crate::Result<&Arc<dyn crate::control::metadata_proposer::MetadataRaftHandle>> {
-        self.metadata_raft
-            .get()
-            .ok_or_else(|| raft_not_started("the metadata raft handle"))
-    }
-
-    /// Synchronous data-group Raft proposer. `start_raft` installs it before
-    /// any listener opens.
-    pub(crate) fn sync_raft_proposer(
-        &self,
-    ) -> crate::Result<&Arc<crate::control::wal_replication::RaftProposer>> {
-        self.raft_proposer
-            .get()
-            .ok_or_else(|| raft_not_started("the raft proposer"))
-    }
-
-    /// The gateway `install_gateway` installs before any listener opens.
-    pub fn installed_gateway(&self) -> crate::Result<&Arc<crate::control::gateway::Gateway>> {
-        self.gateway.get().ok_or_else(|| crate::Error::Internal {
-            detail: "the gateway is not installed: install_gateway has not run on this node".into(),
-        })
-    }
-
-    /// Install the Raft proposal handles atomically during cluster startup.
+    /// Install both Raft proposal handles atomically during cluster startup.
     pub(in crate::control) fn install_async_raft_proposer_pair(
         &self,
         sequenced: Arc<crate::control::wal_replication::AsyncRaftProposer>,
         raw: Arc<crate::control::wal_replication::AsyncRaftProposer>,
-        submit: Arc<crate::control::wal_replication::AsyncRaftSubmit>,
     ) -> crate::Result<()> {
         self.async_raft_proposer_pair
-            .set(super::proposer_pair::AsyncRaftProposerPair {
-                sequenced,
-                raw,
-                submit,
-            })
+            .set(super::fields::AsyncRaftProposerPair { sequenced, raw })
             .map_err(|_| crate::Error::Internal {
                 detail: "async raft proposer already installed".into(),
             })
@@ -103,18 +60,24 @@ impl SharedState {
 
     /// Recover a strong `Arc<SharedState>` from `&self` by upgrading the
     /// gateway's `Weak` back-reference. Always succeeds on a booted node;
-    /// returns a typed error while racing teardown, or before `install_gateway`
-    /// runs.
+    /// returns a typed error while racing teardown, or on a state built
+    /// without `state_wiring` (unit fixtures).
     pub(crate) fn self_arc(&self) -> crate::Result<Arc<SharedState>> {
-        self.installed_gateway()?.shared()
+        let gateway = self.gateway.get().ok_or_else(|| crate::Error::Internal {
+            detail: "SharedState::self_arc: gateway back-reference is not installed; \
+                     this state was built without `bootstrap::state_wiring`"
+                .into(),
+        })?;
+        gateway.shared()
     }
 
     /// Whether this node is the leader of the metadata Raft group.
     ///
     /// Reuses the installed `raft_status_fn` snapshot (set by `start_raft`),
     /// looks up the metadata group (`METADATA_GROUP_ID == 0`), and reports
-    /// whether its role string is `"Leader"`. Returns `false` before
-    /// `start_raft` installs `raft_status_fn`.
+    /// whether its role string is `"Leader"`. Returns `false` in single-node
+    /// mode, where `raft_status_fn` is never installed — there is no metadata
+    /// Raft group to lead.
     ///
     /// Not unit-tested in isolation: it requires a live `raft_status_fn`, so
     /// it is exercised by the cluster-level constraint-reconcile test.
@@ -127,11 +90,15 @@ impl SharedState {
             .any(|g| g.group_id == nodedb_cluster::METADATA_GROUP_ID && g.role == "Leader")
     }
 
-    /// Whether this node runs work that must happen exactly once
-    /// cluster-wide: the metadata-group leader does it. A one-node cluster
-    /// leads its own metadata group.
+    /// Whether this node should perform work that must happen exactly once
+    /// cluster-wide.
+    ///
+    /// Standalone deployments never install a metadata Raft group, so
+    /// `is_metadata_leader` is permanently false there. Gating a singleton job
+    /// on leadership alone therefore disables it entirely on single-node
+    /// deployments — the job must run when there is no group to elect from.
     pub fn is_singleton_worker(&self) -> bool {
-        self.is_metadata_leader()
+        self.metadata_raft.get().is_none() || self.is_metadata_leader()
     }
 
     /// Snapshot the configured global quota ceiling.
@@ -150,7 +117,7 @@ impl SharedState {
     }
 
     /// Replace the global quota ceiling. Called once at startup after the
-    /// server config is parsed; future `ALTER SYSTEM` paths can also call this.
+    /// server config is parsed; future `ALTER SYSTEM` paths may also call this.
     pub fn set_quota_ceiling(
         &self,
         ceiling: crate::control::security::catalog::GlobalQuotaCeiling,
@@ -189,28 +156,95 @@ impl SharedState {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Commit time, in wall milliseconds, of the WAL state below `lsn`: every
-    /// record under `lsn` committed by then.
+    /// Convert an LSN back to wall-clock milliseconds using the anchor map.
     ///
-    /// `lsn` is an exclusive bound, as `wal.next_lsn()` and [`Self::ms_to_lsn`]
-    /// return. `None` when no time anchor covers `lsn - 1` yet.
+    /// Used by the clone resolver to compute `effective_source_ms` for the
+    /// engine's `system_as_of_ms` field. Returns `None` when the anchor map
+    /// has no entries that bracket the requested LSN (engine then uses
+    /// latest-version behaviour — safe for tests where anchors are absent).
+    ///
+    /// A poisoned lock is recovered via `into_inner()` (consistent with the
+    /// other `lsn_ms_map` accessors below) and logged so that bitemporal
+    /// reads do not silently degrade to "latest" on the back of a panic in
+    /// an unrelated writer.
     pub fn ms_to_lsn_inverse(&self, lsn: nodedb_types::Lsn) -> Option<i64> {
-        let last = lsn.as_u64().checked_sub(1)?;
-        let ns = self.wal.time_anchors().commit_ns_of(last)?;
-        i64::try_from(ns / 1_000_000).ok()
+        let map = match self.lsn_ms_map.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                warn!(
+                    lsn = %lsn,
+                    "lsn_ms_map poisoned in ms_to_lsn_inverse — recovering inner state; \
+                     bitemporal reads may use a stale anchor view until the next anchor is recorded"
+                );
+                poisoned.into_inner()
+            }
+        };
+        nodedb_types::temporal::lsn_to_ms(&map, lsn).ok()
     }
 
-    /// The exclusive LSN bound of the WAL state committed by the end of
-    /// millisecond `wall_ms`: every record under it committed by then.
+    /// Convert wall-clock milliseconds to the nearest LSN using the anchor map.
     ///
-    /// A time before the oldest retained anchor is an error, never the WAL
-    /// frontier. A time past the newest anchor resolves to that anchor, since
-    /// the records after it have not committed.
-    pub fn ms_to_lsn(&self, wall_ms: i64) -> Result<nodedb_types::Lsn, nodedb_types::LsnTimeError> {
-        self.wal
-            .time_anchors()
-            .lsn_at_or_before_ms(wall_ms)
-            .map(|last| nodedb_types::Lsn::new(last.saturating_add(1)))
+    /// When the map is populated (WAL anchor records have been replayed), this
+    /// performs linear interpolation between surrounding anchors.  When the map
+    /// is empty (no anchors yet, or testing) the current WAL frontier is
+    /// returned as the best available approximation.
+    pub fn ms_to_lsn(&self, wall_ms: i64) -> nodedb_types::Lsn {
+        let map = match self.lsn_ms_map.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                warn!(
+                    wall_ms = wall_ms,
+                    "lsn_ms_map poisoned in ms_to_lsn — recovering inner state"
+                );
+                poisoned.into_inner()
+            }
+        };
+        // Walk anchors to find the pair that brackets wall_ms.
+        let anchors = map.anchors();
+        if anchors.is_empty() {
+            // No anchor data yet.  A very small wall_ms (well before any
+            // plausible server-start epoch) predates all recorded LSNs;
+            // return LSN 0 so the clone predation check fires correctly.
+            // Any other value maps to the current frontier.
+            const EPOCH_THRESHOLD_MS: i64 = 1_000_000; // ~16 minutes after Unix epoch
+            if wall_ms < EPOCH_THRESHOLD_MS {
+                return nodedb_types::Lsn::new(0);
+            }
+            return self.wal.next_lsn();
+        }
+        // Binary search by wall_ms to find the bracketing pair.
+        match anchors.binary_search_by_key(&wall_ms, |a| a.wall_ms) {
+            Ok(idx) => nodedb_types::Lsn::new(anchors[idx].lsn),
+            Err(0) => nodedb_types::Lsn::new(anchors[0].lsn),
+            Err(idx) if idx >= anchors.len() => {
+                nodedb_types::Lsn::new(anchors[anchors.len() - 1].lsn)
+            }
+            Err(idx) => {
+                // Interpolate between anchors[idx-1] and anchors[idx].
+                let lo = anchors[idx - 1];
+                let hi = anchors[idx];
+                let ms_span = (hi.wall_ms - lo.wall_ms).max(1) as u64;
+                let lsn_span = hi.lsn.saturating_sub(lo.lsn);
+                let ms_delta = (wall_ms - lo.wall_ms).max(0) as u64;
+                let lsn = lo.lsn + (lsn_span * ms_delta / ms_span);
+                nodedb_types::Lsn::new(lsn)
+            }
+        }
+    }
+
+    /// Record a new WAL anchor into the LSN↔ms map.
+    ///
+    /// Called when an `LsnMsAnchor` WAL record is replayed at startup or
+    /// emitted by the WAL writer.  Non-monotonic anchors are silently ignored
+    /// (the WAL guarantees monotonicity; a violation here means a partially
+    /// replayed or corrupt segment and must not panic).
+    pub fn push_lsn_ms_anchor(&self, lsn: u64, wall_ms: i64) {
+        if let Ok(mut map) = self.lsn_ms_map.lock() {
+            let anchor = nodedb_types::temporal::LsnMsAnchor::new(lsn, wall_ms);
+            // Silently ignore non-monotonic anchors — they arrive during WAL
+            // replay of partially-written segments and must not crash the server.
+            let _ = map.push(anchor);
+        }
     }
 
     /// Shared HTTP client reused by every outbound emitter. Cloning the
@@ -226,9 +260,11 @@ impl SharedState {
     /// live topology under a short read guard, so version updates
     /// from joins / leaves are observed immediately.
     ///
-    /// Returns `ClusterVersionView::single_node()` when no topology
-    /// handle is wired: callers that gate on a cluster-wide minimum
-    /// treat this as "all nodes run the local build".
+    /// Returns `ClusterVersionView::single_node()` when no
+    /// topology handle is installed (single-node mode): callers
+    /// that gate on a cluster-wide minimum treat this as "all
+    /// nodes run the local build", which is the correct behavior
+    /// for a solo node.
     pub fn cluster_version_view(&self) -> crate::control::rolling_upgrade::ClusterVersionView {
         let Some(topology) = &self.cluster_topology else {
             return crate::control::rolling_upgrade::ClusterVersionView::single_node();
@@ -242,7 +278,7 @@ impl SharedState {
     /// Lazily creates the watcher if it does not yet exist so a
     /// proposer can register its waiter before the first apply on a
     /// brand-new group. Used by
-    /// [`crate::control::metadata_proposer::propose_catalog_entry_async`]
+    /// [`crate::control::metadata_proposer::propose_catalog_entry`]
     /// (with `nodedb_cluster::METADATA_GROUP_ID`) and by the
     /// descriptor-lease drain path. Distributed-write commit
     /// waiting goes through `propose_tracker` directly because it
@@ -390,13 +426,6 @@ impl SharedState {
     }
 }
 
-/// The error for a Raft handle read before `start_raft` installed it.
-fn raft_not_started(what: &str) -> crate::Error {
-    crate::Error::Internal {
-        detail: format!("{what} is not installed: start_raft has not run on this node"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -407,7 +436,7 @@ mod tests {
     /// Reading `0` from a poisoned lock silently disables the restore
     /// staleness gate: the gate refuses an envelope whose watermark is older
     /// than this value, and every watermark clears a mark of `0`. A restore
-    /// then overwrites newer writes with no error.
+    /// would then overwrite newer writes with no error.
     #[test]
     fn a_poisoned_write_hlc_map_still_reports_the_recorded_mark() {
         let map: Arc<Mutex<HashMap<u64, u64>>> = Arc::new(Mutex::new(HashMap::new()));

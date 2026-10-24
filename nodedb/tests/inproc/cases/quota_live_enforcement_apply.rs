@@ -90,12 +90,12 @@ async fn alter_database_quota_zero_clears_connection_cap() {
         None,
         "zero drops the entry, so the database is uncapped again"
     );
+    let permit = registry
+        .try_acquire_database(db)
+        .expect("an uncapped database admits");
     assert!(
-        registry
-            .try_acquire_database(db)
-            .expect("an uncapped database admits")
-            .is_none(),
-        "an uncapped database hands out no permit"
+        permit.is_some(),
+        "an uncapped database hands out an unconstrained permit"
     );
 }
 

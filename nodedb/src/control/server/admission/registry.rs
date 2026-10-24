@@ -139,7 +139,7 @@ impl LimitEntry {
         let owed = u32::try_from(owed).unwrap_or(u32::MAX);
         let _ = self
             .pending_shrink
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 Some(current.saturating_add(owed))
             });
     }
@@ -273,13 +273,23 @@ impl AdmissionRegistry {
 
     /// Attempt to acquire a database-level permit for a new connection.
     ///
-    /// Returns `Ok(Some(permit))` if an entry exists and a slot was acquired,
-    /// `Ok(None)` if the database has no entry, or `Err(AdmissionError)` if the
-    /// database is at capacity.
+    /// Returns `Ok(Some(permit))` when a slot was acquired, or `Err(AdmissionError)`
+    /// if the database is at capacity.
     pub fn try_acquire_database(
         &self,
         db: DatabaseId,
     ) -> Result<Option<OwnedSemaphorePermit>, AdmissionError> {
+        let has_entry = {
+            let map = self.db_semaphores.read().unwrap_or_else(|p| p.into_inner());
+            map.contains_key(&db)
+        };
+        if !has_entry {
+            let mut map = self
+                .db_semaphores
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
+            map.entry(db).or_insert_with(|| LimitEntry::new(None));
+        }
         let map = self.db_semaphores.read().unwrap_or_else(|p| p.into_inner());
         let permit = try_acquire_entry(map.get(&db), |limit| {
             AdmissionError::DatabaseCapExhausted { db, limit }
@@ -372,10 +382,12 @@ mod tests {
     #[test]
     fn no_database_cap_allows_unlimited() {
         let reg = AdmissionRegistry::new();
-        // No entry configured → Ok(None).
-        let r = reg.try_acquire_database(db(0));
-        assert!(r.unwrap().is_none());
-        assert_eq!(reg.database_live_connections(db(0)), None);
+        // An uncapped database admits and tracks live connections.
+        let p = reg.try_acquire_database(db(0)).unwrap();
+        assert!(p.is_some());
+        assert_eq!(reg.database_live_connections(db(0)), Some(1));
+        drop(p);
+        assert_eq!(reg.database_live_connections(db(0)), Some(0));
     }
 
     #[test]
@@ -563,7 +575,7 @@ mod tests {
         reg.set_database_limit(db(5), 0);
 
         assert_eq!(reg.database_live_connections(db(5)), None);
-        assert!(reg.try_acquire_database(db(5)).unwrap().is_none());
+        assert!(reg.try_acquire_database(db(5)).unwrap().is_some());
     }
 
     #[test]
