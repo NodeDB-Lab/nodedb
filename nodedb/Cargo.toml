@@ -172,6 +172,7 @@ tokio = { workspace = true, features = ["test-util"] }
 faultbox = { workspace = true }
 tempfile = { workspace = true }
 tokio-postgres = { workspace = true }
+nodedb-client = { workspace = true, features = ["native"] }
 proptest = { workspace = true }
 nodedb-types = { workspace = true }
 reqwest = { workspace = true }

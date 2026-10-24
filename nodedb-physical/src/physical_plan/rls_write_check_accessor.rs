@@ -179,6 +179,13 @@ impl PhysicalPlan {
         {
             return vec![source_rls_write_check, dest_rls_write_check];
         }
+        // An edge batch carries one check per edge.
+        if let PhysicalPlan::Graph(
+            GraphOp::EdgePutBatch { edges } | GraphOp::EdgeDeleteBatch { edges },
+        ) = self
+        {
+            return edges.iter().map(|edge| &edge.write_gate).collect();
+        }
         // Every other op carries at most one check (`sole_rls_write_check`
         // is itself exhaustive over `PhysicalPlan`).
         self.sole_rls_write_check().into_iter().collect()

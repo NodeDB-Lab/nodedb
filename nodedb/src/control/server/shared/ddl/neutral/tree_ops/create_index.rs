@@ -268,6 +268,7 @@ pub async fn create_graph_index(
             dst_id: child.to_string(),
             src_surrogate: *src_surrogate,
             dst_surrogate: *dst_surrogate,
+            write_gate: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
         total_edges += 1;
     }

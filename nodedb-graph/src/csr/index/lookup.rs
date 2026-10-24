@@ -67,7 +67,9 @@ impl CsrIndex {
         }
         if matches!(direction, Direction::In | Direction::Both) {
             for (lid, src) in self.dense_iter_in(node_id) {
-                if labels.keeps(lid) {
+                // A self-loop is one edge. `Both` read it in the outbound pass.
+                let repeats_self_loop = direction == Direction::Both && src == node_id;
+                if labels.keeps(lid) && !repeats_self_loop {
                     result.push((
                         self.id_to_label[lid as usize].clone(),
                         self.id_to_node[src as usize].clone(),
@@ -410,6 +412,35 @@ mod tests {
         csr.iter_out_edges(csr.node_id(node).unwrap())
             .map(|(label, target)| (csr.label_name(label).into(), csr.node_name(target).into()))
             .collect()
+    }
+
+    #[test]
+    fn both_directions_list_a_self_loop_once() {
+        use crate::csr::Direction;
+
+        let mut csr = CsrIndex::new(test_memory());
+        csr.add_edge("a", "L", "b").unwrap();
+        csr.add_edge("a", "L", "a").unwrap();
+        csr.add_edge("c", "L", "d").unwrap();
+        csr.add_edge("d", "L", "c").unwrap();
+        for compacted in [false, true] {
+            if compacted {
+                csr.compact().unwrap();
+            }
+            let mut both = csr.neighbors("a", &[], Direction::Both);
+            both.sort();
+            assert_eq!(
+                both,
+                vec![
+                    ("L".to_string(), "a".to_string()),
+                    ("L".to_string(), "b".to_string())
+                ],
+                "compacted: {compacted}"
+            );
+            assert_eq!(csr.neighbors("a", &[], Direction::In).len(), 1);
+            // Two distinct edges to one neighbour stay two entries.
+            assert_eq!(csr.neighbors("c", &[], Direction::Both).len(), 2);
+        }
     }
 
     #[test]

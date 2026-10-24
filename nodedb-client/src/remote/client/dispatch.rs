@@ -89,6 +89,14 @@ impl NodeDb for NodeDbRemote {
             .await
     }
 
+    async fn batch_graph_insert_edges(
+        &self,
+        collection: &str,
+        edges: &[(&str, &str, &str)],
+    ) -> NodeDbResult<()> {
+        self.batch_graph_insert_edges_impl(collection, edges).await
+    }
+
     async fn graph_insert_edge(
         &self,
         collection: &str,

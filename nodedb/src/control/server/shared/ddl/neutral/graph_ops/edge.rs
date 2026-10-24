@@ -26,8 +26,21 @@ use super::support::{data_plane_verdict, ddl_err};
 /// Read the affected count off a Data-Plane response. A missing count is an
 /// error, never a default.
 fn response_affected(response: &crate::bridge::envelope::Response) -> Result<u64, DdlError> {
+    affected_count(response, "edge write")
+}
+
+/// Read the affected count off a Data-Plane response, naming the operation in
+/// the error. A batch statement sums one response per home, so it needs the
+/// same never-default rule as the single-edge form.
+pub(super) fn affected_count(
+    response: &crate::bridge::envelope::Response,
+    what: &str,
+) -> Result<u64, DdlError> {
     require_affected_count(response.payload.as_bytes()).map_err(|e| {
-        DdlError::from_error_in_context("edge write response is missing its affected count", &e)
+        DdlError::from_error_in_context(
+            &format!("{what} response is missing its affected count"),
+            &e,
+        )
     })
 }
 

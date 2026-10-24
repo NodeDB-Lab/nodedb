@@ -12,7 +12,7 @@ pub mod text_fields;
 
 pub use array_batch::{ArrayCellWrite, ArrayPutBatch};
 pub use auth::{AuthMethod, AuthResponse};
-pub use batch::{BatchDocument, BatchVector};
+pub use batch::{BatchDocument, BatchVector, MAX_BATCH_TEXT_BYTES, MAX_EDGES_PER_BATCH_STATEMENT};
 pub use error_cause::ErrorCausePayload;
 pub use frames::{ErrorPayload, NativeRequest, NativeResponse};
 pub use handshake::{

@@ -46,6 +46,12 @@ impl CoreLoop {
         }) {
             return self.response_error(task, refusal);
         }
+        // Each edge's write gate is decided against its stored image before
+        // any tombstone is written: one denied edge refuses the whole batch
+        // and nothing is deleted.
+        if let Err(error) = self.admit_edge_deletes(task, tid, edges) {
+            return self.response_error(task, error);
+        }
         let database_id = task.request.database_id.as_u64();
         let mut removed: u64 = 0;
         // Each edge's tombstone, at the ordinal decided here, journalled after
@@ -170,5 +176,145 @@ impl CoreLoop {
         let mut response = self.response_affected(task, removed);
         response.write_set = write_set;
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::envelope::Status;
+    use nodedb_physical::physical_plan::BatchEdge;
+    use nodedb_types::{QualifiedCollection, RlsWriteCheck, Surrogate};
+
+    use super::super::shared::EdgePutParams;
+    use super::super::shared::test_support::{affected_count, make_core, make_task_with_lsn};
+
+    /// Compiled filters equivalent to a `FOR WRITE` policy on `owner`.
+    fn owner_write_check(owner: &str) -> RlsWriteCheck {
+        let filter = crate::bridge::scan_filter::ScanFilter {
+            field: "owner".into(),
+            op: crate::bridge::scan_filter::FilterOp::Eq,
+            value: nodedb_types::Value::String(owner.into()),
+            clauses: Vec::new(),
+            expr: None,
+        };
+        RlsWriteCheck::Predicate(
+            zerompk::to_msgpack_vec(&vec![filter]).expect("encode policy filter"),
+        )
+    }
+
+    fn owner_properties(owner: &str) -> Vec<u8> {
+        nodedb_types::json_msgpack::json_to_msgpack(&serde_json::json!({ "owner": owner }))
+            .expect("encode properties")
+    }
+
+    fn batch_edge(dst: &str, n: u32, gate: RlsWriteCheck) -> BatchEdge {
+        BatchEdge {
+            collection: QualifiedCollection::new(crate::types::DatabaseId::DEFAULT, "knows"),
+            src_id: "a".into(),
+            label: "KNOWS".into(),
+            dst_id: dst.into(),
+            src_surrogate: Surrogate::new(1),
+            dst_surrogate: Surrogate::new(n),
+            write_gate: gate,
+        }
+    }
+
+    /// Seed `a -KNOWS-> b|c|d`, owned by alice, alice, mallory.
+    fn seeded() -> super::super::shared::test_support::CoreHarness {
+        let mut h = make_core();
+        for (lsn, dst, n, owner) in [
+            (10, "b", 2, "alice"),
+            (11, "c", 3, "alice"),
+            (12, "d", 4, "mallory"),
+        ] {
+            let task = make_task_with_lsn(lsn);
+            assert_eq!(
+                h.core
+                    .execute_edge_put(
+                        &task,
+                        EdgePutParams {
+                            tid: 1,
+                            collection: "knows",
+                            src_id: "a",
+                            label: "KNOWS",
+                            dst_id: dst,
+                            properties: &owner_properties(owner),
+                            src_surrogate: Surrogate::new(1),
+                            dst_surrogate: Surrogate::new(n),
+                        },
+                    )
+                    .status,
+                Status::Ok
+            );
+        }
+        h
+    }
+
+    fn live(h: &super::super::shared::test_support::CoreHarness, dst: &str) -> bool {
+        h.core
+            .edge_store
+            .get_edge(
+                crate::types::DatabaseId::DEFAULT.as_u64(),
+                TenantId::new(1),
+                "knows",
+                "a",
+                "KNOWS",
+                dst,
+            )
+            .expect("read edge back")
+            .is_some()
+    }
+
+    /// One denied edge refuses the whole batch: the allowed edges before and
+    /// after it stay too.
+    #[test]
+    fn a_denied_edge_refuses_the_batch_and_deletes_nothing() {
+        let mut h = seeded();
+        let alice = owner_write_check("alice");
+        let edges = [
+            batch_edge("b", 2, alice.clone()),
+            batch_edge("d", 4, alice.clone()),
+            batch_edge("c", 3, alice),
+        ];
+        let resp = h
+            .core
+            .execute_edge_delete_batch(&make_task_with_lsn(20), 1, &edges);
+        assert_eq!(resp.status, Status::Error);
+        assert!(
+            resp.write_set.is_empty(),
+            "a refused batch journals nothing"
+        );
+        for dst in ["b", "c", "d"] {
+            assert!(live(&h, dst), "edge to {dst} must survive a refused batch");
+        }
+    }
+
+    /// Edges the policy admits all go in one batch, and the count is theirs.
+    #[test]
+    fn an_all_admitted_batch_deletes_every_edge() {
+        let mut h = seeded();
+        let alice = owner_write_check("alice");
+        let edges = [batch_edge("b", 2, alice.clone()), batch_edge("c", 3, alice)];
+        let resp = h
+            .core
+            .execute_edge_delete_batch(&make_task_with_lsn(21), 1, &edges);
+        assert_eq!(resp.status, Status::Ok);
+        assert_eq!(affected_count(&resp), 2);
+        assert!(!live(&h, "b") && !live(&h, "c"));
+        assert!(live(&h, "d"), "an edge outside the batch must survive");
+    }
+
+    /// A gate still at `PendingInjection` denies the batch rather than
+    /// admitting it unchecked.
+    #[test]
+    fn an_uninjected_gate_refuses_the_batch() {
+        let mut h = seeded();
+        let edges = [batch_edge("b", 2, RlsWriteCheck::pending_injection())];
+        let resp = h
+            .core
+            .execute_edge_delete_batch(&make_task_with_lsn(22), 1, &edges);
+        assert_eq!(resp.status, Status::Error);
+        assert!(live(&h, "b"));
     }
 }

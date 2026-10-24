@@ -293,6 +293,7 @@ fn build_node_delete_tasks(
                 dst_id: dst.clone(),
                 src_surrogate: surrogate_of(src)?,
                 dst_surrogate: surrogate_of(dst)?,
+                write_gate: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             });
         }
         guards.push(PhysicalTask {

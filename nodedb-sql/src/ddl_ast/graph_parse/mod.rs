@@ -17,7 +17,13 @@
 //! required clause that is absent, or a clause value outside its own
 //! vocabulary, means no statement reaches the boundary at all. Both are
 //! reported as a parse error naming what is wrong.
+//!
+//! The tokenizer drops `(`, `)`, and `,`, so the batched edge statements check
+//! the shape of their `VALUES` tail on the statement text (`batch_shape`): a
+//! comma-separated list of parenthesized triples. A missing comma or a bare
+//! word list is a parse error.
 
+mod batch_shape;
 mod cursor;
 mod edge_predicate;
 mod entry;

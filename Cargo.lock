@@ -3964,6 +3964,7 @@ dependencies = [
  "nexar",
  "nodedb-array",
  "nodedb-bridge",
+ "nodedb-client",
  "nodedb-cluster",
  "nodedb-codec",
  "nodedb-columnar",

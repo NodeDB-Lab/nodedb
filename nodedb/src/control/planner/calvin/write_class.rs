@@ -608,6 +608,7 @@ mod tests {
             dst_id: "b".to_owned(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            write_gate: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         };
         let plan = PhysicalPlan::Graph(GraphOp::EdgePutBatch { edges: vec![edge] });
         assert!(
@@ -625,6 +626,7 @@ mod tests {
             dst_id: "b".to_owned(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            write_gate: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         };
         let plan = PhysicalPlan::Graph(GraphOp::EdgeDeleteBatch { edges: vec![edge] });
         assert!(

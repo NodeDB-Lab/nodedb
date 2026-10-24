@@ -33,8 +33,13 @@ impl<'t, 'a> Cursor<'t, 'a> {
         self.statement
     }
 
-    fn peek(&self) -> Option<&'t Tok<'a>> {
+    /// The next token that is not a comma. Every reader goes through here,
+    /// so a comma outside a list is as if it were absent.
+    fn peek(&mut self) -> Option<&'t Tok<'a>> {
         let toks: &'t [Tok<'a>] = self.toks;
+        while matches!(toks.get(self.pos), Some(Tok::Comma)) {
+            self.pos += 1;
+        }
         toks.get(self.pos)
     }
 
@@ -63,6 +68,12 @@ impl<'t, 'a> Cursor<'t, 'a> {
             Some(tok) => self.unexpected(tok),
             None => parse_error(format!("unexpected end of {}", self.statement)),
         }
+    }
+
+    /// The tokens not yet consumed.
+    pub(super) fn rest(&self) -> &'t [Tok<'a>] {
+        let toks: &'t [Tok<'a>] = self.toks;
+        toks.get(self.pos..).unwrap_or_default()
     }
 
     /// Consume the next token when it is the bare word `keyword`.
@@ -144,10 +155,11 @@ impl<'t, 'a> Cursor<'t, 'a> {
         }
     }
 
-    /// One or more quoted strings: `'a', 'b'` or `('a', 'b')`.
+    /// One or more quoted strings: `'a', 'b'` or `('a', 'b')`. Exactly one
+    /// comma separates two items. A comma after the last item is skipped.
     pub(super) fn quoted_list(&mut self, clause: &str) -> Result<Vec<String>, SqlError> {
         let mut out = Vec::new();
-        while let Some(Tok::Quoted(text)) = self.peek() {
+        if let Some(Tok::Quoted(text)) = self.peek() {
             out.push(text.clone().into_owned());
             self.pos += 1;
         }
@@ -157,7 +169,26 @@ impl<'t, 'a> Cursor<'t, 'a> {
                 self.statement
             )));
         }
-        Ok(out)
+        loop {
+            let toks: &'t [Tok<'a>] = self.toks;
+            let commas = toks
+                .get(self.pos..)
+                .unwrap_or_default()
+                .iter()
+                .take_while(|tok| matches!(tok, Tok::Comma))
+                .count();
+            let Some(Tok::Quoted(text)) = toks.get(self.pos + commas) else {
+                return Ok(out);
+            };
+            if commas != 1 {
+                return Err(parse_error(format!(
+                    "{} {clause} needs a comma between labels, as {clause} 'a', 'b'",
+                    self.statement
+                )));
+            }
+            out.push(text.clone().into_owned());
+            self.pos += 2;
+        }
     }
 
     /// A `{...}` object literal, braces included.
@@ -266,6 +297,7 @@ fn describe(tok: &Tok<'_>) -> String {
         Tok::Ident(text) => format!("identifier \"{text}\""),
         Tok::Object(_) => "an object literal".to_owned(),
         Tok::List(_) => "a [...] list".to_owned(),
+        Tok::Comma => "','".to_owned(),
     }
 }
 

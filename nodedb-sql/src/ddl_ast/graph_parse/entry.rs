@@ -62,7 +62,11 @@ fn parse_graph(sql: &str) -> Result<NodedbStatement, SqlError> {
         });
     }
 
-    if upper.starts_with("GRAPH INSERT EDGE ") {
+    if upper.starts_with("GRAPH INSERT EDGES ") {
+        variants::parse_insert_edges(&toks, sql)
+    } else if upper.starts_with("GRAPH DELETE EDGES ") {
+        variants::parse_delete_edges(&toks, sql)
+    } else if upper.starts_with("GRAPH INSERT EDGE ") {
         variants::parse_insert_edge(&toks)
     } else if upper.starts_with("GRAPH DELETE EDGE ") {
         variants::parse_delete_edge(&toks)
@@ -88,7 +92,13 @@ fn parse_graph(sql: &str) -> Result<NodedbStatement, SqlError> {
 /// The command words of a `GRAPH` statement, for an error message:
 /// `GRAPH NEIGHBORS`, `GRAPH INSERT EDGE`, `GRAPH RAG FUSION`.
 fn graph_command(upper: &str) -> String {
-    const MULTI_WORD: [&str; 3] = ["GRAPH INSERT EDGE", "GRAPH DELETE EDGE", "GRAPH RAG FUSION"];
+    const MULTI_WORD: [&str; 5] = [
+        "GRAPH INSERT EDGES",
+        "GRAPH DELETE EDGES",
+        "GRAPH INSERT EDGE",
+        "GRAPH DELETE EDGE",
+        "GRAPH RAG FUSION",
+    ];
     if let Some(command) = MULTI_WORD.iter().find(|c| upper.starts_with(*c)) {
         return (*command).to_owned();
     }
@@ -149,6 +159,138 @@ mod tests {
             }
             other => panic!("expected GraphDeleteEdge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_graph_insert_edges_batch() {
+        let stmt =
+            parsed("GRAPH INSERT EDGES IN 'edges' VALUES ('a','b','CALLS'), ('c','d','IMPORTS')");
+        match stmt {
+            NodedbStatement::Graph(GraphStmt::GraphInsertEdges { collection, edges }) => {
+                assert_eq!(collection, "edges");
+                assert_eq!(edges.len(), 2);
+                assert_eq!(edges[0].src, "a");
+                assert_eq!(edges[0].dst, "b");
+                assert_eq!(edges[0].label, "CALLS");
+                assert_eq!(edges[1].src, "c");
+                assert_eq!(edges[1].label, "IMPORTS");
+            }
+            other => panic!("expected GraphInsertEdges, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_graph_delete_edges_batch_accepts_bare_words() {
+        let stmt = parsed("GRAPH DELETE EDGES IN 'edges' VALUES (a, b, CALLS)");
+        match stmt {
+            NodedbStatement::Graph(GraphStmt::GraphDeleteEdges { collection, edges }) => {
+                assert_eq!(collection, "edges");
+                assert_eq!(edges.len(), 1);
+                assert_eq!(edges[0].src, "a");
+                assert_eq!(edges[0].dst, "b");
+                assert_eq!(edges[0].label, "CALLS");
+            }
+            other => panic!("expected GraphDeleteEdges, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn batch_edge_cap_is_enforced() {
+        let mut sql = String::from("GRAPH INSERT EDGES IN 'edges' VALUES ");
+        for i in 0..=variants::MAX_EDGES_PER_BATCH {
+            if i > 0 {
+                sql.push(',');
+            }
+            sql.push_str(&format!("('s{i}','d{i}','L')"));
+        }
+        let error = try_parse(&sql)
+            .expect("input is graph DSL")
+            .expect_err("a batch over the cap must not produce a statement");
+        assert!(
+            error.to_string().contains("at most 1000 edges"),
+            "the error must name the cap: {error}"
+        );
+    }
+
+    #[test]
+    fn batch_edge_text_cap_is_enforced_before_the_count_cap() {
+        // Three edges, far below the 1000-edge cap, but the field values are
+        // long enough to push the statement past 1 MiB. The text cap must be
+        // what rejects it, since the count says nothing about the work.
+        let long = "x".repeat(400 * 1024);
+        let sql = format!(
+            "GRAPH INSERT EDGES IN 'edges' VALUES ('{long}','{long}','L'), \
+             ('{long}','{long}','L'), ('{long}','{long}','L')"
+        );
+        assert!(
+            sql.len() > variants::MAX_BATCH_TEXT_BYTES,
+            "the fixture must exceed the text cap, was {} bytes",
+            sql.len()
+        );
+        let error = try_parse(&sql)
+            .expect("input is graph DSL")
+            .expect_err("a batch over the text cap must not produce a statement");
+        assert!(
+            error.to_string().contains("bytes of SQL text"),
+            "the error must name the text cap: {error}"
+        );
+    }
+
+    #[test]
+    fn batch_edge_at_the_text_cap_is_accepted() {
+        // The cap is a maximum, not an exclusive bound: a statement exactly at
+        // it must still parse. Built by padding the collection name, which is a
+        // single quoted field.
+        let base = "GRAPH INSERT EDGES IN '' VALUES ('a','b','L')";
+        let pad = variants::MAX_BATCH_TEXT_BYTES - base.len();
+        let sql = format!(
+            "GRAPH INSERT EDGES IN '{}' VALUES ('a','b','L')",
+            "c".repeat(pad)
+        );
+        assert_eq!(sql.len(), variants::MAX_BATCH_TEXT_BYTES);
+        try_parse(&sql)
+            .expect("input is graph DSL")
+            .expect("a statement exactly at the text cap must parse");
+    }
+
+    #[test]
+    fn batch_edge_rejects_malformed_triples() {
+        let error = try_parse("GRAPH INSERT EDGES IN 'edges' VALUES ('a','b')")
+            .expect("input is graph DSL")
+            .expect_err("a partial triple must not produce a statement");
+        assert!(
+            error.to_string().contains("triples"),
+            "the error must name the tuple shape: {error}"
+        );
+    }
+
+    #[test]
+    fn batch_edge_rejects_a_missing_comma_between_triples() {
+        let error = try_parse("GRAPH INSERT EDGES IN 'edges' VALUES ('a','b','L') ('c','d','L')")
+            .expect("input is graph DSL")
+            .expect_err("two triples without a comma are malformed");
+        assert!(
+            error.to_string().contains("triples"),
+            "the error must name the tuple shape: {error}"
+        );
+    }
+
+    #[test]
+    fn batch_edge_rejects_bare_words_without_parentheses() {
+        try_parse("GRAPH DELETE EDGES IN 'edges' VALUES a b L")
+            .expect("input is graph DSL")
+            .expect_err("three bare words are not a parenthesized triple");
+    }
+
+    #[test]
+    fn batch_edge_rejects_per_edge_properties() {
+        let error = try_parse("GRAPH INSERT EDGES IN 'edges' VALUES ('a','b','L') PROPERTIES '{}'")
+            .expect("input is graph DSL")
+            .expect_err("per-edge PROPERTIES is not supported in the batch form");
+        assert!(
+            error.to_string().contains("PROPERTIES"),
+            "the error must name the rejected clause: {error}"
+        );
     }
 
     /// A missing required clause is a malformed graph statement, not a
@@ -674,5 +816,114 @@ mod tests {
         assert_eq!(params.rrf_k_triple, Some((1.0, 2.0, 3.0)));
         let params = params_of("GRAPH RAG FUSION ON entities QUERY ARRAY[0.1]");
         assert_eq!(params.bm25_field, None);
+    }
+
+    // ── Missing separators in lists ───────────────────────────────────────
+
+    /// Two quoted labels with no comma between them are one malformed list.
+    #[test]
+    fn a_label_list_without_a_comma_is_refused_on_traverse() {
+        let sql = "GRAPH TRAVERSE IN 'c' FROM 'x' DEPTH 2 LABEL 'a' 'b'";
+        let result = try_parse(sql).expect("graph DSL");
+        assert!(
+            result.is_err(),
+            "a LABEL list missing its comma must be refused, got {result:?}"
+        );
+    }
+
+    /// Two quoted labels with no comma between them are one malformed list.
+    #[test]
+    fn a_label_list_without_a_comma_is_refused_on_neighbors() {
+        let sql = "GRAPH NEIGHBORS IN 'c' OF 'x' LABEL 'a' 'b' DIRECTION both";
+        let result = try_parse(sql).expect("graph DSL");
+        assert!(
+            result.is_err(),
+            "a LABEL list missing its comma must be refused, got {result:?}"
+        );
+    }
+
+    /// Two quoted labels with no comma between them are one malformed list.
+    #[test]
+    fn a_label_list_without_a_comma_is_refused_on_path() {
+        let sql = "GRAPH PATH IN 'c' FROM 'x' TO 'y' MAX_DEPTH 3 LABEL 'a' 'b'";
+        let result = try_parse(sql).expect("graph DSL");
+        assert!(
+            result.is_err(),
+            "a LABEL list missing its comma must be refused, got {result:?}"
+        );
+    }
+
+    /// Two quoted node labels with no comma between them are refused.
+    #[test]
+    fn a_label_set_without_a_comma_is_refused_on_graph_label() {
+        let sql = "GRAPH LABEL 'alice' AS 'Person' 'User'";
+        let result = try_parse(sql).expect("graph DSL");
+        assert!(
+            result.is_err(),
+            "an AS list missing its comma must be refused, got {result:?}"
+        );
+    }
+
+    /// An `IN (...)` list in `EDGE WHERE` needs commas between its values.
+    #[test]
+    fn an_edge_where_list_without_a_comma_is_refused() {
+        let sql = "GRAPH TRAVERSE IN 'c' FROM 'x' DEPTH 2 EDGE WHERE kind IN ('a' 'b')";
+        let result = try_parse(sql).expect("graph DSL");
+        assert!(
+            result.is_err(),
+            "an EDGE WHERE list missing its comma must be refused, got {result:?}"
+        );
+    }
+
+    /// The comma-separated `EDGE WHERE ... IN (...)` list is the accepted form.
+    #[test]
+    fn an_edge_where_list_with_commas_parses() {
+        let sql = "GRAPH TRAVERSE IN 'c' FROM 'x' DEPTH 2 EDGE WHERE kind IN ('a', 'b')";
+        let result = try_parse(sql).expect("graph DSL");
+        assert!(
+            result.is_ok(),
+            "a comma-separated list must parse: {result:?}"
+        );
+    }
+
+    /// The tokenizer keeps a comma as its own token.
+    #[test]
+    fn tokenizer_emits_a_comma_token() {
+        let toks = tokenizer::tokenize("a, b");
+        assert!(matches!(
+            toks.as_slice(),
+            [
+                tokenizer::Tok::Word("a"),
+                tokenizer::Tok::Comma,
+                tokenizer::Tok::Word("b")
+            ]
+        ));
+    }
+
+    /// Two commas between labels are a malformed list.
+    #[test]
+    fn a_label_list_with_two_commas_is_refused() {
+        let sql = "GRAPH NEIGHBORS IN 'c' OF 'x' LABEL 'a',, 'b'";
+        let result = try_parse(sql).expect("graph DSL");
+        assert!(
+            result.is_err(),
+            "a doubled comma must be refused, got {result:?}"
+        );
+    }
+
+    /// A comma after the last label, before a clause keyword, is skipped.
+    #[test]
+    fn a_trailing_label_comma_before_a_clause_parses() {
+        let sql = "GRAPH NEIGHBORS IN 'c' OF 'x' LABEL 'a', DIRECTION out";
+        let result = try_parse(sql).expect("graph DSL");
+        assert!(result.is_ok(), "a trailing comma must parse: {result:?}");
+    }
+
+    /// A comma between two clauses is skipped as it was before commas were tokens.
+    #[test]
+    fn a_stray_comma_between_clauses_parses() {
+        let sql = "GRAPH NEIGHBORS IN 'c', OF 'x', DIRECTION out";
+        let result = try_parse(sql).expect("graph DSL");
+        assert!(result.is_ok(), "a stray comma must parse: {result:?}");
     }
 }

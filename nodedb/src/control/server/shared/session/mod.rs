@@ -15,6 +15,7 @@ pub mod ddl_buffer;
 mod ddl_compensate;
 pub mod ddl_effect;
 mod ddl_flush;
+mod ddl_flush_cleanup;
 pub mod ddl_rollback;
 pub mod deadline;
 pub mod ephemeral_sequence;

@@ -82,6 +82,7 @@ fn batch_edges(edges: &[super::super::types::ReplicatedBatchEdge]) -> Vec<BatchE
             dst_id: e.dst_id.clone(),
             src_surrogate: nodedb_types::Surrogate::new(e.src_surrogate),
             dst_surrogate: nodedb_types::Surrogate::new(e.dst_surrogate),
+            write_gate: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
         })
         .collect()
 }
@@ -202,6 +203,8 @@ mod tests {
             dst_id: "bob".into(),
             src_surrogate: nodedb_types::Surrogate::new(11),
             dst_surrogate: nodedb_types::Surrogate::new(22),
+            // The wire form drops the slot; decode rebuilds it as decided.
+            write_gate: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
         };
         for plan in [
             PhysicalPlan::Graph(GraphOp::EdgePutBatch {

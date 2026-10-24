@@ -6,6 +6,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::json_msgpack::JsonValue;
 
+/// Most edges one batch statement may carry.
+///
+/// A protocol-level bound, so the client and the statement parser agree by
+/// construction rather than by two copies of the number happening to match.
+/// The server enforces it; the client checks it first so an oversized batch
+/// fails with the limit named instead of a round trip and a parse error.
+pub const MAX_EDGES_PER_BATCH_STATEMENT: usize = 1000;
+
+/// Most SQL text one batch statement may carry, in bytes.
+///
+/// The edge count alone does not bound the work: a triple's fields are
+/// arbitrary quoted strings, so a handful of edges with long node ids is far
+/// larger than a thousand short ones. Whichever limit the statement exceeds
+/// first is the one reported.
+pub const MAX_BATCH_TEXT_BYTES: usize = 1 << 20;
+
 /// A single vector in a batch insert.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchVector {

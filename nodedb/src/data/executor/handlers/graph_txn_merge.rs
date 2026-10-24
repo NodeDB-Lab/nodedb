@@ -71,9 +71,13 @@ pub(in crate::data::executor) fn merge_graph_txn_overlay_neighbors(
     let mut merged: Vec<(String, String)> = Vec::new();
     for &pass in Orientation::passes(direction) {
         let durable = durable_of(pass.direction());
+        // A self-loop is one edge. `Both` read it in the outbound pass.
+        let repeats_self_loop =
+            |node: &str| direction == Direction::Both && pass == Orientation::In && node == node_id;
         merged.extend(
             merge_staged_hop_pass(overlay, scope, node_id, pass, durable)
                 .into_iter()
+                .filter(|(_, node, _)| !repeats_self_loop(node))
                 .map(|(label, node, _)| (label, node)),
         );
     }

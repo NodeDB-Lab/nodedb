@@ -49,7 +49,9 @@ impl CsrIndex {
         }
         if matches!(direction, Direction::In | Direction::Both) {
             for (lid, src) in self.iter_in_edges_raw_in(node_id, collection_id) {
-                if keep(lid) {
+                // A self-loop is one edge. `Both` read it in the outbound pass.
+                let repeats_self_loop = direction == Direction::Both && src == node_id;
+                if keep(lid) && !repeats_self_loop {
                     result.push((
                         self.id_to_label[lid as usize].clone(),
                         self.id_to_node[src as usize].clone(),

@@ -10,5 +10,7 @@ pub(crate) mod pagerank;
 pub(crate) mod traverse;
 
 pub(crate) use decode::{decode_path_result, decode_traverse_result};
-pub(crate) use pagerank::{build_pagerank_sql, parse_pagerank_rows};
+pub(crate) use pagerank::{
+    build_delete_edges_sql, build_insert_edges_sql, build_pagerank_sql, parse_pagerank_rows,
+};
 pub(crate) use traverse::{build_graph_path_sql, build_graph_traverse_sql};

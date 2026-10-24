@@ -161,6 +161,7 @@ mod tests {
             dst_id: "b".into(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            write_gate: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }
     }
 

@@ -27,3 +27,12 @@ pub enum GraphProperties {
     /// expected to already be a JSON document.
     Quoted(String),
 }
+
+/// One `(src, dst, label)` triple inside a batched edge statement
+/// (`GRAPH INSERT EDGES` / `GRAPH DELETE EDGES`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphEdgeTuple {
+    pub src: String,
+    pub dst: String,
+    pub label: String,
+}

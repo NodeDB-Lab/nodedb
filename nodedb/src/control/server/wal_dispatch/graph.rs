@@ -236,6 +236,7 @@ mod tests {
             dst_id: dst.to_string(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            write_gate: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         }
     }
 

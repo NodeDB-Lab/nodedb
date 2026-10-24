@@ -166,15 +166,23 @@ pub(crate) async fn acquire_ddl_prepare_lease_async<'a>(
     let deadline = Instant::now() + DDL_PREPARE_WAIT;
 
     loop {
-        propose_metadata_and_wait_async(
-            shared,
-            handle,
-            &MetadataEntry::DdlPrepareAcquire {
+        let index = handle
+            .propose_async(encode_metadata(&MetadataEntry::DdlPrepareAcquire {
                 token,
                 node_id: shared.node_id,
-            },
-        )
-        .await?;
+            })?)
+            .await?;
+        if let Err(error) = await_metadata_apply(shared, index).await {
+            // The acquire is in the log and applies in log order, so this
+            // node will own the lease with no lease object to release it.
+            // The release applies after the acquire and is a no-op if the
+            // token never became owner.
+            shared
+                .lease_runtime
+                .releaser
+                .submit(crate::control::lease::releaser::ReleaseRequest::DdlPrepare { token });
+            return Err(error);
+        }
 
         loop {
             match owner_step(shared, token, deadline)? {
@@ -241,6 +249,48 @@ mod tests {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "the background releaser did not release the dropped lease"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        drop(state);
+        cluster.shutdown().await;
+    }
+
+    /// An acquire whose apply wait runs out of time has already proposed its
+    /// token. The token must not stay the lease owner after the statement
+    /// failed: no lease object exists to release it, and the next DDL would
+    /// wait for the leader's reclaim.
+    #[tokio::test]
+    async fn an_acquire_that_misses_its_deadline_does_not_keep_the_lease() {
+        use crate::control::server::shared::session::{conn_scope, deadline};
+
+        let cluster = crate::control::cluster::test_one_node::boot().await;
+        let state = Arc::clone(&cluster.state);
+        let handle = state.metadata_raft_handle().expect("metadata raft handle");
+
+        let mut missed = 0;
+        for _ in 0..20 {
+            let attempt = conn_scope::scoped(async {
+                let _scope = deadline::enter(Some(Duration::ZERO), 30);
+                acquire_ddl_prepare_lease_async(&state, handle.as_ref()).await
+            })
+            .await;
+            match attempt {
+                Ok(lease) => lease.release().await,
+                Err(Error::DeadlineExceeded { .. }) => missed += 1,
+                Err(other) => panic!("unexpected acquire error: {other}"),
+            }
+        }
+        assert!(
+            missed > 0,
+            "no acquire missed its deadline, so the test checked nothing"
+        );
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while owner(&state).is_some() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "an acquire that missed its deadline left its token as the lease owner"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

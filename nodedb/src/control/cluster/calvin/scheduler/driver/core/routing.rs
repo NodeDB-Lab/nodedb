@@ -471,6 +471,7 @@ mod tests {
             dst_id: dst.to_owned(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            write_gate: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         };
 
         // Two edges over the same endpoint pair: the union must dedupe.

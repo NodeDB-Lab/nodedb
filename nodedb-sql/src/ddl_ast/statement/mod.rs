@@ -17,4 +17,4 @@ pub use wrapper::*;
 // Cross-module re-exports preserved at the `statement::` path for
 // callers that imported these types via the pre-split surface.
 pub use super::alter_ops::{AlterCollectionOp, AlterRoleOp, AlterUserOp};
-pub use super::graph_types::{GraphDirection, GraphProperties};
+pub use super::graph_types::{GraphDirection, GraphEdgeTuple, GraphProperties};

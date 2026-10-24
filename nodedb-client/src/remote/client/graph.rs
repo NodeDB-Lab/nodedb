@@ -14,6 +14,34 @@ use super::core::NodeDbRemote;
 use crate::sql_escape::quote_string_literal;
 
 impl NodeDbRemote {
+    /// Insert a batch of edges as ONE `GRAPH INSERT EDGES` statement.
+    ///
+    /// The statement carries the whole list, so the batch costs one round trip
+    /// instead of one per edge. The server-side form is property-less, which is
+    /// what the caller's `(&str, &str, &str)` triples carry.
+    pub(super) async fn batch_graph_insert_edges_impl(
+        &self,
+        collection: &str,
+        edges: &[(&str, &str, &str)],
+    ) -> NodeDbResult<()> {
+        let sql = crate::graph_dsl::build_insert_edges_sql(collection, edges)?;
+        self.simple_query_raw(&sql).await.map(|_| ())
+    }
+
+    /// Delete a batch of edges as ONE `GRAPH DELETE EDGES` statement.
+    ///
+    /// A delete of an absent edge counts zero, and a refused edge refuses the
+    /// whole batch. This is an inherent method: the `NodeDb` trait file is at
+    /// its line limit.
+    pub async fn batch_graph_delete_edges(
+        &self,
+        collection: &str,
+        edges: &[(&str, &str, &str)],
+    ) -> NodeDbResult<()> {
+        let sql = crate::graph_dsl::build_delete_edges_sql(collection, edges)?;
+        self.simple_query_raw(&sql).await.map(|_| ())
+    }
+
     pub(super) async fn graph_traverse_impl(
         &self,
         collection: &str,
