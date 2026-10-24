@@ -19,6 +19,7 @@ nodedb-columnar = { path = "../nodedb-columnar" }
 nodedb-mem = { path = "../nodedb-mem" }
 nodedb-crs = { path = "../nodedb-crs" }
 nodedb-raster = { path = "../nodedb-raster" }
+nodedb-spatial = { path = "../nodedb-spatial" }
 nodedb-strict = { path = "../nodedb-strict" }
 nodedb-types = { path = "../nodedb-types" }
 nodedb-wal = { path = "../nodedb-wal" }
@@ -75,6 +76,22 @@ required-features = ["fuzzing"]
 [[bin]]
 name = "sql_preprocess"
 path = "fuzz_targets/sql_preprocess.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzzing"]
+
+[[bin]]
+name = "crs_text"
+path = "fuzz_targets/crs_text.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzzing"]
+
+[[bin]]
+name = "spatial_geometry"
+path = "fuzz_targets/spatial_geometry.rs"
 test = false
 doc = false
 bench = false

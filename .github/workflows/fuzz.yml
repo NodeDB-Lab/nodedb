@@ -1,4 +1,4 @@
-# Eight jobs on a nightly toolchain — only worth running when a change can
+# Ten jobs on a nightly toolchain — only worth running when a change can
 # reach a decoder. The weekly cron runs unconditionally, so a too-narrow path
 # filter costs coverage for a week, not forever.
 
@@ -7,12 +7,15 @@ name: ASan fuzz + 32-bit corpus/property
 on:
   pull_request:
     branches: [main]
-    # The crates the seven targets reach.
+    # The crates the nine targets and the wasm32 check reach.
     paths:
       - fuzz/**
       - nodedb-codec/**
       - nodedb-raster/**
       - nodedb-raster-load/**
+      - nodedb-srid/**
+      - nodedb-crs/**
+      - nodedb-spatial/**
       - nodedb-columnar/**
       - nodedb-strict/**
       - nodedb-wal/**
@@ -53,6 +56,10 @@ jobs:
             dictionary: fuzz/dictionaries/sql.dict
           - name: geotiff_decoder
             dictionary: fuzz/dictionaries/binary.dict
+          - name: crs_text
+            dictionary: fuzz/dictionaries/crs.dict
+          - name: spatial_geometry
+            dictionary: fuzz/dictionaries/geometry.dict
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       # A pinned nightly keeps the build cache key stable across days. Move
@@ -67,7 +74,7 @@ jobs:
         with:
           workspaces: fuzz -> target
           key: ${{ matrix.target.name }}
-      # All seven matrix jobs install the same pinned binary; build it once.
+      # All nine matrix jobs install the same pinned binary; build it once.
       - name: Cache cargo-fuzz
         id: cache-cargo-fuzz
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
@@ -112,4 +119,5 @@ jobs:
         run: |
           cargo check --target wasm32-unknown-unknown \
             -p nodedb-codec -p nodedb-columnar -p nodedb-strict \
-            -p nodedb-raster -p nodedb-raster-load
+            -p nodedb-raster -p nodedb-raster-load \
+            -p nodedb-srid -p nodedb-crs -p nodedb-spatial
