@@ -28,6 +28,8 @@
 //!   carried by data-group snapshots.
 //! - `redo_snapshot_owed`: the data-group snapshot installs this node's
 //!   replicas owe.
+//! - `vshard_residency`: the vShards this node hosts, and the departure
+//!   purges it owes.
 //! - `l2_cleanup_queue`, `pending_reclaim`, `pending_history_compaction`:
 //!   work this node still owes its own storage.
 //! - `surrogate_pk_v3`, `surrogate_pk_rev_v3`: PK bindings of stored rows,
@@ -195,6 +197,8 @@ pub(super) const REPLICATED_TABLES: &[ReplicatedTable] = replicated_tables![
     "synonym_groups" => SYNONYM_GROUPS,
     "custom_types" => CUSTOM_TYPES,
     "custom_type_oid_hwm" => super::custom_type_oid_hwm::CUSTOM_TYPE_OID_HWM,
+    "spatial_ref_sys" => SPATIAL_REF_SYS,
+    "credentials" => super::credentials::CREDENTIALS,
     "wasm_modules" => WASM_MODULES,
     "rls_policies" => super::rls::RLS_POLICIES,
     "redaction_policies" => super::redaction::REDACTION_POLICIES,

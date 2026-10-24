@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use nodedb_crs::CrsContext;
 use nodedb_types::Value;
 
 use super::extremum::{extremum_direction, value_replaces};
@@ -16,6 +17,7 @@ pub(super) fn apply_v_aggregate(
     rows: &mut [Vec<Value>],
     indices: &[usize],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
     spec: &WindowFuncSpec,
     write_col: usize,
 ) -> Result<(), WindowError> {
@@ -24,9 +26,9 @@ pub(super) fn apply_v_aggregate(
         && matches!(spec.frame.end, FrameBound::CurrentRow);
 
     if use_running {
-        apply_v_running_aggregate(rows, indices, column_index, spec, write_col)
+        apply_v_running_aggregate(rows, indices, column_index, crs, spec, write_col)
     } else {
-        apply_v_per_row_aggregate(rows, indices, column_index, spec, write_col)
+        apply_v_per_row_aggregate(rows, indices, column_index, crs, spec, write_col)
     }
 }
 
@@ -34,9 +36,10 @@ fn eval_arg(
     spec: &WindowFuncSpec,
     row: &[Value],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
 ) -> Result<Value, WindowError> {
     match spec.args.first() {
-        Some(expr) => Ok(eval_arg_for_row(expr, row, column_index)?),
+        Some(expr) => Ok(eval_arg_for_row(expr, row, column_index, crs)?),
         None => Ok(Value::Null),
     }
 }
@@ -45,6 +48,7 @@ fn apply_v_running_aggregate(
     rows: &mut [Vec<Value>],
     indices: &[usize],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
     spec: &WindowFuncSpec,
     write_col: usize,
 ) -> Result<(), WindowError> {
@@ -64,7 +68,7 @@ fn apply_v_running_aggregate(
     for pos in 0..len {
         let i = indices[pos];
         let val = match rows.get(i) {
-            Some(row) => eval_arg(spec, row, column_index)?,
+            Some(row) => eval_arg(spec, row, column_index, crs)?,
             None => Value::Null,
         };
 
@@ -83,15 +87,15 @@ fn apply_v_running_aggregate(
         }
 
         let is_last_in_group = pos + 1 == len
-            || !order_keys_equal_v(rows, i, indices[pos + 1], column_index, &spec.order_by)?;
+            || !order_keys_equal_v(rows, i, indices[pos + 1], column_index, crs, &spec.order_by)?;
 
         if is_last_in_group {
             let first_val = match rows.get(indices[0]) {
-                Some(row) => eval_arg(spec, row, column_index)?,
+                Some(row) => eval_arg(spec, row, column_index, crs)?,
                 None => Value::Null,
             };
             let last_val = match rows.get(indices[pos]) {
-                Some(row) => eval_arg(spec, row, column_index)?,
+                Some(row) => eval_arg(spec, row, column_index, crs)?,
                 None => Value::Null,
             };
 
@@ -118,6 +122,7 @@ fn apply_v_per_row_aggregate(
     rows: &mut [Vec<Value>],
     indices: &[usize],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
     spec: &WindowFuncSpec,
     write_col: usize,
 ) -> Result<(), WindowError> {
@@ -130,7 +135,7 @@ fn apply_v_per_row_aggregate(
     let order_values: Vec<Value> = indices
         .iter()
         .map(|&i| match (order_expr, rows.get(i)) {
-            (Some(expr), Some(row)) => Ok(eval_arg_for_row(expr, row, column_index)?),
+            (Some(expr), Some(row)) => Ok(eval_arg_for_row(expr, row, column_index, crs)?),
             _ => Ok(Value::Null),
         })
         .collect::<Result<Vec<_>, WindowError>>()?;
@@ -144,7 +149,7 @@ fn apply_v_per_row_aggregate(
     let arg_vals: Vec<Value> = indices
         .iter()
         .map(|&i| match rows.get(i) {
-            Some(row) => eval_arg(spec, row, column_index),
+            Some(row) => eval_arg(spec, row, column_index, crs),
             None => Ok(Value::Null),
         })
         .collect::<Result<Vec<_>, WindowError>>()?;
@@ -423,7 +428,15 @@ mod tests {
             row.push(Value::Null);
         }
         let indices: Vec<usize> = (0..rows.len()).collect();
-        apply_v_aggregate(rows, &indices, cols, spec, write_col).unwrap();
+        apply_v_aggregate(
+            rows,
+            &indices,
+            cols,
+            &nodedb_crs::CrsContext::builtin_only(),
+            spec,
+            write_col,
+        )
+        .unwrap();
     }
 
     fn frame(mode: &str, start: FrameBound, end: FrameBound) -> WindowFrame {

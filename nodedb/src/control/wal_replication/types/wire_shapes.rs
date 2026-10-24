@@ -26,6 +26,13 @@ pub struct ReplicatedBatchEdge {
     /// Leader-assigned global surrogate for the destination node (binding key =
     /// `dst_id.as_bytes()`).
     pub dst_surrogate: u32,
+    /// `VALID_TIME <from>` of a put, ms since epoch. `None` takes the
+    /// applying write's wall time. A delete carries `None`.
+    #[serde(default)]
+    pub valid_from_ms: Option<i64>,
+    /// `UNTIL <until>` of a put. `None` leaves the valid time open.
+    #[serde(default)]
+    pub valid_until_ms: Option<i64>,
 }
 
 /// The fields of one `ApplyBalanceDelta`, borrowed from the plan or the wire

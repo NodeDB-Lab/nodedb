@@ -122,8 +122,21 @@ impl EdgeStore {
         valid_until_ms: i64,
         account_stats: bool,
     ) -> crate::Result<EdgeVersionWrite> {
-        let payload =
-            EdgeValuePayload::new(valid_from_ms, valid_until_ms, properties.to_vec()).encode()?;
+        let payload = EdgeValuePayload::new(valid_from_ms, valid_until_ms, properties.to_vec())
+            .with_surrogates(edge.src_surrogate, edge.dst_surrogate);
+        self.write_payload_recorded(edge, &payload, stamp, account_stats)
+    }
+
+    /// Write `payload` as a version of `edge` at `stamp`, bind the
+    /// endpoints' identities `edge` carries, and return what it changed.
+    fn write_payload_recorded(
+        &self,
+        edge: EdgeRef<'_>,
+        payload: &EdgeValuePayload,
+        stamp: VersionStamp,
+        account_stats: bool,
+    ) -> crate::Result<EdgeVersionWrite> {
+        let payload = payload.encode()?;
         let d = edge.db.as_u64();
         let t = edge.tid.as_u64();
 
@@ -248,13 +261,13 @@ impl EdgeStore {
             }
         };
 
-        self.put_edge_versioned(
-            edge,
-            &prior.properties,
-            system_from,
-            prior.valid_from_ms,
-            now_valid_ms,
-        )?;
+        // The closing version keeps the identities the prior version
+        // recorded.
+        let closing = EdgeValuePayload {
+            valid_until_ms: now_valid_ms,
+            ..prior
+        };
+        self.write_payload_recorded(edge, &closing, VersionStamp::at(system_from), true)?;
         Ok(true)
     }
 
@@ -519,7 +532,7 @@ mod tests {
 
         // Payload encoding check.
         let p = EdgeValuePayload::new(0, i64::MAX, b"x".to_vec());
-        assert_eq!(p.encode().unwrap()[0], 0x93);
+        assert_eq!(p.encode().unwrap()[0], 0x95);
     }
 
     #[test]

@@ -5,6 +5,8 @@
 use super::super::statement::{GraphStmt, NodedbStatement};
 use super::{edge_predicate, tokenizer, variants};
 use crate::error::SqlError;
+use crate::parser::preprocess::temporal::{ExprBoundary, extract_bounded};
+use crate::temporal::{TemporalScope, ValidTime};
 
 /// Parse a graph DSL statement.
 ///
@@ -19,9 +21,7 @@ pub fn try_parse(sql: &str) -> Option<Result<NodedbStatement, SqlError>> {
     let upper = trimmed.to_ascii_uppercase();
 
     if upper.starts_with("MATCH ") || upper.starts_with("OPTIONAL MATCH ") {
-        return Some(Ok(NodedbStatement::Graph(GraphStmt::MatchQuery {
-            body: trimmed.to_string(),
-        })));
+        return Some(parse_match(trimmed));
     }
 
     if !upper.starts_with("GRAPH ") {
@@ -31,14 +31,54 @@ pub fn try_parse(sql: &str) -> Option<Result<NodedbStatement, SqlError>> {
     Some(parse_graph(trimmed))
 }
 
+/// A MATCH statement: its temporal clauses split off, the rest kept for the
+/// pattern compiler. Comments are not blanked: `--` is not a comment inside
+/// a pattern.
+fn parse_match(sql: &str) -> Result<NodedbStatement, SqlError> {
+    let (body, temporal) = split_temporal(sql)?;
+    Ok(NodedbStatement::Graph(GraphStmt::MatchQuery {
+        body: body.trim().to_string(),
+        temporal,
+    }))
+}
+
+/// Remove the `AS OF SYSTEM TIME` / `AS OF VALID TIME` clauses of a graph
+/// read. A valid-time range is refused: a graph read selects the edges valid
+/// at one instant.
+fn split_temporal(sql: &str) -> Result<(String, TemporalScope), SqlError> {
+    let extracted = extract_bounded(sql, ExprBoundary::Token)
+        .map_err(|error| SqlError::Parse { detail: error.0 })?;
+    let Some(extracted) = extracted else {
+        return Ok((sql.to_string(), TemporalScope::default()));
+    };
+    if let ValidTime::Range(lo, hi) = extracted.temporal.valid_time {
+        return Err(SqlError::Parse {
+            detail: format!(
+                "FOR VALID_TIME FROM {lo} TO {hi} is not supported on graph reads; use \
+                 AS OF VALID TIME <t>"
+            ),
+        });
+    }
+    Ok((extracted.sql, extracted.temporal))
+}
+
 /// Parse a statement known to start with `GRAPH `. Comments are blanked
-/// first. A trailing `EDGE WHERE` predicate splits off next, so the clause
-/// text before it tokenizes alone.
+/// first, then the temporal clauses split off. A trailing `EDGE WHERE`
+/// predicate splits off next, so the clause text before it tokenizes alone.
 fn parse_graph(sql: &str) -> Result<NodedbStatement, SqlError> {
     let blanked = tokenizer::blank_comments(sql);
-    let trimmed = blanked.trim();
+    let (text, temporal) = split_temporal(blanked.trim())?;
+    let trimmed = text.trim();
     let upper = trimmed.to_ascii_uppercase();
     let upper = upper.as_str();
+    if temporal.is_temporal() && is_graph_write(upper) {
+        return Err(SqlError::Parse {
+            detail: format!(
+                "{} does not accept AS OF: a write applies at the current system time",
+                graph_command(upper)
+            ),
+        });
+    }
     let (head, predicate_text) = edge_predicate::split_edge_where(trimmed)?;
     let predicate = match predicate_text {
         Some(text) => edge_predicate::parse_edge_predicate(text)?,
@@ -47,10 +87,10 @@ fn parse_graph(sql: &str) -> Result<NodedbStatement, SqlError> {
     let toks = tokenizer::tokenize(head);
 
     if upper.starts_with("GRAPH TRAVERSE ") {
-        return variants::parse_traverse(&toks, predicate);
+        return variants::parse_traverse(&toks, predicate, temporal);
     }
     if upper.starts_with("GRAPH PATH ") {
-        return variants::parse_path(&toks, predicate);
+        return variants::parse_path(&toks, predicate, temporal);
     }
     if predicate_text.is_some() {
         return Err(SqlError::Parse {
@@ -71,11 +111,11 @@ fn parse_graph(sql: &str) -> Result<NodedbStatement, SqlError> {
     } else if upper.starts_with("GRAPH UNLABEL ") {
         variants::parse_set_labels(&toks, true)
     } else if upper.starts_with("GRAPH NEIGHBORS ") {
-        variants::parse_neighbors(&toks)
+        variants::parse_neighbors(&toks, temporal)
     } else if upper.starts_with("GRAPH ALGO ") {
-        variants::parse_algo(&toks)
+        variants::parse_algo(&toks, temporal)
     } else if upper.starts_with("GRAPH RAG FUSION ") {
-        variants::parse_rag_fusion(&toks)
+        variants::parse_rag_fusion(&toks, temporal)
     } else {
         // Starts with `GRAPH ` but names no known command. Still graph DSL,
         // so report it here rather than letting the SQL parser guess.
@@ -83,6 +123,18 @@ fn parse_graph(sql: &str) -> Result<NodedbStatement, SqlError> {
             detail: "unrecognised GRAPH command".to_owned(),
         })
     }
+}
+
+/// A graph statement that writes: edges or node labels.
+fn is_graph_write(upper: &str) -> bool {
+    [
+        "GRAPH INSERT EDGE ",
+        "GRAPH DELETE EDGE ",
+        "GRAPH LABEL ",
+        "GRAPH UNLABEL ",
+    ]
+    .iter()
+    .any(|command| upper.starts_with(command))
 }
 
 /// The command words of a `GRAPH` statement, for an error message:
@@ -121,7 +173,11 @@ mod tests {
                 dst,
                 label,
                 properties,
+                valid_from_ms,
+                valid_until_ms,
             }) => {
+                assert_eq!(valid_from_ms, None);
+                assert_eq!(valid_until_ms, None);
                 assert_eq!(collection, "myedges");
                 assert_eq!(src, "TO");
                 assert_eq!(dst, "FROM");
@@ -216,7 +272,9 @@ mod tests {
                 max_depth,
                 edge_labels,
                 edge_predicate,
+                temporal,
             }) => {
+                assert!(!temporal.is_temporal());
                 assert!(edge_predicate.is_empty());
                 assert_eq!(collection, "docs");
                 assert_eq!(src, "a");
@@ -385,7 +443,7 @@ mod tests {
     fn parse_match_query_captures_raw() {
         let stmt = parsed("MATCH (x)-[:l]->(y) RETURN x, y");
         match stmt {
-            NodedbStatement::Graph(GraphStmt::MatchQuery { body }) => {
+            NodedbStatement::Graph(GraphStmt::MatchQuery { body, .. }) => {
                 assert!(body.starts_with("MATCH"));
             }
             other => panic!("expected MatchQuery, got {other:?}"),
@@ -412,7 +470,9 @@ mod tests {
              RRF_K (60.0, 35.0)",
         );
         match stmt {
-            NodedbStatement::Graph(GraphStmt::GraphRagFusion { collection, params }) => {
+            NodedbStatement::Graph(GraphStmt::GraphRagFusion {
+                collection, params, ..
+            }) => {
                 assert_eq!(collection, "entities");
                 let v = params.query_vector.expect("QUERY ARRAY parsed");
                 assert_eq!(v.len(), 3);
@@ -433,7 +493,9 @@ mod tests {
     fn parse_rag_fusion_minimal_defaults_to_none() {
         let stmt = parsed("GRAPH RAG FUSION ON mycol QUERY ARRAY[1.0, 0.0]");
         match stmt {
-            NodedbStatement::Graph(GraphStmt::GraphRagFusion { collection, params }) => {
+            NodedbStatement::Graph(GraphStmt::GraphRagFusion {
+                collection, params, ..
+            }) => {
                 assert_eq!(collection, "mycol");
                 assert!(params.query_vector.is_some());
                 assert_eq!(params.vector_top_k, None);
@@ -659,7 +721,9 @@ mod tests {
     #[test]
     fn rag_fusion_bm25_field_is_the_on_after_bm25() {
         let params_of = |sql: &str| match parsed(sql) {
-            NodedbStatement::Graph(GraphStmt::GraphRagFusion { collection, params }) => {
+            NodedbStatement::Graph(GraphStmt::GraphRagFusion {
+                collection, params, ..
+            }) => {
                 assert_eq!(collection, "entities");
                 params
             }
@@ -674,5 +738,129 @@ mod tests {
         assert_eq!(params.rrf_k_triple, Some((1.0, 2.0, 3.0)));
         let params = params_of("GRAPH RAG FUSION ON entities QUERY ARRAY[0.1]");
         assert_eq!(params.bm25_field, None);
+    }
+
+    // ── Temporal clauses ─────────────────────────────────────────────────
+
+    fn temporal_of(sql: &str) -> TemporalScope {
+        match parsed(sql) {
+            NodedbStatement::Graph(
+                GraphStmt::GraphTraverse { temporal, .. }
+                | GraphStmt::GraphNeighbors { temporal, .. }
+                | GraphStmt::GraphPath { temporal, .. }
+                | GraphStmt::GraphAlgo { temporal, .. }
+                | GraphStmt::GraphRagFusion { temporal, .. }
+                | GraphStmt::MatchQuery { temporal, .. },
+            ) => temporal,
+            other => panic!("expected a graph read, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_graph_read_accepts_as_of() {
+        use nodedb_types::SystemTimeScope;
+        for sql in [
+            "GRAPH TRAVERSE FROM 'x' IN coll DEPTH 2 AS OF SYSTEM TIME 1700",
+            "GRAPH TRAVERSE IN coll FROM 'x' AS OF SYSTEM TIME 1700 DEPTH 2",
+            "GRAPH NEIGHBORS IN coll OF 'x' AS OF SYSTEM TIME 1700",
+            "GRAPH PATH IN coll FROM 'a' TO 'b' AS OF SYSTEM TIME 1700 MAX_DEPTH 3",
+            "GRAPH ALGO PAGERANK ON coll AS OF SYSTEM TIME 1700 ITERATIONS 5",
+            "GRAPH RAG FUSION ON coll QUERY ARRAY[0.1] AS OF SYSTEM TIME 1700",
+            "MATCH (a)-[:l]->(b) IN coll AS OF SYSTEM TIME 1700 RETURN a, b",
+        ] {
+            assert_eq!(
+                temporal_of(sql).system_time,
+                SystemTimeScope::AsOf(1700),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn traverse_with_as_of_keeps_its_other_clauses() {
+        match parsed(
+            "GRAPH TRAVERSE IN 'g' FROM 'a' AS OF SYSTEM TIME 5 AS OF VALID TIME 9 DEPTH 3 \
+             EDGE WHERE w > 1",
+        ) {
+            NodedbStatement::Graph(GraphStmt::GraphTraverse {
+                depth,
+                edge_predicate,
+                temporal,
+                ..
+            }) => {
+                assert_eq!(depth, 3);
+                assert_eq!(edge_predicate.len(), 1);
+                assert_eq!(temporal.valid_time, ValidTime::At(9));
+            }
+            other => panic!("expected GraphTraverse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn match_body_loses_its_as_of_text() {
+        match parsed("MATCH (a)-[:l]->(b) AS OF SYSTEM TIME 5 WHERE a.x = 1 RETURN a AS n") {
+            NodedbStatement::Graph(GraphStmt::MatchQuery { body, temporal }) => {
+                assert_eq!(body, "MATCH (a)-[:l]->(b) WHERE a.x = 1 RETURN a AS n");
+                assert!(temporal.is_temporal());
+            }
+            other => panic!("expected MatchQuery, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn as_of_on_a_graph_write_is_refused() {
+        for (sql, command) in [
+            (
+                "GRAPH INSERT EDGE IN 'e' FROM 'a' TO 'b' TYPE 'l' AS OF SYSTEM TIME 5",
+                "GRAPH INSERT EDGE",
+            ),
+            (
+                "GRAPH DELETE EDGE IN 'e' FROM 'a' TO 'b' TYPE 'l' AS OF SYSTEM TIME 5",
+                "GRAPH DELETE EDGE",
+            ),
+            ("GRAPH LABEL 'a' AS 'P' AS OF VALID TIME 5", "GRAPH LABEL"),
+        ] {
+            let error = parse_error(sql);
+            assert!(
+                error.contains(command) && error.contains("AS OF"),
+                "{sql}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_time_range_is_refused_on_graph_reads() {
+        let error = parse_error("GRAPH NEIGHBORS IN 'g' OF 'a' FOR VALID_TIME FROM 1 TO 5");
+        assert!(error.contains("AS OF VALID TIME"), "{error}");
+    }
+
+    #[test]
+    fn insert_edge_valid_time_interval_parses() {
+        match parsed(
+            "GRAPH INSERT EDGE IN 'e' FROM 'a' TO 'b' TYPE 'l' \
+             VALID_TIME '2024-01-01T00:00:00Z' UNTIL 1704153600000",
+        ) {
+            NodedbStatement::Graph(GraphStmt::GraphInsertEdge {
+                valid_from_ms,
+                valid_until_ms,
+                ..
+            }) => {
+                assert_eq!(valid_from_ms, Some(1_704_067_200_000));
+                assert_eq!(valid_until_ms, Some(1_704_153_600_000));
+            }
+            other => panic!("expected GraphInsertEdge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_edge_empty_or_unanchored_interval_is_refused() {
+        let error =
+            parse_error("GRAPH INSERT EDGE IN 'e' FROM 'a' TO 'b' TYPE 'l' VALID_TIME 5 UNTIL 5");
+        assert!(error.contains("UNTIL must be after VALID_TIME"), "{error}");
+        let error = parse_error("GRAPH INSERT EDGE IN 'e' FROM 'a' TO 'b' TYPE 'l' UNTIL 5");
+        assert!(error.contains("UNTIL needs VALID_TIME"), "{error}");
+        let error =
+            parse_error("GRAPH INSERT EDGE IN 'e' FROM 'a' TO 'b' TYPE 'l' VALID_TIME 'soon'");
+        assert!(error.contains("VALID_TIME"), "{error}");
     }
 }

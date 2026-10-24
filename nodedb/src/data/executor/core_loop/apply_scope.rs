@@ -26,9 +26,16 @@ pub(in crate::data::executor) struct ApplyScope {
     /// version's restore ordinal. Set beside `graph_system_from` and cleared
     /// with it.
     pub(in crate::data::executor) graph_applied: Option<i64>,
-    /// The ordinal of the Calvin transaction a resolve runs for, from its
-    /// epoch instant and position. Set only for the length of a Calvin
-    /// resolve. Every participant of the transaction computes the same
-    /// value, so a cross-shard edge's two homes stamp one version key.
+    /// The ordinal of the Calvin transaction a stage or resolve runs for,
+    /// from its epoch instant and position. Set only for the length of a
+    /// Calvin stage or resolve. Every participant of the transaction
+    /// computes the same value, so a cross-shard edge's two homes stamp one
+    /// version key, and every document version of the transaction stamps
+    /// the edges' ordinal.
     pub(in crate::data::executor) calvin_txn_ordinal: Option<i64>,
+    /// The system-time ordinal the leader of a replicated data-group entry
+    /// assigned, set for the length of the entry's apply. Every replica
+    /// applies the entry with the same value, so every replica stamps the
+    /// same version keys.
+    pub(in crate::data::executor) replicated_ordinal: Option<i64>,
 }

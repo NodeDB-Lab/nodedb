@@ -61,10 +61,11 @@ impl CsrSnapshot {
     ///
     /// **Important**: This compacts the live CSR first to merge all buffer
     /// edges into the dense arrays. The snapshot only contains dense data.
-    pub fn from_csr(csr: &mut CsrIndex) -> Self {
-        csr.compact()
-            .expect("test governor ceiling covers this reservation");
-        Self::snapshot_dense(csr)
+    /// The compaction reserves memory under the CSR's own scope, so a
+    /// budget refusal is an error.
+    pub fn from_csr(csr: &mut CsrIndex) -> crate::Result<Self> {
+        csr.compact()?;
+        Ok(Self::snapshot_dense(csr))
     }
 
     /// Create a read-only snapshot without compacting (snapshot of current dense
@@ -125,8 +126,7 @@ impl CsrSnapshot {
             })?;
         }
 
-        csr.compact()
-            .expect("test governor ceiling covers this reservation");
+        csr.compact()?;
         Ok(Self::snapshot_dense(&csr))
     }
 
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn snapshot_captures_all_edges() {
         let mut csr = make_csr();
-        let snap = CsrSnapshot::from_csr(&mut csr);
+        let snap = CsrSnapshot::from_csr(&mut csr).expect("snapshot");
 
         assert_eq!(snap.node_count(), 3);
         assert_eq!(snap.edge_count(), 3);
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn snapshot_immutable_while_csr_mutates() {
         let mut csr = make_csr();
-        let snap = CsrSnapshot::from_csr(&mut csr);
+        let snap = CsrSnapshot::from_csr(&mut csr).expect("snapshot");
 
         // Mutate live CSR after snapshot.
         csr.add_edge("c", "KNOWS", "d").unwrap();
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn snapshot_node_lookup() {
         let mut csr = make_csr();
-        let snap = CsrSnapshot::from_csr(&mut csr);
+        let snap = CsrSnapshot::from_csr(&mut csr).expect("snapshot");
 
         assert_eq!(snap.node_id_raw("a"), Some(0));
         assert_eq!(snap.node_name_raw(0), "a");
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn snapshot_edge_iteration() {
         let mut csr = make_csr();
-        let snap = CsrSnapshot::from_csr(&mut csr);
+        let snap = CsrSnapshot::from_csr(&mut csr).expect("snapshot");
 
         let a_id = snap.node_id_raw("a").unwrap();
         let out_edges: Vec<(u32, u32)> = snap.iter_out_edges_raw(a_id).collect();
@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn snapshot_degree() {
         let mut csr = make_csr();
-        let snap = CsrSnapshot::from_csr(&mut csr);
+        let snap = CsrSnapshot::from_csr(&mut csr).expect("snapshot");
 
         let a_id = snap.node_id_raw("a").unwrap();
         assert_eq!(snap.out_degree_raw(a_id), 2);
@@ -402,7 +402,7 @@ mod tests {
         let mut csr = CsrIndex::new(test_scoped_memory());
         csr.add_edge_weighted("a", "R", "b", 2.5).unwrap();
         csr.add_edge_weighted("b", "R", "c", 7.0).unwrap();
-        let snap = CsrSnapshot::from_csr(&mut csr);
+        let snap = CsrSnapshot::from_csr(&mut csr).expect("snapshot");
 
         assert!(snap.has_weights());
         let edges: Vec<(u32, u32, f64)> = snap.iter_out_edges_weighted_raw(0).collect();
@@ -413,7 +413,7 @@ mod tests {
     #[test]
     fn snapshot_memory_estimate() {
         let mut csr = make_csr();
-        let snap = CsrSnapshot::from_csr(&mut csr);
+        let snap = CsrSnapshot::from_csr(&mut csr).expect("snapshot");
         assert!(snap.estimated_memory_bytes() > 0);
     }
 

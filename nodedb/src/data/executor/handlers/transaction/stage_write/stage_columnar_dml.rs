@@ -44,6 +44,8 @@
 //! autocommit handlers (`execute_columnar_delete` / `execute_columnar_update`)
 //! match against.
 
+use crate::data::executor::core_loop::bitemporal_time::raised_above;
+use crate::data::executor::handlers::columnar_write::system_stamp::stored_stamp;
 use nodedb_physical::physical_plan::UpdateValue;
 use nodedb_types::columnar::ColumnarSchema;
 use nodedb_types::value::Value;
@@ -53,7 +55,7 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::columnar_assignments::ColumnarAssignments;
-use crate::data::executor::handlers::columnar_read::convert::row_to_projected_value;
+use crate::data::executor::handlers::columnar_read::convert::row_to_value;
 use crate::data::executor::handlers::columnar_read::filter::row_matches_filters;
 use crate::data::executor::handlers::columnar_resolve::CurrentColumnarRow;
 use crate::data::executor::handlers::transaction::overlay::{
@@ -227,14 +229,27 @@ impl CoreLoop {
             Err(e) => return self.response_error(task, e),
         };
         let affected = affected_rows.len();
+        let crs = self.crs_context();
         let mut new_rows: Vec<(u32, Vec<Value>)> = Vec::with_capacity(affected);
         let mut base_rows: Vec<(u32, Vec<Value>)> = Vec::with_capacity(affected);
         for (surrogate, row) in affected_rows {
-            match assignments.apply(&schema, row.clone()) {
+            match assignments.apply(&schema, row.clone(), &crs) {
                 Ok(r) => new_rows.push((surrogate, r)),
                 Err(e) => return self.response_error(task, e),
             }
             base_rows.push((surrogate, row));
+        }
+        // A bitemporal row's new version takes the statement's system time,
+        // raised above the version it supersedes, never the pre-image's.
+        if let Some(ts_idx) = schema.ts_system_idx() {
+            let base = self.columnar_system_ordinal(None, 0);
+            for ((_, new_row), (_, row)) in new_rows.iter_mut().zip(&base_rows) {
+                let stamp = raised_above(base, stored_stamp(&schema, row));
+                self.observe_bitemporal_ordinal(stamp);
+                if let Some(cell) = new_row.get_mut(ts_idx) {
+                    *cell = Value::Integer(stamp);
+                }
+            }
         }
         if let Err(response) = self.stage_admit_columnar_rows(
             task,
@@ -328,19 +343,16 @@ impl CoreLoop {
         // affected rows are overlay-only staged inserts, which the merge
         // appends below.
         let mut matched: Vec<ColumnarMatchedRow> = Vec::new();
+        let crs = self.crs_context();
         let base =
             self.for_each_current_columnar_row(&coll_key, "columnar_txn_dml_resolve", |row| {
                 let CurrentColumnarRow { surrogate, values } = row;
                 if !filter_predicates.is_empty()
-                    && !row_matches_filters(&values, &schema, &filter_predicates)?
+                    && !row_matches_filters(&values, &schema, &filter_predicates, &crs)?
                 {
                     return Ok(());
                 }
-                // No computed columns on this path (`&[]` below), so this cannot
-                // raise an evaluation error today. It is handled like every other
-                // `row_to_projected_value` caller instead of assuming that
-                // invariant with an `unwrap`.
-                let obj = row_to_projected_value(&values, &schema, &[], &[], false)?;
+                let obj = row_to_value(&values, &schema);
                 matched.push((surrogate, values, obj));
                 Ok(())
             });

@@ -6,9 +6,9 @@
 //!
 //! - Replicable write: the write is proposed through Raft. Every replica
 //!   applies the committed entry through the funnel, which appends the redo
-//!   record. The proposing node publishes the change event. An edge write
-//!   runs as a Calvin transaction at that seam instead
-//!   (`planner::calvin::edge_sequencing`).
+//!   record. The proposing node publishes the change event. An edge or label
+//!   write runs as a Calvin transaction at that seam instead
+//!   (`planner::calvin::graph_sequencing`).
 //! - A write inside a transaction block, or a plan with no replicated form:
 //!   the write enters the funnel with `WalDurability::AppendHere`. The funnel
 //!   appends the redo record under the write-admission guard, inside the

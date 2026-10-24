@@ -103,7 +103,7 @@ fn tuple_close(bytes: &[u8], open: usize) -> Option<usize> {
 }
 
 /// Parse a SQL literal value to a `serde_json::Value`.
-pub(crate) fn parse_sql_value(val: &str) -> nodedb_types::Value {
+pub(crate) fn parse_sql_value(val: &str, crs: &nodedb_crs::CrsContext<'_>) -> nodedb_types::Value {
     let trimmed = val.trim();
     if nodedb_types::starts_with_ascii_case_insensitive(trimmed, "ARRAY[") && trimmed.ends_with(']')
     {
@@ -115,7 +115,7 @@ pub(crate) fn parse_sql_value(val: &str) -> nodedb_types::Value {
         } else {
             split_values(inner)
                 .into_iter()
-                .map(parse_sql_value)
+                .map(|item| parse_sql_value(item, crs))
                 .collect()
         };
         return nodedb_types::Value::Array(items);
@@ -145,7 +145,7 @@ pub(crate) fn parse_sql_value(val: &str) -> nodedb_types::Value {
     // zero-arg function. Route through the shared evaluator so the
     // UPSERT fast-path stays aligned with the SQL planner's VALUES path.
     // Unknown names fall through to the legacy string behavior.
-    if let Some(v) = try_eval_scalar_function(trimmed) {
+    if let Some(v) = try_eval_scalar_function(trimmed, crs) {
         return v;
     }
     nodedb_types::Value::String(trimmed.to_string())
@@ -155,7 +155,10 @@ pub(crate) fn parse_sql_value(val: &str) -> nodedb_types::Value {
 /// keyword like `current_timestamp` via the shared `nodedb_query`
 /// evaluator. Returns `None` if the input isn't a recognizable call
 /// form or the function is unknown.
-fn try_eval_scalar_function(s: &str) -> Option<nodedb_types::Value> {
+fn try_eval_scalar_function(
+    s: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> Option<nodedb_types::Value> {
     // Bare identifier: SQL treats `current_timestamp`, `current_date`,
     // etc. as zero-arg function references without parentheses.
     let is_bare_ident = s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -173,7 +176,7 @@ fn try_eval_scalar_function(s: &str) -> Option<nodedb_types::Value> {
             // with an empty argument list, so folding the
             // `Result` to `Value::Null` on error is unreachable in practice,
             // not a silent swallow.
-            let val = nodedb_query::functions::eval_function(&name, &[])
+            let val = nodedb_query::functions::eval_function(&name, &[], crs)
                 .unwrap_or(nodedb_types::Value::Null);
             if !matches!(val, nodedb_types::Value::Null) {
                 return Some(val);
@@ -207,7 +210,7 @@ fn try_eval_scalar_function(s: &str) -> Option<nodedb_types::Value> {
     // checkable against a relation here.
     let scope = nodedb_sql::resolver::ColumnScope::Unchecked;
     let sql_expr = nodedb_sql::resolver::expr::convert_expr(&ast_expr, &scope).ok()?;
-    let folded = nodedb_sql::planner::const_fold::fold_constant_default(&sql_expr).ok()??;
+    let folded = nodedb_sql::planner::const_fold::fold_constant_default(&sql_expr, crs).ok()??;
     Some(sql_value_to_ndb_value(folded))
 }
 
@@ -226,6 +229,7 @@ fn sql_value_to_ndb_value(v: nodedb_sql::types::SqlValue) -> nodedb_types::Value
         }
         SqlValue::Timestamp(dt) => nodedb_types::Value::NaiveDateTime(dt),
         SqlValue::Timestamptz(dt) => nodedb_types::Value::DateTime(dt),
+        SqlValue::Geometry(g) => nodedb_types::Value::Geometry(g),
     }
 }
 
@@ -439,7 +443,10 @@ mod tests {
 
     #[test]
     fn parse_sql_value_decodes_numeric_array_literals() {
-        let value = parse_sql_value("ARRAY[1.0, 2, 3.5]");
+        let value = parse_sql_value(
+            "ARRAY[1.0, 2, 3.5]",
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
 
         assert_eq!(
             value,
@@ -453,7 +460,10 @@ mod tests {
 
     #[test]
     fn parse_sql_value_decodes_nested_arrays_and_strings() {
-        let value = parse_sql_value("ARRAY['rust', ARRAY[1, 2]]");
+        let value = parse_sql_value(
+            "ARRAY['rust', ARRAY[1, 2]]",
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
 
         assert_eq!(
             value,

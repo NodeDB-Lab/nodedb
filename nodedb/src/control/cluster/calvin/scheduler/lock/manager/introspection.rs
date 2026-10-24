@@ -84,6 +84,77 @@ impl LockManager {
     pub fn holder_count(&self) -> usize {
         self.held_locks.len()
     }
+
+    /// Watches filed by `try_acquire_or_watch` since creation.
+    #[cfg(test)]
+    pub fn watch_registrations(&self) -> u64 {
+        self.watch_registrations
+    }
+
+    /// Watches still filed, over every key.
+    #[cfg(test)]
+    pub fn watcher_count(&self) -> usize {
+        self.watchers.values().map(Vec::len).sum()
+    }
+
+    /// Panic unless the waiter bookkeeping matches the lock table.
+    ///
+    /// - Every waiter of an entry has the key in its `waiting` set, once.
+    /// - Every key of a `waiting` set names the txn among its waiters.
+    /// - A txn is in `waiting` iff it is in `pending_keys`.
+    /// - A blocked txn holds or waits on every key of its request.
+    /// - No entry waits without a holder, and no txn holds and waits on one key.
+    #[cfg(test)]
+    pub fn assert_consistent(&self) {
+        for (key, entry) in &self.table {
+            assert!(
+                !entry.holders.is_empty(),
+                "{key:?} has no holder but stays in the table"
+            );
+            for (waiter, _) in &entry.waiters {
+                assert!(
+                    self.is_waiting(*waiter, key),
+                    "{waiter:?} queues on {key:?} unrecorded"
+                );
+                assert!(
+                    !entry.holds(*waiter),
+                    "{waiter:?} holds and waits on {key:?}"
+                );
+                let queued = entry.waiters.iter().filter(|(w, _)| w == waiter).count();
+                assert_eq!(queued, 1, "{waiter:?} queues {queued} times on {key:?}");
+            }
+        }
+        for (txn, keys) in &self.waiting {
+            assert!(!keys.is_empty(), "{txn:?} has an empty waiting set");
+            assert!(
+                self.pending_keys.contains_key(txn),
+                "{txn:?} waits without a request"
+            );
+            for key in keys {
+                let queued = self
+                    .table
+                    .get(key)
+                    .is_some_and(|entry| entry.waiters.iter().any(|(w, _)| w == txn));
+                assert!(
+                    queued,
+                    "{txn:?} records a wait on {key:?} it does not queue"
+                );
+            }
+        }
+        for (txn, request) in &self.pending_keys {
+            assert!(
+                self.waiting.contains_key(txn),
+                "{txn:?} is pending but waits on nothing"
+            );
+            for key in request.keys() {
+                let held = self.table.get(key).is_some_and(|entry| entry.holds(*txn));
+                assert!(
+                    held || self.is_waiting(*txn, key),
+                    "{txn:?} neither holds nor waits on {key:?} of its request"
+                );
+            }
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

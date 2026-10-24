@@ -89,10 +89,12 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
             let literal_updates: Vec<(String, Vec<u8>)> = assignments
                 .iter()
                 .filter_map(|(field, expr)| match expr {
-                    SqlExpr::Literal(val) => Some((field.clone(), sql_value_to_msgpack(val))),
+                    SqlExpr::Literal(val) => {
+                        Some(sql_value_to_msgpack(val).map(|bytes| (field.clone(), bytes)))
+                    }
                     _ => None,
                 })
-                .collect();
+                .collect::<crate::Result<_>>()?;
             return Ok(vec![PhysicalTask {
                 tenant_id,
                 vshard_id: vshard,
@@ -116,12 +118,12 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
                 .iter()
                 .filter_map(|(field, expr)| {
                     if let SqlExpr::Literal(val) = expr {
-                        Some((field.clone(), sql_value_to_msgpack(val)))
+                        Some(sql_value_to_msgpack(val).map(|bytes| (field.clone(), bytes)))
                     } else {
                         None
                     }
                 })
-                .collect();
+                .collect::<crate::Result<_>>()?;
             let key_bytes = sql_value_to_bytes(key)?;
             // Content-addressed identity: keeps the surrogate the original insert assigned.
             let surrogate = ctx.surrogate_for_pk(collection_key, &key_bytes)?;
@@ -173,6 +175,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
                 collection: qualified_collection.clone(),
                 filters: effective_filter,
                 updates,
+                system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             }),
             post_set_op: PostSetOp::None,

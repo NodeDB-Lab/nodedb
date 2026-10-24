@@ -3,18 +3,20 @@
 //! A contended write no Calvin transaction can sequence: it waits for its
 //! keys at the gate.
 //!
-//! The waiter holds no key while it waits. It probes the lock table with an
-//! all-or-nothing `try_acquire` after every release, so it never holds one
-//! key while it waits for another. A Calvin transaction therefore never
+//! The waiter holds no key while it waits. It probes the lock table all or
+//! nothing, and a blocked probe watches the first key that blocks it. Only a
+//! release of that key wakes the waiter for its next probe. It never holds
+//! one key while it waits for another. A Calvin transaction therefore never
 //! waits on a waiting writer, and the two cannot deadlock.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::control::cluster::calvin::scheduler::lock_manager::{
-    LockKey, LockManager, LockMode, TxnId,
+    GateProbe, LockKey, LockManager, LockMode, TxnId,
 };
 use crate::types::RequestId;
 
@@ -61,30 +63,40 @@ impl AdmissionWait {
         self,
         deadline: tokio::time::Instant,
     ) -> crate::Result<WriteAdmissionGuard> {
-        let signal = self
-            .lock_manager
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .release_signal();
+        let mut watch = Watch {
+            lock_manager: Arc::clone(&self.lock_manager),
+            signal: Arc::new(Notify::new()),
+            key: None,
+        };
         loop {
-            // Enabled before the probe, so a release between the probe and
-            // the wait still wakes this waiter.
-            let released = signal.notified();
-            tokio::pin!(released);
-            released.as_mut().enable();
-            let acquired = {
-                let mut lock_manager = self.lock_manager.lock().unwrap_or_else(|p| p.into_inner());
-                lock_manager.try_acquire(self.txn, self.keys.clone())
-            };
-            if acquired {
-                let mut guard =
-                    WriteAdmissionGuard::new(self.lock_manager, self.txn, self.promotion_sender);
-                if let Some(ticket) = self.ticket {
-                    guard.carry_ticket(ticket);
+            let probe = self
+                .lock_manager
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .try_acquire_or_watch(self.txn, &self.keys, &watch.signal);
+            let blocker = match probe {
+                GateProbe::Acquired => {
+                    drop(watch);
+                    let mut guard = WriteAdmissionGuard::new(
+                        self.lock_manager,
+                        self.txn,
+                        self.promotion_sender,
+                    );
+                    if let Some(ticket) = self.ticket {
+                        guard.carry_ticket(ticket);
+                    }
+                    return Ok(guard);
                 }
-                return Ok(guard);
-            }
-            if tokio::time::timeout_at(deadline, released).await.is_err() {
+                GateProbe::Blocked(blocker) => blocker,
+            };
+            watch.key = Some(blocker);
+            // The watch stores a permit, so a release between the probe and
+            // this wait still wakes the waiter.
+            if tokio::time::timeout_at(deadline, watch.signal.notified())
+                .await
+                .is_err()
+            {
+                drop(watch);
                 let contention = self
                     .lock_manager
                     .lock()
@@ -98,7 +110,30 @@ impl AdmissionWait {
                     request_id: RequestId::new(0),
                 });
             }
+            // The release that woke this waiter dropped its watch.
+            watch.key = None;
         }
+    }
+}
+
+/// The watch an [`AdmissionWait`] files on its blocking key. Dropping it
+/// unfiles the watch, so a deadline or a cancellation leaves none behind.
+struct Watch {
+    lock_manager: Arc<Mutex<LockManager>>,
+    signal: Arc<Notify>,
+    /// The key the signal is filed under, `None` when it is filed nowhere.
+    key: Option<LockKey>,
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        let Some(key) = self.key.take() else {
+            return;
+        };
+        self.lock_manager
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .unwatch(&key, &self.signal);
     }
 }
 
@@ -166,6 +201,98 @@ mod tests {
             outcome,
             Err(crate::Error::DeadlineExceeded { .. })
         ));
+        assert_eq!(lock_manager.lock().expect("lock table").holder_count(), 1);
+        assert_eq!(
+            lock_manager.lock().expect("lock table").watcher_count(),
+            0,
+            "a waiter past its deadline leaves no watch"
+        );
+    }
+
+    fn row(surrogate: u32) -> LockKey {
+        LockKey::Surrogate {
+            collection: Arc::from("other"),
+            surrogate,
+        }
+    }
+
+    /// Releases of keys the waiter does not wait on never wake it to probe.
+    #[tokio::test]
+    async fn a_waiter_sleeps_through_releases_of_other_keys() {
+        let lock_manager = Arc::new(Mutex::new(LockManager::new()));
+        let holder = TxnId::new(7, 0);
+        assert!(
+            lock_manager
+                .lock()
+                .expect("lock table")
+                .try_acquire(holder, BTreeMap::from([(coll(), LockMode::Exclusive)]))
+        );
+        let wait = tokio::spawn(
+            waiter(&lock_manager).acquire(tokio::time::Instant::now() + Duration::from_secs(10)),
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(lock_manager.lock().expect("lock table").watcher_count(), 1);
+
+        for n in 0..100 {
+            let other = TxnId::new(8, n);
+            let mut table = lock_manager.lock().expect("lock table");
+            assert!(table.try_acquire(other, BTreeMap::from([(row(n), LockMode::Exclusive)])));
+            table.release(other);
+        }
+        tokio::task::yield_now().await;
+        assert!(
+            !wait.is_finished(),
+            "the waiter waits while its key is held"
+        );
+        assert_eq!(
+            lock_manager
+                .lock()
+                .expect("lock table")
+                .watch_registrations(),
+            1,
+            "the waiter probed once"
+        );
+
+        lock_manager.lock().expect("lock table").release(holder);
+        let guard = wait.await.expect("join").expect("the keys free up");
+        assert_eq!(
+            lock_manager
+                .lock()
+                .expect("lock table")
+                .watch_registrations(),
+            1
+        );
+        drop(guard);
+        assert_eq!(lock_manager.lock().expect("lock table").lock_count(), 0);
+    }
+
+    /// A waiter dropped mid-wait unfiles its watch.
+    #[tokio::test]
+    async fn a_cancelled_waiter_drops_its_watch() {
+        let lock_manager = Arc::new(Mutex::new(LockManager::new()));
+        let holder = TxnId::new(7, 0);
+        assert!(
+            lock_manager
+                .lock()
+                .expect("lock table")
+                .try_acquire(holder, BTreeMap::from([(coll(), LockMode::Exclusive)]))
+        );
+        let mut acquire = Box::pin(
+            waiter(&lock_manager).acquire(tokio::time::Instant::now() + Duration::from_secs(10)),
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), acquire.as_mut())
+                .await
+                .is_err(),
+            "the waiter waits while its key is held"
+        );
+        assert_eq!(lock_manager.lock().expect("lock table").watcher_count(), 1);
+        drop(acquire);
+        assert_eq!(
+            lock_manager.lock().expect("lock table").watcher_count(),
+            0,
+            "a cancelled waiter leaves no watch"
+        );
         assert_eq!(lock_manager.lock().expect("lock table").holder_count(), 1);
     }
 }

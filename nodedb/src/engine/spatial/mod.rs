@@ -7,6 +7,7 @@ pub use nodedb_spatial::GeohashIndex;
 pub use nodedb_spatial::RTree;
 pub use nodedb_spatial::RTreeEntry;
 pub use nodedb_spatial::SridMismatch;
+pub use nodedb_spatial::TreeSrid;
 pub use nodedb_spatial::geo_meta;
 pub use nodedb_spatial::geohash;
 pub use nodedb_spatial::geohash_index;
@@ -21,10 +22,10 @@ pub use nodedb_spatial::validate;
 pub use nodedb_spatial::wkb;
 pub use nodedb_spatial::wkt;
 pub use nodedb_spatial::{
-    SpatialPreFilterResult, bitmap_contains, geohash_decode, geohash_encode, geohash_neighbors,
-    geometry_from_wkb, geometry_from_wkt, geometry_to_wkb, geometry_to_wkt, h3_encode,
-    h3_encode_string, h3_is_valid, h3_neighbors, h3_parent, h3_resolution, h3_to_boundary,
-    h3_to_center, ids_to_bitmap, is_valid, spatial_prefilter, st_buffer, st_contains, st_disjoint,
-    st_distance, st_dwithin, st_envelope, st_intersection, st_intersects, st_union, st_within,
-    validate_geometry,
+    Metric, SpatialPreFilterResult, bitmap_contains, geohash_decode, geohash_encode,
+    geohash_neighbors, geometry_from_wkb, geometry_from_wkt, geometry_to_wkb, geometry_to_wkt,
+    h3_encode, h3_encode_string, h3_is_valid, h3_neighbors, h3_parent, h3_resolution,
+    h3_to_boundary, h3_to_center, ids_to_bitmap, is_valid, spatial_prefilter, st_contains,
+    st_disjoint, st_distance, st_dwithin, st_envelope, st_intersection, st_intersects, st_union,
+    st_within, validate_geometry,
 };

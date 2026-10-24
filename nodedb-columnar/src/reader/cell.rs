@@ -99,10 +99,11 @@ fn cell_bytes<'a>(data: &'a [u8], offsets: &[u32], row: usize) -> Result<&'a [u8
 /// A binary cell as the `Value` the memtable reads for `declared`.
 fn binary_cell_value(bytes: &[u8], declared: &ColumnType) -> Result<Value, ColumnarError> {
     Ok(match declared {
-        ColumnType::String
-        | ColumnType::Regex
-        | ColumnType::SparseVector
-        | ColumnType::Geometry => Value::String(utf8(bytes, declared)?.to_owned()),
+        ColumnType::String | ColumnType::Regex | ColumnType::SparseVector => {
+            Value::String(utf8(bytes, declared)?.to_owned())
+        }
+        ColumnType::Geometry => nodedb_spatial::value_of_ewkb(bytes)
+            .map_err(|e| corruption(crate::geometry_cell::not_ewkb(e)))?,
         ColumnType::Bytes
         | ColumnType::Array
         | ColumnType::Set
@@ -308,7 +309,12 @@ mod tests {
         let first = &expected[1];
         assert_eq!(first[10], Value::Uuid(uuid::Uuid::from_u128(2).to_string()));
         assert_eq!(first[11], Value::Ulid(ulid_text(1)));
-        assert_eq!(first[12], Value::String("POINT(1 1)".into()));
+        assert_eq!(
+            first[12],
+            Value::Geometry(nodedb_types::geometry::SridGeometry::wgs84(
+                nodedb_types::geometry::Geometry::point(1.0, 1.0)
+            ))
+        );
         assert_eq!(first[15], Value::Integer(3));
         assert_eq!(first[16], Value::String("^r1$".into()));
         assert_eq!(expected[4][10], Value::Null);
@@ -328,6 +334,7 @@ mod tests {
             ColumnType::Ulid,
             ColumnType::Decimal(None),
             ColumnType::Vector(2),
+            ColumnType::Geometry,
         ] {
             assert!(
                 decoded_cell_value(&col, 0, &ty).is_err(),

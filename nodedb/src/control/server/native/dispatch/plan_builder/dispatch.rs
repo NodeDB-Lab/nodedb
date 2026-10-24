@@ -79,7 +79,7 @@ pub(crate) async fn build_plan(
         OpCode::ColumnarInsert => columnar::build_insert(ctx, fields, collection).await,
         // Graph DDL.
         OpCode::GraphAlgo => graph::build_algo(fields, collection).await,
-        OpCode::GraphMatch => graph::build_match(fields, collection).await,
+        OpCode::GraphMatch => graph::build_match(ctx, fields).await,
         // Document DDL.
         OpCode::DocumentTruncate => document_bulk::build_truncate(ctx, collection).await,
         OpCode::DocumentEstimateCount => {

@@ -97,7 +97,6 @@ impl CoreLoop {
                 | GraphOp::BspSuperstep(_)
                 | GraphOp::WccSuperstep(_)
                 | GraphOp::TemporalNeighbors { .. }
-                | GraphOp::TemporalAlgorithm { .. }
                 | GraphOp::Stats { .. }
                 | GraphOp::NodePresenceRead { .. }
                 // Autocommit-then-Raft, never staged in a transaction.
@@ -398,12 +397,15 @@ impl CoreLoop {
         let schema = self.resolve_strict_schema(database_id, tid, collection);
         crate::data::executor::handlers::rls_write_gate::admit_stored_row(
             rls_write_check,
-            body,
-            identity,
-            schema.as_ref(),
-            &self.identity_column(database_id, tid, collection),
+            crate::data::executor::handlers::rls_write_gate::GatedRow {
+                body,
+                identity,
+                strict_schema: schema.as_ref(),
+                identity_column: &self.identity_column(database_id, tid, collection),
+            },
             tid,
             collection,
+            &self.crs_context(),
         )
     }
 

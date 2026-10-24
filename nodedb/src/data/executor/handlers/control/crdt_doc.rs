@@ -202,7 +202,8 @@ impl CoreLoop {
                 Ok(doc) => doc,
                 Err(e) => return self.response_error(task, e),
             };
-            match returning_rows::build_rows_payload(spec, rls_filters, &[doc]) {
+            match returning_rows::build_rows_payload(spec, rls_filters, &[doc], &self.crs_context())
+            {
                 Ok(payload) => self.response_with_payload(task, payload),
                 Err(e) => self.response_error(task, ErrorCode::from(e)),
             }
@@ -243,6 +244,7 @@ impl CoreLoop {
             &config.type_guards,
             &row,
             assigned,
+            &self.crs_context(),
         )
         .map_err(crate::Error::DataPlane)
     }
@@ -460,12 +462,22 @@ impl CoreLoop {
                     Ok(doc) => doc,
                     Err(e) => return self.response_error(task, e),
                 };
-                match returning_rows::build_rows_payload(spec, rls_filters, &[doc]) {
+                match returning_rows::build_rows_payload(
+                    spec,
+                    rls_filters,
+                    &[doc],
+                    &self.crs_context(),
+                ) {
                     Ok(payload) => self.response_with_payload(task, payload),
                     Err(e) => self.response_error(task, ErrorCode::from(e)),
                 }
             } else {
-                match returning_rows::build_rows_payload(spec, rls_filters, &[]) {
+                match returning_rows::build_rows_payload(
+                    spec,
+                    rls_filters,
+                    &[],
+                    &self.crs_context(),
+                ) {
                     Ok(payload) => self.response_with_payload(task, payload),
                     Err(e) => self.response_error(task, ErrorCode::from(e)),
                 }

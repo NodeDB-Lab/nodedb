@@ -140,6 +140,9 @@ pub(super) async fn push_edge_put(
             properties,
             src_surrogate,
             dst_surrogate,
+            // An implicit edge takes its write's own valid time.
+            valid_from_ms: None,
+            valid_until_ms: None,
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,

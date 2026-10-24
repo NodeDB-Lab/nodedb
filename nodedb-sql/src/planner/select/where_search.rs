@@ -43,8 +43,9 @@ pub(super) fn try_extract_where_search(
     table: &crate::resolver::columns::ResolvedTable,
     functions: &FunctionRegistry,
     projection: &[Projection],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<Option<SqlPlan>> {
-    try_extract_with_extra_filters(expr, table, functions, &[], projection)
+    try_extract_with_extra_filters(expr, table, functions, &[], projection, crs)
 }
 
 /// Internal entry that threads the sibling-AND predicates through to the
@@ -58,11 +59,20 @@ fn try_extract_with_extra_filters(
     functions: &FunctionRegistry,
     extra_filters: &[&ast::Expr],
     projection: &[Projection],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<Option<SqlPlan>> {
     match expr {
         ast::Expr::Function(func) => {
             let name = function_name(func);
-            dispatch_trigger(&name, func, table, functions, extra_filters, projection)
+            dispatch_trigger(
+                &name,
+                func,
+                table,
+                functions,
+                extra_filters,
+                projection,
+                crs,
+            )
         }
         // AND: recurse on each side, carrying the other side as a scan filter.
         ast::Expr::BinaryOp {
@@ -73,24 +83,29 @@ fn try_extract_with_extra_filters(
             // Try left as the trigger, with right as a carried filter.
             let mut with_right = extra_filters.to_vec();
             with_right.push(right.as_ref());
-            if let Some(plan) =
-                try_extract_with_extra_filters(left, table, functions, &with_right, projection)?
-            {
+            if let Some(plan) = try_extract_with_extra_filters(
+                left,
+                table,
+                functions,
+                &with_right,
+                projection,
+                crs,
+            )? {
                 return Ok(Some(plan));
             }
             // Try right as the trigger, with left as a carried filter.
             let mut with_left = extra_filters.to_vec();
             with_left.push(left.as_ref());
-            if let Some(plan) =
-                try_extract_with_extra_filters(right, table, functions, &with_left, projection)?
-            {
+            if let Some(plan) = try_extract_with_extra_filters(
+                right, table, functions, &with_left, projection, crs,
+            )? {
                 return Ok(Some(plan));
             }
             Ok(None)
         }
         // A parenthesised conjunction is the same conjunction.
         ast::Expr::Nested(inner) => {
-            try_extract_with_extra_filters(inner, table, functions, extra_filters, projection)
+            try_extract_with_extra_filters(inner, table, functions, extra_filters, projection, crs)
         }
         _ => Ok(None),
     }
@@ -152,6 +167,7 @@ fn dispatch_trigger(
     functions: &FunctionRegistry,
     extra_filters: &[&ast::Expr],
     projection: &[Projection],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<Option<SqlPlan>> {
     // Exhaustive match on `SearchTrigger`: when a new trigger is added,
     // this fails to compile until a WHERE-clause routing decision is made
@@ -162,10 +178,11 @@ fn dispatch_trigger(
             plan_text_from_where(name, func, table, extra_filters, projection)
         }
         SearchTrigger::SpatialDWithin
+        | SearchTrigger::SpatialDWithin3D
         | SearchTrigger::SpatialContains
         | SearchTrigger::SpatialIntersects
         | SearchTrigger::SpatialWithin => {
-            plan_spatial_from_where(name, func, table, extra_filters, projection)
+            plan_spatial_from_where(name, func, table, extra_filters, projection, crs)
         }
         SearchTrigger::VectorSearch => {
             plan_vector_from_where(name, func, table, extra_filters, projection)
@@ -366,9 +383,11 @@ fn plan_spatial_from_where(
     table: &crate::resolver::columns::ResolvedTable,
     extra_filters: &[&ast::Expr],
     projection: &[Projection],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<Option<SqlPlan>> {
     let predicate = match name {
         "st_dwithin" => SpatialPredicate::DWithin,
+        "st_3ddwithin" => SpatialPredicate::DWithin3D,
         "st_contains" => SpatialPredicate::Contains,
         "st_intersects" => SpatialPredicate::Intersects,
         "st_within" => SpatialPredicate::Within,
@@ -386,15 +405,17 @@ fn plan_spatial_from_where(
         field: "query geometry".into(),
         context: name.into(),
     })?;
-    let geometry = crate::planner::geometry_expr::resolve_geometry_expr(geom_arg).map_err(|e| {
-        SqlError::InvalidFunction {
-            detail: format!("invalid geometry in {name}: {e}"),
-        }
-    })?;
-    let issues = nodedb_spatial::validate::validate_geometry(&geometry.geometry);
+    let geometry =
+        crate::planner::geometry_expr::resolve_geometry_expr(geom_arg, crs).map_err(|e| {
+            SqlError::InvalidFunction {
+                detail: format!("invalid geometry in {name}: {e}"),
+            }
+        })?;
+    let issues = nodedb_spatial::validate::validate_geometry(geometry.geometry());
     if !issues.is_empty() {
+        let reasons: Vec<String> = issues.iter().map(ToString::to_string).collect();
         return Err(SqlError::InvalidFunction {
-            detail: format!("invalid geometry in {name}: {}", issues.join("; ")),
+            detail: format!("invalid geometry in {name}: {}", reasons.join("; ")),
         });
     }
     let distance = if args.len() >= 3 {

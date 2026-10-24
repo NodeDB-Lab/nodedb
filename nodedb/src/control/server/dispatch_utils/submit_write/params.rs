@@ -36,11 +36,17 @@ pub(crate) enum WalDurability {
     /// write applies, `None` for a write no entry carries. The funnel makes it
     /// durable ahead of the redo and records it for the CDC router, so every
     /// replica positions the write's change events alike.
+    ///
+    /// `system_ordinal` is the system-time ordinal the leader of that entry
+    /// assigned, `None` for a write no entry carries. Every replica stamps
+    /// the write's bitemporal versions from it, so every replica writes the
+    /// same version keys.
     AppendHere {
         now_override: Option<u64>,
         apply_key: u64,
         commit_hlc: Option<u64>,
         change_position: Option<crate::event::cdc::position::ReplicatedPosition>,
+        system_ordinal: Option<i64>,
     },
     /// The caller already recorded this write's durability elsewhere — COMMIT's
     /// single `Transaction` record, the procedural batch flush, a trigger /

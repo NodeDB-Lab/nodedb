@@ -1,17 +1,28 @@
 [package]
 name = "nodedb-raster"
-description = "Bounded GeoTIFF decoding for NodeDB array bulk loads"
+description = "Sans-IO raster decoding (GeoTIFF/COG) for NodeDB array bulk loads"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license = "Apache-2.0"
+readme = "README.md"
+authors = ["Biz Impulse Solutions Sdn. Bhd. and the NodeDB contributors"]
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/nodedb-raster"
-keywords = ["geotiff", "raster", "tiff", "geospatial"]
+keywords = ["geotiff", "raster", "tiff", "cog", "geospatial"]
 categories = ["science::geo", "parser-implementations"]
 
 [dependencies]
 nodedb-types = { workspace = true }
+nodedb-crs = { workspace = true }
 thiserror = { workspace = true }
+flate2 = { workspace = true }
+weezl = { workspace = true }
+ruzstd = { workspace = true }
+zune-jpeg = { workspace = true }
+lerc-rs = { workspace = true }
+
+[dev-dependencies]
+# Builds in-test TIFF fixtures with an independent encoder.
 tiff = { workspace = true }

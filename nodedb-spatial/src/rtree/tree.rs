@@ -7,6 +7,7 @@ use nodedb_types::{BboxSpace, BoundingBox};
 
 use super::node::{Node, NodeKind, RTreeEntry};
 use super::search::NnResult;
+use super::tree_srid::TreeSrid;
 use nodedb_mem::ScopedMemory;
 
 /// R*-tree spatial index.
@@ -44,13 +45,13 @@ pub struct SridMismatch {
 
 impl RTree {
     /// An empty tree for entries in `srid`.
-    pub fn new(memory: ScopedMemory, srid: Srid) -> Self {
+    pub fn new(memory: ScopedMemory, srid: TreeSrid) -> Self {
         Self {
             nodes: vec![Node::new_leaf()],
             root: 0,
             len: 0,
-            srid,
-            space: srid.bbox_space(),
+            srid: srid.srid,
+            space: srid.space,
             memory,
         }
     }
@@ -80,19 +81,27 @@ impl RTree {
     ///
     /// An empty tree adopts `srid`. A non-empty tree in another SRID refuses
     /// with [`SridMismatch`] and is left unchanged.
-    pub fn bind_srid(&mut self, srid: Srid) -> Result<(), SridMismatch> {
+    pub fn bind_srid(&mut self, srid: TreeSrid) -> Result<(), SridMismatch> {
         if self.is_empty() {
-            self.srid = srid;
-            self.space = srid.bbox_space();
+            self.srid = srid.srid;
+            self.space = srid.space;
             return Ok(());
         }
-        if self.srid == srid {
+        if self.srid == srid.srid {
             Ok(())
         } else {
             Err(SridMismatch {
                 index: self.srid,
-                entry: srid,
+                entry: srid.srid,
             })
+        }
+    }
+
+    /// The SRID and bbox space of every entry.
+    pub fn tree_srid(&self) -> TreeSrid {
+        TreeSrid {
+            srid: self.srid,
+            space: self.space,
         }
     }
 
@@ -194,7 +203,7 @@ pub(crate) fn collect_entries_owned(nodes: &[Node], node_idx: usize, result: &mu
 mod tests {
     use super::super::node::LEAF_CAPACITY;
     use super::*;
-    use crate::test_support::test_memory;
+    use crate::test_support::{test_memory, utm48n};
 
     fn make_entry(id: u64, lng: f64, lat: f64) -> RTreeEntry {
         RTreeEntry {
@@ -212,7 +221,7 @@ mod tests {
 
     #[test]
     fn empty_tree() {
-        let tree = RTree::new(test_memory(), Srid::Wgs84);
+        let tree = RTree::new(test_memory(), TreeSrid::WGS84);
         assert!(tree.is_empty());
         assert!(
             tree.search(&BoundingBox::new(-180.0, -90.0, 180.0, 90.0))
@@ -222,7 +231,7 @@ mod tests {
 
     #[test]
     fn insert_and_search_single() {
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         tree.insert(make_entry(1, 10.0, 20.0));
         assert_eq!(tree.len(), 1);
         assert_eq!(
@@ -237,7 +246,7 @@ mod tests {
 
     #[test]
     fn insert_many_and_search() {
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         for i in 0..200 {
             tree.insert(make_entry(
                 i,
@@ -252,7 +261,7 @@ mod tests {
 
     #[test]
     fn delete_entry() {
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         for i in 0..50 {
             tree.insert(make_entry(i, i as f64, i as f64));
         }
@@ -265,7 +274,7 @@ mod tests {
 
     #[test]
     fn nearest_neighbor() {
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         tree.insert(make_entry(1, 0.0, 0.0));
         tree.insert(make_entry(2, 10.0, 10.0));
         tree.insert(make_entry(3, 5.0, 5.0));
@@ -278,7 +287,7 @@ mod tests {
     #[test]
     fn nearest_empty() {
         assert!(
-            RTree::new(test_memory(), Srid::Wgs84)
+            RTree::new(test_memory(), TreeSrid::WGS84)
                 .nearest(0.0, 0.0, 5)
                 .is_empty()
         );
@@ -286,7 +295,7 @@ mod tests {
 
     #[test]
     fn rect_overlap_search() {
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         tree.insert(make_rect(1, 0.0, 0.0, 10.0, 10.0));
         tree.insert(make_rect(2, 5.0, 5.0, 15.0, 15.0));
         tree.insert(make_rect(3, 20.0, 20.0, 30.0, 30.0));
@@ -296,7 +305,7 @@ mod tests {
 
     #[test]
     fn stress_insert_delete() {
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         for i in 0..100_u64 {
             tree.insert(make_entry(i, (i as f64) * 0.5, (i as f64) * 0.3));
         }
@@ -310,7 +319,7 @@ mod tests {
 
     #[test]
     fn triggers_node_split() {
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         let count = LEAF_CAPACITY * 3;
         for i in 0..count as u64 {
             tree.insert(make_entry(i, (i as f64) * 0.1, (i as f64) * 0.1));
@@ -324,7 +333,7 @@ mod tests {
     /// spans them directly instead of wrapping as if x were longitude.
     #[test]
     fn projected_tree_unions_planar() {
-        let mut tree = RTree::new(test_memory(), Srid::Utm48N);
+        let mut tree = RTree::new(test_memory(), utm48n());
         tree.insert(make_rect(1, 1e5, 0.0, 2e5, 10.0));
         tree.insert(make_rect(2, 7e5, 0.0, 8e5, 10.0));
         let root = tree.nodes[tree.root].bbox;
@@ -343,7 +352,7 @@ mod tests {
 
     #[test]
     fn projected_nearest_is_euclidean_metres() {
-        let mut tree = RTree::new(test_memory(), Srid::Utm48N);
+        let mut tree = RTree::new(test_memory(), utm48n());
         tree.insert(make_entry(1, 500_000.0, 0.0));
         tree.insert(make_entry(2, 500_300.0, 400.0));
         let nn = tree.nearest(500_000.0, 0.0, 2);
@@ -353,18 +362,18 @@ mod tests {
 
     #[test]
     fn empty_tree_adopts_first_srid_then_refuses_another() {
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
-        assert!(tree.accepts_srid(Srid::Utm48N));
-        assert_eq!(tree.bind_srid(Srid::Utm48N), Ok(()));
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
+        assert!(tree.accepts_srid(utm48n().srid));
+        assert_eq!(tree.bind_srid(utm48n()), Ok(()));
         tree.insert(make_entry(1, 500_000.0, 0.0));
-        assert_eq!(tree.srid(), Srid::Utm48N);
+        assert_eq!(tree.srid(), utm48n().srid);
         assert_eq!(tree.space(), BboxSpace::Planar);
-        assert!(!tree.accepts_srid(Srid::Wgs84));
+        assert!(!tree.accepts_srid(Srid::WGS84));
         assert_eq!(
-            tree.bind_srid(Srid::Wgs84),
+            tree.bind_srid(TreeSrid::WGS84),
             Err(SridMismatch {
-                index: Srid::Utm48N,
-                entry: Srid::Wgs84
+                index: utm48n().srid,
+                entry: Srid::WGS84
             })
         );
         assert_eq!(tree.len(), 1);
@@ -372,7 +381,7 @@ mod tests {
 
     #[test]
     fn entries_enumeration() {
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         for i in 0..10 {
             tree.insert(make_entry(i, i as f64, i as f64));
         }

@@ -57,6 +57,14 @@ pub struct ColumnarResolvedDmlWalRecord {
     pub is_update: bool,
     /// Every row the Control Plane resolved and the write policy admitted.
     pub rows: Vec<ColumnarResolvedDmlWalRow>,
+    /// System-time ordinal every new version an update writes stamps, or at
+    /// which a delete closes each removed key on a bitemporal collection,
+    /// raised above the key's bound row at apply. Replay stamps what the
+    /// live write stamped. `None` for a writer that leaves the stamp to the
+    /// apply.
+    #[serde(default)]
+    #[msgpack(default)]
+    pub system_from: Option<i64>,
 }
 
 #[cfg(test)]
@@ -74,6 +82,7 @@ mod tests {
                 pk_msgpack: vec![1, 2, 3],
                 new_row_msgpack: vec![4, 5, 6],
             }],
+            system_from: None,
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode");
         let decoded: ColumnarResolvedDmlWalRecord = zerompk::from_msgpack(&bytes).expect("decode");
@@ -90,6 +99,7 @@ mod tests {
                 pk_msgpack: vec![7],
                 new_row_msgpack: Vec::new(),
             }],
+            system_from: None,
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode");
         let decoded: ColumnarResolvedDmlWalRecord = zerompk::from_msgpack(&bytes).expect("decode");
@@ -106,6 +116,7 @@ mod tests {
                 pk_msgpack: vec![1],
                 new_row_msgpack: Vec::new(),
             }],
+            system_from: None,
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode");
         assert!(zerompk::from_msgpack::<ColumnarDmlWalRecord>(&bytes).is_err());

@@ -166,7 +166,7 @@ pub fn validate_batch_with_assignments(
                     SequencedTxn {
                         epoch,
                         position,
-                        tx_class: tx.tx_class,
+                        tx_class: std::sync::Arc::new(tx.tx_class),
                         // epoch_system_ms is filled in by the service tick()
                         // when the EpochBatch is constructed; 0 is a safe
                         // placeholder here.
@@ -175,6 +175,7 @@ pub fn validate_batch_with_assignments(
                         // state machine at fan-out time; 0 is a safe placeholder.
                         epoch_vshard_txn_count: 0,
                         lock_owner,
+                        local_plans: None,
                     },
                 ));
             }

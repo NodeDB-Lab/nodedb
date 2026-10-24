@@ -33,6 +33,8 @@ fn graph_cross_tenant_insert_does_not_contaminate_neighbors() {
             properties: vec![],
             src_surrogate: doc_surrogate("node_1"),
             dst_surrogate: doc_surrogate("node_2"),
+            valid_from_ms: None,
+            valid_until_ms: None,
         }),
     );
 
@@ -48,6 +50,7 @@ fn graph_cross_tenant_insert_does_not_contaminate_neighbors() {
             direction: Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     assert_eq!(resp_baseline.status, Status::Ok);
@@ -77,6 +80,8 @@ fn graph_cross_tenant_insert_does_not_contaminate_neighbors() {
                 properties: vec![],
                 src_surrogate: doc_surrogate("node_1"),
                 dst_surrogate: doc_surrogate(&format!("b_node_{i}")),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
         );
     }
@@ -93,6 +98,7 @@ fn graph_cross_tenant_insert_does_not_contaminate_neighbors() {
             direction: Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     assert_eq!(resp_after.status, Status::Ok);
@@ -135,6 +141,8 @@ fn graph_cross_tenant_edge_delete_does_not_affect_owner() {
             properties: vec![],
             src_surrogate: doc_surrogate("alpha"),
             dst_surrogate: doc_surrogate("beta"),
+            valid_from_ms: None,
+            valid_until_ms: None,
         }),
     );
 
@@ -169,6 +177,7 @@ fn graph_cross_tenant_edge_delete_does_not_affect_owner() {
             direction: Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     assert_eq!(resp_a.status, Status::Ok);

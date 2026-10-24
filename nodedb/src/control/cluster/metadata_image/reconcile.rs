@@ -19,6 +19,8 @@
 //!   aggregates are registered, removed ones unregistered.
 //! - `PutSynonymGroup` / `DeleteSynonymGroup`: every group is installed,
 //!   removed ones deleted.
+//! - `PutSpatialRefSys` / `DropSpatialRefSys`: the catalog's user-defined
+//!   CRS set is sent to every core.
 //! - `DeleteMaterializedView`: a view target is a collection, reclaimed by
 //!   the collection rule.
 //! - `DeleteTopicWithConsumerGroups`: a removed topic's node-local messages
@@ -34,8 +36,8 @@ use std::sync::Arc;
 use crate::control::array_catalog::ArrayCatalogEntry;
 use crate::control::catalog_entry::post_apply::{
     ContinuousAggregateRegisterFailure, array, clear_before_recreate, compact_async,
-    drop_array_on_every_core, install_synonym_group, install_vector_index_params,
-    open_array_on_every_core, reclaim_collection_storage,
+    drop_array_on_every_core, install_custom_crs_set, install_synonym_group,
+    install_vector_index_params, open_array_on_every_core, reclaim_collection_storage,
     register_continuous_aggregate_on_every_core, remove_synonym_group, remove_vector_index_params,
     unregister_continuous_aggregate,
 };
@@ -57,6 +59,8 @@ pub(super) async fn reconcile_data_plane(
     reconcile_vector_params(shared, before, after).await?;
     reconcile_continuous_aggregates(shared, before, after).await?;
     reconcile_synonym_groups(shared, before, after).await?;
+    // The set is whole and small, so every install sends it.
+    install_custom_crs_set(shared, "image").await?;
     reconcile_event_buffers(shared, before, after)?;
     invalidate_plans(shared, before, after);
     Ok(())

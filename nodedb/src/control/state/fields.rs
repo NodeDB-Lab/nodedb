@@ -195,8 +195,6 @@ pub struct SharedState {
     pub change_stream: crate::control::change_stream::ChangeStream,
     /// PostgreSQL LISTEN/NOTIFY bus: per-tenant channel delivery.
     pub notify_bus: crate::control::notify_bus::NotifyBus,
-    /// Shared HTTP client for outbound emitters (alert webhooks, SIEM, OTEL).
-    pub http_client: Arc<reqwest::Client>,
     /// In-memory trigger registry for fast lookup during DML.
     pub trigger_registry: crate::control::trigger::TriggerRegistry,
     /// Shared ND-array catalog handle. Arc-cloned into every Data-Plane CoreLoop.
@@ -290,6 +288,10 @@ pub struct SharedState {
     /// Open chunked redo streams: the chunks every data-group apply holds
     /// until each stream's final entry.
     pub redo_chunks: Arc<crate::control::wal_replication::transaction_redo::RedoChunkStore>,
+    /// The per-vShard fence between a departure purge and a data-group
+    /// snapshot install: an install of a vShard a running purge removes
+    /// waits for the purge to end.
+    pub departure_fence: crate::control::cluster::vshard_departure::DepartureFence,
     /// Kafka bridge producer manager.
     pub kafka_manager: crate::event::kafka::KafkaManager,
     /// Definition sync fanout: broadcasts `DefinitionSync` (0x70) frames to
@@ -467,6 +469,8 @@ pub struct SharedState {
     /// Object-store access for `BACKUP DATABASE` / `RESTORE DATABASE`.
     /// `None` = the `[backup_storage]` section is absent.
     pub backup_storage: Option<Arc<crate::config::server::BackupStorageSettings>>,
+    /// `[egress]` policy and `[credential_encryption]` key of remote `COPY` sources.
+    pub remote_sources: crate::control::security::egress::RemoteSources,
     /// Tenant captures a database backup's cut barriers parked on this node,
     /// by `(request, group)`, until the backup collects them.
     pub cut_captures: Arc<crate::control::backup::cut_capture::CutCaptures>,

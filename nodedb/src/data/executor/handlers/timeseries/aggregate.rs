@@ -63,6 +63,7 @@ impl CoreLoop {
         &mut self,
         params: TsAggregateParams<'_>,
     ) -> Response {
+        let crs = self.crs_context();
         let TsAggregateParams {
             task,
             tid,
@@ -299,6 +300,7 @@ impl CoreLoop {
                 aggregate_kinds: &aggregate_kinds,
                 bucket_kind,
             },
+            &crs,
         ) {
             Ok(p) => p,
             Err(e) => return self.response_error(task, e),

@@ -2,6 +2,7 @@
 
 //! `SqlCatalog` trait + descriptor-resolution error type.
 
+use nodedb_crs::CrsContext;
 use nodedb_types::DatabaseId;
 use thiserror::Error;
 
@@ -253,6 +254,14 @@ pub trait SqlCatalog {
         _value: i64,
     ) -> Result<i64, crate::SqlError> {
         Err(sequence_access_unavailable())
+    }
+
+    /// The CRS context SRIDs resolve against while planning: the built-in
+    /// registry plus the catalog's user-defined CRSs. The default holds the
+    /// built-in registry only. Origin overrides it, and a wrapping catalog
+    /// forwards it to the catalog it wraps.
+    fn crs_context(&self) -> CrsContext<'_> {
+        CrsContext::builtin_only()
     }
 }
 

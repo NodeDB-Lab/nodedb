@@ -1,0 +1,23 @@
+[package]
+name = "nodedb-crs"
+description = "Coordinate reference systems for NodeDB: EPSG registry, PROJ-string parsing, projections and datum shifts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+authors = ["Biz Impulse Solutions Sdn. Bhd. and the NodeDB contributors"]
+readme = "README.md"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/nodedb-crs"
+keywords = ["crs", "epsg", "projection", "geodesy", "proj"]
+categories = ["science::geo"]
+
+[features]
+default = []
+
+[dependencies]
+nodedb-srid = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+zerompk = { workspace = true }

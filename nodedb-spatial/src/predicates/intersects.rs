@@ -13,8 +13,12 @@ use nodedb_types::geometry_bbox;
 
 use super::edge::{is_collection, point_on_ring_boundary, ring_edges, segments_intersect};
 
-/// ST_Intersects(a, b) — do geometries A and B share any space?
+/// ST_Intersects(a, b) — do geometries A and B share any space? EMPTY
+/// intersects nothing.
 pub fn st_intersects(a: &Geometry, b: &Geometry) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
     // Bbox pre-filter. A GeometryCollection skips it: its bbox is a union
     // whose wrap rule depends on the SRID, and the recursion below filters
     // each member on its own.
@@ -90,9 +94,6 @@ pub fn st_intersects(a: &Geometry, b: &Geometry) -> bool {
         | (other, Geometry::GeometryCollection { geometries }) => {
             geometries.iter().any(|g| st_intersects(g, other))
         }
-
-        // Unknown future geometry types — conservatively non-intersecting.
-        (&_, &_) => false,
     }
 }
 

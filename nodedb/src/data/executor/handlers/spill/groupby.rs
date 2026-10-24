@@ -75,6 +75,7 @@ impl GroupBySpiller {
         key: String,
         aggregates: &[AggregateSpec],
         doc: &[u8],
+        crs: &nodedb_crs::CrsContext<'_>,
     ) -> crate::Result<()> {
         self.feed_counter += 1;
 
@@ -83,14 +84,14 @@ impl GroupBySpiller {
         }
 
         if let Some(state) = self.in_mem.get_mut(&key) {
-            state.feed(aggregates, doc)?;
+            state.feed(aggregates, doc, crs)?;
         } else {
             if self.in_mem.len() >= self.cap {
                 self.spill_current_run()?;
             }
             let key_len = key.len();
             let mut state = GroupState::new(aggregates)?;
-            state.feed(aggregates, doc)?;
+            state.feed(aggregates, doc, crs)?;
             self.in_mem.insert(key, state);
             self.bytes_estimate = self
                 .bytes_estimate
@@ -192,7 +193,7 @@ mod tests {
         for (key, doc) in groups {
             map.entry(key.clone())
                 .or_insert_with(|| GroupState::new(specs).expect("group state"))
-                .feed(specs, doc)
+                .feed(specs, doc, &nodedb_crs::CrsContext::builtin_only())
                 .unwrap();
         }
         map.into_iter()
@@ -270,7 +271,14 @@ mod tests {
         // Distinct keys grow the map every feed. Two charges land, at feed
         // 10 000 and feed 20 000.
         for i in 0..20_000u32 {
-            spiller.feed(format!("k{i}"), &specs, &doc).expect("feed");
+            spiller
+                .feed(
+                    format!("k{i}"),
+                    &specs,
+                    &doc,
+                    &nodedb_crs::CrsContext::builtin_only(),
+                )
+                .expect("feed");
         }
 
         assert_eq!(
@@ -304,7 +312,14 @@ mod tests {
 
         let mut spiller = GroupBySpiller::new(spill_dir, 1000, None).unwrap();
         for (key, doc) in &groups {
-            spiller.feed(key.clone(), &specs, doc).unwrap();
+            spiller
+                .feed(
+                    key.clone(),
+                    &specs,
+                    doc,
+                    &nodedb_crs::CrsContext::builtin_only(),
+                )
+                .unwrap();
         }
         assert_eq!(spiller.spilled_runs(), 0, "no spill expected");
 
@@ -330,7 +345,14 @@ mod tests {
 
         let mut spiller = GroupBySpiller::new(spill_dir, 5, None).unwrap();
         for (key, doc) in &groups {
-            spiller.feed(key.clone(), &specs, doc).unwrap();
+            spiller
+                .feed(
+                    key.clone(),
+                    &specs,
+                    doc,
+                    &nodedb_crs::CrsContext::builtin_only(),
+                )
+                .unwrap();
         }
         assert!(
             spiller.spilled_runs() >= 1,
@@ -357,7 +379,14 @@ mod tests {
 
         let mut spiller = GroupBySpiller::new(spill_dir, 10, None).unwrap();
         for (key, doc) in &groups {
-            spiller.feed(key.clone(), &specs, doc).unwrap();
+            spiller
+                .feed(
+                    key.clone(),
+                    &specs,
+                    doc,
+                    &nodedb_crs::CrsContext::builtin_only(),
+                )
+                .unwrap();
         }
         assert!(spiller.spilled_runs() >= 4, "expected multiple spill runs");
 
@@ -379,7 +408,14 @@ mod tests {
 
         let mut spiller = GroupBySpiller::new(spill_dir, 2, None).unwrap();
         for (key, doc) in &groups {
-            spiller.feed(key.clone(), &specs, doc).unwrap();
+            spiller
+                .feed(
+                    key.clone(),
+                    &specs,
+                    doc,
+                    &nodedb_crs::CrsContext::builtin_only(),
+                )
+                .unwrap();
         }
         let result = spiller.finalize().unwrap();
         let got = finalize_to_values(result, &specs);
@@ -403,7 +439,14 @@ mod tests {
 
         let mut spiller = GroupBySpiller::new(spill_dir, 2, None).unwrap();
         for (key, doc) in &groups {
-            spiller.feed(key.clone(), &specs, doc).unwrap();
+            spiller
+                .feed(
+                    key.clone(),
+                    &specs,
+                    doc,
+                    &nodedb_crs::CrsContext::builtin_only(),
+                )
+                .unwrap();
         }
         let result = spiller.finalize().unwrap();
         let got = finalize_to_values(result, &specs);
@@ -424,7 +467,14 @@ mod tests {
 
         let mut spiller = GroupBySpiller::new(spill_dir, 2, None).unwrap();
         for (key, doc) in &groups {
-            spiller.feed(key.clone(), &specs, doc).unwrap();
+            spiller
+                .feed(
+                    key.clone(),
+                    &specs,
+                    doc,
+                    &nodedb_crs::CrsContext::builtin_only(),
+                )
+                .unwrap();
         }
         let result = spiller.finalize().unwrap();
         let got = finalize_to_values(result, &specs);
@@ -458,7 +508,14 @@ mod tests {
 
         let mut spiller = GroupBySpiller::new(spill_dir, 2, None).unwrap();
         for (key, doc) in &groups {
-            spiller.feed(key.clone(), &specs, doc).unwrap();
+            spiller
+                .feed(
+                    key.clone(),
+                    &specs,
+                    doc,
+                    &nodedb_crs::CrsContext::builtin_only(),
+                )
+                .unwrap();
         }
         let result = spiller.finalize().unwrap();
         let got = finalize_to_values(result, &specs);
@@ -479,7 +536,14 @@ mod tests {
 
         let mut spiller = GroupBySpiller::new(spill_dir, 2, None).unwrap();
         for (key, doc) in &groups {
-            spiller.feed(key.clone(), &specs, doc).unwrap();
+            spiller
+                .feed(
+                    key.clone(),
+                    &specs,
+                    doc,
+                    &nodedb_crs::CrsContext::builtin_only(),
+                )
+                .unwrap();
         }
         let result = spiller.finalize().unwrap();
         let got = finalize_to_values(result, &specs);
@@ -505,7 +569,14 @@ mod tests {
 
         let mut spiller = GroupBySpiller::new(spill_dir, 5, None).unwrap();
         for (key, doc) in &groups {
-            spiller.feed(key.clone(), &specs, doc).unwrap();
+            spiller
+                .feed(
+                    key.clone(),
+                    &specs,
+                    doc,
+                    &nodedb_crs::CrsContext::builtin_only(),
+                )
+                .unwrap();
         }
         let result = spiller.finalize().unwrap();
         let got = finalize_to_values(result, &specs);
@@ -531,7 +602,14 @@ mod tests {
 
         let mut spiller = GroupBySpiller::new(spill_dir, 5, None).unwrap();
         for (key, doc) in &groups {
-            spiller.feed(key.clone(), &specs, doc).unwrap();
+            spiller
+                .feed(
+                    key.clone(),
+                    &specs,
+                    doc,
+                    &nodedb_crs::CrsContext::builtin_only(),
+                )
+                .unwrap();
         }
         let result = spiller.finalize().unwrap();
         let got = finalize_to_values(result, &specs);

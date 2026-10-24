@@ -118,7 +118,7 @@ mod tests {
             nodedb_mem::EngineId::Spatial,
         );
         let rtree = core.spatial_indexes.entry(key.clone()).or_insert_with(|| {
-            crate::engine::spatial::RTree::new(memory, nodedb_types::geometry::Srid::Wgs84)
+            crate::engine::spatial::RTree::new(memory, crate::engine::spatial::TreeSrid::WGS84)
         });
         rtree.insert(crate::engine::spatial::RTreeEntry { id: entry_id, bbox });
         core.spatial_doc_map.insert(
@@ -159,7 +159,10 @@ mod tests {
             entry_id,
             bbox,
             document_id: "d1".to_string(),
-            srid: nodedb_types::geometry::Srid::Utm48N,
+            srid: crate::engine::spatial::TreeSrid {
+                srid: nodedb_types::geometry::Srid::new(32648).expect("srid"),
+                space: nodedb_types::BboxSpace::Planar,
+            },
         };
         core.apply_undo_spatial(0, undo).unwrap();
 
@@ -174,7 +177,7 @@ mod tests {
         );
         assert_eq!(
             core.spatial_indexes.get(&key).map(|rt| rt.srid()),
-            Some(nodedb_types::geometry::Srid::Utm48N),
+            Some(nodedb_types::geometry::Srid::new(32648).expect("srid")),
             "the re-created tree takes the captured SRID"
         );
         assert_eq!(

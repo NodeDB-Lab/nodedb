@@ -367,7 +367,8 @@ mod tests {
 
     /// The head's hash.
     fn head(core: &CoreLoop) -> Option<String> {
-        core.chain_hashes
+        core.chain
+            .heads
             .get(&chain_key())
             .map(|head| head.hash.clone())
     }

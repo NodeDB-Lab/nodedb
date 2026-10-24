@@ -75,6 +75,7 @@ impl CoreLoop {
             entries,
             intent,
             self.declared_columns_of(did, tid, collection),
+            &self.crs_context(),
             |key| self.kv_engine.get(did, tid, collection, key, now_ms),
         ) {
             Ok(rows) => rows,
@@ -87,8 +88,14 @@ impl CoreLoop {
             // The policy decides each body that persists: the entry when the
             // key was absent, the merge when it was stored.
             for row in &rows {
-                if let Err(e) = admit_kv_row(rls_write_check, &row.stored, row.key, tid, collection)
-                {
+                if let Err(e) = admit_kv_row(
+                    rls_write_check,
+                    &row.stored,
+                    row.key,
+                    tid,
+                    collection,
+                    &self.crs_context(),
+                ) {
                     return self.response_error(task, e);
                 }
             }

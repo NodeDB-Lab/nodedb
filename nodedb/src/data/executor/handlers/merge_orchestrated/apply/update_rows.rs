@@ -165,7 +165,7 @@ impl CoreLoop {
                         surrogate.as_u32(),
                         row_identity.clone(),
                         upd.body.clone(),
-                        outcome.bitemporal_sys_from_ms,
+                        outcome.bitemporal_sys_from,
                     ));
                     if returning {
                         match returning_doc(&upd.body, &upd.key, &identity_column) {

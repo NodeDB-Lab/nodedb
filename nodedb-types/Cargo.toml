@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license = "Apache-2.0"
+authors = ["Biz Impulse Solutions Sdn. Bhd. and the NodeDB contributors"]
 readme = "README.md"
 repository.workspace = true
 homepage.workspace = true
@@ -32,6 +33,7 @@ nanoid = { workspace = true }
 rand = { workspace = true }
 rust_decimal = { workspace = true }
 nodedb-codec = { workspace = true }
+nodedb-srid = { workspace = true }
 crc32c = { workspace = true }
 roaring = { workspace = true }
 bytemuck = { workspace = true }
@@ -41,4 +43,5 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]
+nodedb-crs = { workspace = true }
 toml = { workspace = true }

@@ -37,6 +37,7 @@ pub fn binding_join_keys(
     binding: &MaterializedSumBinding,
     updates: &[(String, UpdateValue)],
     rows: &[serde_json::Value],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<String>> {
     let assignment = updates
         .iter()
@@ -70,7 +71,7 @@ pub fn binding_join_keys(
         Some(UpdateValue::Expr(expr)) => {
             for row in rows {
                 let evaluated = expr
-                    .eval(&nodedb_types::Value::from(row.clone()))
+                    .eval(&nodedb_types::Value::from(row.clone()), crs)
                     .map_err(crate::Error::from)?;
                 if let Some(value) = string_value(Some(&serde_json::Value::from(evaluated))) {
                     keys.push(value);
@@ -132,8 +133,13 @@ mod tests {
 
     #[test]
     fn rows_contribute_their_current_join_value_once() {
-        let keys = binding_join_keys(&binding(), &[], &[row("a1"), row("a1"), row("a2")])
-            .expect("fold succeeds");
+        let keys = binding_join_keys(
+            &binding(),
+            &[],
+            &[row("a1"), row("a1"), row("a2")],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("fold succeeds");
         assert_eq!(keys, vec!["a1".to_string(), "a2".to_string()]);
     }
 
@@ -141,8 +147,13 @@ mod tests {
     /// needs no target resolved.
     #[test]
     fn a_row_without_the_join_column_needs_nothing() {
-        let keys = binding_join_keys(&binding(), &[], &[serde_json::json!({"amount": 10})])
-            .expect("fold succeeds");
+        let keys = binding_join_keys(
+            &binding(),
+            &[],
+            &[serde_json::json!({"amount": 10})],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("fold succeeds");
         assert!(keys.is_empty());
     }
 
@@ -153,7 +164,13 @@ mod tests {
     fn rewriting_the_join_key_needs_both_sides() {
         let literal = nodedb_types::json_to_msgpack(&serde_json::json!("a9")).expect("encode");
         let updates = vec![("account_id".to_string(), UpdateValue::Literal(literal))];
-        let keys = binding_join_keys(&binding(), &updates, &[row("a1")]).expect("fold succeeds");
+        let keys = binding_join_keys(
+            &binding(),
+            &updates,
+            &[row("a1")],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("fold succeeds");
         assert_eq!(keys, vec!["a1".to_string(), "a9".to_string()]);
     }
 
@@ -163,7 +180,13 @@ mod tests {
     fn an_assignment_with_no_matched_rows_needs_nothing() {
         let literal = nodedb_types::json_to_msgpack(&serde_json::json!("a9")).expect("encode");
         let updates = vec![("account_id".to_string(), UpdateValue::Literal(literal))];
-        let keys = binding_join_keys(&binding(), &updates, &[]).expect("fold succeeds");
+        let keys = binding_join_keys(
+            &binding(),
+            &updates,
+            &[],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("fold succeeds");
         assert!(keys.is_empty());
     }
 
@@ -175,7 +198,13 @@ mod tests {
             UpdateValue::Expr(nodedb_query::expr::SqlExpr::Column("owner".to_string())),
         )];
         let rows = vec![serde_json::json!({"account_id": "a1", "owner": "a7"})];
-        let keys = binding_join_keys(&binding(), &updates, &rows).expect("fold succeeds");
+        let keys = binding_join_keys(
+            &binding(),
+            &updates,
+            &rows,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("fold succeeds");
         assert_eq!(keys, vec!["a1".to_string(), "a7".to_string()]);
     }
 

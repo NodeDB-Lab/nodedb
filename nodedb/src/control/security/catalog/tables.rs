@@ -240,6 +240,11 @@ pub(super) const SYNONYM_GROUPS: TableDefinition<&str, &[u8]> =
 pub(super) const CUSTOM_TYPES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("_system.custom_types");
 
+/// Table: SRID code -> MessagePack-serialized `CustomCrs`: a user-defined
+/// CRS or the tombstone of a dropped one.
+pub(super) const SPATIAL_REF_SYS: TableDefinition<u32, &[u8]> =
+    TableDefinition::new("_system.spatial_ref_sys");
+
 /// Table: "wasm_module:{sha256_hex}" -> raw WASM binary bytes.
 pub(super) const WASM_MODULES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("_system.wasm_modules");

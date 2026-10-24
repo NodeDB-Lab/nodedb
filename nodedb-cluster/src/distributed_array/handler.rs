@@ -417,16 +417,15 @@ mod tests {
             valid_at_ms: None,
             txn_id: None,
             zone_msgpack: vec![],
+            physical: false,
         };
         zerompk::to_msgpack_vec(&req).unwrap()
     }
 
     fn make_agg_req_bytes() -> Vec<u8> {
-        // Encode a minimal Sum reducer (c_enum byte).
-        // We use rmp_serde directly since we don't have ArrayReducer here,
-        // but any single-byte msgpack value works as the reducer payload for
-        // StubExecutor (it never decodes it).
-        let reducer_bytes = vec![0x00u8]; // Sum = 0 as c_enum
+        // StubExecutor never decodes the reducer, so any msgpack value
+        // serves as its payload.
+        let reducer_bytes = vec![0x00u8];
         let req = super::super::wire::ArrayShardAggReq {
             array_id_msgpack: vec![],
             attr_idx: 0,
@@ -434,10 +433,11 @@ mod tests {
             group_by_dim: -1,
             cell_filter_msgpack: vec![],
             shard_bucket: None,
-            system_as_of: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             txn_id: None,
             region_msgpack: vec![],
+            physical: false,
         };
         zerompk::to_msgpack_vec(&req).unwrap()
     }
@@ -466,7 +466,7 @@ mod tests {
             op_msgpack: vec![0x00],
             attr_idx: 0,
             shard_bucket: None,
-            system_as_of: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             txn_id: None,
         };
@@ -781,6 +781,7 @@ mod tests {
             valid_at_ms: None,
             txn_id: None,
             zone_msgpack: vec![],
+            physical: false,
         }
     }
 

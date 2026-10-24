@@ -124,6 +124,7 @@ impl CompiledDefault {
             parsed,
             crate::planner::const_fold::default_registry(),
             crate::planner::const_fold::FoldScope::Once,
+            &catalog.crs_context(),
         )
         .map_err(|_| unevaluable(&self.column, &self.text))?
         .ok_or_else(|| unevaluable(&self.column, &self.text))?;

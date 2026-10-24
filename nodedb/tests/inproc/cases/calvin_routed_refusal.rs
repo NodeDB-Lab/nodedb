@@ -99,7 +99,8 @@ async fn routed_sqlstate(server: &TestServer, name: &str, sql: &str) -> String {
         lock_manager
             .lock()
             .expect("lock table")
-            .acquire(holder(), BTreeMap::from([(key, LockMode::Exclusive)])),
+            .acquire(holder(), BTreeMap::from([(key, LockMode::Exclusive)]))
+            .outcome,
         AcquireOutcome::Ready,
         "the test holds the collection key"
     );

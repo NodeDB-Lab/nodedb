@@ -62,11 +62,16 @@ pub fn binding_image_deltas(
     binding: &MaterializedSumBinding,
     old: Option<&serde_json::Value>,
     new: Option<&serde_json::Value>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<BindingDelta>> {
     match (old, new) {
         (None, None) => Ok(Vec::new()),
-        (None, Some(new_doc)) => Ok(single(binding, new_doc, Sign::Plus)?.into_iter().collect()),
-        (Some(old_doc), None) => Ok(single(binding, old_doc, Sign::Minus)?.into_iter().collect()),
+        (None, Some(new_doc)) => Ok(single(binding, new_doc, Sign::Plus, crs)?
+            .into_iter()
+            .collect()),
+        (Some(old_doc), None) => Ok(single(binding, old_doc, Sign::Minus, crs)?
+            .into_iter()
+            .collect()),
         (Some(old_doc), Some(new_doc)) => {
             let old_target = binding_join_value(binding, old_doc);
             let new_target = binding_join_value(binding, new_doc);
@@ -74,8 +79,8 @@ pub fn binding_image_deltas(
                 // Same target: only the DIFFERENCE moves. Re-adding the new
                 // value in full would double-count the row's old contribution.
                 (Some(old_target), Some(new_target)) if old_target == new_target => {
-                    let delta =
-                        binding_amount(binding, new_doc)? - binding_amount(binding, old_doc)?;
+                    let delta = binding_amount(binding, new_doc, crs)?
+                        - binding_amount(binding, old_doc, crs)?;
                     Ok(vec![BindingDelta {
                         join_value: new_target,
                         delta,
@@ -85,22 +90,22 @@ pub fn binding_image_deltas(
                 (Some(old_target), Some(new_target)) => Ok(vec![
                     BindingDelta {
                         join_value: old_target,
-                        delta: -binding_amount(binding, old_doc)?,
+                        delta: -binding_amount(binding, old_doc, crs)?,
                     },
                     BindingDelta {
                         join_value: new_target,
-                        delta: binding_amount(binding, new_doc)?,
+                        delta: binding_amount(binding, new_doc, crs)?,
                     },
                 ]),
                 // The row left the binding (its join column was cleared) or
                 // joined it (the column was set). One side only.
                 (Some(old_target), None) => Ok(vec![BindingDelta {
                     join_value: old_target,
-                    delta: -binding_amount(binding, old_doc)?,
+                    delta: -binding_amount(binding, old_doc, crs)?,
                 }]),
                 (None, Some(new_target)) => Ok(vec![BindingDelta {
                     join_value: new_target,
-                    delta: binding_amount(binding, new_doc)?,
+                    delta: binding_amount(binding, new_doc, crs)?,
                 }]),
                 (None, None) => Ok(Vec::new()),
             }
@@ -148,8 +153,9 @@ pub fn coalesce_binding_deltas(deltas: Vec<BindingDelta>) -> Vec<(String, Decima
 pub fn apply_update_assignments(
     doc: &serde_json::Value,
     updates: &[(String, UpdateValue)],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<serde_json::Value> {
-    assign(doc, updates, None)
+    assign(doc, updates, None, crs)
 }
 
 /// The document an UPSERT's CONFLICT branch produces from the stored row and
@@ -173,11 +179,12 @@ pub fn apply_conflict_assignments(
     stored: &serde_json::Value,
     submitted: &serde_json::Value,
     updates: &[(String, UpdateValue)],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<serde_json::Value> {
     if updates.is_empty() {
         return Ok(overlay(stored, submitted));
     }
-    assign(stored, updates, Some(submitted))
+    assign(stored, updates, Some(submitted), crs)
 }
 
 /// Apply a statement's assignments to one pre-image, with `excluded` standing in
@@ -189,6 +196,7 @@ fn assign(
     doc: &serde_json::Value,
     updates: &[(String, UpdateValue)],
     excluded: Option<&serde_json::Value>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<serde_json::Value> {
     if updates.is_empty() {
         return Ok(doc.clone());
@@ -208,8 +216,8 @@ fn assign(
             }
             UpdateValue::Expr(expr) => {
                 let evaluated = match &excluded_row {
-                    Some(row) => expr.eval_with_excluded(&snapshot, row),
-                    None => expr.eval(&snapshot),
+                    Some(row) => expr.eval_with_excluded(&snapshot, row, crs),
+                    None => expr.eval(&snapshot, crs),
                 }
                 .map_err(crate::Error::from)?;
                 object.insert(field.clone(), serde_json::Value::from(evaluated));
@@ -247,11 +255,12 @@ fn single(
     binding: &MaterializedSumBinding,
     doc: &serde_json::Value,
     sign: Sign,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Option<BindingDelta>> {
     let Some(join_value) = binding_join_value(binding, doc) else {
         return Ok(None);
     };
-    let amount = binding_amount(binding, doc)?;
+    let amount = binding_amount(binding, doc, crs)?;
     Ok(Some(BindingDelta {
         join_value,
         delta: match sign {
@@ -288,7 +297,13 @@ mod tests {
     fn an_insert_shaped_pair_adds_the_whole_value() {
         let new_doc = row("a1", 25);
         assert_eq!(
-            binding_image_deltas(&binding(), None, Some(&new_doc)).expect("fold"),
+            binding_image_deltas(
+                &binding(),
+                None,
+                Some(&new_doc),
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .expect("fold"),
             vec![BindingDelta {
                 join_value: "a1".to_string(),
                 delta: d("25"),
@@ -300,7 +315,13 @@ mod tests {
     fn a_delete_shaped_pair_subtracts_the_whole_value() {
         let old_doc = row("a1", 25);
         assert_eq!(
-            binding_image_deltas(&binding(), Some(&old_doc), None).expect("fold"),
+            binding_image_deltas(
+                &binding(),
+                Some(&old_doc),
+                None,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .expect("fold"),
             vec![BindingDelta {
                 join_value: "a1".to_string(),
                 delta: d("-25"),
@@ -313,7 +334,13 @@ mod tests {
         let old_doc = row("a1", 25);
         let new_doc = row("a1", 40);
         assert_eq!(
-            binding_image_deltas(&binding(), Some(&old_doc), Some(&new_doc)).expect("fold"),
+            binding_image_deltas(
+                &binding(),
+                Some(&old_doc),
+                Some(&new_doc),
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .expect("fold"),
             vec![BindingDelta {
                 join_value: "a1".to_string(),
                 delta: d("15"),
@@ -328,8 +355,13 @@ mod tests {
     fn a_join_key_move_yields_the_old_side_first() {
         let old_doc = row("a1", 25);
         let new_doc = row("a2", 40);
-        let deltas =
-            binding_image_deltas(&binding(), Some(&old_doc), Some(&new_doc)).expect("fold");
+        let deltas = binding_image_deltas(
+            &binding(),
+            Some(&old_doc),
+            Some(&new_doc),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("fold");
         assert_eq!(
             deltas,
             vec![
@@ -349,9 +381,14 @@ mod tests {
     fn a_row_outside_the_binding_owes_nothing() {
         let new_doc = serde_json::json!({"amount": 25});
         assert!(
-            binding_image_deltas(&binding(), None, Some(&new_doc))
-                .expect("fold")
-                .is_empty()
+            binding_image_deltas(
+                &binding(),
+                None,
+                Some(&new_doc),
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .expect("fold")
+            .is_empty()
         );
     }
 
@@ -382,7 +419,12 @@ mod tests {
     fn a_literal_assignment_lands_on_the_post_image() {
         let literal = nodedb_types::json_to_msgpack(&serde_json::json!("a9")).expect("encode");
         let updates = vec![("account_id".to_string(), UpdateValue::Literal(literal))];
-        let post = apply_update_assignments(&row("a1", 25), &updates).expect("assign");
+        let post = apply_update_assignments(
+            &row("a1", 25),
+            &updates,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("assign");
         assert_eq!(post.get("account_id").and_then(|v| v.as_str()), Some("a9"));
         assert_eq!(post.get("amount").and_then(|v| v.as_i64()), Some(25));
     }
@@ -403,7 +445,12 @@ mod tests {
                 UpdateValue::Expr(nodedb_query::expr::SqlExpr::Column("amount".to_string())),
             ),
         ];
-        let post = apply_update_assignments(&row("a1", 25), &updates).expect("assign");
+        let post = apply_update_assignments(
+            &row("a1", 25),
+            &updates,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("assign");
         assert_eq!(post.get("amount").and_then(|v| v.as_str()), Some("a1"));
         assert_eq!(post.get("account_id").and_then(|v| v.as_i64()), Some(25));
     }
@@ -413,7 +460,11 @@ mod tests {
     #[test]
     fn no_assignments_leaves_the_document_alone() {
         let doc = row("a1", 25);
-        assert_eq!(apply_update_assignments(&doc, &[]).expect("assign"), doc);
+        assert_eq!(
+            apply_update_assignments(&doc, &[], &nodedb_crs::CrsContext::builtin_only())
+                .expect("assign"),
+            doc
+        );
     }
 
     /// `SET col = EXCLUDED.col` resolves against the SUBMITTED body.
@@ -429,11 +480,22 @@ mod tests {
                 "amount".to_string(),
             )),
         )];
-        let post = apply_conflict_assignments(&row("a1", 25), &row("a1", 60), &updates)
-            .expect("conflict assign");
+        let post = apply_conflict_assignments(
+            &row("a1", 25),
+            &row("a1", 60),
+            &updates,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("conflict assign");
         assert_eq!(post.get("amount").and_then(|v| v.as_i64()), Some(60));
         assert_eq!(
-            binding_image_deltas(&binding(), Some(&row("a1", 25)), Some(&post)).expect("fold"),
+            binding_image_deltas(
+                &binding(),
+                Some(&row("a1", 25)),
+                Some(&post),
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .expect("fold"),
             vec![BindingDelta {
                 join_value: "a1".to_string(),
                 delta: d("35"),
@@ -455,8 +517,13 @@ mod tests {
                 )),
             }),
         )];
-        let post = apply_conflict_assignments(&row("a1", 25), &row("a1", 60), &updates)
-            .expect("conflict assign");
+        let post = apply_conflict_assignments(
+            &row("a1", 25),
+            &row("a1", 60),
+            &updates,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("conflict assign");
         assert_eq!(post.get("amount").and_then(|v| v.as_i64()), Some(85));
     }
 
@@ -469,7 +536,13 @@ mod tests {
     fn a_conflict_branch_without_assignments_overlays_the_body() {
         let stored = serde_json::json!({"account_id": "a1", "amount": 25, "memo": "kept"});
         let submitted = serde_json::json!({"account_id": "a1", "amount": 60});
-        let post = apply_conflict_assignments(&stored, &submitted, &[]).expect("conflict merge");
+        let post = apply_conflict_assignments(
+            &stored,
+            &submitted,
+            &[],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("conflict merge");
         assert_eq!(post.get("amount").and_then(|v| v.as_i64()), Some(60));
         assert_eq!(
             post.get("memo").and_then(|v| v.as_str()),
@@ -497,10 +570,21 @@ mod tests {
             ),
         ];
         let stored = row("a1", 25);
-        let post =
-            apply_conflict_assignments(&stored, &row("a2", 60), &updates).expect("conflict assign");
+        let post = apply_conflict_assignments(
+            &stored,
+            &row("a2", 60),
+            &updates,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("conflict assign");
         assert_eq!(
-            binding_image_deltas(&binding(), Some(&stored), Some(&post)).expect("fold"),
+            binding_image_deltas(
+                &binding(),
+                Some(&stored),
+                Some(&post),
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .expect("fold"),
             vec![
                 BindingDelta {
                     join_value: "a1".to_string(),

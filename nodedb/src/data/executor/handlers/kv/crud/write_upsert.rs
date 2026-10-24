@@ -53,6 +53,7 @@ impl CoreLoop {
             value,
             updates,
             self.declared_columns_of(did, tid, collection),
+            &self.crs_context(),
         ) {
             Ok(b) => b,
             Err(e) => return self.response_error(task, e),
@@ -62,9 +63,14 @@ impl CoreLoop {
         // incoming row when the key was absent, the merge when it was present.
         // Deciding the merge is the point: admitting only the incoming row
         // would clear a write whose real post-image the policy never saw.
-        if let Err(e) =
-            super::super::rls::admit_kv_row(rls_write_check, &stored_bytes, key, tid, collection)
-        {
+        if let Err(e) = super::super::rls::admit_kv_row(
+            rls_write_check,
+            &stored_bytes,
+            key,
+            tid,
+            collection,
+            &self.crs_context(),
+        ) {
             return self.response_error(task, e);
         }
 

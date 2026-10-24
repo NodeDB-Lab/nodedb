@@ -420,6 +420,8 @@ mod tests {
     fn truncate_record(lsn: u64) -> nodedb_wal::WalRecord {
         let payload = zerompk::to_msgpack_vec(&nodedb_types::columnar::ColumnarTruncateWalRecord {
             collection: COLL.to_string(),
+            system_from: None,
+            erase_history: false,
         })
         .expect("encode truncate");
         wal_record(
@@ -552,7 +554,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = Core::open_at(dir.path());
         let key = (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_string());
-        core.core.ts_replay_stamps.insert(
+        core.core.ts_replay.stamps.insert(
             key,
             super::super::stamp::TsReplayStamp {
                 rows: crate::types::replay_stamp::ReplayStamp::through(5)

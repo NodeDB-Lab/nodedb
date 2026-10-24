@@ -147,6 +147,8 @@ fn edge_put(src: (&str, u32), dst: (&str, u32)) -> PhysicalPlan {
         properties: Vec::new(),
         src_surrogate: Surrogate::new(src.1),
         dst_surrogate: Surrogate::new(dst.1),
+        valid_from_ms: None,
+        valid_until_ms: None,
     })
 }
 

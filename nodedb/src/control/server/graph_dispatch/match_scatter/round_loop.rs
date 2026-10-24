@@ -184,6 +184,7 @@ pub(super) async fn dispatch_continuations(
                 partial_row,
                 source_node: cont.start_node.clone(),
                 source_binding: cont.start_binding.clone(),
+                scope: read.scope,
             });
             push_dispatch_fut(&mut futs, &ctx, plan, remote_coords);
         }
@@ -239,6 +240,7 @@ pub(super) async fn dispatch_resumes(
         let plan = PhysicalPlan::Graph(GraphOp::MatchVarLenResume {
             query: query_bytes.to_vec(),
             resume: resume_bytes,
+            scope: read.scope,
         });
         push_dispatch_fut(&mut futs, &ctx, plan, remote_coords);
     }

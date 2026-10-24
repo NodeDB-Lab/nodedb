@@ -124,6 +124,7 @@ impl RetryableSchemaChange for Error {
             | Error::DivisionByZero
             | Error::DataException { .. }
             | Error::MixedSrid { .. }
+            | Error::UnknownSrid { .. }
             | Error::NumericValueOutOfRange { .. }
             | Error::InvalidTextRepresentation { .. }
             | Error::DatatypeMismatch { .. }

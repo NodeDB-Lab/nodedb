@@ -41,9 +41,8 @@ impl CoreLoop {
             // Preserve the collection definition: clear-then-install replaces row
             // data from the snapshot, but the snapshot does not carry the schema,
             // so the reinstalled rows must land in the still-defined collection.
-            // Fail-closed: if stale state cannot be cleared, abort the restore
-            // rather than install the snapshot over rows that survived — those
-            // would linger as un-owned data on this follower.
+            // Fail closed: a clear error aborts the restore. Rows that survive
+            // a clear stay as un-owned data on this follower.
             if let Err(e) = self.clear_collection_all_engines(
                 nodedb_types::DatabaseId::new(target.database_id),
                 crate::types::TenantId::new(target.tenant_id),
@@ -88,6 +87,20 @@ impl CoreLoop {
 
         // Edges: the group's vShards take the snapshot's edge versions.
         let group_set: std::collections::HashSet<u32> = group_vshards.iter().copied().collect();
+        // Node labels: the group's nodes take the snapshot's labels. Every
+        // other label stays, and survives a CSR rebuild below.
+        let group = group_install.then_some(&group_set);
+        let kept_labels = self.held_node_labels(group);
+        if let Err(e) = self.purge_group_node_label_versions(&group_set) {
+            return self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: format!("restore: clearing the group's node labels failed: {e}"),
+                },
+            );
+        }
+        // A historical CSR can read a version the install replaces.
+        self.historical_csr.clear();
         let edges_purged = match self.edge_store.purge_homed(&group_set) {
             Ok(purged) => purged,
             Err(e) => {
@@ -149,12 +162,12 @@ impl CoreLoop {
                     );
                 }
             };
-            // Rebuild CSR from restored edges. A rebuild failure is fatal to the
-            // whole restore: leaving the stale CSR in place would make graph
-            // traversals silently return wrong results over the just-installed
-            // edges — the same silent-corruption class the durable-section
-            // failures above treat as fatal.
-            if edges_written > 0 || edges_purged > 0 {
+            // Rebuild the CSR from the restored edges. A rebuild error fails
+            // the whole restore. A stale CSR returns wrong traversal results
+            // over the installed edges. The durable-section errors above fail
+            // the restore for the same reason.
+            let csr_rebuilt = edges_written > 0 || edges_purged > 0;
+            if csr_rebuilt {
                 match crate::engine::graph::csr::rebuild::rebuild_sharded_from_store(
                     &self.edge_store,
                     Arc::clone(&self.governor),
@@ -171,6 +184,17 @@ impl CoreLoop {
                         );
                     }
                 }
+            }
+
+            if let Err(e) =
+                self.install_snapshot_node_labels(&kept_labels, csr_rebuilt, group, &snap)
+            {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("restore: node label install failed: {e}"),
+                    },
+                );
             }
 
             // Restore vector_params: re-populate HnswParams before the vector

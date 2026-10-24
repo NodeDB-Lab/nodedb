@@ -60,6 +60,7 @@ impl CoreLoop {
         mut fetch_k: usize,
     ) -> crate::Result<WindowHits> {
         let live = window.collection.live_count();
+        let crs = self.crs_context();
         loop {
             let ef = effective_ef(window.ef_search, fetch_k);
             let ranked = match window.bitmap {
@@ -92,7 +93,7 @@ impl CoreLoop {
                     )
                 })
                 .collect::<crate::Result<Vec<_>>>()?;
-            if residual.is_empty() || exhausted || passing(&hits, residual) >= top_k {
+            if residual.is_empty() || exhausted || passing(&hits, residual, &crs) >= top_k {
                 return Ok(WindowHits { hits, fetch_k });
             }
             fetch_k = fetch_k.saturating_mul(2);
@@ -102,12 +103,16 @@ impl CoreLoop {
 
 /// Hits the Control Plane keeps under `residual`. A filter that fails to
 /// evaluate against a body drops that hit there, so it does not count here.
-pub(super) fn passing(hits: &[VectorSearchHit], residual: &[ScanFilter]) -> usize {
+pub(super) fn passing(
+    hits: &[VectorSearchHit],
+    residual: &[ScanFilter],
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> usize {
     hits.iter()
         .filter(|hit| {
-            hit.body
-                .as_deref()
-                .is_some_and(|body| ScanFilter::all_match_binary(residual, body).unwrap_or(false))
+            hit.body.as_deref().is_some_and(|body| {
+                ScanFilter::all_match_binary(residual, body, crs).unwrap_or(false)
+            })
         })
         .count()
 }

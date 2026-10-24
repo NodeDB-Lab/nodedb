@@ -6,8 +6,9 @@ use nodedb_raster::{BlockKind, BlockWindow, Interleave, SampleType};
 
 use crate::fixtures::{
     DEFLATE, LZW, NONE, Pred, RawImage, RawLayout, Sample, encode_chunks, encode_raw, expected,
-    open, planes, read_all,
+    planes,
 };
+use crate::image::{open, read_all};
 
 /// 40 x 24 pixels in 16 x 16 tiles: the right column is 8 wide and the
 /// bottom row 8 tall.
@@ -63,7 +64,7 @@ fn chunky_tiles_crop_edge_tiles() {
         compression: DEFLATE,
     };
     let (bytes, want) = encode::<u16>(&case, 16, 1);
-    let mut reader = open(&bytes).expect("opens");
+    let reader = open(&bytes).expect("opens");
     assert_eq!(reader.layout().kind, BlockKind::Tiles);
     assert_eq!(reader.layout().interleave, Interleave::Chunky);
     assert_eq!(reader.block_count(), 6);
@@ -71,6 +72,7 @@ fn chunky_tiles_crop_edge_tiles() {
     assert_eq!(
         corner.window,
         BlockWindow {
+            outer: Vec::new(),
             col_off: 32,
             row_off: 16,
             width: 8,
@@ -78,7 +80,7 @@ fn chunky_tiles_crop_edge_tiles() {
         }
     );
     assert!(corner.bands.iter().all(|band| band.len() == 64));
-    assert_eq!(read_all(&mut reader), want);
+    assert_eq!(read_all(&reader), want);
 }
 
 #[test]
@@ -91,13 +93,13 @@ fn planar_tiles_crop_edge_tiles_in_every_plane() {
         compression: LZW,
     };
     let (bytes, want) = encode::<i16>(&case, 16, 2);
-    let mut reader = open(&bytes).expect("opens");
+    let reader = open(&bytes).expect("opens");
     assert_eq!(reader.layout().interleave, Interleave::Planar);
     assert_eq!(reader.sample_type(), SampleType::I16);
     let bottom = reader.read_block(4).expect("bottom tile");
     assert_eq!((bottom.window.width, bottom.window.height), (16, 8));
     assert!(bottom.bands.iter().all(|band| band.len() == 16 * 8));
-    assert_eq!(read_all(&mut reader), want);
+    assert_eq!(read_all(&reader), want);
 }
 
 #[test]
@@ -110,10 +112,10 @@ fn planar_strips_round_trip() {
         compression: NONE,
     };
     let (bytes, want) = encode::<u8>(&case, 8, 1);
-    let mut reader = open(&bytes).expect("opens");
+    let reader = open(&bytes).expect("opens");
     assert_eq!(reader.layout().kind, BlockKind::Strips);
     assert_eq!(reader.block_count(), H.div_ceil(5));
-    assert_eq!(read_all(&mut reader), want);
+    assert_eq!(read_all(&reader), want);
 }
 
 #[test]
@@ -126,8 +128,8 @@ fn tiles_with_horizontal_predictor_round_trip() {
         compression: DEFLATE,
     };
     let (bytes, want) = encode::<u16>(&case, 16, 1);
-    let mut reader = open(&bytes).expect("opens");
-    assert_eq!(read_all(&mut reader), want);
+    let reader = open(&bytes).expect("opens");
+    assert_eq!(read_all(&reader), want);
 }
 
 #[test]
@@ -140,9 +142,9 @@ fn planar_float_tiles_with_floating_point_predictor_round_trip() {
         compression: DEFLATE,
     };
     let (bytes, want) = encode::<f32>(&case, 32, 3);
-    let mut reader = open(&bytes).expect("opens");
+    let reader = open(&bytes).expect("opens");
     assert_eq!(reader.sample_type(), SampleType::F32);
-    assert_eq!(read_all(&mut reader), want);
+    assert_eq!(read_all(&reader), want);
 }
 
 #[test]
@@ -155,12 +157,12 @@ fn u32_and_f64_tiles_round_trip() {
         compression: LZW,
     };
     let (bytes, want) = encode::<u32>(&case, 32, 1);
-    let mut reader = open(&bytes).expect("opens");
+    let reader = open(&bytes).expect("opens");
     assert_eq!(reader.sample_type(), SampleType::U32);
-    assert_eq!(read_all(&mut reader), want);
+    assert_eq!(read_all(&reader), want);
 
     let (bytes, want) = encode::<f64>(&case, 64, 3);
-    let mut reader = open(&bytes).expect("opens");
+    let reader = open(&bytes).expect("opens");
     assert_eq!(reader.sample_type(), SampleType::F64);
-    assert_eq!(read_all(&mut reader), want);
+    assert_eq!(read_all(&reader), want);
 }

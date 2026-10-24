@@ -92,6 +92,7 @@ pub async fn shape_response_materialized(
         projection,
         redaction,
         sequences.map(|s| s as &dyn SequenceAccess),
+        &crate::control::crs_context::crs_set_for(state),
     )
 }
 
@@ -106,6 +107,7 @@ pub fn shape_returning_materialized(
         plan,
         plan_kind,
         projection,
+        state,
         redaction,
         sequences,
         ..
@@ -125,6 +127,7 @@ pub fn shape_returning_materialized(
         projection,
         redaction,
         sequences.map(|s| s as &dyn SequenceAccess),
+        &crate::control::crs_context::crs_set_for(state),
     )
 }
 
@@ -135,16 +138,19 @@ fn shape_translated(
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
     sequences: Option<&dyn SequenceAccess>,
+    crs_set: &nodedb_crs::CustomCrsSet,
 ) -> Result<ShapeOutcome, NodeDbError> {
     let shaped = match plan_kind {
-        PlanKind::ArraySlice => shape_array_slice(translated, projection, redaction, sequences)?,
+        PlanKind::ArraySlice => {
+            shape_array_slice(translated, projection, redaction, sequences, crs_set)?
+        }
         // `RETURNING` rows are held to the columns already announced to the
         // client, when any were — see `super::returning`.
         PlanKind::ReturningRows => {
-            shape_returning_rows(translated, projection, redaction, sequences)?
+            shape_returning_rows(translated, projection, redaction, sequences, crs_set)?
         }
         PlanKind::SingleDocument | PlanKind::MultiRow => {
-            shape_generic_rows(translated, projection, redaction, sequences)?
+            shape_generic_rows(translated, projection, redaction, sequences, crs_set)?
         }
         // The callers return early for these; kept exhaustive (no catch-all,
         // no panic) so a future PlanKind desync degrades to passthrough
@@ -175,19 +181,20 @@ pub fn shape_payload_no_plan(
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
     sequences: Option<&dyn SequenceAccess>,
+    crs_set: &nodedb_crs::CustomCrsSet,
 ) -> Result<ShapeOutcome, NodeDbError> {
     Ok(match plan_kind {
         PlanKind::Execution | PlanKind::DmlResult(_) | PlanKind::DmlResultByOp => {
             ShapeOutcome::Passthrough
         }
         PlanKind::ArraySlice => ShapeOutcome::Rows(shape_array_slice(
-            payload, projection, redaction, sequences,
+            payload, projection, redaction, sequences, crs_set,
         )?),
         PlanKind::ReturningRows => ShapeOutcome::Rows(shape_returning_rows(
-            payload, projection, redaction, sequences,
+            payload, projection, redaction, sequences, crs_set,
         )?),
         PlanKind::SingleDocument | PlanKind::MultiRow => ShapeOutcome::Rows(shape_generic_rows(
-            payload, projection, redaction, sequences,
+            payload, projection, redaction, sequences, crs_set,
         )?),
     })
 }
@@ -203,12 +210,13 @@ fn shape_generic_rows(
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
     sequences: Option<&dyn SequenceAccess>,
+    crs_set: &nodedb_crs::CustomCrsSet,
 ) -> crate::Result<ShapedRows> {
     if payload.is_empty() {
         return Ok(empty_shaped());
     }
     match decode_payload_value(payload) {
-        Ok(value) => shape_decoded_rows(value, projection, redaction, sequences),
+        Ok(value) => shape_decoded_rows(value, projection, redaction, sequences, crs_set),
         Err(_) => Ok(single_result_row(
             String::from_utf8_lossy(payload).into_owned(),
         )),
@@ -295,7 +303,14 @@ mod tests {
             expected
         );
 
-        let no_plan = shape_payload_no_plan(&payload, kind, None, None, None);
+        let no_plan = shape_payload_no_plan(
+            &payload,
+            kind,
+            None,
+            None,
+            None,
+            nodedb_crs::CustomCrsSet::empty(),
+        );
         assert!(matches!(no_plan, Ok(ShapeOutcome::Passthrough)));
         assert_eq!(
             payload, original_payload,
@@ -322,9 +337,15 @@ mod tests {
         ]))
         .expect("encode");
 
-        let ShapeOutcome::Rows(shaped) =
-            shape_payload_no_plan(&payload, PlanKind::MultiRow, None, None, None).expect("shape")
-        else {
+        let ShapeOutcome::Rows(shaped) = shape_payload_no_plan(
+            &payload,
+            PlanKind::MultiRow,
+            None,
+            None,
+            None,
+            nodedb_crs::CustomCrsSet::empty(),
+        )
+        .expect("shape") else {
             panic!("multi-row plan must yield rows");
         };
         assert_eq!(

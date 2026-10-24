@@ -34,7 +34,7 @@ impl Scheduler {
         let epoch = txn.epoch;
         let position = txn.position;
 
-        let plans = match super::super::super::helpers::decode_plans(&txn.tx_class.plans) {
+        let plans = match super::super::super::helpers::decode_plans(txn.plans()) {
             Ok(p) => p,
             Err(e) => {
                 self.reject_plan(txn, txn_id, lock_owner, &e);

@@ -79,6 +79,9 @@ impl CoreLoop {
             Err(error) => return self.response_error(task, error),
         };
         let now_ms = batch.now_ms;
+        // The resolved rows carry the stamp their resolve took. It folds into
+        // the shared clock on every replica and every replay.
+        self.observe_ingest_stamp_ms(now_ms);
         let key: CollKey = (task.request.database_id, tid, collection.to_string());
         let live = mode == TimeseriesApplyMode::Immediate;
         let fit = self.schema_fit(&key, &batch);

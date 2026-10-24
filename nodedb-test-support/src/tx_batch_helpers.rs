@@ -159,6 +159,8 @@ pub fn edge_put(collection: &str, src: &str, dst: &str) -> PhysicalPlan {
         properties: Vec::new(),
         src_surrogate: crate::kv_rows::kv_row_surrogate(src.as_bytes()),
         dst_surrogate: crate::kv_rows::kv_row_surrogate(dst.as_bytes()),
+        valid_from_ms: None,
+        valid_until_ms: None,
     })
 }
 
@@ -169,6 +171,7 @@ pub fn neighbors(_collection: &str, src: &str) -> PhysicalPlan {
         edge_labels: vec!["REL".into()],
         direction: nodedb::engine::graph::edge_store::Direction::Out,
         rls_filters: Vec::new(),
+        scope: nodedb_physical::physical_plan::GraphReadScope::default(),
     })
 }
 
@@ -209,6 +212,7 @@ pub fn columnar_insert(collection: &str, id: &str, val: i64) -> PhysicalPlan {
         schema_bytes: Vec::new(),
         provenance: None,
         wal_lsn: None,
+        system_from: None,
         // These helpers build plans for transaction-batch tests on
         // collections that carry no RLS policy.
         rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,

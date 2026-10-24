@@ -133,6 +133,7 @@ impl CoreLoop {
                         vector: field,
                     },
                     &[(&key, sidecar.as_slice(), vector)],
+                    &self.crs_context(),
                 )
                 .map_err(ErrorCode::from)?
             }

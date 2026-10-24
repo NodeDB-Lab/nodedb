@@ -201,7 +201,6 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | GraphOp::BspSuperstep(_)
             | GraphOp::WccSuperstep(_)
             | GraphOp::TemporalNeighbors { .. }
-            | GraphOp::TemporalAlgorithm { .. }
             | GraphOp::Stats { .. }
             | GraphOp::NodePresenceRead { .. },
         ) => false,
@@ -349,6 +348,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::ConvertCollection { .. }
             | MetaOp::CreateTenantSnapshot { .. }
             | MetaOp::RestoreTenantSnapshot { .. }
+            | MetaOp::PurgeDepartedVShards { .. }
             | MetaOp::PurgeTenant { .. }
             | MetaOp::UnregisterCollection { .. }
             | MetaOp::UnregisterMaterializedView { .. }
@@ -371,6 +371,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::RebuildIndex { .. }
             | MetaOp::PutSynonymGroup { .. }
             | MetaOp::DeleteSynonymGroup { .. }
+            | MetaOp::SetCustomCrsSet { .. }
             | MetaOp::StageWrite { .. }
             | MetaOp::DropTxnOverlay { .. }
             | MetaOp::MarkSavepoint { .. }
@@ -431,8 +432,8 @@ mod tests {
     use nodedb_graph::{AlgoParams, Direction, GraphAlgorithm, GraphTraversalOptions};
     use nodedb_physical::physical_plan::{
         ArrayBinaryOp, ArrayReducer, BatchEdge, BspSuperstepPlan, ColumnarInsertIntent,
-        EnforcementOptions, ExchangeMode, ExchangeOp, OllpPredictedEdge, SpatialPredicate,
-        StorageMode, WccSuperstepPlan,
+        EnforcementOptions, ExchangeMode, ExchangeOp, GraphReadScope, OllpPredictedEdge,
+        SpatialPredicate, StorageMode, WccSuperstepPlan,
     };
     use nodedb_types::calvin::{
         EngineKeySet, EngineTag, PassiveReadKey, ReadKeyIdent, SortedVec, VersionedReadEntry,
@@ -658,6 +659,7 @@ mod tests {
                 vector_fields: Vec::new(),
                 declared_columns: Vec::new(),
                 declared_key: None,
+                incarnation: nodedb_types::Hlc::ZERO,
             }),
             PhysicalPlan::Document(DocumentOp::IndexLookup {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -672,7 +674,7 @@ mod tests {
                 projection: Vec::new(),
                 limit: 0,
                 offset: 0,
-                system_as_of_ms: None,
+                system_time: SystemTimeScope::Current,
             }),
             PhysicalPlan::Document(DocumentOp::DropIndex {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -799,7 +801,7 @@ mod tests {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 cursor: Vec::new(),
                 count: 0,
-                system_as_of_ms: None,
+                system_time: SystemTimeScope::Current,
                 raw_bodies: false,
             }),
             PhysicalPlan::Document(DocumentOp::ApplyBalanceDelta {
@@ -1128,6 +1130,8 @@ mod tests {
                 properties: Vec::new(),
                 src_surrogate: Surrogate::new(1),
                 dst_surrogate: Surrogate::new(2),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
             PhysicalPlan::Graph(GraphOp::EdgePutBatch {
                 edges: Vec::<BatchEdge>::new(),
@@ -1153,6 +1157,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 frontier_bitmap: None,
                 collection: None,
+                scope: GraphReadScope::default(),
             }),
             PhysicalPlan::Graph(GraphOp::Neighbors {
                 node_id: "n".into(),
@@ -1160,6 +1165,7 @@ mod tests {
                 direction: Direction::Out,
                 rls_filters: Vec::new(),
                 collection: None,
+                scope: GraphReadScope::default(),
             }),
             PhysicalPlan::Graph(GraphOp::NeighborsMulti {
                 node_ids: Vec::new(),
@@ -1170,6 +1176,7 @@ mod tests {
                 collection: None,
                 edge_predicate: Vec::new(),
                 with_properties: false,
+                scope: GraphReadScope::default(),
             }),
             PhysicalPlan::Graph(GraphOp::Path {
                 src: "a".into(),
@@ -1180,6 +1187,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 frontier_bitmap: None,
                 collection: None,
+                scope: GraphReadScope::default(),
             }),
             PhysicalPlan::Graph(GraphOp::Subgraph {
                 start_nodes: Vec::new(),
@@ -1188,6 +1196,7 @@ mod tests {
                 options: GraphTraversalOptions::default(),
                 rls_filters: Vec::new(),
                 collection: None,
+                scope: GraphReadScope::default(),
             }),
             PhysicalPlan::Graph(GraphOp::RagFusion {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1204,16 +1213,19 @@ mod tests {
                 bm25_query: None,
                 bm25_field: None,
                 stage: nodedb_physical::physical_plan::RagStage::Local,
+                scope: GraphReadScope::default(),
             }),
             PhysicalPlan::Graph(GraphOp::Algo {
                 algorithm: GraphAlgorithm::PageRank,
                 params: AlgoParams::default(),
                 stage: nodedb_physical::physical_plan::AlgoStage::Local,
+                scope: GraphReadScope::default(),
             }),
             PhysicalPlan::Graph(GraphOp::Match {
                 query: Vec::new(),
                 frontier_bitmap: None,
                 cluster_mode: false,
+                scope: GraphReadScope::default(),
             }),
             PhysicalPlan::Graph(GraphOp::MatchContinuation {
                 query: Vec::new(),
@@ -1221,10 +1233,12 @@ mod tests {
                 partial_row: Vec::new(),
                 source_node: "n".into(),
                 source_binding: "b".into(),
+                scope: GraphReadScope::default(),
             }),
             PhysicalPlan::Graph(GraphOp::MatchVarLenResume {
                 query: Vec::new(),
                 resume: Vec::new(),
+                scope: GraphReadScope::default(),
             }),
             PhysicalPlan::Graph(GraphOp::BspSuperstep(Box::new(BspSuperstepPlan {
                 algorithm: GraphAlgorithm::PageRank,
@@ -1238,12 +1252,14 @@ mod tests {
                 personalization_sum: 0.0,
                 read_cut_marker: 0,
                 system_as_of: None,
+                valid_at_ms: None,
             }))),
             PhysicalPlan::Graph(GraphOp::WccSuperstep(Box::new(WccSuperstepPlan {
                 params: AlgoParams::default(),
                 owned_vshards: Vec::new(),
                 read_cut_marker: 0,
                 system_as_of: None,
+                valid_at_ms: None,
             }))),
             PhysicalPlan::Graph(GraphOp::SetNodeLabels {
                 node_id: "n".into(),
@@ -1258,14 +1274,8 @@ mod tests {
                 node_id: "n".into(),
                 edge_label: None,
                 direction: Direction::Out,
-                system_time: SystemTimeScope::Current,
-                valid_at_ms: None,
+                scope: GraphReadScope::default(),
                 rls_filters: Vec::new(),
-            }),
-            PhysicalPlan::Graph(GraphOp::TemporalAlgorithm {
-                algorithm: GraphAlgorithm::PageRank,
-                params: AlgoParams::default(),
-                system_time: SystemTimeScope::Current,
             }),
             PhysicalPlan::Graph(GraphOp::Stats {
                 collection: None,
@@ -1525,6 +1535,7 @@ mod tests {
                 schema_bytes: Vec::new(),
                 provenance: None,
                 wal_lsn: None,
+                system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 returning: None,
                 rls_filters: Vec::new(),
@@ -1533,21 +1544,25 @@ mod tests {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 filters: Vec::new(),
                 updates: Vec::new(),
+                system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             PhysicalPlan::Columnar(ColumnarOp::Delete {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 filters: Vec::new(),
+                system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             }),
             PhysicalPlan::Columnar(ColumnarOp::ResolvedUpdate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 rows: Vec::new(),
+                system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
             }),
             PhysicalPlan::Columnar(ColumnarOp::ResolvedDelete {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 pks: Vec::new(),
+                system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
             }),
             PhysicalPlan::Columnar(ColumnarOp::MaterializeScan {
@@ -2089,6 +2104,7 @@ mod tests {
                 system_time: SystemTimeScope::Current,
                 valid_at_ms: None,
                 zone_msgpack: Vec::new(),
+                physical: false,
             }),
             PhysicalPlan::Array(ArrayOp::Aggregate {
                 array_id: array_id.clone(),
@@ -2098,9 +2114,10 @@ mod tests {
                 cell_filter: None,
                 return_partial: false,
                 shard_bucket: None,
-                system_as_of: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
                 valid_at_ms: None,
                 region_msgpack: Vec::new(),
+                physical: false,
             }),
             PhysicalPlan::Array(ArrayOp::Elementwise {
                 left: array_id.clone(),
@@ -2109,7 +2126,7 @@ mod tests {
                 attr_idx: 0,
                 cell_filter: None,
                 shard_bucket: None,
-                system_as_of: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
                 valid_at_ms: None,
             }),
             PhysicalPlan::Array(ArrayOp::Flush {
@@ -2153,6 +2170,7 @@ mod tests {
                 system_time: SystemTimeScope::Current,
                 valid_at_ms: None,
                 zone_msgpack: Vec::new(),
+                physical: false,
             }),
             PhysicalPlan::ClusterArray(ClusterArrayOp::Agg {
                 array_id: array_id.clone(),
@@ -2161,9 +2179,10 @@ mod tests {
                 group_by_dim: -1,
                 slice_tile_keys: Vec::new(),
                 prefix_bits: 0,
-                system_as_of: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
                 valid_at_ms: None,
                 region_msgpack: Vec::new(),
+                physical: false,
             }),
             PhysicalPlan::ClusterArray(ClusterArrayOp::Elementwise {
                 left: array_id.clone(),
@@ -2171,7 +2190,7 @@ mod tests {
                 op: ArrayBinaryOp::Add,
                 attr_idx: 0,
                 prefix_bits: 0,
-                system_as_of: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
                 valid_at_ms: None,
             }),
             PhysicalPlan::ClusterArray(ClusterArrayOp::Flush {
@@ -2291,6 +2310,8 @@ mod tests {
             PhysicalPlan::Columnar(ColumnarOp::Truncate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 restart_identity: false,
+                system_from: None,
+                erase_history: false,
             }),
             PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),

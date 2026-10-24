@@ -1,192 +1,214 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Readers over a geometry's own contents: ordinates, type name, vertex count,
-//! and the WKT / GeoJSON renderings. The SRID reader lives in `crs`.
+//! Readers over a geometry's own contents: ordinates, dimension, type name
+//! and vertex count. The encodings live in `encode`, the SRID reader in
+//! `crs`.
 
+use nodedb_crs::CrsContext;
 use nodedb_types::Value;
 use nodedb_types::geometry::{Geometry, SridGeometry};
 
-use super::helpers::{GeoEval, geom_arg};
+use super::helpers::{GeoEval, geom_arg, unary};
+use crate::expr::EvalError;
 use crate::value_ops::to_value_number;
 
-pub(super) fn eval(canonical: &'static str, args: &[Value]) -> GeoEval {
+pub(super) fn eval(canonical: &'static str, args: &[Value], ctx: &CrsContext<'_>) -> GeoEval {
     let result = match canonical {
-        "st_x" => ordinate(args, 0),
-        "st_y" => ordinate(args, 1),
-        // WKT stays plain: it has no SRID slot.
-        "st_astext" => unary(args, |g| {
-            Value::String(nodedb_spatial::geometry_to_wkt(&g.geometry))
+        "st_x" => ordinate(canonical, args, ctx, Ordinate::X),
+        "st_y" => ordinate(canonical, args, ctx, Ordinate::Y),
+        "st_z" => ordinate(canonical, args, ctx, Ordinate::Z),
+        "st_m" => ordinate(canonical, args, ctx, Ordinate::M),
+        "st_zmin" => unary(canonical, args, ctx, |g| Ok(z_extreme(g, f64::min))),
+        "st_zmax" => unary(canonical, args, ctx, |g| Ok(z_extreme(g, f64::max))),
+        "st_coorddim" | "st_ndims" => unary(canonical, args, ctx, |g| {
+            Ok(Value::Integer(i64::from(g.dimension().coord_dim())))
         }),
-        // GeoJSON carries the `crs` member for any SRID other than 4326.
-        "st_asgeojson" => unary(args, |g| match sonic_rs::to_string(g) {
-            Ok(json) => Value::String(json),
-            Err(_) => Value::Null,
+        "st_zmflag" => unary(canonical, args, ctx, |g| {
+            Ok(Value::Integer(i64::from(g.dimension().zm_flag())))
         }),
-        "st_geometrytype" => unary(args, |g| {
-            Value::String(g.geometry.geometry_type().to_string())
+        "st_hasz" => unary(canonical, args, ctx, |g| Ok(Value::Bool(g.has_z()))),
+        "st_hasm" => unary(canonical, args, ctx, |g| Ok(Value::Bool(g.has_m()))),
+        "st_isempty" => unary(canonical, args, ctx, |g| Ok(Value::Bool(g.is_empty()))),
+        "st_geometrytype" => unary(canonical, args, ctx, |g| {
+            Ok(Value::String(g.geometry().geometry_type().to_string()))
         }),
-        "st_npoints" => unary(args, |g| Value::Integer(count_points(&g.geometry) as i64)),
+        "st_npoints" => unary(canonical, args, ctx, |g| {
+            Ok(Value::Integer(g.geometry().coord_count() as i64))
+        }),
         _ => return None,
     };
-    Some(Ok(result))
+    Some(result)
 }
 
-fn unary(args: &[Value], f: fn(&SridGeometry) -> Value) -> Value {
-    match geom_arg(args, 0) {
-        Some(geom) => f(&geom),
-        None => Value::Null,
+#[derive(Clone, Copy)]
+enum Ordinate {
+    X,
+    Y,
+    Z,
+    M,
+}
+
+/// One ordinate of a point. PostGIS defines these on points only: any other
+/// geometry, an EMPTY point, and a missing Z or M yield NULL.
+fn ordinate(
+    function: &'static str,
+    args: &[Value],
+    ctx: &CrsContext<'_>,
+    which: Ordinate,
+) -> Result<Value, EvalError> {
+    let Some(g) = geom_arg(args, 0, function, ctx)? else {
+        return Ok(Value::Null);
+    };
+    if !matches!(g.geometry(), Geometry::Point { .. }) || g.is_empty() {
+        return Ok(Value::Null);
     }
+    let Some(p) = g.positions().next() else {
+        return Ok(Value::Null);
+    };
+    let value = match which {
+        Ordinate::X => Some(p.x),
+        Ordinate::Y => Some(p.y),
+        Ordinate::Z => p.z,
+        Ordinate::M => p.m,
+    };
+    Ok(value.map_or(Value::Null, to_value_number))
 }
 
-/// Read one ordinate of a point. PostGIS defines `ST_X`/`ST_Y` on points only;
-/// any other geometry yields NULL rather than an arbitrary vertex.
-fn ordinate(args: &[Value], index: usize) -> Value {
-    match geom_arg(args, 0).map(|g| g.geometry) {
-        Some(Geometry::Point { coordinates }) => to_value_number(coordinates[index]),
-        _ => Value::Null,
+/// The least or greatest Z. A geometry without Z has a Z of 0 everywhere,
+/// as PostGIS reports it. EMPTY is NULL.
+fn z_extreme(g: &SridGeometry, pick: fn(f64, f64) -> f64) -> Value {
+    if g.is_empty() {
+        return Value::Null;
     }
-}
-
-fn count_points(geom: &Geometry) -> usize {
-    match geom {
-        Geometry::Point { .. } => 1,
-        Geometry::LineString { coordinates } | Geometry::MultiPoint { coordinates } => {
-            coordinates.len()
-        }
-        Geometry::Polygon { coordinates } | Geometry::MultiLineString { coordinates } => {
-            coordinates.iter().map(|ring| ring.len()).sum()
-        }
-        Geometry::MultiPolygon { coordinates } => coordinates
+    match g.ordinates().z() {
+        Some(z) => z
             .iter()
-            .flat_map(|poly| poly.iter())
-            .map(|ring| ring.len())
-            .sum(),
-        Geometry::GeometryCollection { geometries } => geometries.iter().map(count_points).sum(),
-        // `Geometry` is `#[non_exhaustive]`; a kind added upstream exposes no
-        // coordinates this crate can count.
-        _ => 0,
+            .copied()
+            .reduce(pick)
+            .map_or(Value::Null, to_value_number),
+        None => to_value_number(0.0),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nodedb_types::geometry::{Ordinates, Srid};
 
-    /// The evaluator with its infallible accessors unwrapped.
+    fn ctx() -> CrsContext<'static> {
+        CrsContext::builtin_only()
+    }
+
+    /// The evaluator with a fault turned into a test failure.
     fn eval(canonical: &'static str, args: &[Value]) -> Option<Value> {
-        super::eval(canonical, args).map(|r| r.expect("accessors never fail"))
+        super::eval(canonical, args, &ctx()).map(|r| r.expect("no fault expected"))
     }
 
     fn geom(v: Geometry) -> Vec<Value> {
         vec![Value::Geometry(SridGeometry::wgs84(v))]
     }
 
+    fn zm_point() -> Vec<Value> {
+        vec![Value::Geometry(
+            SridGeometry::with_ordinates(
+                Srid::WGS84,
+                Geometry::point(1.0, 2.0),
+                Ordinates::new(Some(vec![3.0]), Some(vec![4.0])),
+            )
+            .unwrap(),
+        )]
+    }
+
     #[test]
     fn ordinates_read_a_point() {
-        let point = geom(Geometry::point(1.0, 2.0));
+        let point = zm_point();
         assert_eq!(eval("st_x", &point), Some(to_value_number(1.0)));
         assert_eq!(eval("st_y", &point), Some(to_value_number(2.0)));
+        assert_eq!(eval("st_z", &point), Some(to_value_number(3.0)));
+        assert_eq!(eval("st_m", &point), Some(to_value_number(4.0)));
+        let xy = geom(Geometry::point(1.0, 2.0));
+        assert_eq!(eval("st_z", &xy), Some(Value::Null));
+        assert_eq!(eval("st_m", &xy), Some(Value::Null));
     }
 
     /// A non-point has no single X; returning a vertex would be a guess.
     #[test]
-    fn ordinates_of_a_non_point_are_null() {
+    fn ordinates_of_a_non_point_or_empty_are_null() {
         let line = geom(Geometry::line_string(vec![[0.0, 0.0], [1.0, 1.0]]));
         assert_eq!(eval("st_x", &line), Some(Value::Null));
-        assert_eq!(eval("st_y", &line), Some(Value::Null));
-    }
-
-    #[test]
-    fn astext_renders_wkt() {
-        let Some(Value::String(wkt)) = eval("st_astext", &geom(Geometry::point(1.0, 2.0))) else {
-            panic!("expected WKT text");
-        };
-        assert!(wkt.to_uppercase().starts_with("POINT"), "got {wkt}");
-        assert!(wkt.contains('1') && wkt.contains('2'), "got {wkt}");
-    }
-
-    #[test]
-    fn asgeojson_renders_geojson() {
-        let Some(Value::String(json)) = eval("st_asgeojson", &geom(Geometry::point(1.0, 2.0)))
-        else {
-            panic!("expected GeoJSON text");
-        };
-        assert!(
-            json.contains("\"Point\"") && json.contains("coordinates"),
-            "got {json}"
-        );
-    }
-
-    /// The two renderings must describe the same geometry — a reader that
-    /// round-trips one must get the other's geometry back.
-    #[test]
-    fn wkt_and_geojson_renderings_agree() {
-        let original = Geometry::line_string(vec![[0.0, 0.0], [1.0, 1.0]]);
-        let Some(Value::String(wkt)) = eval("st_astext", &geom(original.clone())) else {
-            panic!("expected WKT");
-        };
-        let Some(Value::String(json)) = eval("st_asgeojson", &geom(original.clone())) else {
-            panic!("expected GeoJSON");
-        };
         assert_eq!(
-            super::super::helpers::geometry_from_text(&wkt),
-            Some(SridGeometry::wgs84(original.clone()))
+            eval("st_x", &geom(Geometry::empty_point())),
+            Some(Value::Null)
         );
+    }
+
+    #[test]
+    fn dimension_readers() {
+        let zm = zm_point();
+        assert_eq!(eval("st_coorddim", &zm), Some(Value::Integer(4)));
+        assert_eq!(eval("st_ndims", &zm), Some(Value::Integer(4)));
+        assert_eq!(eval("st_zmflag", &zm), Some(Value::Integer(3)));
+        assert_eq!(eval("st_hasz", &zm), Some(Value::Bool(true)));
+        assert_eq!(eval("st_hasm", &zm), Some(Value::Bool(true)));
+        let xy = geom(Geometry::point(0.0, 0.0));
+        assert_eq!(eval("st_zmflag", &xy), Some(Value::Integer(0)));
+        assert_eq!(eval("st_coorddim", &xy), Some(Value::Integer(2)));
+    }
+
+    #[test]
+    fn z_extremes() {
+        let line = vec![Value::Geometry(
+            SridGeometry::with_ordinates(
+                Srid::WGS84,
+                Geometry::line_string(vec![[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]),
+                Ordinates::new(Some(vec![5.0, -1.0, 3.0]), None),
+            )
+            .unwrap(),
+        )];
+        assert_eq!(eval("st_zmin", &line), Some(to_value_number(-1.0)));
+        assert_eq!(eval("st_zmax", &line), Some(to_value_number(5.0)));
         assert_eq!(
-            super::super::helpers::geometry_from_text(&json),
-            Some(SridGeometry::wgs84(original))
+            eval("st_zmax", &geom(Geometry::point(0.0, 0.0))),
+            Some(to_value_number(0.0))
         );
     }
 
-    /// GeoJSON keeps a projected SRID in its `crs` member; WKT stays plain.
     #[test]
-    fn projected_renderings() {
-        let g = SridGeometry::new(
-            nodedb_types::geometry::Srid::Utm48N,
-            Geometry::point(1.0, 2.0),
-        );
-        let args = vec![Value::Geometry(g.clone())];
-        let Some(Value::String(json)) = eval("st_asgeojson", &args) else {
-            panic!("expected GeoJSON");
-        };
-        assert!(json.contains("EPSG:32648"), "{json}");
-        assert_eq!(super::super::helpers::geometry_from_text(&json), Some(g));
-        let Some(Value::String(wkt)) = eval("st_astext", &args) else {
-            panic!("expected WKT");
-        };
-        assert!(!wkt.contains("SRID"), "{wkt}");
-    }
-
-    #[test]
-    fn geometrytype_names_the_variant() {
+    fn type_count_and_empty() {
         assert_eq!(
             eval("st_geometrytype", &geom(Geometry::point(0.0, 0.0))),
             Some(Value::String("Point".into()))
         );
-    }
-
-    #[test]
-    fn npoints_counts_every_vertex() {
         let line = geom(Geometry::line_string(vec![
             [0.0, 0.0],
             [1.0, 1.0],
             [2.0, 2.0],
         ]));
         assert_eq!(eval("st_npoints", &line), Some(Value::Integer(3)));
-    }
-
-    #[test]
-    fn unreadable_geometry_yields_null() {
-        let bad = vec![Value::String("not a geometry".into())];
-        assert_eq!(eval("st_astext", &bad), Some(Value::Null));
-        assert_eq!(eval("st_npoints", &bad), Some(Value::Null));
+        assert_eq!(
+            eval("st_npoints", &geom(Geometry::empty_point())),
+            Some(Value::Integer(0))
+        );
+        assert_eq!(
+            eval("st_isempty", &geom(Geometry::empty_point())),
+            Some(Value::Bool(true))
+        );
     }
 
     /// A WKT string argument is a geometry, so accessors read it directly.
     #[test]
     fn wkt_string_argument_is_accepted() {
-        let wkt = vec![Value::String("POINT(3 4)".into())];
+        let wkt = vec![Value::String("POINT Z (3 4 5)".into())];
         assert_eq!(eval("st_x", &wkt), Some(to_value_number(3.0)));
-        assert_eq!(eval("st_y", &wkt), Some(to_value_number(4.0)));
+        assert_eq!(eval("st_z", &wkt), Some(to_value_number(5.0)));
+    }
+
+    #[test]
+    fn unreadable_text_fails_the_statement() {
+        let bad = vec![Value::String("not a geometry".into())];
+        assert!(matches!(
+            super::eval("st_npoints", &bad, &ctx()),
+            Some(Err(EvalError::Geometry { .. }))
+        ));
     }
 }

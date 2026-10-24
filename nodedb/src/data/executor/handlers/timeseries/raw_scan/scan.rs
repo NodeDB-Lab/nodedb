@@ -45,6 +45,7 @@ impl CoreLoop {
         &self,
         params: RawScanParams<'_>,
     ) -> Response {
+        let crs = self.crs_context();
         let RawScanParams {
             task,
             tid,
@@ -156,7 +157,7 @@ impl CoreLoop {
             } else {
                 match results
                     .into_iter()
-                    .map(|row| apply_computed_columns_rmpv(row, &computed_cols))
+                    .map(|row| apply_computed_columns_rmpv(row, &computed_cols, &crs))
                     .collect::<crate::Result<Vec<_>>>()
                 {
                     Ok(rows) => rows,
@@ -180,7 +181,9 @@ impl CoreLoop {
         // `limit` rows of the requested order rather than an arbitrary `limit`
         // rows sorted among themselves. Audit-log reads keep their system-time
         // order, which is the semantics of `AS OF SYSTEM TIME NULL`.
-        if !all_versions && let Err(e) = super::super::sort::sort_rows(&mut results, sort_keys) {
+        if !all_versions
+            && let Err(e) = super::super::sort::sort_rows(&mut results, sort_keys, &crs)
+        {
             return self.response_error(task, e);
         }
         results.truncate(limit);

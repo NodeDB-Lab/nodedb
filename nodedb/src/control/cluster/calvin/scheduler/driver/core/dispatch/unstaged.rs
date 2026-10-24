@@ -186,7 +186,7 @@ mod tests {
     /// A txn whose plan bytes do not decode.
     fn undecodable_txn(epoch: u64, position: u32) -> SequencedTxn {
         let mut txn = make_sequenced_txn(epoch, position);
-        txn.tx_class.plans = vec![0xc1];
+        std::sync::Arc::make_mut(&mut txn.tx_class).plans = vec![0xc1];
         txn
     }
 

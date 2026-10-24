@@ -93,8 +93,8 @@ pub(crate) async fn propose_sync_plan(
 /// deadline, so a retry gets only the time that remains. Only propose-layer machinery failures
 /// map to [`crate::Error::Dispatch`]; a classified apply verdict passes through.
 ///
-/// An edge write is not proposed. It runs as a Calvin transaction
-/// (`planner::calvin::edge_sequencing`), and its applied payload comes back.
+/// An edge or label write is not proposed. It runs as a Calvin transaction
+/// (`planner::calvin::graph_sequencing`), and its applied payload comes back.
 pub(crate) async fn propose_sync_write(
     state: &SharedState,
     mut entry: ReplicatedEntry,
@@ -102,7 +102,7 @@ pub(crate) async fn propose_sync_write(
     deadline: StatementDeadline,
 ) -> crate::Result<Vec<u8>> {
     if let Some(response) =
-        crate::control::planner::calvin::sequence_replicated_edge_write(state, &entry).await?
+        crate::control::planner::calvin::sequence_replicated_graph_write(state, &entry).await?
     {
         return Ok(response.payload.to_vec());
     }

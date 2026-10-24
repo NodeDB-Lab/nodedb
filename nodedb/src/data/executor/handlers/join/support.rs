@@ -164,6 +164,7 @@ pub(super) fn compare_preextracted(
 pub(super) fn binary_row_matches_filters(
     row: &[u8],
     filters: &[crate::bridge::scan_filter::ScanFilter],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<bool, EvalError> {
     use crate::bridge::scan_filter::FilterOp;
 
@@ -178,7 +179,7 @@ pub(super) fn binary_row_matches_filters(
         } else {
             row
         };
-        if !f.matches_binary(doc)? {
+        if !f.matches_binary(doc, crs)? {
             return Ok(false);
         }
     }
@@ -403,7 +404,10 @@ mod tests {
             expr: None,
         }];
 
-        assert!(binary_row_matches_filters(&merged, &filters).unwrap());
+        assert!(
+            binary_row_matches_filters(&merged, &filters, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap()
+        );
     }
 
     #[test]

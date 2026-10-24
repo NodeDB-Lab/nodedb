@@ -406,6 +406,7 @@ impl CoreLoop {
             entries,
             intent,
             self.declared_columns_of(did, tid, collection),
+            &self.crs_context(),
             |key| {
                 let ctx = self.kv_atomic_stage_ctx(task, tid, txn_id, collection, key);
                 self.resolve_kv_current(&ctx, key)

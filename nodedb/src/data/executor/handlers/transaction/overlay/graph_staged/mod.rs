@@ -7,4 +7,4 @@ mod txn_overlay;
 mod types;
 
 pub use txn_overlay::GraphTxnOverlay;
-pub use types::{GraphCollKey, NodeLabelDelta};
+pub use types::{EdgeValidTime, GraphCollKey, NodeLabelDelta};

@@ -50,10 +50,7 @@ pub(crate) async fn submit_local_assign(
     mut tx_class: TxClass,
     deadline: tokio::time::Instant,
 ) -> crate::Result<RoutedAssignment> {
-    super::local::raise_metadata_floor(state, &mut tx_class);
-    super::local::stamp_incarnations(state, &mut tx_class)?;
-    super::unique_claims::stamp_unique_claims(state, &mut tx_class)?;
-    let stream = super::parts::split_into_parts(state, &mut tx_class)?;
+    let stream = super::prepare::prepare_submit(state, &mut tx_class)?.stream;
     assign_prepared(state, tx_class, stream, deadline).await
 }
 
@@ -123,10 +120,7 @@ pub async fn submit_calvin_routed_assign(
     state: &SharedState,
     mut tx_class: TxClass,
 ) -> crate::Result<RoutedAssignment> {
-    super::local::raise_metadata_floor(state, &mut tx_class);
-    super::local::stamp_incarnations(state, &mut tx_class)?;
-    super::unique_claims::stamp_unique_claims(state, &mut tx_class)?;
-    let stream = super::parts::split_into_parts(state, &mut tx_class)?;
+    let stream = super::prepare::prepare_submit(state, &mut tx_class)?.stream;
 
     // Every running server has a cluster transport, the synthesized one-node
     // cluster included. Without one, `start_raft` never ran here.

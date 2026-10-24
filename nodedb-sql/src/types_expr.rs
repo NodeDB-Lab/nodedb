@@ -26,6 +26,9 @@ pub enum SqlValue {
     Timestamp(NdbDateTime),
     /// Typed timezone-aware timestamp literal: `TIMESTAMPTZ '...'` or `'...'::TIMESTAMPTZ`.
     Timestamptz(NdbDateTime),
+    /// A geometry: what a geometry-returning call folds to. Carries its
+    /// SRID, Z and M.
+    Geometry(nodedb_types::geometry::SridGeometry),
 }
 
 /// SQL-side payload-bitmap predicate atom. Mirrors `nodedb_types::PayloadAtom`

@@ -22,6 +22,7 @@ impl CoreLoop {
         &mut self,
         p: NestedLoopJoinParams<'_>,
     ) -> Response {
+        let crs = self.crs_context();
         let NestedLoopJoinParams {
             task,
             tid,
@@ -171,6 +172,7 @@ impl CoreLoop {
                     match crate::bridge::scan_filter::ScanFilter::all_match_binary(
                         &predicates,
                         &merged,
+                        &crs,
                     ) {
                         Ok(b) => b,
                         Err(e) => {

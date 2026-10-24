@@ -33,6 +33,7 @@ impl CoreLoop {
         task: &ExecutionTask,
         params: KvScanHandlerParams<'_>,
     ) -> Response {
+        let crs = self.crs_context();
         let KvScanHandlerParams {
             did,
             tid,
@@ -144,6 +145,7 @@ impl CoreLoop {
                 match crate::bridge::scan_filter::ScanFilter::all_match_binary(
                     &filter_predicates,
                     &entry_mp,
+                    &crs,
                 ) {
                     Ok(true) => {}
                     Ok(false) => continue,
@@ -168,7 +170,7 @@ impl CoreLoop {
 
         if !sort_keys.is_empty()
             && let Err(e) =
-                super::super::sort_utils::sort_msgpack_rows(&mut result_entries, sort_keys)
+                super::super::sort_utils::sort_msgpack_rows(&mut result_entries, sort_keys, &crs)
         {
             return self.response_error(task, e);
         }
@@ -202,6 +204,7 @@ impl CoreLoop {
         projection: &[String],
         computed_columns_bytes: &[u8],
     ) -> Result<Vec<Vec<u8>>, Response> {
+        let crs = self.crs_context();
         if projection.is_empty() && computed_columns_bytes.is_empty() {
             return Ok(result_entries);
         }
@@ -228,6 +231,7 @@ impl CoreLoop {
                 result_entries,
                 &[],
                 computed_columns_bytes,
+                &crs,
             )
             .map_err(|e| self.response_error(task, e))
         } else {
@@ -237,6 +241,7 @@ impl CoreLoop {
                     entry,
                     &computed_cols,
                     projection,
+                    &crs,
                 )
                 .map_err(|e| self.response_error(task, e))?;
                 projected_entries.push(row);

@@ -29,6 +29,10 @@ pub(super) fn columnar_write(op: &ColumnarOp) -> crate::Result<Option<Replicated
             provenance,
             // wal_lsn omitted: a follower allocates its own LSN at apply time.
             wal_lsn: _,
+            // Not on the wire: the data group's leader reserves the rows' run
+            // as it admits the entry (`ReplicatedEntry::system_ordinal`), and
+            // every replica's funnel stamps that run.
+            system_from: _,
             // Plain insert: policy decided at plan time. ON CONFLICT DO UPDATE defers —
             // its merged row exists only in the handler, so the guard below refuses it.
             rls_write_check,
@@ -54,6 +58,9 @@ pub(super) fn columnar_write(op: &ColumnarOp) -> crate::Result<Option<Replicated
         ColumnarOp::Delete {
             collection,
             filters,
+            // Not on the wire: the data group's leader stamps the entry
+            // (`ReplicatedEntry::system_ordinal`), as for `Update` below.
+            system_from: _,
             rls_write_check,
         } => {
             refuse_governed_predicate_dml(collection.as_str(), rls_write_check)?;
@@ -63,6 +70,9 @@ pub(super) fn columnar_write(op: &ColumnarOp) -> crate::Result<Option<Replicated
             collection,
             filters,
             updates,
+            // Not on the wire: the data group's leader stamps the entry
+            // (`ReplicatedEntry::system_ordinal`), as for an insert.
+            system_from: _,
             rls_write_check,
         } => {
             refuse_governed_predicate_dml(collection.as_str(), rls_write_check)?;
@@ -74,11 +84,15 @@ pub(super) fn columnar_write(op: &ColumnarOp) -> crate::Result<Option<Replicated
         ColumnarOp::ResolvedUpdate {
             collection,
             rows,
+            // Not on the wire, as for `Update` above.
+            system_from: _,
             rls_write_check: _,
         } => columnar::bulk_resolved_update(collection.as_str(), rows)?,
         ColumnarOp::ResolvedDelete {
             collection,
             pks,
+            // Not on the wire, as for `Update` above.
+            system_from: _,
             rls_write_check: _,
         } => columnar::bulk_resolved_delete(collection.as_str(), pks)?,
 
@@ -87,7 +101,10 @@ pub(super) fn columnar_write(op: &ColumnarOp) -> crate::Result<Option<Replicated
         ColumnarOp::Truncate {
             collection,
             restart_identity,
-        } => columnar::truncate(collection.as_str(), *restart_identity),
+            // Not on the wire, as for `Update` above.
+            system_from: _,
+            erase_history,
+        } => columnar::truncate(collection.as_str(), *restart_identity, *erase_history),
 
         // Not a write — reads/scans. `ResolveDml` only reports the row set a DML touches.
         ColumnarOp::Scan { .. }
@@ -158,8 +175,10 @@ pub(super) fn timeseries_write(op: &TimeseriesOp) -> Option<ReplicatedWrite> {
             payload,
             format,
             surrogates,
-            // Read once, here on the proposer: every replica stamps an
-            // untimed row with this instant instead of its own clock.
+            // Read once, here on the proposer. Every replica stamps the batch
+            // with the millisecond of the ordinal the entry's leader assigns
+            // (`decode::entry`), and with this instant only for an entry no
+            // leader stamped.
             default_timestamp_ms: crate::engine::kv::current_ms() as i64,
             provenance: encode_provenance(provenance),
             returning: encode_returning(returning),

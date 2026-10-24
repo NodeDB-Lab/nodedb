@@ -29,7 +29,11 @@ impl RowShaper {
     /// Shape one msgpack source row. A source column absent from the row
     /// yields SQL NULL, as on every other projection path. A division by zero
     /// in a bound expression fails the statement instead of writing NULL.
-    pub(crate) fn shape(&self, row: Vec<u8>) -> crate::Result<Vec<u8>> {
+    pub(crate) fn shape(
+        &self,
+        row: Vec<u8>,
+        crs: &nodedb_crs::CrsContext<'_>,
+    ) -> crate::Result<Vec<u8>> {
         if self.columns.is_empty() {
             return Ok(row);
         }
@@ -38,17 +42,21 @@ impl RowShaper {
                 format: "msgpack".into(),
                 detail: format!("source row: {e}"),
             })?;
-        self.shape_value(&row)
+        self.shape_value(&row, crs)
     }
 
     /// Shape one decoded source row.
-    pub(crate) fn shape_value(&self, row: &nodedb_types::Value) -> crate::Result<Vec<u8>> {
+    pub(crate) fn shape_value(
+        &self,
+        row: &nodedb_types::Value,
+        crs: &nodedb_crs::CrsContext<'_>,
+    ) -> crate::Result<Vec<u8>> {
         if self.columns.is_empty() {
             return encode_row(row);
         }
         let mut shaped = std::collections::HashMap::with_capacity(self.columns.len());
         for column in &self.columns {
-            shaped.insert(column.alias.clone(), column.expr.eval(row)?);
+            shaped.insert(column.alias.clone(), column.expr.eval(row, crs)?);
         }
         encode_row(&nodedb_types::Value::Object(shaped))
     }
@@ -83,7 +91,12 @@ mod tests {
     fn an_empty_map_passes_the_row_through() {
         let shaper = RowShaper::decode(&[]).expect("decode map");
         let input = row(&[("a", Value::Integer(1))]);
-        assert_eq!(shaper.shape(input.clone()).expect("shape"), input);
+        assert_eq!(
+            shaper
+                .shape(input.clone(), &nodedb_crs::CrsContext::builtin_only())
+                .expect("shape"),
+            input
+        );
     }
 
     #[test]
@@ -95,10 +108,10 @@ mod tests {
         let bytes = zerompk::to_msgpack_vec(&columns).expect("encode map");
         let shaper = RowShaper::decode(&bytes).expect("decode map");
         let shaped = shaper
-            .shape(row(&[
-                ("out", Value::Integer(7)),
-                ("extra", Value::Bool(true)),
-            ]))
+            .shape(
+                row(&[("out", Value::Integer(7)), ("extra", Value::Bool(true))]),
+                &nodedb_crs::CrsContext::builtin_only(),
+            )
             .expect("shape");
         let Value::Object(map) = decode(&shaped) else {
             panic!("shaped row is not an object");
@@ -115,7 +128,9 @@ mod tests {
         }];
         let bytes = zerompk::to_msgpack_vec(&columns).expect("encode map");
         let shaper = RowShaper::decode(&bytes).expect("decode map");
-        let shaped = shaper.shape(row(&[])).expect("shape");
+        let shaped = shaper
+            .shape(row(&[]), &nodedb_crs::CrsContext::builtin_only())
+            .expect("shape");
         let Value::Object(map) = decode(&shaped) else {
             panic!("shaped row is not an object");
         };

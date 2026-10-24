@@ -28,6 +28,8 @@ fn edge_put_and_graph_neighbors() {
                 properties: vec![],
                 src_surrogate: doc_surrogate("alice"),
                 dst_surrogate: doc_surrogate(dst),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
         );
     }
@@ -42,6 +44,7 @@ fn edge_put_and_graph_neighbors() {
             direction: Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let json = payload_json(&payload);
@@ -69,6 +72,8 @@ fn graph_hop_traversal() {
                 properties: vec![],
                 src_surrogate: doc_surrogate(s),
                 dst_surrogate: doc_surrogate(d),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
         );
     }
@@ -86,6 +91,7 @@ fn graph_hop_traversal() {
             rls_filters: Vec::new(),
             frontier_bitmap: None,
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let nodes: Vec<String> = serde_json::from_value(payload_value(&payload)).unwrap();
@@ -114,6 +120,8 @@ fn graph_path_and_subgraph() {
                 properties: vec![],
                 src_surrogate: doc_surrogate(s),
                 dst_surrogate: doc_surrogate(d),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
         );
     }
@@ -131,6 +139,7 @@ fn graph_path_and_subgraph() {
             rls_filters: Vec::new(),
             frontier_bitmap: None,
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let path: Vec<String> = serde_json::from_value(payload_value(&payload)).unwrap();
@@ -147,6 +156,7 @@ fn graph_path_and_subgraph() {
             options: Default::default(),
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let edges: Vec<serde_json::Value> = serde_json::from_value(payload_value(&payload)).unwrap();
@@ -172,6 +182,8 @@ fn edge_delete_updates_csr() {
             properties: vec![],
             src_surrogate: doc_surrogate("x"),
             dst_surrogate: doc_surrogate("y"),
+            valid_from_ms: None,
+            valid_until_ms: None,
         }),
     );
 
@@ -203,6 +215,7 @@ fn edge_delete_updates_csr() {
             direction: Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let neighbors: Vec<serde_json::Value> =
@@ -257,6 +270,8 @@ fn graph_rag_fusion_pipeline() {
                 properties: vec![],
                 src_surrogate: doc_surrogate(s),
                 dst_surrogate: doc_surrogate(d),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
         );
     }
@@ -283,6 +298,7 @@ fn graph_rag_fusion_pipeline() {
             bm25_query: None,
             bm25_field: None,
             stage: nodedb_physical::physical_plan::RagStage::Local,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
 
@@ -329,6 +345,8 @@ fn label_set_graph() -> (
                 properties: vec![],
                 src_surrogate: doc_surrogate(s),
                 dst_surrogate: doc_surrogate(d),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
         );
     }
@@ -352,6 +370,7 @@ fn hop_follows_every_listed_label() {
             rls_filters: Vec::new(),
             frontier_bitmap: None,
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         })
     };
 
@@ -396,6 +415,7 @@ fn neighbors_multi_follows_every_listed_label() {
             collection: None,
             edge_predicate: Vec::new(),
             with_properties: false,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let rows: Vec<serde_json::Value> = serde_json::from_value(payload_value(&payload)).unwrap();
@@ -436,6 +456,7 @@ fn path_and_subgraph_follow_every_listed_label() {
             rls_filters: Vec::new(),
             frontier_bitmap: None,
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let path: Vec<String> = serde_json::from_value(payload_value(&payload)).unwrap();
@@ -452,6 +473,7 @@ fn path_and_subgraph_follow_every_listed_label() {
             options: Default::default(),
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let edges: Vec<serde_json::Value> = serde_json::from_value(payload_value(&payload)).unwrap();

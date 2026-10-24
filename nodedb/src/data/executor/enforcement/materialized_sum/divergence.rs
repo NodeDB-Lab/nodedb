@@ -78,6 +78,7 @@ impl CoreLoop {
         check: &SumTargetCheck<'_>,
         rows: &[serde_json::Value],
     ) -> bool {
+        let crs = self.crs_context();
         let key = (
             DatabaseId::new(check.database_id),
             TenantId::new(check.tid),
@@ -114,7 +115,8 @@ impl CoreLoop {
             // write path, on the same row and with the same typed error. It is
             // not a prediction drift, so it must not be reported as one — a
             // retry would re-run the same failing expression forever.
-            let Ok(required) = crate::query::binding_join_keys(binding, check.updates, rows) else {
+            let Ok(required) = crate::query::binding_join_keys(binding, check.updates, rows, &crs)
+            else {
                 continue;
             };
             if let Some(missing) = crate::query::missing_join_key(

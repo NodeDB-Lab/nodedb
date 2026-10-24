@@ -99,6 +99,7 @@ impl TenantCrdtEngine {
         delta: &[u8],
         target: ApplyTarget<'_>,
         peer_id: u64,
+        crs: &nodedb_crs::CrsContext<'_>,
     ) -> ValidatedApplyOutcome {
         self.apply_committed_delta_authenticated(
             collection,
@@ -110,6 +111,7 @@ impl TenantCrdtEngine {
                 required: false,
                 preverified: false,
             },
+            crs,
         )
     }
 
@@ -121,6 +123,7 @@ impl TenantCrdtEngine {
         target: ApplyTarget<'_>,
         peer_id: u64,
         admission: DeltaSigningAdmission,
+        crs: &nodedb_crs::CrsContext<'_>,
     ) -> ValidatedApplyOutcome {
         self.last_dead_letter = None;
         if admission.required && admission.auth.delta_signature == [0; 32] {
@@ -171,7 +174,7 @@ impl TenantCrdtEngine {
         let previous = self.collections.insert(collection.to_owned(), candidate);
         for (coll, row) in &write_set {
             let sg = target.validation_surrogate(row);
-            let violation = match self.validate_committed_row(coll, row, sg) {
+            let violation = match self.validate_committed_row(coll, row, sg, crs) {
                 ValidationOutcome::Accepted => continue,
                 ValidationOutcome::Rejected(violations) => match violations.into_iter().next() {
                     Some(v) => v,
@@ -263,7 +266,7 @@ impl TenantCrdtEngine {
         // collection. The node's base peer id would mint operation ids that
         // collide across collections — the silent row-drop `collection_peer_id`
         // exists to prevent.
-        let peer_id = Self::collection_peer_id(self.peer_id, collection);
+        let peer_id = self.peer_id_of(collection);
         match self.collections.get(collection) {
             // Its own snapshot, exported on the line above: admitted as local,
             // because under the peer ceilings a collection that outgrew them
@@ -495,8 +498,13 @@ mod tests {
         let delta = raw_delta(5, |doc| {
             doc.get_map("users").insert("s1", 5).unwrap();
         });
-        let outcome =
-            engine.apply_committed_delta_validated("users", &delta, ApplyTarget::Collection, 5);
+        let outcome = engine.apply_committed_delta_validated(
+            "users",
+            &delta,
+            ApplyTarget::Collection,
+            5,
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
         match outcome {
             ValidatedApplyOutcome::Rejected(ViolationType::SchemaViolation { field, reason }) => {
                 assert_eq!(field, "users/s1");
@@ -514,8 +522,13 @@ mod tests {
         let delta = raw_delta(6, |doc| {
             doc.get_text("notes").insert(0, "hi").unwrap();
         });
-        let outcome =
-            engine.apply_committed_delta_validated("users", &delta, ApplyTarget::Collection, 6);
+        let outcome = engine.apply_committed_delta_validated(
+            "users",
+            &delta,
+            ApplyTarget::Collection,
+            6,
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
         match outcome {
             ValidatedApplyOutcome::Rejected(ViolationType::SchemaViolation { field, .. }) => {
                 assert_eq!(field, "notes");
@@ -536,6 +549,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(1),
             },
             2,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         assert!(matches!(outcome, ValidatedApplyOutcome::Clean { .. }));
         assert!(engine.row_exists("users", "a"));
@@ -563,12 +577,18 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(1),
             },
             9,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         assert!(matches!(refused, ValidatedApplyOutcome::Malformed));
         assert!(!engine.row_exists("users", "a"));
 
-        let imported =
-            engine.apply_committed_delta_validated("users", &snapshot, ApplyTarget::Collection, 9);
+        let imported = engine.apply_committed_delta_validated(
+            "users",
+            &snapshot,
+            ApplyTarget::Collection,
+            9,
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
         assert!(matches!(imported, ValidatedApplyOutcome::Clean { .. }));
         assert!(engine.row_exists("users", "a") && engine.row_exists("users", "b"));
     }
@@ -605,6 +625,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(2),
             },
             7,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         assert!(matches!(outcome, ValidatedApplyOutcome::Malformed));
         assert!(!engine.row_exists("users", "a"));
@@ -664,6 +685,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(3),
             },
             11,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         assert!(matches!(first, ValidatedApplyOutcome::Clean { .. }));
         assert!(engine.row_exists("users", "u1"));
@@ -678,6 +700,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(4),
             },
             11,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
 
         // The load-bearing assertion: an apply that did not actually write the
@@ -747,6 +770,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(5),
             },
             12,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         let outcome = engine.apply_committed_delta_validated(
             "users",
@@ -756,6 +780,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(6),
             },
             12,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
 
         let reported_clean = matches!(outcome, ValidatedApplyOutcome::Clean { .. });
@@ -792,6 +817,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(7),
             },
             1,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         match first {
             ValidatedApplyOutcome::Clean { imported_ops, .. } => {
@@ -810,6 +836,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(8),
             },
             1,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         match second {
             ValidatedApplyOutcome::Clean {
@@ -846,6 +873,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(9),
             },
             4,
+            &nodedb_crs::CrsContext::builtin_only(),
         ) {
             ValidatedApplyOutcome::Clean {
                 write_set,
@@ -872,6 +900,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(10),
             },
             2,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         assert!(matches!(clean, ValidatedApplyOutcome::Clean { .. }));
 
@@ -885,6 +914,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(11),
             },
             3,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         match outcome {
             ValidatedApplyOutcome::Rejected(ViolationType::UniqueViolation { field, value }) => {
@@ -914,6 +944,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(10),
             },
             2,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         assert!(matches!(seeded, ValidatedApplyOutcome::Clean { .. }));
         let capacity = engine.fill_dead_letter_queue_for_test();
@@ -928,6 +959,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(11),
             },
             3,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         match outcome {
             ValidatedApplyOutcome::DeadLetterRefused {
@@ -970,6 +1002,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(12),
             },
             2,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         let delta_seed = row_delta(9, "seed", "seed@y.com", "S");
         engine.apply_committed_delta_validated(
@@ -980,6 +1013,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(13),
             },
             9,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         assert_eq!(engine.apply_candidate_count(), 1, "candidate is retained");
 
@@ -1002,6 +1036,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(14),
             },
             3,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
 
         assert!(matches!(outcome, ValidatedApplyOutcome::Clean { .. }));
@@ -1028,6 +1063,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(15),
             },
             2,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
 
         // Rejected: reuses row a's email under a strict UNIQUE policy.
@@ -1040,6 +1076,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(16),
             },
             3,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         assert!(matches!(rejected, ValidatedApplyOutcome::Rejected(_)));
         assert_eq!(
@@ -1058,6 +1095,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(17),
             },
             4,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         assert!(matches!(outcome, ValidatedApplyOutcome::Clean { .. }));
         assert!(engine.row_exists("users", "c"));
@@ -1088,6 +1126,7 @@ mod tests {
                     surrogate: nodedb_types::Surrogate::new(18),
                 },
                 10 + i,
+                &nodedb_crs::CrsContext::builtin_only(),
             );
             assert!(
                 matches!(outcome, ValidatedApplyOutcome::Clean { .. }),
@@ -1123,9 +1162,14 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(19),
             },
             5,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
 
-        let expected = TenantCrdtEngine::collection_peer_id(engine.peer_id(), "users");
+        let expected = TenantCrdtEngine::collection_peer_id(
+            engine.peer_id(),
+            "users",
+            nodedb_types::Hlc::ZERO,
+        );
         assert_eq!(
             engine.collection_peer_id_for_test("users"),
             Some(expected),
@@ -1145,6 +1189,7 @@ mod tests {
                 surrogate: nodedb_types::Surrogate::new(20),
             },
             9,
+            &nodedb_crs::CrsContext::builtin_only(),
         );
         assert!(matches!(outcome, ValidatedApplyOutcome::Malformed));
         assert_eq!(engine.dlq_len(), 0);

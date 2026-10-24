@@ -11,10 +11,15 @@ use crate::wal::WalManager;
 
 /// Open, validate, and replay the WAL. Load the tombstone set from redb + WAL.
 ///
+/// `wal_key` is the key `[encryption]` names, loaded by
+/// [`crate::control::security::keystore::load_wal_key`]; `None` when the
+/// section is absent.
+///
 /// Returns `(wal, wal_records, tombstones)`. Exits the process on unrecoverable
 /// corruption — a dirty WAL cannot be safely replayed.
 pub fn init_wal(
     config: &ServerConfig,
+    wal_key: Option<nodedb_wal::crypto::WalEncryptionKey>,
 ) -> anyhow::Result<(
     Arc<WalManager>,
     Arc<[nodedb_wal::WalRecord]>,
@@ -27,11 +32,9 @@ pub fn init_wal(
         let mut mgr =
             WalManager::open_with_tuning(&wal_dir, wal_segment_target, &config.tuning.wal)
                 .map_err(|error| wal_open_error(&wal_dir, error))?;
-        if let Some(ref enc) = config.encryption {
-            let key = nodedb_wal::crypto::WalEncryptionKey::from_file(&enc.key_path)
-                .map_err(crate::Error::Wal)?;
+        if let Some(key) = wal_key {
             mgr.set_encryption_ring(nodedb_wal::crypto::KeyRing::new(key))?;
-            info!(key_path = %enc.key_path.display(), "WAL encryption enabled");
+            info!("WAL encryption enabled");
         }
         Arc::new(mgr)
     };

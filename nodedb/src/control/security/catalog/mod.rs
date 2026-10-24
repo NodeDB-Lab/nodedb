@@ -29,6 +29,7 @@ pub mod consumer_groups;
 pub mod continuous_aggregate;
 pub mod continuous_aggregates;
 pub mod crdt_compaction_points;
+pub mod credentials;
 pub mod custom_type_oid_hwm;
 pub mod custom_types;
 pub mod cut_floors;
@@ -74,6 +75,8 @@ pub mod scopes;
 pub mod security;
 pub mod sequence_types;
 pub mod sequences;
+pub mod spatial_ref_sys;
+pub mod srid_refs;
 pub mod streaming_mvs;
 pub mod surrogate_hwm;
 pub mod surrogate_pk;
@@ -87,6 +90,8 @@ pub mod tables;
 pub mod tenant_group_marks;
 pub mod tenant_id_hwm;
 pub mod tenant_quotas;
+#[cfg(test)]
+mod test_faults;
 pub mod topic_lookup;
 pub mod topic_messages;
 pub mod topic_publish_marks;
@@ -97,7 +102,9 @@ pub mod types;
 pub mod users;
 pub mod vector_index_params;
 pub mod vector_model;
+pub mod vshard_residency;
 pub mod wal_tombstones;
+pub mod wasm_raw;
 
 pub use auth_types::{
     StoredApiKey, StoredAuthUser, StoredBlacklistEntry, StoredOwner, StoredPermission, StoredRole,
@@ -134,6 +141,7 @@ pub use redaction::StoredRedactionPolicy;
 pub use rls::StoredRlsPolicy;
 pub use scopes::{StoredScope, StoredScopeGrant};
 pub use sequence_types::{SequenceState, StoredSequence};
+pub use spatial_ref_sys::CustomCrsWrite;
 pub use synonym_groups::StoredSynonymGroup;
 pub use system_catalog::SystemCatalog;
 pub use trigger_types::StoredTrigger;

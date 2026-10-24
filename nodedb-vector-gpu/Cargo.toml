@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 license = "Apache-2.0"
+authors = ["Biz Impulse Solutions Sdn. Bhd. and the NodeDB contributors"]
 readme = "README.md"
 repository.workspace = true
 homepage.workspace = true

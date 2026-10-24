@@ -46,6 +46,7 @@ pub mod start_raft_helpers;
 #[cfg(test)]
 pub(crate) mod test_one_node;
 pub mod tls;
+pub mod vshard_departure;
 pub mod vshard_envelope_handler;
 pub mod warm_peers;
 

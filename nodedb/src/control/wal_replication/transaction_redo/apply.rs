@@ -113,6 +113,9 @@ pub(crate) async fn enqueue_transaction_redo(
                 apply_key,
                 commit_hlc,
                 change_position,
+                // A transaction redo carries the stamp of every version it
+                // installs.
+                system_ordinal: None,
             },
             // Raft fixed the order.
             ordering: WriteOrdering::AlreadyOrdered,

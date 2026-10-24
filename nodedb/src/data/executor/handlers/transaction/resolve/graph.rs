@@ -12,12 +12,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use nodedb_physical::physical_plan::{GraphOp, PhysicalPlan};
 use nodedb_wal::record::RecordType;
 
-use crate::control::server::wal_dispatch::encode_graph_node_label_payload;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::{
     GraphCollKey, GraphTxnOverlay, NodeLabelDelta,
 };
-use crate::wal::RedoSubRecord;
+use crate::wal::{NodeLabelRedo, RedoSubRecord};
 
 use super::edge_ordinal::EdgeOrdinals;
 
@@ -54,6 +53,7 @@ pub(super) fn serialize_graph_collection(
     }
 
     for ((src, label, dst), properties) in puts {
+        let valid = overlay.staged_edge_valid_time(coll_key, &src, &label, &dst);
         let identity_key = (
             collection.to_string(),
             src.clone(),
@@ -73,6 +73,8 @@ pub(super) fn serialize_graph_collection(
             dst_surrogate,
             system_from: Some(stamp.system_from),
             applied: (stamp.applied != stamp.system_from).then_some(stamp.applied),
+            valid_from_ms: valid.valid_from_ms,
+            valid_until_ms: valid.valid_until_ms,
         })
         .map_err(|e| crate::Error::Serialization {
             format: "msgpack".into(),
@@ -145,12 +147,14 @@ fn bound_endpoints(
 
 /// Append the redo sub-records for every staged node-label delta in
 /// `overlay` under `label_coll_key`, in deterministic node-id order.
-/// `added`/`removed` are disjoint by construction, mapping directly onto
-/// the autocommit `(node_id, labels)` payload shape. Each `HashSet` is
-/// sorted into a `Vec` first, so replicas produce byte-identical payloads.
+/// `added`/`removed` are disjoint by construction. Each `HashSet` is sorted
+/// into a `Vec` first, so replicas produce byte-identical payloads. Every
+/// sub-record of a node carries `ordinal_of(node)` as its `system_from`, so
+/// every replica writes the node's label version at the same ordinal.
 pub(super) fn serialize_node_label_deltas(
     overlay: &GraphTxnOverlay,
     label_coll_key: &GraphCollKey,
+    ordinal_of: impl Fn(&str) -> crate::Result<i64>,
     ops: &mut Vec<RedoSubRecord>,
 ) -> crate::Result<()> {
     let mut deltas: BTreeMap<&str, &NodeLabelDelta> = BTreeMap::new();
@@ -159,22 +163,48 @@ pub(super) fn serialize_node_label_deltas(
     }
 
     for (node_id, delta) in deltas {
-        if !delta.added.is_empty() {
-            let payload = encode_graph_node_label_payload(node_id, &sorted_labels(&delta.added))?;
+        let system_from = Some(ordinal_of(node_id)?);
+        let parts = [
+            (RecordType::GraphNodeLabelSet, &delta.added),
+            (RecordType::GraphNodeLabelRemove, &delta.removed),
+        ];
+        for (record_type, labels) in parts {
+            if labels.is_empty() {
+                continue;
+            }
+            let payload = NodeLabelRedo {
+                node_id: node_id.to_string(),
+                labels: sorted_labels(labels),
+                system_from,
+                exact: false,
+            }
+            .encode()?;
             ops.push(RedoSubRecord {
-                record_type: RecordType::GraphNodeLabelSet as u32,
-                payload,
-            });
-        }
-        if !delta.removed.is_empty() {
-            let payload = encode_graph_node_label_payload(node_id, &sorted_labels(&delta.removed))?;
-            ops.push(RedoSubRecord {
-                record_type: RecordType::GraphNodeLabelRemove as u32,
+                record_type: record_type as u32,
                 payload,
             });
         }
     }
     Ok(())
+}
+
+/// The ordinal a transaction at `txn` stamps on `node`'s label version: `txn`,
+/// raised one above the node's newest stored version when that one is at or
+/// above it (a restored version from a clock that ran ahead). The node's
+/// version then sorts after every earlier write of its labels.
+pub(super) fn label_ordinal(
+    store: &crate::engine::graph::edge_store::EdgeStore,
+    database_id: crate::types::DatabaseId,
+    tenant_id: crate::types::TenantId,
+    node: &str,
+    txn: i64,
+) -> crate::Result<i64> {
+    Ok(
+        match store.newest_node_label_ordinal(database_id, tenant_id, node)? {
+            Some(newest) if newest >= txn => newest.saturating_add(1),
+            _ => txn,
+        },
+    )
 }
 
 /// Sort a staged label `HashSet` into a deterministic `Vec` before encoding.
@@ -290,7 +320,6 @@ pub(super) fn classify_graph_op(
         | GraphOp::BspSuperstep(_)
         | GraphOp::WccSuperstep(_)
         | GraphOp::TemporalNeighbors { .. }
-        | GraphOp::TemporalAlgorithm { .. }
         | GraphOp::Stats { .. }
         | GraphOp::NodePresenceRead { .. } => Ok(()),
 
@@ -552,14 +581,19 @@ mod tests {
         overlay.stage_node_labels_set(coll_key("g"), "n1", &["Person".to_string()]);
 
         let mut ops = Vec::new();
-        serialize_node_label_deltas(&overlay, &coll_key("g"), &mut ops).expect("serialize");
+        serialize_node_label_deltas(&overlay, &coll_key("g"), |_| Ok(123), &mut ops)
+            .expect("serialize");
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].record_type, RecordType::GraphNodeLabelSet as u32);
 
-        let (node_id, labels) =
-            zerompk::from_msgpack::<(String, Vec<String>)>(&ops[0].payload).expect("decode");
-        assert_eq!(node_id, "n1");
-        assert_eq!(labels, vec!["Person".to_string()]);
+        let decoded = NodeLabelRedo::decode(&ops[0].payload).expect("decode");
+        assert_eq!(decoded.node_id, "n1");
+        assert_eq!(decoded.labels, vec!["Person".to_string()]);
+        assert_eq!(
+            decoded.system_from,
+            Some(123),
+            "the sub-record carries the transaction's ordinal"
+        );
     }
 
     #[test]
@@ -568,14 +602,15 @@ mod tests {
         overlay.stage_node_labels_remove(coll_key("g"), "n1", &["Person".to_string()]);
 
         let mut ops = Vec::new();
-        serialize_node_label_deltas(&overlay, &coll_key("g"), &mut ops).expect("serialize");
+        serialize_node_label_deltas(&overlay, &coll_key("g"), |_| Ok(123), &mut ops)
+            .expect("serialize");
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].record_type, RecordType::GraphNodeLabelRemove as u32);
 
-        let (node_id, labels) =
-            zerompk::from_msgpack::<(String, Vec<String>)>(&ops[0].payload).expect("decode");
-        assert_eq!(node_id, "n1");
-        assert_eq!(labels, vec!["Person".to_string()]);
+        let decoded = NodeLabelRedo::decode(&ops[0].payload).expect("decode");
+        assert_eq!(decoded.node_id, "n1");
+        assert_eq!(decoded.labels, vec!["Person".to_string()]);
+        assert_eq!(decoded.system_from, Some(123));
     }
 
     #[test]
@@ -585,7 +620,8 @@ mod tests {
         overlay.stage_node_labels_remove(coll_key("g"), "n1", &["Person".to_string()]);
 
         let mut ops = Vec::new();
-        serialize_node_label_deltas(&overlay, &coll_key("g"), &mut ops).expect("serialize");
+        serialize_node_label_deltas(&overlay, &coll_key("g"), |_| Ok(123), &mut ops)
+            .expect("serialize");
         assert_eq!(
             ops.len(),
             2,
@@ -616,9 +652,11 @@ mod tests {
         );
 
         let mut ops_a = Vec::new();
-        serialize_node_label_deltas(&overlay_a, &coll_key("g"), &mut ops_a).expect("serialize a");
+        serialize_node_label_deltas(&overlay_a, &coll_key("g"), |_| Ok(123), &mut ops_a)
+            .expect("serialize a");
         let mut ops_b = Vec::new();
-        serialize_node_label_deltas(&overlay_b, &coll_key("g"), &mut ops_b).expect("serialize b");
+        serialize_node_label_deltas(&overlay_b, &coll_key("g"), |_| Ok(123), &mut ops_b)
+            .expect("serialize b");
 
         assert_eq!(ops_a.len(), 1);
         assert_eq!(
@@ -632,7 +670,8 @@ mod tests {
     fn no_staged_labels_emits_nothing() {
         let overlay = GraphTxnOverlay::new();
         let mut ops = Vec::new();
-        serialize_node_label_deltas(&overlay, &coll_key("g"), &mut ops).expect("serialize");
+        serialize_node_label_deltas(&overlay, &coll_key("g"), |_| Ok(123), &mut ops)
+            .expect("serialize");
         assert!(ops.is_empty());
     }
 }

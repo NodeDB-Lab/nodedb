@@ -95,6 +95,7 @@ impl RlsPolicyStore {
         document: &serde_json::Value,
         auth: &AuthContext,
         emitter: &dyn AuditEmitter,
+        crs: &nodedb_crs::CrsContext<'_>,
     ) -> crate::Result<()> {
         if auth.is_superuser() {
             return Ok(());
@@ -107,9 +108,16 @@ impl RlsPolicyStore {
 
         for policy in &policies {
             if let Some(ref compiled) = policy.compiled_predicate {
-                check_compiled_write(
-                    policy, compiled, document, auth, tenant_id, collection, emitter,
-                )?;
+                check_compiled_write(CompiledWriteCheck {
+                    policy,
+                    compiled,
+                    document,
+                    auth,
+                    tenant_id,
+                    collection,
+                    emitter,
+                    crs,
+                })?;
             }
         }
 
@@ -172,6 +180,7 @@ pub fn admit_compiled_write_image(
     image: &[u8],
     tenant_id: u64,
     collection: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     if compiled.is_empty() {
         return Ok(());
@@ -184,22 +193,36 @@ pub fn admit_compiled_write_image(
         tenant_id: crate::types::TenantId::new(tenant_id),
         resource: format!("RLS write policy on '{collection}' {detail}"),
     };
-    match crate::bridge::scan_filter::ScanFilter::all_match_binary(&filters, image) {
+    match crate::bridge::scan_filter::ScanFilter::all_match_binary(&filters, image, crs) {
         Ok(true) => Ok(()),
         Ok(false) => Err(deny("rejected the row".into())),
         Err(error) => Err(deny(format!("could not be evaluated: {error}"))),
     }
 }
 
-fn check_compiled_write(
-    policy: &RlsPolicy,
-    compiled: &RlsPredicate,
-    document: &serde_json::Value,
-    auth: &AuthContext,
+/// One compiled write policy judged against one document.
+struct CompiledWriteCheck<'a> {
+    policy: &'a RlsPolicy,
+    compiled: &'a RlsPredicate,
+    document: &'a serde_json::Value,
+    auth: &'a AuthContext,
     tenant_id: u64,
-    collection: &str,
-    emitter: &dyn AuditEmitter,
-) -> crate::Result<()> {
+    collection: &'a str,
+    emitter: &'a dyn AuditEmitter,
+    crs: &'a nodedb_crs::CrsContext<'a>,
+}
+
+fn check_compiled_write(check: CompiledWriteCheck<'_>) -> crate::Result<()> {
+    let CompiledWriteCheck {
+        policy,
+        compiled,
+        document,
+        auth,
+        tenant_id,
+        collection,
+        emitter,
+        crs,
+    } = check;
     let filters = match substitute_to_scan_filters(compiled, auth) {
         Some(f) => f,
         None => {
@@ -233,7 +256,7 @@ fn check_compiled_write(
     };
 
     let doc_mp = nodedb_types::json_to_msgpack_or_empty(document);
-    if !crate::bridge::scan_filter::ScanFilter::all_match_binary(&filters, &doc_mp)? {
+    if !crate::bridge::scan_filter::ScanFilter::all_match_binary(&filters, &doc_mp, crs)? {
         info!(
             policy = %policy.name,
             username = %auth.username,
@@ -330,7 +353,14 @@ mod tests {
         let doc_ok = serde_json::json!({"owner_id": "42", "amount": 100});
         assert!(
             store
-                .check_write_with_auth(1, "orders", &doc_ok, &auth, NOOP)
+                .check_write_with_auth(
+                    1,
+                    "orders",
+                    &doc_ok,
+                    &auth,
+                    NOOP,
+                    &nodedb_crs::CrsContext::builtin_only()
+                )
                 .is_ok()
         );
 
@@ -338,7 +368,14 @@ mod tests {
         let doc_bad = serde_json::json!({"owner_id": "99", "amount": 100});
         assert!(
             store
-                .check_write_with_auth(1, "orders", &doc_bad, &auth, NOOP)
+                .check_write_with_auth(
+                    1,
+                    "orders",
+                    &doc_bad,
+                    &auth,
+                    NOOP,
+                    &nodedb_crs::CrsContext::builtin_only()
+                )
                 .is_err()
         );
     }
@@ -350,7 +387,14 @@ mod tests {
         let doc = serde_json::json!({"anything": "goes"});
         assert!(
             store
-                .check_write_with_auth(1, "whatever", &doc, &auth, NOOP)
+                .check_write_with_auth(
+                    1,
+                    "whatever",
+                    &doc,
+                    &auth,
+                    NOOP,
+                    &nodedb_crs::CrsContext::builtin_only()
+                )
                 .is_ok()
         );
     }
@@ -371,7 +415,14 @@ mod tests {
 
         let auth = nonsuper_auth();
         let doc = serde_json::json!({"org_id": "some_org"});
-        let result = store.check_write_with_auth(1, "orders", &doc, &auth, NOOP);
+        let result = store.check_write_with_auth(
+            1,
+            "orders",
+            &doc,
+            &auth,
+            NOOP,
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
         assert!(
             result.is_err(),
             "RLS must fail-closed on unresolvable $auth ref; got {result:?}"
@@ -394,7 +445,14 @@ mod tests {
 
         let doc = serde_json::json!({"secret_scope": "admin"});
         let auth = nonsuper_auth();
-        let result = store.check_write_with_auth(1, "orders", &doc, &auth, NOOP);
+        let result = store.check_write_with_auth(
+            1,
+            "orders",
+            &doc,
+            &auth,
+            NOOP,
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
         assert!(
             result.is_err(),
             "write path must fail-closed on unresolvable auth ref; got {result:?}"
@@ -419,7 +477,14 @@ mod tests {
         // alice's user_id is 42; owner_id is 99 → denied.
         let doc_bad = serde_json::json!({"owner_id": "99", "qty": 1});
         let emitter = CapturingEmitter::new();
-        let result = store.check_write_with_auth(1, "items", &doc_bad, &auth, &emitter);
+        let result = store.check_write_with_auth(
+            1,
+            "items",
+            &doc_bad,
+            &auth,
+            &emitter,
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
         assert!(result.is_err());
 
         let recorded = emitter.recorded();
@@ -444,7 +509,14 @@ mod tests {
         let auth = nonsuper_auth();
         let doc_ok = serde_json::json!({"owner_id": "42", "qty": 1});
         let emitter = CapturingEmitter::new();
-        let result = store.check_write_with_auth(1, "items", &doc_ok, &auth, &emitter);
+        let result = store.check_write_with_auth(
+            1,
+            "items",
+            &doc_ok,
+            &auth,
+            &emitter,
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
         assert!(result.is_ok());
         assert!(emitter.recorded().is_empty());
     }
@@ -540,7 +612,13 @@ mod tests {
         }];
         let compiled = encode_scan_filters(&filters).expect("encodes");
         let image = nodedb_types::json_to_msgpack_or_empty(&serde_json::json!({"qty": 1}));
-        let result = admit_compiled_write_image(&compiled, &image, 1, "items");
+        let result = admit_compiled_write_image(
+            &compiled,
+            &image,
+            1,
+            "items",
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
         match result {
             Err(crate::Error::RejectedAuthz { resource, .. }) => {
                 assert!(

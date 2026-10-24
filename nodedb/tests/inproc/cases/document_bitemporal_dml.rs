@@ -31,11 +31,13 @@ fn register(sparse: &SparseEngine) -> DocumentEngine<'_> {
     e
 }
 
-fn wall_ms() -> i64 {
-    std::time::SystemTime::now()
+/// The system-time ordinal cut `AS OF SYSTEM TIME <now ms>` reads at.
+fn now_cut() -> i64 {
+    let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    nodedb_types::ms_to_ordinal_upper(ms)
 }
 
 #[test]
@@ -47,7 +49,7 @@ fn update_via_put_creates_new_version_and_preserves_old() {
         .put("c", &key(1), &serde_json::json!({"v": 1}))
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(5));
-    let t_mid = wall_ms();
+    let t_mid = now_cut();
     std::thread::sleep(std::time::Duration::from_millis(5));
     engine
         .put("c", &key(1), &serde_json::json!({"v": 2}))
@@ -74,7 +76,7 @@ fn delete_appends_tombstone_but_prior_version_still_visible_as_of() {
         .put("c", &key(1), &serde_json::json!({"name": "Alice"}))
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(5));
-    let t_before_delete = wall_ms();
+    let t_before_delete = now_cut();
     std::thread::sleep(std::time::Duration::from_millis(5));
     assert!(engine.delete("c", &key(1)).unwrap());
 
@@ -94,13 +96,13 @@ fn delete_appends_tombstone_but_prior_version_still_visible_as_of() {
 fn ten_sequential_updates_produce_ten_reachable_versions() {
     let (sparse, _d) = open();
     let engine = register(&sparse);
-    let mut cutoffs: Vec<(i64, i64)> = Vec::new(); // (cutoff_ms, expected_v)
+    let mut cutoffs: Vec<(i64, i64)> = Vec::new(); // (cutoff ordinal, expected_v)
     for i in 1..=10 {
         engine
             .put("c", &key(1), &serde_json::json!({"v": i}))
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(3));
-        cutoffs.push((wall_ms(), i));
+        cutoffs.push((now_cut(), i));
         std::thread::sleep(std::time::Duration::from_millis(3));
     }
     for (cutoff, expected) in &cutoffs {
@@ -128,7 +130,7 @@ fn secondary_index_reflects_each_version_independently() {
         .put("c", &key(1), &serde_json::json!({"email": "a@x.com"}))
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(5));
-    let t_mid = wall_ms();
+    let t_mid = now_cut();
     std::thread::sleep(std::time::Duration::from_millis(5));
     engine
         .put("c", &key(1), &serde_json::json!({"email": "b@x.com"}))

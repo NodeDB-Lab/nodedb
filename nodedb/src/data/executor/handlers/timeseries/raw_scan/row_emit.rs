@@ -31,21 +31,23 @@ pub(super) fn row_admitted(
     row: &rmpv::Value,
     where_predicates: &[ScanFilter],
     rls_predicates: &[ScanFilter],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<bool> {
     if where_predicates.is_empty() && rls_predicates.is_empty() {
         return Ok(true);
     }
     let doc = rmpv_to_value(row);
-    Ok(value_matches_filters(&doc, where_predicates)?
-        && value_matches_filters(&doc, rls_predicates)?)
+    Ok(value_matches_filters(&doc, where_predicates, crs)?
+        && value_matches_filters(&doc, rls_predicates, crs)?)
 }
 
 /// [`row_admitted`] for a row whose WHERE clause was already applied.
 pub(super) fn row_admitted_by_policy(
     row: &rmpv::Value,
     rls_predicates: &[ScanFilter],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<bool> {
-    row_admitted(row, &[], rls_predicates)
+    row_admitted(row, &[], rls_predicates, crs)
 }
 
 /// Extract the `_ts_system` value from an rmpv-encoded row for audit-log
@@ -194,6 +196,7 @@ pub(super) fn extract_timestamp(row: &rmpv::Value) -> i64 {
 pub(super) fn apply_computed_columns_rmpv(
     row: rmpv::Value,
     computed_cols: &[crate::bridge::expr_eval::ComputedColumn],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<rmpv::Value> {
     let doc = rmpv_to_value(&row);
     let mut fields: Vec<(rmpv::Value, rmpv::Value)> = Vec::with_capacity(computed_cols.len());
@@ -201,7 +204,7 @@ pub(super) fn apply_computed_columns_rmpv(
         // A computed column is projection-shaped: a division/modulo-by-zero
         // fails the whole scan instead of silently materializing NULL into
         // the response.
-        let result = cc.expr.eval(&doc)?;
+        let result = cc.expr.eval(&doc, crs)?;
         fields.push((
             rmpv::Value::String(cc.alias.as_str().into()),
             value_to_rmpv(&result),

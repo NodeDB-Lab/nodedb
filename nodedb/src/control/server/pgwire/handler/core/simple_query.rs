@@ -92,19 +92,8 @@ impl SimpleQueryHandler for NodeDbPgHandler {
                 .await;
         }
 
-        // J.4: install the DDL audit context for this statement. Any
-        // `propose_catalog_entry` call reached from `execute_sql`
-        // picks up the identity + raw SQL so the applier can emit a
-        // full audit record on every replica. The guard auto-clears
-        // on scope exit.
-        let _audit_scope = crate::control::server::shared::session::audit_context::AuditScope::new(
-            crate::control::server::shared::session::audit_context::AuditCtx {
-                auth_user_id: identity.user_id.to_string(),
-                auth_user_name: identity.username.clone(),
-                sql_text: query.to_string(),
-            },
-        );
-
+        // `execute_sql` installs the DDL audit context of each statement the
+        // message splits into.
         let result = self
             .execute_sql(&identity, session_id, query, &TEXT_RESULTS)
             .await;

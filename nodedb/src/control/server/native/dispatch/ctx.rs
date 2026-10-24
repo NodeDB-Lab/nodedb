@@ -99,7 +99,6 @@ impl DispatchCtx<'_> {
                 | GraphOp::SetNodeLabels { .. }
                 | GraphOp::RemoveNodeLabels { .. }
                 | GraphOp::TemporalNeighbors { .. }
-                | GraphOp::TemporalAlgorithm { .. }
                 | GraphOp::Stats { .. }
                 | GraphOp::NodePresenceGuard { .. }
                 | GraphOp::NodePresenceRead { .. }

@@ -25,7 +25,7 @@
 //! a condition that failed to parse would leave a grant looking conditional
 //! while applying unconditionally.
 
-use crate::control::security::blacklist::ip::CidrRange;
+use crate::control::security::net::Cidr;
 
 use super::condition::{DEFAULT_STEP_UP_SECS, GrantCondition, WEEKDAYS, WEEKENDS};
 
@@ -208,7 +208,7 @@ fn parse_require_ip(tokens: &[&str], start: usize) -> crate::Result<(GrantCondit
         if cidr.is_empty() {
             continue;
         }
-        if CidrRange::parse(cidr).is_none() {
+        if Cidr::parse(cidr).is_none() {
             return Err(condition_error(format!(
                 "REQUIRE IP IN: '{cidr}' is not a valid IP address or CIDR range"
             )));

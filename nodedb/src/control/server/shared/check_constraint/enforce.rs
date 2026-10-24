@@ -34,7 +34,11 @@ pub async fn enforce_check_constraints(
         if constraint.has_subquery {
             enforce_subquery_check(state, identity, database_id, constraint, fields).await?;
         } else {
-            enforce_simple_check(constraint, fields)?;
+            enforce_simple_check(
+                constraint,
+                fields,
+                &crate::control::crs_context::crs_context_for(state),
+            )?;
         }
     }
 

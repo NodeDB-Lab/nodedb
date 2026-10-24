@@ -340,6 +340,7 @@ mod tests {
                 name: "nir".into(),
                 dtype: ArrayAttrType::Float64,
                 nullable: true,
+                meta: Default::default(),
             }],
             tile_extents: vec![2, 2],
             georef: None,
@@ -354,6 +355,7 @@ mod tests {
             limit,
             zone: None,
             temporal: TemporalScope::default(),
+            physical: false,
         }
     }
 

@@ -74,6 +74,8 @@ pub(super) struct ScatterSuperstepParams<'a> {
     pub(super) dispatches: Vec<ShardDispatch>,
     pub(super) deadline_ms: u64,
     pub(super) linearizable: bool,
+    /// The valid-time instant every superstep reads at, or `None`.
+    pub(super) valid_at_ms: Option<i64>,
 }
 
 /// Dispatch one `BspSuperstep` to every owner node concurrently and decode each
@@ -93,6 +95,7 @@ pub(super) async fn scatter_superstep(
         dispatches,
         deadline_ms,
         linearizable,
+        valid_at_ms,
     } = args;
     let shared_arc = gateway_shared(state)?;
     let version_set = GatewayVersionSet::from_pairs(Vec::new());
@@ -112,6 +115,7 @@ pub(super) async fn scatter_superstep(
             personalization_sum: d.personalization_sum,
             read_cut_marker: d.read_cut_marker,
             system_as_of: d.system_as_of,
+            valid_at_ms,
         })));
         let version_set = version_set.clone();
         let node_id = d.node_id;

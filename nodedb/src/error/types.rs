@@ -397,6 +397,14 @@ pub enum Error {
         row_srid: u32,
     },
 
+    /// A geometry names an SRID no CRS defines, or one a user dropped.
+    /// Rendered as SQLSTATE `22000` (data_exception) at the pgwire layer.
+    #[error("{source}")]
+    UnknownSrid {
+        #[from]
+        source: nodedb_crs::UnknownSrid,
+    },
+
     /// A value does not fit its numeric type: an integer past a column's
     /// declared width, a float that overflows `REAL`, a literal past the exact
     /// numeric range, or arithmetic that overflows. Rendered as SQLSTATE

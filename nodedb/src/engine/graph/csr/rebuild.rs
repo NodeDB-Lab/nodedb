@@ -5,7 +5,6 @@
 #[cfg(test)]
 use nodedb_graph::CsrIndex;
 use nodedb_graph::ShardedCsrIndex;
-use nodedb_graph::csr::weights::extract_weight_from_properties;
 use nodedb_mem::EngineId;
 use nodedb_mem::MemoryGovernor;
 use nodedb_mem::ScopedMemory;
@@ -64,15 +63,11 @@ pub fn rebuild_sharded_from_store_as_of(
     for (db, tid, collection, src, label, dst, props) in &all_edges {
         let memory = ScopedMemory::new(Arc::clone(&governor), *db, *tid, EngineId::Graph);
         let partition = sharded.get_or_create(*db, *tid, memory);
-        let weight = extract_weight_from_properties(props);
-        let res = if weight != 1.0 {
-            partition.add_edge_weighted_in_collection(src, label, dst, collection, weight)
-        } else {
-            partition.add_edge_in_collection(src, label, dst, collection)
-        };
-        res.map_err(|e| crate::Error::Internal {
-            detail: format!("CSR rebuild: {e}"),
-        })?;
+        partition
+            .insert_record_edge(src, label, dst, collection, props)
+            .map_err(|e| crate::Error::Internal {
+                detail: format!("CSR rebuild: {e}"),
+            })?;
     }
 
     // Third pass: restore each node's global identity. Without this the rebuilt

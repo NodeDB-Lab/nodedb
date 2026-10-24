@@ -43,6 +43,7 @@ impl CoreLoop {
     /// state. An absent checkpoint directory — or one with no manifest — is not
     /// an error: WAL replay reconstructs everything.
     pub fn load_crdt_checkpoints(&mut self) -> crate::Result<()> {
+        let crs = self.crs_context();
         let ckpt_dir = crdt_ckpt_dir(&self.data_dir, self.core_id);
         if !ckpt_dir.exists() {
             return Ok(());
@@ -60,7 +61,7 @@ impl CoreLoop {
         let loaded = decoded.len();
         for entry in decoded {
             let engine = self.get_crdt_engine(entry.database_id, entry.tenant_id)?;
-            engine.import_snapshot_bytes(&entry.collection, &entry.snapshot)?;
+            engine.import_snapshot_bytes(&entry.collection, &entry.snapshot, &crs)?;
         }
 
         self.floors.crdt_durable_lsn = Lsn::new(manifest.durable_through_lsn);

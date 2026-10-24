@@ -9,6 +9,7 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::graph::csr::CsrIndex;
+use nodedb_physical::physical_plan::GraphReadScope;
 
 /// Bundled arguments for [`CoreLoop::execute_graph_path`].
 pub(in crate::data::executor) struct GraphPathParams<'a> {
@@ -21,6 +22,11 @@ pub(in crate::data::executor) struct GraphPathParams<'a> {
     /// The walk's visit cap ([`CoreLoop::walk_visit_cap`]).
     pub max_visited: usize,
     pub frontier_bitmap: Option<&'a nodedb_types::SurrogateBitmap>,
+    /// The collection a historical read walks. A live read walks every
+    /// collection's edges.
+    pub collection: Option<&'a str>,
+    /// The bitemporal cut the path is searched at.
+    pub scope: &'a GraphReadScope,
 }
 
 /// Bundled arguments for [`CoreLoop::execute_graph_subgraph`].
@@ -32,6 +38,11 @@ pub(in crate::data::executor) struct GraphSubgraphParams<'a> {
     pub depth: usize,
     /// The walk's visit cap ([`CoreLoop::walk_visit_cap`]).
     pub max_visited: usize,
+    /// The collection a historical read walks. A live read walks every
+    /// collection's edges.
+    pub collection: Option<&'a str>,
+    /// The bitemporal cut the subgraph is read at.
+    pub scope: &'a GraphReadScope,
 }
 
 impl CoreLoop {
@@ -48,6 +59,8 @@ impl CoreLoop {
             max_depth,
             max_visited,
             frontier_bitmap,
+            collection,
+            scope,
         } = params;
         let max_depth =
             max_depth.min(crate::engine::graph::traversal_options::MAX_GRAPH_TRAVERSAL_DEPTH);
@@ -56,25 +69,15 @@ impl CoreLoop {
         // Read-your-own-writes: fold this transaction's staged edges/tombstones
         // into the bidirectional search, including a path that must pass
         // through a node reachable only via a staged edge.
-        // Read-your-own-writes refreshes the lease (see the overlay reaper).
-        if let Some(txn_id) = task.request.txn_id {
-            self.touch_overlay(txn_id);
-        }
-        let delta = task
-            .request
-            .txn_id
-            .and_then(|txn_id| self.graph_txn_overlays.get(&txn_id))
-            .map(|ov| {
-                super::graph_txn_merge::build_graph_overlay_delta(
-                    ov,
-                    task.request.database_id,
-                    crate::types::TenantId::new(tid),
-                )
-            });
+        let delta = self.live_overlay_delta(task, tid, scope);
+        let csr = match self.csr_view(database_id, tid, collection, scope) {
+            Ok(csr) => csr,
+            Err(e) => return self.response_error(task, e),
+        };
         let label_filter: Vec<&str> = edge_labels.iter().map(String::as_str).collect();
         // A tenant with no CSR partition still searches its staged edges.
         let path = CsrIndex::shortest_path_on(
-            self.csr_partition(database_id, tid),
+            csr,
             crate::engine::graph::csr::ShortestPathParams {
                 src,
                 dst,
@@ -113,6 +116,8 @@ impl CoreLoop {
             edge_labels,
             depth,
             max_visited,
+            collection,
+            scope,
         } = params;
         debug!(
             core = self.core_id,
@@ -129,25 +134,15 @@ impl CoreLoop {
         let direction = crate::engine::graph::edge_store::Direction::Out;
         // Read-your-own-writes: fold this transaction's staged edges/tombstones
         // into the materialized subgraph, including through staged-only nodes.
-        // Read-your-own-writes refreshes the lease (see the overlay reaper).
-        if let Some(txn_id) = task.request.txn_id {
-            self.touch_overlay(txn_id);
-        }
-        let delta = task
-            .request
-            .txn_id
-            .and_then(|txn_id| self.graph_txn_overlays.get(&txn_id))
-            .map(|ov| {
-                super::graph_txn_merge::build_graph_overlay_delta(
-                    ov,
-                    task.request.database_id,
-                    crate::types::TenantId::new(tid),
-                )
-            });
+        let delta = self.live_overlay_delta(task, tid, scope);
+        let csr = match self.csr_view(database_id, tid, collection, scope) {
+            Ok(csr) => csr,
+            Err(e) => return self.response_error(task, e),
+        };
         let labels: Vec<&str> = edge_labels.iter().map(String::as_str).collect();
         // A tenant with no CSR partition still walks its staged edges.
         let edges: Vec<(String, String, String)> = CsrIndex::subgraph_on(
-            self.csr_partition(database_id, tid),
+            csr,
             &refs,
             &labels,
             direction,
@@ -175,5 +170,29 @@ impl CoreLoop {
                 self.response_error(task, ErrorCode::from(e))
             }
         }
+    }
+
+    /// The transaction's staged edge writes as a walk delta, for a live
+    /// read. A historical read sees committed versions only, so it gets
+    /// none. Read-your-own-writes refreshes the overlay lease (see the
+    /// overlay reaper).
+    pub(in crate::data::executor) fn live_overlay_delta(
+        &self,
+        task: &ExecutionTask,
+        tid: u64,
+        scope: &GraphReadScope,
+    ) -> Option<crate::engine::graph::csr::GraphOverlayDelta> {
+        if !scope.is_live() {
+            return None;
+        }
+        let txn_id = task.request.txn_id?;
+        self.touch_overlay(txn_id);
+        self.graph_txn_overlays.get(&txn_id).map(|ov| {
+            super::graph_txn_merge::build_graph_overlay_delta(
+                ov,
+                task.request.database_id,
+                crate::types::TenantId::new(tid),
+            )
+        })
     }
 }

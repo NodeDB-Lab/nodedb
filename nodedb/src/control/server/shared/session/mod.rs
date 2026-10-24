@@ -62,7 +62,7 @@ pub use self::deadline::{
 pub use self::outcome::{AbortReason, CommitOutcome, TxnDataPlane};
 pub use self::params::{parse_set_command, parse_show_command};
 pub use self::read_set::{
-    EngineTag, ReadCapture, ReadKey, ReadOrigin, ReadSetEntry, record_read_set,
+    EngineTag, ReadCapture, ReadKey, ReadOrigin, ReadPoint, ReadSetEntry, record_read_set,
 };
 pub use self::record_reads::{ResponseReads, record_reads_for_response};
 pub use self::savepoint_ops::SavepointError;

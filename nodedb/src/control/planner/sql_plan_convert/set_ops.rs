@@ -33,7 +33,8 @@ pub(super) fn convert_constant_result(
             | SqlValue::Float(_)
             | SqlValue::Bool(_)
             | SqlValue::Null
-            | SqlValue::String(_) => sql_value_to_nodedb_value(val),
+            | SqlValue::String(_)
+            | SqlValue::Geometry(_) => sql_value_to_nodedb_value(val),
             // The shaper has no typed renderer that reproduces PostgreSQL's
             // text form for these — `\x..` for bytes, `{1,2}` for arrays, the
             // ISO string for timestamps — from a typed value, so they keep
@@ -113,6 +114,8 @@ pub(super) fn convert_truncate(
             PhysicalPlan::Columnar(ColumnarOp::Truncate {
                 collection: qualified_collection,
                 restart_identity,
+                system_from: None,
+                erase_history: false,
             })
         }
         EngineType::Timeseries => PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
@@ -500,6 +503,7 @@ mod tests {
                 PhysicalPlan::Columnar(ColumnarOp::Truncate {
                     collection,
                     restart_identity,
+                    ..
                 }) => {
                     assert_eq!(collection.as_str(), "c");
                     assert!(*restart_identity, "{engine:?} must carry restart_identity");

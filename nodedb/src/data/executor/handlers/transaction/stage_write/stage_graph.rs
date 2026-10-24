@@ -13,7 +13,7 @@
 
 use nodedb_physical::physical_plan::{BatchEdge, GraphOp};
 
-use crate::bridge::envelope::Response;
+use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::{
     GraphCollKey, GraphTxnOverlay, MAX_TXN_OVERLAY_BYTES,
@@ -77,7 +77,6 @@ fn unbound_edge_refusal(op: &GraphOp) -> Option<crate::bridge::envelope::ErrorCo
         | GraphOp::BspSuperstep(_)
         | GraphOp::WccSuperstep(_)
         | GraphOp::TemporalNeighbors { .. }
-        | GraphOp::TemporalAlgorithm { .. }
         | GraphOp::Stats { .. }
         | GraphOp::NodeEdgeGuard { .. }
         | GraphOp::NodePresenceGuard { .. }
@@ -107,6 +106,8 @@ impl CoreLoop {
                 label,
                 dst_id,
                 properties,
+                valid_from_ms,
+                valid_until_ms,
                 ..
             } => {
                 if let Err(e) = self.stage_graph_capped(properties.len()) {
@@ -114,12 +115,14 @@ impl CoreLoop {
                 }
                 let coll_key = graph_coll_key(task, tid, collection.as_str());
                 self.tag_staged_edge(txn_id, &coll_key, src_id, label, dst_id);
-                self.graph_txn_overlay_mut(txn_id).stage_edge_put(
+                self.graph_txn_overlay_mut(txn_id).stage_edge_put_valid(
                     coll_key,
-                    src_id,
-                    label,
-                    dst_id,
+                    (src_id, label, dst_id),
                     properties.clone(),
+                    crate::data::executor::handlers::transaction::overlay::EdgeValidTime {
+                        valid_from_ms: *valid_from_ms,
+                        valid_until_ms: *valid_until_ms,
+                    },
                 );
                 self.stage_count_response(task, 1)
             }
@@ -165,6 +168,11 @@ impl CoreLoop {
 
             GraphOp::SetNodeLabels { node_id, labels } => {
                 let coll_key = graph_coll_key(task, tid, GRAPH_LABEL_COLL_KEY);
+                if let Some(refusal) =
+                    self.staged_label_limit_refusal(task, tid, txn_id, &coll_key, node_id, labels)
+                {
+                    return self.response_error(task, refusal);
+                }
                 self.tag_staged_labels(txn_id, &coll_key, node_id);
                 self.graph_txn_overlay_mut(txn_id)
                     .stage_node_labels_set(coll_key, node_id, labels);
@@ -209,7 +217,6 @@ impl CoreLoop {
             | GraphOp::BspSuperstep(_)
             | GraphOp::WccSuperstep(_)
             | GraphOp::TemporalNeighbors { .. }
-            | GraphOp::TemporalAlgorithm { .. }
             | GraphOp::Stats { .. }
             | GraphOp::NodePresenceRead { .. } => self.stage_not_point_write(task),
 
@@ -277,12 +284,14 @@ impl CoreLoop {
             let coll_key = graph_coll_key(task, tid, edge.collection.as_str());
             self.tag_staged_edge(txn_id, &coll_key, &edge.src_id, &edge.label, &edge.dst_id);
             let overlay: &mut GraphTxnOverlay = self.graph_txn_overlay_mut(txn_id);
-            overlay.stage_edge_put(
+            overlay.stage_edge_put_valid(
                 coll_key,
-                &edge.src_id,
-                &edge.label,
-                &edge.dst_id,
+                (&edge.src_id, &edge.label, &edge.dst_id),
                 Vec::new(),
+                crate::data::executor::handlers::transaction::overlay::EdgeValidTime {
+                    valid_from_ms: edge.valid_from_ms,
+                    valid_until_ms: edge.valid_until_ms,
+                },
             );
         }
         self.stage_count_response(task, edges.len())
@@ -386,6 +395,54 @@ impl CoreLoop {
     }
 }
 
+impl CoreLoop {
+    /// The refusal of a staged label set that needs more distinct node
+    /// labels than one partition holds, counting the partition's interned
+    /// names, every label the transaction staged, and `labels`. The install
+    /// cannot refuse the set then. Every replica stages at the same position
+    /// over the same state, so every replica refuses alike.
+    fn staged_label_limit_refusal(
+        &self,
+        task: &ExecutionTask,
+        tid: u64,
+        txn_id: TxnId,
+        coll_key: &GraphCollKey,
+        node_id: &str,
+        labels: &[String],
+    ) -> Option<ErrorCode> {
+        use crate::data::executor::dispatch::graph::node_labels::NODE_LABEL_LIMIT;
+
+        let partition = self.csr_partition(task.request.database_id.as_u64(), tid);
+        let interned = partition.map_or(0, |p| p.node_label_name_count());
+        let is_interned = |label: &str| partition.is_some_and(|p| p.has_node_label_name(label));
+        let mut fresh: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        if let Some(overlay) = self.graph_txn_overlays.get(&txn_id) {
+            for (_, delta) in overlay.staged_node_label_deltas_for_collection(coll_key) {
+                fresh.extend(
+                    delta
+                        .added
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|label| !is_interned(label)),
+                );
+            }
+        }
+        for label in labels {
+            if is_interned(label.as_str()) || !fresh.insert(label.as_str()) {
+                continue;
+            }
+            if interned + fresh.len() > NODE_LABEL_LIMIT {
+                return Some(ErrorCode::NodeLabelLimit {
+                    node: node_id.to_string(),
+                    label: label.clone(),
+                    limit: NODE_LABEL_LIMIT,
+                });
+            }
+        }
+        None
+    }
+}
+
 fn graph_coll_key(task: &ExecutionTask, tid: u64, collection: &str) -> GraphCollKey {
     (
         task.request.database_id,
@@ -471,6 +528,8 @@ mod tests {
             properties: Vec::new(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
         })
     }
 
@@ -534,6 +593,43 @@ mod tests {
         assert_eq!(
             body_rows(&core, txn),
             vec![(GRAPH_LABEL_STREAM.to_string(), "n2".to_string())]
+        );
+    }
+
+    /// A staged label set past the partition's distinct-label limit is
+    /// refused at stage, counting the labels the transaction staged before.
+    /// A set of interned labels still stages.
+    #[test]
+    fn a_staged_label_set_past_the_limit_is_refused() {
+        use crate::data::executor::dispatch::graph::node_labels::NODE_LABEL_LIMIT;
+
+        let (mut core, _dir) = make_core();
+        let partition = core.csr_partition_mut(DatabaseId::DEFAULT.as_u64(), 1);
+        for i in 0..NODE_LABEL_LIMIT - 1 {
+            partition
+                .add_node_label("filler", &format!("L{i}"))
+                .expect("label filler");
+        }
+        let txn = TxnId::new(9);
+        let set = |node: &str, label: &str| {
+            PhysicalPlan::Graph(GraphOp::SetNodeLabels {
+                node_id: node.into(),
+                labels: vec![label.into()],
+            })
+        };
+        stage(&mut core, set("n1", "Fresh"), EventSource::User, txn);
+        stage(&mut core, set("n2", "L0"), EventSource::User, txn);
+        let over = set("n3", "Over");
+        let response =
+            core.execute_stage_write(&stage_task(&over, EventSource::User, txn), 1, &over);
+        assert_eq!(response.status, Status::Error);
+        assert_eq!(
+            response.error_code.as_deref(),
+            Some(&ErrorCode::NodeLabelLimit {
+                node: "n3".into(),
+                label: "Over".into(),
+                limit: NODE_LABEL_LIMIT,
+            })
         );
     }
 }

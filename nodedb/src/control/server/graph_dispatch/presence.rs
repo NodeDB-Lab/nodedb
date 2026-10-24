@@ -6,8 +6,13 @@
 //! a node that graph does not hold finds nothing, so `GRAPH PATH`,
 //! `GRAPH TRAVERSE` and the cross-core hop walk check their endpoints against
 //! this node set first.
+//!
+//! A historical walk reads a CSR of its own collection at its cut, so its
+//! node set is the nodes an edge of that collection names at the cut.
 
 use std::collections::HashSet;
+
+use nodedb_physical::physical_plan::GraphReadScope;
 
 use crate::control::state::SharedState;
 use crate::engine::graph::edge_store::Direction;
@@ -26,6 +31,11 @@ pub(crate) struct PresenceScope<'a> {
     /// The session's transaction. Presence counts its staged edge puts and
     /// tombstones.
     pub txn_id: Option<TxnId>,
+    /// The walk's database-qualified collection. A historical presence
+    /// check reads it.
+    pub collection: Option<&'a str>,
+    /// The walk's bitemporal cut.
+    pub read_scope: GraphReadScope,
 }
 
 /// The nodes of `nodes` that exist in the graph: those with an edge of any
@@ -43,7 +53,13 @@ pub(crate) async fn graph_nodes_present(
         scope.tenant_id,
         scope.database_id,
         NeighborHopParams {
-            collection: None,
+            // The live graph holds every collection's edges in one node
+            // space. A historical CSR holds the walk's collection alone.
+            collection: if scope.read_scope.is_live() {
+                None
+            } else {
+                scope.collection
+            },
             frontier: nodes,
             edge_labels: &[],
             direction: Direction::Both,
@@ -54,6 +70,7 @@ pub(crate) async fn graph_nodes_present(
             edge_predicate: &[],
             with_properties: false,
             txn_id: scope.txn_id,
+            read_scope: scope.read_scope,
         },
     )
     .await?;

@@ -106,7 +106,7 @@ pub(super) fn document_units(
                     for (stamp, body) in versions {
                         ops.push(match body {
                             Some(value) => document_put(stored, pk, value, raw, Some(stamp))?,
-                            None => document_tombstone(stored, pk, raw, stamp.sys_from_ms)?,
+                            None => document_tombstone(stored, pk, raw, stamp.sys_from)?,
                         });
                     }
                     (ops, ends_live)

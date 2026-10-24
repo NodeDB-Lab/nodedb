@@ -6,13 +6,11 @@
 use nodedb_cluster::PendingDdlObject;
 use nodedb_cluster::calvin::types::ReleaseReason;
 
-use crate::control::gateway::RouteDecision;
-use crate::control::planner::calvin::{DispatchClass, classify_dispatch, read_vshards_of};
+use crate::control::planner::calvin::read_vshards_of;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::plan_util::extract_collection;
 use crate::control::state::SharedState;
 
-use super::super::commit_calvin;
 use super::super::commit_fence;
 use super::super::connection::SessionId;
 use super::super::ddl_compensate;
@@ -21,18 +19,19 @@ use super::super::outcome::{AbortReason, CommitOutcome, TxnDataPlane};
 use super::super::overlay_drop::drop_txn_overlay;
 use super::super::reservation_release;
 use super::super::store::SessionStore;
+use super::buffered_dispatch::BufferedCommit;
 use super::metering::{meter_committed_buffered_writes, resolve_buffered_write_scopes};
 use super::read_split::SplitReads;
 use super::read_validation::stale_read_abort;
 use super::restart_identity::restart_truncated_identities;
-use super::single_shard::{commit_publishes, dispatch_single_shard};
+use super::single_shard::commit_publishes;
 
 /// Reverse whatever `begin_commit` already finalized to the catalog before a
 /// dispatch failure that follows it. Called on every abort path reachable
 /// after `finalize_pending` — the caller still aborts either way, since the
 /// durable batch never dispatched; a compensation failure is surfaced in the
 /// trace alongside the original failure rather than swallowed.
-async fn compensate_finalized_ddl(
+pub(super) async fn compensate_finalized_ddl(
     state: &SharedState,
     compensation: &Option<Vec<PendingDdlObject>>,
 ) {
@@ -214,119 +213,23 @@ pub async fn run_commit(
                 };
             }
         };
-        match classify_dispatch(&buffered, &read_vshards) {
-            DispatchClass::MultiShard { .. } => {
-                // Flush the buffered cross-shard batch through Calvin's durable
-                // Vote/Verdict barrier (`run_commit_calvin`), leader-routed.
-                // Calvin's participants validate `versioned_reads` themselves
-                // and return a serialization abort (SQLSTATE 40001) on an ABORT
-                // verdict.
-                if let Some(outcome) = split_reads
-                    .stale_here(state, sessions, session_id, &written_collections)
-                    .await
-                {
-                    compensate_finalized_ddl(state, &ddl_compensation).await;
-                    return outcome;
-                }
-                if let Some(reason) = commit_calvin::run_commit_calvin(
-                    sessions,
-                    session_id,
-                    state,
-                    commit_calvin::CalvinCommit {
-                        buffered: &buffered,
-                        tenant_id,
-                        reads: split_reads.enlisted(),
-                        event_source: dp.event_source(),
-                        publishes: &publishes,
-                        applied_key: dp.applied_key().zip(dp.applied_key_vshard()),
-                        ts_preview: &ts_preview,
-                        user_roles: identity.role_names(),
-                    },
-                )
-                .await
-                {
-                    compensate_finalized_ddl(state, &ddl_compensation).await;
-                    reservation_release::release_and_rollback(state, sessions, session_id).await;
-                    return CommitOutcome::Aborted { reason };
-                }
-            }
-            DispatchClass::SingleShard { vshard: vshard_id } => {
-                let leader = crate::control::gateway::live_leaders::resolve_live_decision(
-                    state,
-                    vshard_id.as_u32(),
-                );
-                if !matches!(leader, RouteDecision::Local)
-                    || crate::control::planner::calvin::writes_edges(&buffered)
-                {
-                    // The interactive transaction WAL record belongs to this
-                    // coordinator and cannot be forwarded as a bare remote
-                    // Data-Plane LSN. Route a non-local single-shard commit
-                    // through Calvin's replicated Vote/Verdict barrier instead;
-                    // this gives it the same leader routing, OCC, durability,
-                    // and apply ordering as any multi-participant commit.
-                    // A commit that writes an edge takes it too: every edge
-                    // version takes a Calvin ordinal, so it orders against a
-                    // TRUNCATE's cut on every replica.
-                    if let Some(outcome) = split_reads
-                        .stale_here(state, sessions, session_id, &written_collections)
-                        .await
-                    {
-                        compensate_finalized_ddl(state, &ddl_compensation).await;
-                        return outcome;
-                    }
-                    if let Some(reason) = commit_calvin::run_commit_calvin(
-                        sessions,
-                        session_id,
-                        state,
-                        commit_calvin::CalvinCommit {
-                            buffered: &buffered,
-                            tenant_id,
-                            reads: split_reads.enlisted(),
-                            event_source: dp.event_source(),
-                            publishes: &publishes,
-                            applied_key: dp.applied_key().zip(dp.applied_key_vshard()),
-                            ts_preview: &ts_preview,
-                            user_roles: identity.role_names(),
-                        },
-                    )
-                    .await
-                    {
-                        compensate_finalized_ddl(state, &ddl_compensation).await;
-                        reservation_release::release_and_rollback(state, sessions, session_id)
-                            .await;
-                        return CommitOutcome::Aborted { reason };
-                    }
-                } else {
-                    if let Some(outcome) = stale_read_abort(
-                        state,
-                        sessions,
-                        session_id,
-                        &read_set,
-                        &written_collections,
-                    )
-                    .await
-                    {
-                        compensate_finalized_ddl(state, &ddl_compensation).await;
-                        return outcome;
-                    }
-                    if let Some(reason) = dispatch_single_shard(
-                        state,
-                        dp,
-                        &buffered,
-                        identity,
-                        vshard_id,
-                        publishes,
-                        &ts_preview,
-                    )
-                    .await
-                    {
-                        compensate_finalized_ddl(state, &ddl_compensation).await;
-                        reservation_release::release_and_rollback(state, sessions, session_id)
-                            .await;
-                        return CommitOutcome::Aborted { reason };
-                    }
-                }
-            }
+        let dispatch = BufferedCommit {
+            sessions,
+            session_id,
+            identity,
+            state,
+            dp,
+            buffered: &buffered,
+            read_set: &read_set,
+            split_reads: &split_reads,
+            written_collections: &written_collections,
+            ts_preview: &ts_preview,
+        };
+        if let Some(outcome) = dispatch
+            .dispatch(&read_vshards, publishes, &ddl_compensation)
+            .await
+        {
+            return outcome;
         }
     }
 

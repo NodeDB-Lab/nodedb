@@ -152,6 +152,7 @@ impl CoreLoop {
             schema.as_ref(),
             &identity_column,
             rows,
+            &self.crs_context(),
         )
         .and_then(|rows| {
             zerompk::to_msgpack_vec(&StagedReturningReply { affected, rows }).map_err(|error| {

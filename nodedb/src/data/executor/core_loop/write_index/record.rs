@@ -34,7 +34,7 @@ impl CoreLoop {
         self.write_index.record_stamps.resolve(WriteStamp {
             vshard: task.request.vshard_id,
             lsn,
-            entry: task.request.entry_version,
+            entry: task.request.entry_version.map(|entry| entry.version),
         })
     }
 
@@ -637,6 +637,8 @@ mod tests {
                 properties: &[],
                 src_surrogate: Surrogate::new(1),
                 dst_surrogate: Surrogate::new(2),
+                valid_from_ms: None,
+                valid_until_ms: None,
             },
         );
         assert_eq!(resp.status, Status::Ok);

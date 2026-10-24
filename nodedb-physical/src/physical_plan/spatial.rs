@@ -20,6 +20,8 @@ use nodedb_types::{QualifiedCollection, Surrogate, SurrogateBitmap, geometry::Sr
 pub enum SpatialPredicate {
     /// ST_DWithin: geometry within distance (meters).
     DWithin,
+    /// ST_3DDWithin: 3D distance within metres, Z in metres.
+    DWithin3D,
     /// ST_Contains: query geometry contains document geometry.
     Contains,
     /// ST_Intersects: query geometry intersects document geometry.

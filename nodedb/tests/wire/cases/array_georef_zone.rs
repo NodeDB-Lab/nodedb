@@ -9,8 +9,8 @@
 
 use std::collections::BTreeSet;
 
-use nodedb_spatial::crs::Transformer;
-use nodedb_types::geometry::{Srid, point_in_polygon};
+use nodedb_crs::{CrsContext, Srid, Transformer};
+use nodedb_types::geometry::point_in_polygon;
 
 use crate::harness::TestServer;
 
@@ -18,6 +18,20 @@ const SIZE: i64 = 32;
 const PIXEL_M: f64 = 30.0;
 const EAST0: f64 = 550_000.0;
 const NORTH0: f64 = 664_000.0;
+
+/// The UTM 47N to WGS 84 transformer.
+fn utm47n_to_wgs84() -> Transformer {
+    let utm47n = Srid::new(32647).expect("srid");
+    CrsContext::builtin_only()
+        .transformer(utm47n, Srid::WGS84)
+        .expect("UTM 47N and WGS 84 are built in")
+}
+
+/// One UTM 47N position in WGS 84 degrees.
+fn to_lon_lat(to_wgs84: &Transformer, p: [f64; 2]) -> [f64; 2] {
+    let [lon, lat, _] = to_wgs84.apply([p[0], p[1], 0.0]).expect("inside UTM 47N");
+    [lon, lat]
+}
 
 /// World centre of pixel `(row, col)`, UTM 47N metres.
 fn centre(row: i64, col: i64) -> [f64; 2] {
@@ -33,17 +47,14 @@ fn cell_value(row: i64, col: i64) -> f64 {
 
 /// A WGS 84 quadrilateral over the middle of the grid, from UTM corners.
 fn zone_ring() -> Vec<[f64; 2]> {
-    let to_wgs84 = Transformer::new(Srid::Utm47N, Srid::Wgs84);
+    let to_wgs84 = utm47n_to_wgs84();
     let utm = [
         [EAST0 + 140.0, NORTH0 - 110.0],
         [EAST0 + 830.0, NORTH0 - 260.0],
         [EAST0 + 700.0, NORTH0 - 880.0],
         [EAST0 + 210.0, NORTH0 - 760.0],
     ];
-    let mut ring: Vec<[f64; 2]> = utm
-        .iter()
-        .map(|p| to_wgs84.apply(*p).expect("inside UTM 47N"))
-        .collect();
+    let mut ring: Vec<[f64; 2]> = utm.iter().map(|p| to_lon_lat(&to_wgs84, *p)).collect();
     ring.push(ring[0]);
     ring
 }
@@ -59,11 +70,11 @@ fn ewkt(ring: &[[f64; 2]]) -> String {
 
 /// The cells whose centre lies inside `ring`.
 fn expected_cells(ring: &[[f64; 2]]) -> BTreeSet<(i64, i64)> {
-    let to_wgs84 = Transformer::new(Srid::Utm47N, Srid::Wgs84);
+    let to_wgs84 = utm47n_to_wgs84();
     let mut out = BTreeSet::new();
     for row in 0..SIZE {
         for col in 0..SIZE {
-            let [lon, lat] = to_wgs84.apply(centre(row, col)).expect("inside UTM 47N");
+            let [lon, lat] = to_lon_lat(&to_wgs84, centre(row, col));
             if point_in_polygon(lon, lat, ring) {
                 out.insert((row, col));
             }

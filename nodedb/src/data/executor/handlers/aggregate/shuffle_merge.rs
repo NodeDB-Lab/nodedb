@@ -61,6 +61,7 @@ pub(in crate::data::executor) fn merge_state_frames(
     // symmetry with `accumulate_groups`; the decoded states already carry one
     // accumulator per spec, so the merge needs no per-spec dispatch.
     _aggregates: &[AggregateSpec],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<HashMap<String, GroupState>> {
     let mut merged: HashMap<String, GroupState> = HashMap::new();
     let mut reader = FrameStreamReader::open(state_path)?;
@@ -71,7 +72,7 @@ pub(in crate::data::executor) fn merge_state_frames(
         // `row_keys` are plain column specs (the producer already materialized
         // any computed key into a field), so this cannot divide by zero; the
         // `?` upholds the crate-wide contract without a reachable error path.
-        let key = msgpack_scan::build_group_key(&row, &row_keys)?;
+        let key = msgpack_scan::build_group_key(&row, &row_keys, crs)?;
 
         // Extract the `__agg_state` binary field.
         let (val_start, _val_end) = msgpack_scan::extract_field(&row, 0, AGG_STATE_FIELD)
@@ -133,7 +134,8 @@ impl CoreLoop {
             sort_keys,
         } = params;
 
-        let merged = match merge_state_frames(Path::new(state_path), group_by, aggregates) {
+        let crs = self.crs_context();
+        let merged = match merge_state_frames(Path::new(state_path), group_by, aggregates, &crs) {
             Ok(m) => m,
             Err(e) => {
                 return self.response_error(task, ErrorCode::from(e));
@@ -202,12 +204,16 @@ mod tests {
     ) {
         let mut groups: HashMap<String, GroupState> = HashMap::new();
         for doc in docs {
-            let key =
-                nodedb_query::msgpack_scan::build_group_key(doc, group_by).expect("group key");
+            let key = nodedb_query::msgpack_scan::build_group_key(
+                doc,
+                group_by,
+                &nodedb_crs::CrsContext::builtin_only(),
+            )
+            .expect("group key");
             groups
                 .entry(key)
                 .or_insert_with(|| GroupState::new(specs).expect("group state"))
-                .feed(specs, doc)
+                .feed(specs, doc, &nodedb_crs::CrsContext::builtin_only())
                 .expect("feed");
         }
 
@@ -253,11 +259,15 @@ mod tests {
     ) -> HashMap<String, Vec<Value>> {
         let mut map: HashMap<String, GroupState> = HashMap::new();
         for doc in docs {
-            let key =
-                nodedb_query::msgpack_scan::build_group_key(doc, group_by).expect("group key");
+            let key = nodedb_query::msgpack_scan::build_group_key(
+                doc,
+                group_by,
+                &nodedb_crs::CrsContext::builtin_only(),
+            )
+            .expect("group key");
             map.entry(key)
                 .or_insert_with(|| GroupState::new(specs).expect("group state"))
-                .feed(specs, doc)
+                .feed(specs, doc, &nodedb_crs::CrsContext::builtin_only())
                 .expect("feed");
         }
         map.into_iter()
@@ -329,7 +339,13 @@ mod tests {
         }
 
         // Merge the partial states, finalize.
-        let merged = merge_state_frames(&combined, &group_by, &specs).expect("merge");
+        let merged = merge_state_frames(
+            &combined,
+            &group_by,
+            &specs,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("merge");
         let got: HashMap<String, Vec<Value>> = merged
             .into_iter()
             .map(|(k, s)| {

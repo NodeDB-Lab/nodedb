@@ -58,6 +58,8 @@ fn purge_removes_all_tenant_data() {
             properties: vec![],
             src_surrogate: doc_surrogate("u0"),
             dst_surrogate: doc_surrogate("u1"),
+            valid_from_ms: None,
+            valid_until_ms: None,
         }),
     );
 
@@ -189,6 +191,7 @@ fn purge_removes_all_tenant_data() {
             direction: nodedb::engine::graph::edge_store::Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     assert_eq!(graph_resp.status, Status::Ok);

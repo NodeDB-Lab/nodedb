@@ -3,13 +3,16 @@
 //! Edge-property work for one traversal hop: the `EDGE WHERE` predicate and
 //! the property object a `GRAPH TRAVERSE` row carries.
 //!
-//! Both read the crossed edge's current property map on the core that holds
-//! the edge, through one read transaction per hop. A dual-homed edge is
+//! Both read the crossed edge's property map at the hop's cut on the core
+//! that holds the edge. A live hop reads the current map through one read
+//! transaction per hop. A historical hop resolves each edge's version at
+//! its cut. A dual-homed edge is
 //! stored in full on both homes, so either direction reads it locally. An
 //! edge the hop's transaction staged a put of uses the staged map instead.
 
 use std::borrow::Cow;
 
+use nodedb_physical::physical_plan::GraphReadScope;
 use nodedb_types::filter::MetadataFilter;
 use nodedb_types::graph::Direction;
 use nodedb_types::{DatabaseId, TenantId, Value};
@@ -27,6 +30,7 @@ pub(in crate::data::executor) struct HopEdgeProperties<'a> {
     database: DatabaseId,
     tenant: TenantId,
     collection: &'a str,
+    read_scope: GraphReadScope,
 }
 
 /// The verdict on one crossed edge.
@@ -49,6 +53,8 @@ pub(in crate::data::executor) struct HopPropertyScope<'a> {
     pub filters: &'a [MetadataFilter],
     /// Each admitted row carries the edge's property object.
     pub with_properties: bool,
+    /// The cut the properties are read at.
+    pub read_scope: GraphReadScope,
 }
 
 impl<'a> HopEdgeProperties<'a> {
@@ -64,6 +70,7 @@ impl<'a> HopEdgeProperties<'a> {
             collection,
             filters,
             with_properties,
+            read_scope,
         } = scope;
         if filters.is_empty() && !with_properties {
             return Ok(None);
@@ -83,6 +90,7 @@ impl<'a> HopEdgeProperties<'a> {
             database,
             tenant,
             collection,
+            read_scope,
         }))
     }
 
@@ -122,23 +130,28 @@ impl<'a> HopEdgeProperties<'a> {
         )?)))
     }
 
-    /// The stored property map of `(src, label, dst)`, empty when the edge
-    /// has no live version. Opens the hop's read transaction on first use.
+    /// The stored property map of `(src, label, dst)` at the hop's cut,
+    /// empty when the edge has no version there. A live hop opens its read
+    /// transaction on first use.
     fn stored(&mut self, src: &str, label: &str, dst: &str) -> crate::Result<Vec<u8>> {
+        let edge = EdgeRef::new(self.database, self.tenant, self.collection, src, label, dst);
+        if !self.read_scope.is_live() {
+            let cutoff =
+                self.read_scope
+                    .cutoff_ordinal()
+                    .ok_or_else(|| crate::Error::BadRequest {
+                        detail: nodedb_physical::physical_plan::ALL_VERSIONS_REFUSED.into(),
+                    })?;
+            return Ok(self
+                .store
+                .ceiling_resolve_edge(edge, cutoff, self.read_scope.valid_at_ms)?
+                .unwrap_or_default());
+        }
         let reader = match &mut self.reader {
             Some(reader) => reader,
             empty => empty.insert(self.store.property_reader()?),
         };
-        Ok(reader
-            .current(EdgeRef::new(
-                self.database,
-                self.tenant,
-                self.collection,
-                src,
-                label,
-                dst,
-            ))?
-            .unwrap_or_default())
+        Ok(reader.current(edge)?.unwrap_or_default())
     }
 }
 
@@ -281,6 +294,7 @@ mod tests {
             collection,
             filters,
             with_properties,
+            read_scope: GraphReadScope::default(),
         }
     }
 

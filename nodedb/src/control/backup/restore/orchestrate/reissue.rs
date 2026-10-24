@@ -181,6 +181,10 @@ pub(super) async fn reissue_columnar_snapshots(
             PhysicalPlan::Columnar(ColumnarOp::Truncate {
                 collection: name.stored.clone(),
                 restart_identity: false,
+                system_from: None,
+                // The restore reinstalls every version under the system time
+                // it carries, so the old history goes, bitemporal or not.
+                erase_history: true,
             }),
         )
         .await?;

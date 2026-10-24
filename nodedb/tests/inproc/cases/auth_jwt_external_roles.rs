@@ -6,6 +6,7 @@ use base64::Engine;
 use nodedb::config::auth::{JwtAuthConfig, JwtProviderConfig};
 use nodedb::control::security::identity::Role;
 use nodedb::control::security::jwks::registry::JwksRegistry;
+use nodedb_test_support::jwks_fixture::loopback_egress;
 use nodedb_types::id::DatabaseId;
 
 async fn spawn_static_jwks(body: String) -> String {
@@ -75,19 +76,19 @@ fn signed_jwt_fixture(roles: &[&str], is_superuser: bool) -> (String, String) {
 
 async fn registry_for(jwks: String) -> JwksRegistry {
     let jwks_url = spawn_static_jwks(jwks).await;
-    JwksRegistry::init(JwtAuthConfig {
-        allow_http_jwks: true,
-        allow_jwks_hosts: vec!["localhost".into()],
-        allow_jwks_cidrs: vec!["127.0.0.0/8".into(), "::1/128".into()],
-        providers: vec![JwtProviderConfig {
-            name: "static-idp".into(),
-            jwks_url,
-            issuer: "https://static-idp.example/".into(),
-            audience: "nodedb-api".into(),
-            tenant_id: 42,
-        }],
-        ..JwtAuthConfig::default()
-    })
+    JwksRegistry::init(
+        JwtAuthConfig {
+            providers: vec![JwtProviderConfig {
+                name: "static-idp".into(),
+                jwks_url,
+                issuer: "https://static-idp.example/".into(),
+                audience: "nodedb-api".into(),
+                tenant_id: 42,
+            }],
+            ..JwtAuthConfig::default()
+        },
+        loopback_egress(),
+    )
     .await
     .expect("static provider configuration must initialize")
 }

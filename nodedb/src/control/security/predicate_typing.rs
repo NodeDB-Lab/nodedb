@@ -124,7 +124,8 @@ fn sql_literal_to_predicate_value(
         | SqlValue::Decimal(_)
         | SqlValue::String(_)
         | SqlValue::Bytes(_)
-        | SqlValue::Array(_) => PredicateValue::Literal(original),
+        | SqlValue::Array(_)
+        | SqlValue::Geometry(_) => PredicateValue::Literal(original),
     }
 }
 

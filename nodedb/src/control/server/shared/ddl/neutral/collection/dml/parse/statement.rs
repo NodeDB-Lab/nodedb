@@ -36,6 +36,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) fn parse_write_
     sql: &str,
     keyword: &str,
 ) -> Option<Result<ParsedInsert, DdlError>> {
+    let crs = crate::control::crs_context::crs_context_for(state);
     let (sql, returning_clause) = split_returning(sql);
     let kw_pos = find_ascii_case_insensitive(sql, keyword)?;
     let after_into = sql[kw_pos + keyword.len()..].trim_start();
@@ -75,7 +76,13 @@ pub(in crate::control::server::shared::ddl::neutral::collection) fn parse_write_
             // The preprocessed SQL is always INSERT INTO regardless of original keyword.
             Ok(Some(preprocessed)) => {
                 return with_returning(
-                    parse_values_form(&preprocessed.sql, "INSERT INTO ", &coll_name, coll_type),
+                    parse_values_form(
+                        &preprocessed.sql,
+                        "INSERT INTO ",
+                        &coll_name,
+                        coll_type,
+                        &crs,
+                    ),
                     returning_clause,
                 );
             }
@@ -90,7 +97,7 @@ pub(in crate::control::server::shared::ddl::neutral::collection) fn parse_write_
     }
 
     with_returning(
-        parse_values_form(sql, keyword, &coll_name, coll_type),
+        parse_values_form(sql, keyword, &coll_name, coll_type, &crs),
         returning_clause,
     )
 }
@@ -133,6 +140,7 @@ fn parse_values_form(
     keyword: &str,
     coll_name: &str,
     coll_type: Option<nodedb_types::CollectionType>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Option<Result<ParsedInsert, DdlError>> {
     let first_open = match sql.find('(') {
         Some(p) => p,
@@ -162,7 +170,7 @@ fn parse_values_form(
     };
     let mut rows = Vec::with_capacity(tuples.len());
     for tuple in tuples {
-        match parse_row(&columns, tuple) {
+        match parse_row(&columns, tuple, crs) {
             Ok(row) => rows.push(row),
             Err(error) => return Some(Err(error)),
         }
@@ -178,7 +186,11 @@ fn parse_values_form(
 }
 
 /// One `VALUES` tuple matched against the column list.
-fn parse_row(columns: &[&str], tuple: &str) -> Result<ParsedRow, DdlError> {
+fn parse_row(
+    columns: &[&str],
+    tuple: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> Result<ParsedRow, DdlError> {
     let values: Vec<&str> = split_values(tuple);
     if columns.len() != values.len() {
         return Err(ddl_err(
@@ -201,7 +213,7 @@ fn parse_row(columns: &[&str], tuple: &str) -> Result<ParsedRow, DdlError> {
         {
             doc_id = val.trim_matches('\'').to_string();
         }
-        fields.insert(col.to_string(), parse_sql_value(val));
+        fields.insert(col.to_string(), parse_sql_value(val, crs));
     }
     if doc_id.is_empty() {
         doc_id = nodedb_types::id_gen::uuid_v7();
@@ -216,9 +228,15 @@ mod tests {
     #[test]
     fn values_keyword_after_unicode_identifier_preserves_original_offsets() {
         let sql = "INSERT INTO tﬀﬀ (a) VALUES (42)";
-        let parsed = parse_values_form(sql, "INSERT INTO ", "tﬀﬀ", None)
-            .expect("statement should be recognized")
-            .expect("statement should parse");
+        let parsed = parse_values_form(
+            sql,
+            "INSERT INTO ",
+            "tﬀﬀ",
+            None,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("statement should be recognized")
+        .expect("statement should parse");
         assert_eq!(
             parsed.rows[0].fields.get("a"),
             Some(&nodedb_types::Value::Integer(42))
@@ -228,9 +246,15 @@ mod tests {
     #[test]
     fn every_values_row_parses_in_order() {
         let sql = "UPSERT INTO c (key, n) VALUES ('a', 2), ('b', 3);";
-        let parsed = parse_values_form(sql, "UPSERT INTO ", "c", None)
-            .expect("statement should be recognized")
-            .expect("statement should parse");
+        let parsed = parse_values_form(
+            sql,
+            "UPSERT INTO ",
+            "c",
+            None,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("statement should be recognized")
+        .expect("statement should parse");
         let keys: Vec<&str> = parsed.rows.iter().map(|row| row.doc_id.as_str()).collect();
         assert_eq!(keys, vec!["a", "b"]);
         assert_eq!(

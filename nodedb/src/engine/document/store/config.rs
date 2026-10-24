@@ -17,7 +17,7 @@ pub struct CollectionConfig {
     /// Collection enforcement options (append-only, period lock, retention, etc.).
     pub enforcement: nodedb_physical::physical_plan::EnforcementOptions,
     /// Bitemporal storage: every write goes to the versioned document
-    /// table, keyed by `system_from_ms`. Enables `FOR SYSTEM_TIME AS OF`
+    /// table, keyed by its system-time ordinal. Enables `FOR SYSTEM_TIME AS OF`
     /// queries.
     pub bitemporal: bool,
     /// Durable CRDT conflict-resolution policy (JSON-serialized
@@ -58,6 +58,9 @@ pub struct CollectionConfig {
     /// The typeguards of `enforcement.type_guards`, parsed once at
     /// registration. Every write applies them to the body it stores.
     pub type_guards: Vec<crate::data::executor::enforcement::typeguard::CompiledTypeGuard>,
+    /// The collection's catalog incarnation. Its CRDT document derives its
+    /// Loro peer id from it. `Hlc::ZERO` when the catalog holds none.
+    pub incarnation: nodedb_types::Hlc,
 }
 
 impl CollectionConfig {
@@ -76,6 +79,7 @@ impl CollectionConfig {
             declared_columns: Vec::new(),
             declared_key: None,
             type_guards: Vec::new(),
+            incarnation: nodedb_types::Hlc::ZERO,
         }
     }
 

@@ -3,6 +3,8 @@
 //! Flattened per-key view of a transaction's read and write sets, and the
 //! one predicate that decides whether a read key and a write key conflict.
 
+use std::collections::BTreeSet;
+
 use crate::calvin::types::{EngineKeySet, ReadWriteSet};
 
 /// Canonical, order-comparable identity of a single key across engines:
@@ -123,10 +125,12 @@ pub(super) fn flatten_set(set: &ReadWriteSet) -> Vec<FlatKey> {
                     });
                 }
             }
+            // One key per distinct pair: a pair placed on two homes is one key.
             EngineKeySet::Edge {
                 collection, edges, ..
             } => {
-                for &(src, dst) in edges.as_slice() {
+                let pairs: BTreeSet<(u32, u32)> = edges.iter().map(|p| p.pair).collect();
+                for (src, dst) in pairs {
                     let mut key_bytes = src.to_le_bytes().to_vec();
                     key_bytes.extend_from_slice(&dst.to_le_bytes());
                     out.push(FlatKey {

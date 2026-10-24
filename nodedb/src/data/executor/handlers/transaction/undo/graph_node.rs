@@ -13,8 +13,10 @@
 //! newly inserted the node, so this un-mark never resurrects a tombstone a
 //! prior committed op created.
 //!
-//! The node-label undo puts each label back, then withdraws the label names
-//! and the node the op interned, so the CSR holds what it held before.
+//! The node-label undo removes the label version the op wrote, or writes back
+//! the one it replaced. It puts each label back, then withdraws the label
+//! names and the node the op interned. The edge store and the CSR then hold
+//! what they held before.
 //!
 //! Returns an [`UndoError`] on fatal failure, and the caller escalates it to
 //! a typed `RollbackFailed` response.
@@ -78,6 +80,8 @@ impl CoreLoop {
             prior,
             interned_labels,
             created_node: local.is_none(),
+            version: None,
+            replaced: None,
         }
     }
 
@@ -95,7 +99,33 @@ impl CoreLoop {
             prior,
             interned_labels,
             created_node,
+            version,
+            replaced,
         } = undo;
+        if let Some(ordinal) = version {
+            let db = nodedb_types::DatabaseId::new(database_id);
+            let tenant = crate::types::TenantId::new(tid);
+            let reverted = match &replaced {
+                Some(labels) => self
+                    .edge_store
+                    .put_node_label_version(db, tenant, &node_id, ordinal, None, labels)
+                    .map(|_| ()),
+                None => self
+                    .edge_store
+                    .remove_node_label_version(db, tenant, &node_id, ordinal),
+            };
+            reverted.map_err(|e| {
+                UndoError::failed(
+                    entry_index,
+                    format!("reverting the label version of node '{node_id}' at {ordinal}"),
+                    e,
+                )
+            })?;
+            self.historical_csr.invalidate_tenant(
+                nodedb_types::DatabaseId::new(database_id),
+                crate::types::TenantId::new(tid),
+            );
+        }
         let partition = self.csr_partition_mut(database_id, tid);
         for (label, carried) in prior {
             if carried {
@@ -132,6 +162,8 @@ pub(super) struct NodeLabelsUndo {
     pub prior: Vec<(String, bool)>,
     pub interned_labels: Vec<String>,
     pub created_node: bool,
+    pub version: Option<i64>,
+    pub replaced: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -278,6 +310,8 @@ mod tests {
                 properties: b"p1",
                 src_surrogate: nodedb_types::Surrogate::new(1),
                 dst_surrogate: nodedb_types::Surrogate::new(2),
+                valid_from_ms: None,
+                valid_until_ms: None,
             },
             Some(&mut undo_log),
         );

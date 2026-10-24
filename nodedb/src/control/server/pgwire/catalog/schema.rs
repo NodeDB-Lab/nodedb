@@ -21,6 +21,8 @@ pub enum CatalogColType {
     Int4,
     /// 8-byte integer.
     Int8,
+    /// 8-byte float.
+    Float8,
     Text,
 }
 
@@ -29,6 +31,7 @@ impl CatalogColType {
         match self {
             CatalogColType::Bool => SqlDataType::Bool,
             CatalogColType::Int4 | CatalogColType::Int8 => SqlDataType::Int64,
+            CatalogColType::Float8 => SqlDataType::Float64,
             CatalogColType::Text => SqlDataType::String,
         }
     }
@@ -59,6 +62,7 @@ pub const KNOWN_TABLES: &[&str] = &[
     "_system.audit_log",
     "_system.dropped_collections",
     "_system.l2_cleanup_queue",
+    "nodedb.spatial_ref_sys",
 ];
 
 /// Map a relation name to its canonical static name (case-insensitive).
@@ -72,7 +76,7 @@ pub fn known_table(name: &str) -> Option<&'static str> {
 /// Static column spec for a known catalog relation, in output order. Returns
 /// `None` for any name that is not a catalog relation.
 pub fn catalog_columns(table: &str) -> Option<Vec<CatalogColumn>> {
-    use CatalogColType::{Bool, Int4, Int8, Text};
+    use CatalogColType::{Bool, Float8, Int4, Int8, Text};
     Some(match table {
         "pg_database" => vec![
             col("oid", Int8),
@@ -196,6 +200,16 @@ pub fn catalog_columns(table: &str) -> Option<Vec<CatalogColumn>> {
             col("bytes_pending", Int8),
             col("last_error", Text),
             col("attempts", Int4),
+        ],
+        "nodedb.spatial_ref_sys" => vec![
+            col("srid", Int4),
+            col("auth_name", Text),
+            col("auth_srid", Int4),
+            col("name", Text),
+            col("kind", Text),
+            col("proj4text", Text),
+            col("srtext", Text),
+            col("datum_shift_accuracy_m", Float8),
         ],
         _ => return None,
     })

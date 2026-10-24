@@ -40,7 +40,7 @@ impl DataPlaneArrayExecutor {
             attr_idx: req.attr_idx,
             cell_filter: None,
             shard_bucket: req.shard_bucket,
-            system_as_of: req.system_as_of,
+            system_time: req.system_time,
             valid_at_ms: req.valid_at_ms,
         });
         let resp = self
@@ -58,7 +58,8 @@ impl DataPlaneArrayExecutor {
         // A temporal read ends with the `{"truncated_before_horizon": bool}`
         // summary row. The coordinator ORs the flag and appends one summary
         // row for the whole fan-out.
-        let truncated_before_horizon = if req.system_as_of.is_some() || req.valid_at_ms.is_some() {
+        let truncated_before_horizon = if req.system_time.is_temporal() || req.valid_at_ms.is_some()
+        {
             let summary = rows.pop().ok_or_else(|| ClusterError::Codec {
                 detail: "exec_elementwise: temporal answer has no summary row".into(),
             })?;

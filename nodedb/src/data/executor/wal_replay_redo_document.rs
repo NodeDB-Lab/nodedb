@@ -25,13 +25,13 @@
 //!   The trailing `surrogate` is the stable identity `apply_point_put` keys on,
 //!   and `value` is the MessagePack body `apply_point_put` encodes into storage.
 //!   A `bitemporal=true` collection's put instead carries an 8-tuple that
-//!   appends `(sys_from_ms, valid_from_ms, valid_until_ms)`; the decoder tries
+//!   appends `(sys_from, valid_from_ms, valid_until_ms)`; the decoder tries
 //!   the 8-tuple first and falls back to the 5-tuple, and a decoded stamp
 //!   forces the put onto the versioned store at that exact version key.
 //! * DELETE — `(collection, document_id, Option<SyncProvenance>, surrogate)`.
 //!   The redb storage key is `StorageKey::for_surrogate(surrogate)`, and the
 //!   delete cascade keys on it. A `bitemporal=true` collection's delete
-//!   appends its `sys_from_ms` as a fifth element, and the decoded stamp
+//!   appends its `sys_from` as a fifth element, and the decoded stamp
 //!   forces the versioned tombstone at that exact version key.
 //!
 //! A record without a stamp on a `bitemporal=true` collection is a point
@@ -180,7 +180,7 @@ impl CoreLoop {
                                 value,
                                 surrogate,
                                 Some(BitemporalStamp {
-                                    sys_from_ms: sys,
+                                    sys_from: sys,
                                     valid_from_ms: vf,
                                     valid_until_ms: vu,
                                 }),
@@ -223,9 +223,10 @@ impl CoreLoop {
                 }
                 // Carry the stamp into apply scratch (forcing the versioned
                 // branch at the exact stamp the commit-time install used) and
-                // advance the per-core HLC so post-restart writes stay monotonic.
+                // fold its ordinal into the shared clock so post-restart writes
+                // stamp above it.
                 if let Some(s) = stamp {
-                    self.observe_bitemporal_stamp(s.sys_from_ms);
+                    self.observe_bitemporal_ordinal(s.sys_from);
                     self.apply_scope.bitemporal_stamps.insert(surrogate_u32, s);
                 }
                 let folds = self.redo_folds();
@@ -288,15 +289,14 @@ impl CoreLoop {
                             },
                         )
                     });
-                let Ok((collection, document_id, surrogate_u32, sys_from_ms)) = decoded else {
+                let Ok((collection, document_id, surrogate_u32, sys_from)) = decoded else {
                     continue;
                 };
                 if tombstones.is_tombstoned(database_id, tenant_id, &collection, record_lsn) {
                     continue;
                 }
                 // The stamped image journalled after apply carries the removal.
-                if sys_from_ms.is_none() && self.is_bitemporal(database_id, tenant_id, &collection)
-                {
+                if sys_from.is_none() && self.is_bitemporal(database_id, tenant_id, &collection) {
                     continue;
                 }
                 // A delete record names a bound row. One under `ZERO` is
@@ -316,12 +316,12 @@ impl CoreLoop {
                 if self.claim_for_validation() {
                     continue;
                 }
-                if let Some(sys) = sys_from_ms {
-                    self.observe_bitemporal_stamp(sys);
+                if let Some(sys) = sys_from {
+                    self.observe_bitemporal_ordinal(sys);
                     self.apply_scope.bitemporal_stamps.insert(
                         surrogate_u32,
                         BitemporalStamp {
-                            sys_from_ms: sys,
+                            sys_from: sys,
                             valid_from_ms: i64::MIN,
                             valid_until_ms: i64::MAX,
                         },
@@ -346,7 +346,7 @@ impl CoreLoop {
                         surrogate: surrogate_u32,
                     })
                 };
-                if sys_from_ms.is_some() {
+                if sys_from.is_some() {
                     self.apply_scope.bitemporal_stamps.remove(&surrogate_u32);
                 }
                 if removed {
@@ -882,7 +882,7 @@ mod tests {
         );
     }
 
-    fn bitemporal_put_sub(collection: &str, surrogate: u32, sys_from_ms: i64) -> RedoSubRecord {
+    fn bitemporal_put_sub(collection: &str, surrogate: u32, sys_from: i64) -> RedoSubRecord {
         let prov: Option<SyncProvenance> = None;
         let payload = zerompk::to_msgpack_vec(&(
             collection,
@@ -890,7 +890,7 @@ mod tests {
             doc_value("alice"),
             prov,
             surrogate,
-            sys_from_ms,
+            sys_from,
             i64::MIN,
             i64::MAX,
         ))
@@ -901,11 +901,10 @@ mod tests {
         }
     }
 
-    fn bitemporal_delete_sub(collection: &str, surrogate: u32, sys_from_ms: i64) -> RedoSubRecord {
+    fn bitemporal_delete_sub(collection: &str, surrogate: u32, sys_from: i64) -> RedoSubRecord {
         let prov: Option<SyncProvenance> = None;
-        let payload =
-            zerompk::to_msgpack_vec(&(collection, "userpk", prov, surrogate, sys_from_ms))
-                .expect("encode bitemporal delete sub-record");
+        let payload = zerompk::to_msgpack_vec(&(collection, "userpk", prov, surrogate, sys_from))
+            .expect("encode bitemporal delete sub-record");
         RedoSubRecord {
             record_type: RecordType::Delete as u32,
             payload,
@@ -962,6 +961,23 @@ mod tests {
                 "the carried stamp is scoped to its own apply"
             );
         }
+    }
+
+    /// A replayed version stamped ahead of the local clock folds into it, so
+    /// the next local write stamps above the replayed version.
+    #[test]
+    fn a_replayed_ordinal_ahead_of_the_clock_keeps_later_stamps_above_it() {
+        let mut h = make_core();
+        let ahead = h.core.hlc.next_ordinal().saturating_add(1_000_000_000_000);
+        let record = redo_record(7, 0, vec![bitemporal_put_sub("hist", 42, ahead)]);
+        h.core
+            .replay_transaction_redo_wal(
+                std::slice::from_ref(&record),
+                1,
+                &nodedb_wal::TombstoneSet::new(),
+            )
+            .expect("redo replay must succeed");
+        assert!(h.core.bitemporal_ordinal() > ahead);
     }
 
     /// A document put or delete record under `Surrogate::ZERO` names no row:

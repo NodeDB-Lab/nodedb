@@ -39,7 +39,14 @@ impl CoreLoop {
         identity_column: &str,
         rows: &[StoredRow<'_>],
     ) -> Response {
-        match build_stored_rows_payload(spec, rls_filters, strict_schema, identity_column, rows) {
+        match build_stored_rows_payload(
+            spec,
+            rls_filters,
+            strict_schema,
+            identity_column,
+            rows,
+            &self.crs_context(),
+        ) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(
                 task,
@@ -68,7 +75,7 @@ impl CoreLoop {
         rls_filters: &[u8],
         rows: &[KvStoredRow<'_>],
     ) -> Response {
-        match kv_stored_rows_payload(spec, rls_filters, rows) {
+        match kv_stored_rows_payload(spec, rls_filters, rows, &self.crs_context()) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(task, e),
         }
@@ -82,6 +89,7 @@ pub(in crate::data::executor) fn kv_stored_rows_payload(
     spec: &ReturningSpec,
     rls_filters: &[u8],
     rows: &[KvStoredRow<'_>],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<u8>> {
     let docs: Vec<Value> = rows
         .iter()
@@ -90,7 +98,7 @@ pub(in crate::data::executor) fn kv_stored_rows_payload(
             doc_format::decode_document_value(&body)
         })
         .collect::<crate::Result<Vec<_>>>()?;
-    build_rows_payload(spec, rls_filters, &docs).map_err(|e| crate::Error::Internal {
+    build_rows_payload(spec, rls_filters, &docs, crs).map_err(|e| crate::Error::Internal {
         detail: format!("RETURNING encode: {e}"),
     })
 }
@@ -110,9 +118,9 @@ impl CoreLoop {
     ) -> Response {
         let docs: Vec<Value> = rows
             .iter()
-            .map(|row| super::columnar_write::row_values_to_object(schema, row))
+            .map(|row| super::columnar_write::row_values_to_user_object(schema, row))
             .collect();
-        match build_rows_payload(spec, rls_filters, &docs) {
+        match build_rows_payload(spec, rls_filters, &docs, &self.crs_context()) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(
                 task,
@@ -140,7 +148,8 @@ impl CoreLoop {
         rejection: Option<IngestRejection>,
     ) -> Response {
         let docs: Vec<Value> = rows.iter().map(rmpv_to_value).collect();
-        match build_rejecting_rows_payload(spec, rls_filters, &docs, rejection) {
+        match build_rejecting_rows_payload(spec, rls_filters, &docs, rejection, &self.crs_context())
+        {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(
                 task,
@@ -183,7 +192,7 @@ impl CoreLoop {
         columns: VectorRowColumns<'_>,
         rows: &[VectorStoredRow<'_>],
     ) -> Response {
-        match vector_stored_rows_payload(spec, rls_filters, columns, rows) {
+        match vector_stored_rows_payload(spec, rls_filters, columns, rows, &self.crs_context()) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(task, e),
         }
@@ -199,6 +208,7 @@ pub(in crate::data::executor) fn vector_stored_rows_payload(
     rls_filters: &[u8],
     columns: VectorRowColumns<'_>,
     rows: &[VectorStoredRow<'_>],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<u8>> {
     // An unreadable sidecar fails the statement: an empty row set here
     // would report "the write affected nothing" for a write that did land.
@@ -221,7 +231,7 @@ pub(in crate::data::executor) fn vector_stored_rows_payload(
             Ok(doc)
         })
         .collect::<crate::Result<Vec<_>>>()?;
-    build_rows_payload(spec, rls_filters, &docs).map_err(|e| crate::Error::Internal {
+    build_rows_payload(spec, rls_filters, &docs, crs).map_err(|e| crate::Error::Internal {
         detail: format!("RETURNING encode: {e}"),
     })
 }
@@ -237,6 +247,7 @@ pub(in crate::data::executor) fn build_stored_rows_payload(
     strict_schema: Option<&StrictSchema>,
     identity_column: &str,
     rows: &[StoredRow<'_>],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<u8>> {
     let docs: Vec<Value> = rows
         .iter()
@@ -244,7 +255,7 @@ pub(in crate::data::executor) fn build_stored_rows_payload(
             returning_doc::from_stored(body, doc_id, strict_schema, identity_column)
         })
         .collect::<crate::Result<Vec<_>>>()?;
-    build_rows_payload(spec, rls_filters, &docs)
+    build_rows_payload(spec, rls_filters, &docs, crs)
 }
 
 /// Project documents per `spec` (Star = field name order, Named = spec
@@ -257,8 +268,9 @@ pub(super) fn build_rows_payload(
     spec: &ReturningSpec,
     rls_filters: &[u8],
     docs: &[Value],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<u8>> {
-    build_rejecting_rows_payload(spec, rls_filters, docs, None)
+    build_rejecting_rows_payload(spec, rls_filters, docs, None, crs)
 }
 
 /// [`build_rows_payload`] for an ingest that rejected rows: with a
@@ -269,8 +281,9 @@ pub(super) fn build_rejecting_rows_payload(
     rls_filters: &[u8],
     docs: &[Value],
     rejection: Option<IngestRejection>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<u8>> {
-    let RowsPayload { columns, rows } = rows_payload(spec, rls_filters, docs);
+    let RowsPayload { columns, rows } = rows_payload(spec, rls_filters, docs, crs);
     let encoded = match rejection {
         None => zerompk::to_msgpack_vec(&RowsPayload { columns, rows }),
         Some(rejected) => zerompk::to_msgpack_vec(&RejectingRowsPayload {
@@ -285,10 +298,15 @@ pub(super) fn build_rejecting_rows_payload(
 }
 
 /// The projected, policy-filtered rows of `docs`.
-fn rows_payload(spec: &ReturningSpec, rls_filters: &[u8], docs: &[Value]) -> RowsPayload {
+fn rows_payload(
+    spec: &ReturningSpec,
+    rls_filters: &[u8],
+    docs: &[Value],
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> RowsPayload {
     let visible: Vec<&Value> = docs
         .iter()
-        .filter(|doc| rls_eval::rls_check_value(rls_filters, doc))
+        .filter(|doc| rls_eval::rls_check_value(rls_filters, doc, crs))
         .collect();
 
     let (columns, source_names) = match &spec.columns {
@@ -404,15 +422,26 @@ mod tests {
             collection: "metrics".into(),
             lines: 2,
         };
-        let payload =
-            build_rejecting_rows_payload(&named(&["id"]), &[], &docs(), Some(rejection.clone()))
-                .expect("build");
+        let payload = build_rejecting_rows_payload(
+            &named(&["id"]),
+            &[],
+            &docs(),
+            Some(rejection.clone()),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("build");
         let reply: ReturningRowsReply = zerompk::from_msgpack(&payload).expect("decode reply");
         assert_eq!(reply.rows.len(), 2);
         assert_eq!(reply.rejected, Some(rejection));
 
-        let plain =
-            build_rejecting_rows_payload(&named(&["id"]), &[], &docs(), None).expect("build");
+        let plain = build_rejecting_rows_payload(
+            &named(&["id"]),
+            &[],
+            &docs(),
+            None,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("build");
         assert_eq!(decode(&plain).rows.len(), 2);
         let reply: ReturningRowsReply = zerompk::from_msgpack(&plain).expect("decode reply");
         assert!(reply.rejected.is_none());
@@ -420,15 +449,26 @@ mod tests {
 
     #[test]
     fn empty_filters_return_every_row() {
-        let payload = build_rows_payload(&named(&["id"]), &[], &docs()).expect("build");
+        let payload = build_rows_payload(
+            &named(&["id"]),
+            &[],
+            &docs(),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("build");
         let rows = decode(&payload).rows;
         assert_eq!(rows.len(), 2);
     }
 
     #[test]
     fn excluded_rows_are_dropped() {
-        let payload =
-            build_rows_payload(&named(&["id"]), &owner_policy("bob"), &docs()).expect("build");
+        let payload = build_rows_payload(
+            &named(&["id"]),
+            &owner_policy("bob"),
+            &docs(),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("build");
         let decoded = decode(&payload);
         assert_eq!(decoded.rows.len(), 1);
         assert_eq!(cells(&decoded.rows[0]), vec![Value::String("r2".into())]);
@@ -438,8 +478,13 @@ mod tests {
     /// still see it, which it only can before projection.
     #[test]
     fn a_policy_column_outside_the_projection_still_filters() {
-        let payload =
-            build_rows_payload(&named(&["note"]), &owner_policy("bob"), &docs()).expect("build");
+        let payload = build_rows_payload(
+            &named(&["note"]),
+            &owner_policy("bob"),
+            &docs(),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("build");
         let decoded = decode(&payload);
         assert_eq!(decoded.columns, vec!["note".to_string()]);
         assert_eq!(decoded.rows.len(), 1);
@@ -457,7 +502,13 @@ mod tests {
         let spec = ReturningSpec {
             columns: ReturningColumns::Star,
         };
-        let payload = build_rows_payload(&spec, &owner_policy("bob"), &docs).expect("build");
+        let payload = build_rows_payload(
+            &spec,
+            &owner_policy("bob"),
+            &docs,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("build");
         let decoded = decode(&payload);
         assert_eq!(decoded.columns, vec!["id".to_string(), "owner".to_string()]);
         assert_eq!(decoded.rows.len(), 1);
@@ -466,7 +517,13 @@ mod tests {
     /// A malformed policy denies rather than passing rows through.
     #[test]
     fn a_corrupt_policy_returns_no_rows() {
-        let payload = build_rows_payload(&named(&["id"]), &[0xFF, 0xFE], &docs()).expect("build");
+        let payload = build_rows_payload(
+            &named(&["id"]),
+            &[0xFF, 0xFE],
+            &docs(),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("build");
         assert!(decode(&payload).rows.is_empty());
     }
 
@@ -489,6 +546,7 @@ mod tests {
             &named(&["at", "n", "meta", "absent"]),
             &[],
             &[Value::Object(doc)],
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("build");
         let decoded = decode(&payload);
@@ -514,7 +572,13 @@ mod tests {
             std::collections::HashMap::from([("t".to_string(), Value::DateTime(at))]),
         ));
         let docs = vec![rmpv_to_value(&row)];
-        let payload = build_rows_payload(&named(&["t"]), &[], &docs).expect("build");
+        let payload = build_rows_payload(
+            &named(&["t"]),
+            &[],
+            &docs,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("build");
         assert_eq!(cells(&decode(&payload).rows[0]), vec![Value::DateTime(at)]);
     }
 }

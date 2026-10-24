@@ -95,13 +95,15 @@ impl CoreLoop {
                 database_id,
                 tenant: tid,
                 coll: collection,
-                sys_cutoff_ms: None,
+                sys_cutoff: None,
                 valid_at_ms: None,
                 limit: usize::MAX,
             },
             &|_: &StorageKey, _: &[u8]| true,
             &crate::engine::sparse::scan_stop::never_stop,
         )?;
+        // A delete version has no body to rewrite: its tombstone stays.
+        let versions: Vec<_> = versions.into_iter().filter(|v| !v.deleted).collect();
         let live: HashSet<StorageKey> = self
             .current_rows(database_id, tid, collection, usize::MAX)?
             .into_iter()
@@ -112,8 +114,8 @@ impl CoreLoop {
         for version in versions.iter().filter(|v| live.contains(&v.doc_id)) {
             let newest = current_version
                 .entry(version.doc_id)
-                .or_insert(version.system_from_ms);
-            *newest = (*newest).max(version.system_from_ms);
+                .or_insert(version.system_from);
+            *newest = (*newest).max(version.system_from);
         }
         // A schemaless source already stores what a schemaless target holds.
         if matches!(target, VersionTarget::Schemaless)
@@ -142,7 +144,7 @@ impl CoreLoop {
                     let tuple = strict_format::bytes_to_binary_tuple_bitemporal(
                         &with_id,
                         schema,
-                        version.system_from_ms,
+                        version.system_from,
                         version.valid_from_ms,
                         version.valid_until_ms,
                         collection,
@@ -165,13 +167,13 @@ impl CoreLoop {
                     tenant: tid,
                     coll: collection,
                     doc_id: &version.doc_id,
-                    sys_from_ms: version.system_from_ms,
+                    sys_from: version.system_from,
                     valid_from_ms: version.valid_from_ms,
                     valid_until_ms: version.valid_until_ms,
                     body: &stored,
                 },
             )?;
-            if current_version.get(&version.doc_id) == Some(&version.system_from_ms) {
+            if current_version.get(&version.doc_id) == Some(&version.system_from) {
                 let new_doc = crate::data::executor::doc_format::decode_document(&visible)?;
                 self.update_reindex_text(
                     &txn,

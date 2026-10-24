@@ -43,7 +43,7 @@ pub(crate) fn convert_elementwise(
         attr,
         temporal,
     } = call;
-    let (system_as_of, valid_at_ms) =
+    let (system_time, valid_at_ms) =
         super::helpers::resolve_array_temporal(temporal, "ARRAY_ELEMENTWISE")?;
     let lentry = load_entry(left_name, tenant_id, ctx)?;
     let rentry = load_entry(right_name, tenant_id, ctx)?;
@@ -90,7 +90,7 @@ pub(crate) fn convert_elementwise(
             op,
             attr_idx,
             prefix_bits: lentry.prefix_bits,
-            system_as_of,
+            system_time,
             valid_at_ms,
         })
     } else {
@@ -101,7 +101,7 @@ pub(crate) fn convert_elementwise(
             attr_idx,
             cell_filter: None,
             shard_bucket: None,
-            system_as_of,
+            system_time,
             valid_at_ms,
         })
     };
@@ -213,7 +213,7 @@ mod tests {
         assert!(matches!(
             &tasks[0].plan,
             PhysicalPlan::ClusterArray(ClusterArrayOp::Elementwise {
-                system_as_of: Some(1_000),
+                system_time: nodedb_types::SystemTimeScope::AsOf(1_000),
                 valid_at_ms: Some(2_000),
                 ..
             })
@@ -227,7 +227,7 @@ mod tests {
         assert!(matches!(
             &tasks[0].plan,
             PhysicalPlan::Array(ArrayOp::Elementwise {
-                system_as_of: Some(1_000),
+                system_time: nodedb_types::SystemTimeScope::AsOf(1_000),
                 valid_at_ms: Some(2_000),
                 ..
             })

@@ -66,6 +66,36 @@ fn has_ambiguous_issuer_route(existing_audience: Option<&str>, audience: Option<
     }
 }
 
+/// Refuse a claim mapping that names a database that does not exist
+/// (SQLSTATE 3D000): a login mapped to it opens no session. A database
+/// dropped after this check refuses the login instead.
+fn validate_claim_mapping_databases(
+    state: &SharedState,
+    claim_mappings: &[OidcClaimMappingClause],
+) -> Result<(), DdlError> {
+    let catalog = state.credentials.catalog();
+    let named = claim_mappings.iter().flat_map(|mapping| {
+        mapping
+            .default_database
+            .iter()
+            .chain(mapping.add_databases.iter())
+            .copied()
+    });
+    for db_id in named {
+        let exists = catalog
+            .get_database(crate::types::DatabaseId::new(db_id))
+            .map_err(|e| DdlError::from_error_in_context("database catalog read", &e))?
+            .is_some();
+        if !exists {
+            return Err(DdlError::new(
+                "3D000",
+                format!("OIDC claim mapping names database {db_id}, which does not exist"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Refuse a claim mapping that grants superuser, or a role that is neither
 /// built in nor defined in the provider's tenant: a login mapped to it will
 /// hold nothing. A role dropped after this check refuses the login instead.
@@ -132,6 +162,13 @@ pub async fn create_oidc_provider(
     if jwks_uri.is_empty() {
         return Err(DdlError::new("22023", "JWKS_URI must not be empty"));
     }
+    // Every key fetch goes through the `[egress]` policy, so a URI it refuses
+    // could never verify a token.
+    state
+        .remote_sources
+        .egress()
+        .check_url(jwks_uri)
+        .map_err(|e| DdlError::new("42501", format!("JWKS_URI fails the [egress] policy: {e}")))?;
 
     let catalog = state.credentials.catalog();
 
@@ -147,6 +184,7 @@ pub async fn create_oidc_provider(
         ));
     }
     validate_claim_mapping_roles(state, claim_mappings, Some(tenant_id))?;
+    validate_claim_mapping_databases(state, claim_mappings)?;
 
     // Check for duplicate by provider name.
     match catalog.get_oidc_provider(name) {
@@ -236,6 +274,7 @@ pub async fn alter_oidc_provider_claim_mapping(
         .map_err(|e| DdlError::from_error_in_context("catalog read", &e))?
         .ok_or_else(|| DdlError::new("42704", format!("OIDC provider '{name}' does not exist")))?;
     validate_claim_mapping_roles(state, claim_mappings, provider.tenant_id)?;
+    validate_claim_mapping_databases(state, claim_mappings)?;
 
     let stored_mappings: Vec<StoredClaimMappingRule> = claim_mappings
         .iter()

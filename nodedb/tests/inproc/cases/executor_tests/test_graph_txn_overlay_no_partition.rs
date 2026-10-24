@@ -57,6 +57,7 @@ fn hop(start_nodes: &[&str], depth: usize) -> PhysicalPlan {
         rls_filters: Vec::new(),
         frontier_bitmap: None,
         collection: None,
+        scope: nodedb_physical::physical_plan::GraphReadScope::default(),
     })
 }
 
@@ -79,6 +80,7 @@ fn path(src: &str, dst: &str) -> PhysicalPlan {
         rls_filters: Vec::new(),
         frontier_bitmap: None,
         collection: None,
+        scope: nodedb_physical::physical_plan::GraphReadScope::default(),
     })
 }
 
@@ -138,6 +140,7 @@ fn a_subgraph_follows_staged_edges_without_a_partition() {
             options: Default::default(),
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);

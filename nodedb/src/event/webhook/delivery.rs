@@ -9,6 +9,11 @@
 //! own buffer and from the members of groups it does not replicate. See
 //! [`crate::event::cdc::sink_owner`] and [`deliver_event`] for the fencing and
 //! idempotency headers. Failed deliveries retry with exponential backoff.
+//!
+//! The URL is user-supplied, so every POST goes through the egress client:
+//! the URL passes the `[egress]` policy, every resolved address is checked
+//! at connect time, and no redirect is followed. A URL the policy refuses
+//! stops the task, since no retry can deliver to it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +23,9 @@ use sonic_rs;
 use tokio::sync::watch;
 use tracing::{debug, info, trace, warn};
 
+use crate::control::security::egress::{
+    EgressClientOptions, EgressFault, SystemLookup, classify, egress_client,
+};
 use crate::control::security::redaction::RedactionStore;
 use crate::control::state::SharedState;
 use crate::event::cdc::CdcSubscriberScope;
@@ -79,10 +87,36 @@ async fn delivery_loop(
         "webhook delivery task started"
     );
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(config.timeout_secs))
-        .build()
-        .unwrap_or_default();
+    let policy = Arc::clone(state.remote_sources.egress());
+    if let Err(e) = policy.check_url(&config.url) {
+        tracing::error!(
+            stream = %stream_name,
+            error = %e,
+            "webhook delivery stopped: the URL fails the [egress] policy"
+        );
+        return;
+    }
+    let timeout = Duration::from_secs(config.timeout_secs);
+    let client = match egress_client(
+        policy,
+        Arc::new(SystemLookup),
+        EgressClientOptions {
+            timeout: Some(timeout),
+            connect_timeout: timeout,
+            read_timeout: timeout,
+            max_redirects: 0,
+        },
+    ) {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::error!(
+                stream = %stream_name,
+                error = %e,
+                "webhook delivery stopped: the HTTP client cannot be built"
+            );
+            return;
+        }
+    };
 
     loop {
         if *shutdown.borrow() {
@@ -376,10 +410,19 @@ async fn deliver_event(target: &DeliveryTarget<'_>, event: &CdcEvent) -> bool {
                 );
             }
             Err(e) => {
+                if let EgressFault::Refused(refused) = classify(&e) {
+                    warn!(
+                        stream = stream_name,
+                        lsn = event.lsn,
+                        error = %refused,
+                        "webhook refused by the egress policy, not retrying"
+                    );
+                    return false;
+                }
                 warn!(
                     stream = stream_name,
                     lsn = event.lsn,
-                    error = %e,
+                    error = %e.without_url(),
                     attempt,
                     max_retries = config.max_retries,
                     "webhook delivery error, retrying"
@@ -425,6 +468,46 @@ mod tests {
         assert_eq!(backoff_delay(7), Duration::from_secs(10));
         assert_eq!(backoff_delay(10), Duration::from_secs(10));
         assert_eq!(backoff_delay(32), Duration::from_secs(10));
+    }
+
+    /// A webhook URL is user-supplied. One the egress policy refuses stops
+    /// the task before any request leaves the server.
+    #[tokio::test]
+    async fn a_url_the_egress_policy_refuses_is_never_contacted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = Arc::new(
+            crate::wal::WalManager::open_for_testing(&dir.path().join("webhook.wal")).expect("wal"),
+        );
+        let (dispatcher, _sides) = crate::bridge::dispatch::Dispatcher::new(1, 64);
+        let state = SharedState::new(dispatcher, wal).expect("shared state");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (_tx, shutdown) = watch::channel(false);
+        for url in [
+            format!("http://127.0.0.1:{port}/hook"),
+            format!("http://localhost:{port}/hook"),
+            "https://169.254.169.254/latest/meta-data/".to_string(),
+        ] {
+            let task = spawn_delivery_task(
+                Arc::clone(&state),
+                crate::types::DatabaseId::DEFAULT,
+                1,
+                "ssrf_stream".into(),
+                WebhookConfig {
+                    url: url.clone(),
+                    ..WebhookConfig::default()
+                },
+                shutdown.clone(),
+            );
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap_or_else(|_| panic!("{url}: the task did not stop"))
+                .expect("the task ends cleanly");
+        }
+        let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+        assert!(accepted.is_err(), "a refused webhook reached the listener");
     }
 
     #[test]

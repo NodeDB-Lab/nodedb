@@ -15,9 +15,11 @@ impl From<nodedb_query::EvalError> for Error {
             e @ (nodedb_query::EvalError::VectorDimensionMismatch { .. }
             | nodedb_query::EvalError::ArgumentType { .. }
             | nodedb_query::EvalError::InvalidJsonPath { .. }
-            | nodedb_query::EvalError::UnsupportedSrid { .. }
+            | nodedb_query::EvalError::Crs { .. }
             | nodedb_query::EvalError::MixedSrid { .. }
-            | nodedb_query::EvalError::ProjectionDomain { .. }) => Self::DataException {
+            | nodedb_query::EvalError::Transform { .. }
+            | nodedb_query::EvalError::Geometry { .. }
+            | nodedb_query::EvalError::ArgumentValue { .. }) => Self::DataException {
                 detail: e.to_string(),
             },
             e @ nodedb_query::EvalError::NumericOverflow { .. } => Self::NumericValueOutOfRange {
@@ -35,18 +37,23 @@ mod tests {
     #[test]
     fn srid_faults_are_data_exceptions() {
         for e in [
-            nodedb_query::EvalError::UnsupportedSrid {
+            nodedb_query::EvalError::Crs {
                 function: "st_transform",
-                srid: 2154,
+                source: nodedb_crs::UnknownSrid::Undefined { code: 999 },
             },
             nodedb_query::EvalError::MixedSrid {
                 function: "st_intersects",
                 left: 4326,
                 right: 32648,
             },
-            nodedb_query::EvalError::ProjectionDomain {
+            nodedb_query::EvalError::Transform {
                 function: "st_transform",
-                srid: 32648,
+                source: nodedb_crs::CrsError::OutOfDomain {
+                    srid: nodedb_crs::Srid::new(32648).expect("srid"),
+                    x: f64::NAN,
+                    y: 0.0,
+                    reason: nodedb_crs::DomainReason::NonFinite,
+                },
             },
         ] {
             let text = e.to_string();

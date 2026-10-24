@@ -35,6 +35,7 @@ pub(in crate::data::executor) fn apply_windows_and_computed(
     rows: Vec<Vec<u8>>,
     window_bytes: &[u8],
     computed_bytes: &[u8],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<Vec<u8>>> {
     if window_bytes.is_empty() && computed_bytes.is_empty() {
         return Ok(rows);
@@ -62,7 +63,8 @@ pub(in crate::data::executor) fn apply_windows_and_computed(
     }
 
     if !window_specs.is_empty() {
-        evaluate_window_functions(&mut value_rows, &window_specs).map_err(crate::Error::from)?;
+        evaluate_window_functions(&mut value_rows, &window_specs, crs)
+            .map_err(crate::Error::from)?;
     }
 
     for (_, row) in &mut value_rows {
@@ -78,7 +80,7 @@ pub(in crate::data::executor) fn apply_windows_and_computed(
             if already_present {
                 continue;
             }
-            let v = cc.expr.eval(&before)?;
+            let v = cc.expr.eval(&before, crs)?;
             if let nodedb_types::Value::Object(obj) = row {
                 obj.insert(cc.alias.clone(), v);
             }

@@ -150,16 +150,20 @@ pub async fn crdt_merge(
     // collection, and the preview addresses the Data Plane by it.
     let qualified_collection =
         crate::control::planner::sql_plan_convert::convert::db_qualified(database_id, collection);
+    let crs_set = crate::control::crs_context::crs_set_for(state);
     let policy = ExternalCrdtPostImagePolicy::from_identity(
         tenant_id,
         database_id,
         &qualified_collection,
         identity,
         "sql".into(),
-        &state.rls,
-        &audit,
+        crate::control::crdt_post_image_policy::PolicyServices {
+            rls: &state.rls,
+            audit: &audit,
+            crs_set: &crs_set,
+        },
     )
-    .with_type_guards_from(state.credentials.catalog(), database_id);
+    .with_type_guards_from(state, database_id);
     crate::control::crdt_admission::dispatch_authorized_crdt_apply_admitted(
         state,
         crate::control::crdt_admission::AuthorizedCrdtApplyAdmissionRequest {

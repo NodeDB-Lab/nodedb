@@ -12,6 +12,7 @@ use std::sync::Arc;
 use nodedb_types::{DatabaseId, TenantId};
 use redb::{Database, TableDefinition};
 
+use super::node_labels::{NODE_LABEL_LSN, NODE_LABEL_VERSIONS};
 use super::stats::GRAPH_STATS;
 use super::temporal::visibility::{EDGE_APPLIED, EDGE_CUTS};
 use crate::engine::durability_gate::GatedDatabase;
@@ -24,7 +25,7 @@ pub(super) type TenantBaseKey = (u64, u64, String, String, String, String);
 
 /// Edge table: composite key `(db, tid, "collection\x00src\x00label\x00dst\x00{system_from:020}")` → value.
 ///
-/// Value is either an `EdgeValuePayload` (zerompk fixarray-3) or a single-byte
+/// Value is either an `EdgeValuePayload` (zerompk fixarray-5) or a single-byte
 /// sentinel (`TOMBSTONE_SENTINEL`, `GDPR_ERASURE_SENTINEL`).
 pub(super) const EDGES: TableDefinition<(u64, u64, &str), &[u8]> = TableDefinition::new("edges");
 
@@ -89,6 +90,9 @@ pub struct Edge {
 /// [`crate::engine::durability_gate`]).
 pub struct EdgeStore {
     pub(super) db: Arc<GatedDatabase>,
+    /// The newest WAL LSN a node-label version recorded when the store
+    /// opened. Boot replay writes a label version only above it.
+    pub(super) label_lsn_floor: u64,
 }
 
 impl EdgeStore {
@@ -120,11 +124,19 @@ impl EdgeStore {
             let _ = write_txn
                 .open_table(EDGE_APPLIED)
                 .map_err(|e| redb_err("open edge_applied", e))?;
+            let _ = write_txn
+                .open_table(NODE_LABEL_VERSIONS)
+                .map_err(|e| redb_err("open node_label_versions", e))?;
+            let _ = write_txn
+                .open_table(NODE_LABEL_LSN)
+                .map_err(|e| redb_err("open node_label_lsn", e))?;
         }
         write_txn.commit().map_err(|e| redb_err("commit", e))?;
+        let label_lsn_floor = Self::read_label_lsn(&db)?;
 
         Ok(Self {
             db: Arc::new(GatedDatabase::new(db)),
+            label_lsn_floor,
         })
     }
 

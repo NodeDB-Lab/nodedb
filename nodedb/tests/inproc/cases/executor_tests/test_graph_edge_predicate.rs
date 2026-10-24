@@ -43,6 +43,8 @@ fn core_with(edges: &[(&str, &str, Vec<u8>)]) -> Core {
                 properties: props.clone(),
                 src_surrogate: doc_surrogate(src),
                 dst_surrogate: doc_surrogate(dst),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
         );
     }
@@ -65,6 +67,7 @@ fn neighbors_multi(
         rls_filters: Vec::new(),
         edge_predicate,
         with_properties,
+        scope: nodedb_physical::physical_plan::GraphReadScope::default(),
     })
 }
 
@@ -208,6 +211,7 @@ fn a_predicate_without_a_collection_is_refused() {
             rls_filters: Vec::new(),
             edge_predicate: score_above(5),
             with_properties: false,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     assert_eq!(response.status, Status::Error);

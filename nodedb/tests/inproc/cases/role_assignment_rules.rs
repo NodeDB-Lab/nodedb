@@ -161,7 +161,7 @@ async fn an_oidc_claim_mapping_refuses_an_undefined_role() {
          JWKS_URI 'https://ghost-idp.example/jwks' \
          AUDIENCE 'nodedb-api' \
          TENANT 43 \
-         CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 1 ADD ROLES ['ghost_role']",
+         CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 0 ADD ROLES ['ghost_role']",
     )
     .await;
     assert_undefined(&error, "ghost_role");

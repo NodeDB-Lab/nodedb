@@ -95,12 +95,15 @@ impl CoreLoop {
         // Both live branches gate the MessagePack body, no schema passed.
         rls_write_gate::admit_stored_row(
             rls_write_check,
-            &body,
-            &row_identity,
-            None,
-            &ctx.identity_column,
+            rls_write_gate::GatedRow {
+                body: &body,
+                identity: &row_identity,
+                strict_schema: None,
+                identity_column: &ctx.identity_column,
+            },
             tid,
             collection,
+            &self.crs_context(),
         )
         .map_err(ErrorCode::from)?;
 
@@ -117,7 +120,7 @@ impl CoreLoop {
                 surrogate,
                 value: &body,
                 bitemporal: ctx.bitemporal,
-                sys_from_ms: self.bitemporal_now_ms(),
+                sys_from: self.bitemporal_ordinal(),
                 valid_from_ms: i64::MIN,
                 valid_until_ms: i64::MAX,
                 guards,
@@ -129,6 +132,7 @@ impl CoreLoop {
             rls_filters,
             &ctx,
             &[(&document_identity, stored_image.as_slice())],
+            &self.crs_context(),
         )?;
 
         Ok(DocumentResolveOutcome {
@@ -154,6 +158,6 @@ impl CoreLoop {
         strict_schema: Option<&nodedb_types::columnar::StrictSchema>,
     ) -> Result<Vec<u8>, ErrorCode> {
         let existing = decode_stored_row(current_bytes, strict_schema)?;
-        Ok(merge_upsert_body(existing, value, on_conflict_updates)?.body)
+        Ok(merge_upsert_body(existing, value, on_conflict_updates, &self.crs_context())?.body)
     }
 }

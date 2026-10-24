@@ -439,7 +439,6 @@ impl CoreLoop {
             | GraphOp::MatchContinuation { .. }
             | GraphOp::MatchVarLenResume { .. }
             | GraphOp::TemporalNeighbors { .. }
-            | GraphOp::TemporalAlgorithm { .. }
             | GraphOp::Stats { .. } => {}
             // Distributed algorithm supersteps: compute passes over an
             // in-memory CSR snapshot, no key written.

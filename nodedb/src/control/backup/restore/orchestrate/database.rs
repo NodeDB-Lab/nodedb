@@ -128,6 +128,8 @@ pub(super) async fn reissue_database(
         super::super::redo_reissue::RestoredRows {
             documents,
             edges: std::mem::take(&mut snap.edges),
+            node_labels: std::mem::take(&mut snap.node_labels),
+            node_label_versions: std::mem::take(&mut snap.node_label_versions),
         },
     )
     .await?;

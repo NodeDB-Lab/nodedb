@@ -50,7 +50,7 @@ fn db_detail(e: &tokio_postgres::Error) -> String {
     }
 }
 
-async fn drain_backup(client: &tokio_postgres::Client) -> Vec<u8> {
+pub(super) async fn drain_backup(client: &tokio_postgres::Client) -> Vec<u8> {
     let stream = client
         .copy_out(&format!("COPY (BACKUP TENANT {TENANT}) TO STDOUT"))
         .await
@@ -63,7 +63,7 @@ async fn drain_backup(client: &tokio_postgres::Client) -> Vec<u8> {
     bytes
 }
 
-async fn push_restore(client: &tokio_postgres::Client, envelope: Vec<u8>) {
+pub(super) async fn push_restore(client: &tokio_postgres::Client, envelope: Vec<u8>) {
     let sink = client
         .copy_in::<_, Bytes>(&format!("COPY tenant_restore({TENANT}) FROM STDIN"))
         .await
@@ -179,12 +179,50 @@ async fn assert_restored_on(node: &TestClusterNode, stage: &str) {
     );
 }
 
+/// Each system time of the bitemporal row's versions on `node`, with the
+/// values a read `AS OF SYSTEM TIME` that time returns there.
+async fn cut_view(node: &TestClusterNode) -> Vec<(String, Vec<String>)> {
+    let stamps = column(
+        node,
+        "SELECT _ts_system FROM crd_ledger AS OF SYSTEM TIME NULL",
+    )
+    .await;
+    let mut view = Vec::with_capacity(stamps.len());
+    for stamp in stamps {
+        let values = column(
+            node,
+            &format!("SELECT value FROM crd_ledger AS OF SYSTEM TIME {stamp}"),
+        )
+        .await;
+        view.push((stamp, values));
+    }
+    view
+}
+
 async fn assert_restored(cluster: &TestCluster, stage: &str) {
     cluster
         .wait_for_full_apply_convergence(Duration::from_secs(30))
         .await;
     for node in &cluster.nodes {
         assert_restored_on(node, stage).await;
+    }
+    // Every replica keys the restored versions at the ordinals the backup
+    // carried, so a read at each version's system time answers the same rows
+    // on every node.
+    let first = cut_view(&cluster.nodes[0]).await;
+    assert_eq!(first.len(), 2, "{stage}: both versions carry a system time");
+    assert_eq!(
+        first.last().map(|(_, values)| values.clone()),
+        Some(vec!["final".to_string()]),
+        "{stage}: a read at the newest version's system time sees it"
+    );
+    for node in &cluster.nodes[1..] {
+        assert_eq!(
+            cut_view(node).await,
+            first,
+            "{stage}, node {}: every replica answers each cut alike",
+            node.node_id
+        );
     }
     let duplicate = cluster.nodes[0]
         .exec("INSERT INTO crd_people (id, city, email) VALUES ('dave', 'oslo', 'a@x')")

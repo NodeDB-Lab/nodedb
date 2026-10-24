@@ -42,6 +42,7 @@ pub fn filter_batch_by_when(
     collection: &str,
     operation: &str,
     when_condition: Option<&str>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<Vec<bool>, nodedb_query::EvalError> {
     let when_cond = match when_condition {
         Some(cond) => cond,
@@ -62,9 +63,9 @@ pub fn filter_batch_by_when(
                 match raw {
                     // A division/modulo-by-zero propagates as `Err` — never a
                     // silent "does not fire".
-                    Some(bytes) => {
-                        crate::bridge::scan_filter::ScanFilter::all_match_binary(&filters, bytes)
-                    }
+                    Some(bytes) => crate::bridge::scan_filter::ScanFilter::all_match_binary(
+                        &filters, bytes, crs,
+                    ),
                     // No raw bytes (test rows from from_decoded) — fall back to
                     // the decode + substitute path for this row.
                     None => {
@@ -129,14 +130,28 @@ mod tests {
             row_with_field("x", nodedb_types::Value::Integer(1)),
             row_with_field("x", nodedb_types::Value::Integer(2)),
         ];
-        let mask = filter_batch_by_when(&rows, "c", "INSERT", None).unwrap();
+        let mask = filter_batch_by_when(
+            &rows,
+            "c",
+            "INSERT",
+            None,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert_eq!(mask, vec![true, true]);
     }
 
     #[test]
     fn when_true_all_pass() {
         let rows = vec![row_with_field("x", nodedb_types::Value::Integer(1))];
-        let mask = filter_batch_by_when(&rows, "c", "INSERT", Some("TRUE")).unwrap();
+        let mask = filter_batch_by_when(
+            &rows,
+            "c",
+            "INSERT",
+            Some("TRUE"),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert_eq!(mask, vec![true]);
     }
 
@@ -146,7 +161,14 @@ mod tests {
             row_with_field("x", nodedb_types::Value::Integer(1)),
             row_with_field("x", nodedb_types::Value::Integer(2)),
         ];
-        let mask = filter_batch_by_when(&rows, "c", "INSERT", Some("FALSE")).unwrap();
+        let mask = filter_batch_by_when(
+            &rows,
+            "c",
+            "INSERT",
+            Some("FALSE"),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert_eq!(mask, vec![false, false]);
     }
 

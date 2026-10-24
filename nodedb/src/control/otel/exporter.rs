@@ -10,7 +10,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::watch;
 use tracing::{debug, warn};
 
 use super::proto::{
@@ -19,6 +18,9 @@ use super::proto::{
     SpanKind, SpanStatus, StatusCode as OtelStatusCode,
 };
 use crate::control::metrics::SystemMetrics;
+use crate::control::security::egress::EgressError;
+use crate::control::shutdown::{ShutdownPhase, spawn_loop};
+use crate::control::state::SharedState;
 use nodedb_types::TraceId;
 
 /// Configuration for the OTLP exporter.
@@ -51,61 +53,72 @@ impl ExporterConfig {
     }
 }
 
-/// Spawn the background OTLP metrics exporter.
+/// Cap on one metrics POST.
+const METRICS_POST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Spawn the background OTLP metrics exporter of `shared`.
 ///
-/// Periodically reads SystemMetrics and pushes to the configured OTLP endpoint.
-/// Returns a shutdown signal sender.
+/// Every `config.metrics_interval` it reads the node's `SystemMetrics` and
+/// posts them to `<endpoint>/v1/metrics` through the outbound egress client.
+/// The loop joins at the Control Plane drain. The endpoint is operator
+/// config: one the `[egress]` policy refuses is an error, and nothing is
+/// spawned. Returns whether the exporter started: it does not when metrics
+/// export is off or the state carries no metrics registry.
 pub fn spawn_metrics_exporter(
+    shared: &Arc<SharedState>,
     config: ExporterConfig,
-    metrics: Arc<SystemMetrics>,
-    node_id: u64,
-) -> watch::Sender<bool> {
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-
+) -> Result<bool, EgressError> {
     if !config.is_enabled() || !config.export_metrics {
-        return shutdown_tx;
+        return Ok(false);
     }
-
+    let Some(metrics) = shared.system_metrics.clone() else {
+        return Ok(false);
+    };
     let endpoint = format!("{}/v1/metrics", config.endpoint.trim_end_matches('/'));
+    shared.remote_sources.egress().check_url(&endpoint)?;
+    let client = Arc::clone(shared.remote_sources.http());
     let interval = config.metrics_interval;
+    let node_id = shared.node_id;
 
-    tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        let mut ticker = tokio::time::interval(interval);
-
-        loop {
-            tokio::select! {
-                _ = ticker.tick() => {}
-                _ = shutdown_rx.changed() => break,
-            }
-
-            let request = build_metrics_request(&metrics, node_id);
-            let mut buf = Vec::new();
-            if prost::Message::encode(&request, &mut buf).is_err() {
-                continue;
-            }
-
-            match client
-                .post(&endpoint)
-                .header("content-type", "application/x-protobuf")
-                .body(buf)
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    debug!("OTLP metrics export: OK");
+    spawn_loop(
+        &shared.loop_registry,
+        &shared.shutdown,
+        "otlp_metrics_export",
+        ShutdownPhase::DrainingControlPlane,
+        move |mut shutdown| async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                tokio::select! {
+                    _ = shutdown.wait_cancelled() => break,
+                    _ = ticker.tick() => {}
                 }
-                Ok(resp) => {
-                    warn!("OTLP metrics export: status {}", resp.status());
+                let request = build_metrics_request(&metrics, node_id);
+                let mut buf = Vec::new();
+                if prost::Message::encode(&request, &mut buf).is_err() {
+                    continue;
                 }
-                Err(e) => {
-                    warn!("OTLP metrics export: {e}");
+                match client
+                    .post(&endpoint)
+                    .header("content-type", "application/x-protobuf")
+                    .timeout(METRICS_POST_TIMEOUT)
+                    .body(buf)
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        debug!("OTLP metrics export: OK");
+                    }
+                    Ok(resp) => {
+                        warn!("OTLP metrics export: status {}", resp.status());
+                    }
+                    Err(e) => {
+                        warn!("OTLP metrics export: {}", e.without_url());
+                    }
                 }
             }
-        }
-    });
-
-    shutdown_tx
+        },
+    );
+    Ok(true)
 }
 
 /// Build an OTLP ExportMetricsServiceRequest from SystemMetrics.
@@ -350,4 +363,53 @@ fn rand_span_id() -> [u8; 8] {
         .as_nanos() as u64;
     id.copy_from_slice(&ts.to_le_bytes());
     id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state() -> (Arc<SharedState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = Arc::new(
+            crate::wal::WalManager::open_for_testing(&dir.path().join("otlp.wal")).expect("wal"),
+        );
+        let (dispatcher, _sides) = crate::bridge::dispatch::Dispatcher::new(1, 64);
+        let state = SharedState::new(dispatcher, wal).expect("shared state");
+        (state, dir)
+    }
+
+    fn metrics_config(endpoint: &str) -> ExporterConfig {
+        ExporterConfig {
+            endpoint: endpoint.into(),
+            export_metrics: true,
+            ..ExporterConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_metrics_endpoint_outside_the_egress_policy_is_refused() {
+        let (state, _dir) = test_state();
+        for (endpoint, expected) in [
+            ("http://127.0.0.1:4318", EgressError::IpLiteral),
+            ("http://otel-collector:4318", EgressError::NonHttps),
+        ] {
+            let refused = spawn_metrics_exporter(&state, metrics_config(endpoint));
+            assert_eq!(refused.err(), Some(expected), "{endpoint}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_exporter_never_starts() {
+        let (state, _dir) = test_state();
+        let off = ExporterConfig {
+            endpoint: "https://otel.example".into(),
+            ..ExporterConfig::default()
+        };
+        assert_eq!(spawn_metrics_exporter(&state, off), Ok(false));
+        assert_eq!(
+            spawn_metrics_exporter(&state, ExporterConfig::default()),
+            Ok(false)
+        );
+    }
 }

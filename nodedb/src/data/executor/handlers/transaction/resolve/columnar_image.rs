@@ -20,9 +20,16 @@
 //!   nothing.
 //! * A staged TRUNCATE → the `ColumnarTruncate` record ahead of the rows.
 //!   The truncate removes every base row, so rows after it carry no base key.
+//!   On a bitemporal collection the record carries the transaction's ordinal,
+//!   and the truncate closes every current key at it, raised per key.
 //!
 //! Rows are emitted in surrogate order, so two resolves of one transaction
 //! produce byte-identical records.
+//!
+//! In a bitemporal collection every row carries the stamp its resolve fixed
+//! (`ColumnarImageWalRow::system_from`, see `columnar_ordinal`). A put's
+//! image takes it as its `_ts_system`. Replay closes a base key the write
+//! removes with a tombstone at it and keeps the base row as history.
 //!
 //! Session and Calvin transactions both stage every columnar write, so both
 //! resolve here.
@@ -99,6 +106,13 @@ pub(super) struct ColumnarCollectionImages<'a> {
     /// core, which is legal only when the transaction staged no put.
     pub schema: Option<&'a ColumnarSchema>,
     pub schema_bytes: &'a [u8],
+    /// The stamp of each staged row by surrogate, for a bitemporal
+    /// collection. `None` for any other collection.
+    pub stamps: Option<&'a BTreeMap<u32, i64>>,
+    /// The transaction's ordinal, for a bitemporal collection: a staged
+    /// truncate closes every current key at it, raised per key. `None` for
+    /// any other collection.
+    pub txn_ordinal: Option<i64>,
 }
 
 /// Append the truncate record (when the transaction truncated the
@@ -112,13 +126,15 @@ pub(super) fn serialize_columnar_collection(
         coll_key,
         schema,
         schema_bytes,
+        stamps,
+        txn_ordinal,
     } = params;
     let collection = coll_key.2.as_str();
     let truncated = overlay.is_truncated(coll_key);
     if truncated {
         ops.push(RedoSubRecord {
             record_type: RecordType::ColumnarTruncate as u32,
-            payload: encode_columnar_truncate_payload(collection)?,
+            payload: encode_columnar_truncate_payload(collection, txn_ordinal, false)?,
         });
     }
 
@@ -133,8 +149,9 @@ pub(super) fn serialize_columnar_collection(
                 .map(<[u8]>::to_vec)
                 .unwrap_or_default()
         };
+        let system_from = stamps.and_then(|stamps| stamps.get(&surrogate).copied());
         let image_msgpack = match staged {
-            Staged::Put(body) => staged_image(collection, schema, surrogate, body)?,
+            Staged::Put(body) => staged_image(collection, schema, surrogate, body, system_from)?,
             Staged::Tombstone if prior_pk_msgpack.is_empty() => continue,
             Staged::Tombstone => Vec::new(),
         };
@@ -142,6 +159,7 @@ pub(super) fn serialize_columnar_collection(
             surrogate,
             prior_pk_msgpack,
             image_msgpack,
+            system_from,
         });
     }
     if rows.is_empty() {
@@ -165,12 +183,14 @@ pub(super) fn serialize_columnar_collection(
     Ok(())
 }
 
-/// The staged row body as a column-name object, MessagePack-encoded.
+/// The staged row body as a column-name object, MessagePack-encoded. A
+/// `system_from` stamp replaces the row's `_ts_system`.
 fn staged_image(
     collection: &str,
     schema: Option<&ColumnarSchema>,
     surrogate: u32,
     body: &[u8],
+    system_from: Option<i64>,
 ) -> crate::Result<Vec<u8>> {
     let schema = schema.ok_or_else(|| crate::Error::Internal {
         detail: format!(
@@ -178,7 +198,7 @@ fn staged_image(
              engine schema on this core"
         ),
     })?;
-    let values = decode_staged_row(body).ok_or_else(|| crate::Error::Internal {
+    let mut values = decode_staged_row(body).ok_or_else(|| crate::Error::Internal {
         detail: format!(
             "columnar resolve: staged row of '{collection}' (surrogate {surrogate}) does not \
              decode"
@@ -193,6 +213,11 @@ fn staged_image(
                 schema.columns.len()
             ),
         });
+    }
+    if let (Some(stamp), Some(ts_idx)) = (system_from, schema.ts_system_idx())
+        && let Some(cell) = values.get_mut(ts_idx)
+    {
+        *cell = Value::Integer(stamp);
     }
     let image: Value = row_values_to_object(schema, &values);
     nodedb_types::value_to_msgpack(&image).map_err(|e| crate::Error::Serialization {
@@ -240,6 +265,8 @@ mod tests {
                 coll_key: &coll_key(),
                 schema: Some(&schema),
                 schema_bytes: &[],
+                stamps: None,
+                txn_ordinal: None,
             },
             &mut ops,
         )

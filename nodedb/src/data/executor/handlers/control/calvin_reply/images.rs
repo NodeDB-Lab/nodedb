@@ -20,7 +20,7 @@ use crate::data::executor::handlers::transaction::stage_write::unhex_key;
 
 /// One row's identity and the stored bytes of the image `RETURNING`
 /// reports. A vector-primary row's bytes are its payload sidecar.
-pub(super) struct StoredRow {
+pub(super) struct ReturningImageRow {
     pub identity: RowIdentity,
     pub surrogate: Surrogate,
     pub bytes: Vec<u8>,
@@ -114,7 +114,7 @@ impl CoreLoop {
         at: &RowLocation<'_>,
         spec: &ReturningSpec,
         rls_filters: &[u8],
-        rows: &[StoredRow],
+        rows: &[ReturningImageRow],
     ) -> Result<Vec<u8>, ErrorCode> {
         match at.engine {
             RowEngine::Document | RowEngine::Crdt => {
@@ -140,6 +140,7 @@ impl CoreLoop {
                     strict_schema.as_ref(),
                     &identity_column,
                     &stored,
+                    &self.crs_context(),
                 )
                 .map_err(ErrorCode::from)
             }
@@ -153,7 +154,8 @@ impl CoreLoop {
                     .zip(rows)
                     .map(|(key, row)| (key.as_slice(), row.bytes.as_slice()))
                     .collect();
-                kv_stored_rows_payload(spec, rls_filters, &stored).map_err(ErrorCode::from)
+                kv_stored_rows_payload(spec, rls_filters, &stored, &self.crs_context())
+                    .map_err(ErrorCode::from)
             }
             RowEngine::Vector => {
                 let keys: Vec<StorageKey> = rows
@@ -195,7 +197,7 @@ impl CoreLoop {
                     identity: &identity_column,
                     vector: field,
                 };
-                vector_stored_rows_payload(spec, rls_filters, columns, &stored)
+                vector_stored_rows_payload(spec, rls_filters, columns, &stored, &self.crs_context())
                     .map_err(ErrorCode::from)
             }
             RowEngine::Columnar | RowEngine::Timeseries => Err(ErrorCode::Internal {

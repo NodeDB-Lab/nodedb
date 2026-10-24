@@ -28,6 +28,7 @@ pub(crate) fn convert_agg(
         slice,
         zone,
         temporal,
+        physical,
     } = args;
     let entry = load_entry(name, tenant_id, ctx)?;
     let schema = decode_schema(&entry)?;
@@ -51,9 +52,9 @@ pub(crate) fn convert_agg(
             })? as i32,
     };
 
-    let (system_as_of, valid_at_ms) =
+    let (system_time, valid_at_ms) =
         super::helpers::resolve_array_temporal(*temporal, "ARRAY_AGG")?;
-    let region = resolve_region(name, slice, zone, &schema)?;
+    let region = resolve_region(name, slice, zone, &schema, &ctx.crs_context())?;
     let region_msgpack = match &region {
         Some(region) => {
             zerompk::to_msgpack_vec(region).map_err(|e| crate::Error::Serialization {
@@ -64,6 +65,10 @@ pub(crate) fn convert_agg(
         None => Vec::new(),
     };
     let mapped = map_reducer(reducer);
+    // A malformed histogram spec is refused here, before any shard runs it.
+    mapped.engine().map_err(|e| crate::Error::PlanError {
+        detail: format!("ARRAY_AGG: {e}"),
+    })?;
     let aid = ArrayId::in_database(tenant_id, ctx.database_id, name);
     let vshard = ctx.collection_key(name).vshard();
 
@@ -87,9 +92,10 @@ pub(crate) fn convert_agg(
             group_by_dim: group_by_dim_idx,
             slice_tile_keys: compute_slice_tile_keys(&schema, box_ranges, entry.prefix_bits),
             prefix_bits: entry.prefix_bits,
-            system_as_of,
+            system_time,
             valid_at_ms,
             region_msgpack,
+            physical,
         })
     } else {
         PhysicalPlan::Array(ArrayOp::Aggregate {
@@ -100,9 +106,10 @@ pub(crate) fn convert_agg(
             cell_filter: None,
             return_partial: false,
             shard_bucket: None,
-            system_as_of,
+            system_time,
             valid_at_ms,
             region_msgpack,
+            physical,
         })
     };
 
@@ -141,6 +148,7 @@ mod tests {
             slice,
             zone: None,
             temporal,
+            physical: false,
         }
     }
     use nodedb_array::schema::{ArraySchemaBuilder, AttrSpec, AttrType, DimSpec, DimType};

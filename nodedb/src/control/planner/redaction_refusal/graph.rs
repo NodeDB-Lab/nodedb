@@ -44,7 +44,6 @@ pub(super) fn refuse_graph_op(op: &GraphOp, ctx: &RefusalCtx<'_>) -> crate::Resu
         | GraphOp::ResolveEdgeDelete(_)
         | GraphOp::RagFusion { .. }
         | GraphOp::Algo { .. }
-        | GraphOp::TemporalAlgorithm { .. }
         | GraphOp::BspSuperstep(_)
         | GraphOp::WccSuperstep(_)
         | GraphOp::SetNodeLabels { .. }

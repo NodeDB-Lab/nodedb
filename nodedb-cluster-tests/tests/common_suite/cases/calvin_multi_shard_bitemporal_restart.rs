@@ -77,6 +77,25 @@ async fn current_value(
     }))
 }
 
+/// `value` for `id` in a bitemporal document collection `AS OF SYSTEM TIME
+/// as_of_ms`, or `None` if not visible at that cut.
+async fn value_as_of(
+    client: &tokio_postgres::Client,
+    coll: &str,
+    id: &str,
+    as_of_ms: &str,
+) -> Result<Option<String>, tokio_postgres::Error> {
+    let msgs = client
+        .simple_query(&format!(
+            "SELECT id, value FROM {coll} AS OF SYSTEM TIME {as_of_ms}"
+        ))
+        .await?;
+    Ok(msgs.iter().find_map(|m| match m {
+        SimpleQueryMessage::Row(r) if r.get("id") == Some(id) => r.get("value").map(str::to_owned),
+        _ => None,
+    }))
+}
+
 /// Sorted `_ts_system` stamps of every audit-log version (`AS OF SYSTEM TIME
 /// NULL`) belonging to `id` in `coll`. Filters by id in Rust rather than in
 /// SQL — `AS OF SYSTEM TIME NULL` combined with `WHERE` is not exercised
@@ -244,6 +263,28 @@ async fn calvin_multi_shard_bitemporal_commit_survives_wal_only_restart() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
+    // One Calvin transaction stamps one system-time ordinal on every shard it
+    // writes, the ordinal its edges would take, so one cut splits it whole.
+    assert_eq!(
+        stamp_a, stamp_b,
+        "both shards' versions carry the transaction's one system time"
+    );
+    // A read at the stamp sees both rows of the transaction.
+    for (coll, id, value) in [(&coll_a, "a1", "va"), (&coll_b, "b1", "vb")] {
+        let at_stamp = read_once_a_leader_exists(
+            "row as of the committed stamp",
+            Duration::from_secs(10),
+            Duration::from_millis(25),
+            || value_as_of(&node.client, coll, id, &stamp_a),
+        )
+        .await;
+        assert_eq!(
+            at_stamp.as_deref(),
+            Some(value),
+            "{id} is visible AS OF its committed stamp"
+        );
+    }
+
     // WAL-only restart: shut down cleanly (flushing the WAL, releasing every
     // redb handle) and reopen against the SAME directory — no checkpoint, so
     // both rows must be reconstructed purely from the committed cross-shard
@@ -310,6 +351,23 @@ async fn calvin_multi_shard_bitemporal_commit_survives_wal_only_restart() {
             );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // After the restart the same cut answers the same rows: replay installed
+    // the committed ordinal, not one from the replay-time clock.
+    for (coll, id, value) in [(&coll_a, "a1", "va"), (&coll_b, "b1", "vb")] {
+        let at_stamp = read_once_a_leader_exists(
+            "row as of the committed stamp after restart",
+            Duration::from_secs(10),
+            Duration::from_millis(25),
+            || value_as_of(&node.client, coll, id, &stamp_a),
+        )
+        .await;
+        assert_eq!(
+            at_stamp.as_deref(),
+            Some(value),
+            "{id} is visible AS OF its committed stamp after a WAL-only restart"
+        );
     }
 
     node.shutdown().await;

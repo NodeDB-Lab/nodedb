@@ -4,13 +4,14 @@
 
 use crate::bridge::envelope::Response;
 use nodedb_physical::physical_plan::DocumentOp;
-use nodedb_types::SystemTimeScope;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::document::read::materialize_scan::DocumentMaterializeScan;
 use crate::data::executor::task::ExecutionTask;
 
-use super::document_admit::{DOCUMENT_WRITE_ENGINES, doc_scan_mode, is_document_write};
+use super::document_admit::{
+    DOCUMENT_WRITE_ENGINES, all_versions_refused, doc_scan_mode, is_document_write, point_cut,
+};
 
 impl CoreLoop {
     pub(super) fn dispatch_document(&mut self, task: &ExecutionTask, op: &DocumentOp) -> Response {
@@ -33,19 +34,8 @@ impl CoreLoop {
                 system_time,
                 valid_at_ms,
             } => {
-                let system_as_of_ms = match system_time {
-                    SystemTimeScope::Current => None,
-                    SystemTimeScope::AsOf(ms) => Some(*ms),
-                    SystemTimeScope::AllVersions => {
-                        return self.response_error(
-                            task,
-                            crate::bridge::envelope::ErrorCode::Unsupported {
-                                detail: "AS OF SYSTEM TIME NULL (all-versions) is not \
-                                         supported on point gets; use a table scan"
-                                    .into(),
-                            },
-                        );
-                    }
+                let Some(system_as_of) = point_cut(system_time) else {
+                    return self.response_error(task, all_versions_refused("point gets"));
                 };
                 self.execute_point_get(
                     task,
@@ -55,7 +45,7 @@ impl CoreLoop {
                         document_id,
                         surrogate: *surrogate,
                         rls_filters,
-                        system_as_of_ms,
+                        system_as_of,
                         valid_at_ms: *valid_at_ms,
                     },
                 )
@@ -376,21 +366,26 @@ impl CoreLoop {
                 projection,
                 limit,
                 offset,
-                system_as_of_ms,
-            } => self.execute_document_indexed_fetch(
-                task,
-                super::super::handlers::document::index_fetch::IndexedFetchParams {
-                    tid,
-                    collection: collection.as_str(),
-                    path,
-                    value,
-                    filters,
-                    projection,
-                    limit: *limit,
-                    offset: *offset,
-                    system_as_of_ms: *system_as_of_ms,
-                },
-            ),
+                system_time,
+            } => {
+                let Some(system_as_of) = point_cut(system_time) else {
+                    return self.response_error(task, all_versions_refused("indexed fetches"));
+                };
+                self.execute_document_indexed_fetch(
+                    task,
+                    super::super::handlers::document::index_fetch::IndexedFetchParams {
+                        tid,
+                        collection: collection.as_str(),
+                        path,
+                        value,
+                        filters,
+                        projection,
+                        limit: *limit,
+                        offset: *offset,
+                        system_as_of,
+                    },
+                )
+            }
 
             DocumentOp::DropIndex { collection, field } => {
                 self.execute_drop_document_index(task, tid, collection.as_str(), field)
@@ -438,19 +433,24 @@ impl CoreLoop {
                 collection,
                 cursor,
                 count,
-                system_as_of_ms,
+                system_time,
                 raw_bodies,
-            } => self.execute_document_materialize_scan(
-                task,
-                DocumentMaterializeScan {
-                    tid,
-                    collection: collection.as_str(),
-                    cursor,
-                    count: *count,
-                    system_as_of_ms: *system_as_of_ms,
-                    raw_bodies: *raw_bodies,
-                },
-            ),
+            } => {
+                let Some(system_as_of) = point_cut(system_time) else {
+                    return self.response_error(task, all_versions_refused("materialize scans"));
+                };
+                self.execute_document_materialize_scan(
+                    task,
+                    DocumentMaterializeScan {
+                        tid,
+                        collection: collection.as_str(),
+                        cursor,
+                        count: *count,
+                        system_as_of,
+                        raw_bodies: *raw_bodies,
+                    },
+                )
+            }
 
             DocumentOp::ApplyBalanceDelta {
                 collection,

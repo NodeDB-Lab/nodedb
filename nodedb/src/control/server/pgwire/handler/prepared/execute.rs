@@ -64,18 +64,14 @@ impl NodeDbPgHandler {
         self.authorize_session_database(&identity, session_id)?;
         let tenant_id = identity.tenant_id;
 
-        // J.4: mirror `do_query`'s audit scope. The extended-query
-        // path also triggers DDL (a prepared `CREATE COLLECTION`
-        // binds parameters then dispatches), so audit context must
-        // be installed here too or followers receive a plain
-        // `CatalogDdl` with no SQL trail.
-        let _audit_scope = crate::control::server::shared::session::audit_context::AuditScope::new(
-            crate::control::server::shared::session::audit_context::AuditCtx {
-                auth_user_id: identity.user_id.to_string(),
-                auth_user_name: identity.username.clone(),
-                sql_text: stmt.sql.clone(),
-            },
-        );
+        // The extended-query path also runs DDL (a prepared `CREATE
+        // COLLECTION` binds parameters, then dispatches), so it installs the
+        // statement's audit context too. A credential statement installs its
+        // redacted text.
+        let _audit_scope =
+            crate::control::server::shared::session::audit_context::AuditScope::statement(
+                &identity, &stmt.sql,
+            );
 
         // Wire-streaming COPY shapes for backup/restore. Recognised before
         // sqlparser-based execution because the shapes aren't standard COPY

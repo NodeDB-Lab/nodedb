@@ -132,6 +132,8 @@ impl CoreLoop {
                 prior,
                 interned_labels,
                 created_node,
+                version,
+                replaced,
             } => self.apply_undo_node_labels(
                 entry_index,
                 NodeLabelsUndo {
@@ -141,6 +143,8 @@ impl CoreLoop {
                     prior,
                     interned_labels,
                     created_node,
+                    version,
+                    replaced,
                 },
             ),
         }
@@ -177,7 +181,7 @@ mod tests {
                 tenant: TID,
                 coll: "c",
                 doc_id: &key(doc),
-                sys_from_ms: t,
+                sys_from: t,
                 valid_from_ms: 0,
                 valid_until_ms: i64::MAX,
                 body,
@@ -194,7 +198,7 @@ mod tests {
                 field: "status",
                 value: "active",
                 doc_id: &key(doc),
-                sys_from_ms: t,
+                sys_from: t,
             })
             .unwrap();
     }
@@ -239,7 +243,7 @@ mod tests {
                 field: "status",
                 value: "active",
                 doc_id: &d1,
-                sys_from_ms: 2_000,
+                sys_from: 2_000,
             })
             .unwrap();
 
@@ -256,7 +260,7 @@ mod tests {
                 collection: "c".into(),
                 document_id: d1,
                 old_value: None,
-                bitemporal_sys_from_ms: Some(1_000),
+                bitemporal_sys_from: Some(1_000),
                 bitemporal_index_tuples: vec![("status".into(), "active".into())],
                 secondary_index_added: Vec::new(),
                 secondary_index_removed: Vec::new(),
@@ -266,7 +270,7 @@ mod tests {
                 collection: "c".into(),
                 document_id: d1,
                 old_value: b"v1".to_vec(),
-                bitemporal_sys_from_ms: Some(2_000),
+                bitemporal_sys_from: Some(2_000),
                 bitemporal_index_tuples: vec![("status".into(), "active".into())],
                 secondary_index_tuples: Vec::new(),
                 chain_hash_prior: None,

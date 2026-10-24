@@ -217,6 +217,8 @@ fn a_graph_slice_records_every_edge_version() {
         properties: Vec::new(),
         src_surrogate: Surrogate::new(1),
         dst_surrogate: Surrogate::new(2),
+        valid_from_ms: None,
+        valid_until_ms: None,
     });
     staged_slice_parity(&[plan]);
 }
@@ -237,6 +239,7 @@ fn a_columnar_slice_records_its_collection_floor() {
         schema_bytes: Vec::new(),
         provenance: None,
         wal_lsn: None,
+        system_from: None,
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
         returning: None,
         rls_filters: Vec::new(),

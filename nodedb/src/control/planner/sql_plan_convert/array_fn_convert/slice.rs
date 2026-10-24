@@ -27,6 +27,7 @@ pub(crate) fn convert_slice(
         limit,
         zone,
         temporal,
+        physical,
     } = args;
     let entry = load_entry(name, tenant_id, ctx)?;
     let schema = decode_schema(&entry)?;
@@ -37,7 +38,14 @@ pub(crate) fn convert_slice(
     let zone_msgpack = match zone {
         None => Vec::new(),
         Some(zone) => {
-            let lowered = lower_zone("ARRAY_SLICE", name, zone, &schema, &mut slice)?;
+            let lowered = lower_zone(
+                "ARRAY_SLICE",
+                name,
+                zone,
+                &schema,
+                &mut slice,
+                &ctx.crs_context(),
+            )?;
             zerompk::to_msgpack_vec(&lowered).map_err(|e| crate::Error::Serialization {
                 format: "msgpack".into(),
                 detail: format!("array slice zone encode: {e}"),
@@ -50,8 +58,7 @@ pub(crate) fn convert_slice(
             detail: format!("array slice encode: {e}"),
         })?;
 
-    let (system_time, valid_at_ms) =
-        super::helpers::resolve_array_temporal_scope(*temporal, "ARRAY_SLICE")?;
+    let (system_time, valid_at_ms) = super::helpers::resolve_array_temporal_scope(*temporal)?;
     let attr_indices = resolve_attr_indices(name, attr_projection, &schema)?;
     let aid = ArrayId::in_database(tenant_id, ctx.database_id, name);
     let vshard = ctx.collection_key(name).vshard();
@@ -75,6 +82,7 @@ pub(crate) fn convert_slice(
             system_time,
             valid_at_ms,
             zone_msgpack,
+            physical,
         })
     } else {
         PhysicalPlan::Array(ArrayOp::Slice {
@@ -87,6 +95,7 @@ pub(crate) fn convert_slice(
             system_time,
             valid_at_ms,
             zone_msgpack,
+            physical,
         })
     };
 
@@ -185,6 +194,7 @@ mod tests {
                 limit: 100,
                 zone: None,
                 temporal: &TemporalScope::default(),
+                physical: false,
             },
             TenantId::new(1),
             ctx,

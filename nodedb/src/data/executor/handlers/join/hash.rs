@@ -104,6 +104,28 @@ impl HashIndex {
     }
 }
 
+/// The residual ON predicates of a join and the CRS context they evaluate in.
+#[derive(Clone, Copy)]
+pub(super) struct JoinResidual<'a> {
+    pub(super) filters: &'a [crate::bridge::scan_filter::ScanFilter],
+    pub(super) crs: &'a nodedb_crs::CrsContext<'a>,
+}
+
+impl JoinResidual<'_> {
+    /// Whether the merged row `row` passes every residual predicate.
+    pub(super) fn admits(&self, row: &[u8]) -> Result<bool, nodedb_query::EvalError> {
+        binary_row_matches_filters(row, self.filters, self.crs)
+    }
+}
+
+/// Whether `row` passes `residual`. A join without a residual admits it.
+fn residual_admits(
+    residual: Option<&JoinResidual<'_>>,
+    row: &[u8],
+) -> Result<bool, nodedb_query::EvalError> {
+    residual.map_or(Ok(true), |r| r.admits(row))
+}
+
 /// Parameters for probing a hash join index.
 pub(super) struct ProbeParams<'a> {
     pub(super) probe_docs: &'a [(String, Vec<u8>)],
@@ -115,8 +137,9 @@ pub(super) struct ProbeParams<'a> {
     pub(super) probe_collection: &'a str,
     pub(super) index_collection: &'a str,
     /// Residual ON predicates. Candidates that fail these predicates do not
-    /// count as matches for outer-join null extension.
-    pub(super) join_filters: &'a [crate::bridge::scan_filter::ScanFilter],
+    /// count as matches for outer-join null extension. `None` when the join
+    /// has no residual predicate.
+    pub(super) join_filters: Option<JoinResidual<'a>>,
     /// For broadcast RIGHT/FULL joins: only the designated core should emit
     /// unmatched right-side rows. Other cores set this to `false` to avoid
     /// N× duplication of unmatched rows across cores.
@@ -162,8 +185,7 @@ pub(super) fn probe_hash_index(
                 // A division/modulo-by-zero in a join's residual ON
                 // predicate PROPAGATES here (SQLSTATE 22012) rather than
                 // folding to "no match".
-                if p.join_filters.is_empty() || binary_row_matches_filters(&merged, p.join_filters)?
-                {
+                if residual_admits(p.join_filters.as_ref(), &merged)? {
                     results.push(merged);
                 }
             }
@@ -234,17 +256,17 @@ pub(super) fn probe_rows_into(
         // 22012) instead of folding to "no match".
         let mut matched_indices: Vec<usize> = Vec::new();
         for index in candidate_indices {
-            if p.join_filters.is_empty() {
+            let Some(residual) = p.join_filters.as_ref() else {
                 matched_indices.push(index);
                 continue;
-            }
+            };
             let merged = merge_join_docs_binary(
                 value,
                 Some(&p.index_docs[index].1),
                 p.probe_collection,
                 p.index_collection,
             );
-            if binary_row_matches_filters(&merged, p.join_filters)? {
+            if residual.admits(&merged)? {
                 matched_indices.push(index);
             }
         }

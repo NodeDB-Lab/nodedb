@@ -40,12 +40,23 @@ fn alert_webhook_accepts_shared_client() {
     use nodedb::event::alert::notify::notify_webhook_with_client;
     use nodedb::event::alert::types::AlertEvent;
 
-    fn assert_shape(client: &reqwest::Client, url: &str, event: &AlertEvent) {
+    fn assert_shape(
+        client: &reqwest::Client,
+        policy: &nodedb::control::security::egress::EgressPolicy,
+        url: &str,
+        event: &AlertEvent,
+    ) {
         // The fix renames `notify_webhook` → `notify_webhook_with_client` so
         // the shared client is threaded through; the per-request timeout is
         // explicit and tuned from `SchedulerTuning::webhook_timeout_secs`.
-        let _fut =
-            notify_webhook_with_client(client, url, event, std::time::Duration::from_secs(5));
+        // The URL is user-supplied, so the `[egress]` policy travels with it.
+        let _fut = notify_webhook_with_client(
+            client,
+            policy,
+            url,
+            event,
+            std::time::Duration::from_secs(5),
+        );
     }
     let _ = assert_shape;
 }
@@ -56,8 +67,12 @@ fn alert_webhook_accepts_shared_client() {
 fn siem_exporter_holds_shared_client() {
     use nodedb::control::security::siem::{SiemConfig, SiemExporter};
 
-    fn assert_shape(client: Arc<reqwest::Client>, config: SiemConfig) {
-        let _exporter = SiemExporter::with_client(config, client);
+    fn assert_shape(
+        client: Arc<reqwest::Client>,
+        config: SiemConfig,
+        policy: Arc<nodedb::control::security::egress::EgressPolicy>,
+    ) {
+        let _exporter = SiemExporter::with_client(config, client, policy);
     }
     let _ = assert_shape;
 }

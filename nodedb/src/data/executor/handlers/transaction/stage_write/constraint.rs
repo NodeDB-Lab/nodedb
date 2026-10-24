@@ -185,6 +185,7 @@ impl CoreLoop {
                 bitemporal: config.bitemporal,
                 base_visible: overlay
                     .is_none_or(|overlay| overlay.base_visible(statement.coll_key)),
+                crs: &self.crs_context(),
             },
             &rows,
         )

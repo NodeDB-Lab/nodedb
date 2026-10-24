@@ -12,6 +12,7 @@ use nodedb::control::security::jwt::JwtError;
 use nodedb::control::security::oidc::verify_bearer_token;
 
 use super::oidc_authentication::{PEER, SESSION};
+use nodedb_test_support::jwks_fixture::{loopback_egress, loopback_sources};
 use nodedb_test_support::pgwire_auth_helpers::{
     ddl_err, ddl_ok, make_state_with_catalog, make_state_with_catalog_configured, superuser,
 };
@@ -130,15 +131,13 @@ fn signed_jwt_fixture(roles: &[&str], is_superuser: bool) -> (String, String) {
 /// fixture server. The registry is set before the gateway install, as
 /// production boot sets it.
 async fn state_with_catalog_registry() -> nodedb_test_support::pgwire_auth_helpers::BootedState {
-    let registry = JwksRegistry::init(JwtAuthConfig {
-        allow_http_jwks: true,
-        allow_jwks_hosts: vec!["localhost".into()],
-        allow_jwks_cidrs: vec!["127.0.0.0/8".into(), "::1/128".into()],
-        ..JwtAuthConfig::default()
+    let registry = JwksRegistry::init(JwtAuthConfig::default(), loopback_egress())
+        .await
+        .expect("test JWKS registry must initialize");
+    make_state_with_catalog_configured(|state| {
+        state.remote_sources = loopback_sources();
+        state.jwks_registry = Some(Arc::new(registry));
     })
-    .await
-    .expect("test JWKS registry must initialize");
-    make_state_with_catalog_configured(|state| state.jwks_registry = Some(Arc::new(registry)))
 }
 
 #[tokio::test]
@@ -155,7 +154,7 @@ async fn create_oidc_provider_rejects_superuser_claim_mapping() {
          JWKS_URI 'https://catalog-idp.example/jwks' \
          AUDIENCE 'nodedb-api' \
          TENANT 42 \
-         CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 1 ADD ROLES ['superuser']",
+         CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 0 ADD ROLES ['superuser']",
     )
     .await;
 
@@ -178,7 +177,7 @@ async fn alter_oidc_provider_rejects_superuser_and_preserves_existing_mapping() 
          JWKS_URI 'https://catalog-idp.example/jwks' \
          AUDIENCE 'nodedb-api' \
          TENANT 42 \
-         CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 1 ADD ROLES ['readonly']",
+         CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 0 ADD ROLES ['readonly']",
     )
     .await;
 
@@ -186,7 +185,7 @@ async fn alter_oidc_provider_rejects_superuser_and_preserves_existing_mapping() 
         &state,
         &su,
         "ALTER OIDC PROVIDER safe_mapping SET CLAIM MAPPING \
-         WHEN sub = '*' SET DEFAULT_DATABASE = 1 ADD ROLES ['superuser']",
+         WHEN sub = '*' SET DEFAULT_DATABASE = 0 ADD ROLES ['superuser']",
     )
     .await;
     assert!(
@@ -220,7 +219,7 @@ async fn legacy_oidc_mapping_cannot_grant_superuser() {
              JWKS_URI '{jwks_uri}' \
              AUDIENCE 'nodedb-api' \
              TENANT 42 \
-             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 1 ADD ROLES ['readwrite']"
+             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 0 ADD ROLES ['readwrite']"
         ),
     )
     .await;
@@ -244,7 +243,7 @@ async fn legacy_oidc_mapping_cannot_grant_superuser() {
     assert!(!identity.is_superuser);
     assert!(!identity.roles.contains(&Role::Superuser));
     assert!(identity.roles.contains(&Role::ReadWrite));
-    assert_eq!(identity.default_database, Some(DatabaseId::new(1)));
+    assert_eq!(identity.default_database, Some(DatabaseId::DEFAULT));
     assert!(!identity.can_access_database(DatabaseId::new(9_999)));
 }
 
@@ -266,7 +265,7 @@ async fn authenticate_catalog_token(
              JWKS_URI '{jwks_uri}' \
              AUDIENCE 'nodedb-api' \
              TENANT 42 \
-             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 1 ADD ROLES ['readonly']"
+             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 0 ADD ROLES ['readonly']"
         ),
     )
     .await;
@@ -284,7 +283,7 @@ fn assert_catalog_identity_has_only_mapped_authority(
     assert!(!identity.is_superuser);
     assert!(!identity.roles.contains(&Role::Superuser));
     assert!(identity.roles.contains(&Role::ReadOnly));
-    assert_eq!(identity.default_database, Some(DatabaseId::new(1)));
+    assert_eq!(identity.default_database, Some(DatabaseId::DEFAULT));
 }
 
 #[tokio::test]
@@ -308,18 +307,19 @@ async fn catalog_oidc_rejects_algorithm_confusion_missing_expiration_and_none() 
     let fixture = signed_jwt_fixtures(&[], false);
     let jwks_uri = spawn_static_jwks(fixture.jwks).await;
     let registry = Arc::new(
-        JwksRegistry::init(JwtAuthConfig {
-            allow_http_jwks: true,
-            allow_jwks_hosts: vec!["localhost".into()],
-            allow_jwks_cidrs: vec!["127.0.0.0/8".into(), "::1/128".into()],
-            allowed_algorithms: vec!["RS256".into(), "HS256".into()],
-            ..JwtAuthConfig::default()
-        })
+        JwksRegistry::init(
+            JwtAuthConfig {
+                allowed_algorithms: vec!["RS256".into(), "HS256".into()],
+                ..JwtAuthConfig::default()
+            },
+            loopback_egress(),
+        )
         .await
         .expect("test JWKS registry must initialize"),
     );
     let installed = Arc::clone(&registry);
     let state = make_state_with_catalog_configured(move |state| {
+        state.remote_sources = loopback_sources();
         state.jwks_registry = Some(installed);
     });
     let su = superuser();
@@ -333,7 +333,7 @@ async fn catalog_oidc_rejects_algorithm_confusion_missing_expiration_and_none() 
              JWKS_URI '{jwks_uri}' \
              AUDIENCE 'nodedb-api' \
              TENANT 42 \
-             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 1 ADD ROLES ['readonly']"
+             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 0 ADD ROLES ['readonly']"
         ),
     )
     .await;

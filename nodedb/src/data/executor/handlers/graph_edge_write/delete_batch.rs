@@ -108,6 +108,12 @@ impl CoreLoop {
                     return self.refusal_with_landed_rows(task, code, write_set);
                 }
             };
+            self.historical_csr.note_version(
+                task.request.database_id,
+                TenantId::new(tid),
+                edge.collection.as_str(),
+                ord,
+            );
             let current = tombstone.current.clone();
             // The CSR follows what the edge resolves to after the tombstone.
             // A CSR refusal takes this tombstone back out; the edges before it

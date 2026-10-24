@@ -384,6 +384,7 @@ fn document_scan_bitmap_filters_columnar_aggregate() {
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             // No RLS policy on this test's collection.
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             returning: None,

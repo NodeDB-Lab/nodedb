@@ -133,6 +133,7 @@ impl MbrBuilder {
             CellValue::Null => self.attr_nulls[i] += 1,
             CellValue::Int64(_)
             | CellValue::Float64(_)
+            | CellValue::Int8(_)
             | CellValue::UInt8(_)
             | CellValue::Int16(_)
             | CellValue::UInt16(_)

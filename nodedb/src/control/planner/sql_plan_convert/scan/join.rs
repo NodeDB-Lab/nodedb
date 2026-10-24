@@ -104,7 +104,7 @@ fn bitmap_hint_to_plan(hint: &BitmapHint, database_id: DatabaseId) -> Option<Box
         offset: 0,
         // The bitmap reads the versioned index at the side's cutoff, so it
         // holds the rows the side reads.
-        system_as_of_ms: hint.system_as_of_ms,
+        system_time: hint.system_time,
     })))
 }
 

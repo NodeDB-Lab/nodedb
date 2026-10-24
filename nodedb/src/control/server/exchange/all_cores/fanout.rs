@@ -102,7 +102,6 @@ async fn dispatch_all_cores(
                     | GraphOp::SetNodeLabels { .. }
                     | GraphOp::RemoveNodeLabels { .. }
                     | GraphOp::TemporalNeighbors { .. }
-                    | GraphOp::TemporalAlgorithm { .. }
                     | GraphOp::Stats { .. }
                     | GraphOp::NodeEdgeGuard { .. }
                     | GraphOp::NodePresenceGuard { .. }

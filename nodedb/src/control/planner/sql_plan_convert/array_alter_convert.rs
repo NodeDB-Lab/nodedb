@@ -10,6 +10,7 @@ use nodedb_sql::AlterArrayVisitArgs;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::array_catalog::ArrayCatalogEntry;
+use crate::control::array_catalog::attr_meta::remeta_schema;
 use crate::control::array_catalog::georef::regeoref_schema;
 use crate::control::array_catalog::retention::check_retention_floor;
 use crate::types::TenantId;
@@ -25,8 +26,9 @@ use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 /// - `Some(None)`    = key present with value `NULL` → unregister.
 /// - `Some(Some(v))` = key present with value `v` → update.
 ///
-/// A georef change re-encodes the schema. Its content bytes stay equal, so
-/// `schema_hash`, segments, and the Data Plane open check stay valid.
+/// A georef or attr metadata change re-encodes the schema. Its content bytes
+/// stay equal, so `schema_hash`, segments, and the Data Plane open check stay
+/// valid.
 pub(super) fn convert_alter_array(
     args: AlterArrayVisitArgs<'_>,
     tenant_id: TenantId,
@@ -37,6 +39,7 @@ pub(super) fn convert_alter_array(
         audit_retain_ms,
         minimum_audit_retain_ms,
         georef,
+        attr_meta,
     } = args;
     ctx.require_execute("ALTER ARRAY")?;
     let array_catalog = ctx
@@ -65,11 +68,19 @@ pub(super) fn convert_alter_array(
         minimum_audit_retain_ms.map(Some),
     )?;
 
-    // 3. Re-encode the schema for a georef change.
+    // 3. Re-encode the schema for a georef or attr metadata change. One
+    // statement makes one change, so at most one applies.
     let statement = format!("ALTER ARRAY {name}");
-    let schema_msgpack = georef
-        .map(|change| regeoref_schema(&statement, &current.schema_msgpack, change))
-        .transpose()?;
+    let schema_msgpack = match (georef, attr_meta) {
+        (Some(change), _) => Some(regeoref_schema(
+            &statement,
+            &current.schema_msgpack,
+            change,
+            &ctx.crs_context(),
+        )?),
+        (None, Some(change)) => Some(remeta_schema(&statement, &current.schema_msgpack, change)?),
+        (None, None) => None,
+    };
 
     let vshard = ctx.collection_key(name).vshard();
     Ok(vec![PhysicalTask {

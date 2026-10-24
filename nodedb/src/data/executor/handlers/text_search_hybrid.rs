@@ -99,7 +99,7 @@ impl CoreLoop {
 
         // The rows the residual filters and RLS admit restrict both legs
         // before fusion, so the fused top-k counts only admitted rows.
-        let eligible = match TextRowGate::new(filters, rls_filters)
+        let eligible = match TextRowGate::new(filters, rls_filters, self.crs_context())
             .and_then(|gate| self.text_eligible_rows(task, tid, collection, &gate))
         {
             Ok(eligible) => combine_eligible(filter_bitmap, eligible),

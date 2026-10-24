@@ -4,7 +4,7 @@ use tracing::debug;
 
 use crate::bridge::envelope::{ErrorCode, Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::redo_image::StoredRow;
+use crate::data::executor::core_loop::redo_image::WriteSetRow;
 use crate::data::executor::enforcement::unique::PostImage;
 use crate::data::executor::enforcement::write_hook;
 use crate::data::executor::handlers::partial_refusal::refusal_after_partial_apply;
@@ -143,9 +143,14 @@ impl CoreLoop {
 
         // One system time stamps every new version of a bitemporal
         // collection, so the statement writes its rows at one instant.
-        let bitemporal_sys_from_ms = self
-            .is_bitemporal(database_id, tid, collection)
-            .then(|| self.bitemporal_now_ms());
+        let bitemporal_sys_from = if self.is_bitemporal(database_id, tid, collection) {
+            match self.rows_version_ordinal(database_id, tid, collection, &apply_ids) {
+                Ok(ordinal) => Some(ordinal),
+                Err(e) => return self.response_error(task, ErrorCode::from(e)),
+            }
+        } else {
+            None
+        };
 
         // The secondary-index paths for this collection, cloned once for the
         // whole statement. Each row's primary write reconciles them in the
@@ -183,7 +188,7 @@ impl CoreLoop {
             updates,
             strict_schema: strict_schema.as_ref(),
             declared_primary_key,
-            bitemporal_sys_from_ms,
+            bitemporal_sys_from,
         }) {
             Ok(projected) => projected,
             Err(e) => return self.response_error(task, e),
@@ -263,7 +268,7 @@ impl CoreLoop {
                     deferred_sum_targets: &[],
                     wal_lsn: task.wal_lsn(),
                 },
-                bitemporal_sys_from_ms,
+                bitemporal_sys_from,
             );
             let (touched, target_writes) = match persisted {
                 Ok(persisted) => (persisted.touched, persisted.target_writes),
@@ -290,7 +295,7 @@ impl CoreLoop {
             // target row, naming the TARGET collection. A bitemporal version
             // carries its system time, so replay lands the same version.
             let image = self.stored_row_image(
-                StoredRow {
+                WriteSetRow {
                     database_id,
                     tid,
                     collection,
@@ -298,7 +303,7 @@ impl CoreLoop {
                     identity: row_identity.clone(),
                 },
                 &updated_bytes,
-                bitemporal_sys_from_ms,
+                bitemporal_sys_from,
             );
             match image {
                 Ok(image) => write_set.push(image),
@@ -392,7 +397,12 @@ impl CoreLoop {
         // Every matched row committed, so an encode error answers with the
         // rows' entries as well.
         let mut response = if let Some(spec) = returning {
-            match returning_rows::build_rows_payload(spec, rls_filters, &returned_docs) {
+            match returning_rows::build_rows_payload(
+                spec,
+                rls_filters,
+                &returned_docs,
+                &self.crs_context(),
+            ) {
                 Ok(payload) => self.response_with_payload(task, payload),
                 Err(e) => self.response_error(task, ErrorCode::from(e)),
             }

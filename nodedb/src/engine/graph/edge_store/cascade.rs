@@ -100,7 +100,7 @@ impl EdgeStore {
                 collection,
                 node,
                 label_filter: None,
-                system_as_of_ms: None,
+                cutoff_ordinal: i64::MAX,
                 valid_at_ms: None,
             },
             Direction::Both,

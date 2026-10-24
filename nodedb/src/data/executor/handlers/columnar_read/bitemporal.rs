@@ -2,26 +2,24 @@
 
 //! Bitemporal row-visibility predicate for system-time / valid-time queries.
 
-/// Extract the system-time (`_ts_system`) value of a columnar row for
+/// Extract the system-time ordinal (`_ts_system`) of a columnar row for
 /// audit-log ordering. Rows missing the column (non-bitemporal, or the
 /// column index is `None`) sort first via `i64::MIN`.
 pub(super) fn row_system_time(
     row: &[nodedb_types::value::Value],
     ts_system_idx: Option<usize>,
 ) -> i64 {
-    use nodedb_types::value::Value;
     match ts_system_idx.and_then(|i| row.get(i)) {
-        Some(Value::Integer(i)) => *i,
-        Some(Value::DateTime(dt)) | Some(Value::NaiveDateTime(dt)) => dt.micros / 1000,
+        Some(nodedb_types::value::Value::Integer(i)) => *i,
         _ => i64::MIN,
     }
 }
 
 /// Bitemporal row-level visibility predicate.
 ///
-/// - `system_as_of_ms`: when `Some`, any row whose `_ts_system` value
-///   exceeds the cutoff is hidden (write happened after the query's
-///   system-time horizon).
+/// - `system_as_of`: when `Some`, the system-time ordinal cutoff
+///   (`SystemTimeScope::as_of_ordinal`). A row whose `_ts_system` ordinal
+///   exceeds it is hidden (written after the query's system-time cut).
 /// - `valid_at_ms`: when `Some`, the row's
 ///   `[_ts_valid_from, _ts_valid_until)` interval must contain this
 ///   point.
@@ -33,20 +31,18 @@ pub(super) fn bitemporal_row_visible(
     ts_system_idx: Option<usize>,
     ts_valid_from_idx: Option<usize>,
     ts_valid_until_idx: Option<usize>,
-    system_as_of_ms: Option<i64>,
+    system_as_of: Option<i64>,
     valid_at_ms: Option<i64>,
 ) -> bool {
     use nodedb_types::value::Value;
-    if let Some(cutoff) = system_as_of_ms
+    if let Some(cutoff) = system_as_of
         && let Some(idx) = ts_system_idx
         && let Some(v) = row.get(idx)
     {
-        let ts = match v {
-            Value::Integer(i) => *i,
-            Value::DateTime(dt) | Value::NaiveDateTime(dt) => dt.micros / 1000,
-            _ => return false,
+        let Value::Integer(ordinal) = v else {
+            return false;
         };
-        if ts > cutoff {
+        if *ordinal > cutoff {
             return false;
         }
     }
@@ -115,6 +111,34 @@ mod tests {
             })
             .collect();
         assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    /// Two versions written in one millisecond, one on each side of a
+    /// pinned cut inside that millisecond: the cut sees the first and hides
+    /// the second, which a millisecond stamp cannot tell apart.
+    #[test]
+    fn a_pinned_cut_splits_two_versions_of_one_millisecond() {
+        let ms = 1_700_000_000_000;
+        let first = ms * nodedb_types::NANOS_PER_MS + 10;
+        let second = ms * nodedb_types::NANOS_PER_MS + 20;
+        let cut = nodedb_types::SystemTimeScope::Pinned {
+            ordinal: ms * nodedb_types::NANOS_PER_MS + 15,
+            cut_marker: 0,
+        }
+        .as_of_ordinal();
+        let visible = |ordinal| {
+            bitemporal_row_visible(&row(ordinal, 1), Some(0), Some(1), Some(2), cut, None)
+        };
+        assert!(visible(first), "the version before the cut is visible");
+        assert!(!visible(second), "the version after the cut is hidden");
+        let whole_ms = nodedb_types::SystemTimeScope::AsOf(ms).as_of_ordinal();
+        let visible_at_ms = |ordinal| {
+            bitemporal_row_visible(&row(ordinal, 1), Some(0), Some(1), Some(2), whole_ms, None)
+        };
+        assert!(
+            visible_at_ms(first) && visible_at_ms(second),
+            "AS OF the millisecond sees both"
+        );
     }
 
     #[test]

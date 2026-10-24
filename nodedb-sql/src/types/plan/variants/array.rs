@@ -35,6 +35,8 @@ pub struct AlterArrayPlan {
     pub minimum_audit_retain_ms: Option<u64>,
     /// Georef change. `None` = georef unchanged.
     pub georef: Option<types_array::ArrayGeorefAlter>,
+    /// Attr metadata change. `None` = every attr's metadata unchanged.
+    pub attr_meta: Option<types_array::ArrayAttrMetaAlter>,
 }
 
 /// Payload of [`SqlPlan::InsertArray`](crate::types::SqlPlan::InsertArray).
@@ -66,6 +68,9 @@ pub struct ArraySlicePlan {
     /// Plane returns the live (current) state — the default fast path.
     /// Populated from `AS OF SYSTEM TIME` / `AS OF VALID TIME` clauses.
     pub temporal: TemporalScope,
+    /// `physical => true`: a nodata cell reads as NULL, and a numeric cell
+    /// of an attr with a scale or offset as `raw * scale + offset`.
+    pub physical: bool,
 }
 
 /// Payload of [`SqlPlan::ArrayAgg`](crate::types::SqlPlan::ArrayAgg).
@@ -84,6 +89,9 @@ pub struct ArrayAggPlan {
     /// Plane aggregates against the live (current) state — the default
     /// fast path. Populated from `AS OF SYSTEM TIME` / `AS OF VALID TIME`.
     pub temporal: TemporalScope,
+    /// `physical => true`: reduce `raw * scale + offset` for an attr with a
+    /// scale or offset. A nodata cell never contributes, either way.
+    pub physical: bool,
 }
 
 /// Payload of [`SqlPlan::ArrayElementwise`](crate::types::SqlPlan::ArrayElementwise).

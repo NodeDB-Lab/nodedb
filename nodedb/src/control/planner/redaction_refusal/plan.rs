@@ -581,6 +581,7 @@ mod tests {
             edge_labels: Vec::new(),
             direction: nodedb_types::graph::Direction::Out,
             rls_filters: Vec::new(),
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         });
         assert_refused(check(&plan, &store, "support"));
         assert!(check(&plan, &store, "analyst").is_ok());
@@ -606,6 +607,7 @@ mod tests {
             query: zerompk::to_msgpack_vec(&query).expect("encode match query"),
             frontier_bitmap: None,
             cluster_mode: false,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         });
         assert_refused(check(&refused, &store, "support"));
 
@@ -614,6 +616,7 @@ mod tests {
             query: zerompk::to_msgpack_vec(&query).expect("encode match query"),
             frontier_bitmap: None,
             cluster_mode: false,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         });
         assert!(check(&allowed, &store, "support").is_ok());
     }
@@ -639,6 +642,7 @@ mod tests {
             query: zerompk::to_msgpack_vec(&query).expect("encode match query"),
             frontier_bitmap: None,
             cluster_mode: false,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         });
         assert_refused(check(&plan, &store, "support"));
         assert!(check(&plan, &store, "analyst").is_ok());

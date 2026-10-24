@@ -43,6 +43,12 @@ impl CoreLoop {
             );
             err
         };
+        // A historical CSR at or above the cut read what the cut hid.
+        self.historical_csr.invalidate_collection(
+            DatabaseId::new(database_id),
+            TenantId::new(tid),
+            &install.collection,
+        );
         self.edge_store
             .remove_edge_cut(DatabaseId::new(database_id), TenantId::new(tid), &install)
             .map_err(|e| {

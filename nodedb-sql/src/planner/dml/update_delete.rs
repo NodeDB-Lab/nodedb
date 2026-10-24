@@ -72,7 +72,7 @@ pub fn plan_update(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Ve
         None => Vec::new(),
     };
 
-    let target_keys = extract_point_keys(update.selection.as_ref(), &info);
+    let target_keys = extract_point_keys(update.selection.as_ref(), &info, &catalog.crs_context());
 
     // Vector-primary collection: the row lives in the HNSW index and its
     // payload sidecar, never in the document store the engine rules target.
@@ -179,7 +179,7 @@ pub fn plan_delete(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Ve
         None => Vec::new(),
     };
 
-    let target_keys = extract_point_keys(delete.selection.as_ref(), &info);
+    let target_keys = extract_point_keys(delete.selection.as_ref(), &info, &catalog.crs_context());
 
     // Vector-primary collection: see `plan_update`.
     if is_vector_primary(&info)

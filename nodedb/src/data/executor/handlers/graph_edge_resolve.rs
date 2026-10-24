@@ -55,6 +55,7 @@ impl CoreLoop {
             stored.as_deref(),
             tid,
             collection.as_str(),
+            &self.crs_context(),
         ) {
             // Same count semantics as `execute_edge_delete`: 1 when a live
             // edge exists to remove, 0 when it is already absent.

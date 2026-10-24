@@ -170,6 +170,7 @@ impl CoreLoop {
             now_ms,
             tid.as_u64(),
             collection,
+            &self.crs_context(),
         ) {
             return self.response_error(task, error);
         }

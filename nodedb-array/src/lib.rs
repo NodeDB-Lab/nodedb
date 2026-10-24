@@ -24,7 +24,7 @@ pub use coord::{
 };
 pub use error::{ArrayError, ArrayResult};
 pub use schema::{
-    ArrayGeoref, ArraySchema, ArraySchemaBuilder, AttrSpec, CellOrder, DimSpec, DimType,
+    ArrayGeoref, ArraySchema, ArraySchemaBuilder, AttrMeta, AttrSpec, CellOrder, DimSpec, DimType,
     GeoTransform, TileOrder,
 };
 pub use segment::{

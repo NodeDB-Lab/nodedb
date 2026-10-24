@@ -68,8 +68,14 @@ impl CoreLoop {
                 value,
                 ..
             } = mutation
-                && let Err(error) =
-                    admit_kv_row(rls_write_check, value, key, tid, collection.as_str())
+                && let Err(error) = admit_kv_row(
+                    rls_write_check,
+                    value,
+                    key,
+                    tid,
+                    collection.as_str(),
+                    &self.crs_context(),
+                )
             {
                 return self.response_error(task, error);
             }

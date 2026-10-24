@@ -10,6 +10,7 @@
 //! contract documented on `ArrayOp::Slice::slice_msgpack`. Each emitted
 //! row is the named map `slice_row::named_cell_row` builds.
 
+use nodedb_array::query::physical::{physical_cells, physical_sparse};
 use nodedb_array::query::project::{Projection, project_sparse};
 use nodedb_array::query::region::{ArrayRegion, PolygonZone};
 use nodedb_array::query::slice::{Slice, filter_sparse, slice_sparse_owned};
@@ -39,6 +40,9 @@ pub(in crate::data::executor) struct SliceParams<'a> {
     pub valid_at_ms: Option<i64>,
     /// zerompk-encoded [`PolygonZone`]. Empty = no zone.
     pub zone_msgpack: &'a [u8],
+    /// Read attrs physically: a nodata cell as NULL, and a cell of an attr
+    /// with a scale or offset as `raw * scale + offset`.
+    pub physical: bool,
 }
 
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -66,6 +70,7 @@ impl CoreLoop {
             system_time,
             valid_at_ms,
             zone_msgpack,
+            physical,
         } = p;
 
         if let Err(resp) = self.ensure_array_open(task, array_id) {
@@ -180,8 +185,14 @@ impl CoreLoop {
                     // Build coords from CoordValue.
                     let coords: Vec<Value> = coord.iter().map(coord_value_to_value).collect();
                     // Build attrs from payload, applying projection.
-                    let all_attrs: Vec<Value> =
-                        payload.attrs.iter().map(cell_value_to_value).collect();
+                    let all_attrs: Vec<Value> = if physical {
+                        physical_cells(&schema, payload.attrs.clone())
+                            .iter()
+                            .map(cell_value_to_value)
+                            .collect()
+                    } else {
+                        payload.attrs.iter().map(cell_value_to_value).collect()
+                    };
                     let attrs = if let Some(p) = proj.as_ref() {
                         p.attr_indices
                             .iter()
@@ -209,13 +220,12 @@ impl CoreLoop {
                 encode_slice_rows(self, task, rows, false)
             }
 
-            SystemTimeScope::Current | SystemTimeScope::AsOf(_) => {
+            SystemTimeScope::Current
+            | SystemTimeScope::AsOf(_)
+            | SystemTimeScope::Pinned { .. } => {
                 // Point-in-time / live path — use existing Ceiling resolver.
-                let cutoff = match system_time {
-                    SystemTimeScope::AsOf(t) => t,
-                    SystemTimeScope::Current => i64::MAX,
-                    SystemTimeScope::AllVersions => unreachable!(),
-                };
+                // Array cells stamp system time in milliseconds.
+                let cutoff = system_time.as_of_ms().unwrap_or(i64::MAX);
                 let store = match self.array_engine.store(array_id) {
                     Ok(s) => s,
                     Err(e) => {
@@ -287,6 +297,11 @@ impl CoreLoop {
                                 },
                             );
                         }
+                    };
+                    let filtered = if physical {
+                        physical_sparse(&schema, filtered)
+                    } else {
+                        filtered
                     };
                     let final_tile = match proj.as_ref() {
                         Some(p) => match project_sparse(&filtered, p) {
@@ -622,6 +637,7 @@ mod tests {
             system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             zone_msgpack: Vec::new(),
+            physical: false,
         });
         assert_eq!(r.status, Status::Ok, "slice failed: {r:?}");
         let rows = decode_slice_rows(r.payload.as_ref());
@@ -672,6 +688,7 @@ mod tests {
             system_time: nodedb_types::SystemTimeScope::AllVersions,
             valid_at_ms: None,
             zone_msgpack: Vec::new(),
+            physical: false,
         });
         assert_eq!(r.status, Status::Ok, "all-versions slice failed: {r:?}");
 
@@ -743,6 +760,7 @@ mod tests {
             system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             zone_msgpack: Vec::new(),
+            physical: false,
         });
         assert_eq!(r.status, Status::Ok, "slice+filter failed: {r:?}");
         let rows = decode_slice_rows(r.payload.as_ref());
@@ -779,6 +797,7 @@ mod tests {
             system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             zone_msgpack: Vec::new(),
+            physical: false,
         });
         assert_eq!(r.status, Status::Ok, "slice failed: {r:?}");
         decode_slice_rows(r.payload.as_ref())
@@ -789,7 +808,7 @@ mod tests {
     fn georef_schema(name: &str) -> ArraySchema {
         schema_2d_f64(name)
             .with_georef(Some(nodedb_array::schema::ArrayGeoref {
-                srid: nodedb_types::geometry::Srid::Wgs84,
+                srid: nodedb_types::geometry::Srid::WGS84,
                 x_dim: 0,
                 y_dim: 1,
                 transform: Some(nodedb_array::schema::GeoTransform([
@@ -814,8 +833,13 @@ mod tests {
             ],
             holes: Vec::new(),
         }];
-        let frame = build_zone_frame(schema, nodedb_types::geometry::Srid::Wgs84, &polygons)
-            .expect("frame");
+        let frame = build_zone_frame(
+            schema,
+            nodedb_types::geometry::Srid::WGS84,
+            &polygons,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("frame");
         zerompk::to_msgpack_vec(&PolygonZone {
             x_dim: 0,
             y_dim: 1,
@@ -854,6 +878,7 @@ mod tests {
             system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             zone_msgpack: lon_lat_zone(&s),
+            physical: false,
         });
         assert_eq!(r.status, Status::Ok, "zone slice failed: {r:?}");
         let rows = decode_slice_rows(r.payload.as_ref());
@@ -890,6 +915,7 @@ mod tests {
             system_time: nodedb_types::SystemTimeScope::AllVersions,
             valid_at_ms: None,
             zone_msgpack: lon_lat_zone(&s),
+            physical: false,
         });
         assert_eq!(r.status, Status::Ok, "zone audit slice failed: {r:?}");
         let rows = decode_slice_rows(r.payload.as_ref());

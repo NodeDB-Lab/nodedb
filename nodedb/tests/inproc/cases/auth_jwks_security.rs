@@ -21,6 +21,7 @@ use nodedb::config::ServerConfig;
 use nodedb::config::auth::{JwtAuthConfig, JwtProviderConfig};
 use nodedb::control::security::jwks::registry::JwksRegistry;
 use nodedb::control::security::jwt::JwtError;
+use nodedb_test_support::jwks_fixture::loopback_egress;
 
 // ── helpers ────────────────────────────────────────────────────────────
 
@@ -67,9 +68,6 @@ fn forged_token(iss: &str) -> String {
 
 fn single_provider_cfg(jwks_url: &str, issuer: &str) -> JwtAuthConfig {
     JwtAuthConfig {
-        allow_http_jwks: true,
-        allow_jwks_hosts: vec!["localhost".into()],
-        allow_jwks_cidrs: vec!["127.0.0.0/8".into(), "::1/128".into()],
         providers: vec![JwtProviderConfig {
             name: "prod".into(),
             jwks_url: jwks_url.into(),
@@ -114,16 +112,10 @@ fn signed_jwt_fixture(issuer: &str, audience: &str, claimed_tenant_id: u64) -> (
     (jwks, token)
 }
 
+/// An `[auth.jwt]` section of `provider_tables`. Its registry fetches from
+/// the loopback fixture server through [`loopback_egress`].
 fn local_jwks_config(provider_tables: &str) -> JwtAuthConfig {
-    toml::from_str(&format!(
-        r#"
-allow_http_jwks = true
-allow_jwks_hosts = ["localhost"]
-allow_jwks_cidrs = ["127.0.0.0/8", "::1/128"]
-{provider_tables}
-"#
-    ))
-    .expect("JWT provider fixture must deserialize")
+    toml::from_str(provider_tables).expect("JWT provider fixture must deserialize")
 }
 
 // ── 1. Issuer bypass ───────────────────────────────────────────────────
@@ -136,7 +128,7 @@ async fn single_provider_does_not_accept_mismatched_issuer() {
     // fall through to sig/kid lookup on the sole provider.
     let jwks_url = spawn_static_body(r#"{"keys":[]}"#).await;
     let cfg = single_provider_cfg(&jwks_url, "https://auth.example.com/");
-    let registry = JwksRegistry::init(cfg)
+    let registry = JwksRegistry::init(cfg, loopback_egress())
         .await
         .expect("valid static provider configuration must initialise");
 
@@ -155,7 +147,7 @@ async fn single_provider_with_empty_configured_issuer_is_rejected_at_init() {
     let jwks_url = spawn_static_body(r#"{"keys":[]}"#).await;
     let cfg = single_provider_cfg(&jwks_url, "");
     assert!(
-        JwksRegistry::init(cfg).await.is_err(),
+        JwksRegistry::init(cfg, loopback_egress()).await.is_err(),
         "empty-issuer provider must be rejected during registry initialisation"
     );
 }
@@ -381,7 +373,7 @@ async fn registry_init_rejects_duplicate_static_provider_issuer_audience_routes(
     };
 
     assert!(
-        JwksRegistry::init(config).await.is_err(),
+        JwksRegistry::init(config, loopback_egress()).await.is_err(),
         "direct registry initialisation must reject duplicate issuer/audience routes"
     );
 }
@@ -391,8 +383,9 @@ async fn same_issuer_distinct_audiences_and_tenant_bindings_are_routed_independe
     let issuer = "https://issuer.example.com/";
     let (jwks, token) = signed_jwt_fixture(issuer, "tenant-b-api", 999);
     let jwks_url = spawn_static_body(jwks).await;
-    let registry = JwksRegistry::init(local_jwks_config(&format!(
-        r#"
+    let registry = JwksRegistry::init(
+        local_jwks_config(&format!(
+            r#"
 [[providers]]
 name = "tenant-a"
 jwks_url = "{jwks_url}"
@@ -407,7 +400,9 @@ issuer = "{issuer}"
 audience = "tenant-b-api"
 tenant_id = 202
 "#
-    )))
+        )),
+        loopback_egress(),
+    )
     .await
     .expect("valid static provider configuration must initialise");
 
@@ -423,8 +418,9 @@ async fn static_provider_tenant_binding_overrides_signed_tenant_claim() {
     let issuer = "https://issuer.example.com/";
     let (jwks, token) = signed_jwt_fixture(issuer, "nodedb-api", 999);
     let jwks_url = spawn_static_body(jwks).await;
-    let registry = JwksRegistry::init(local_jwks_config(&format!(
-        r#"
+    let registry = JwksRegistry::init(
+        local_jwks_config(&format!(
+            r#"
 [[providers]]
 name = "bound-provider"
 jwks_url = "{jwks_url}"
@@ -432,7 +428,9 @@ issuer = "{issuer}"
 audience = "nodedb-api"
 tenant_id = 42
 "#
-    )))
+        )),
+        loopback_egress(),
+    )
     .await
     .expect("valid static provider configuration must initialise");
 

@@ -38,6 +38,7 @@ pub fn cell_value_to_value(c: &CellValue) -> Value {
         CellValue::Bytes(v) => Value::Bytes(v.clone()),
         CellValue::Null => Value::Null,
         CellValue::UInt8(v) => Value::Integer(i64::from(*v)),
+        CellValue::Int8(v) => Value::Integer(i64::from(*v)),
         CellValue::Int16(v) => Value::Integer(i64::from(*v)),
         CellValue::UInt16(v) => Value::Integer(i64::from(*v)),
         CellValue::Int32(v) => Value::Integer(i64::from(*v)),

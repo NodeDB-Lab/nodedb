@@ -49,9 +49,10 @@ pub(super) struct DispatchTarget {
     pub resolved_now_ms: Option<u64>,
     /// The write's commit HLC, which dates every event it emits.
     pub commit_hlc: u64,
-    /// The log position of the data-group entry the write applies, its
-    /// version on every replica. `None` for a write that applies no entry.
-    pub entry_version: Option<nodedb_types::WriteVersion>,
+    /// The data-group entry the write applies: its version and the
+    /// system-time ordinal its leader assigned, alike on every replica.
+    /// `None` for a write that applies no entry.
+    pub entry_version: Option<crate::bridge::envelope::AppliedEntry>,
     pub admission: Admission,
     /// The record group the write journals its write set into.
     pub journal: Option<JournalGroup>,

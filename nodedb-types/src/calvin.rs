@@ -4,7 +4,7 @@
 //! (the physical-plan IR layer) and `nodedb-cluster` (the distributed
 //! Calvin sequencer / scheduler).
 //!
-//! Provides [`SortedVec`], [`EngineKeySet`], and [`PassiveReadKey`] —
+//! Provides [`SortedVec`], [`HomedPair`], [`EngineKeySet`], and [`PassiveReadKey`] —
 //! the building blocks of Calvin read/write sets. `DependentReadSpec`
 //! and other scheduler-internal aggregates stay in `nodedb-cluster`.
 
@@ -20,8 +20,20 @@ pub use crate::calvin_passive::{PassiveKey, PassiveReadKeyId};
 /// construction time. This property is load-bearing for byte-determinism:
 /// two `SortedVec`s built from the same logical set (in any insertion order)
 /// produce identical serialized bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Every decode path refuses input that is out of order or repeats an item.
+/// Encoders write only the sorted, deduplicated form, so a refusal means
+/// the bytes come from no encoder.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SortedVec<T>(Vec<T>);
+
+/// The index of the first item of `items` that is not above the one before it.
+fn first_unsorted<T: Ord>(items: &[T]) -> Option<usize> {
+    items
+        .windows(2)
+        .position(|pair| pair[0] >= pair[1])
+        .map(|at| at + 1)
+}
 
 impl<T: zerompk::ToMessagePack> zerompk::ToMessagePack for SortedVec<T> {
     fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
@@ -31,11 +43,36 @@ impl<T: zerompk::ToMessagePack> zerompk::ToMessagePack for SortedVec<T> {
 
 impl<'de, T> zerompk::FromMessagePack<'de> for SortedVec<T>
 where
-    T: zerompk::FromMessagePack<'de> + Ord + Clone,
+    T: zerompk::FromMessagePack<'de> + Ord,
 {
     fn read<R: zerompk::Read<'de>>(reader: &mut R) -> zerompk::Result<Self> {
-        let v = Vec::<T>::read(reader)?;
-        Ok(Self::new(v))
+        let items = Vec::<T>::read(reader)?;
+        match first_unsorted(&items) {
+            // zerompk has no ordering variant. A repeat or a disorder in a
+            // set is reported as a duplicated key at that index.
+            Some(at) => Err(zerompk::Error::KeyDuplicated(format!(
+                "SortedVec item {at} is not above the item before it"
+            ))),
+            None => Ok(Self(items)),
+        }
+    }
+}
+
+impl<T: Serialize> Serialize for SortedVec<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de, T: Deserialize<'de> + Ord> Deserialize<'de> for SortedVec<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let items = Vec::<T>::deserialize(deserializer)?;
+        match first_unsorted(&items) {
+            Some(at) => Err(serde::de::Error::custom(format_args!(
+                "SortedVec item {at} is not above the item before it"
+            ))),
+            None => Ok(Self(items)),
+        }
     }
 }
 
@@ -67,6 +104,45 @@ impl<T: Ord + Clone> SortedVec<T> {
 impl<T: Ord + Clone> From<Vec<T>> for SortedVec<T> {
     fn from(v: Vec<T>) -> Self {
         Self::new(v)
+    }
+}
+
+/// One graph lock pair and the vShard that locks it.
+///
+/// `home: Some(v)` locks the pair only on vShard `v`. `home: None` locks it
+/// on every participant. Field order sets the sort: `None` entries sort
+/// first, and the entries of one home form one contiguous run.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub struct HomedPair {
+    pub home: Option<u32>,
+    pub pair: (u32, u32),
+}
+
+impl HomedPair {
+    /// A pair locked only on vShard `home`.
+    pub fn on(home: u32, pair: (u32, u32)) -> Self {
+        Self {
+            home: Some(home),
+            pair,
+        }
+    }
+
+    /// A pair locked on every participant.
+    pub fn everywhere(pair: (u32, u32)) -> Self {
+        Self { home: None, pair }
     }
 }
 
@@ -102,15 +178,16 @@ pub enum EngineKeySet {
     },
     /// Graph edge engine: identified by (src_surrogate, dst_surrogate) pairs.
     ///
-    /// `edges` carries the surrogate-pair IDENTITY used for Calvin locking and
-    /// conflict detection. `home_vshards` carries the from_key ROUTING homes —
-    /// the set of `VShardId::from_key(src_str)` / `from_key(dst_str)` u32 ids
-    /// for every edge in this set. Routing (which vShards participate) is driven
-    /// by `home_vshards`, NOT by the collection name, because a graph edge is
-    /// dual-homed across its two endpoint key-hashed vShards.
+    /// `edges` carries each lock pair with the vShard that locks it. An edge
+    /// pair and its node pairs sit once on each endpoint home. A participant
+    /// locks the `None` entries and the run for its own vShard only.
+    /// `home_vshards` carries the from_key ROUTING homes: the
+    /// `VShardId::from_key(src_str)` / `from_key(dst_str)` u32 ids of every
+    /// edge. Routing follows `home_vshards`, not the collection name, because
+    /// an edge lives on both endpoint vShards.
     Edge {
         collection: String,
-        edges: SortedVec<(u32, u32)>,
+        edges: SortedVec<HomedPair>,
         home_vshards: SortedVec<u32>,
     },
     /// Array engine: the array's cells on each vShard in `vshards`.
@@ -161,8 +238,8 @@ impl EngineKeySet {
             }
             // KV keys: sum of key byte lengths.
             Self::Kv { keys, .. } => keys.iter().map(|k| k.len()).sum(),
-            // Edge: two u32 per edge = 8 bytes each.
-            Self::Edge { edges, .. } => edges.len() * 8,
+            // Edge: one u32 home plus two u32 per placement = 12 bytes each.
+            Self::Edge { edges, .. } => edges.len() * 12,
             // Array: one u32 vShard each.
             Self::Array { vshards, .. } => vshards.len() * 4,
             // Collection: the name plus one u32 vShard each.
@@ -378,5 +455,48 @@ impl VersionedReadSet {
     /// Borrow the entries as a slice.
     pub fn as_slice(&self) -> &[VersionedReadEntry] {
         &self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SortedVec;
+
+    fn msgpack(items: &[u32]) -> Vec<u8> {
+        zerompk::to_msgpack_vec(&items.to_vec()).expect("encode")
+    }
+
+    #[test]
+    fn a_sorted_array_decodes_as_is() {
+        let decoded: SortedVec<u32> = zerompk::from_msgpack(&msgpack(&[1, 4, 9])).expect("decode");
+        assert_eq!(decoded.as_slice(), &[1, 4, 9]);
+
+        let decoded: SortedVec<u32> = sonic_rs::from_str("[1,4,9]").expect("decode");
+        assert_eq!(decoded.as_slice(), &[1, 4, 9]);
+    }
+
+    #[test]
+    fn a_disordered_or_repeating_array_is_refused() {
+        for items in [[4u32, 1, 9], [1, 4, 4]] {
+            let refused: zerompk::Result<SortedVec<u32>> = zerompk::from_msgpack(&msgpack(&items));
+            assert!(refused.is_err(), "zerompk accepts {items:?}");
+
+            let json = sonic_rs::to_string(&items.to_vec()).expect("encode");
+            let refused: Result<SortedVec<u32>, _> = sonic_rs::from_str(&json);
+            assert!(refused.is_err(), "serde accepts {items:?}");
+        }
+    }
+
+    #[test]
+    fn every_encoder_writes_the_sorted_form() {
+        let set = SortedVec::new(vec![9u32, 1, 4, 1]);
+        let bytes = zerompk::to_msgpack_vec(&set).expect("encode");
+        let decoded: SortedVec<u32> = zerompk::from_msgpack(&bytes).expect("decode");
+        assert_eq!(decoded, set);
+
+        let json = sonic_rs::to_string(&set).expect("encode");
+        assert_eq!(json, "[1,4,9]");
+        let decoded: SortedVec<u32> = sonic_rs::from_str(&json).expect("decode");
+        assert_eq!(decoded, set);
     }
 }

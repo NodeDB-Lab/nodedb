@@ -81,7 +81,8 @@ impl CoreLoop {
         let (database_id, tenant, collection) = coll_key;
         let (database_id, tid) = (database_id.as_u64(), tenant.as_u64());
         let collection = collection.as_str();
-        let raw_matches = self.strict_aware_matcher(database_id, tid, collection, filters);
+        let crs = self.crs_context();
+        let raw_matches = self.strict_aware_matcher(database_id, tid, collection, filters, &crs);
         let held = HeldEvalError::default();
         let matches = |row_key: &StorageKey, body: &[u8]| held.check(|| raw_matches(row_key, body));
         let mut rows = self.current_rows_where(database_id, tid, collection, &matches)?;

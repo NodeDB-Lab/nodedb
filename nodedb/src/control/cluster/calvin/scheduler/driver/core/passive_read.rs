@@ -49,14 +49,7 @@ impl Scheduler {
         txn_id: TxnId,
         lock_owner: TxnId,
     ) {
-        let role = match self.dependent_role(&txn) {
-            Ok(role) => role,
-            Err(error) => {
-                self.reject_plan(txn, txn_id, lock_owner, &error);
-                return;
-            }
-        };
-        match role {
+        match self.dependent_role(&txn) {
             DependentRole { passive: true, .. } => {
                 self.dispatch_passive_read(txn, txn_id, lock_owner);
             }
@@ -72,7 +65,7 @@ impl Scheduler {
     }
 
     /// This vShard's role in dependent-read txn `txn`.
-    fn dependent_role(&self, txn: &SequencedTxn) -> crate::Result<DependentRole> {
+    fn dependent_role(&self, txn: &SequencedTxn) -> DependentRole {
         let passive = txn
             .tx_class
             .dependent_reads
@@ -81,14 +74,9 @@ impl Scheduler {
         let active = txn
             .tx_class
             .active_vshards()
-            .map_err(|error| crate::Error::Internal {
-                detail: format!(
-                    "calvin txn {}/{}: the write set names no vShard of its database: {error}",
-                    txn.epoch, txn.position
-                ),
-            })?
-            .contains(&self.vshard_id);
-        Ok(DependentRole { passive, active })
+            .binary_search(&self.vshard_id)
+            .is_ok();
+        DependentRole { passive, active }
     }
 
     /// Dispatch the passive read of `txn` on this vShard, and hold the txn
@@ -162,15 +150,6 @@ impl Scheduler {
         else {
             return;
         };
-        let role = match role {
-            Ok(role) => role,
-            Err(error) => {
-                if let Some(pending) = self.pending.remove(&txn_id) {
-                    self.reject_plan(pending.txn, txn_id, pending.lock_owner, &error);
-                }
-                return;
-            }
-        };
         let read = response.status == Status::Ok;
         if read {
             self.propose_read_results(txn_id, response.payload.to_vec());
@@ -205,19 +184,7 @@ impl Scheduler {
             return;
         };
         let tx_class = &pending.txn.tx_class;
-        let targets = match tx_class.active_vshards() {
-            Ok(targets) => targets,
-            Err(error) => {
-                tracing::error!(
-                    vshard_id = self.vshard_id,
-                    epoch = txn_id.epoch,
-                    position = txn_id.position,
-                    %error,
-                    "calvin: no active vShard to propose the passive read to"
-                );
-                return;
-            }
-        };
+        let targets = tx_class.active_vshards().to_vec();
         #[cfg(feature = "failpoints")]
         let gates: Vec<String> = tx_class
             .dependent_reads
@@ -304,12 +271,12 @@ mod tests {
                     != test_coll_vshard()
             })
             .expect("a collection on another vShard");
-        txn.tx_class.write_set =
+        std::sync::Arc::make_mut(&mut txn.tx_class).write_set =
             nodedb_cluster::calvin::types::ReadWriteSet::new(vec![EngineKeySet::Document {
                 collection: other,
                 surrogates: SortedVec::new(vec![1]),
             }]);
-        txn.tx_class.dependent_reads = Some(DependentReadSpec {
+        std::sync::Arc::make_mut(&mut txn.tx_class).dependent_reads = Some(DependentReadSpec {
             passive_reads: BTreeMap::from([(
                 test_coll_vshard(),
                 vec![PassiveReadKey {
@@ -321,6 +288,9 @@ mod tests {
             )]),
             expected: BTreeMap::new(),
         });
+        std::sync::Arc::make_mut(&mut txn.tx_class)
+            .restore_derived()
+            .expect("a derivable class");
         txn
     }
 
@@ -435,10 +405,13 @@ mod tests {
     async fn a_passive_and_active_vshard_opens_its_barrier_after_reading() {
         let (mut scheduler, _dir, mut data_side, _proposer) = leader();
         let mut txn = make_local_write_txn(72, 0);
-        txn.tx_class.dependent_reads = Some(DependentReadSpec {
+        std::sync::Arc::make_mut(&mut txn.tx_class).dependent_reads = Some(DependentReadSpec {
             passive_reads: BTreeMap::from([(test_coll_vshard(), Vec::new())]),
             expected: BTreeMap::new(),
         });
+        std::sync::Arc::make_mut(&mut txn.tx_class)
+            .restore_derived()
+            .expect("a derivable class");
         scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(txn)));
         let txn_id = TxnId::new(72, 0);
         let request_id = passive_read_request(&mut data_side).expect("the passive read");
@@ -459,10 +432,13 @@ mod tests {
     async fn a_demoted_passive_and_active_leader_waits_for_the_redo() {
         let (mut scheduler, _dir, mut data_side, _proposer) = leader();
         let mut txn = make_local_write_txn(73, 0);
-        txn.tx_class.dependent_reads = Some(DependentReadSpec {
+        std::sync::Arc::make_mut(&mut txn.tx_class).dependent_reads = Some(DependentReadSpec {
             passive_reads: BTreeMap::from([(test_coll_vshard(), Vec::new())]),
             expected: BTreeMap::new(),
         });
+        std::sync::Arc::make_mut(&mut txn.tx_class)
+            .restore_derived()
+            .expect("a derivable class");
         scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(txn)));
         let txn_id = TxnId::new(73, 0);
         assert!(passive_read_request(&mut data_side).is_some());

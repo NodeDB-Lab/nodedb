@@ -166,7 +166,7 @@ pub(super) fn typed_rows(
     rows_ast: &[ast::Parens<Vec<ast::Expr>>],
     catalog: &dyn SqlCatalog,
 ) -> Result<TypedRows> {
-    let mut rows = convert_value_rows(columns, rows_ast)?;
+    let mut rows = convert_value_rows(columns, rows_ast, &catalog.crs_context())?;
     let volatile_defaults = materialize_defaults_in_rows(&info.columns, &mut rows, catalog)?;
     coerce_and_check_rows(info, &mut rows)?;
     Ok(TypedRows {

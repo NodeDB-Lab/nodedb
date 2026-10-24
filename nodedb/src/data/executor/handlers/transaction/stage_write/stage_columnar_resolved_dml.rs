@@ -44,7 +44,9 @@ use nodedb_types::{RowIdentity, value_to_pk_string};
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::bitemporal_time::raised_above;
 use crate::data::executor::handlers::columnar_write::coerce_columnar_row;
+use crate::data::executor::handlers::columnar_write::system_stamp::stored_stamp;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{TenantId, TxnId};
 
@@ -142,8 +144,14 @@ impl CoreLoop {
         // Drift check BEFORE staging anything: every shipped PK must resolve
         // to a surrogate in the current in-transaction view.
         let mut by_pk: HashMap<Vec<u8>, u32> = HashMap::with_capacity(matched.len());
+        // The `_ts_system` of each key's current version, which a new
+        // version's stamp rises above.
+        let mut current_stamps: HashMap<Vec<u8>, i64> = HashMap::new();
         for (surrogate, row) in &matched {
             by_pk.insert(encode_pk(&row[pk_idx]), *surrogate);
+            if let Some(stamp) = stored_stamp(&schema, row) {
+                current_stamps.insert(encode_pk(&row[pk_idx]), stamp);
+            }
         }
         let mut resolved: Vec<(u32, RowIdentity, Vec<Value>)> = Vec::with_capacity(rows.len());
         for (pk, new_row) in rows {
@@ -154,6 +162,20 @@ impl CoreLoop {
             match by_pk.get(&encode_pk(pk)) {
                 Some(surrogate) => resolved.push((*surrogate, identity, new_row.clone())),
                 None => return self.response_error(task, ErrorCode::OllpRetryRequired),
+            }
+        }
+
+        // A bitemporal row's new version takes the statement's system time,
+        // raised above the version it supersedes, never the shipped image's.
+        if let Some(ts_idx) = schema.ts_system_idx() {
+            let base = self.columnar_system_ordinal(None, 0);
+            for ((_, _, new_row), (pk, _)) in resolved.iter_mut().zip(rows) {
+                let current = current_stamps.get(&encode_pk(pk)).copied();
+                let stamp = raised_above(base, current);
+                self.observe_bitemporal_ordinal(stamp);
+                if let Some(cell) = new_row.get_mut(ts_idx) {
+                    *cell = Value::Integer(stamp);
+                }
             }
         }
 

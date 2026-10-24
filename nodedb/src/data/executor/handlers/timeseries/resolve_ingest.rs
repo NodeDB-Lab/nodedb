@@ -90,7 +90,7 @@ impl CoreLoop {
         let time_key = self
             .declared_ts_time_key(task.request.database_id, tid, collection.as_str())
             .map(str::to_string);
-        let now_ms = self.ingest_now_ms();
+        let now_ms = self.ingest_stamp_ms();
         let lines = match self.stamped_ingest_lines(StampedIngest {
             database_id: task.request.database_id,
             tid,
@@ -124,6 +124,7 @@ impl CoreLoop {
             now_ms,
             tid.as_u64(),
             collection.as_str(),
+            &self.crs_context(),
         ) {
             return self.response_error(task, error);
         }

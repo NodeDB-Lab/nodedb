@@ -16,7 +16,7 @@ use nodedb_physical::physical_plan::{BatchEdge, GraphOp};
 
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::manager::WalAppender;
-use crate::wal::{EdgeDeleteRedo, EdgePutRedo};
+use crate::wal::{EdgeDeleteRedo, EdgePutRedo, NodeLabelRedo};
 
 /// Append the WAL record for a single `GraphOp`, returning the allocated LSN
 /// for edge/node-label writes or `None` for traversal/algorithm/read variants.
@@ -37,6 +37,8 @@ pub(super) fn wal_append_graph_op(
             properties,
             src_surrogate,
             dst_surrogate,
+            valid_from_ms,
+            valid_until_ms,
         } => {
             let entry = encode_edge_put(EdgePutRedo {
                 collection: collection.to_string(),
@@ -48,6 +50,8 @@ pub(super) fn wal_append_graph_op(
                 dst_surrogate: dst_surrogate.as_u32(),
                 system_from: None,
                 applied: None,
+                valid_from_ms: *valid_from_ms,
+                valid_until_ms: *valid_until_ms,
             })?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
@@ -74,11 +78,11 @@ pub(super) fn wal_append_graph_op(
             Some(wal.append_delete(tenant_id, vshard_id, database_id, &entry)?)
         }
         GraphOp::SetNodeLabels { node_id, labels } => {
-            let entry = super::encode_graph_node_label_payload(node_id, labels)?;
+            let entry = NodeLabelRedo::live(node_id, labels).encode()?;
             Some(wal.append_graph_node_label_set(tenant_id, vshard_id, database_id, &entry)?)
         }
         GraphOp::RemoveNodeLabels { node_id, labels } => {
-            let entry = super::encode_graph_node_label_payload(node_id, labels)?;
+            let entry = NodeLabelRedo::live(node_id, labels).encode()?;
             Some(wal.append_graph_node_label_remove(tenant_id, vshard_id, database_id, &entry)?)
         }
         // Batched edge writes (`CREATE GRAPH INDEX` build/rollback). See module
@@ -104,7 +108,6 @@ pub(super) fn wal_append_graph_op(
         | GraphOp::BspSuperstep(_)
         | GraphOp::WccSuperstep(_)
         | GraphOp::TemporalNeighbors { .. }
-        | GraphOp::TemporalAlgorithm { .. }
         | GraphOp::Stats { .. }
         | GraphOp::NodePresenceRead { .. } => None,
         // A node delete's guard writes nothing. A TRUNCATE's edge share runs
@@ -139,6 +142,8 @@ pub(crate) fn wal_append_graph_edge_put_batch(
                 dst_surrogate: edge.dst_surrogate.as_u32(),
                 system_from: None,
                 applied: None,
+                valid_from_ms: edge.valid_from_ms,
+                valid_until_ms: edge.valid_until_ms,
             })
         })
         .collect::<crate::Result<Vec<_>>>()?;
@@ -236,6 +241,8 @@ mod tests {
             dst_id: dst.to_string(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
         }
     }
 
@@ -400,6 +407,8 @@ mod tests {
             properties: vec![],
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
         });
 
         let outcome = super::super::wal_append_if_write(
@@ -443,6 +452,8 @@ mod tests {
                 properties: vec![],
                 src_surrogate: src,
                 dst_surrogate: Surrogate::new(6),
+                valid_from_ms: None,
+                valid_until_ms: None,
             })
         };
         let delete = |dst: Surrogate| {
@@ -517,6 +528,7 @@ mod tests {
             direction: Direction::Out,
             rls_filters: vec![],
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         });
 
         let outcome = super::super::wal_append_if_write(

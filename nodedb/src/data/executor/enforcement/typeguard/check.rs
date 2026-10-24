@@ -30,6 +30,7 @@ pub fn check_type_guards(
     guards: &[CompiledTypeGuard],
     doc: &Value,
     written_fields: Option<&[String]>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<(), ErrorCode> {
     for guard in guards {
         let field_written = match written_fields {
@@ -77,7 +78,7 @@ pub fn check_type_guards(
         {
             // An evaluation error keeps its own SQLSTATE, not this guard's
             // violation code, matching CHECK-constraint enforcement elsewhere.
-            let result = check_expr.eval(doc).map_err(ErrorCode::from)?;
+            let result = check_expr.eval(doc, crs).map_err(ErrorCode::from)?;
             match result {
                 Value::Bool(true) | Value::Null => {}
                 _ => {
@@ -200,21 +201,26 @@ mod tests {
     #[test]
     fn passes_when_no_guards() {
         let doc = obj(&[("x", Value::Integer(1))]);
-        assert!(check_type_guards(&[], &doc, None).is_ok());
+        assert!(
+            check_type_guards(&[], &doc, None, &nodedb_crs::CrsContext::builtin_only()).is_ok()
+        );
     }
 
     #[test]
     fn passes_correct_type() {
         let guards = compiled(&[make_guard("name", "STRING", false)]);
         let doc = obj(&[("name", Value::String("alice".into()))]);
-        assert!(check_type_guards(&guards, &doc, None).is_ok());
+        assert!(
+            check_type_guards(&guards, &doc, None, &nodedb_crs::CrsContext::builtin_only()).is_ok()
+        );
     }
 
     #[test]
     fn rejects_wrong_type() {
         let guards = compiled(&[make_guard("name", "STRING", false)]);
         let doc = obj(&[("name", Value::Integer(42))]);
-        let err = check_type_guards(&guards, &doc, None).expect_err("wrong type");
+        let err = check_type_guards(&guards, &doc, None, &nodedb_crs::CrsContext::builtin_only())
+            .expect_err("wrong type");
         assert!(matches!(
             err,
             ErrorCode::TypeGuardViolation { ref detail, .. } if detail.contains("name")
@@ -225,7 +231,8 @@ mod tests {
     fn rejects_missing_required_field() {
         let guards = compiled(&[make_guard("email", "STRING", true)]);
         let doc = obj(&[("name", Value::String("bob".into()))]);
-        let err = check_type_guards(&guards, &doc, None).expect_err("email missing");
+        let err = check_type_guards(&guards, &doc, None, &nodedb_crs::CrsContext::builtin_only())
+            .expect_err("email missing");
         assert!(matches!(
             err,
             ErrorCode::TypeGuardViolation { ref detail, .. } if detail.contains("email")
@@ -236,7 +243,8 @@ mod tests {
     fn rejects_null_required_field() {
         let guards = compiled(&[make_guard("email", "STRING", true)]);
         let doc = obj(&[("email", Value::Null)]);
-        let err = check_type_guards(&guards, &doc, None).expect_err("email null");
+        let err = check_type_guards(&guards, &doc, None, &nodedb_crs::CrsContext::builtin_only())
+            .expect_err("email null");
         assert!(matches!(
             err,
             ErrorCode::TypeGuardViolation { ref detail, .. } if detail.contains("email")
@@ -247,14 +255,18 @@ mod tests {
     fn allows_null_for_optional_field() {
         let guards = compiled(&[make_guard("notes", "STRING|NULL", false)]);
         let doc = obj(&[("notes", Value::Null)]);
-        assert!(check_type_guards(&guards, &doc, None).is_ok());
+        assert!(
+            check_type_guards(&guards, &doc, None, &nodedb_crs::CrsContext::builtin_only()).is_ok()
+        );
     }
 
     #[test]
     fn allows_absent_optional_field() {
         let guards = compiled(&[make_guard("bio", "STRING", false)]);
         let doc = obj(&[("name", Value::String("carol".into()))]);
-        assert!(check_type_guards(&guards, &doc, None).is_ok());
+        assert!(
+            check_type_guards(&guards, &doc, None, &nodedb_crs::CrsContext::builtin_only()).is_ok()
+        );
     }
 
     #[test]
@@ -266,7 +278,15 @@ mod tests {
             ("score", Value::String("bad".into())),
         ]);
         let written = vec!["name".to_string()];
-        assert!(check_type_guards(&guards, &doc, Some(&written)).is_ok());
+        assert!(
+            check_type_guards(
+                &guards,
+                &doc,
+                Some(&written),
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -274,7 +294,13 @@ mod tests {
         let guards = compiled(&[make_guard("score", "INT", false)]);
         let doc = obj(&[("score", Value::String("bad".into()))]);
         let written = vec!["score".to_string()];
-        let err = check_type_guards(&guards, &doc, Some(&written)).expect_err("bad");
+        let err = check_type_guards(
+            &guards,
+            &doc,
+            Some(&written),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect_err("bad");
         assert!(matches!(err, ErrorCode::TypeGuardViolation { .. }));
     }
 
@@ -283,7 +309,9 @@ mod tests {
         let inner = obj(&[("source", Value::String("web".into()))]);
         let doc = obj(&[("metadata", inner)]);
         let guards = compiled(&[make_guard("metadata.source", "STRING", true)]);
-        assert!(check_type_guards(&guards, &doc, None).is_ok());
+        assert!(
+            check_type_guards(&guards, &doc, None, &nodedb_crs::CrsContext::builtin_only()).is_ok()
+        );
     }
 
     #[test]
@@ -291,7 +319,8 @@ mod tests {
         let inner = obj(&[("source", Value::Integer(99))]);
         let doc = obj(&[("metadata", inner)]);
         let guards = compiled(&[make_guard("metadata.source", "STRING", false)]);
-        let err = check_type_guards(&guards, &doc, None).expect_err("wrong type");
+        let err = check_type_guards(&guards, &doc, None, &nodedb_crs::CrsContext::builtin_only())
+            .expect_err("wrong type");
         assert!(matches!(
             err,
             ErrorCode::TypeGuardViolation { ref detail, .. } if detail.contains("metadata.source")
@@ -302,7 +331,8 @@ mod tests {
     fn dot_path_absent_required() {
         let doc = obj(&[("metadata", obj(&[]))]);
         let guards = compiled(&[make_guard("metadata.source", "STRING", true)]);
-        let err = check_type_guards(&guards, &doc, None).expect_err("absent");
+        let err = check_type_guards(&guards, &doc, None, &nodedb_crs::CrsContext::builtin_only())
+            .expect_err("absent");
         assert!(matches!(err, ErrorCode::TypeGuardViolation { .. }));
     }
 
@@ -311,15 +341,32 @@ mod tests {
         let guards = compiled(&[make_guard("count", "INT|NULL", false)]);
         let doc1 = obj(&[("count", Value::Integer(5))]);
         let doc2 = obj(&[("count", Value::Null)]);
-        assert!(check_type_guards(&guards, &doc1, None).is_ok());
-        assert!(check_type_guards(&guards, &doc2, None).is_ok());
+        assert!(
+            check_type_guards(
+                &guards,
+                &doc1,
+                None,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_ok()
+        );
+        assert!(
+            check_type_guards(
+                &guards,
+                &doc2,
+                None,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn invalid_type_expr_returns_violation() {
         let guards = compiled(&[make_guard("x", "NOTATYPE", false)]);
         let doc = obj(&[("x", Value::String("foo".into()))]);
-        let err = check_type_guards(&guards, &doc, None).expect_err("NOTATYPE");
+        let err = check_type_guards(&guards, &doc, None, &nodedb_crs::CrsContext::builtin_only())
+            .expect_err("NOTATYPE");
         assert!(matches!(err, ErrorCode::TypeGuardViolation { .. }));
     }
 
@@ -330,7 +377,8 @@ mod tests {
             make_guard("b", "INT", true), // required but absent
         ]);
         let doc = obj(&[("a", Value::String("ok".into()))]);
-        let err = check_type_guards(&guards, &doc, None).expect_err("b missing");
+        let err = check_type_guards(&guards, &doc, None, &nodedb_crs::CrsContext::builtin_only())
+            .expect_err("b missing");
         assert!(matches!(
             err,
             ErrorCode::TypeGuardViolation { ref detail, .. } if detail.contains("'b'")
@@ -357,7 +405,12 @@ mod tests {
         let guards = compiled(&[with_clauses("status", "STRING", Some("'draft'"), None)]);
         let mut fields = HashMap::new();
         fields.insert("name".to_string(), Value::String("Alice".into()));
-        let injected = inject_defaults(&guards, &mut fields).expect("injects");
+        let injected = inject_defaults(
+            &guards,
+            &mut fields,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("injects");
         assert_eq!(fields.get("status"), Some(&Value::String("draft".into())));
         assert_eq!(injected, ["status"]);
     }
@@ -367,7 +420,12 @@ mod tests {
         let guards = compiled(&[with_clauses("status", "STRING", Some("'draft'"), None)]);
         let mut fields = HashMap::new();
         fields.insert("status".to_string(), Value::String("active".into()));
-        let injected = inject_defaults(&guards, &mut fields).expect("injects");
+        let injected = inject_defaults(
+            &guards,
+            &mut fields,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("injects");
         assert_eq!(fields.get("status"), Some(&Value::String("active".into())));
         assert!(injected.is_empty());
     }
@@ -377,7 +435,12 @@ mod tests {
         let guards = compiled(&[with_clauses("updated", "STRING", None, Some("'computed'"))]);
         let mut fields = HashMap::new();
         fields.insert("updated".to_string(), Value::String("user_input".into()));
-        inject_defaults(&guards, &mut fields).expect("injects");
+        inject_defaults(
+            &guards,
+            &mut fields,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("injects");
         assert_eq!(
             fields.get("updated"),
             Some(&Value::String("computed".into()))
@@ -390,10 +453,17 @@ mod tests {
         def.required = true;
         let guards = compiled(&[def]);
         let mut fields = HashMap::new();
-        inject_defaults(&guards, &mut fields).expect("injects");
+        inject_defaults(
+            &guards,
+            &mut fields,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("injects");
         assert_eq!(fields.get("version"), Some(&Value::Integer(1)));
         let doc = obj(&[("version", Value::Integer(1))]);
-        assert!(check_type_guards(&guards, &doc, None).is_ok());
+        assert!(
+            check_type_guards(&guards, &doc, None, &nodedb_crs::CrsContext::builtin_only()).is_ok()
+        );
     }
 
     #[test]
@@ -401,7 +471,12 @@ mod tests {
         let guards = compiled(&[with_clauses("greeting", "STRING", None, Some("name"))]);
         let mut fields = HashMap::new();
         fields.insert("name".to_string(), Value::String("Alice".into()));
-        inject_defaults(&guards, &mut fields).expect("injects");
+        inject_defaults(
+            &guards,
+            &mut fields,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("injects");
         assert_eq!(fields.get("greeting"), Some(&Value::String("Alice".into())));
     }
 
@@ -414,7 +489,8 @@ mod tests {
         let guards = compiled(&[def]);
         let long: String = "é".repeat(60);
         let doc = obj(&[("tag", Value::String(long))]);
-        let err = check_type_guards(&guards, &doc, None).expect_err("CHECK fails");
+        let err = check_type_guards(&guards, &doc, None, &nodedb_crs::CrsContext::builtin_only())
+            .expect_err("CHECK fails");
         match err {
             ErrorCode::TypeGuardViolation { detail, .. } => {
                 assert!(detail.contains(&"é".repeat(47)), "{detail}");
@@ -428,7 +504,13 @@ mod tests {
     #[test]
     fn a_violation_names_the_compiled_collection() {
         let guards = CompiledTypeGuard::compile_all("orders", &[make_guard("a", "INT", true)]);
-        let err = check_type_guards(&guards, &obj(&[]), None).expect_err("a missing");
+        let err = check_type_guards(
+            &guards,
+            &obj(&[]),
+            None,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect_err("a missing");
         assert!(matches!(
             err,
             ErrorCode::TypeGuardViolation { ref collection, .. } if collection == "orders"
@@ -445,7 +527,13 @@ mod tests {
 
     /// Whether `value` in `field` passes the guard's CHECK.
     fn passes(guards: &[CompiledTypeGuard], field: &str, value: Value) -> bool {
-        check_type_guards(guards, &obj(&[(field, value)]), None).is_ok()
+        check_type_guards(
+            guards,
+            &obj(&[(field, value)]),
+            None,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .is_ok()
     }
 
     #[test]
@@ -491,9 +579,25 @@ mod tests {
         // is absent.
         let is_null = with_check("code", "STRING", "legacy IS NULL");
         let code = ("code", Value::String("x".into()));
-        assert!(check_type_guards(&is_null, &obj(std::slice::from_ref(&code)), None).is_ok());
+        assert!(
+            check_type_guards(
+                &is_null,
+                &obj(std::slice::from_ref(&code)),
+                None,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_ok()
+        );
         let both = obj(&[code, ("legacy", Value::Integer(1))]);
-        assert!(check_type_guards(&is_null, &both, None).is_err());
+        assert!(
+            check_type_guards(
+                &is_null,
+                &both,
+                None,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_err()
+        );
         let not_null = with_check("code", "STRING", "code IS NOT NULL AND code <> ''");
         assert!(passes(&not_null, "code", Value::String("x".into())));
         assert!(!passes(&not_null, "code", Value::String(String::new())));

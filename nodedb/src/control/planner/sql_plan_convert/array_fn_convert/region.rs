@@ -19,7 +19,6 @@ use nodedb_array::schema::{ArraySchema, DimType};
 use nodedb_array::types::domain::DomainBound;
 use nodedb_sql::types_array::{ArraySliceAst, ArrayZoneAst};
 use nodedb_types::NodeDbError;
-use nodedb_types::geometry::Srid;
 
 use super::helpers::resolve_slice;
 
@@ -30,13 +29,14 @@ pub(super) fn resolve_region(
     slice: &ArraySliceAst,
     zone: Option<&ArrayZoneAst>,
     schema: &ArraySchema,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Option<ArrayRegion>> {
     if slice.dim_ranges.is_empty() && zone.is_none() {
         return Ok(None);
     }
     let mut engine_slice = resolve_slice("ARRAY_AGG", name, slice, schema)?;
     let zone = zone
-        .map(|z| lower_zone("ARRAY_AGG", name, z, schema, &mut engine_slice))
+        .map(|z| lower_zone("ARRAY_AGG", name, z, schema, &mut engine_slice, crs))
         .transpose()?;
     Ok(Some(ArrayRegion::new(engine_slice, zone)))
 }
@@ -48,6 +48,7 @@ pub(super) fn lower_zone(
     zone: &ArrayZoneAst,
     schema: &ArraySchema,
     slice: &mut Slice,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<PolygonZone> {
     let x = zone_axis(func, name, &zone.x_dim, schema)?;
     let y = zone_axis(func, name, &zone.y_dim, schema)?;
@@ -55,11 +56,13 @@ pub(super) fn lower_zone(
     let frame = match zone.srid {
         None => None,
         Some(code) => {
-            let zone_srid = Srid::try_from(code).map_err(|e| crate::Error::DataException {
-                detail: format!("{func}: zone SRID: {e}"),
-            })?;
+            let zone_srid = crs
+                .resolve_u32(code)
+                .map_err(|e| crate::Error::DataException {
+                    detail: format!("{func}: zone SRID: {e}"),
+                })?;
             check_georef_axes(func, name, schema, x.dim, y.dim)?;
-            Some(build_zone_frame(schema, zone_srid, &polygons).map_err(frame_error)?)
+            Some(build_zone_frame(schema, zone_srid, &polygons, crs).map_err(frame_error)?)
         }
     };
     let extent = match &frame {
@@ -176,11 +179,11 @@ fn frame_error(e: ZoneFrameError) -> crate::Error {
         ZoneFrameError::VertexBudget { .. } => {
             crate::Error::from(NodeDbError::program_limit_exceeded(e.to_string()))
         }
-        ZoneFrameError::OutOfDomain { .. } | ZoneFrameError::EmptyZone { .. } => {
-            crate::Error::DataException {
-                detail: e.to_string(),
-            }
-        }
+        ZoneFrameError::OutOfDomain { .. }
+        | ZoneFrameError::EmptyZone { .. }
+        | ZoneFrameError::Crs { .. } => crate::Error::DataException {
+            detail: e.to_string(),
+        },
     }
 }
 
@@ -229,6 +232,7 @@ mod tests {
     };
     use nodedb_array::types::domain::Domain;
     use nodedb_sql::types_array::{ArrayCoordLiteral, NamedDimRange};
+    use nodedb_types::geometry::Srid;
 
     fn schema() -> ArraySchema {
         ArraySchemaBuilder::new("grid")
@@ -270,7 +274,7 @@ mod tests {
             .build()
             .expect("schema build")
             .with_georef(Some(ArrayGeoref {
-                srid: Srid::Wgs84,
+                srid: Srid::WGS84,
                 x_dim: 1,
                 y_dim: 0,
                 transform: Some(GeoTransform([100.0, 1.0, 0.0, 8.0, 0.0, -1.0])),
@@ -310,7 +314,14 @@ mod tests {
 
     #[test]
     fn the_whole_array_has_no_region() {
-        let region = resolve_region("grid", &ArraySliceAst::default(), None, &schema()).unwrap();
+        let region = resolve_region(
+            "grid",
+            &ArraySliceAst::default(),
+            None,
+            &schema(),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert!(region.is_none());
     }
 
@@ -321,6 +332,7 @@ mod tests {
             &ArraySliceAst::default(),
             Some(&zone("lon", "row")),
             &schema(),
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap()
         .expect("region");
@@ -349,9 +361,15 @@ mod tests {
                 hi: ArrayCoordLiteral::Int64(50),
             }],
         };
-        let region = resolve_region("grid", &slice, Some(&zone("lon", "row")), &schema())
-            .unwrap()
-            .expect("region");
+        let region = resolve_region(
+            "grid",
+            &slice,
+            Some(&zone("lon", "row")),
+            &schema(),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap()
+        .expect("region");
         assert_eq!(
             range(&region, 0),
             Some((DomainBound::Float64(5.0), DomainBound::Float64(7.25)))
@@ -365,6 +383,7 @@ mod tests {
             &ArraySliceAst::default(),
             Some(&zone("lon", "ts")),
             &schema(),
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect_err("refused");
         assert!(
@@ -380,6 +399,7 @@ mod tests {
             &ArraySliceAst::default(),
             Some(&zone("lon", "lat")),
             &schema(),
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect_err("refused");
         assert!(
@@ -395,14 +415,15 @@ mod tests {
             &ArraySliceAst::default(),
             Some(&lon_lat_zone(101.0, 5.0, 103.0, 7.0)),
             &pixel_schema(),
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap()
         .expect("region");
         let zone = region.zone.as_ref().expect("zone");
         let frame = zone.frame.as_ref().expect("frame");
         assert_eq!(
-            (frame.array_srid, frame.zone_srid),
-            (Srid::Wgs84, Srid::Wgs84)
+            (frame.array_crs.srid, frame.zone_srid()),
+            (Srid::WGS84, Srid::WGS84)
         );
         // Cells 1..=2 on both axes hold the zone. The box pads by half a
         // pixel and rounds outward: 0..=3.
@@ -427,6 +448,7 @@ mod tests {
             &lon_lat_zone(130.0, 5.0, 131.0, 6.0),
             &pixel_schema(),
             &mut engine,
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("lowered");
         let col = engine.dim_ranges[1].as_ref().expect("col range");
@@ -442,6 +464,7 @@ mod tests {
             &ArraySliceAst::default(),
             Some(&lon_lat_zone(101.0, 5.0, 103.0, 7.0)),
             &no_georef,
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect_err("refused");
         assert!(
@@ -459,6 +482,7 @@ mod tests {
             &ArraySliceAst::default(),
             Some(&swapped),
             &pixel_schema(),
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect_err("refused");
         assert!(
@@ -481,7 +505,7 @@ mod tests {
             array: "img".into(),
             x: 150.0,
             y: 6.0,
-            zone_srid: Srid::Wgs84,
+            zone_srid: Srid::WGS84,
             detail: "too far from the central meridian".into(),
         });
         assert!(

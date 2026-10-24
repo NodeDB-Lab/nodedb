@@ -13,6 +13,8 @@ pub(super) struct ColumnarReplayArgs<'a> {
     pub surrogates: Vec<nodedb_types::Surrogate>,
     /// The insert's encoded conflict policy (`crate::wal::ColumnarConflictPolicy`).
     pub conflict_policy: Vec<u8>,
+    /// System-time ordinal the live insert stamped its first row with.
+    pub system_from: Option<i64>,
 }
 
 /// Record-level fields for replaying one timeseries WAL batch.

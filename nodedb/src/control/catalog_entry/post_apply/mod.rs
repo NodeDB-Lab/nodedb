@@ -29,6 +29,7 @@ pub mod custom_type;
 pub mod database;
 pub mod function;
 pub mod materialized_view;
+pub mod oidc_provider;
 pub mod owner;
 pub mod permission;
 pub mod procedure;
@@ -70,6 +71,7 @@ pub(crate) use async_dispatch::continuous_aggregate::{
 };
 pub(crate) use async_dispatch::crdt_compact::{compact_async, drain_pending_compactions};
 pub use async_dispatch::run_post_apply_async_side_effects;
+pub(crate) use async_dispatch::spatial_ref_sys::install_on_every_core as install_custom_crs_set;
 pub(crate) use async_dispatch::synonym_group::delete_async as remove_synonym_group;
 pub(crate) use async_dispatch::synonym_group::put_async as install_synonym_group;
 pub(crate) use async_dispatch::vector::delete_async as remove_vector_index_params;

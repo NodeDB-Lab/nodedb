@@ -67,6 +67,13 @@ pub struct ColumnarWalRecord {
     #[serde(default)]
     #[msgpack(default)]
     pub conflict_policy: Vec<u8>,
+    /// System-time ordinal of the first row of a bitemporal insert. Row `i`
+    /// of `payload` stamps `system_from + i`. Replay stamps the ordinals the
+    /// live insert stamped. `None` for a collection that is not bitemporal,
+    /// and for a writer that leaves the stamp to the apply.
+    #[serde(default)]
+    #[msgpack(default)]
+    pub system_from: Option<i64>,
 }
 
 #[cfg(test)]
@@ -88,6 +95,7 @@ mod tests {
             provenance: Some(prov.clone()),
             surrogates: vec![Surrogate::new(10), Surrogate::new(11), Surrogate::new(12)],
             conflict_policy: Vec::new(),
+            system_from: Some(1_700_000_000_000_000_007),
         };
 
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode ColumnarWalRecord");
@@ -102,6 +110,7 @@ mod tests {
             decoded.surrogates,
             vec![Surrogate::new(10), Surrogate::new(11), Surrogate::new(12)]
         );
+        assert_eq!(decoded.system_from, Some(1_700_000_000_000_000_007));
     }
 
     #[test]
@@ -113,6 +122,7 @@ mod tests {
             provenance: None,
             surrogates: Vec::new(),
             conflict_policy: Vec::new(),
+            system_from: None,
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode");
         let decoded: ColumnarWalRecord = zerompk::from_msgpack(&bytes).expect("decode");

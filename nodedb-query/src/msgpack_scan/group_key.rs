@@ -5,6 +5,7 @@
 //! Builds a deterministic string key from field values extracted directly
 //! from msgpack bytes, avoiding full document decode.
 
+use nodedb_crs::CrsContext;
 use nodedb_types::{NdbDateTime, read_instant};
 
 use crate::expr::{EvalError, GroupKeySpec, SqlExpr};
@@ -31,7 +32,13 @@ use crate::msgpack_scan::reader::{read_f64, read_integer, read_null, read_str};
 /// `b = 0` fails the whole statement with SQLSTATE `22012`, exactly like a
 /// WHERE/projection expression, instead of silently grouping the row under a
 /// `null` key.
-pub fn build_group_key(doc: &[u8], group_keys: &[GroupKeySpec]) -> Result<String, EvalError> {
+///
+/// Geo functions in a computed key resolve SRIDs through `crs`.
+pub fn build_group_key(
+    doc: &[u8],
+    group_keys: &[GroupKeySpec],
+    crs: &CrsContext<'_>,
+) -> Result<String, EvalError> {
     if group_keys.is_empty() {
         return Ok("__all__".to_string());
     }
@@ -50,7 +57,7 @@ pub fn build_group_key(doc: &[u8], group_keys: &[GroupKeySpec]) -> Result<String
             if written > 0 {
                 key_buf.push(',');
             }
-            append_computed_value(&mut key_buf, doc, expr)?;
+            append_computed_value(&mut key_buf, doc, expr, crs)?;
             written += 1;
         }
     }
@@ -65,6 +72,7 @@ pub fn build_group_key_indexed(
     doc: &[u8],
     group_keys: &[GroupKeySpec],
     idx: &FieldIndex,
+    crs: &CrsContext<'_>,
 ) -> Result<String, EvalError> {
     if group_keys.is_empty() {
         return Ok("__all__".to_string());
@@ -87,7 +95,7 @@ pub fn build_group_key_indexed(
             if written > 0 {
                 key_buf.push(',');
             }
-            append_computed_value(&mut key_buf, doc, expr)?;
+            append_computed_value(&mut key_buf, doc, expr, crs)?;
             written += 1;
         }
     }
@@ -151,12 +159,17 @@ fn append_field_value_range(buf: &mut String, doc: &[u8], range: Option<(usize, 
 /// returns `Err(EvalError::DivisionByZero)`: a computed GROUP BY
 /// key gets the same `22012` statement-failure treatment as a WHERE/projection
 /// expression rather than silently grouping the row under a `null` key.
-fn append_computed_value(buf: &mut String, doc: &[u8], expr: &SqlExpr) -> Result<(), EvalError> {
+fn append_computed_value(
+    buf: &mut String,
+    doc: &[u8],
+    expr: &SqlExpr,
+    crs: &CrsContext<'_>,
+) -> Result<(), EvalError> {
     let Ok(doc_val) = nodedb_types::json_msgpack::value_from_msgpack(doc) else {
         buf.push_str("null");
         return Ok(());
     };
-    let val = expr.eval(&doc_val)?;
+    let val = expr.eval(&doc_val, crs)?;
     match nodedb_types::json_msgpack::value_to_msgpack(&val) {
         Ok(vb) => append_value_at(buf, &vb, 0, vb.len()),
         Err(_) => buf.push_str("null"),
@@ -167,6 +180,10 @@ fn append_computed_value(buf: &mut String, doc: &[u8], expr: &SqlExpr) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn crs() -> CrsContext<'static> {
+        CrsContext::builtin_only()
+    }
     use serde_json::json;
 
     fn encode(v: &serde_json::Value) -> Vec<u8> {
@@ -180,14 +197,14 @@ mod tests {
     #[test]
     fn single_string_field() {
         let doc = encode(&json!({"name": "alice", "age": 30}));
-        let key = build_group_key(&doc, &keys(&["name"])).unwrap();
+        let key = build_group_key(&doc, &keys(&["name"]), &crs()).unwrap();
         assert_eq!(key, r#"["alice"]"#);
     }
 
     #[test]
     fn single_int_field() {
         let doc = encode(&json!({"status": 200}));
-        let key = build_group_key(&doc, &keys(&["status"])).unwrap();
+        let key = build_group_key(&doc, &keys(&["status"]), &crs()).unwrap();
         assert_eq!(key, "[200]");
     }
 
@@ -196,48 +213,48 @@ mod tests {
     #[test]
     fn large_integers_key_exactly() {
         let doc = encode(&json!({"v": u64::MAX}));
-        let key = build_group_key(&doc, &keys(&["v"])).unwrap();
+        let key = build_group_key(&doc, &keys(&["v"]), &crs()).unwrap();
         assert_eq!(key, "[18446744073709551615]");
         let a = encode(&json!({"v": 9_007_199_254_740_993_i64}));
         let b = encode(&json!({"v": 9_007_199_254_740_992_i64}));
         assert_ne!(
-            build_group_key(&a, &keys(&["v"])).unwrap(),
-            build_group_key(&b, &keys(&["v"])).unwrap()
+            build_group_key(&a, &keys(&["v"]), &crs()).unwrap(),
+            build_group_key(&b, &keys(&["v"]), &crs()).unwrap()
         );
     }
 
     #[test]
     fn multiple_fields() {
         let doc = encode(&json!({"city": "ny", "year": 2024}));
-        let key = build_group_key(&doc, &keys(&["city", "year"])).unwrap();
+        let key = build_group_key(&doc, &keys(&["city", "year"]), &crs()).unwrap();
         assert_eq!(key, r#"["ny",2024]"#);
     }
 
     #[test]
     fn missing_field_is_null() {
         let doc = encode(&json!({"x": 1}));
-        let key = build_group_key(&doc, &keys(&["missing"])).unwrap();
+        let key = build_group_key(&doc, &keys(&["missing"]), &crs()).unwrap();
         assert_eq!(key, "[null]");
     }
 
     #[test]
     fn empty_group_fields() {
         let doc = encode(&json!({"x": 1}));
-        let key = build_group_key(&doc, &[]).unwrap();
+        let key = build_group_key(&doc, &[], &crs()).unwrap();
         assert_eq!(key, "__all__");
     }
 
     #[test]
     fn null_field_value() {
         let doc = encode(&json!({"v": null}));
-        let key = build_group_key(&doc, &keys(&["v"])).unwrap();
+        let key = build_group_key(&doc, &keys(&["v"]), &crs()).unwrap();
         assert_eq!(key, "[null]");
     }
 
     #[test]
     fn float_field() {
         let doc = encode(&json!({"temp": 36.6}));
-        let key = build_group_key(&doc, &keys(&["temp"])).unwrap();
+        let key = build_group_key(&doc, &keys(&["temp"]), &crs()).unwrap();
         assert_eq!(key, "[36.6]");
     }
 
@@ -256,11 +273,11 @@ mod tests {
         );
         crate::msgpack_scan::write_kv_i64(&mut doc, "n", 1);
 
-        let key = build_group_key(&doc, &keys(&["ts", "n"])).unwrap();
+        let key = build_group_key(&doc, &keys(&["ts", "n"]), &crs()).unwrap();
         assert_eq!(key, r#"["2020-03-05T10:00:00.000000Z",1]"#);
         let idx = FieldIndex::build(&doc, 0).unwrap_or_else(FieldIndex::empty);
         assert_eq!(
-            build_group_key_indexed(&doc, &keys(&["ts", "n"]), &idx).unwrap(),
+            build_group_key_indexed(&doc, &keys(&["ts", "n"]), &idx, &crs()).unwrap(),
             key
         );
     }
@@ -283,11 +300,11 @@ mod tests {
         let lower = encode(&json!({"label": "alpha", "score": 7}));
         let upper = encode(&json!({"label": "ALPHA", "score": 3}));
         assert_eq!(
-            build_group_key(&lower, &[upper_label_spec()]).unwrap(),
+            build_group_key(&lower, &[upper_label_spec()], &crs()).unwrap(),
             r#"["ALPHA"]"#
         );
         assert_eq!(
-            build_group_key(&upper, &[upper_label_spec()]).unwrap(),
+            build_group_key(&upper, &[upper_label_spec()], &crs()).unwrap(),
             r#"["ALPHA"]"#
         );
     }
@@ -308,12 +325,12 @@ mod tests {
             }),
         };
         assert_eq!(
-            build_group_key(&doc, std::slice::from_ref(&spec)),
+            build_group_key(&doc, std::slice::from_ref(&spec), &crs()),
             Err(EvalError::DivisionByZero)
         );
         let idx = FieldIndex::build(&doc, 0).unwrap_or_else(FieldIndex::empty);
         assert_eq!(
-            build_group_key_indexed(&doc, std::slice::from_ref(&spec), &idx),
+            build_group_key_indexed(&doc, std::slice::from_ref(&spec), &idx, &crs()),
             Err(EvalError::DivisionByZero)
         );
     }
@@ -324,8 +341,8 @@ mod tests {
         let specs = [upper_label_spec()];
         let idx = FieldIndex::build(&doc, 0).unwrap_or_else(FieldIndex::empty);
         assert_eq!(
-            build_group_key(&doc, &specs).unwrap(),
-            build_group_key_indexed(&doc, &specs, &idx).unwrap(),
+            build_group_key(&doc, &specs, &crs()).unwrap(),
+            build_group_key_indexed(&doc, &specs, &idx, &crs()).unwrap(),
         );
     }
 
@@ -333,6 +350,9 @@ mod tests {
     fn mixed_column_and_computed_keys() {
         let doc = encode(&json!({"region": "us", "label": "west"}));
         let specs = [GroupKeySpec::column("region"), upper_label_spec()];
-        assert_eq!(build_group_key(&doc, &specs).unwrap(), r#"["us","WEST"]"#);
+        assert_eq!(
+            build_group_key(&doc, &specs, &crs()).unwrap(),
+            r#"["us","WEST"]"#
+        );
     }
 }

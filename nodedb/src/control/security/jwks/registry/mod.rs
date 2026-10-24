@@ -21,10 +21,13 @@
 //! - `validate` — the three public entry points + the claim-policy gate.
 //! - `claims` — post-verification claim checks + identity construction.
 //! - `cache_identity` — collision-free cache keys for static/catalog providers.
+//! - `catalog` — register and unregister catalog OIDC providers.
+//! - `targets` — the endpoints the periodic refresh task fetches.
 //! - `header` — JWT header (first token segment) parsing.
 //! - `verified` — `VerifiedJwtClaims`, the opaque post-verification proof.
 
 pub mod cache_identity;
+pub mod catalog;
 pub mod claims;
 pub mod header;
 pub mod init;
@@ -32,6 +35,7 @@ pub mod pipeline;
 pub mod refetch;
 pub mod routing;
 pub mod state;
+pub mod targets;
 pub mod validate;
 pub mod verified;
 

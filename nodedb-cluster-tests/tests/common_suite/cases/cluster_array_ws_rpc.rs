@@ -44,7 +44,9 @@ async fn ws_rpc_sql(node: &TestClusterNode, sql: &str) -> serde_json::Value {
         .to_identity(HARNESS_SUPERUSER, AuthMethod::Trust)
         .expect("the harness superuser exists on every node");
     let query_ctx = QueryContext::for_state_with_lease(&node.shared);
-    execute_sql(
+    // Boxed: the statement future is deep enough to exceed the layout query
+    // depth of this test crate when held inline.
+    Box::pin(execute_sql(
         &node.shared,
         &query_ctx,
         &identity,
@@ -52,7 +54,7 @@ async fn ws_rpc_sql(node: &TestClusterNode, sql: &str) -> serde_json::Value {
         sql,
         TraceId::generate(),
         "127.0.0.1:40000",
-    )
+    ))
     .await
     .unwrap_or_else(|e| panic!("ws_rpc {sql} on node {}: {e:?}", node.node_id))
 }

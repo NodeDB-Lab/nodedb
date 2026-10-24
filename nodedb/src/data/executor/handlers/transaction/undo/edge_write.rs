@@ -142,6 +142,9 @@ impl CoreLoop {
                 &version,
             )
             .map_err(|e| fail(format!("removing the version of {edge_name}"), e))?;
+        // A historical CSR at or above the removed version read it.
+        self.historical_csr
+            .invalidate_collection(database, tenant, &collection);
 
         let partition = self.csr_partition_mut(database_id, tid);
         partition

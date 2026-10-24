@@ -103,6 +103,10 @@ impl CatalogEntry {
             Self::DeleteVectorIndexParams { .. } => "delete_vector_index_params",
             Self::CommitConsumerOffsets(_) => "commit_consumer_offsets",
             Self::PutBackupScheduleMark(_) => "put_backup_schedule_mark",
+            Self::PutSpatialRefSys(_) => "put_spatial_ref_sys",
+            Self::DropSpatialRefSys { .. } => "drop_spatial_ref_sys",
+            Self::PutCredential(_) => "put_credential",
+            Self::DropCredential { .. } => "drop_credential",
         }
     }
 }

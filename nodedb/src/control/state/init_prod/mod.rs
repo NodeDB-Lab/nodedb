@@ -7,7 +7,9 @@ mod bootstrap;
 mod catalog_registries;
 mod handles;
 mod open;
+mod open_config;
 mod post_init;
 mod stores;
 
 pub use handles::DataPlaneHandles;
+pub use open_config::OpenConfig;

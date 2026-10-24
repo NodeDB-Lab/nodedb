@@ -14,11 +14,12 @@
 //! to index based on collection cardinality.
 
 use nodedb_mem::ScopedMemory;
-use nodedb_types::geometry::{Geometry, Srid};
-use nodedb_types::{BboxSpace, BoundingBox, geometry_bbox_in};
+use nodedb_types::geometry::Geometry;
+use nodedb_types::{BoundingBox, geometry_bbox_in};
 
+use crate::metric::Metric;
 use crate::predicates;
-use crate::rtree::{RTree, RTreeEntry};
+use crate::rtree::{RTree, RTreeEntry, TreeSrid};
 
 /// Result of a spatial join between two collections.
 pub struct SpatialJoinResult {
@@ -37,12 +38,15 @@ pub struct SpatialJoinResult {
 /// `get_geometry`: callback to retrieve the full geometry for an entry ID
 ///   (needed for exact predicate evaluation after R-tree bbox filter).
 /// `predicate`: which spatial predicate to apply (intersects, contains, etc.).
+/// `metric`: the shared SRID's metric. `DWithin` widens each probe box by
+///   its distance under it and measures under it.
 pub fn spatial_join(
     indexed_side: &RTree,
     probe_entries: &[(u64, BoundingBox)],
     get_indexed_geom: &dyn Fn(u64) -> Option<Geometry>,
     get_probe_geom: &dyn Fn(u64) -> Option<Geometry>,
     predicate: SpatialJoinPredicate,
+    metric: &Metric,
 ) -> SpatialJoinResult {
     let mut pairs = Vec::new();
     let mut probes = 0;
@@ -50,7 +54,13 @@ pub fn spatial_join(
 
     for &(probe_id, ref probe_bbox) in probe_entries {
         // R-tree range search: find indexed entries whose bbox intersects probe bbox.
-        let candidates = indexed_side.search(probe_bbox);
+        let search_bbox = match predicate {
+            SpatialJoinPredicate::DWithin(metres) => metric.widen(probe_bbox, metres),
+            SpatialJoinPredicate::Intersects
+            | SpatialJoinPredicate::Contains
+            | SpatialJoinPredicate::Within => *probe_bbox,
+        };
+        let candidates = indexed_side.search(&search_bbox);
         probes += 1;
 
         for candidate in &candidates {
@@ -71,14 +81,9 @@ pub fn spatial_join(
                     predicates::st_contains(&probe_geom, &indexed_geom)
                 }
                 SpatialJoinPredicate::Within => predicates::st_within(&probe_geom, &indexed_geom),
-                SpatialJoinPredicate::DWithin(dist) => match indexed_side.space() {
-                    BboxSpace::Geographic => {
-                        predicates::st_dwithin(&probe_geom, &indexed_geom, dist)
-                    }
-                    BboxSpace::Planar => {
-                        crate::planar::planar_dwithin(&probe_geom, &indexed_geom, dist)
-                    }
-                },
+                SpatialJoinPredicate::DWithin(metres) => {
+                    metric.dwithin(&probe_geom, &indexed_geom, metres)
+                }
             };
 
             if matches {
@@ -96,8 +101,12 @@ pub fn spatial_join(
 
 /// Build an R-tree from a list of (entry_id, geometry) pairs, all in
 /// `srid`, for join.
-pub fn build_join_index(entries: &[(u64, Geometry)], memory: ScopedMemory, srid: Srid) -> RTree {
-    let space = srid.bbox_space();
+pub fn build_join_index(
+    entries: &[(u64, Geometry)],
+    memory: ScopedMemory,
+    srid: TreeSrid,
+) -> RTree {
+    let space = srid.space;
     let rtree_entries: Vec<RTreeEntry> = entries
         .iter()
         .map(|(id, geom)| RTreeEntry {
@@ -115,6 +124,7 @@ pub enum SpatialJoinPredicate {
     Intersects,
     Contains,
     Within,
+    /// Within a distance in metres under the join's metric.
     DWithin(f64),
 }
 
@@ -161,7 +171,7 @@ mod tests {
             .collect();
 
         // Build index on left side.
-        let index = build_join_index(&left, test_memory(), Srid::Wgs84);
+        let index = build_join_index(&left, test_memory(), TreeSrid::WGS84);
 
         // Probe with right side.
         let probe_entries: Vec<(u64, BoundingBox)> = right
@@ -178,6 +188,7 @@ mod tests {
             &|id| left_map.get(&id).cloned(),
             &|id| right_map.get(&id).cloned(),
             SpatialJoinPredicate::Intersects,
+            &Metric::wgs84(),
         );
 
         // Adjacent overlapping squares should produce matches.
@@ -208,7 +219,7 @@ mod tests {
             ]]),
         )];
 
-        let index = build_join_index(&left, test_memory(), Srid::Wgs84);
+        let index = build_join_index(&left, test_memory(), TreeSrid::WGS84);
         let probes: Vec<(u64, BoundingBox)> = right
             .iter()
             .map(|(id, g)| (*id, geometry_bbox(g)))
@@ -223,6 +234,7 @@ mod tests {
             &|id| left_map.get(&id).cloned(),
             &|id| right_map.get(&id).cloned(),
             SpatialJoinPredicate::Intersects,
+            &Metric::wgs84(),
         );
 
         assert!(result.pairs.is_empty());
@@ -233,13 +245,10 @@ mod tests {
         let left = vec![(1u64, Geometry::point(0.0, 0.0))];
         let right = vec![(100u64, Geometry::point(0.001, 0.0))]; // ~111m away
 
-        let index = build_join_index(&left, test_memory(), Srid::Wgs84);
+        let index = build_join_index(&left, test_memory(), TreeSrid::WGS84);
         let probes: Vec<(u64, BoundingBox)> = right
             .iter()
-            .map(|(id, g)| {
-                // Expand bbox by distance for R-tree search.
-                (*id, geometry_bbox(g).expand_meters(500.0))
-            })
+            .map(|(id, g)| (*id, geometry_bbox(g)))
             .collect();
 
         let left_map: std::collections::HashMap<u64, Geometry> = left.into_iter().collect();
@@ -250,7 +259,8 @@ mod tests {
             &probes,
             &|id| left_map.get(&id).cloned(),
             &|id| right_map.get(&id).cloned(),
-            SpatialJoinPredicate::DWithin(500.0), // 500m
+            SpatialJoinPredicate::DWithin(500.0),
+            &Metric::wgs84(),
         );
 
         assert_eq!(result.pairs.len(), 1);

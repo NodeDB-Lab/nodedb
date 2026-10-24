@@ -148,7 +148,7 @@ fn open_state(
         },
         wal,
         &dir.path().join("system.redb"),
-        &auth_config,
+        nodedb::control::state::OpenConfig::strict(&auth_config),
         nodedb_types::config::TuningConfig::default(),
         false,
         nodedb::data::executor::core_loop::test_governor(),

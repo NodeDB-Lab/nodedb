@@ -238,7 +238,7 @@ impl CoreLoop {
         // UNIQUE indexes at all; skipping the check here would let it stage
         // and commit over a value another row already owns.
         let mut incoming_doc = doc_format::decode_document(value)?;
-        evaluate_generated(&config, &mut incoming_doc)?;
+        evaluate_generated(&config, &mut incoming_doc, &self.crs_context())?;
         self.stage_unique_check(ctx, &config, &incoming_doc)
     }
 

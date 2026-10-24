@@ -8,7 +8,9 @@
 //! writes, as their live writers lock them. Its resolve appends them to the
 //! transaction's redo record, each edge version applied at the transaction's
 //! ordinal, so a TRUNCATE sequenced before the RESTORE leaves them visible
-//! and one sequenced after it hides them. Every replica binds the batch's
+//! and one sequenced after it hides them. Restored node labels go to each
+//! node's home, every label version at its system time. Every replica binds
+//! the batch's
 //! identities, installs the record as a RESTORE, and raises the tenant's
 //! restore mark under the restore's id. The call returns once the
 //! transaction committed.
@@ -26,6 +28,7 @@ use crate::event::EventSource;
 use crate::types::{DatabaseId, TenantId, VShardId};
 use crate::wal::RedoRecord;
 
+use super::labels::{HomedLabels, label_weight};
 use super::units::{CollectionEdges, CollectionUnits, EdgeUnit, RowUnit};
 
 /// Most sub-records or edge versions one restore batch carries.
@@ -115,6 +118,7 @@ fn row_batch(
         rows_redo,
         rows,
         edges: Vec::new(),
+        node_labels: Vec::new(),
         collections: vec![stored.to_string()],
         identities,
     })
@@ -133,6 +137,7 @@ fn edge_batch(stored: &str, batch: Vec<EdgeUnit>) -> Vec<RestoredRedo> {
                         rows_redo: Vec::new(),
                         rows: Vec::new(),
                         edges: Vec::new(),
+                        node_labels: Vec::new(),
                         collections: vec![stored.to_string()],
                         identities: Vec::new(),
                     },
@@ -264,6 +269,46 @@ pub(super) async fn commit_edges(
     Ok(transactions)
 }
 
+/// Commit every restored node of `homed` in `database_id`, marked under
+/// `restore_id`: one batch of a home's nodes per transaction. Returns the
+/// transactions committed.
+pub(super) async fn commit_labels(
+    state: &SharedState,
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+    restore_id: u64,
+    homed: HomedLabels,
+) -> crate::Result<usize> {
+    let mut transactions = 0usize;
+    for (vshard_id, nodes) in homed {
+        for batch in batch_units(nodes, label_weight) {
+            super::super::durable::log_reissue_step(
+                state,
+                "node labels",
+                "",
+                vshard_id,
+                batch.len(),
+            );
+            let plan = RestoredRedo {
+                vshard: vshard_id.as_u32(),
+                rows_redo: Vec::new(),
+                rows: Vec::new(),
+                edges: Vec::new(),
+                node_labels: batch,
+                collections: Vec::new(),
+                identities: Vec::new(),
+            };
+            commit_batch(state, tenant_id, database_id, restore_id, vec![plan])
+                .await
+                .map_err(|e| {
+                    in_context(e, &format!("node labels to vShard {}", vshard_id.as_u32()))
+                })?;
+            transactions += 1;
+        }
+    }
+    Ok(transactions)
+}
+
 #[cfg(test)]
 mod tests {
     use nodedb_physical::physical_plan::RestoredEdgeVersion;
@@ -302,6 +347,7 @@ mod tests {
                 dst_surrogate: 2,
                 system_from,
                 properties: Some(Vec::new()),
+                valid_time: Some((0, i64::MAX)),
             },
             identities: vec![
                 CarriedIdentity {

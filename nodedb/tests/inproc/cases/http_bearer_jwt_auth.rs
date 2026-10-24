@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use nodedb::control::security::jwks::registry::JwksRegistry;
-use nodedb_test_support::jwks_fixture::{JwksFixture, now_secs};
+use nodedb_test_support::jwks_fixture::{JwksFixture, loopback_egress, now_secs};
 use nodedb_test_support::pgwire_harness::TestServer;
 
 /// Tenant the test provider binds its identities to.
@@ -36,9 +36,12 @@ struct HttpJwtFixture {
 impl HttpJwtFixture {
     async fn start() -> Self {
         let jwks = JwksFixture::spawn().await;
-        let registry = JwksRegistry::init(jwks.auth_config(ISSUER, AUDIENCE, TENANT))
-            .await
-            .expect("test JWKS registry must initialize");
+        let registry = JwksRegistry::init(
+            jwks.auth_config(ISSUER, AUDIENCE, TENANT),
+            loopback_egress(),
+        )
+        .await
+        .expect("test JWKS registry must initialize");
         let server = TestServer::start_with_jwks(Arc::new(registry)).await;
         Self { server, jwks }
     }

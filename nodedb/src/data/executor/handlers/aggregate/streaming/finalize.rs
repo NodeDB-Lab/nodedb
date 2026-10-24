@@ -142,12 +142,13 @@ impl CoreLoop {
 
         let having_predicates =
             crate::bridge::scan_filter::decode_scan_filters(having, "aggregate HAVING")?;
-        retain_having(&mut results, &having_predicates)?;
+        let crs = self.crs_context();
+        retain_having(&mut results, &having_predicates, &crs)?;
 
         apply_user_aliases_to_rows(&mut results, aggregates);
         // Post-aggregate ORDER BY: sort group rows before
         // truncating so LIMIT picks the requested top-N.
-        sort_aggregated_rows(&mut results, sort_keys)?;
+        sort_aggregated_rows(&mut results, sort_keys, &crs)?;
         results.truncate(limit);
 
         crate::data::executor::response_codec::encode_value_vec(&results)

@@ -12,7 +12,9 @@
 //!   partition, which requested names carry a surrogate, and whether the
 //!   partition holds edges of the collection.
 
-use nodedb_physical::physical_plan::{RagBindingRow, RagLegs, RagTextHit, RagVectorHit};
+use nodedb_physical::physical_plan::{
+    GraphReadScope, RagBindingRow, RagLegs, RagTextHit, RagVectorHit,
+};
 use nodedb_types::Surrogate;
 
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -39,6 +41,8 @@ pub(in crate::data::executor) struct RagBindingsParams<'a> {
     pub collection: &'a str,
     pub surrogates: &'a [u32],
     pub names: &'a [String],
+    /// The graph the bindings name nodes in: the fusion's bitemporal cut.
+    pub scope: &'a GraphReadScope,
 }
 
 impl CoreLoop {
@@ -116,10 +120,15 @@ impl CoreLoop {
             collection,
             surrogates,
             names,
+            scope,
         } = params;
         let database_id = task.request.database_id.as_u64();
         let mut rows: Vec<RagBindingRow> = Vec::new();
-        if let Some(partition) = self.csr_partition(database_id, tenant_id) {
+        let partition = match self.csr_view(database_id, tenant_id, Some(collection), scope) {
+            Ok(partition) => partition,
+            Err(e) => return self.response_error(task, e),
+        };
+        if let Some(partition) = partition {
             if partition.collection_id(collection).is_some() {
                 rows.push(RagBindingRow::KnowsCollection);
             }

@@ -191,7 +191,7 @@ fn plan_statements(
 /// Plan one parsed array statement.
 fn plan_array_statement(stmt: ArrayStatement, catalog: &dyn SqlCatalog) -> Result<Vec<SqlPlan>> {
     match stmt {
-        ArrayStatement::Create(c) => Ok(vec![planner::array_ddl::plan_create_array(&c)?]),
+        ArrayStatement::Create(c) => Ok(vec![planner::array_ddl::plan_create_array(&c, catalog)?]),
         ArrayStatement::Drop(d) => Ok(vec![planner::array_ddl::plan_drop_array(&d)?]),
         ArrayStatement::Insert(i) => planner::array_dml::plan_insert_array(&i, catalog),
         ArrayStatement::Delete(d) => planner::array_dml::plan_delete_array(&d, catalog),

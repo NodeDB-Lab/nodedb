@@ -264,6 +264,39 @@ pub fn load_columnar_schema_seed(
         .collect()
 }
 
+/// Load the user-defined CRS set from the durable catalog so each Data Plane
+/// core resolves user-defined SRIDs from its first request, WAL replay
+/// included. A committed `CREATE` or `DROP SPATIAL_REF_SYS` reaches a running
+/// core through `MetaOp::SetCustomCrsSet`; this seed covers the set as of
+/// boot. Mirrors [`load_doc_config_registry`]'s fail-open pattern: a catalog
+/// open/load failure logs an error and yields an empty set, so a geometry in
+/// a user-defined SRID fails to resolve instead of booting being refused.
+pub fn load_crs_set_seed(config: &ServerConfig) -> Arc<nodedb_crs::CustomCrsSet> {
+    let catalog = match CatalogForRead::open(&config.catalog_path()) {
+        Ok(Some(catalog)) => catalog,
+        // No catalog yet: a genuine fresh start, nothing to seed.
+        Ok(None) => return Arc::new(nodedb_crs::CustomCrsSet::new()),
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "catalog exists but could not be opened; cores will boot with an \
+                 EMPTY user-defined CRS set"
+            );
+            return Arc::new(nodedb_crs::CustomCrsSet::new());
+        }
+    };
+    match catalog.load_custom_crs_set() {
+        Ok(set) => Arc::new(set),
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "failed to load the user-defined CRS set; cores will boot with an EMPTY set"
+            );
+            Arc::new(nodedb_crs::CustomCrsSet::new())
+        }
+    }
+}
+
 /// Result of [`spawn_data_plane_cores`]: the core thread handles plus each
 /// core's WAL-replay-completion signal.
 pub struct SpawnedDataPlaneCores {
@@ -295,6 +328,7 @@ pub struct CoreSharedResources {
             nodedb_types::columnar::ColumnarSchema,
         )>,
     >,
+    pub crs_set_seed: Arc<nodedb_crs::CustomCrsSet>,
 }
 
 /// Spawn all Data Plane cores, wire dispatcher notifiers, and return core
@@ -325,6 +359,7 @@ pub fn spawn_data_plane_cores(
         doc_config_seed,
         vector_index_param_seed,
         columnar_schema_seed,
+        crs_set_seed,
     } = resources;
     let num_cores = config.server.data_plane_cores;
     let node_id = crate::control::cluster::configured_node_id(config);
@@ -368,6 +403,7 @@ pub fn spawn_data_plane_cores(
             doc_config_seed: Arc::clone(&doc_config_seed),
             vector_index_param_seed: Arc::clone(&vector_index_param_seed),
             columnar_schema_seed: Arc::clone(&columnar_schema_seed),
+            crs_set_seed: Arc::clone(&crs_set_seed),
             replay_done: replay_done_tx,
         })?;
         core_handles.push(handle);

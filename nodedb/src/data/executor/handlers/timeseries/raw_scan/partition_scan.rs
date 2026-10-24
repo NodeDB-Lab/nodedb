@@ -2,6 +2,7 @@
 
 //! Parallel and sequential disk-partition scanning for raw mode.
 
+use nodedb_crs::CrsContext;
 use nodedb_wal::crypto::WalEncryptionKey;
 
 use crate::bridge::scan_filter::ScanFilter;
@@ -13,32 +14,38 @@ use crate::engine::timeseries::columnar_memtable::ColumnType;
 
 use super::row_emit::{emit_partition_row, extract_timestamp, row_admitted};
 
+/// The read-only inputs every partition scan shares.
+///
+/// The CRS context is not part of it: a context is not `Sync`, so each scan
+/// thread takes its own fork and passes it alongside.
+#[derive(Clone, Copy)]
+pub(super) struct PartitionScan<'a> {
+    /// Inclusive `(min_ms, max_ms)` bounds on the time key.
+    pub time_range: (i64, i64),
+    /// Row ceiling.
+    pub limit: usize,
+    /// WHERE predicates; applied only when `has_filters` is set.
+    pub filter_predicates: &'a [ScanFilter],
+    pub has_filters: bool,
+    /// The caller's read policy: every row is checked against it before it
+    /// counts toward `limit`.
+    pub rls_predicates: &'a [ScanFilter],
+    /// The core's timeseries segment key.
+    pub kek: Option<&'a WalEncryptionKey>,
+}
+
 /// Scan disk partitions in parallel, returning rmpv rows sorted by timestamp.
 ///
-/// `rls_predicates` is the caller's read policy: every row is checked
-/// against it before it counts toward `limit`. `kek` is the core's
-/// timeseries segment key. `Err` when a stored time cell cannot be read as
-/// its column's instant or a predicate expression divides by zero.
+/// `Err` when a stored time cell cannot be read as its column's instant or a
+/// predicate expression divides by zero.
 pub(super) fn scan_partitions_parallel(
     partition_dirs: &[std::path::PathBuf],
-    time_range: (i64, i64),
-    limit: usize,
-    filter_predicates: &[ScanFilter],
-    has_filters: bool,
-    rls_predicates: &[ScanFilter],
-    kek: Option<&WalEncryptionKey>,
+    scan: &PartitionScan<'_>,
+    crs: &CrsContext<'_>,
 ) -> crate::Result<Vec<rmpv::Value>> {
     if partition_dirs.len() <= 1 {
         return match partition_dirs.first() {
-            Some(dir) => scan_one_partition(
-                dir,
-                time_range,
-                limit,
-                filter_predicates,
-                has_filters,
-                rls_predicates,
-                kek,
-            ),
+            Some(dir) => scan_one_partition(dir, scan, crs),
             None => Ok(Vec::new()),
         };
     }
@@ -51,36 +58,17 @@ pub(super) fn scan_partitions_parallel(
         let thread_count = available.min(partition_dirs.len()).min(8);
 
         if thread_count <= 1 {
-            return scan_partitions_sequential(
-                partition_dirs,
-                time_range,
-                limit,
-                filter_predicates,
-                has_filters,
-                rls_predicates,
-                kek,
-            );
+            return scan_partitions_sequential(partition_dirs, scan, crs);
         }
 
         let chunk_size = partition_dirs.len().div_ceil(thread_count);
-        let filters_ref = filter_predicates;
-        let rls_ref = rls_predicates;
 
         let mut thread_results: Vec<Vec<rmpv::Value>> = std::thread::scope(|s| {
             let handles: Vec<_> = partition_dirs
                 .chunks(chunk_size)
                 .map(|chunk| {
-                    s.spawn(move || {
-                        scan_partitions_sequential(
-                            chunk,
-                            time_range,
-                            limit,
-                            filters_ref,
-                            has_filters,
-                            rls_ref,
-                            kek,
-                        )
-                    })
+                    let thread_crs = crs.fork();
+                    s.spawn(move || scan_partitions_sequential(chunk, scan, &thread_crs))
                 })
                 .collect();
 
@@ -99,6 +87,7 @@ pub(super) fn scan_partitions_parallel(
         // Merge: each thread's results are already time-sorted (partitions are
         // time-ordered). Flatten, sort globally, truncate to limit.
         let total: usize = thread_results.iter().map(|v| v.len()).sum();
+        let limit = scan.limit;
         let mut merged = Vec::with_capacity(total.min(limit));
         for batch in &mut thread_results {
             merged.append(batch);
@@ -111,42 +100,26 @@ pub(super) fn scan_partitions_parallel(
 
     #[cfg(target_arch = "wasm32")]
     {
-        scan_partitions_sequential(
-            partition_dirs,
-            time_range,
-            limit,
-            filter_predicates,
-            has_filters,
-            rls_predicates,
-            kek,
-        )
+        scan_partitions_sequential(partition_dirs, scan, crs)
     }
 }
 
 pub(super) fn scan_partitions_sequential(
     partition_dirs: &[std::path::PathBuf],
-    time_range: (i64, i64),
-    limit: usize,
-    filter_predicates: &[ScanFilter],
-    has_filters: bool,
-    rls_predicates: &[ScanFilter],
-    kek: Option<&WalEncryptionKey>,
+    scan: &PartitionScan<'_>,
+    crs: &CrsContext<'_>,
 ) -> crate::Result<Vec<rmpv::Value>> {
+    let limit = scan.limit;
     let mut results = Vec::new();
     for dir in partition_dirs {
         if results.len() >= limit {
             break;
         }
-        let remaining = limit - results.len();
-        let rows = scan_one_partition(
-            dir,
-            time_range,
-            remaining,
-            filter_predicates,
-            has_filters,
-            rls_predicates,
-            kek,
-        )?;
+        let remaining = PartitionScan {
+            limit: limit - results.len(),
+            ..*scan
+        };
+        let rows = scan_one_partition(dir, &remaining, crs)?;
         results.extend(rows);
     }
     results.truncate(limit);
@@ -162,13 +135,17 @@ pub(super) fn scan_partitions_sequential(
 /// divides by zero.
 pub(super) fn scan_one_partition(
     part_dir: &std::path::Path,
-    time_range: (i64, i64),
-    limit: usize,
-    filter_predicates: &[ScanFilter],
-    has_filters: bool,
-    rls_predicates: &[ScanFilter],
-    kek: Option<&WalEncryptionKey>,
+    scan: &PartitionScan<'_>,
+    crs: &CrsContext<'_>,
 ) -> crate::Result<Vec<rmpv::Value>> {
+    let PartitionScan {
+        time_range,
+        limit,
+        filter_predicates,
+        has_filters,
+        rls_predicates,
+        kek,
+    } = *scan;
     // A partition that does not read refuses the scan. Skipping it would
     // answer without the partition's rows.
     let TsPartitionColumns {
@@ -233,7 +210,7 @@ pub(super) fn scan_one_partition(
             break;
         }
         let row = emit_partition_row(part_dir, &schema_vec, &col_data, &sym_dicts, idx as usize)?;
-        if !row_admitted(&row, row_filters, rls_predicates)? {
+        if !row_admitted(&row, row_filters, rls_predicates, crs)? {
             continue;
         }
         rows.push(row);

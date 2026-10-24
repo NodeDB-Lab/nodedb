@@ -23,8 +23,9 @@ use nodedb_mem::ScopedMemory;
 #[cfg(test)]
 use nodedb_types::BoundingBox;
 use nodedb_types::geometry::Geometry;
-use nodedb_types::{BboxSpace, geometry_bbox_in};
+use nodedb_types::geometry_bbox_in;
 
+use crate::metric::Metric;
 use crate::predicates;
 use crate::rtree::RTree;
 
@@ -43,13 +44,16 @@ pub struct SpatialPreFilterResult {
 
 /// Execute the spatial pre-filter phase.
 ///
-/// 1. Compute search bounding box from query geometry + optional distance expansion
+/// 1. Compute search bounding box from query geometry, widened by
+///    `distance_meters` under `metric`
 /// 2. R-tree range search → rough candidates
 /// 3. For each candidate, load geometry and apply exact predicate
 /// 4. Return filtered entry IDs
 ///
 /// The caller (vector engine) uses the candidate IDs to build a RoaringBitmap
-/// that restricts HNSW graph traversal.
+/// that restricts HNSW graph traversal. `metric` is the tree SRID's
+/// metric: geodesic metres in a geographic CRS, grid metres in a projected
+/// one.
 ///
 /// The `candidate_ids` allocation is budgeted via [`ScopedMemory::reserve`]
 /// before the `Vec::with_capacity`. Budget pressure is a backpressure
@@ -58,15 +62,15 @@ pub fn spatial_prefilter(
     rtree: &RTree,
     query_geometry: &Geometry,
     distance_meters: Option<f64>,
+    metric: &Metric,
     exact_geometries: &dyn Fn(u64) -> Option<Geometry>,
     memory: &ScopedMemory,
 ) -> SpatialPreFilterResult {
     // Compute the search bbox in the tree's space. The query geometry is in
     // the tree's SRID: the caller rejects a mismatch before this point.
-    let space = rtree.space();
-    let query_bbox = geometry_bbox_in(query_geometry, space);
+    let query_bbox = geometry_bbox_in(query_geometry, rtree.space());
     let search_bbox = match distance_meters {
-        Some(dist) => query_bbox.expand_meters_in(dist, space),
+        Some(dist) => metric.widen(&query_bbox, dist),
         None => query_bbox,
     };
 
@@ -80,14 +84,9 @@ pub fn spatial_prefilter(
     let mut candidate_ids = Vec::with_capacity(rtree_candidates);
     for entry in &rtree_results {
         if let Some(doc_geom) = exact_geometries(entry.id) {
-            let passes = match (distance_meters, space) {
-                (Some(dist), BboxSpace::Geographic) => {
-                    predicates::st_dwithin(&doc_geom, query_geometry, dist)
-                }
-                (Some(dist), BboxSpace::Planar) => {
-                    crate::planar::planar_dwithin(&doc_geom, query_geometry, dist)
-                }
-                (None, _) => predicates::st_intersects(&doc_geom, query_geometry),
+            let passes = match distance_meters {
+                Some(dist) => metric.dwithin(&doc_geom, query_geometry, dist),
+                None => predicates::st_intersects(&doc_geom, query_geometry),
             };
             if passes {
                 candidate_ids.push(entry.id);
@@ -141,7 +140,7 @@ mod tests {
     use crate::test_support::test_memory;
 
     fn make_tree() -> RTree {
-        let mut tree = RTree::new(test_memory(), nodedb_types::geometry::Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), crate::rtree::TreeSrid::WGS84);
         // 10 points in a grid from (0,0) to (9,9).
         for i in 0..10 {
             tree.insert(RTreeEntry {
@@ -167,7 +166,14 @@ mod tests {
         };
 
         // 200km radius should capture several nearby points.
-        let result = spatial_prefilter(&tree, &query, Some(200_000.0), &get_geom, &test_memory());
+        let result = spatial_prefilter(
+            &tree,
+            &query,
+            Some(200_000.0),
+            &Metric::wgs84(),
+            &get_geom,
+            &test_memory(),
+        );
         assert!(!result.candidate_ids.is_empty());
         // Point (5,5) should definitely be in results (distance = 0).
         assert!(result.candidate_ids.contains(&5));
@@ -193,7 +199,14 @@ mod tests {
             }
         };
 
-        let result = spatial_prefilter(&tree, &query, None, &get_geom, &test_memory());
+        let result = spatial_prefilter(
+            &tree,
+            &query,
+            None,
+            &Metric::wgs84(),
+            &get_geom,
+            &test_memory(),
+        );
         // Points 4, 5, 6 should be inside (3 is on edge → not contained by intersects returns true).
         assert!(result.candidate_ids.contains(&4));
         assert!(result.candidate_ids.contains(&5));
@@ -207,7 +220,7 @@ mod tests {
     /// threshold in Euclidean metres.
     #[test]
     fn projected_prefilter_uses_planar_metres() {
-        let mut tree = RTree::new(test_memory(), nodedb_types::geometry::Srid::Utm48N);
+        let mut tree = RTree::new(test_memory(), crate::test_support::utm48n());
         let points = [[500_000.0, 0.0], [500_300.0, 400.0], [510_000.0, 0.0]];
         for (id, p) in points.iter().enumerate() {
             tree.insert(RTreeEntry {
@@ -217,7 +230,16 @@ mod tests {
         }
         let get_geom = |id: u64| points.get(id as usize).map(|p| Geometry::point(p[0], p[1]));
         let query = Geometry::point(500_000.0, 0.0);
-        let result = spatial_prefilter(&tree, &query, Some(500.0), &get_geom, &test_memory());
+        let result = spatial_prefilter(
+            &tree,
+            &query,
+            Some(500.0),
+            &Metric::Planar {
+                metres_per_unit: 1.0,
+            },
+            &get_geom,
+            &test_memory(),
+        );
         let mut ids = result.candidate_ids.clone();
         ids.sort_unstable();
         assert_eq!(ids, vec![0, 1]);

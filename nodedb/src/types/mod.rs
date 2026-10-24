@@ -19,8 +19,8 @@ pub use nodedb_types::{KeyRepr, SpanId, TraceId};
 pub use read_versions::ReadVersions;
 pub use record_home::{HomedRecord, RecordHomes};
 pub use snapshot::{
-    ArrayCellsBlob, SurrogateBindEntry, TenantDataSnapshot, TsFlushedCollectionBlob,
-    TsFlushedPartitionBlob,
+    ArrayCellsBlob, NodeLabelVersionEntry, NodeLabelsEntry, SurrogateBindEntry, TenantDataSnapshot,
+    TsFlushedCollectionBlob, TsFlushedPartitionBlob,
 };
 pub use snapshot_calvin::{
     CoveredCutBarrier, CutBarrierLog, CutFloor, GroupCalvinCut, VShardCalvinState,

@@ -17,8 +17,8 @@ use crate::types::query::{
     AggregateExpr, EngineType, JoinType, Projection, SortKey, SpatialPredicate, WindowSpec,
 };
 use crate::types_array::{
-    ArrayAttrAst, ArrayCellOrderAst, ArrayDimAst, ArrayGeorefAlter, ArrayGeorefAst,
-    ArrayReducerAst, ArraySliceAst, ArrayTileOrderAst, ArrayZoneAst,
+    ArrayAttrAst, ArrayAttrMetaAlter, ArrayCellOrderAst, ArrayDimAst, ArrayGeorefAlter,
+    ArrayGeorefAst, ArrayReducerAst, ArraySliceAst, ArrayTileOrderAst, ArrayZoneAst,
 };
 use crate::types_expr::{SqlExpr, SqlPayloadAtom, SqlValue};
 use nodedb_types::vector_distance::DistanceMetric;
@@ -273,6 +273,8 @@ pub struct AlterArrayVisitArgs<'a> {
     pub minimum_audit_retain_ms: Option<u64>,
     /// Georef change. `None` = georef unchanged.
     pub georef: Option<&'a ArrayGeorefAlter>,
+    /// Attr metadata change. `None` = unchanged.
+    pub attr_meta: Option<&'a ArrayAttrMetaAlter>,
 }
 
 /// Parameters for [`super::trait_def::PlanVisitor::array_slice`].
@@ -287,6 +289,8 @@ pub struct ArraySliceVisitArgs<'a> {
     /// Polygon zone inside the box. `None` = the whole box.
     pub zone: Option<&'a ArrayZoneAst>,
     pub temporal: &'a TemporalScope,
+    /// Read attrs physically.
+    pub physical: bool,
 }
 
 /// Parameters for [`super::trait_def::PlanVisitor::array_agg`].
@@ -300,6 +304,8 @@ pub struct ArrayAggVisitArgs<'a> {
     /// Polygon zone inside the box. `None` = the whole box.
     pub zone: Option<&'a ArrayZoneAst>,
     pub temporal: &'a TemporalScope,
+    /// Reduce physical values.
+    pub physical: bool,
 }
 
 /// Parameters for [`super::trait_def::PlanVisitor::merge`].

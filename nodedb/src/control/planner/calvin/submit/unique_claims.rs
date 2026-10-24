@@ -18,7 +18,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use nodedb_cluster::calvin::types::{EngineKeySet, SortedVec, TxClass};
 use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan, UpdateValue};
 
-use crate::Error;
 use crate::control::state::SharedState;
 use crate::engine::document::store::extract_index_values;
 
@@ -35,8 +34,8 @@ pub(crate) struct UniquePath {
     pub case_insensitive: bool,
 }
 
-/// Add the UNIQUE claims of `tx_class`'s plans to its write set, read from
-/// this node's catalog.
+/// Add the UNIQUE claims of `plans` to `tx_class`'s write set, read from
+/// this node's catalog. `plans` are `tx_class`'s decoded plans.
 ///
 /// A class already split into parts was stamped by its coordinator, so it is
 /// left as it is. A forwarded class is stamped again with the same result:
@@ -44,27 +43,32 @@ pub(crate) struct UniquePath {
 pub(crate) fn stamp_unique_claims(
     state: &SharedState,
     tx_class: &mut TxClass,
+    plans: &[PhysicalPlan],
 ) -> crate::Result<()> {
     if tx_class.is_multi_part() {
         return Ok(());
     }
-    let plans =
-        nodedb_physical::physical_plan::wire::decode_batch(&tx_class.plans).map_err(|e| {
-            Error::Serialization {
-                format: "msgpack".into(),
-                detail: format!("calvin unique claims: plan decode: {e}"),
-            }
-        })?;
     let sets = catalog_unique_claim_sets(
         state,
         tx_class.database_id,
         tx_class.tenant_id.as_u64(),
-        &plans,
+        plans,
     )?;
+    let mut added = false;
     for set in sets {
         if !tx_class.write_set.0.contains(&set) {
             tx_class.write_set.0.push(set);
+            added = true;
         }
+    }
+    // The participants derive from the write set, so a widened write set
+    // derives them again.
+    if added {
+        tx_class
+            .restore_derived()
+            .map_err(|e| crate::Error::Internal {
+                detail: format!("calvin unique claims: participants underivable: {e}"),
+            })?;
     }
     Ok(())
 }
@@ -457,11 +461,13 @@ mod tests {
             &nodedb_cluster::calvin::types::SequencedTxn {
                 epoch: 1,
                 position: 0,
-                tx_class,
+                tx_class: std::sync::Arc::new(tx_class),
                 epoch_system_ms: 1_700_000_000_000,
                 epoch_vshard_txn_count: 2,
                 lock_owner: None,
+                local_plans: None,
             },
+            crate::control::cluster::calvin::scheduler::driver::helpers::LockSite::Everywhere,
         )
     }
 
@@ -483,17 +489,23 @@ mod tests {
         let (first, second) = (TxnId::new(1, 0), TxnId::new(1, 1));
         let mut table = LockManager::new();
         assert_eq!(
-            table.acquire(first, claim_locks(&[insert("a", 1, "a@x.io")])),
+            table
+                .acquire(first, claim_locks(&[insert("a", 1, "a@x.io")]))
+                .outcome,
             AcquireOutcome::Ready
         );
         assert_eq!(
-            table.acquire(second, claim_locks(&[insert("b", 2, "A@X.IO")])),
+            table
+                .acquire(second, claim_locks(&[insert("b", 2, "A@X.IO")]))
+                .outcome,
             AcquireOutcome::Blocked,
             "a second claim of one value waits for the first"
         );
         let third = TxnId::new(1, 2);
         assert_eq!(
-            table.acquire(third, claim_locks(&[insert("c", 4, "c@x.io")])),
+            table
+                .acquire(third, claim_locks(&[insert("c", 4, "c@x.io")]))
+                .outcome,
             AcquireOutcome::Ready,
             "a claim of another value runs beside them"
         );

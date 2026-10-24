@@ -73,9 +73,9 @@ impl zerompk::ToMessagePack for OrderedMapRef<'_> {
 
 /// Write a `nodedb_types::Value` as standard msgpack.
 ///
-/// `Duration`, `Decimal`, and `Geometry` are strings, except a `Decimal`
-/// that holds a `u64` above `i64::MAX` (see [`crate::Value::decimal_as_wide_u64`]),
-/// which is a `uint64`. `Vector` is a float64 array, `ArrayCell` a map, and
+/// `Duration` and `Decimal` are strings, except a `Decimal` that holds a
+/// `u64` above `i64::MAX` (see [`crate::Value::decimal_as_wide_u64`]),
+/// which is a `uint64`. `Geometry` is the geometry ext (type 3). `Vector` is a float64 array, `ArrayCell` a map, and
 /// `Range` / `Record` are `nil`.
 pub(crate) fn write_native_value<W: Write>(
     writer: &mut W,
@@ -113,10 +113,7 @@ pub(crate) fn write_native_value<W: Write>(
             Some(u) => writer.write_u64(u),
             None => writer.write_string(&d.to_string()),
         },
-        crate::Value::Geometry(g) => match sonic_rs::to_string(g) {
-            Ok(s) => writer.write_string(&s),
-            Err(_) => writer.write_nil(),
-        },
+        crate::Value::Geometry(g) => super::geometry_ext::write_geometry_ext(writer, g),
         crate::Value::Range { .. } | crate::Value::Record { .. } => writer.write_nil(),
         crate::Value::Vector(v) => {
             // A standard msgpack array of float64 values, so pgwire clients

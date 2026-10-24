@@ -27,6 +27,7 @@ pub mod crdt_compact;
 mod dispatcher;
 pub mod materialized_view;
 pub mod move_tenant;
+pub mod spatial_ref_sys;
 pub mod synonym_group;
 pub mod vector;
 

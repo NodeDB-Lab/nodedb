@@ -7,7 +7,8 @@
 //! writes order against every other transaction, a TRUNCATE included. Each
 //! participant installs the batch at its transaction's turn. A restored row
 //! installs as the backup holds it. A restored edge version keeps its
-//! historical `system_from` and is applied at the transaction's ordinal.
+//! historical `system_from` and is applied at the transaction's ordinal. A
+//! restored node label version keeps its system time too.
 
 /// One restored edge version.
 #[derive(
@@ -33,6 +34,9 @@ pub struct RestoredEdgeVersion {
     pub system_from: i64,
     /// The version's properties, `None` for a tombstone.
     pub properties: Option<Vec<u8>>,
+    /// The version's valid time `[from, until)` in ms since epoch, as the
+    /// backup holds it. `None` for a tombstone.
+    pub valid_time: Option<(i64, i64)>,
 }
 
 /// One restored document row: the keys its writers lock.
@@ -53,6 +57,27 @@ pub struct RestoredRow {
     /// The row's key, as its surrogate binds it.
     pub document_id: String,
     pub surrogate: u32,
+}
+
+/// One restored node's label history and current label set.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+#[msgpack(map)]
+pub struct RestoredNodeLabels {
+    pub node_id: String,
+    /// Every label version the backup holds, as `(system_from, labels)`, in
+    /// ascending system time. Each keeps its system time.
+    pub versions: Vec<(i64, Vec<String>)>,
+    /// The label set the node carries in the backup.
+    pub current: Vec<String>,
 }
 
 /// One `(collection, key) → surrogate` identity every participant binds
@@ -98,6 +123,10 @@ pub struct RestoredRedo {
     pub rows: Vec<RestoredRow>,
     /// The restored edge versions, in apply order.
     pub edges: Vec<RestoredEdgeVersion>,
+    /// The restored node labels of nodes homed on `vshard`.
+    #[serde(default)]
+    #[msgpack(default)]
+    pub node_labels: Vec<RestoredNodeLabels>,
     /// Every collection the batch writes, as the Data Plane stores it.
     pub collections: Vec<String>,
     /// Every identity the rows and edge endpoints are stored under.
@@ -127,6 +156,12 @@ mod tests {
                 dst_surrogate: 5,
                 system_from: 100,
                 properties: None,
+                valid_time: None,
+            }],
+            node_labels: vec![RestoredNodeLabels {
+                node_id: "alice".into(),
+                versions: vec![(90, vec!["Person".into()])],
+                current: vec!["Person".into()],
             }],
             collections: vec!["knows".into(), "people".into()],
             identities: vec![RestoredIdentity {

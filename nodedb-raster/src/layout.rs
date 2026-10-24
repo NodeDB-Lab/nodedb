@@ -1,21 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The block grid of IFD 0: image size, band layout, and strip or tile
-//! geometry, read once at open.
-
-use std::io::{Read, Seek};
-
-use tiff::decoder::{ChunkType, Decoder};
-use tiff::tags::{SampleFormat, Tag};
+//! The block grid of one image: size, band layout, and strip or tile
+//! geometry.
 
 use crate::error::RasterError;
 use crate::sample::SampleType;
-
-/// `PlanarConfiguration` value of band-separate storage.
-const PLANAR_SEPARATE: u16 = 2;
-/// Photometric interpretations whose samples decode unchanged:
-/// BlackIsZero, RGB, CMYK, YCbCr.
-const RAW_PHOTOMETRICS: [u16; 4] = [1, 2, 5, 6];
 
 /// How a raster stores its blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,8 +26,11 @@ pub enum Interleave {
 
 /// The pixel rectangle one block covers. Edge blocks are cropped to the
 /// image.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockWindow {
+    /// The block's index along each outer dim, outermost first. Empty for
+    /// a 2D raster.
+    pub outer: Vec<u64>,
     pub col_off: u32,
     pub row_off: u32,
     pub width: u32,
@@ -70,80 +62,18 @@ pub struct RasterLayout {
 }
 
 impl RasterLayout {
-    /// Read the layout of the decoder's current image.
-    pub(crate) fn read<R: Read + Seek>(
-        decoder: &mut Decoder<R>,
-        limit_bytes: usize,
-    ) -> Result<Self, RasterError> {
-        let tiff = |e| RasterError::from_tiff(e, limit_bytes);
-        let photometric = decoder
-            .find_tag_unsigned::<u16>(Tag::PhotometricInterpretation)
-            .map_err(tiff)?
-            .unwrap_or(1);
-        if !RAW_PHOTOMETRICS.contains(&photometric) {
-            return Err(RasterError::UnsupportedPhotometric { code: photometric });
-        }
-        let (width, height) = decoder.dimensions().map_err(tiff)?;
-        let color = decoder.colortype().map_err(tiff)?;
-        let bands = decoder
-            .find_tag_unsigned::<u16>(Tag::SamplesPerPixel)
-            .map_err(tiff)?
-            .unwrap_or(1);
-        let format = decoder
-            .find_tag_unsigned_vec::<u16>(Tag::SampleFormat)
-            .map_err(tiff)?
-            .and_then(|formats| formats.first().copied())
-            .map_or(SampleFormat::Uint, SampleFormat::from_u16_exhaustive);
-        let sample_type = SampleType::from_tiff(format, color.bit_depth())?;
-        let interleave = match decoder
-            .find_tag_unsigned::<u16>(Tag::PlanarConfiguration)
-            .map_err(tiff)?
-        {
-            Some(PLANAR_SEPARATE) => Interleave::Planar,
-            _ => Interleave::Chunky,
-        };
-        // A chunky pixel decodes to the color type's samples. Fewer than the
-        // file stores drops bands.
-        if interleave == Interleave::Chunky && color.num_samples() != bands {
-            return Err(RasterError::UnsupportedBandLayout {
-                samples: bands,
-                decoded: color.num_samples(),
-            });
-        }
-        // The tiff decoder refuses a zero image size, tile size, and
-        // RowsPerStrip, so every block dimension here is at least 1.
-        let (stored_width, stored_height) = decoder.chunk_dimensions();
-        let (kind, block_width, block_height) = match decoder.get_chunk_type() {
-            ChunkType::Strip => (BlockKind::Strips, width, stored_height.min(height)),
-            ChunkType::Tile => (BlockKind::Tiles, stored_width, stored_height),
-        };
-        Ok(Self {
-            width,
-            height,
-            bands,
-            sample_type,
-            kind,
-            interleave,
-            block_width,
-            block_height,
-            blocks_across: width.div_ceil(block_width),
-            blocks_down: height.div_ceil(block_height),
-        })
-    }
-
     /// Blocks per band plane.
     pub fn block_count(&self) -> u32 {
-        // The tiff decoder checked that the chunk offsets, a u32-countable
-        // list, hold this many entries per plane.
+        // The TIFF layer checks at open that this product fits a u32.
         self.blocks_across.saturating_mul(self.blocks_down)
     }
 
     /// Decoded bytes of the largest block, across all bands.
     pub fn block_bytes(&self) -> u64 {
         u64::from(self.block_width)
-            * u64::from(self.block_height)
-            * u64::from(self.bands)
-            * self.sample_type.byte_len() as u64
+            .saturating_mul(u64::from(self.block_height))
+            .saturating_mul(u64::from(self.bands))
+            .saturating_mul(self.sample_type.byte_len() as u64)
     }
 
     /// The window of block `index`, cropped to the image.
@@ -155,6 +85,7 @@ impl RasterLayout {
         let col_off = (index % self.blocks_across) * self.block_width;
         let row_off = (index / self.blocks_across) * self.block_height;
         Ok(BlockWindow {
+            outer: Vec::new(),
             col_off,
             row_off,
             width: self.block_width.min(self.width - col_off),
@@ -190,6 +121,7 @@ mod tests {
         assert_eq!(
             last,
             BlockWindow {
+                outer: Vec::new(),
                 col_off: 32,
                 row_off: 16,
                 width: 8,

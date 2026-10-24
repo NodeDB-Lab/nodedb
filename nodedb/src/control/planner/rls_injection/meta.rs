@@ -90,6 +90,7 @@ pub(super) fn inject_meta(ctx: &RlsCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         | MetaOp::AwaitContinuousAggregateRefresh { .. }
         | MetaOp::ConvertCollection { .. }
         | MetaOp::RestoreTenantSnapshot { .. }
+        | MetaOp::PurgeDepartedVShards { .. }
         | MetaOp::PurgeTenant { .. }
         | MetaOp::UnregisterCollection { .. }
         | MetaOp::UnregisterMaterializedView { .. }
@@ -105,6 +106,7 @@ pub(super) fn inject_meta(ctx: &RlsCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         | MetaOp::RebuildIndex { .. }
         | MetaOp::PutSynonymGroup { .. }
         | MetaOp::DeleteSynonymGroup { .. }
+        | MetaOp::SetCustomCrsSet { .. }
         | MetaOp::DropTxnOverlay { .. }
         | MetaOp::MarkSavepoint { .. }
         | MetaOp::RollbackToSavepoint { .. }

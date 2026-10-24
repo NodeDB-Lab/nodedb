@@ -178,7 +178,9 @@ fn build_static_tx_class_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::server::shared::session::read_set::{EngineTag, ReadKey, ReadOrigin};
+    use crate::control::server::shared::session::read_set::{
+        EngineTag, ReadKey, ReadOrigin, ReadPoint,
+    };
     use crate::types::{DatabaseId, KeyRepr, VShardId};
     use nodedb_physical::physical_plan::DocumentOp;
     use nodedb_types::Surrogate;
@@ -277,7 +279,7 @@ mod tests {
             read_entry(
                 "read_col",
                 ReadKey::Point {
-                    repr: KeyRepr::Surrogate(42),
+                    repr: ReadPoint::Surrogate(42),
                 },
                 7,
             ),
@@ -299,7 +301,7 @@ mod tests {
             assert_eq!(entry.read_version, read.read_version);
             let expected_key = match &read.key {
                 ReadKey::Point { repr } => {
-                    nodedb_cluster::calvin::types::ReadKeyIdent::Point(repr.clone())
+                    nodedb_cluster::calvin::types::ReadKeyIdent::Point(repr.to_key_repr())
                 }
                 ReadKey::Predicate => nodedb_cluster::calvin::types::ReadKeyIdent::Predicate,
                 ReadKey::IndexEq { field, value } => {
@@ -369,11 +371,13 @@ mod tests {
             &nodedb_cluster::calvin::types::SequencedTxn {
                 epoch: 1,
                 position,
-                tx_class,
+                tx_class: std::sync::Arc::new(tx_class),
                 epoch_system_ms: 1_700_000_000_000,
                 epoch_vshard_txn_count: 2,
                 lock_owner: None,
+                local_plans: None,
             },
+            crate::control::cluster::calvin::scheduler::driver::helpers::LockSite::Everywhere,
         )
     }
 
@@ -394,7 +398,7 @@ mod tests {
             read_entry(
                 "read_col",
                 ReadKey::Point {
-                    repr: KeyRepr::Surrogate(9),
+                    repr: ReadPoint::Surrogate(9),
                 },
                 10,
             ),
@@ -432,9 +436,12 @@ mod tests {
 
         let (first, second) = (TxnId::new(1, 0), TxnId::new(1, 1));
         let mut table = LockManager::new();
-        assert_eq!(table.acquire(first, reader_locks), AcquireOutcome::Ready);
         assert_eq!(
-            table.acquire(second, locks(writer, 1)),
+            table.acquire(first, reader_locks).outcome,
+            AcquireOutcome::Ready
+        );
+        assert_eq!(
+            table.acquire(second, locks(writer, 1)).outcome,
             AcquireOutcome::Blocked,
             "a row writer waits for the predicate reader of its collection"
         );
@@ -477,7 +484,7 @@ mod tests {
         let reads = vec![origin_read_entry(
             &col_a,
             ReadKey::Point {
-                repr: KeyRepr::Surrogate(11),
+                repr: ReadPoint::Surrogate(11),
             },
             42,
             ReadOrigin::PlanDerivation,
@@ -521,7 +528,7 @@ mod tests {
         let reads = vec![read_entry(
             &col_a,
             ReadKey::Point {
-                repr: KeyRepr::Surrogate(11),
+                repr: ReadPoint::Surrogate(11),
             },
             42,
         )];

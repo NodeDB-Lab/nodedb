@@ -64,7 +64,7 @@ use crate::control::state::SharedState;
 use crate::engine::graph::edge_store::Direction;
 use crate::engine::graph::traversal_options::GraphTraversalOptions;
 use crate::types::{DatabaseId, TenantId, TraceId, TxnId, VShardId};
-use nodedb_physical::physical_plan::GraphOp;
+use nodedb_physical::physical_plan::{GraphOp, GraphReadScope};
 use nodedb_types::filter::MetadataFilter;
 
 use super::neighbor_rows::{NeighborRow, decode_neighbor_rows};
@@ -107,6 +107,9 @@ pub(super) struct NeighborHopParams<'a> {
     pub with_properties: bool,
     /// The session's transaction. Its staged edge writes merge into the hop.
     pub txn_id: Option<TxnId>,
+    /// The bitemporal cut the hop reads. Every hop of a walk carries the
+    /// same one.
+    pub read_scope: GraphReadScope,
 }
 
 /// Execute one hop of BFS from `params.frontier`.
@@ -127,6 +130,7 @@ pub(super) async fn execute_neighbor_hop(
         edge_predicate,
         with_properties,
         txn_id,
+        read_scope,
     } = params;
 
     // Cap this hop's handler-side allocation to the remaining budget under
@@ -151,6 +155,7 @@ pub(super) async fn execute_neighbor_hop(
         edge_predicate,
         with_properties,
         txn_id,
+        read_scope,
     };
 
     // Single-node mode: no routing table — every frontier node is local.
@@ -287,6 +292,8 @@ struct ExpandScope<'a> {
     with_properties: bool,
     /// The session's transaction, whose staged edge writes merge in.
     txn_id: Option<TxnId>,
+    /// The bitemporal cut the hop reads.
+    read_scope: GraphReadScope,
 }
 
 impl ExpandScope<'_> {
@@ -303,6 +310,7 @@ impl ExpandScope<'_> {
             rls_filters: Vec::new(),
             edge_predicate: self.edge_predicate.to_vec(),
             with_properties: self.with_properties,
+            scope: self.read_scope,
         })
     }
 }
@@ -319,6 +327,13 @@ async fn expand_local(
     if scope.linearizable {
         super::read_groups::confirm_graph_read(shared, scope.database_id, &plan).await?;
     }
+    // A historical hop reads only once this node installed its cut.
+    crate::control::read_cut::await_read_cut(
+        shared,
+        &plan,
+        crate::control::server::shared::session::StatementDeadline::of_statement(shared),
+    )
+    .await?;
     let resp = crate::control::server::broadcast::broadcast_to_all_cores_txn(
         shared,
         scope.tenant_id,

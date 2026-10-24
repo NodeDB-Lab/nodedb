@@ -87,9 +87,7 @@ impl PitrStorage {
     ) -> HarnessResult<ServerConfig> {
         let mut config = ServerConfig::default();
         config.server.data_dir = data_dir.to_path_buf();
-        config.encryption = Some(EncryptionSettings {
-            key_path: self.key_path(),
-        });
+        config.encryption = Some(EncryptionSettings::file(self.key_path()));
         config.cold_storage = Some(self.cold_settings()?);
         config.snapshot_storage = Some(self.snapshot_settings()?);
         config.pitr.enabled = true;

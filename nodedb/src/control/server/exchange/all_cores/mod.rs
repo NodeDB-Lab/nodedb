@@ -33,7 +33,7 @@ mod bsp;
 mod dispatch;
 mod fanout;
 mod home_versions;
-mod read_cut;
+pub(crate) mod read_cut;
 mod snapshot;
 mod wcc;
 

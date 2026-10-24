@@ -53,6 +53,7 @@ impl CoreLoop {
         decimal_keys: &[bool],
         output_limit: usize,
     ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+        let crs = self.crs_context();
         // Spill directory for the named sort run files. `create_dir_all` is a
         // bounded metadata op (not bulk content I/O), so it stays `std::fs`.
         let spill_dir = self
@@ -76,7 +77,7 @@ impl CoreLoop {
 
         for (run_idx, chunk) in rows.chunks(self.query_tuning.sort_run_size).enumerate() {
             let mut run: Vec<(String, Vec<u8>)> = chunk.to_vec();
-            sort_rows(&mut run, sort_keys, decimal_keys)?;
+            sort_rows(&mut run, sort_keys, decimal_keys, &crs)?;
 
             // Build the framed run into one buffer and write it in a single
             // pass. Writing each tiny frame field separately would be hundreds
@@ -85,7 +86,7 @@ impl CoreLoop {
             framed.extend_from_slice(&(run.len() as u32).to_le_bytes());
             for (id, val) in &run {
                 let key_bytes = if computed_keys {
-                    encode_sort_values(&eval_sort_values(val, sort_keys)?)?
+                    encode_sort_values(&eval_sort_values(val, sort_keys, &crs)?)?
                 } else {
                     Vec::new()
                 };

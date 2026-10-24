@@ -60,6 +60,24 @@ pub struct TemporalParseError(pub String);
 /// extracted `TemporalScope`. Returns `Ok(None)` when no temporal clause is
 /// present so the caller can short-circuit to the existing pipeline.
 pub fn extract(sql: &str) -> Result<Option<Extracted>, TemporalParseError> {
+    extract_bounded(sql, ExprBoundary::SqlClause)
+}
+
+/// Where an unquoted `AS OF` expression ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExprBoundary {
+    /// At the next SQL clause keyword (`WHERE`, `LIMIT`, `ORDER`, ...).
+    SqlClause,
+    /// At the next whitespace. The graph DSL and MATCH use it: their clause
+    /// keywords (`DEPTH`, `LABEL`, `RETURN`, ...) are not SQL keywords.
+    Token,
+}
+
+/// [`extract`] with the `AS OF` expression ending at `boundary`.
+pub fn extract_bounded(
+    sql: &str,
+    boundary: ExprBoundary,
+) -> Result<Option<Extracted>, TemporalParseError> {
     let mut scope = TemporalScope::default();
     let mut working = sql.to_string();
     let mut any = false;
@@ -82,7 +100,7 @@ pub fn extract(sql: &str) -> Result<Option<Extracted>, TemporalParseError> {
         any = true;
     }
     // AS OF SYSTEM TIME <expr> (array read style, CockroachDB-inspired)
-    if let Some((rewritten, sys_scope)) = strip_as_of_system_time(&working)? {
+    if let Some((rewritten, sys_scope)) = strip_as_of_system_time(&working, boundary)? {
         if scope.system_time.is_temporal() {
             return Err(TemporalParseError(
                 "multiple system-time AS OF clauses in one statement".into(),
@@ -91,7 +109,7 @@ pub fn extract(sql: &str) -> Result<Option<Extracted>, TemporalParseError> {
         working = rewritten;
         scope.system_time = sys_scope;
         any = true;
-        if strip_as_of_system_time(&working)?.is_some() {
+        if strip_as_of_system_time(&working, boundary)?.is_some() {
             return Err(TemporalParseError(
                 "multiple system-time AS OF clauses in one statement".into(),
             ));
@@ -104,7 +122,7 @@ pub fn extract(sql: &str) -> Result<Option<Extracted>, TemporalParseError> {
         any = true;
     }
     // AS OF VALID TIME <expr> (array read style)
-    if let Some((rewritten, ms)) = strip_as_of_valid_time(&working)? {
+    if let Some((rewritten, ms)) = strip_as_of_valid_time(&working, boundary)? {
         if !matches!(scope.valid_time, ValidTime::Any) {
             return Err(TemporalParseError(
                 "multiple valid-time AS OF clauses in one statement".into(),
@@ -241,7 +259,7 @@ fn strip_valid_time(sql: &str) -> Result<Option<(String, ValidTime)>, TemporalPa
 ///
 /// Any other expression form is rejected with a descriptive error rather than
 /// silently defaulting, so callers always get exactly the version they asked for.
-fn parse_temporal_expr(token: &str) -> Result<i64, TemporalParseError> {
+pub(crate) fn parse_temporal_expr(token: &str) -> Result<i64, TemporalParseError> {
     let t = token.trim();
 
     // Integer literal
@@ -296,13 +314,14 @@ fn parse_temporal_expr(token: &str) -> Result<i64, TemporalParseError> {
 /// preprocessing in the same pipeline.
 fn strip_as_of_system_time(
     sql: &str,
+    boundary: ExprBoundary,
 ) -> Result<Option<(String, SystemTimeScope)>, TemporalParseError> {
     let keyword = "AS OF SYSTEM TIME";
     let Some(start) = keyword_position_outside_literals(sql, keyword) else {
         return Ok(None);
     };
     let after_kw = start + keyword.len();
-    let (scope, end_abs) = parse_as_of_expr(sql, after_kw)?;
+    let (scope, end_abs) = parse_as_of_expr(sql, after_kw, boundary)?;
     let mut out = String::with_capacity(sql.len());
     out.push_str(sql[..start].trim_end());
     out.push(' ');
@@ -313,13 +332,16 @@ fn strip_as_of_system_time(
 /// Match `AS OF VALID TIME <expr>` (case-insensitive) anywhere in `sql` and
 /// strip it. Same expression forms as `strip_as_of_system_time`. Returns `None`
 /// if the clause is absent.
-fn strip_as_of_valid_time(sql: &str) -> Result<Option<(String, i64)>, TemporalParseError> {
+fn strip_as_of_valid_time(
+    sql: &str,
+    boundary: ExprBoundary,
+) -> Result<Option<(String, i64)>, TemporalParseError> {
     let keyword = "AS OF VALID TIME";
     let Some(start) = keyword_position_outside_literals(sql, keyword) else {
         return Ok(None);
     };
     let after_kw = start + keyword.len();
-    let (scope, end_abs) = parse_as_of_expr(sql, after_kw)?;
+    let (scope, end_abs) = parse_as_of_expr(sql, after_kw, boundary)?;
     let ms = match scope {
         SystemTimeScope::AsOf(ms) => ms,
         SystemTimeScope::AllVersions => {
@@ -332,6 +354,11 @@ fn strip_as_of_valid_time(sql: &str) -> Result<Option<(String, i64)>, TemporalPa
         SystemTimeScope::Current => {
             return Err(TemporalParseError(
                 "AS OF VALID TIME requires an expression".into(),
+            ));
+        }
+        SystemTimeScope::Pinned { .. } => {
+            return Err(TemporalParseError(
+                "AS OF VALID TIME takes a time, not a pinned system-time ordinal".into(),
             ));
         }
     };
@@ -351,6 +378,7 @@ fn strip_as_of_valid_time(sql: &str) -> Result<Option<(String, i64)>, TemporalPa
 fn parse_as_of_expr(
     sql: &str,
     offset: usize,
+    boundary: ExprBoundary,
 ) -> Result<(SystemTimeScope, usize), TemporalParseError> {
     let rest = &sql[offset..];
     let trimmed = rest.trim_start();
@@ -394,7 +422,12 @@ fn parse_as_of_expr(
         "OFFSET",
         ";",
     ];
-    let mut end_rel = trimmed.len();
+    let mut end_rel = match boundary {
+        ExprBoundary::SqlClause => trimmed.len(),
+        ExprBoundary::Token => trimmed
+            .find(|c: char| c.is_ascii_whitespace())
+            .unwrap_or(trimmed.len()),
+    };
     for stop in &stop_tokens {
         // Only match at a word boundary (preceded by whitespace or start).
         let mut search_from = 0;
@@ -660,5 +693,38 @@ mod tests {
             extract("SELECT * FROM t AS OF VALID TIME NULL").is_err(),
             "AS OF VALID TIME NULL must be rejected"
         );
+    }
+
+    #[test]
+    fn token_boundary_ends_the_expression_at_whitespace() {
+        let ex = extract_bounded(
+            "GRAPH TRAVERSE IN 'g' FROM 'a' AS OF SYSTEM TIME 1700 DEPTH 2 \
+             AS OF VALID TIME '2024-01-15T00:00:00Z' LABEL 'l'",
+            ExprBoundary::Token,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ex.temporal.system_time, SystemTimeScope::AsOf(1700));
+        assert_eq!(ex.temporal.valid_time, ValidTime::At(1_705_276_800_000));
+        assert_eq!(ex.sql, "GRAPH TRAVERSE IN 'g' FROM 'a' DEPTH 2 LABEL 'l'");
+    }
+
+    #[test]
+    fn token_boundary_reads_null_and_now() {
+        let ex = extract_bounded(
+            "MATCH (a)-[:l]->(b) AS OF SYSTEM TIME NULL RETURN a",
+            ExprBoundary::Token,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ex.temporal.system_time, SystemTimeScope::AllVersions);
+        assert_eq!(ex.sql, "MATCH (a)-[:l]->(b) RETURN a");
+        let ex = extract_bounded(
+            "MATCH (a)-[:l]->(b) AS OF SYSTEM TIME NOW() RETURN a",
+            ExprBoundary::Token,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(ex.temporal.system_time, SystemTimeScope::AsOf(_)));
     }
 }

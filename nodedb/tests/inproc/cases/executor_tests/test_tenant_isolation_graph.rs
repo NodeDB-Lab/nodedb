@@ -29,6 +29,8 @@ fn graph_neighbors_isolated() {
                 properties: vec![],
                 src_surrogate: doc_surrogate(&format!("node_{i}")),
                 dst_surrogate: doc_surrogate(&format!("node_{}", i + 1)),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
         );
     }
@@ -45,6 +47,7 @@ fn graph_neighbors_isolated() {
             direction: nodedb::engine::graph::edge_store::Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     assert_eq!(resp_a.status, Status::Ok);
@@ -66,6 +69,7 @@ fn graph_neighbors_isolated() {
             direction: nodedb::engine::graph::edge_store::Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     assert_eq!(resp_b.status, Status::Ok);

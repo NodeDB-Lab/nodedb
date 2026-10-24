@@ -6,6 +6,8 @@
 //! Every replica applies the same `EpochBatch` in the same order, guaranteeing
 //! determinism.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use super::lock_wire::TxnIdWire;
@@ -35,7 +37,10 @@ pub struct SequencedTxn {
     /// Zero-based position within the epoch batch.
     pub position: u32,
     /// The fully-declared transaction class.
-    pub tx_class: TxClass,
+    ///
+    /// Shared: the sequencer fans one class out to every participating
+    /// vShard, so each copy clones a pointer. It encodes as the inner class.
+    pub tx_class: Arc<TxClass>,
     /// Wall-clock ms at epoch creation (read once on the sequencer leader).
     ///
     /// This is the single deterministic timestamp source for all Calvin write
@@ -71,6 +76,40 @@ pub struct SequencedTxn {
     #[serde(default)]
     #[msgpack(default)]
     pub lock_owner: Option<TxnIdWire>,
+    /// The plans this vShard runs, once a multi-part txn's parts assembled.
+    ///
+    /// Local to one vShard's copy, so the shared class stays one allocation.
+    /// Never encoded: `#[msgpack(ignore)]` decodes it as `None`.
+    #[serde(skip)]
+    #[msgpack(ignore)]
+    pub local_plans: Option<Arc<LocalPlans>>,
+}
+
+/// The local plans of one vShard's copy of a multi-part txn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalPlans {
+    /// The local tasks as a plan batch, in their order in the whole txn.
+    pub plans: Vec<u8>,
+    /// Indexes into `plans` of the tasks a trigger body buffered. Sorted, no repeats.
+    pub body_plans: Vec<u32>,
+}
+
+impl SequencedTxn {
+    /// The plan batch this vShard runs: the local plans once assembled, else the class's.
+    pub fn plans(&self) -> &[u8] {
+        match &self.local_plans {
+            Some(local) => &local.plans,
+            None => &self.tx_class.plans,
+        }
+    }
+
+    /// The trigger-body indexes into [`Self::plans`]. Sorted, no repeats.
+    pub fn body_plans(&self) -> &[u32] {
+        match &self.local_plans {
+            Some(local) => &local.body_plans,
+            None => &self.tx_class.body_plans,
+        }
+    }
 }
 
 // ── EpochBatch ────────────────────────────────────────────────────────────────
@@ -165,18 +204,28 @@ mod tests {
         let st = SequencedTxn {
             epoch: 42,
             position: 7,
-            tx_class,
+            tx_class: std::sync::Arc::new(tx_class),
             epoch_system_ms: 1_700_000_000_000,
             epoch_vshard_txn_count: 3,
             lock_owner: None,
+            local_plans: Some(std::sync::Arc::new(LocalPlans {
+                plans: vec![0x09],
+                body_plans: vec![0],
+            })),
         };
+        assert_eq!(st.plans(), &[0x09]);
+        assert_eq!(st.body_plans(), &[0]);
         let bytes = zerompk::to_msgpack_vec(&st).unwrap();
         let mut decoded: SequencedTxn = zerompk::from_msgpack(&bytes).unwrap();
-        decoded.tx_class.restore_derived().expect("restore derived");
+        std::sync::Arc::make_mut(&mut decoded.tx_class)
+            .restore_derived()
+            .expect("restore derived");
         assert_eq!(st.epoch, decoded.epoch);
         assert_eq!(st.position, decoded.position);
         assert_eq!(st.epoch_system_ms, decoded.epoch_system_ms);
         assert_eq!(st.tx_class.write_set, decoded.tx_class.write_set);
+        assert!(decoded.local_plans.is_none(), "local plans never encode");
+        assert_eq!(decoded.plans(), st.tx_class.plans.as_slice());
     }
 
     #[test]
@@ -188,18 +237,20 @@ mod tests {
                 SequencedTxn {
                     epoch: 1,
                     position: 0,
-                    tx_class: tc.clone(),
+                    tx_class: std::sync::Arc::new(tc.clone()),
                     epoch_system_ms: 1_700_000_000_000,
                     epoch_vshard_txn_count: 2,
                     lock_owner: None,
+                    local_plans: None,
                 },
                 SequencedTxn {
                     epoch: 1,
                     position: 1,
-                    tx_class: tc,
+                    tx_class: std::sync::Arc::new(tc),
                     epoch_system_ms: 1_700_000_000_000,
                     epoch_vshard_txn_count: 2,
                     lock_owner: None,
+                    local_plans: None,
                 },
             ],
             epoch_system_ms: 1_700_000_000_000,
@@ -207,7 +258,9 @@ mod tests {
         let bytes = zerompk::to_msgpack_vec(&batch).unwrap();
         let mut decoded: EpochBatch = zerompk::from_msgpack(&bytes).unwrap();
         for txn in &mut decoded.txns {
-            txn.tx_class.restore_derived().expect("restore derived");
+            std::sync::Arc::make_mut(&mut txn.tx_class)
+                .restore_derived()
+                .expect("restore derived");
         }
         assert_eq!(batch.epoch, decoded.epoch);
         assert_eq!(batch.epoch_system_ms, decoded.epoch_system_ms);

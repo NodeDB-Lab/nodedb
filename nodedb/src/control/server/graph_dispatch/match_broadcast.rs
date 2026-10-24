@@ -53,6 +53,8 @@ pub struct GraphRead {
     /// The read observes every write committed before it began: each node
     /// that serves part of it confirms its groups first.
     pub linearizable: bool,
+    /// The bitemporal cut every plan of the read carries.
+    pub scope: nodedb_physical::physical_plan::GraphReadScope,
 }
 
 /// Result of a MATCH cross-core broadcast after envelope unwrapping.
@@ -219,6 +221,7 @@ pub async fn broadcast_match_to_all_cores(
     let GraphRead {
         txn_id,
         linearizable,
+        ..
     } = read;
     // A linearizable read confirms the groups the plan reads first. A MATCH
     // walks the local CSR, so that is every group this node replicates. A
@@ -226,6 +229,13 @@ pub async fn broadcast_match_to_all_cores(
     if linearizable {
         super::read_groups::confirm_graph_read(state, database_id, &plan).await?;
     }
+    // A historical MATCH reads only once this node installed its cut.
+    crate::control::read_cut::await_read_cut(
+        state,
+        &plan,
+        crate::control::server::shared::session::StatementDeadline::of_statement(state),
+    )
+    .await?;
 
     // Shared broadcast call counter (parity with the generic gather path).
     crate::control::server::broadcast::broadcast_call_count_increment();

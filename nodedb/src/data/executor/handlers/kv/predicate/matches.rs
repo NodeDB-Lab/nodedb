@@ -31,6 +31,7 @@ impl CoreLoop {
         filters: &[u8],
         now_ms: u64,
     ) -> Result<Vec<KvPredicateRow>, ErrorCode> {
+        let crs = self.crs_context();
         let predicates: Vec<ScanFilter> = if filters.is_empty() {
             Vec::new()
         } else {
@@ -61,7 +62,7 @@ impl CoreLoop {
                 if !predicates.is_empty() {
                     let (_key_str, row) =
                         crate::data::executor::scan_normalize::kv_row_to_doc(&key, &value);
-                    match ScanFilter::all_match_binary(&predicates, &row) {
+                    match ScanFilter::all_match_binary(&predicates, &row, &crs) {
                         Ok(true) => {}
                         Ok(false) => continue,
                         Err(e) => return Err(ErrorCode::from(e)),

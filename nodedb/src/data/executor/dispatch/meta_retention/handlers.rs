@@ -184,6 +184,13 @@ impl CoreLoop {
         ) {
             Ok(n) => {
                 if n > 0 {
+                    // A historical CSR at a cut the purge reaches read the
+                    // removed versions.
+                    self.historical_csr.invalidate_collection(
+                        task.request.database_id,
+                        tid,
+                        collection,
+                    );
                     tracing::info!(
                         tenant = tenant_id,
                         collection,

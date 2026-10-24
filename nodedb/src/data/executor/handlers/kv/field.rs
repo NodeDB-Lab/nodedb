@@ -170,9 +170,14 @@ impl CoreLoop {
         // The merged body is the row that will exist afterwards, and it exists
         // only now — decided before it is persisted, so a rejected merge leaves
         // the stored row untouched.
-        if let Err(e) =
-            super::rls::admit_kv_row(rls_write_check, &computed.new_value, key, tid, collection)
-        {
+        if let Err(e) = super::rls::admit_kv_row(
+            rls_write_check,
+            &computed.new_value,
+            key,
+            tid,
+            collection,
+            &self.crs_context(),
+        ) {
             return self.response_error(task, e);
         }
 

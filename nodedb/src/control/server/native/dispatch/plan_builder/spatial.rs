@@ -27,16 +27,18 @@ pub(crate) async fn build_scan(
             detail: format!("invalid query geometry: {e}"),
         })?;
 
-    let issues = nodedb_spatial::validate::validate_geometry(&geometry.geometry);
+    let issues = nodedb_spatial::validate::validate_geometry(geometry.geometry());
     if !issues.is_empty() {
+        let reasons: Vec<String> = issues.iter().map(ToString::to_string).collect();
         return Err(crate::Error::BadRequest {
-            detail: format!("invalid query geometry: {}", issues.join("; ")),
+            detail: format!("invalid query geometry: {}", reasons.join("; ")),
         });
     }
 
     let predicate_str = fields.spatial_predicate.as_deref().unwrap_or("dwithin");
     let predicate = match predicate_str.to_lowercase().as_str() {
         "dwithin" => SpatialPredicate::DWithin,
+        "3ddwithin" => SpatialPredicate::DWithin3D,
         "contains" => SpatialPredicate::Contains,
         "intersects" => SpatialPredicate::Intersects,
         "within" => SpatialPredicate::Within,

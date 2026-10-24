@@ -11,7 +11,9 @@
 //!   timeseries, CRDT): the vShard of the collection's `(database, bare name)`
 //!   key, the same key [`vshard_of_stored`] resolves;
 //! - graph edges: dual-homed on `VShardId::from_key(src)` and
-//!   `VShardId::from_key(dst)`, the homes an `EdgePut` is written to.
+//!   `VShardId::from_key(dst)`, the homes an `EdgePut` is written to;
+//! - node labels: homed on `VShardId::from_key(node)`, the home a label
+//!   write is written to.
 //!
 //! The vShard → core step is the dispatcher's own [`VShardRouter`].
 
@@ -152,6 +154,12 @@ impl Splitter<'_> {
         Ok(())
     }
 
+    /// The core a node's labels are stored on: its home vShard's.
+    fn node_core(&self, node: &str) -> Result<usize, SnapshotInstallError> {
+        self.cores
+            .core_of(self.group_id, VShardId::from_key(node.as_bytes()).as_u32())
+    }
+
     /// The cores an edge is stored on: the homes of its two endpoints.
     fn edge_cores(
         &self,
@@ -201,6 +209,8 @@ pub fn split_by_core(
         edge_applied,
         tenant_edge_cuts,
         tenant_edge_applied,
+        node_labels,
+        node_label_versions,
         group_write_marks,
         group_proposal_keys,
         group_proposal_keys_complete_from,
@@ -331,6 +341,16 @@ pub fn split_by_core(
         s.per_core[first]
             .tenant_edge_applied
             .push((db, tid, key, applied));
+    }
+    // A node's labels go to the core of its home vShard, where every label
+    // write of the node routes.
+    for entry in node_labels {
+        let core = s.node_core(&entry.2)?;
+        s.per_core[core].node_labels.push(entry);
+    }
+    for entry in node_label_versions {
+        let core = s.node_core(&entry.2)?;
+        s.per_core[core].node_label_versions.push(entry);
     }
     // A cut covers every edge of its collection, on whichever core it lives.
     for share in &mut s.per_core {
@@ -473,6 +493,22 @@ mod tests {
         for (core, share) in shares.per_core.iter().enumerate() {
             let expected = usize::from(core == endpoint_core(&src) || core == endpoint_core(&dst));
             assert_eq!(share.tenant_edges.len(), expected, "core {core}");
+        }
+    }
+
+    #[test]
+    fn a_nodes_labels_land_on_its_home_core() {
+        let node = "a7";
+        let snap = TenantDataSnapshot {
+            node_labels: vec![(0, 1, node.into(), vec!["L".into()])],
+            node_label_versions: vec![(0, 1, node.into(), 5, vec!["L".into()])],
+            ..Default::default()
+        };
+        let shares = split_by_core(GROUP, snap, &cores()).unwrap();
+        for (core, share) in shares.per_core.iter().enumerate() {
+            let expected = usize::from(core == endpoint_core(node));
+            assert_eq!(share.node_labels.len(), expected, "core {core}");
+            assert_eq!(share.node_label_versions.len(), expected, "core {core}");
         }
     }
 

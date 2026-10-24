@@ -201,6 +201,7 @@ async fn boot_node(options: BootOptions) -> Result<Node, BootError> {
         doc_config_seed: nodedb::bootstrap::data_plane::load_doc_config_registry_from(
             state.credentials.catalog(),
         ),
+        crs_set_seed: state.credentials.catalog().custom_crs_set(),
         event_interest: crate::core_loop_runner::event_interest_for(&state),
         stop_rx: core_stop_rx,
     });

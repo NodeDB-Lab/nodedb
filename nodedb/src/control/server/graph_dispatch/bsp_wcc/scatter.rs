@@ -40,6 +40,11 @@ pub(super) struct WccRound<'a> {
     pub(super) targets: &'a [ShardTarget],
     /// The cut marker every node resolves the round's read cut from.
     pub(super) read_cut_marker: u64,
+    /// A historical round's pinned ordinal: every node waits for the marker
+    /// and reads at it unchanged.
+    pub(super) system_as_of_cap: Option<i64>,
+    /// The valid-time instant the round reads at, or `None`.
+    pub(super) valid_at_ms: Option<i64>,
     pub(super) deadline_ms: u64,
     pub(super) linearizable: bool,
 }
@@ -57,6 +62,8 @@ pub(super) async fn scatter_wcc_round(
         params,
         targets,
         read_cut_marker,
+        system_as_of_cap,
+        valid_at_ms,
         deadline_ms,
         linearizable,
     } = round;
@@ -72,7 +79,8 @@ pub(super) async fn scatter_wcc_round(
             owned_vshards: t.owned_vshards.clone(),
             // Every node resolves the same read cut from the marker.
             read_cut_marker,
-            system_as_of: None,
+            system_as_of: system_as_of_cap,
+            valid_at_ms,
         })));
         let version_set = version_set.clone();
         let node_id = t.node_id;

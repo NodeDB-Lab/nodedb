@@ -153,6 +153,7 @@ impl SqlCatalog for TestCatalog {
                     name: "qual".into(),
                     dtype: crate::types_array::ArrayAttrType::Float64,
                     nullable: true,
+                    meta: Default::default(),
                 }],
                 tile_extents: vec![1, 1_000_000],
                 georef: None,

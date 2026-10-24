@@ -77,6 +77,10 @@ impl SqlCatalog for CteCatalog<'_> {
         }
     }
 
+    fn crs_context(&self) -> nodedb_crs::CrsContext<'_> {
+        self.inner.crs_context()
+    }
+
     fn lookup_array(&self, name: &str) -> Option<ArrayCatalogView> {
         self.inner.lookup_array(name)
     }

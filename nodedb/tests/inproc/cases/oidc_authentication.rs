@@ -8,6 +8,7 @@ use base64::Engine;
 use nodedb::config::auth::{JwtAuthConfig, JwtProviderConfig};
 use nodedb::control::security::jwks::registry::JwksRegistry;
 use nodedb::control::security::oidc::{claim_mapping::apply_claim_mapping, verify_bearer_token};
+use nodedb_test_support::jwks_fixture::{loopback_egress, loopback_sources};
 use nodedb_test_support::pgwire_auth_helpers::{
     ddl_ok, make_state_with_catalog_configured, superuser,
 };
@@ -20,15 +21,11 @@ pub(super) const SESSION: &str = "s_oidc_test";
 
 // ── Catalog-backed bearer verification ─────────────────────────────────────
 
-/// The JWKS policy every catalog-provider test runs under: plain HTTP to the
-/// loopback fixture server.
+/// The `[auth.jwt]` section every catalog-provider test runs under. Its
+/// registry fetches from the loopback fixture server through
+/// [`loopback_egress`].
 pub(super) fn loopback_jwks_config() -> JwtAuthConfig {
-    JwtAuthConfig {
-        allow_http_jwks: true,
-        allow_jwks_hosts: vec!["localhost".into()],
-        allow_jwks_cidrs: vec!["127.0.0.0/8".into(), "::1/128".into()],
-        ..JwtAuthConfig::default()
-    }
+    JwtAuthConfig::default()
 }
 
 /// A catalog-backed state whose JWKS registry is built from `config`. The
@@ -36,10 +33,13 @@ pub(super) fn loopback_jwks_config() -> JwtAuthConfig {
 pub(super) async fn state_with_registry(
     config: JwtAuthConfig,
 ) -> nodedb_test_support::pgwire_auth_helpers::BootedState {
-    let registry = JwksRegistry::init(config)
+    let registry = JwksRegistry::init(config, loopback_egress())
         .await
         .expect("test JWKS registry must initialize");
-    make_state_with_catalog_configured(|state| state.jwks_registry = Some(Arc::new(registry)))
+    make_state_with_catalog_configured(|state| {
+        state.remote_sources = loopback_sources();
+        state.jwks_registry = Some(Arc::new(registry));
+    })
 }
 
 pub(super) async fn spawn_static_jwks(body: String) -> String {
@@ -180,7 +180,7 @@ async fn catalog_provider_tenant_binding_overrides_signed_tenant_claim() {
              JWKS_URI '{jwks_uri}' \
              AUDIENCE 'nodedb-api' \
              TENANT 42 \
-             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 1"
+             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 0"
         ),
     )
     .await;
@@ -227,7 +227,7 @@ async fn catalog_provider_does_not_reuse_static_provider_cache_entry() {
              JWKS_URI '{catalog_jwks_uri}' \
              AUDIENCE 'catalog-api' \
              TENANT 42 \
-             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 1"
+             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 0"
         ),
     )
     .await;
@@ -265,7 +265,7 @@ async fn catalog_authentication_failures_are_client_indistinguishable() {
              JWKS_URI '{jwks_uri}' \
              AUDIENCE 'expected-audience' \
              TENANT 42 \
-             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 1"
+             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 0"
         ),
     )
     .await;
@@ -278,7 +278,7 @@ async fn catalog_authentication_failures_are_client_indistinguishable() {
              JWKS_URI '{expired_jwks_uri}' \
              AUDIENCE 'expired-audience' \
              TENANT 42 \
-             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 1"
+             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 0"
         ),
     )
     .await;
@@ -330,14 +330,9 @@ async fn catalog_provider_cache_identity_frames_name_and_uri() {
         "fixture tuples must collide under the legacy concatenated cache identity"
     );
 
-    let registry = JwksRegistry::init(JwtAuthConfig {
-        allow_http_jwks: true,
-        allow_jwks_hosts: vec!["localhost".into()],
-        allow_jwks_cidrs: vec!["127.0.0.0/8".into(), "::1/128".into()],
-        ..JwtAuthConfig::default()
-    })
-    .await
-    .expect("test JWKS registry must initialize");
+    let registry = JwksRegistry::init(JwtAuthConfig::default(), loopback_egress())
+        .await
+        .expect("test JWKS registry must initialize");
 
     registry
         .validate_with_catalog_provider(first_provider_name, &first_provider_uri, &first_token)
@@ -367,7 +362,7 @@ async fn authenticated_token_is_rejected_when_provider_tenant_was_dropped() {
              JWKS_URI '{jwks_uri}' \
              AUDIENCE 'nodedb-api' \
              TENANT 42 \
-             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 1"
+             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 0"
         ),
     )
     .await;

@@ -31,7 +31,7 @@ These planes communicate only through bounded lock-free bridges:
 
 **Mixing planes is a correctness bug, not a style issue.** Spawning a Tokio task from Data Plane code, or calling io_uring from Control Plane code, will be rejected in review regardless of how small the change is.
 
-Before writing any Data Plane or engine code, read `nodedb/CLAUDE.md` in full. It covers the plane rules, engine routing via `EngineRules`, serialization requirements, error handling conventions, and file size limits — all of which are enforced in review.
+Before writing any Data Plane or engine code, follow these rules. Review enforces them: plane separation, engine routing through `EngineRules`, MessagePack for internal transport, typed errors, and the 500-line file limit.
 
 ---
 
@@ -106,7 +106,7 @@ cargo nextest run --all-features                            # tests
 cargo deny check                                            # dependency audit
 ```
 
-Key rules (full list in `nodedb/CLAUDE.md`):
+Key rules:
 
 - No `.unwrap()` in library code — use `thiserror`, propagate errors
 - No `Result<T, String>` — always typed error enums
@@ -231,10 +231,14 @@ NodeDB uses a mixed-license model for its runtime and library crates:
 
 | Crates                                                                                                                                                                                                                                                                                | License                          |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
-| `nodedb-types`, `nodedb-client`, `nodedb-query`, `nodedb-codec`, `nodedb-spatial`, `nodedb-graph`, `nodedb-vector`, `nodedb-vector-gpu`, `nodedb-fts`, `nodedb-strict`, `nodedb-columnar`, `nodedb-array`, `nodedb-sql`, `nodedb-physical`, `nodedb-wal`, `nodedb-mem`, `nodedb-crdt` | [Apache 2.0](LICENSE.APACHE-2.0) |
+| `nodedb-types`, `nodedb-srid`, `nodedb-crs`, `nodedb-client`, `nodedb-query`, `nodedb-codec`, `nodedb-spatial`, `nodedb-graph`, `nodedb-vector`, `nodedb-vector-gpu`, `nodedb-fts`, `nodedb-strict`, `nodedb-columnar`, `nodedb-array`, `nodedb-raster`, `nodedb-raster-load`, `nodedb-sql`, `nodedb-physical`, `nodedb-wal`, `nodedb-mem`, `nodedb-crdt` | [Apache 2.0](LICENSE.APACHE-2.0) |
 | `nodedb` (server), `nodedb-bridge`, `nodedb-raft`, `nodedb-cluster`                                                                                                                                                                                                                   | [BUSL-1.1](LICENSE)              |
 
-**What this means for contributors:** contributions to Apache-2.0 crates are under Apache 2.0; contributions to server crates are under BUSL-1.1. No CLA is required for either.
+**What this means for contributors:** you sign the Contributor Assignment Agreement (the CLA) once, before your first pull request merges. It assigns the copyright in your contributions to Biz Impulse Solutions Sdn. Bhd. and gives you a licence back to use your own code for any purpose. The code stays public under the licence of its crate: Apache 2.0 for the library crates, BUSL-1.1 for the server crates.
+
+## Contributor Assignment Agreement
+
+Our CLA assistant comments on your first pull request with a link to sign. You sign once for all later pull requests. The agreement is [CLA.md](CLA.md) in this repository. If you write code for an employer, your employer must consent in the form the agreement provides.
 
 **What this means for SDK/tool builders:** you can depend on the Apache-2.0 crates freely in your own open-source or commercial projects. The BUSL restriction only applies to the server crates — you are not affected unless you are redistributing the NodeDB server itself as a hosted service.
 

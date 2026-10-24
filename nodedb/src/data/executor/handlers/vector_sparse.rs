@@ -180,6 +180,7 @@ impl CoreLoop {
         let hits = match super::vector_sparse_window::rank_sparse_window(
             top_k,
             &residual,
+            &self.crs_context(),
             |k| crate::engine::vector::sparse::search::dot_product_topk(index, &query, k),
             |hit| self.attach_body(database_id, tid, collection, true, hit),
         ) {

@@ -129,6 +129,7 @@ impl CoreLoop {
         bindings: &[MaterializedSumBinding],
         images: &RowImages<'_>,
     ) -> crate::Result<Vec<TargetWrite>> {
+        let crs = self.crs_context();
         let mut writes: Vec<TargetWrite> = Vec::new();
         // The source's canonical key, de-qualified from the plan's name once.
         let source = nodedb_types::CollectionKey::from_qualified_str(
@@ -159,7 +160,7 @@ impl CoreLoop {
             {
                 continue;
             }
-            for (join_value, delta) in coalesce(fold_sum_deltas(binding, images)?) {
+            for (join_value, delta) in coalesce(fold_sum_deltas(binding, images, &crs)?) {
                 // A zero net delta leaves the stored total unchanged, so the
                 // read-modify-write would rewrite the row byte-for-byte. An
                 // UPDATE that touched no amount produces exactly this.

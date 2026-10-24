@@ -26,7 +26,7 @@ pub(in crate::data::executor) struct SpatialRowUndo {
     pub entry_id: u64,
     /// The R-tree entry, its reverse-map value and the tree's SRID before the
     /// write, `None` when the field held no entry for the row.
-    pub prior_entry: Option<(BoundingBox, String, nodedb_types::geometry::Srid)>,
+    pub prior_entry: Option<(BoundingBox, String, crate::engine::spatial::TreeSrid)>,
 }
 
 impl CoreLoop {
@@ -62,7 +62,7 @@ impl CoreLoop {
                     .into_iter()
                     .find(|entry| entry.id == entry_id)
                     .map(|entry| entry.bbox)?;
-                Some((bbox, document_id.clone(), rtree.srid()))
+                Some((bbox, document_id.clone(), rtree.tree_srid()))
             });
         Ok(UndoEntry::SpatialRow(Box::new(SpatialRowUndo {
             key,

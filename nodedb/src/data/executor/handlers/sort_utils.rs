@@ -20,6 +20,7 @@ use nodedb_query::{EvalError, compare_json, eval_expr_on_json};
 pub(in crate::data::executor) fn sort_msgpack_rows(
     rows: &mut [Vec<u8>],
     sort_keys: &[SortKeySpec],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     if sort_keys.is_empty() {
         return Ok(());
@@ -34,7 +35,7 @@ pub(in crate::data::executor) fn sort_msgpack_rows(
         })
         .collect::<crate::Result<_>>()?;
 
-    let keyed = sort_key_values(&decoded, sort_keys)?;
+    let keyed = sort_key_values(&decoded, sort_keys, crs)?;
 
     let mut indices: Vec<usize> = (0..rows.len()).collect();
     indices.sort_by(|&a, &b| compare_key_rows(&keyed[a], &keyed[b], sort_keys));
@@ -53,12 +54,13 @@ pub(in crate::data::executor) fn sort_msgpack_rows(
 pub(in crate::data::executor) fn sort_key_values(
     rows: &[serde_json::Value],
     sort_keys: &[SortKeySpec],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<Vec<Vec<serde_json::Value>>, EvalError> {
     rows.iter()
         .map(|row| {
             sort_keys
                 .iter()
-                .map(|k| eval_expr_on_json(&k.expr, row))
+                .map(|k| eval_expr_on_json(&k.expr, row, crs))
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect()

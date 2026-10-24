@@ -279,10 +279,18 @@ fn array_length_function() {
         .unwrap()
         .0;
     let doc = nodedb_types::Value::from(serde_json::json!({"tags": ["a", "b", "c"]}));
-    assert_eq!(expr.eval(&doc).unwrap(), nodedb_types::Value::Integer(3));
+    assert_eq!(
+        expr.eval(&doc, &nodedb_crs::CrsContext::builtin_only())
+            .unwrap(),
+        nodedb_types::Value::Integer(3)
+    );
 
     let doc2 = nodedb_types::Value::from(serde_json::json!({"tags": []}));
-    assert_eq!(expr.eval(&doc2).unwrap(), nodedb_types::Value::Integer(0));
+    assert_eq!(
+        expr.eval(&doc2, &nodedb_crs::CrsContext::builtin_only())
+            .unwrap(),
+        nodedb_types::Value::Integer(0)
+    );
 }
 
 #[test]
@@ -292,7 +300,8 @@ fn array_append_function() {
         .0;
     let doc = nodedb_types::Value::from(serde_json::json!({"tags": ["a", "b"]}));
     assert_eq!(
-        expr.eval(&doc).unwrap(),
+        expr.eval(&doc, &nodedb_crs::CrsContext::builtin_only())
+            .unwrap(),
         nodedb_types::Value::Array(vec![
             nodedb_types::Value::String("a".into()),
             nodedb_types::Value::String("b".into()),
@@ -308,7 +317,8 @@ fn array_remove_function() {
         .0;
     let doc = nodedb_types::Value::from(serde_json::json!({"tags": ["a", "b", "c"]}));
     assert_eq!(
-        expr.eval(&doc).unwrap(),
+        expr.eval(&doc, &nodedb_crs::CrsContext::builtin_only())
+            .unwrap(),
         nodedb_types::Value::Array(vec![
             nodedb_types::Value::String("a".into()),
             nodedb_types::Value::String("c".into()),

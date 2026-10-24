@@ -59,20 +59,9 @@ pub(in crate::control::server) async fn maybe_intercept_clone_read(
         roles,
         emitter,
     } = params;
-    // With `system_as_of_ms`, query_lsn is the highest LSN committed by that
-    // time, and a time before the oldest retained anchor is refused. Without
-    // it, query_lsn is the current WAL LSN.
-    let (query_lsn, query_ms) = if let Some(as_of_ms) = extract_system_as_of_ms(Some(&task.plan)) {
-        let lsn = state.ms_to_lsn(as_of_ms)?;
-        (lsn, Some(as_of_ms))
-    } else {
-        let lsn = state.wal.next_lsn();
-        let ms = state.ms_to_lsn_inverse(lsn);
-        (lsn, ms)
-    };
+    // The resolver maps the `AS OF` time to an LSN only for a live clone.
     let resolve_params = CloneReadParams {
-        query_lsn,
-        query_ms,
+        as_of_ms: extract_system_as_of_ms(Some(&task.plan)),
     };
 
     let Some(outcome) = resolve_read(state, task.clone(), tenant_id, &resolve_params).await? else {

@@ -161,6 +161,7 @@ pub(crate) async fn run_update_from_join(
                 std::iter::empty(),
                 args.tenant_id,
                 args.target_collection,
+                &crate::control::crs_context::crs_context_for(state),
             )?;
             Vec::new()
         };
@@ -264,6 +265,7 @@ async fn resolve_matched_rows(
         arms.iter().map(|(_, _, body, _)| body.as_slice()),
         args.tenant_id,
         args.target_collection,
+        &crate::control::crs_context::crs_context_for(state),
     )?;
     let bodies: Vec<&[u8]> = arms
         .iter()

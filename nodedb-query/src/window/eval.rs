@@ -10,6 +10,7 @@ use super::ranking::{
     apply_row_number,
 };
 use super::spec::WindowFuncSpec;
+use nodedb_crs::CrsContext;
 
 /// Evaluate window functions over sorted, partitioned rows.
 ///
@@ -26,32 +27,35 @@ use super::spec::WindowFuncSpec;
 /// A division/modulo-by-zero in any PARTITION BY / ORDER BY / argument
 /// expression propagates as `Err(EvalError::DivisionByZero)` rather than
 /// folding to NULL.
+///
+/// Geo functions in any expression resolve SRIDs through `crs`.
 pub fn evaluate_window_functions(
     rows: &mut [(String, nodedb_types::Value)],
     specs: &[WindowFuncSpec],
+    crs: &CrsContext<'_>,
 ) -> Result<(), crate::expr::EvalError> {
     for spec in specs {
-        let partitions = build_partitions(rows, &spec.partition_by, &spec.order_by)?;
+        let partitions = build_partitions(rows, &spec.partition_by, &spec.order_by, crs)?;
 
         for partition_indices in &partitions {
             match spec.func_name.as_str() {
                 "row_number" => apply_row_number(rows, partition_indices, &spec.alias),
-                "rank" => apply_rank(rows, partition_indices, &spec.alias, &spec.order_by)?,
+                "rank" => apply_rank(rows, partition_indices, &spec.alias, &spec.order_by, crs)?,
                 "dense_rank" => {
-                    apply_dense_rank(rows, partition_indices, &spec.alias, &spec.order_by)?
+                    apply_dense_rank(rows, partition_indices, &spec.alias, &spec.order_by, crs)?
                 }
                 "ntile" => apply_ntile(rows, partition_indices, spec),
                 "percent_rank" => {
-                    apply_percent_rank(rows, partition_indices, &spec.alias, &spec.order_by)?
+                    apply_percent_rank(rows, partition_indices, &spec.alias, &spec.order_by, crs)?
                 }
                 "cume_dist" => {
-                    apply_cume_dist(rows, partition_indices, &spec.alias, &spec.order_by)?
+                    apply_cume_dist(rows, partition_indices, &spec.alias, &spec.order_by, crs)?
                 }
-                "lag" => apply_lag(rows, partition_indices, spec)?,
-                "lead" => apply_lead(rows, partition_indices, spec)?,
-                "nth_value" => apply_nth_value(rows, partition_indices, spec)?,
+                "lag" => apply_lag(rows, partition_indices, spec, crs)?,
+                "lead" => apply_lead(rows, partition_indices, spec, crs)?,
+                "nth_value" => apply_nth_value(rows, partition_indices, spec, crs)?,
                 "sum" | "count" | "avg" | "min" | "max" | "first_value" | "last_value" => {
-                    apply_aggregate_window(rows, partition_indices, spec)?
+                    apply_aggregate_window(rows, partition_indices, spec, crs)?
                 }
                 other => {
                     unreachable!(
@@ -130,7 +134,8 @@ mod tests {
             order_by: vec![],
             frame: WindowFrame::default(),
         };
-        evaluate_window_functions(&mut rows, &[spec]).unwrap();
+        evaluate_window_functions(&mut rows, &[spec], &nodedb_crs::CrsContext::builtin_only())
+            .unwrap();
         assert_eq!(col(&rows[0], "rn"), json!(1));
         assert_eq!(col(&rows[4], "rn"), json!(5));
     }
@@ -146,7 +151,8 @@ mod tests {
             order_by: vec![],
             frame: WindowFrame::default(),
         };
-        evaluate_window_functions(&mut rows, &[spec]).unwrap();
+        evaluate_window_functions(&mut rows, &[spec], &nodedb_crs::CrsContext::builtin_only())
+            .unwrap();
         assert_eq!(col(&rows[0], "rn"), json!(1));
         assert_eq!(col(&rows[2], "rn"), json!(3));
         assert_eq!(col(&rows[3], "rn"), json!(1));
@@ -164,7 +170,8 @@ mod tests {
             order_by: vec![(SqlExpr::Column("salary".into()), true)],
             frame: WindowFrame::default(),
         };
-        evaluate_window_functions(&mut rows, &[spec]).unwrap();
+        evaluate_window_functions(&mut rows, &[spec], &nodedb_crs::CrsContext::builtin_only())
+            .unwrap();
         // The frame runs in salary order within each dept, not in row
         // arrival order: eng = Carol(90) → Alice(100) → Bob(120).
         // Integer salaries total exactly as integers.
@@ -202,7 +209,8 @@ mod tests {
         ];
         let mut spec = ordered_by_n("total", "sum");
         spec.args = vec![SqlExpr::Column("x".into())];
-        evaluate_window_functions(&mut rows, &[spec]).unwrap();
+        evaluate_window_functions(&mut rows, &[spec], &nodedb_crs::CrsContext::builtin_only())
+            .unwrap();
         assert_eq!(rows[0].1.get("total"), Some(&Value::Float(1e308)));
         assert_eq!(rows[1].1.get("total"), Some(&Value::Float(f64::INFINITY)));
     }
@@ -217,7 +225,12 @@ mod tests {
             ("c".to_string(), doc(f64::NAN)),
             ("d".to_string(), doc(f64::INFINITY)),
         ];
-        evaluate_window_functions(&mut rows, &[ordered_by_n("rnk", "rank")]).unwrap();
+        evaluate_window_functions(
+            &mut rows,
+            &[ordered_by_n("rnk", "rank")],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert_eq!(col(&rows[1], "rnk"), json!(1));
         assert_eq!(col(&rows[3], "rnk"), json!(2));
         assert_eq!(col(&rows[0], "rnk"), json!(3));
@@ -227,7 +240,12 @@ mod tests {
     #[test]
     fn percent_rank_distinct_keys() {
         let mut rows = numbered(5);
-        evaluate_window_functions(&mut rows, &[ordered_by_n("pr", "percent_rank")]).unwrap();
+        evaluate_window_functions(
+            &mut rows,
+            &[ordered_by_n("pr", "percent_rank")],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert_eq!(col(&rows[0], "pr"), json!(0.0));
         assert_eq!(col(&rows[1], "pr"), json!(0.25));
         assert_eq!(col(&rows[2], "pr"), json!(0.5));
@@ -240,7 +258,12 @@ mod tests {
         // Peers share the leader's rank, so [1, 1, 2, 3] yields ranks
         // 1, 1, 3, 4 → percent_rank = 0, 0, 2/3, 3/3.
         let mut rows = peers();
-        evaluate_window_functions(&mut rows, &[ordered_by_n("pr", "percent_rank")]).unwrap();
+        evaluate_window_functions(
+            &mut rows,
+            &[ordered_by_n("pr", "percent_rank")],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert_eq!(col(&rows[0], "pr"), json!(0.0));
         assert_eq!(col(&rows[1], "pr"), json!(0.0));
         assert_eq!(col(&rows[2], "pr"), json!(2.0 / 3.0));
@@ -250,7 +273,12 @@ mod tests {
     #[test]
     fn cume_dist_distinct_keys() {
         let mut rows = numbered(5);
-        evaluate_window_functions(&mut rows, &[ordered_by_n("cd", "cume_dist")]).unwrap();
+        evaluate_window_functions(
+            &mut rows,
+            &[ordered_by_n("cd", "cume_dist")],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert_eq!(col(&rows[0], "cd"), json!(0.2));
         assert_eq!(col(&rows[1], "cd"), json!(0.4));
         assert_eq!(col(&rows[2], "cd"), json!(0.6));
@@ -261,7 +289,12 @@ mod tests {
     #[test]
     fn cume_dist_with_peers() {
         let mut rows = peers();
-        evaluate_window_functions(&mut rows, &[ordered_by_n("cd", "cume_dist")]).unwrap();
+        evaluate_window_functions(
+            &mut rows,
+            &[ordered_by_n("cd", "cume_dist")],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         // Peers share value of last peer's position / N.
         assert_eq!(col(&rows[0], "cd"), json!(0.5));
         assert_eq!(col(&rows[1], "cd"), json!(0.5));
@@ -277,7 +310,8 @@ mod tests {
             SqlExpr::Column("n".into()),
             SqlExpr::Literal(Value::Integer(2)),
         ];
-        evaluate_window_functions(&mut rows, &[spec]).unwrap();
+        evaluate_window_functions(&mut rows, &[spec], &nodedb_crs::CrsContext::builtin_only())
+            .unwrap();
         assert_eq!(col(&rows[0], "nv"), json!(null));
         assert_eq!(col(&rows[1], "nv"), json!(2));
         assert_eq!(col(&rows[2], "nv"), json!(2));
@@ -299,7 +333,8 @@ mod tests {
             order_by: vec![(SqlExpr::Column("salary".into()), false)],
             frame: WindowFrame::default(),
         };
-        evaluate_window_functions(&mut rows, &[spec]).unwrap();
+        evaluate_window_functions(&mut rows, &[spec], &nodedb_crs::CrsContext::builtin_only())
+            .unwrap();
         assert_eq!(col(&rows[0], "name"), json!("Alice"));
         assert_eq!(col(&rows[1], "name"), json!("Bob"));
         assert_eq!(col(&rows[2], "name"), json!("Carol"));
@@ -324,6 +359,7 @@ mod tests {
             order_by: vec![],
             frame: WindowFrame::default(),
         };
-        evaluate_window_functions(&mut rows, &[spec]).unwrap();
+        evaluate_window_functions(&mut rows, &[spec], &nodedb_crs::CrsContext::builtin_only())
+            .unwrap();
     }
 }

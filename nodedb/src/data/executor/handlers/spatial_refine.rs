@@ -10,9 +10,9 @@
 //! `spatial` / columnar-family row (fetched from columnar) alike.
 
 use nodedb_physical::physical_plan::SpatialPredicate;
-use nodedb_spatial::SridMismatch;
+use nodedb_spatial::{Metric, SridMismatch};
+use nodedb_types::Value;
 use nodedb_types::geometry::SridGeometry;
-use nodedb_types::{BboxSpace, Value};
 
 /// Extract geometry from a document field.
 ///
@@ -22,11 +22,17 @@ use nodedb_types::{BboxSpace, Value};
 /// - `Value::Object(_)` — GeoJSON object (from schemaless doc storage)
 ///
 /// GeoJSON keeps the SRID its `crs` member names; no member is WGS 84.
+/// `Ok(None)` when the field is absent or holds no geometry. `Err` when the
+/// geometry names an SRID `crs` does not define.
 pub(in crate::data::executor) fn extract_geometry(
     doc: &Value,
     field: &str,
-) -> Option<SridGeometry> {
-    SridGeometry::from_value(doc.get(field)?)
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> Result<Option<SridGeometry>, nodedb_crs::UnknownSrid> {
+    match doc.get(field) {
+        Some(value) => SridGeometry::from_value(value, crs),
+        None => Ok(None),
+    }
 }
 
 /// Apply the spatial predicate.
@@ -34,13 +40,16 @@ pub(in crate::data::executor) fn extract_geometry(
 /// The stored and query geometries must share an SRID: a mismatch is
 /// [`SridMismatch`] (`index` the stored SRID, `entry` the query's), which
 /// the caller raises as `Error::MixedSrid` instead of skipping the row.
-/// `ST_DWithin` measures geodesic metres for 4326 and planar metres for a
-/// projected SRID.
+/// `metric` is the shared SRID's metric: `ST_DWithin` measures geodesic
+/// metres on the CRS ellipsoid in a geographic CRS, and grid metres in a
+/// projected one. `ST_3DDWithin` adds Z in metres. An EMPTY operand
+/// matches no predicate.
 pub(in crate::data::executor) fn apply_predicate(
     predicate: &SpatialPredicate,
     query: &SridGeometry,
     doc: &SridGeometry,
     distance_meters: f64,
+    metric: &Metric,
 ) -> Result<bool, SridMismatch> {
     if query.srid != doc.srid {
         return Err(SridMismatch {
@@ -48,15 +57,10 @@ pub(in crate::data::executor) fn apply_predicate(
             entry: query.srid,
         });
     }
-    let (q, d) = (&query.geometry, &doc.geometry);
+    let (q, d) = (query.geometry(), doc.geometry());
     Ok(match predicate {
-        SpatialPredicate::DWithin => {
-            if doc.srid.is_geographic() {
-                crate::engine::spatial::st_dwithin(q, d, distance_meters)
-            } else {
-                nodedb_spatial::planar_dwithin(q, d, distance_meters)
-            }
-        }
+        SpatialPredicate::DWithin => metric.dwithin(q, d, distance_meters),
+        SpatialPredicate::DWithin3D => metric.dwithin_3d(query, doc, distance_meters),
         // `ST_Contains(loc, q)` asks whether the *stored* geometry contains
         // the query geometry — the geofencing shape, where `loc` is a zone
         // polygon and `q` a point. `ST_Within(loc, q)` is its converse. Both
@@ -142,38 +146,110 @@ pub(in crate::data::executor) fn project_doc(
     }
 }
 
-/// Metres per degree used to widen a geographic search box: the WGS 84
-/// equatorial degree of longitude, rounded. Using it for latitude too keeps
-/// the box at least as wide as the true distance.
-const METRES_PER_DEGREE: f64 = 111_320.0;
-
-/// Floor on cos(latitude) so a box near a pole stays finite.
-const MIN_COS_LAT: f64 = 0.001;
-
-/// Expand a bounding box by a distance in meters, in `space`.
-///
-/// Geographic space converts metres to degrees at the box's mean latitude.
-/// Planar space adds the metres directly.
-pub(in crate::data::executor) fn expand_bbox(
-    bbox: &nodedb_types::BoundingBox,
-    meters: f64,
-    space: BboxSpace,
+/// The R-tree search box of `predicate`: the query box, widened to cover
+/// every point within `distance_meters` for the distance predicates.
+pub(in crate::data::executor) fn search_bbox(
+    predicate: &SpatialPredicate,
+    query_bbox: nodedb_types::BoundingBox,
+    distance_meters: f64,
+    metric: &Metric,
 ) -> nodedb_types::BoundingBox {
-    let (lng_delta, lat_delta) = match space {
-        BboxSpace::Geographic => {
-            let avg_lat = ((bbox.min_lat + bbox.max_lat) / 2.0).to_radians();
-            (
-                meters / (METRES_PER_DEGREE * avg_lat.cos().max(MIN_COS_LAT)),
-                meters / METRES_PER_DEGREE,
-            )
+    match predicate {
+        SpatialPredicate::DWithin => metric.widen(&query_bbox, distance_meters),
+        SpatialPredicate::DWithin3D => metric.widen(&query_bbox, metric.reach_3d(distance_meters)),
+        SpatialPredicate::Contains | SpatialPredicate::Intersects | SpatialPredicate::Within => {
+            query_bbox
         }
-        BboxSpace::Planar => (meters, meters),
-    };
+    }
+}
 
-    nodedb_types::BoundingBox::new(
-        bbox.min_lng - lng_delta,
-        bbox.min_lat - lat_delta,
-        bbox.max_lng + lng_delta,
-        bbox.max_lat + lat_delta,
-    )
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nodedb_types::geometry::{Geometry, Ordinates, Srid};
+
+    fn metric(code: u32) -> Metric {
+        let crs = nodedb_crs::CrsContext::builtin_only();
+        Metric::resolve(&crs, Srid::new(code).unwrap()).unwrap()
+    }
+
+    /// EPSG:2263 is in US survey feet: a 100 m search widens the box by
+    /// about 328 ft, and a metre CRS by 100 m.
+    #[test]
+    fn planar_expansion_is_in_the_crs_unit() {
+        let bbox = nodedb_types::BoundingBox::from_point(1_000_000.0, 200_000.0);
+        let feet = search_bbox(&SpatialPredicate::DWithin, bbox, 100.0, &metric(2263));
+        let expected_ft = 100.0 / (1200.0 / 3937.0);
+        assert!(
+            (feet.max_lng - 1_000_000.0 - expected_ft).abs() < 1e-6,
+            "{feet:?}"
+        );
+        let metres = search_bbox(&SpatialPredicate::DWithin, bbox, 100.0, &metric(32618));
+        assert!((metres.max_lng - 1_000_100.0).abs() < 1e-9, "{metres:?}");
+    }
+
+    /// The geographic search box covers the true geodesic reach in
+    /// latitude: 100 km north of the equator is 0.9043 degrees, more than
+    /// 100 km over the equatorial degree of longitude.
+    #[test]
+    fn geographic_expansion_covers_latitude_reach() {
+        let bbox = nodedb_types::BoundingBox::from_point(0.0, 0.0);
+        let wide = search_bbox(&SpatialPredicate::DWithin, bbox, 100_000.0, &metric(4326));
+        assert!(wide.max_lat >= 0.9043, "{wide:?}");
+        let a = SridGeometry::wgs84(Geometry::point(0.0, 0.0));
+        let b = SridGeometry::wgs84(Geometry::point(0.0, 0.904));
+        assert!(
+            apply_predicate(&SpatialPredicate::DWithin, &a, &b, 100_000.0, &metric(4326)).unwrap()
+        );
+    }
+
+    /// `ST_DWithin` in a feet CRS compares metres, not feet.
+    #[test]
+    fn planar_dwithin_converts_metres_to_the_crs_unit() {
+        let srid = Srid::new(2263).unwrap();
+        let a = SridGeometry::new(srid, Geometry::point(0.0, 0.0));
+        // 300 ft is about 91.44 m.
+        let b = SridGeometry::new(srid, Geometry::point(300.0, 0.0));
+        let within =
+            |m: f64| apply_predicate(&SpatialPredicate::DWithin, &a, &b, m, &metric(2263)).unwrap();
+        assert!(within(92.0));
+        assert!(!within(91.0));
+    }
+
+    /// `ST_3DDWithin` counts the Z gap: 30 m apart in plan, 40 m in Z.
+    #[test]
+    fn dwithin_3d_counts_z() {
+        let srid = Srid::new(32618).unwrap();
+        let at = |x: f64, z: f64| {
+            SridGeometry::with_ordinates(
+                srid,
+                Geometry::point(x, 0.0),
+                Ordinates::new(Some(vec![z]), None),
+            )
+            .unwrap()
+        };
+        let (a, b) = (at(0.0, 0.0), at(30.0, 40.0));
+        let within = |m: f64| {
+            apply_predicate(&SpatialPredicate::DWithin3D, &a, &b, m, &metric(32618)).unwrap()
+        };
+        assert!(within(50.0));
+        assert!(!within(49.9));
+        assert!(apply_predicate(&SpatialPredicate::DWithin, &a, &b, 30.0, &metric(32618)).unwrap());
+    }
+
+    /// An EMPTY stored geometry matches no predicate.
+    #[test]
+    fn empty_matches_nothing() {
+        let q = SridGeometry::wgs84(Geometry::point(0.0, 0.0));
+        let empty = SridGeometry::wgs84(Geometry::empty_point());
+        for predicate in [
+            SpatialPredicate::DWithin,
+            SpatialPredicate::DWithin3D,
+            SpatialPredicate::Contains,
+            SpatialPredicate::Intersects,
+            SpatialPredicate::Within,
+        ] {
+            assert!(!apply_predicate(&predicate, &q, &empty, 1e9, &metric(4326)).unwrap());
+        }
+    }
 }

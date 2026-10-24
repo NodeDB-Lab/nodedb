@@ -18,7 +18,7 @@
 //! * [`filter_region_owned`] — per-cell filter of one tile, through a
 //!   [`PreparedRegion`] built once per scan.
 
-use nodedb_spatial::crs::Transformer;
+use nodedb_crs::Transformer;
 use nodedb_types::geometry::point_in_polygon;
 
 use super::slice::{Slice, cell_in_slice, filter_sparse, slice_sparse_owned, tile_overlaps_slice};
@@ -315,6 +315,7 @@ mod tests {
 
     /// A zone drawn in `zone_srid` over a world-mode array in `array_srid`.
     fn framed(array_srid: Srid, zone_srid: Srid, polygons: Vec<ZonePolygon>) -> ArrayRegion {
+        let ctx = nodedb_crs::CrsContext::builtin_only();
         ArrayRegion::new(
             Slice::default(),
             Some(PolygonZone {
@@ -323,8 +324,8 @@ mod tests {
                 polygons,
                 frame: Some(ZoneFrame {
                     transform: None,
-                    array_srid,
-                    zone_srid,
+                    array_crs: (*ctx.resolve(array_srid).unwrap()).clone(),
+                    zone_crs: (*ctx.resolve(zone_srid).unwrap()).clone(),
                     dim_bbox: [-180.0, -90.0, 180.0, 90.0],
                 }),
             }),
@@ -334,8 +335,8 @@ mod tests {
     #[test]
     fn a_framed_zone_keeps_the_edge_and_hole_rules() {
         let r = framed(
-            Srid::Wgs84,
-            Srid::Wgs84,
+            Srid::WGS84,
+            Srid::WGS84,
             vec![ZonePolygon {
                 exterior: square(0.0, 10.0),
                 holes: vec![square(4.0, 6.0)],
@@ -360,8 +361,8 @@ mod tests {
     #[test]
     fn a_cell_the_projection_cannot_map_is_outside() {
         let r = framed(
-            Srid::Wgs84,
-            Srid::Utm47N,
+            Srid::WGS84,
+            Srid::new(32647).unwrap(),
             vec![ZonePolygon {
                 exterior: square(-1.0e7, 1.0e7),
                 holes: Vec::new(),
@@ -378,8 +379,8 @@ mod tests {
     #[test]
     fn a_framed_zone_prunes_by_its_dim_box() {
         let mut r = framed(
-            Srid::Wgs84,
-            Srid::Wgs84,
+            Srid::WGS84,
+            Srid::WGS84,
             vec![ZonePolygon {
                 exterior: square(0.0, 50.0),
                 holes: Vec::new(),

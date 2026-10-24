@@ -71,10 +71,7 @@ pub async fn submit_calvin_routed(
     state: &SharedState,
     mut tx_class: TxClass,
 ) -> crate::Result<Option<Response>> {
-    super::local::raise_metadata_floor(state, &mut tx_class);
-    super::local::stamp_incarnations(state, &mut tx_class)?;
-    super::unique_claims::stamp_unique_claims(state, &mut tx_class)?;
-    let stream = super::parts::split_into_parts(state, &mut tx_class)?;
+    let prepared = super::prepare::prepare_submit(state, &mut tx_class)?;
     // Every running server has a cluster transport, the synthesized one-node
     // cluster included. Without one, `start_raft` never ran here.
     let Some(transport) = state.cluster_transport.as_ref() else {
@@ -125,7 +122,7 @@ pub async fn submit_calvin_routed(
     // Leader is self: submit-and-await locally (a self-RPC will be a pointless
     // extra hop and the local registry is the one that completes).
     if leader == state.node_id {
-        return submit_prepared_and_await(state, tx_class, stream, deadline).await;
+        return submit_prepared_and_await(state, tx_class, prepared, deadline).await;
     }
 
     // Remote leader: ensure its address is registered before dispatch, then send
@@ -161,7 +158,7 @@ pub async fn submit_calvin_routed(
     // The header's reply comes only at completion, so the parts stream
     // beside it. The leader opens the stream when it proposes the header;
     // until then it answers `Unknown`, and the stream waits.
-    let reply = match &stream {
+    let reply = match &prepared.stream {
         None => header.await,
         Some(stream) => {
             tokio::pin!(header);

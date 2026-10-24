@@ -276,6 +276,19 @@ pub async fn run_post_apply_async_side_effects(
         } => {
             super::synonym_group::delete_async(database_id, tenant_id, name, &shared).await;
         }
+        // AWAITED: every core must hold the new set before the applied-index
+        // watcher bumps. A statement that runs first refuses the CRS it just
+        // defined, or still resolves the one it just dropped. A core that
+        // misses the set stops the batch, and the re-delivered entry resends
+        // it.
+        CatalogEntry::PutSpatialRefSys(_) => {
+            super::spatial_ref_sys::install_on_every_core(&shared, "define").await?;
+        }
+        CatalogEntry::DropSpatialRefSys { .. } => {
+            super::spatial_ref_sys::install_on_every_core(&shared, "drop").await?;
+        }
+        // No core holds a credential: a COPY reads the catalog row.
+        CatalogEntry::PutCredential(_) | CatalogEntry::DropCredential { .. } => {}
         // AWAITED: the moved rows must leave the source key before the
         // applied-index watcher bumps. Otherwise a same-name CREATE in the
         // source database observes them.

@@ -27,7 +27,7 @@ pub(in crate::data::executor) struct VersionTombstone<'a> {
     /// values receive the index tombstones.
     pub current_body: &'a [u8],
     /// The system time of the tombstone version.
-    pub sys_from_ms: i64,
+    pub sys_from: i64,
 }
 
 /// Inputs to [`CoreLoop::remove_current_row_in_txn`].
@@ -38,7 +38,7 @@ pub(in crate::data::executor) struct CurrentRowRemoval<'a> {
     pub storage_key: &'a StorageKey,
     /// The tombstone's system time on a bitemporal collection, `None` on any
     /// other.
-    pub bitemporal_sys_from_ms: Option<i64>,
+    pub bitemporal_sys_from: Option<i64>,
 }
 
 /// What [`CoreLoop::remove_current_row_in_txn`] removed.
@@ -47,12 +47,12 @@ pub(in crate::data::executor) struct RemovedRow {
     pub prior: Option<Vec<u8>>,
     /// The tombstone's system time. `Some` only when a bitemporal row was
     /// closed.
-    pub tombstone_sys_from_ms: Option<i64>,
+    pub tombstone_sys_from: Option<i64>,
 }
 
 impl CoreLoop {
     /// Close a bitemporal row's current version within `txn`. Writes the
-    /// tombstone version at `sys_from_ms` and an index tombstone for each
+    /// tombstone version at `sys_from` and an index tombstone for each
     /// value the closed version held. Does NOT commit.
     ///
     /// A registered collection's body must decode. An undecodable body fails
@@ -97,7 +97,7 @@ impl CoreLoop {
             p.tid,
             p.collection,
             p.storage_key,
-            p.sys_from_ms,
+            p.sys_from,
         )?;
         let config_key = (
             DatabaseId::new(p.database_id),
@@ -124,7 +124,7 @@ impl CoreLoop {
                         field: &path.path,
                         value: &value,
                         doc_id: p.storage_key,
-                        sys_from_ms: p.sys_from_ms,
+                        sys_from: p.sys_from,
                     },
                 )?;
                 tombstoned(&path.path, &value);
@@ -145,7 +145,7 @@ impl CoreLoop {
         txn: &WriteTransaction,
         r: CurrentRowRemoval<'_>,
     ) -> crate::Result<RemovedRow> {
-        let Some(sys_from_ms) = r.bitemporal_sys_from_ms else {
+        let Some(sys_from) = r.bitemporal_sys_from else {
             let prior = self.sparse.delete_in_txn(
                 txn,
                 r.database_id,
@@ -155,7 +155,7 @@ impl CoreLoop {
             )?;
             return Ok(RemovedRow {
                 prior,
-                tombstone_sys_from_ms: None,
+                tombstone_sys_from: None,
             });
         };
         let Some(prior) =
@@ -164,7 +164,7 @@ impl CoreLoop {
         else {
             return Ok(RemovedRow {
                 prior: None,
-                tombstone_sys_from_ms: None,
+                tombstone_sys_from: None,
             });
         };
         // The caller records the indexed values from the row's pre-image.
@@ -176,12 +176,12 @@ impl CoreLoop {
                 collection: r.collection,
                 storage_key: r.storage_key,
                 current_body: &prior,
-                sys_from_ms,
+                sys_from,
             },
         )?;
         Ok(RemovedRow {
             prior: Some(prior),
-            tombstone_sys_from_ms: Some(sys_from_ms),
+            tombstone_sys_from: Some(sys_from),
         })
     }
 }

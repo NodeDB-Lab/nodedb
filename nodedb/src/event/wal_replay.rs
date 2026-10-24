@@ -14,7 +14,7 @@
 //! - `Delete`: `(collection, document_id)` for documents,
 //!   `("kv_delete", collection, keys)` for KV, a map-encoded `EdgeDeleteRedo`
 //!   carrying both endpoint surrogates for graph edges
-//! - `GraphNodeLabelSet` / `GraphNodeLabelRemove`: `(node_id, labels)` — surface
+//! - `GraphNodeLabelSet` / `GraphNodeLabelRemove`: a `NodeLabelRedo` — surface
 //!   on the nameable `__graph_node_labels__` CDC stream
 //! - `VectorPut`: `(collection, vector, dim)` — not a document write event
 //! - `VectorDelete`: `(collection, vector_id)` — not a document write event
@@ -752,6 +752,8 @@ mod tests {
             dst_surrogate: dst,
             system_from: None,
             applied: None,
+            valid_from_ms: None,
+            valid_until_ms: None,
         })
         .expect("encode edge put")
     }
@@ -885,7 +887,9 @@ mod tests {
 
     #[test]
     fn graph_node_label_set_replays_on_label_stream() {
-        let payload = zerompk::to_msgpack_vec(&("alice", vec!["Person".to_string()])).expect("enc");
+        let payload = crate::wal::NodeLabelRedo::live("alice", &["Person".to_string()])
+            .encode()
+            .expect("enc");
         let record = make_record(RecordType::GraphNodeLabelSet, &payload, 5, 0, 500);
         let mut seq = 0u64;
         let event = one_event(&record, &mut seq);
@@ -914,7 +918,9 @@ mod tests {
 
     #[test]
     fn graph_node_label_remove_replays_as_delete_event() {
-        let payload = zerompk::to_msgpack_vec(&("alice", vec!["Person".to_string()])).expect("enc");
+        let payload = crate::wal::NodeLabelRedo::live("alice", &["Person".to_string()])
+            .encode()
+            .expect("enc");
         let record = make_record(RecordType::GraphNodeLabelRemove, &payload, 5, 0, 501);
         let mut seq = 0u64;
         let event = one_event(&record, &mut seq);

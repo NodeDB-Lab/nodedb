@@ -15,7 +15,7 @@ use crate::types::{
     ArrayAggPlan, ArrayCatalogView, ArraySlicePlan, CollectionInfo, ColumnInfo, EngineType,
     SqlCatalog, SqlDataType,
 };
-use crate::types_array::{ArrayAttrType, ArrayDimType, ArrayReducerAst};
+use crate::types_array::{ArrayAttrAst, ArrayAttrType, ArrayDimType, ArrayReducerAst};
 use nodedb_types::columnar::{FloatWidth, IntWidth};
 
 /// The column an audit-log slice (`AS OF SYSTEM TIME NULL`) stamps on each
@@ -101,29 +101,50 @@ pub(super) fn resolve_array_tvf(
 /// The columns of the relation an array cell read exposes: every dim in
 /// schema order, then each attr `attrs` names in that order, or every attr
 /// in schema order when `attrs` is empty.
-pub fn array_relation_columns(view: &ArrayCatalogView, attrs: &[String]) -> Vec<ColumnInfo> {
+///
+/// A `physical` read types an attr with a scale or offset as `float8`, and
+/// an attr with a nodata as nullable, since a nodata cell reads as NULL.
+pub fn array_relation_columns(
+    view: &ArrayCatalogView,
+    attrs: &[String],
+    physical: bool,
+) -> Vec<ColumnInfo> {
     let mut cols = Vec::with_capacity(view.dims.len() + view.attrs.len());
     for d in &view.dims {
         cols.push(column(&d.name, dim_type_to_sql(d.dtype), false));
     }
+    let attr_col = |a: &ArrayAttrAst| {
+        let nullable = a.nullable || (physical && a.meta.nodata.is_some());
+        attr_column(&a.name, read_type(a, physical), nullable)
+    };
     if attrs.is_empty() {
         for a in &view.attrs {
-            cols.push(attr_column(&a.name, a.dtype, a.nullable));
+            cols.push(attr_col(a));
         }
     } else {
         for name in attrs {
             if let Some(a) = view.attrs.iter().find(|a| &a.name == name) {
-                cols.push(attr_column(&a.name, a.dtype, a.nullable));
+                cols.push(attr_col(a));
             }
         }
     }
     cols
 }
 
+/// The type a read of `attr` carries: `FLOAT64` for a physical read of an
+/// attr with a scale or offset, the attr's own type otherwise.
+fn read_type(attr: &ArrayAttrAst, physical: bool) -> ArrayAttrType {
+    if physical && attr.meta.has_transform() {
+        ArrayAttrType::Float64
+    } else {
+        attr.dtype
+    }
+}
+
 /// The columns a slice's rows carry: its dims and attrs, plus
 /// [`ARRAY_SYSTEM_TIME_COLUMN`] when it reads every system-time version.
 pub fn array_slice_columns(view: &ArrayCatalogView, slice: &ArraySlicePlan) -> Vec<ColumnInfo> {
-    let mut cols = array_relation_columns(view, &slice.attr_projection);
+    let mut cols = array_relation_columns(view, &slice.attr_projection, slice.physical);
     if matches!(
         slice.temporal.system_time,
         nodedb_types::SystemTimeScope::AllVersions
@@ -134,11 +155,12 @@ pub fn array_slice_columns(view: &ArrayCatalogView, slice: &ArraySlicePlan) -> V
 }
 
 /// The columns an aggregate's rows carry: `group`, typed as the group dim,
-/// when it groups, then `result`, typed by the reducer.
+/// when it groups, then `result`, typed by the reducer. A histogram carries
+/// `bin_lo`, `bin_hi` and `count` in place of `result`, one row per bin.
 ///
 /// Refuses an attr the array does not hold, or a reducer the attr type cannot answer.
 pub fn array_agg_columns(view: &ArrayCatalogView, agg: &ArrayAggPlan) -> Result<Vec<ColumnInfo>> {
-    let mut cols = Vec::with_capacity(2);
+    let mut cols = Vec::with_capacity(4);
     if let Some(dim) = &agg.group_by_dim
         && let Some(d) = view.dims.iter().find(|d| &d.name == dim)
     {
@@ -152,7 +174,18 @@ pub fn array_agg_columns(view: &ArrayCatalogView, agg: &ArrayAggPlan) -> Result<
             table: view.name.clone(),
             column: agg.attr.clone(),
         })?;
-    cols.push(agg_result_column(agg.reducer, &attr.name, attr.dtype)?);
+    check_agg_reducer(agg.reducer, &attr.name, attr.dtype)?;
+    if let ArrayReducerAst::Histogram { .. } = agg.reducer {
+        cols.push(column("bin_lo", SqlDataType::Float64, false));
+        cols.push(column("bin_hi", SqlDataType::Float64, false));
+        cols.push(column("count", SqlDataType::Int64, false));
+        return Ok(cols);
+    }
+    cols.push(agg_result_column(
+        agg.reducer,
+        &attr.name,
+        read_type(attr, agg.physical),
+    )?);
     Ok(cols)
 }
 
@@ -178,10 +211,10 @@ fn horizon_column() -> ColumnInfo {
 
 /// Refuse a reducer that an attr of type `attr` cannot answer.
 ///
-/// The engine folds only numeric cells and skips every other cell.
-/// `SUM`, `MEAN`, `MIN`, and `MAX` over a `STRING` or `BYTES` attr see no cell.
-/// Their rows can only carry NULL, so the planner refuses them.
-/// `COUNT` counts the non-null cells of every attr type.
+/// The engine folds only numeric cells and skips every other cell. Every
+/// reducer but `COUNT` over a `STRING` or `BYTES` attr sees no cell, so its
+/// rows can only carry NULL, and the planner refuses it. `COUNT` counts the
+/// non-null cells of every attr type.
 pub fn check_agg_reducer(
     reducer: ArrayReducerAst,
     attr_name: &str,
@@ -192,7 +225,15 @@ pub fn check_agg_reducer(
         ArrayReducerAst::Sum
         | ArrayReducerAst::Min
         | ArrayReducerAst::Max
-        | ArrayReducerAst::Mean => attr.is_integer() || attr.is_float(),
+        | ArrayReducerAst::Mean
+        | ArrayReducerAst::Median
+        | ArrayReducerAst::Percentile(_)
+        | ArrayReducerAst::StdDevPop
+        | ArrayReducerAst::StdDevSamp
+        | ArrayReducerAst::VarPop
+        | ArrayReducerAst::VarSamp
+        | ArrayReducerAst::Mode
+        | ArrayReducerAst::Histogram { .. } => attr.is_integer() || attr.is_float(),
     };
     if answers {
         Ok(())
@@ -267,8 +308,8 @@ fn dim_type_to_sql(t: ArrayDimType) -> SqlDataType {
     }
 }
 
-/// The column of attr `name`, typed to its wire type: `UINT8` and `INT16`
-/// are `int2`, `UINT16` and `INT32` are `int4`, `UINT32` and `INT64` are
+/// The column of attr `name`, typed to its wire type: `INT8`, `UINT8` and
+/// `INT16` are `int2`, `UINT16` and `INT32` are `int4`, `UINT32` and `INT64` are
 /// `int8`, `FLOAT32` is `float4`, and `FLOAT64` is `float8`. An unsigned
 /// type takes the next signed width, so every stored value fits. A width of
 /// `None` keeps the base `int8` / `float8`.
@@ -287,7 +328,7 @@ fn attr_wire_type(t: ArrayAttrType) -> (SqlDataType, Option<IntWidth>, Option<Fl
         ArrayAttrType::Int32 | ArrayAttrType::UInt16 => {
             (SqlDataType::Int64, Some(IntWidth::I32), None)
         }
-        ArrayAttrType::Int16 | ArrayAttrType::UInt8 => {
+        ArrayAttrType::Int16 | ArrayAttrType::UInt8 | ArrayAttrType::Int8 => {
             (SqlDataType::Int64, Some(IntWidth::I16), None)
         }
         ArrayAttrType::Float64 => (SqlDataType::Float64, None, None),
@@ -298,7 +339,8 @@ fn attr_wire_type(t: ArrayAttrType) -> (SqlDataType, Option<IntWidth>, Option<Fl
 }
 
 /// The `result` column of an aggregate. `COUNT` and the `SUM` of an integer
-/// attr are `int8`. `MIN` / `MAX` take the attr's own wire type. `MEAN`
+/// attr are `int8`. `MIN`, `MAX` and `MODE` take the attr's own wire type.
+/// `MEAN`, `MEDIAN`, `PERCENTILE`, the variances, the standard deviations
 /// and the `SUM` of a float attr are `float8`.
 /// A reducer the attr type cannot answer is refused, see [`check_agg_reducer`].
 fn agg_result_column(
@@ -311,10 +353,19 @@ fn agg_result_column(
     let int8 = || column("result", SqlDataType::Int64, true);
     Ok(match reducer {
         ArrayReducerAst::Count => int8(),
-        ArrayReducerAst::Mean => float8(),
+        ArrayReducerAst::Mean
+        | ArrayReducerAst::Median
+        | ArrayReducerAst::Percentile(_)
+        | ArrayReducerAst::StdDevPop
+        | ArrayReducerAst::StdDevSamp
+        | ArrayReducerAst::VarPop
+        | ArrayReducerAst::VarSamp
+        | ArrayReducerAst::Histogram { .. } => float8(),
         ArrayReducerAst::Sum if attr.is_integer() => int8(),
         ArrayReducerAst::Sum => float8(),
-        ArrayReducerAst::Min | ArrayReducerAst::Max => attr_column("result", attr, true),
+        ArrayReducerAst::Min | ArrayReducerAst::Max | ArrayReducerAst::Mode => {
+            attr_column("result", attr, true)
+        }
     })
 }
 
@@ -395,6 +446,7 @@ mod tests {
                 name: "nir".into(),
                 dtype: ArrayAttrType::Float64,
                 nullable: true,
+                meta: Default::default(),
             }],
             tile_extents: vec![2],
             georef: None,
@@ -407,6 +459,7 @@ mod tests {
             slice: ArraySliceAst::default(),
             zone: None,
             temporal,
+            physical: false,
         };
         let names = |plan: &ArrayAggPlan| -> Vec<String> {
             array_agg_row_columns(&view, plan)
@@ -427,6 +480,72 @@ mod tests {
     }
 
     #[test]
+    fn histograms_and_physical_reads_announce_their_columns() {
+        use crate::types_array::{ArrayAttrMetaAst, ArrayDimAst, ArrayDomainBound, ArraySliceAst};
+        let view = ArrayCatalogView {
+            name: "img".into(),
+            dims: vec![ArrayDimAst {
+                name: "x".into(),
+                dtype: ArrayDimType::Int64,
+                lo: ArrayDomainBound::Int64(0),
+                hi: ArrayDomainBound::Int64(3),
+            }],
+            attrs: vec![ArrayAttrAst {
+                name: "red".into(),
+                dtype: ArrayAttrType::UInt16,
+                nullable: false,
+                meta: ArrayAttrMetaAst {
+                    nodata: Some(0.0),
+                    scale: Some(0.5),
+                    ..ArrayAttrMetaAst::default()
+                },
+            }],
+            tile_extents: vec![2],
+            georef: None,
+        };
+        let agg = |reducer, physical| ArrayAggPlan {
+            name: "img".into(),
+            attr: "red".into(),
+            reducer,
+            group_by_dim: Some("x".into()),
+            slice: ArraySliceAst::default(),
+            zone: None,
+            temporal: TemporalScope::default(),
+            physical,
+        };
+        let hist = array_agg_columns(
+            &view,
+            &agg(
+                ArrayReducerAst::Histogram {
+                    bins: 4,
+                    lo: 0.0,
+                    hi: 1.0,
+                },
+                false,
+            ),
+        )
+        .expect("answerable");
+        let names: Vec<&str> = hist.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["group", "bin_lo", "bin_hi", "count"]);
+        let raw_max = array_agg_columns(&view, &agg(ArrayReducerAst::Max, false)).expect("max");
+        assert_eq!(raw_max[1].int_width, Some(IntWidth::I32));
+        let physical_max =
+            array_agg_columns(&view, &agg(ArrayReducerAst::Max, true)).expect("physical max");
+        assert_eq!(physical_max[1].data_type, SqlDataType::Float64);
+        let mode = array_agg_columns(&view, &agg(ArrayReducerAst::Mode, false)).expect("mode");
+        assert_eq!(mode[1].int_width, Some(IntWidth::I32));
+        let median = array_agg_columns(&view, &agg(ArrayReducerAst::Median, false)).expect("med");
+        assert_eq!(median[1].data_type, SqlDataType::Float64);
+
+        let physical = array_relation_columns(&view, &[], true);
+        assert_eq!(physical[1].data_type, SqlDataType::Float64);
+        assert!(physical[1].nullable, "a nodata cell reads as NULL");
+        let raw = array_relation_columns(&view, &[], false);
+        assert_eq!(raw[1].int_width, Some(IntWidth::I32));
+        assert!(!raw[1].nullable);
+    }
+
+    #[test]
     fn non_numeric_attrs_refuse_numeric_reducers() {
         for attr in [ArrayAttrType::String, ArrayAttrType::Bytes] {
             for reducer in [
@@ -434,6 +553,9 @@ mod tests {
                 ArrayReducerAst::Mean,
                 ArrayReducerAst::Min,
                 ArrayReducerAst::Max,
+                ArrayReducerAst::Median,
+                ArrayReducerAst::Mode,
+                ArrayReducerAst::VarPop,
             ] {
                 match agg_result_column(reducer, "label", attr) {
                     Err(SqlError::TypeMismatch { detail }) => {

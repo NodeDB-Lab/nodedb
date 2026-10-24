@@ -134,14 +134,24 @@ impl CoreLoop {
         // Both post-images are decided before either is persisted: a transfer
         // is one write, so a policy that rejects the credit must not leave the
         // debit applied.
-        if let Err(e) =
-            super::rls::admit_kv_row(rls_write_check, &new_source, source_key, tid, collection)
-        {
+        if let Err(e) = super::rls::admit_kv_row(
+            rls_write_check,
+            &new_source,
+            source_key,
+            tid,
+            collection,
+            &self.crs_context(),
+        ) {
             return self.response_error(task, e);
         }
-        if let Err(e) =
-            super::rls::admit_kv_row(rls_write_check, &new_dest, dest_key, tid, collection)
-        {
+        if let Err(e) = super::rls::admit_kv_row(
+            rls_write_check,
+            &new_dest,
+            dest_key,
+            tid,
+            collection,
+            &self.crs_context(),
+        ) {
             return self.response_error(task, e);
         }
 
@@ -273,6 +283,7 @@ impl CoreLoop {
             item_key,
             tid,
             source_collection,
+            &self.crs_context(),
         ) {
             return self.response_error(task, e);
         }
@@ -282,6 +293,7 @@ impl CoreLoop {
             dest_key,
             tid,
             dest_collection,
+            &self.crs_context(),
         ) {
             return self.response_error(task, e);
         }

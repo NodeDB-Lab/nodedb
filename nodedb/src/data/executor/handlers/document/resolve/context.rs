@@ -142,6 +142,7 @@ pub(super) fn resolved_response_payload(
     rls_filters: &[u8],
     ctx: &DocResolveCtx,
     rows: &[(&RowIdentity, &[u8])],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<Vec<u8>, ErrorCode> {
     match returning {
         Some(spec) => returning_rows::build_stored_rows_payload(
@@ -150,6 +151,7 @@ pub(super) fn resolved_response_payload(
             ctx.strict_schema.as_ref(),
             &ctx.identity_column,
             rows,
+            crs,
         )
         .map_err(|e| ErrorCode::Internal {
             detail: format!("RETURNING encode: {e}"),

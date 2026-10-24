@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 publish = false
 description = "3-node integration test suite for NodeDB. Heavy; runs in its own CI stage."
 
@@ -26,7 +27,9 @@ nodedb-array = { workspace = true }
 nodedb-bridge = { workspace = true }
 nodedb-client = { workspace = true, features = ["native"] }
 nodedb-cluster = { workspace = true }
+nodedb-columnar = { workspace = true }
 nodedb-crdt = { workspace = true }
+nodedb-crs = { workspace = true }
 nodedb-physical = { workspace = true }
 nodedb-query = { workspace = true }
 nodedb-raft = { workspace = true }

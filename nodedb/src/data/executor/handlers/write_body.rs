@@ -23,11 +23,12 @@ pub fn materialize_write_body(
     config: &CollectionConfig,
     doc: &mut serde_json::Value,
     scope: GuardScope<'_>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<(), ErrorCode> {
     if !config.crdt_enabled {
-        enforce_type_guards(&config.type_guards, doc, scope)?;
+        enforce_type_guards(&config.type_guards, doc, scope, crs)?;
     }
-    evaluate_generated_columns(doc, &config.enforcement.generated_columns)
+    evaluate_generated_columns(doc, &config.enforcement.generated_columns, crs)
 }
 
 /// Whether a write to `config` rewrites its body: it carries typeguards or

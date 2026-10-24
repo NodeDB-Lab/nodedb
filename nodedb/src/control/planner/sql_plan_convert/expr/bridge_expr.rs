@@ -297,7 +297,9 @@ mod tests {
         let expr = SqlExpr::ArrayLiteral(vec![col("n"), SqlExpr::Literal(SqlValue::Int(1))]);
         let lowered = sql_expr_to_bridge_expr(&expr);
         assert_eq!(
-            lowered.eval(&row()).expect("eval"),
+            lowered
+                .eval(&row(), &nodedb_crs::CrsContext::builtin_only())
+                .expect("eval"),
             Value::Array(vec![Value::Integer(7), Value::Integer(1)])
         );
     }
@@ -325,7 +327,11 @@ mod tests {
             negated,
             case_insensitive,
         };
-        let eval = |e: SqlExpr| sql_expr_to_bridge_expr(&e).eval(&row()).expect("eval");
+        let eval = |e: SqlExpr| {
+            sql_expr_to_bridge_expr(&e)
+                .eval(&row(), &nodedb_crs::CrsContext::builtin_only())
+                .expect("eval")
+        };
         assert_eq!(eval(like(false, false, "Al%")), Value::Bool(true));
         assert_eq!(eval(like(true, false, "Al%")), Value::Bool(false));
         assert_eq!(eval(like(false, true, "al%")), Value::Bool(true));

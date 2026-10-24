@@ -1,15 +1,79 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Encryption at rest settings (WAL).
+use crate::control::security::keystore::KeyDerivation;
+
+/// Encryption at rest settings: the WAL key, which also derives the segment
+/// and checkpoint keys.
+///
+/// The key comes from exactly one source:
+///
+/// ```toml
+/// [encryption]
+/// # A 32-byte key file, the default source.
+/// key_path = "/etc/nodedb/keys/wal.key"
+/// ```
+///
+/// ```toml
+/// [encryption.key_derivation]
+/// # A key-management service: type = "vault", "aws_kms" or "file".
+/// type = "vault"
+/// addr = "https://vault.internal:8200"
+/// token_path = "/etc/nodedb/keys/vault.token"
+/// key_name = "nodedb-wal"
+/// mount = "transit"
+/// ciphertext_blob_path = "/var/lib/nodedb/.wal-key.wrapped"
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EncryptionSettings {
     /// Path to the 32-byte AES-256-GCM key file used to encrypt WAL records.
     /// Generate with: `head -c 32 /dev/urandom > /etc/nodedb/keys/wal.key`
-    pub key_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_path: Option<PathBuf>,
+    /// A key-management service that supplies the key in place of
+    /// `key_path`. A Vault address goes through the `[egress]` policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_derivation: Option<KeyDerivation>,
+}
+
+impl EncryptionSettings {
+    /// Settings that read the key from the file at `key_path`.
+    pub fn file(key_path: PathBuf) -> Self {
+        Self {
+            key_path: Some(key_path),
+            key_derivation: None,
+        }
+    }
+
+    /// The key source these settings name. Exactly one of `key_path` and
+    /// `key_derivation` must be set.
+    pub fn source(&self) -> crate::Result<KeyDerivation> {
+        match (&self.key_path, &self.key_derivation) {
+            (Some(key_path), None) => Ok(KeyDerivation::File {
+                key_path: key_path.clone(),
+            }),
+            (None, Some(derivation)) => Ok(derivation.clone()),
+            (Some(_), Some(_)) => Err(crate::Error::Config {
+                detail: "[encryption] sets both key_path and key_derivation; keep one".into(),
+            }),
+            (None, None) => Err(crate::Error::Config {
+                detail: "[encryption] needs key_path or a [encryption.key_derivation] table".into(),
+            }),
+        }
+    }
+
+    /// The key file, when the key comes from a local file.
+    pub fn key_file(&self) -> Option<&Path> {
+        match (&self.key_path, &self.key_derivation) {
+            (Some(key_path), _) => Some(key_path),
+            (None, Some(KeyDerivation::File { key_path })) => Some(key_path),
+            (None, _) => None,
+        }
+    }
 }
 
 /// Per-backup encryption settings.
@@ -66,4 +130,77 @@ pub struct TlsSettings {
 
 fn default_true() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(body: &str) -> EncryptionSettings {
+        toml::from_str(body).expect("the [encryption] section must deserialize")
+    }
+
+    #[test]
+    fn key_path_selects_the_file_source() {
+        let settings = parse(r#"key_path = "/k/wal.key""#);
+        assert!(matches!(
+            settings.source(),
+            Ok(KeyDerivation::File { ref key_path }) if key_path == Path::new("/k/wal.key")
+        ));
+        assert_eq!(settings.key_file(), Some(Path::new("/k/wal.key")));
+    }
+
+    #[test]
+    fn key_derivation_selects_vault_kms_or_file() {
+        let vault = parse(
+            r#"
+            [key_derivation]
+            type = "vault"
+            addr = "https://vault.internal:8200"
+            token_path = "/k/token"
+            key_name = "wal"
+            mount = "transit"
+            ciphertext_blob_path = "/k/blob"
+            "#,
+        );
+        assert!(matches!(vault.source(), Ok(KeyDerivation::Vault { .. })));
+        assert_eq!(vault.key_file(), None);
+
+        let kms = parse(
+            r#"
+            [key_derivation]
+            type = "aws_kms"
+            key_id = "arn:aws:kms:us-east-1:1:key/k"
+            region = "us-east-1"
+            ciphertext_blob_path = "/k/blob"
+            "#,
+        );
+        assert!(matches!(kms.source(), Ok(KeyDerivation::AwsKms { .. })));
+        assert_eq!(kms.key_file(), None);
+
+        let file = parse(
+            r#"
+            [key_derivation]
+            type = "file"
+            key_path = "/k/wal.key"
+            "#,
+        );
+        assert!(matches!(file.source(), Ok(KeyDerivation::File { .. })));
+        assert_eq!(file.key_file(), Some(Path::new("/k/wal.key")));
+    }
+
+    #[test]
+    fn exactly_one_source_is_required() {
+        let both = parse(
+            r#"
+            key_path = "/k/wal.key"
+            [key_derivation]
+            type = "file"
+            key_path = "/k/other.key"
+            "#,
+        );
+        assert!(both.source().is_err());
+        assert!(parse("").source().is_err());
+        assert!(toml::from_str::<EncryptionSettings>(r#"keypath = "/k""#).is_err());
+    }
 }

@@ -19,6 +19,8 @@ pub(super) struct EdgePutFields<'a> {
     pub(super) properties: &'a [u8],
     pub(super) src_surrogate: u32,
     pub(super) dst_surrogate: u32,
+    pub(super) valid_from_ms: Option<i64>,
+    pub(super) valid_until_ms: Option<i64>,
 }
 
 pub(super) fn edge_put(f: EdgePutFields) -> PhysicalPlan {
@@ -30,6 +32,8 @@ pub(super) fn edge_put(f: EdgePutFields) -> PhysicalPlan {
         properties: f.properties.to_vec(),
         src_surrogate: nodedb_types::Surrogate::new(f.src_surrogate),
         dst_surrogate: nodedb_types::Surrogate::new(f.dst_surrogate),
+        valid_from_ms: f.valid_from_ms,
+        valid_until_ms: f.valid_until_ms,
     })
 }
 
@@ -82,6 +86,8 @@ fn batch_edges(edges: &[super::super::types::ReplicatedBatchEdge]) -> Vec<BatchE
             dst_id: e.dst_id.clone(),
             src_surrogate: nodedb_types::Surrogate::new(e.src_surrogate),
             dst_surrogate: nodedb_types::Surrogate::new(e.dst_surrogate),
+            valid_from_ms: e.valid_from_ms,
+            valid_until_ms: e.valid_until_ms,
         })
         .collect()
 }
@@ -137,6 +143,8 @@ mod tests {
             properties: vec![],
             src_surrogate: nodedb_types::Surrogate::new(11),
             dst_surrogate: nodedb_types::Surrogate::new(22),
+            valid_from_ms: None,
+            valid_until_ms: None,
         });
         let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
             .expect("encode must not error")
@@ -188,11 +196,10 @@ mod tests {
         }
     }
 
-    /// The propose seams hand every edge write, single or batched, to its
-    /// Calvin transaction as the plan it carries, and keep a label write on
-    /// the data group.
+    /// The propose seams hand every edge write, single or batched, and every
+    /// label write to its Calvin transaction as the plan it carries.
     #[test]
-    fn every_edge_write_entry_yields_its_plan_for_calvin() {
+    fn every_edge_and_label_write_entry_yields_its_plan_for_calvin() {
         let tenant = TenantId::new(1);
         let vshard = VShardId::new(0);
         let edge = BatchEdge {
@@ -202,6 +209,8 @@ mod tests {
             dst_id: "bob".into(),
             src_surrogate: nodedb_types::Surrogate::new(11),
             dst_surrogate: nodedb_types::Surrogate::new(22),
+            valid_from_ms: None,
+            valid_until_ms: None,
         };
         for plan in [
             PhysicalPlan::Graph(GraphOp::EdgePutBatch {
@@ -210,26 +219,22 @@ mod tests {
             PhysicalPlan::Graph(GraphOp::EdgeDeleteBatch {
                 edges: vec![edge.clone()],
             }),
+            PhysicalPlan::Graph(GraphOp::SetNodeLabels {
+                node_id: "alice".into(),
+                labels: vec!["person".into()],
+            }),
+            PhysicalPlan::Graph(GraphOp::RemoveNodeLabels {
+                node_id: "alice".into(),
+                labels: vec!["person".into()],
+            }),
         ] {
             let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
                 .expect("encode")
-                .expect("an edge batch has a replicated form");
-            let carried = decode::edge_write_plan(&entry.write)
+                .expect("an edge or label write has a replicated form");
+            let carried = decode::sequenced_graph_write_plan(&entry.write)
                 .expect("decode")
-                .expect("an edge batch runs as a Calvin transaction");
+                .expect("an edge or label write runs as a Calvin transaction");
             assert_eq!(carried, plan);
         }
-        let labels = PhysicalPlan::Graph(GraphOp::SetNodeLabels {
-            node_id: "alice".into(),
-            labels: vec!["person".into()],
-        });
-        let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &labels)
-            .expect("encode")
-            .expect("a label write has a replicated form");
-        assert!(
-            decode::edge_write_plan(&entry.write)
-                .expect("decode")
-                .is_none()
-        );
     }
 }

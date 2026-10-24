@@ -33,6 +33,7 @@ pub(super) fn apply_set_ops(
     result_formats: &Format,
     redaction: Option<RedactionCtx<'_>>,
     sequences: Option<&dyn SequenceAccess>,
+    crs_set: &nodedb_crs::CustomCrsSet,
 ) -> PgWireResult<(Response, Option<String>)> {
     let merged = match dedup_set_op {
         PostSetOp::Intersect | PostSetOp::IntersectAll => {
@@ -51,6 +52,7 @@ pub(super) fn apply_set_ops(
             projection,
             redaction,
             sequences,
+            crs_set,
         )
         .map_err(|e| shape_error_to_pg(&e))?
         {

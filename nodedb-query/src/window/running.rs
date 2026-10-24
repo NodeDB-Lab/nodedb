@@ -11,6 +11,7 @@
 //! computed at the *last* peer in the group (i.e., they all include each
 //! other). This matches PostgreSQL behaviour for RANGE CURRENT ROW.
 
+use nodedb_crs::CrsContext;
 use nodedb_types::Value;
 
 use super::arg::{ArgValues, arg_at};
@@ -29,6 +30,7 @@ pub(super) fn running_aggregate(
     indices: &[usize],
     spec: &WindowFuncSpec,
     arg_values: &ArgValues,
+    crs: &CrsContext<'_>,
 ) -> Result<(), crate::expr::EvalError> {
     let len = indices.len();
     if len == 0 {
@@ -66,7 +68,7 @@ pub(super) fn running_aggregate(
 
         // Check if the *next* row starts a new peer group (or we're at the end).
         let is_last_in_group =
-            pos + 1 == len || !order_keys_equal(rows, i, indices[pos + 1], &spec.order_by)?;
+            pos + 1 == len || !order_keys_equal(rows, i, indices[pos + 1], &spec.order_by, crs)?;
 
         if is_last_in_group {
             // Compute the result at the end of this peer group.

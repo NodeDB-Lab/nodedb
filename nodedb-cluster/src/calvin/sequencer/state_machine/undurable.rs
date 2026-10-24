@@ -15,7 +15,7 @@
 //! The record holds one entry per input not yet seen durable, so it is
 //! bounded by the inputs in flight on this node's schedulers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::core::SequencerStateMachine;
 
@@ -25,16 +25,16 @@ type Input = (u32, u64, u32);
 /// The inputs not yet seen durable, by sequencer log index.
 #[derive(Debug, Default)]
 pub(super) struct UndurableInputs {
-    by_index: BTreeMap<u64, Vec<Input>>,
+    by_index: BTreeMap<u64, BTreeSet<Input>>,
 }
 
 impl UndurableInputs {
-    /// Record the input of `vshard` at `index`.
+    /// Record the input of `vshard` at `index`. A repeat is a no-op.
     pub(super) fn note(&mut self, index: u64, vshard: u32, epoch: u64, position: u32) {
-        let inputs = self.by_index.entry(index).or_default();
-        if !inputs.contains(&(vshard, epoch, position)) {
-            inputs.push((vshard, epoch, position));
-        }
+        self.by_index
+            .entry(index)
+            .or_default()
+            .insert((vshard, epoch, position));
     }
 
     /// Drop every input `durable` answers true for, then return the lowest

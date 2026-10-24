@@ -160,7 +160,7 @@ pub(crate) async fn build_insert_select(
         source: RowSource::DocumentPages(DocumentPageSource {
             collection: QualifiedCollection::new(ctx.database_id(), &source),
             filters: fields.filters.clone().unwrap_or_default(),
-            system_as_of_ms: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             offset: 0,
             limit,
             column_map: Vec::new(),

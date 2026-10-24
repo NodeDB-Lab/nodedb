@@ -10,7 +10,8 @@
 use nodedb_cluster::calvin::types::TxClass;
 use nodedb_cluster::calvin::{AttemptOutcome, TxnId};
 
-use super::stream::{PartStream, StreamTarget, stream_parts};
+use super::prepare::{Prepared, prepare_submit};
+use super::stream::{StreamTarget, stream_parts};
 use super::wait::{await_assignment, await_completion};
 use crate::Error;
 use crate::bridge::envelope::{PhysicalPlan, Response};
@@ -56,23 +57,21 @@ pub(crate) fn raise_metadata_floor(state: &SharedState, tx_class: &mut TxClass) 
 }
 
 /// Stamp the incarnation this node's catalog holds for every user collection
-/// `tx_class`'s plans name. The coordinator stamps first, against the catalog
-/// it planned with. A forwarded submit arrives stamped and keeps its stamps.
-pub(crate) fn stamp_incarnations(state: &SharedState, tx_class: &mut TxClass) -> crate::Result<()> {
+/// `plans` name. `plans` are `tx_class`'s decoded plans. The coordinator
+/// stamps first, against the catalog it planned with. A forwarded submit
+/// arrives stamped and keeps its stamps.
+pub(crate) fn stamp_incarnations(
+    state: &SharedState,
+    tx_class: &mut TxClass,
+    plans: &[PhysicalPlan],
+) -> crate::Result<()> {
     // A split class was stamped by its coordinator before the split, and no
     // longer carries its plans in `plans`.
     if !tx_class.incarnations.is_empty() || tx_class.is_multi_part() {
         return Ok(());
     }
-    let plans =
-        nodedb_physical::physical_plan::wire::decode_batch(&tx_class.plans).map_err(|e| {
-            Error::Serialization {
-                format: "msgpack".into(),
-                detail: format!("calvin incarnation stamp: plan decode: {e}"),
-            }
-        })?;
     let mut named = std::collections::BTreeSet::new();
-    for plan in &plans {
+    for plan in plans {
         // Array cell writes route by the array's own incarnation.
         if matches!(plan, PhysicalPlan::Array(_) | PhysicalPlan::ClusterArray(_)) {
             continue;
@@ -118,15 +117,13 @@ pub async fn submit_and_await_calvin_until(
     mut tx_class: TxClass,
     deadline: tokio::time::Instant,
 ) -> crate::Result<Option<Response>> {
-    raise_metadata_floor(state, &mut tx_class);
-    stamp_incarnations(state, &mut tx_class)?;
-    super::unique_claims::stamp_unique_claims(state, &mut tx_class)?;
-    let stream = super::parts::split_into_parts(state, &mut tx_class)?;
-    submit_prepared_and_await(state, tx_class, stream, deadline).await
+    let prepared = prepare_submit(state, &mut tx_class)?;
+    submit_prepared_and_await(state, tx_class, prepared, deadline).await
 }
 
 /// Submit a stamped `tx_class` to this node's sequencer, stream its parts
-/// when it carries them as parts, and await its completion.
+/// when it carries them as parts, and await its completion. `prepared`
+/// holds the parts and the reply fold [`prepare_submit`] derived.
 ///
 /// PRECONDITION: this node is the sequencer-group leader.
 ///
@@ -135,12 +132,12 @@ pub async fn submit_and_await_calvin_until(
 pub(crate) async fn submit_prepared_and_await(
     state: &SharedState,
     tx_class: TxClass,
-    stream: Option<PartStream>,
+    prepared: Prepared,
     deadline: tokio::time::Instant,
 ) -> crate::Result<Option<Response>> {
     #[cfg(feature = "failpoints")]
     crate::control::fail_gate::after_calvin_stamp(state.node_id, &tx_class).await;
-    let fold = ReplyFold::of_tx_class(&tx_class)?;
+    let Prepared { stream, fold } = prepared;
     let inbox = state
         .sequencer_inbox
         .get()
@@ -360,27 +357,21 @@ impl ReplyFold {
         }
     }
 
-    /// The fold of `tx_class`. A class split into parts reads its manifest,
-    /// and one with no edge key needs no decode.
-    pub(crate) fn of_tx_class(tx_class: &TxClass) -> crate::Result<Self> {
+    /// The fold of `tx_class`, whose decoded plans are `plans`. A class
+    /// split into parts reads its manifest, and one with no edge key reads
+    /// nothing.
+    pub(crate) fn of_prepared(tx_class: &TxClass, plans: &[PhysicalPlan]) -> Self {
         if !super::edge_slices::writes_edges(tx_class) {
-            return Ok(Self::First);
+            return Self::First;
         }
         if let Some(manifest) = &tx_class.multi_part {
-            return Ok(if manifest.user_write {
+            return if manifest.user_write {
                 Self::First
             } else {
                 Self::SumOwnedEdges
-            });
+            };
         }
-        let plans =
-            nodedb_physical::physical_plan::wire::decode_batch(&tx_class.plans).map_err(|e| {
-                Error::Serialization {
-                    format: "msgpack".into(),
-                    detail: format!("calvin reply fold: plan decode: {e}"),
-                }
-            })?;
-        Ok(Self::of_plans(plans.iter()))
+        Self::of_plans(plans.iter())
     }
 }
 

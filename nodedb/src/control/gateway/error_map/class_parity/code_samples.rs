@@ -8,7 +8,7 @@ use nodedb_types::sync::wire::SyncProvenance;
 use crate::bridge::envelope::{CounterFault, ErrorCode, SyncHold};
 
 /// The number of `ErrorCode` variants [`variant_index`] numbers.
-pub(super) const VARIANT_COUNT: usize = 53;
+pub(super) const VARIANT_COUNT: usize = 54;
 
 /// A dense index per variant. Exhaustive, so a new variant fails to compile
 /// here until it gets an index, and [`every_variant_has_a_sample`] then fails
@@ -61,6 +61,7 @@ pub(super) fn variant_index(code: &ErrorCode) -> usize {
         ErrorCode::TextColumn { .. } => 43,
         ErrorCode::NumericValueOutOfRange { .. } => 44,
         ErrorCode::NodeLabelLimit { .. } => 45,
+        ErrorCode::ProgramLimitExceeded { .. } => 53,
         ErrorCode::InvalidTextRepresentation { .. } => 46,
         ErrorCode::DatatypeMismatch { .. } => 47,
         ErrorCode::InvalidDatetimeFormat { .. } => 48,
@@ -221,6 +222,7 @@ pub(super) fn samples() -> Vec<ErrorCode> {
             label: "Person".into(),
             limit: 64,
         },
+        ErrorCode::ProgramLimitExceeded { detail: text() },
     ];
     for constraint in [
         "not_null",

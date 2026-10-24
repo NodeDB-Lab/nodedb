@@ -207,6 +207,7 @@ mod tests {
             mutation_id: 42,
             device_id: 0,
             delta_signature: [0; 32],
+            collection_incarnation: nodedb_types::Hlc::new(1_000, 0),
             checksum: 0,
             device_valid_time_ms: None,
             producer_id: 0,

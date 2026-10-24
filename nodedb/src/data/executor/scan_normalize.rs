@@ -57,9 +57,10 @@ impl CoreLoop {
 
         let filters = crate::bridge::scan_filter::decode_scan_filters(filter_bytes, context)?;
 
+        let crs = self.crs_context();
         let mut kept = Vec::with_capacity(docs.len());
         for (id, bytes) in docs {
-            if crate::bridge::scan_filter::ScanFilter::all_match_binary(&filters, &bytes)? {
+            if crate::bridge::scan_filter::ScanFilter::all_match_binary(&filters, &bytes, &crs)? {
                 kept.push((id, bytes));
             }
         }
@@ -82,7 +83,9 @@ impl CoreLoop {
         }
         let filters = crate::bridge::scan_filter::decode_scan_filters(rls_filters, "RLS filter")?;
         Ok(crate::bridge::scan_filter::ScanFilter::all_match_binary(
-            &filters, row,
+            &filters,
+            row,
+            &self.crs_context(),
         )?)
     }
 
@@ -245,7 +248,8 @@ impl CoreLoop {
     }
 
     /// Scan plain/spatial columnar rows → standard msgpack: flushed
-    /// segments, then the live memtable.
+    /// segments, then the live memtable. A bitemporal collection scans each
+    /// key's current version only.
     fn scan_columnar(
         &self,
         database_id: u64,
@@ -263,6 +267,10 @@ impl CoreLoop {
         };
 
         let schema = engine.schema();
+        let version_gate = self.columnar_version_gate(&columnar_key, None, false)?;
+        let current = |row: &[nodedb_types::value::Value]| {
+            version_gate.as_ref().is_none_or(|gate| gate.admits(row))
+        };
         let mut results = Vec::new();
 
         // 1. Read from flushed segments (older rows drained from prior memtable flushes).
@@ -290,16 +298,24 @@ impl CoreLoop {
                     if delete_bm.is_some_and(|bm| bm.is_deleted(row_idx as u32)) {
                         continue;
                     }
-                    results.push(columnar_row_to_doc(schema, segment.row(schema, row_idx)?)?);
+                    let row = segment.row(schema, row_idx)?;
+                    if current(&row) {
+                        results.push(columnar_row_to_doc(schema, row)?);
+                    }
                 }
             }
         }
 
         // 2. Read from the live memtable (most-recent rows not yet flushed).
         if results.len() < limit {
-            let remaining = limit - results.len();
-            for row in engine.scan_memtable_rows().take(remaining) {
-                results.push(columnar_row_to_doc(schema, row?)?);
+            for row in engine.scan_memtable_rows() {
+                if results.len() >= limit {
+                    break;
+                }
+                let row = row?;
+                if current(&row) {
+                    results.push(columnar_row_to_doc(schema, row)?);
+                }
             }
         }
 

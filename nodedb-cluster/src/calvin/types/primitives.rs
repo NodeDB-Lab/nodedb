@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub use nodedb_types::calvin::{
-    EngineKeySet, EngineTag, PassiveKey, PassiveReadKey, PassiveReadKeyId, ReadKeyIdent, SortedVec,
-    VersionedReadEntry, VersionedReadSet,
+    EngineKeySet, EngineTag, HomedPair, PassiveKey, PassiveReadKey, PassiveReadKeyId, ReadKeyIdent,
+    SortedVec, VersionedReadEntry, VersionedReadSet,
 };
 
 /// Describes the passive-read participants for a dependent-read Calvin txn.
@@ -101,7 +101,7 @@ mod tests {
     fn edge_set(collection: &str, edges: Vec<(u32, u32)>) -> EngineKeySet {
         EngineKeySet::Edge {
             collection: collection.to_owned(),
-            edges: SortedVec::new(edges),
+            edges: SortedVec::new(edges.into_iter().map(HomedPair::everywhere).collect()),
             home_vshards: SortedVec::new(Vec::new()),
         }
     }

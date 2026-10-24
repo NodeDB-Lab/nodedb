@@ -48,7 +48,7 @@ pub(in crate::data::executor) struct ProjectUpdateRows<'a> {
     /// The system time of the new versions on a bitemporal collection,
     /// `None` on any other. A bitemporal strict tuple carries it in its
     /// reserved slot.
-    pub(in crate::data::executor) bitemporal_sys_from_ms: Option<i64>,
+    pub(in crate::data::executor) bitemporal_sys_from: Option<i64>,
 }
 
 /// What every row of one update projects under.
@@ -60,7 +60,9 @@ struct RowShape<'a> {
     updates: &'a [(String, UpdateValue)],
     strict_schema: Option<&'a StrictSchema>,
     declared_primary_key: Option<&'a str>,
-    bitemporal_sys_from_ms: Option<i64>,
+    bitemporal_sys_from: Option<i64>,
+    /// Resolves the SRIDs assignment expressions meet.
+    crs: &'a nodedb_crs::CrsContext<'a>,
 }
 
 /// The rows an update projects.
@@ -90,8 +92,9 @@ impl CoreLoop {
             updates,
             strict_schema,
             declared_primary_key,
-            bitemporal_sys_from_ms,
+            bitemporal_sys_from,
         } = p;
+        let crs = self.crs_context();
         let shape = RowShape {
             database_id,
             tid,
@@ -99,7 +102,8 @@ impl CoreLoop {
             updates,
             strict_schema,
             declared_primary_key,
-            bitemporal_sys_from_ms,
+            bitemporal_sys_from,
+            crs: &crs,
         };
         let rows = match rows {
             MatchedRows::Read(rows) => rows,
@@ -137,7 +141,8 @@ impl CoreLoop {
             updates,
             strict_schema,
             declared_primary_key,
-            bitemporal_sys_from_ms,
+            bitemporal_sys_from,
+            crs,
         } = shape;
         let config_key = (
             DatabaseId::new(database_id),
@@ -200,7 +205,7 @@ impl CoreLoop {
                             })?,
                         // Division or modulo by zero fails the statement.
                         UpdateValue::Expr(expr) => {
-                            let result: nodedb_types::Value = expr.eval(&eval_doc)?;
+                            let result: nodedb_types::Value = expr.eval(&eval_doc, crs)?;
                             result.into()
                         }
                     };
@@ -231,6 +236,7 @@ impl CoreLoop {
                     &config.type_guards,
                     &mut doc,
                     crate::data::executor::enforcement::typeguard::GuardScope::Assigned(&assigned),
+                    crs,
                 )
                 .map_err(crate::Error::DataPlane)?;
             }
@@ -243,6 +249,7 @@ impl CoreLoop {
                 super::super::generated::evaluate_generated_columns(
                     &mut doc,
                     &config.enforcement.generated_columns,
+                    crs,
                 )
                 .map_err(crate::Error::DataPlane)?;
             }
@@ -260,13 +267,13 @@ impl CoreLoop {
         // does not declare.
         // A bitemporal strict tuple stamps the version's system time, valid
         // for all time, as the point update encodes it.
-        let updated_bytes = match (strict_schema, bitemporal_sys_from_ms) {
-            (Some(schema), Some(sys_from_ms)) if schema.bitemporal => {
+        let updated_bytes = match (strict_schema, bitemporal_sys_from) {
+            (Some(schema), Some(sys_from)) if schema.bitemporal => {
                 let ndb_val: nodedb_types::Value = doc.clone().into();
                 crate::data::executor::strict_format::value_to_binary_tuple_bitemporal(
                     &ndb_val,
                     schema,
-                    sys_from_ms,
+                    sys_from,
                     i64::MIN,
                     i64::MAX,
                     collection,
@@ -330,6 +337,7 @@ impl CoreLoop {
                     &row.old_doc,
                     &row.doc,
                     &task.request.user_roles,
+                    &self.crs_context(),
                 )?;
             }
             // A closed period refuses an edit to a row it holds, and an edit
@@ -351,6 +359,7 @@ impl CoreLoop {
                 &row.doc,
                 tid,
                 collection,
+                &self.crs_context(),
             )?;
         }
         Ok(())

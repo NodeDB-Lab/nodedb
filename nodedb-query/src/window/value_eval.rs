@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use nodedb_crs::CrsContext;
 use nodedb_types::Value;
 
 use super::spec::WindowFuncSpec;
@@ -42,12 +43,13 @@ pub enum WindowError {
 pub fn evaluate_window_functions_value(
     rows: &mut [Vec<Value>],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
     specs: &[WindowFuncSpec],
 ) -> Result<Vec<String>, WindowError> {
     let mut new_cols: Vec<String> = Vec::with_capacity(specs.len());
 
     for spec in specs {
-        let partitions = build_value_partitions(rows, column_index, spec)?;
+        let partitions = build_value_partitions(rows, column_index, crs, spec)?;
         let write_col = rows.first().map(|r| r.len()).unwrap_or(0);
 
         for row in rows.iter_mut() {
@@ -57,24 +59,33 @@ pub fn evaluate_window_functions_value(
         for partition_indices in &partitions {
             match spec.func_name.as_str() {
                 "row_number" => apply_v_row_number(rows, partition_indices, write_col),
-                "rank" => apply_v_rank(rows, partition_indices, column_index, spec, write_col)?,
+                "rank" => {
+                    apply_v_rank(rows, partition_indices, column_index, crs, spec, write_col)?
+                }
                 "dense_rank" => {
-                    apply_v_dense_rank(rows, partition_indices, column_index, spec, write_col)?
+                    apply_v_dense_rank(rows, partition_indices, column_index, crs, spec, write_col)?
                 }
                 "ntile" => apply_v_ntile(rows, partition_indices, spec, write_col)?,
-                "percent_rank" => {
-                    apply_v_percent_rank(rows, partition_indices, column_index, spec, write_col)?
-                }
+                "percent_rank" => apply_v_percent_rank(
+                    rows,
+                    partition_indices,
+                    column_index,
+                    crs,
+                    spec,
+                    write_col,
+                )?,
                 "cume_dist" => {
-                    apply_v_cume_dist(rows, partition_indices, column_index, spec, write_col)?
+                    apply_v_cume_dist(rows, partition_indices, column_index, crs, spec, write_col)?
                 }
-                "lag" => apply_v_lag(rows, partition_indices, column_index, spec, write_col)?,
-                "lead" => apply_v_lead(rows, partition_indices, column_index, spec, write_col)?,
+                "lag" => apply_v_lag(rows, partition_indices, column_index, crs, spec, write_col)?,
+                "lead" => {
+                    apply_v_lead(rows, partition_indices, column_index, crs, spec, write_col)?
+                }
                 "nth_value" => {
-                    apply_v_nth_value(rows, partition_indices, column_index, spec, write_col)?
+                    apply_v_nth_value(rows, partition_indices, column_index, crs, spec, write_col)?
                 }
                 "sum" | "count" | "avg" | "min" | "max" | "first_value" | "last_value" => {
-                    apply_v_aggregate(rows, partition_indices, column_index, spec, write_col)?
+                    apply_v_aggregate(rows, partition_indices, column_index, crs, spec, write_col)?
                 }
                 other => {
                     return Err(WindowError::ArgEval {
@@ -110,13 +121,14 @@ pub(super) fn order_keys_equal_v(
     a: usize,
     b: usize,
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
     order_by: &[(SqlExpr, bool)],
 ) -> Result<bool, WindowError> {
     for (expr, _) in order_by {
         let row_a = rows.get(a).map(|r| r.as_slice()).unwrap_or(&[]);
         let row_b = rows.get(b).map(|r| r.as_slice()).unwrap_or(&[]);
-        let va = eval_arg_for_row(expr, row_a, column_index)?;
-        let vb = eval_arg_for_row(expr, row_b, column_index)?;
+        let va = eval_arg_for_row(expr, row_a, column_index, crs)?;
+        let vb = eval_arg_for_row(expr, row_b, column_index, crs)?;
         if !matches!(cmp_values(&va, &vb), std::cmp::Ordering::Equal) {
             return Ok(false);
         }
@@ -134,6 +146,7 @@ pub(super) fn eval_arg_for_row(
     expr: &SqlExpr,
     row: &[Value],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
 ) -> Result<Value, crate::expr::EvalError> {
     match expr {
         SqlExpr::Column(name) => Ok(column_index
@@ -144,7 +157,7 @@ pub(super) fn eval_arg_for_row(
         SqlExpr::Literal(v) => Ok(v.clone()),
         other => {
             let doc = row_to_obj(row, column_index);
-            Ok(other.eval(&doc)?)
+            Ok(other.eval(&doc, crs)?)
         }
     }
 }
@@ -201,6 +214,7 @@ fn apply_v_rank(
     rows: &mut [Vec<Value>],
     indices: &[usize],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
     spec: &WindowFuncSpec,
     write_col: usize,
 ) -> Result<(), WindowError> {
@@ -215,6 +229,7 @@ fn apply_v_rank(
             indices[pos - 1],
             indices[pos],
             column_index,
+            crs,
             &spec.order_by,
         )? {
             current_rank = pos + 1;
@@ -233,6 +248,7 @@ fn apply_v_dense_rank(
     rows: &mut [Vec<Value>],
     indices: &[usize],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
     spec: &WindowFuncSpec,
     write_col: usize,
 ) -> Result<(), WindowError> {
@@ -247,6 +263,7 @@ fn apply_v_dense_rank(
             indices[pos - 1],
             indices[pos],
             column_index,
+            crs,
             &spec.order_by,
         )? {
             current_rank += 1;
@@ -283,6 +300,7 @@ fn apply_v_percent_rank(
     rows: &mut [Vec<Value>],
     indices: &[usize],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
     spec: &WindowFuncSpec,
     write_col: usize,
 ) -> Result<(), WindowError> {
@@ -303,6 +321,7 @@ fn apply_v_percent_rank(
             indices[pos - 1],
             indices[pos],
             column_index,
+            crs,
             &spec.order_by,
         )? {
             current_rank = pos + 1;
@@ -317,6 +336,7 @@ fn apply_v_cume_dist(
     rows: &mut [Vec<Value>],
     indices: &[usize],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
     spec: &WindowFuncSpec,
     write_col: usize,
 ) -> Result<(), WindowError> {
@@ -334,6 +354,7 @@ fn apply_v_cume_dist(
                 indices[group_start],
                 indices[group_end],
                 column_index,
+                crs,
                 &spec.order_by,
             )?
         {
@@ -354,12 +375,13 @@ fn collect_arg_values(
     rows: &[Vec<Value>],
     indices: &[usize],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
     spec: &WindowFuncSpec,
 ) -> Result<Vec<Value>, WindowError> {
     indices
         .iter()
         .map(|&i| match (rows.get(i), spec.args.first()) {
-            (Some(row), Some(expr)) => Ok(eval_arg_for_row(expr, row, column_index)?),
+            (Some(row), Some(expr)) => Ok(eval_arg_for_row(expr, row, column_index, crs)?),
             _ => Ok(Value::Null),
         })
         .collect()
@@ -369,12 +391,13 @@ fn apply_v_lag(
     rows: &mut [Vec<Value>],
     indices: &[usize],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
     spec: &WindowFuncSpec,
     write_col: usize,
 ) -> Result<(), WindowError> {
     let offset = usize_arg(spec, 1, 1);
     let default = default_arg_value(spec, 2);
-    let values = collect_arg_values(rows, indices, column_index, spec)?;
+    let values = collect_arg_values(rows, indices, column_index, crs, spec)?;
     for (pos, &i) in indices.iter().enumerate() {
         let val = if pos >= offset {
             values[pos - offset].clone()
@@ -390,12 +413,13 @@ fn apply_v_lead(
     rows: &mut [Vec<Value>],
     indices: &[usize],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
     spec: &WindowFuncSpec,
     write_col: usize,
 ) -> Result<(), WindowError> {
     let offset = usize_arg(spec, 1, 1);
     let default = default_arg_value(spec, 2);
-    let values = collect_arg_values(rows, indices, column_index, spec)?;
+    let values = collect_arg_values(rows, indices, column_index, crs, spec)?;
     for (pos, &i) in indices.iter().enumerate() {
         let val = if pos + offset < indices.len() {
             values[pos + offset].clone()
@@ -411,11 +435,12 @@ fn apply_v_nth_value(
     rows: &mut [Vec<Value>],
     indices: &[usize],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
     spec: &WindowFuncSpec,
     write_col: usize,
 ) -> Result<(), WindowError> {
     let n = usize_arg(spec, 1, 1).max(1);
-    let values = collect_arg_values(rows, indices, column_index, spec)?;
+    let values = collect_arg_values(rows, indices, column_index, crs, spec)?;
     for (pos, &i) in indices.iter().enumerate() {
         let val = if pos + 1 >= n {
             values[n - 1].clone()
@@ -484,7 +509,13 @@ mod tests {
         let mut rows = rows_v(&[5, 5, 5]);
         let cols = ci(&["v"]);
         let s = spec("row_number", vec![], vec![], vec![]);
-        evaluate_window_functions_value(&mut rows, &cols, &[s]).unwrap();
+        evaluate_window_functions_value(
+            &mut rows,
+            &cols,
+            &nodedb_crs::CrsContext::builtin_only(),
+            &[s],
+        )
+        .unwrap();
         assert_eq!(out_int(&rows, 1), vec![1, 2, 3]);
     }
 
@@ -493,7 +524,13 @@ mod tests {
         let mut rows = rows_v(&[10, 10, 20]);
         let cols = ci(&["v"]);
         let s = spec("rank", vec![], vec![], vec![(col("v"), true)]);
-        evaluate_window_functions_value(&mut rows, &cols, &[s]).unwrap();
+        evaluate_window_functions_value(
+            &mut rows,
+            &cols,
+            &nodedb_crs::CrsContext::builtin_only(),
+            &[s],
+        )
+        .unwrap();
         assert_eq!(out_int(&rows, 1), vec![1, 1, 3]);
     }
 
@@ -502,7 +539,13 @@ mod tests {
         let mut rows = rows_v(&[10, 10, 20]);
         let cols = ci(&["v"]);
         let s = spec("dense_rank", vec![], vec![], vec![(col("v"), true)]);
-        evaluate_window_functions_value(&mut rows, &cols, &[s]).unwrap();
+        evaluate_window_functions_value(
+            &mut rows,
+            &cols,
+            &nodedb_crs::CrsContext::builtin_only(),
+            &[s],
+        )
+        .unwrap();
         assert_eq!(out_int(&rows, 1), vec![1, 1, 2]);
     }
 
@@ -516,7 +559,13 @@ mod tests {
             vec![],
             vec![(col("v"), true)],
         );
-        evaluate_window_functions_value(&mut rows, &cols, &[s]).unwrap();
+        evaluate_window_functions_value(
+            &mut rows,
+            &cols,
+            &nodedb_crs::CrsContext::builtin_only(),
+            &[s],
+        )
+        .unwrap();
         assert_eq!(out_int(&rows, 1), vec![1, 1, 2]);
     }
 
@@ -525,7 +574,13 @@ mod tests {
         let mut rows = rows_v(&[1, 2, 3]);
         let cols = ci(&["v"]);
         let s = spec("lag", vec![col("v")], vec![], vec![(col("v"), true)]);
-        evaluate_window_functions_value(&mut rows, &cols, &[s]).unwrap();
+        evaluate_window_functions_value(
+            &mut rows,
+            &cols,
+            &nodedb_crs::CrsContext::builtin_only(),
+            &[s],
+        )
+        .unwrap();
         // First row has no predecessor → Null; rest carry the prior value.
         assert!(matches!(rows[0][1], Value::Null));
         assert_eq!(rows[1][1].as_f64().unwrap() as i64, 1);
@@ -537,7 +592,13 @@ mod tests {
         let mut rows = rows_v(&[1, 2, 3]);
         let cols = ci(&["v"]);
         let s = spec("lead", vec![col("v")], vec![], vec![(col("v"), true)]);
-        evaluate_window_functions_value(&mut rows, &cols, &[s]).unwrap();
+        evaluate_window_functions_value(
+            &mut rows,
+            &cols,
+            &nodedb_crs::CrsContext::builtin_only(),
+            &[s],
+        )
+        .unwrap();
         assert_eq!(rows[0][1].as_f64().unwrap() as i64, 2);
         assert_eq!(rows[1][1].as_f64().unwrap() as i64, 3);
         // Last row has no successor → Null.
@@ -550,7 +611,13 @@ mod tests {
 
         let mut rows = rows_v(&[10, 10, 20]);
         let pr = spec("percent_rank", vec![], vec![], vec![(col("v"), true)]);
-        evaluate_window_functions_value(&mut rows, &cols, &[pr]).unwrap();
+        evaluate_window_functions_value(
+            &mut rows,
+            &cols,
+            &nodedb_crs::CrsContext::builtin_only(),
+            &[pr],
+        )
+        .unwrap();
         let pr_out = out_f64(&rows, 1);
         assert!((pr_out[0] - 0.0).abs() < 1e-9);
         assert!((pr_out[1] - 0.0).abs() < 1e-9);
@@ -558,7 +625,13 @@ mod tests {
 
         let mut rows = rows_v(&[10, 10, 20]);
         let cd = spec("cume_dist", vec![], vec![], vec![(col("v"), true)]);
-        evaluate_window_functions_value(&mut rows, &cols, &[cd]).unwrap();
+        evaluate_window_functions_value(
+            &mut rows,
+            &cols,
+            &nodedb_crs::CrsContext::builtin_only(),
+            &[cd],
+        )
+        .unwrap();
         let cd_out = out_f64(&rows, 1);
         assert!((cd_out[0] - 2.0 / 3.0).abs() < 1e-9);
         assert!((cd_out[1] - 2.0 / 3.0).abs() < 1e-9);
@@ -574,7 +647,13 @@ mod tests {
             vec![Value::Integer(2), Value::Integer(102)],
         ];
         let s = spec("row_number", vec![], vec![col("g")], vec![]);
-        evaluate_window_functions_value(&mut rows, &cols, &[s]).unwrap();
+        evaluate_window_functions_value(
+            &mut rows,
+            &cols,
+            &nodedb_crs::CrsContext::builtin_only(),
+            &[s],
+        )
+        .unwrap();
         // Two rows in partition g=1 → 1,2; one row in g=2 → 1. Result at idx 2.
         assert_eq!(out_int(&rows, 2), vec![1, 2, 1]);
     }
@@ -587,7 +666,13 @@ mod tests {
         let mut rows = rows_v(&[10, 30, 20]);
         let cols = ci(&["v"]);
         let s = spec("rank", vec![], vec![], vec![(col("v"), false)]);
-        evaluate_window_functions_value(&mut rows, &cols, &[s]).unwrap();
+        evaluate_window_functions_value(
+            &mut rows,
+            &cols,
+            &nodedb_crs::CrsContext::builtin_only(),
+            &[s],
+        )
+        .unwrap();
         assert_eq!(out_int(&rows, 0), vec![10, 30, 20]);
         assert_eq!(out_int(&rows, 1), vec![3, 1, 2]);
     }
@@ -597,7 +682,13 @@ mod tests {
         let mut rows = rows_v(&[1]);
         let cols = ci(&["v"]);
         let s = spec("nonexistent", vec![], vec![], vec![]);
-        let err = evaluate_window_functions_value(&mut rows, &cols, &[s]).unwrap_err();
+        let err = evaluate_window_functions_value(
+            &mut rows,
+            &cols,
+            &nodedb_crs::CrsContext::builtin_only(),
+            &[s],
+        )
+        .unwrap_err();
         assert!(matches!(err, WindowError::ArgEval { .. }));
     }
 
@@ -608,7 +699,13 @@ mod tests {
         let cols = ci(&["v"]);
         let mut rows = rows_v(&[1, 2]);
         let s = spec("row_number", vec![], vec![col("missing")], vec![]);
-        evaluate_window_functions_value(&mut rows, &cols, &[s]).unwrap();
+        evaluate_window_functions_value(
+            &mut rows,
+            &cols,
+            &nodedb_crs::CrsContext::builtin_only(),
+            &[s],
+        )
+        .unwrap();
         assert_eq!(out_int(&rows, 1), vec![1, 2]);
     }
 }

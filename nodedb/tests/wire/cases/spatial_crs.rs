@@ -5,7 +5,7 @@
 //! measures in a projected SRID, and the one-SRID-per-index rule.
 //!
 //! Reference coordinates come from PROJ 9.8.1 via pyproj (EPSG:4326 to the
-//! target, always_xy).
+//! target, always_xy). `spatial_crs_open.rs` covers CRSs beyond these.
 
 use crate::harness::TestServer;
 
@@ -59,13 +59,11 @@ async fn mixed_srid_predicate_is_an_error() {
 }
 
 #[tokio::test]
-async fn transform_to_an_unsupported_srid_names_every_supported_code() {
+async fn transform_to_an_undefined_srid_names_it() {
     let srv = TestServer::start().await;
-    let sql = "SELECT ST_Transform(ST_Point(101.7, 3.1), 2154)";
-    srv.expect_error(sql, "unsupported SRID 2154").await;
-    for code in ["4326", "32647", "32648", "3375", "3376"] {
-        srv.expect_error(sql, code).await;
-    }
+    let sql = "SELECT ST_Transform(ST_Point(101.7, 3.1), 999)";
+    srv.expect_error(sql, "SRID 999 is not defined").await;
+    srv.expect_error(sql, "22000").await;
 }
 
 #[tokio::test]

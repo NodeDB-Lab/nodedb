@@ -18,6 +18,7 @@ pub(crate) fn engine_attr_type(t: ArrayAttrType) -> AttrType {
         ArrayAttrType::Int32 => AttrType::Int32,
         ArrayAttrType::UInt32 => AttrType::UInt32,
         ArrayAttrType::Float32 => AttrType::Float32,
+        ArrayAttrType::Int8 => AttrType::Int8,
     }
 }
 
@@ -34,6 +35,7 @@ pub(crate) fn sql_attr_type(t: AttrType) -> ArrayAttrType {
         AttrType::Int32 => ArrayAttrType::Int32,
         AttrType::UInt32 => ArrayAttrType::UInt32,
         AttrType::Float32 => ArrayAttrType::Float32,
+        AttrType::Int8 => ArrayAttrType::Int8,
     }
 }
 
@@ -54,6 +56,7 @@ mod tests {
             ArrayAttrType::Int32,
             ArrayAttrType::UInt32,
             ArrayAttrType::Float32,
+            ArrayAttrType::Int8,
         ];
         for t in all {
             assert_eq!(sql_attr_type(engine_attr_type(t)), t);

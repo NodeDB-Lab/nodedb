@@ -79,7 +79,26 @@ impl CoreLoop {
                 }
             };
             let ord = stamp.system_from;
-            let valid_from_ms = nodedb_types::ordinal_to_ms(ord);
+            let valid_from_ms = edge
+                .valid_from_ms
+                .unwrap_or_else(|| match self.epoch_system_ms {
+                    Some(ms) => ms,
+                    None => nodedb_types::ordinal_to_ms(ord),
+                });
+            let valid_until_ms = edge.valid_until_ms.unwrap_or(i64::MAX);
+            if valid_until_ms <= valid_from_ms {
+                let code = refusal_after_rows(
+                    write_set.len() as u64,
+                    crate::Error::BadRequest {
+                        detail: format!(
+                            "edge ({})-[{}]->({}) valid time [{valid_from_ms}, \
+                             {valid_until_ms}) is empty",
+                            edge.src_id, edge.label, edge.dst_id
+                        ),
+                    },
+                );
+                return self.refusal_with_landed_rows(task, code, write_set);
+            }
             use crate::engine::graph::edge_store::EdgeRef;
             match self.edge_store.put_edge_version_recorded(
                 EdgeRef::new(
@@ -94,10 +113,16 @@ impl CoreLoop {
                 &[],
                 stamp,
                 valid_from_ms,
-                i64::MAX,
+                valid_until_ms,
                 owns_logical_edge_stats(task, &edge.src_id),
             ) {
                 Ok(version) => {
+                    self.historical_csr.note_version(
+                        task.request.database_id,
+                        TenantId::new(tid),
+                        edge.collection.as_str(),
+                        ord,
+                    );
                     let current = version.current.clone();
                     // The CSR follows what the edge resolves to: a version a
                     // TRUNCATE hides leaves the edge as it was. A CSR refusal
@@ -125,6 +150,8 @@ impl CoreLoop {
                             dst_surrogate: edge.dst_surrogate.as_u32(),
                             system_from: Some(ord),
                             applied: (stamp.applied != ord).then_some(stamp.applied),
+                            valid_from_ms: Some(valid_from_ms),
+                            valid_until_ms: Some(valid_until_ms),
                         },
                     )));
                     let partition = self.csr_partition_mut(database_id, tid);
@@ -190,6 +217,8 @@ mod tests {
             dst_id: dst.to_string(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
         }
     }
 

@@ -6,7 +6,7 @@
 //! queries still see prior history; on non-bitemporal collections the
 //! row is removed in place.
 
-use super::batch::{DocumentEngine, wall_now_ms};
+use super::batch::DocumentEngine;
 use crate::engine::document::store::StorageKey;
 use crate::engine::document::store::extract::extract_index_values_rmpv;
 
@@ -22,7 +22,7 @@ impl<'a> DocumentEngine<'a> {
             let Some(body) = prior_body else {
                 return Ok(false);
             };
-            let sys_from = wall_now_ms();
+            let sys_from = self.clock.next_ordinal();
             self.sparse.versioned_tombstone(
                 self.database_id,
                 self.tenant_id,
@@ -45,7 +45,7 @@ impl<'a> DocumentEngine<'a> {
                                 field: &index_path.path,
                                 value: &v,
                                 doc_id,
-                                sys_from_ms: sys_from,
+                                sys_from,
                             },
                         )?;
                     }

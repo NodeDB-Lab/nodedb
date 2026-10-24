@@ -18,12 +18,12 @@ pub enum GeoArgShape {
     Geometry2Distance,
     /// `(geom, srid)`
     GeometrySrid,
+    /// `(geom, srid [, epoch])`: the epoch is a decimal year.
+    GeometrySridEpoch,
     /// `(geom, distance_m [, segments])`
     GeometryBuffer,
     /// `(lng, lat)`
     LngLat,
-    /// `(x, y [, z])`
-    LngLatZ,
     /// `(lng, lat [, precision])`
     LngLatPrecision,
     /// `(lat, lng, resolution)` — note the reversed leading pair relative to
@@ -45,6 +45,26 @@ pub enum GeoArgShape {
     PointsVariadic,
     /// `(ring, ring, ...)`
     RingsVariadic,
+    /// `(x, y [, z [, m]])`
+    Xyzm,
+    /// `(x, y, m)`
+    Xym,
+    /// `(geom, number)`
+    GeometryNumber,
+    /// `(geom [, number])`
+    GeometryNumberOpt,
+    /// `(geom [, number [, number]])`
+    GeometryNumbers2Opt,
+    /// `(geom, number [, number])`
+    GeometryNumberNumberOpt,
+    /// `(geom, number, number [, number])`
+    GeometryRange,
+    /// `(geom [, text])`
+    GeometryTextOpt,
+    /// `(geom1, geom2 [, text])`
+    Geometry2TextOpt,
+    /// `(z, x, y [, bounds])`
+    TileEnvelope,
 }
 
 impl GeoArgShape {
@@ -52,14 +72,58 @@ impl GeoArgShape {
     pub const fn arity(self) -> (usize, usize) {
         match self {
             Self::Geometry1 | Self::Text1 => (1, 1),
-            Self::TextSrid | Self::BytesSrid => (1, 2),
-            Self::Geometry2 | Self::LngLat | Self::GeometrySrid => (2, 2),
-            Self::GeometryBuffer | Self::LngLatZ | Self::LngLatPrecision => (2, 3),
-            Self::Geometry2Distance | Self::LatLngResolution => (3, 3),
-            Self::Circle => (3, 4),
+            Self::TextSrid | Self::BytesSrid | Self::GeometryNumberOpt | Self::GeometryTextOpt => {
+                (1, 2)
+            }
+            Self::GeometryNumbers2Opt => (1, 3),
+            Self::Geometry2 | Self::LngLat | Self::GeometrySrid | Self::GeometryNumber => (2, 2),
+            Self::GeometryBuffer
+            | Self::GeometrySridEpoch
+            | Self::LngLatPrecision
+            | Self::GeometryNumberNumberOpt
+            | Self::Geometry2TextOpt => (2, 3),
+            Self::Xyzm => (2, 4),
+            Self::Geometry2Distance | Self::LatLngResolution | Self::Xym => (3, 3),
+            Self::Circle | Self::GeometryRange | Self::TileEnvelope => (3, 4),
             Self::Haversine4 | Self::Bbox => (4, 4),
             Self::PointsVariadic => (2, MAX_VARIADIC),
             Self::RingsVariadic => (1, MAX_VARIADIC),
+        }
+    }
+}
+
+impl GeoArgShape {
+    /// The zero-based position of the SRID argument, for a shape that has
+    /// one: `(geom, srid)`, `(geom, srid [, epoch])`, `(wkt [, srid])` and
+    /// `(wkb [, srid])`.
+    pub const fn srid_position(self) -> Option<usize> {
+        match self {
+            Self::GeometrySrid | Self::GeometrySridEpoch | Self::TextSrid | Self::BytesSrid => {
+                Some(1)
+            }
+            Self::Geometry1
+            | Self::Geometry2
+            | Self::Geometry2Distance
+            | Self::GeometryBuffer
+            | Self::LngLat
+            | Self::LngLatPrecision
+            | Self::LatLngResolution
+            | Self::Text1
+            | Self::Haversine4
+            | Self::Circle
+            | Self::Bbox
+            | Self::PointsVariadic
+            | Self::RingsVariadic
+            | Self::Xyzm
+            | Self::Xym
+            | Self::GeometryNumber
+            | Self::GeometryNumberOpt
+            | Self::GeometryNumbers2Opt
+            | Self::GeometryNumberNumberOpt
+            | Self::GeometryRange
+            | Self::GeometryTextOpt
+            | Self::Geometry2TextOpt
+            | Self::TileEnvelope => None,
         }
     }
 }
@@ -79,9 +143,13 @@ pub enum GeoReturn {
     Float,
     Int,
     Text,
+    Bytes,
     Geometry,
     Object,
     Array,
+    /// The type depends on the argument count (`ST_Relate`: text with two
+    /// arguments, boolean with a pattern). Typed at runtime.
+    ByArity,
 }
 
 /// One geospatial SQL function.

@@ -36,8 +36,9 @@ pub enum StagedTtl {
 /// out of the overlay sidecar so both agree on the version key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BitemporalStamp {
-    /// System-time key (`_ts_system`) the version row is appended at.
-    pub sys_from_ms: i64,
+    /// System-time ordinal the version row is keyed at. `_ts_system`
+    /// renders its millisecond.
+    pub sys_from: i64,
     /// Valid-time lower bound (`i64::MIN` = unbounded).
     pub valid_from_ms: i64,
     /// Valid-time upper bound (`i64::MAX` = unbounded).

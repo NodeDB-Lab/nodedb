@@ -39,6 +39,14 @@ pub enum CalvinError {
     /// lock keys until its admission deadline.
     #[error("the lock keys of the proposed write stayed held past the leader's admission deadline")]
     AdmissionTimedOut,
+
+    /// A decoded class's `body_plans` is out of order or repeats an index.
+    #[error("body_plans index {index} is not above the index before it")]
+    BodyPlansUnsorted { index: usize },
+
+    /// A whole-task part's plan bytes are not a valid part tasks form.
+    #[error("calvin part tasks: {0}")]
+    PartTasks(#[from] crate::calvin::types::PartTasksError),
 }
 
 /// Error emitted when applying or validating a `MigrationCheckpoint` entry.

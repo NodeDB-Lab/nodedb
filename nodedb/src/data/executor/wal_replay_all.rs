@@ -471,6 +471,7 @@ mod tests {
                 prior_pk_msgpack: Vec::new(),
                 image_msgpack: nodedb_types::value_to_msgpack(&Value::Object(image))
                     .expect("encode image"),
+                system_from: None,
             }],
         };
         RedoSubRecord {

@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::Message;
 use nodedb::control::security::jwks::registry::JwksRegistry;
 use nodedb::control::server::sync::listener::{SyncListenerConfig, start_sync_listener};
 use nodedb::control::server::sync::shape::handler::{ShapeSnapshotMsg, ShapeSubscribeMsg};
-use nodedb_test_support::jwks_fixture::{JwksFixture, now_secs};
+use nodedb_test_support::jwks_fixture::{JwksFixture, loopback_egress, now_secs};
 use nodedb_test_support::pgwire_harness::TestServer;
 use nodedb_types::sync::shape::{ShapeDefinition, ShapeType};
 use nodedb_types::sync::wire::{
@@ -56,9 +56,12 @@ struct Jwt {
 impl Jwt {
     async fn start_server() -> Self {
         let fixture = JwksFixture::spawn().await;
-        let registry = JwksRegistry::init(fixture.auth_config(ISSUER, AUDIENCE, TENANT))
-            .await
-            .expect("test JWKS registry must initialize");
+        let registry = JwksRegistry::init(
+            fixture.auth_config(ISSUER, AUDIENCE, TENANT),
+            loopback_egress(),
+        )
+        .await
+        .expect("test JWKS registry must initialize");
         let server = TestServer::start_with_jwks(std::sync::Arc::new(registry)).await;
         Self { server, fixture }
     }
@@ -118,7 +121,7 @@ async fn handshake(ws: &mut Ws, token: &str) {
         client_version: "shape-authz-test".into(),
         lite_id: String::new(),
         epoch: 0,
-        wire_version: nodedb_types::wire_version::WIRE_FORMAT_VERSION,
+        wire_version: nodedb_types::sync::wire::SYNC_WIRE_VERSION,
     };
     send(ws, SyncMessageType::Handshake, &msg).await;
     let frame = next_frame(ws).await.expect("handshake must be answered");

@@ -56,7 +56,21 @@ pub(crate) async fn bootstrap_data_plane(
     let governor = nodedb::memory::init_governor(config.server.memory_limit, &byte_budgets)?;
 
     // Open WAL, validate, replay, and load tombstone set.
-    let (wal, wal_records, replay_tombstones) = bootstrap::wal_init::init_wal(config)?;
+    // The WAL key comes from the source `[encryption]` names: a key file,
+    // Vault or AWS KMS. A Vault request goes through the `[egress]` policy.
+    let wal_key = match &config.encryption {
+        Some(settings) => {
+            let key = nodedb::control::security::keystore::load_wal_key(
+                settings,
+                Arc::new(config.egress.checked_policy()?),
+            )
+            .await?;
+            tracing::info!(source = settings.source()?.kind(), "WAL key loaded");
+            Some(key)
+        }
+        None => None,
+    };
+    let (wal, wal_records, replay_tombstones) = bootstrap::wal_init::init_wal(config, wal_key)?;
     wal_gate.fire();
 
     // Create SPSC bridge: Dispatcher (Control Plane) + CoreChannelDataSide (Data Plane).
@@ -107,6 +121,10 @@ pub(crate) async fn bootstrap_data_plane(
     // replayed row.
     let columnar_schema_seed = Arc::new(bootstrap::data_plane::load_columnar_schema_seed(config));
 
+    // Seed each core with the catalog's user-defined CRS set, so WAL replay
+    // and the first request resolve user-defined SRIDs.
+    let crs_set_seed = bootstrap::data_plane::load_crs_set_seed(config);
+
     // Create the quarantine registry before spawning cores.
     let quarantine_registry =
         std::sync::Arc::new(nodedb::storage::quarantine::QuarantineRegistry::new());
@@ -130,7 +148,7 @@ pub(crate) async fn bootstrap_data_plane(
             governor: Arc::clone(&governor),
             quiesce: Arc::clone(&quiesce),
             event_interest: Arc::clone(&event_interest),
-            hlc: Arc::new(nodedb_types::OrdinalClock::new()),
+            hlc: wal.ordinal_clock(),
             array_catalog: Arc::clone(&array_catalog),
             quarantine_registry: Arc::clone(&quarantine_registry),
             system_metrics: Arc::clone(&system_metrics),
@@ -138,6 +156,7 @@ pub(crate) async fn bootstrap_data_plane(
             doc_config_seed: Arc::clone(&doc_config_seed),
             vector_index_param_seed: Arc::clone(&vector_index_param_seed),
             columnar_schema_seed: Arc::clone(&columnar_schema_seed),
+            crs_set_seed: Arc::clone(&crs_set_seed),
         },
     )?;
 

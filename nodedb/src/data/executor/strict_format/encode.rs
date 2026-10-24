@@ -113,13 +113,14 @@ fn tuple_encode_error(
 }
 
 /// Bitemporal variant: decode msgpack to `Value`, then encode as a Binary
-/// Tuple with reserved slots 0/1/2 populated from the supplied timestamps.
+/// Tuple with reserved slots 0/1/2 populated from the supplied system-time
+/// ordinal and valid-time bounds.
 /// `collection` names the target in an unknown-field error and carries no
 /// other meaning.
 pub fn bytes_to_binary_tuple_bitemporal(
     bytes: &[u8],
     schema: &StrictSchema,
-    system_from_ms: i64,
+    system_from: i64,
     valid_from_ms: i64,
     valid_until_ms: i64,
     collection: &str,
@@ -132,7 +133,7 @@ pub fn bytes_to_binary_tuple_bitemporal(
     value_to_binary_tuple_bitemporal(
         &value,
         schema,
-        system_from_ms,
+        system_from,
         valid_from_ms,
         valid_until_ms,
         collection,
@@ -145,7 +146,7 @@ pub fn bytes_to_binary_tuple_bitemporal(
 pub fn value_to_binary_tuple_bitemporal(
     value: &Value,
     schema: &StrictSchema,
-    system_from_ms: i64,
+    system_from: i64,
     valid_from_ms: i64,
     valid_until_ms: i64,
     collection: &str,
@@ -211,6 +212,6 @@ pub fn value_to_binary_tuple_bitemporal(
 
     let encoder = nodedb_strict::TupleEncoder::new(schema);
     encoder
-        .encode_bitemporal(system_from_ms, valid_from_ms, valid_until_ms, &user_values)
+        .encode_bitemporal(system_from, valid_from_ms, valid_until_ms, &user_values)
         .map_err(|e| tuple_encode_error(e, map))
 }

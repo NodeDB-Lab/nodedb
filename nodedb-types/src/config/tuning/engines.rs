@@ -110,6 +110,10 @@ pub const DEFAULT_VARLEN_MAX_FRONTIER: usize = 100_000;
 /// typical keys, so the default bounds one run near 1 GB before its CSR.
 pub const DEFAULT_MAX_GATHERED_ALGO_EDGES: usize = 10_000_000;
 
+/// Default number of historical CSRs one Data Plane core keeps for
+/// `AS OF` graph reads.
+pub const DEFAULT_MAX_HISTORICAL_CSR_CACHE_ENTRIES: usize = 8;
+
 /// Graph engine tuning (traversal limits, LCC algorithm).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphTuning {
@@ -140,6 +144,13 @@ pub struct GraphTuning {
     /// rather than answered from part of the graph.
     #[serde(default = "default_max_gathered_algo_edges")]
     pub max_gathered_algo_edges: usize,
+    /// Number of historical CSRs one Data Plane core keeps. An `AS OF` graph
+    /// read builds the CSR of one collection at one cut from the versioned
+    /// edge store. Later reads at the same cut reuse it until it is the
+    /// least recently used past this count. `0` keeps none: every historical
+    /// read builds its CSR again.
+    #[serde(default = "default_max_historical_csr_cache_entries")]
+    pub max_historical_csr_cache_entries: usize,
 }
 
 impl Default for GraphTuning {
@@ -152,6 +163,7 @@ impl Default for GraphTuning {
             varlen_max_results: default_varlen_max_results(),
             varlen_max_frontier: default_varlen_max_frontier(),
             max_gathered_algo_edges: default_max_gathered_algo_edges(),
+            max_historical_csr_cache_entries: default_max_historical_csr_cache_entries(),
         }
     }
 }
@@ -176,6 +188,9 @@ fn default_varlen_max_frontier() -> usize {
 }
 fn default_max_gathered_algo_edges() -> usize {
     DEFAULT_MAX_GATHERED_ALGO_EDGES
+}
+fn default_max_historical_csr_cache_entries() -> usize {
+    DEFAULT_MAX_HISTORICAL_CSR_CACHE_ENTRIES
 }
 
 /// Timeseries engine tuning (memtable budgets, block sizes).

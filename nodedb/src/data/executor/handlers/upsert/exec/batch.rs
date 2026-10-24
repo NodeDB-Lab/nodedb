@@ -292,7 +292,7 @@ impl CoreLoop {
                 key.surrogate.as_u32(),
                 key.identity.clone(),
                 key.post.clone(),
-                outcome.bitemporal_sys_from_ms,
+                outcome.bitemporal_sys_from,
             ));
             if task.wal_lsn().is_some() {
                 let mut tuples = std::mem::take(&mut outcome.secondary_index_added);

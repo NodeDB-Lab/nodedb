@@ -76,6 +76,12 @@ pub async fn read_on_vshard(
             if linearizable {
                 super::read_groups::confirm_graph_read(state, database_id, &plan).await?;
             }
+            crate::control::read_cut::await_read_cut(
+                state,
+                &plan,
+                crate::control::server::shared::session::StatementDeadline::of_statement(state),
+            )
+            .await?;
             let response = crate::control::server::broadcast::broadcast_to_all_cores_txn(
                 state,
                 tenant_id,

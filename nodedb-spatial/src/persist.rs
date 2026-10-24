@@ -22,13 +22,14 @@
 //! - `{collection}\x00{field}\x00rtree` → serialized R-tree entries
 //! - `{collection}\x00{field}\x00meta`  → SpatialIndexMeta
 
+use nodedb_crs::InvalidSridCode;
 use nodedb_mem::ScopedMemory;
-use nodedb_types::BoundingBox;
-use nodedb_types::geometry::{Srid, UnsupportedSrid};
+use nodedb_types::geometry::Srid;
+use nodedb_types::{BboxSpace, BoundingBox};
 use serde::{Deserialize, Serialize};
 use zerompk::{FromMessagePack, ToMessagePack};
 
-use crate::rtree::{RTree, RTreeEntry};
+use crate::rtree::{RTree, RTreeEntry, TreeSrid};
 
 // ── SEGV framing constants ─────────────────────────────────────────────────
 //
@@ -44,9 +45,9 @@ const SEGV_MAGIC: [u8; 4] = *b"SEGV";
 /// Magic header for rkyv-serialized R-tree snapshots (6 bytes).
 const RTREE_RKYV_MAGIC: &[u8; 6] = b"RKSPT\0";
 
-/// Current format version for rkyv-serialized R-tree snapshots. Version 2
-/// carries the tree's SRID.
-pub const RTREE_FORMAT_VERSION: u8 = 2;
+/// Current format version for rkyv-serialized R-tree snapshots. Version 3
+/// carries the tree's SRID and bbox space.
+pub const RTREE_FORMAT_VERSION: u8 = 3;
 
 // ── SEGV framing helpers ───────────────────────────────────────────────────
 
@@ -133,8 +134,11 @@ impl std::fmt::Display for SpatialIndexType {
 /// rkyv-serialized R-tree snapshot.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct RTreeSnapshotRkyv {
-    /// EPSG code of the tree's SRID.
+    /// Code of the tree's SRID.
     srid: u32,
+    /// Whether the tree's bbox space is planar. A restore reads the space
+    /// from here, so it never resolves the SRID against a CRS registry.
+    planar: bool,
     entries: Vec<RTreeEntry>,
 }
 
@@ -152,6 +156,7 @@ impl RTree {
     ) -> Result<Vec<u8>, RTreeCheckpointError> {
         let snapshot = RTreeSnapshotRkyv {
             srid: self.srid().code(),
+            planar: self.space() == BboxSpace::Planar,
             entries: self.entries().into_iter().cloned().collect(),
         };
         let rkyv_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot)
@@ -226,7 +231,15 @@ impl RTree {
         let snapshot: RTreeSnapshotRkyv =
             rkyv::from_bytes::<RTreeSnapshotRkyv, rkyv::rancor::Error>(&aligned)
                 .map_err(|e| RTreeCheckpointError::RkyvDeserialize(e.to_string()))?;
-        let srid = Srid::try_from(snapshot.srid)?;
+        // The SRID is checked for syntax only.
+        let srid = TreeSrid {
+            srid: Srid::new(snapshot.srid)?,
+            space: if snapshot.planar {
+                BboxSpace::Planar
+            } else {
+                BboxSpace::Geographic
+            },
+        };
         Ok(RTree::bulk_load(snapshot.entries, memory, srid))
     }
 }
@@ -305,9 +318,9 @@ pub enum RTreeCheckpointError {
     /// AES-256-GCM decryption failed.
     #[error("spatial checkpoint decryption failed: {0}")]
     DecryptionFailed(String),
-    /// The checkpoint names an SRID outside the supported set.
+    /// The checkpoint names an SRID code outside the valid range.
     #[error("R-tree checkpoint: {0}")]
-    UnsupportedSrid(#[from] UnsupportedSrid),
+    InvalidSrid(#[from] InvalidSridCode),
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -315,7 +328,7 @@ pub enum RTreeCheckpointError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_memory;
+    use crate::test_support::{planar_srid, test_memory};
 
     fn make_entry(id: u64, lng: f64, lat: f64) -> RTreeEntry {
         RTreeEntry {
@@ -326,7 +339,7 @@ mod tests {
 
     #[test]
     fn checkpoint_roundtrip_empty() {
-        let tree = RTree::new(test_memory(), Srid::Wgs84);
+        let tree = RTree::new(test_memory(), TreeSrid::WGS84);
         let bytes = tree.checkpoint_to_bytes(None).unwrap();
         let restored = RTree::from_checkpoint(&bytes, None, test_memory()).unwrap();
         assert_eq!(restored.len(), 0);
@@ -334,7 +347,7 @@ mod tests {
 
     #[test]
     fn checkpoint_roundtrip_entries() {
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         for i in 0..100 {
             tree.insert(make_entry(i, (i as f64) * 0.5, (i as f64) * 0.3));
         }
@@ -351,7 +364,7 @@ mod tests {
 
     #[test]
     fn checkpoint_preserves_ids() {
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         tree.insert(make_entry(42, 10.0, 20.0));
         tree.insert(make_entry(99, 30.0, 40.0));
 
@@ -379,23 +392,23 @@ mod tests {
             index_type: SpatialIndexType::RTree,
             entry_count: 1000,
             extent: Some(BoundingBox::new(-180.0, -90.0, 180.0, 90.0)),
-            srid: Srid::PeninsularRso,
+            srid: Srid::new(3375).unwrap(),
         };
         let bytes = serialize_meta(&meta).unwrap();
         let restored = deserialize_meta(&bytes).unwrap();
         assert_eq!(restored.collection, "buildings");
         assert_eq!(restored.entry_count, 1000);
         assert_eq!(restored.index_type, SpatialIndexType::RTree);
-        assert_eq!(restored.srid, Srid::PeninsularRso);
+        assert_eq!(restored.srid, Srid::new(3375).unwrap());
     }
 
     #[test]
     fn checkpoint_preserves_srid() {
-        let mut tree = RTree::new(test_memory(), Srid::BorneoRso);
+        let mut tree = RTree::new(test_memory(), planar_srid(3376));
         tree.insert(make_entry(7, 708_697.0, 662_326.0));
         let bytes = tree.checkpoint_to_bytes(None).unwrap();
         let restored = RTree::from_checkpoint(&bytes, None, test_memory()).unwrap();
-        assert_eq!(restored.srid(), Srid::BorneoRso);
+        assert_eq!(restored.tree_srid(), planar_srid(3376));
         assert_eq!(restored.len(), 1);
     }
 
@@ -410,7 +423,7 @@ mod tests {
 
     #[test]
     fn checkpoint_size_reasonable() {
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         for i in 0..1000 {
             tree.insert(make_entry(i, (i as f64) * 0.01, (i as f64) * 0.01));
         }
@@ -431,7 +444,7 @@ mod tests {
 
     #[test]
     fn golden_header_layout() {
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         tree.insert(make_entry(1, 10.0, 20.0));
         let bytes = tree.checkpoint_to_bytes(None).unwrap();
         // Magic at bytes[0..6].
@@ -444,7 +457,7 @@ mod tests {
 
     #[test]
     fn version_mismatch_returns_error() {
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         tree.insert(make_entry(1, 10.0, 20.0));
         let mut bytes = tree.checkpoint_to_bytes(None).unwrap();
         // Corrupt the version byte to an unsupported value.
@@ -466,7 +479,7 @@ mod tests {
     #[test]
     fn spatial_rtree_checkpoint_encrypted_at_rest() {
         let kek = make_test_kek();
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         for i in 0..50 {
             tree.insert(make_entry(i, i as f64, i as f64 * 0.5));
         }
@@ -486,7 +499,7 @@ mod tests {
     #[test]
     fn spatial_rtree_refuses_plaintext_when_kek_required() {
         let kek = make_test_kek();
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         tree.insert(make_entry(1, 10.0, 20.0));
 
         // Write plaintext checkpoint.
@@ -502,7 +515,7 @@ mod tests {
     #[test]
     fn spatial_rtree_refuses_encrypted_without_kek() {
         let kek = make_test_kek();
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         tree.insert(make_entry(1, 10.0, 20.0));
 
         let enc_bytes = tree.checkpoint_to_bytes(Some(&kek)).unwrap();
@@ -517,7 +530,7 @@ mod tests {
     #[test]
     fn spatial_rtree_tampered_ciphertext_rejected() {
         let kek = make_test_kek();
-        let mut tree = RTree::new(test_memory(), Srid::Wgs84);
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
         tree.insert(make_entry(1, 10.0, 20.0));
 
         let mut enc_bytes = tree.checkpoint_to_bytes(Some(&kek)).unwrap();

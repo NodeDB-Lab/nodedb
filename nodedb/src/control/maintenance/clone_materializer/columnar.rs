@@ -248,6 +248,7 @@ impl ColumnarCopy<'_> {
                 schema_bytes: Vec::new(),
                 provenance: None,
                 wal_lsn: None,
+                system_from: None,
                 // `materialize_one` (walker.rs) already refused this
                 // materialization if either side carried an RLS policy,
                 // so no policy applies to source or target here — this

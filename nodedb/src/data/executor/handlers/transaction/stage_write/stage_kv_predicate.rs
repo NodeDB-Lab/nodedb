@@ -200,6 +200,7 @@ impl CoreLoop {
         coll_key: &(DatabaseId, TenantId, String),
         filter_bytes: &[u8],
     ) -> Result<Vec<KvStageMatch>, Response> {
+        let crs = self.crs_context();
         let (did, tid) = (coll_key.0.as_u64(), coll_key.1.as_u64());
         let collection = coll_key.2.as_str();
         let filters: Vec<ScanFilter> =
@@ -218,7 +219,9 @@ impl CoreLoop {
             if filters.is_empty() {
                 return true;
             }
-            held.check(|| ScanFilter::all_match_binary(&filters, &kv_row_to_doc(key, value).1))
+            held.check(|| {
+                ScanFilter::all_match_binary(&filters, &kv_row_to_doc(key, value).1, &crs)
+            })
         };
         self.merge_kv_overlay_into_scan(txn_id, coll_key, &mut rows, &matches);
         let rows = held

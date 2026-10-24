@@ -85,8 +85,14 @@ fn tile_bytes(tx: u32, ty: u32) -> Vec<u8> {
     out
 }
 
-/// The whole scene GeoTIFF.
+/// The whole scene GeoTIFF, with `GDAL_NODATA` 0.
 pub fn scene_tiff() -> Vec<u8> {
+    scene_tiff_with_nodata(Some("0"))
+}
+
+/// The whole scene GeoTIFF, with `nodata` as its `GDAL_NODATA` tag, or no
+/// tag when `None`.
+pub fn scene_tiff_with_nodata(nodata: Option<&str>) -> Vec<u8> {
     let mut cursor = Cursor::new(Vec::new());
     {
         let mut encoder = TiffEncoder::new(&mut cursor).expect("encoder");
@@ -147,7 +153,9 @@ pub fn scene_tiff() -> Vec<u8> {
         ];
         dir.write_tag(Tag::GeoKeyDirectoryTag, &geokeys[..])
             .expect("tag");
-        dir.write_tag(Tag::GdalNodata, "0").expect("tag");
+        if let Some(nodata) = nodata {
+            dir.write_tag(Tag::GdalNodata, nodata).expect("tag");
+        }
         dir.finish().expect("directory writes");
     }
     cursor.into_inner()
@@ -168,6 +176,13 @@ pub fn write_tiff(bytes: &[u8]) -> tempfile::NamedTempFile {
 /// The scene in a temp file, and its absolute path.
 pub fn scene_file() -> (tempfile::NamedTempFile, String) {
     let file = write_tiff(&scene_tiff());
+    let path = file.path().to_string_lossy().into_owned();
+    (file, path)
+}
+
+/// The scene without a `GDAL_NODATA` tag in a temp file, and its path.
+pub fn scene_file_without_nodata() -> (tempfile::NamedTempFile, String) {
+    let file = write_tiff(&scene_tiff_with_nodata(None));
     let path = file.path().to_string_lossy().into_owned();
     (file, path)
 }

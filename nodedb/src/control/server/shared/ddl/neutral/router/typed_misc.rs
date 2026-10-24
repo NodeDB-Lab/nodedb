@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Typed DDL arms for `MiscStmt` (COPY FROM file or STDIN, COPY TO file) and the `ClusterStmt`
-//! `AlterRaftGroup` variant.
+//! Typed DDL arms for `MiscStmt` (COPY FROM file or STDIN, COPY TO file, CREATE and DROP
+//! SPATIAL_REF_SYS, CREATE, DROP and SHOW CREDENTIAL) and the `ClusterStmt` `AlterRaftGroup`
+//! variant.
 
 use nodedb_sql::ddl_ast::statement::{ClusterStmt, MiscStmt, NodedbStatement};
 
@@ -14,6 +15,8 @@ use super::super::super::result::{DdlError, DdlResult};
 use super::super::bulk;
 use super::super::cluster;
 use super::super::collection;
+use super::super::credential;
+use super::super::spatial_ref_sys;
 
 pub(super) async fn try_typed(
     state: &SharedState,
@@ -27,7 +30,7 @@ pub(super) async fn try_typed(
         // `COPY <collection> FROM '<path>' [WITH (...)]` bulk import.
         NodedbStatement::Misc(MiscStmt::CopyFromFile {
             collection,
-            path,
+            sources,
             format,
             delimiter,
             header,
@@ -37,7 +40,7 @@ pub(super) async fn try_typed(
                 state,
                 identity,
                 collection,
-                path,
+                sources,
                 collection::CopyFromOptions {
                     format: format.as_ref(),
                     delimiter: *delimiter,
@@ -80,6 +83,34 @@ pub(super) async fn try_typed(
             )
             .await,
         ),
+
+        NodedbStatement::Misc(MiscStmt::CreateSpatialRefSys {
+            srid,
+            name,
+            format,
+            definition,
+        }) => Some(
+            spatial_ref_sys::create_spatial_ref_sys(
+                state, identity, *srid, name, *format, definition,
+            )
+            .await,
+        ),
+
+        NodedbStatement::Misc(MiscStmt::DropSpatialRefSys { srid }) => {
+            Some(spatial_ref_sys::drop_spatial_ref_sys(state, identity, *srid).await)
+        }
+
+        NodedbStatement::Misc(MiscStmt::CreateCredential { name, spec }) => {
+            Some(credential::create_credential(state, identity, name, spec).await)
+        }
+
+        NodedbStatement::Misc(MiscStmt::DropCredential { name, if_exists }) => {
+            Some(credential::drop_credential(state, identity, name, *if_exists).await)
+        }
+
+        NodedbStatement::Misc(MiscStmt::ShowCredentials) => {
+            Some(credential::show_credentials(state, identity))
+        }
 
         NodedbStatement::Cluster(ClusterStmt::AlterRaftGroup {
             group_id,

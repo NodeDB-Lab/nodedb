@@ -49,6 +49,16 @@ impl PlanCacheInvalidator {
             cache.invalidate_descriptor(name, new_version);
         }
     }
+
+    /// Evict every cache entry.
+    ///
+    /// No-op if the plan cache has been dropped.
+    pub fn invalidate_all(&self) {
+        if let Some(cache) = self.cache.upgrade() {
+            debug!("gateway plan cache: invalidating every entry");
+            cache.clear();
+        }
+    }
 }
 
 #[cfg(test)]

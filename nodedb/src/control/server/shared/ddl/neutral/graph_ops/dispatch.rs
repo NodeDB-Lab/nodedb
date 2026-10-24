@@ -35,6 +35,8 @@ pub async fn dispatch_graph(
             dst,
             label,
             properties,
+            valid_from_ms,
+            valid_until_ms,
         }) => Some(
             edge::insert_edge(
                 state,
@@ -46,7 +48,11 @@ pub async fn dispatch_graph(
                     dst,
                     label,
                 },
-                properties,
+                edge::EdgeInsert {
+                    properties,
+                    valid_from_ms,
+                    valid_until_ms,
+                },
                 txn_ctx,
             )
             .await,
@@ -85,6 +91,7 @@ pub async fn dispatch_graph(
             edge_labels,
             direction,
             edge_predicate,
+            temporal,
         }) => {
             // Every hop of the walk merges the session transaction's staged
             // edge writes. Idle sessions resolve to `None`.
@@ -103,6 +110,7 @@ pub async fn dispatch_graph(
                         edge_predicate,
                         txn_id,
                         linearizable,
+                        temporal,
                     },
                 )
                 .await,
@@ -113,6 +121,7 @@ pub async fn dispatch_graph(
             node,
             edge_labels,
             direction,
+            temporal,
         }) => {
             // Read-your-own-writes for single-hop GRAPH reads needs the
             // session's active `TxnId` so the Data Plane merges this
@@ -131,6 +140,7 @@ pub async fn dispatch_graph(
                         direction,
                         txn_id,
                         linearizable,
+                        temporal,
                     },
                 )
                 .await,
@@ -143,6 +153,7 @@ pub async fn dispatch_graph(
             max_depth,
             edge_labels,
             edge_predicate,
+            temporal,
         }) => {
             // Every hop of the path search merges the session transaction's
             // staged edge writes. Idle sessions resolve to `None`.
@@ -161,6 +172,7 @@ pub async fn dispatch_graph(
                         edge_predicate,
                         txn_id,
                         linearizable,
+                        temporal,
                     },
                 )
                 .await,
@@ -179,6 +191,7 @@ pub async fn dispatch_graph(
             direction,
             mode,
             personalization,
+            temporal,
         }) => Some(
             algo::algo(
                 state,
@@ -198,18 +211,26 @@ pub async fn dispatch_graph(
                     mode,
                     personalization,
                     linearizable,
+                    temporal,
                 },
             )
             .await,
         ),
-        NodedbStatement::Graph(GraphStmt::GraphRagFusion { collection, params }) => Some(
+        NodedbStatement::Graph(GraphStmt::GraphRagFusion {
+            collection,
+            params,
+            temporal,
+        }) => Some(
             rag_fusion::rag_fusion(
                 state,
                 identity,
                 database_id,
-                collection,
-                params,
-                linearizable,
+                rag_fusion::RagFusionRequest {
+                    collection,
+                    params,
+                    linearizable,
+                    temporal,
+                },
             )
             .await,
         ),

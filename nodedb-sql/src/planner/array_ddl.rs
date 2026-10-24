@@ -16,9 +16,11 @@ use crate::error::{Result, SqlError};
 use crate::parser::array_stmt::{AlterArrayAction, AlterArrayAst, CreateArrayAst, DropArrayAst};
 use crate::planner::array_georef::check_georef;
 use crate::types::SqlPlan;
-use crate::types_array::{ArrayDimType, ArrayDomainBound, ArrayGeorefAlter};
+use crate::types_array::{
+    ArrayAttrMetaAlter, ArrayAttrMetaChange, ArrayDimType, ArrayDomainBound, ArrayGeorefAlter,
+};
 
-pub fn plan_create_array(ast: &CreateArrayAst) -> Result<SqlPlan> {
+pub fn plan_create_array(ast: &CreateArrayAst, catalog: &dyn SqlCatalog) -> Result<SqlPlan> {
     if ast.name.is_empty() {
         return Err(SqlError::Parse {
             detail: "CREATE ARRAY: array name must not be empty".into(),
@@ -106,7 +108,7 @@ pub fn plan_create_array(ast: &CreateArrayAst) -> Result<SqlPlan> {
         });
     }
     if let Some(georef) = &ast.georef {
-        check_georef(&ast.name, georef, &ast.dims)?;
+        check_georef(&ast.name, georef, &ast.dims, &catalog.crs_context())?;
     }
     Ok(SqlPlan::CreateArray(CreateArrayPlan {
         name: ast.name.clone(),
@@ -131,7 +133,51 @@ pub fn plan_alter_array(ast: &AlterArrayAst, catalog: &dyn SqlCatalog) -> Result
     match &ast.action {
         AlterArrayAction::SetOptions(set) => plan_alter_options(&ast.name, set),
         AlterArrayAction::Georef(change) => plan_alter_georef(&ast.name, change, catalog),
+        AlterArrayAction::AttrMeta(change) => plan_alter_attr_meta(&ast.name, change, catalog),
     }
+}
+
+/// `ALTER ARRAY <name> ALTER ATTR <attr> SET (...)` or `DROP ...`, checked
+/// against the array's attrs. The engine checks each value against the
+/// attr type when it applies the change.
+fn plan_alter_attr_meta(
+    name: &str,
+    change: &ArrayAttrMetaAlter,
+    catalog: &dyn SqlCatalog,
+) -> Result<SqlPlan> {
+    let view = catalog
+        .lookup_array(name)
+        .ok_or_else(|| SqlError::UnknownTable {
+            name: name.to_string(),
+        })?;
+    let attr = view
+        .attrs
+        .iter()
+        .find(|a| a.name == change.attr)
+        .ok_or_else(|| SqlError::UnknownColumn {
+            table: name.to_string(),
+            column: change.attr.clone(),
+        })?;
+    if let ArrayAttrMetaChange::Drop(keys) = &change.change
+        && let Some(unset) = keys.iter().find(|k| !k.is_set(&attr.meta))
+    {
+        return Err(SqlError::ObjectNotInPrerequisiteState {
+            object: format!("attr '{}' of array '{name}'", change.attr),
+            detail: format!(
+                "ALTER ARRAY {name} ALTER ATTR {} DROP {}: the attr has no {}",
+                change.attr,
+                unset.sql_name(),
+                unset.sql_name()
+            ),
+        });
+    }
+    Ok(SqlPlan::AlterArray(AlterArrayPlan {
+        name: name.to_string(),
+        audit_retain_ms: None,
+        minimum_audit_retain_ms: None,
+        georef: None,
+        attr_meta: Some(change.clone()),
+    }))
 }
 
 /// `ALTER ARRAY <name> SET GEOREF (...)` or `DROP GEOREF`, checked against
@@ -147,7 +193,9 @@ fn plan_alter_georef(
             name: name.to_string(),
         })?;
     match change {
-        ArrayGeorefAlter::Set(georef) => check_georef(name, georef, &view.dims)?,
+        ArrayGeorefAlter::Set(georef) => {
+            check_georef(name, georef, &view.dims, &catalog.crs_context())?
+        }
         ArrayGeorefAlter::Drop => {
             if view.georef.is_none() {
                 return Err(SqlError::ObjectNotInPrerequisiteState {
@@ -162,6 +210,7 @@ fn plan_alter_georef(
         audit_retain_ms: None,
         minimum_audit_retain_ms: None,
         georef: Some(change.clone()),
+        attr_meta: None,
     }))
 }
 
@@ -208,6 +257,7 @@ fn plan_alter_options(name: &str, set: &[(String, Option<i64>)]) -> Result<SqlPl
         audit_retain_ms,
         minimum_audit_retain_ms,
         georef: None,
+        attr_meta: None,
     }))
 }
 
@@ -279,6 +329,7 @@ mod tests {
                 name: "v".into(),
                 dtype: ArrayAttrType::Int64,
                 nullable: false,
+                meta: Default::default(),
             }],
             tile_extents: vec![4],
             cell_order: Default::default(),
@@ -322,7 +373,8 @@ mod tests {
     #[test]
     fn create_carries_georef() {
         let g = georef("col", "row", Some(GT));
-        let SqlPlan::CreateArray(plan) = plan_create_array(&raster_ast(Some(g.clone()))).unwrap()
+        let SqlPlan::CreateArray(plan) =
+            plan_create_array(&raster_ast(Some(g.clone())), &Catalog(None)).unwrap()
         else {
             panic!("expected CreateArray");
         };
@@ -331,14 +383,18 @@ mod tests {
 
     #[test]
     fn create_refuses_bad_georef_with_sqlstate_class() {
-        let err = plan_create_array(&raster_ast(Some(georef("col", "lat", None)))).unwrap_err();
+        let err = plan_create_array(
+            &raster_ast(Some(georef("col", "lat", None))),
+            &Catalog(None),
+        )
+        .unwrap_err();
         assert!(matches!(err, SqlError::UnknownColumn { .. }), "{err:?}");
         let mut srid = georef("col", "row", None);
-        srid.srid = 2154;
-        let err = plan_create_array(&raster_ast(Some(srid))).unwrap_err();
+        srid.srid = 999;
+        let err = plan_create_array(&raster_ast(Some(srid)), &Catalog(None)).unwrap_err();
         assert!(matches!(err, SqlError::DataException { .. }), "{err:?}");
         let singular = georef("col", "row", Some([0.0, 1.0, 1.0, 0.0, 1.0, 1.0]));
-        let err = plan_create_array(&raster_ast(Some(singular))).unwrap_err();
+        let err = plan_create_array(&raster_ast(Some(singular)), &Catalog(None)).unwrap_err();
         assert!(matches!(err, SqlError::DataException { .. }), "{err:?}");
     }
 
@@ -461,6 +517,43 @@ mod tests {
     }
 
     #[test]
+    fn alter_attr_meta_checks_the_attr_and_dropped_keys() {
+        use crate::types_array::{ArrayAttrMetaAst, ArrayAttrMetaKey};
+        let catalog = Catalog(Some(view(None)));
+        let set = ArrayAttrMetaAlter {
+            attr: "v".into(),
+            change: ArrayAttrMetaChange::Set(ArrayAttrMetaAst {
+                nodata: Some(0.0),
+                ..ArrayAttrMetaAst::default()
+            }),
+        };
+        let SqlPlan::AlterArray(plan) =
+            alter(AlterArrayAction::AttrMeta(set.clone()), &catalog).unwrap()
+        else {
+            panic!("expected AlterArray");
+        };
+        assert_eq!(plan.attr_meta, Some(set));
+        assert_eq!(plan.georef, None);
+
+        let unknown = ArrayAttrMetaAlter {
+            attr: "nope".into(),
+            change: ArrayAttrMetaChange::Drop(vec![ArrayAttrMetaKey::Nodata]),
+        };
+        let err = alter(AlterArrayAction::AttrMeta(unknown), &catalog).unwrap_err();
+        assert!(matches!(err, SqlError::UnknownColumn { .. }), "{err:?}");
+
+        let unset = ArrayAttrMetaAlter {
+            attr: "v".into(),
+            change: ArrayAttrMetaChange::Drop(vec![ArrayAttrMetaKey::Scale]),
+        };
+        let err = alter(AlterArrayAction::AttrMeta(unset), &catalog).unwrap_err();
+        assert!(
+            matches!(err, SqlError::ObjectNotInPrerequisiteState { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
     fn alter_options_refuse_negative_values() {
         for key in ["audit_retain_ms", "minimum_audit_retain_ms"] {
             let err = alter(
@@ -474,7 +567,7 @@ mod tests {
 
     #[test]
     fn happy_path() {
-        let plan = plan_create_array(&ok_ast()).unwrap();
+        let plan = plan_create_array(&ok_ast(), &Catalog(None)).unwrap();
         assert!(matches!(plan, SqlPlan::CreateArray { .. }));
     }
 
@@ -482,7 +575,7 @@ mod tests {
     fn rejects_extent_arity() {
         let mut a = ok_ast();
         a.tile_extents = vec![1, 2];
-        assert!(plan_create_array(&a).is_err());
+        assert!(plan_create_array(&a, &Catalog(None)).is_err());
     }
 
     #[test]
@@ -490,7 +583,7 @@ mod tests {
         let mut a = ok_ast();
         a.dims.push(a.dims[0].clone());
         a.tile_extents = vec![4, 4];
-        assert!(plan_create_array(&a).is_err());
+        assert!(plan_create_array(&a, &Catalog(None)).is_err());
     }
 
     #[test]
@@ -498,6 +591,6 @@ mod tests {
         let mut a = ok_ast();
         a.dims[0].lo = ArrayDomainBound::Int64(5);
         a.dims[0].hi = ArrayDomainBound::Int64(1);
-        assert!(plan_create_array(&a).is_err());
+        assert!(plan_create_array(&a, &Catalog(None)).is_err());
     }
 }

@@ -12,7 +12,7 @@
 //!   transaction's ordinal. The cut writes no edge version and reads no
 //!   stored edge: every read hides the collection's versions applied below
 //!   it. Every edge write runs as a Calvin transaction
-//!   ([`super::edge_sequencing`]), so every edge version is applied at a
+//!   ([`super::graph_sequencing`]), so every edge version is applied at a
 //!   Calvin ordinal. An edge sequenced before the TRUNCATE is hidden, and
 //!   one sequenced after it stays, on every replica, under any clock skew
 //!   and in any order a core applies the transactions in.

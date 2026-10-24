@@ -212,10 +212,15 @@ fn encode_resolved_value(collection: &str, value: &nodedb_types::Value) -> crate
 
 /// `ColumnarOp::Truncate` replicates as a plain `ColumnarTruncate` entry:
 /// same idempotent-replay contract as `kv::truncate`.
-pub(super) fn truncate(collection: &str, restart_identity: bool) -> ReplicatedWrite {
+pub(super) fn truncate(
+    collection: &str,
+    restart_identity: bool,
+    erase_history: bool,
+) -> ReplicatedWrite {
     ReplicatedWrite::ColumnarTruncate {
         collection: collection.to_owned(),
         restart_identity,
+        erase_history,
     }
 }
 

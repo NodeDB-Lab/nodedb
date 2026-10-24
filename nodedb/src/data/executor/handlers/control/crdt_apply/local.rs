@@ -44,6 +44,7 @@ impl CoreLoop {
         task: &ExecutionTask,
         params: CrdtApplyParams<'_>,
     ) -> Response {
+        let crs = self.crs_context();
         let CrdtApplyParams {
             collection,
             document_id,
@@ -107,6 +108,7 @@ impl CoreLoop {
                     surrogate,
                 },
                 peer_id,
+                &crs,
             );
             match outcome {
                 ValidatedApplyOutcome::Clean { .. } => {

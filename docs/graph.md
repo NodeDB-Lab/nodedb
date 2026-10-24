@@ -379,6 +379,7 @@ Variable-length `[*min..max]` MATCH expansion is bounded by operational knobs in
 | `varlen_max_frontier`| 100000  | Cap on the live per-hop frontier; overflow pages via resume.                                              |
 | `max_depth`          | 10      | Maximum traversal depth.                                                                                  |
 | `max_visited`        | 100000  | Memory budget on visited nodes.                                                                           |
+| `max_historical_csr_cache_entries` | 8 | Historical CSRs one core keeps for `AS OF` reads. `0` keeps none.                         |
 
 Resume cursors work both locally and across shards, so a capped expansion continues from where it stopped instead of failing.
 
@@ -386,24 +387,50 @@ Resume cursors work both locally and across shards, so a capped expansion contin
 
 ## Bitemporal Support
 
-Graph edges support both system time and valid time, enabling relationship timelines and historical traversal.
+Every edge write is versioned. Each version carries the system time of its write and a valid time `[from, until)`. Graph reads take `AS OF SYSTEM TIME` and `AS OF VALID TIME`.
 
 ```sql
--- Insert an edge that becomes valid in the future (scheduled relationship)
+-- An edge valid from a set date. Without VALID_TIME the write's own time
+-- starts the valid time. Without UNTIL it stays open.
 GRAPH INSERT EDGE IN 'edges' FROM 'user:alice' TO 'project:rocket'
   TYPE 'assigned_to'
   PROPERTIES { assigned_date: '2026-05-01' }
-  VALID_TIME '2026-05-01T00:00:00Z';
+  VALID_TIME '2026-05-01T00:00:00Z' UNTIL '2026-09-01T00:00:00Z';
 
--- Query the graph as it existed at a past moment
-GRAPH TRAVERSE FROM 'user:alice' DEPTH 2
-AS OF SYSTEM TIME 1700000000000;
+-- The graph as it stood at a past moment.
+GRAPH TRAVERSE FROM 'user:alice' IN 'edges' DEPTH 2
+  AS OF SYSTEM TIME 1700000000000;
 
--- Query relationships that were valid at a specific date
-MATCH (u:User)-[:assigned_to]->(p:Project)
-WHERE u.id = 'alice'
-AS OF VALID TIME 1746086400000;  -- May 1, 2026
+GRAPH NEIGHBORS IN 'edges' OF 'user:alice' AS OF SYSTEM TIME '2025-01-15T00:00:00Z';
+
+GRAPH PATH IN 'edges' FROM 'user:alice' TO 'project:rocket' MAX_DEPTH 4
+  AS OF SYSTEM TIME 1700000000000;
+
+-- The relationships valid on a date.
+MATCH (u)-[:assigned_to]->(p) IN 'edges'
+  AS OF VALID TIME 1746086400000
+  RETURN u, p;
+
+-- Algorithms and GraphRAG run over the graph at the cut.
+GRAPH ALGO PAGERANK ON edges AS OF SYSTEM TIME 1700000000000;
+GRAPH RAG FUSION ON edges QUERY ARRAY[0.1, 0.2, 0.3]
+  AS OF SYSTEM TIME 1700000000000;
 ```
+
+Rules:
+
+- **Clauses** — `AS OF SYSTEM TIME` and `AS OF VALID TIME` go anywhere after the command words. A time is an integer of ms since the Unix epoch, `NOW()`, or an ISO-8601 string.
+- **One cut per statement** — a statement pins one system time. Every hop of a walk, every superstep of a BSP algorithm, and every node of a cluster reads that cut. A time past the statement's start reads the graph as of the start.
+- **Complete at the cut** — before a node serves any read of a historical statement, it waits until it holds every edge version at or below the cut. A statement whose deadline ends during that wait fails with `DEADLINE_EXCEEDED`. It never returns a partial graph.
+- **Valid time** — an edge is read when its valid time contains the `AS OF VALID TIME` instant. A version that does not contain it is passed over for the next older version.
+- **Collection** — a historical read names its collection (`IN`, `ON`). Edge versions are stored per collection.
+- **Writes** — `GRAPH INSERT EDGE`, `GRAPH DELETE EDGE`, `GRAPH LABEL` and `GRAPH UNLABEL` refuse `AS OF`. `UNTIL` needs `VALID_TIME`, and `UNTIL` must be after `VALID_TIME`.
+- **Not supported** — `AS OF SYSTEM TIME NULL` (every version) and a `FOR VALID_TIME FROM ... TO ...` range are refused on graph reads.
+- **Node properties** — a MATCH `WHERE` on node properties reads a `bitemporal = true` node collection at the same cut. A plain node collection has no history and reads its current documents.
+- **Node identity and labels** — a historical read takes each node's identity from the edge version the cut resolves to, and each node's labels as they stood at the cut. A node deleted after the cut keeps its identity and labels there.
+- **Transactions** — a historical read inside a transaction reads committed versions only. Staged writes appear in live reads.
+
+Each Data Plane core keeps the most recently used historical CSRs, up to `max_historical_csr_cache_entries` in `[tuning.graph]` (default 8). A write at or below a cached cut, a TRUNCATE, a purge, a restore, or a node label change drops the CSRs it affects.
 
 This is useful for organizational hierarchies, historical relationship analysis, and compliance audits. See [Bitemporal](bitemporal.md) for detailed examples.
 

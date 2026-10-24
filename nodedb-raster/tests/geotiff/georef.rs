@@ -2,13 +2,17 @@
 
 //! Georeference from the GeoTIFF tags: geotransform, CRS, and nodata.
 
+use nodedb_crs::CrsContext;
 use nodedb_raster::RasterError;
-use nodedb_raster::geokeys::{GEOGRAPHIC_TYPE, GT_MODEL_TYPE, GT_RASTER_TYPE, PROJECTED_CS_TYPE};
+use nodedb_raster::tiff::geokeys::{
+    GEOGRAPHIC_TYPE, GT_MODEL_TYPE, GT_RASTER_TYPE, PROJECTED_CS_TYPE,
+};
 use nodedb_types::geometry::Srid;
 use tiff::encoder::colortype::Gray16;
 use tiff::tags::Tag;
 
-use crate::fixtures::{Extra, StripSpec, encode_strips, geokeys, open, planes, strip_spec};
+use crate::fixtures::{Extra, StripSpec, encode_strips, geokeys, planes, strip_spec};
+use crate::image::open;
 
 const W: u32 = 6;
 const H: u32 = 4;
@@ -45,7 +49,10 @@ fn tiepoint_and_scale_give_a_north_up_transform() {
     let reader = open(&with_tags(&utm_tiepoint(1))).expect("opens");
     let gt = reader.transform().expect("georeferenced");
     assert_eq!(gt.0, [600_000.0, 30.0, 0.0, 450_000.0, 0.0, -30.0]);
-    assert_eq!(reader.srid().expect("CRS maps"), Some(Srid::Utm47N));
+    assert_eq!(
+        reader.srid(&CrsContext::builtin_only()).expect("CRS maps"),
+        Some(Srid::new(32647).unwrap())
+    );
 }
 
 #[test]
@@ -73,7 +80,10 @@ fn model_transformation_gives_a_rotated_transform() {
     let reader = open(&with_tags(&extras)).expect("opens");
     let gt = reader.transform().expect("georeferenced");
     assert_eq!(gt.0, [101.0, 0.5, 0.1, 3.5, -0.1, -0.5]);
-    assert_eq!(reader.srid().expect("CRS maps"), Some(Srid::Wgs84));
+    assert_eq!(
+        reader.srid(&CrsContext::builtin_only()).expect("CRS maps"),
+        Some(Srid::WGS84)
+    );
 }
 
 #[test]
@@ -103,7 +113,10 @@ fn gdal_nodata_is_read() {
 fn a_plain_tiff_has_no_georeference() {
     let reader = open(&with_tags(&[])).expect("opens");
     assert_eq!(reader.transform(), None);
-    assert_eq!(reader.srid().expect("no CRS"), None);
+    assert_eq!(
+        reader.srid(&CrsContext::builtin_only()).expect("no CRS"),
+        None
+    );
     assert_eq!(reader.nodata(), None);
     assert!(reader.geokeys().is_none());
 }
@@ -124,13 +137,30 @@ fn ground_control_points_are_refused() {
 }
 
 #[test]
-fn an_unsupported_crs_is_a_typed_error() {
+fn an_undefined_crs_is_a_typed_error() {
+    let extras = [Extra::Shorts(
+        Tag::GeoKeyDirectoryTag,
+        geokeys(&[(GT_MODEL_TYPE, 1), (PROJECTED_CS_TYPE, 999)]),
+    )];
+    let reader = open(&with_tags(&extras)).expect("opens");
+    assert!(matches!(
+        reader.srid(&CrsContext::builtin_only()),
+        Err(RasterError::UnknownCrs(_))
+    ));
+}
+
+/// Any EPSG projected CRS maps, such as UTM 33N.
+#[test]
+fn an_epsg_projected_crs_maps() {
     let extras = [Extra::Shorts(
         Tag::GeoKeyDirectoryTag,
         geokeys(&[(GT_MODEL_TYPE, 1), (PROJECTED_CS_TYPE, 32633)]),
     )];
     let reader = open(&with_tags(&extras)).expect("opens");
-    assert!(matches!(reader.srid(), Err(RasterError::UnsupportedCrs(_))));
+    assert_eq!(
+        reader.srid(&CrsContext::builtin_only()).expect("CRS maps"),
+        Some(Srid::new(32633).unwrap())
+    );
 }
 
 #[test]

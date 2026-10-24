@@ -105,7 +105,11 @@ impl CatalogEntry {
             | Self::DeleteArray { .. }
             | Self::DeleteVectorIndexParams { .. }
             | Self::CommitConsumerOffsets(_)
-            | Self::PutBackupScheduleMark(_) => false,
+            | Self::PutBackupScheduleMark(_)
+            | Self::PutSpatialRefSys(_)
+            | Self::DropSpatialRefSys { .. }
+            | Self::PutCredential(_)
+            | Self::DropCredential { .. } => false,
         }
     }
 }

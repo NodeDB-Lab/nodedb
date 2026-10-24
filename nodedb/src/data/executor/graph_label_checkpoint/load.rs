@@ -27,10 +27,8 @@ impl CoreLoop {
     /// it keeps the restore from interning nodes the rebuild would then re-add.
     ///
     /// Replay then applies the `GraphNodeLabelSet` / `GraphNodeLabelRemove`
-    /// records the WAL still holds on top of this state, in LSN order. No floor
-    /// gates them: both records are absolute bit operations keyed by
-    /// `(node, label)`, so a record already folded into this state re-applies to
-    /// the same bit.
+    /// records the WAL holds above this state's durable LSN, in LSN order. A
+    /// record at or below it is in this state already.
     pub fn load_graph_label_checkpoint(&mut self) -> crate::Result<()> {
         let ckpt_dir = graph_label_ckpt_dir(&self.data_dir, self.core_id);
         let path = graph_label_ckpt_state_path(&ckpt_dir);
@@ -210,6 +208,7 @@ mod tests {
             database_id: DatabaseId::DEFAULT.as_u64(),
             tenant_id: TID,
             collection: Some(COLL),
+            document_cut: Default::default(),
         };
         let parsed = compiler::parse(query).expect("parse MATCH");
         let mut sources: Vec<String> = execute(

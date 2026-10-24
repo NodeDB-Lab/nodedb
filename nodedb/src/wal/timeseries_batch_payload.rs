@@ -73,6 +73,9 @@ pub(crate) struct DecodedBatchRecord {
     /// The statement instant of a timeseries ingest. Present in the
     /// six-element timeseries tuple every ingest record takes.
     pub default_timestamp_ms: Option<i64>,
+    /// The system-time ordinal of a bitemporal columnar insert's first row.
+    /// `None` for every other record shape.
+    pub system_from: Option<i64>,
 }
 
 impl DecodedBatchRecord {
@@ -93,6 +96,7 @@ impl DecodedBatchRecord {
             surrogates: Vec::new(),
             conflict_policy: Vec::new(),
             default_timestamp_ms,
+            system_from: None,
         }
     }
 }
@@ -114,6 +118,7 @@ pub(crate) fn decode_batch_record(payload: &[u8]) -> Result<DecodedBatchRecord, 
             surrogates: rec.surrogates,
             conflict_policy: rec.conflict_policy,
             default_timestamp_ms: None,
+            system_from: rec.system_from,
         });
     }
     zerompk::from_msgpack::<(String, String, Vec<u8>, ProvenanceField, String, i64)>(payload)

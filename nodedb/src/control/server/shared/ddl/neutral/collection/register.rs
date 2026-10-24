@@ -412,6 +412,7 @@ pub(crate) fn build_doc_config_from_stored<S: CollectionSource + ?Sized>(
         vector_fields: declared_vector_fields(coll),
         declared_columns: declared_columns(coll),
         declared_key: crate::control::planner::catalog_adapter::document_declared_key(coll),
+        incarnation: coll.incarnation,
     }
 }
 
@@ -438,6 +439,7 @@ async fn dispatch_register_from_stored_inner(
             vector_fields: config.vector_fields.clone(),
             declared_columns: config.declared_columns.clone(),
             declared_key: config.declared_key.clone(),
+            incarnation: config.incarnation,
         },
     );
 

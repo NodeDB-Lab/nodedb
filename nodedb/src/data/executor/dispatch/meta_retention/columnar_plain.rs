@@ -3,14 +3,18 @@
 //! Plain columnar profile temporal-purge.
 //!
 //! Row-level audit purge on bitemporal plain-columnar collections.
-//! Walks flushed segments (through the shared flushed-segment reader) and
-//! the live memtable, groups rows by primary key, and marks every
-//! *superseded* row whose `_ts_system` is below the cutoff in the
-//! engine's per-segment delete bitmap.
+//! Lists every row version (flushed segments and live memtable), groups
+//! them by primary key, and marks the versions no read at or after the
+//! cutoff resolves to in the engine's per-segment delete bitmap. The
+//! millisecond retention horizon converts to the last ordinal of that
+//! millisecond (`ms_to_ordinal_upper`), as the document and edge purges
+//! convert it.
 //!
-//! The single latest version per PK is always preserved — even if it is
-//! itself below the cutoff — so "AS OF" reads beyond the cutoff can still
-//! resolve each logical row's terminal state.
+//! Per PK, the head is the newest version at or below the cutoff: the one a
+//! read at the cutoff resolves to. Every older version goes. The head stays,
+//! so "AS OF" reads at or after the cutoff still resolve each key. A head
+//! that is a tombstone resolves to absent, so it goes with its whole
+//! history. Versions above the cutoff are never touched.
 //!
 //! A version's row index is its physical position in its segment or in the
 //! memtable: the index the delete bitmap marks.
@@ -18,21 +22,10 @@
 use std::collections::HashMap;
 
 use nodedb_columnar::MutationEngine;
-use nodedb_types::columnar::ColumnType;
-use nodedb_types::value::Value;
 use nodedb_types::{DatabaseId, TenantId};
 
 use crate::data::executor::core_loop::CoreLoop;
-
-/// The read path the corruption report names.
-const SITE: &str = "columnar_temporal_purge";
-
-pub(super) struct RowVersion {
-    pub seg_id: u64,
-    pub row_idx: u32,
-    pub pk_bytes: Vec<u8>,
-    pub sys_ts: i64,
-}
+use crate::data::executor::handlers::columnar_read::versions::{RowVersion, VersionColumns};
 
 impl CoreLoop {
     /// See module docs. Returns the number of rows tombstoned in
@@ -57,8 +50,16 @@ impl CoreLoop {
             if !engine.schema().is_bitemporal() {
                 return Ok(0);
             }
-            let versions = self.plain_columnar_row_versions(&key, engine)?;
-            purge_victims(engine, versions, cutoff_system_ms)
+            let columns = VersionColumns::of(engine).ok_or_else(|| crate::Error::Storage {
+                engine: "columnar".into(),
+                detail: "bitemporal collection without primary key columns".into(),
+            })?;
+            let versions = self.columnar_row_versions(&key, engine, &columns)?;
+            purge_victims(
+                engine,
+                versions,
+                nodedb_types::ms_to_ordinal_upper(cutoff_system_ms),
+            )
         };
         if victims_per_seg.is_empty() {
             return Ok(0);
@@ -81,171 +82,53 @@ impl CoreLoop {
         }
         Ok(total)
     }
-
-    /// Every row version of the collection at `key`. A flushed row is listed
-    /// tombstoned or not. A memtable row is listed only when live.
-    fn plain_columnar_row_versions(
-        &self,
-        key: &(DatabaseId, TenantId, String),
-        engine: &MutationEngine,
-    ) -> crate::Result<Vec<RowVersion>> {
-        let collection = key.2.as_str();
-        let schema = engine.schema();
-        let ts_idx = schema
-            .ts_system_idx()
-            .ok_or_else(|| crate::Error::Storage {
-                engine: "columnar".into(),
-                detail: "bitemporal schema missing _ts_system column".into(),
-            })?;
-        let pk_indices: Vec<usize> = engine.pk_col_indices().to_vec();
-        if pk_indices.is_empty() {
-            return Err(crate::Error::Storage {
-                engine: "columnar".into(),
-                detail: "bitemporal collection without primary key columns".into(),
-            });
-        }
-        // Decode the columns up to the last one a version needs.
-        let column_count = pk_indices.iter().copied().fold(ts_idx, usize::max) + 1;
-
-        let mut versions: Vec<RowVersion> = Vec::new();
-
-        // Flushed segments: segment_id starts at 1 (memtable is id 0).
-        let segments = self
-            .columnar_flushed_segments
-            .get(key)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        for (seg_idx, seg_bytes) in segments.iter().enumerate() {
-            let seg_id = seg_idx as u64 + 1;
-            let segment =
-                self.decode_flushed_segment(collection, seg_id, seg_bytes, column_count, SITE)?;
-            for row_idx in 0..segment.row_count() {
-                let ts_cell = segment.cell(ts_idx, row_idx, &ColumnType::Int64)?;
-                let sys_ts =
-                    system_time(&ts_cell, collection, seg_id, row_idx).inspect_err(|e| {
-                        crate::diag::columnar_segment_corrupt(e, collection, seg_id, "cell", SITE);
-                    })?;
-                let pk_cells = pk_indices
-                    .iter()
-                    .map(|&i| segment.cell(i, row_idx, &schema.columns[i].column_type))
-                    .collect::<crate::Result<Vec<Value>>>()?;
-                versions.push(RowVersion {
-                    seg_id,
-                    row_idx: row_index_u32(collection, seg_id, row_idx)?,
-                    pk_bytes: version_pk_bytes(&pk_cells),
-                    sys_ts,
-                });
-            }
-        }
-
-        // Memtable rows, each at its physical index.
-        let memtable_seg_id = engine.memtable_segment_id();
-        for row_idx in 0..engine.memtable().row_count() {
-            // `None` is a row the memtable delete bitmap marks.
-            let Some(row) = engine.get_memtable_row(row_idx)? else {
-                continue;
-            };
-            let sys_ts = system_time(
-                row.get(ts_idx).unwrap_or(&Value::Null),
-                collection,
-                memtable_seg_id,
-                row_idx,
-            )?;
-            let pk_cells = pk_indices
-                .iter()
-                .map(|&i| {
-                    row.get(i).cloned().ok_or_else(|| crate::Error::Internal {
-                        detail: format!(
-                            "columnar '{collection}': memtable row {row_idx} holds no \
-                             primary-key cell {i}"
-                        ),
-                    })
-                })
-                .collect::<crate::Result<Vec<Value>>>()?;
-            versions.push(RowVersion {
-                seg_id: memtable_seg_id,
-                row_idx: row_index_u32(collection, memtable_seg_id, row_idx)?,
-                pk_bytes: version_pk_bytes(&pk_cells),
-                sys_ts,
-            });
-        }
-        Ok(versions)
-    }
 }
 
-/// The row indices to tombstone, per segment: every version superseded by a
-/// later one of its PK, below `cutoff_system_ms`, and not tombstoned yet.
+/// The row indices to tombstone, per segment: every version older than its
+/// PK's head at the ordinal `cutoff`, and the head itself when it is a
+/// tombstone. A version the delete bitmap already marks reads as absent, so
+/// it is neither a head nor a victim.
 fn purge_victims(
     engine: &MutationEngine,
     versions: Vec<RowVersion>,
-    cutoff_system_ms: i64,
+    cutoff: i64,
 ) -> HashMap<u64, Vec<u32>> {
-    let mut latest: HashMap<&[u8], i64> = HashMap::new();
-    for v in &versions {
-        latest
+    let candidates: Vec<&RowVersion> = versions
+        .iter()
+        .filter(|v| v.sys_ts <= cutoff)
+        .filter(|v| {
+            !engine
+                .delete_bitmap(v.seg_id)
+                .is_some_and(|bm| bm.is_deleted(v.row_idx))
+        })
+        .collect();
+    let mut heads: HashMap<&[u8], (i64, bool)> = HashMap::new();
+    for v in &candidates {
+        let slot = heads
             .entry(v.pk_bytes.as_slice())
-            .and_modify(|cur| *cur = (*cur).max(v.sys_ts))
-            .or_insert(v.sys_ts);
+            .or_insert((v.sys_ts, v.closed));
+        if v.sys_ts >= slot.0 {
+            *slot = (v.sys_ts, v.closed);
+        }
     }
 
     let mut victims_per_seg: HashMap<u64, Vec<u32>> = HashMap::new();
-    for v in &versions {
-        let lat = latest
-            .get(v.pk_bytes.as_slice())
-            .copied()
-            .unwrap_or(v.sys_ts);
-        if v.sys_ts < cutoff_system_ms && v.sys_ts < lat {
-            let already = engine
-                .delete_bitmap(v.seg_id)
-                .is_some_and(|bm| bm.is_deleted(v.row_idx));
-            if !already {
-                victims_per_seg.entry(v.seg_id).or_default().push(v.row_idx);
-            }
+    for v in &candidates {
+        let Some(&(head_ts, head_closed)) = heads.get(v.pk_bytes.as_slice()) else {
+            continue;
+        };
+        if v.sys_ts < head_ts || head_closed {
+            victims_per_seg.entry(v.seg_id).or_default().push(v.row_idx);
         }
     }
     victims_per_seg
 }
 
-/// The system time `_ts_system` holds. The column is a required `Int64`, so
-/// any other cell is an error.
-fn system_time(cell: &Value, collection: &str, seg_id: u64, row_idx: usize) -> crate::Result<i64> {
-    match cell {
-        Value::Integer(n) => Ok(*n),
-        other => Err(crate::Error::SegmentCorrupted {
-            detail: format!(
-                "columnar '{collection}': row {row_idx} of segment {seg_id} holds {other:?} \
-                 in _ts_system, not an integer system time"
-            ),
-        }),
-    }
-}
-
-/// Encode a version's primary key from its PK cells, in PK column order.
-/// The bytes match what the engine's PK index holds for the same row.
-fn version_pk_bytes(cells: &[Value]) -> Vec<u8> {
-    match cells {
-        [single] => nodedb_columnar::pk_index::encode_pk(single),
-        _ => {
-            let refs: Vec<&Value> = cells.iter().collect();
-            nodedb_columnar::pk_index::encode_composite_pk(&refs)
-        }
-    }
-}
-
-/// `row_idx` as the `u32` row index a delete bitmap marks.
-fn row_index_u32(collection: &str, seg_id: u64, row_idx: usize) -> crate::Result<u32> {
-    u32::try_from(row_idx).map_err(|_| crate::Error::Internal {
-        detail: format!(
-            "columnar '{collection}': row {row_idx} of segment {seg_id} is past the u32 row \
-             index range"
-        ),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use nodedb_columnar::pk_index::encode_pk;
-    use nodedb_types::columnar::{ColumnDef, ColumnarSchema};
+    use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
+    use nodedb_types::value::Value;
 
     use super::*;
     use crate::data::executor::core_loop::tests::make_core_with_dir;
@@ -258,6 +141,11 @@ mod tests {
             ColumnDef::required("id", ColumnType::Int64).with_primary_key(),
         ])
         .expect("valid")
+    }
+
+    /// An ordinal inside millisecond `ms`.
+    fn at_ms(ms: i64) -> i64 {
+        ms * nodedb_types::NANOS_PER_MS + 3
     }
 
     fn version(sys_ts: i64, id: i64) -> Vec<Value> {
@@ -277,9 +165,9 @@ mod tests {
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
         let mut engine = MutationEngine::new("bt".to_string(), schema());
         // Physical rows: 0 = id 9 (deleted below), 1 = id 1 at 10, 2 = id 1 at 50.
-        engine.insert(&version(5, 9)).expect("insert");
-        engine.insert(&version(10, 1)).expect("insert");
-        engine.insert(&version(50, 1)).expect("insert");
+        engine.insert(&version(at_ms(5), 9)).expect("insert");
+        engine.insert(&version(at_ms(10), 1)).expect("insert");
+        engine.insert(&version(at_ms(50), 1)).expect("insert");
         engine.delete(&Value::Integer(9)).expect("delete");
         let memtable_seg = engine.memtable_segment_id();
         let key = (DatabaseId::DEFAULT, TenantId::new(1), "bt".to_string());
@@ -301,6 +189,80 @@ mod tests {
                 .get(&encode_pk(&Value::Integer(1)))
                 .map(|loc| loc.row_index),
             Some(2)
+        );
+    }
+
+    /// The horizon reaches the last ordinal of its millisecond: the version
+    /// inside ms 101 is the head at horizon 101, so the version before it
+    /// goes and the version after the horizon stays.
+    #[test]
+    fn the_horizon_reaches_the_last_ordinal_of_its_millisecond() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let mut engine = MutationEngine::new("bt".to_string(), schema());
+        // Physical rows: 0 = id 1 in ms 100, 1 = id 1 in ms 101, 2 = id 1 in ms 102.
+        engine.insert(&version(at_ms(100), 1)).expect("insert");
+        engine.insert(&version(at_ms(101), 1)).expect("insert");
+        engine.insert(&version(at_ms(102), 1)).expect("insert");
+        let memtable_seg = engine.memtable_segment_id();
+        let key = (DatabaseId::DEFAULT, TenantId::new(1), "bt".to_string());
+        core.columnar_engines.insert(key.clone(), engine);
+
+        let purged = core
+            .plain_columnar_purge(key.0, key.1, "bt", 101)
+            .expect("purge");
+
+        assert_eq!(purged, 1, "only the version older than the head goes");
+        let engine = core.columnar_engines.get(&key).expect("engine");
+        let bitmap = engine.delete_bitmap(memtable_seg).expect("bitmap");
+        assert!(bitmap.is_deleted(0));
+        assert!(!bitmap.is_deleted(1), "the head inside ms 101 stays");
+        assert!(!bitmap.is_deleted(2), "a version after the horizon stays");
+    }
+
+    /// A key a delete closed below the horizon loses its whole history,
+    /// tombstone included. A key closed after the horizon keeps the version
+    /// a read between the horizon and the close resolves to.
+    #[test]
+    fn the_purge_removes_a_closed_keys_history_past_the_horizon() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let mut engine = MutationEngine::new("bt".to_string(), schema());
+        let tombstone = |sys_ts: i64, id: i64| {
+            vec![
+                Value::Integer(sys_ts),
+                Value::Integer(i64::MIN),
+                Value::Integer(i64::MIN),
+                Value::Integer(id),
+            ]
+        };
+        // Physical rows: 0 = id 1 in ms 10, 1 = id 1 closed in ms 20,
+        // 2 = id 2 in ms 10, 3 = id 2 closed in ms 300.
+        engine.insert(&version(at_ms(10), 1)).expect("insert");
+        engine.close(&tombstone(at_ms(20), 1), None).expect("close");
+        engine.insert(&version(at_ms(10), 2)).expect("insert");
+        engine
+            .close(&tombstone(at_ms(300), 2), None)
+            .expect("close");
+        let memtable_seg = engine.memtable_segment_id();
+        let key = (DatabaseId::DEFAULT, TenantId::new(1), "bt".to_string());
+        core.columnar_engines.insert(key.clone(), engine);
+
+        let purged = core
+            .plain_columnar_purge(key.0, key.1, "bt", 100)
+            .expect("purge");
+
+        assert_eq!(purged, 2, "id 1's version and tombstone go");
+        let engine = core.columnar_engines.get(&key).expect("engine");
+        let bitmap = engine.delete_bitmap(memtable_seg).expect("bitmap");
+        assert!(
+            bitmap.is_deleted(0) && bitmap.is_deleted(1),
+            "id 1's whole history"
+        );
+        assert!(!bitmap.is_deleted(2), "id 2's head at the horizon stays");
+        assert!(
+            !bitmap.is_deleted(3),
+            "id 2's tombstone after the horizon stays"
         );
     }
 }

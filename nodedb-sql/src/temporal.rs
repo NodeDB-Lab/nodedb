@@ -9,8 +9,9 @@
 //! statement, threaded through `plan_sql` into each `SqlPlan::Scan`, and
 //! finally honored by the engine's Data Plane handler.
 //!
-//! All timestamps are **milliseconds since Unix epoch**. The edge store
-//! converts to HLC ordinal via `nodedb_types::ms_to_ordinal_upper`. A
+//! All timestamps are **milliseconds since Unix epoch**. The edge store and
+//! the document versioned store key versions by system-time ordinal, so a
+//! system-time cut converts via `nodedb_types::ms_to_ordinal_upper`. A
 //! `TemporalScope::default()` value is equivalent to "current state"
 //! (no temporal qualifier) — every scan site must construct one even when
 //! the query is not temporal.

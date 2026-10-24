@@ -204,6 +204,7 @@ pub(super) fn ndjson_body_stream(
                 projection.as_ref(),
                 redaction.as_ref().map(|r| r.ctx(&state.redaction)),
                 None,
+                &crate::control::crs_context::crs_set_for(&state),
             ) {
                 Ok(s) => s,
                 Err(e) => {

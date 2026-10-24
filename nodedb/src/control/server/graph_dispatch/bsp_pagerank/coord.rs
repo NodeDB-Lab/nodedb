@@ -22,7 +22,7 @@
 //!    graph node is homed on exactly one owner node. The count phase carries
 //!    a fresh cut marker. Every node resolves the run's read cut from it and
 //!    answers it, and every later superstep reads at that one cut (see
-//!    `graph_dispatch::run_cut`). A write during the run is above the cut, so
+//!    `read_cut::run_marker`). A write during the run is above the cut, so
 //!    the rank set stays the nodes that existed at the cut.
 //! 2. **Initial scatter.** Superstep 0 sets every node's initial rank and
 //!    returns the contributions it scatters. It changes no rank, so it is not
@@ -53,7 +53,7 @@ use crate::types::{DatabaseId, TenantId};
 
 use super::enumerate::enumerate_shards;
 use super::scatter::{ScatterSuperstepParams, ShardDispatch, ShardResult, scatter_superstep};
-use crate::control::server::graph_dispatch::run_cut::{agreed_cut, new_cut_marker};
+use crate::control::read_cut::{agreed_cut, new_cut_marker};
 use crate::control::server::graph_dispatch::shard_reads::{ShardReadLog, qualified};
 
 /// Default max supersteps when the query carries no explicit `ITERATIONS`.
@@ -85,6 +85,8 @@ struct Carry {
 ///
 /// Caller guarantees cluster mode (`cluster_routing.is_some()`) and
 /// `algorithm == PageRank`; single-node / other algorithms never enter here.
+/// `scope` is the run's bitemporal cut: a historical run reads every
+/// superstep at the scope's pinned ordinal and at its valid time.
 pub async fn run_bsp_pagerank(
     state: &SharedState,
     tenant_id: TenantId,
@@ -92,6 +94,7 @@ pub async fn run_bsp_pagerank(
     params: AlgoParams,
     deadline_ms: u64,
     linearizable: bool,
+    scope: nodedb_physical::physical_plan::GraphReadScope,
 ) -> crate::Result<Payload> {
     let algorithm = GraphAlgorithm::PageRank;
 
@@ -145,7 +148,8 @@ pub async fn run_bsp_pagerank(
             global_dangling: 0.0,
             personalization_sum: 0.0,
             read_cut_marker,
-            system_as_of: None,
+            // A historical run reads at its statement's pinned ordinal.
+            system_as_of: scope.pinned_ordinal(),
         })
         .collect();
     let counts = scatter_superstep(
@@ -160,6 +164,7 @@ pub async fn run_bsp_pagerank(
             dispatches: count_dispatches,
             deadline_ms,
             linearizable,
+            valid_at_ms: scope.valid_at_ms,
         },
     )
     .await?;
@@ -248,6 +253,7 @@ pub async fn run_bsp_pagerank(
                 global_n,
                 dispatches,
                 deadline_ms,
+                valid_at_ms: scope.valid_at_ms,
                 linearizable,
             },
         )

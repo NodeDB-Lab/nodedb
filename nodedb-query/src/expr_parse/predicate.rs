@@ -131,7 +131,8 @@ mod tests {
 
     fn eval(text: &str, doc: serde_json::Value) -> Value {
         let (expr, _) = parse_generated_expr(text).expect("parses");
-        expr.eval(&Value::from(doc)).expect("evaluates")
+        expr.eval(&Value::from(doc), &nodedb_crs::CrsContext::builtin_only())
+            .expect("evaluates")
     }
 
     #[test]

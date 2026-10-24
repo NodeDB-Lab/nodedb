@@ -193,6 +193,12 @@ impl CsrIndex {
         self.node_label_to_id.contains_key(label)
     }
 
+    /// How many distinct node label names are interned. Each holds one bit
+    /// of the label bitset until it is withdrawn.
+    pub fn node_label_name_count(&self) -> usize {
+        self.node_label_names.len()
+    }
+
     /// Withdraw `node`, which a rolled-back write interned.
     ///
     /// An absent node is a no-op. The node must be the newest one, with no

@@ -7,13 +7,14 @@
 //! entry point) and `NativeCell::read` (inside a zerompk derive) share it.
 //!
 //! Instant ext values (`fixext8` type 1 / 2) become `Value::DateTime` /
-//! `Value::NaiveDateTime`. Every other ext marker, and a `fixext8` of any
-//! other type, becomes `Value::Null`. Map keys that are not strings are
+//! `Value::NaiveDateTime`. A geometry ext (type 3) becomes
+//! `Value::Geometry`. Every other ext becomes `Value::Null`. Map keys that are not strings are
 //! rendered with `Debug`.
 
 use zerompk::{Read, SliceReader};
 
 use super::super::error::{MsgpackError, MsgpackResult};
+use super::super::geometry_ext::geometry_from_ext;
 use super::super::instant_ext::instant_from_ext;
 use crate::Value;
 
@@ -99,7 +100,10 @@ pub(crate) fn read_native_value<'de, R: Read<'de>>(reader: &mut R) -> zerompk::R
             };
             Ok(match instant {
                 Some((kind, micros)) => kind.from_micros(micros),
-                None => Value::Null,
+                None => match geometry_from_ext(ext_type, &payload) {
+                    Some(g) => Value::Geometry(g),
+                    None => Value::Null,
+                },
             })
         }
         other => Err(zerompk::Error::InvalidMarker(other)),

@@ -30,6 +30,7 @@ use crate::util::rmpv_value::{rmpv_to_value, value_to_rmpv};
 pub(in crate::data::executor) fn sort_rows(
     rows: &mut [rmpv::Value],
     sort_keys: &[SortKeySpec],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     if sort_keys.is_empty() {
         return Ok(());
@@ -37,7 +38,7 @@ pub(in crate::data::executor) fn sort_rows(
 
     let keyed: Vec<Vec<rmpv::Value>> = rows
         .iter()
-        .map(|row| eval_row_keys(row, sort_keys))
+        .map(|row| eval_row_keys(row, sort_keys, crs))
         .collect::<crate::Result<Vec<_>>>()?;
 
     let mut order: Vec<usize> = (0..rows.len()).collect();
@@ -51,7 +52,11 @@ pub(in crate::data::executor) fn sort_rows(
 }
 
 /// Evaluate every sort key against one result row.
-fn eval_row_keys(row: &rmpv::Value, sort_keys: &[SortKeySpec]) -> crate::Result<Vec<rmpv::Value>> {
+fn eval_row_keys(
+    row: &rmpv::Value,
+    sort_keys: &[SortKeySpec],
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> crate::Result<Vec<rmpv::Value>> {
     let mut out = Vec::with_capacity(sort_keys.len());
     let mut row_value: Option<nodedb_types::Value> = None;
 
@@ -67,7 +72,7 @@ fn eval_row_keys(row: &rmpv::Value, sort_keys: &[SortKeySpec]) -> crate::Result<
             Some(ref v) => v,
             None => row_value.insert(rmpv_to_value(row)),
         };
-        let evaluated = key.expr.eval(value).map_err(crate::Error::from)?;
+        let evaluated = key.expr.eval(value, crs).map_err(crate::Error::from)?;
         out.push(value_to_rmpv(&evaluated));
     }
     Ok(out)
@@ -186,7 +191,12 @@ mod tests {
             row(&[("ts", rmpv::Value::Integer(300.into()))]),
             row(&[("ts", rmpv::Value::Integer(200.into()))]),
         ];
-        sort_rows(&mut rows, &[SortKeySpec::column("ts", false)]).expect("sort");
+        sort_rows(
+            &mut rows,
+            &[SortKeySpec::column("ts", false)],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("sort");
         assert_eq!(ints("ts", &rows), vec![300, 200, 100]);
     }
 
@@ -196,7 +206,12 @@ mod tests {
             row(&[("ts", rmpv::Value::Integer(300.into()))]),
             row(&[("ts", rmpv::Value::Integer(100.into()))]),
         ];
-        sort_rows(&mut rows, &[SortKeySpec::column("ts", true)]).expect("sort");
+        sort_rows(
+            &mut rows,
+            &[SortKeySpec::column("ts", true)],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("sort");
         assert_eq!(ints("ts", &rows), vec![100, 300]);
     }
 
@@ -218,6 +233,7 @@ mod tests {
                 SortKeySpec::column("host", true),
                 SortKeySpec::column("ts", true),
             ],
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("sort");
         assert_eq!(ints("ts", &rows), vec![100, 200]);
@@ -230,7 +246,12 @@ mod tests {
             row(&[("other", rmpv::Value::Integer(1.into()))]),
             row(&[("ts", rmpv::Value::Integer(5.into()))]),
         ];
-        sort_rows(&mut rows, &[SortKeySpec::column("ts", true)]).expect("sort");
+        sort_rows(
+            &mut rows,
+            &[SortKeySpec::column("ts", true)],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("sort");
         assert_eq!(ints("ts", &rows)[0], 5);
     }
 
@@ -241,7 +262,12 @@ mod tests {
             row(&[("v", rmpv::Value::Integer(2.into()))]),
             row(&[("v", rmpv::Value::F64(1.5))]),
         ];
-        sort_rows(&mut rows, &[SortKeySpec::column("v", true)]).expect("sort");
+        sort_rows(
+            &mut rows,
+            &[SortKeySpec::column("v", true)],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("sort");
         let vs: Vec<nodedb_types::Value> = rows
             .iter()
             .map(|r| as_number(field_of(r, "v").unwrap()).unwrap())
@@ -264,7 +290,12 @@ mod tests {
             row(&[("v", rmpv::Value::Integer(9_007_199_254_740_992_i64.into()))]),
             row(&[("v", rmpv::Value::F64(9_007_199_254_740_992.0))]),
         ];
-        sort_rows(&mut rows, &[SortKeySpec::column("v", false)]).expect("sort");
+        sort_rows(
+            &mut rows,
+            &[SortKeySpec::column("v", false)],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("sort");
         let vs: Vec<rmpv::Value> = rows
             .iter()
             .map(|r| field_of(r, "v").unwrap().clone())
@@ -286,7 +317,12 @@ mod tests {
             row(&[("ts", rmpv::Value::Integer(2.into()))]),
             row(&[("ts", rmpv::Value::Integer(1.into()))]),
         ];
-        sort_rows(&mut rows, &[SortKeySpec::column("nope", true)]).expect("sort");
+        sort_rows(
+            &mut rows,
+            &[SortKeySpec::column("nope", true)],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("sort");
         assert_eq!(ints("ts", &rows), vec![2, 1]);
     }
 
@@ -296,7 +332,7 @@ mod tests {
             row(&[("ts", rmpv::Value::Integer(2.into()))]),
             row(&[("ts", rmpv::Value::Integer(1.into()))]),
         ];
-        sort_rows(&mut rows, &[]).expect("sort");
+        sort_rows(&mut rows, &[], &nodedb_crs::CrsContext::builtin_only()).expect("sort");
         assert_eq!(ints("ts", &rows), vec![2, 1]);
     }
 }

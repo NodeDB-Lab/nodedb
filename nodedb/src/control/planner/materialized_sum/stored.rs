@@ -251,7 +251,11 @@ pub(super) async fn extend_with_stored_row(
     .await?;
 
     let outcome = StoredImages {
-        images: images_of(scope, read.rows.as_ref())?,
+        images: images_of(
+            scope,
+            read.rows.as_ref(),
+            &crate::control::crs_context::crs_context_for(state),
+        )?,
         read_version: read.read_version,
     };
 
@@ -280,7 +284,13 @@ pub(super) async fn extend_with_stored_row(
     // column and name different targets each keep their own entry.
     // `ResolvedTargets` enforces the dedupe.
     for binding in bindings.iter() {
-        for join_value in crate::query::binding_join_keys(binding, &[], &rows)? {
+        let join_values = crate::query::binding_join_keys(
+            binding,
+            &[],
+            &rows,
+            &crate::control::crs_context::crs_context_for(state),
+        )?;
+        for join_value in join_values {
             resolved
                 .resolve(&binding.target_collection, join_value, async |v| {
                     lookup_join_value(state, binding, v, tenant_id, database_id, trace_id)
@@ -300,9 +310,10 @@ pub(super) async fn extend_with_stored_row(
 fn images_of(
     scope: &StoredRowScope<'_>,
     stored: Option<&serde_json::Value>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<(Option<serde_json::Value>, Option<serde_json::Value>)>> {
     let assigned =
-        |old: &serde_json::Value| crate::query::apply_update_assignments(old, scope.updates);
+        |old: &serde_json::Value| crate::query::apply_update_assignments(old, scope.updates, crs);
     Ok(match (&scope.post_image, stored) {
         (PostImage::Removed, Some(old)) => vec![(Some(old.clone()), None)],
         (PostImage::Assigned, Some(old)) => vec![(Some(old.clone()), Some(assigned(old)?))],
@@ -326,6 +337,7 @@ fn images_of(
                     old,
                     &submitted,
                     scope.updates,
+                    crs,
                 )?),
             )]
         }
@@ -530,7 +542,12 @@ mod tests {
         );
         let scope = stored_row_scope(&op, None).expect("an upsert names its stored row");
         let stored = serde_json::json!({"account_id": "acc-1", "amount": 25});
-        let images = images_of(&scope, Some(&stored)).expect("images");
+        let images = images_of(
+            &scope,
+            Some(&stored),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("images");
 
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].0.as_ref(), Some(&stored));
@@ -545,7 +562,12 @@ mod tests {
         let op = upsert_with(body("acc-1", 60), Vec::new());
         let scope = stored_row_scope(&op, None).expect("an upsert names its stored row");
         let stored = serde_json::json!({"account_id": "acc-1", "amount": 25, "memo": "kept"});
-        let images = images_of(&scope, Some(&stored)).expect("images");
+        let images = images_of(
+            &scope,
+            Some(&stored),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("images");
 
         assert_eq!(amount_of(images[0].1.as_ref()), Some(60));
         assert_eq!(
@@ -573,7 +595,12 @@ mod tests {
         );
         let scope = stored_row_scope(&op, None).expect("an upsert names its stored row");
         let stored = serde_json::json!({"account_id": "acc-1", "amount": 25});
-        let images = images_of(&scope, Some(&stored)).expect("images");
+        let images = images_of(
+            &scope,
+            Some(&stored),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("images");
 
         assert_eq!(
             images[0]
@@ -595,7 +622,8 @@ mod tests {
             vec![("amount".to_string(), excluded("amount"))],
         );
         let scope = stored_row_scope(&op, None).expect("an upsert names its stored row");
-        let images = images_of(&scope, None).expect("images");
+        let images =
+            images_of(&scope, None, &nodedb_crs::CrsContext::builtin_only()).expect("images");
 
         assert_eq!(images.len(), 1);
         assert!(images[0].0.is_none(), "an insert has no pre-image");
@@ -619,7 +647,12 @@ mod tests {
         };
         let scope = stored_row_scope(&op, None).expect("a put names its stored row");
         let stored = serde_json::json!({"account_id": "acc-1", "amount": 25});
-        let images = images_of(&scope, Some(&stored)).expect("images");
+        let images = images_of(
+            &scope,
+            Some(&stored),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("images");
 
         assert_eq!(images[0].0.as_ref(), Some(&stored));
         assert_eq!(amount_of(images[0].1.as_ref()), Some(60));

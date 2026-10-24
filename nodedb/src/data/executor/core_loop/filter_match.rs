@@ -13,6 +13,7 @@
 //! step so the staging handlers (and, ideally, the two base-scan call sites)
 //! evaluate strict predicates identically.
 
+use nodedb_crs::CrsContext;
 use nodedb_query::EvalError;
 use nodedb_types::StorageKey;
 use nodedb_types::columnar::StrictSchema;
@@ -77,7 +78,8 @@ impl HeldEvalError {
 /// `filters` contains a `FilterOp::Expr` predicate that divides or takes a
 /// modulus by zero — this is the base document scan's WHERE predicate, so
 /// the behavior-flip rule applies: the query fails instead of the row being
-/// silently excluded.
+/// silently excluded. Geo functions in an expression filter resolve SRIDs
+/// through `crs`.
 ///
 /// `row_key` is the row's storage key. A row that lacks its identity column
 /// carries its identity only in that key, so the image is matched with the
@@ -91,6 +93,7 @@ pub(in crate::data::executor) fn matches_with_resolved_schema(
     row_key: &StorageKey,
     body: &[u8],
     identity_column: &str,
+    crs: &CrsContext<'_>,
 ) -> Result<bool, EvalError> {
     let decoded;
     let stored: &[u8] = match strict_schema {
@@ -104,7 +107,7 @@ pub(in crate::data::executor) fn matches_with_resolved_schema(
         None => body,
     };
     let image = super::super::row_shape::inject_row_identity(stored, row_key, identity_column);
-    ScanFilter::all_match_binary(filters, &image)
+    ScanFilter::all_match_binary(filters, &image, crs)
 }
 
 impl CoreLoop {
@@ -138,13 +141,15 @@ impl CoreLoop {
     /// closure evaluating `filters` against a stored row's `(row_key, body)`,
     /// resolving `collection`'s strict schema ONCE up front (not per row) and
     /// capturing it in the closure. A scan that takes an infallible predicate
-    /// wraps it with [`HeldEvalError::check`].
+    /// wraps it with [`HeldEvalError::check`]. Geo functions resolve SRIDs
+    /// through `crs`.
     pub(in crate::data::executor) fn strict_aware_matcher<'a>(
         &self,
         database_id: u64,
         tid: u64,
         collection: &str,
         filters: &'a [ScanFilter],
+        crs: &'a CrsContext<'a>,
     ) -> impl Fn(&StorageKey, &[u8]) -> Result<bool, EvalError> + 'a {
         let strict_schema = self.resolve_strict_schema(database_id, tid, collection);
         let identity_column = self.identity_column(database_id, tid, collection);
@@ -155,6 +160,7 @@ impl CoreLoop {
                 row_key,
                 body,
                 &identity_column,
+                crs,
             )
         }
     }

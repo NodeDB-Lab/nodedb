@@ -195,7 +195,7 @@ mod tests {
         );
         assert_eq!(spec.expected.get(&row), Some(&Some(b"item".to_vec())));
         assert_eq!(class.read_set.0.len(), 1);
-        let mut active = class.active_vshards().expect("active vShards");
+        let mut active = class.active_vshards().to_vec();
         active.sort_unstable();
         let mut expected_active = vec![vshard_of(&source), vshard_of(&dest)];
         expected_active.sort_unstable();

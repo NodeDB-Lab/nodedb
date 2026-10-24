@@ -2,13 +2,16 @@
 
 //! Msgpack → `serde_json::Value` reader.
 //!
-//! Instant ext values (fixext8 type 1 / 2) become ISO 8601 strings. Every
-//! other ext type becomes `null`.
+//! Instant ext values (fixext8 type 1 / 2) become ISO 8601 strings. A
+//! geometry ext (type 3) becomes its GeoJSON object. Every other ext type
+//! becomes `null`.
 
 use super::super::error::MsgpackResult;
+use super::super::geometry_ext::geometry_from_ext;
 use super::super::instant_ext::instant_from_ext;
 use super::cursor::Cursor;
 use crate::datetime::NdbDateTime;
+use crate::geometry::geojson_tree;
 use crate::value::float_text::float_to_json;
 
 /// Deserialize a `serde_json::Value` from MessagePack bytes.
@@ -151,28 +154,30 @@ fn read_json_value(c: &mut Cursor<'_>) -> zerompk::Result<serde_json::Value> {
             c.take_n(5)?;
             Ok(serde_json::Value::Null)
         }
-        0xD8 => {
-            c.take_n(17)?;
-            Ok(serde_json::Value::Null)
-        }
+        0xD8 => read_json_ext(c, 16),
         0xC7 => {
             let l = c.take()? as usize;
-            c.take_n(1 + l)?;
-            Ok(serde_json::Value::Null)
+            read_json_ext(c, l)
         }
         0xC8 => {
             let l = c.read_u16_be()? as usize;
-            c.take_n(1 + l)?;
-            Ok(serde_json::Value::Null)
+            read_json_ext(c, l)
         }
         0xC9 => {
             let l = c.read_u32_be()? as usize;
-            c.take_n(1 + l)?;
-            Ok(serde_json::Value::Null)
+            read_json_ext(c, l)
         }
 
         _ => Err(zerompk::Error::InvalidMarker(marker)),
     }
+}
+
+/// An ext value of `len` payload bytes: a geometry becomes its GeoJSON
+/// object, any other type `null`.
+fn read_json_ext(c: &mut Cursor<'_>, len: usize) -> zerompk::Result<serde_json::Value> {
+    let ext_type = c.take()? as i8;
+    let payload = c.take_n(len)?;
+    Ok(geometry_from_ext(ext_type, payload).map_or(serde_json::Value::Null, |g| geojson_tree(&g)))
 }
 
 fn read_json_str(c: &mut Cursor<'_>, len: usize) -> zerompk::Result<serde_json::Value> {

@@ -28,6 +28,13 @@ pub enum StrictError {
         detail: String,
     },
 
+    /// A stored variable-length cell whose bytes do not hold its type.
+    #[error("column of type {column_type}: corrupt cell: {detail}")]
+    CorruptCell {
+        column_type: ColumnType,
+        detail: String,
+    },
+
     /// A non-nullable column received a null value with no default.
     #[error("column '{0}' is NOT NULL and has no default")]
     NullViolation(String),

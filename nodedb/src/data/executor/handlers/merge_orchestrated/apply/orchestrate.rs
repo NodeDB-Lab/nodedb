@@ -77,6 +77,7 @@ impl CoreLoop {
             &identity_column,
             tid,
             params.target_collection,
+            &self.crs_context(),
         ) {
             return self.response_error(task, e);
         }
@@ -291,7 +292,12 @@ impl CoreLoop {
         // Every arm committed, so an encode error answers with the rows'
         // entries as well.
         let mut response = if let Some(spec) = params.returning {
-            match returning_rows::build_rows_payload(spec, params.rls_filters, &returned_docs) {
+            match returning_rows::build_rows_payload(
+                spec,
+                params.rls_filters,
+                &returned_docs,
+                &self.crs_context(),
+            ) {
                 Ok(payload) => self.response_with_payload(task, payload),
                 Err(e) => self.response_error(task, ErrorCode::from(e)),
             }

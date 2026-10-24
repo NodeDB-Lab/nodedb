@@ -64,7 +64,6 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             | GraphOp::MatchContinuation { .. }
             | GraphOp::MatchVarLenResume { .. }
             | GraphOp::TemporalNeighbors { .. }
-            | GraphOp::TemporalAlgorithm { .. }
             | GraphOp::BspSuperstep(_)
             | GraphOp::WccSuperstep(_)
             | GraphOp::Stats { .. }
@@ -281,6 +280,7 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             | MetaOp::Checkpoint
             | MetaOp::CreateTenantSnapshot { .. }
             | MetaOp::RestoreTenantSnapshot { .. }
+            | MetaOp::PurgeDepartedVShards { .. }
             | MetaOp::UnregisterCollection { .. }
             | MetaOp::UnregisterMaterializedView { .. }
             | MetaOp::QueryCollectionSize { .. }
@@ -425,6 +425,9 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         PhysicalPlan::Meta(MetaOp::PutSynonymGroup { .. } | MetaOp::DeleteSynonymGroup { .. }) => {
             Permission::Alter
         }
+
+        // User-defined CRS set install: Alter permission, as the DDL it carries.
+        PhysicalPlan::Meta(MetaOp::SetCustomCrsSet { .. }) => Permission::Alter,
     }
 }
 

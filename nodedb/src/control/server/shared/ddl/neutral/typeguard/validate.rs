@@ -105,6 +105,7 @@ pub async fn validate_typeguard(
 
     // Parse JSON rows and validate each document.
     let mut violations = Vec::new();
+    let crs = crate::control::crs_context::crs_context_for(state);
 
     for chunk in &json_chunks {
         if let Ok(serde_json::Value::Array(rows)) = sonic_rs::from_str::<serde_json::Value>(chunk) {
@@ -136,6 +137,7 @@ pub async fn validate_typeguard(
                         std::slice::from_ref(guard),
                         &doc,
                         None,
+                        &crs,
                     ) {
                         let detail = match &e {
                             crate::bridge::envelope::ErrorCode::TypeGuardViolation {

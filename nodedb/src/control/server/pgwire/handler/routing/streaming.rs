@@ -154,6 +154,7 @@ impl NodeDbPgHandler {
                             shaping.projection,
                             Some(redaction.ctx(&state.redaction)),
                             None,
+                            &crate::control::crs_context::crs_set_for(&state),
                         )
                         .map_err(|e| shape_error_to_pg(&e))?
                         {

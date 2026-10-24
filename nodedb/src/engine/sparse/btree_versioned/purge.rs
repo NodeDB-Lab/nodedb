@@ -3,7 +3,8 @@
 //! Audit-retention purge for the versioned document / index tables.
 //!
 //! Same contract as `edge_store::temporal::purge`: drop *superseded*
-//! versions older than `cutoff_system_ms`. The newest version of every
+//! versions below the ordinal cutoff of `cutoff_system_ms`
+//! (`ms_to_ordinal_upper`). The newest version of every
 //! `(doc_id)` — live, tombstone, or GDPR-erased — is always preserved so
 //! the Ceiling read for any future `AS OF` cutoff still sees the row's
 //! terminal state.
@@ -104,7 +105,9 @@ impl SparseEngine {
     }
 
     /// Purge superseded document + index versions for `(tenant, coll)`.
-    /// Returns `(docs_deleted, index_entries_deleted)`.
+    /// `cutoff_system_ms` is the retention horizon in milliseconds. It
+    /// converts to the last ordinal of that millisecond, as the edge store's
+    /// purge converts it. Returns `(docs_deleted, index_entries_deleted)`.
     pub fn purge_superseded_document_versions(
         &self,
         database_id: u64,
@@ -112,9 +115,9 @@ impl SparseEngine {
         coll: &str,
         cutoff_system_ms: i64,
     ) -> crate::Result<(usize, usize)> {
-        let doc_victims = self.collect_doc_victims(database_id, tenant, coll, cutoff_system_ms)?;
-        let idx_victims =
-            self.collect_index_victims(database_id, tenant, coll, cutoff_system_ms)?;
+        let cutoff = nodedb_types::ms_to_ordinal_upper(cutoff_system_ms);
+        let doc_victims = self.collect_doc_victims(database_id, tenant, coll, cutoff)?;
+        let idx_victims = self.collect_index_victims(database_id, tenant, coll, cutoff)?;
 
         if doc_victims.is_empty() && idx_victims.is_empty() {
             return Ok((0, 0));
@@ -149,7 +152,7 @@ impl SparseEngine {
         database_id: u64,
         tenant: u64,
         coll: &str,
-        cutoff_system_ms: i64,
+        cutoff: i64,
     ) -> crate::Result<Vec<String>> {
         let lo = coll_prefix(database_id, tenant, coll);
         let hi = coll_prefix_end(database_id, tenant, coll);
@@ -189,7 +192,7 @@ impl SparseEngine {
                     pending = Some((base_s, sys_from, key_str));
                 }
                 Some((prev_base, prev_sf, prev_key)) if prev_base == base_s => {
-                    if prev_sf < cutoff_system_ms {
+                    if prev_sf < cutoff {
                         victims.push(prev_key);
                     }
                     pending = Some((base_s, sys_from, key_str));
@@ -207,7 +210,7 @@ impl SparseEngine {
         database_id: u64,
         tenant: u64,
         coll: &str,
-        cutoff_system_ms: i64,
+        cutoff: i64,
     ) -> crate::Result<Vec<String>> {
         let lo = coll_prefix(database_id, tenant, coll);
         let hi = coll_prefix_end(database_id, tenant, coll);
@@ -243,7 +246,7 @@ impl SparseEngine {
                     pending = Some((base_s, sys_from, key_str));
                 }
                 Some((prev_base, prev_sf, prev_key)) if prev_base == base_s => {
-                    if prev_sf < cutoff_system_ms {
+                    if prev_sf < cutoff {
                         victims.push(prev_key);
                     }
                     pending = Some((base_s, sys_from, key_str));
@@ -275,18 +278,46 @@ mod tests {
         (dir, eng)
     }
 
-    fn put_version(eng: &SparseEngine, doc_id: u32, sys_from: i64) {
+    /// A version stamped at the first ordinal of millisecond `at_ms`.
+    fn put_version(eng: &SparseEngine, doc_id: u32, at_ms: i64) {
         eng.versioned_put(VersionedPut {
             database_id: 1,
             tenant: 1,
             coll: "c",
             doc_id: &key(doc_id),
             body: b"payload",
-            sys_from_ms: sys_from,
+            sys_from: at_ms * nodedb_types::NANOS_PER_MS,
             valid_from_ms: 0,
             valid_until_ms: i64::MAX,
         })
         .unwrap();
+    }
+
+    /// A superseded version written in the horizon millisecond itself is
+    /// purged: the horizon converts to the last ordinal of that millisecond.
+    #[test]
+    fn purge_reaches_versions_inside_the_horizon_millisecond() {
+        let (_d, eng) = fresh_engine();
+        let first_of_150 = 150 * nodedb_types::NANOS_PER_MS;
+        let first_of_151 = 151 * nodedb_types::NANOS_PER_MS;
+        for sys_from in [first_of_150, first_of_150 + 5, first_of_151] {
+            eng.versioned_put(VersionedPut {
+                database_id: 1,
+                tenant: 1,
+                coll: "c",
+                doc_id: &key(1),
+                body: b"payload",
+                sys_from,
+                valid_from_ms: 0,
+                valid_until_ms: i64::MAX,
+            })
+            .unwrap();
+        }
+        let (docs, _idx) = eng
+            .purge_superseded_document_versions(1, 1, "c", 150)
+            .unwrap();
+        assert_eq!(docs, 2, "both superseded versions of ms 150 are purged");
+        assert_eq!(count_doc_versions(&eng, 1), 1);
     }
 
     fn count_doc_versions(eng: &SparseEngine, doc_id: u32) -> usize {
@@ -381,7 +412,7 @@ mod tests {
             coll: "other",
             doc_id: &key(1),
             body: b"x",
-            sys_from_ms: 100,
+            sys_from: 100,
             valid_from_ms: 0,
             valid_until_ms: i64::MAX,
         })
@@ -392,7 +423,7 @@ mod tests {
             coll: "c",
             doc_id: &key(1),
             body: b"x",
-            sys_from_ms: 100,
+            sys_from: 100,
             valid_from_ms: 0,
             valid_until_ms: i64::MAX,
         })
@@ -425,7 +456,7 @@ mod tests {
                 coll,
                 doc_id: &key(1),
                 body: b"x",
-                sys_from_ms: 100,
+                sys_from: 100,
                 valid_from_ms: 0,
                 valid_until_ms: i64::MAX,
             })
@@ -438,7 +469,7 @@ mod tests {
             coll: "c",
             doc_id: &key(1),
             body: b"x",
-            sys_from_ms: 100,
+            sys_from: 100,
             valid_from_ms: 0,
             valid_until_ms: i64::MAX,
         })
@@ -467,7 +498,7 @@ mod tests {
             coll: "other",
             doc_id: &key(1),
             body: b"x",
-            sys_from_ms: 100,
+            sys_from: 100,
             valid_from_ms: 0,
             valid_until_ms: i64::MAX,
         })
@@ -478,7 +509,7 @@ mod tests {
             coll: "other",
             doc_id: &key(1),
             body: b"x",
-            sys_from_ms: 200,
+            sys_from: 200,
             valid_from_ms: 0,
             valid_until_ms: i64::MAX,
         })
@@ -489,7 +520,7 @@ mod tests {
             coll: "c",
             doc_id: &key(1),
             body: b"x",
-            sys_from_ms: 100,
+            sys_from: 100,
             valid_from_ms: 0,
             valid_until_ms: i64::MAX,
         })
@@ -500,7 +531,7 @@ mod tests {
             coll: "c",
             doc_id: &key(1),
             body: b"x",
-            sys_from_ms: 200,
+            sys_from: 200,
             valid_from_ms: 0,
             valid_until_ms: i64::MAX,
         })

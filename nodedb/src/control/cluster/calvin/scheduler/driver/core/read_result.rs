@@ -328,10 +328,13 @@ mod tests {
     /// [`PASSIVE`], whose coordinator read `expected` for it.
     fn dependent_txn(epoch: u64, expected: Option<&[u8]>) -> SequencedTxn {
         let mut txn = make_local_write_txn(epoch, 0);
-        txn.tx_class.dependent_reads = Some(DependentReadSpec {
+        std::sync::Arc::make_mut(&mut txn.tx_class).dependent_reads = Some(DependentReadSpec {
             passive_reads: BTreeMap::from([(PASSIVE, Vec::new())]),
             expected: BTreeMap::from([(row(), expected.map(<[u8]>::to_vec))]),
         });
+        std::sync::Arc::make_mut(&mut txn.tx_class)
+            .restore_derived()
+            .expect("a derivable class");
         txn
     }
 

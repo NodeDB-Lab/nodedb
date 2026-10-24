@@ -2,9 +2,10 @@
 
 //! `GEOREF (SRID n, X dim, Y dim [, TRANSFORM (gt0, .., gt5)])` clause parsing.
 //!
-//! The parser checks the SRID against the supported set and the coefficient
-//! count. The planner checks the dims and the coefficient values.
+//! The parser checks the SRID code range and the coefficient count. The
+//! planner checks the SRID is defined, the dims and the coefficient values.
 
+use nodedb_crs::UnknownSrid;
 use nodedb_types::geometry::Srid;
 
 use crate::error::{Result, SqlError};
@@ -22,9 +23,11 @@ impl<'a> Parser<'a> {
         self.expect(&Tok::LParen)?;
         self.expect_kw("SRID")?;
         let code = self.expect_int()?;
-        let srid = Srid::from_code(code)
-            .map_err(|e| SqlError::DataException {
-                detail: format!("GEOREF: {e}"),
+        let srid = u32::try_from(code)
+            .ok()
+            .and_then(|c| Srid::new(c).ok())
+            .ok_or_else(|| SqlError::DataException {
+                detail: format!("GEOREF: {}", UnknownSrid::OutOfRange { code }),
             })?
             .code();
         self.expect(&Tok::Comma)?;
@@ -137,15 +140,22 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_srid_is_data_exception_naming_supported_codes() {
-        let err = create_georef("GEOREF (SRID 2154, X col, Y row)").unwrap_err();
+    fn out_of_range_srid_is_data_exception() {
+        let err = create_georef("GEOREF (SRID 0, X col, Y row)").unwrap_err();
         let SqlError::DataException { detail } = err else {
             panic!("expected DataException, got {err:?}");
         };
-        assert!(detail.contains("2154"), "{detail}");
-        for code in ["4326", "32647", "32648", "3375", "3376"] {
-            assert!(detail.contains(code), "{detail}");
-        }
+        assert!(detail.contains("SRID 0"), "{detail}");
+    }
+
+    /// The parser checks syntax only: an undefined code in range parses and
+    /// the planner refuses it.
+    #[test]
+    fn undefined_srid_in_range_parses() {
+        let g = create_georef("GEOREF (SRID 999, X col, Y row)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(g.srid, 999);
     }
 
     #[test]
@@ -218,7 +228,7 @@ mod tests {
 
     #[test]
     fn alter_georef_errors() {
-        let err = alter("ALTER ARRAY scene SET GEOREF (SRID 27700, X col, Y row)").unwrap_err();
+        let err = alter("ALTER ARRAY scene SET GEOREF (SRID 0, X col, Y row)").unwrap_err();
         assert!(matches!(err, SqlError::DataException { .. }), "{err:?}");
         for sql in [
             "ALTER ARRAY scene DROP GEOREF extra",

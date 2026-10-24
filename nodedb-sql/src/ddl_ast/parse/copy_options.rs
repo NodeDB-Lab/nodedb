@@ -4,14 +4,15 @@
 //! from the file extension.
 //!
 //! Text formats take `FORMAT`, `DELIMITER` and `HEADER`. GeoTIFF takes
-//! `FORMAT geotiff`, `BANDS (name | SKIP, ...)`, `NODATA <number>` and
-//! `TIME '<iso>'`. An option of the other family is refused once the
-//! format is known.
+//! `FORMAT geotiff`, `BANDS (name | SKIP, ...)`, `NODATA <number>`,
+//! `TIME '<iso>'`, `CREDENTIAL <name>`, `ADOPT_METADATA <bool>`,
+//! `OVERVIEW <n>`, `WINDOW (x0, y0, x1, y1)` and `REQUESTER_PAYS <bool>`.
+//! An option of the other family is refused once the format is known.
 
 use nodedb_types::NdbDateTime;
 
 use super::clause::{ClauseCursor, Tok, Token, parse_err};
-use crate::ddl_ast::statement::{CopyBand, CopyFormat, CopyRasterOptions};
+use crate::ddl_ast::statement::{CopyBand, CopyFormat, CopyRasterOptions, CopyWindow};
 use crate::error::SqlError;
 
 /// The options of one `COPY ... WITH (...)` clause, before the format is
@@ -36,7 +37,8 @@ impl CopyOptions {
         }
         if !geotiff && !self.raster.is_empty() {
             return Err(parse_err(
-                "COPY: BANDS, NODATA and TIME need FORMAT geotiff (or a .tif / .tiff path)",
+                "COPY: BANDS, NODATA, TIME, CREDENTIAL, ADOPT_METADATA, OVERVIEW, WINDOW and \
+                 REQUESTER_PAYS need FORMAT geotiff (or a .tif / .tiff path)",
             ));
         }
         Ok(())
@@ -49,6 +51,11 @@ enum OptionValue {
     Bands(Vec<CopyBand>),
     Nodata(f64),
     TimeMs(i64),
+    Credential(String),
+    AdoptMetadata(bool),
+    Overview(u32),
+    Window(CopyWindow),
+    RequesterPays(bool),
 }
 
 /// Read an optional `WITH (key [=] value, ...)` and require the end of the
@@ -63,6 +70,11 @@ pub(super) fn parse_copy_options(c: &mut ClauseCursor<'_, '_>) -> Result<CopyOpt
                 "BANDS" => OptionValue::Bands(bands_value(c)?),
                 "NODATA" => OptionValue::Nodata(nodata_value(c)?),
                 "TIME" => OptionValue::TimeMs(time_value(c)?),
+                "CREDENTIAL" => OptionValue::Credential(c.name("CREDENTIAL")?),
+                "ADOPT_METADATA" => OptionValue::AdoptMetadata(c.bool_literal("ADOPT_METADATA")?),
+                "OVERVIEW" => OptionValue::Overview(overview_value(c)?),
+                "WINDOW" => OptionValue::Window(window_value(c)?),
+                "REQUESTER_PAYS" => OptionValue::RequesterPays(c.bool_literal("REQUESTER_PAYS")?),
                 _ => OptionValue::Text(match c.string(&key) {
                     Ok(value) => value,
                     Err(_) => c.word(&key)?.to_string(),
@@ -104,6 +116,11 @@ fn apply(
         (_, OptionValue::Bands(bands)) => options.raster.bands = Some(bands),
         (_, OptionValue::Nodata(nodata)) => options.raster.nodata = Some(nodata),
         (_, OptionValue::TimeMs(time_ms)) => options.raster.time_ms = Some(time_ms),
+        (_, OptionValue::Credential(name)) => options.raster.credential = Some(name),
+        (_, OptionValue::AdoptMetadata(adopt)) => options.raster.adopt_metadata = adopt,
+        (_, OptionValue::Overview(level)) => options.raster.overview = Some(level),
+        (_, OptionValue::Window(window)) => options.raster.window = Some(window),
+        (_, OptionValue::RequesterPays(pays)) => options.raster.requester_pays = pays,
         (other, OptionValue::Text(_)) => {
             return Err(c.error(format!("WITH: unknown option '{other}'")));
         }
@@ -186,6 +203,32 @@ fn nodata_value(c: &mut ClauseCursor<'_, '_>) -> Result<f64, SqlError> {
         .map_err(|_| c.error(format!("NODATA must be a number — found '{text}'")))?;
     c.skip(used);
     Ok(value)
+}
+
+/// An image index: 0 is full resolution, `n` the n-th overview.
+fn overview_value(c: &mut ClauseCursor<'_, '_>) -> Result<u32, SqlError> {
+    let level = c.u64("OVERVIEW")?;
+    u32::try_from(level).map_err(|_| c.error(format!("OVERVIEW {level} is out of range")))
+}
+
+/// `(x0, y0, x1, y1)`: a non-empty half-open pixel window.
+fn window_value(c: &mut ClauseCursor<'_, '_>) -> Result<CopyWindow, SqlError> {
+    let bounds = c.paren_list("WINDOW", |c| {
+        let value = c.u64("WINDOW bound")?;
+        u32::try_from(value).map_err(|_| c.error(format!("WINDOW bound {value} is out of range")))
+    })?;
+    let &[x0, y0, x1, y1] = bounds.as_slice() else {
+        return Err(c.error(format!(
+            "WINDOW takes four bounds (x0, y0, x1, y1) — found {}",
+            bounds.len()
+        )));
+    };
+    if x1 <= x0 || y1 <= y0 {
+        return Err(c.error(format!(
+            "WINDOW ({x0}, {y0}, {x1}, {y1}) is empty; x1 must exceed x0 and y1 must exceed y0"
+        )));
+    }
+    Ok(CopyWindow { x0, y0, x1, y1 })
 }
 
 /// A quoted ISO 8601 instant, in milliseconds since the Unix epoch.
@@ -390,6 +433,37 @@ mod tests {
         assert!(message.contains("twice"), "{message}");
         let message = refusal("COPY s FROM '/d/s.csv' WITH (FORMAT csv, FORMAT json)");
         assert!(message.contains("twice"), "{message}");
+    }
+
+    #[test]
+    fn remote_load_options_parse() {
+        let (_, raster) = copy_from(
+            "COPY s FROM 's3://b/k.tif' WITH (CREDENTIAL earthdata, ADOPT_METADATA true, \
+             OVERVIEW 2, WINDOW (10, 20, 266, 276), REQUESTER_PAYS true)",
+        );
+        assert_eq!(raster.credential.as_deref(), Some("earthdata"));
+        assert!(raster.adopt_metadata);
+        assert!(raster.requester_pays);
+        assert_eq!(raster.overview, Some(2));
+        assert_eq!(
+            raster.window,
+            Some(CopyWindow {
+                x0: 10,
+                y0: 20,
+                x1: 266,
+                y1: 276
+            })
+        );
+    }
+
+    #[test]
+    fn a_window_needs_four_ordered_bounds() {
+        assert!(refusal("COPY s FROM '/d/s.tif' WITH (WINDOW (1, 2, 3))").contains("four"));
+        assert!(refusal("COPY s FROM '/d/s.tif' WITH (WINDOW (5, 0, 5, 9))").contains("empty"));
+        assert!(refusal("COPY s FROM '/d/s.tif' WITH (OVERVIEW -1)").contains("OVERVIEW"));
+        assert!(
+            refusal("COPY s FROM '/d/s.csv' WITH (ADOPT_METADATA true)").contains("FORMAT geotiff")
+        );
     }
 
     #[test]

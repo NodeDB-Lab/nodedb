@@ -4,6 +4,7 @@ pub mod capture;
 pub mod chunk;
 pub mod continuation;
 pub mod group;
+pub mod node_label;
 pub mod record;
 pub mod replay;
 pub mod row_changes;
@@ -15,6 +16,7 @@ pub use chunk::{
 };
 pub use continuation::{ContinuedRedo, SplitRedo, split_redo};
 pub use group::{CascadedEdge, GroupMembership, NodeCascadeRedo, WriteGroup, WriteGroupRecord};
+pub use node_label::NodeLabelRedo;
 pub use record::{
     CalvinStamp, CrossShardAppliedKey, EdgeCutRedo, EdgeDeleteRedo, EdgePutRedo, PublishPosition,
     RedoPublish, RedoRecord, RedoSubRecord,

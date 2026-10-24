@@ -44,20 +44,14 @@ pub fn decode_value(bytes: &[u8]) -> crate::Result<DecodedValue<'_>> {
         });
     }
     let tag = bytes[0];
-    let vf = i64::from_le_bytes(
-        bytes[1..9]
-            .try_into()
-            .expect("length checked above — 8 bytes"),
-    );
-    let vu = i64::from_le_bytes(
-        bytes[9..17]
-            .try_into()
-            .expect("length checked above — 8 bytes"),
-    );
+    let mut vf = [0u8; 8];
+    vf.copy_from_slice(&bytes[1..9]);
+    let mut vu = [0u8; 8];
+    vu.copy_from_slice(&bytes[9..17]);
     Ok(DecodedValue {
         tag,
-        valid_from_ms: vf,
-        valid_until_ms: vu,
+        valid_from_ms: i64::from_le_bytes(vf),
+        valid_until_ms: i64::from_le_bytes(vu),
         body: &bytes[17..],
     })
 }
@@ -69,7 +63,8 @@ pub struct VersionedPut<'a> {
     pub tenant: u64,
     pub coll: &'a str,
     pub doc_id: &'a StorageKey,
-    pub sys_from_ms: i64,
+    /// The version's system-time ordinal.
+    pub sys_from: i64,
     pub valid_from_ms: i64,
     pub valid_until_ms: i64,
     pub body: &'a [u8],
@@ -86,7 +81,8 @@ pub struct VersionedIndexEntry<'a> {
     pub field: &'a str,
     pub value: &'a str,
     pub doc_id: &'a StorageKey,
-    pub sys_from_ms: i64,
+    /// The entry's system-time ordinal.
+    pub sys_from: i64,
 }
 
 impl VersionedIndexEntry<'_> {
@@ -101,7 +97,7 @@ impl VersionedIndexEntry<'_> {
             self.field,
             self.value,
             self.doc_id,
-            format_sys_from(self.sys_from_ms)
+            format_sys_from(self.sys_from)
         )
     }
 }
@@ -112,7 +108,8 @@ pub struct VersionedScanParams<'a> {
     pub database_id: u64,
     pub tenant: u64,
     pub coll: &'a str,
-    pub sys_cutoff_ms: Option<i64>,
+    /// System-time ordinal cutoff (`None` = current).
+    pub sys_cutoff: Option<i64>,
     pub valid_at_ms: Option<i64>,
     pub limit: usize,
 }

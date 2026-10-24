@@ -204,6 +204,16 @@ pub(super) fn describe_entry(e: &catalog_entry::CatalogEntry) -> (String, u64, S
             0,
             String::new(),
         ),
+        E::PutSpatialRefSys(def) => (format!("spatial_ref_sys:{}", def.srid), 0, String::new()),
+        E::DropSpatialRefSys { srid } => (format!("spatial_ref_sys:{srid}"), 0, String::new()),
+        E::PutCredential(row) => (
+            format!("credential:{}:{}", row.tenant_id, row.name),
+            0,
+            row.kind.type_name().to_string(),
+        ),
+        E::DropCredential { tenant_id, name } => {
+            (format!("credential:{tenant_id}:{name}"), 0, String::new())
+        }
         E::CommitConsumerOffsets(c) => (
             format!(
                 "consumer_group:{}:{}:{}:{}",

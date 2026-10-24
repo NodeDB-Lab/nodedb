@@ -61,7 +61,8 @@ impl CoreLoop {
                     collection: collection.to_string(),
                 })?;
         let head = self
-            .chain_hashes
+            .chain
+            .heads
             .get(&key)
             .cloned()
             .unwrap_or_else(ChainHead::genesis);

@@ -72,15 +72,14 @@ impl Scheduler {
         txn: &SequencedTxn,
         txn_id: TxnId,
     ) -> SliceScope {
-        let local =
-            super::super::super::helpers::decode_plans(&txn.tx_class.plans).and_then(|plans| {
-                self.local_calvin_plans(
-                    plans,
-                    txn.tx_class.database_id,
-                    txn_id.epoch,
-                    txn_id.position,
-                )
-            });
+        let local = super::super::super::helpers::decode_plans(txn.plans()).and_then(|plans| {
+            self.local_calvin_plans(
+                plans,
+                txn.tx_class.database_id,
+                txn_id.epoch,
+                txn_id.position,
+            )
+        });
         match local {
             Ok(local) => SliceScope::of_plans(&local),
             Err(error) => {

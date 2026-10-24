@@ -122,7 +122,7 @@ async fn fence_write_blocks_behind_held_commit_lock() {
     let commit_txn = TxnId::new(5, 0);
     let held: BTreeMap<LockKey, LockMode> = [(kv_lock_key(coll, b"K"), LockMode::Exclusive)].into();
     assert_eq!(
-        lm.lock().expect("lm").acquire(commit_txn, held),
+        lm.lock().expect("lm").acquire(commit_txn, held).outcome,
         AcquireOutcome::Ready,
         "the simulated commit takes the lock first"
     );
@@ -296,7 +296,10 @@ async fn fast_path_drop_delivers_promoted_scheduler_txn() {
     let scheduler_txn = TxnId::new(7, 0);
     let want: BTreeMap<LockKey, LockMode> = [(kv_lock_key(coll, b"K"), LockMode::Exclusive)].into();
     assert_eq!(
-        lm.lock().expect("lm").acquire(scheduler_txn, want.clone()),
+        lm.lock()
+            .expect("lm")
+            .acquire(scheduler_txn, want.clone())
+            .outcome,
         AcquireOutcome::Blocked,
         "the scheduler txn must block behind the fast-path holder"
     );
@@ -371,7 +374,8 @@ async fn calvin_truncate_and_autocommit_point_write_serialize() {
     assert_eq!(
         lm.lock()
             .expect("lm")
-            .acquire(truncate, truncate_keys.clone()),
+            .acquire(truncate, truncate_keys.clone())
+            .outcome,
         AcquireOutcome::Ready
     );
     assert!(
@@ -392,7 +396,8 @@ async fn calvin_truncate_and_autocommit_point_write_serialize() {
     assert_eq!(
         lm.lock()
             .expect("lm")
-            .acquire(later_truncate, truncate_keys.clone()),
+            .acquire(later_truncate, truncate_keys.clone())
+            .outcome,
         AcquireOutcome::Blocked,
         "a truncate must wait for the point write's collection intent"
     );
@@ -422,7 +427,7 @@ async fn autocommit_truncate_routes_behind_a_calvin_row_writer() {
     ]
     .into();
     assert_eq!(
-        lm.lock().expect("lm").acquire(row_writer, row_keys),
+        lm.lock().expect("lm").acquire(row_writer, row_keys).outcome,
         AcquireOutcome::Ready
     );
     let truncate = PhysicalPlan::Kv(KvOp::Truncate {

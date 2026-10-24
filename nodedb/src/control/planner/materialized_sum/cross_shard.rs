@@ -48,6 +48,7 @@ pub fn append_cross_shard_balance_tasks(
 ) -> crate::Result<()> {
     let schema_version = state.schema_version.current();
     let catalog = state.credentials.catalog();
+    let crs = crate::control::crs_context::crs_context_for(state);
 
     // Collected first so the immutable walk of `tasks` does not borrow-conflict
     // with the `&mut Vec` pushed into below — the same two-phase shape
@@ -82,7 +83,7 @@ pub fn append_cross_shard_balance_tasks(
             if sum_target_is_co_resident(source, &binding.target_collection) {
                 continue;
             }
-            for (join_value, delta) in crate::query::binding_insert_deltas(binding, &docs)? {
+            for (join_value, delta) in crate::query::binding_insert_deltas(binding, &docs, &crs)? {
                 // A zero net delta leaves the stored total unchanged, so the
                 // read-modify-write on the target would rewrite the row
                 // byte-for-byte. Shipping a task for it would also make an

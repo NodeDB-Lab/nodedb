@@ -2,7 +2,6 @@
 
 //! The columnar base scan entry point.
 
-use nodedb_types::columnar::schema::{TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
 use nodedb_types::value::Value;
 
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -44,6 +43,7 @@ impl CoreLoop {
         task: &ExecutionTask,
         params: ColumnarScanParams<'_>,
     ) -> Response {
+        let crs = self.crs_context();
         let ColumnarScanParams {
             collection,
             projection,
@@ -61,11 +61,14 @@ impl CoreLoop {
         use nodedb_types::SystemTimeScope;
         let all_versions = system_time.is_all_versions();
         // AS OF SYSTEM TIME NULL must surface every version: do not apply a
-        // system-time cutoff. `AsOf(ms)` applies the ceiling; `Current` is
+        // system-time cutoff. A point-in-time scope applies its ordinal
+        // ceiling (`_ts_system` stores a system-time ordinal); `Current` is
         // unconstrained.
-        let system_as_of_ms = match system_time {
+        let system_as_of = match system_time {
             SystemTimeScope::Current | SystemTimeScope::AllVersions => None,
-            SystemTimeScope::AsOf(ms) => Some(ms),
+            SystemTimeScope::AsOf(_) | SystemTimeScope::Pinned { .. } => {
+                system_time.as_of_ordinal()
+            }
         };
 
         let computed_cols: Vec<ComputedColumn> = if !computed_columns.is_empty() {
@@ -160,10 +163,17 @@ impl CoreLoop {
         let mut matched: Vec<ColumnarMatchedRow> = Vec::new();
         // Resolve hidden bitemporal column positions once; `None` means
         // the collection is not bitemporal, so the per-row filter is a
-        // no-op regardless of `system_as_of_ms` / `valid_at_ms` values.
-        let ts_system_idx = schema.columns.iter().position(|c| c.name == TS_SYSTEM);
-        let ts_valid_from_idx = schema.columns.iter().position(|c| c.name == TS_VALID_FROM);
-        let ts_valid_until_idx = schema.columns.iter().position(|c| c.name == TS_VALID_UNTIL);
+        // no-op regardless of `system_as_of` / `valid_at_ms` values.
+        let ts_system_idx = schema.ts_system_idx();
+        let ts_valid_from_idx = schema.ts_valid_from_idx();
+        let ts_valid_until_idx = schema.ts_valid_until_idx();
+        // On a bitemporal collection each key emits its newest version at the
+        // cut, and a key closed at the cut emits nothing.
+        let version_gate = match self.columnar_version_gate(&engine_key, system_as_of, all_versions)
+        {
+            Ok(gate) => gate,
+            Err(e) => return self.response_error(task, e),
+        };
 
         // Block-boundary prefilter: skip the whole live memtable before any
         // row decoding when no recorded surrogate can be in the bitmap.
@@ -199,11 +209,12 @@ impl CoreLoop {
                 prefilter,
                 computed_cols: &computed_cols,
                 all_versions,
-                system_as_of_ms,
+                system_as_of,
                 valid_at_ms,
                 ts_system_idx,
                 ts_valid_from_idx,
                 ts_valid_until_idx,
+                version_gate: version_gate.as_ref(),
             },
             &mut matched,
         ) {
@@ -249,9 +260,12 @@ impl CoreLoop {
                     ts_system_idx,
                     ts_valid_from_idx,
                     ts_valid_until_idx,
-                    system_as_of_ms,
+                    system_as_of,
                     valid_at_ms,
                 ) {
+                    continue;
+                }
+                if version_gate.as_ref().is_some_and(|gate| !gate.admits(&row)) {
                     continue;
                 }
                 // The query's WHERE predicates, then the caller's read
@@ -263,6 +277,7 @@ impl CoreLoop {
                     schema,
                     &filter_predicates,
                     &rls_predicates,
+                    &crs,
                 ) {
                     Ok(true) => {}
                     Ok(false) => continue,
@@ -276,6 +291,7 @@ impl CoreLoop {
                     projection,
                     &computed_cols,
                     all_versions,
+                    &crs,
                 ) {
                     Ok(v) => v,
                     // `row_to_projected_value` returns `crate::Result<_>`
@@ -314,7 +330,7 @@ impl CoreLoop {
         // Document engine's overlay-merge convention.
         if let Some(txn_id) = txn_id
             && !all_versions
-            && system_as_of_ms.is_none()
+            && system_as_of.is_none()
         {
             let coll_key = (
                 task.request.database_id,
@@ -345,8 +361,14 @@ impl CoreLoop {
             }
         }
 
-        if let Err(e) = order_matched(&mut matched, schema, sort_keys, all_versions, ts_system_idx)
-        {
+        if let Err(e) = order_matched(
+            &mut matched,
+            schema,
+            sort_keys,
+            all_versions,
+            ts_system_idx,
+            &crs,
+        ) {
             return self.response_error(task, e);
         }
         // Safe point: the sort is the one stage whose cost grows with the
@@ -900,5 +922,118 @@ mod tests {
             rows.len(),
             "inner per-row surrogate Vec length must equal segment row count"
         );
+    }
+
+    /// Make `collection` bitemporal on `core` and insert one row per
+    /// `(id, v, system_from)`, each stamped at its carried ordinal.
+    fn insert_bitemporal(core: &mut CoreLoop, collection: &str, rows: &[(i64, i64, i64)]) {
+        let mut config = crate::engine::document::store::CollectionConfig::new(collection);
+        config.bitemporal = true;
+        core.doc_configs.insert(engine_key(collection), config);
+        let schema = ColumnarSchema::new(vec![
+            ColumnDef::required("id", ColumnType::Int64).with_primary_key(),
+            ColumnDef::required("v", ColumnType::Int64),
+        ])
+        .expect("valid schema");
+        let schema_bytes = zerompk::to_msgpack_vec(&schema).expect("encode schema");
+        for (id, v, system_from) in rows {
+            let row = Value::Object(std::collections::HashMap::from([
+                ("id".to_string(), Value::Integer(*id)),
+                ("v".to_string(), Value::Integer(*v)),
+            ]));
+            let payload =
+                nodedb_types::value_to_msgpack(&Value::Array(vec![row])).expect("encode row");
+            let resp = core.execute_columnar_insert(
+                &make_task(),
+                crate::data::executor::handlers::columnar_write::ColumnarInsertParams {
+                    collection,
+                    payload: &payload,
+                    format: "msgpack",
+                    intent: nodedb_physical::physical_plan::ColumnarInsertIntent::Insert,
+                    on_conflict_updates: &[],
+                    surrogates: &[],
+                    schema_bytes: &schema_bytes,
+                    provenance: None,
+                    system_from: Some(*system_from),
+                    rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
+                    returning: None,
+                    rls_filters: &[],
+                    spatial_undo: None,
+                },
+            );
+            assert_eq!(
+                resp.status,
+                crate::bridge::envelope::Status::Ok,
+                "insert: {:?}",
+                resp.error_code
+            );
+        }
+    }
+
+    /// The `v` and `_ts_system` of every row a scan of `collection` at
+    /// `system_time` returns, sorted.
+    fn versions_at(
+        core: &mut CoreLoop,
+        collection: &str,
+        system_time: nodedb_types::SystemTimeScope,
+    ) -> Vec<(i64, i64)> {
+        let mut params = scan_params(collection, None);
+        params.system_time = system_time;
+        let resp = core.execute_columnar_scan(&make_task(), params);
+        let mut out: Vec<(i64, i64)> = decode_rows(resp.payload.as_bytes())
+            .iter()
+            .map(|row| match (field(row, "v"), field(row, "_ts_system")) {
+                (Some(Value::Integer(v)), Some(Value::Integer(ts))) => (*v, *ts),
+                other => panic!("row has no v / _ts_system: {other:?}"),
+            })
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Two versions of one key written in one millisecond: a pinned cut
+    /// between their ordinals reads the first, a cut at or after the second
+    /// reads the second (a cut answers one version per key), `AS OF` the
+    /// millisecond covers both ordinals and reads the second, and
+    /// `_ts_system` reads as that millisecond.
+    #[test]
+    fn a_pinned_cut_splits_two_versions_of_one_millisecond() {
+        let (mut core, _dir) = make_core();
+        let ms = 1_700_000_000_000;
+        let base = ms * nodedb_types::NANOS_PER_MS;
+        insert_bitemporal(
+            &mut core,
+            "bt_cut",
+            &[(1, 10, base + 10), (1, 20, base + 20)],
+        );
+
+        let pinned = |ordinal| nodedb_types::SystemTimeScope::Pinned {
+            ordinal,
+            cut_marker: 0,
+        };
+        assert_eq!(
+            versions_at(&mut core, "bt_cut", pinned(base + 15)),
+            vec![(10, ms)]
+        );
+        assert_eq!(
+            versions_at(&mut core, "bt_cut", pinned(base + 20)),
+            vec![(20, ms)]
+        );
+        assert_eq!(
+            versions_at(&mut core, "bt_cut", nodedb_types::SystemTimeScope::AsOf(ms)),
+            vec![(20, ms)]
+        );
+        assert!(
+            versions_at(
+                &mut core,
+                "bt_cut",
+                nodedb_types::SystemTimeScope::AsOf(ms - 1)
+            )
+            .is_empty(),
+            "a millisecond before both versions reads neither"
+        );
+        // The carried ordinals fold into the shared clock, so a later write
+        // stamps above them.
+        assert!(core.hlc.peek() >= base + 20);
     }
 }

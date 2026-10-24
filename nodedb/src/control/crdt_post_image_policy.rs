@@ -11,6 +11,7 @@ use crate::control::security::audit::{AuditEmitContext, AuditEmitter, AuditEvent
 use crate::control::security::auth_context::AuthContext;
 use crate::control::security::catalog::SystemCatalog;
 use crate::control::security::rls::RlsPolicyStore;
+use crate::control::state::SharedState;
 use crate::types::TenantId;
 use nodedb_types::{CrdtPreviewResult, Value};
 
@@ -19,11 +20,20 @@ pub struct ExternalCrdtPostImagePolicy<'a> {
     tenant_id: TenantId,
     collection: &'a str,
     auth: AuthContext,
-    rls: &'a RlsPolicyStore,
-    audit: &'a dyn AuditEmitter,
+    services: PolicyServices<'a>,
     /// Where the collection's typeguards and transition rules are read from.
     /// `None` judges no rule.
     guards: Option<GuardSource<'a>>,
+}
+
+/// The shared services a CRDT post-image policy evaluates against: the RLS
+/// store, the audit sink, and the user-defined CRSs write predicates resolve
+/// SRIDs against.
+#[derive(Clone, Copy)]
+pub struct PolicyServices<'a> {
+    pub rls: &'a RlsPolicyStore,
+    pub audit: &'a dyn AuditEmitter,
+    pub crs_set: &'a nodedb_crs::CustomCrsSet,
 }
 
 /// The catalog row a CRDT admission reads the collection's typeguards and
@@ -31,6 +41,9 @@ pub struct ExternalCrdtPostImagePolicy<'a> {
 struct GuardSource<'a> {
     catalog: &'a SystemCatalog,
     database_id: nodedb_types::DatabaseId,
+    /// Resolves the CRS context CHECK and transition predicates evaluate
+    /// under.
+    state: &'a SharedState,
 }
 
 impl<'a> ExternalCrdtPostImagePolicy<'a> {
@@ -38,15 +51,13 @@ impl<'a> ExternalCrdtPostImagePolicy<'a> {
         tenant_id: TenantId,
         collection: &'a str,
         auth: AuthContext,
-        rls: &'a RlsPolicyStore,
-        audit: &'a dyn AuditEmitter,
+        services: PolicyServices<'a>,
     ) -> Self {
         Self {
             tenant_id,
             collection,
             auth,
-            rls,
-            audit,
+            services,
             guards: None,
         }
     }
@@ -61,12 +72,13 @@ impl<'a> ExternalCrdtPostImagePolicy<'a> {
     /// change, with the writer's roles.
     pub fn with_type_guards_from(
         mut self,
-        catalog: &'a SystemCatalog,
+        state: &'a SharedState,
         database_id: nodedb_types::DatabaseId,
     ) -> Self {
         self.guards = Some(GuardSource {
-            catalog,
+            catalog: state.credentials.catalog(),
             database_id,
+            state,
         });
         self
     }
@@ -97,6 +109,7 @@ impl<'a> ExternalCrdtPostImagePolicy<'a> {
         else {
             return Ok(());
         };
+        let crs = crate::control::crs_context::crs_context_for(source.state);
         if !coll.type_guards.is_empty() {
             let compiled =
                 crate::data::executor::enforcement::typeguard::CompiledTypeGuard::compile_all(
@@ -104,7 +117,7 @@ impl<'a> ExternalCrdtPostImagePolicy<'a> {
                     &coll.type_guards,
                 );
             crate::data::executor::enforcement::typeguard::check_type_guards(
-                &compiled, document, None,
+                &compiled, document, None, &crs,
             )
             .map_err(crate::Error::DataPlane)?;
         }
@@ -124,6 +137,7 @@ impl<'a> ExternalCrdtPostImagePolicy<'a> {
                     &serde_json::Value::from(previous.clone()),
                     &serde_json::Value::from(document.clone()),
                     &self.auth.roles,
+                    &crs,
                 )
                 .map_err(crate::Error::DataPlane)?;
             }
@@ -139,16 +153,15 @@ impl<'a> ExternalCrdtPostImagePolicy<'a> {
         collection: &'a str,
         identity: &crate::control::security::identity::AuthenticatedIdentity,
         session_id: String,
-        rls: &'a RlsPolicyStore,
-        audit: &'a dyn AuditEmitter,
+        services: PolicyServices<'a>,
     ) -> Self {
         let mut auth = AuthContext::from_identity(identity, session_id);
         auth.database_id = Some(database_id);
-        Self::with_auth(tenant_id, collection, auth, rls, audit)
+        Self::with_auth(tenant_id, collection, auth, services)
     }
 
     fn deny(&self) -> crate::Result<()> {
-        self.audit.emit(
+        self.services.audit.emit(
             AuditEvent::RlsRejected,
             &self.auth.username,
             "CRDT post-merge write policy rejected",
@@ -180,6 +193,7 @@ impl CrdtPostImagePolicy for ExternalCrdtPostImagePolicy<'_> {
             return Ok(());
         }
         let policies = self
+            .services
             .rls
             .write_policies(self.tenant_id.as_u64(), self.collection);
         if policies.is_empty() {
@@ -205,12 +219,13 @@ impl CrdtPostImagePolicy for ExternalCrdtPostImagePolicy<'_> {
             };
         };
         let document = serde_json::Value::from(value);
-        self.rls.check_write_with_auth(
+        self.services.rls.check_write_with_auth(
             self.tenant_id.as_u64(),
             self.collection,
             &document,
             &self.auth,
-            self.audit,
+            self.services.audit,
+            &nodedb_crs::CrsContext::new(self.services.crs_set),
         )
     }
 }
@@ -288,8 +303,11 @@ mod tests {
             principal.tenant_id,
             "orders",
             AuthContext::from_identity(&principal, "test".into()),
-            &store,
-            &audit,
+            PolicyServices {
+                rls: &store,
+                audit: &audit,
+                crs_set: nodedb_crs::CustomCrsSet::empty(),
+            },
         );
         assert!(
             policy
@@ -315,8 +333,11 @@ mod tests {
             principal.tenant_id,
             "orders",
             AuthContext::from_identity(&principal, "test".into()),
-            &store,
-            &audit,
+            PolicyServices {
+                rls: &store,
+                audit: &audit,
+                crs_set: nodedb_crs::CustomCrsSet::empty(),
+            },
         );
         let malformed = CrdtPreviewResult {
             post_image_msgpack: vec![0x8f],
@@ -348,8 +369,11 @@ mod tests {
             principal.tenant_id,
             "orders",
             AuthContext::from_identity(&principal, "test".into()),
-            &constrained,
-            &audit,
+            PolicyServices {
+                rls: &constrained,
+                audit: &audit,
+                crs_set: nodedb_crs::CustomCrsSet::empty(),
+            },
         );
         assert!(matches!(
             constrained_policy.evaluate(&preview(None)),
@@ -361,8 +385,11 @@ mod tests {
             principal.tenant_id,
             "orders",
             AuthContext::from_identity(&principal, "test".into()),
-            &vacuous,
-            &audit,
+            PolicyServices {
+                rls: &vacuous,
+                audit: &audit,
+                crs_set: nodedb_crs::CustomCrsSet::empty(),
+            },
         );
         assert!(vacuous_policy.evaluate(&preview(None)).is_ok());
     }
@@ -380,8 +407,11 @@ mod tests {
             principal.tenant_id,
             "orders",
             AuthContext::from_identity(&principal, "test".into()),
-            &store,
-            &audit,
+            PolicyServices {
+                rls: &store,
+                audit: &audit,
+                crs_set: nodedb_crs::CustomCrsSet::empty(),
+            },
         );
         assert!(
             policy
@@ -402,8 +432,11 @@ mod tests {
             root.tenant_id,
             "orders",
             AuthContext::from_identity(&root, "test".into()),
-            &store,
-            &audit,
+            PolicyServices {
+                rls: &store,
+                audit: &audit,
+                crs_set: nodedb_crs::CustomCrsSet::empty(),
+            },
         );
         assert!(
             root_policy
@@ -433,8 +466,11 @@ mod tests {
             "orders",
             &principal,
             "test".into(),
-            &store,
-            &audit,
+            PolicyServices {
+                rls: &store,
+                audit: &audit,
+                crs_set: nodedb_crs::CustomCrsSet::empty(),
+            },
         );
 
         assert!(

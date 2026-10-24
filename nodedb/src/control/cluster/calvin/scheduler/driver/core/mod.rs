@@ -33,6 +33,7 @@ pub mod intake;
 mod metadata_hold;
 pub mod owed;
 pub mod parts;
+mod parts_assemble;
 mod parts_error;
 pub mod parts_lane;
 mod passive_read;

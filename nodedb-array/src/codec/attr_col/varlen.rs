@@ -65,6 +65,7 @@ pub(super) fn decode_varlen(
             AttrType::Bytes => CellValue::Bytes(bytes.to_vec()),
             AttrType::Int64
             | AttrType::Float64
+            | AttrType::Int8
             | AttrType::UInt8
             | AttrType::Int16
             | AttrType::UInt16

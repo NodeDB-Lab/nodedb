@@ -9,7 +9,7 @@
 //! before the algorithm executes rather than post-filtered on output.
 
 use nodedb_graph::CsrIndex;
-use nodedb_physical::physical_plan::AlgoStage;
+use nodedb_physical::physical_plan::{AlgoStage, GraphReadScope};
 use nodedb_types::TenantId;
 use tracing::debug;
 
@@ -30,6 +30,7 @@ impl CoreLoop {
         algorithm: &GraphAlgorithm,
         params: &AlgoParams,
         stage: &AlgoStage,
+        scope: &GraphReadScope,
     ) -> Response {
         debug!(
             core = self.core_id,
@@ -37,16 +38,15 @@ impl CoreLoop {
             algorithm = algorithm.name(),
             collection = %params.collection,
             edge_label = ?params.edge_label,
+            ?scope,
             "graph algorithm dispatch"
         );
-
-        let database_id = task.request.database_id.as_u64();
 
         // The export stage runs nothing: it answers this core's edges for the
         // coordinator to gather. The gathered stage reads no edges of its own.
         let gathered = match stage {
-            AlgoStage::ExportEdges { system_as_of_ms } => {
-                return self.export_algo_edges(task, tid, params, *system_as_of_ms);
+            AlgoStage::ExportEdges => {
+                return self.export_algo_edges(task, tid, params, scope);
             }
             AlgoStage::Gathered { edges } => Some(edges),
             AlgoStage::Local => None,
@@ -61,23 +61,18 @@ impl CoreLoop {
             );
         }
 
-        let memory = nodedb_mem::ScopedMemory::new(
-            self.governor.clone(),
-            task.request.database_id,
-            TenantId::new(tid),
-            nodedb_mem::EngineId::Graph,
-        );
         let built = match gathered {
-            Some(edges) => csr_from_edges(edges, memory),
-            None => build_csr_for_collection(
-                &self.edge_store,
-                database_id,
-                tid,
-                &params.collection,
-                params.edge_label.as_deref(),
-                None,
-                memory,
-            ),
+            Some(edges) => {
+                let memory = nodedb_mem::ScopedMemory::new(
+                    self.governor.clone(),
+                    task.request.database_id,
+                    TenantId::new(tid),
+                    nodedb_mem::EngineId::Graph,
+                );
+                csr_from_edges(edges, memory)
+                    .map(|csr| super::graph_algo_csr::AlgoCsr::Built(Box::new(csr)))
+            }
+            None => self.algo_csr(task.request.database_id, tid, params, scope),
         };
         let scoped_csr = match built {
             Ok(c) => c,
@@ -100,14 +95,13 @@ impl CoreLoop {
     }
 
     /// Answer this core's edges of `params.collection`, after the label
-    /// filter, as a msgpack array of `AlgoEdge`. `system_as_of_ms` bounds them
-    /// to the edges live at that system time.
+    /// filter, as a msgpack array of `AlgoEdge`, read at `scope`.
     fn export_algo_edges(
         &self,
         task: &ExecutionTask,
         tid: u64,
         params: &AlgoParams,
-        system_as_of_ms: Option<i64>,
+        scope: &GraphReadScope,
     ) -> Response {
         collection_edges(
             &self.edge_store,
@@ -115,7 +109,7 @@ impl CoreLoop {
             tid,
             &params.collection,
             params.edge_label.as_deref(),
-            system_as_of_ms.map(nodedb_types::ms_to_ordinal_upper),
+            scope,
         )
         .and_then(|edges| {
             zerompk::to_msgpack_vec(&edges).map_err(|e| crate::Error::Serialization {
@@ -132,9 +126,8 @@ impl CoreLoop {
 
 /// Build a `CsrIndex` containing only the edges for a specific
 /// `(database, tid, collection)`, optionally filtered to a single edge label.
-/// Reads from the versioned EdgeStore so the result reflects current state
-/// (pass `None` for `system_as_of`) or a historical snapshot (pass a bitemporal
-/// ordinal cutoff).
+/// Reads from the versioned EdgeStore at `scope`: the current edges for a
+/// live scope, or the edges live at its bitemporal cut.
 ///
 /// Two-pass construction: first intern all endpoint nodes so isolated nodes get
 /// stable ids, then insert edges. This matches the pattern in `CsrSnapshot::from_edge_store_as_of`.
@@ -144,44 +137,11 @@ pub(super) fn build_csr_for_collection(
     tid: u64,
     collection: &str,
     edge_label: Option<&str>,
-    system_as_of: Option<i64>,
+    scope: &GraphReadScope,
     memory: nodedb_mem::ScopedMemory,
 ) -> crate::Result<CsrIndex> {
-    let edges = collection_edges(
-        edge_store,
-        database_id,
-        tid,
-        collection,
-        edge_label,
-        system_as_of,
-    )?;
+    let edges = collection_edges(edge_store, database_id, tid, collection, edge_label, scope)?;
     csr_from_edges(&edges, memory)
-}
-
-/// Shared implementation used by both current-state and temporal
-/// `execute_graph_algo*` handlers. Runs the algorithm and encodes the
-/// response (success payload or structured error).
-pub(super) fn run_algo_response(
-    core: &CoreLoop,
-    task: &ExecutionTask,
-    csr: &CsrIndex,
-    algorithm: &GraphAlgorithm,
-    params: &AlgoParams,
-) -> Response {
-    if *algorithm == GraphAlgorithm::Sssp && params.source_node.is_none() {
-        return core.response_error(
-            task,
-            ErrorCode::Internal {
-                detail: "SSSP requires FROM '<source_node>'".into(),
-            },
-        );
-    }
-    run_algorithm(csr, algorithm, params, &core.graph_tuning)
-        .and_then(|batch| batch.to_msgpack())
-        .map_or_else(
-            |e| core.response_error(task, ErrorCode::from(e)),
-            |payload| core.response_with_payload(task, payload),
-        )
 }
 
 pub(super) fn run_algorithm(

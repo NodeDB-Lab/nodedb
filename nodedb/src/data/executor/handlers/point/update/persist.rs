@@ -38,7 +38,7 @@ pub(in crate::data::executor) struct PointUpdatePersist<'a> {
     /// The row as it will be stored.
     pub(in crate::data::executor) updated_bytes: &'a [u8],
     pub(in crate::data::executor) bitemporal: bool,
-    pub(in crate::data::executor) sys_from_ms: i64,
+    pub(in crate::data::executor) sys_from: i64,
     pub(in crate::data::executor) wal_lsn: Option<Lsn>,
     /// The stamp the update's index values record under, `None` without a
     /// WAL record.
@@ -72,7 +72,7 @@ impl CoreLoop {
             current_bytes,
             updated_bytes,
             bitemporal,
-            sys_from_ms,
+            sys_from,
             wal_lsn,
             write_stamp,
             resolved_sum_targets,
@@ -110,7 +110,7 @@ impl CoreLoop {
                 storage_key,
                 current_bytes,
                 updated_bytes,
-                bitemporal_sys_from_ms: bitemporal.then_some(sys_from_ms),
+                bitemporal_sys_from: bitemporal.then_some(sys_from),
             },
         )?;
 

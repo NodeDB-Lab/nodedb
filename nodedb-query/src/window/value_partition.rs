@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use nodedb_crs::CrsContext;
 use nodedb_types::Value;
 
 use super::helpers::null_order;
@@ -20,6 +21,7 @@ use crate::expr::types::SqlExpr;
 pub(super) fn build_value_partitions(
     rows: &[Vec<Value>],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
     spec: &WindowFuncSpec,
 ) -> Result<Vec<Vec<usize>>, WindowError> {
     let mut partitions = if spec.partition_by.is_empty() {
@@ -29,7 +31,7 @@ pub(super) fn build_value_partitions(
         let mut order: Vec<String> = Vec::new();
 
         for (i, row) in rows.iter().enumerate() {
-            let key = partition_key(row, column_index, &spec.partition_by)?;
+            let key = partition_key(row, column_index, crs, &spec.partition_by)?;
             let entry = groups.entry(key.clone()).or_default();
             if entry.is_empty() {
                 order.push(key);
@@ -46,7 +48,7 @@ pub(super) fn build_value_partitions(
             keys.push(
                 spec.order_by
                     .iter()
-                    .map(|(expr, _)| eval_arg_for_row(expr, row, column_index))
+                    .map(|(expr, _)| eval_arg_for_row(expr, row, column_index, crs))
                     .collect::<Result<Vec<_>, _>>()?,
             );
         }
@@ -62,12 +64,13 @@ pub(super) fn build_value_partitions(
 fn partition_key(
     row: &[Value],
     column_index: &HashMap<String, usize>,
+    crs: &CrsContext<'_>,
     partition_by: &[SqlExpr],
 ) -> Result<String, WindowError> {
     Ok(partition_by
         .iter()
         .map(|expr| {
-            let v = eval_arg_for_row(expr, row, column_index)?;
+            let v = eval_arg_for_row(expr, row, column_index, crs)?;
             Ok(format!("{v:?}"))
         })
         .collect::<Result<Vec<_>, WindowError>>()?

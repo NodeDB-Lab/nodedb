@@ -6,7 +6,9 @@ use crate::bridge::envelope::Response;
 use nodedb_physical::physical_plan::ColumnarOp;
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::columnar_mutation::ColumnarDml;
 use crate::data::executor::handlers::columnar_read::ColumnarScanParams;
+use crate::data::executor::handlers::columnar_truncate::TruncateHistory;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
@@ -50,6 +52,7 @@ impl CoreLoop {
                 schema_bytes,
                 provenance,
                 wal_lsn: _,
+                system_from,
                 rls_write_check,
                 returning,
                 rls_filters,
@@ -68,6 +71,7 @@ impl CoreLoop {
                         surrogates,
                         schema_bytes,
                         provenance: provenance.as_ref(),
+                        system_from: *system_from,
                         rls_write_check,
                         returning: returning.as_ref(),
                         rls_filters,
@@ -80,6 +84,7 @@ impl CoreLoop {
                 collection,
                 filters,
                 updates,
+                system_from,
                 rls_write_check,
             } => {
                 if let Some(r) = self.check_engine_pressure(task, nodedb_mem::EngineId::Columnar) {
@@ -87,10 +92,13 @@ impl CoreLoop {
                 }
                 self.execute_columnar_update(
                     task,
-                    collection.as_str(),
-                    filters,
+                    ColumnarDml {
+                        collection: collection.as_str(),
+                        filter_bytes: filters,
+                        system_from: *system_from,
+                        rls_write_check,
+                    },
                     updates,
-                    rls_write_check,
                     None,
                 )
             }
@@ -98,6 +106,7 @@ impl CoreLoop {
             ColumnarOp::Delete {
                 collection,
                 filters,
+                system_from,
                 rls_write_check,
             } => {
                 if let Some(r) = self.check_engine_pressure(task, nodedb_mem::EngineId::Columnar) {
@@ -105,9 +114,12 @@ impl CoreLoop {
                 }
                 self.execute_columnar_delete(
                     task,
-                    collection.as_str(),
-                    filters,
-                    rls_write_check,
+                    ColumnarDml {
+                        collection: collection.as_str(),
+                        filter_bytes: filters,
+                        system_from: *system_from,
+                        rls_write_check,
+                    },
                     None,
                 )
             }
@@ -128,6 +140,7 @@ impl CoreLoop {
             ColumnarOp::ResolvedUpdate {
                 collection,
                 rows,
+                system_from,
                 rls_write_check,
             } => {
                 if let Some(r) = self.check_engine_pressure(task, nodedb_mem::EngineId::Columnar) {
@@ -137,6 +150,7 @@ impl CoreLoop {
                     task,
                     collection.as_str(),
                     rows,
+                    *system_from,
                     rls_write_check,
                     None,
                 )
@@ -145,6 +159,7 @@ impl CoreLoop {
             ColumnarOp::ResolvedDelete {
                 collection,
                 pks,
+                system_from,
                 rls_write_check,
             } => {
                 if let Some(r) = self.check_engine_pressure(task, nodedb_mem::EngineId::Columnar) {
@@ -154,6 +169,7 @@ impl CoreLoop {
                     task,
                     collection.as_str(),
                     pks,
+                    *system_from,
                     rls_write_check,
                     None,
                 )
@@ -177,7 +193,14 @@ impl CoreLoop {
             ColumnarOp::Truncate {
                 collection,
                 restart_identity: _,
-            } => self.execute_columnar_truncate(task, collection.as_str(), None),
+                system_from,
+                erase_history,
+            } => self.execute_columnar_truncate(
+                task,
+                collection.as_str(),
+                TruncateHistory::of(*erase_history, *system_from),
+                None,
+            ),
         }
     }
 }

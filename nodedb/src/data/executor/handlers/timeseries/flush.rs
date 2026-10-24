@@ -149,7 +149,7 @@ impl CoreLoop {
         let drain = mt.drain();
         let replay_prefix = stamp.rows.prefix;
         let applied_ranges = stamp.rows.applied_above.len();
-        self.ts_replay_stamps.insert(key.clone(), stamp);
+        self.ts_replay.stamps.insert(key.clone(), stamp);
 
         // The memtable is empty, so drop its memory reservation. The
         // reservation tracks the full resident footprint, kept current by

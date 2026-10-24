@@ -28,15 +28,28 @@ pub(in crate::data::executor) fn admit_ilp_lines(
     default_timestamp_ms: i64,
     tid: u64,
     collection: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     if matches!(rls_write_check.decision(), WriteGateDecision::AdmitAll) {
         return Ok(());
     }
     for line in lines {
         let image = line_image(line, time_key, default_timestamp_ms);
-        admit_value_row(rls_write_check, &image, tid, collection)?;
+        admit_value_row(rls_write_check, &image, tid, collection, crs)?;
     }
     Ok(())
+}
+
+/// A structured MessagePack row batch and the line-protocol binding it is
+/// normalized under before the write policy decides it.
+pub(in crate::data::executor) struct MsgpackBatch<'a> {
+    pub payload: &'a [u8],
+    /// The measurement name every row is normalized into.
+    pub measurement: &'a str,
+    /// The declared time column; `None` when the measurement has no DDL.
+    pub time_key: Option<&'a str>,
+    /// The timestamp of every untimed row, in milliseconds.
+    pub default_timestamp_ms: i64,
 }
 
 /// Decide a structured MessagePack row batch against the compiled write
@@ -45,13 +58,17 @@ pub(in crate::data::executor) fn admit_ilp_lines(
 /// fails to decode or normalize is refused rather than admitted.
 pub(in crate::data::executor) fn admit_msgpack_rows(
     rls_write_check: &RlsWriteCheck,
-    payload: &[u8],
-    measurement: &str,
-    time_key: Option<&str>,
-    default_timestamp_ms: i64,
+    batch: MsgpackBatch<'_>,
     tid: u64,
     collection: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
+    let MsgpackBatch {
+        payload,
+        measurement,
+        time_key,
+        default_timestamp_ms,
+    } = batch;
     if matches!(rls_write_check.decision(), WriteGateDecision::AdmitAll) {
         return Ok(());
     }
@@ -73,6 +90,7 @@ pub(in crate::data::executor) fn admit_msgpack_rows(
         default_timestamp_ms,
         tid,
         collection,
+        crs,
     )
 }
 
@@ -142,7 +160,8 @@ mod tests {
                 Some("ts"),
                 0,
                 1,
-                "cpu"
+                "cpu",
+                &nodedb_crs::CrsContext::builtin_only()
             )
             .is_ok()
         );
@@ -158,7 +177,8 @@ mod tests {
                 Some("ts"),
                 0,
                 1,
-                "cpu"
+                "cpu",
+                &nodedb_crs::CrsContext::builtin_only()
             )
             .is_ok()
         );
@@ -176,7 +196,8 @@ mod tests {
                 Some("ts"),
                 0,
                 1,
-                "cpu"
+                "cpu",
+                &nodedb_crs::CrsContext::builtin_only()
             ),
             Err(crate::Error::RejectedAuthz { .. })
         ));
@@ -194,7 +215,8 @@ mod tests {
                 Some("ts"),
                 0,
                 1,
-                "cpu"
+                "cpu",
+                &nodedb_crs::CrsContext::builtin_only()
             )
             .is_err()
         );
@@ -212,7 +234,8 @@ mod tests {
                 Some("ts"),
                 0,
                 1,
-                "cpu"
+                "cpu",
+                &nodedb_crs::CrsContext::builtin_only()
             )
             .is_err()
         );
@@ -230,7 +253,8 @@ mod tests {
                 Some("ts"),
                 0,
                 1,
-                "cpu"
+                "cpu",
+                &nodedb_crs::CrsContext::builtin_only()
             ),
             Err(crate::Error::Internal { .. })
         ));
@@ -259,7 +283,19 @@ mod tests {
         }]));
 
         assert!(
-            admit_msgpack_rows(&policy, &payload, "cpu", Some("ts"), 0, 1, "cpu").is_ok(),
+            admit_msgpack_rows(
+                &policy,
+                MsgpackBatch {
+                    payload: &payload,
+                    measurement: "cpu",
+                    time_key: Some("ts"),
+                    default_timestamp_ms: 0,
+                },
+                1,
+                "cpu",
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_ok(),
             "a row whose stored value satisfies the policy must be admitted"
         );
     }
@@ -273,7 +309,19 @@ mod tests {
             "value": 1,
         }]));
         assert!(
-            admit_msgpack_rows(&policy, &payload, "cpu", Some("ts"), 0, 1, "cpu").is_err(),
+            admit_msgpack_rows(
+                &policy,
+                MsgpackBatch {
+                    payload: &payload,
+                    measurement: "cpu",
+                    time_key: Some("ts"),
+                    default_timestamp_ms: 0,
+                },
+                1,
+                "cpu",
+                &nodedb_crs::CrsContext::builtin_only()
+            )
+            .is_err(),
             "normalization must not turn a violating row into an admitted one"
         );
     }
@@ -285,12 +333,15 @@ mod tests {
         assert!(
             admit_msgpack_rows(
                 &RlsWriteCheck::Predicate(owner_policy("alice")),
-                &[0xC1],
-                "cpu",
-                Some("ts"),
-                0,
+                MsgpackBatch {
+                    payload: &[0xC1],
+                    measurement: "cpu",
+                    time_key: Some("ts"),
+                    default_timestamp_ms: 0,
+                },
                 1,
-                "cpu"
+                "cpu",
+                &nodedb_crs::CrsContext::builtin_only()
             )
             .is_err()
         );

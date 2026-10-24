@@ -63,6 +63,108 @@
       "path": "nodedb/src/control/server/resp/gateway_dispatch.rs",
       "sink": "^\\s*(assert!\\(result\\.is_ok\\(\\), \"RESP KV dispatch must succeed: \\{result:\\?\\}\"\\);|\"dispatch must still succeed with metering disabled: \\{result:\\?\\}\")$",
       "reason": "Test-only: assert messages inside #[cfg(test)] mod tests print a test dispatch result when it fails. The session id is generated for a test session on a one-node test cluster, never a real client's, and the message goes to test output, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb-crs/src/parse/helmert_params.rs",
+      "sink": "^\\s*(\"\\{h:\\?\\}\"|assert!\\(close\\(r\\.dtz_m_per_yr,\\ 0\\.002\\),\\ \"\\{r:\\?\\}\"\\);)\\s*$",
+      "reason": "Test-only: an assert or panic inside #[cfg(test)] mod tests prints a CRS definition or coordinates built from hard-coded fixtures. Coordinates are map positions in test data, never user data, and the output goes to test results, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb-crs/src/parse/proj_string.rs",
+      "sink": "^\\s*(hom\\.gamma_c_deg)\\s*$",
+      "reason": "Test-only: an assert or panic inside #[cfg(test)] mod tests prints a CRS definition or coordinates built from hard-coded fixtures. Coordinates are map positions in test data, never user data, and the output goes to test results, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb-crs/src/parse/projjson_writer.rs",
+      "sink": "^\\s*(assert!\\(json\\.contains\\(r\\#\"\"name\":\"a\\ \\\\\"quoted\\\\\"\\ name\"\"\\#\\),\\ \"\\{json\\}\"\\);|assert_eq!\\(back,\\ def,\\ \"\\{text\\}\\\\n\\{json\\}\"\\);|parse_projjson\\(srid,\\ \"rt\",\\ \\&json\\)\\.unwrap_or_else\\(\\|e\\|\\ panic!\\(\"\\{text\\}\\\\n\\{json\\}\\\\n\\{e\\}\"\\)\\);)\\s*$",
+      "reason": "Test-only: an assert or panic inside #[cfg(test)] mod tests prints a CRS definition or coordinates built from hard-coded fixtures. Coordinates are map positions in test data, never user data, and the output goes to test results, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb-crs/src/parse/wkt2_writer.rs",
+      "sink": "^\\s*(assert_eq!\\(back,\\ def,\\ \"\\{text\\}\\\\n\\{wkt\\}\"\\);|let\\ back\\ =\\ parse_wkt2\\(srid,\\ \"rt\",\\ \\&wkt\\)\\.unwrap_or_else\\(\\|e\\|\\ panic!\\(\"\\{text\\}\\\\n\\{wkt\\}\\\\n\\{e\\}\"\\)\\);)\\s*$",
+      "reason": "Test-only: an assert or panic inside #[cfg(test)] mod tests prints a CRS definition or coordinates built from hard-coded fixtures. Coordinates are map positions in test data, never user data, and the output goes to test results, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb-query/src/geo_functions/crs.rs",
+      "sink": "^\\s*(assert!\\(\\(coordinates\\[0\\]\\ \\-\\ UTM47_X\\)\\.abs\\(\\)\\ <\\ 1e\\-3,\\ \"\\{coordinates:\\?\\}\"\\);|assert!\\(\\(coordinates\\[1\\]\\ \\-\\ UTM47_Y\\)\\.abs\\(\\)\\ <\\ 1e\\-3,\\ \"\\{coordinates:\\?\\}\"\\);)\\s*$",
+      "reason": "Test-only: an assert or panic inside #[cfg(test)] mod tests prints a CRS definition or coordinates built from hard-coded fixtures. Coordinates are map positions in test data, never user data, and the output goes to test results, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb-raster/src/crs/srid.rs",
+      "sink": "^\\s*(other\\ =>\\ panic!\\(\"expected\\ an\\ ambiguous\\ user\\ CRS,\\ got\\ \\{other:\\?\\}\"\\),)\\s*$",
+      "reason": "Test-only: an assert or panic inside #[cfg(test)] mod tests prints a CRS definition or coordinates built from hard-coded fixtures. Coordinates are map positions in test data, never user data, and the output goes to test results, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb-sql/src/ddl_ast/parse/conflict_policy.rs",
+      "sink": "^\\s*(other\\ =>\\ panic!\\(\"expected\\ AlterCollection,\\ got\\ \\{other:\\?\\}\"\\),)\\s*$",
+      "reason": "Test-only: a panic inside #[cfg(test)] mod tests prints a parsed statement built from hard-coded SQL when the match fails. Credential secrets in it are SecretText, whose Debug prints <redacted>. The panic goes to test output, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb-sql/src/ddl_ast/parse/copy_from.rs",
+      "sink": "^\\s*(other\\ =>\\ panic!\\(\"unexpected:\\ \\{other:\\?\\}\"\\),)\\s*$",
+      "reason": "Test-only: a panic inside #[cfg(test)] mod tests prints a parsed statement built from hard-coded SQL when the match fails. Credential secrets in it are SecretText, whose Debug prints <redacted>. The panic goes to test output, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb-sql/src/ddl_ast/parse/copy_from_stdin.rs",
+      "sink": "^\\s*(other\\ =>\\ panic!\\(\"unexpected:\\ \\{other:\\?\\}\"\\),)\\s*$",
+      "reason": "Test-only: a panic inside #[cfg(test)] mod tests prints a parsed statement built from hard-coded SQL when the match fails. Credential secrets in it are SecretText, whose Debug prints <redacted>. The panic goes to test output, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb-sql/src/ddl_ast/parse/copy_options.rs",
+      "sink": "^\\s*(other\\ =>\\ panic!\\(\"unexpected:\\ \\{other:\\?\\}\"\\),)\\s*$",
+      "reason": "Test-only: a panic inside #[cfg(test)] mod tests prints a parsed statement built from hard-coded SQL when the match fails. Credential secrets in it are SecretText, whose Debug prints <redacted>. The panic goes to test output, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb-sql/src/ddl_ast/parse/copy_to.rs",
+      "sink": "^\\s*(other\\ =>\\ panic!\\(\"unexpected:\\ \\{other:\\?\\}\"\\),)\\s*$",
+      "reason": "Test-only: a panic inside #[cfg(test)] mod tests prints a parsed statement built from hard-coded SQL when the match fails. Credential secrets in it are SecretText, whose Debug prints <redacted>. The panic goes to test output, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb-sql/src/ddl_ast/parse/credential.rs",
+      "sink": "^\\s*(other\\ =>\\ panic!\\(\"unexpected:\\ \\{other:\\?\\}\"\\),)\\s*$",
+      "reason": "Test-only: a panic inside #[cfg(test)] mod tests prints a parsed statement built from hard-coded SQL when the match fails. Credential secrets in it are SecretText, whose Debug prints <redacted>. The panic goes to test output, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb-sql/src/ddl_ast/parse/custom_type.rs",
+      "sink": "^\\s*(other\\ =>\\ panic!\\(\"unexpected\\ \\{other:\\?\\}\"\\),)\\s*$",
+      "reason": "Test-only: a panic inside #[cfg(test)] mod tests prints a parsed statement built from hard-coded SQL when the match fails. Credential secrets in it are SecretText, whose Debug prints <redacted>. The panic goes to test output, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb-sql/src/ddl_ast/parse/dispatch.rs",
+      "sink": "^\\s*(other\\ =>\\ panic!\\(\"expected\\ AddMaterializedSum,\\ got\\ \\{other:\\?\\}\"\\),|other\\ =>\\ panic!\\(\"expected\\ AlterCollection,\\ got\\ \\{other:\\?\\}\"\\),|other\\ =>\\ panic!\\(\"expected\\ CreateCollection,\\ got\\ \\{other:\\?\\}\"\\),|other\\ =>\\ panic!\\(\"expected\\ CreateSequence,\\ got\\ \\{other:\\?\\}\"\\),|other\\ =>\\ panic!\\(\"expected\\ CreateTable,\\ got\\ \\{other:\\?\\}\"\\),|other\\ =>\\ panic!\\(\"expected\\ CreateTrigger,\\ got\\ \\{other:\\?\\}\"\\),|other\\ =>\\ panic!\\(\"expected\\ DropIndex,\\ got\\ \\{other:\\?\\}\"\\),|other\\ =>\\ panic!\\(\"expected\\ GrantRole,\\ got\\ \\{other:\\?\\}\"\\),|other\\ =>\\ panic!\\(\"expected\\ MatchQuery,\\ got\\ \\{other:\\?\\}\"\\),|other\\ =>\\ panic!\\(\"expected\\ RestoreTenant,\\ got\\ \\{other:\\?\\}\"\\),)\\s*$",
+      "reason": "Test-only: a panic inside #[cfg(test)] mod tests prints a parsed statement built from hard-coded SQL when the match fails. Credential secrets in it are SecretText, whose Debug prints <redacted>. The panic goes to test output, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb-sql/src/ddl_ast/parse/synonym_group.rs",
+      "sink": "^\\s*(other\\ =>\\ panic!\\(\"unexpected\\ \\{other:\\?\\}\"\\),)\\s*$",
+      "reason": "Test-only: a panic inside #[cfg(test)] mod tests prints a parsed statement built from hard-coded SQL when the match fails. Credential secrets in it are SecretText, whose Debug prints <redacted>. The panic goes to test output, not a log."
+    },
+    {
+      "rule": "rust/cleartext-logging",
+      "path": "nodedb/src/control/server/shared/session/audit_context.rs",
+      "sink": "^\\s*(assert!\\(!ctx\\.sql_text\\.contains\\(\"pw\\-secret\"\\),\\ \"\\{\\}\",\\ ctx\\.sql_text\\);|assert!\\(!ctx\\.sql_text\\.contains\\(\"tok\\-secret\"\\),\\ \"\\{\\}\",\\ ctx\\.sql_text\\);)\\s*$",
+      "reason": "Test-only: an assert inside #[cfg(test)] mod tests prints redacted SQL text when a fixture secret was not redacted. The secret is a hard-coded test literal, and the output goes to test results, not a log."
+    },
+    {
+      "rule": "rust/hard-coded-cryptographic-value",
+      "path": "nodedb/src/control/security/keystore/wal_key.rs",
+      "sink": "^\\s*(let\\ expected\\ =\\ nodedb_wal::crypto::WalEncryptionKey::with_epoch\\(\\&\\[0x24u8;\\ 32\\],\\ \\[0u8;\\ 4\\]\\);)\\s*$",
+      "reason": "Test-only: inside #[cfg(test)] mod tests, a fixed key and epoch build the expected key for a round-trip check against a fixture key file. No production key or nonce comes from it."
     }
   ]
 }

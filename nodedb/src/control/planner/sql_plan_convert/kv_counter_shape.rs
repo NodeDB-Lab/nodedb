@@ -53,7 +53,7 @@ pub(crate) fn kv_counter_shape(
             write_msgpack_map_header(&mut template, cells.len());
             for (name, value) in &cells {
                 write_msgpack_str(&mut template, name);
-                write_msgpack_value(&mut template, value);
+                write_msgpack_value(&mut template, value)?;
             }
             KvCounterShape::Typed { column, template }
         }

@@ -353,6 +353,7 @@ impl CoreLoop {
         let held = crate::data::executor::core_loop::filter_match::HeldEvalError::default();
         let identity_column =
             self.identity_column(coll_key.0.as_u64(), coll_key.1.as_u64(), &coll_key.2);
+        let crs = self.crs_context();
         let residual_matches = |row_key: &StorageKey, body: &[u8]| -> bool {
             if residual.is_empty() {
                 return true;
@@ -364,6 +365,7 @@ impl CoreLoop {
                     row_key,
                     body,
                     &identity_column,
+                    &crs,
                 )
             })
         };

@@ -122,6 +122,8 @@ pub(super) fn merge_core_snapshots(
             edge_applied,
             tenant_edge_cuts,
             tenant_edge_applied,
+            node_labels,
+            node_label_versions,
             group_write_marks,
             group_proposal_keys,
             group_proposal_keys_complete_from,
@@ -145,6 +147,8 @@ pub(super) fn merge_core_snapshots(
         merged.edge_applied.extend(edge_applied);
         merged.tenant_edge_cuts.extend(tenant_edge_cuts);
         merged.tenant_edge_applied.extend(tenant_edge_applied);
+        merged.node_labels.extend(node_labels);
+        merged.node_label_versions.extend(node_label_versions);
         merged.documents.extend(documents);
         merged.vector_multi_documents.extend(vector_multi_documents);
         merged.indexes.extend(indexes);
@@ -181,6 +185,15 @@ pub(super) fn merge_core_snapshots(
     dedup_edges(&mut merged.tenant_edge_applied, |(db, tid, key, _)| {
         (*db, *tid, key.clone())
     });
+    // A node's labels live on its home core alone. A version both report
+    // is kept once all the same.
+    dedup_edges(&mut merged.node_labels, |(db, tid, node, _)| {
+        (*db, *tid, node.clone())
+    });
+    dedup_edges(
+        &mut merged.node_label_versions,
+        |(db, tid, node, ordinal, _)| (*db, *tid, node.clone(), *ordinal),
+    );
     // Every core that holds a vShard of the collection records the cut.
     dedup_edges(&mut merged.edge_cuts, Clone::clone);
     dedup_edges(&mut merged.tenant_edge_cuts, Clone::clone);

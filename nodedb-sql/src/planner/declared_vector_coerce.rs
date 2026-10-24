@@ -100,6 +100,7 @@ fn element_description(element: &SqlValue) -> String {
         SqlValue::Array(_) => "a nested array".to_string(),
         SqlValue::Timestamp(_) => "a timestamp".to_string(),
         SqlValue::Timestamptz(_) => "a timestamptz".to_string(),
+        SqlValue::Geometry(_) => "a geometry".to_string(),
         SqlValue::Int(_) => "an integer".to_string(),
         SqlValue::Float(_) => "a float".to_string(),
         SqlValue::Decimal(_) => "a decimal".to_string(),

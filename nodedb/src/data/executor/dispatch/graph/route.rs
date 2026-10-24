@@ -8,24 +8,6 @@ use nodedb_physical::physical_plan::GraphOp;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
-use nodedb_types::SystemTimeScope;
-
-/// Resolve a graph temporal op's system-time selection to a point-in-time
-/// cutoff. `AllVersions` (audit log) is not yet supported on the graph
-/// engine and surfaces a typed `Unsupported` error.
-fn graph_system_as_of(
-    system_time: &SystemTimeScope,
-) -> Result<Option<i64>, crate::bridge::envelope::ErrorCode> {
-    match system_time {
-        SystemTimeScope::Current => Ok(None),
-        SystemTimeScope::AsOf(ms) => Ok(Some(*ms)),
-        SystemTimeScope::AllVersions => Err(crate::bridge::envelope::ErrorCode::Unsupported {
-            detail: "AS OF SYSTEM TIME NULL (all-versions) is not yet supported on the \
-                     graph engine"
-                .into(),
-        }),
-    }
-}
 
 impl CoreLoop {
     pub(in crate::data::executor::dispatch) fn dispatch_graph(
@@ -56,6 +38,8 @@ impl CoreLoop {
                 properties,
                 src_surrogate,
                 dst_surrogate,
+                valid_from_ms,
+                valid_until_ms,
             } => self.execute_edge_put(
                 task,
                 crate::data::executor::handlers::graph::EdgePutParams {
@@ -67,6 +51,8 @@ impl CoreLoop {
                     properties,
                     src_surrogate: *src_surrogate,
                     dst_surrogate: *dst_surrogate,
+                    valid_from_ms: *valid_from_ms,
+                    valid_until_ms: *valid_until_ms,
                 },
             ),
 
@@ -99,9 +85,10 @@ impl CoreLoop {
             GraphOp::EdgeDeleteBatch { edges } => self.execute_edge_delete_batch(task, tid, edges),
 
             GraphOp::Hop {
-                // Scope is enforced for these at the hop level: they expand
+                // A live walk's scope is enforced at the hop level: it expands
                 // through `NeighborsMulti`, which carries the same collection.
-                collection: _,
+                // A historical walk reads the collection's CSR at its cut.
+                collection,
                 start_nodes,
                 edge_labels,
                 direction,
@@ -109,18 +96,27 @@ impl CoreLoop {
                 options,
                 rls_filters: _,
                 frontier_bitmap,
-            } => self.execute_graph_hop(
-                task,
-                crate::data::executor::handlers::graph::GraphHopParams {
-                    tid,
-                    start_nodes,
-                    edge_labels,
-                    direction: *direction,
-                    depth: *depth,
-                    max_visited: self.walk_visit_cap(options),
-                    frontier_bitmap: frontier_bitmap.as_ref(),
-                },
-            ),
+                scope,
+            } => {
+                let collection = collection.as_ref().map(|c| c.as_str());
+                if let Err(e) = self.prepare_csr_view(database_id, tid, collection, scope) {
+                    return self.response_error(task, e);
+                }
+                self.execute_graph_hop(
+                    task,
+                    crate::data::executor::handlers::graph::GraphHopParams {
+                        tid,
+                        start_nodes,
+                        edge_labels,
+                        direction: *direction,
+                        depth: *depth,
+                        max_visited: self.walk_visit_cap(options),
+                        frontier_bitmap: frontier_bitmap.as_ref(),
+                        collection,
+                        scope,
+                    },
+                )
+            }
 
             GraphOp::Neighbors {
                 collection,
@@ -128,14 +124,24 @@ impl CoreLoop {
                 edge_labels,
                 direction,
                 rls_filters: _,
-            } => self.execute_graph_neighbors(
-                task,
-                tid,
-                node_id,
-                edge_labels,
-                *direction,
-                collection.as_ref().map(|c| c.as_str()),
-            ),
+                scope,
+            } => {
+                let collection = collection.as_ref().map(|c| c.as_str());
+                if let Err(e) = self.prepare_csr_view(database_id, tid, collection, scope) {
+                    return self.response_error(task, e);
+                }
+                self.execute_graph_neighbors(
+                    task,
+                    tid,
+                    crate::data::executor::handlers::graph::GraphNeighborsArgs {
+                        node_id,
+                        edge_labels,
+                        direction: *direction,
+                        collection,
+                        scope,
+                    },
+                )
+            }
 
             GraphOp::NeighborsMulti {
                 collection,
@@ -146,24 +152,33 @@ impl CoreLoop {
                 rls_filters: _,
                 edge_predicate,
                 with_properties,
-            } => self.execute_graph_neighbors_multi(
-                task,
-                tid,
-                crate::data::executor::handlers::graph::GraphNeighborsMultiArgs {
-                    node_ids,
-                    edge_labels,
-                    direction: *direction,
-                    max_results: *max_results,
-                    collection: collection.as_ref().map(|c| c.as_str()),
-                    edge_predicate,
-                    with_properties: *with_properties,
-                },
-            ),
+                scope,
+            } => {
+                let collection = collection.as_ref().map(|c| c.as_str());
+                if let Err(e) = self.prepare_csr_view(database_id, tid, collection, scope) {
+                    return self.response_error(task, e);
+                }
+                self.execute_graph_neighbors_multi(
+                    task,
+                    tid,
+                    crate::data::executor::handlers::graph::GraphNeighborsMultiArgs {
+                        node_ids,
+                        edge_labels,
+                        direction: *direction,
+                        max_results: *max_results,
+                        collection,
+                        edge_predicate,
+                        with_properties: *with_properties,
+                        scope,
+                    },
+                )
+            }
 
             GraphOp::Path {
-                // Scope is enforced for these at the hop level: they expand
+                // A live walk's scope is enforced at the hop level: it expands
                 // through `NeighborsMulti`, which carries the same collection.
-                collection: _,
+                // A historical walk reads the collection's CSR at its cut.
+                collection,
                 src,
                 dst,
                 edge_labels,
@@ -171,147 +186,87 @@ impl CoreLoop {
                 options,
                 rls_filters: _,
                 frontier_bitmap,
-            } => self.execute_graph_path(
-                task,
-                crate::data::executor::handlers::graph::graph_traversal::GraphPathParams {
-                    tid,
-                    src,
-                    dst,
-                    edge_labels,
-                    max_depth: *max_depth,
-                    max_visited: self.walk_visit_cap(options),
-                    frontier_bitmap: frontier_bitmap.as_ref(),
-                },
-            ),
+                scope,
+            } => {
+                let collection = collection.as_ref().map(|c| c.as_str());
+                if let Err(e) = self.prepare_csr_view(database_id, tid, collection, scope) {
+                    return self.response_error(task, e);
+                }
+                self.execute_graph_path(
+                    task,
+                    crate::data::executor::handlers::graph::graph_traversal::GraphPathParams {
+                        tid,
+                        src,
+                        dst,
+                        edge_labels,
+                        max_depth: *max_depth,
+                        max_visited: self.walk_visit_cap(options),
+                        frontier_bitmap: frontier_bitmap.as_ref(),
+                        collection,
+                        scope,
+                    },
+                )
+            }
 
             GraphOp::Subgraph {
-                // Scope is enforced for these at the hop level: they expand
+                // A live walk's scope is enforced at the hop level: it expands
                 // through `NeighborsMulti`, which carries the same collection.
-                collection: _,
+                // A historical walk reads the collection's CSR at its cut.
+                collection,
                 start_nodes,
                 edge_labels,
                 depth,
                 options,
                 rls_filters: _,
-            } => self.execute_graph_subgraph(
-                task,
-                crate::data::executor::handlers::graph::graph_traversal::GraphSubgraphParams {
-                    tid,
-                    start_nodes,
-                    edge_labels,
-                    depth: *depth,
-                    max_visited: self.walk_visit_cap(options),
-                },
-            ),
-
-            GraphOp::RagFusion {
-                collection,
-                query_vector,
-                vector_top_k,
-                edge_label,
-                direction,
-                expansion_depth,
-                final_top_k,
-                rrf_k,
-                rrf_k_triple,
-                vector_field,
-                options,
-                bm25_query,
-                bm25_field,
-                stage,
+                scope,
             } => {
-                let triple_text = match (bm25_query.as_deref(), bm25_field.as_deref(), rrf_k_triple)
-                {
-                    (Some(query), Some(field), Some(_)) => {
-                        Some(crate::data::executor::handlers::graph_rag_triple::Bm25Leg {
-                            query,
-                            field,
-                        })
-                    }
-                    _ => None,
-                };
-                match stage {
-                    nodedb_physical::physical_plan::RagStage::Local => {}
-                    nodedb_physical::physical_plan::RagStage::ExportLegs => {
-                        return self.execute_rag_export_legs(
-                            task,
-                            crate::data::executor::handlers::graph_rag_stages::RagExportParams {
-                                tenant_id: tid,
-                                collection: collection.as_str(),
-                                query_vector,
-                                vector_top_k: *vector_top_k,
-                                vector_field: vector_field.as_str(),
-                                final_top_k: *final_top_k,
-                                bm25: triple_text,
-                            },
-                        );
-                    }
-                    nodedb_physical::physical_plan::RagStage::Bindings { surrogates, names } => {
-                        return self.execute_rag_bindings(
-                            task,
-                            crate::data::executor::handlers::graph_rag_stages::RagBindingsParams {
-                                tenant_id: tid,
-                                collection: collection.as_str(),
-                                surrogates,
-                                names,
-                            },
-                        );
-                    }
+                let collection = collection.as_ref().map(|c| c.as_str());
+                if let Err(e) = self.prepare_csr_view(database_id, tid, collection, scope) {
+                    return self.response_error(task, e);
                 }
-                if let (Some(bm25_q), Some(bm25_f), Some(triple_k)) =
-                    (bm25_query.as_deref(), bm25_field.as_deref(), rrf_k_triple)
-                {
-                    self.execute_graph_rag_fusion_triple(
-                        task,
-                        crate::data::executor::handlers::graph_rag_triple::GraphRagFusionTripleParams {
-                            tenant_id: tid,
-                            collection: collection.as_str(),
-                            query_vector,
-                            vector_top_k: *vector_top_k,
-                            edge_label,
-                            direction: *direction,
-                            expansion_depth: *expansion_depth,
-                            final_top_k: *final_top_k,
-                            rrf_k: *triple_k,
-                            vector_field: vector_field.as_str(),
-                            max_visited: options.max_visited,
-                            bm25_query: bm25_q,
-                            bm25_field: bm25_f,
-                        },
-                    )
-                } else {
-                    self.execute_graph_rag_fusion(
-                        task,
-                        crate::data::executor::handlers::graph_rag::GraphRagFusionParams {
-                            tenant_id: tid,
-                            collection: collection.as_str(),
-                            query_vector,
-                            vector_top_k: *vector_top_k,
-                            edge_label,
-                            direction: *direction,
-                            expansion_depth: *expansion_depth,
-                            final_top_k: *final_top_k,
-                            rrf_k: *rrf_k,
-                            vector_field: vector_field.as_str(),
-                            max_visited: options.max_visited,
-                        },
-                    )
-                }
+                self.execute_graph_subgraph(
+                    task,
+                    crate::data::executor::handlers::graph::graph_traversal::GraphSubgraphParams {
+                        tid,
+                        start_nodes,
+                        edge_labels,
+                        depth: *depth,
+                        max_visited: self.walk_visit_cap(options),
+                        collection,
+                        scope,
+                    },
+                )
             }
+
+            GraphOp::RagFusion { .. } => self.dispatch_rag_fusion(task, tid, op),
 
             GraphOp::Algo {
                 algorithm,
                 params,
                 stage,
-            } => self.execute_graph_algo(task, tid, algorithm, params, stage),
+                scope,
+            } => {
+                if matches!(stage, nodedb_physical::physical_plan::AlgoStage::Local)
+                    && let Err(e) = self.prepare_algo_view(task, tid, params, scope)
+                {
+                    return self.response_error(task, e);
+                }
+                self.execute_graph_algo(task, tid, algorithm, params, stage, scope)
+            }
 
             GraphOp::Match {
                 query,
                 frontier_bitmap,
                 cluster_mode,
-            } => {
-                self.execute_graph_match(task, tid, query, frontier_bitmap.as_ref(), *cluster_mode)
-            }
+                scope,
+            } => self.execute_graph_match(
+                task,
+                tid,
+                query,
+                frontier_bitmap.as_ref(),
+                *cluster_mode,
+                scope,
+            ),
 
             GraphOp::MatchContinuation {
                 query,
@@ -319,6 +274,7 @@ impl CoreLoop {
                 partial_row,
                 source_node,
                 source_binding,
+                scope,
             } => self.execute_graph_match_continuation(
                 task,
                 crate::data::executor::handlers::graph_match::GraphMatchContinuationParams {
@@ -328,12 +284,15 @@ impl CoreLoop {
                     partial_row_bytes: partial_row,
                     source_node,
                     source_binding,
+                    scope,
                 },
             ),
 
-            GraphOp::MatchVarLenResume { query, resume } => {
-                self.execute_graph_match_varlen_resume(task, tid, query, resume)
-            }
+            GraphOp::MatchVarLenResume {
+                query,
+                resume,
+                scope,
+            } => self.execute_graph_match_varlen_resume(task, tid, query, resume, scope),
 
             GraphOp::SetNodeLabels { node_id, labels } => {
                 self.dispatch_set_node_labels(task, database_id, tid, node_id, labels)
@@ -348,64 +307,70 @@ impl CoreLoop {
                 node_id,
                 edge_label,
                 direction,
-                system_time,
-                valid_at_ms,
+                scope,
                 rls_filters: _,
-            } => {
-                let system_as_of_ms = match graph_system_as_of(system_time) {
-                    Ok(v) => v,
-                    Err(resp) => return self.response_error(task, resp),
-                };
-                self.execute_graph_temporal_neighbors(
-                    task,
-                    crate::data::executor::handlers::graph_temporal::TemporalNeighborsParams {
+            } => self.execute_graph_temporal_neighbors(
+                task,
+                crate::data::executor::handlers::graph_temporal::TemporalNeighborsParams {
+                    tid,
+                    collection: collection.as_str(),
+                    node_id,
+                    edge_label,
+                    direction: *direction,
+                    scope,
+                },
+            ),
+
+            GraphOp::BspSuperstep(plan) => {
+                if let Some(cut) = plan.system_as_of
+                    && let Err(e) = self.prepare_algo_view(
+                        task,
                         tid,
-                        collection: collection.as_str(),
-                        node_id,
-                        edge_label,
-                        direction: *direction,
-                        system_as_of_ms,
-                        valid_at_ms: *valid_at_ms,
+                        &plan.params,
+                        &superstep_scope(cut, plan.valid_at_ms),
+                    )
+                {
+                    return self.response_error(task, e);
+                }
+                self.execute_bsp_superstep(
+                    task,
+                    tid,
+                    crate::data::executor::handlers::graph_bsp::BspSuperstepArgs {
+                        algorithm: &plan.algorithm,
+                        params: &plan.params,
+                        superstep: plan.superstep,
+                        global_n: plan.global_n,
+                        owned_vshards: &plan.owned_vshards,
+                        incoming_contributions: &plan.incoming_contributions,
+                        rank_seed: &plan.rank_seed,
+                        global_dangling: plan.global_dangling,
+                        personalization_sum: plan.personalization_sum,
+                        system_as_of: plan.system_as_of,
+                        valid_at_ms: plan.valid_at_ms,
                     },
                 )
             }
 
-            GraphOp::TemporalAlgorithm {
-                algorithm,
-                params,
-                system_time,
-            } => {
-                let system_as_of_ms = match graph_system_as_of(system_time) {
-                    Ok(v) => v,
-                    Err(resp) => return self.response_error(task, resp),
-                };
-                self.execute_graph_temporal_algo(task, tid, algorithm, params, system_as_of_ms)
+            GraphOp::WccSuperstep(plan) => {
+                if let Some(cut) = plan.system_as_of
+                    && let Err(e) = self.prepare_algo_view(
+                        task,
+                        tid,
+                        &plan.params,
+                        &superstep_scope(cut, plan.valid_at_ms),
+                    )
+                {
+                    return self.response_error(task, e);
+                }
+                self.execute_wcc_superstep(
+                    task,
+                    tid,
+                    &plan.params,
+                    &plan.owned_vshards,
+                    plan.system_as_of,
+                    plan.valid_at_ms,
+                )
             }
-
-            GraphOp::BspSuperstep(plan) => self.execute_bsp_superstep(
-                task,
-                tid,
-                crate::data::executor::handlers::graph_bsp::BspSuperstepArgs {
-                    algorithm: &plan.algorithm,
-                    params: &plan.params,
-                    superstep: plan.superstep,
-                    global_n: plan.global_n,
-                    owned_vshards: &plan.owned_vshards,
-                    incoming_contributions: &plan.incoming_contributions,
-                    rank_seed: &plan.rank_seed,
-                    global_dangling: plan.global_dangling,
-                    personalization_sum: plan.personalization_sum,
-                    system_as_of: plan.system_as_of,
-                },
-            ),
-
-            GraphOp::WccSuperstep(plan) => self.execute_wcc_superstep(
-                task,
-                tid,
-                &plan.params,
-                &plan.owned_vshards,
-                plan.system_as_of,
-            ),
 
             GraphOp::Stats { collection, as_of } => {
                 self.execute_graph_stats(task, tid, collection.as_ref().map(|c| c.as_str()), *as_of)
@@ -441,4 +406,36 @@ impl CoreLoop {
             ),
         }
     }
+
+    /// Build or reuse the historical CSR an algorithm stage at `scope` reads
+    /// through the cache. A label-filtered or live stage builds its own.
+    fn prepare_algo_view(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        params: &nodedb_graph::AlgoParams,
+        scope: &nodedb_physical::physical_plan::GraphReadScope,
+    ) -> crate::Result<()> {
+        match crate::data::executor::handlers::graph_algo_csr::algo_view_collection(
+            task.request.database_id,
+            params,
+            scope,
+        ) {
+            Some(collection) => self.prepare_csr_view(
+                task.request.database_id.as_u64(),
+                tid,
+                Some(&collection),
+                scope,
+            ),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The scope a BSP or WCC superstep reads: the run's pinned cut.
+fn superstep_scope(
+    cut: i64,
+    valid_at_ms: Option<i64>,
+) -> nodedb_physical::physical_plan::GraphReadScope {
+    nodedb_physical::physical_plan::GraphReadScope::at_installed_cut(cut, valid_at_ms)
 }

@@ -362,11 +362,13 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
             filters: vec![],
             updates: vec![],
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         });
         let delete = PhysicalPlan::Columnar(ColumnarOp::Delete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
             filters: vec![],
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         });
         assert!(

@@ -14,4 +14,5 @@ pub mod procedural;
 pub mod redaction_refusal;
 pub mod rls_injection;
 pub mod sql_plan_convert;
+pub mod system_cut;
 pub mod wasm;

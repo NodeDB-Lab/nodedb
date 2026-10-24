@@ -59,7 +59,7 @@ fn expected_cells() -> BTreeSet<(i64, i64)> {
         .build()
         .expect("schema")
         .with_georef(Some(ArrayGeoref {
-            srid: Srid::Utm47N,
+            srid: Srid::new(32647).unwrap(),
             x_dim: 1,
             y_dim: 0,
             transform: Some(GeoTransform(GT)),
@@ -69,7 +69,13 @@ fn expected_cells() -> BTreeSet<(i64, i64)> {
         exterior: RING.to_vec(),
         holes: Vec::new(),
     }];
-    let frame = build_zone_frame(&schema, Srid::Wgs84, &polygons).expect("frame");
+    let frame = build_zone_frame(
+        &schema,
+        Srid::WGS84,
+        &polygons,
+        &nodedb_crs::CrsContext::builtin_only(),
+    )
+    .expect("frame");
     let zone = PolygonZone {
         x_dim: 1,
         y_dim: 0,

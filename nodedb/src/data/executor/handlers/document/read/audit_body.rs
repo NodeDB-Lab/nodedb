@@ -57,14 +57,16 @@ pub(super) fn strict_audit_body(body: &[u8], schema: &StrictSchema) -> crate::Re
 /// Decode the MessagePack document body, insert/overwrite the three synthetic
 /// user-facing audit temporal columns (`_ts_system`, `_ts_valid_from`,
 /// `_ts_valid_until`) from the version's real stored temporal coordinates, and
-/// re-encode. Valid-time is surfaced raw — `i64::MIN` / `i64::MAX` sentinels
-/// mean "unbounded" (matching how columnar/timeseries emit their real Int64
-/// temporal columns). Non-object bodies are wrapped in a fresh object carrying
-/// only the temporal columns. The triple is uniform across both Document
-/// engines and columnar/timeseries.
+/// re-encode. `system_from` is the version's system-time ordinal, and
+/// `_ts_system` renders its millisecond (`ordinal_to_ms`), the unit
+/// `AS OF SYSTEM TIME` takes. Valid-time is surfaced raw — `i64::MIN` /
+/// `i64::MAX` sentinels mean "unbounded" (matching how columnar/timeseries
+/// emit their real Int64 temporal columns). Non-object bodies are wrapped in a
+/// fresh object carrying only the temporal columns. The triple is uniform
+/// across both Document engines and columnar/timeseries.
 pub(super) fn inject_temporal_columns(
     body: &[u8],
-    system_from_ms: i64,
+    system_from: i64,
     valid_from_ms: i64,
     valid_until_ms: i64,
 ) -> crate::Result<Vec<u8>> {
@@ -78,7 +80,10 @@ pub(super) fn inject_temporal_columns(
         Value::Object(map) => map,
         _ => std::collections::HashMap::new(),
     };
-    obj.insert(TS_SYSTEM.to_string(), Value::Integer(system_from_ms));
+    obj.insert(
+        TS_SYSTEM.to_string(),
+        Value::Integer(nodedb_types::ordinal_to_ms(system_from)),
+    );
     obj.insert(TS_VALID_FROM.to_string(), Value::Integer(valid_from_ms));
     obj.insert(TS_VALID_UNTIL.to_string(), Value::Integer(valid_until_ms));
     nodedb_types::value_to_msgpack(&Value::Object(obj)).map_err(|e| crate::Error::Serialization {
@@ -113,7 +118,10 @@ mod tests {
             ("v", Value::Integer(1)),
             ("name", Value::String("alice".into())),
         ]);
-        let out = inject_temporal_columns(&body, 1_700_000_000_123, 10, 20).unwrap();
+        // An ordinal inside millisecond 1_700_000_000_123 renders that
+        // millisecond.
+        let ordinal = 1_700_000_000_123 * nodedb_types::NANOS_PER_MS + 456_789;
+        let out = inject_temporal_columns(&body, ordinal, 10, 20).unwrap();
         let m = decode(&out);
         assert_eq!(m.get("v"), Some(&Value::Integer(1)));
         assert_eq!(m.get("name"), Some(&Value::String("alice".into())));
@@ -132,7 +140,8 @@ mod tests {
             (TS_VALID_UNTIL, Value::Integer(-3)),
             ("v", Value::Integer(2)),
         ]);
-        let out = inject_temporal_columns(&body, 999, 111, 222).unwrap();
+        let out =
+            inject_temporal_columns(&body, 999 * nodedb_types::NANOS_PER_MS, 111, 222).unwrap();
         let m = decode(&out);
         assert_eq!(m.get(TS_SYSTEM), Some(&Value::Integer(999)));
         assert_eq!(m.get(TS_VALID_FROM), Some(&Value::Integer(111)));
@@ -152,7 +161,7 @@ mod tests {
     #[test]
     fn inject_wraps_non_object_body_in_fresh_object() {
         let body = nodedb_types::value_to_msgpack(&Value::Integer(42)).unwrap();
-        let out = inject_temporal_columns(&body, 7, 8, 9).unwrap();
+        let out = inject_temporal_columns(&body, 7 * nodedb_types::NANOS_PER_MS, 8, 9).unwrap();
         let m = decode(&out);
         assert_eq!(m.get(TS_SYSTEM), Some(&Value::Integer(7)));
         assert_eq!(m.get(TS_VALID_FROM), Some(&Value::Integer(8)));

@@ -43,6 +43,7 @@ impl CoreLoop {
         txn: &WriteTransaction,
         params: PointPutParams<'_>,
     ) -> crate::Result<PointPutOutcome> {
+        let crs = self.crs_context();
         let PointPutParams {
             database_id,
             tid,
@@ -67,21 +68,24 @@ impl CoreLoop {
         // A stamp in `apply_scope.bitemporal_stamps` (WAL redo replay) forces the
         // versioned branch at the EXACT redo stamp, independent of
         // `doc_configs` (empty during replay); absent an override, derive
-        // bitemporality from config and mint a fresh stamp.
-        let (bitemporal, sys_from_ms, valid_from_ms, valid_until_ms) =
+        // bitemporality from config and stamp the write's system-time
+        // ordinal, raised above the row's newest version when the write
+        // applies a replicated entry.
+        let (bitemporal, sys_from, valid_from_ms, valid_until_ms) =
             match self.apply_scope.bitemporal_stamps.get(&surrogate.as_u32()) {
                 Some(stamp) => (
                     true,
-                    stamp.sys_from_ms,
+                    stamp.sys_from,
                     stamp.valid_from_ms,
                     stamp.valid_until_ms,
                 ),
-                None => (
-                    self.is_bitemporal(database_id, tid, collection),
-                    self.bitemporal_now_ms(),
+                None if self.is_bitemporal(database_id, tid, collection) => (
+                    true,
+                    self.row_version_ordinal(database_id, tid, collection, &storage_key)?,
                     i64::MIN,
                     i64::MAX,
                 ),
+                None => (false, self.bitemporal_ordinal(), i64::MIN, i64::MAX),
             };
 
         // Shared with the governed-write RESOLVE pass.
@@ -90,7 +94,7 @@ impl CoreLoop {
             surrogate,
             value,
             bitemporal,
-            sys_from_ms,
+            sys_from,
             valid_from_ms,
             valid_until_ms,
             guards,
@@ -160,7 +164,7 @@ impl CoreLoop {
                     tenant: tid,
                     coll: collection,
                     doc_id: &storage_key,
-                    sys_from_ms,
+                    sys_from,
                     valid_from_ms,
                     valid_until_ms,
                     body: &stored,
@@ -258,6 +262,7 @@ impl CoreLoop {
                         paths: &paths,
                         bitemporal,
                         base_visible: true,
+                        crs: &self.crs_context(),
                     },
                     &[PostImage {
                         surrogate: storage_key.surrogate().as_u32(),
@@ -267,11 +272,11 @@ impl CoreLoop {
                 )?;
             }
             if bitemporal {
-                // Keyed at the same `sys_from_ms` as the primary version row,
-                // so one `bitemporal_sys_from_ms` in the undo entry reverses both.
+                // Keyed at the same `sys_from` as the primary version row,
+                // so one `bitemporal_sys_from` in the undo entry reverses both.
                 for path in &paths {
                     if let Some(ref pred) = path.predicate
-                        && !pred.evaluate_json(&doc)
+                        && !pred.evaluate_json(&doc, &crs)
                     {
                         continue;
                     }
@@ -294,7 +299,7 @@ impl CoreLoop {
                                 field: &path.path,
                                 value: &value,
                                 doc_id: &storage_key,
-                                sys_from_ms,
+                                sys_from,
                             },
                         )?;
                         bitemporal_index_tuples.push((path.path.clone(), value));
@@ -343,7 +348,7 @@ impl CoreLoop {
         Ok(PointPutOutcome {
             prior_value: prior,
             stored_value: stored,
-            bitemporal_sys_from_ms: if bitemporal { Some(sys_from_ms) } else { None },
+            bitemporal_sys_from: if bitemporal { Some(sys_from) } else { None },
             bitemporal_index_tuples,
             secondary_index_added,
             secondary_index_removed,

@@ -19,6 +19,8 @@ mod cluster_boot;
 mod ddl_objects;
 #[path = "../../sql_cluster_cross_node_dml_tests/gather_cross_node.rs"]
 mod gather_cross_node;
+#[path = "../../sql_cluster_cross_node_dml_tests/graph_algo_pagerank_as_of_cross_node.rs"]
+mod graph_algo_pagerank_as_of_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/graph_algo_pagerank_cross_node.rs"]
 mod graph_algo_pagerank_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/graph_algo_pagerank_dangling_cross_node.rs"]
@@ -39,6 +41,8 @@ mod graph_homed_read_per_core;
 mod graph_implicit_reverse_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/graph_match_cross_node.rs"]
 mod graph_match_cross_node;
+#[path = "../../sql_cluster_cross_node_dml_tests/graph_match_label_as_of_cross_node.rs"]
+mod graph_match_label_as_of_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/graph_match_read_set_cross_node.rs"]
 mod graph_match_read_set_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/graph_match_ryow_cross_node.rs"]
@@ -59,6 +63,8 @@ mod graph_owner_reads_cross_node;
 mod graph_rag_fusion_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/graph_rag_fusion_naming_cross_node.rs"]
 mod graph_rag_fusion_naming_cross_node;
+#[path = "../../sql_cluster_cross_node_dml_tests/graph_traverse_as_of_cross_node.rs"]
+mod graph_traverse_as_of_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/graph_traverse_cross_node.rs"]
 mod graph_traverse_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/graph_traverse_reverse_cross_node.rs"]

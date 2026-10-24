@@ -42,7 +42,7 @@ pub(in crate::data::executor) struct CollectUpdateRows<'a> {
     /// The system time the statement's new versions land at on a bitemporal
     /// target, `None` on any other. A bitemporal target is read at its
     /// current versions, and a strict one encodes the time into each tuple.
-    pub bitemporal_sys_from_ms: Option<i64>,
+    pub bitemporal_sys_from: Option<i64>,
 }
 
 impl CoreLoop {
@@ -64,7 +64,7 @@ impl CoreLoop {
             strict_schema,
             config_key,
             declared_primary_key,
-            bitemporal_sys_from_ms,
+            bitemporal_sys_from,
         } = ctx;
         let database_id = task.request.database_id.as_u64();
         // Read the TARGET as the transaction's CURRENT view = base ∪ overlay:
@@ -91,6 +91,7 @@ impl CoreLoop {
         };
 
         let mut rows: Vec<ResolvedUpdateRow> = Vec::new();
+        let crs = self.crs_context();
         for (key, current_bytes) in target_rows {
             // A row the statement matched but cannot decode fails the
             // statement. Skipping it leaves the row untouched under a smaller
@@ -152,9 +153,10 @@ impl CoreLoop {
                                 ),
                             })?,
                         // Division or modulo by zero fails the statement.
-                        UpdateValue::Expr(expr) => {
-                            expr.eval(&merged_ndb).map_err(crate::Error::from)?.into()
-                        }
+                        UpdateValue::Expr(expr) => expr
+                            .eval(&merged_ndb, &crs)
+                            .map_err(crate::Error::from)?
+                            .into(),
                     };
                     target_obj.insert(field.clone(), val);
                 }
@@ -185,6 +187,7 @@ impl CoreLoop {
                         crate::data::executor::enforcement::typeguard::GuardScope::Assigned(
                             &assigned,
                         ),
+                        &crs,
                     )
                     .map_err(crate::Error::DataPlane)?;
                 }
@@ -197,6 +200,7 @@ impl CoreLoop {
                     super::generated::evaluate_generated_columns(
                         &mut target_doc,
                         &config.enforcement.generated_columns,
+                        &crs,
                     )
                     .map_err(crate::Error::DataPlane)?;
                 }
@@ -214,14 +218,14 @@ impl CoreLoop {
             // strict schema does not declare.
             let updated_bytes = if let Some(schema) = strict_schema {
                 let ndb_val: nodedb_types::Value = target_doc.clone().into();
-                match bitemporal_sys_from_ms {
+                match bitemporal_sys_from {
                     // The version's system time lives in a bitemporal tuple,
                     // valid for all time, as a point update encodes it.
-                    Some(sys_from_ms) if schema.bitemporal => {
+                    Some(sys_from) if schema.bitemporal => {
                         super::super::strict_format::value_to_binary_tuple_bitemporal(
                             &ndb_val,
                             schema,
-                            sys_from_ms,
+                            sys_from,
                             i64::MIN,
                             i64::MAX,
                             target_collection,

@@ -30,6 +30,8 @@ fn graph_traversal_bounded_under_adversarial_queries() {
                 properties: vec![],
                 src_surrogate: doc_surrogate("hub"),
                 dst_surrogate: doc_surrogate(&format!("n{i}")),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
         );
     }
@@ -48,6 +50,8 @@ fn graph_traversal_bounded_under_adversarial_queries() {
                 properties: vec![],
                 src_surrogate: doc_surrogate(&format!("c{i}")),
                 dst_surrogate: doc_surrogate(&format!("c{}", i + 1)),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
         );
     }
@@ -67,6 +71,7 @@ fn graph_traversal_bounded_under_adversarial_queries() {
             rls_filters: Vec::new(),
             frontier_bitmap: None,
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let hop1_nodes: Vec<String> = serde_json::from_value(payload_value(&hop1)).unwrap();
@@ -91,6 +96,7 @@ fn graph_traversal_bounded_under_adversarial_queries() {
             rls_filters: Vec::new(),
             frontier_bitmap: None,
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let hop0_nodes: Vec<String> = serde_json::from_value(payload_value(&hop0)).unwrap();
@@ -111,6 +117,7 @@ fn graph_traversal_bounded_under_adversarial_queries() {
             rls_filters: Vec::new(),
             frontier_bitmap: None,
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let chain_nodes: Vec<String> = serde_json::from_value(payload_value(&chain)).unwrap();
@@ -136,6 +143,7 @@ fn graph_traversal_bounded_under_adversarial_queries() {
             rls_filters: Vec::new(),
             frontier_bitmap: None,
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     // c0→c50 is 50 hops, depth limit 3 should fail.
@@ -157,6 +165,7 @@ fn graph_traversal_bounded_under_adversarial_queries() {
             options: Default::default(),
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let edges: Vec<serde_json::Value> = serde_json::from_value(payload_value(&subgraph)).unwrap();

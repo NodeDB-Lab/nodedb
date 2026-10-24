@@ -211,6 +211,10 @@ pub enum ErrorCode {
         label: String,
         limit: usize,
     },
+    /// The statement passed a fixed program limit, such as the distinct
+    /// values an exact median holds. `detail` names the limit and the
+    /// next action. SQLSTATE `54000` (program_limit_exceeded).
+    ProgramLimitExceeded { detail: String },
     /// Text does not parse as the type of the column it is written to.
     /// `detail` names the column, the text and the type. SQLSTATE `22P02`
     /// (invalid_text_representation).

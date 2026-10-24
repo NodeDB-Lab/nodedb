@@ -36,10 +36,13 @@ pub(super) fn eval_catalog_constant(
     // A from-less SELECT's plan is marked volatile when it holds a volatile
     // call, so it is never cached. Evaluating the call here therefore serves
     // this execution only, and the next execution re-plans and re-evaluates.
-    Ok(
-        crate::planner::const_fold::fold_constant_scoped(expr, functions, FoldScope::Once)?
-            .unwrap_or(SqlValue::Null),
-    )
+    Ok(crate::planner::const_fold::fold_constant_scoped(
+        expr,
+        functions,
+        FoldScope::Once,
+        &catalog.crs_context(),
+    )?
+    .unwrap_or(SqlValue::Null))
 }
 
 /// Route `nextval` / `currval` / `setval` to the catalog's sequence state.

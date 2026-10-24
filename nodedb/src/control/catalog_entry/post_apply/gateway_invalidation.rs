@@ -48,6 +48,9 @@ use crate::control::state::SharedState;
 /// | PutAlertRule / DeleteAlertRule          | ❌ no       | alert rules drive their own eval loop and never enter a PhysicalPlan |
 /// | Topic / consumer-group variants         | ❌ no       | Event Plane delivery identities that never enter a PhysicalPlan |
 /// | PutArray / DeleteArray                  | ✅ yes      | array schema and routing prefix are baked into the plan |
+/// | PutSpatialRefSys                        | ❌ no       | a new code is one no cached plan resolved: planning it failed |
+/// | DropSpatialRefSys                       | ✅ yes, all | any cached plan can carry the dropped definition, and no version set names a CRS |
+/// | PutCredential / DropCredential          | ❌ no       | a COPY reads the credential row when it runs; no plan carries it |
 pub(crate) fn invalidate_gateway_cache_for_entry(entry: &CatalogEntry, shared: &Arc<SharedState>) {
     let Some(inv) = shared.gateway_invalidator.get() else {
         return;
@@ -342,6 +345,17 @@ pub(crate) fn invalidate_gateway_cache_for_entry(entry: &CatalogEntry, shared: &
         }
         CatalogEntry::PutBackupScheduleMark(_) => {
             // no-op: a backup schedule mark never enters a query plan.
+        }
+        CatalogEntry::PutSpatialRefSys(_) => {
+            // no-op: no cached plan resolved a code before it was defined.
+        }
+        CatalogEntry::PutCredential(_) | CatalogEntry::DropCredential { .. } => {
+            // no-op: a COPY reads the credential row when it runs.
+        }
+        CatalogEntry::DropSpatialRefSys { .. } => {
+            // A plan resolves a CRS to its definition at planning time, so
+            // a cached plan can still transform with the dropped one.
+            inv.invalidate_all();
         }
         CatalogEntry::PutCheckpoint(_)
         | CatalogEntry::DeleteCheckpoint { .. }

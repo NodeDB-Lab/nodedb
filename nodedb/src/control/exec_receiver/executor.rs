@@ -271,15 +271,32 @@ impl LocalPlanExecutor {
             }
         }
 
-        if let Err(error) =
-            confirm_read_leg(&self.state, database_id, &plan, &req.read_groups, deadline).await
+        // The read confirm, the cut wait, and the read share one instant: the
+        // coordinator's remaining budget.
+        let hop_deadline =
+            crate::control::server::shared::session::StatementDeadline::after(deadline);
+        if let Err(error) = confirm_read_leg(
+            &self.state,
+            database_id,
+            &plan,
+            &req.read_groups,
+            hop_deadline.remaining(),
+        )
+        .await
         {
             return ExecuteResponse::err(error);
         }
+        // A historical read runs only once this node installed every
+        // version at or below its cut.
+        if let Err(error) =
+            crate::control::read_cut::await_read_cut(&self.state, &plan, hop_deadline).await
+        {
+            return ExecuteResponse::err(execution_error_to_typed(error));
+        }
         // A vShard-scoped plan runs on its one owning core. Every other plan
         // fans across all local cores.
-        match tokio::time::timeout(
-            deadline,
+        match tokio::time::timeout_at(
+            hop_deadline.tokio_instant(),
             execute_received_plan(
                 &self.state,
                 tenant_id,

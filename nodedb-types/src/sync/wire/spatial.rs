@@ -25,7 +25,7 @@ use crate::sync::wire::ack_status::AckStatus;
 ///
 /// `geometry_bytes` is a MessagePack-serialised
 /// `nodedb_types::geometry::SridGeometry` produced via
-/// `zerompk::to_msgpack_vec(&geometry)`: `[srid_code_u32, geometry]`.
+/// `zerompk::to_msgpack_vec(&geometry)`: `[srid_code_u32, geometry, z | nil, m | nil]`.
 #[derive(
     Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
 )]

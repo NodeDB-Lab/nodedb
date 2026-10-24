@@ -56,7 +56,7 @@ impl RowCopy<'_> {
                 source_db_id: self.source_db_id,
                 source_qualified: &self.source_qualified,
                 cursor: &cursor,
-                system_as_of_ms: self.system_as_of_ms,
+                system_time: super::document::clone_scope(self.system_as_of_ms),
                 raw_bodies: true,
             };
             let (entries, next_cursor) = scan_page(self.state, page, None).await?;

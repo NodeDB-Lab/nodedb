@@ -51,11 +51,10 @@ pub(super) fn inject_graph(ctx: &RlsCtx<'_>, op: &mut GraphOp) -> crate::Result<
         // Refuse: runs over the whole CSR, returns scalars derived from
         // every row (including hidden ones), no row to filter. `params.collection`
         // is bare (from `nodedb-graph`) — qualify before the lookup.
-        GraphOp::Algo { params, .. } | GraphOp::TemporalAlgorithm { params, .. } => ctx
-            .refuse_if_policy(
-                &nodedb_types::QualifiedCollection::new(ctx.database_id, &params.collection),
-                ALGORITHM_REASON,
-            ),
+        GraphOp::Algo { params, .. } => ctx.refuse_if_policy(
+            &nodedb_types::QualifiedCollection::new(ctx.database_id, &params.collection),
+            ALGORITHM_REASON,
+        ),
 
         // Refuse: same algorithm, one round at a time.
         GraphOp::BspSuperstep(plan) => ctx.refuse_if_policy(
@@ -182,6 +181,7 @@ mod tests {
                 personalization_vector: None,
             },
             stage: nodedb_physical::physical_plan::AlgoStage::Local,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         })
     }
 
@@ -199,6 +199,7 @@ mod tests {
             query: zerompk::to_msgpack_vec(&query).expect("encode match query"),
             frontier_bitmap: None,
             cluster_mode: false,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         })
     }
 
@@ -262,6 +263,8 @@ mod tests {
             properties,
             src_surrogate: nodedb_types::Surrogate::new(1),
             dst_surrogate: nodedb_types::Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
         })
     }
 

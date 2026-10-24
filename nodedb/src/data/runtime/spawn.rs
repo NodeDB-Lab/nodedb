@@ -49,6 +49,7 @@ pub fn spawn_core(
         doc_config_seed,
         vector_index_param_seed,
         columnar_schema_seed,
+        crs_set_seed,
         replay_done,
     } = params;
 
@@ -138,6 +139,7 @@ pub fn spawn_core(
                 &doc_config_seed,
                 &vector_index_param_seed,
                 &columnar_schema_seed,
+                &crs_set_seed,
             );
             let replayed = replay_wal_and_rebuild_indexes(
                 &mut core,
@@ -261,6 +263,7 @@ mod tests {
             doc_config_seed: Arc::new(Vec::new()),
             vector_index_param_seed: Arc::new(Vec::new()),
             columnar_schema_seed: Arc::new(Vec::new()),
+            crs_set_seed: Arc::new(nodedb_crs::CustomCrsSet::new()),
             replay_done: replay_done_tx,
         })
         .unwrap();

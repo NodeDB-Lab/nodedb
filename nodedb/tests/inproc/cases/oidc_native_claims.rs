@@ -26,6 +26,7 @@ use nodedb::control::security::oidc::verify_bearer_token;
 use nodedb::control::security::request_scope::RequestAuthScope;
 
 use super::oidc_authentication::{PEER, SESSION};
+use nodedb_test_support::jwks_fixture::{loopback_egress, loopback_sources};
 use nodedb_test_support::pgwire_auth_helpers::{
     ddl_ok, make_state_with_catalog_configured, superuser,
 };
@@ -112,16 +113,13 @@ async fn verify_via_catalog_provider(
     let jwks_uri = spawn_static_jwks(jwks).await;
     // The registry is set before the gateway install, as production boot
     // sets it.
-    let registry = JwksRegistry::init(JwtAuthConfig {
-        allow_http_jwks: true,
-        allow_jwks_hosts: vec!["localhost".into()],
-        allow_jwks_cidrs: vec!["127.0.0.0/8".into(), "::1/128".into()],
-        ..JwtAuthConfig::default()
-    })
-    .await
-    .expect("test JWKS registry must initialize");
-    let state =
-        make_state_with_catalog_configured(|state| state.jwks_registry = Some(Arc::new(registry)));
+    let registry = JwksRegistry::init(JwtAuthConfig::default(), loopback_egress())
+        .await
+        .expect("test JWKS registry must initialize");
+    let state = make_state_with_catalog_configured(|state| {
+        state.remote_sources = loopback_sources();
+        state.jwks_registry = Some(Arc::new(registry));
+    });
     let su = superuser();
 
     ddl_ok(&state, &su, "CREATE TENANT native_claims_tenant ID 999").await;
@@ -134,7 +132,7 @@ async fn verify_via_catalog_provider(
              JWKS_URI '{jwks_uri}' \
              AUDIENCE '{audience}' \
              TENANT 999 \
-             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 1"
+             CLAIM MAPPING WHEN sub = '*' SET DEFAULT_DATABASE = 0"
         ),
     )
     .await;
