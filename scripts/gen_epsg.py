@@ -868,6 +868,39 @@ def fixture_line(src, dst, x_in, y_in, x_out, y_out) -> str:
     return "\t".join([str(src), str(dst), repr(x_in), repr(y_in), repr(x_out), repr(y_out)])
 
 
+# PROJ runs on the host libm, so a fixture coordinate's last digits differ
+# between glibc versions (7e-15 relative between glibc 2.39 and 2.44). The
+# Rust tests allow 1 mm, which is 1e-10 relative at 1e7 m.
+FIXTURE_REL_TOL = 1e-12
+# Fixture columns that hold coordinates: x_in, y_in, x_out, y_out.
+FIXTURE_FLOAT_COLUMNS = range(2, 6)
+
+
+def fixtures_match(committed: str, generated: str) -> bool:
+    """Same lines and fields, coordinates equal within FIXTURE_REL_TOL."""
+    old, new = committed.split("\n"), generated.split("\n")
+    if len(old) != len(new):
+        return False
+    for old_line, new_line in zip(old, new):
+        if old_line == new_line:
+            continue
+        old_fields, new_fields = old_line.split("\t"), new_line.split("\t")
+        if old_line.startswith("#") or len(old_fields) != len(new_fields):
+            return False
+        for column, (a, b) in enumerate(zip(old_fields, new_fields)):
+            if a == b:
+                continue
+            if column not in FIXTURE_FLOAT_COLUMNS:
+                return False
+            try:
+                x, y = float(a), float(b)
+            except ValueError:
+                return False
+            if abs(x - y) > FIXTURE_REL_TOL * max(1.0, abs(x)):
+                return False
+    return True
+
+
 def render_fixtures(epsg: str, table: Table, supplement: list[Row]) -> str:
     """Reference points computed from the emitted PROJ strings."""
     wgs84 = CRS.from_proj4(WGS84_PROJ)
@@ -1079,6 +1112,11 @@ def main() -> int:
         for path, text in outputs.items():
             if not path.exists():
                 errors.append(f"{path.relative_to(ROOT)} is missing: run scripts/gen_epsg.py --fixtures")
+            elif path in (FIXTURE_PATH, MALAYSIA_PATH):
+                if not fixtures_match(path.read_text(), text):
+                    errors.append(
+                        f"{path.relative_to(ROOT)} differs: run scripts/gen_epsg.py --fixtures"
+                    )
             elif path.read_text() != text:
                 errors.append(f"{path.relative_to(ROOT)} differs: run scripts/gen_epsg.py --fixtures")
     else:
