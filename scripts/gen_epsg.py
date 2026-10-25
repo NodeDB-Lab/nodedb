@@ -868,16 +868,25 @@ def fixture_line(src, dst, x_in, y_in, x_out, y_out) -> str:
     return "\t".join([str(src), str(dst), repr(x_in), repr(y_in), repr(x_out), repr(y_out)])
 
 
-# PROJ runs on the host libm, so a fixture coordinate's last digits differ
-# between glibc versions (7e-15 relative between glibc 2.39 and 2.44). The
-# Rust tests allow 1 mm, which is 1e-10 relative at 1e7 m.
-FIXTURE_REL_TOL = 1e-12
-# Fixture columns that hold coordinates: x_in, y_in, x_out, y_out.
+# PROJ runs on the host libm and CPU, so a fixture coordinate's last digits
+# differ between glibc versions and between x86_64 and aarch64. The error
+# scales with the Earth-sized intermediates, not with the coordinate: a local
+# grid near its origin differs by 8e-10 m on a 1140 m value. Measured worst
+# cases, aarch64 against x86_64: 1.5e-8 m projected, 2e-13 degrees geographic.
+# The Rust tests allow 1e-3 m and 1e-9 degrees.
+FIXTURE_PROJECTED_TOL = 1e-6
+FIXTURE_GEOGRAPHIC_TOL_DEG = 1e-11
+# Fixture columns that hold coordinates: x_in, y_in in src, x_out, y_out in dst.
 FIXTURE_FLOAT_COLUMNS = range(2, 6)
+FIXTURE_FIRST_OUT_COLUMN = 4
 
 
-def fixtures_match(committed: str, generated: str) -> bool:
-    """Same lines and fields, coordinates equal within FIXTURE_REL_TOL."""
+def fixtures_match(committed: str, generated: str, geographic: frozenset[int]) -> bool:
+    """Same lines and fields, coordinates equal within the tolerance of their CRS kind.
+
+    A code outside `geographic` is projected: the fixtures hold only table,
+    supplement and SYNTHETIC codes.
+    """
     old, new = committed.split("\n"), generated.split("\n")
     if len(old) != len(new):
         return False
@@ -894,9 +903,11 @@ def fixtures_match(committed: str, generated: str) -> bool:
                 return False
             try:
                 x, y = float(a), float(b)
+                code = int(old_fields[1 if column >= FIXTURE_FIRST_OUT_COLUMN else 0])
             except ValueError:
                 return False
-            if abs(x - y) > FIXTURE_REL_TOL * max(1.0, abs(x)):
+            tol = FIXTURE_GEOGRAPHIC_TOL_DEG if code in geographic else FIXTURE_PROJECTED_TOL
+            if abs(x - y) > tol:
                 return False
     return True
 
@@ -1109,11 +1120,14 @@ def main() -> int:
 
     errors = unlisted_skips(table) + check_supplement(table, supplement)
     if args.check:
+        geographic = frozenset(
+            row.code for row in table.rows + supplement if row.kind == "geographic"
+        )
         for path, text in outputs.items():
             if not path.exists():
                 errors.append(f"{path.relative_to(ROOT)} is missing: run scripts/gen_epsg.py --fixtures")
             elif path in (FIXTURE_PATH, MALAYSIA_PATH):
-                if not fixtures_match(path.read_text(), text):
+                if not fixtures_match(path.read_text(), text, geographic):
                     errors.append(
                         f"{path.relative_to(ROOT)} differs: run scripts/gen_epsg.py --fixtures"
                     )
